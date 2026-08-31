@@ -653,9 +653,30 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "Disable",
         lua.create_function(|lua, this: Table| with_button(lua, &this, |bs| bs.enabled = false))?,
     )?;
+    // IsEnabled() → the NUMBER 1 or the NUMBER 0 — never a boolean, and never nil.
+    //
+    // wow-re `ui/scratch/button-enabled-state.md`, VERIFIED off the Button method table at
+    // `0x879d10`: `IsEnabled 0x7800b0` reads the three-valued STATE at `[obj+0x328]`
+    // (0 DISABLED / 1 NORMAL / 2 PUSHED), does `setne cl` for "not disabled", and pushes that as a
+    // NUMBER. So the reference's own `IsEnabled() == 0` and `== 1` tests (FriendsFrame.lua l.404,
+    // StaticPopup.lua l.713) are live code.
+    //
+    // **This answered a Lua boolean until now, and the difference is not cosmetic, because 0 is
+    // TRUTHY in Lua.** A caller writing the reference's `== 0` got false forever; a caller writing
+    // `IsEnabled() > 0` got "attempt to compare number with boolean" — which is where pfUI's
+    // `api/ui-widgets.lua:812` icon-fade died, taking the widget module with it. The divergence was
+    // known and worked around by hand in three of our own files (FriendsFrame.xml's
+    // `guildButtonDisabled` read BOTH spellings and said so); those workarounds go with this
+    // change, which is 1719's bar — a prior call revisited because a new measurement arrived.
+    //
+    // Slider carries its own `IsEnabled` (slider.rs) and is deliberately NOT changed here: the
+    // note above is the BUTTON method table, and whether the slider widget shares the contract is
+    // unverified. Assuming they match is exactly the guess this comment exists to have avoided.
     m.set(
         "IsEnabled",
-        lua.create_function(|lua, this: Table| with_button(lua, &this, |bs| bs.enabled))?,
+        lua.create_function(|lua, this: Table| {
+            with_button(lua, &this, |bs| i64::from(bs.enabled))
+        })?,
     )?;
 
     // RegisterForClicks(...): replaces the button's registered-click set outright (the live API's

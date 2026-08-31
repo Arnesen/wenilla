@@ -974,6 +974,47 @@
             BenillaBagBarSlot_OnEnter(this)
         end
 
+        -- ref BagSlotButton_OnClick / _OnDrag / _OnShiftClick (MainMenuBarBagButtons.lua l.3-53),
+        -- published beside _OnEnter above for the same reason it was: they are the names
+        -- BagSlotButtonTemplate binds, and an addon that builds its bag bar from that template
+        -- reaches them and nothing else. pfUI is the measured caller (modules/bags.lua l.537), and
+        -- it CHAINS them — `GetScript("OnEnter")` then calling what it got — so a missing one is
+        -- not a dead button, it is a nil call inside the addon's own wrapper.
+        --
+        -- **Our four bar slots do not come through here** and are untouched: they carry an explicit
+        -- bagId from BenillaBagBarSlot_OnLoad and wire the Benilla bodies directly. These three
+        -- exist so a TEMPLATE-built button reaches the same bodies — one implementation, two entry
+        -- points, which is the whole point of publishing the reference's name over ours.
+        --
+        -- NOT the reference's bodies, and the difference is forced rather than chosen: all three of
+        -- its versions scan ContainerFrame1..NUM_CONTAINER_FRAMES to re-derive the checked state,
+        -- and reach for PutItemInBag / PickupBagFromSlot. benilla builds no ContainerFrame windows
+        -- and binds neither verb — our equip/swap arm is PickupInventoryItem (0208 1b) and our
+        -- checked state is read off BenillaBagFrame<N>. Sourcing MainMenuBarBagButtons.lua instead
+        -- of writing these would have handed every caller a body that raises on `frame:GetID()`
+        -- against a nil ContainerFrame1, which is why that file is NOT in reference_ui's SOURCED
+        -- list while PaperDollFrame.lua is.
+        function BagSlotButton_OnClick()
+            BenillaBagBarSlot_OnClick(this)
+        end
+
+        -- The drag arm: ref picks the equipped bag up with PickupBagFromSlot; ours is the same
+        -- PickupInventoryItem transition the bar slots already use, so an empty cursor picks the
+        -- bag up and a held bag places it.
+        function BagSlotButton_OnDrag()
+            BenillaBagBarSlot_Place(this)
+        end
+
+        -- Shift-click opens every bag if this slot HOLDS one (ref l.38-41 verbatim), then re-reads
+        -- the checked state off our own window the way BenillaBagBarSlot_OnClick's tail does.
+        function BagSlotButton_OnShiftClick()
+            if GetInventoryItemTexture("player", this:GetID()) then
+                OpenAllBags()
+            end
+            local frame = this.bagId and getglobal("BenillaBagFrame" .. this.bagId)
+            this:SetChecked(frame and frame:IsShown())
+        end
+
         -- ref OnLeave for both (l.100-102 / the template's own): a plain Hide, no fade — the item
         -- half of the split BenillaUnitFrame_OnLeave's comment describes.
         function BenillaBagBarButton_OnLeave()
@@ -1074,7 +1115,7 @@
             -- drag feedback, IsInventoryItemLocked — the bag-slot twin of BenillaBagSlot_Update).
             if IsInventoryItemLocked(invSlot) then
                 button.icon:SetVertexColor(0.4, 0.4, 0.4)
-            elseif button:IsEnabled() then
+            elseif button:IsEnabled() ~= 0 then
                 button.icon:SetVertexColor(1, 1, 1)
             else
                 -- Disabled by Disable_BagButtons below: keep the grey. The reference needs no such

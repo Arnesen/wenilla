@@ -447,6 +447,21 @@ impl ObjectFields {
     pub fn player_flags(&self) -> u32 {
         self.get_u32(FIELD_PLAYER_FLAGS).unwrap_or(0)
     }
+    /// **`PLAYER_FLAGS` bit `0x1` — this player leads their group.** The sole consumer image-wide
+    /// is `UnitIsPartyLeader 0x516210`'s first leg (`0x51624a`), out of 55 sites reading this
+    /// field, and it is the only test of the bit anywhere (wow-re
+    /// `ui/scratch/party-leader-and-nameplate-verbs.md`).
+    ///
+    /// The bit's POSITION is verified; the name `PLAYER_FLAGS_GROUP_LEADER` is inferred, earned
+    /// from two disjoint in-binary controls that pin its neighbours — `0x5eca0c` → `"CHAT_FLAG_AFK"`
+    /// and `0x5eca49` → `"CHAT_FLAG_DND"` fix bits 1 and 2, so this is the one before them.
+    ///
+    /// **Server-sourced, and that is the point.** It answers for any held player, including a
+    /// stranger who leads their *own* party — something a comparison against our group's leader
+    /// GUID cannot express. It is one of the predicate's two legs, never the whole of it.
+    pub fn player_is_group_leader(&self) -> bool {
+        self.player_flags() & 0x1 != 0
+    }
     /// Whether the player is a released **ghost** — `PLAYER_FLAGS_GHOST (0x10)`, set/cleared by
     /// the ghost aura 8326 at release/resurrect (decision 0308 §1). NB a ghost's health is **1**
     /// on the wire, so `unit_is_dead` is FALSE for a ghost: the three predicates are

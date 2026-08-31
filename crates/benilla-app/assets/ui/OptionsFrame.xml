@@ -866,6 +866,43 @@
         -- refreshing guard: SetMinMaxValues re-clamps the held value and fires OnValueChanged,
         -- and that clamp is wiring, not a player gesture — without the guard every load would
         -- SetCVar the template's 0 clamped into the new range.
+        -- ── OptionsFrameSliders — ref OptionsFrame.lua l.24-34 ──────────────────────────────
+        -- The reference's options-slider table: one row per graphics slider, carrying the bounds
+        -- the slider is built with. It is PUBLISHED, so addons read and write it — pfUI's
+        -- `hdgraphic` module opens with `_G.OptionsFrameSliders[3].maxValue = 15`
+        -- (modules/hdgraphic.lua l.3) and died on the nil, taking the module with it.
+        --
+        -- **It is the real thing, not a shape put here to satisfy that write.** The three rows
+        -- below are the source of truth for our own Graphics page: each row's OnLoad reads its
+        -- bounds from here rather than carrying literals, and the page re-applies them on every
+        -- OnShow, which is what makes an addon's write actually move the slider. A table nothing
+        -- read would be a name with no behaviour behind it (1134 §4) — worse than absent, because
+        -- the write would appear to succeed.
+        --
+        -- **Three rows, not the reference's nine.** Ours are its rows 1-3 in its own order, and the
+        -- `func` strings match our CVars exactly (uiscale/farclip/WorldDetail) — which is why
+        -- pfUI's index 3 lands on Environment Detail here as it does there. The other six
+        -- (TerrainMip, BaseMip, Gamma, anisotropic, spellEffectLevel, weatherDensity) have no
+        -- benilla knob behind them; listing them would publish six rows whose writes do nothing.
+        -- 0959/1649 own which knobs this page ships, and this table follows that, not the reverse.
+        --
+        -- `benillaRow` is ours: the reference addresses its sliders as OptionsFrameSlider1..9, a
+        -- numbering our page does not use, so each row names the child it drives instead.
+        --
+        -- NOT bound, and named rather than faked: pfUI's module goes on to hook `SetWorldDetail`
+        -- and drive `ConsoleExec("frillDensity ...")`, `lodDist`, `nearClip`, `maxLOD`. benilla has
+        -- no console and none of those CVars. Neither verb is called at load, so the module loads
+        -- and its slider write lands; its EXTENDED arm cannot work here and a no-op ConsoleExec
+        -- would be exactly the silent pretence 1203 exists to forbid.
+        OptionsFrameSliders = {
+            { text = "UI Scale", func = "uiscale",
+              minValue = 0.64, maxValue = 1.0, valueStep = 0.01, benillaRow = "RowUiScale" },
+            { text = "Terrain Distance", func = "farclip",
+              minValue = 177, maxValue = 777, valueStep = 60, benillaRow = "RowFarclip" },
+            { text = "Environment Detail", func = "WorldDetail",
+              minValue = 0, maxValue = 2, valueStep = 1, benillaRow = "RowWorldDetail" },
+        }
+
         function OptionsSliderRow_Setup(row, min, max, step, fmt, stops)
             local slider = getglobal(row:GetName() .. "ControlSlider")
             row.fmt = fmt
@@ -2280,7 +2317,9 @@
                                             <Scripts><OnLoad>
                                                 OptionsRow_OnLoad(self, "uiScale", "UI Scale",
                                                     "OPTION_TOOLTIP_UI_SCALE")
-                                                OptionsSliderRow_Setup(self, 0.64, 1.0, 0.01)
+                                                OptionsSliderRow_Setup(self, OptionsFrameSliders[1].minValue,
+                                                    OptionsFrameSliders[1].maxValue,
+                                                    OptionsFrameSliders[1].valueStep)
                                                 -- era registers its uiscale row CommitFlag.Apply
                                                 -- (Graphics.lua l.684): the one row whose live
                                                 -- write would rescale the very slider mid-drag —
@@ -2296,7 +2335,9 @@
                                             <Scripts><OnLoad>
                                                 OptionsRow_OnLoad(self, "farclip", "Terrain Distance",
                                                     "OPTION_TOOLTIP_FARCLIP")
-                                                OptionsSliderRow_Setup(self, 177, 777, 60, "raw")
+                                                OptionsSliderRow_Setup(self, OptionsFrameSliders[2].minValue,
+                                                    OptionsFrameSliders[2].maxValue,
+                                                    OptionsFrameSliders[2].valueStep, "raw")
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowWorldDetail" inherits="OptionsSliderRowTemplate">
@@ -2310,7 +2351,9 @@
                                                 -- The stop names are the era preset ladder's (its
                                                 -- quality dropdowns say Low/Medium/High); 1.12's
                                                 -- slider had no stop labels to quote.
-                                                OptionsSliderRow_Setup(self, 0, 2, 1, nil,
+                                                OptionsSliderRow_Setup(self, OptionsFrameSliders[3].minValue,
+                                                    OptionsFrameSliders[3].maxValue,
+                                                    OptionsFrameSliders[3].valueStep, nil,
                                                     { "Low", "Medium", "High" })
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -2410,6 +2453,28 @@
                                             </OnLoad></Scripts>
                                         </Frame>
                                     </Frames>
+                                    <!-- Re-apply the slider bounds from OptionsFrameSliders every time the page is shown.
+                                         The rows read the table at OnLoad, which is long before any addon runs; an addon that
+                                         writes a bound (pfUI's hdgraphic raises Environment Detail's maxValue to 15) would
+                                         otherwise never move the slider it just rewrote. The reference does the same loop in
+                                         OptionsFrame_Load; ours lives here rather than under that name because our page
+                                         implements almost none of the rest of that function's contract and publishing a
+                                         reference name over a partial body is how a gap hides.
+                                    
+                                         fmt and stops are read back off the row rather than the table: they are OUR readout
+                                         grammar (0992/1649's stop names), set at OnLoad, and no addon addresses them. -->
+                                    <Scripts>
+                                        <OnShow>
+                                            for i = 1, table.getn(OptionsFrameSliders) do
+                                                local info = OptionsFrameSliders[i]
+                                                local row = info.benillaRow and getglobal(this:GetName() .. info.benillaRow)
+                                                if ( row ) then
+                                                    OptionsSliderRow_Setup(row, info.minValue, info.maxValue,
+                                                        info.valueStep, row.fmt, row.stops)
+                                                end
+                                            end
+                                        </OnShow>
+                                    </Scripts>
                                 </Frame>
                                 <!-- The COMBAT page (decision 1134) — the first page whose rows
                                      write saved-variable GLOBALS rather than CVars, and the first

@@ -118,6 +118,7 @@ fn push_raid(s: &mut UiScript, raid: Vec<RaidMemberInfo>) {
     s.set_party(PartyState {
         members,
         leader_index: 0,
+        leader_guid: 0, // the player leads; their guid is unset in this fixture
         raid,
         loot_method: "group".into(),
         master_looter: None,
@@ -218,7 +219,7 @@ fn convert_to_raid_is_live_only_for_a_party_leader() {
     assert!(visible(&s, "RaidFrameRaidDescription"), "solo: the blurb");
     assert!(visible(&s, "RaidFrameConvertToRaidButton"));
     assert_eq!(
-        s.eval::<i64>("return RaidFrameConvertToRaidButton:IsEnabled() and 1 or 0")
+        s.eval::<i64>("return RaidFrameConvertToRaidButton:IsEnabled()")
             .unwrap(),
         0,
         "solo there is no party to convert"
@@ -240,7 +241,7 @@ fn convert_to_raid_is_live_only_for_a_party_leader() {
     });
     s.fire_event("PARTY_MEMBERS_CHANGED", Vec::new());
     assert_eq!(
-        s.eval::<i64>("return RaidFrameConvertToRaidButton:IsEnabled() and 1 or 0")
+        s.eval::<i64>("return RaidFrameConvertToRaidButton:IsEnabled()")
             .unwrap(),
         1,
         "a party leader can convert"
@@ -263,7 +264,7 @@ fn convert_to_raid_is_live_only_for_a_party_leader() {
     });
     s.fire_event("PARTY_LEADER_CHANGED", Vec::new());
     assert_eq!(
-        s.eval::<i64>("return RaidFrameConvertToRaidButton:IsEnabled() and 1 or 0")
+        s.eval::<i64>("return RaidFrameConvertToRaidButton:IsEnabled()")
             .unwrap(),
         0,
         "a party member cannot"
@@ -714,7 +715,7 @@ fn the_raid_info_panel_lists_the_saved_lockouts() {
     ]);
     s.fire_event("UPDATE_INSTANCE_INFO", Vec::new());
     assert_eq!(
-        s.eval::<i64>("return RaidFrameRaidInfoButton:IsEnabled() and 1 or 0")
+        s.eval::<i64>("return RaidFrameRaidInfoButton:IsEnabled()")
             .unwrap(),
         1
     );
@@ -743,7 +744,7 @@ fn the_raid_info_panel_lists_the_saved_lockouts() {
     s.set_saved_instances(Vec::new());
     s.fire_event("UPDATE_INSTANCE_INFO", Vec::new());
     assert_eq!(
-        s.eval::<i64>("return RaidFrameRaidInfoButton:IsEnabled() and 1 or 0")
+        s.eval::<i64>("return RaidFrameRaidInfoButton:IsEnabled()")
             .unwrap(),
         0
     );
@@ -781,7 +782,7 @@ fn a_player_with_no_lockouts_loses_the_raid_info_button_on_the_second_answer() {
     // Answer two, saying the same nothing.
     s.fire_event("UPDATE_INSTANCE_INFO", Vec::new());
     assert_eq!(
-        s.eval::<i64>("return RaidFrameRaidInfoButton:IsEnabled() and 1 or 0")
+        s.eval::<i64>("return RaidFrameRaidInfoButton:IsEnabled()")
             .unwrap(),
         0,
         "an empty lockout list is a dead button"

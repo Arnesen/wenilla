@@ -167,7 +167,7 @@ pub use cursor::{
     CursorAction, CursorItem, CursorMacro, CursorPayload, CursorPetAction, CursorSpell,
     CursorStablePet, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
 };
-pub use cvars::MultisampleFormat;
+pub use cvars::{MultisampleFormat, CVAR_NAMEPLATE_ENEMIES, CVAR_NAMEPLATE_FRIENDS};
 pub use death::{DeathAction, DeathUiState};
 pub use dressup::DressUpIntent;
 pub use duel::DuelRequest;

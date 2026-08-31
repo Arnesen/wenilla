@@ -213,6 +213,9 @@ ColorPickerFrame.xml
 # The fullscreen world map (decision 0203 phase 2), over the worldmap host API
 # (`crate::ui_world_map` feeds it); the 'M' binding (ui_script/input.rs) calls its
 # ToggleWorldMap().
+# Its per-unit blip templates load FIRST: WorldMapFrame.xml instantiates WorldMapParty1..4 and
+# WorldMapRaid1..40 with inherits=, so the virtual Frames have to be registered before it.
+WorldMapFrameTemplates.xml
 WorldMapFrame.xml
 # The cast bar (decision 0137 phase 1) — the extracted 1.12 CastingBarFrame, driven by
 # the SPELLCAST_* events `crate::ui_cast` fires. Only needs Fonts before it.
@@ -251,6 +254,12 @@ ContainerFrameAdapters.xml
 # windows (Gossip/Merchant/Quest*) — it depends only on Fonts/UiPanels/GameTooltip, all
 # already loaded above.
 CharacterFrame.xml
+# The reference's item-SLOT button templates (PaperDollItemSlotButtonTemplate <-
+# BagSlotButtonTemplate), published for addons rather than used by our own windows. Here
+# rather than beside their subjects because the chain crosses BagFrame.xml (241) ->
+# CharacterFrame.xml (256) the wrong way; needs ItemButtonTemplate.xml (45) above it for the
+# base and Cooldown.xml (124) for the $parentCooldown the doll template carries.
+ItemSlotButtonTemplates.xml
 # The Pet tab (decision 1057): the same separate-top-level-file shape as SkillFrame below,
 # and ahead of it because it is the earlier tab. It leans on CharacterFrame.xml for real —
 # the `(unit, prefix)` stat setters, the `BenillaStatRow`/`BenillaMagicResistanceFrame`

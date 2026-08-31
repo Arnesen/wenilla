@@ -265,6 +265,11 @@ pub(super) fn feed_party(
     let fresh = PartyState {
         members,
         leader_index,
+        // The wire's leader GUID verbatim — `UnitIsPartyLeader`'s second leg compares the
+        // RESOLVED token against it, so an index cannot stand in (an out-of-range member has no
+        // descriptor, and the compare must still answer). Zero when ungrouped, and deliberately
+        // not guarded against zero at the comparison — see `PartyState::leader_guid`.
+        leader_guid: group.leader,
         raid,
         loot_method,
         master_looter,

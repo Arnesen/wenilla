@@ -139,6 +139,26 @@
         NEWBIE_TOOLTIP_PARTYOPTIONS = NEWBIE_TOOLTIP_PARTYOPTIONS or "If you belong to a party, you can right-click your portrait to bring up the Party Options menu. This menu will allow you to quit the party or see what looting rules the party is using. A party leader can add or remove party members, as well as change the party's looting rules."
         NEWBIE_TOOLTIP_PLAYEROPTIONS = NEWBIE_TOOLTIP_PLAYEROPTIONS or "Right-click to bring up special commands for interacting with another player. You can inspect their equipment, issue a party invite, initiate a trade, or challenge a player to a duel. A group leader can promote or remove that player from the group."
 
+        -- ── UnitReactionColor (ref TargetFrame.lua l.6-13, verbatim) ────────────────────────
+        -- The reference's reaction→colour table, indexed by `UnitReaction`'s 1..7. Seven rows for
+        -- five distinct colours: 1 and 2 are both red, and 5/6/7 are all green — the reference
+        -- writes them out rather than collapsing them, and so do we, because an addon indexing
+        -- `UnitReactionColor[7]` must find a row rather than nil.
+        --
+        -- It lives in `TargetFrame.lua` there and here in the unit-frame file, for the same reason
+        -- `ManaBarColor` does: we ship no TargetFrame.lua, and what matters is the NAME being
+        -- published before anything reads it. pfUI indexes it in `GetColor`
+        -- (`api/unitframes.lua:2617`) on every unit-frame repaint.
+        UnitReactionColor = {
+            { r = 1.0, g = 0.0, b = 0.0 },
+            { r = 1.0, g = 0.0, b = 0.0 },
+            { r = 1.0, g = 0.5, b = 0.0 },
+            { r = 1.0, g = 1.0, b = 0.0 },
+            { r = 0.0, g = 1.0, b = 0.0 },
+            { r = 0.0, g = 1.0, b = 0.0 },
+            { r = 0.0, g = 1.0, b = 0.0 },
+        }
+
         -- ── ManaBarColor (ref UnitFrame.lua l.1-6, verbatim) ────────────────────────────────
         -- The reference's own table: keyed by the NUMERIC power type `UnitPowerType` returns, each
         -- row carrying the `prefix` its bar's text is labelled with. **8 addons in the top-20 root
@@ -661,9 +681,23 @@
             feedbackText:Show()
         end
 
-        -- The fade envelope (ref CombatFeedback_OnUpdate): 0.2 s ramp in, 0.7 s hold, 0.3 s
-        -- ramp out, then Hide. GetTime-based like the ref — no per-tick accumulation.
-        function CombatFeedback_OnUpdate(frame)
+        -- The fade envelope (ref CombatFeedback_OnUpdate, CombatFeedback.lua l.92): 0.2 s ramp in,
+        -- 0.7 s hold, 0.3 s ramp out, then Hide. GetTime-based like the ref — no per-tick
+        -- accumulation.
+        --
+        -- **The SIGNATURE is the reference's, and it did not used to be.** The ref takes `elapsed`
+        -- and reads the frame from `this`; ours took the frame as its argument while the comment
+        -- above claimed to be the ref's. pfUI hooks this global and calls it the way the ref
+        -- declares it — `CombatFeedback_OnUpdate(arg1)` — so our version indexed the elapsed
+        -- NUMBER as a frame and raised `attempt to index local 'frame' (a number value)`.
+        --
+        -- A published global is a contract addons call BY NAME, so its signature is not ours to
+        -- improve: taking the frame explicitly reads better and is wrong. `elapsed` is unused here
+        -- (the envelope is GetTime-based) and is still named, because the parameter list is the
+        -- part addons see.
+        function CombatFeedback_OnUpdate(elapsed)
+            local frame = this
+            if not frame then return end
             local feedbackText = frame.feedbackText
             if not (feedbackText and feedbackText:IsVisible()) then return end
             local elapsedTime = GetTime() - frame.feedbackStartTime
@@ -1088,7 +1122,9 @@
                 frame.statusTexture:SetAlpha(alpha)
                 frame.statusGlow:SetAlpha(alpha)
             end
-            CombatFeedback_OnUpdate(frame)
+            -- `this` is already the frame here (`local frame = this` above), which is the
+            -- contract the ref's own signature relies on.
+            CombatFeedback_OnUpdate(elapsed)
         end
 
         -- Left-click the player frame to target yourself (ref PlayerFrame_OnClick, the LeftButton

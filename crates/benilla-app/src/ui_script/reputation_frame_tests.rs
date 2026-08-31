@@ -467,7 +467,7 @@ fn clicking_a_bar_opens_the_detail_popup_on_that_faction() {
         "at war, so the box is ticked"
     );
     assert!(
-        !s.eval::<bool>("return ReputationDetailAtWarCheckBox:IsEnabled() and true or false")
+        !s.eval::<bool>("return ReputationDetailAtWarCheckBox:IsEnabled() ~= 0")
             .unwrap(),
         "peace-forced, so the box is dead"
     );

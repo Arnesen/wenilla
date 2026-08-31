@@ -330,6 +330,7 @@ pub(super) fn sync_dressup_booth(
                     emitters: fx.emitters.clone(),
                 })
                 .collect::<Vec<_>>(),
+            BoothInstance::default(),
         );
         // The bake animates, so its camera can't sleep — `gate_booth_cameras` runs it every frame
         // the window is drawing this pane, and none once it closes.

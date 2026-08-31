@@ -104,4 +104,73 @@
         end
 
     ]]></Script>
+
+    <!-- ── The reference's item-button TEMPLATE, which the sourced file cannot bring ────────────
+         `ui_script::reference_ui` sources `ContainerFrame.lua`, so every handler named below is
+         the reference's own live code, not a transcription. It cannot source `ContainerFrame.xml`
+         — that file also declares the twelve `ContainerFrame1..12` windows this client does not
+         build — so the template that BINDS those handlers to a shape was the one missing piece.
+         Declaring it here is the smallest thing that closes the gap, and it goes in THIS file
+         because this is where reference container behaviour that needs a benilla answer lives.
+
+         Ref ContainerFrame.xml l.4-60, verbatim but for the one deviation named below. Loads after
+         ItemButtonTemplate.xml (its base, toc l.45) and after Cooldown.xml (CooldownFrameTemplate,
+         toc l.124) — both are why this cannot simply sit next to the base.
+
+         pfUI is the measured caller: `CreateFrame("Button", name, pfUI.bags[bag], tpl)`
+         (modules/bags.lua l.381) died on "Couldn't find inherited node" and took its whole bag
+         module with it. It then reads `$parentCooldown`, `$parentCount`, `$parentIconTexture` and
+         `$parentNormalTexture` straight off what it just built, and installs NO scripts of its own
+         on the slot — so the handlers below are not decoration, they are what makes a pfUI bag
+         respond to a click at all.
+
+         DEVIATION, named: the reference's OnEnter/OnDragStart/OnReceiveDrag/OnClick each open with
+         a KeyRing fork keyed on `KEYRING_CONTAINER`. Those bodies are the SOURCED ones and they
+         keep their fork; what this file's header explains at length is that our keyring is an
+         ordinary container (0765), so the fork is wrong here rather than merely unavailable, and
+         the adapter above is what answers it. Nothing new is introduced by this template. -->
+    <Button name="ContainerFrameItemButtonTemplate" inherits="ItemButtonTemplate" hidden="true" virtual="true">
+        <Anchors>
+            <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+        </Anchors>
+        <Frames>
+            <Model name="$parentCooldown" inherits="CooldownFrameTemplate"/>
+        </Frames>
+        <Scripts>
+            <OnLoad>ContainerFrameItemButton_OnLoad();</OnLoad>
+            <OnClick>
+                if ( this:GetParent():GetID() == KEYRING_CONTAINER ) then
+                    KeyRingItemButton_OnClick(arg1);
+                    return;
+                end
+                ContainerFrameItemButton_OnClick(arg1);
+            </OnClick>
+            <OnEnter>ContainerFrameItemButton_OnEnter();</OnEnter>
+            <OnLeave>
+                this.updateTooltip = nil;
+                GameTooltip:Hide();
+                ResetCursor();
+            </OnLeave>
+            <OnHide>
+                if ( this.hasStackSplit and (this.hasStackSplit == 1) ) then
+                    StackSplitFrame:Hide();
+                end
+            </OnHide>
+            <OnDragStart>
+                if ( this:GetParent():GetID() == KEYRING_CONTAINER ) then
+                    KeyRingItemButton_OnClick("LeftButton", 1);
+                    return;
+                end
+                ContainerFrameItemButton_OnClick("LeftButton", 1);
+            </OnDragStart>
+            <OnReceiveDrag>
+                if ( this:GetParent():GetID() == KEYRING_CONTAINER ) then
+                    KeyRingItemButton_OnClick("LeftButton", 1);
+                    return;
+                end
+                ContainerFrameItemButton_OnClick("LeftButton", 1);
+            </OnReceiveDrag>
+            <OnUpdate>ContainerFrameItemButton_OnUpdate(arg1);</OnUpdate>
+        </Scripts>
+    </Button>
 </Ui>

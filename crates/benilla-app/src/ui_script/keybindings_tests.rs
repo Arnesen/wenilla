@@ -101,12 +101,12 @@ fn the_page_is_an_options_category_with_the_collapsed_honest_tree() {
         "Unbind Key exists on this page"
     );
     assert!(
-        !s.eval::<bool>("return OptionsFrameContainerUnbind:IsEnabled()")
+        !s.eval::<bool>("return OptionsFrameContainerUnbind:IsEnabled() ~= 0")
             .unwrap(),
         "…disabled until a capsule is selected"
     );
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled()")
+        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
         .unwrap());
     // The section tree: the registry's category tokens, first-appearance order — exactly
     // 1.12's file order — every section a COLLAPSED header row (the era default).
@@ -196,7 +196,7 @@ fn the_capture_flow_binds_steals_and_refuses_like_112() {
         "a selected capsule arms the capture"
     );
     assert!(
-        s.eval::<bool>("return OptionsFrameContainerUnbind:IsEnabled()")
+        s.eval::<bool>("return OptionsFrameContainerUnbind:IsEnabled() ~= 0")
             .unwrap(),
         "Unbind arms with the selection"
     );

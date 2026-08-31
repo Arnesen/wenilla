@@ -1399,6 +1399,7 @@ pub(super) fn sync_glue_booth(
                     emitters: fx.emitters.clone(),
                 })
                 .collect::<Vec<_>>(),
+            instance,
         );
         if fx_emitters > 0 {
             info!(

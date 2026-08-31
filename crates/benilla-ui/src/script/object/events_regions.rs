@@ -8,6 +8,7 @@ use std::collections::HashSet;
 
 use mlua::{Function, Lua, MultiValue, Table, Value};
 
+use crate::script::binding_abi::optional_string;
 use crate::script::region::region_wrapper;
 use crate::script::{Model, RegionData, REG_SCRIPTS, SCRIPT_KINDS};
 use crate::widget::RegionKind;
@@ -140,18 +141,30 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // (CustomNameplates:437, a four-argument later-client form). Accepted rather than skipped
     // because dropping it silently is the very class this fixes, and one real site is still a site.
     m.set(
+        // **The three argument positions are NOT one rule, and the fourth is the odd one.** Verified
+        // together in wow-re `ui/scratch/xml-template-name-lookup.md` §5.2:
+        //
+        //  · `name` and `layer` go through `0x6f3510` (is-number-**or**-string) then `0x6f3690`, and
+        //    **the result is never tested** — so a table is simply absent (unnamed / the pre-staged
+        //    default layer), and a NUMBER is accepted and stringified.
+        //  · `inherits` is gated by a raw `lua_type(L, 4) == LUA_TSTRING` (`0x773d28` / `0x773b06`)
+        //    asked BEFORE anything reads the slot — so a table AND a number are both ignored, and the
+        //    non-string leg jumps to the very block the two template-HIT legs jump to, with both
+        //    template handles NULL. It is the success path, not a bolted-on case.
+        //
+        // **Nothing here raises.** This mattered: benilla typed all three `Option<String>`, so mlua
+        // raised `bad argument #4: error converting Lua table to String` — and pfUI, the most-installed
+        // 1.12 addon, builds every buff-stack label as
+        // `f.buffs[i]:CreateFontString(nil, "OVERLAY", f.buffs[i])`, passing the BUTTON as the third
+        // argument. The real client constructs it, ignores the argument, and logs nothing.
         "CreateTexture",
         lua.create_function(
-            |lua,
-             (this, name, layer, inherits): (
-                Table,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-            )| {
+            |lua, (this, name, layer, inherits): (Table, Value, Value, Value)| {
+                let name = optional_string(lua, &name);
+                let layer = optional_string(lua, &layer);
                 let wrapper = create_region(lua, &this, RegionKind::Texture, name, layer)?;
-                if let Some(from) = inherits.as_deref().filter(|s| !s.is_empty()) {
-                    apply_region_inherits(lua, &wrapper, from)?;
+                if let Some(from) = strict_string_arg(&inherits).filter(|s| !s.is_empty()) {
+                    apply_region_inherits(lua, &wrapper, &from)?;
                 }
                 Ok(wrapper)
             },
@@ -255,16 +268,12 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     m.set(
         "CreateFontString",
         lua.create_function(
-            |lua,
-             (this, name, layer, inherits): (
-                Table,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-            )| {
+            |lua, (this, name, layer, inherits): (Table, Value, Value, Value)| {
+                let name = optional_string(lua, &name);
+                let layer = optional_string(lua, &layer);
                 let wrapper = create_region(lua, &this, RegionKind::FontString, name, layer)?;
-                if let Some(from) = inherits.as_deref().filter(|s| !s.is_empty()) {
-                    apply_region_inherits(lua, &wrapper, from)?;
+                if let Some(from) = strict_string_arg(&inherits).filter(|s| !s.is_empty()) {
+                    apply_region_inherits(lua, &wrapper, &from)?;
                 }
                 Ok(wrapper)
             },
@@ -440,6 +449,23 @@ fn apply_region_inherits(lua: &Lua, wrapper: &Table, from: &str) -> mlua::Result
     Err(mlua::Error::runtime(format!(
         "Couldn't find inherited node \"{from}\""
     )))
+}
+
+/// **The `lua_type(L, idx) == LUA_TSTRING` gate, asked before anything reads the slot** — the
+/// region constructors' `inherits` argument and nowhere else (`0x773d28` for `CreateFontString`,
+/// `0x773b06` for `CreateTexture`).
+///
+/// Strictly narrower than [`optional_string`]: a **number is refused here**, because the tag is
+/// tested raw with no coercion. That one-argument difference is the whole reason
+/// `f:CreateTexture(nil, nil, 5)` silently ignores the 5 while `CreateFrame("Frame", nil, nil, 5)`
+/// **raises** `Couldn't find inherited node "5"` — `CreateFrame` runs `lua_tostring(L, 4)` BEFORE
+/// its own `cmp 4`, and that retags the number's stack slot in place, so it arrives as a string.
+/// Same value, opposite outcome, from argument order alone.
+fn strict_string_arg(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => s.to_str().ok().map(|s| s.to_owned()),
+        _ => None,
+    }
 }
 
 fn create_region(

@@ -224,6 +224,18 @@ fn set_inventory_item_renders_full_outside_compare() {
         assert(quoted, "full render keeps the description")
         assert(tt:SetInventoryItem("player", 5) == nil, "empty slot answers nil")
         assert(tt:SetInventoryItem("target", 16) == nil, "self-only feed")
+
+        -- THREE returns, on every leg. The reference's own PaperDollFrame.lua:741 destructures
+        -- `hasItem, hasCooldown, repairCost` unconditionally and only then tests hasItem, so an
+        -- empty slot answering ONE value hands its caller a nil where a number belongs. pfUI's
+        -- durability scan (panel.lua:499) does `totalRep + repCost` with no guard at all and died
+        -- exactly there.
+        local n = { tt:SetInventoryItem("player", 16) }
+        assert(table.getn(n) == 3, "occupied: three returns, got " .. table.getn(n))
+        assert(n[3] == 0, "repairCost is a NUMBER — the reference always pushes one; 0 INTERIM")
+        local e = { tt:SetInventoryItem("player", 5) }
+        assert(table.getn(e) == 3, "empty: three returns too, got " .. table.getn(e))
+        assert(e[1] == nil and e[3] == 0, "empty slot: no item, but still a numeric repairCost")
     "#,
     )
     .unwrap();

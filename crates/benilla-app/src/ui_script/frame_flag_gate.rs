@@ -187,12 +187,6 @@ const KNOWN: &[Known] = &[
               UIDropDownMenuTemplate; ours takes the template alone.",
     },
     Known {
-        frame: "WorldMapPlayer",
-        flag: Flag::Mouse,
-        why: "the reference's map dot has OnEnter -> WorldMapUnit_OnEnter, the name-on-hover \
-              tooltip. Wants that handler, not the flag.",
-    },
-    Known {
         frame: "WorldStateAlwaysUpFrame",
         flag: Flag::Mouse,
         why:

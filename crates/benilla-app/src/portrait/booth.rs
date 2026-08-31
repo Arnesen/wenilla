@@ -294,6 +294,9 @@ pub(super) fn spawn_booth_effects(
     layer: &RenderLayers,
     light: Option<&bevy::render::render_resource::Buffer>,
     effects: &[BoothEffects],
+    // The bake's instance-level properties ([`BoothInstance`]). An effect model attached to a
+    // translucent instance composes onto it — see the host spawn below.
+    instance: BoothInstance,
 ) -> (usize, usize) {
     let mut spawned = 0usize;
     let mut frames = 0usize;
@@ -301,14 +304,28 @@ pub(super) fn spawn_booth_effects(
         let Some(joint) = rig.anchor(commands, fx.bone) else {
             continue; // bad bone index — bake the body without this model's effects
         };
-        let host = commands
-            .spawn((
-                Transform::from_translation(fx.offset),
-                Visibility::default(),
-                ChildOf(joint),
-                layer.clone(),
-            ))
-            .id();
+        // The host stands for the ATTACHED MODEL, which is what makes it the right place to hang
+        // the composed alpha: the reference recomposes an attached model's own instance alpha every
+        // frame as `child+0x19c = parent+0x19c × child+0x180` (`0x714260`), and the emitter lane
+        // then copies that into `emitter+0x1a8` (`0x718960` @`0x719073`) to fold into every
+        // particle's alpha. Our particle sim already walks that chain
+        // ([`benilla_world::model_fade::ModelAlphas`], decisions 0827/0833) — it had simply never
+        // been given a link to walk from a booth, because until a bake could be translucent every
+        // booth rider really was opaque. A ghosted select body is the case that made it false.
+        //
+        // `ModelFade`, not `ModelAlpha`: the game declares the translucency and the engine owns the
+        // composition (decision 1164). A booth bake has no ramps to fold, so the walk reads the
+        // declared value straight — see [`benilla_world::model_fade::ModelAlphas`].
+        let mut host = commands.spawn((
+            Transform::from_translation(fx.offset),
+            Visibility::default(),
+            ChildOf(joint),
+            layer.clone(),
+        ));
+        if instance.feathering() {
+            host.insert(benilla_world::model_fade::ModelFade(instance.alpha));
+        }
+        let host = host.id();
         for em in &fx.emitters {
             // A **billboard** bone in the emitter's chain (decision 0813): its palette rows are
             // replaced with the rendering camera's basis about the bone's own pivot, and children
@@ -343,9 +360,10 @@ pub(super) fn spawn_booth_effects(
                     anchor: Some(host), // the cloud anchors at the MODEL; bones compose births only
                     // A booth rider's host is torn down with the bake it belongs to.
                     on_owner_loss: benilla_world::particles::OwnerLoss::Free,
-                    // A booth bake has no appear/despawn ramp and no self-avatar feather — its
-                    // riders are always opaque (0827).
-                    alpha: None,
+                    // The MODEL this cloud multiplies by (0827): its own host, whose composed
+                    // alpha is the bake's instance alpha. `ModelAlphas` reads 1.0 through an
+                    // entity carrying no `ModelAlpha`, so an opaque bake costs exactly what it did.
+                    alpha: Some(host),
                     // A booth's light is its own buffer (`EffectLightOverride` below), never a
                     // world light node — the world's would fog and shade the pane by the world's
                     // time of day.
@@ -1883,6 +1901,21 @@ mod instance_tests {
         assert!(
             fm.bake_blend.is_none(),
             "a booth is never interior-classified"
+        );
+    }
+
+    /// The emitters an attached effect model carries compose onto the instance too — the reference
+    /// recomposes `child+0x19c = parent+0x19c × child+0x180` every frame (`0x714260`) and copies it
+    /// into `emitter+0x1a8`. Pinned as the *link* rather than the arithmetic (the fold itself is
+    /// `benilla_world`'s and already tested there): what this asserts is that a feathering bake
+    /// gives its effect host a `ModelAlpha` at all, which is the half that was missing — a ghost's
+    /// wisps drew at full strength over a body at 0.5 until it existed.
+    #[test]
+    fn a_feathering_bake_hands_its_effect_host_an_alpha_to_compose() {
+        assert!(BoothInstance { alpha: 0.5 }.feathering());
+        assert!(
+            !BoothInstance::default().feathering(),
+            "and an opaque bake hands it none, so every existing booth is untouched"
         );
     }
 

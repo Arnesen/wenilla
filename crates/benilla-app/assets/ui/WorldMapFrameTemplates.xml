@@ -1,0 +1,72 @@
+<!--
+    The world map's per-unit blip templates, transcribed from the reference's own
+    `Interface\FrameXML\WorldMapFrameTemplates.xml` (l.3-35). Two virtual Frames and nothing else:
+    `WorldMapUnitTemplate` (a party member) and `WorldMapRaidUnitTemplate` (a raid member), which
+    inherits it and re-states its OnLoad without the `party` token.
+
+    **Why they are a file of their own rather than four hand-written copies inside WorldMapFrame.xml.**
+    They used to be exactly that: `WorldMapParty1..4` written out four times, each carrying an
+    ANONYMOUS `<Texture>`. Anonymous is the bug. The reference's blip names its icon `$parentIcon`,
+    and that published name is load-bearing for addons — pfUI's `modules/mapcolors.lua` recolours
+    party and raid blips by class and reaches them as
+
+        frame.icon = _G[frame_name.."Icon"]
+        frame.icon:SetTexture(pfUI.media["img:circleparty"])
+
+    so against four anonymous textures line 11 raised `attempt to index field 'icon' (a nil value)`
+    and took pfUI's whole module chain down with it. A template gets the naming right once.
+
+    **The raid pool is DECLARED but not DRIVEN, and that is the honest half-step.** `mapcolors`
+    loops `1, MAX_RAID_MEMBERS` (40) as well as `1, MAX_PARTY_MEMBERS` (4), so all 44 frames have to
+    exist for it to survive; the reference declares all 44 too (WorldMapFrame.xml l.486-529). What
+    ours cannot do yet is POSITION the raid forty: `GetPlayerMapPosition` resolves `player` and
+    `party1..4` and answers (0,0) for every `raid` token (worldmap.rs l.487-505), and the
+    reference's second raid arm — battleground team members — needs `GetNumBattlefieldPositions`
+    and `GetBattlefieldPosition`, neither of which we bind. So the forty are declared, hidden, and
+    left where the reference leaves them until a raid actually has coordinates to place them at.
+    Declaring a frame the reference declares is not stubbing behaviour (1134 §4): the frames and
+    their art are real, and the missing piece is a data source, named here and in WorldMapFrame.xml's
+    OUT list rather than faked with an empty setter.
+
+    The hover is the reference's `WorldMapUnit_OnEnter`, which reads `this` and owns
+    `WorldMapTooltip` — both of which now exist, so the template's `WorldMapTooltip:Hide()` OnLeave
+    has something to hide. Our body is the single-unit case; the reference additionally walks every
+    overlapping blip with MouseIsOver and stacks their names into one tooltip, which we do not.
+-->
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+    <!-- No enableMouse, exactly as the reference declares it: the OnEnter/OnLeave below
+         AUTO-ENABLE the mouse on their own (wow-re ui/scratch/scripts-auto-enable.md §1,
+         VERIFIED — a script handler reaches the same enable primitive 0x76af00(2,-1) the
+         attribute does). Adding the attribute would be redundant, and frame_flag_gate reads
+         the loaded ENGINE rather than our XML precisely so the two spellings cannot drift. -->
+    <Frame name="WorldMapUnitTemplate" hidden="true" virtual="true">
+        <Size><AbsDimension x="16" y="16"/></Size>
+        <Anchors><Anchor point="CENTER"/></Anchors>
+        <Layers>
+            <Layer level="ARTWORK">
+                <Texture name="$parentIcon" setAllPoints="true"/>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnLoad>
+                this:SetFrameLevel(this:GetFrameLevel() + 1);
+                this.unit = "party" .. this:GetID();
+                getglobal(this:GetName() .. "Icon"):SetTexture("Interface\\WorldMap\\WorldMapPartyIcon");
+            </OnLoad>
+            <OnEnter>WorldMapUnit_OnEnter()</OnEnter>
+            <OnLeave>WorldMapTooltip:Hide()</OnLeave>
+        </Scripts>
+    </Frame>
+
+    <!-- Ref l.29-35 verbatim: the same frame WITHOUT the `party` token, because a raid blip's unit
+         is assigned by the positioning pass (`partyMemberFrame.unit = unit`, WorldMapFrame.lua
+         l.386) rather than derived from its id. -->
+    <Frame name="WorldMapRaidUnitTemplate" inherits="WorldMapUnitTemplate" virtual="true">
+        <Scripts>
+            <OnLoad>
+                this:SetFrameLevel(this:GetFrameLevel() + 1);
+                getglobal(this:GetName() .. "Icon"):SetTexture("Interface\\WorldMap\\WorldMapPartyIcon");
+            </OnLoad>
+        </Scripts>
+    </Frame>
+</Ui>

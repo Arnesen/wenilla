@@ -223,7 +223,7 @@ fn accept_update_drives_the_column_glows() {
         .eval::<bool>("return TradeHighlightPlayer:IsShown()")
         .unwrap());
     assert!(!s
-        .eval::<bool>("return TradeFrameTradeButton:IsEnabled()")
+        .eval::<bool>("return TradeFrameTradeButton:IsEnabled() ~= 0")
         .unwrap());
     assert!(s.take_errors().is_empty());
 }

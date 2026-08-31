@@ -224,11 +224,27 @@ pub const MAX_MODEL_CHAIN: usize = 8;
 /// an effect multiplies into its vertex alpha; **an effect passes its OWN instance root** and the
 /// chain supplies everything above it.
 ///
-/// Missing components read as opaque throughout: an entity with no `ModelAlpha` and no parent is
-/// `1.0`, which is why the steady-state world pays nothing for this.
+/// Missing components read as opaque throughout: an entity with no alpha and no parent is `1.0`,
+/// which is why the steady-state world pays nothing for this.
+///
+/// **A link the engine does not compose reads its DECLARED fade.** [`ModelAlpha`] is published by
+/// [`publish_model_alpha`], which runs over streamed objects — a model tree the engine never
+/// composes (a booth bake, which has no appear ramp, no despawn ramp and no self feather, and whose
+/// value is final the moment it is built) therefore carries only the [`ModelFade`] its owner
+/// declared. Reading that when there is no published alpha is what lets one law cover both: the
+/// game still only ever declares (1164), and the walk is still the reference's `0x714000` recursion.
+/// A streamed unit carries both and the published one wins, because that one has the ramps folded in.
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct ModelAlphas<'w, 's> {
-    chain: Query<'w, 's, (Option<&'static ModelAlpha>, Option<&'static ParentModel>)>,
+    chain: Query<
+        'w,
+        's,
+        (
+            Option<&'static ModelAlpha>,
+            Option<&'static ModelFade>,
+            Option<&'static ParentModel>,
+        ),
+    >,
 }
 
 impl ModelAlphas<'_, '_> {
@@ -238,11 +254,12 @@ impl ModelAlphas<'_, '_> {
         let mut alpha = 1.0;
         let mut at = instance;
         for _ in 0..MAX_MODEL_CHAIN {
-            let Ok((own, parent)) = self.chain.get(at) else {
+            let Ok((published, declared, parent)) = self.chain.get(at) else {
                 break;
             };
-            if let Some(a) = own {
-                alpha *= a.0;
+            // Published wins: it is the declared fade with this frame's ramps already folded in.
+            if let Some(a) = published.map(|a| a.0).or(declared.map(|d| d.0)) {
+                alpha *= a;
             }
             match parent {
                 Some(p) => at = p.0,
@@ -881,6 +898,62 @@ pub fn plugin(app: &mut App) {
         PostUpdate,
         publish_model_alpha.before(crate::billboard::BillboardPlace),
     );
+}
+
+/// The composition walk, over a tree the engine never publishes an alpha for — a booth bake, whose
+/// value is final at build time.
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+
+    fn composed(app: &mut App, at: Entity) -> f32 {
+        let mut sys = bevy::ecs::system::SystemState::<ModelAlphas>::new(app.world_mut());
+        let alphas = sys.get(app.world());
+        alphas.get(at)
+    }
+
+    /// A model the engine composes nothing for reads its **declared** fade — the half that was
+    /// missing when a ghosted character-select body's wisps drew at full strength over it. And a
+    /// child composes onto it, which is the reference's `0x714000` recursion
+    /// (`child+0x19c = parent+0x19c × child+0x180`).
+    #[test]
+    fn an_uncomposed_tree_reads_its_declared_fade_and_children_compose_onto_it() {
+        let mut app = App::new();
+        let parent = app.world_mut().spawn(ModelFade(0.5)).id();
+        let child = app
+            .world_mut()
+            .spawn((ModelFade(0.5), ParentModel(parent)))
+            .id();
+        let plain = app.world_mut().spawn(ParentModel(parent)).id();
+        assert_eq!(composed(&mut app, parent), 0.5);
+        assert_eq!(composed(&mut app, child), 0.25, "0.5 × 0.5, the recursion");
+        assert_eq!(
+            composed(&mut app, plain),
+            0.5,
+            "a child declaring nothing is its parent's"
+        );
+    }
+
+    /// The PUBLISHED alpha wins where both exist — a streamed unit, whose published value already
+    /// has this frame's appear/despawn/self-feather ramps folded into the declared one. Reading
+    /// both would apply the declared fade twice.
+    #[test]
+    fn a_published_alpha_beats_the_declaration_it_was_computed_from() {
+        let mut app = App::new();
+        let unit = app
+            .world_mut()
+            .spawn((ModelFade(0.5), ModelAlpha(0.2)))
+            .id();
+        assert_eq!(composed(&mut app, unit), 0.2);
+    }
+
+    /// The steady-state world still pays nothing: an entity with neither is opaque.
+    #[test]
+    fn an_entity_with_neither_is_opaque() {
+        let mut app = App::new();
+        let bare = app.world_mut().spawn_empty().id();
+        assert_eq!(composed(&mut app, bare), 1.0);
+    }
 }
 
 #[cfg(test)]

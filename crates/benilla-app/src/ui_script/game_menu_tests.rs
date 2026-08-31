@@ -131,7 +131,7 @@ fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
 
     for name in ["GameMenuButtonEditMode", "GameMenuButtonSupport"] {
         assert!(
-            !s.eval::<bool>(&format!("return {name}:IsEnabled()"))
+            !s.eval::<bool>(&format!("return {name}:IsEnabled() ~= 0"))
                 .unwrap(),
             "{name} has no panel behind it and must read that way"
         );
@@ -144,7 +144,7 @@ fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
         "GameMenuButtonContinue",
     ] {
         assert!(
-            s.eval::<bool>(&format!("return {name}:IsEnabled()"))
+            s.eval::<bool>(&format!("return {name}:IsEnabled() ~= 0"))
                 .unwrap(),
             "{name} is live"
         );
@@ -468,12 +468,12 @@ fn logout_and_exit_read_disabled_while_a_countdown_runs() {
     s.fire_event("PLAYER_CAMPING", vec![]);
     s.run("ToggleGameMenu(1)").unwrap();
     assert!(
-        !s.eval::<bool>("return GameMenuButtonLogout:IsEnabled()")
+        !s.eval::<bool>("return GameMenuButtonLogout:IsEnabled() ~= 0")
             .unwrap(),
         "Logout is dead while the camp timer runs"
     );
     assert!(!s
-        .eval::<bool>("return GameMenuButtonQuit:IsEnabled()")
+        .eval::<bool>("return GameMenuButtonQuit:IsEnabled() ~= 0")
         .unwrap());
 
     // With the countdown gone, a re-opened menu has them back.
@@ -481,7 +481,7 @@ fn logout_and_exit_read_disabled_while_a_countdown_runs() {
     s.fire_event("LOGOUT_CANCEL", vec![]);
     s.run("ToggleGameMenu(1)").unwrap();
     assert!(s
-        .eval::<bool>("return GameMenuButtonLogout:IsEnabled()")
+        .eval::<bool>("return GameMenuButtonLogout:IsEnabled() ~= 0")
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -690,7 +690,7 @@ fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
         "closing the menu restores full colour: {toggle:?}"
     );
     assert!(
-        s.eval::<bool>("return MainMenuBarBackpackButton:IsEnabled()")
+        s.eval::<bool>("return MainMenuBarBackpackButton:IsEnabled() ~= 0")
             .unwrap(),
         "…and the button works again"
     );

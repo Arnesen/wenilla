@@ -133,7 +133,7 @@ fn resurrect_request_picks_variant_and_answers() {
         "the offerer name formats into the no-sickness text"
     );
     assert!(s
-        .eval::<bool>("return StaticPopup1Button1:IsEnabled()")
+        .eval::<bool>("return StaticPopup1Button1:IsEnabled() ~= 0")
         .unwrap());
     s.run("StaticPopup_OnClick(StaticPopup1, 1)").unwrap();
     assert_eq!(s.take_death_actions(), vec![DeathAction::AcceptResurrect]);
@@ -341,7 +341,7 @@ fn corpse_range_events_drive_recover_corpse() {
         "RECOVER_CORPSE"
     );
     assert!(
-        !s.eval::<bool>("return StaticPopup1Button1:IsEnabled()")
+        !s.eval::<bool>("return StaticPopup1Button1:IsEnabled() ~= 0")
             .unwrap(),
         "Accept is delay-gated"
     );
@@ -358,7 +358,7 @@ fn corpse_range_events_drive_recover_corpse() {
         "Resurrect now?"
     );
     assert!(s
-        .eval::<bool>("return StaticPopup1Button1:IsEnabled()")
+        .eval::<bool>("return StaticPopup1Button1:IsEnabled() ~= 0")
         .unwrap());
     s.run("StaticPopup_OnClick(StaticPopup1, 1)").unwrap();
     assert_eq!(s.take_death_actions(), vec![DeathAction::RetrieveCorpse]);

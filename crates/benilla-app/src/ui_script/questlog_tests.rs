@@ -598,7 +598,7 @@ fn empty_quest_log_hides_rows_and_disables_abandon() {
     );
     assert!(!s.eval::<bool>("return QuestLogTitle1:IsVisible()").unwrap());
     assert!(!s
-        .eval::<bool>("return QuestLogAbandonButton:IsEnabled()")
+        .eval::<bool>("return QuestLogAbandonButton:IsEnabled() ~= 0")
         .unwrap());
     // The Description header is now Lua-managed (BenillaQuestLogDetail_Clear blanks it) rather than
     // a static `text=` — it used to float "Description" over the empty-log parchment with no
@@ -1226,7 +1226,7 @@ fn share_quest_needs_both_a_sharable_selection_and_a_party() {
         "quest 1 carries the sharable bit"
     );
     assert!(
-        !s.eval::<bool>("return QuestLogPushQuestButton:IsEnabled()")
+        !s.eval::<bool>("return QuestLogPushQuestButton:IsEnabled() ~= 0")
             .unwrap(),
         "solo: sharable is not enough"
     );
@@ -1235,7 +1235,7 @@ fn share_quest_needs_both_a_sharable_selection_and_a_party() {
     s.set_party(party(2));
     s.fire_event("PARTY_MEMBERS_CHANGED", vec![]);
     assert!(
-        s.eval::<bool>("return QuestLogPushQuestButton:IsEnabled()")
+        s.eval::<bool>("return QuestLogPushQuestButton:IsEnabled() ~= 0")
             .unwrap(),
         "PARTY_MEMBERS_CHANGED alone re-tests the button"
     );
@@ -1249,7 +1249,7 @@ fn share_quest_needs_both_a_sharable_selection_and_a_party() {
         "quest 2 has no sharable bit"
     );
     assert!(
-        !s.eval::<bool>("return QuestLogPushQuestButton:IsEnabled()")
+        !s.eval::<bool>("return QuestLogPushQuestButton:IsEnabled() ~= 0")
             .unwrap(),
         "in a party: an unsharable selection is still dark"
     );
@@ -1258,12 +1258,12 @@ fn share_quest_needs_both_a_sharable_selection_and_a_party() {
     s.run("SelectQuestLogEntry(1)").unwrap();
     s.run("BenillaQuestLogFrame_Update()").unwrap();
     assert!(s
-        .eval::<bool>("return QuestLogPushQuestButton:IsEnabled()")
+        .eval::<bool>("return QuestLogPushQuestButton:IsEnabled() ~= 0")
         .unwrap());
     s.set_party(PartyState::default());
     s.fire_event("PARTY_MEMBERS_CHANGED", vec![]);
     assert!(!s
-        .eval::<bool>("return QuestLogPushQuestButton:IsEnabled()")
+        .eval::<bool>("return QuestLogPushQuestButton:IsEnabled() ~= 0")
         .unwrap());
 }
 
@@ -1284,7 +1284,7 @@ fn share_quest_is_dark_on_an_empty_log_even_in_a_party() {
     s.set_party(party(4));
     s.run("ToggleQuestLog()").unwrap();
     assert!(!s
-        .eval::<bool>("return QuestLogPushQuestButton:IsEnabled()")
+        .eval::<bool>("return QuestLogPushQuestButton:IsEnabled() ~= 0")
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

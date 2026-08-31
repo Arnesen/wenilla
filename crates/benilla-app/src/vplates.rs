@@ -118,8 +118,8 @@ pub(crate) struct VPlateMode {
 /// The persisted names of the two toggles — see [`VPlateMode`]. Welded to [`crate::cvars`]'s
 /// registered table by its own test, so the spelling here and the row on the Nameplates page can
 /// never drift apart.
-pub(crate) const CVAR_ENEMIES: &str = "nameplateShowEnemies";
-pub(crate) const CVAR_FRIENDS: &str = "nameplateShowFriends";
+pub(crate) const CVAR_ENEMIES: &str = benilla_ui::script::CVAR_NAMEPLATE_ENEMIES;
+pub(crate) const CVAR_FRIENDS: &str = benilla_ui::script::CVAR_NAMEPLATE_FRIENDS;
 
 impl Default for VPlateMode {
     fn default() -> Self {

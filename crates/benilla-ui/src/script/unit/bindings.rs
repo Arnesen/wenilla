@@ -32,6 +32,123 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // `UnitIsVisible(unit)` — `0x516030`, and it is **object presence, nothing else**:
+    // `ClntObjMgrObjectPtr(resolve(token), TYPEMASK_UNIT) != NULL`. 57 bytes, one branch, no field
+    // read and no comparison beyond `test eax,eax`.
+    //
+    // **Not a synonym for `UnitExists`, and neither implies the other.** An out-of-range party
+    // member has a roster entry and no object: `UnitExists` = 1 through its GUID fallback,
+    // `UnitIsVisible` = nil. That pair is the branch pfUI takes seven times — most visibly
+    // `if not UnitIsVisible(unitstr) or not UnitIsConnected(unitstr)`, which chooses between a 3D
+    // portrait and a flat one.
+    //
+    // **The return is the NUMBER 1, never a boolean** — `0x6f3810` writes tag 3 with the operands
+    // of `1.0` on the true leg, `lua_pushnil` on the false one. `UnitExists` above answers a Rust
+    // `bool` and so hands Lua `true`/`false`; that is its own pre-existing question, and matching
+    // it here would have been the wrong kind of consistency.
+    g.set(
+        "UnitIsVisible",
+        lua.create_function(|lua, token: Option<String>| {
+            Ok(if with_unit(lua, &token, false, |u| u.has_object)? {
+                Value::Integer(1)
+            } else {
+                Value::Nil
+            })
+        })?,
+    )?;
+
+    // `UnitIsTapped(unit)` / `UnitIsTappedByPlayer(unit)` — `0x519c90` / `0x519d00`, a masked-byte
+    // pair (108 bytes each; only the mask and the `Usage:` string differ). Each is
+    // `object present && (UNIT_DYNAMIC_FLAGS & mask)` and nothing else: no ownership, no GUID
+    // compare, no party/raid or health conjunct anywhere in either body.
+    //
+    // **Shape A, unlike `UnitIsVisible` directly above** — these two carry an `lua_isstring` gate
+    // and a `Usage:` `luaL_error`, where their neighbour has none. Two adjacent verbs in one
+    // family with opposite argument shapes is exactly why 1717's taxonomy is settled per binding;
+    // inheriting the sibling's shape here would have been wrong in the quiet direction.
+    //
+    // The reference raises TWO different messages — `Usage:` for a non-string/non-number, and the
+    // resolver's `"Unknown unit name: %s"` for a bad token (and for any NUMBER, since the
+    // `lua_isstring` gate admits tag 3 and hands the resolver `"5"`). `check_unit_token` inside
+    // `with_unit` is the second of those; the first is the `?` on the argument type below.
+    // The gate is the BINDING's, not `with_unit`'s: `check_unit_token` lets a nil through by
+    // design, because that is right for `UnitExists`, `UnitIsVisible` and most of this family. It
+    // is wrong for exactly these two, so the shape-A test happens here, before the shared path.
+    for (name, usage, by_player) in [
+        ("UnitIsTapped", r#"Usage: UnitIsTapped("unit")"#, false),
+        (
+            "UnitIsTappedByPlayer",
+            r#"Usage: UnitIsTappedByPlayer("unit")"#,
+            true,
+        ),
+    ] {
+        g.set(
+            name,
+            lua.create_function(move |lua, token: Value| {
+                // Shape A: a string OR a number passes (`lua_isstring` admits tag 3, and the
+                // client hands the resolver `"5"` — which then raises `Unknown unit name: 5`,
+                // the family's SECOND message). Everything else — nil, absent, boolean, table,
+                // function — is the `Usage:` raise.
+                let token = Some(crate::script::binding_abi::string_arg(lua, token, usage)?);
+                let hit = with_unit(lua, &token, false, |u| {
+                    if by_player {
+                        u.tapped_by_player
+                    } else {
+                        u.tapped
+                    }
+                })?;
+                // One value, and it is the NUMBER 1 or nil — never a boolean, the same shape the
+                // rest of this family answers in.
+                Ok(if hit { Value::Integer(1) } else { Value::Nil })
+            })?,
+        )?;
+    }
+
+    // `UnitIsPartyLeader(unit)` — `0x516210`. **Two legs, ORed, covering disjoint failures:**
+    //
+    //     o = ObjPtr(resolve(token), TYPEMASK_PLAYER)          -- 0x10, not this family's 8
+    //     (o != NULL && (o.PLAYER_FLAGS & 0x1)) || resolve(token) == g_groupLeaderGuid
+    //
+    // The descriptor leg answers for any held player — including a stranger who leads their OWN
+    // party, which a comparison against our group's leader can never express. The GUID leg answers
+    // for a group member whose object the client does not hold (an out-of-range `party3`, any
+    // `raidN`), where there is no descriptor to read. Neither is sufficient alone, which is why
+    // this is not derivable from `IsPartyLeader()` + `GetPartyLeaderIndex()` however it is
+    // arranged (wow-re `ui/scratch/party-leader-and-nameplate-verbs.md`, G1 REFUTED).
+    //
+    // **No zero guard, and that is deliberate.** `IsPartyLeader 0x4e9130` short-circuits on a
+    // `0:0` cached leader; this one does not. An unresolvable-but-non-raising token resolves to
+    // `0:0`, which equals the zeroed leader while ungrouped — so `UnitIsPartyLeader(nil)` answers
+    // **1 solo**. It reads like a bug and it is the behaviour; answering nil there would be the
+    // divergence.
+    //
+    // Shape C with a shape-A tail: no `lua_isstring` gate and no `Usage:` of its own, but a bad
+    // token — and any Lua NUMBER, which the resolver stringifies first — raises
+    // `"Unknown unit name: %s"` from `check_unit_token`. One value on both legs, the number 1 or
+    // nil, never a boolean.
+    g.set(
+        "UnitIsPartyLeader",
+        lua.create_function(|lua, token: Option<String>| {
+            check_unit_token(&token)?;
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let by_flag = token
+                .as_ref()
+                .and_then(|t| model.unit(t))
+                .is_some_and(|u| u.group_leader);
+            // The GUID leg. A token with no snapshot resolves to GUID 0 — the reference's `0:0` —
+            // and 0 == the zeroed leader is exactly the solo case above.
+            let guid = token
+                .as_ref()
+                .and_then(|t| model.unit(t))
+                .map_or(0, |u| u.guid);
+            Ok(if by_flag || guid == model.party.leader_guid {
+                Value::Integer(1)
+            } else {
+                Value::Nil
+            })
+        })?,
+    )?;
+
     g.set(
         "UnitName",
         lua.create_function(|lua, token: Option<String>| {

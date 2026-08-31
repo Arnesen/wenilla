@@ -64,7 +64,28 @@ use bevy::prelude::*;
 /// are a *contract addons call by name* AND benilla has no reason to compute them differently.
 /// Anything we want to own — because our own windows are the consumer — belongs in `assets/ui` as
 /// our own code, under the reference's names (`BagFrame.xml`'s `ToggleBackpack` is the pattern).
-pub(crate) const SOURCED: &[&str] = &["Interface\\FrameXML\\ContainerFrame.lua"];
+pub(crate) const SOURCED: &[&str] = &[
+    "Interface\\FrameXML\\ContainerFrame.lua",
+    // PaperDollFrame.lua earns its place for ONE family: `PaperDollItemSlotButton_OnLoad`/
+    // `_OnEvent`/`_OnClick`/`_Update`/`_UpdateLock`/`_OnEnter`/`_OnUpdate`. Every one of them is
+    // frame-agnostic in exactly the sense rule 2 above means — it acts on `this` and `this:GetID()`
+    // through live APIs, never on a named reference window — which is what makes it safe to hand
+    // an addon's own button. `PaperDollItemSlotButtonTemplate` and `BagSlotButtonTemplate` are
+    // declared over them (CharacterFrame.xml, BagFrame.xml), and pfUI builds its bag bar from the
+    // latter.
+    //
+    // Checked before adding, because this list is a decision:
+    //  · TOP-LEVEL is four constants (NUM_RESISTANCE_TYPES, NUM_STATS, NUM_SHOPPING_TOOLTIPS,
+    //    ATTACK_POWER_MAGIC_NUMBER). Nothing touches a frame at load, so sourcing cannot raise.
+    //  · 18 of its 29 functions COLLIDE with ours (the PaperDollFrame_Set* stat family, the two
+    //    damage-frame hovers, PaperDollFormatStat, PaperDollStatTooltip). Order settles all of
+    //    them the documented way: this runs before assets/ui, so OUR bodies overwrite the
+    //    reference's and keep driving our character sheet. Not one of the seven names we are here
+    //    for is in that overlap.
+    //  · Our own doll slots keep calling `BenillaPaperDollSlot_*` and are untouched — the sourced
+    //    family is new surface for addons, not a replacement for ours.
+    "Interface\\FrameXML\\PaperDollFrame.lua",
+];
 
 /// Execute every [`SOURCED`] file into `script`, read off the install's patch chain.
 ///

@@ -111,8 +111,8 @@ fn shipped_gossip_frame_drives_end_to_end() {
     // so the shared pool starts filling from option 1 at row 1 — decision 0088 §3).
     let states: (bool, bool, bool, bool) = s
         .eval(
-            "return GossipRow1:IsVisible(), GossipRow1:IsEnabled(),\n\
-                        GossipRow2:IsEnabled(), GossipRow3:IsVisible()",
+            "return GossipRow1:IsVisible(), GossipRow1:IsEnabled() ~= 0,\n\
+                        GossipRow2:IsEnabled() ~= 0, GossipRow3:IsVisible()",
         )
         .unwrap();
     assert_eq!(

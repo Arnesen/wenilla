@@ -30,7 +30,66 @@ use super::Model;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UnitState {
     /// Whether the unit exists (`UnitExists`). A token with no snapshot is treated as `false` too.
+    ///
+    /// **Stays TRUE for an out-of-range party member** — that is the whole point of the roster
+    /// fallback, and it is what separates this field from [`Self::has_object`].
+    ///
+    /// *Named gap, second order:* 1.12's `UnitExists 0x515fb0` is a **conjunction** — the object
+    /// lookup AND a virtual `[edx+0x58]` that resolves to `IsSelectable 0x60be60`
+    /// (`!(UNIT_FIELD_FLAGS & 0x02000000) || UNIT_FIELD_CREATEDBY == you`) — falling back to the
+    /// GUID-only roster test on a miss. We model the fallback and not the conjunct, so a
+    /// not-selectable unit created by someone else reads `exists` here and `nil` there. No corpus
+    /// caller reaches it; recorded rather than folded in (wow-re
+    /// `ui/scratch/unitisvisible-object-presence.md`).
     pub exists: bool,
+    /// **`UnitIsVisible` — the client holds a live object for this token, and nothing else.**
+    ///
+    /// The reference is 57 bytes with one branch (`0x516030`):
+    /// `ClntObjMgrObjectPtr(resolve(token), TYPEMASK_UNIT) != NULL`. Its body reads **zero** object
+    /// fields, makes **zero** comparisons beyond `test eax,eax`, and contains **zero** float
+    /// opcodes — so there is no distance term, no radius, no alpha/fade/interpolation flag and no
+    /// "known to the client" bit in it. Addons read it as a range gate because **the range test is
+    /// the server's**: `SMSG_DESTROY_OBJECT` and the OUT_OF_RANGE demotion unlink the object from
+    /// the manager index this query searches, so the client answers with the presence of the
+    /// object the server chose to send.
+    ///
+    /// Distinct from [`Self::exists`], and neither implies the other. The one that matters here:
+    /// an out-of-range party member is `exists == true`, `has_object == false` — which is exactly
+    /// pfUI's `if not UnitIsVisible(unitstr) or not UnitIsConnected(unitstr)` portrait branch.
+    ///
+    /// The app already computed this and did not publish it: `ui_party::feed`'s
+    /// `member_unit_state` takes `store: Option<&ObjectStore>` and its own comment calls that
+    /// argument "the reference's `0x468460`". Every snapshot built from a live store sets it
+    /// (`ui_unit::snapshot`); the roster-record leg and a token with no snapshot leave it `false`.
+    ///
+    /// **One presence field serves three verbs** — `UnitIsVisible`, and the object-presence
+    /// conjunct of both tapped predicates below.
+    pub has_object: bool,
+    /// `UnitIsTapped` — `UNIT_DYNAMIC_FLAGS` (UpdateField **143**) bit `0x4`: this unit is
+    /// someone's kill credit. `0x519c90` is `test BYTE PTR [eax+0x224],0x4` behind the same
+    /// object-presence check [`Self::has_object`] carries, and **nothing else** — no ownership, no
+    /// GUID compare, no party/raid or health conjunct anywhere in the body (wow-re
+    /// `ui/scratch/tapped-bits-and-unit-faction.md`).
+    ///
+    /// Set only on the live-descriptor leg, so an out-of-range unit reads `false` — which is the
+    /// object-presence conjunct, for free, by the same route `has_object` gets it.
+    pub tapped: bool,
+    /// **`UnitIsPartyLeader`'s FIRST leg** — the server's `PLAYER_FLAGS & 0x1` on this unit's own
+    /// descriptor, restricted to players (`TYPEMASK_PLAYER`, `0x10` — **not** this family's usual
+    /// `8`, which is the one difference the predicate makes to the object lookup).
+    ///
+    /// Not derived client-side, and not the same question as "leads MY group": it is true for a
+    /// stranger who leads their own party, which no comparison against our group's leader GUID can
+    /// express. The second leg is that comparison, in `script::party` — the two cover disjoint
+    /// failures and the reference ORs them (wow-re
+    /// `ui/scratch/party-leader-and-nameplate-verbs.md`).
+    pub group_leader: bool,
+    /// `UnitIsTappedByPlayer` — the same field's bit `0x8` (`0x519d00`, a masked-byte clone of its
+    /// sibling: 108 bytes each, differing only in the mask and the `Usage:` string).
+    ///
+    /// Read as a **pair**: `tapped && !tapped_by_player` is "someone else's kill", which is the
+    /// grey-bar condition unit-frame addons draw (pfUI `api/unitframes.lua:2012`).
+    pub tapped_by_player: bool,
     /// The unit's name (`UnitName` → the string, or nil). `None` while the app's name-query cache
     /// hasn't answered (or the server doesn't know the unit).
     pub name: Option<String>,

@@ -2622,6 +2622,7 @@ fn sync_body_booth(
             &booth.layer,
             booth_light.pane.buffer.as_ref(),
             &booth_effects,
+            BoothInstance::default(),
         );
         // The turn's node bookkeeping named the player this bake just replaced.
         booth.turn.rebaked();

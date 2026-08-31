@@ -400,6 +400,22 @@ impl ObjectFields {
     pub fn unit_dynamic_flags(&self) -> u32 {
         self.get_u32(FIELD_UNIT_DYNAMIC_FLAGS).unwrap_or(0)
     }
+    /// `UNIT_DYNAMIC_FLAGS` bit `0x4` — **tapped**: this unit is someone's kill credit.
+    /// `UnitIsTapped 0x519c90` is exactly `0x519cd0 test BYTE PTR [eax+0x224],0x4` behind an
+    /// object-presence check, nothing else — no ownership, GUID compare, party/raid or health
+    /// conjunct anywhere in its body (wow-re `ui/scratch/tapped-bits-and-unit-faction.md`).
+    pub fn unit_tapped(&self) -> bool {
+        self.unit_dynamic_flags() & 0x4 != 0
+    }
+    /// `UNIT_DYNAMIC_FLAGS` bit `0x8` — **tapped by me** (`UnitIsTappedByPlayer 0x519d00`, the same
+    /// 108-byte body with the mask changed). Per-viewer: the server decides whose credit it is
+    /// before it ships the field, so the client reads it verbatim and does nothing else with it.
+    ///
+    /// The pair is read together — `tapped && !tapped_by_player` is "someone ELSE's kill", the
+    /// grey-bar condition every unit-frame addon draws.
+    pub fn unit_tapped_by_player(&self) -> bool {
+        self.unit_dynamic_flags() & 0x8 != 0
+    }
     /// `UNIT_DYNAMIC_FLAGS` bit `0x1` — **lootable by me** (the server strips the bit per viewer
     /// before it ships — vmangos's "hide lootable animation for unallowed players"). Gates the
     /// loot cursor, the right-click loot route, and the corpse sparkle (wow-re

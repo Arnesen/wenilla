@@ -18,6 +18,7 @@ use std::ffi::c_void;
 
 use mlua::{LightUserData, Lua, Table, Value};
 
+use super::binding_abi::optional_string;
 use super::{Model, REG_FRAME_META, REG_FRAME_METHODS, REG_SCRIPTS, REG_WRAPPERS};
 use crate::layout::Point;
 use crate::order::{DrawLayer, Strata};
@@ -378,16 +379,33 @@ fn create_frame(
 ) -> mlua::Result<Table> {
     let frame_kind = frame_kind_from_str(&kind)
         .ok_or_else(|| mlua::Error::runtime(format!("CreateFrame: unknown frame type '{kind}'")))?;
-    let name: Option<String> = match &name {
-        Some(Value::String(s)) => Some(s.to_str()?.to_string()),
-        _ => None,
-    };
-    let template: Option<String> = match &inherits {
-        Some(Value::String(s)) => Some(s.to_str()?.to_string()),
-        _ => None,
-    };
+    // **`name` and `inherits` are `lua_tostring` positions, and a NUMBER is a string to it.**
+    // `0x7060b0` reads both through `0x6f3690` with no type guard at all, so `CreateFrame("Frame",
+    // 5)` names the frame `"5"` — a `Value::String`-only match drops it (wow-re
+    // `ui/scratch/xml-template-name-lookup.md` §5.2).
+    //
+    // The fourth argument's quirk, which is real and reads like a bug in the client: `lua_tostring`
+    // runs at `0x70613f` **before** the `cmp 4` gate, and `0x6f7cb1 mov dword ptr [esi],0x4`
+    // retags the number's stack slot **in place** — so by the time the tag is tested it IS a
+    // string. `CreateFrame("Frame", nil, nil, 5)` therefore raises `Couldn't find inherited node
+    // "5"`, while `f:CreateTexture(nil, nil, 5)` silently ignores the 5, because the region
+    // constructors ask `lua_type` first and never coerce. Same value, opposite outcome, decided by
+    // argument order alone — which is why this is spelled out rather than shared with them.
+    let name: Option<String> = name.as_ref().and_then(|v| optional_string(lua, v));
+    let template: Option<String> = inherits.as_ref().and_then(|v| optional_string(lua, v));
 
     // Resolve the parent handle (a wrapper table, or a name string) under a short read borrow.
+    //
+    // **The name-string arm is OURS, and the reference RAISES on it** — `0x7060b0` asks
+    // `lua_type` three times and `cmp eax,5`: a table is the parent, nil/absent means no parent,
+    // and a string takes the error leg (`xml-template-name-lookup.md` §5.2's per-position table).
+    //
+    // It is **parked, not pruned**, on the same footing as `TEXTURE_ONLY_METHODS`' tail three: the
+    // §5 established *that* it raises but did not quote the message, and inventing the text of a
+    // client error is exactly what decision 1721 was written about — a plausible string in the
+    // voice of a finding. Measured meanwhile: **zero** call sites pass a string parent, in the
+    // 109-folder corpus or in our own FrameXML, so the superset is unreachable in practice and
+    // removing it blind would buy nothing. Pruning it needs the message, not more confidence.
     let parent_handle: Option<FrameHandle> = {
         let model = lua.app_data_ref::<Model>().expect("model app_data");
         match &parent {
@@ -399,7 +417,10 @@ fn create_frame(
         }
     };
 
-    // A 4th argument that is present but not a string is the caller's bug, not a template.
+    // A 4th argument that is present but neither a string nor a number is **silently ignored by
+    // the reference** — `lua_tostring` returns NULL for it and the `cmp 4` gate then falls into
+    // the ordinary construction path. So this is a benilla-only diagnostic and stays a WARNING,
+    // never a raise: it tells a reader something was dropped without changing what runs.
     if template.is_none() {
         if let Some(v) = inherits.as_ref().filter(|v| !v.is_nil()) {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");

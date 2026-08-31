@@ -865,6 +865,29 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // GetInventoryItemCooldown(unit, slot) → (start, duration, enable), the EQUIPPED twin of
+    // `GetContainerItemCooldown` (container.rs) and the same `GetTime`-clock convention.
+    //
+    // **It answers "no cooldown" and that is an absent FEED, not a pretended one.** benilla has no
+    // equipped-item cooldown source yet — the same gap `tooltip_item`'s `SetInventoryItem` already
+    // records where it leaves `hasCooldown` nil — so there is nothing to report and `(0, 0, 1)` is
+    // exactly what the container twin answers for a slot with no record. It is bound rather than
+    // left absent because the SOURCED `PaperDollFrame.lua` calls it UNCONDITIONALLY, once per
+    // `PaperDollItemSlotButton_Update`: without it every button built from
+    // `PaperDollItemSlotButtonTemplate` or `BagSlotButtonTemplate` raises inside its own OnLoad,
+    // which is how pfUI's bag bar would meet it. A raise there is not the loud-and-correct kind
+    // (1203) — it is a raise on a verb whose honest answer we already know.
+    //
+    // When an equipped-cooldown feed lands, this reads it the way the container twin reads
+    // `container_cooldowns`, and the CooldownFrame the doll slots already carry starts sweeping
+    // with no caller change.
+    g.set(
+        "GetInventoryItemCooldown",
+        lua.create_function(|_, (_token, _slot): (Option<String>, i64)| {
+            Ok((0.0f64, 0.0f64, 1i64))
+        })?,
+    )?;
+
     // GetInventoryAlertStatus(index) → the region's alert status (`INV_ALERT_STATUS`: 0 none,
     // 3 damaged/low-ammo, 4 broken; 1/2 = temp-enchant alerts, unfed) — DurabilityFrame's
     // armor-guy read. Valid 1..=12 (the client's own 12-entry table; index 12 = low ammo, which

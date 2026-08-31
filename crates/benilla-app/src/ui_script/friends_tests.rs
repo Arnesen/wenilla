@@ -216,8 +216,10 @@ fn the_friend_buttons_follow_the_selection() {
     push(&mut s, SocialState::default(), "FRIENDLIST_UPDATE");
     for button in ["SendMessage", "GroupInvite", "RemoveFriend"] {
         assert!(
-            !s.eval::<bool>(&format!("return FriendsFrame{button}Button:IsEnabled()"))
-                .unwrap(),
+            !s.eval::<bool>(&format!(
+                "return FriendsFrame{button}Button:IsEnabled() ~= 0"
+            ))
+            .unwrap(),
             "{button} is disabled with no friends"
         );
     }
@@ -232,12 +234,12 @@ fn the_friend_buttons_follow_the_selection() {
         "FRIENDLIST_UPDATE",
     );
     assert!(
-        s.eval::<bool>("return FriendsFrameRemoveFriendButton:IsEnabled()")
+        s.eval::<bool>("return FriendsFrameRemoveFriendButton:IsEnabled() ~= 0")
             .unwrap(),
         "an offline friend can still be removed"
     );
     assert!(
-        !s.eval::<bool>("return FriendsFrameSendMessageButton:IsEnabled()")
+        !s.eval::<bool>("return FriendsFrameSendMessageButton:IsEnabled() ~= 0")
             .unwrap(),
         "…but not whispered"
     );
@@ -459,14 +461,14 @@ fn the_who_buttons_need_a_selected_row() {
         "WHO_LIST_UPDATE",
     );
     assert!(
-        !s.eval::<bool>("return WhoFrameAddFriendButton:IsEnabled()")
+        !s.eval::<bool>("return WhoFrameAddFriendButton:IsEnabled() ~= 0")
             .unwrap(),
         "nothing selected yet"
     );
 
     s.run("WhoFrameButton2:Click()").unwrap();
     assert!(s
-        .eval::<bool>("return WhoFrameAddFriendButton:IsEnabled()")
+        .eval::<bool>("return WhoFrameAddFriendButton:IsEnabled() ~= 0")
         .unwrap());
     let _ = s.take_social_requests();
     s.run("WhoFrameAddFriendButton:Click()").unwrap();
@@ -485,7 +487,7 @@ fn the_who_buttons_need_a_selected_row() {
         "WHO_LIST_UPDATE",
     );
     assert!(
-        !s.eval::<bool>("return WhoFrameAddFriendButton:IsEnabled()")
+        !s.eval::<bool>("return WhoFrameAddFriendButton:IsEnabled() ~= 0")
             .unwrap(),
         "a fresh answer drops the old selection"
     );
@@ -663,7 +665,7 @@ fn right_clicking_a_who_row_opens_the_friend_menu() {
     );
     // …and a right-click must NOT also select the row (the ref's two branches are exclusive).
     assert!(
-        !s.eval::<bool>("return WhoFrameAddFriendButton:IsEnabled()")
+        !s.eval::<bool>("return WhoFrameAddFriendButton:IsEnabled() ~= 0")
             .unwrap(),
         "right-click does not select"
     );

@@ -94,7 +94,7 @@ fn new_then_pick_an_icon_then_okay_creates_the_macro() {
         .eval::<bool>("return BenillaMacroPopupFrame:IsVisible()")
         .unwrap());
     assert!(
-        !s.eval::<bool>("return BenillaMacroPopupOkayButton:IsEnabled()")
+        !s.eval::<bool>("return BenillaMacroPopupOkayButton:IsEnabled() ~= 0")
             .unwrap(),
         "a nameless, iconless macro cannot be created"
     );
@@ -104,7 +104,7 @@ fn new_then_pick_an_icon_then_okay_creates_the_macro() {
     s.run("BenillaMacroPopupButton_OnClick(BenillaMacroPopupButton1)")
         .unwrap();
     assert!(
-        s.eval::<bool>("return BenillaMacroPopupOkayButton:IsEnabled()")
+        s.eval::<bool>("return BenillaMacroPopupOkayButton:IsEnabled() ~= 0")
             .unwrap(),
         "a name and an icon enable OKAY"
     );

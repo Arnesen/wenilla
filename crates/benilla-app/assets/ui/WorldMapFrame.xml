@@ -20,10 +20,22 @@
     art spun by SetRotation(GetPlayerFacing()) — the reference renders an engine arrow model;
     0203 flags the stand-in).
 
-    OUT (later slices, per 0203): the raid/battlefield/ping children (the PARTY blips landed with
-    report B320 — the raid pool waits on `GetPlayerMapPosition` answering a `raid` token); the
-    magnifying-glass zoom-out shortcut (redundant with the button); SetupFullscreenScale (the map renders at its native
-    1024×768 centered; a scale pass is a taste knob); WorldMapTooltip (only unit blips used it).
+    OUT (later slices, per 0203): the ping child; the magnifying-glass zoom-out shortcut (redundant
+    with the button); SetupFullscreenScale (the map renders at its native 1024×768 centered; a scale
+    pass is a taste knob).
+
+    The raid pool moved half-way out of that list and the halves are worth separating. The 40
+    `WorldMapRaid` frames are now DECLARED, as inherits= instances of WorldMapRaidUnitTemplate
+    alongside the four party ones, because the published names and their `$parentIcon` children are
+    what addons index — pfUI's mapcolors walks all 44 and died on the first missing icon. What is
+    still OUT is POSITIONING them: `GetPlayerMapPosition` answers (0,0) for every `raid` token, and
+    the reference's second arm (team members in a battleground) needs GetNumBattlefieldPositions and
+    GetBattlefieldPosition, neither of which we bind. So they exist, hidden, and WorldMapParty_Update
+    drives the party arm alone.
+
+    WorldMapTooltip was in this OUT list — "only unit blips used it" — and is now declared at the
+    foot of the file. That reason was about the reference's own consumers and never about the
+    published NAME, which six corpus addons index directly and pfUI dies on at file scope.
 
     Deviations from the reference, deliberate: BlackoutWorld fills via anchors instead of the
     GetScreenWidth resize dance (same pixels); OnShow calls WorldMapFrame_Update() directly after
@@ -213,11 +225,58 @@
             end
         end
 
-        -- A party blip's hover names the member (ref WorldMapUnit_OnEnter, which reads the
-        -- frame's own `unit`). The frame id IS the party slot, so the token needs no bookkeeping.
-        function WorldMapParty_OnEnter(blip)
-            local unit = "party" .. blip:GetID()
-            WorldMapMarker_ShowTooltip(blip, UnitName(unit) or UNKNOWN)
+        -- Ref WorldMapUnit_OnEnter (WorldMapFrame.lua l.457-499) transcribed. Three things it does
+        -- that the one-line version it replaces did not: it takes NO argument and reads `this` (the
+        -- reference's calling convention, and now ours, because the name is the reference's and an
+        -- addon may call it); it drives WorldMapTooltip, which is what the blip templates' OnLeave
+        -- hides; and it stacks the name of EVERY blip under the cursor rather than one, because
+        -- blips overlap whenever a group stands together.
+        --
+        -- No `or UNKNOWN` fallback, deliberately: a blip is only reached here when it is VISIBLE,
+        -- and it is only visible when GetPlayerMapPosition answered real coordinates for its unit,
+        -- so UnitName cannot be nil without a contract already being broken. A guard there would
+        -- turn that into a silently wrong tooltip instead of a raise (1203).
+        --
+        -- `unitButton.name` is the battleground-team label the reference sets for someone on your
+        -- team but in neither your party nor your raid; our positioning pass never sets it (no
+        -- GetBattlefieldPosition binding), so that branch is dead here and kept because it is the
+        -- reference's own fallback order.
+        function WorldMapUnit_OnEnter()
+            local x = this:GetCenter()
+            local parentX = this:GetParent():GetCenter()
+            if ( x > parentX ) then
+                WorldMapTooltip:SetOwner(this, "ANCHOR_LEFT")
+            else
+                WorldMapTooltip:SetOwner(this, "ANCHOR_RIGHT")
+            end
+
+            local unitButton
+            local newLineString = ""
+            local tooltipText = ""
+            if ( MouseIsOver(WorldMapPlayer) ) then
+                tooltipText = UnitName(WorldMapPlayer.unit)
+                newLineString = "\n"
+            end
+            for i = 1, MAX_PARTY_MEMBERS do
+                unitButton = getglobal("WorldMapParty" .. i)
+                if ( unitButton:IsVisible() and MouseIsOver(unitButton) ) then
+                    tooltipText = tooltipText .. newLineString .. UnitName(unitButton.unit)
+                    newLineString = "\n"
+                end
+            end
+            for i = 1, MAX_RAID_MEMBERS do
+                unitButton = getglobal("WorldMapRaid" .. i)
+                if ( unitButton:IsVisible() and MouseIsOver(unitButton) ) then
+                    if ( unitButton.name ) then
+                        tooltipText = tooltipText .. newLineString .. unitButton.name
+                    else
+                        tooltipText = tooltipText .. newLineString .. UnitName(unitButton.unit)
+                    end
+                    newLineString = "\n"
+                end
+            end
+            WorldMapTooltip:SetText(tooltipText)
+            WorldMapTooltip:Show()
         end
 
         function WorldMapMarker_ShowTooltip(marker, title, subtitle)
@@ -399,7 +458,24 @@
          itself (WorldMapFrame) is now the native 1024×768 sheet that SetupFullscreenScale grows to
          fill the screen; the blackout stays screen-sized so the world never shows through the
          margins, and eats clicks so nothing leaks to the world behind it. -->
-    <Frame name="WorldMapBlackout" frameStrata="FULLSCREEN" hidden="true" enableMouse="true" parent="UIParent">
+    <!-- BlackoutWorld — **the reference's name**, which this frame did not carry until now.
+
+         The reference declares it as a `<Texture>` in WorldMapFrame's own BACKGROUND layer
+         (WorldMapFrame.xml l.8: 1024x768, BOTTOMLEFT, solid black); ours is a separate
+         mouse-enabled fullscreen Frame, which is the deliberate deviation the header records —
+         it blacks the world out AND eats the clicks the reference's fullscreen map frame would
+         have taken. That structural choice stands.
+
+         What was wrong was the NAME. `WorldMapBlackout` was ours; `BlackoutWorld` is the published
+         global, and four corpus addons index it directly — pfUI calls `BlackoutWorld:Hide()` at
+         `modules/map.lua:109` and died there. This file's own header has been calling it
+         "BlackoutWorld" in prose the whole time while the code said otherwise.
+
+         **The kind still differs and is not papered over**: `GetObjectType()` answers "Frame"
+         here and "Texture" in the reference. Every corpus caller only Shows/Hides it, which both
+         kinds answer identically; an addon that asked its type would see the deviation, and that
+         is the honest cost of the structural choice above. -->
+    <Frame name="BlackoutWorld" frameStrata="FULLSCREEN" hidden="true" enableMouse="true" parent="UIParent">
         <Anchors>
             <Anchor point="TOPLEFT"/>
             <Anchor point="BOTTOMRIGHT"/>
@@ -670,13 +746,37 @@
                                 <Texture name="WorldMapPlayerIcon" file="Interface\Minimap\MinimapArrow" setAllPoints="true"/>
                             </Layer>
                         </Layers>
+                        <!-- Ref WorldMapFrame.xml l.473-484. The OnLoad is load-bearing and not
+                             decoration: WorldMapUnit_OnEnter reads `WorldMapPlayer.unit` when the
+                             cursor is over the arrow, and this is the only place it is ever set.
+                             The hover pair is transcribed with it and is LIVE, which is the
+                             opposite of what an earlier draft of this comment claimed. Neither the
+                             reference's frame nor ours carries enableMouse, but a declared OnEnter
+                             AUTO-ENABLES the mouse (wow-re ui/scratch/scripts-auto-enable.md §1,
+                             VERIFIED: a handler reaches the same enable primitive 0x76af00(2,-1)
+                             as the attribute). So the arrow takes the mouse and names the player on
+                             hover, exactly as the reference's does — and frame_flag_gate's KNOWN
+                             entry for this frame, which existed only because we had the flag-gap
+                             without the handler, went stale the moment this landed. -->
+                        <Scripts>
+                            <OnLoad>
+                                this.unit = "player";
+                                this:SetFrameLevel(this:GetFrameLevel() + 1);
+                            </OnLoad>
+                            <OnEnter>WorldMapUnit_OnEnter()</OnEnter>
+                            <OnLeave>WorldMapTooltip:Hide()</OnLeave>
+                        </Scripts>
                     </Frame>
                     <!-- The corpse marker (decision 0308 §5) — ref WorldMapCorpseTemplate
                          (WorldMapFrameTemplates.xml l.55-88) inlined: 16x16, the POIIcons skull
                          cell (0.875-1.0 / 0-0.125), hover names it CORPSE_RED. The ref anchors its
-                         tooltip to a WorldMapTooltip; ours rides the shared GameTooltip (this
-                         map ships no separate tooltip — header note) through the side-pick every
-                         marker on the sheet shares. -->
+                         tooltip to a WorldMapTooltip; ours rides the shared GameTooltip through
+                         the side-pick every marker on the sheet shares. That parenthetical used to
+                         read "this map ships no separate tooltip" and is no longer true —
+                         WorldMapTooltip is declared below. The UNIT blips moved onto it with
+                         WorldMapUnit_OnEnter; the sheet MARKERS (this one, the POIs) deliberately
+                         did not, because they share WorldMapMarker_ShowTooltip and moving one
+                         moves all of them. That is a deviation left standing, not an oversight. -->
                     <Frame name="WorldMapCorpse" hidden="true" enableMouse="true">
                         <Size><AbsDimension x="16" y="16"/></Size>
                         <Anchors><Anchor point="CENTER"/></Anchors>
@@ -696,70 +796,61 @@
                             </OnLeave>
                         </Scripts>
                     </Frame>
-                    <!-- The party blips (report B320) — ref WorldMapUnitTemplate
-                         (WorldMapFrameTemplates.xml l.3-28) re-expressed: 16x16 centered,
-                         WorldMapPartyIcon art, one frame per `party1..4` slot, placed by
-                         GetPlayerMapPosition in the Update above. The reference hovers them into
-                         its own WorldMapTooltip; this map ships none (header note), so they take
-                         the shared GameTooltip through WorldMapMarker_ShowTooltip exactly as the
-                         corpse marker beside them does.
+                    <!-- The group blips — ref WorldMapFrame.xml l.486-529, which declares all 44 of them as
+                         inherits= instances of WorldMapUnitTemplate / WorldMapRaidUnitTemplate. Ours now does the
+                         same; they used to be four hand-written Frames carrying an ANONYMOUS texture, which cost
+                         the `$parentIcon` name every addon recolouring a blip reaches for (see
+                         WorldMapFrameTemplates.xml's header for the pfUI raise that found it).
 
-                         The reference's RAID pool (25 more frames, its `GetNumRaidMembers() > 0`
-                         arm) is NOT here: `GetPlayerMapPosition` answers no `raid` token yet, so
-                         a raid would show these four filled from its own subgroup and nothing
-                         else. That is the honest half-step, and it is named in the OUT list. -->
-                    <Frame name="WorldMapParty1" hidden="true" enableMouse="true" id="1">
-                        <Size><AbsDimension x="16" y="16"/></Size>
-                        <Anchors><Anchor point="CENTER"/></Anchors>
-                        <Layers>
-                            <Layer level="ARTWORK">
-                                <Texture file="Interface\WorldMap\WorldMapPartyIcon" setAllPoints="true"/>
-                            </Layer>
-                        </Layers>
-                        <Scripts>
-                            <OnEnter>WorldMapParty_OnEnter(this)</OnEnter>
-                            <OnLeave>GameTooltip:Hide()</OnLeave>
-                        </Scripts>
-                    </Frame>
-                    <Frame name="WorldMapParty2" hidden="true" enableMouse="true" id="2">
-                        <Size><AbsDimension x="16" y="16"/></Size>
-                        <Anchors><Anchor point="CENTER"/></Anchors>
-                        <Layers>
-                            <Layer level="ARTWORK">
-                                <Texture file="Interface\WorldMap\WorldMapPartyIcon" setAllPoints="true"/>
-                            </Layer>
-                        </Layers>
-                        <Scripts>
-                            <OnEnter>WorldMapParty_OnEnter(this)</OnEnter>
-                            <OnLeave>GameTooltip:Hide()</OnLeave>
-                        </Scripts>
-                    </Frame>
-                    <Frame name="WorldMapParty3" hidden="true" enableMouse="true" id="3">
-                        <Size><AbsDimension x="16" y="16"/></Size>
-                        <Anchors><Anchor point="CENTER"/></Anchors>
-                        <Layers>
-                            <Layer level="ARTWORK">
-                                <Texture file="Interface\WorldMap\WorldMapPartyIcon" setAllPoints="true"/>
-                            </Layer>
-                        </Layers>
-                        <Scripts>
-                            <OnEnter>WorldMapParty_OnEnter(this)</OnEnter>
-                            <OnLeave>GameTooltip:Hide()</OnLeave>
-                        </Scripts>
-                    </Frame>
-                    <Frame name="WorldMapParty4" hidden="true" enableMouse="true" id="4">
-                        <Size><AbsDimension x="16" y="16"/></Size>
-                        <Anchors><Anchor point="CENTER"/></Anchors>
-                        <Layers>
-                            <Layer level="ARTWORK">
-                                <Texture file="Interface\WorldMap\WorldMapPartyIcon" setAllPoints="true"/>
-                            </Layer>
-                        </Layers>
-                        <Scripts>
-                            <OnEnter>WorldMapParty_OnEnter(this)</OnEnter>
-                            <OnLeave>GameTooltip:Hide()</OnLeave>
-                        </Scripts>
-                    </Frame>
+                         The RAID forty are declared here and positioned NOWHERE: WorldMapParty_Update below drives
+                         the party arm only, because `GetPlayerMapPosition` answers (0,0) for every `raid` token and
+                         the reference's battleground arm needs GetNumBattlefieldPositions / GetBattlefieldPosition,
+                         which we do not bind. Declared-and-hidden is what the reference does with them out of a
+                         raid anyway; the difference is that ours stay that way. Named in the OUT list. -->
+                    <Frame name="WorldMapParty1" inherits="WorldMapUnitTemplate" id="1"/>
+                    <Frame name="WorldMapParty2" inherits="WorldMapUnitTemplate" id="2"/>
+                    <Frame name="WorldMapParty3" inherits="WorldMapUnitTemplate" id="3"/>
+                    <Frame name="WorldMapParty4" inherits="WorldMapUnitTemplate" id="4"/>
+                    <Frame name="WorldMapRaid1" inherits="WorldMapRaidUnitTemplate" id="1"/>
+                    <Frame name="WorldMapRaid2" inherits="WorldMapRaidUnitTemplate" id="2"/>
+                    <Frame name="WorldMapRaid3" inherits="WorldMapRaidUnitTemplate" id="3"/>
+                    <Frame name="WorldMapRaid4" inherits="WorldMapRaidUnitTemplate" id="4"/>
+                    <Frame name="WorldMapRaid5" inherits="WorldMapRaidUnitTemplate" id="5"/>
+                    <Frame name="WorldMapRaid6" inherits="WorldMapRaidUnitTemplate" id="6"/>
+                    <Frame name="WorldMapRaid7" inherits="WorldMapRaidUnitTemplate" id="7"/>
+                    <Frame name="WorldMapRaid8" inherits="WorldMapRaidUnitTemplate" id="8"/>
+                    <Frame name="WorldMapRaid9" inherits="WorldMapRaidUnitTemplate" id="9"/>
+                    <Frame name="WorldMapRaid10" inherits="WorldMapRaidUnitTemplate" id="10"/>
+                    <Frame name="WorldMapRaid11" inherits="WorldMapRaidUnitTemplate" id="11"/>
+                    <Frame name="WorldMapRaid12" inherits="WorldMapRaidUnitTemplate" id="12"/>
+                    <Frame name="WorldMapRaid13" inherits="WorldMapRaidUnitTemplate" id="13"/>
+                    <Frame name="WorldMapRaid14" inherits="WorldMapRaidUnitTemplate" id="14"/>
+                    <Frame name="WorldMapRaid15" inherits="WorldMapRaidUnitTemplate" id="15"/>
+                    <Frame name="WorldMapRaid16" inherits="WorldMapRaidUnitTemplate" id="16"/>
+                    <Frame name="WorldMapRaid17" inherits="WorldMapRaidUnitTemplate" id="17"/>
+                    <Frame name="WorldMapRaid18" inherits="WorldMapRaidUnitTemplate" id="18"/>
+                    <Frame name="WorldMapRaid19" inherits="WorldMapRaidUnitTemplate" id="19"/>
+                    <Frame name="WorldMapRaid20" inherits="WorldMapRaidUnitTemplate" id="20"/>
+                    <Frame name="WorldMapRaid21" inherits="WorldMapRaidUnitTemplate" id="21"/>
+                    <Frame name="WorldMapRaid22" inherits="WorldMapRaidUnitTemplate" id="22"/>
+                    <Frame name="WorldMapRaid23" inherits="WorldMapRaidUnitTemplate" id="23"/>
+                    <Frame name="WorldMapRaid24" inherits="WorldMapRaidUnitTemplate" id="24"/>
+                    <Frame name="WorldMapRaid25" inherits="WorldMapRaidUnitTemplate" id="25"/>
+                    <Frame name="WorldMapRaid26" inherits="WorldMapRaidUnitTemplate" id="26"/>
+                    <Frame name="WorldMapRaid27" inherits="WorldMapRaidUnitTemplate" id="27"/>
+                    <Frame name="WorldMapRaid28" inherits="WorldMapRaidUnitTemplate" id="28"/>
+                    <Frame name="WorldMapRaid29" inherits="WorldMapRaidUnitTemplate" id="29"/>
+                    <Frame name="WorldMapRaid30" inherits="WorldMapRaidUnitTemplate" id="30"/>
+                    <Frame name="WorldMapRaid31" inherits="WorldMapRaidUnitTemplate" id="31"/>
+                    <Frame name="WorldMapRaid32" inherits="WorldMapRaidUnitTemplate" id="32"/>
+                    <Frame name="WorldMapRaid33" inherits="WorldMapRaidUnitTemplate" id="33"/>
+                    <Frame name="WorldMapRaid34" inherits="WorldMapRaidUnitTemplate" id="34"/>
+                    <Frame name="WorldMapRaid35" inherits="WorldMapRaidUnitTemplate" id="35"/>
+                    <Frame name="WorldMapRaid36" inherits="WorldMapRaidUnitTemplate" id="36"/>
+                    <Frame name="WorldMapRaid37" inherits="WorldMapRaidUnitTemplate" id="37"/>
+                    <Frame name="WorldMapRaid38" inherits="WorldMapRaidUnitTemplate" id="38"/>
+                    <Frame name="WorldMapRaid39" inherits="WorldMapRaidUnitTemplate" id="39"/>
+                    <Frame name="WorldMapRaid40" inherits="WorldMapRaidUnitTemplate" id="40"/>
                     <Frame name="WorldMapFrameAreaFrame">
                         <Size><AbsDimension x="400" y="128"/></Size>
                         <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
@@ -803,7 +894,7 @@
             <!-- UpdateMicroButtons leads both, as in the ref (WorldMapFrame.xml l.599/606) — live
                  since the micro-menu slice (MicroMenu.xml). -->
             <OnShow>
-                WorldMapBlackout:Show();
+                BlackoutWorld:Show();
                 SetupFullscreenScale();
                 SetMapToCurrentZone();
                 WorldMapFrame_Update();
@@ -812,7 +903,7 @@
                 CloseDropDownMenus();
             </OnShow>
             <OnHide>
-                WorldMapBlackout:Hide();
+                BlackoutWorld:Hide();
                 if UpdateMicroButtons then UpdateMicroButtons() end;
                 PlaySound("igQuestLogClose");
             </OnHide>
@@ -823,4 +914,20 @@
             </OnEvent>
         </Scripts>
     </Frame>
+
+    <!-- WorldMapTooltip (ref WorldMapFrame.xml l.636, verbatim attributes).
+
+         **This file's header listed it OUT, and the reason has expired.** The note said "only unit
+         blips used it" — true of the REFERENCE's own consumers, and never the question. The name is
+         a published global that addons index directly, and six in the corpus do: !Questie,
+         Cartographer, CT_MapMod, Gatherer, pfQuest and pfUI. Three of those are on the failing
+         roster, and for pfUI it is a load-time blocker — `modules/map.lua:13` indexes it at file
+         scope, so the addon dies there whatever the map is drawing.
+
+         Declared, not driven: this is the widget under its reference name and geometry, so an
+         addon that seats its own lines in it works. Our OWN map still routes its hovers through
+         the shared GameTooltip (the two notes at l.666/l.692 say so and stay true) — adopting the
+         reference's separate-tooltip routing is a different change, and doing half of it silently
+         would be worse than either. -->
+    <GameTooltip name="WorldMapTooltip" frameStrata="TOOLTIP" hidden="true" parent="WorldMapFrame" inherits="GameTooltipTemplate"/>
 </Ui>

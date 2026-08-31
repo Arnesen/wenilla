@@ -974,7 +974,8 @@ fn merchant_tabs_drive_buyback_page_and_repair_pair() {
         .unwrap());
     assert!(s
         .eval::<bool>(
-            "return MerchantRepairAllButton:IsShown() and MerchantRepairAllButton:IsEnabled()"
+            "return MerchantRepairAllButton:IsShown() and \
+             MerchantRepairAllButton:IsEnabled() ~= 0"
         )
         .unwrap());
     assert!(s

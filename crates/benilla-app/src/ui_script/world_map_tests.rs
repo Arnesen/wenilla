@@ -20,6 +20,10 @@ fn harness() -> UiScript {
         "GameTooltip.xml",
         "UIDropDownMenu.xml", // the map's continent/zone pickers initialize into it at OnLoad
         "ScrollTemplates.xml",
+        // The blip templates, which WorldMapFrame.xml instantiates with inherits=. Not
+        // optional: an unknown template is a loader WARNING, not an error, so leaving this
+        // out loads clean and then hands every blip a sizeless, anchorless frame.
+        "WorldMapFrameTemplates.xml",
         "WorldMapFrame.xml",
     ] {
         let text = std::fs::read_to_string(

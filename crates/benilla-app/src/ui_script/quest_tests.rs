@@ -434,7 +434,7 @@ fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
         "instant text keeps the writing sound: one scratch on the wake tick"
     );
     assert!(s
-        .eval::<bool>("return QuestAcceptButton:IsEnabled()")
+        .eval::<bool>("return QuestAcceptButton:IsEnabled() ~= 0")
         .unwrap());
     assert_eq!(
         s.eval::<f32>("return QuestDetailTextAlphaFrame:GetAlpha()")
@@ -494,7 +494,7 @@ fn write_on_still_fades_when_instant_text_is_off() {
         "the write-on scratches the WriteQuest quill each tick"
     );
     assert!(!s
-        .eval::<bool>("return QuestAcceptButton:IsEnabled()")
+        .eval::<bool>("return QuestAcceptButton:IsEnabled() ~= 0")
         .unwrap());
 
     // Half a second more runs the 13-char gradient off (40 chars/s): Accept wakes and the block
@@ -502,7 +502,7 @@ fn write_on_still_fades_when_instant_text_is_off() {
     s.tick(0.5);
     assert!(s.errors().is_empty(), "tick errors: {:?}", s.errors());
     assert!(s
-        .eval::<bool>("return QuestAcceptButton:IsEnabled()")
+        .eval::<bool>("return QuestAcceptButton:IsEnabled() ~= 0")
         .unwrap());
     let alpha = s
         .eval::<f32>("return QuestDetailTextAlphaFrame:GetAlpha()")
