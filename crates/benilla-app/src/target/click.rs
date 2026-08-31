@@ -398,7 +398,26 @@ pub(super) fn act_on_right_click(
             );
         }
         if store.is_some_and(|s| s.0.corpse_lootable()) {
-            // Leg 1. Range rides the cursor's own gray, exactly as the unit loot branch does —
+            // **`GetStandState() != 0` refuses before the send** (`0x5d6c3b call [playerVtbl+0xa4]`
+            // = `0x5ed570`, non-zero → `0x496720(0x85)`): sitting, kneeling or asleep, the click
+            // raises the client-local red **`ERR_LOOT_NOTSTANDING`** as a `UI_ERROR_MESSAGE` and
+            // sends nothing. Client-local, so the line shows even where the server would also have
+            // refused — and unlike the range gray it is loud, because the player can fix it.
+            // Scoped to the corpse leg: this is the gate the §5 round read, and the unit loot
+            // branch's own copy of it is unverified here (1729).
+            let standing = self_player
+                .single()
+                .ok()
+                .and_then(|(e, _, _)| stores.get(e).ok())
+                .is_none_or(|(s, _)| s.0.unit_stand_state() == 0);
+            if !standing {
+                debug!("right-click corpse loot: refused, not standing ({guid:#x})");
+                ui_error_keys
+                    .0
+                    .push(crate::ui_action::UiError::key("ERR_LOOT_NOTSTANDING"));
+                return;
+            }
+            // Range rides the cursor's own gray, exactly as the unit loot branch does —
             // the classifier and the click ask literally the same question, so the pouch can never
             // be lit on something a click refuses.
             if !cursor.unable {

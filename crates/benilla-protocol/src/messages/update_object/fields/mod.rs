@@ -765,6 +765,16 @@ impl ObjectFields {
     pub fn corpse_flags(&self) -> u32 {
         self.get_u32(35).unwrap_or(0)
     }
+    /// [`Self::corpse_flags`] **preserving absence** — `None` when this snapshot does not carry
+    /// field 35 at all.
+    ///
+    /// The two are not interchangeable, and the difference is the create-vs-delta seam: a values
+    /// delta carries only what changed, so an untouched `FLAGS` reads absent, and `unwrap_or(0)`
+    /// would report every bit *clear* — turning "nothing was said about the flags" into a positive
+    /// claim that the corpse is not bones. Readers acting on a **change** must use this one.
+    pub fn corpse_flags_present(&self) -> Option<u32> {
+        self.get_u32(35)
+    }
     /// `CORPSE_FLAG_BONES` (`0x01`) — this object is a **bone pile**, not a fresh body. It is the
     /// first thing `0x5d6260` tests (`0x5d6287 test byte [eax+0x74],0x1; jne`): a bone pile builds
     /// **no** character component at all, wears nothing, and takes its model from race/sex rather
@@ -796,16 +806,23 @@ impl ObjectFields {
         self.get_u32(36).unwrap_or(0) & 0x01 != 0
     }
 
-    /// `CORPSE_FLAG_LOOTABLE` (`0x20`, [`Self::corpse_flags`] bit 5) — the **PvP insignia** flag,
-    /// the one the reference's corpse cursor classifier `0x482740` reads at
-    /// `[[corpse+0x110]+0x74] >> 5 & 1` for its second leg, and the corpse right-click `0x5d6bf0`
-    /// reads again at `0x5d6c9c` for the matching send.
+    /// `CORPSE_FLAG_LOOTABLE` (`0x20`, [`Self::corpse_flags`] bit 5) — the flag that makes a body's
+    /// **battleground insignia** takeable. It gates the second leg of the corpse cursor classifier
+    /// `0x482740` (`[[corpse+0x110]+0x74] >> 5 & 1`), and the corpse right-click `0x5d6bf0` reads
+    /// it again at `0x5d6c9c` for the matching send.
     ///
-    /// **It is not "reclaimable"** — `object-layer/scratch/w2a.md` calls it both things in one
-    /// file (line 264 "reclaimable", line 618 "PvP flag") and only the second survives the byte
-    /// read: both readers pair it with the `SPELL_EFFECT_SKIN_PLAYER_CORPSE` learn-time latch
-    /// `[0xb700e8]`, which is a skinning precondition and has nothing to do with recovering your
-    /// own body. Nothing in the reclaim path consults this bit.
+    /// **Neither of `w2a.md`'s two labels for this bit was right**, and it took a §5 round to say
+    /// so (wow-re `corpse-click-and-reclaim.md`; decision 1729). "Reclaimable" (its line 264) is
+    /// wrong outright — nothing in the reclaim path consults it, and `RetrieveCorpse` reads no
+    /// corpse flag at all. "PvP flag" (its line 618) names the wrong bit: the corpse's actual PvP
+    /// flag is **bit 2**, read by `UnitIsPVP 0x516460` at `0x5164e6` (`shr eax,2; and al,1`), and
+    /// it is the only corpse flag this client exposes to Lua.
+    ///
+    /// What bit 5 actually unlocks is spell **22027 "Remove Insignia"** — the sole row in the
+    /// shipped `Spell.dbc` with `Effect[0] == 116`, targeting `TARGET_FLAG_PVP_CORPSE`, absent
+    /// from the base `dbc.MPQ` and added with Battlegrounds. The "skin a player" reading came from
+    /// the cursor **art** names (`SkinAlliance`/`SkinHorde`) and from nowhere else; there is no
+    /// skinning of players in 1.12.1.
     pub fn corpse_pvp_insignia(&self) -> bool {
         self.corpse_flags() & 0x20 != 0
     }

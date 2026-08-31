@@ -289,14 +289,19 @@ pub(super) fn update_hover(
                     palettes.world_palette(rig.slot, rig.bones() as usize)
                 })
             };
-        // The halo ladder (alive 3 / dead 2), with a **corpse below every unit** (1). Deliberately
-        // conservative and deliberately not read off `unit_is_dead()`: a corpse descriptor has no
-        // UNIT fields at all, so that accessor answers "alive" for one and would rank a body above
-        // a dead mob. Ranking it last means a corpse can never steal the generous-retry pick from
-        // a unit — the direction that cannot break an existing click. (Where `CGCorpse_C` actually
-        // sits in the reference's ladder is an open RE question, dispatched with 1723.)
+        // The halo ladder (alive 3 / dead 2), with the corpse rung now **byte-verified** rather
+        // than guessed (wow-re `corpse-click-and-reclaim.md` Q6, folding back into 1723's open
+        // question): `0x480c90`'s arm at `0x480cec` scores a corpse **2 when
+        // `CORPSE_DYNFLAG_LOOTABLE`, else 0** — the same rung as a dead unit when there is
+        // something to take, and the floor otherwise. 1723 guessed a flat 1; this replaces it.
+        //
+        // The rung matters less than it looks: **pass 1 sorts on distance alone**, so a corpse
+        // can neither steal a click from a unit standing in front of it nor lose one it is in
+        // front of. Priority decides only the inflated pass-2 retry. Still not read off
+        // `unit_is_dead()` — a corpse descriptor has no UNIT block, so that accessor answers
+        // "alive" for one.
         let priority = if net.kind == EntityKind::Corpse {
-            1
+            u8::from(store.is_some_and(|s| s.0.corpse_lootable())) * 2
         } else if store.is_some_and(|s| s.0.unit_is_dead()) {
             2
         } else {

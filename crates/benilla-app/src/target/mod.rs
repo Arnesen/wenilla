@@ -66,7 +66,9 @@ mod reticle;
 pub(crate) mod ring;
 mod scan;
 
-pub(crate) use cursor_mode::{CursorKind, WorldCursor, GO_TYPE_GENERIC, SERVICE_RANGE_SQ};
+pub(crate) use cursor_mode::{
+    corpse_mouseover_eligible, CursorKind, WorldCursor, GO_TYPE_GENERIC, SERVICE_RANGE_SQ,
+};
 /// `GO_FLAG_LOCKED` — the wire bit the lock chain and the GO tooltip's "Locked" line both read.
 pub(crate) use lock::GO_FLAG_LOCKED;
 // This frame's combat-flash verdict — read by the ring's material pick (in `ring`) and by the

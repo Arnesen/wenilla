@@ -709,6 +709,22 @@ fn loot_cursor(auto_loot: bool, shift_held: bool) -> CursorKind {
     }
 }
 
+/// Is this corpse **moused over at all** — the reference's `[CGCorpse_C vtbl+0x54]` = `0x5d76d0`,
+/// asked at `0x482982` by the mouseover publisher (wow-re `corpse-click-and-reclaim.md` Q6, §5
+/// cross-checked).
+///
+/// A **real body** (BONES clear) qualifies **unconditionally — owner irrelevant**, so your own
+/// corpse is moused over like anyone else's. Only a **bone pile with nothing to take** is dropped;
+/// the base occupant it falls through to is `0x469fd0`, a constant false, which is the same reason
+/// an item lying in the world is never moused over.
+///
+/// This is a *separate* gate from pick eligibility (`0x480816`) — a rejected corpse is still
+/// picked, it simply publishes no mouseover, so it gets no name plate and no brighten. Ours reads
+/// it the same way: the pick is unconditional, this decides what the hover *shows*.
+pub(crate) fn corpse_mouseover_eligible(store: &ObjectStore) -> bool {
+    !store.0.corpse_is_bones() || store.0.corpse_lootable()
+}
+
 /// What a hovered **corpse object** classifies to — the reference's corpse classifier `0x482740`
 /// (wow-re `cursor-system.md` §3, VERIFIED), as a pure decision so it can be tested the way the
 /// service ladder is. `esi` = player, `edi` = corpse, `d2` = centre-to-centre distance².
