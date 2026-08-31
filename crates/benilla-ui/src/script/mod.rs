@@ -829,6 +829,23 @@ impl UiScript {
         self.model_mut().minimap_ping_request.take()
     }
 
+    /// The mask art the Minimap widget asks its renderer for — `Minimap:SetMaskTexture`'s value,
+    /// or `None` while no widget has set one (the app then keeps
+    /// [`crate::widget::MINIMAP_DEFAULT_MASK`]).
+    ///
+    /// The **first** Minimap in the registry answers, not every one: the mask is a property of the
+    /// map the app draws, and the app draws one. (Everything else in `MinimapState` is per widget
+    /// because the Lua API reads it back per widget; this has no getter in 1.12 to read back.)
+    pub fn minimap_mask_texture(&self) -> Option<String> {
+        let model = self.model_ref();
+        model.arena.minimap_kinds().iter().find_map(|&h| {
+            match model.arena.frame(h).map(|f| &f.kind_state) {
+                Some(KindState::Minimap(m)) => m.mask_texture.clone(),
+                _ => None,
+            }
+        })
+    }
+
     /// Monotonic count of Minimap widgets ever created in this VM — the O(1) signal that a new
     /// one exists and needs the containment state pushed.
     pub fn minimap_widgets_created(&self) -> u64 {
@@ -1214,6 +1231,29 @@ impl UiScript {
     /// Returns `true` if consumed.
     pub fn editbox_action(&mut self, action: EditAction) -> bool {
         editbox::action(&self.lua, action)
+    }
+
+    /// Is the focused EditBox in **alt-arrow mode** — the flag the XML spells `ignoreArrows` and
+    /// the Lua surface spells `SetAltArrowKeyMode` (`[editbox+0x318] & 0x10`)?
+    ///
+    /// The host asks this to decide whether an arrow key reaches the box at all. With the flag set
+    /// and ALT not held, the reference's key handler returns 0 at `0x77b1c4` for the four arrow
+    /// codes — **not consumed** — and the strata walk carries down to `CGWorldFrame`, which runs
+    /// the key's binding. That is what lets you turn while the chat box has focus, and it is why
+    /// the gate is on the key rather than on the [`EditAction`]: `Move { unit: Edge }` reaches the
+    /// box from HOME/END as well as from an arrow, and only the arrow is gated.
+    ///
+    /// `false` when nothing is focused, which is the same answer as an unflagged box: neither
+    /// declines the key.
+    pub fn editbox_alt_arrow_mode(&self) -> bool {
+        let model = self.model_ref();
+        model.focused_editbox.is_some_and(|h| {
+            model.arena.frame(h).is_some_and(|f| {
+                f.effective_visible
+                    && matches!(&f.kind_state,
+                        crate::widget::KindState::EditBox(eb) if eb.alt_arrow_key_mode)
+            })
+        })
     }
 
     /// Whether an EditBox currently holds keyboard focus (and is effectively visible) — the app gates

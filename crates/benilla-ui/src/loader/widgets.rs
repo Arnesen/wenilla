@@ -355,7 +355,9 @@ impl Loader<'_> {
             ("numeric", "SetNumeric"),
             ("password", "SetPassword"),
             ("multiLine", "SetMultiLine"),
-            ("ignoreArrows", "SetIgnoreArrows"),
+            // The XML spelling of the alt-arrow flag; the Lua spelling is `SetAltArrowKeyMode`,
+            // and there is one flag behind both (wow-re `ignorearrows-alt-arrow-gate.md`).
+            ("ignoreArrows", "SetAltArrowKeyMode"),
         ] {
             if let Some(on) = el.attr_bool_opt(attr) {
                 self.call(wrapper, method, on, dbg);

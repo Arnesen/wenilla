@@ -1494,8 +1494,9 @@ impl Model {
             petition_requests: Vec::new(),
             tell_requests: Vec::new(),
             open_chat_requests: Vec::new(),
-            chat_window_looks: [chat_window::ChatWindowLook::DEFAULT;
-                chat_window::NUM_CHAT_WINDOWS],
+            // Seeded per window, because the stock `DOCKED` position is not the same for all
+            // seven (`ChatWindowLook::stock`): 1 and 2 are the dock, 3..7 are undocked.
+            chat_window_looks: std::array::from_fn(chat_window::ChatWindowLook::stock),
             chat_window_changes: HashSet::new(),
             user_placed_changed: false,
             default_language: None,

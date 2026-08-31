@@ -654,10 +654,17 @@ fn a_line_added_to_chat_frame3_lands_in_chat_frame3_only() {
 
 /// `FCF_SelectDockFrame(frame)` — the corpus idiom (CustomNameplates.lua:69, Roid-Macros
 /// Utility.lua:40) is "un-hide the default chat frame before printing into it". It takes a FRAME,
-/// where ours takes a dock id; and it RAISES on a window benilla cannot dock rather than returning
-/// quietly and leaving the caller's next AddMessage in a window that is still hidden.
+/// where `BenillaFCF_SelectDock` takes a dock id.
+///
+/// **It used to RAISE on an undocked window and no longer does** (1714). The raise was right for a
+/// client whose dock was the literal `for i = 1, 2`: "select ChatFrame5" had no meaning, and
+/// answering with silence would have left the caller's next `AddMessage` in a still-hidden window.
+/// With a real `DOCKED_CHAT_FRAMES` the reference's own answer applies — the assignment, then
+/// `FCF_DockUpdate` hiding every docked window (none of them is the selection) and leaving the
+/// undocked one exactly as it was. Not a nice answer, but the client's; and neither corpus caller
+/// reaches it, since both pass `DEFAULT_CHAT_FRAME`.
 #[test]
-fn fcf_select_dock_frame_selects_by_frame_and_raises_for_an_undocked_one() {
+fn fcf_select_dock_frame_selects_by_frame_and_leaves_an_undocked_one_alone() {
     let s = chat_frame();
     s.run("FCF_SelectDockFrame(ChatFrame2)").unwrap();
     let (one, two): (bool, bool) = (
@@ -673,9 +680,28 @@ fn fcf_select_dock_frame_selects_by_frame_and_raises_for_an_undocked_one() {
         "the corpus guard brings the default frame back"
     );
 
+    // An undocked window: no raise, and the reference's consequence — the dock's members all
+    // hide, because none of them is the selection, and ChatFrame5 is untouched (still hidden,
+    // since nothing showed it).
+    let shown5_before: bool = s
+        .eval("return ChatFrame5:IsShown() and true or false")
+        .unwrap();
+    s.run("FCF_SelectDockFrame(ChatFrame5)").unwrap();
+    assert_eq!(
+        s.eval::<String>("return SELECTED_DOCK_FRAME:GetName()")
+            .unwrap(),
+        "ChatFrame5"
+    );
     assert!(
-        s.run("FCF_SelectDockFrame(ChatFrame5)").is_err(),
-        "an undocked window raises — benilla has no dock model for it (0288 §2)"
+        !s.eval::<bool>("return ChatFrame1:IsShown()").unwrap()
+            && !s.eval::<bool>("return ChatFrame2:IsShown()").unwrap(),
+        "FCF_DockUpdate hides every docked window when the selection is not one of them"
+    );
+    assert_eq!(
+        s.eval::<bool>("return ChatFrame5:IsShown() and true or false")
+            .unwrap(),
+        shown5_before,
+        "an undocked window is not in the loop, so nothing shows or hides it"
     );
 }
 

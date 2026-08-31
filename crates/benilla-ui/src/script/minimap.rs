@@ -135,6 +135,20 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
     m.set(
+        // SetMaskTexture(path) — the disc's mask art. A real 1.12 method (the name is in the 5875
+        // image) with no getter beside it, so this is write-only from Lua, exactly as there.
+        //
+        // An absent or empty path restores the engine default rather than leaving the map
+        // unmasked: `SetMaskTexture` is how a UI replaces the circle, never how it removes one,
+        // and a nil-means-square reading would hand every mistyped path a square minimap with no
+        // error. (pfUI passes a real path; this is about the failure mode, not about pfUI.)
+        "SetMaskTexture",
+        lua.create_function(|lua, (this, path): (Table, Option<String>)| {
+            let path = path.filter(|p| !p.is_empty());
+            with_minimap(lua, &this, |m| m.mask_texture = path)
+        })?,
+    )?;
+    m.set(
         "GetZoomLevels",
         lua.create_function(|lua, this: Table| {
             // Validate the receiver like every kind method (the constant is per the client's

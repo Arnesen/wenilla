@@ -260,3 +260,36 @@ fn a_minimap_is_born_with_nine_model_children_and_the_ninth_is_the_player_arrow(
         .unwrap()
         .is_none_or(|p| p.is_empty()));
 }
+
+/// **`Minimap:SetMaskTexture` is state, and an empty path restores the default rather than
+/// unmasking the map.**
+///
+/// A real 1.12 method (the name is in the 5875 image) with no getter beside it, so the readback
+/// here is through the arena — the same shape `simplehtml`'s and `modelframe`'s tests use for a
+/// write-only verb. pfUI's `modules/minimap.lua:27` is the caller that matters: swapping this art
+/// is how its square minimap becomes square.
+#[test]
+fn set_mask_texture_is_state_and_empty_restores_the_default() {
+    let s = script();
+    s.run(r#"m = CreateFrame("Minimap", "TestMinimap")"#)
+        .unwrap();
+    assert_eq!(s.minimap_mask_texture(), None, "fresh = the engine default");
+
+    s.run(r#"m:SetMaskTexture("Interface\\AddOns\\pfUI\\img\\minimap")"#)
+        .unwrap();
+    assert_eq!(
+        s.minimap_mask_texture().as_deref(),
+        Some("Interface\\AddOns\\pfUI\\img\\minimap")
+    );
+
+    // Empty and nil both mean "back to the engine's circle" — never "no mask at all". A
+    // nil-means-unmasked reading would hand every mistyped path a silently square minimap.
+    s.run(r#"m:SetMaskTexture("")"#).unwrap();
+    assert_eq!(s.minimap_mask_texture(), None);
+    s.run(r#"m:SetMaskTexture("Interface\\Foo") m:SetMaskTexture(nil)"#)
+        .unwrap();
+    assert_eq!(s.minimap_mask_texture(), None);
+
+    // There is no getter in 1.12, and we do not invent one (decision 1189).
+    assert!(s.eval::<bool>("return m.GetMaskTexture == nil").unwrap());
+}

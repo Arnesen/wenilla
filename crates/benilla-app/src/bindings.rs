@@ -471,7 +471,7 @@ fn latch_and_dispatch(
     // releases every direction bit, `0x514490`): Held latches clear once on the rising edge;
     // EdgeUpDown latches stay armed — their release half still fires (the reference delivers
     // the up of a pressed binding regardless).
-    let typing = capture.0;
+    let typing = capture.typing;
     if typing && !state.was_typing {
         state.latched.retain(|&(_, b)| match b {
             Bound::Spec(c) => !matches!(SPECS[c.0 as usize].kind, Kind::Held),
@@ -488,7 +488,19 @@ fn latch_and_dispatch(
         let key = chord::normalize_key(ev.key_code);
         match ev.state {
             ButtonState::Pressed => {
-                if armed || typing || sup || ev.repeat {
+                // The alt-arrow exemption: a focused box in alt-arrow mode declines the four
+                // arrows, so their bindings DO fire even while typing — which is the whole
+                // point of the flag (turn the camera with the chat box open). Every other key
+                // a focused box still swallows. See `UiKeyboardCapture::arrows_fall_through`.
+                let arrow_exempt = capture.arrows_fall_through
+                    && matches!(
+                        ev.key_code,
+                        KeyCode::ArrowLeft
+                            | KeyCode::ArrowRight
+                            | KeyCode::ArrowUp
+                            | KeyCode::ArrowDown
+                    );
+                if armed || (typing && !arrow_exempt) || sup || ev.repeat {
                     continue;
                 }
                 if state.latched.iter().any(|&(k, _)| k == BindKey::Key(key)) {
@@ -965,6 +977,54 @@ mod tests {
     /// same pair wearing one chunk, so it must follow the same rule — dropped on the focus edge,
     /// it would leave whatever its down half started running forever, with no key left to press
     /// to stop it.
+    /// **The alt-arrow exemption: you can turn while the chat box has focus.**
+    ///
+    /// A focused EditBox swallows every key — that is the reference's own handler returning 1 on
+    /// every path (`0x77b35e`) and our `UiKeyboardCapture::typing` gate. The four arrow codes are
+    /// the single exception: with the box in alt-arrow mode (`ignoreArrows` in XML,
+    /// `SetAltArrowKeyMode` in Lua) and ALT not held, the handler returns 0 at `0x77b1c4`, the
+    /// strata walk carries the key down to `CGWorldFrame`, and `ExecuteBinding` runs `TURNLEFT`.
+    /// The reference's own chat box ships the flag, so this is the default experience.
+    ///
+    /// benilla read the flag as "consumed but inert, unless Ctrl" until the §5
+    /// (`ignorearrows-alt-arrow-gate.md`) corrected both halves — the modifier is ALT, and the key
+    /// is not consumed at all. Under the old reading, holding LEFT with the chat box open did
+    /// nothing whatever.
+    #[test]
+    fn a_flagged_editbox_lets_the_arrow_keys_through_to_their_bindings() {
+        let mut app = harness();
+
+        // Typing with no exemption: the arrow is swallowed, exactly like every other key.
+        app.world_mut().resource_mut::<UiKeyboardCapture>().typing = true;
+        press_key(&mut app, KeyCode::ArrowLeft);
+        app.update();
+        assert!(
+            !state(&app).pressed(cmd::TURN_LEFT),
+            "an unflagged focused box eats the arrow"
+        );
+        release_key(&mut app, KeyCode::ArrowLeft);
+        app.update();
+
+        // Same key, same focus, exemption armed: the binding fires.
+        app.world_mut()
+            .resource_mut::<UiKeyboardCapture>()
+            .arrows_fall_through = true;
+        press_key(&mut app, KeyCode::ArrowLeft);
+        app.update();
+        assert!(
+            state(&app).pressed(cmd::TURN_LEFT),
+            "a flagged box declines the arrow, so TURNLEFT runs"
+        );
+
+        // And the exemption is FOUR KEYS, not a hole in the typing gate: W is still swallowed.
+        press_key(&mut app, KeyCode::KeyW);
+        app.update();
+        assert!(
+            !state(&app).pressed(cmd::MOVE_FORWARD),
+            "only the arrows are exempt — every other key a focused box still eats"
+        );
+    }
+
     #[test]
     fn a_run_on_up_addon_latch_survives_the_typing_edge_and_still_releases() {
         let mut script = UiScript::new().expect("VM");
@@ -983,7 +1043,7 @@ mod tests {
         assert_eq!(lua_count(&app, "PROBE_DOWN"), 1);
 
         // A box takes focus: movement stops, the addon's latch stays.
-        app.world_mut().resource_mut::<UiKeyboardCapture>().0 = true;
+        app.world_mut().resource_mut::<UiKeyboardCapture>().typing = true;
         app.update();
         assert!(!state(&app).pressed(cmd::MOVE_FORWARD));
         assert_eq!(
@@ -1342,7 +1402,7 @@ mod tests {
         assert!(state(&app).pressed(cmd::MOVE_FORWARD));
         // A box takes focus: movement stops (the reference's focus handler releases the
         // direction bits), and new presses do nothing.
-        app.world_mut().resource_mut::<UiKeyboardCapture>().0 = true;
+        app.world_mut().resource_mut::<UiKeyboardCapture>().typing = true;
         app.update();
         assert!(
             !state(&app).pressed(cmd::MOVE_FORWARD),
@@ -1356,7 +1416,7 @@ mod tests {
         );
         // Focus drops; keys work again.
         release_key(&mut app, KeyCode::KeyX);
-        app.world_mut().resource_mut::<UiKeyboardCapture>().0 = false;
+        app.world_mut().resource_mut::<UiKeyboardCapture>().typing = false;
         app.update();
         press_key(&mut app, KeyCode::KeyX);
         app.update();

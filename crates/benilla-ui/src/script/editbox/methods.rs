@@ -187,9 +187,47 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // The config flags. SetAutoFocus/SetNumeric/SetPassword/SetMultiLine mirror the live API;
-    // SetIgnoreArrows has no client method (the flag is XML-only) — a benilla convenience so the
-    // loader can drive every flag through one method surface.
+    // The config flags. All four mirror the live API. The fifth flag — bit4, the XML's
+    // `ignoreArrows` — is NOT here: its Lua surface is `SetAltArrowKeyMode`/`GetAltArrowKeyMode`
+    // below, which take a different argument coercion and answer a number rather than a boolean,
+    // so it cannot share this loop. benilla used to register a `SetIgnoreArrows` "convenience"
+    // for the loader to drive; 5875 has no such method (the 48-entry table
+    // `[0x87bb68, 0x87bce8)` carries no entry whose name contains "Ignore"), so publishing it was
+    // exactly the error decision 1189 names — and it stood in for the two real names, which were
+    // missing. The loader drives the XML attribute through `SetAltArrowKeyMode` now.
+    // ── SetAltArrowKeyMode / GetAltArrowKeyMode (`0x7996e0` / `0x799790`) ────────────────────
+    //
+    // **The setter's argument is `GetBoolOrDefault(L, 2, default = 1)`** (`0x6f1c10`), not Lua
+    // truthiness and not a plain numeric coercion — `0x7996e0` pushes the default `1` before the
+    // call, so **an absent argument ENABLES** the mode. `nil` disables; a number goes through
+    // `__ftol` so `0` and `0.5` are false and `-1` is true; `""` matches nothing in the
+    // off/disabled/on/enabled chain and falls to the default, so it ENABLES; `"0"` disables.
+    // [`crate::script::binding_abi::bool_or_default`] already models every arm.
+    //
+    // **The getter answers the NUMBER 1 or nil**, never a boolean (`0x799815`: the set arm pushes
+    // the double 1.0 via `0x6f3810`, the clear arm pushes nil via `0x6f37f0`) — the same idiom as
+    // `IsShiftKeyDown`. An addon writing `if box:GetAltArrowKeyMode() then` reads either the same;
+    // one writing `== 1` only reads the number.
+    m.set(
+        "SetAltArrowKeyMode",
+        lua.create_function(|lua, (this, args): (Table, mlua::MultiValue)| {
+            // `MultiValue`, not `Value`, because the reference DISTINGUISHES absent from nil here
+            // and mlua's `Value` cannot: `0x7996e0` pushes the default `1` before the call, so
+            // `SetAltArrowKeyMode()` enables while `SetAltArrowKeyMode(nil)` disables.
+            let args: Vec<Value> = args.into_iter().collect();
+            let on = crate::script::binding_abi::bool_or_default(args.first(), true);
+            with_editbox(lua, &this, |eb| eb.alt_arrow_key_mode = on)?;
+            Ok(())
+        })?,
+    )?;
+    m.set(
+        "GetAltArrowKeyMode",
+        lua.create_function(|lua, this: Table| {
+            let on = with_editbox(lua, &this, |eb| eb.alt_arrow_key_mode)?;
+            Ok(if on { Value::Integer(1) } else { Value::Nil })
+        })?,
+    )?;
+
     for (name, set) in flag_setters() {
         let refresh_justify = name == "SetMultiLine";
         m.set(
@@ -307,12 +345,11 @@ fn install_font_block(lua: &Lua, m: &Table) -> mlua::Result<()> {
 type FlagSetter = (&'static str, fn(&mut EditBoxState, bool));
 
 /// The config-flag setters, in one place so the loader and the Lua surface share the list.
-fn flag_setters() -> [FlagSetter; 5] {
+fn flag_setters() -> [FlagSetter; 4] {
     [
         ("SetAutoFocus", |eb, on| eb.auto_focus = on),
         ("SetNumeric", |eb, on| eb.numeric = on),
         ("SetPassword", |eb, on| eb.password = on),
         ("SetMultiLine", |eb, on| eb.multi_line = on),
-        ("SetIgnoreArrows", |eb, on| eb.ignore_arrows = on),
     ]
 }

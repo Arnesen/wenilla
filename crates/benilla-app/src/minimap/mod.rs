@@ -984,6 +984,45 @@ fn feed_minimap_inside(
     }
 }
 
+/// Swap the disc's mask when an addon has asked for a different one — `Minimap:SetMaskTexture`.
+///
+/// The renderer already masks the map through its own `UiQuadMask`; this only decides which
+/// texture that is, so the whole feature is a load and a handle swap. It is what makes pfUI's
+/// square minimap — the single most recognisable thing it does to the default UI — actually
+/// square, and it is a real 1.12 method rather than a pfUI invention.
+///
+/// Memoised on the path, so the load happens on the edge and never per frame; a VM restart resets
+/// the memo and re-reads, because the fresh VM's widget starts at the engine default again. A path
+/// that fails to load leaves the current mask standing and says so once — a missing file must not
+/// silently unmask the map into a square, which is what dropping the handle would do.
+fn feed_minimap_mask(
+    script: Option<bevy::ecs::system::NonSendMut<benilla_ui::script::UiScript>>,
+    assets: Option<ResMut<MinimapAssets>>,
+    world_assets: Option<ResMut<WorldAssets>>,
+    mut images: ResMut<Assets<Image>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<String>>>,
+) {
+    let (Some(script), Some(mut assets), Some(mut world_assets)) = (script, assets, world_assets)
+    else {
+        return;
+    };
+    let want = script.minimap_mask_texture();
+    let last = last.get(&script);
+    if *last == want {
+        return;
+    }
+    *last = want.clone();
+    let path = want
+        .as_deref()
+        .unwrap_or(benilla_ui::widget::MINIMAP_DEFAULT_MASK);
+    match world_assets.mask_texture(path, &mut images) {
+        Some(handle) => assets.mask = Some(handle),
+        None => {
+            warn!("minimap: SetMaskTexture(\"{path}\") — no such texture; keeping the current mask")
+        }
+    }
+}
+
 /// Push the player's world facing onto the Minimap's engine-owned player-arrow `Model` — the
 /// client's `CMinimap::SetPlayerFacing 0x4eb8e0`, which writes it verbatim into the arrow's
 /// `[+0x39c]`, the field `Model:GetFacing()` reads.
@@ -1070,6 +1109,9 @@ impl Plugin for MinimapPlugin {
                     // Before the script tick, so an addon's OnUpdate steers off this frame's
                     // heading rather than last frame's.
                     feed_minimap_player_facing.before(crate::ui_script::UiInput),
+                    // Before the emit that reads `MinimapAssets::mask`, so a mask set this frame
+                    // is the one this frame draws with.
+                    feed_minimap_mask.before(UiQuadAppend),
                     // Before the script tick, and after the containment verdict it reads: the
                     // `MINIMAP_PING` event and `Minimap:GetPingPosition()`'s value land in the
                     // same tick, on a ping the renderer already drew at the end of last frame.

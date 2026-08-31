@@ -572,7 +572,7 @@ fn control(
     // "no keys held" — so the avatar isn't also driven while typing (a `.tele` command). Mouse still
     // works. The gate is `UiKeyboardCapture`, which the focused chat EditBox drives; the free-fly
     // chord below is deliberately outside it, like every dev chord ([`modkeys::dev_chord`]).
-    let typing = ui_capture.0;
+    let typing = ui_capture.typing;
     // The rebindable inputs all read `binds` (decision 0997): the dispatch already enforced the
     // typing gate and 0585's exact-modifier law when it latched, so this module carries neither
     // anymore. Nothing here reads a bare key any more (decision 1043) — the free-fly toggle is on

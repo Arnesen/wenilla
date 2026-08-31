@@ -392,6 +392,15 @@ pub struct MinimapState {
     /// Is the player inside a WMO interior (the client's `0xceaa60`)? Selects which index the Lua
     /// zoom API reads and writes. Pushed down by the app, which owns the WMO containment test.
     pub inside: bool,
+    /// The mask art the disc is cut to — `Minimap:SetMaskTexture(path)`, a real 1.12 method (the
+    /// name is in the 5875 image; there is no `GetMaskTexture` beside it, so this is write-only
+    /// from Lua). `None` = the engine default, [`MINIMAP_DEFAULT_MASK`].
+    ///
+    /// State-only here, pixels app-side, like the zoom index (0203): the app already masks the
+    /// disc through its own `UiQuadMask`, and this only decides which texture it loads. It is what
+    /// makes a **square minimap** possible, which is the single most recognisable thing pfUI does
+    /// to the default UI (`modules/minimap.lua:27`).
+    pub mask_texture: Option<String>,
     /// The **player-arrow** `Model` — the client's `[Minimap+0x338]`, ninth and last of the nine
     /// engine children the ctor builds ([`MINIMAP_ENGINE_CHILDREN`]). An explicit slot because that
     /// is the shape the client keeps: `CMinimap::SetPlayerFacing 0x4eb8e0` reaches the arrow through
@@ -415,6 +424,7 @@ impl Default for MinimapState {
             zoom: MINIMAP_DEFAULT_ZOOM,
             inside_zoom: MINIMAP_DEFAULT_ZOOM,
             inside: false,
+            mask_texture: None,
             // Filled by the arena the moment the widget is inserted — the nine are ctor-time, so a
             // Minimap is never observably without them (`WidgetArena::create`).
             player_arrow: None,
@@ -444,6 +454,11 @@ impl MinimapState {
 
 /// The client's minimap zoom-level count (`get_zoom_levels` `0x6da9a0` returns the constant 6).
 pub const MINIMAP_ZOOM_LEVELS: u8 = 6;
+
+/// The engine's own minimap mask — the circle `Minimap:SetMaskTexture` replaces. benilla's
+/// renderer has loaded this path since the minimap existed; naming it here is what lets the Lua
+/// setter override it.
+pub const MINIMAP_DEFAULT_MASK: &str = "Textures\\MinimapMask";
 
 /// **Nine `Model` children, built by the `CMinimap` ctor before anything else sees the widget** —
 /// wow-re `ui/scratch/widget-list-bindings.md` §5 / `ui/ui.md`, VERIFIED. The ctor `0x4edbc0`

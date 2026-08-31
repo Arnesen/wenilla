@@ -1948,10 +1948,34 @@ fn the_combat_log_window_has_the_docks_rect() {
             "ChatFrame2:{get}() must equal ChatFrame1's — a docked window shares the dock's rect"
         );
     }
+    // **Three points, and which three is the assertion.** The XML authors two (TOPLEFT and
+    // BOTTOMRIGHT onto ChatFrame1) and `FCF_DockUpdate` then clears them and applies the
+    // reference's own three for a non-first dock member — TOPLEFT / BOTTOMLEFT / BOTTOMRIGHT,
+    // FloatingChatFrame.lua l.1059-1063. So `3` here means the dock seeding ran and this window is
+    // in `DOCKED_CHAT_FRAMES`; `2` would mean it never did and the rect is standing on the XML
+    // alone. Either way one alone cannot size the frame, which is what 1575 shipped.
     assert_eq!(
         s.eval::<i64>("return ChatFrame2:GetNumPoints()").unwrap(),
+        3,
+        "FCF_DockUpdate's three points — a 2 means the dock never seeded this window"
+    );
+    assert_eq!(
+        s.eval::<i64>("return table.getn(DOCKED_CHAT_FRAMES)")
+            .unwrap(),
         2,
-        "both authored anchors must survive — one alone cannot size the frame"
+        "the dock is ChatFrame1 + ChatFrame2, seeded from GetChatWindowInfo's stored positions"
+    );
+    assert_eq!(
+        s.eval::<String>("return SELECTED_DOCK_FRAME:GetName()")
+            .unwrap(),
+        "ChatFrame1"
+    );
+    assert!(
+        s.eval::<bool>(
+            "return ChatFrame1.isDocked and ChatFrame2.isDocked and not ChatFrame3.isDocked"
+        )
+        .unwrap(),
+        "FCF_DockFrame set the flag on the dock's two and nothing else"
     );
 }
 
