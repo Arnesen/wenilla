@@ -69,11 +69,16 @@ pub(crate) enum ChatEventKind {
     BgSystemNeutral,
     BgSystemAlliance,
     BgSystemHorde,
-    // ── the combat log (B297) ──────────────────────────────────────────────────────────────
-    // The `COMBAT_*`/`SPELL_*` block 0288 §3 held back as "the combat-log content arc". All 44
-    // kinds are produced by [`super::combat`]; the rest of the reference's block (the death,
-    // dispel, enchant, tradeskill and cast-failure leaves) has no decoded wire source yet and is
-    // deliberately still absent — a kind with no producer is dead weight the sweeps cannot police.
+    // ── the combat log (B297; completed by 1703) ───────────────────────────────────────────
+    // The `COMBAT_*`/`SPELL_*` block 0288 §3 held back as "the combat-log content arc". 1571 shipped
+    // the damage/heal/power 44; 1703 added the eleven leaves it named as "deliberately out because
+    // their wire sources are undecoded" — the death pair, the three AURA_GONE rows, MISC_INFO,
+    // TRADESKILLS, ITEM_ENCHANTMENTS, BREAK_AURA, FACTION_CHANGE and FAILED_LOCALPLAYER. Every kind
+    // here has a producer in [`super::combat`]; a kind with none is dead weight the sweeps cannot
+    // police, which is why the enum grew only as the arms did.
+    /// `0x19` — the reference's catch-all combat line: `DURABILITYDAMAGE_DEATH`, `SPELLDISMISSPET*`,
+    /// `PET_LOYALTY_*`, `SPELLHAPPINESSDRAIN*`, and the "string not found" warning.
+    CombatMiscInfo,
     CombatSelfHits,
     CombatSelfMisses,
     CombatPetHits,
@@ -90,6 +95,10 @@ pub(crate) enum ChatEventKind {
     CombatCreatureVsPartyMisses,
     CombatCreatureVsCreatureHits,
     CombatCreatureVsCreatureMisses,
+    /// `0x2b` — a death whose victim classifies 0..5 (you, yours, a friendly player or their pet).
+    CombatFriendlyDeath,
+    /// `0x2c` — every other death: a hostile player, a creature, an unresolvable victim.
+    CombatHostileDeath,
     SpellSelfDamage,
     SpellSelfBuff,
     SpellPetDamage,
@@ -106,8 +115,20 @@ pub(crate) enum ChatEventKind {
     SpellCreatureVsPartyBuff,
     SpellCreatureVsCreatureDamage,
     SpellCreatureVsCreatureBuff,
+    /// `0x3e` — the item a cast produced: `TRADESKILL_LOG_*` and `FEEDPET_LOG_*`.
+    SpellTradeskills,
     SpellDamageShieldsOnSelf,
     SpellDamageShieldsOnOthers,
+    /// `0x41` — an aura leaving you or your pet (`AURAREMOVED*`).
+    SpellAuraGoneSelf,
+    /// `0x42` — an aura leaving a party member or their pet.
+    SpellAuraGoneParty,
+    /// `0x43` — an aura leaving anyone else.
+    SpellAuraGoneOther,
+    /// `0x44` — an enchant landing on or fading from an item (`ITEMENCHANTMENT*`).
+    SpellItemEnchantments,
+    /// `0x45` — an aura dispelled or stolen (`AURADISPEL*`, `AURASTOLEN*`).
+    SpellBreakAura,
     SpellPeriodicSelfDamage,
     SpellPeriodicSelfBuffs,
     SpellPeriodicPartyDamage,
@@ -118,6 +139,10 @@ pub(crate) enum ChatEventKind {
     SpellPeriodicHostilePlayerBuffs,
     SpellPeriodicCreatureDamage,
     SpellPeriodicCreatureBuffs,
+    /// `0x50` — your own cast that failed (`SPELLFAIL{CAST,PERFORM}SELF`).
+    SpellFailedLocalPlayer,
+    /// `0x55` — a reputation delta (`FACTION_STANDING_INCREASED`/`_DECREASED`).
+    CombatFactionChange,
 }
 
 impl ChatEventKind {
@@ -134,7 +159,8 @@ impl ChatEventKind {
         use ChatEventKind as K;
         matches!(
             self,
-            K::CombatSelfHits
+            K::CombatMiscInfo
+                | K::CombatSelfHits
                 | K::CombatSelfMisses
                 | K::CombatPetHits
                 | K::CombatPetMisses
@@ -150,6 +176,8 @@ impl ChatEventKind {
                 | K::CombatCreatureVsPartyMisses
                 | K::CombatCreatureVsCreatureHits
                 | K::CombatCreatureVsCreatureMisses
+                | K::CombatFriendlyDeath
+                | K::CombatHostileDeath
                 | K::SpellSelfDamage
                 | K::SpellSelfBuff
                 | K::SpellPetDamage
@@ -166,8 +194,14 @@ impl ChatEventKind {
                 | K::SpellCreatureVsPartyBuff
                 | K::SpellCreatureVsCreatureDamage
                 | K::SpellCreatureVsCreatureBuff
+                | K::SpellTradeskills
                 | K::SpellDamageShieldsOnSelf
                 | K::SpellDamageShieldsOnOthers
+                | K::SpellAuraGoneSelf
+                | K::SpellAuraGoneParty
+                | K::SpellAuraGoneOther
+                | K::SpellItemEnchantments
+                | K::SpellBreakAura
                 | K::SpellPeriodicSelfDamage
                 | K::SpellPeriodicSelfBuffs
                 | K::SpellPeriodicPartyDamage
@@ -178,6 +212,8 @@ impl ChatEventKind {
                 | K::SpellPeriodicHostilePlayerBuffs
                 | K::SpellPeriodicCreatureDamage
                 | K::SpellPeriodicCreatureBuffs
+                | K::SpellFailedLocalPlayer
+                | K::CombatFactionChange
         )
     }
 
@@ -229,6 +265,7 @@ impl ChatEventKind {
             K::BgSystemNeutral,
             K::BgSystemAlliance,
             K::BgSystemHorde,
+            K::CombatMiscInfo,
             K::CombatSelfHits,
             K::CombatSelfMisses,
             K::CombatPetHits,
@@ -245,6 +282,8 @@ impl ChatEventKind {
             K::CombatCreatureVsPartyMisses,
             K::CombatCreatureVsCreatureHits,
             K::CombatCreatureVsCreatureMisses,
+            K::CombatFriendlyDeath,
+            K::CombatHostileDeath,
             K::SpellSelfDamage,
             K::SpellSelfBuff,
             K::SpellPetDamage,
@@ -261,8 +300,14 @@ impl ChatEventKind {
             K::SpellCreatureVsPartyBuff,
             K::SpellCreatureVsCreatureDamage,
             K::SpellCreatureVsCreatureBuff,
+            K::SpellTradeskills,
             K::SpellDamageShieldsOnSelf,
             K::SpellDamageShieldsOnOthers,
+            K::SpellAuraGoneSelf,
+            K::SpellAuraGoneParty,
+            K::SpellAuraGoneOther,
+            K::SpellItemEnchantments,
+            K::SpellBreakAura,
             K::SpellPeriodicSelfDamage,
             K::SpellPeriodicSelfBuffs,
             K::SpellPeriodicPartyDamage,
@@ -273,6 +318,8 @@ impl ChatEventKind {
             K::SpellPeriodicHostilePlayerBuffs,
             K::SpellPeriodicCreatureDamage,
             K::SpellPeriodicCreatureBuffs,
+            K::SpellFailedLocalPlayer,
+            K::CombatFactionChange,
         ]
     };
 }
@@ -448,6 +495,7 @@ pub(crate) fn event_name(kind: ChatEventKind) -> &'static str {
         K::BgSystemNeutral => "CHAT_MSG_BG_SYSTEM_NEUTRAL",
         K::BgSystemAlliance => "CHAT_MSG_BG_SYSTEM_ALLIANCE",
         K::BgSystemHorde => "CHAT_MSG_BG_SYSTEM_HORDE",
+        K::CombatMiscInfo => "CHAT_MSG_COMBAT_MISC_INFO",
         K::CombatSelfHits => "CHAT_MSG_COMBAT_SELF_HITS",
         K::CombatSelfMisses => "CHAT_MSG_COMBAT_SELF_MISSES",
         K::CombatPetHits => "CHAT_MSG_COMBAT_PET_HITS",
@@ -464,6 +512,8 @@ pub(crate) fn event_name(kind: ChatEventKind) -> &'static str {
         K::CombatCreatureVsPartyMisses => "CHAT_MSG_COMBAT_CREATURE_VS_PARTY_MISSES",
         K::CombatCreatureVsCreatureHits => "CHAT_MSG_COMBAT_CREATURE_VS_CREATURE_HITS",
         K::CombatCreatureVsCreatureMisses => "CHAT_MSG_COMBAT_CREATURE_VS_CREATURE_MISSES",
+        K::CombatFriendlyDeath => "CHAT_MSG_COMBAT_FRIENDLY_DEATH",
+        K::CombatHostileDeath => "CHAT_MSG_COMBAT_HOSTILE_DEATH",
         K::SpellSelfDamage => "CHAT_MSG_SPELL_SELF_DAMAGE",
         K::SpellSelfBuff => "CHAT_MSG_SPELL_SELF_BUFF",
         K::SpellPetDamage => "CHAT_MSG_SPELL_PET_DAMAGE",
@@ -480,8 +530,14 @@ pub(crate) fn event_name(kind: ChatEventKind) -> &'static str {
         K::SpellCreatureVsPartyBuff => "CHAT_MSG_SPELL_CREATURE_VS_PARTY_BUFF",
         K::SpellCreatureVsCreatureDamage => "CHAT_MSG_SPELL_CREATURE_VS_CREATURE_DAMAGE",
         K::SpellCreatureVsCreatureBuff => "CHAT_MSG_SPELL_CREATURE_VS_CREATURE_BUFF",
+        K::SpellTradeskills => "CHAT_MSG_SPELL_TRADESKILLS",
         K::SpellDamageShieldsOnSelf => "CHAT_MSG_SPELL_DAMAGESHIELDS_ON_SELF",
         K::SpellDamageShieldsOnOthers => "CHAT_MSG_SPELL_DAMAGESHIELDS_ON_OTHERS",
+        K::SpellAuraGoneSelf => "CHAT_MSG_SPELL_AURA_GONE_SELF",
+        K::SpellAuraGoneParty => "CHAT_MSG_SPELL_AURA_GONE_PARTY",
+        K::SpellAuraGoneOther => "CHAT_MSG_SPELL_AURA_GONE_OTHER",
+        K::SpellItemEnchantments => "CHAT_MSG_SPELL_ITEM_ENCHANTMENTS",
+        K::SpellBreakAura => "CHAT_MSG_SPELL_BREAK_AURA",
         K::SpellPeriodicSelfDamage => "CHAT_MSG_SPELL_PERIODIC_SELF_DAMAGE",
         K::SpellPeriodicSelfBuffs => "CHAT_MSG_SPELL_PERIODIC_SELF_BUFFS",
         K::SpellPeriodicPartyDamage => "CHAT_MSG_SPELL_PERIODIC_PARTY_DAMAGE",
@@ -492,6 +548,8 @@ pub(crate) fn event_name(kind: ChatEventKind) -> &'static str {
         K::SpellPeriodicHostilePlayerBuffs => "CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_BUFFS",
         K::SpellPeriodicCreatureDamage => "CHAT_MSG_SPELL_PERIODIC_CREATURE_DAMAGE",
         K::SpellPeriodicCreatureBuffs => "CHAT_MSG_SPELL_PERIODIC_CREATURE_BUFFS",
+        K::SpellFailedLocalPlayer => "CHAT_MSG_SPELL_FAILED_LOCALPLAYER",
+        K::CombatFactionChange => "CHAT_MSG_COMBAT_FACTION_CHANGE",
     }
 }
 
@@ -680,6 +738,9 @@ pub(crate) fn default_color(kind: ChatEventKind) -> [u8; 3] {
         K::BgSystemNeutral => [255, 120, 10],
         K::BgSystemAlliance => [0, 174, 239],
         K::BgSystemHorde => [255, 0, 0],
+        // The two `8080ff` rows, both from the reference's table: the catch-all combat line and
+        // the reputation line share a colour and nothing else.
+        K::CombatMiscInfo | K::CombatFactionChange => [128, 128, 255],
         // ── the combat log ───────────────────────────────────────────────────────────────
         // The shipped defaults are overwhelmingly plain white; the three that are not are the
         // ones about YOU being hit, and they are the reason the block is grouped by colour
@@ -729,7 +790,16 @@ pub(crate) fn default_color(kind: ChatEventKind) -> [u8; 3] {
         | K::SpellPeriodicHostilePlayerDamage
         | K::SpellPeriodicHostilePlayerBuffs
         | K::SpellPeriodicCreatureDamage
-        | K::SpellPeriodicCreatureBuffs => [255, 255, 255],
+        | K::SpellPeriodicCreatureBuffs
+        | K::CombatFriendlyDeath
+        | K::CombatHostileDeath
+        | K::SpellTradeskills
+        | K::SpellAuraGoneSelf
+        | K::SpellAuraGoneParty
+        | K::SpellAuraGoneOther
+        | K::SpellItemEnchantments
+        | K::SpellBreakAura
+        | K::SpellFailedLocalPlayer => [255, 255, 255],
     }
 }
 

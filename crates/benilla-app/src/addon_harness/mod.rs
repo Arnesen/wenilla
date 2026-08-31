@@ -1947,6 +1947,7 @@ const PROBE_FRAME_KINDS: &[&str] = &[
     "Slider",
     "ScrollFrame",
     "Model",
+    "PlayerModel",
     "MessageFrame",
     "ScrollingMessageFrame",
     "ColorSelect",

@@ -77,14 +77,14 @@ fn shipped_unit_frames_drive_end_to_end() {
     let ok: bool = s
         .eval(
             r#"
-            local hb, pb = PlayerFrameHealthBar, PlayerFramePowerBar
+            local hb, pb = PlayerFrameHealthBar, PlayerFrameManaBar
             local _, hmax = hb:GetMinMaxValues()
             local _, pmax = pb:GetMinMaxValues()
             local r, g, b = pb:GetStatusBarColor()
             return hb:GetValue() == 72 and hmax == 100
                and pb:GetValue() == 45 and pmax == 80 and pb:IsVisible()
                and b == 1 and r == 0 -- mana blue
-               and PlayerFrameTextureFrameNameText:GetText() == "Unknown"
+               and PlayerName:GetText() == "Unknown"
         "#,
         )
         .unwrap();
@@ -109,8 +109,7 @@ fn shipped_unit_frames_drive_end_to_end() {
     );
     s.fire_event("UNIT_NAME_UPDATE", vec![ScriptValue::Str("player".into())]);
     assert_eq!(
-        s.eval::<String>("return PlayerFrameTextureFrameNameText:GetText()")
-            .unwrap(),
+        s.eval::<String>("return PlayerName:GetText()").unwrap(),
         "Benilla"
     );
 
@@ -137,10 +136,10 @@ fn shipped_unit_frames_drive_end_to_end() {
         .eval(
             r#"
             return TargetFrame:IsVisible()
-               and not TargetFramePowerBar:IsVisible()
-               and TargetFrameTextureFrameNameText:GetText() == "Young Wolf"
-               and TargetFrameTextureFrameLevelText:GetText() == "3"
-               and not TargetFrameTextureFrameDeadText:IsShown() -- living target: no dead word
+               and not TargetFrameManaBar:IsVisible()
+               and TargetName:GetText() == "Young Wolf"
+               and TargetLevelText:GetText() == "3"
+               and not TargetDeadText:IsShown() -- living target: no dead word
         "#,
         )
         .unwrap();
@@ -280,7 +279,7 @@ fn unit_combat_drives_the_player_hit_indicator() {
     let ok: bool = s
         .eval(
             r#"
-            local ind = PlayerFrameTextureFrameHitIndicator
+            local ind = PlayerHitIndicator
             return ind:IsShown() ~= nil and tostring(ind:GetText()) == "17"
         "#,
         )
@@ -295,7 +294,7 @@ fn unit_combat_drives_the_player_hit_indicator() {
     // A spell crit: ×1.5 height (the CRITICAL arm), and the type>0 yellow.
     s.fire_event("UNIT_COMBAT", ev("player", "WOUND", "CRITICAL", 64, 4));
     let ok: bool = s
-        .eval("return tostring(PlayerFrameTextureFrameHitIndicator:GetText()) == \"64\"")
+        .eval("return tostring(PlayerHitIndicator:GetText()) == \"64\"")
         .unwrap();
     assert!(ok, "spell crit paints ({:?})", s.errors());
     assert_eq!(
@@ -307,7 +306,7 @@ fn unit_combat_drives_the_player_hit_indicator() {
     // A full absorb: the word at ×0.75.
     s.fire_event("UNIT_COMBAT", ev("player", "WOUND", "ABSORB", 0, 0));
     let ok: bool = s
-        .eval("return PlayerFrameTextureFrameHitIndicator:GetText() == \"Absorb\"")
+        .eval("return PlayerHitIndicator:GetText() == \"Absorb\"")
         .unwrap();
     assert!(ok, "full absorb paints the word ({:?})", s.errors());
     assert_eq!(
@@ -321,7 +320,7 @@ fn unit_combat_drives_the_player_hit_indicator() {
     let ok: bool = s
         .eval(
             r#"
-            local ind = PlayerFrameTextureFrameHitIndicator
+            local ind = PlayerHitIndicator
             return ind:IsShown() ~= nil and ind:GetAlpha() == 1.0
         "#,
         )
@@ -329,7 +328,7 @@ fn unit_combat_drives_the_player_hit_indicator() {
     assert!(ok, "mid-hold: opaque ({:?})", s.errors());
     s.tick(0.8); // past fade-in + hold + fade-out (1.2 s total)
     assert!(
-        s.eval::<bool>("return PlayerFrameTextureFrameHitIndicator:IsShown() == nil")
+        s.eval::<bool>("return PlayerHitIndicator:IsShown() == nil")
             .unwrap(),
         "the envelope ends in a Hide ({:?})",
         s.errors()
@@ -338,7 +337,7 @@ fn unit_combat_drives_the_player_hit_indicator() {
     // A target-token event leaves the (hidden) indicator alone.
     s.fire_event("UNIT_COMBAT", ev("target", "WOUND", "", 99, 0));
     assert!(
-        s.eval::<bool>("return PlayerFrameTextureFrameHitIndicator:IsShown() == nil")
+        s.eval::<bool>("return PlayerHitIndicator:IsShown() == nil")
             .unwrap(),
         "a target event never touches the player indicator"
     );
@@ -643,8 +642,8 @@ fn shipped_target_frame_runs_the_level_law() {
     let ok: bool = s
         .eval(
             r#"
-            local lvl = getglobal("TargetFrameTextureFrameLevelText")
-            local skull = getglobal("TargetFrameTextureFrameHighLevelTexture")
+            local lvl = getglobal("TargetLevelText")
+            local skull = getglobal("TargetHighLevelTexture")
             local c = GetDifficultyColor(8)
             return lvl:IsShown() ~= nil and skull:IsShown() == nil
                and tostring(lvl:GetText()) == "8"
@@ -672,8 +671,8 @@ fn shipped_target_frame_runs_the_level_law() {
     let ok: bool = s
         .eval(
             r#"
-            local lvl = getglobal("TargetFrameTextureFrameLevelText")
-            local skull = getglobal("TargetFrameTextureFrameHighLevelTexture")
+            local lvl = getglobal("TargetLevelText")
+            local skull = getglobal("TargetHighLevelTexture")
             return UnitLevel("target") == -1
                and skull:IsShown() ~= nil and lvl:IsShown() == nil
         "#,
@@ -700,8 +699,8 @@ fn shipped_target_frame_runs_the_level_law() {
     let ok: bool = s
         .eval(
             r#"
-            local lvl = getglobal("TargetFrameTextureFrameLevelText")
-            local skull = getglobal("TargetFrameTextureFrameHighLevelTexture")
+            local lvl = getglobal("TargetLevelText")
+            local skull = getglobal("TargetHighLevelTexture")
             return UnitIsCorpse("target") == nil
                and lvl:IsShown() ~= nil and skull:IsShown() == nil
                and tostring(lvl:GetText()) == "8"
@@ -729,7 +728,7 @@ fn shipped_target_frame_runs_the_level_law() {
     let ok: bool = s
         .eval(
             r#"
-            local skull = getglobal("TargetFrameTextureFrameHighLevelTexture")
+            local skull = getglobal("TargetHighLevelTexture")
             return UnitIsCorpse("target") == 1 and skull:IsShown() ~= nil
         "#,
         )
@@ -778,9 +777,9 @@ fn pvp_icon_follows_the_three_branch_law() {
     load_unit_frames(&s);
     let _ = s.take_sounds(); // the frames' own load-time kits (target hide) aren't ours
 
-    let icon_shown = |s: &UiScript, frame: &str| -> bool {
+    let icon_shown = |s: &UiScript, unit: &str| -> bool {
         s.eval(&format!(
-            "return {frame}TextureFramePVPIcon:IsVisible() and true or false"
+            "return {unit}PVPIcon:IsVisible() and true or false"
         ))
         .unwrap()
     };
@@ -808,13 +807,13 @@ fn pvp_icon_follows_the_three_branch_law() {
     // Unflagged: no icon, no sound.
     s.set_unit("player", Some(alliance_player(false, false)));
     s.fire_event("UNIT_FACTION", vec![ScriptValue::Str("player".into())]);
-    assert!(!icon_shown(&s, "PlayerFrame"), "unflagged shows none");
+    assert!(!icon_shown(&s, "Player"), "unflagged shows none");
     assert!(s.take_sounds().is_empty(), "no sound while unflagged");
 
     // Flagged: the Alliance icon, and one igPVPUpdate for the flag change.
     s.set_unit("player", Some(alliance_player(true, false)));
     s.fire_event("UNIT_FACTION", vec![ScriptValue::Str("player".into())]);
-    assert!(icon_shown(&s, "PlayerFrame"));
+    assert!(icon_shown(&s, "Player"));
     assert!(icon_path(&mut s, "UI-PVP-Alliance"), "faction leg art");
     assert_eq!(
         s.take_sounds(),
@@ -851,7 +850,7 @@ fn pvp_icon_follows_the_three_branch_law() {
     );
     s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
     assert!(
-        !icon_shown(&s, "TargetFrame"),
+        !icon_shown(&s, "Target"),
         "flagged but sideless draws no icon"
     );
 
@@ -871,7 +870,7 @@ fn pvp_icon_follows_the_three_branch_law() {
         }),
     );
     s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
-    assert!(icon_shown(&s, "TargetFrame"));
+    assert!(icon_shown(&s, "Target"));
     assert!(icon_path(&mut s, "UI-PVP-Horde"), "the target's own side");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -1046,7 +1045,7 @@ fn target_frame_border_follows_the_classification_law() {
     let plain_on_player: bool = s
         .eval(
             r#"
-            local p = getglobal("PlayerFrameTextureFrameTexture")
+            local p = getglobal("PlayerFrameTexture")
             return p ~= nil and PlayerFrame.frameTexture == nil
         "#,
         )
@@ -1235,9 +1234,9 @@ fn a_feigning_target_paints_empty_bars_and_the_dead_text() {
     let alive: bool = s
         .eval(
             r#"
-            local hb, pb = TargetFrameHealthBar, TargetFramePowerBar
+            local hb, pb = TargetFrameHealthBar, TargetFrameManaBar
             return hb:GetValue() == 1200 and pb:GetValue() == 300
-               and not TargetFrameTextureFrameDeadText:IsShown()
+               and not TargetDeadText:IsShown()
         "#,
         )
         .unwrap();
@@ -1250,25 +1249,24 @@ fn a_feigning_target_paints_empty_bars_and_the_dead_text() {
         s.eval("return TargetFrameHealthBar:GetValue()").unwrap(),
         s.eval("local _, m = TargetFrameHealthBar:GetMinMaxValues() return m")
             .unwrap(),
-        s.eval("return TargetFramePowerBar:GetValue()").unwrap(),
-        s.eval("local _, m = TargetFramePowerBar:GetMinMaxValues() return m")
+        s.eval("return TargetFrameManaBar:GetValue()").unwrap(),
+        s.eval("local _, m = TargetFrameManaBar:GetMinMaxValues() return m")
             .unwrap(),
     );
     assert_eq!((hp, hmax), (0.0, 1500.0), "empty health bar, real track");
     assert_eq!((mana, mmax), (0.0, 900.0), "empty mana bar, real track");
     assert!(
-        s.eval::<bool>("return TargetFramePowerBar:IsVisible()")
+        s.eval::<bool>("return TargetFrameManaBar:IsVisible()")
             .unwrap(),
         "the mana bar empties, it does not disappear — UnitManaMax 0x5177e0 is ungated"
     );
     assert!(
-        s.eval::<bool>("return TargetFrameTextureFrameDeadText:IsShown() and true or false")
+        s.eval::<bool>("return TargetDeadText:IsShown() and true or false")
             .unwrap(),
         "TargetFrame_CheckDead's UnitHealth(unit) <= 0 test, tripped by the flag"
     );
     assert_eq!(
-        s.eval::<String>("return TargetFrameTextureFrameDeadText:GetText()")
-            .unwrap(),
+        s.eval::<String>("return TargetDeadText:GetText()").unwrap(),
         "Dead",
         "the WORD is the GlobalString `DEAD` (l.898), never the key: a literal \"DEAD\" here \
          is the caps bug the director caught on Onyxia"
@@ -1285,8 +1283,8 @@ fn a_feigning_target_paints_empty_bars_and_the_dead_text() {
         .eval(
             r#"
             return TargetFrameHealthBar:GetValue() == 1200
-               and TargetFramePowerBar:GetValue() == 300
-               and not TargetFrameTextureFrameDeadText:IsShown()
+               and TargetFrameManaBar:GetValue() == 300
+               and not TargetDeadText:IsShown()
                and not UnitIsDead("target")
         "#,
         )
@@ -1326,14 +1324,14 @@ fn the_player_frame_flashes_zzz_while_resting() {
     let resting: bool = s
         .eval(
             r#"
-            local tf = "PlayerFrameTextureFrame"
-            return getglobal(tf .. "StatusTexture"):IsShown()
-               and getglobal(tf .. "RestIcon"):IsShown()
-               and not getglobal(tf .. "AttackIcon"):IsShown()
-               and PlayerFrameStatusGlow:IsShown()
-               and PlayerFrameStatusGlowRestGlow:IsShown()
-               and not PlayerFrameStatusGlowAttackGlow:IsShown()
-               and not getglobal(tf .. "AttackBackground"):IsShown()
+            local u = "Player"
+            return getglobal(u .. "StatusTexture"):IsShown()
+               and getglobal(u .. "RestIcon"):IsShown()
+               and not getglobal(u .. "AttackIcon"):IsShown()
+               and PlayerStatusGlow:IsShown()
+               and PlayerRestGlow:IsShown()
+               and not PlayerAttackGlow:IsShown()
+               and not getglobal(u .. "AttackBackground"):IsShown()
         "#,
         )
         .unwrap();
@@ -1343,14 +1341,10 @@ fn the_player_frame_flashes_zzz_while_resting() {
     );
 
     // The pulse: two OnUpdate ticks move the ring's alpha (the 0.5 s triangle wave).
-    let a0: f64 = s
-        .eval("return PlayerFrameTextureFrameStatusTexture:GetAlpha()")
-        .unwrap();
+    let a0: f64 = s.eval("return PlayerStatusTexture:GetAlpha()").unwrap();
     s.run("this = PlayerFrame; PlayerFrame_OnUpdate(0.25)")
         .unwrap();
-    let a1: f64 = s
-        .eval("return PlayerFrameTextureFrameStatusTexture:GetAlpha()")
-        .unwrap();
+    let a1: f64 = s.eval("return PlayerStatusTexture:GetAlpha()").unwrap();
     assert!(
         (a0 - a1).abs() > 0.1,
         "the flash moves the status alpha ({a0} → {a1})"
@@ -1359,8 +1353,7 @@ fn the_player_frame_flashes_zzz_while_resting() {
     // Swinging while resting: resting still wins (the ref's branch order).
     s.fire_event("PLAYER_ENTER_COMBAT", vec![]);
     assert!(
-        s.eval::<bool>("return PlayerFrameTextureFrameRestIcon:IsShown()")
-            .unwrap(),
+        s.eval::<bool>("return PlayerRestIcon:IsShown()").unwrap(),
         "resting outranks auto-attack"
     );
 
@@ -1370,12 +1363,12 @@ fn the_player_frame_flashes_zzz_while_resting() {
     let attacking: bool = s
         .eval(
             r#"
-            local tf = "PlayerFrameTextureFrame"
-            return getglobal(tf .. "StatusTexture"):IsShown()
-               and getglobal(tf .. "AttackIcon"):IsShown()
-               and not getglobal(tf .. "RestIcon"):IsShown()
-               and PlayerFrameStatusGlowAttackGlow:IsShown()
-               and getglobal(tf .. "AttackBackground"):IsShown()
+            local u = "Player"
+            return getglobal(u .. "StatusTexture"):IsShown()
+               and getglobal(u .. "AttackIcon"):IsShown()
+               and not getglobal(u .. "RestIcon"):IsShown()
+               and PlayerAttackGlow:IsShown()
+               and getglobal(u .. "AttackBackground"):IsShown()
         "#,
         )
         .unwrap();
@@ -1386,12 +1379,12 @@ fn the_player_frame_flashes_zzz_while_resting() {
     let clear: bool = s
         .eval(
             r#"
-            local tf = "PlayerFrameTextureFrame"
-            return not getglobal(tf .. "StatusTexture"):IsShown()
-               and not getglobal(tf .. "RestIcon"):IsShown()
-               and not getglobal(tf .. "AttackIcon"):IsShown()
-               and not PlayerFrameStatusGlow:IsShown()
-               and not getglobal(tf .. "AttackBackground"):IsShown()
+            local u = "Player"
+            return not getglobal(u .. "StatusTexture"):IsShown()
+               and not getglobal(u .. "RestIcon"):IsShown()
+               and not getglobal(u .. "AttackIcon"):IsShown()
+               and not PlayerStatusGlow:IsShown()
+               and not getglobal(u .. "AttackBackground"):IsShown()
         "#,
         )
         .unwrap();
@@ -1497,8 +1490,8 @@ fn status_bar_text_paints_the_player_numerals_but_not_the_targets() {
     };
 
     // Off (the shipped default): the strings carry the numbers, and nothing paints.
-    assert!(!shown(&s, "PlayerFrameTextureFrameHealthBarText"));
-    assert!(!shown(&s, "PlayerFrameTextureFramePowerBarText"));
+    assert!(!shown(&s, "PlayerFrameHealthBarText"));
+    assert!(!shown(&s, "PlayerFrameManaBarText"));
 
     // On, through the switch's own event — no repaint, no damage taken.
     s.register_cvars([("statusBarText", "0")]);
@@ -1506,17 +1499,17 @@ fn status_bar_text_paints_the_player_numerals_but_not_the_targets() {
         .unwrap();
     s.tick(0.0);
     assert!(
-        shown(&s, "PlayerFrameTextureFrameHealthBarText"),
+        shown(&s, "PlayerFrameHealthBarText"),
         "your own health numerals pin on"
     );
     assert_eq!(
-        text(&s, "PlayerFrameTextureFrameHealthBarText"),
+        text(&s, "PlayerFrameHealthBarText"),
         "72 / 100",
         "bare numbers: the reference's \"Health\"/\"Rage\" labels were cut on the \
          director's call (1147)"
     );
     assert_eq!(
-        text(&s, "PlayerFrameTextureFramePowerBarText"),
+        text(&s, "PlayerFrameManaBarText"),
         "45 / 80",
         "the power bar shows the number alone, whatever resource it is"
     );
@@ -1524,19 +1517,19 @@ fn status_bar_text_paints_the_player_numerals_but_not_the_targets() {
     // The target's stay dark with the switch ON: 1.12 never makes its bars textLockable, so the
     // option does not reach them.
     assert!(
-        !shown(&s, "TargetFrameTextureFrameHealthBarText"),
+        !shown(&s, "TargetFrameHealthBarText"),
         "the switch pins your own numbers, never the target's"
     );
 
     // ...but the HOVER reveals them, which is how you read a target's health in 1.12 (1146).
     s.run("BenillaUnitFrameBar_OnEnter(TargetFrameHealthBar)")
         .unwrap();
-    assert!(shown(&s, "TargetFrameTextureFrameHealthBarText"));
-    assert_eq!(text(&s, "TargetFrameTextureFrameHealthBarText"), "50 / 100");
+    assert!(shown(&s, "TargetFrameHealthBarText"));
+    assert_eq!(text(&s, "TargetFrameHealthBarText"), "50 / 100");
     s.run("BenillaUnitFrameBar_OnLeave(TargetFrameHealthBar)")
         .unwrap();
     assert!(
-        !shown(&s, "TargetFrameTextureFrameHealthBarText"),
+        !shown(&s, "TargetFrameHealthBarText"),
         "and go away again — the lockShow refcount balances"
     );
 
@@ -1545,16 +1538,16 @@ fn status_bar_text_paints_the_player_numerals_but_not_the_targets() {
     s.run("SetCVar(\"statusBarText\", \"0\", \"STATUS_BAR_TEXT\")")
         .unwrap();
     s.tick(0.0);
-    assert!(!shown(&s, "PlayerFrameTextureFrameHealthBarText"));
+    assert!(!shown(&s, "PlayerFrameHealthBarText"));
     s.run("BenillaUnitFrameBar_OnEnter(PlayerFrameHealthBar)")
         .unwrap();
     assert!(
-        shown(&s, "PlayerFrameTextureFrameHealthBarText"),
+        shown(&s, "PlayerFrameHealthBarText"),
         "hover shows them even with the option off"
     );
     s.run("BenillaUnitFrameBar_OnLeave(PlayerFrameHealthBar)")
         .unwrap();
-    assert!(!shown(&s, "PlayerFrameTextureFrameHealthBarText"));
+    assert!(!shown(&s, "PlayerFrameHealthBarText"));
     s.run("SetCVar(\"statusBarText\", \"1\", \"STATUS_BAR_TEXT\")")
         .unwrap();
     s.tick(0.0);
@@ -1562,12 +1555,12 @@ fn status_bar_text_paints_the_player_numerals_but_not_the_targets() {
     // A health change repaints through the bar's own OnValueChanged, like the reference's.
     s.set_unit("player", Some(alive(31, 45, 1)));
     s.fire_event("UNIT_HEALTH", vec![ScriptValue::Str("player".into())]);
-    assert_eq!(text(&s, "PlayerFrameTextureFrameHealthBarText"), "31 / 100");
+    assert_eq!(text(&s, "PlayerFrameHealthBarText"), "31 / 100");
 
     // A power-type change repaints the same way (it used to re-LABEL the bar too — 1147 cut that).
     s.set_unit("player", Some(alive(31, 60, 3)));
     s.fire_event("UNIT_DISPLAYPOWER", vec![ScriptValue::Str("player".into())]);
-    assert_eq!(text(&s, "PlayerFrameTextureFramePowerBarText"), "60 / 80");
+    assert_eq!(text(&s, "PlayerFrameManaBarText"), "60 / 80");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -1636,16 +1629,11 @@ fn no_two_numeral_strings_overlap_on_any_frame() {
     for (frame, upper, lower, want) in [
         (
             "player",
-            "PlayerFrameTextureFrameHealthBarText",
-            "PlayerFrameTextureFramePowerBarText",
+            "PlayerFrameHealthBarText",
+            "PlayerFrameManaBarText",
             12.0,
         ),
-        (
-            "pet",
-            "PetFrameTextureFrameHealthBarText",
-            "PetFrameTextureFrameManaBarText",
-            11.0,
-        ),
+        ("pet", "PetFrameHealthBarText", "PetFrameManaBarText", 11.0),
     ] {
         let mid = |s: &UiScript, n: &str| -> f64 {
             s.eval::<f64>(&format!("return ({n}:GetTop() + {n}:GetBottom()) / 2"))
@@ -1790,8 +1778,8 @@ fn the_player_frame_wears_the_leader_and_master_looter_icons() {
         s.eval::<bool>(&format!("return {region}:IsVisible()"))
             .unwrap()
     };
-    let leader = "PlayerFrameTextureFrameLeaderIcon";
-    let master = "PlayerFrameTextureFrameMasterIcon";
+    let leader = "PlayerLeaderIcon";
+    let master = "PlayerMasterIcon";
 
     // Solo: neither. A solo player "leads" nothing — `IsPartyLeader()` is nil without a group.
     assert!(!shown(&s, leader), "solo: no leader icon");
@@ -1840,4 +1828,141 @@ fn the_player_frame_wears_the_leader_and_master_looter_icons() {
     );
 
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **Every unit-frame global the reference declares** — the whole block, per decision 1718.
+///
+/// benilla named the player's and target's power bar `…PowerBar`, which is the LATER client's
+/// vocabulary: 1.12 has no `*PowerBar` anywhere. Every one is `ManaBar` — `PlayerFrameManaBar`,
+/// `TargetFrameManaBar`, `PetFrameManaBar`, plus the `ManaBarColor` table and the `frame.manabar`
+/// field `UnitFrame_Initialize` sets (`UnitFrame.lua:14`). So we published four names the
+/// reference lacks and were missing four it has, which is decision 1189's error in both
+/// directions at once. ShaguTweaks reads `TargetFrameManaBar` unguarded (`health-numbers.lua:22`)
+/// and died on it; our own party frames already used the right name, so the tree disagreed with
+/// itself as well.
+///
+/// The guard is the reference's own list, not the names that turned up missing — 1718's rule,
+/// which exists because the two previous guards of this class each enumerated the instances that
+/// had already broken and so could not fire on the next one. Deliberate ADDITIONS are fine and are
+/// not asserted against; what is asserted is that nothing the reference declares is absent.
+#[test]
+fn the_unit_frames_publish_every_name_the_reference_declares() {
+    let s = UiScript::new().unwrap();
+    load_unit_frames(&s);
+
+    // ref PlayerFrame.xml / TargetFrame.xml / PetFrame.xml — every `name=` those three files
+    // declare, minus the `virtual="true"` templates (which are not globals) and the buff/debuff
+    // button instances (a separate arc: TargetFrameBuff1..5, TargetFrameDebuff1..16).
+    //
+    // The list is taken from the reference files, not written from what turned up missing — and
+    // the first draft of THIS test still got that wrong, by filtering the reference's own list to
+    // the names starting `PlayerFrame`/`TargetFrame`/`PetFrame` and so dropping `PlayerName`,
+    // `PetPortrait`, `PetAttackModeTexture` and two dozen more. 1718's rule is easy to state and
+    // easy to re-break one level down.
+    //
+    // Collected rather than asserted one at a time: the point of a whole-block guard is to report
+    // the whole gap, and a first-failure assert would have hidden everything after it.
+    let mut missing = Vec::new();
+    for name in [
+        // PlayerFrame.xml
+        "PlayerAttackBackground",
+        "PlayerAttackGlow",
+        "PlayerAttackIcon",
+        "PlayerFrame",
+        "PlayerFrameBackground",
+        "PlayerFrameGroupIndicator",
+        "PlayerFrameGroupIndicatorLeft",
+        "PlayerFrameGroupIndicatorMiddle",
+        "PlayerFrameGroupIndicatorRight",
+        "PlayerFrameGroupIndicatorText",
+        "PlayerFrameHealthBar",
+        "PlayerFrameHealthBarText",
+        "PlayerFrameManaBar",
+        "PlayerFrameManaBarText",
+        "PlayerFrameTexture",
+        "PlayerHitIndicator",
+        "PlayerLeaderIcon",
+        "PlayerLevelText",
+        "PlayerMasterIcon",
+        "PlayerName",
+        "PlayerPortrait",
+        "PlayerPVPIcon",
+        "PlayerRestGlow",
+        "PlayerRestIcon",
+        "PlayerStatusGlow",
+        "PlayerStatusTexture",
+        // TargetFrame.xml
+        "TargetDeadText",
+        "TargetFrame",
+        "TargetFrameBackground",
+        "TargetFrameHealthBar",
+        "TargetFrameManaBar",
+        "TargetFrameNameBackground",
+        "TargetFrameTexture",
+        "TargetFrameTextureFrame",
+        "TargetHighLevelTexture",
+        "TargetLevelText",
+        "TargetName",
+        "TargetPortrait",
+        "TargetPVPIcon",
+        // PetFrame.xml
+        "PetAttackModeTexture",
+        "PetFrame",
+        "PetFrameHappiness",
+        "PetFrameHappinessTexture",
+        "PetFrameHealthBar",
+        "PetFrameHealthBarText",
+        "PetFrameManaBar",
+        "PetFrameManaBarText",
+        "PetFrameTexture",
+        "PetName",
+        "PetPortrait",
+    ] {
+        if !s
+            .eval::<bool>(&format!("return getglobal('{name}') ~= nil"))
+            .unwrap()
+        {
+            missing.push(name);
+        }
+    }
+    // The one genuine GAP, stated rather than quietly dropped from the list (1718's whole point
+    // is that the block stays visible): `PlayerFrameGroupIndicator` and its four children are the
+    // raid "Group N" tab above the player frame, driven by `PlayerFrame_UpdateGroupIndicator`
+    // (ref PlayerFrame.lua:214-229). We build no region, no texture and no handler for it — this
+    // is a feature we have not written, not a name we got wrong, and inventing five regions to
+    // satisfy a list would be the worse error. Zero corpus readers.
+    let unbuilt = [
+        "PlayerFrameGroupIndicator",
+        "PlayerFrameGroupIndicatorLeft",
+        "PlayerFrameGroupIndicatorMiddle",
+        "PlayerFrameGroupIndicatorRight",
+        "PlayerFrameGroupIndicatorText",
+    ];
+    missing.retain(|m| !unbuilt.contains(m));
+    assert!(
+        missing.is_empty(),
+        "the reference declares these and we do not publish them — an addon reading any of them \
+         by name finds nil: {missing:?}"
+    );
+
+    // The colour table is `ManaBarColor` (ref UnitFrame.lua:2), not the later `PowerBarColor`,
+    // and addons index it directly for the power-type prefix and tint.
+    assert!(s.eval::<bool>("return ManaBarColor ~= nil").unwrap());
+    assert!(
+        s.eval::<bool>("return PowerBarColor == nil").unwrap(),
+        "PowerBarColor is the later client's name — 1.12 has no such global"
+    );
+
+    // And the frame FIELD `UnitFrame_Initialize` sets (ref UnitFrame.lua:13-14), which unit-frame
+    // addons read off the frame rather than by global name.
+    assert!(
+        s.eval::<bool>("return PlayerFrame.manabar ~= nil and PlayerFrame.healthbar ~= nil")
+            .unwrap(),
+        "the reference's field names are `manabar`/`healthbar`, both lowercase"
+    );
+
+    // ShaguTweaks' own line, in shape (health-numbers.lua:22).
+    s.run("TargetFrameManaBar:SetStatusBarColor(0, 0, 1)")
+        .unwrap();
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
 }

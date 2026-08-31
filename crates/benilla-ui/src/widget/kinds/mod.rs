@@ -27,6 +27,31 @@ pub enum FrameKind {
     Slider,
     ScrollFrame,
     Model,
+    /// `CGCharacterModelBase` (`0x505680`, size `0x3f8`) — the **unit-showing** model pane, and a
+    /// registered `CreateFrame` type in its own right: pair `("PlayerModel" @0x84343c, factory
+    /// 0x495bd0)` at registration site `0x49597f`, one of the eight the game client registers
+    /// through `0x495940` (wow-re `ui/scratch/model-pane-method-tables.md` §1).
+    ///
+    /// **It extends [`FrameKind::Model`] and adds exactly three verbs** — `SetUnit`, `RefreshUnit`,
+    /// `SetRotation` (table `0x84f1fc`, 3 entries). Its Lua surface is those three *plus* all 23 of
+    /// `Model`'s, and it gets them by **chaining, not repetition**: `CGCharacterModelBase`'s method
+    /// lookup `0x506260` probes its own 3-entry map and, on a miss, tail-calls `0x506290 call
+    /// 0x76f870` — `CSimpleModel`'s. Our `__index` already walks a *slice* of registry keys, so the
+    /// chain is `&[PLAYERMODEL, MODEL]` and nothing is duplicated.
+    ///
+    /// **The direction is derived → base only.** A plain `<Model>` does *not* acquire `SetUnit`/
+    /// `RefreshUnit`/`SetRotation`: nothing chains from `0x76f870` down into `0x506260`. benilla
+    /// published all three on `Model` until 2026-08-30 — a `strings WoW.exe` hit read as ownership,
+    /// which it cannot be (`SetUnit`'s pooled string `0x84f22c` is referenced by **two** table
+    /// entries, `PlayerModel 0x84f1fc` and `GameTooltip 0x854290`, and by no `Model` entry).
+    ///
+    /// Same posture as its base: the engine core holds the scene the Lua API reads and writes
+    /// ([`KindState::Model`], shared with [`FrameKind::Model`]); the pixels are the app renderer's.
+    /// `CGCharacterModelBase` adds `0x1c` bytes of members over `CSimpleModel` — the turn-animation
+    /// flag/expiry at `+0x3e8`/`+0x3ec` that `SetRotation` arms — and those are **not modeled**:
+    /// no getter reads them, and they drive a shuffle animation on a renderer we have not built.
+    /// `script::modelframe`'s `SetRotation` carries the addresses.
+    PlayerModel,
     /// `CSimpleMessageFrame` — the non-scrolling message frame (`UIErrorsFrame`'s class, and the
     /// one `CreateFrame("MessageFrame")` makes). Its behaviour (the display lines, the per-line
     /// fade, `insertMode`) is modeled in [`KindState::Message`]. Sibling of
@@ -294,7 +319,9 @@ impl CooldownState {
     }
 }
 
-/// The `Model` widget's scene state (`0x6eecf0`'s frame type; the `<Model>` element).
+/// The model-pane scene state — **shared by [`FrameKind::Model`] and [`FrameKind::PlayerModel`]**,
+/// because the client's `CGCharacterModelBase` (`0x505680`) *extends* `CSimpleModel` (`0x76c8e0`)
+/// rather than replacing it: every field below is a `CSimpleModel` member both classes carry.
 ///
 /// **What this is and is not.** The 1.12 `Model` widget is a viewport that draws one M2 in a
 /// little scene of its own — the character pane, the tabard designer, the minimap ping, the pet
@@ -303,23 +330,32 @@ impl CooldownState {
 /// contract [`MinimapState`] and [`CooldownState`] already run under, and the reason both of those
 /// exist as state-only kinds here.
 ///
-/// **Every field is a 1.12 binding's storage, not a guess at one.** The names are in the shipped
-/// binary as isolated strings (`SetModel`, `ClearModel`, `GetModel`, `SetSequence`,
-/// `SetSequenceTime`, `SetRotation`, `SetFacing`, `SetModelScale`, `SetCamera`, `SetPosition`,
-/// `SetLight`, `SetFogColor`, `SetUnit`, `RefreshUnit`), and wow-re's ledger already has the
-/// scene half registered — `SetPosition 0x76dc00`, `SetLight 0x76e1e0`, `GetLight 0x76e7d0`,
-/// `GetPosition 0x76ea40`, `SetFogColor 0x76ee60`, `GetFogColor 0x76f080`. (wow-re's
-/// registration scan does *not* list the model/sequence half; the strings say otherwise, and that
-/// gap is reported back rather than worked around.)
+/// **Every field is a 1.12 binding's storage, and which binding is read off the registrar, not off
+/// a string scan.** wow-re enumerated the whole family at the pair bytes on 2026-08-30
+/// (`ui/scratch/model-pane-method-tables.md`): `Model`'s table is `0x878948` with **23** entries,
+/// `PlayerModel`'s is `0x84f1fc` with **3**, and the derived table never repeats its base's. The
+/// earlier justification for these fields — "the names are in the binary as isolated strings" — is
+/// the mistake that round corrected: a `strings` hit answers *whether a name exists*, never *which
+/// table owns it*, and `SetUnit`'s single pooled string `0x84f22c` is referenced by two entries in
+/// two different tables. Ownership now comes from a dword-reference count over the name's VA.
+///
+/// **Seven of `Model`'s 23 are not published yet** — `AdvanceTime 0x76eca0`,
+/// `ReplaceIconTexture 0x76ed70`, `SetFogNear 0x76f1e0`, `GetFogNear 0x76f2d0`,
+/// `SetFogFar 0x76f390`, `GetFogFar 0x76f480`, `ClearFog 0x76f540` — named here rather than
+/// stubbed (decision 1134 §4). They have no corpus caller and their bodies are uncarved.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelState {
     /// The M2/MDX path last given to `SetModel`, or `None` after `ClearModel` / before any set.
     /// Stored **as written** — the client's own path space is `Interface\...\Foo.mdx`, and the
     /// app's loader is what maps `.mdx` to the `.m2` that actually ships.
     pub path: Option<String>,
-    /// `SetUnit(unit)` — the *other* way a pane gets its content, used by the dress-up and
-    /// paper-doll frames. Mutually exclusive with [`Self::path`] in practice: whichever was set
+    /// `PlayerModel:SetUnit(unit)` — the *other* way a pane gets its content, used by the dress-up
+    /// and paper-doll frames. Mutually exclusive with [`Self::path`] in practice: whichever was set
     /// last is what the pane shows, so each setter clears the other.
+    ///
+    /// The field lives on every pane because it is a `CSimpleModel` member; the **setter** does
+    /// not — `SetUnit` is [`FrameKind::PlayerModel`]'s (`0x84f1fc[0]` → `0x505d70`), and a plain
+    /// `<Model>` has no way to reach it.
     pub unit: Option<String>,
     /// `SetSequence(n)` — the animation index the pane plays.
     pub sequence: i32,
@@ -327,10 +363,11 @@ pub struct ModelState {
     /// cooldown indicator's whole mechanism is this pair driven per frame, which is why it is
     /// stored rather than folded into [`Self::sequence`].
     pub sequence_time: Option<(i32, i32)>,
-    /// `SetRotation`/`SetFacing` — the model's yaw in radians. **Two names, one slot**: the
-    /// reference FrameXML drives the tabard and character panes with `SetRotation` (10 sites) and
-    /// nothing in the shipped chain calls `SetFacing`, but both are in the binary and both mean
-    /// the pane's yaw.
+    /// The pane's yaw in radians — `CSimpleModel+0x39c`. **One slot, written by two verbs on two
+    /// different classes**: `Model:SetFacing` (`0x76dce0`) and `PlayerModel:SetRotation`
+    /// (`0x505f00` → `0x505bb0`, whose last act is `0x505c44 mov [esi+0x39c], eax` — literally the
+    /// same field). That is why the reference's rotate buttons can drive a paper-doll pane through
+    /// `SetRotation` and `GetFacing` reads it back.
     pub facing: f32,
     /// `SetModelScale` — the model's own scale within the pane, default 1.
     pub scale: f32,
@@ -344,8 +381,9 @@ pub struct ModelState {
     /// no lighting model, and inventing a typed one would be asserting a scene semantics we have
     /// not verified.
     pub light: Option<Vec<f32>>,
-    /// `SetFogColor(r, g, b)` — `None` until set; the client also has a `SetFogFar`/`SetFogNear`
-    /// pair we do not model (nothing in the corpus or the shipped chain calls them).
+    /// `SetFogColor(r, g, b)` — `None` until set. The client's fog surface is seven verbs, not two:
+    /// this pair plus `SetFogNear`/`GetFogNear`/`SetFogFar`/`GetFogFar`/`ClearFog`, which the
+    /// struct doc names as unbuilt.
     pub fog_color: Option<(f32, f32, f32)>,
 }
 

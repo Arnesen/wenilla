@@ -63,6 +63,25 @@ pub(crate) fn number_arg(lua: &Lua, v: Value, usage: &'static str) -> mlua::Resu
     }
 }
 
+/// **Shape C** — a numeric argument the binding reads with a bare `lua_tonumber 0x6f3620` and NO
+/// `lua_isnumber` guard, so it cannot fail: absent, `nil`, `true`, a table, a function, or an
+/// unparseable string all land on **`0.0`** and the binding completes.
+///
+/// This is the counterpart to [`number_arg`] (shape A, which raises `Usage:`), and which shape a
+/// given argument takes is **per binding, not a global law** — wow-re
+/// `scratch/numeric-arg-coercion-law.md`, which censused all 408 widget-registrar entries and
+/// found 110 gated positions against 64 ungated ones. The clustering is the useful part: C is the
+/// colour/coordinate tuples (`Set*Color`'s r/g/b, `SetTexCoord`, `SetPosition`), A is the single
+/// scalar setters (`SetAlpha`, `SetWidth`, `SetValue`, `SetID`). Do not reach for this one because
+/// an argument "looks optional" — check the census.
+///
+/// One instruction settles why nil and a table are not distinguished: `0x6f7c32 cmp ecx,4;
+/// jne 0x6f7c6a` refuses every non-string tag without inspecting the value.
+pub(crate) fn coerced_number(lua: &Lua, v: Option<Value>) -> f64 {
+    v.and_then(|v| lua.coerce_number(v).ok().flatten())
+        .unwrap_or(0.0)
+}
+
 /// `is-number-or-string` (`0x6f3510`) → `arg-as-C-string` (`0x6f3690`), with the binding's own
 /// `Usage:` string on the failure edge.
 ///

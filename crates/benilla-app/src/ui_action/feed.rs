@@ -94,6 +94,9 @@ pub(super) fn feed_actions(
     areas: Option<Res<crate::area::AreaTableRes>>,
     commands: Res<NetCommands>,
     mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
+    // The combat log's own record of a failed cast (1703) — a different frame, a different
+    // sentence, and the reference emits both from the one routine (`0x6e1a00`).
+    mut chat_log: ResMut<crate::ui_chat::ChatLog>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -114,6 +117,11 @@ pub(super) fn feed_actions(
     // are filled inside [`cast_fail`] itself, off the wire's argument word.
     let self_store = self_q.iter().next();
     let mut await_template: Vec<crate::ui_action::CastFail> = Vec::new();
+    // The same failures, worded for the combat log. Collected beside the red line rather than
+    // instead of it: `0x6e1a00` calls `0x62c360` AND `DisplayError`, and they say different
+    // things — "Not enough mana." on the screen, "You fail to cast Frostbolt: Not enough mana."
+    // in the log.
+    let mut fail_lines: Vec<crate::ui_chat::combat::PendingCombat> = Vec::new();
     let fail_args = cast_fail::FailArgs {
         arg: None,
         focus: spell_focus.as_deref().map(|f| &f.catalog),
@@ -185,6 +193,45 @@ pub(super) fn feed_actions(
                     .filter(|s| !s.is_empty())
                     .map(|t| t.replace("%s", &name));
             }
+            // The combat-log twin. **Only the `…SELF` half is reachable here**: `SMSG_CAST_FAILED`
+            // is addressed to the caster alone, so benilla never learns that somebody *else's*
+            // cast failed — the `…OTHER` keys exist and stay unproduced, exactly as the reference
+            // leaves its own two unreachable `…SELFSTART` keys.
+            //
+            // The reason `%s` is the FIRST-layer string — `GetText("SPELL_FAILED_<name>")`, which
+            // is what `0x6e1a00` holds when it calls the formatter — not the errorId-substituted
+            // message the red line shows. An empty one drops the line rather than printing a
+            // sentence with a hole, the same rule every other family here follows.
+            if let Some(display) = d {
+                // `0x62aff0`: `Attributes` bit 4 marks an ABILITY, which "performs" rather than
+                // "casts".
+                const ATTR_IS_ABILITY: u32 = 0x10;
+                let family = if display.attributes & ATTR_IS_ABILITY != 0 {
+                    crate::ui_chat::combat::SPELLFAILPERFORM
+                } else {
+                    crate::ui_chat::combat::SPELLFAILCAST
+                };
+                let why = cast_fail::CAST_FAIL_KEYS
+                    .get(usize::from(reason))
+                    .and_then(|k| get(k))
+                    .filter(|t| !t.is_empty());
+                if let (Some(why), false) = (why, display.name.is_empty()) {
+                    fail_lines.push(crate::ui_chat::combat::PendingCombat {
+                        kind: crate::ui_chat::ChatEventKind::SpellFailedLocalPlayer,
+                        family,
+                        variant: crate::ui_chat::combat::Variant::SelfOther,
+                        subject: 0,
+                        object: 0,
+                        fills: crate::ui_chat::combat::Fills {
+                            spell: display.name.clone(),
+                            named: why,
+                            ..Default::default()
+                        },
+                        named: crate::ui_chat::combat::Named::Ready,
+                        tries: 0,
+                    });
+                }
+            }
             let text = cast_fail::cast_fail_text(
                 reason,
                 d,
@@ -207,6 +254,9 @@ pub(super) fn feed_actions(
         })
         .collect();
     cast_errors.0.extend(await_template);
+    for line in fail_lines {
+        chat_log.push_combat(line);
+    }
     for text in texts {
         script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
     }

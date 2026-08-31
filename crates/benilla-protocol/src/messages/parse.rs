@@ -603,6 +603,31 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_SPELLLOGMISS => {
             ServerPacket::SpellLogMiss(combat_log::read_spell_log_miss(&mut r)?)
         }
+        opcode::SMSG_PARTYKILLLOG => {
+            ServerPacket::PartyKillLog(combat_log::read_party_kill_log(&mut r)?)
+        }
+        opcode::SMSG_SPELLINSTAKILLLOG => {
+            ServerPacket::SpellInstaKillLog(combat_log::read_spell_insta_kill_log(&mut r)?)
+        }
+        // One body, two sentences — the arm is the only thing that tells them apart.
+        opcode::SMSG_PROCRESIST => {
+            ServerPacket::ProcResist(combat_log::read_spell_outcome_log(&mut r)?)
+        }
+        opcode::SMSG_SPELLORDAMAGE_IMMUNE => {
+            ServerPacket::SpellOrDamageImmune(combat_log::read_spell_outcome_log(&mut r)?)
+        }
+        opcode::SMSG_SPELLDISPELLOG => {
+            ServerPacket::SpellDispelLog(combat_log::read_spell_dispel_log(&mut r)?)
+        }
+        opcode::SMSG_DISPEL_FAILED => {
+            ServerPacket::DispelFailed(combat_log::read_dispel_failed(&mut r)?)
+        }
+        opcode::SMSG_ENCHANTMENTLOG => {
+            ServerPacket::EnchantmentLog(combat_log::read_enchantment_log(&mut r)?)
+        }
+        opcode::SMSG_SPELLLOGEXECUTE => {
+            ServerPacket::SpellLogExecute(combat_log::read_spell_log_execute(&mut r)?)
+        }
         opcode::SMSG_LOG_XPGAIN => ServerPacket::XpGain(progression::read_xp_gain(&mut r)?),
         opcode::SMSG_EXPLORATION_EXPERIENCE => {
             ServerPacket::ExplorationXp(progression::read_exploration_xp(&mut r)?)

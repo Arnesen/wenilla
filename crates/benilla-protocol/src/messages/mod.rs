@@ -101,8 +101,9 @@ pub use client::{
     teleport_ack, text_emote,
 };
 pub use combat_log::{
-    DamageShield, EnvironmentalDamageLog, PeriodicAuraLog, PeriodicTick, SpellDamageLog,
-    SpellEnergizeLog, SpellHealLog, SpellLogMiss,
+    DamageShield, DispelFailed, EnchantmentLog, EnvironmentalDamageLog, ExecuteLog, PartyKillLog,
+    PeriodicAuraLog, PeriodicTick, SpellDamageLog, SpellDispelLog, SpellEnergizeLog, SpellHealLog,
+    SpellInstaKillLog, SpellLogExecute, SpellLogMiss, SpellOutcomeLog,
 };
 pub use death::{
     reclaim_corpse, resurrect_response, spirit_healer_activate, CorpseLocation,

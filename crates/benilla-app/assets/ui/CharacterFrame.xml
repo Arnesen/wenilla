@@ -366,7 +366,7 @@
             getglobal("CharacterNameText"):SetText(UnitName("player"))
             if ShowTextStatusBarText then -- engine tests load file subsets
                 ShowTextStatusBarText(PlayerFrameHealthBar)
-                ShowTextStatusBarText(PlayerFramePowerBar)
+                ShowTextStatusBarText(PlayerFrameManaBar)
                 ShowTextStatusBarText(MainMenuExpBar)
                 ShowTextStatusBarText(PetFrameHealthBar)
                 ShowTextStatusBarText(PetFrameManaBar)
@@ -394,7 +394,7 @@
             PlaySound("igCharacterInfoClose")
             if HideTextStatusBarText then -- engine tests load file subsets
                 HideTextStatusBarText(PlayerFrameHealthBar)
-                HideTextStatusBarText(PlayerFramePowerBar)
+                HideTextStatusBarText(PlayerFrameManaBar)
                 HideTextStatusBarText(MainMenuExpBar)
                 HideTextStatusBarText(PetFrameHealthBar)
                 HideTextStatusBarText(PetFrameManaBar)

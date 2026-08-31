@@ -7,18 +7,19 @@ use crate::wire::Vector3d;
 use super::{
     ActionButton, AttackerState, AuctionBidderNotification, AuctionCommandTail, AuctionListEntry,
     AuctionOwnerNotification, CastOutcome, ChannelNotify, Character, ChatMessage, CorpseLocation,
-    DamageShield, EnvironmentalDamageLog, ExplorationXp, FriendEntry, FriendStatusUpdate,
-    GameObjectQueryInfo, GmTicket, GossipOption, GossipPoi, GroupLootInfo, GroupMemberEntry,
-    GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse, GuildRoster,
-    InitWorldStates, InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo,
-    LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart,
-    MoveMode, Object, PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells,
-    PetitionQueryResponse, PetitionRename, PetitionShowList, PetitionShowSignatures,
-    PetitionSignResults, PvpCredit, QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward,
-    QuestOption, QuestRequestItems, QuestTemplate, ResurrectRequestBody, SpeedKind,
-    SpellChainTargets, SpellCooldown, SpellDamageLog, SpellEnergizeLog, SpellGo, SpellHealLog,
-    SpellLogMiss, SpellStart, StabledPet, TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell,
-    TransportPose, VendorItem, WhoResults, XpGain,
+    DamageShield, DispelFailed, EnchantmentLog, EnvironmentalDamageLog, ExplorationXp, FriendEntry,
+    FriendStatusUpdate, GameObjectQueryInfo, GmTicket, GossipOption, GossipPoi, GroupLootInfo,
+    GroupMemberEntry, GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse,
+    GuildRoster, InitWorldStates, InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo,
+    LevelUpInfo, LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry,
+    MirrorTimerStart, MoveMode, Object, PartyKillLog, PartyMemberStatsInfo, PeriodicAuraLog,
+    PetMode, PetSpells, PetitionQueryResponse, PetitionRename, PetitionShowList,
+    PetitionShowSignatures, PetitionSignResults, PvpCredit, QuestComplete, QuestDetails,
+    QuestGiverList, QuestOfferReward, QuestOption, QuestRequestItems, QuestTemplate,
+    ResurrectRequestBody, SpeedKind, SpellChainTargets, SpellCooldown, SpellDamageLog,
+    SpellDispelLog, SpellEnergizeLog, SpellGo, SpellHealLog, SpellInstaKillLog, SpellLogExecute,
+    SpellLogMiss, SpellOutcomeLog, SpellStart, StabledPet, TaxiMask, TradeStatus,
+    TradeStatusExtended, TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
 };
 
 /// The **final facing** a `SMSG_MONSTER_MOVE` dictates (its `moveType`): the unit snaps to face this
@@ -671,6 +672,31 @@ pub enum ServerPacket {
     /// `SMSG_SPELLLOGMISS` — a spell cast's per-target miss list (decision 0137 phase 2; layout in
     /// [`super::combat_log::read_spell_log_miss`]).
     SpellLogMiss(SpellLogMiss),
+    /// `SMSG_PARTYKILLLOG` — the killing blow (decision 1703; layout in
+    /// [`super::combat_log::read_party_kill_log`]).
+    PartyKillLog(PartyKillLog),
+    /// `SMSG_SPELLINSTAKILLLOG` — an instant kill (decision 1703; layout in
+    /// [`super::combat_log::read_spell_insta_kill_log`]).
+    SpellInstaKillLog(SpellInstaKillLog),
+    /// `SMSG_PROCRESIST` — a proc the target resisted (decision 1703; layout in
+    /// [`super::combat_log::read_spell_outcome_log`]).
+    ProcResist(SpellOutcomeLog),
+    /// `SMSG_SPELLORDAMAGE_IMMUNE` — a target immune to the spell (decision 1703; the same body as
+    /// [`Self::ProcResist`], a different sentence).
+    SpellOrDamageImmune(SpellOutcomeLog),
+    /// `SMSG_SPELLDISPELLOG` — the auras a dispel removed (decision 1703; layout in
+    /// [`super::combat_log::read_spell_dispel_log`]).
+    SpellDispelLog(SpellDispelLog),
+    /// `SMSG_DISPEL_FAILED` — the auras a dispel failed to remove (decision 1703; layout in
+    /// [`super::combat_log::read_dispel_failed`]).
+    DispelFailed(DispelFailed),
+    /// `SMSG_ENCHANTMENTLOG` — an enchant landing on or fading from an item (decision 1703; layout
+    /// in [`super::combat_log::read_enchantment_log`]).
+    EnchantmentLog(EnchantmentLog),
+    /// `SMSG_SPELLLOGEXECUTE` — what a cast's effects did: created items, interrupts, extra
+    /// attacks, power drains, durability damage (decision 1703; layout in
+    /// [`super::combat_log::read_spell_log_execute`]).
+    SpellLogExecute(SpellLogExecute),
     /// `SMSG_LOG_XPGAIN` — an XP award, kill or non-kill (decision 0137 phase 2; layout in
     /// [`super::progression::read_xp_gain`]).
     XpGain(XpGain),
@@ -1469,6 +1495,14 @@ impl ServerPacket {
             ServerPacket::DamageShield(_) => "SMSG_SPELLDAMAGESHIELD".into(),
             ServerPacket::EnvironmentalDamageLog(_) => "SMSG_ENVIRONMENTALDAMAGELOG".into(),
             ServerPacket::SpellLogMiss(_) => "SMSG_SPELLLOGMISS".into(),
+            ServerPacket::PartyKillLog(_) => "SMSG_PARTYKILLLOG".into(),
+            ServerPacket::SpellInstaKillLog(_) => "SMSG_SPELLINSTAKILLLOG".into(),
+            ServerPacket::ProcResist(_) => "SMSG_PROCRESIST".into(),
+            ServerPacket::SpellOrDamageImmune(_) => "SMSG_SPELLORDAMAGE_IMMUNE".into(),
+            ServerPacket::SpellDispelLog(_) => "SMSG_SPELLDISPELLOG".into(),
+            ServerPacket::DispelFailed(_) => "SMSG_DISPEL_FAILED".into(),
+            ServerPacket::EnchantmentLog(_) => "SMSG_ENCHANTMENTLOG".into(),
+            ServerPacket::SpellLogExecute(_) => "SMSG_SPELLLOGEXECUTE".into(),
             ServerPacket::XpGain(_) => "SMSG_LOG_XPGAIN".into(),
             ServerPacket::ExplorationXp(_) => "SMSG_EXPLORATION_EXPERIENCE".into(),
             ServerPacket::LevelUp(_) => "SMSG_LEVELUP_INFO".into(),

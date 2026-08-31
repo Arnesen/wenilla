@@ -209,12 +209,19 @@ fn raid_class_colors_is_the_references_own_nine() {
     );
 }
 
-/// **The four font-PATH globals** (ref `Fonts.xml` l.4-7), which this file quoted around for a long
-/// time — it took the colour block at l.8-19 and skipped the four lines above it.
+/// **Every global `Fonts.xml` l.4-20 assigns** — the whole block, not the names someone noticed
+/// were missing (1718).
 ///
-/// `STANDARD_TEXT_FONT` is why they matter: `Dewdrop-2.0` calls
-/// `button.text:SetFont(STANDARD_TEXT_FONT, height)` **unguarded** at two of its three sites, so a
-/// nil global is a failed `SetFont` on every menu button the Ace2 ecosystem draws.
+/// The four font-PATH globals came first (l.4-7): this file had taken the colour block at l.8-19
+/// and skipped the four lines above it. `STANDARD_TEXT_FONT` is why they matter — `Dewdrop-2.0`
+/// calls `button.text:SetFont(STANDARD_TEXT_FONT, height)` **unguarded** at two of its three
+/// sites, so a nil global is a failed `SetFont` on every menu button the Ace2 ecosystem draws.
+///
+/// Then the same class struck INSIDE the block this test was standing next to:
+/// `LIGHTYELLOW_FONT_COLOR_CODE` (l.13) was absent, with `Fonts.xml`'s own comments skipping from
+/// `-- l.12` to `-- l.14`, and aux-addon — which concatenates it at file scope — died on its first
+/// line. This test could not catch it, because it enumerated the four names the previous round had
+/// found rather than the block those four came out of. It now enumerates the block.
 #[test]
 fn the_font_path_globals_are_the_references_own_four() {
     let mut s = UiScript::new().unwrap();
@@ -250,4 +257,46 @@ fn the_font_path_globals_are_the_references_own_four() {
     )
     .unwrap();
     assert!(s.errors().is_empty(), "{:?}", s.errors());
+
+    // ── The WHOLE block, not the names someone noticed were missing (1718) ──────────────────
+    //
+    // This test was written because the colour block was transcribed and the four font-path lines
+    // above it were dropped. It then enumerated those four — and `LIGHTYELLOW_FONT_COLOR_CODE`,
+    // l.13, sat missing INSIDE the colour block the whole time, with the comments in `Fonts.xml`
+    // skipping from `-- l.12` to `-- l.14` where it should have been. aux-addon concatenates it at
+    // file scope and died on its own first line.
+    //
+    // A list of "the names we found absent" cannot catch the next absent name. This is the
+    // reference's `Fonts.xml` l.4-20 in full, so the next dropped line fails here instead of in an
+    // addon: every global that block assigns, and nothing else.
+    for name in [
+        "STANDARD_TEXT_FONT",          // l.4
+        "UNIT_NAME_FONT",              // l.5
+        "DAMAGE_TEXT_FONT",            // l.6
+        "NAMEPLATE_FONT",              // l.7
+        "NORMAL_FONT_COLOR_CODE",      // l.8
+        "HIGHLIGHT_FONT_COLOR_CODE",   // l.9
+        "RED_FONT_COLOR_CODE",         // l.10
+        "GREEN_FONT_COLOR_CODE",       // l.11
+        "GRAY_FONT_COLOR_CODE",        // l.12
+        "LIGHTYELLOW_FONT_COLOR_CODE", // l.13
+        "FONT_COLOR_CODE_CLOSE",       // l.14
+        "NORMAL_FONT_COLOR",           // l.15
+        "HIGHLIGHT_FONT_COLOR",        // l.16
+        "GRAY_FONT_COLOR",             // l.17
+        "GREEN_FONT_COLOR",            // l.18
+        "RED_FONT_COLOR",              // l.19
+        "PASSIVE_SPELL_FONT_COLOR",    // l.20
+    ] {
+        assert!(
+            s.eval::<bool>(&format!("return {name} ~= nil")).unwrap(),
+            "{name} — ref Fonts.xml assigns it; a dropped line from a transcribed block is how              LIGHTYELLOW_FONT_COLOR_CODE went missing"
+        );
+    }
+    // The one whose value the addons splice into a string, spelled out (ref l.13).
+    assert_eq!(
+        s.eval::<String>("return LIGHTYELLOW_FONT_COLOR_CODE")
+            .unwrap(),
+        "|cffffff9a"
+    );
 }

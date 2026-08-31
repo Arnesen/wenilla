@@ -100,9 +100,51 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     m.set(
+        // `GetMaxLetters 0x79929f` — the read half, which we were missing. Not published off the
+        // `strings` hit alone (that is what put `SetUnit` on the wrong widget earlier today):
+        // wow-re's numeric-arg round identified `0x79929f` as the GETTER of `[widget+0x340]`,
+        // the same field the setter below writes, which is table-level evidence rather than a
+        // name that happens to be in the image.
+        //
+        // Its sibling `GetMaxBytes` is in the image too and is NOT added: we do not model
+        // `maxBytes` at all (a separate field with a `-1` sentinel), and a getter for a field we
+        // do not have would answer confidently with a number that means nothing.
+        "GetMaxLetters",
+        lua.create_function(|lua, this: Table| {
+            with_editbox(lua, &this, |eb| eb.max_letters as i64)
+        })?,
+    )?;
+    m.set(
+        // `SetMaxLetters 0x799110` — one of only FOUR widget bindings in the whole registrar that
+        // calls `lua_gettop` (wow-re `numeric-arg-coercion-law.md` Q3), and its gate is EXACT:
+        // `cmp eax,2`. So the count is checked and the type is not, which is the opposite of the
+        // usual pairing and the reason this needs its own body:
+        //
+        //   SetMaxLetters()           -> RAISES `Usage:` (too few)
+        //   SetMaxLetters(50, 60)     -> RAISES `Usage:` (too MANY — an exact gate, not a minimum)
+        //   SetMaxLetters(nil)        -> completes, stores 0
+        //   SetMaxLetters("12")       -> completes, stores 12 (a numeric string coerces)
+        //   SetMaxLetters({})         -> completes, stores 0
+        //
+        // and **0 is "no limit"**, not "no letters": the insert path's trim block is skipped
+        // whole on zero (`0x77c085 test edi,edi; je`), which is what `max_letters == 0` already
+        // means here. So `SetMaxLetters(nil)` is `SetMaxLetters(0)` is unlimited — aux-addon's
+        // `gui/core.lua:288` writes exactly that, and benilla raised on it and killed the addon at
+        // load. (Its neighbour `SetMaxBytes` uses **-1** for the same idea; two adjacent fields,
+        // two different sentinels.)
         "SetMaxLetters",
-        lua.create_function(|lua, (this, n): (Table, i64)| {
-            with_editbox(lua, &this, |eb| eb.max_letters = n.max(0) as usize)
+        lua.create_function(|lua, (this, args): (Table, mlua::MultiValue)| {
+            let args: Vec<Value> = args.into_iter().collect();
+            if args.len() != 1 {
+                return Err(mlua::Error::runtime(
+                    "Usage: <unnamed>:SetMaxLetters(maxLetters)",
+                ));
+            }
+            let n = crate::script::binding_abi::coerced_number(lua, args.first().cloned());
+            // `__ftol` truncates toward zero; a negative stores as itself there, but our field is
+            // a `usize` and the trim only ever tests `> 0`, so the two agree on every value that
+            // can change behaviour.
+            with_editbox(lua, &this, |eb| eb.max_letters = (n as i64).max(0) as usize)
         })?,
     )?;
     // The submitted-line history (`historyLines`): FrameXML pushes each sent line

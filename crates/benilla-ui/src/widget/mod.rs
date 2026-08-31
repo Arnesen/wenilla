@@ -659,7 +659,12 @@ impl WidgetArena {
                 FrameKind::ColorSelect => {
                     KindState::ColorSelect(kinds::ColorSelectState::default())
                 }
-                FrameKind::Model => KindState::Model(kinds::ModelState::default()),
+                // Both model panes share one state: `CGCharacterModelBase` EXTENDS `CSimpleModel`,
+                // so a `<PlayerModel>` carries every `CSimpleModel` member and adds only the
+                // turn-animation pair we do not model (`ModelState`'s doc).
+                FrameKind::Model | FrameKind::PlayerModel => {
+                    KindState::Model(kinds::ModelState::default())
+                }
                 FrameKind::Minimap => KindState::Minimap(kinds::MinimapState::default()),
                 FrameKind::Cooldown => KindState::Cooldown(kinds::CooldownState::default()),
                 FrameKind::GameTooltip => KindState::Tooltip(kinds::TooltipState::default()),

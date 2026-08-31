@@ -795,7 +795,7 @@ fn every_texture_frame_outranks_its_status_bars() {
         let Some(base) = texture_frame.strip_suffix("TextureFrame") else {
             continue;
         };
-        for suffix in ["HealthBar", "PowerBar", "ManaBar"] {
+        for suffix in ["HealthBar", "ManaBar", "ManaBar"] {
             let bar = format!("{base}{suffix}");
             let Some(&(bar_strata, bar_level)) = level_of.get(&bar) else {
                 continue;

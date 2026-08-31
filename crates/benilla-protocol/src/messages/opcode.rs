@@ -280,6 +280,18 @@ pub const SMSG_PERIODICAURALOG: u16 = 0x024E; // 590
 pub const SMSG_SPELLDAMAGESHIELD: u16 = 0x024F; // 591
 pub const SMSG_SPELLNONMELEEDAMAGELOG: u16 = 0x0250; // 592
 
+// The combat log's remaining wire (VERIFIED vmangos `Opcodes_1_12_1.h`; decision 1703 — the
+// families 1571 §5 named as "deliberately out because their wire sources are undecoded"). Bodies
+// in [`super::combat_log`].
+pub const SMSG_ENCHANTMENTLOG: u16 = 0x01D7; // 471
+pub const SMSG_PARTYKILLLOG: u16 = 0x01F5; // 501
+pub const SMSG_SPELLLOGEXECUTE: u16 = 0x024C; // 588
+pub const SMSG_PROCRESIST: u16 = 0x0260; // 608
+pub const SMSG_DISPEL_FAILED: u16 = 0x0262; // 610
+pub const SMSG_SPELLORDAMAGE_IMMUNE: u16 = 0x0263; // 611
+pub const SMSG_SPELLDISPELLOG: u16 = 0x027B; // 635
+pub const SMSG_SPELLINSTAKILLLOG: u16 = 0x032F; // 815
+
 // The heal/energize pair (VERIFIED vmangos `Opcodes_1_12_1.h`: 336/337) — the center combat
 // text's HEAL / power-gain feed (decision 0578). Bodies in [`super::spells`].
 pub const SMSG_SPELLHEALLOG: u16 = 0x0150; // 336

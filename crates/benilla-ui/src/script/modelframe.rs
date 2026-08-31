@@ -1,10 +1,33 @@
-//! The `Model` widget's method surface — the 3D pane an addon or a FrameXML frame parks a model in.
+//! The model-pane family's method surfaces — `Model` and `PlayerModel`, the 3D panes an addon or a
+//! FrameXML frame parks a model in.
 //!
 //! **The same split as [`super::minimap`] and [`super::cooldown`], and for the same reason.** The
 //! engine core holds exactly the scene the Lua API reads and writes ([`ModelState`]); the pixels
 //! are the app renderer's job. That is the posture the `<Minimap>` and cooldown widgets already
-//! run under — a sized hole the game layer draws into — and this widget is the third of that
-//! shape, not a new compromise.
+//! run under — a sized hole the game layer draws into.
+//!
+//! ## Two tables, chained — not one table with everything in it
+//!
+//! 1.12 registers **four** model-pane types, and each has its own Lua method table that **never
+//! repeats its base's entries**; a derived pane reaches its base's verbs through the miss leg of
+//! `vtable+0x8` (wow-re `ui/scratch/model-pane-method-tables.md`, byte-enumerated 2026-08-30):
+//!
+//! ```text
+//! CSimpleFrame 0x778590
+//! └─ CSimpleModel          0x76f870   table 0x878948 (23)   <Model>          ← built here
+//!    └─ CGCharacterModelBase 0x506260  table 0x84f1fc (3)   <PlayerModel>    ← built here
+//!       ├─ DressUpModelFrame 0x5050d0  table 0x84f190 (3)   <DressUpModel>   ← not built
+//!       └─ TabardModel       0x503bd0  table 0x84ee40 (10)  <TabardModel>    ← not built
+//! ```
+//!
+//! Our `__index` dispatcher already walks a *slice* of registry keys per kind, so the chain is
+//! `&[REG_PLAYERMODEL_METHODS, REG_MODEL_METHODS]` and neither table duplicates the other. The
+//! direction is derived → base **only**: a plain `<Model>` does not acquire `SetUnit`.
+//!
+//! `DressUpModel` (`Undress`/`Dress`/`TryOn`) and `TabardModel` (10 tabard verbs) are deliberately
+//! **not built**: zero callers in the corpus, and our dress-up window already models the intents
+//! host-side (`super::dressup`), so wiring them is a design change to that subsystem rather than a
+//! missing verb. Named, not stubbed (decision 1134 §4).
 //!
 //! ## Why this surface, in this order
 //!
@@ -17,31 +40,41 @@
 //! f.autocast:SetSequence(0)
 //! ```
 //!
-//! and pfUI is embedded in pfQuest, pfQuest-turtle and ShaguDPS as well — so one missing verb
-//! stopped all four dead, each of them *after* the whole rest of the UI had built.
+//! and its unit frames build portraits as `CreateFrame("PlayerModel", …)` driven by `SetUnit` +
+//! `SetCamera`. pfUI is embedded in pfQuest, pfQuest-turtle and ShaguDPS as well, so one missing
+//! type stopped all four dead, each of them *after* the whole rest of the UI had built.
 //!
-//! ## The names are read off the binary, not assumed
+//! ## Ownership is read off the registrar, never off a string scan
 //!
-//! wow-re's registered-binding scan lists the **scene** half of this widget and not the rest —
-//! `SetPosition 0x76dc00`, `SetLight 0x76e1e0`, `GetLight 0x76e7d0`, `GetPosition 0x76ea40`,
-//! `SetFogColor 0x76ee60`, `GetFogColor 0x76f080`. It has no row for `SetModel` or its siblings,
-//! which would ordinarily mean "not a 1.12 verb" and would make publishing one a fidelity error of
-//! exactly the kind decision 1189 warns about (a name we have and the reference lacks routes an
-//! addon down a path the real client never takes).
+//! This module published `SetUnit`, `RefreshUnit` and `SetRotation` on `Model` until 2026-08-30,
+//! on the strength of an isolated-string scan of `WoW.exe` finding one occurrence of each. **A
+//! `strings` hit cannot settle ownership** — it answers *whether a name exists*, and `SetUnit`'s
+//! single pooled string `0x84f22c` is referenced by **two** method-table entries in two different
+//! tables (`PlayerModel 0x84f1fc[0]` and `GameTooltip 0x854290`). All three are `PlayerModel`'s.
 //!
-//! So it was checked against the shipped image rather than inferred either way: an isolated-string
-//! scan of `WoW.exe` finds **one occurrence each** of `SetModel`, `ClearModel`, `GetModel`,
-//! `SetSequence`, `SetSequenceTime`, `SetRotation`, `SetFacing`, `SetModelScale`, `SetCamera`,
-//! `SetUnit` and `RefreshUnit`. The reference's own FrameXML corroborates the ones it uses —
-//! `SetRotation` ×10 (TabardFrame, UIParent), `SetSequence` ×7, `SetSequenceTime` ×5, `SetUnit`
-//! ×9, `RefreshUnit` ×3. **These are 1.12 verbs; wow-re's scan is incomplete for this widget**,
-//! and that is reported back to wow-re rather than quietly worked around here.
+//! The question a `strings` hit *does* settle, and the reason it was reached for: wow-re's
+//! registrar-dump tool silently missed six of the 23 widget tables — including this whole family —
+//! so the "not in wow-re's scan" half of the old header was a tooling defect, not a fidelity fact.
+//! The enumeration recipe that replaces both is §5.1 of the note above: census `(call|jmp)
+//! 0x701d80`, read the count from the registering `mov edx`, read the pairs at
+//! `base + 8*i`, and settle "which table owns method M" by counting image-wide dword references to
+//! M's name VA.
 //!
 //! ## What is deliberately NOT here
 //!
-//! `SetFogFar`/`SetFogNear` (nothing in the shipped chain or the corpus calls them) and any
-//! interpretation of `SetLight`'s numbers — the engine core has no lighting model, so the tuple is
-//! stored verbatim rather than typed into a scene semantics nobody has verified.
+//! Seven of `Model`'s own 23 — `AdvanceTime 0x76eca0`, `ReplaceIconTexture 0x76ed70`,
+//! `SetFogNear 0x76f1e0`, `GetFogNear 0x76f2d0`, `SetFogFar 0x76f390`, `GetFogFar 0x76f480`,
+//! `ClearFog 0x76f540`. No corpus caller, and their bodies are uncarved: `ClearFog`'s exact effect
+//! on the colour/near/far triple is a guess until someone reads it, and a guessed clear reads as
+//! knowledge. Named, not stubbed.
+//!
+//! Also absent, and correctly so: `SetCreature` and `SetCustomRace`. Neither string exists in
+//! 5875 in any form (substring scan of the whole mapped image returns 0, against a positive
+//! control of 27 hits for `Creature`) — they are later-expansion names, and publishing one would
+//! be decision 1189's error.
+//!
+//! And any interpretation of `SetLight`'s numbers — the engine core has no lighting model, so the
+//! tuple is stored verbatim rather than typed into a scene semantics nobody has verified.
 
 use mlua::{Lua, MultiValue, Table, Value};
 
@@ -49,8 +82,13 @@ use super::object::frame_handle_of;
 use super::Model;
 use crate::widget::{KindState, ModelState};
 
-/// Registry key of the Model method table (the MAXCSTACK discipline: Lua-side root, named key).
+/// Registry key of the `Model` method table (the MAXCSTACK discipline: Lua-side root, named key).
 pub(super) const REG_MODEL_METHODS: &str = "__benilla_model_methods";
+
+/// Registry key of the `PlayerModel` method table — its **own three** entries only. The other 23
+/// names a `<PlayerModel>` answers come from [`REG_MODEL_METHODS`] through the dispatcher's chain,
+/// exactly as the client's `0x506260` reaches `0x76f870` on a miss.
+pub(super) const REG_PLAYERMODEL_METHODS: &str = "__benilla_playermodel_methods";
 
 /// Run `f` over a frame's Model state under one short write borrow. Errors if `this` is not a live
 /// Model (unreachable through the kind dispatcher, but the method table is a plain Lua value — a
@@ -90,12 +128,13 @@ fn int(v: &Value) -> i32 {
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let m = lua.create_table()?;
 
-    // ── Content: the model, the unit, and clearing ──────────────────────────────────────────
+    // ── Content: the model, and clearing ────────────────────────────────────────────────────
     //
-    // `SetModel` and `SetUnit` are the two ways a pane gets content and they are alternatives, not
-    // layers: setting one clears the other, so `GetModel` after a `SetUnit` cannot answer a stale
-    // path from three frames ago. (The dress-up and paper-doll frames drive the `SetUnit` arm; every
-    // addon in the corpus drives the path arm.)
+    // `SetModel` and `PlayerModel:SetUnit` are the two ways a pane gets content and they are
+    // alternatives, not layers: setting one clears the other, so `GetModel` after a `SetUnit`
+    // cannot answer a stale path from three frames ago. Only the `SetModel` arm is a `Model` verb —
+    // the unit arm is `PlayerModel`'s (`playermodel_install` below), which is why the paper-doll
+    // and dress-up panes are `<PlayerModel>`s and every corpus `<Model>` drives the path arm.
     m.set(
         "SetModel",
         lua.create_function(|lua, (this, path): (Table, Value)| {
@@ -125,28 +164,6 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             })
         })?,
     )?;
-    m.set(
-        "SetUnit",
-        lua.create_function(|lua, (this, unit): (Table, Value)| {
-            let unit = match &unit {
-                Value::String(s) => Some(s.to_str()?.to_string()),
-                _ => None,
-            };
-            with_model(lua, &this, |m| {
-                m.unit = unit;
-                m.path = None;
-            })
-        })?,
-    )?;
-    // `RefreshUnit()` re-reads the unit the pane is already showing — for us a no-op with a live
-    // receiver check, because our pane holds the unit TOKEN and resolves it at render, so there is
-    // no cached appearance here to invalidate. Present because the reference's own
-    // `DressUpFrame`/`PaperDollFrame` call it (3 sites) and an addon that hooks them will too.
-    m.set(
-        "RefreshUnit",
-        lua.create_function(|lua, this: Table| with_model(lua, &this, |_| ()))?,
-    )?;
-
     // ── Animation ───────────────────────────────────────────────────────────────────────────
     m.set(
         "SetSequence",
@@ -175,19 +192,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // ── The pane's view: yaw, scale, camera, position ───────────────────────────────────────
     //
-    // `SetRotation` and `SetFacing` are TWO NAMES FOR ONE SLOT. Both are in the binary; the shipped
-    // FrameXML drives the tabard and character panes with `SetRotation` (10 sites) and calls
-    // `SetFacing` nowhere, while addons reach for either. A pane with two independent yaws would be
-    // a bug nobody could see until a frame used both.
-    for name in ["SetRotation", "SetFacing"] {
-        m.set(
-            name,
-            lua.create_function(|lua, (this, rad): (Table, Value)| {
-                let rad = num(&rad);
-                with_model(lua, &this, |m| m.facing = rad)
-            })?,
-        )?;
-    }
+    // `SetFacing` is `Model`'s yaw setter (`0x878948[4]` -> `0x76dce0`, writing `+0x39c`).
+    // `SetRotation` writes THE SAME FIELD but is `PlayerModel`'s, not a second name here — see
+    // `playermodel_install`. A `<Model>` that wants its pane turned calls this one.
+    m.set(
+        "SetFacing",
+        lua.create_function(|lua, (this, rad): (Table, Value)| {
+            let rad = num(&rad);
+            with_model(lua, &this, |m| m.facing = rad)
+        })?,
+    )?;
     m.set(
         "GetFacing",
         lua.create_function(|lua, this: Table| with_model(lua, &this, |m| m.facing))?,
@@ -276,5 +290,62 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    lua.set_named_registry_value(REG_MODEL_METHODS, m)
+    lua.set_named_registry_value(REG_MODEL_METHODS, m)?;
+    playermodel_install(lua)
+}
+
+/// `PlayerModel`'s **own three** verbs (table `0x84f1fc`) — nothing else. Everything a
+/// `<PlayerModel>` else answers is `Model`'s, reached through the dispatcher's chain.
+fn playermodel_install(lua: &Lua) -> mlua::Result<()> {
+    let m = lua.create_table()?;
+
+    // `SetUnit(unit)` — `0x84f1fc[0]` -> `0x505d70`. The pane's other content arm, and `SetModel`'s
+    // alternative: each clears the other, so `GetModel` after a `SetUnit` cannot answer a stale
+    // path. Ours stores the unit TOKEN and resolves it at render.
+    m.set(
+        "SetUnit",
+        lua.create_function(|lua, (this, unit): (Table, Value)| {
+            let unit = match &unit {
+                Value::String(s) => Some(s.to_str()?.to_string()),
+                _ => None,
+            };
+            with_model(lua, &this, |m| {
+                m.unit = unit;
+                m.path = None;
+            })
+        })?,
+    )?;
+
+    // `RefreshUnit()` — `0x84f1fc[1]` -> `0x505e40`. Re-reads the unit the pane already shows; for
+    // us a no-op with a live receiver check, because the pane holds the TOKEN and resolves it at
+    // render, so there is no cached appearance here to invalidate. Present because the reference's
+    // own `DressUpFrame`/`PaperDollFrame` call it (3 sites) and addons that hook them will too.
+    m.set(
+        "RefreshUnit",
+        lua.create_function(|lua, this: Table| with_model(lua, &this, |_| ()))?,
+    )?;
+
+    // `SetRotation(rad)` — `0x84f1fc[2]` -> the Lua glue `0x505f00` -> the worker `0x505bb0`, whose
+    // final instruction is `0x505c44 mov [esi+0x39c], eax`: **the same yaw field `SetFacing`
+    // writes**, so the Lua-observable effect of the two verbs is identical and `GetFacing` reads
+    // either back. That equality is the whole reason this can be one line.
+    //
+    // What `0x505bb0` does BESIDES the yaw write is deliberately not modeled, and is worth naming
+    // because it is real: it picks a turn animation from the sign of the change (`0xc`
+    // ShuffleRight when the current facing is **<** the argument, `0xb` ShuffleLeft when **>**,
+    // `0` Stand on equality or NaN — the mapping wow-re CORRECTED on 2026-08-23 after publishing
+    // it inverted), plays it unless that id is already armed on bone slot 0, and then
+    // UNCONDITIONALLY sets `[+0x3e8] = 1` and `[+0x3ec] = now_ms + 100` — a 100 ms turn hold that
+    // the per-paint `0x505c50` expires. Every one of those is invisible to Lua (no getter reads
+    // them) and lands on a model renderer we have not built, so storing them here would be state
+    // nobody writes and nobody reads. The addresses are the pin for the day the renderer exists.
+    m.set(
+        "SetRotation",
+        lua.create_function(|lua, (this, rad): (Table, Value)| {
+            let rad = num(&rad);
+            with_model(lua, &this, |m| m.facing = rad)
+        })?,
+    )?;
+
+    lua.set_named_registry_value(REG_PLAYERMODEL_METHODS, m)
 }

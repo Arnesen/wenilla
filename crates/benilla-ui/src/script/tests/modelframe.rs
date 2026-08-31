@@ -1,9 +1,15 @@
-//! **The `Model` widget's Lua surface** — the pane's scene, read back through the API that wrote it.
+//! **The model-pane family's Lua surface** — `Model` and `PlayerModel`, read back through the API
+//! that wrote them.
 //!
-//! The property under test throughout is that this widget is *state the app renders*, not state the
-//! engine interprets: every setter's value must come back out unchanged, and the two places where
-//! the widget does have an opinion (the two names sharing one yaw slot, and content being an
-//! either/or) must hold.
+//! The property under test throughout is that these widgets are *state the app renders*, not state
+//! the engine interprets: every setter's value must come back out unchanged, and the places where
+//! the widget does have an opinion (one yaw slot written by two verbs on two classes; content being
+//! an either/or) must hold.
+//!
+//! Plus the one structural property, guarded as a whole block:
+//! [`the_two_model_tables_are_the_references_own`] asserts our surfaces against the reference's
+//! enumerated tables in **both** directions, so neither a missing verb nor an invented one can slip
+//! past — and so `Model` can never re-acquire the three that are `PlayerModel`'s.
 
 use super::common::script;
 use crate::script::UiScript;
@@ -38,17 +44,10 @@ fn the_model_pane_holds_the_scene_it_was_given() {
         r"Interface\Buttons\UI-AutoCastButton.mdx"
     );
 
-    // ── ONE YAW SLOT, TWO NAMES. Both are in the binary; the shipped FrameXML drives the tabard
-    //    and character panes with SetRotation and never calls SetFacing, while addons reach for
-    //    either. Two independent yaws would be a bug invisible until one frame used both names.
-    s.run("MPane:SetRotation(1.5)").unwrap();
-    assert_eq!(s.eval::<f64>("return MPane:GetFacing()").unwrap(), 1.5);
+    // The yaw. `SetFacing` is the `Model` verb for it (`0x878948[4]`); `SetRotation` writes the
+    // same field but belongs to `PlayerModel` and is tested there.
     s.run("MPane:SetFacing(-0.25)").unwrap();
-    assert_eq!(
-        s.eval::<f64>("return MPane:GetFacing()").unwrap(),
-        -0.25,
-        "SetFacing writes the same slot SetRotation does"
-    );
+    assert_eq!(s.eval::<f64>("return MPane:GetFacing()").unwrap(), -0.25);
 
     // Scale, camera, position — plain storage, read back through their own getters.
     s.run("MPane:SetModelScale(0.4) MPane:SetCamera(2) MPane:SetPosition(0.1, -0.2, 3)")
@@ -64,33 +63,204 @@ fn the_model_pane_holds_the_scene_it_was_given() {
         "GetPosition returns the three numbers SetPosition took"
     );
 
-    // ── CONTENT IS AN EITHER/OR. SetUnit and SetModel are two ways to fill one pane, not layers:
-    //    after a SetUnit, GetModel must not answer a path from three frames ago.
-    s.run(r#"MPane:SetUnit("player")"#).unwrap();
-    assert_eq!(
-        s.eval::<Option<String>>("return MPane:GetModel()").unwrap(),
-        None,
-        "SetUnit displaces the model path"
-    );
-    s.run(r#"MPane:SetModel("Interface\\Buttons\\Other.mdx")"#)
-        .unwrap();
-    // ...and back the other way, which is the direction an addon reskinning the dress-up pane takes.
-    assert_eq!(
-        s.eval::<String>("return MPane:GetModel()").unwrap(),
-        r"Interface\Buttons\Other.mdx"
-    );
-
-    // RefreshUnit is a live no-op: our pane stores the unit TOKEN and resolves it at render, so
-    // there is no cached appearance to invalidate. It must still exist — the reference's own
-    // DressUp/PaperDoll frames call it, so an addon hooking them will too.
-    assert!(s.run("MPane:RefreshUnit()").is_ok());
-
-    // ClearModel empties BOTH content slots, not just the one that was last set.
+    // `SetModel(nil)` is the documented clear and reaches the same place `ClearModel` does — not
+    // everything in the corpus calls the dedicated verb.
     s.run("MPane:ClearModel()").unwrap();
     assert_eq!(
         s.eval::<Option<String>>("return MPane:GetModel()").unwrap(),
         None
     );
+}
+
+/// **A `<PlayerModel>` is a `<Model>` plus exactly three verbs — and the inheritance runs one way.**
+///
+/// The client registers four model-pane types and each has its own Lua method table that never
+/// repeats its base's; a derived pane reaches its base through the miss leg of `vtable+0x8`
+/// (wow-re `ui/scratch/model-pane-method-tables.md` §3). So `PlayerModel`'s three-entry table
+/// `0x84f1fc` must sit *over* `Model`'s 23-entry `0x878948`, and nothing may chain the other way:
+/// `CSimpleModel`'s lookup `0x76f870` has no leg into `CGCharacterModelBase`'s `0x506260`.
+///
+/// This is the shape pfUI's unit frames need — `CreateFrame("PlayerModel", ...)` driven by
+/// `SetUnit` + `SetCamera`, one verb from each table on the same frame.
+#[test]
+fn a_player_model_is_a_model_plus_three_and_the_chain_runs_one_way() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        pm = CreateFrame("PlayerModel", "PMPane", UIParent)
+        m  = CreateFrame("Model", "MOnly", UIParent)
+    "#,
+    )
+    .unwrap();
+
+    // Its own three resolve on the PlayerModel...
+    for verb in ["SetUnit", "RefreshUnit", "SetRotation"] {
+        assert_eq!(
+            s.eval::<String>(&format!("return type(PMPane.{verb})"))
+                .unwrap(),
+            "function",
+            "PlayerModel must answer its own {verb}"
+        );
+        // ...and on the plain Model they are ABSENT. This is the assertion that would have caught
+        // three years of `SetUnit` published on the wrong class.
+        assert_eq!(
+            s.eval::<String>(&format!("return type(MOnly.{verb})"))
+                .unwrap(),
+            "nil",
+            "a plain Model must NOT answer {verb} — the chain runs derived -> base only"
+        );
+    }
+
+    // ...and the base's verbs resolve through the chain, unrepeated. pfUI's portrait line.
+    s.run(r#"PMPane:SetUnit("player") PMPane:SetCamera(0)"#)
+        .unwrap();
+    assert_eq!(
+        s.eval::<Option<String>>("return PMPane:GetModel()")
+            .unwrap(),
+        None,
+        "SetUnit displaces the model path — content is an either/or, not layers"
+    );
+    s.run(r#"PMPane:SetModel("Interface\\Buttons\\Other.mdx")"#)
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return PMPane:GetModel()").unwrap(),
+        r"Interface\Buttons\Other.mdx",
+        "...and back the other way, the direction an addon reskinning a paper doll takes"
+    );
+
+    // `SetRotation` writes THE SAME yaw field `SetFacing` does — `0x505bb0`'s last instruction is
+    // `mov [esi+0x39c], eax`, and `+0x39c` is what `0x76dce0` writes. `GetFacing` reads either.
+    s.run("PMPane:SetRotation(1.5)").unwrap();
+    assert_eq!(s.eval::<f64>("return PMPane:GetFacing()").unwrap(), 1.5);
+    s.run("PMPane:SetFacing(-0.25)").unwrap();
+    assert_eq!(
+        s.eval::<f64>("return PMPane:GetFacing()").unwrap(),
+        -0.25,
+        "one slot: SetFacing overwrites what SetRotation wrote"
+    );
+
+    // RefreshUnit is a live no-op: the pane stores the unit TOKEN and resolves it at render, so
+    // there is no cached appearance to invalidate. It must still exist — the reference's own
+    // DressUp/PaperDoll frames call it, so an addon hooking them will too.
+    assert!(s.run("PMPane:RefreshUnit()").is_ok());
+
+    // ClearModel — a `Model` verb reached through the chain — empties BOTH content slots.
+    s.run(r#"PMPane:SetUnit("player") PMPane:ClearModel()"#)
+        .unwrap();
+    assert_eq!(
+        s.eval::<Option<String>>("return PMPane:GetModel()")
+            .unwrap(),
+        None
+    );
+}
+
+/// **The whole block, both directions** — decision 1718's rule applied to the two model tables.
+///
+/// The lists below are the reference's OWN enumerations, transcribed entry-for-entry from
+/// wow-re's `ui/scratch/model-pane-method-tables.md` §2.1 and §2.2 (each table's count fixed twice:
+/// the registering `mov edx, imm32`, and the dword at `base + 8*count` being the start of the
+/// string pool). They are **not** the names anyone noticed were missing — that is exactly the
+/// mistake 1718 records, and it was re-made inside the test written to enforce it.
+///
+/// Guarding both directions is the point:
+///
+/// - **no gap** — every reference name we claim to publish must resolve;
+/// - **no superset** — a name the reference does not have on a table must not resolve there
+///   (1189: a name we have and the reference lacks routes an addon down a path the real client
+///   never takes);
+/// - **the seven we deliberately do not build must stay absent**, so "unbuilt" cannot quietly
+///   become "stubbed" without this test being edited to say so.
+#[test]
+fn the_two_model_tables_are_the_references_own() {
+    /// `Model` — `CSimpleModel`, table `0x878948`, 23 entries, in table order.
+    const MODEL_23: [&str; 23] = [
+        "SetModel",
+        "GetModel",
+        "ClearModel",
+        "SetPosition",
+        "SetFacing",
+        "SetModelScale",
+        "SetSequence",
+        "SetSequenceTime",
+        "SetCamera",
+        "SetLight",
+        "GetLight",
+        "GetPosition",
+        "GetFacing",
+        "GetModelScale",
+        "AdvanceTime",
+        "ReplaceIconTexture",
+        "SetFogColor",
+        "GetFogColor",
+        "SetFogNear",
+        "GetFogNear",
+        "SetFogFar",
+        "GetFogFar",
+        "ClearFog",
+    ];
+    /// `PlayerModel` — `CGCharacterModelBase`, table `0x84f1fc`, 3 entries, in table order.
+    const PLAYERMODEL_3: [&str; 3] = ["SetUnit", "RefreshUnit", "SetRotation"];
+    /// The subset of [`MODEL_23`] this client does not build. Named, not stubbed (1134 §4) — their
+    /// bodies are uncarved and they have no corpus caller. Moving a name OUT of here means the
+    /// verb was actually implemented.
+    const UNBUILT: [&str; 7] = [
+        "AdvanceTime",
+        "ReplaceIconTexture",
+        "SetFogNear",
+        "GetFogNear",
+        "SetFogFar",
+        "GetFogFar",
+        "ClearFog",
+    ];
+
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        CreateFrame("Model", "GuardM", UIParent)
+        CreateFrame("PlayerModel", "GuardPM", UIParent)
+    "#,
+    )
+    .unwrap();
+    let is_fn = |s: &UiScript, frame: &str, name: &str| {
+        s.eval::<String>(&format!("return type({frame}.{name})"))
+            .unwrap()
+            == "function"
+    };
+
+    for name in MODEL_23 {
+        let want = !UNBUILT.contains(&name);
+        // A `Model` verb resolves on BOTH panes — on the PlayerModel through the chain.
+        for frame in ["GuardM", "GuardPM"] {
+            assert_eq!(
+                is_fn(&s, frame, name),
+                want,
+                "{frame}.{name}: table 0x878948 has it; built = {want}"
+            );
+        }
+    }
+    for name in PLAYERMODEL_3 {
+        assert!(
+            is_fn(&s, "GuardPM", name),
+            "GuardPM.{name}: table 0x84f1fc entry, all three are built"
+        );
+        assert!(
+            !is_fn(&s, "GuardM", name),
+            "GuardM.{name}: 0x84f1fc is NOT reachable from CSimpleModel's lookup"
+        );
+    }
+    // The two names a `strings` scan of the model band would tempt anyone into, which do not exist
+    // in 5875 in ANY form (substring scan of the mapped image returns 0, positive control 27 hits
+    // for `Creature`). They are later-expansion verbs; publishing one is decision 1189's error.
+    for name in ["SetCreature", "SetCustomRace"] {
+        for frame in ["GuardM", "GuardPM"] {
+            assert!(
+                !is_fn(&s, frame, name),
+                "{frame}.{name} does not exist in 1.12.1.5875"
+            );
+        }
+    }
 }
 
 /// **`SetSequenceTime` is a scrub INTO the current sequence**, so changing the sequence drops it.

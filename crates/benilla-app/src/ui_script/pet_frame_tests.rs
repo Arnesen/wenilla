@@ -144,7 +144,7 @@ fn the_pet_frame_appears_on_a_summon_and_leaves_on_a_dismiss() {
             local _, hmax = hb:GetMinMaxValues()
             local _, mmax = mb:GetMinMaxValues()
             return PetFrame:IsVisible()
-               and PetFrameTextureFrameName:GetText() == "Grimjaw"
+               and PetName:GetText() == "Grimjaw"
                and hb:GetValue() == 72 and hmax == 100
                and mb:GetValue() == 45 and mmax == 80 and mb:IsVisible()
             "#,
@@ -242,12 +242,12 @@ fn the_attack_overlay_follows_its_own_two_events() {
     s.set_unit("pet", Some(pet("Grimjaw", 72, 45, 80, 0)));
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
     assert!(!s
-        .eval::<bool>("return PetFrameAttackMode:IsVisible()")
+        .eval::<bool>("return PetAttackModeTexture:IsVisible()")
         .unwrap());
 
     s.fire_event("PET_ATTACK_START", vec![]);
     assert!(s
-        .eval::<bool>("return PetFrameAttackMode:IsVisible()")
+        .eval::<bool>("return PetAttackModeTexture:IsVisible()")
         .unwrap());
 
     // The ref's OnUpdate ramps the overlay's tint alpha down from 1 on the opening (sign −1) leg.
@@ -269,7 +269,7 @@ fn the_attack_overlay_follows_its_own_two_events() {
 
     s.fire_event("PET_ATTACK_STOP", vec![]);
     assert!(!s
-        .eval::<bool>("return PetFrameAttackMode:IsVisible()")
+        .eval::<bool>("return PetAttackModeTexture:IsVisible()")
         .unwrap());
 }
 

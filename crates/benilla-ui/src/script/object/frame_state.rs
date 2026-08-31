@@ -122,6 +122,10 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             FrameKind::Slider => &["Slider", "Frame", "Region"],
             FrameKind::ScrollFrame => &["ScrollFrame", "Frame", "Region"],
             FrameKind::Model => &["Model", "Frame", "Region"],
+            // 4 deep, and the ONLY frame chain in the roster that is: `PlayerModel` derives from
+            // `Model`, and `DressUpModel`/`TabardModel` (unbuilt) derive from it in turn, for a
+            // maximum depth of 5 (wow-re `ui/scratch/widget-type-identity.md` §6).
+            FrameKind::PlayerModel => &["PlayerModel", "Model", "Frame", "Region"],
             FrameKind::MessageFrame => &["MessageFrame", "Frame", "Region"],
             FrameKind::ScrollingMessageFrame => &["ScrollingMessageFrame", "Frame", "Region"],
             FrameKind::ColorSelect => &["ColorSelect", "Frame", "Region"],
@@ -590,29 +594,27 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     )?;
     m.set(
         "SetBackdropColor",
-        lua.create_function(
-            |lua, (this, r, g, b, a): (Table, f32, f32, f32, Option<f32>)| {
-                let h = frame_handle_of(lua, &this)?;
-                let mut model = lua.app_data_mut::<Model>().expect("model");
-                if let Some(bd) = model.backdrops.get_mut(&h) {
-                    bd.bg_color = [r, g, b, a.unwrap_or(1.0)];
-                }
-                Ok(())
-            },
-        )?,
+        lua.create_function(|lua, (this, args): (Table, mlua::MultiValue)| {
+            let color = backdrop_color(lua, args);
+            let h = frame_handle_of(lua, &this)?;
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            if let Some(bd) = model.backdrops.get_mut(&h) {
+                bd.bg_color = color;
+            }
+            Ok(())
+        })?,
     )?;
     m.set(
         "SetBackdropBorderColor",
-        lua.create_function(
-            |lua, (this, r, g, b, a): (Table, f32, f32, f32, Option<f32>)| {
-                let h = frame_handle_of(lua, &this)?;
-                let mut model = lua.app_data_mut::<Model>().expect("model");
-                if let Some(bd) = model.backdrops.get_mut(&h) {
-                    bd.border_color = [r, g, b, a.unwrap_or(1.0)];
-                }
-                Ok(())
-            },
-        )?,
+        lua.create_function(|lua, (this, args): (Table, mlua::MultiValue)| {
+            let color = backdrop_color(lua, args);
+            let h = frame_handle_of(lua, &this)?;
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            if let Some(bd) = model.backdrops.get_mut(&h) {
+                bd.border_color = color;
+            }
+            Ok(())
+        })?,
     )?;
     m.set(
         "GetBackdropColor",
@@ -906,4 +908,50 @@ fn regions_of(lua: &Lua, this: &Table) -> mlua::Result<Vec<u32>> {
         .filter(|r| model.arena.region(*r).is_some_and(|reg| !reg.detached))
         .collect();
     Ok(live.into_iter().map(|r| model.region_id(r)).collect())
+}
+
+/// One backdrop colour channel, the reference's own conversion (`SetBackdropColor 0x777d30` /
+/// `SetBackdropBorderColor 0x7780d0` — instruction-identical bar the delegate; wow-re
+/// `scratch/numeric-arg-coercion-law.md` Q4, VERIFIED).
+///
+/// **r/g/b are UNGATED and alpha is not**, and that asymmetry is the whole of this function:
+///
+///  · r/g/b (`lua` indices 2/3/4) go through a bare `lua_tonumber`, so a `nil` channel is `0.0`
+///    and the call completes — no raise. ShaguTweaks `helpers.lua:248` passes `color.r` from a
+///    table that does not always have one, and benilla raised on it, killing the addon.
+///  · alpha (index 5) is `lua_isnumber`-gated at `0x778227` with `1.0f` staged at `0x778220`, so a
+///    **missing or nil** alpha is OPAQUE. Reading the asymmetry the other way — nil alpha as `0.0`
+///    like its neighbours — would turn every one of those borders transparent, which is a worse
+///    bug than the raise it replaced and would look like a rendering fault.
+///
+/// Then the reference clamps to `[0,1]` with **NaN landing on 1.0** (the compare's unordered arm
+/// takes the high clamp), and quantizes `×255 + 0.5` through `__ftol` — round-half-up, not the
+/// bare truncate `chat-window-record.md`'s colour path uses. The field is a packed `0xAARRGGBB`
+/// byte quad, so nothing finer survives the store and we quantize on the way in rather than
+/// pretend to a precision `GetBackdropColor` could not read back.
+fn backdrop_channel(lua: &Lua, v: Option<Value>, gated: bool) -> f32 {
+    let x = if gated {
+        // `lua_isnumber` — a number or a numeric string; anything else takes the staged default.
+        v.and_then(|v| lua.coerce_number(v).ok().flatten())
+            .unwrap_or(1.0)
+    } else {
+        crate::script::binding_abi::coerced_number(lua, v)
+    };
+    let clamped = if x.is_nan() { 1.0 } else { x.clamp(0.0, 1.0) };
+    // `×255 + 0.5` then `__ftol` (truncate toward zero) = round-half-up over `[0,1]`.
+    let byte = (clamped * 255.0 + 0.5) as u8;
+    f32::from(byte) / 255.0
+}
+
+/// The four channels of a backdrop colour setter, in the reference's own gating (see
+/// [`backdrop_channel`]). Takes the raw stack so a missing argument and an explicit `nil` reach
+/// the same place they do there.
+fn backdrop_color(lua: &Lua, args: mlua::MultiValue) -> [f32; 4] {
+    let a: Vec<Value> = args.into_iter().collect();
+    [
+        backdrop_channel(lua, a.first().cloned(), false),
+        backdrop_channel(lua, a.get(1).cloned(), false),
+        backdrop_channel(lua, a.get(2).cloned(), false),
+        backdrop_channel(lua, a.get(3).cloned(), true),
+    ]
 }

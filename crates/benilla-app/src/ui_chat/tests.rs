@@ -942,7 +942,7 @@ fn every_kind_is_in_all() {
     seen.sort_unstable();
     seen.dedup();
     assert_eq!(seen.len(), before, "a kind is listed twice in ALL");
-    assert_eq!(before, 81, "81 kinds — update this when the kind set grows");
+    assert_eq!(before, 92, "92 kinds — update this when the kind set grows");
 }
 
 #[test]
@@ -1813,6 +1813,52 @@ fn an_addon_sees_the_combat_log_line_it_registers_for() {
         "arg1 must be the whole sentence, not a fragment — got {seen:?}"
     );
     assert!(s.errors().is_empty(), "handler errors: {:?}", s.errors());
+}
+
+/// **Every combat-log kind reaches an addon that registers it**, not just the one B297 named.
+///
+/// [`an_addon_sees_the_combat_log_line_it_registers_for`] pins the shape on `SPELL_SELF_DAMAGE`;
+/// this sweeps the whole block, which is what makes 1703's eleven new types a *fact* rather than a
+/// hope — a kind whose name is misspelled in `event_name`, or that the router drops, fires nothing
+/// and would otherwise be found by a player's damage meter months later.
+#[test]
+fn every_combat_log_kind_reaches_an_addon() {
+    for kind in K::ALL.iter().copied().filter(|k| k.is_combat_log()) {
+        let name = super::event::event_name(kind);
+        let mut s = chat_vm();
+        let mut windows = super::frames::ChatWindows::default();
+        s.run(SPY).unwrap();
+        s.run(&format!(r#"BenillaChatSpy:RegisterEvent("{name}")"#))
+            .unwrap();
+
+        let line = format!("a line for {name}");
+        super::frames::route(
+            &mut s,
+            &mut windows,
+            &ChatEvent::text_only(kind, line.clone()),
+        );
+
+        assert_eq!(
+            s.eval::<String>("return SpyEvent").unwrap(),
+            name,
+            "{name} did not fire under its own name"
+        );
+        assert_eq!(
+            s.eval::<i64>("return SpyN").unwrap(),
+            1,
+            "{name} fired more than once"
+        );
+        let seen: String = s.eval("return SpyLine").unwrap();
+        assert!(
+            seen.starts_with(&format!("{line}|")),
+            "{name}: arg1 must be the whole sentence — got {seen:?}"
+        );
+        assert!(
+            s.errors().is_empty(),
+            "{name} handler errors: {:?}",
+            s.errors()
+        );
+    }
 }
 
 /// The combat block is **verbatim**: the composer adds `arg1` and nothing else — no `[Name]` link,

@@ -1320,3 +1320,52 @@ fn creating_a_box_does_not_focus_it_the_way_showing_one_does() {
     assert!(!s.eval::<bool>("return E:HasFocus()").unwrap());
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
+
+/// **`SetMaxLetters` gates the COUNT and not the type** — one of four widget bindings in the whole
+/// registrar that calls `lua_gettop`, and its gate is exact (`cmp eax,2`), while the value goes
+/// through a bare `lua_tonumber` with no `isnumber` guard (wow-re `numeric-arg-coercion-law.md`
+/// Q1/Q3, VERIFIED).
+///
+/// That pairing is the opposite of the usual one, which is why it earns a test: benilla typed the
+/// argument `i64` and so raised on `SetMaxLetters(nil)` — aux-addon's `gui/core.lua:288` writes
+/// exactly that, and died at load on it — while accepting the wrong *number* of arguments
+/// silently.
+///
+/// And `0` is **no limit**, not "no letters".
+#[test]
+fn set_max_letters_gates_the_argument_count_and_coerces_the_value() {
+    let s = script();
+    s.run(r#"E = CreateFrame("EditBox", "E") E:SetFocus()"#)
+        .unwrap();
+    let max = |s: &UiScript| s.eval::<i64>("return E:GetMaxLetters()").unwrap();
+
+    s.run("E:SetMaxLetters(12)").unwrap();
+    assert_eq!(max(&s), 12);
+
+    // nil is 0 is UNLIMITED — the call completes, which is the whole point.
+    s.run("E:SetMaxLetters(nil)").unwrap();
+    assert_eq!(max(&s), 0);
+    s.run(r#"E:SetMaxLetters(5) E:SetText("abcdefgh")"#)
+        .unwrap();
+    assert_eq!(s.eval::<String>("return E:GetText()").unwrap().len(), 5);
+    s.run(r#"E:SetMaxLetters(nil) E:SetText("abcdefgh")"#)
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return E:GetText()").unwrap(),
+        "abcdefgh",
+        "0 skips the trim block whole (0x77c085) — it is no limit, not no letters"
+    );
+
+    // A numeric string coerces; anything else is 0.
+    s.run(r#"E:SetMaxLetters("12")"#).unwrap();
+    assert_eq!(max(&s), 12);
+    s.run("E:SetMaxLetters({})").unwrap();
+    assert_eq!(max(&s), 0);
+
+    // The COUNT is exact — too few AND too many both raise.
+    assert!(s.run("E:SetMaxLetters()").is_err(), "too few raises");
+    assert!(
+        s.run("E:SetMaxLetters(50, 60)").is_err(),
+        "too many raises too"
+    );
+}

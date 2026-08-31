@@ -10,7 +10,6 @@ use bevy::prelude::*;
 
 use crate::death::{CorpsePoint, DeathNet, ResurrectOffer};
 use crate::net::MoveModeMessage;
-use crate::ui_action::UiErrorTexts;
 
 use super::super::SelfGuid;
 
@@ -88,10 +87,25 @@ pub(super) fn spirit_healer_confirm(npc: u64, death_net: &mut DeathNet) {
     death_net.confirm_generation = death_net.confirm_generation.wrapping_add(1);
 }
 
-/// `SMSG_DURABILITY_DAMAGE_DEATH` — the red line, verbatim GlobalStrings `DURABILITYDAMAGE_DEATH`
-/// (the `%%` unescaped).
-pub(super) fn durability_damage_death(errors: &mut UiErrorTexts) {
-    errors.error("Your equipped items suffer a 10% durability loss.".to_string());
+/// `SMSG_DURABILITY_DAMAGE_DEATH` — the 10% death durability loss.
+///
+/// **It is a combat-log line, not a red error** (1703, correcting the shape 0308 shipped):
+/// `0x628e60` is itself the packet's handler and it emits at the literal chat type `0x19`
+/// `COMBAT_MISC_INFO`, with **zero arguments** — the packet's body is empty and both of vmangos's
+/// fields are ignored. Routing it to `UIErrorsFrame` put it in the wrong frame and, worse, meant
+/// hard-coding Blizzard's English sentence in our source; as a combat-log family it resolves
+/// `DURABILITYDAMAGE_DEATH` out of the player's own `GlobalStrings.lua` like every other line.
+pub(super) fn durability_damage_death(log: &mut crate::ui_chat::ChatLog) {
+    log.push_combat(crate::ui_chat::combat::PendingCombat {
+        kind: crate::ui_chat::ChatEventKind::CombatMiscInfo,
+        family: crate::ui_chat::combat::DURABILITYDAMAGE_DEATH,
+        variant: crate::ui_chat::combat::Variant::OtherOther,
+        subject: 0,
+        object: 0,
+        fills: crate::ui_chat::combat::Fills::default(),
+        named: crate::ui_chat::combat::Named::Ready,
+        tries: 0,
+    });
 }
 
 /// **The ack'd movement-mode family** (decision 0866) — root, water-walk, feather-fall, hover. The

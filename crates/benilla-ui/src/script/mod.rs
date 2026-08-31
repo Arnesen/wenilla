@@ -1364,6 +1364,7 @@ impl UiScript {
                 crate::widget::FrameKind::Slider => "Slider",
                 crate::widget::FrameKind::ScrollFrame => "ScrollFrame",
                 crate::widget::FrameKind::Model => "Model",
+                crate::widget::FrameKind::PlayerModel => "PlayerModel",
                 crate::widget::FrameKind::MessageFrame => "MessageFrame",
                 crate::widget::FrameKind::ScrollingMessageFrame => "ScrollingMessageFrame",
                 crate::widget::FrameKind::ColorSelect => "ColorSelect",

@@ -50,6 +50,11 @@
         RED_FONT_COLOR_CODE = "|cffff2020"       -- l.10
         GREEN_FONT_COLOR_CODE = "|cff20ff20"     -- l.11
         GRAY_FONT_COLOR_CODE = "|cff808080"      -- l.12
+        -- l.13, and it was the ONE line of this block that was missing — the comments beside it
+        -- even skipped from `l.12` to `l.14`. `aux-addon.lua:7` concatenates it at file scope
+        -- (`LIGHTYELLOW_FONT_COLOR_CODE .. "aux: " ..`), so its absence was not a wrong colour, it
+        -- was the addon dying on its own first line.
+        LIGHTYELLOW_FONT_COLOR_CODE = "|cffffff9a" -- l.13
         FONT_COLOR_CODE_CLOSE = "|r"             -- l.14
         NORMAL_FONT_COLOR = { r = 1.0, g = 0.82, b = 0 }    -- l.15
         HIGHLIGHT_FONT_COLOR = { r = 1.0, g = 1.0, b = 1.0 } -- l.16
