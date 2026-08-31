@@ -15,9 +15,10 @@
 //!   `SMSG_NOTIFICATION` / `SMSG_AREA_TRIGGER_MESSAGE` text, the death durability notice), so
 //!   there is no key to look up — only the arm to pick.
 //!
-//! All four drain in `super::feed_actions`, firing `UI_ERROR_MESSAGE` (or, for the info arm,
-//! `UI_INFO_MESSAGE`) per resolved line;
-//! every string comes from the VM's own loaded `GlobalStrings.lua`, never hardcoded, so an
+//! All four drain in `super::feed_actions` into the one sink [`show_messages`], which puts each
+//! resolved line on the surface its message record names — read from the catalog
+//! ([`benilla_ui::messages`], decision 1770) rather than carried to the call site by hand.
+//! Every string comes from the VM's own loaded `GlobalStrings.lua`, never hardcoded, so an
 //! absent key shows nothing (the reference's data-suppression face) and localization rides
 //! for free.
 
@@ -74,24 +75,15 @@ impl CastErrors {
 #[derive(Resource, Default)]
 pub(crate) struct MountErrors(pub Vec<(bool, u32)>);
 
-/// Where a client message is SHOWN — the `kind` field (`+0x04`) of the reference's message record
-/// (`0xb4b498 + 20*msgId`), which `CGGameUI::DisplayError` (`0x496720`) dispatches on through the
-/// four-way jump at `0x496888`: **0 → the chat window** (`0x49a870`), 1 → `AddErrorMessage(text, 0)`
-/// (the yellow info line), **2 → `AddErrorMessage(text, 1)`** (the red error line), 3 → the console.
-/// Only the two our messages use are modeled (decision 0669); the info line has its own established
-/// route (`UI_INFO_MESSAGE`, decision 0340) and rides [`UiError::info`] instead.
+/// Where a client message is SHOWN is **not a decision this crate makes** — it is the `kind` field
+/// (`+0x04`) of the reference's message record, and it now arrives from the catalog
+/// ([`benilla_ui::messages`], decision 1770) instead of being hand-carried to every call site
+/// beside the key. [`MsgKind`] is that field; [`UiError::kind`] is the whole lookup.
 ///
-/// This lives beside [`UiError`] rather than in any one window because the surface is a property of
-/// the MESSAGE, not of the window that raised it — and it has more than one tenant: the quest
-/// refusals (0669) and, since 1523, the auction house, where the twenty `ERR_AUCTION_*` ids split
-/// clean down the middle of this enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MsgSurface {
-    /// kind 0 — a chat-window system line.
-    Chat,
-    /// kind 2 — the red `UIErrorsFrame` line.
-    Error,
-}
+/// It reads as a property of the MESSAGE rather than of the window that raised it because that is
+/// exactly what it is: the quest refusals (0669), the auction house (1523) and the party
+/// quest-share (1733) all ask the same table the same question.
+pub(crate) use benilla_ui::messages::MsgKind;
 
 /// One `DisplayError` message: a GlobalStrings key plus the argText fills. The 1.12 error
 /// formats use at most one `%s` and one `%d` ("Requires %s", "Requires %s %d" — wow-re
@@ -104,13 +96,6 @@ pub(crate) struct UiError {
     pub key: &'static str,
     pub fill_s: Option<String>,
     pub fill_d: Option<u32>,
-    /// The message record's **type arm** (wow-re `fish-msg-handlers.md`, byte-proven — the
-    /// registry entry's `+4` type, last written `mov edx,1` at `0x486235`): the reference's
-    /// `DisplayError` pipeline is one, and the type selects the UIErrorsFrame event — type 1
-    /// fires the **yellow** `UI_INFO_MESSAGE` (0xe1), type 2 the **red** `UI_ERROR_MESSAGE`
-    /// (0xe0). `true` = the yellow info arm (the fishing verdicts are the first tenants);
-    /// `false` = the red error arm, the default.
-    pub info: bool,
 }
 
 impl UiError {
@@ -121,16 +106,13 @@ impl UiError {
             key,
             fill_s: None,
             fill_d: None,
-            info: false,
         }
     }
 
-    /// A fill-less **type-1** message — the yellow `UI_INFO_MESSAGE` arm (see [`UiError::info`]).
-    pub(crate) fn info_key(key: &'static str) -> Self {
-        Self {
-            info: true,
-            ..Self::key(key)
-        }
+    /// Where this message is shown, straight off the catalog row its key names — the reference's
+    /// `DisplayError` reading `[record+0x04]`, which is the only place that answer has ever lived.
+    pub(crate) fn kind(&self) -> MsgKind {
+        benilla_ui::messages::kind_of(self.key)
     }
 }
 
@@ -142,27 +124,30 @@ impl UiError {
 pub(crate) struct UiErrorKeys(pub Vec<UiError>);
 
 /// [`UiErrorKeys`]' twin for lines that arrive **already resolved** — text with no GlobalStrings
-/// key to look up, because the server (or a fixed literal) already wrote it. Same frame, same two
-/// events, same drain.
+/// key to look up, because the server (or a fixed literal) already wrote it. Same frame, same
+/// sink, same drain.
 ///
-/// The wire tenants are the reference's own: `SMSG_NOTIFICATION` (`0x1cb`, handler `0x401800` —
+/// This is the one route that does **not** consult the catalog, and faithfully so: its tenants do
+/// not go through `DisplayError` at all, so there is no record and no id to read a kind from. The
+/// wire tenants are the reference's own: `SMSG_NOTIFICATION` (`0x1cb`, handler `0x401800` —
 /// `mov edx,1; call 0x4945b0` → `UI_ERROR_MESSAGE`) and `SMSG_AREA_TRIGGER_MESSAGE` (`0x2b8`, the
 /// shared handler `0x48f690`'s arm at `0x48f8ff` — `xor edx,edx; call 0x4945b0` →
 /// `UI_INFO_MESSAGE`). `0x4945b0(text, flag)` is the whole sink: null/empty guard, then
 /// `neg edx; sbb edx,edx; add edx,0xe1` = event `0xe1` when the flag is 0 and `0xe0` when it is 1
-/// (wow-re `system/ui/ui.md` l.2459). So the flag IS [`UiError::info`] under another name.
+/// (wow-re `system/ui/ui.md` l.2459). The handler's own choice of flag is what the [`MsgKind`]
+/// here carries — the same two surfaces the catalog names, reached by a different road.
 #[derive(Resource, Default)]
-pub(crate) struct UiErrorTexts(pub Vec<(String, bool)>);
+pub(crate) struct UiErrorTexts(pub Vec<(String, MsgKind)>);
 
 impl UiErrorTexts {
     /// The red `UI_ERROR_MESSAGE` arm (`0x4945b0(text, 1)`).
     pub(crate) fn error(&mut self, text: String) {
-        self.0.push((text, false));
+        self.0.push((text, MsgKind::Error));
     }
 
     /// The yellow `UI_INFO_MESSAGE` arm (`0x4945b0(text, 0)`).
     pub(crate) fn info(&mut self, text: String) {
-        self.0.push((text, true));
+        self.0.push((text, MsgKind::Info));
     }
 }
 
@@ -181,28 +166,37 @@ pub(crate) fn ui_error_text(e: &UiError, get: &dyn Fn(&str) -> Option<String>) -
     (!text.is_empty()).then_some(text)
 }
 
-/// Show already-resolved [`UiError`] lines on the surface each message record names — the second
-/// half of every [`MsgSurface`] tenant's drain, factored out once it had three (the questgiver
-/// refusals 0669, the auction house 1523, the party quest-share 1733). The tenants differ only in
-/// how they *build* their lines (a window's queue, a deferred item template, a guid awaiting a
-/// name); what they do with a resolved one is this, identically, down to the debug line — which
-/// exists because the chat path keeps no log of its own, so without it a live probe can count
-/// lines but never read one (0669's in-app leg).
+/// **The one sink** for a resolved message line: put it on the surface its [`MsgKind`] names.
 ///
-/// `who` is the caller's module tag for that debug line.
+/// Every route into the client's message display ends here — the window queues that resolve a
+/// [`UiError`] (the questgiver refusals 0669, the auction house 1523, the party quest-share 1733),
+/// the client-local [`UiErrorKeys`], and the already-resolved [`UiErrorTexts`] off the wire. They
+/// differ only in how they *build* a line and where the kind comes from; what happens to a built
+/// one is this, once, so the three cannot drift apart.
+///
+/// `who` is the caller's module tag for the debug line — which exists because the chat path keeps
+/// no log of its own, so without it a live probe can count lines but never read one (0669's
+/// in-app leg).
+///
+/// [`MsgKind::Chat`] lines go out as `CHAT_MSG_SYSTEM`. Three catalog rows ask for
+/// `CHAT_MSG_SKILL` instead (the skill-up trio, [`benilla_ui::messages::MessageRecord::chat_type`])
+/// and benilla raises none of them yet; when it does, this is the line that has to read the field.
 pub(crate) fn show_messages(
     script: &mut UiScript,
     chat: &mut ChatLog,
     who: &str,
-    lines: impl IntoIterator<Item = (MsgSurface, String)>,
+    lines: impl IntoIterator<Item = (MsgKind, String)>,
 ) {
-    for (surface, text) in lines {
-        debug!("{who}: message ({surface:?}) {text:?}");
-        match surface {
-            MsgSurface::Chat => {
+    for (kind, text) in lines {
+        debug!("{who}: message ({kind:?}) {text:?}");
+        match kind {
+            MsgKind::Chat => {
                 chat.push_event(ChatEvent::text_only(ChatEventKind::System, text));
             }
-            MsgSurface::Error => {
+            MsgKind::Info => {
+                script.fire_event("UI_INFO_MESSAGE", vec![ScriptValue::Str(text)]);
+            }
+            MsgKind::Error => {
                 script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
             }
         }
@@ -428,7 +422,6 @@ mod ui_error_tests {
             key,
             fill_s: s.map(String::from),
             fill_d: d,
-            info: false,
         }
     }
 

@@ -425,6 +425,21 @@ impl ChatLog {
             .collect()
     }
 
+    /// The text of every parked line headed for a chat window, in order — test-only, the
+    /// text-shaped twin of [`Self::pending_len`]. A count proves a line was queued; only the text
+    /// proves it is the *right* line, which is the whole question for a composed one (decision
+    /// 1764's `ERR_TRADE_BLOCKED_S`, whose `%s` has to name the right player).
+    #[cfg(test)]
+    pub(crate) fn pending_texts(&self) -> Vec<String> {
+        self.pending
+            .iter()
+            .filter_map(|p| match p {
+                Pending::Event(e) => Some(e.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// How many parked items are headed for a CHAT WINDOW.
     ///
     /// Addon lines are excluded on purpose. They park in the same queue for the same ask-once name

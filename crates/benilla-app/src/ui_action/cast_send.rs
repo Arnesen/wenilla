@@ -764,6 +764,7 @@ mod tests {
         // The sheath request the commit tail writes for a ranged spell — a bare World has no
         // message storage until it is asked for.
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
+        world.init_resource::<Messages<crate::player::StandStateRequest>>();
         (world, rx)
     }
 

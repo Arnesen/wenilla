@@ -738,7 +738,6 @@ fn route_lock_refusal(
                 key: "ERR_USE_LOCKED_WITH_ITEM_S",
                 fill_s: Some(name),
                 fill_d: None,
-                info: false,
             }),
         },
         benilla_formats::LOCK_KEY_SKILL => {
@@ -749,14 +748,12 @@ fn route_lock_refusal(
                     key: "ERR_USE_LOCKED_WITH_SPELL_KNOWN_SI",
                     fill_s: Some(name),
                     fill_d: Some(required),
-                    info: false,
                 })
             } else {
                 Some(UiError {
                     key: "ERR_USE_LOCKED_WITH_SPELL_S",
                     fill_s: Some(name),
                     fill_d: None,
-                    info: false,
                 })
             }
         }

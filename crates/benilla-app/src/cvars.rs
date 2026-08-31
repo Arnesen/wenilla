@@ -103,6 +103,13 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // pitch invert). `autoLootDefault` is era's — no 1.12 CVar exists, vanilla only had the
     // shift gesture — default off, like era's engine registrar.
     ("deselectOnClick", "1"),
+    // *Block Trades* (decision 1764) — 1.12's own `BlockTrades` (`0x842fbc`), the General-box
+    // checkbox at index 14 whose tooltip is "Block all incoming trade requests.". Registered
+    // **"0"**: the reference's own `0x4bf7bc` leg only refuses when the CVar is set, so an
+    // unset/absent value has to mean "trades allowed" — and a client that shipped with trades
+    // blocked would refuse every trade until the player found the box. The knob is
+    // [`crate::ui_trade::BlockTrades`], read by the incoming-request answerer.
+    ("BlockTrades", "0"),
     // 1.12's own `autoSelfCast` (`0x870dc0`) — a friendly cast that binds nothing falls back to
     // the caster. The behaviour has been here since the cast arm landed, welded to a Resource
     // default; it is a CVar now because 1.12's `TOGGLEAUTOSELFCAST` binding is `GetCVar`/`SetCVar`
@@ -567,6 +574,7 @@ pub(crate) struct KnobParams<'w> {
     tex_filter: ResMut<'w, benilla_assets::TexFilterSetting>,
     pane_rate: ResMut<'w, PaneRate>,
     guild_notify: ResMut<'w, crate::ui_guild::GuildMemberNotify>,
+    block_trades: ResMut<'w, crate::ui_trade::BlockTrades>,
     auto_self_cast: ResMut<'w, crate::ui_action::AutoSelfCast>,
     realmlist: ResMut<'w, crate::realmlist::Realmlist>,
 }
@@ -601,6 +609,7 @@ impl KnobParams<'_> {
             tex_filter: &mut self.tex_filter,
             pane_rate: &mut self.pane_rate,
             guild_notify: &mut self.guild_notify,
+            block_trades: &mut self.block_trades,
             auto_self_cast: &mut self.auto_self_cast,
             realmlist: &mut self.realmlist,
         }
@@ -631,6 +640,7 @@ struct Knobs<'a> {
     tex_filter: &'a mut benilla_assets::TexFilterSetting,
     pane_rate: &'a mut PaneRate,
     guild_notify: &'a mut crate::ui_guild::GuildMemberNotify,
+    block_trades: &'a mut crate::ui_trade::BlockTrades,
     auto_self_cast: &'a mut crate::ui_action::AutoSelfCast,
     realmlist: &'a mut crate::realmlist::Realmlist,
 }
@@ -721,6 +731,7 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "showlootspam" => knobs.loot.show_loot_spam = v != 0.0,
         // Guild Member Alert (1589) — conjunct 2 of the sign-on/sign-off line's condition.
         "guildmembernotify" => knobs.guild_notify.0 = v != 0.0,
+        "blocktrades" => knobs.block_trades.0 = v != 0.0,
         // The panel's 0/1/2 lands as the density multiplier ×1/×2/×3; the clamp is the 1.12
         // slider's own range (an off-grid hand-edit rides between stops, like every slider).
         "worlddetail" => knobs.clutter.density = v.clamp(0.0, 2.0) + 1.0,
@@ -1004,6 +1015,7 @@ fn sync_cvars(
             render_scale,
             pane_rate,
             guild_notify,
+            block_trades,
             auto_self_cast,
             msaa,
             msaa_formats,
@@ -1041,7 +1053,7 @@ fn sync_cvars(
                 .collect(),
         );
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 41] = [
+        let session: [(&str, String); 42] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -1067,6 +1079,7 @@ fn sync_cvars(
             ("autoLootDefault", flag(loot.auto_loot)),
             ("showLootSpam", flag(loot.show_loot_spam)),
             ("guildMemberNotify", flag(guild_notify.0)),
+            ("BlockTrades", flag(block_trades.0)),
             ("UnitNamePlayer", flag(names.player)),
             ("UnitNameNPC", flag(names.npc)),
             ("UnitNameOwn", flag(names.own)),
@@ -1332,6 +1345,13 @@ mod tests {
             crate::ui_guild::GuildMemberNotify::default().0
         );
         assert_eq!(d["guildMemberNotify"], 0.0, "the binary registers \"0\"");
+        // Block Trades (1764) welds the same way, and its "0" is behaviour: the refusal leg only
+        // fires when the CVar is SET, so an unset value must read as "trades allowed".
+        assert_eq!(
+            d["BlockTrades"] != 0.0,
+            crate::ui_trade::BlockTrades::default().0
+        );
+        assert_eq!(d["BlockTrades"], 0.0, "an unset BlockTrades allows trades");
         // The name trio (0992) welds to NameConfig's defaults the same way.
         let names = NameConfig::default();
         assert_eq!(d["UnitNamePlayer"] != 0.0, names.player);
@@ -1394,6 +1414,7 @@ mod tests {
         let mut video = VideoConfig::default();
         let mut pane_rate = PaneRate::default();
         let mut guild_notify = crate::ui_guild::GuildMemberNotify::default();
+        let mut block_trades = crate::ui_trade::BlockTrades::default();
         // Literal, not Default: MsaaSetting::default() reads $WOW_MSAA.
         let mut msaa = MsaaSetting { samples: 1 };
         // What an Apple GPU answers for the trio we render into (Rgba16Float / Depth32Float /
@@ -1433,6 +1454,7 @@ mod tests {
             render_scale: &mut render_scale,
             pane_rate: &mut pane_rate,
             guild_notify: &mut guild_notify,
+            block_trades: &mut block_trades,
             msaa: &mut msaa,
             tex_filter: &mut tex_filter,
             msaa_formats: &msaa_formats,
@@ -1552,6 +1574,9 @@ mod tests {
         // Guild Member Alert (1589) — the row that ships OFF, so its ON is the interesting write.
         assert!(apply_to_knobs("guildMemberNotify", "1", &mut knobs));
         assert!(knobs.guild_notify.0);
+        // Block Trades (1764) — the other row that ships OFF; its ON is what refuses a trade.
+        assert!(apply_to_knobs("BlockTrades", "1", &mut knobs));
+        assert!(knobs.block_trades.0);
         // The name trio lands on its gates (0992).
         assert!(apply_to_knobs("UnitNameNPC", "0", &mut knobs));
         assert!(!knobs.names.npc);
@@ -1710,6 +1735,7 @@ mod tests {
             ))
             .init_resource::<PaneRate>()
             .init_resource::<crate::ui_guild::GuildMemberNotify>()
+            .init_resource::<crate::ui_trade::BlockTrades>()
             .init_resource::<crate::ui_action::AutoSelfCast>()
             .add_plugins(CvarPlugin);
         app.insert_non_send_resource(UiScript::new().unwrap());

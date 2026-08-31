@@ -425,10 +425,11 @@ fn apply_roster_policy(
                 }
                 None
             }
-            // `WOW_CHAR`, or the login smoke's optional third field (decision 1262): the smoke's
-            // seat exists because `WOW_CHAR` is also an *unattended* marker
-            // ([`crate::run_mode::unattended_login`]), so using it to reach the world would switch
-            // the very branch a session test is trying to exercise. Same fast path, no marker.
+            // `WOW_CHAR`, or the login smoke's optional third field (decision 1262): the seat
+            // exists because `WOW_CHAR` *was* also an unattended marker, so using it to reach the
+            // world switched the very branch a session test was trying to exercise. 1769 severed
+            // that — `WOW_CHAR` now only means "skip the click" — and the seat stays as the
+            // smoke's own way in. Same fast path either way.
             None => std::env::var("WOW_CHAR").ok().or_else(|| {
                 std::env::var("WOW_LOGIN_SMOKE")
                     .ok()
@@ -509,13 +510,14 @@ fn apply_roster_policy(
                 }
                 None => {
                     warn!("char select: WOW_CHAR={name} not on this account — showing roster");
-                    // A harness run (env creds, no smoke) can never pick a different row itself —
-                    // parked here it burns its whole wall-clock. Same marker the login arm uses,
-                    // same greppable verdict for leg.sh.
-                    if crate::run_mode::unattended_login()
-                        && std::env::var_os("WOW_LOGIN_SMOKE").is_none()
+                    // A driverless run can never pick a different row itself — parked here it
+                    // burns its whole wall-clock. Same home as the login arm's verdict, so the
+                    // marker leg.sh greps for is written in exactly one place (1371, 1769).
+                    if std::env::var_os("WOW_LOGIN_SMOKE").is_none()
+                        && crate::run_mode::fatal_when_driverless(&format!(
+                            "WOW_CHAR={name} is not on this account"
+                        ))
                     {
-                        error!("login: FATAL — WOW_CHAR={name} is not on this account; exiting");
                         exit.write(AppExit::error());
                     }
                 }

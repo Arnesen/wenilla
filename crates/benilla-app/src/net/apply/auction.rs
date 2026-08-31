@@ -208,13 +208,13 @@ pub(super) fn auction_removed_notification(item_entry: u32, auction: &mut Auctio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui_action::MsgSurface;
+    use crate::ui_action::MsgKind;
 
-    fn keys(auction: &AuctionOpen) -> Vec<(&'static str, MsgSurface, Option<u32>)> {
+    fn keys(auction: &AuctionOpen) -> Vec<(&'static str, MsgKind, Option<u32>)> {
         auction
             .messages
             .iter()
-            .map(|m| (m.key, m.surface, m.item))
+            .map(|m| (m.key, benilla_ui::messages::kind_of(m.key), m.item))
             .collect()
     }
 
@@ -259,7 +259,7 @@ mod tests {
         auction_owner_notification(&owner(0, 10_000), &mut a);
         assert_eq!(
             keys(&a),
-            vec![("ERR_AUCTION_SOLD_S", MsgSurface::Chat, Some(2589))]
+            vec![("ERR_AUCTION_SOLD_S", MsgKind::Chat, Some(2589))]
         );
 
         // Expired: guid zeroed, and nobody paid anything.
@@ -267,7 +267,7 @@ mod tests {
         auction_owner_notification(&owner(0, 0), &mut a);
         assert_eq!(
             keys(&a),
-            vec![("ERR_AUCTION_EXPIRED_S", MsgSurface::Chat, Some(2589))],
+            vec![("ERR_AUCTION_EXPIRED_S", MsgKind::Chat, Some(2589))],
             "a zero bid on a closed auction is an expiry, not a sale"
         );
     }
@@ -279,14 +279,14 @@ mod tests {
         auction_bidder_notification(&bidder(0), &mut a);
         assert_eq!(
             keys(&a),
-            vec![("ERR_AUCTION_WON_S", MsgSurface::Chat, Some(2589))]
+            vec![("ERR_AUCTION_WON_S", MsgKind::Chat, Some(2589))]
         );
 
         let mut a = AuctionOpen::default();
         auction_bidder_notification(&bidder(9_000), &mut a);
         assert_eq!(
             keys(&a),
-            vec![("ERR_AUCTION_OUTBID_S", MsgSurface::Chat, Some(2589))]
+            vec![("ERR_AUCTION_OUTBID_S", MsgKind::Chat, Some(2589))]
         );
     }
 
@@ -305,7 +305,7 @@ mod tests {
             auction_command_result(7, action, auction_error::OK, &tail, &mut a);
             assert_eq!(
                 keys(&a),
-                vec![(key, MsgSurface::Chat, None)],
+                vec![(key, MsgKind::Chat, None)],
                 "a successful {action} says so in chat, with no item fill"
             );
         }
@@ -314,7 +314,7 @@ mod tests {
         auction_removed_notification(2589, &mut a);
         assert_eq!(
             keys(&a),
-            vec![("ERR_AUCTION_REMOVED_S", MsgSurface::Chat, Some(2589))]
+            vec![("ERR_AUCTION_REMOVED_S", MsgKind::Chat, Some(2589))]
         );
 
         // A refusal, on the red frame.
@@ -322,7 +322,7 @@ mod tests {
         auction_command_result(0, auction_action::BID_PLACED, 10, &tail, &mut a);
         assert_eq!(
             keys(&a),
-            vec![("ERR_AUCTION_BID_OWN", MsgSurface::Error, None)]
+            vec![("ERR_AUCTION_BID_OWN", MsgKind::Error, None)]
         );
 
         // HIGHER_BID is the live outbid UPDATE path, not a message — the line the player sees is
@@ -345,7 +345,7 @@ mod tests {
         a.clear();
         assert_eq!(
             keys(&a),
-            vec![("ERR_AUCTION_SOLD_S", MsgSurface::Chat, Some(2589))]
+            vec![("ERR_AUCTION_SOLD_S", MsgKind::Chat, Some(2589))]
         );
     }
 }

@@ -9,7 +9,7 @@ use benilla_protocol::messages::{
 };
 use bevy::prelude::*;
 
-use crate::ui_action::{MsgSurface, UiError};
+use crate::ui_action::UiError;
 use crate::ui_chat::ChatLog;
 use crate::ui_quest::QuestGiver;
 use crate::ui_quest_log::QuestLog;
@@ -167,7 +167,7 @@ pub(super) fn quest_failed(
 /// English chat push here).
 pub(super) fn quest_log_full(quest: &mut QuestGiver) {
     debug!("net: quest log full");
-    quest.push_message(MsgSurface::Error, UiError::key("ERR_QUEST_LOG_FULL"));
+    quest.push_message(UiError::key("ERR_QUEST_LOG_FULL"));
 }
 
 /// The giver won't offer the quest (`SMSG_QUESTGIVER_QUEST_INVALID`, ref handler `0x5dbca0`): one
@@ -181,10 +181,9 @@ pub(super) fn quest_log_full(quest: &mut QuestGiver) {
 /// this the panel sat open on a refused accept (decision 0669).
 pub(super) fn quest_giver_invalid(reason: u32, quest: &mut QuestGiver) {
     debug!("net: questgiver refused to offer the quest (reason {reason})");
-    quest.push_message(
-        MsgSurface::Chat,
-        UiError::key(crate::ui_quest::questgiver_invalid_key(reason)),
-    );
+    quest.push_message(UiError::key(crate::ui_quest::questgiver_invalid_key(
+        reason,
+    )));
     quest.clear();
 }
 
@@ -210,17 +209,13 @@ pub(super) fn quest_giver_failed(
                 .map(|t| t.title.clone())
         })
         .unwrap_or_default();
-    quest.push_message(
-        MsgSurface::Chat,
-        UiError {
-            key: crate::ui_quest::questgiver_failed_key(reason),
-            fill_s: Some(title),
-            fill_d: None,
-            info: false,
-        },
-    );
+    quest.push_message(UiError {
+        key: crate::ui_quest::questgiver_failed_key(reason),
+        fill_s: Some(title),
+        fill_d: None,
+    });
     if matches!(reason, 4 | 50) {
-        quest.push_message(MsgSurface::Error, UiError::key("ERR_INV_FULL"));
+        quest.push_message(UiError::key("ERR_INV_FULL"));
     }
     quest.clear();
 }
@@ -283,8 +278,8 @@ mod tests {
         quest_giver_invalid(13, &mut giver);
         let msgs = giver.take_messages();
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].0, MsgSurface::Chat);
-        assert_eq!(msgs[0].1, UiError::key("ERR_QUEST_ALREADY_ON"));
+        assert_eq!(msgs[0].kind(), crate::ui_action::MsgKind::Chat);
+        assert_eq!(msgs[0], UiError::key("ERR_QUEST_ALREADY_ON"));
         assert!(!giver.is_open(), "the ref closes the window on a refusal");
     }
 
@@ -299,18 +294,17 @@ mod tests {
         quest_giver_failed(373, 4, &mut giver, &mut log, &commands);
         let msgs = giver.take_messages();
         assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0].0, MsgSurface::Chat);
+        assert_eq!(msgs[0].kind(), crate::ui_action::MsgKind::Chat);
         assert_eq!(
-            msgs[0].1,
+            msgs[0],
             UiError {
                 key: "ERR_QUEST_FAILED_BAG_FULL_S",
                 fill_s: Some("A Threat Within".into()),
                 fill_d: None,
-                info: false,
             }
         );
-        assert_eq!(msgs[1].0, MsgSurface::Error);
-        assert_eq!(msgs[1].1, UiError::key("ERR_INV_FULL"));
+        assert_eq!(msgs[1].kind(), crate::ui_action::MsgKind::Error);
+        assert_eq!(msgs[1], UiError::key("ERR_INV_FULL"));
         assert!(!giver.is_open());
     }
 
@@ -322,8 +316,8 @@ mod tests {
         quest_log_full(&mut giver);
         let msgs = giver.take_messages();
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].0, MsgSurface::Error);
-        assert_eq!(msgs[0].1, UiError::key("ERR_QUEST_LOG_FULL"));
+        assert_eq!(msgs[0].kind(), crate::ui_action::MsgKind::Error);
+        assert_eq!(msgs[0], UiError::key("ERR_QUEST_LOG_FULL"));
         assert!(
             giver.is_open(),
             "the ref's 0x195 arm does not close the panel"
@@ -340,8 +334,8 @@ mod tests {
         let commands = NetCommands(tx);
         quest_giver_failed(999, 17, &mut giver, &mut log, &commands);
         let msgs = giver.take_messages();
-        assert_eq!(msgs[0].1.key, "ERR_QUEST_FAILED_MAX_COUNT_S");
-        assert_eq!(msgs[0].1.fill_s.as_deref(), Some(""));
+        assert_eq!(msgs[0].key, "ERR_QUEST_FAILED_MAX_COUNT_S");
+        assert_eq!(msgs[0].fill_s.as_deref(), Some(""));
     }
 
     // ── The share's BUSY refusal (decision 1738) ─────────────────────────────────────────────────

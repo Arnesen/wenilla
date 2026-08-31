@@ -1173,6 +1173,7 @@ mod tests {
         world.init_resource::<crate::ui_cast::QueuedMeleeSpell>();
         world.init_resource::<crate::ui_action::AutoRepeatActive>();
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
+        world.init_resource::<Messages<crate::player::StandStateRequest>>();
         world.init_resource::<Selection>();
         world.spawn(SelfPlayer);
 

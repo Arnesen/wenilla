@@ -103,7 +103,7 @@ pub(super) fn fish_verdict(escaped: bool, errors: &mut UiErrorKeys) {
         "ERR_FISH_NOT_HOOKED"
     };
     debug!("net: fishing verdict {key}");
-    errors.0.push(UiError::info_key(key));
+    errors.0.push(UiError::key(key));
 }
 
 /// The server refused to open the loot window (`SMSG_LOOT_RESPONSE`'s error shape — didn't kill
@@ -295,8 +295,8 @@ mod tests {
         assert_eq!(
             errors.0,
             vec![
-                UiError::info_key("ERR_FISH_NOT_HOOKED"),
-                UiError::info_key("ERR_FISH_ESCAPED"),
+                UiError::key("ERR_FISH_NOT_HOOKED"),
+                UiError::key("ERR_FISH_ESCAPED"),
             ]
         );
 

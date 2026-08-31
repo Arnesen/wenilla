@@ -2151,9 +2151,11 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // bar as the other two. Camera Following Style is counted on the key it wears at rest (Smart's
     // OPTION_TOOLTIP_CAMERA1) and Show When on its own (Always's OPTION_TOOLTIP_TARGETOFTARGET5);
     // their other entries ride the same census as the selection moves.
-    // 53 of the 55 are 1.12's own; the other two are Render Scale (1639) and Display Mode
+    // 54 of the 56 are 1.12's own; the other two are Render Scale (1639) and Display Mode
     // (1650), whose descriptions are benilla's and whose carve-out is above.
-    assert_eq!(checked, 55, "every tipped row carries a live key");
+    // The 28th CVar row is Block Trades (1764), on the Controls page — its key
+    // OPTION_TOOLTIP_BLOCK_TRADES is the reference's, so it is counted here like the rest.
+    assert_eq!(checked, 56, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
@@ -2260,7 +2262,8 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
     // Cloak / Show Helm, 1472; the four multibar switches, 1500).
     // …plus the Graphics page's Render Scale (1639) and Display Mode (1650), the two rows whose
     // descriptions are benilla's own rather than 1.12 GlobalStrings — see the guard above.
-    assert_eq!(raised, 55, "every row but Auto Loot raises a description");
+    // …and Block Trades (1764), the Controls page's 28th CVar row.
+    assert_eq!(raised, 56, "every row but Auto Loot raises a description");
 }
 
 /// The **Combat page** (decision 1134) — the first rows in this window whose store is a

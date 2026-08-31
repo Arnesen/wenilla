@@ -1956,9 +1956,7 @@ pub(super) fn apply_net_updates(
             // The player-trade arc (decision 0592 P1): the status packet drives the open/accept/close
             // state machine, the extended snapshot replaces one side's item/gold — both into the
             // `TradeSession` the trade feed (`crate::ui_trade`) reads.
-            SessionEvent::TradeStatus { status } => {
-                trade::trade_status(status, &mut trade_session, &net_commands)
-            }
+            SessionEvent::TradeStatus { status } => trade::trade_status(status, &mut trade_session),
             SessionEvent::TradeStatusExtended { state } => {
                 trade::trade_status_extended(&state, &mut trade_session)
             }

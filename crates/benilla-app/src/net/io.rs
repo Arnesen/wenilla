@@ -1028,6 +1028,8 @@ fn writer_loop(
                     // The player-trade arc (decision 0592) — the CMSG verbs onto the P0 writers.
                     ClientCommand::InitiateTrade { target } => w.initiate_trade(target),
                     ClientCommand::BeginTrade => w.begin_trade(),
+                    ClientCommand::BusyTrade => w.busy_trade(),
+                    ClientCommand::IgnoreTrade => w.ignore_trade(),
                     ClientCommand::AcceptTrade => w.accept_trade(),
                     ClientCommand::UnacceptTrade => w.unaccept_trade(),
                     ClientCommand::CancelTrade => w.cancel_trade(),

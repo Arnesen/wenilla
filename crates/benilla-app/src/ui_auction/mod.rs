@@ -48,7 +48,7 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_action::{show_messages, ui_error_text, MsgSurface, UiError};
+use crate::ui_action::{show_messages, ui_error_text, UiError};
 use crate::ui_script::UiInput;
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 
@@ -255,7 +255,6 @@ pub(crate) struct AuctionOpen {
 /// That split is the whole reason this is a queue of records rather than a queue of red strings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AuctionMessage {
-    pub(crate) surface: MsgSurface,
     pub(crate) key: &'static str,
     /// The item entry whose name fills the `%s`; `None` for the six fill-less lines.
     ///
@@ -267,31 +266,22 @@ pub(crate) struct AuctionMessage {
 }
 
 impl AuctionMessage {
-    /// A chat line with no fill (`ERR_AUCTION_STARTED` and friends).
+    /// A line with no fill (`ERR_AUCTION_STARTED` and friends).
     pub(crate) fn chat(key: &'static str) -> Self {
-        Self {
-            surface: MsgSurface::Chat,
-            key,
-            item: None,
-        }
+        Self { key, item: None }
     }
 
-    /// A chat line about one item — the five `_S` outcomes.
+    /// A line about one item — the five `_S` outcomes.
     pub(crate) fn chat_item(key: &'static str, item: u32) -> Self {
         Self {
-            surface: MsgSurface::Chat,
             key,
             item: Some(item),
         }
     }
 
-    /// A red line — the twelve refusals, none of which take a fill.
+    /// A refusal — the twelve precondition failures, none of which take a fill.
     pub(crate) fn error(key: &'static str) -> Self {
-        Self {
-            surface: MsgSurface::Error,
-            key,
-            item: None,
-        }
+        Self { key, item: None }
     }
 }
 
@@ -622,10 +612,9 @@ fn feed_auction(
                 key: msg.key,
                 fill_s: fill,
                 fill_d: None,
-                info: false,
             };
             if let Some(text) = ui_error_text(&err, &get) {
-                lines.push((msg.surface, text));
+                lines.push((benilla_ui::messages::kind_of(msg.key), text));
             }
         }
         auction.messages = deferred;

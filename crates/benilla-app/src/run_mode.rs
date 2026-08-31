@@ -51,28 +51,82 @@ pub(crate) fn scenario_active() -> bool {
     std::env::var("WOW_CAPTURE").is_ok()
 }
 
-/// **Is anything but a person answering this session's login?** (`$WOW_USER` / `$WOW_PASS` /
-/// `$WOW_CHAR` — the login screen's env fast path.)
+/// **Do the credentials come from the environment?** (`$WOW_USER` / `$WOW_PASS` / `$WOW_CHAR` —
+/// the login screen's env fast path.)
 ///
 /// The player answer is `false`, and it is the default: with none of these set the client opens at
-/// the login screen and waits for somebody to type. Setting any of them *is* a harness saying "log
-/// in without me" — a probe, a smoke, a rig — so it is also the honest answer to the question a
-/// dead session asks: **is there anybody here to log back in?**
+/// the login screen and waits for somebody to type. Setting any of them says *"log in without
+/// waiting for me to type"* — and **that is the only thing it says.** It is not a claim about who
+/// is in the room; [`unattended`] is the fact for that, and keeping the two apart is decision 1769.
 ///
-/// That question decides what a lost session does (decision 1262). A person gets the reference's
-/// answer — the world torn down, the account screen, "Disconnected from server", and nothing
-/// retried until they say so. An unattended run keeps 0065's seamless reconnect, because the
-/// alternative is a probe parked on a login dialog for the rest of its wall-clock. One environment
-/// fact, several readers, no shared symbol — the module doc's pattern, same as [`scenario_active`],
-/// and the reason the login policy's own fast path asks here instead of re-reading the three names.
-///
-/// The session-loss readers never call this directly: [`crate::net::DisconnectedMessage::new`]
-/// asks once, at the wire edge, and every reader acts on the verdict it carries — so the teardown,
-/// the screen flip and the credential policy cannot answer it three different ways.
-pub(crate) fn unattended_login() -> bool {
+/// One environment fact, several readers, no shared symbol — the module doc's pattern, same as
+/// [`scenario_active`], and the reason the roster's `WOW_CHAR` fast path asks here instead of
+/// re-reading the three names.
+pub(crate) fn env_login() -> bool {
     ["WOW_USER", "WOW_PASS", "WOW_CHAR"]
         .iter()
         .any(|k| std::env::var_os(k).is_some())
+}
+
+/// **Is there nobody here?** (`$WOW_UNATTENDED`, or the two runs that are automated by
+/// construction: `$WOW_CAPTURE` and `$WOW_RIG`.)
+///
+/// The player answer is `false` and it is the **default**, like every other answer in this module:
+/// a client with nobody at the keyboard is the exception, and an exception declares itself. The
+/// direction is the whole point — guessing "attended" when a probe is running costs that probe a
+/// timeout, loudly; guessing "unattended" when a person is playing ships them a client that fights
+/// another client for their account, silently. Those two are not worth the same, so the doubt goes
+/// one way.
+///
+/// **This is the fact [`env_login`] was mistaken for, twice.** Env credentials mean "log in without
+/// typing"; they say nothing about the room — and the director plays with
+/// `WOW_USER=one WOW_PASS=pone cargo play`, which is the example line in `.cargo/config.toml`. So
+/// every session they played read as "a harness": a typed password's refusal killed the process
+/// (fixed on 2026-08-28 by asking `announced` — direct evidence — instead of the environment) and,
+/// the half that fix left standing, a kick sent the client racing to take the account back instead
+/// of to the login screen. That is decision 1262's reported bug, reappearing three weeks later
+/// with not one line of its code changed, because the fact underneath it was never true. 1769.
+///
+/// `WOW_CAPTURE` and `WOW_RIG` are folded in because they *cannot* be a person: a capture authors
+/// the camera and a rig drives the body, so a run that sets either has already said what it is and
+/// cannot forget to. Everything else declares — `scripts/leg.sh`, `smoke.sh`, `cine.sh`,
+/// `summon-live.sh` and the ad-hoc probe recipe in `method.md` all pass `WOW_UNATTENDED=1`.
+///
+/// Read by whatever may act *instead of* a person: the lost-session verdict (decision 1262 — the
+/// session-loss readers never call this directly, [`crate::net::DisconnectedMessage::new`] asks
+/// once at the wire edge and every reader acts on the verdict it carries) and the two `FATAL`
+/// exits that keep a driverless run from burning its wall-clock on a dialog (decision 1371).
+pub(crate) fn unattended() -> bool {
+    ["WOW_UNATTENDED", "WOW_CAPTURE", "WOW_RIG"]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some())
+}
+
+/// **This run cannot get past the screen it is on — may the client end it instead of a person?**
+/// (decision 1371's `FATAL` marker, resting on 1769's fact.)
+///
+/// `true` only for a run that has declared itself [`unattended`]: it exits non-zero on the one
+/// greppable marker `scripts/leg.sh` keys on, rather than parking a driverless run on a dialog for
+/// its whole wall-clock. Otherwise the dialog stays up for whoever is there.
+///
+/// The `false` arm still speaks, when the credentials came from the environment: a probe that
+/// quietly parks for 300 s instead of failing in 5 is precisely what 1769's default trades away,
+/// so the log names the declaration that buys the old behaviour back. Both arms live here because
+/// three call sites — two in [`crate::login`], one in [`crate::char_select`] — must not drift
+/// apart on either the verdict or the marker `leg.sh` greps for.
+pub(crate) fn fatal_when_driverless(why: &str) -> bool {
+    if unattended() {
+        error!("login: FATAL — {why}; exiting");
+        return true;
+    }
+    if env_login() {
+        warn!(
+            "login: {why} — leaving the dialog up, because nothing declared this run driverless. \
+             Set WOW_UNATTENDED=1 if nobody is here and it should exit non-zero instead \
+             (decision 1769)."
+        );
+    }
+    false
 }
 
 /// **Which screen the client starts on.** A player starts at the login screen, always; a capture
@@ -367,6 +421,43 @@ mod tests {
              `run_mode::dev_affordances()` instead (decision 1179). Offenders:\n  {}",
             offenders.join("\n  "),
         );
+    }
+
+    /// **Two questions, two facts** (decision 1769) — and the fixture is the line the director
+    /// actually types, so a future merge of the two answers fails here rather than in their game.
+    #[test]
+    fn env_credentials_are_not_a_claim_about_who_is_in_the_room() {
+        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _decl = EnvGuard::unset("WOW_UNATTENDED");
+        let _cap = EnvGuard::unset("WOW_CAPTURE");
+        let _rig = EnvGuard::unset("WOW_RIG");
+
+        // A player build's defaults: nothing set, nothing assumed.
+        {
+            let _u = EnvGuard::unset("WOW_USER");
+            let _p = EnvGuard::unset("WOW_PASS");
+            let _c = EnvGuard::unset("WOW_CHAR");
+            assert!(!env_login() && !unattended());
+        }
+        // `WOW_USER=one WOW_PASS=pone cargo play` — `.cargo/config.toml`'s own example, and the
+        // director's launch line since 2026-08-29. Log them in without typing, yes. Decide things
+        // on their behalf, no.
+        let _u = EnvGuard::set("WOW_USER", "one");
+        let _p = EnvGuard::set("WOW_PASS", "pone");
+        assert!(env_login(), "the fast path still submits for them");
+        assert!(
+            !unattended(),
+            "credentials in the environment are not an empty chair",
+        );
+        // The declaration, and the two runs that are automated by construction.
+        for key in ["WOW_UNATTENDED", "WOW_CAPTURE", "WOW_RIG"] {
+            let _d = EnvGuard::set(key, "1");
+            assert!(unattended(), "{key} declares the run driverless");
+        }
+        assert!(!unattended(), "and each guard puts it back");
     }
 
     #[test]

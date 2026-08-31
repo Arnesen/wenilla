@@ -260,7 +260,47 @@ impl FailArgs<'_> {
     }
 }
 
-/// The displayed text for a failed cast — `None` = the reference shows nothing. `get` is the
+/// The errorId every reason that overrides nothing falls through to — `0x2c`, whose text is the
+/// bare `"%s"`, so what the player reads is the first layer's `SPELL_FAILED_*` string. benilla
+/// short-circuits the identity substitution and displays that string directly; the id still
+/// matters, because it is the id whose **record** decides the surface.
+pub(super) const PASSTHROUGH: &str = "ERR_SPELL_FAILED_S";
+
+/// One resolved cast-failure line: the text to show, and the **message id's key** that decides
+/// where to show it.
+///
+/// The key rides along because the reference's second layer hands its errorId to
+/// `CGGameUI::DisplayError`, and that function reads the record's kind — so the surface is a
+/// property of the id this dispatch picked, not of "cast failures" as a category. Seventeen of
+/// the overrides are red and `ERR_SPELL_FAILED_NOTUNSHEATHED` is **yellow**; before the catalog
+/// (decision 1770) benilla painted all eighteen red, because nothing here knew which id it had
+/// chosen by the time the line reached the frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CastFailLine {
+    pub key: &'static str,
+    pub text: String,
+}
+
+impl CastFailLine {
+    /// A line the second layer left on its default errorId — the drain builds these for the three
+    /// argument arms it owns (`0x78` TOTEMS, `0x5c` REAGENTS, `0x19`-`0x1b` EQUIPPED_ITEM_CLASS*),
+    /// whose fills need the item caches.
+    pub(super) fn passthrough(text: String) -> Self {
+        Self {
+            key: PASSTHROUGH,
+            text,
+        }
+    }
+
+    fn fill(self, name: &str) -> Self {
+        Self {
+            text: self.text.replace("%s", name),
+            ..self
+        }
+    }
+}
+
+/// The displayed line for a failed cast — `None` = the reference shows nothing. `get` is the
 /// VM's GlobalStrings lookup (an absent or empty key resolves to `None`, the data-suppression
 /// face). Reasons beyond the table print their code — our debug affordance, not a ref string.
 pub(super) fn cast_fail_text(
@@ -268,16 +308,17 @@ pub(super) fn cast_fail_text(
     spell: Option<&SpellDisplay>,
     args: FailArgs<'_>,
     get: &dyn Fn(&str) -> Option<String>,
-) -> Option<String> {
-    let get_display = |key: &str| get(key).filter(|s| !s.is_empty());
+) -> Option<CastFailLine> {
+    let get_text = |key: &str| get(key).filter(|s| !s.is_empty());
+    let get_display = |key: &'static str| get_text(key).map(|text| CastFailLine { key, text });
     // The errorId overrides (`0x6e1aab–0x6e1c5f`): the replaced-message reasons.
     match reason {
         0x01 => return get_display("ERR_SPELL_FAILED_ALREADY_AT_FULL_HEALTH"),
         0x02 => {
             let t = get_display("ERR_SPELL_FAILED_ALREADY_AT_FULL_POWER_S")?;
             let power = spell.map_or(0, |d| d.power_type);
-            let name = get_display(power_keys(power).1).unwrap_or_default();
-            return Some(t.replace("%s", &name));
+            let name = get_text(power_keys(power).1).unwrap_or_default();
+            return Some(t.fill(&name));
         }
         0x09 => return get_display("ERR_GENERIC_NO_TARGET"),
         0x17 => return None, // DONT_REPORT: control-flow hidden (jumps past DisplayError)
@@ -312,12 +353,19 @@ pub(super) fn cast_fail_text(
     }
     // The passthrough layer: errorId 0x2c ("%s") displays GetText(SPELL_FAILED_<name>) as-is.
     let Some(key) = CAST_FAIL_KEYS.get(usize::from(reason)) else {
-        return Some(format!("Spell failed ({reason:#04x})"));
+        return Some(CastFailLine {
+            key: PASSTHROUGH,
+            text: format!("Spell failed ({reason:#04x})"),
+        });
     };
-    let text = get_display(key)?;
+    let text = get_text(key)?;
+    let line = |text: String| CastFailLine {
+        key: PASSTHROUGH,
+        text,
+    };
     // The argument arms (`0x6e1d8e`): fill the template's `%s` from the reason's own DBC.
     if let Some(name) = args.fill(reason, spell) {
-        return Some(text.replace("%s", &name));
+        return Some(line(text.replace("%s", &name)));
     }
     // An arm we don't model (or one whose lookup missed) — strip the tokens so the stem reads
     // clean ("Missing reagent: %s" → "Missing reagent"), never a raw % on screen.
@@ -328,13 +376,13 @@ pub(super) fn cast_fail_text(
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
-        return Some(
+        return Some(line(
             stripped
                 .trim_end_matches([' ', ':', '.', '(', ')'])
                 .to_string(),
-        );
+        ));
     }
-    Some(text)
+    Some(line(text))
 }
 
 #[cfg(test)]
@@ -357,7 +405,43 @@ mod tests {
             ("ERR_POTION_COOLDOWN", "Item is not ready yet."),
             ("ERR_OUT_OF_MANA", "Not enough mana"),
             ("ERR_OUT_OF_RAGE", "Not enough rage"),
+            (
+                "ERR_SPELL_FAILED_NOTUNSHEATHED",
+                "You have nothing to attack with.",
+            ),
         ])
+    }
+
+    /// **The one cast failure that is not a red line.** Reason `0x41` overrides to
+    /// `ERR_SPELL_FAILED_NOTUNSHEATHED` (id 320), and that record's kind is `1` — the yellow
+    /// `UI_INFO_MESSAGE`, not the red `UI_ERROR_MESSAGE` its seventeen override neighbours take.
+    ///
+    /// benilla painted it red until decision 1770, and could not have done otherwise: the drain
+    /// fired one event for every resolved cast-failure line, because by the time a line got there
+    /// nothing knew which errorId this dispatch had chosen. Carrying the key out is what makes the
+    /// surface answerable, and this test is the answer.
+    ///
+    /// Its two yellow siblings, `ERR_FISH_NOT_HOOKED` (318) and `ERR_FISH_ESCAPED` (319), sit one
+    /// and two ids below it and were hand-traced correctly by an earlier round — which is exactly
+    /// how a hand-swept surface goes wrong: two of the three neighbours seen, the third not.
+    #[test]
+    fn the_unsheathed_refusal_is_yellow_and_its_neighbours_are_red() {
+        use benilla_ui::messages::{kind_of, MsgKind};
+        let m = gs();
+        let g = getter(&m);
+
+        let line = cast_fail_text(0x41, None, FailArgs::default(), &g).expect("a line");
+        assert_eq!(line.key, "ERR_SPELL_FAILED_NOTUNSHEATHED");
+        assert_eq!(kind_of(line.key), MsgKind::Info);
+
+        // An override that IS red, and a passthrough that falls to errorId 0x2c.
+        let red = cast_fail_text(0x59, None, FailArgs::default(), &g).expect("a line");
+        assert_eq!(red.key, "ERR_SPELL_OUT_OF_RANGE");
+        assert_eq!(kind_of(red.key), MsgKind::Error);
+
+        let through = cast_fail_text(0x43, None, FailArgs::default(), &g).expect("a line");
+        assert_eq!(through.key, PASSTHROUGH);
+        assert_eq!(kind_of(through.key), MsgKind::Error);
     }
 
     fn getter<'a>(
@@ -392,35 +476,49 @@ mod tests {
         let m = gs();
         let g = getter(&m);
         assert_eq!(
-            cast_fail_text(0x43, None, FailArgs::default(), &g).unwrap(),
+            cast_fail_text(0x43, None, FailArgs::default(), &g)
+                .unwrap()
+                .text,
             "Out of ammo"
         );
         assert_eq!(
-            cast_fail_text(0x59, None, FailArgs::default(), &g).unwrap(),
+            cast_fail_text(0x59, None, FailArgs::default(), &g)
+                .unwrap()
+                .text,
             "Out of range."
         );
         assert_eq!(
-            cast_fail_text(0x76, None, FailArgs::default(), &g).unwrap(),
+            cast_fail_text(0x76, None, FailArgs::default(), &g)
+                .unwrap()
+                .text,
             "Target too close"
         );
         assert_eq!(
-            cast_fail_text(0x09, None, FailArgs::default(), &g).unwrap(),
+            cast_fail_text(0x09, None, FailArgs::default(), &g)
+                .unwrap()
+                .text,
             "You have no target."
         );
         // 0x3c: plain spell → spell cooldown; Attr&0x10 → ability; potion category → potion.
         let plain = spell(0, 0, 0);
         assert_eq!(
-            cast_fail_text(0x3C, Some(&plain), FailArgs::default(), &g).unwrap(),
+            cast_fail_text(0x3C, Some(&plain), FailArgs::default(), &g)
+                .unwrap()
+                .text,
             "Spell is not ready yet."
         );
         let ability = spell(1, 0, 0x10);
         assert_eq!(
-            cast_fail_text(0x3C, Some(&ability), FailArgs::default(), &g).unwrap(),
+            cast_fail_text(0x3C, Some(&ability), FailArgs::default(), &g)
+                .unwrap()
+                .text,
             "Ability is not ready yet."
         );
         let potion = spell(0, 4, 0);
         assert_eq!(
-            cast_fail_text(0x3C, Some(&potion), FailArgs::default(), &g).unwrap(),
+            cast_fail_text(0x3C, Some(&potion), FailArgs::default(), &g)
+                .unwrap()
+                .text,
             "Item is not ready yet."
         );
     }
@@ -433,12 +531,16 @@ mod tests {
         let g = getter(&m);
         let rage = spell(1, 0, 0);
         assert_eq!(
-            cast_fail_text(0x4D, Some(&rage), FailArgs::default(), &g).unwrap(),
+            cast_fail_text(0x4D, Some(&rage), FailArgs::default(), &g)
+                .unwrap()
+                .text,
             "Not enough rage"
         );
         let mana = spell(0, 0, 0);
         assert_eq!(
-            cast_fail_text(0x4D, Some(&mana), FailArgs::default(), &g).unwrap(),
+            cast_fail_text(0x4D, Some(&mana), FailArgs::default(), &g)
+                .unwrap()
+                .text,
             "Not enough mana"
         );
     }
@@ -453,11 +555,15 @@ mod tests {
         assert_eq!(cast_fail_text(0x17, None, FailArgs::default(), &g), None);
         assert_eq!(cast_fail_text(0x08, None, FailArgs::default(), &g), None);
         assert_eq!(
-            cast_fail_text(0x92, None, FailArgs::default(), &g).unwrap(),
+            cast_fail_text(0x92, None, FailArgs::default(), &g)
+                .unwrap()
+                .text,
             "Spell failed (0x92)"
         );
         assert_eq!(
-            cast_fail_text(0x5C, None, FailArgs::default(), &g).unwrap(),
+            cast_fail_text(0x5C, None, FailArgs::default(), &g)
+                .unwrap()
+                .text,
             "Missing reagent"
         );
     }
@@ -479,31 +585,43 @@ mod tests {
         let g = |key: &str| s.lua().globals().get::<String>(key).ok();
 
         assert_eq!(
-            cast_fail_text(0x43, None, FailArgs::default(), &g).unwrap(),
+            cast_fail_text(0x43, None, FailArgs::default(), &g)
+                .unwrap()
+                .text,
             "Out of ammo"
         );
         assert_eq!(
-            cast_fail_text(0x59, None, FailArgs::default(), &g).unwrap(),
+            cast_fail_text(0x59, None, FailArgs::default(), &g)
+                .unwrap()
+                .text,
             "Out of range."
         );
         assert_eq!(
-            cast_fail_text(0x3C, None, FailArgs::default(), &g).unwrap(),
+            cast_fail_text(0x3C, None, FailArgs::default(), &g)
+                .unwrap()
+                .text,
             "Spell is not ready yet."
         );
         let rage = spell(1, 0, 0);
         assert_eq!(
-            cast_fail_text(0x4D, Some(&rage), FailArgs::default(), &g).unwrap(),
+            cast_fail_text(0x4D, Some(&rage), FailArgs::default(), &g)
+                .unwrap()
+                .text,
             "Not enough rage"
         );
         // The environment gate's pair (decision 1056) — both are plain passthroughs, so what the
         // player reads IS the GlobalStrings value. A typo'd key here would degrade a real refusal
         // to a dead-looking button, which is what this test exists to catch.
         assert_eq!(
-            cast_fail_text(0x50, None, FailArgs::default(), &g).unwrap(),
+            cast_fail_text(0x50, None, FailArgs::default(), &g)
+                .unwrap()
+                .text,
             "Cannot use while swimming"
         );
         assert_eq!(
-            cast_fail_text(0x58, None, FailArgs::default(), &g).unwrap(),
+            cast_fail_text(0x58, None, FailArgs::default(), &g)
+                .unwrap()
+                .text,
             "Can only use while swimming"
         );
         // The data-suppression face on the real file: the absent keys show nothing.
@@ -524,26 +642,28 @@ mod tests {
         // 0x5e REQUIRES_SPELL_FOCUS: the Crown of the Earth phials' own refusal. Focus 12 is the
         // Starbreeze Village moonwell — using the Jade Phial at any *other* pool is the report.
         assert_eq!(
-            cast_fail_text(0x5E, None, args(12), &g).unwrap(),
+            cast_fail_text(0x5E, None, args(12), &g).unwrap().text,
             "Requires Starbreeze Village Moonwell"
         );
         assert_eq!(
-            cast_fail_text(0x5E, None, args(1), &g).unwrap(),
+            cast_fail_text(0x5E, None, args(1), &g).unwrap().text,
             "Requires Anvil"
         );
         // 0x5d REQUIRES_AREA: area 1657 is Darnassus.
         assert_eq!(
-            cast_fail_text(0x5D, None, args(1657), &g).unwrap(),
+            cast_fail_text(0x5D, None, args(1657), &g).unwrap().text,
             "You need to be in Darnassus"
         );
         // The fallbacks. An id the DBC doesn't name, and a wire word the server never sent, both
         // decline the arm and fall through to the strip — never a raw `%s` on screen.
         assert_eq!(
-            cast_fail_text(0x5E, None, args(999_999), &g).unwrap(),
+            cast_fail_text(0x5E, None, args(999_999), &g).unwrap().text,
             "Requires"
         );
         assert_eq!(
-            cast_fail_text(0x5D, None, FailArgs::default(), &g).unwrap(),
+            cast_fail_text(0x5D, None, FailArgs::default(), &g)
+                .unwrap()
+                .text,
             "You need to be in"
         );
         // 0x5e alone has a client-side stand-in: the failing spell's own `RequiresSpellFocus`
@@ -563,7 +683,8 @@ mod tests {
                 },
                 &g
             )
-            .unwrap(),
+            .unwrap()
+            .text,
             "Requires Shadowglen Moonwell"
         );
     }

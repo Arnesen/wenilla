@@ -47,7 +47,7 @@ use bevy::prelude::*;
 
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
-use crate::ui_action::{show_messages, ui_error_text, MsgSurface, UiError};
+use crate::ui_action::{show_messages, ui_error_text, MsgKind, UiError};
 use crate::ui_chat::ChatLog;
 use crate::ui_script::UiInput;
 
@@ -116,7 +116,7 @@ impl QuestShare {
 /// `push 0x0` at `0x487dc9`-`0x487e69`), which `CGGameUI::DisplayError` dispatches to the chat
 /// window as `CHAT_MSG_SYSTEM`. Not one of them reaches `UIErrorsFrame`, which is what 1733
 /// guessed and is why the guess is recorded as having been a guess.
-fn verdict_message(msg: QuestShareMsg) -> Option<(MsgSurface, &'static str)> {
+fn verdict_message(msg: QuestShareMsg) -> Option<&'static str> {
     let key = match msg {
         QuestShareMsg::SHARING_QUEST => "ERR_QUEST_PUSH_SUCCESS_S",
         QuestShareMsg::CANT_TAKE_QUEST => "ERR_QUEST_PUSH_INVALID_S",
@@ -129,7 +129,7 @@ fn verdict_message(msg: QuestShareMsg) -> Option<(MsgSurface, &'static str)> {
         QuestShareMsg::FINISH_QUEST => "ERR_QUEST_PUSH_ALREADY_DONE_S",
         _ => return None,
     };
-    Some((MsgSurface::Chat, key))
+    Some(key)
 }
 
 /// Owns [`QuestShare`] and its two systems — a plugin of its own rather than a lodger in
@@ -166,10 +166,10 @@ fn feed_quest_share(
     };
 
     // The verdicts: one line per resolved name, the rest kept for the next frame.
-    let mut lines: Vec<(MsgSurface, String)> = Vec::new();
+    let mut lines: Vec<(MsgKind, String)> = Vec::new();
     let mut waiting = Vec::new();
     for mut v in std::mem::take(&mut share.verdicts) {
-        let Some((surface, key)) = verdict_message(v.msg) else {
+        let Some(key) = verdict_message(v.msg) else {
             debug!(
                 "ui_quest_share: unmapped push verdict {} — no line",
                 v.msg.0
@@ -182,11 +182,10 @@ fn feed_quest_share(
                     key,
                     fill_s: Some(name),
                     fill_d: None,
-                    info: false,
                 };
                 let get = |k: &str| script.lua().globals().get::<String>(k).ok();
                 if let Some(text) = ui_error_text(&err, &get) {
-                    lines.push((surface, text));
+                    lines.push((err.kind(), text));
                 }
             }
             None => {
@@ -259,7 +258,7 @@ mod tests {
     #[test]
     fn verdict_keys_are_distinct() {
         let mut keys: Vec<&str> = (0u8..=8)
-            .filter_map(|v| verdict_message(QuestShareMsg(v)).map(|(_, k)| k))
+            .filter_map(|v| verdict_message(QuestShareMsg(v)))
             .collect();
         keys.sort_unstable();
         let n = keys.len();
@@ -284,7 +283,7 @@ mod tests {
         let g = |key: &str| s.lua().globals().get::<String>(key).ok();
 
         for raw in 0u8..=8 {
-            let (_, key) = verdict_message(QuestShareMsg(raw)).expect("mapped");
+            let key = verdict_message(QuestShareMsg(raw)).expect("mapped");
             let text = g(key).unwrap_or_default();
             assert!(!text.is_empty(), "{key} (verdict {raw}) missing");
             assert!(text.contains("%s"), "{key} names no member: {text:?}");
@@ -293,13 +292,12 @@ mod tests {
         // The two ends of the flow, filled: the opener the sharer sees the instant they click, and
         // the answer a decline produces.
         let line = |raw: u8| {
-            let (_, key) = verdict_message(QuestShareMsg(raw)).unwrap();
+            let key = verdict_message(QuestShareMsg(raw)).unwrap();
             ui_error_text(
                 &UiError {
                     key,
                     fill_s: Some("Mate".into()),
                     fill_d: None,
-                    info: false,
                 },
                 &g,
             )

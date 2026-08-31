@@ -29,7 +29,7 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_action::{show_messages, ui_error_text, MsgSurface, UiError};
+use crate::ui_action::{show_messages, ui_error_text, MsgKind, UiError};
 use crate::ui_chat::ChatLog;
 use crate::ui_script::UiInput;
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
@@ -69,7 +69,7 @@ pub(crate) struct QuestGiver {
     /// reference's `DisplayError(msgId)` split into (surface, GlobalStrings key + fills), so the
     /// line comes from the VM's own strings and never from a hardcoded English literal
     /// (decision 0669).
-    messages: Vec<(MsgSurface, UiError)>,
+    messages: Vec<UiError>,
     /// The re-ask epoch — see [`Self::bump_reask`].
     reask: u32,
 }
@@ -163,13 +163,14 @@ impl QuestGiver {
     }
 
     /// Queue one client message for [`feed_quest`] to resolve and show — the net apply's half of
-    /// the reference's `DisplayError(msgId)` (decision 0669).
-    pub(crate) fn push_message(&mut self, surface: MsgSurface, msg: UiError) {
-        self.messages.push((surface, msg));
+    /// the reference's `DisplayError(msgId)` (decision 0669). The message carries its own surface
+    /// in its key; the caller does not choose one (decision 1770).
+    pub(crate) fn push_message(&mut self, msg: UiError) {
+        self.messages.push(msg);
     }
 
     /// Take the queued client messages (drained by [`feed_quest`], which owns the VM).
-    pub(crate) fn take_messages(&mut self) -> Vec<(MsgSurface, UiError)> {
+    pub(crate) fn take_messages(&mut self) -> Vec<UiError> {
         std::mem::take(&mut self.messages)
     }
 
@@ -465,12 +466,12 @@ fn feed_quest(
     // VM's own GlobalStrings first (immutable script), then show each on the surface its message
     // record names — decision 0669's `DisplayError` kind. Drained BEFORE the snapshot's early-out
     // so a refusal that also closes the panel still gets its line out this frame.
-    let lines: Vec<(MsgSurface, String)> = giver
+    let lines: Vec<(MsgKind, String)> = giver
         .take_messages()
         .into_iter()
-        .filter_map(|(surface, msg)| {
+        .filter_map(|msg| {
             let get = |key: &str| script.lua().globals().get::<String>(key).ok();
-            ui_error_text(&msg, &get).map(|text| (surface, text))
+            ui_error_text(&msg, &get).map(|text| (msg.kind(), text))
         })
         .collect();
     show_messages(&mut script, &mut chat, "ui_quest", lines);
@@ -978,7 +979,6 @@ mod tests {
                     key: questgiver_failed_key(4),
                     fill_s: Some("A Threat Within".into()),
                     fill_d: None,
-                    info: false,
                 },
                 &g
             )

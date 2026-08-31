@@ -1733,10 +1733,22 @@ pub(crate) enum ClientCommand {
     InitiateTrade {
         target: u64,
     },
-    /// The target's auto-reply to `BEGIN_TRADE` (`CMSG_BEGIN_TRADE`, empty) — makes the server emit
-    /// `OPEN_WINDOW` to both sides. Sent by the net bridge the frame it decodes a `BEGIN_TRADE`
-    /// status (decision 0592 P1; the reference client auto-answers, `TradeHandler.cpp`).
+    /// **Accept** an incoming trade request (`CMSG_BEGIN_TRADE`, empty) — makes the server emit
+    /// `OPEN_WINDOW` to both sides. Sent by [`crate::ui_trade::answer_trade_request`], never by the
+    /// net drain: *whether* to accept is a policy with five inputs and (decision 1764) the player's
+    /// own answer, so the arm that decodes `BEGIN_TRADE` only records the request.
     BeginTrade,
+    /// Decline an incoming trade request as **ignored** (`CMSG_IGNORE_TRADE`, `0x119`, empty) —
+    /// leg 2 of the reference's ladder (`0x4bf759` → `0x5d41c0`, its one call site image-wide),
+    /// and the only leg that answers on a different opcode. vmangos turns it into
+    /// `TRADE_STATUS_IGNORE_YOU`, so the initiator reads "… is ignoring you" rather than "busy".
+    IgnoreTrade,
+    /// **Decline** an incoming trade request as busy (`CMSG_BUSY_TRADE`, `0x118`, empty) — the
+    /// reference's own refusal sender (`0x5d4150`), which vmangos turns into `TRADE_STATUS_BUSY`
+    /// to *both* sides. Five of the ladder's eight refusal legs go out on this opcode (decision
+    /// 1764); the ignore leg uses [`Self::IgnoreTrade`], two legs send nothing at all, and the
+    /// **player's** own No is [`Self::CancelTrade`], not this.
+    BusyTrade,
     /// Press the Trade button (`CMSG_ACCEPT_TRADE`) — the accept half of the two-sided confirm.
     AcceptTrade,
     /// Drop your own accept but stay in the trade (`CMSG_UNACCEPT_TRADE`).
@@ -2294,11 +2306,19 @@ impl DisconnectedMessage {
     ///
     /// It is `false` twice over. A [`SessionEnd::LoggedOut`](benilla_protocol::SessionEnd::LoggedOut)
     /// teardown is the relist *inside* one session — the roster that follows IS the character
-    /// select the player asked for. And an unattended run ([`crate::run_mode::unattended_login`])
-    /// keeps 0065's seamless reconnect: a probe has nobody to press Okay.
+    /// select the player asked for. And a run that has **declared itself unattended**
+    /// ([`crate::run_mode::unattended`]) keeps 0065's seamless reconnect: a probe has nobody to
+    /// press Okay.
+    ///
+    /// That second clause used to read the *environment* instead
+    /// ([`crate::run_mode::env_login`] — "any of `$WOW_USER`/`$WOW_PASS`/`$WOW_CHAR`"), which is
+    /// true of the director's own launch line, so 1262's fix was inert in every session a person
+    /// was actually in: the kick came, and the client reconnected and took the account back off
+    /// whoever had displaced it. Decision 1769 — the doubt now falls the other way, and only a run
+    /// that says it is driverless gets to act instead of a person.
     pub(crate) fn new(reason: String, end: benilla_protocol::SessionEnd) -> Self {
         let session_over =
-            end == benilla_protocol::SessionEnd::Lost && !crate::run_mode::unattended_login();
+            end == benilla_protocol::SessionEnd::Lost && !crate::run_mode::unattended();
         Self {
             reason,
             end,
@@ -2497,6 +2517,64 @@ pub(crate) struct AiReactionMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The kick sends the player back to the login screen** — decision 1262's whole promise,
+    /// pinned at the one place that decides it, in the environment the director actually plays in.
+    ///
+    /// 1262 was built and verified in August and then quietly stopped working, with none of its
+    /// code touched: the verdict asked the *environment* whether anybody was here, and on
+    /// 2026-08-29 the director's launch line became `WOW_USER=one WOW_PASS=pone cargo play` — the
+    /// example line in our own `.cargo/config.toml`. From that moment every session they played
+    /// was "a probe", so a kick meant reconnect, and the account ping-ponged exactly as B252
+    /// reported. Nothing about the fix was wrong; the fact under it was. 1769 made the claim a
+    /// declaration, and this test is the tripwire: a run may only act instead of a person if it
+    /// said so.
+    #[test]
+    fn a_kick_ends_the_session_unless_the_run_declared_itself_driverless() {
+        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let lost = || {
+            DisconnectedMessage::new("kicked".into(), benilla_protocol::SessionEnd::Lost)
+                .session_over
+        };
+
+        // The director's launch line, verbatim. Credentials in the environment, nobody declared
+        // absent — this is a person playing, and a lost session is over.
+        let _user = EnvGuard::set("WOW_USER", "one");
+        let _pass = EnvGuard::set("WOW_PASS", "pone");
+        let _char = EnvGuard::set("WOW_CHAR", "One");
+        let _decl = EnvGuard::unset("WOW_UNATTENDED");
+        let _cap = EnvGuard::unset("WOW_CAPTURE");
+        let _rig = EnvGuard::unset("WOW_RIG");
+        assert!(lost(), "the reported regression: this must be `true`");
+
+        // A clean `/logout` is never "over" — the roster that follows IS the screen they asked for.
+        assert!(
+            !DisconnectedMessage::new("bye".into(), benilla_protocol::SessionEnd::LoggedOut)
+                .session_over
+        );
+
+        // 0065's seamless reconnect survives exactly where the run says nobody is there to press
+        // Okay — a declaration, or the two runs that cannot be a person.
+        {
+            let _d = EnvGuard::set("WOW_UNATTENDED", "1");
+            assert!(!lost(), "a declared probe still reconnects");
+        }
+        {
+            let _r = EnvGuard::set("WOW_RIG", "at:229,0,0,0");
+            assert!(!lost(), "a rig drives the body; it cannot be a person");
+        }
+        {
+            let _c = EnvGuard::set("WOW_CAPTURE", "some-scenario");
+            assert!(
+                !lost(),
+                "a capture authors the camera; it cannot be a person"
+            );
+        }
+        assert!(lost(), "and the guards put every one of those back");
+    }
 
     /// The vanilla player set, and the one every number below is read against:
     /// walk 2.5 · run 7.0 · runBack 4.5 · swim 4.722 · swimBack 2.5 (vmangos `baseMoveSpeed`).

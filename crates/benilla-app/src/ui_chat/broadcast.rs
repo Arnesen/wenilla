@@ -62,7 +62,7 @@
 //! Its arm reads nothing off the wire — `0x5e4a09` is `push 0x1c3; call 0x496720`, three
 //! instructions — so the whole packet is "show message 451". benilla already models
 //! `CGGameUI::DisplayError 0x496720` and its message registry
-//! ([`crate::ui_action::MsgSurface`]); what this packet needed was the two facts that registry
+//! ([`crate::ui_action::MsgKind`]); what this packet needed was the two facts that registry
 //! entry carries, and both are VERIFIED here:
 //!
 //! - **451 is `ERR_CHAT_RESTRICTED`.** The string `"ERR_CHAT_RESTRICTED"` (`0x83f6d4`) has exactly
@@ -239,6 +239,14 @@ pub(super) fn feed_broadcasts(
                 push_channel_lines(&mut log, &channels, zone, player_zone, &text);
             }
             Broadcast::ChatRestricted => {
+                // The system line is written out here rather than routed through
+                // `ui_action::show_messages`, and that is not an oversight: of this feed's four
+                // arms only this one is a `DisplayError` tenant at all — the two defence
+                // broadcasts are engine-composed CHANNEL lines and `SMSG_SERVER_MESSAGE` composes
+                // from `ServerMessages.dbc`, so three of the four have no message record to read a
+                // surface from. The claim that this one's record says "chat" is checked instead,
+                // in `chat_restricted_is_a_chat_row` below.
+                //
                 // An absent key shows nothing — this crate's uniform GlobalStrings stance, and a
                 // deliberate half-step short of the reference: `0x496720` suppresses on the message
                 // record's own key field being NULL or empty (`0x4967c5`), but `FrameScript_GetText`
@@ -289,6 +297,16 @@ fn push_channel_lines(
 
 #[cfg(test)]
 mod tests {
+    /// `ERR_CHAT_RESTRICTED` (id 451) carries kind 0, so the arm above is right to write a chat
+    /// system line and not a red toast — the one hand-set surface left in this feed, checked
+    /// rather than trusted (decision 1770).
+    #[test]
+    fn chat_restricted_is_a_chat_row() {
+        use benilla_ui::messages::{by_key, kind_of, MsgKind};
+        assert_eq!(by_key("ERR_CHAT_RESTRICTED").expect("a real row").id, 451);
+        assert_eq!(kind_of("ERR_CHAT_RESTRICTED"), MsgKind::Chat);
+    }
+
     use super::*;
     use benilla_formats::{ChatChannelRow, ChatChannelsCatalog};
 

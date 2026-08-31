@@ -402,7 +402,10 @@ mod tests {
         notification("GM mode is ON".to_string(), &mut errors);
         assert_eq!(
             errors.0,
-            [("GM mode is ON".to_string(), false)],
+            [(
+                "GM mode is ON".to_string(),
+                crate::ui_action::MsgKind::Error
+            )],
             "the SendNotification half is the RED toast (0x4945b0's flag 1), never a second line"
         );
     }
@@ -420,7 +423,10 @@ mod tests {
         );
         assert_eq!(
             errors.0,
-            [("You must be at least level 58 to enter.".to_string(), true)]
+            [(
+                "You must be at least level 58 to enter.".to_string(),
+                crate::ui_action::MsgKind::Info
+            )]
         );
     }
 }
