@@ -981,10 +981,21 @@ pub(crate) struct Model {
     /// drain.
     pub(crate) craft_close: bool,
 
-    /// The open loot's row snapshot the app pushes (`None` = no loot open), the `LootSlot` row-pick
-    /// intents it drains, and whether `CloseLoot` was called — the loot seam ([`loot`]).
+    /// The open loot's row snapshot the app pushes (`None` = no loot open), the row-pick intents it
+    /// drains, and whether `CloseLoot` was called — the loot seam ([`loot`]).
+    ///
+    /// **The picks come in two flavours, and the flavour is load-bearing** (decision 1744): the
+    /// reference's take dispatcher `0x4c2790(slot, flag)` is one function with two entries, and the
+    /// flag decides whether a bind-on-pickup row raises the LOOT_BIND confirm or is taken outright.
+    /// `flag == 0` is the row click, which in 1.12 is the C `CLootButton`'s own behaviour and here
+    /// is `BenillaTakeLootSlot`; `flag != 0` is the confirm continuation, which is the ONLY thing
+    /// the 1.12 Lua binding `LootSlot` does (`0x4c2e70` passes `edx = 1`, and its sole FrameXML
+    /// caller is `StaticPopupDialogs["LOOT_BIND"].OnAccept`).
     pub(crate) loot: Option<loot::LootState>,
     pub(crate) loot_picks: Vec<u32>,
+    /// The `LootSlot(slot)` confirm continuations — 1-based display rows, drained separately from
+    /// [`Self::loot_picks`] so the app can honour the reference's pending-slot gate.
+    pub(crate) loot_confirms: Vec<u32>,
     pub(crate) loot_close: bool,
     /// The `GiveMasterLoot(slot, candidateIndex)` assignments the app drains — both 1-based and
     /// both display-side: the row as the window numbers it, and the candidate's position in
@@ -1638,6 +1649,7 @@ impl Model {
             craft_close: false,
             loot: None,
             loot_picks: Vec::new(),
+            loot_confirms: Vec::new(),
             loot_close: false,
             loot_master_gives: Vec::new(),
             loot_rolls: loot_roll::LootRollsState::default(),

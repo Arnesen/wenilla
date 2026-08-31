@@ -88,6 +88,10 @@ fn scroll(
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let m = lua.create_table()?;
 
+    // The justify quartet, shared with the sibling class — see [`super::install_justify`] for the
+    // method-table bytes that put all four on BOTH tables.
+    super::install_justify(lua, &m, "ScrollingMessageFrame")?;
+
     // AddMessage(text [, r, g, b [, id]]) — the id (5th arg) is accepted and ignored (v1 has no
     // per-line UpdateColorByID). rgb absent ⇒ white; the state quantizes round-half-up and forces
     // the line opaque, then the fade drives its alpha.

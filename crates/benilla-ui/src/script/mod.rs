@@ -277,9 +277,12 @@ const REG_DEFAULT_ERRORHANDLER: &str = "__benilla_default_errorhandler";
 /// Names on **both** region leaves — and each leaf registers its own copy, so these are NOT on the
 /// Region map and must not be hoisted into it (wow-re
 /// `system/ui/scratch/texture-fontstring-method-split.md`, stated there as a trap in as many words).
-/// `GetDrawLayer` is in the client's pair and absent here; absent is absent.
-pub(crate) const REGION_LEAF_SHARED: [&str; 8] = [
+/// `GetDrawLayer` is the setter's pair on both leaves (Texture `0x79a6c0`, FontString `0x79c660`)
+/// and is here now — it was carved as absent, which was true and was a gap, not a decision; pfUI's
+/// `GetNoNameObject` reads it off every child of a frame it reskins.
+pub(crate) const REGION_LEAF_SHARED: [&str; 9] = [
     "SetDrawLayer",
+    "GetDrawLayer",
     "SetVertexColor",
     "SetAlpha",
     "GetAlpha",

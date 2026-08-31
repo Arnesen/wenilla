@@ -180,6 +180,18 @@ pub(super) fn draw_layer_from_str(s: &str) -> Option<DrawLayer> {
     })
 }
 
+/// The inverse of [`draw_layer_from_str`] — the token `GetDrawLayer` answers, in the client's own
+/// spelling (uppercase, the five `<Layer level=>` names).
+pub(super) fn draw_layer_name(l: DrawLayer) -> &'static str {
+    match l {
+        DrawLayer::Background => "BACKGROUND",
+        DrawLayer::Border => "BORDER",
+        DrawLayer::Artwork => "ARTWORK",
+        DrawLayer::Overlay => "OVERLAY",
+        DrawLayer::Highlight => "HIGHLIGHT",
+    }
+}
+
 fn frame_kind_from_str(s: &str) -> Option<FrameKind> {
     Some(match enum_token(s).as_str() {
         "FRAME" => FrameKind::Frame,

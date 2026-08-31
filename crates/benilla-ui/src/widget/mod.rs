@@ -198,6 +198,19 @@ pub use kinds::{
 pub struct Frame {
     /// The widget subtype.
     pub kind: FrameKind,
+    /// Draw layers switched OFF on this frame — bit `n` = [`DrawLayer::index`] `n`.
+    ///
+    /// `Frame:EnableDrawLayer(layer)` / `DisableDrawLayer(layer)`, VERIFIED present on the Frame
+    /// method table `0x878ec0` at `0x7755b0` / `0x775680`, sitting between `IsToplevel` and `Show`.
+    /// (Read off the `{const char*, void*}` pair bytes; the same walk reproduces wow-re's recorded
+    /// Button table at `0x879d00` exactly.)
+    ///
+    /// A disabled layer hides every region the frame owns in it, and the region's own `Show`/`Hide`
+    /// is untouched underneath — re-enabling the layer brings back exactly what was showing before,
+    /// which is why this is a frame-level mask rather than a sweep over the regions. Both corpus
+    /// consumers (pfUI, MoveAnything) use it to strip Blizzard artwork off a frame they are
+    /// reskinning without disturbing what the owner does to its own regions.
+    pub disabled_layers: u8,
     /// The frame's name (its global identifier), if any. See [`WidgetArena::lookup`] for the
     /// non-overwriting publish rule.
     pub name: Option<String>,
@@ -576,6 +589,7 @@ impl WidgetArena {
         let effective_alpha = alpha;
 
         let frame = Frame {
+            disabled_layers: 0,
             kind,
             name: name.clone(),
             parent,

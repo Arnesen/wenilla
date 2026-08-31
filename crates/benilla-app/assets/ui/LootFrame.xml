@@ -34,9 +34,12 @@
         The Era loot API this drives (all app-fed via the loot seam, benilla-ui `script/loot.rs`):
         GetNumLootItems(), GetLootSlotInfo(slot) -> texture,item,quantity,quality, LootSlotIsItem/
         LootSlotIsCoin(slot), GetLootSlotLink(slot) (the row's item link, read by the click's
-        ctrl/shift arms — decision 1059), LootSlot(slot) (the row click's action), CloseLoot() (from
-        OnHide). The synthesized coin pile is row 1 when the loot carries gold; a row click sends the
-        money or the item's wire slot (the app maps it).
+        ctrl/shift arms — decision 1059), BenillaTakeLootSlot(slot) (the row click's action, which
+        in 1.12 is the C LootButton's and no Lua binding at all — decision 1744), LootSlot(slot) (the
+        LOOT_BIND confirmation continuation, its only 1.12 meaning), CloseLoot() (from OnHide). The
+        synthesized coin pile is row 1 when the loot carries gold; a row click sends the money or the
+        item's wire slot (the app maps it) — unless the row binds on pickup, where it raises the
+        soulbind confirm instead and the send waits for the OK.
 
         Paging (LootFrame.lua l.27-31,70-73,105-118): 4 rows/page; > 4 items spends one slot on the
         pager, showing 3 rows + Up/Down. We keep the current page across content-change repaints
@@ -139,13 +142,13 @@
         --  · The button code is never read (`0x4c1820` doesn't look at it), so a RIGHT-click loots
         --    exactly like a left one — which is why this handler takes no `mouseButton`.
         --
-        -- benilla folds that C action into this Lua handler (`LootSlot(button.slot)`, this file's
-        -- model since 0084), so the gate has to be an early return here. Named divergence, not a
-        -- transcription slip: 1.12 exposes no plain "take slot N" binding at all — the real
-        -- `LootSlot 0x4c2e70` is the LOOT_BIND *confirmation continuation* (flag 1, gated on the
-        -- stashed slot at `[0x847cec]`; its only FrameXML caller is `StaticPopup.lua:606`). Moving
-        -- the take host-side onto the widget, and shrinking `LootSlot()` to that continuation, is
-        -- 1067's named follow-up.
+        -- benilla folds that C action into this Lua handler, so the gate has to be an early return
+        -- here. The verb it calls is `BenillaTakeLootSlot`, not `LootSlot`, and that is 1067's
+        -- named follow-up landed (decision 1744): 1.12 exposes no plain "take slot N" binding at
+        -- all — the real `LootSlot 0x4c2e70` is the LOOT_BIND *confirmation continuation* (flag 1,
+        -- gated on the stashed slot at `[0x847cec]`; its only FrameXML caller is
+        -- `StaticPopup.lua:606`, the entry below). Ours keeps exactly that meaning, so an addon
+        -- calling `LootSlot(n)` on an ordinary row does what it does on the real client: nothing.
         --
         -- The reference's tail (StaticPopup_Hide("CONFIRM_LOOT_DISTRIBUTION") and the four
         -- LootFrame.selected* fields, l.155-161) is the MASTER-LOOT dropdown's bookkeeping —
@@ -198,7 +201,7 @@
             LootFrame.selectedItemName = button.name:GetText()
 
             if modified then return end
-            LootSlot(button.slot)
+            BenillaTakeLootSlot(button.slot)
         end
 
         -- Hover: the plain engine item tooltip, ITEM rows only — the ref's own gate (its
@@ -302,12 +305,53 @@
             LootFrame_Update()
         end
 
+        -- ── The soulbind confirm ──────────────────────────────────────────────────────────────
+        -- ref GlobalStrings.lua l.2612 / l.2818 / l.465, fallback form (the player's own localized
+        -- file runs off the patch chain first).
+        LOOT_NO_DROP = LOOT_NO_DROP or "Looting this item will bind it to you."
+        OKAY = OKAY or "Okay"
+        CANCEL = CANCEL or "Cancel"
+
+        -- ref StaticPopup.lua l.601-611, verbatim. `OnAccept`'s argument is `dialog.data`, which
+        -- the driver below sets to the event's row — and `LootSlot` is the continuation verb, so
+        -- this line is the ONLY thing in the client that ever completes a bind-deferred take.
+        --
+        -- Nothing else is needed: no OnCancel (declining just leaves the row in the window, and the
+        -- app drops the pending stash when the window turns over) and no OnUpdate poll, because the
+        -- window's own LOOT_CLOSED hides it (below, ref LootFrame.lua l.53-54).
+        StaticPopupDialogs["LOOT_BIND"] = {
+            text = LOOT_NO_DROP,
+            button1 = OKAY,
+            button2 = CANCEL,
+            OnAccept = function(slot)
+                LootSlot(slot)
+            end,
+            timeout = 0,
+            exclusive = 1,
+            hideOnEscape = 1,
+        }
+
+        -- ref UIParent.lua l.317-323. The row rides on `dialog.data` rather than as a text arg —
+        -- LOOT_NO_DROP has no format specifier, so the dialog shows the same sentence whatever
+        -- binds; the number is only there to be handed back to LootSlot.
+        --
+        -- The reference registers this on UIParent, which owns every bind confirm; benilla hangs it
+        -- on LootFrame, whose LOOT_CLOSED already has to hide the dialog. Same two moments, one
+        -- listener, and the arc stays in one file.
+        function BenillaLootBindConfirm(slot)
+            local dialog = StaticPopup_Show("LOOT_BIND")
+            if dialog then
+                dialog.data = slot
+            end
+        end
+
         function LootFrame_OnLoad()
             local frame = this
             frame.page = 1
             frame:RegisterEvent("LOOT_OPENED")
             frame:RegisterEvent("LOOT_UPDATE")
             frame:RegisterEvent("LOOT_CLOSED")
+            frame:RegisterEvent("LOOT_BIND_CONFIRM")
             -- Master loot (ref l.9-10). Neither event carries an argument: the candidate list is
             -- read back through GetMasterLootCandidate at menu-build time, not pushed.
             frame:RegisterEvent("OPEN_MASTER_LOOT_LIST")
@@ -338,7 +382,12 @@
                     LootFrame_PageDown()
                 end
             elseif event == "LOOT_CLOSED" then
+                -- ref l.53-54: the confirm dies with the window it addressed. Its row number would
+                -- name a slot in the NEXT corpse otherwise.
+                StaticPopup_Hide("LOOT_BIND")
                 HideUIPanel(frame)
+            elseif event == "LOOT_BIND_CONFIRM" then
+                BenillaLootBindConfirm(arg1)
             elseif event == "OPEN_MASTER_LOOT_LIST" then
                 -- Ref l.58-61. Anchored to the ROW that was clicked, not to the frame — the name
                 -- the click stashed a moment ago.

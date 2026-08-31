@@ -758,7 +758,7 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
         s.eval::<i64>("return GetSelectedSkill()").unwrap() > 0,
         "the row click selects"
     );
-    assert!(shown(&mut s, "SkillDetailBar"), "detail bar arms");
+    assert!(shown(&mut s, "SkillDetailStatusBar"), "detail bar arms");
     // The description body renders through the SKILL_DESCRIPTION format (skillType is "" in every
     // reachable 1.12 branch) — the nil-global half of the report, pinned.
     assert_eq!(

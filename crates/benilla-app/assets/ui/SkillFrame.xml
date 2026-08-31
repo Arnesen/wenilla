@@ -96,7 +96,14 @@
     -->
     <Script><![CDATA[
         -- ── Constants (ref SkillFrame.lua:1-2) ──────────────────────────────────────────────────────
-        local SKILLFRAME_SKILLS_DISPLAYED = 12 -- SKILLS_TO_DISPLAY
+        -- SKILLS_TO_DISPLAY is the reference's own GLOBAL and is published as one. It was a chunk
+        -- local named SKILLS_TO_DISPLAY with the real name in a trailing comment — the
+        -- value transcribed, the NAME kept private, which is the same shape that cost us
+        -- BlackoutWorld and the five SkillFrame* children. Addons read it: pfUI's character skin
+        -- loops `for i = 1, SKILLS_TO_DISPLAY` over the row labels
+        -- (skins/blizzard/character.lua:277) and died on "'for' limit must be a number".
+        -- 12 is honest here rather than copied — this file declares exactly 12 SkillTypeLabel rows.
+        SKILLS_TO_DISPLAY = 12
         local SKILLFRAME_SKILL_HEIGHT = 15     -- SKILLFRAME_SKILL_HEIGHT
 
         -- GlobalStrings (ref GlobalStrings.lua:3478), chunk-local per the codebase idiom — safe
@@ -188,7 +195,7 @@
         -- same fill (ref l.220-226): shown only for an abandonable line, carrying the name the
         -- confirm popup formats and the index its accept abandons.
         function BenillaSkillFrame_UpdateDetail()
-            local bar = getglobal("SkillDetailBar")
+            local bar = getglobal("SkillDetailStatusBar")
             local desc = getglobal("SkillDetailDescriptionText")
             local unlearn = getglobal("SkillDetailUnlearnButton")
             local index = GetSelectedSkill()
@@ -299,14 +306,14 @@
         function BenillaSkillFrame_Update()
             local numRows = GetNumSkillLines()
             local scrollFrame = getglobal("SkillListScrollFrame")
-            FauxScrollFrame_Update(scrollFrame, numRows, SKILLFRAME_SKILLS_DISPLAYED, SKILLFRAME_SKILL_HEIGHT)
+            FauxScrollFrame_Update(scrollFrame, numRows, SKILLS_TO_DISPLAY, SKILLFRAME_SKILL_HEIGHT)
             local offset = FauxScrollFrame_GetOffset(scrollFrame)
 
             local highlight = getglobal("SkillHighlight")
             highlight:Hide()
             local selected = GetSelectedSkill()
 
-            for i = 1, SKILLFRAME_SKILLS_DISPLAYED do
+            for i = 1, SKILLS_TO_DISPLAY do
                 local index = i + offset
                 BenillaSkillFrame_SetRow(i, index, numRows)
                 if selected == index and index <= numRows then
@@ -323,7 +330,7 @@
                     allExpanded = false
                 end
             end
-            local collapseAll = getglobal("SkillCollapseAllButton")
+            local collapseAll = getglobal("SkillFrameCollapseAllButton")
             if numRows == 0 then
                 collapseAll:Disable()
             else
@@ -338,7 +345,7 @@
             end
 
             BenillaSkillFrame_UpdateDetail()
-            BenillaSkillExpandButtonFrame_Fit()
+            BenillaSkillFrameExpandButtonFrame_Fit()
         end
 
         -- A rank-bar click selects it (ref SkillBar_OnClick, l.450-455).
@@ -376,8 +383,8 @@
         -- The collapse-all tab (ref SkillFrameCollapseAllButton's own isExpanded flag, l.303-309,
         -- driven the TrainerFrame.xml BenillaTrainerCollapseAllButton way since this engine's
         -- CollapseSkillHeader(0)/ExpandSkillHeader(0) already fold/unfold every group at once).
-        function BenillaSkillCollapseAllButton_OnClick()
-            local b = getglobal("SkillCollapseAllButton")
+        function BenillaSkillFrameCollapseAllButton_OnClick()
+            local b = getglobal("SkillFrameCollapseAllButton")
             if b.collapsed then
                 ExpandSkillHeader(0)
             else
@@ -401,11 +408,11 @@
         -- two opposing anchors and no Lua width — UiPanels.xml's tab-highlight note — but a span
         -- can only be resolved from two anchors when both edges are frames; a text width has to be
         -- asked for.)
-        function BenillaSkillExpandButtonFrame_Fit()
-            local label = getglobal("SkillCollapseAllButton")
+        function BenillaSkillFrameExpandButtonFrame_Fit()
+            local label = getglobal("SkillFrameCollapseAllButton")
             local w = label:GetTextWidth()
             if w and w > 0 then
-                getglobal("SkillExpandButtonFrame"):SetWidth(w + 45)
+                getglobal("SkillFrameExpandButtonFrame"):SetWidth(w + 45)
             end
         end
 
@@ -441,7 +448,7 @@
             -- clear both anchors stand and the left/center edges resolve off the page, not the
             -- bar. (The ref needs no clear on ITS file only because its XML anchors the string.)
             SkillDetailDescriptionText:ClearAllPoints()
-            SkillDetailDescriptionText:SetPoint("TOPLEFT", "SkillDetailBar", "BOTTOMLEFT", -2, -10)
+            SkillDetailDescriptionText:SetPoint("TOPLEFT", "SkillDetailStatusBar", "BOTTOMLEFT", -2, -10)
         end
 
         function SkillFrame_OnShow()
@@ -597,13 +604,13 @@
                  label's seat. Was a fixed 54 with a fixed 38 middle, copied off
                  TrainerFrame.xml rather than read off THIS ref; the label's own font fix below
                  (12px, not 10) would have run under the right cap at that width. -->
-            <Frame name="SkillExpandButtonFrame">
+            <Frame name="SkillFrameExpandButtonFrame">
                 <Size><AbsDimension x="54" y="32"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="70" y="-49"/></Offset></Anchor></Anchors>
                 <Layers><Layer level="BACKGROUND">
-                    <Texture name="SkillExpandTabLeft" file="Interface\QuestFrame\UI-QuestLogSortTab-Left"><Size><AbsDimension x="8" y="32"/></Size><Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="6"/></Offset></Anchor></Anchors></Texture>
-                    <Texture name="SkillExpandTabRight" file="Interface\QuestFrame\UI-QuestLogSortTab-Right"><Size><AbsDimension x="8" y="32"/></Size><Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="6"/></Offset></Anchor></Anchors></Texture>
-                    <Texture name="SkillExpandTabMiddle" file="Interface\QuestFrame\UI-QuestLogSortTab-Middle"><Size><AbsDimension x="0" y="32"/></Size><Anchors><Anchor point="LEFT" relativeTo="SkillExpandTabLeft" relativePoint="RIGHT"/><Anchor point="RIGHT" relativeTo="SkillExpandTabRight" relativePoint="LEFT"/></Anchors></Texture>
+                    <Texture name="SkillFrameExpandTabLeft" file="Interface\QuestFrame\UI-QuestLogSortTab-Left"><Size><AbsDimension x="8" y="32"/></Size><Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="6"/></Offset></Anchor></Anchors></Texture>
+                    <Texture name="SkillFrameExpandTabRight" file="Interface\QuestFrame\UI-QuestLogSortTab-Right"><Size><AbsDimension x="8" y="32"/></Size><Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="6"/></Offset></Anchor></Anchors></Texture>
+                    <Texture name="SkillFrameExpandTabMiddle" file="Interface\QuestFrame\UI-QuestLogSortTab-Middle"><Size><AbsDimension x="0" y="32"/></Size><Anchors><Anchor point="LEFT" relativeTo="SkillFrameExpandTabLeft" relativePoint="RIGHT"/><Anchor point="RIGHT" relativeTo="SkillFrameExpandTabRight" relativePoint="LEFT"/></Anchors></Texture>
                 </Layer></Layers>
                 <Frames>
                     <!-- The ALL fold (ref SkillFrameCollapseAllButton, l.292-310). Its face is the
@@ -620,17 +627,17 @@
                          texture's geometric middle, so the label rides 3px low, not 3px high — the
                          +3 copied from TrainerFrame.xml put the whole "- All" 6px above where the
                          reference seats it. -->
-                    <Button name="SkillCollapseAllButton" text="ALL">
+                    <Button name="SkillFrameCollapseAllButton" text="ALL">
                         <Size><AbsDimension x="40" y="22"/></Size>
-                        <Anchors><Anchor point="LEFT" relativeTo="SkillExpandTabLeft" relativePoint="RIGHT"><Offset><AbsDimension x="-3" y="-3"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="LEFT" relativeTo="SkillFrameExpandTabLeft" relativePoint="RIGHT"><Offset><AbsDimension x="-3" y="-3"/></Offset></Anchor></Anchors>
                         <NormalTexture file="Interface\Buttons\UI-MinusButton-Up"><Size><AbsDimension x="16" y="16"/></Size><Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors></NormalTexture>
                         <HighlightTexture file="Interface\Buttons\UI-PlusButton-Hilight" alphaMode="ADD"><Size><AbsDimension x="16" y="16"/></Size><Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors></HighlightTexture>
                         <ButtonText><Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="25" y="0"/></Offset></Anchor></Anchors></ButtonText>
                         <NormalFont inherits="GameFontHighlight" justifyH="LEFT"/>
-                        <Scripts><OnClick>BenillaSkillCollapseAllButton_OnClick()</OnClick></Scripts>
+                        <Scripts><OnClick>BenillaSkillFrameCollapseAllButton_OnClick()</OnClick></Scripts>
                     </Button>
                 </Frames>
-                <Scripts><OnLoad>BenillaSkillExpandButtonFrame_Fit()</OnLoad></Scripts>
+                <Scripts><OnLoad>BenillaSkillFrameExpandButtonFrame_Fit()</OnLoad></Scripts>
             </Frame>
 
             <!-- The page's own CLOSE button (ref SkillFrameCancelButton, l.339-357: 80x22,
@@ -706,7 +713,7 @@
 
             <!-- The faux-scroll frame (FauxScrollFrameTemplate, ScrollTemplates.xml): invisible
                  container over the 12 rows; only its right-hand Slider scroll bar renders. Sized to the
-                 12-row span (SKILLFRAME_SKILLS_DISPLAYED × 18px pitch), TrainerFrame.xml's own
+                 12-row span (SKILLS_TO_DISPLAY × 18px pitch), TrainerFrame.xml's own
                  same-TOPLEFT-as-row1 convention. updateFunc set in SkillFrame_OnLoad. -->
             <Frame name="SkillListScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="296" y="216"/></Size>
@@ -717,7 +724,7 @@
                  skill's own rank StatusBar + name — no description/abandon/spend row. Reuses the SAME
                  rank template the list rows use (its Border click is harmless here: no .skillIndex is
                  ever set on this instance, so BenillaSkillRankFrame_OnClick's guard no-ops it). -->
-            <StatusBar name="SkillDetailBar" inherits="BenillaSkillRankTemplate" hidden="true">
+            <StatusBar name="SkillDetailStatusBar" inherits="BenillaSkillRankTemplate" hidden="true">
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="38" y="-325"/></Offset></Anchor></Anchors>
                 <Frames>
                     <!-- The unlearn (abandon) button (ref $parentUnlearnButton, ref SkillFrame.xml
@@ -729,7 +736,7 @@
                     <Button name="SkillDetailUnlearnButton" hidden="true">
                         <Size><AbsDimension x="32" y="32"/></Size>
                         <Anchors>
-                            <Anchor point="LEFT" relativeTo="SkillDetailBarBorder" relativePoint="RIGHT">
+                            <Anchor point="LEFT" relativeTo="SkillDetailStatusBarBorder" relativePoint="RIGHT">
                                 <Offset><AbsDimension x="-2" y="-1"/></Offset>
                             </Anchor>
                         </Anchors>

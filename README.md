@@ -51,8 +51,8 @@ benilla is done when a 1.12.1 player can do everything here that they could in t
 client, it looks and feels the same, and it runs from a download on Windows, Linux and macOS.
 No dates; the order is what is likely, not a promise.
 
-- The rest of the basics: battlegrounds, guild charters, the stable master, meeting stones,
-  GM tickets, master loot, cinematics and whatever else turns up.
+- Battlegrounds and meeting stones, then the long tail of small features that separates a
+  working client from a finished one.
 - Addons, options and performance, ongoing.
 - The no-brainer fixes from VanillaFixes, SuperWoW and the like.
 - Playable downloads for Windows, Linux and macOS. Linux first.

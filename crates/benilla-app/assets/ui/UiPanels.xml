@@ -945,8 +945,10 @@
         --     (reason ∈ "clicked"|"timeout"|"override"), OnUpdate(elapsed, dialog), timeout,
         --     StartDelay, delayText, sound, whileDead, hideOnEscape, cancels, showAlert (the
         --     420 widen + DialogAlertIcon, decision 1068).
-        --   · hasEditBox + maxLetters + EditBoxOnEnterPressed are live (decision 0668's
-        --     ADD_FRIEND/ADD_IGNORE are the first customers): the box shows, caps its length,
+        --   · hasEditBox + maxLetters + all three box hooks — EditBoxOnEnterPressed,
+        --     EditBoxOnTextChanged, EditBoxOnEscapePressed — are live (decision 0668's
+        --     ADD_FRIEND/ADD_IGNORE are the first customers; 1743's DELETE_GOOD_ITEM is the
+        --     first to gate button1 on what is typed): the box shows, caps its length,
         --     opens empty, and re-anchors the buttons under itself.
         --   · hasWideEditBox is live too (the guild arc's SET_GUILDMOTD / SET_GUILDPLAYERNOTE /
         --     SET_GUILDOFFICERNOTE, registered in FriendsFrame.xml): the 350x64 centred box
@@ -1255,10 +1257,12 @@
             end
         end
 
-        -- The edit box's two keys (ref StaticPopup.xml's template scripts). Enter runs the
-        -- entry's EditBoxOnEnterPressed hook, which by convention does the accept work and hides
-        -- the dialog itself; Escape dismisses the dialog through the ordinary cancel path so a
-        -- half-typed name never acts.
+        -- The edit box's three script hooks (ref StaticPopup.xml's template scripts, ref
+        -- l.1810-1829). All three are pure delegation to the entry's own hook of the same name;
+        -- `this` is the EDIT BOX while they run, which is what lets an entry body say
+        -- `this:GetParent()`. Enter runs the entry's EditBoxOnEnterPressed, which by convention
+        -- does the accept work and hides the dialog itself; text-changed drives a live gate on
+        -- button1 (DELETE_GOOD_ITEM's typed "DELETE" is the only 1.12 customer).
         function StaticPopup_EditBoxOnEnterPressed(editBox)
             local dialog = editBox:GetParent()
             local info = StaticPopupDialogs[dialog.which]
@@ -1267,10 +1271,35 @@
             end
         end
 
+        function StaticPopup_EditBoxOnTextChanged(editBox)
+            local dialog = editBox:GetParent()
+            local info = StaticPopupDialogs[dialog.which]
+            if info and info.EditBoxOnTextChanged then
+                info.EditBoxOnTextChanged(dialog.data)
+            end
+        end
+
+        -- Escape delegates like its two siblings — and where the entry names no hook, falls back
+        -- to what ESC would have done had the focused box not swallowed the key, i.e. the ordinary
+        -- StaticPopup_EscapePressed leg: the entry's OnCancel, then hide, and only for a
+        -- hideOnEscape entry. NAMED DIVERGENCE (1743): the reference has no fallback at all, so a
+        -- 1.12 dialog whose entry omits the hook simply eats the key — which is what its own
+        -- DELETE_GOOD_ITEM does, leaving a destroy confirm that ESC cannot dismiss. Every other
+        -- benilla popup closes on ESC and this one now does too; without the OnCancel leg it would
+        -- also have hidden while still holding the item, which is the half that made the old
+        -- unconditional `dialog:Hide()` wrong rather than merely lenient.
         function StaticPopup_EditBoxOnEscapePressed(editBox)
             local dialog = editBox:GetParent()
+            local info = StaticPopupDialogs[dialog.which]
             editBox:ClearFocus()
-            dialog:Hide()
+            if info and info.EditBoxOnEscapePressed then
+                info.EditBoxOnEscapePressed(dialog.data)
+            elseif dialog.hideOnEscape then
+                if info and info.OnCancel then
+                    info.OnCancel(dialog.data, "clicked")
+                end
+                dialog:Hide()
+            end
         end
 
         -- Ref l.1832-1848: the open/close pair sounds on EVERY path, then the entry's own hook.
@@ -1387,20 +1416,29 @@
             return closed
         end
 
-        -- Delete-item confirm strings — the real 1.12 GlobalStrings.lua (patch-2.MPQ,
-        -- Interface\FrameXML\GlobalStrings.lua), quoted verbatim (extracted via benilla-extract).
-        local DELETE_ITEM_TEXT = "Do you want to destroy %s?" -- DELETE_ITEM; %s = the item name
-        local YES_TEXT = "Yes" -- YES
-        local NO_TEXT = "No"   -- No
+        -- Destroy-confirm strings — the real 1.12 GlobalStrings.lua (patch-2.MPQ,
+        -- Interface\FrameXML\GlobalStrings.lua l.921-923; YES/NO are l.5463/l.2794, the same pair
+        -- LootFrame.xml declares), quoted verbatim in the FALLBACK form:
+        -- the player's own localized GlobalStrings.lua runs off the patch chain BEFORE this file
+        -- (ui_script/mod.rs), so these only fill in for the harnesses that load no chain. They
+        -- were plain locals until 1743; a local could never be the localized text, and
+        -- DELETE_ITEM_CONFIRM_STRING in particular MUST be the player's own word — it is what the
+        -- good-item dialog below makes them type.
+        DELETE_ITEM = DELETE_ITEM or "Do you want to destroy %s?"
+        DELETE_GOOD_ITEM = DELETE_GOOD_ITEM
+            or "Do you want to destroy %s?\n\nType \"DELETE\" into the field to confirm."
+        DELETE_ITEM_CONFIRM_STRING = DELETE_ITEM_CONFIRM_STRING or "DELETE"
+        YES = YES or "Yes"
+        NO = NO or "No"
 
         -- Ref StaticPopup.lua l.659-679, verbatim — its own OnUpdate poll (cursor emptied by any
         -- other path → hide) replaces the old bespoke `deleteItemFlow` CURSOR_UPDATE driver.
         -- exclusive is v1-inert (engine header note); showAlert is live since 1068 — the ref's
         -- own "display the error image" case is this very dialog.
         StaticPopupDialogs["DELETE_ITEM"] = {
-            text = DELETE_ITEM_TEXT,
-            button1 = YES_TEXT,
-            button2 = NO_TEXT,
+            text = DELETE_ITEM,
+            button1 = YES,
+            button2 = NO,
             OnAccept = function()
                 DeleteCursorItem()
             end,
@@ -1419,14 +1457,78 @@
             hideOnEscape = 1,
         }
 
+        -- Ref StaticPopup.lua l.680-724, verbatim — the RARE-or-better destroy. Same accept,
+        -- cancel and auto-hide poll as DELETE_ITEM above; what it adds is the typed confirmation:
+        -- the edit box takes focus on open, button1 starts DISABLED, and only the exact
+        -- DELETE_ITEM_CONFIRM_STRING (case-insensitively, via the ref's own strupper) enables it.
+        --
+        -- `this` is the dialog inside OnShow/OnHide and the EDIT BOX inside the two EditBox hooks —
+        -- the reference's own convention, which is why those two reach the dialog through
+        -- `this:GetParent()`. Our engine sets the same `this` on both paths (StaticPopup_OnShow /
+        -- the template's <OnEnterPressed>/<OnTextChanged>), so the bodies transcribe unchanged.
+        --
+        -- The one guard added: the ref's OnHide reads ChatFrameEditBox unguarded, which raises in a
+        -- harness that loads no ChatFrame.xml. Same `and` the bag's shift-link arm carries.
+        StaticPopupDialogs["DELETE_GOOD_ITEM"] = {
+            text = DELETE_GOOD_ITEM,
+            button1 = YES,
+            button2 = NO,
+            OnAccept = function()
+                DeleteCursorItem()
+            end,
+            OnCancel = function()
+                ClearCursor()
+            end,
+            OnUpdate = function()
+                if not CursorHasItem() then
+                    StaticPopup_Hide("DELETE_GOOD_ITEM")
+                end
+            end,
+            timeout = 0,
+            whileDead = 1,
+            exclusive = 1,
+            showAlert = 1,
+            hideOnEscape = 1,
+            hasEditBox = 1,
+            maxLetters = 32,
+            OnShow = function()
+                getglobal(this:GetName() .. "Button1"):Disable()
+                getglobal(this:GetName() .. "EditBox"):SetFocus()
+            end,
+            OnHide = function()
+                if ChatFrameEditBox and ChatFrameEditBox:IsVisible() then
+                    ChatFrameEditBox:SetFocus()
+                end
+                getglobal(this:GetName() .. "EditBox"):SetText("")
+            end,
+            EditBoxOnEnterPressed = function()
+                if getglobal(this:GetParent():GetName() .. "Button1"):IsEnabled() == 1 then
+                    DeleteCursorItem()
+                    this:GetParent():Hide()
+                end
+            end,
+            EditBoxOnTextChanged = function()
+                local editBox = getglobal(this:GetParent():GetName() .. "EditBox")
+                if strupper(editBox:GetText()) == DELETE_ITEM_CONFIRM_STRING then
+                    getglobal(this:GetParent():GetName() .. "Button1"):Enable()
+                else
+                    getglobal(this:GetParent():GetName() .. "Button1"):Disable()
+                end
+            end,
+        }
+
         -- BenillaDeleteItemConfirmDriver's OnEvent — DELETE_ITEM_CONFIRM(name, quality) is the
         -- engine's world-drop of an item payload (decision 0216 §3, cursor.rs::world_drop) →
-        -- ref UIParent.lua:344-352. DEFERRED (0216 §3): the ref splits quality >= 3 to
-        -- DELETE_GOOD_ITEM (the typed-confirmation editbox variant) — no editbox variant yet, so
-        -- every quality (arg2) shows DELETE_ITEM for now.
+        -- ref UIParent.lua:344-352, now whole: the ref's `arg2 >= 3` fork routes RARE-or-better
+        -- (quality 3..6 — blue, epic, legendary, artifact) to the typed-confirmation variant and
+        -- everything below it to the plain one. 0216 §3's deferral is closed (1743).
         function BenillaDeleteItemConfirmDriver_OnEvent(frame)
             if event == "DELETE_ITEM_CONFIRM" then
-                StaticPopup_Show("DELETE_ITEM", arg1)
+                if arg2 >= 3 then
+                    StaticPopup_Show("DELETE_GOOD_ITEM", arg1)
+                else
+                    StaticPopup_Show("DELETE_ITEM", arg1)
+                end
             end
         end
 
@@ -1990,8 +2092,9 @@
             <!-- The name-entry box (ref StaticPopup.xml l.84-140): 130x32 at BOTTOM +45, the
                  chat-input three-slice border, hidden unless the entry sets hasEditBox. First
                  customer: the social window's ADD_FRIEND / ADD_IGNORE dialogs (decision 0668).
-                 Enter runs the entry's own EditBoxOnEnterPressed (the ref's hook name) and Escape
-                 dismisses the whole dialog, which is the ref's EditBoxOnEscapePressed default. -->
+                 All three of the ref's box hooks are wired (Enter / Escape / TextChanged), each
+                 delegating to the entry's own hook of that name; OnTextChanged rides the NARROW
+                 box alone, which is the ref's own asymmetry (StaticPopup.xml l.133 vs l.190). -->
             <EditBox name="$parentEditBox" historyLines="1" hidden="true" autoFocus="false">
                 <Size><AbsDimension x="130" y="32"/></Size>
                 <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="45"/></Offset></Anchor></Anchors>
@@ -2012,6 +2115,7 @@
                 <Scripts>
                     <OnEnterPressed>StaticPopup_EditBoxOnEnterPressed(self)</OnEnterPressed>
                     <OnEscapePressed>StaticPopup_EditBoxOnEscapePressed(self)</OnEscapePressed>
+                    <OnTextChanged>StaticPopup_EditBoxOnTextChanged(self)</OnTextChanged>
                 </Scripts>
                 <FontString inherits="ChatFontNormal"/>
             </EditBox>

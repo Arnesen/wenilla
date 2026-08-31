@@ -10,7 +10,7 @@ use crate::order::Strata;
 use crate::script::{event, Backdrop, Insets, Model};
 use crate::widget::FrameKind;
 
-use super::{decode_id, frame_handle_of, frame_wrapper, strata_from_str};
+use super::{decode_id, draw_layer_from_str, frame_handle_of, frame_wrapper, strata_from_str};
 
 /// Populate `m`'s visibility/hierarchy/strata/backdrop/mouse methods (see the module doc).
 pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
@@ -717,6 +717,38 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // attribute, declare it on those 44 sites, then gate. Until then this is a disclosed superset
     // (1189's argument, pointed the other way), and the two corpus addons that stopped on the
     // missing *method* are unblocked either way.
+    // EnableDrawLayer(layer) / DisableDrawLayer(layer) — Frame method table `0x878ec0`, entries
+    // `0x7755b0` / `0x775680`, between `IsToplevel` and `Show`. See [`crate::widget::Frame`]'s
+    // `disabled_layers` for what was read and why the mask lives on the frame.
+    //
+    // An unknown layer name is a NO-OP here rather than a raise. That is the honest state, not a
+    // decision: `draw_layer_from_str` is the same parser `SetDrawLayer` and `CreateTexture` use,
+    // and what the reference does with an unparseable name in THIS pair has not been read out of
+    // the binary. Both corpus callers (pfUI, MoveAnything) pass literals from the five-name set.
+    for (name, disable) in [("EnableDrawLayer", false), ("DisableDrawLayer", true)] {
+        m.set(
+            name,
+            lua.create_function(move |lua, (this, layer): (Table, Value)| {
+                let Some(l) = layer
+                    .as_string()
+                    .and_then(|s| s.to_str().ok().and_then(|s| draw_layer_from_str(&s)))
+                else {
+                    return Ok(());
+                };
+                let h = frame_handle_of(lua, &this)?;
+                let mut model = lua.app_data_mut::<Model>().expect("model");
+                if let Some(frame) = model.arena.frame_mut(h) {
+                    let bit = 1u8 << l.index();
+                    if disable {
+                        frame.disabled_layers |= bit;
+                    } else {
+                        frame.disabled_layers &= !bit;
+                    }
+                }
+                Ok(())
+            })?,
+        )?;
+    }
     m.set(
         "EnableMouseWheel",
         lua.create_function(|lua, (this, enable): (Table, bool)| {
