@@ -481,6 +481,7 @@ pub(super) fn monster_move(
     stop: bool,
     duration_ms: u32,
     flying: bool,
+    run_mode: bool,
     commands: &mut Commands,
     index: &GuidIndex,
     transforms: &mut Query<&mut Transform>,
@@ -542,7 +543,7 @@ pub(super) fn monster_move(
             crate::creature_anim::NockLatch,
             crate::creature_anim::RangedHold,
         )>();
-        match monster_move_spline(path, spline_id, stop, duration_ms, flying) {
+        match monster_move_spline(path, spline_id, stop, duration_ms, flying, run_mode) {
             // A moving path: sample_splines drives the transform along every waypoint.
             Some(spline) => {
                 commands.entity(e).insert(spline).remove::<SplineStopped>();

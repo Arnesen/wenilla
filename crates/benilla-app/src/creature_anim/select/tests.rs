@@ -922,6 +922,7 @@ fn unify_stamps_flying_from_the_live_spline_on_every_leg() {
         duration: Duration::from_secs(10),
         id: 1,
         grounded,
+        run_mode: true,
     };
     // Self leg: the controller's stored component says nothing about the ride — the live
     // Spline does (the client reads the active CMovement's spline flags at select time).

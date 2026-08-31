@@ -42,7 +42,10 @@ pub(super) fn this_frame(
     jumped: bool,
     held: bool,
     air_nudged: bool,
-    stunned: bool,
+    // This frame's two movement-input predicates — what the reference's `0x514560` and `0x5145b0`
+    // answered ([`state::may_translate`], [`state::may_turn`]). Both go down on death (1753).
+    may_translate: bool,
+    may_turn: bool,
     now: f32,
     launch_y: f32,
 ) -> FrameFlags {
@@ -187,10 +190,12 @@ pub(super) fn this_frame(
     if player.knock_arc {
         move_flags_now = (move_flags_now & !move_flags::BACKWARD) | move_flags::FORWARD;
     }
-    // The two incapacitate suppressions — rooted drops the direction bits, stunned drops the
-    // turn bits — applied to the whole word in one place, whichever branch built it, and with
-    // the reference's byte trail in [`state::incapacitated_flags`] (decision 0880).
-    move_flags_now = state::incapacitated_flags(move_flags_now, player.modes.rooted, stunned);
+    // The two incapacitate suppressions — the translate predicate down drops the direction bits,
+    // the turn predicate down drops the turn bits — applied to the whole word in one place,
+    // whichever branch built it, and with the reference's byte trail in
+    // [`state::incapacitated_flags`] (decision 0880). Death drops both, through the precondition
+    // the two predicates share (decision 1753), so a corpse streams a bare word.
+    move_flags_now = state::incapacitated_flags(move_flags_now, !may_translate, !may_turn);
     // Riding a transport: the ON_TRANSPORT bit rides every packet with its local-pose tail
     // (built at the send). Set from the POST-attach state so flag and tail agree the
     // very frame we board or step off (decision 0438 phase 2).
@@ -268,7 +273,10 @@ mod tests {
                 false,
                 held,
                 false,
-                stunned,
+                // The two predicates, as this case's root and stun leave them — the body is alive,
+                // so each is simply its own term (decision 1753).
+                !rooted,
+                !stunned,
                 1.0,
                 0.0,
             )
@@ -313,7 +321,8 @@ mod tests {
             false,
             false,
             false,
-            false,
+            true,
+            true,
             1.0,
             0.0,
         );
@@ -343,7 +352,8 @@ mod tests {
             false,
             false,
             false,
-            false,
+            true,
+            true,
             1.0,
             0.0,
         );
@@ -369,7 +379,8 @@ mod tests {
             false,
             false,
             false,
-            false,
+            true,
+            true,
             1.0,
             0.0,
         );

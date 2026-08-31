@@ -173,7 +173,7 @@ pub fn parse_wmo_root(bytes: &[u8]) -> Result<WmoRoot> {
     let group_infos = parse_wmo_group_infos(bytes);
     let portals = parse_wmo_portals(bytes);
     let fogs = parse_wmo_fogs(bytes);
-    let skybox = parse_wmo_skybox(bytes);
+    let skybox = parse_skybox(bytes);
     Ok(WmoRoot {
         parsed,
         doodads,
@@ -188,7 +188,7 @@ pub fn parse_wmo_root(bytes: &[u8]) -> Result<WmoRoot> {
 /// Parse the root's **MOSB** chunk — a single null-terminated model path, or the 4 zero bytes that
 /// stand for "no skybox" (which is what almost every root carries). Returned normalized to `.m2`, the
 /// extension the loaders take; the chunk itself names the authoring-time `.mdx`.
-fn parse_wmo_skybox(bytes: &[u8]) -> Option<String> {
+fn parse_skybox(bytes: &[u8]) -> Option<String> {
     let mosb = find_wmo_chunk(bytes, b"BSOM")?;
     let end = mosb.iter().position(|&b| b == 0).unwrap_or(mosb.len());
     let raw = std::str::from_utf8(&mosb[..end]).ok()?.trim();

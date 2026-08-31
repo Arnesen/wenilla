@@ -1,5 +1,15 @@
-//! The **WMO skybox** — the authored sky a building swaps in for the `Light.dbc` gradient dome while
-//! the camera stands in one of its own groups.
+//! The **skybox** — an authored sky model that stands in for the `Light.dbc` gradient dome, drawn
+//! camera-anchored in the sky slice.
+//!
+//! **Two sources feed one lane, and the DBC source wins.** A *building* asks for its own painted sky
+//! (the **MOSB**/`0x40000` mechanism derived below); the *death profile* asks for the ghost sky
+//! (`LightSkybox.dbc` via `LightParams.lightSkyboxID`, [`benilla_formats::LightCatalog::ghost_skybox`]).
+//! The reference keeps these in separate slots — the WMO's is loop slot A, the DBC's is the single
+//! slot B — and slot B, whose weight is hardcoded `1.0` whenever it is filled, makes
+//! `0x6d4ac1`–`0x6d4acc` skip loop A entirely: **an active DBC skybox suppresses the WMO one
+//! outright** (byte-VERIFIED, wow-re `lighting/scratch/wmo-skybox.md` §3–4). Here that is one
+//! `Option` with the DBC source taken first, because a resolve that produced both would have to
+//! decide anyway and the binary has already decided.
 //!
 //! A WMO root can name a skybox model in its **MOSB** chunk, and a group can ask for it with group
 //! flag **`0x40000`**. Both halves matter, and the flag is tested **on the groups the portal flood
@@ -75,7 +85,7 @@ use bevy::prelude::*;
 
 use crate::model_render::M2BatchMaterials;
 use crate::view::WorldCamera;
-use benilla_assets::coords::wow_to_bevy;
+use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_assets::WmoModel;
 use benilla_assets::{LockRecover, WorldAssets};
 
@@ -88,12 +98,12 @@ const SHOW_SKYBOX: u32 = 0x40000;
 /// the [`crate::sky`] gradient dome is the backdrop. Resolved from [`CameraInteriorClaim`]: the same
 /// down-ray seed that already names the camera's room for the MFOG fog resolve.
 #[derive(Resource, Default, PartialEq, Eq)]
-pub struct CameraWmoSkybox(pub Option<String>);
+pub struct CameraSkybox(pub Option<String>);
 
 /// Marks one batch of a built skybox model, tagged with the model path it belongs to (a session can
 /// walk through more than one skybox building, and the built entities are cached, not rebuilt).
 #[derive(Component)]
-struct WmoSkyboxPart(String);
+struct SkyboxPart(String);
 
 /// This batch **spins**: every one of its vertices is wholly weighted to one parentless
 /// rotation-only bone, so the authored motion is a rigid transform about that bone's pivot and needs
@@ -125,21 +135,21 @@ struct SkyboxSpin {
 #[derive(Resource, Default)]
 struct BuiltSkyboxes(HashSet<String>);
 
-/// Ordering handle: [`CameraWmoSkybox`] is settled for the frame after this set. `crate::sky`'s dome
+/// Ordering handle: [`CameraSkybox`] is settled for the frame after this set. `crate::sky`'s dome
 /// gate hangs off it, because the two backdrops must agree *within* a frame — one reading a stale
 /// resource is a frame with both drawn or neither.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct WmoSkyResolve;
+pub(crate) struct SkyboxResolve;
 
 /// The WMO-skybox subsystem: resolve which model the camera's room wants, build it on first need,
 /// then show exactly that one and pin it to the camera.
-pub(crate) struct WmoSkyPlugin;
+pub(crate) struct SkyboxPlugin;
 
-impl Plugin for WmoSkyPlugin {
+impl Plugin for SkyboxPlugin {
     fn build(&self, app: &mut App) {
         // No `MaterialPlugin` of its own any more: a skybox batch is a `WowModelMaterial` like every
         // other model batch, and that plugin is already loaded.
-        app.init_resource::<CameraWmoSkybox>()
+        app.init_resource::<CameraSkybox>()
             .init_resource::<BuiltSkyboxes>()
             .add_systems(
                 Update,
@@ -150,7 +160,7 @@ impl Plugin for WmoSkyPlugin {
                     // move that changes rooms lands a frame late, or not at all on the frame it
                     // matters, and the backdrop flickers between the painted sky and the gradient.
                     .after(crate::wmo_portal::WmoPvsSet)
-                    .in_set(WmoSkyResolve),
+                    .in_set(SkyboxResolve),
             )
             // Camera-anchored placement runs post-propagation off the SAME-frame camera pose — the
             // slot decision 0504 moved every camera-anchored shell into.
@@ -173,11 +183,36 @@ impl Plugin for WmoSkyPlugin {
 /// placement. The reference draws the painted sky there regardless, because 61 of the 83 groups the
 /// flood reaches from group 39 do carry the bit. (Verified on the asset: BFS over `Stratholme_B`'s
 /// MOPR reaches 82 of 83 groups from group 39, 61 of them flagged.)
+#[allow(clippy::too_many_arguments)]
 fn resolve_camera_skybox(
     instances: Query<&crate::wmo_portal::WmoPortalInstance>,
     wmos: Res<Assets<WmoModel>>,
-    mut want: ResMut<CameraWmoSkybox>,
+    sampler: Option<Res<crate::lighting::LightSampler>>,
+    viewer: Res<crate::view::Viewer>,
+    current_map: Option<Res<crate::world_map::CurrentMap>>,
+    cam: Query<&GlobalTransform, With<WorldCamera>>,
+    mut want: ResMut<CameraSkybox>,
 ) {
+    // **The ghost sky first — it wins outright.** Slot B is filled at weight 1.0 and that makes the
+    // reference skip loop A entirely (module header, wow-re §3–4), so a dead player under
+    // Stratholme's painted sky sees DeathClouds, not the building's.
+    //
+    // Resolved from the SAME (map, camera position) seed the atmosphere uses, so the sky and the
+    // fog it hangs over come from one zone row. The ghost bit is `PLAYER_FLAGS` bit 0x10 — the same
+    // one `lighting::resolve` reads to select param slot 4 — so the two switch on the same frame.
+    if viewer.ghost {
+        let ghost_sky = sampler.as_ref().and_then(|s| {
+            let pos = bevy_to_wow(cam.single().ok()?.translation());
+            let map = current_map.as_ref().map_or(0, |m| m.0);
+            s.0.ghost_skybox(map, pos)
+        });
+        if let Some(sky) = ghost_sky {
+            if want.0.as_deref() != Some(sky) {
+                want.0 = Some(sky.to_owned());
+            }
+            return;
+        }
+    }
     // `min()` rather than "first match": `Query` iteration order is not stable across frames, and a
     // tie would otherwise alternate two backdrops frame to frame. Five roots qualify — Stratholme_B
     // and the four Caverns of Time shells — and the tie-break is live code, not a formality: the
@@ -215,7 +250,7 @@ fn resolve_camera_skybox(
 /// Stratholme's gate must not re-decode art.
 fn build_skybox(
     mut commands: Commands,
-    want: Res<CameraWmoSkybox>,
+    want: Res<CameraSkybox>,
     mut built: ResMut<BuiltSkyboxes>,
     world_assets: Option<ResMut<WorldAssets>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -250,12 +285,12 @@ fn build_skybox(
     let subs = match subs {
         Ok(subs) if !subs.is_empty() => subs,
         Ok(_) => {
-            warn!("WMO skybox '{path}' has no render batches — keeping the gradient dome");
+            warn!("skybox '{path}' has no render batches — keeping the gradient dome");
             built.0.insert(path.to_string());
             return;
         }
         Err(e) => {
-            warn!("WMO skybox '{path}' failed to load, keeping the gradient dome: {e:#}");
+            warn!("skybox '{path}' failed to load, keeping the gradient dome: {e:#}");
             built.0.insert(path.to_string());
             return;
         }
@@ -301,7 +336,7 @@ fn build_skybox(
                 MeshMaterial3d(material),
                 Transform::default(),
                 Visibility::Hidden, // `apply_skybox_visibility` turns on exactly the wanted one
-                WmoSkyboxPart(path.to_string()),
+                SkyboxPart(path.to_string()),
             ))
             .id();
         if let Some(spin) = sole_bone(sub).and_then(|b| spins.get(&b)) {
@@ -339,8 +374,8 @@ fn sole_bone(sub: &benilla_formats::RenderSubmesh) -> Option<u16> {
 /// writer for these entities (the gradient dome's own gate lives in [`crate::sky`], which reads the
 /// same resource — one authority per entity class, decision 0025).
 fn apply_skybox_visibility(
-    want: Res<CameraWmoSkybox>,
-    mut parts: Query<(&WmoSkyboxPart, &mut Visibility)>,
+    want: Res<CameraSkybox>,
+    mut parts: Query<(&SkyboxPart, &mut Visibility)>,
 ) {
     for (part, mut vis) in &mut parts {
         let show = want.0.as_deref() == Some(part.0.as_str());
@@ -393,7 +428,7 @@ fn follow_camera(
     cam: Query<&GlobalTransform, With<WorldCamera>>,
     mut parts: Query<
         (&mut Transform, &mut GlobalTransform, Option<&SkyboxSpin>),
-        (With<WmoSkyboxPart>, Without<WorldCamera>),
+        (With<SkyboxPart>, Without<WorldCamera>),
     >,
 ) {
     let Some(cam_gt) = cam.iter().next() else {

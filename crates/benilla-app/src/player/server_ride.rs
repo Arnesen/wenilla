@@ -101,6 +101,19 @@ pub(super) fn drive_self_ride(
                     spline.speed(),
                     spline.duration.as_millis(),
                 );
+                // **A spline re-authors the walk gait, and its RUNMODE bit is inverted** (decision
+                // 1758, wow-re `walk-mode-law.md` §5.2). The reference's `SMSG_MONSTER_MOVE` commit
+                // `0x7c6a50` does this unconditionally for every incoming spline: `0x7c6ac2 and
+                // edi,0x100` takes the path's own `SPLINEFLAG_RUNMODE` and `0x7c6acb` hands it to
+                // `CMovement::SetRunMode 0x7c71c0`, whose argument is *run* — so a path the server
+                // did NOT mark as a run leaves the body in walk mode when the ride ends, and a path
+                // it did mark clears any walk the player had toggled. The two `0x100`s are inverses.
+                //
+                // On the START edge only, matching the byte site: the commit runs once per spline,
+                // not per sampled frame. It writes the same latch the keybind does, so the wire
+                // announces it through the ordinary flag differ on the frame the ride hands back.
+                player.walking = !spline.run_mode;
+                super::move_trace::gait("spline", player.walking, false, player.modes.rooted, true);
             }
             let yaw = yaw_of(transform.rotation);
             player.pos = transform.translation;
@@ -186,6 +199,15 @@ mod tests {
 
     /// A one-system app riding a 2-point self-spline, `Player` mid-strafe as at charge engage.
     fn ride_app() -> (App, Entity, crossbeam_channel::Receiver<ClientCommand>) {
+        ride_app_with(true, false)
+    }
+
+    /// …parameterised by the spline's `SPLINEFLAG_RUNMODE` and the walk gait the player had
+    /// toggled before the ride took over.
+    fn ride_app_with(
+        run_mode: bool,
+        walking: bool,
+    ) -> (App, Entity, crossbeam_channel::Receiver<ClientCommand>) {
         let mut app = App::new();
         app.add_systems(Update, drive_self_ride);
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -195,6 +217,7 @@ mod tests {
             // Stale pre-ride momentum: a strafe was held when the spline took over.
             horiz_vel: Vec3::new(5.0, 0.0, 0.0),
             vel_y: -2.0,
+            walking,
             ..Default::default()
         });
         // Mid-strafe counter-twist: the aim sits 90° off the rendered root.
@@ -210,12 +233,48 @@ mod tests {
                     duration: Duration::from_secs(600), // far from ending during the test
                     id: 77,
                     grounded: true,
+                    run_mode,
                 },
                 twist,
                 Embodied,
             ))
             .id();
         (app, entity, rx)
+    }
+
+    /// **A spline re-authors the walk gait, inverted from its own RUNMODE bit** (decision 1758).
+    /// The reference does this in the `SMSG_MONSTER_MOVE` commit `0x7c6a50`, unconditionally for
+    /// every incoming spline: `0x7c6ac2 and edi,0x100` takes `SPLINEFLAG_RUNMODE` and `0x7c6acb`
+    /// hands it to `SetRunMode 0x7c71c0`, whose argument is *run*. The two `0x100`s are inverses,
+    /// which is the whole reason this is a test and not an obvious line of code — reading it the
+    /// natural way round gets the behaviour exactly backwards in both directions.
+    #[test]
+    fn a_spline_re_authors_the_walk_gait_from_its_inverted_runmode_bit() {
+        // A path the server did NOT mark as a run leaves the body walking — even though the
+        // player was running when it took over.
+        let (mut app, _e, _rx) = ride_app_with(false, false);
+        app.update();
+        assert!(
+            app.world().resource::<Player>().walking,
+            "a spline without RUNMODE forces walk mode ON"
+        );
+        // …and a run path clears a walk the player had toggled.
+        let (mut app, _e, _rx) = ride_app_with(true, true);
+        app.update();
+        assert!(
+            !app.world().resource::<Player>().walking,
+            "a spline WITH RUNMODE clears the toggled walk"
+        );
+        // The start edge only: the commit runs once per spline, not once per sampled frame, so a
+        // toggle taken mid-ride survives the rest of it.
+        let (mut app, _e, _rx) = ride_app_with(true, true);
+        app.update();
+        app.world_mut().resource_mut::<Player>().walking = true;
+        app.update();
+        assert!(
+            app.world().resource::<Player>().walking,
+            "re-authored on the START edge, not every frame"
+        );
     }
 
     #[test]

@@ -343,6 +343,9 @@ pub enum SessionEvent {
         /// `true` ⇒ a 3-D flight path (keep the spline's Z); `false` ⇒ a ground walk whose Z the app
         /// re-derives from the terrain under the unit (see the renderer's creature ground-clamp).
         flying: bool,
+        /// `SPLINEFLAG_RUNMODE` — the path is travelled at run speed. Its **absence** forces
+        /// `MOVEFLAG_WALK_MODE` on for the unit the spline moves (decision 1758).
+        run_mode: bool,
     },
     /// Same-map teleport (`MSG_MOVE_TELEPORT_ACK`): the app snaps our player + echoes the ack.
     Teleport {

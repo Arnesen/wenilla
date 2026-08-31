@@ -587,10 +587,14 @@ pub(super) fn drive_step(
 /// The swim translation amounts — read by [`drive_step`] AND the flag build, so the two can never
 /// disagree (decision 0056: the flags mirror the avatar's motion). W/S, strafe Q/E (+ mouselook
 /// A/D), and a root cuts both.
-pub(super) fn translate_amounts(axes: &super::input::MoveAxes, rooted: bool) -> (f32, f32) {
-    // Rooted kills swim translation like the walk `dir` does (decision 0308's regime — the water
-    // arm reads its own axes, so it needs its own cut).
-    if rooted {
+pub(super) fn translate_amounts(
+    axes: &super::input::MoveAxes,
+    translate_gated: bool,
+) -> (f32, f32) {
+    // The translate predicate being down (`0x514560`: a root, or **death** through the precondition
+    // it shares with the turn gate — decision 1753) kills swim translation like the walk `dir` does
+    // (decision 0308's regime — the water arm reads its own axes, so it needs its own cut).
+    if translate_gated {
         return (0.0, 0.0);
     }
     let swim_fwd = axes.fwd.signum() as f32;

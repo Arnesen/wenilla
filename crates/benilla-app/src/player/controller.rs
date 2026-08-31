@@ -205,24 +205,41 @@ pub(super) fn control(
     // movement flag and NOT an aura: the reference's `0x5145b0` computes `!STUNNED` straight off
     // `[[unit+0x110]+0xa0]` (`not eax; shr eax,0x12; and eax,1`) and `0x514755` consumes it to skip
     // the turn and pitch emitters outright.
-    let stunned = body
+    // **Dead** is read in the same pass and for the same reason: the reference's two movement-input
+    // predicates share a precondition (`0x5144e0`) whose second term is `[[mover+0x110]+0x40] > 0`
+    // — UNIT_FIELD_HEALTH, the `jle` at `0x5144f8` — so a body at zero health answers *no* to both
+    // "may I translate?" (`0x514560`) and "am I not stunned?" (`0x5145b0`). **A corpse is stunned**
+    // as far as the input tick is concerned, and that is the whole reason the reference will not
+    // let you spin your own body on the ground (decision 1753). Off the MOVER's descriptor, not
+    // ours — `esi` in `0x5144e0` is whatever we are driving (1277) — and a ghost is not dead by it,
+    // because the server puts a released player's health at 1 (0308).
+    let (stunned, dead) = body
         .single()
         .ok()
         .and_then(|(.., store, _, _, _, _, _)| {
-            store.map(|s| s.0.unit_flags() & UNIT_FLAG_STUNNED != 0)
+            store.map(|s| {
+                (
+                    s.0.unit_flags() & UNIT_FLAG_STUNNED != 0,
+                    s.0.unit_is_dead(),
+                )
+            })
         })
-        .unwrap_or(false);
+        .unwrap_or((false, false));
+    // `0x5145b0`, evaluated here because the first thing it suppresses is the mouse turn below. Its
+    // translate sibling waits until after `apply_server_moves`, where the root edge it reads lands.
+    let may_turn = state::may_turn(dead, stunned);
     // Drunkenness (B210): this frame's wobble angle, computed once — the facing veer and the
     // swim-pitch porpoise ([`swim::drive_step`]) both read it. Zero while sober (`wobble` early-outs on a 0.0
-    // fraction), and zero while stunned — the reference's wobble sits behind the same
-    // input-allowed chain as the turn emitters (`0x60aa47` → `0x5145b0`).
+    // fraction), and zero whenever the turn predicate is down — the reference's wobble sits behind
+    // the same input-allowed chain as the turn emitters (`0x60aa47` → `0x5145b0`), so a stun stops
+    // it and, through the precondition that predicate shares, so does death.
     let drunk_wobble = {
         let f = body
             .single()
             .ok()
             .and_then(|(.., store, _, _, _, _, _)| store.and_then(|s| s.0.player_drunk_byte()))
             .map_or(0.0, drunk::fraction);
-        if stunned {
+        if !may_turn {
             0.0
         } else {
             drunk::wobble(time.elapsed().as_millis() as u32, f)
@@ -265,7 +282,25 @@ pub(super) fn control(
     // Holding *somebody else's* reins is emphatically not in this set: the turn belongs to whatever
     // we are driving, and once the marker has caught up that is the creature, whose `Transform` is
     // the one this `face_yaw` writes.
-    if stunned || player.control_lost || player.reseat {
+    //
+    // **Death enters through the same door** (decision 1753) — but by its own byte trail, not the
+    // keyboard's, and the two are worth keeping apart. The reference's right-drag lives in
+    // `0x514400`, off the mouse-MOVE handler `0x492c00`, and its body hand-off
+    // `0x51447b call 0x5103e0` is gated at `0x514474` by a THIRD predicate, `0x5145e0`, whose first
+    // act is to call the stun test `0x5145b0` — which fails the precondition `0x5144e0` it shares
+    // with the translate gate at zero health, and short-circuits the rest. The two commit gates
+    // further down, `0x5151b0` (yaw) and `0x515250` (pitch), carry their own health tests as well,
+    // and a closed census of all nine call sites of the facing setters `0x60de30`/`0x60de70` finds
+    // every route health-gated. So the mouse and the keys do NOT share `0x514755`; they share
+    // `0x5144e0`, and `may_turn` is where that term lives on our side (wow-re §6.4).
+    //
+    // That is the line this file was missing: benilla modelled the server's root on death (0308),
+    // and a root deliberately leaves turning live (0872), so a right-drag went on spinning the body
+    // on the ground. Note the reference has **nothing to restore** — it never writes the facing at
+    // all, because `0x50fee0` (the camera rotate at `0x514446`) runs before any object lookup and
+    // the hand-off simply does not run. Ours writes and puts back, which is indistinguishable
+    // downstream and keeps the approved camera path intact — a shape difference, not a copy.
+    if !may_turn || player.control_lost || player.reseat {
         player.face_yaw = yaw_before_look;
     }
     let mouse_turned = player.face_yaw != yaw_before_look;
@@ -410,7 +445,18 @@ pub(super) fn control(
         }
         // This frame's netted movement axes, the mouselook/turn modes they imply, and the autorun
         // latch with its verified cancel set — all of it decoded once in [`input::move_axes`].
-        let axes = input::move_axes(binds, &buttons, &mut player, &rig, both_buttons, stunned);
+        // `0x514560`, evaluated now — after `apply_server_moves`, so a root edge that landed this
+        // frame is already in `player.modes` and not read a frame late.
+        let may_translate = state::may_translate(dead, player.modes.rooted);
+        let axes = input::move_axes(
+            binds,
+            &buttons,
+            &mut player,
+            &rig,
+            both_buttons,
+            may_translate,
+            may_turn,
+        );
         let input::MoveAxes {
             fwd: fwd_axis,
             side: side_axis,
@@ -486,14 +532,16 @@ pub(super) fn control(
             -1 => dir -= move_right,
             _ => {}
         }
-        // **Rooted: translation intent dies here — turning above stays live.** Confirmed at the
-        // bytes (decisions 0866/0872) and it is *authored*, not accidental: the reference's input
+        // **The translate predicate down: translation intent dies here — and under a plain root,
+        // turning above stays live.** Confirmed at the bytes (decisions 0866/0872) and it is
+        // *authored*, not accidental: the reference's input
         // tick consults an allow-list (`0x615c71` → the byte table at `0x618054`) which blocks the
         // translation command ids and **explicitly permits** the turn ids 8/9/0xa, pitch, run/walk
         // and SetFacing. A character who cannot even pivot is STUNNED, a separate `UNIT_FIELD_FLAGS`
         // gate handled above — and vmangos's `HandleModStun` grants both at once, which is why Ice
-        // Block freezes completely while Frost Nova lets you turn.
-        if player.modes.rooted {
+        // Block freezes completely while Frost Nova lets you turn. **Death is the third way this
+        // predicate goes down** (1753), and unlike the root it takes the pivot with it.
+        if !may_translate {
             dir = Vec3::ZERO;
         }
         let moving = dir != Vec3::ZERO;
@@ -566,7 +614,13 @@ pub(super) fn control(
         // id 7 is blocked). HOVER's refusal is NOT here — it belongs to the movement handler
         // itself (`0x7c623a`, the breach term below and [`mover::step`]'s grounded arm), which
         // is what keeps the mounted flourish reachable while hovering, as the reference has it.
-        let mut want_jump = binds.fired(crate::bindings::cmd::JUMP) && !player.modes.rooted;
+        //
+        // **And death is refused here too** — `may_translate` and not `!rooted`, which corrects
+        // what 1753 first shipped on the reading that `0x513cee`'s `test ch,0x12` was the whole
+        // gate. `Jump 0x513bd0` inlines *both* `0x5144e0` and `0x514560`: a health test at
+        // `0x513cbc` (`jle 0x513d43`), a second at `0x513cde`, the root mask, and stand state
+        // `!= 7` at `0x513cf3` — which is `may_translate`, term for term (wow-re §6.7).
+        let mut want_jump = binds.fired(crate::bindings::cmd::JUMP) && may_translate;
 
         // Swim vs walk: the water over our feet decides. Hysteresis-latched (`update_swimming`,
         // the verified `0x6030c0` boundary — B7 resolved, decision 0226) so wading the line
@@ -628,7 +682,7 @@ pub(super) fn control(
         // The netted swim translation amounts ([`swim::translate_amounts`]) — read by the swim
         // mover arm AND the flag build, so the two can never disagree (decision 0056).
         let (swim_fwd, swim_side) = if swimming {
-            swim::translate_amounts(&axes, player.modes.rooted)
+            swim::translate_amounts(&axes, !may_translate)
         } else {
             (0.0, 0.0)
         };
@@ -824,7 +878,8 @@ pub(super) fn control(
             jumped,
             held,
             air_nudged,
-            stunned,
+            may_translate,
+            may_turn,
             now,
             launch_y,
         );

@@ -146,6 +146,10 @@ pub enum ServerPacket {
         /// The path is a 3-D **flight** (`SPLINE_FLAG_FLYING` = `Mask_CatmullRom`): keep the spline's own Z.
         /// Clear ⇒ a ground walk whose Z the client re-derives from the terrain (the app terrain-clamps it).
         flying: bool,
+        /// The path's `SPLINEFLAG_RUNMODE` bit — and its **absence** is the load-bearing half: a
+        /// spline without it forces `MOVEFLAG_WALK_MODE` **on** for the unit it moves (see
+        /// [`super::monster_move`]'s `SPLINE_FLAG_RUNMODE`).
+        run_mode: bool,
     },
     /// A relayed *player* movement packet (`MSG_MOVE_*`, see [`super::parse::is_movement_relay`]): the mover's
     /// authoritative pose plus its live CMovement `moveFlags`. The app snaps the entity to `position`

@@ -136,7 +136,10 @@ pub(super) fn move_axes(
     player: &mut Player,
     rig: &CameraControl,
     both_buttons: bool,
-    stunned: bool,
+    // The reference's two movement-input predicates this frame ([`state::may_translate`],
+    // [`state::may_turn`]) — `0x514560` and `0x5145b0`. Both go down on death (decision 1753).
+    may_translate: bool,
+    may_turn: bool,
 ) -> MoveAxes {
     // ── Autorun ── TOGGLEAUTORUN through the binding table (0997; 1.12 defaults NUMLOCK +
     // BUTTON4 — the latter is winit's `Forward`, the thumb button this toggle lived on before
@@ -169,11 +172,17 @@ pub(super) fn move_axes(
     //   letting go of S after reversing leaves you standing rather than running again.
     // - **The transition INTO both-buttons-held** (`0x514a73`, the same helper) — engaging the
     //   both-button run replaces autorun rather than stacking with it.
-    // - **Losing the mover** — death, root/stun, a taxi/charge hand-off. In the reference the
-    //   emitter's gate `0x514560` goes down (health `<= 0`, `MOVEMENTFLAGS & 0x1200`, the on-taxi
-    //   predicate) and writer #4 `0x514748` clears the bit as a side effect of the next emit; a
-    //   level test is the faithful shape, not an edge. (Mechanism VERIFIED; the individual bit
-    //   identities behind the gate are INFERRED — see the note's §4.)
+    // - **Losing the mover** — death, or a root/stun. In the reference the emitter's gate
+    //   `0x514560` goes down (health `<= 0`, `MOVEMENTFLAGS & 0x1200`, stand state 7) and writer #4
+    //   `0x514748` clears the bit as a side effect of the next emit; a level test is the faithful
+    //   shape, not an edge. The `death` half of that sentence was prose only until decision 1753:
+    //   the term passed here was the root alone, so dying with autorun latched kept the bit. It is
+    //   [`state::may_translate`] now — the gate itself.
+    //
+    //   **This list used to say "a taxi/charge hand-off", on rf79 §4's parked reading that
+    //   `0x60f5b0` is an on-taxi predicate. It is not** — wow-re §6.2 reads it as
+    //   `AnimationData.dbc` column 3 bit `0x80`, set on exactly one of 208 shipped rows, id 121
+    //   `Knockdown`. The ride term below is benilla's own and is kept on its own merits.
     //
     // Deliberately absent, each VERIFIED as a *survivor*: a jump, a chat EditBox taking focus, and
     // a zone change. Mounting is genuinely unsettled in the reference and left alone here.
@@ -184,7 +193,7 @@ pub(super) fn move_axes(
         binds.just_pressed(crate::bindings::cmd::MOVE_FORWARD),
         binds.just_pressed(crate::bindings::cmd::MOVE_BACKWARD),
         both_buttons_engaged,
-        player.modes.rooted || player.server_riding,
+        !may_translate || player.server_riding,
     ) {
         player.autorun = false;
     }
@@ -234,12 +243,15 @@ pub(super) fn move_axes(
             0
         };
     // TURNLEFT/TURNRIGHT turn the facing when not mouse-looking (yaw increases turning left,
-    // matching mouse-left). …and never while stunned: the reference skips the keyboard turn
-    // emitter `0x514f50` entirely (and force-stops an in-flight turn) behind the same
+    // matching mouse-left). …and never while [`state::may_turn`] is down: the reference skips the
+    // keyboard turn emitter `0x514f50` entirely (and force-stops an in-flight turn) behind the
     // `0x514755` gate. Killing the turn here is also what ends B179's *second* half — the walk
     // animation a stunned character was still playing was the turn-in-place shuffle, which
-    // `gait` derives from real yaw change.
-    let turning = !mouselook && !stunned && (turn_left || turn_right);
+    // `gait` derives from real yaw change. A **dead** body is down the same gate, through the
+    // precondition `0x5144e0` that both predicates share (decision 1753): health `<= 0` fails it,
+    // so as far as `0x5145b0` is concerned a corpse is stunned — which is why our corpses could
+    // be spun with A/D until 1753, and why one term fixes the keys and the mouse together.
+    let turning = !mouselook && may_turn && (turn_left || turn_right);
     // The net translate state — the reference's `flags & 0xf` (its four move bits), read off
     // the *net* axes, not the keys: W+S streams no direction bit and doesn't translate.
     let translating = fwd_axis != 0 || side_axis != 0;

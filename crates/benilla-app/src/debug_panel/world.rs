@@ -41,7 +41,7 @@ pub(super) struct WorldReadout<'w, 's> {
     /// [`benilla_world::exterior_cull`] runs on. See the readout below for why they are worth a line.
     room: Res<'w, benilla_world::wmo_portal::CameraInteriorClaim>,
     windows: Res<'w, benilla_world::wmo_portal::ExteriorWindows>,
-    skybox: Res<'w, benilla_world::wmo_sky::CameraWmoSkybox>,
+    skybox: Res<'w, benilla_world::skybox::CameraSkybox>,
     streamer: Res<'w, benilla_world::terrain_stream::TerrainStreamer>,
     self_guid: Res<'w, crate::net::SelfGuid>,
     names: ResMut<'w, crate::names::NameCache>,

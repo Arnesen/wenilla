@@ -712,6 +712,7 @@ pub(super) fn apply_net_updates(
                 stop,
                 duration_ms,
                 flying,
+                run_mode,
             } => objects::monster_move(
                 guid,
                 start,
@@ -721,6 +722,7 @@ pub(super) fn apply_net_updates(
                 stop,
                 duration_ms,
                 flying,
+                run_mode,
                 &mut commands,
                 &index,
                 &mut transforms,

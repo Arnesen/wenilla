@@ -178,7 +178,7 @@ pub(super) fn setup_cloud_layer(
 /// The sky-dome visibility toggle (the clouds hide with the rest of the sky). All color state
 /// lives in the texture — the kernel's `0x6cfb00` port owns it.
 ///
-/// A WMO skybox ([`crate::wmo_sky`]) hides the clouds too: `CSky::Render`'s one shared boolean skips
+/// A WMO skybox ([`crate::skybox`]) hides the clouds too: `CSky::Render`'s one shared boolean skips
 /// **all six** sky elements together (`0x6d4a3b test edi,edi; je`), so the painted art is the whole
 /// sky rather than a backdrop the procedural clouds keep drawing over. The art carries its own cloud
 /// banks; layering ours on top lifted the painted zenith out of its near-black.
@@ -188,12 +188,12 @@ pub(super) fn setup_cloud_layer(
 /// under the surface there is no sky, only the murk.
 pub(super) fn apply_cloud_visibility(
     debug: Res<DebugState>,
-    wmo_skybox: Res<crate::wmo_sky::CameraWmoSkybox>,
+    skybox: Res<crate::skybox::CameraSkybox>,
     underwater: Res<crate::liquid::Underwater>,
     mut dome: Query<&mut Visibility, With<CloudDome>>,
 ) {
     if let Ok(mut vis) = dome.single_mut() {
-        *vis = if debug.lighting.disable_sky_dome || wmo_skybox.0.is_some() || underwater.0.any() {
+        *vis = if debug.lighting.disable_sky_dome || skybox.0.is_some() || underwater.0.any() {
             Visibility::Hidden
         } else {
             Visibility::Inherited

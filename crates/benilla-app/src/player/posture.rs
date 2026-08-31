@@ -34,11 +34,22 @@ pub(super) fn update(
     // observer's. `stand_pending` is the local commit (the client's `SetStandState`
     // applies immediately and sends, one setter — `0x6127b0`), overlaid on the echoed
     // byte until it lands so the pose never waits on the round-trip.
-    let stand_byte = body
+    let (stand_byte, reads_dead) = body
         .single()
         .ok()
-        .and_then(|(.., store, _, _, _, _, _)| store.map(|s| s.0.unit_stand_state()))
-        .unwrap_or(0);
+        .and_then(|(.., store, _, _, _, _, _)| {
+            // `SetStandState`'s own first two guards, read together with the byte they gate:
+            // health ≤ 0, **or** `UNIT_DYNAMIC_FLAGS & 0x20` — a feigner, whose health never moved.
+            // Deliberately NOT `unit_reads_dead`, which folds in stand state 7 as a third term the
+            // setter does not test (wow-re `local-move-input-gate.md` §6.7; decision 1753).
+            store.map(|s| {
+                (
+                    s.0.unit_stand_state(),
+                    s.0.unit_is_dead() || s.0.unit_dynflag_dead(),
+                )
+            })
+        })
+        .unwrap_or((0, false));
     if player.stand_pending == Some(stand_byte) {
         player.stand_pending = None; // the echo landed
     }
@@ -76,16 +87,20 @@ pub(super) fn update(
     // The sit-down gate — the client's own, inside the ONE setter `0x5ed430`
     // ([`state::stand_state_refused`], bug B155): a body the movement layer is already driving
     // cannot be seated, and **swimming is one of the driving states**, so the press is refused
-    // for as long as we are in the water. Silently, and before the packet — like the reference,
+    // for as long as we are in the water — and a body that reads dead is refused in EITHER
+    // direction, which is the setter's own first guard (decision 1753). Silently, and before the packet — like the reference,
     // which returns from `SetStandState` without building `CMSG_STANDSTATECHANGE` at all.
     // Placed on the shared commit below rather than on the X key, so it covers the posture
     // emotes (`/sit`, `/sleep`, `/kneel`) in the same stroke — their own `Emotes.dbc` gate
     // does NOT carry the swim bit (`ui_chat::tests::the_posture_emotes_carry_no_swim_suppression_flag`).
     // The word is the live outbound one, a frame old — the same `[[this+0x118]+0x40]` the cast
     // gates read (decision 1056), so all three refusals can never disagree about "am I moving".
-    if let Some(s) = request_stand.filter(|&s| state::stand_state_refused(player.move_flags(), s)) {
+    if let Some(s) =
+        request_stand.filter(|&s| state::stand_state_refused(reads_dead, player.move_flags(), s))
+    {
         debug!(
-            "stand state {s} refused (move flags {:#x} — the client's `0x5ed430` gate)",
+            "stand state {s} refused (dead {reads_dead}, move flags {:#x} — the client's \
+             `0x5ed430` gate)",
             player.move_flags()
         );
         move_trace::posture("REFUSED", s, stand_state, player.move_flags());

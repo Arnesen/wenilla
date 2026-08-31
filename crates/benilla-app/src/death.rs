@@ -493,11 +493,17 @@ fn drive_death_look(
     }
 }
 
-/// `WOW_GHOST_PROBE=1|0` — pin the ghost **screen pass** on or off without dying, so the
-/// ghost-world look (and everything that must NOT inherit it — the portrait bakes, decision 1481)
-/// can be A/B'd from a capture instead of from a corpse run. It overrides only this look; the
-/// death arc's state machine, its events and its UI are untouched and still follow the wire.
-fn ghost_probe() -> Option<bool> {
+/// `WOW_GHOST_PROBE=1|0` — pin the **ghost world** on or off without dying, so the ghost-world look
+/// (and everything that must NOT inherit it — the portrait bakes, decision 1481) can be A/B'd from a
+/// capture instead of from a corpse run.
+///
+/// It drives all three halves of that look together, because they are one state: this screen pass,
+/// the death light (`LightParams` slot 4) and the DeathClouds sky, the latter two through
+/// [`Viewer::ghost`](benilla_world::view::Viewer::ghost), whose only readers they are. It pinned
+/// the screen pass alone until the sky landed, which made an A/B of "the ghost world" quietly a
+/// third of one. The death arc's state machine, its events and its UI stay untouched and still
+/// follow the wire.
+pub(crate) fn ghost_probe() -> Option<bool> {
     static PROBE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
     *PROBE.get_or_init(|| match std::env::var("WOW_GHOST_PROBE").ok()?.trim() {
         "1" | "true" => Some(true),

@@ -49,6 +49,9 @@ const SPLINE_FLAG_FINAL_ANGLE: u32 = 0x4_0000;
 /// (`MoveSplineFlag.h:48,77`), the same split [`crate::ServerPacket::MonsterMove`] reads: set ⇒ a 3-D
 /// flight path that keeps its own Z, clear ⇒ a ground walk whose Z the client re-derives from terrain.
 const SPLINE_FLAG_FLYING: u32 = 0x200;
+/// `SPLINEFLAG_RUNMODE` — see [`super::super::monster_move`]'s copy for why its *absence* is what
+/// matters: a spline without it forces walk mode on for the unit it moves.
+const SPLINE_FLAG_RUNMODE: u32 = 0x100;
 /// `MoveSplineFlag::Cyclic` (`MoveSplineFlag.h:59`) — the path loops back on itself forever.
 const SPLINE_FLAG_CYCLIC: u32 = 0x10_0000;
 
@@ -86,6 +89,8 @@ pub struct CreateSpline {
     /// `MoveSplineFlag::Cyclic` — the server loops this path forever. The app rides it once; a looping
     /// follow is unbuilt (the same gap `MonsterMove`'s cyclic paths have).
     pub cyclic: bool,
+    /// `MoveSplineFlag::Runmode` — and its absence forces walk mode on (decision 1758).
+    pub run_mode: bool,
 }
 
 /// The decoded fields a movement block carries: the pose (from its `LIVING`/`HAS_POSITION` flag),
@@ -199,6 +204,7 @@ impl MovementBlock {
                     duration_ms,
                     flying: spline_flags & SPLINE_FLAG_FLYING != 0,
                     cyclic: spline_flags & SPLINE_FLAG_CYCLIC != 0,
+                    run_mode: spline_flags & SPLINE_FLAG_RUNMODE != 0,
                 });
             }
         } else if update_flag & UPDATE_FLAG_HAS_POSITION != 0 {

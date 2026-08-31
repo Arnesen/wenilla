@@ -77,7 +77,7 @@ pub struct WmoModel {
     /// ROUND 5 (`0x69de20`).
     pub fogs: Vec<WmoFog>,
     /// The root's **MOSB** skybox model (`.m2`), drawn as the sky backdrop while the camera stands in
-    /// a group whose flags carry `0x40000` — see `crate::wmo_sky` in the app for the gate and
+    /// a group whose flags carry `0x40000` — see `crate::skybox` in the app for the gate and
     /// `benilla_formats::WmoGroupInfo::show_skybox` for how that bit was identified. `None` for all
     /// but a handful of roots (`benilla-extract skyboxscan`); carrying it here costs one `Option`
     /// per building and saves the sky lane a second root parse.

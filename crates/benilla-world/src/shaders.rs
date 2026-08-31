@@ -77,7 +77,7 @@ mod tests {
                  `shaders::plugin`, or was registered from a file that is not directly under src/"
             );
         }
-        // 6 since decision 1264 retired `wmo_skybox.wgsl` (a WMO skybox draws on the shared
+        // 6 since decision 1264 retired `skybox.wgsl` (a WMO skybox draws on the shared
         // model lane, whose forced-far-depth branch lives in `benilla_assets`'
         // `wow_model.wgsl`); 7 since 1429 added `static_gx.wgsl` (the B1 retained pass).
         assert_eq!(found, 7, "the engine's shader set changed size");

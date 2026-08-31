@@ -490,6 +490,7 @@ impl World {
                 stop,
                 duration_ms,
                 flying,
+                ..
             } => {
                 let mine = *guid == self.self_guid;
                 if mine {

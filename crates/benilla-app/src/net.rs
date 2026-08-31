@@ -233,10 +233,16 @@ pub(crate) struct UnitSpeeds(pub(crate) MoveSpeeds);
 /// the smaller (ties/NaN → the forward field). At vanilla values the min is always the back field,
 /// so the clamp is only visible under a server that force-sets a back speed above its forward one.
 ///
-/// A **zero** `walk` is the ctor state, not a rate (`0x7c48e8`–`0x7c4906` zeroes all six speed
-/// fields and only the create block or a `SMSG_FORCE_WALK_SPEED_CHANGE` fills them), so a mover
-/// whose speeds have not landed falls back to the run arm rather than freezing solid — the same
-/// treatment `turn_rate` already gets in [`crate::player`]'s controller.
+/// **There is no zero-`walk` fallback here, and that is a settled question rather than an
+/// oversight** (decision 1759). The ctor does zero all six speed fields (`0x7c48e8`–`0x7c4906`),
+/// and 1752 guarded against a mover reaching this with `walk == 0` by falling back to the run arm.
+/// The wow-re §5 then reported that the local player's create skips the speed-block apply, so the
+/// zero was live after every world port — and then **retracted it**: the guard it found
+/// (`0x5ff070`) has two callers, and the post-create `0x5fad50` passes 0, so the block is applied
+/// for our own unit exactly as for a remote one (`0x5fad98 xor edi,edi`, unwritten to the push at
+/// `0x5fb131`). The self-skip belongs to the *redundant*-create path `0x466350`, reached only when
+/// the object-manager lookup HIT. The ctor's zero is a transient inside one call and is never
+/// observable, so this is the plain minimum the bytes are.
 pub(crate) fn current_speed(s: &MoveSpeeds, flags: u32) -> f32 {
     use crate::creature_anim::move_flags as f;
     if flags & f::ANY_MOVE == 0 {
@@ -249,7 +255,7 @@ pub(crate) fn current_speed(s: &MoveSpeeds, flags: u32) -> f32 {
             s.swim
         };
     }
-    if flags & f::WALK_MODE != 0 && s.walk > 0.0 {
+    if flags & f::WALK_MODE != 0 {
         return s.walk.min(s.run);
     }
     if flags & f::BACKWARD != 0 {
@@ -2553,13 +2559,19 @@ mod tests {
         assert_eq!(current_speed(&s, f::BACKWARD | f::SWIMMING), 4.0);
     }
 
-    /// The two guards at the ends of the cascade. No direction bit → 0.0 (`0x7c4c99 test dl,0xf`),
-    /// never a stale speed: a mover standing still is standing however its fields read, and the
-    /// turn/pitch/mode bits are not translation. And a **zero walk speed is the ctor state, not a
-    /// rate** — a mover whose speed block has not landed falls back to the run arm rather than
-    /// freezing solid the moment somebody toggles walk (the same treatment `turn_rate` gets).
+    /// The guard at the TOP of the cascade: no direction bit → 0.0 (`0x7c4c99 test dl,0xf`), never
+    /// a stale speed. A mover standing still is standing however its fields read, and the
+    /// turn/pitch/mode bits are not translation — walk mode least of all, being precisely a mode
+    /// and not a motion.
+    ///
+    /// The bottom of the cascade has **no** guard, and decision 1759 is why: 1752 shipped a
+    /// zero-`walk` fallback to the run arm, on the reading that a mover could reach here before
+    /// its speed block landed. The wow-re §5 retracted the basis for it — the local player's
+    /// create applies the speed block like anyone else's — so the fallback is gone. The zero is
+    /// asserted rather than merely no longer asserted against, so that re-adding the guard is a
+    /// deliberate act with a record to argue against, not a plausible-looking tidy-up.
     #[test]
-    fn no_direction_bit_is_zero_and_an_unfilled_walk_speed_is_not_a_freeze() {
+    fn a_mode_is_not_a_motion_and_a_zero_walk_speed_is_a_zero() {
         use crate::creature_anim::move_flags as f;
         let s = vanilla();
         assert_eq!(current_speed(&s, 0), 0.0);
@@ -2576,8 +2588,13 @@ mod tests {
         };
         assert_eq!(
             current_speed(&unfilled, f::FORWARD | f::WALK_MODE),
+            0.0,
+            "no fallback: `min(walk, run)` with walk 0 is 0 (decision 1759)"
+        );
+        assert_eq!(
+            current_speed(&unfilled, f::FORWARD),
             7.0,
-            "walk 0.0 is the ctor, not a rate — fall back rather than freeze"
+            "…and the run arm is untouched by it"
         );
     }
 
