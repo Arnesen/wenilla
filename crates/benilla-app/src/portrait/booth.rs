@@ -245,6 +245,10 @@ pub(super) fn spawn_booth_effects(
                     // A booth bake has no appear/despawn ramp and no self-avatar feather — its
                     // riders are always opaque (0827).
                     alpha: None,
+                    // A booth's light is its own buffer (`EffectLightOverride` below), never a
+                    // world light node — the world's would fog and shade the pane by the world's
+                    // time of day.
+                    light_node: None,
                 },
                 benilla_world::particles::EmitClock::Pinned, // an item's effects loop forever
             ) else {
@@ -325,6 +329,9 @@ pub(super) fn spawn_booth_own_emitters(
             benilla_world::particles::EmitterFrames {
                 owner: Some(owner),
                 anchor: Some(root),
+                // A booth's light is its own buffer (`EffectLightOverride` below), never a world
+                // light node — the world's would fog and shade the pane by the world's time of day.
+                light_node: None,
                 // The bake root is torn down and rebuilt as a whole.
                 on_owner_loss: benilla_world::particles::OwnerLoss::Free,
                 // A booth bake has no appear/despawn ramp and no self-avatar feather (0827).

@@ -277,6 +277,30 @@ pub(super) fn feed_ui_input(
                 continue;
             }
         }
+        // EVERY OTHER KEY reaches a keyboard frame by name too. The reference's key-down walk
+        // carries the whole key table — its `arg1` comes from the *same* table the keybinding
+        // chord uses (wow-re `frame-key-script-delivery.md` §4.2), which is [`chord::key_token`]
+        // here — and the frame's gate is EXISTENCE, not handling: a shown keyboard frame with an
+        // `OnKeyDown` swallows the key whatever its script does with it (§3, §3.1). This host used
+        // to feed only the ten names above, so `CinematicFrame` — fullscreen, keyboard-enabled, an
+        // `OnKeyDown` that answers ESCAPE — consumed ESC and let W straight through, and the player
+        // walked around underneath their own intro cinematic.
+        //
+        // The reference's own Lua is the proof this is the law and not an over-reading: that
+        // handler has to call `RunBinding("SCREENSHOT")` **by hand** to get one key back. It would
+        // not need to if unhandled keys fell through to their bindings.
+        //
+        // Consumption sets the capture gate and nothing else: it suppresses the binding and the
+        // world/gameplay readers, and deliberately does NOT suppress `char_input` below — `OnChar`
+        // is a separate channel off a separate dispatcher (`0x765df0`), which is exactly how the
+        // stack-split spinner receives a digit whose key-down its own `OnKeyDown` already ate.
+        else if named.is_none() {
+            if let Some(token) = crate::bindings::chord::key_token(ev.key_code) {
+                if script.frame_key_input(token) {
+                    capture.0 = true;
+                }
+            }
+        }
         if let Some(name) = named {
             // The three box-event keys. An unconsumed press is not acted on here: every GAME
             // action of a key — ESCAPE's close/cancel ladder (TOGGLEGAMEMENU), TAB's targeting,

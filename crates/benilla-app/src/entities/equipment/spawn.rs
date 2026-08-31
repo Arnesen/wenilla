@@ -726,6 +726,11 @@ fn spawn_slot(
                 // (`0x714000`) — so the sparkle on a pauldron fades in with the body wearing it
                 // and vanishes with the avatar in first person (0827/0833).
                 alpha: Some(root),
+                // The light node is the WEARER's, never the item's: the reference has one node
+                // per object and aliases the wearer's collector into each attached model
+                // (`[item+0x3b8] = [wearer+0x3b8]`, `0x718960`) — the same rule this item's mesh
+                // batches already classify under (`BodyBakeCenter`).
+                light_node: Some(entity),
             },
             // A held item spawns no rig; its emitters run the item model's own slot-0
             // loop on the spawn clock (the torch burns always — the doodad law).

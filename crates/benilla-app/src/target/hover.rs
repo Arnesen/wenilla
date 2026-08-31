@@ -172,7 +172,11 @@ pub(super) fn update_hover(
         ),
         With<CreaturePickPart>,
     >,
-    units: Query<&Guid, Without<SelfPlayer>>,
+    // The pick's guid resolution — **and its kind**, which the skinless fallback below needs to
+    // apply the same eligibility rule the faithful path states inline (decision 1706: a corpse
+    // renders, and renders as a character body with pickable parts, but it is not a unit and a
+    // click must never send `CMSG_SET_SELECTION` for it).
+    units: Query<(&Guid, &NetEntity), Without<SelfPlayer>>,
 ) {
     hovered.target = None;
     hovered.guid = None;
@@ -194,7 +198,7 @@ pub(super) fn update_hover(
     // (visually topmost) plate wins an overlap.
     if let Some(&(_, entity)) = plate_rects.0.iter().rev().find(|(r, _)| r.contains(cursor)) {
         hovered.target = Some(entity);
-        hovered.guid = units.get(entity).ok().map(|g| g.0);
+        hovered.guid = units.get(entity).ok().map(|(g, _)| g.0);
         hovered.distance = 0.0; // a plate is topmost UI — it beats any world GameObject at a tie
         *last_pick = Some(entity);
         return;
@@ -328,8 +332,20 @@ pub(super) fn update_hover(
             continue;
         }
         let parent = child_of.parent();
-        if faithful.contains(&parent) || units.get(parent).is_err() {
-            continue; // posed-mesh-tested above, or not a targetable unit (e.g. the self player)
+        if faithful.contains(&parent) {
+            continue; // posed-mesh-tested above
+        }
+        // Not a targetable unit (the self player; or — since 1706 — a **corpse**, which is a
+        // streamed body with a guid, a character model and pickable parts, and yet is not a unit:
+        // the reference's own interact slot for `CGCorpse_C` is `0x5d6bf0` (release/loot), never
+        // `SetTarget`. The faithful path states this rule inline at its head; without it here the
+        // corpse would be pass-2-eligible through the back door and a left click on one would send
+        // a selection for a guid no unit owns.
+        let Ok((_, parent_net)) = units.get(parent) else {
+            continue;
+        };
+        if !matches!(parent_net.kind, EntityKind::Unit | EntityKind::Player) {
+            continue;
         }
         if let Some(t) = ray_mesh_bounds(origin, dir, aabb, gt) {
             if best.is_none_or(|(bt, _)| t < bt) {
@@ -370,7 +386,7 @@ pub(super) fn update_hover(
     }
     if let Some((t, entity)) = best {
         hovered.target = Some(entity);
-        hovered.guid = units.get(entity).ok().map(|g| g.0);
+        hovered.guid = units.get(entity).ok().map(|(g, _)| g.0);
         hovered.distance = t;
     }
     *last_pick = best.map(|(_, e)| e);

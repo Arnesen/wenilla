@@ -200,18 +200,41 @@ fn spawn_letterbox(mut commands: Commands) {
     }
 }
 
+/// The height of **one** letterbox bar, in the same units as the screen it is measured against.
+///
+/// The reference's law in one expression — see [`drive_letterbox`] for where each term comes from.
+/// Pure and unit-agnostic, so it is testable against the reference's own numbers without a window.
+fn letterbox_bar(width: f32, screen: f32) -> f32 {
+    let two_to_one = (screen - (width / 2.0).min(screen)) / 2.0;
+    two_to_one.min(screen / 6.0).max(0.0)
+}
+
 /// Raise the letterbox and darken the HUD while a shot is on screen; put both back after.
 ///
-/// The bar height is the reference's own law, the one `CinematicFrame` carries in Lua: only a
-/// screen wider than 4:3 gets bars, and there the picture is cropped to **2:1** — `width/2`,
-/// capped at the screen height, with the remainder split evenly. Computed here per frame so a
-/// window resized mid-cinematic stays letterboxed correctly.
+/// The bar height is the reference's own law, and it is **two** halves of one formula. The Lua in
+/// `CinematicFrame.lua` crops the picture to **2:1** — `width/2`, capped at the screen height,
+/// remainder split evenly — but only `if width/height > 4/3`; below that it recomputes nothing and
+/// the bars stand at the size `CinematicFrame.xml` declares them, `1024 x 128`. That is not a
+/// separate rule: the frame is authored on the client's native `1024 x 768` sheet (`WorldMapFrame`
+/// authors its fullscreen backdrop at exactly that, and `SetupFullscreenScale` grows it), so `128`
+/// is `height/6` — which is the 2:1 formula evaluated at exactly 4:3. The `if` is a guard around a
+/// recompute, not a gate on whether there are bars.
+///
+/// So the whole law is one line: **`min((height - min(width/2, height))/2, height/6)`**. Wider than
+/// 4:3 the first term wins and the picture is 2:1; at 4:3 they are equal; narrower, the cap holds
+/// the bars at a sixth apiece exactly as the reference's un-recomputed textures do. Reading it as
+/// "only a wide screen gets bars" left benilla un-letterboxed at 4:3 and below, which is the
+/// reference's *native* aspect.
+///
+/// Computed here per frame rather than once in `OnLoad`: a window resized mid-cinematic stays
+/// letterboxed, where the reference (whose resolution changed only across a restart) would not.
 fn drive_letterbox(
     cine: Res<Cinematic>,
     mut hidden: ResMut<crate::ui_hide::UiHidden>,
     mut bars: Query<(&mut Node, &mut Visibility), With<LetterboxBar>>,
     windows: Query<&Window>,
     mut ours: Local<bool>,
+    mut logged: Local<f32>,
 ) {
     let playing = cine.is_playing();
     // Only ever un-hide a UI *we* hid: a player who pressed ALT-Z before the cinematic keeps
@@ -231,15 +254,15 @@ fn drive_letterbox(
         .flatten()
         .map_or(0.0, |w| {
             let (width, screen) = (w.width(), w.height().max(1.0));
-            if width / screen <= 4.0 / 3.0 {
-                return 0.0;
-            }
-            ((screen - (width / 2.0).min(screen)) / 2.0).max(0.0)
+            letterbox_bar(width, screen)
         });
-    if *ours && height > 0.0 {
-        // Once per cinematic, not per frame: the measured crop, so the letterbox is a number in
-        // the log rather than something only an eye can confirm.
-        debug!("cinematic: letterbox bar {height:.1} px");
+    // On the edges and on a resize, never every frame: the measured crop, so the letterbox is a
+    // number in the log rather than something only an eye can confirm.
+    if height != *logged {
+        *logged = height;
+        if height > 0.0 {
+            debug!("cinematic: letterbox bar {height:.1} px");
+        }
     }
     for (mut node, mut vis) in &mut bars {
         let want = if height > 0.0 {
@@ -504,5 +527,63 @@ fn feed_ui(
 fn ack(net: Option<&NetCommands>) {
     if let Some(net) = net {
         let _ = net.0.send(ClientCommand::CompleteCinematic);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::letterbox_bar;
+
+    /// The reference computes the bars on its native `1024 x 768` sheet, so that sheet is where its
+    /// own numbers are quotable — and both of its cases have to come out of the one expression.
+    #[test]
+    fn the_letterbox_matches_the_reference_on_its_own_sheet() {
+        // Exactly 4:3 — the branch `CinematicFrame.lua` does NOT take, so the bars stand at the
+        // size `CinematicFrame.xml` declares: 128 of 768. The formula has to agree there, because
+        // that agreement is the proof the XML default *is* the formula at the boundary.
+        assert_eq!(letterbox_bar(1024.0, 768.0), 128.0);
+
+        // Wider: the Lua recomputes, `desiredHeight = width/2`, remainder split evenly. 16:10 on
+        // the same sheet is 1229 x 768 -> picture 614.5, bars 76.75 apiece.
+        assert!((letterbox_bar(1228.8, 768.0) - 76.8).abs() < 0.05);
+    }
+
+    /// The wide case is a **2:1 picture**, whatever the screen: that is the whole point of
+    /// `desiredHeight = width/2`, and it is the number a player can measure off a screenshot.
+    #[test]
+    fn a_widescreen_picture_is_cropped_to_two_to_one() {
+        for (w, h) in [(1920.0, 1080.0), (2560.0, 1440.0), (1600.0, 900.0)] {
+            let bar = letterbox_bar(w, h);
+            let picture = h - 2.0 * bar;
+            assert!(
+                (w / picture - 2.0).abs() < 1e-3,
+                "{w}x{h}: bar {bar} leaves {picture}, aspect {}",
+                w / picture
+            );
+        }
+    }
+
+    /// The regression this function exists for: benilla read the Lua's `if` as "only a wide screen
+    /// gets bars" and drew none at or below 4:3 — the reference's *native* aspect, and the one a
+    /// windowed player lands on most easily.
+    #[test]
+    fn four_three_and_narrower_are_still_letterboxed() {
+        // 4:3 at a real resolution.
+        assert!((letterbox_bar(1024.0, 768.0) / 768.0 - 1.0 / 6.0).abs() < 1e-6);
+        assert!((letterbox_bar(1600.0, 1200.0) / 1200.0 - 1.0 / 6.0).abs() < 1e-6);
+        // 5:4 and square: the reference leaves its textures alone, so the cap holds at a sixth
+        // rather than following `width/2` down to a taller bar.
+        assert!((letterbox_bar(1280.0, 1024.0) / 1024.0 - 1.0 / 6.0).abs() < 1e-6);
+        assert!((letterbox_bar(768.0, 768.0) / 768.0 - 1.0 / 6.0).abs() < 1e-6);
+    }
+
+    /// A window can be any shape; none of them may produce a negative or a screen-swallowing bar.
+    #[test]
+    fn no_window_shape_produces_a_nonsense_bar() {
+        for (w, h) in [(1.0, 1.0), (4000.0, 100.0), (100.0, 4000.0), (0.0, 720.0)] {
+            let bar = letterbox_bar(w, h);
+            assert!(bar >= 0.0, "{w}x{h} -> {bar}");
+            assert!(2.0 * bar <= h, "{w}x{h} -> {bar} swallows the screen");
+        }
     }
 }

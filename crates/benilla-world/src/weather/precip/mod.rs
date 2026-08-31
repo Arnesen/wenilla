@@ -659,7 +659,7 @@ fn push_precip(
         fog,
         // Rain/snow ride the reference's own weather render state (its verified Mod2x /
         // forced-grey-fog trio), not the M2 batch state producer — no GL_LIGHTING on them.
-        lit: false,
+        lighting: crate::particles::buffer::EffectLighting::None,
         anchor: cam_pos,
         bias: 0.0,
         raster_bias: 0,

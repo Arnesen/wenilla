@@ -594,6 +594,24 @@ pub struct PlayerSkillSlot {
 /// `None`. Conflating the two made every `player_*` accessor answer a confident `0` for any
 /// created creature, which is how the pet sheet's damage multiplier came out `0` instead of the
 /// unstreamed default `1.0` and the tooltip read `inf - inf` / `nan` (director, 2026-08-07).
+/// A corpse's body appearance — the seven `CORPSE_FIELD_BYTES_1`/`_2` bytes the reference's dress
+/// `0x5d6260` loads into the corpse's own `CCharacterComponent` (`+0x69..+0x6f`), which are the same
+/// seven selectors a living player's body is composited from. Read via
+/// [`ObjectFields::corpse_look`].
+///
+/// This is the corpse's OWN snapshot, taken at death: it is not the owner's live `PLAYER_BYTES`,
+/// and it survives the owner logging out or being nowhere near.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorpseLook {
+    pub race: u8,
+    pub sex: u8,
+    pub skin: u8,
+    pub face: u8,
+    pub hair_style: u8,
+    pub hair_color: u8,
+    pub facial_hair: u8,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ObjectFields {
     /// Presence bitmask, one bit per field index (`index = word * 32 + bit`) — the wire's block
@@ -681,6 +699,101 @@ impl ObjectFields {
     /// send (decision 0308 §5). `None`/0 when absent.
     pub fn corpse_owner(&self) -> Option<u64> {
         self.get_guid(6).filter(|&g| g != 0)
+    }
+
+    /// `CORPSE_FIELD_DISPLAY_ID` (field 12, `OBJECT_END + 0x6`): the dead player's body model, as a
+    /// **`CreatureDisplayInfo` id** — vmangos writes the owner's `GetNativeDisplayId()` straight in
+    /// (`Player::CreateCorpse`, `Player.cpp:4809`), so it resolves down the very same
+    /// displayId → CreatureDisplayInfo → CreatureModelData chain a player's living body does
+    /// (decision 0041). The reference reads exactly this field for the model: `0x5d6700`'s
+    /// not-bones leg is `[[corpse+0x110]+0x18]` → `[0xc0de90]` (CreatureDisplayInfo) → `[row+4]`
+    /// → `[0xc0de68]` (CreatureModelData) → `[row+8]` = the path.
+    ///
+    /// **Only meaningful while [`Self::corpse_is_bones`] is false.** A bone pile carries the field
+    /// (the server's corpse→bones conversion copies fields 3.. verbatim, vmangos `Map.cpp:3638`)
+    /// and the client ignores it: `0x5d6700` branches on the BONES bit *first* and builds the
+    /// skeleton path from race/sex instead.
+    pub fn corpse_display_id(&self) -> Option<u32> {
+        self.get_u32(12).filter(|&d| d != 0)
+    }
+
+    /// One `CORPSE_FIELD_ITEM` slot (fields 13..31, `OBJECT_END + 0x7 + slot`, `slot` = the
+    /// **equipment slot** 0..18): the worn piece as `(ItemDisplayInfo id, InventoryType)` — the
+    /// server packs `DisplayInfoID | (InventoryType << 24)` (`Player::CreateCorpse`,
+    /// `Player.cpp:4821`), and the client unpacks the same way (`0x5d6423 and eax,0xffffff`
+    /// before the `[0xc0dc10]` ItemDisplayInfo index). `None` for an empty slot.
+    ///
+    /// Note this is a **display id, already resolved** — unlike `PLAYER_VISIBLE_ITEM`, which
+    /// carries item *entries* and needs a template round trip. A corpse dresses off the wire alone.
+    pub fn corpse_item(&self, slot: u8) -> Option<(u32, u8)> {
+        let raw = self.get_u32(13 + u16::from(slot))?;
+        let display = raw & 0x00ff_ffff;
+        (display != 0).then_some((display, (raw >> 24) as u8))
+    }
+
+    /// `CORPSE_FIELD_BYTES_1` (field 32, `OBJECT_END + 0x1A`) — byte 1 **race**, byte 2 **gender**,
+    /// byte 3 **skinColor** (byte 0 is unused; vmangos writes `(0) | (race<<8) | (gender<<16) |
+    /// (skin<<24)`, `Corpse.cpp:228`). The reference reads them one byte at a time off the same
+    /// word — `[[corpse+0x110]+0x69/+0x6a/+0x6b]` in the dress `0x5d6260`.
+    fn corpse_bytes_1(&self) -> Option<u32> {
+        self.get_u32(32)
+    }
+    /// `CORPSE_FIELD_BYTES_2` (field 33, `OBJECT_END + 0x1B`) — byte 0 **face**, byte 1
+    /// **hairStyle**, byte 2 **hairColor**, byte 3 **facialHair** (`Corpse.cpp:229`; the reference's
+    /// `+0x6c..+0x6f`).
+    fn corpse_bytes_2(&self) -> Option<u32> {
+        self.get_u32(33)
+    }
+    /// The corpse's body appearance — `(race, sex, skin, face, hairStyle, hairColor, facialHair)`,
+    /// the seven bytes `0x5d6260` loads into the corpse's own `CCharacterComponent`. `None` when
+    /// neither BYTES word is known (a bare `Values` delta).
+    pub fn corpse_look(&self) -> Option<CorpseLook> {
+        let (b1, b2) = (self.corpse_bytes_1()?, self.corpse_bytes_2()?);
+        Some(CorpseLook {
+            race: (b1 >> 8) as u8,
+            sex: (b1 >> 16) as u8,
+            skin: (b1 >> 24) as u8,
+            face: b2 as u8,
+            hair_style: (b2 >> 8) as u8,
+            hair_color: (b2 >> 16) as u8,
+            facial_hair: (b2 >> 24) as u8,
+        })
+    }
+
+    /// `CORPSE_FIELD_FLAGS` (field 35, `OBJECT_END + 0x1D`) — the corpse's own flag word, read by
+    /// the reference as `[[corpse+0x110]+0x74]`. `0` when absent.
+    pub fn corpse_flags(&self) -> u32 {
+        self.get_u32(35).unwrap_or(0)
+    }
+    /// `CORPSE_FLAG_BONES` (`0x01`) — this object is a **bone pile**, not a fresh body. It is the
+    /// first thing `0x5d6260` tests (`0x5d6287 test byte [eax+0x74],0x1; jne`): a bone pile builds
+    /// **no** character component at all, wears nothing, and takes its model from race/sex rather
+    /// than from [`Self::corpse_display_id`] (`0x5d6700`). Named in vmangos `Corpse.h:45`; set on
+    /// the converted object at `Map.cpp:3644`.
+    pub fn corpse_is_bones(&self) -> bool {
+        self.corpse_flags() & 0x01 != 0
+    }
+    /// `CORPSE_FLAG_HIDE_HELM` (`0x08`) — the owner's helm preference, snapshotted at death
+    /// (vmangos copies `PLAYER_FLAGS_HIDE_HELM` in, `Player.cpp:4801`). The corpse honours it by
+    /// **never installing equipment slot 0** (`0x5d6465 test byte [edx+0x74],0x8` → the skip),
+    /// which is its own bit on its own field — *not* `PLAYER_FLAGS`, and the opposite instruction
+    /// polarity to the player lane (wow-re `helm-cloak-hide.md` §2b).
+    pub fn corpse_hides_helm(&self) -> bool {
+        self.corpse_flags() & 0x08 != 0
+    }
+    /// `CORPSE_FLAG_HIDE_CLOAK` (`0x10`) — the same, for equipment slot 14 (`0x5d6470`).
+    pub fn corpse_hides_cloak(&self) -> bool {
+        self.corpse_flags() & 0x10 != 0
+    }
+
+    /// `CORPSE_FIELD_DYNAMIC_FLAGS` (field 36, `OBJECT_END + 0x1E`) bit 0 — this bone pile carries
+    /// **lootable insignia** (`CORPSE_DYNFLAG_LOOTABLE`, vmangos `Map.cpp:3660`). The reference's
+    /// `0x5d6e20` is literally `return *(+0x110)+0x78 & 1`, and it gates both the corpse highlight
+    /// emitter (`0x5d6e30`/`0x5d6e80`, armed at build and re-armed by the field's own mirror
+    /// handler) and the `CMSG_LOOT` route off the corpse's interact slot (wow-re
+    /// `loot-anim-leg.md`).
+    pub fn corpse_lootable(&self) -> bool {
+        self.get_u32(36).unwrap_or(0) & 0x01 != 0
     }
 
     /// `DYNAMICOBJECT_CASTER` (fields 6–7, `OBJECT_END + 0x0`, a 2-field guid — vmangos

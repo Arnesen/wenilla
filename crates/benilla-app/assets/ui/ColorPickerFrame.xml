@@ -66,9 +66,13 @@
         **width**; the value marker scales by the **wheel's** height while anchoring to the strip).
 
         OTHER DEVIATIONS, each forced:
-        · **`<OnKeyDown>` (ref l.177-184) is not transcribed** — this engine gives plain frames no
-          raw key events (SCRIPT_KINDS has no `OnKeyDown`), the same wall StackSplit.xml hit
-          (its own header note). Its ESCAPE arm is `HideUIPanel(this) + cancelFunc(previousValues)`, i.e.
+        · **`<OnKeyDown>` (ref l.177-184) is not transcribed.** The engine reason is GONE — decision
+          1319 built the frame key-down walk and `OnKeyDown` is a live script kind (StackSplit.xml
+          declares one), so this could now be transcribed as written. It is not, because transcribing
+          it changes more than ESC: the walk's gate is EXISTENCE, so the frame would begin swallowing
+          EVERY key while the picker is open, and the UiPanels ESC rung below would have to come out
+          in the same move. That is a deliberate deferral now, not a wall. Its ESCAPE arm is
+          `HideUIPanel(this) + cancelFunc(previousValues)`, i.e.
           exactly what the Cancel button does, so the arm is carried in UiPanels.xml's ESC chain as
           `ColorPickerCancelButton:Click()` — the reference's own idiom for this (its game-menu
           chain cancel-clicks `OptionsFrameCancel` the same way). ESC therefore CANCELS, it does not

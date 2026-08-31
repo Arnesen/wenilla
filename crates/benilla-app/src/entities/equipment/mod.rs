@@ -37,8 +37,8 @@ use benilla_assets::m2_url;
 
 mod resolve;
 pub(in crate::entities) use resolve::placement;
-pub(super) use resolve::resolve_equipment;
 pub(crate) use resolve::DressKey;
+pub(super) use resolve::{resolve_corpse_equipment, resolve_equipment};
 mod spawn;
 pub(super) use spawn::attach_held_items;
 

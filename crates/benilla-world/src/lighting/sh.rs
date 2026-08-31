@@ -77,6 +77,29 @@ mod tests {
         [0usize, 1, 2].map(|ch| c[ch].dot(n1) + c[3 + ch].dot(quad) + c[6][ch] * x2y2)
     }
 
+    /// GOLDEN — this lane's half of the two-curve split (decision 1709). An interior fold puts its
+    /// diffuse word on the fixed axis `(−0.30822, −0.30822, −0.9)` in WoW space, whose Bevy image
+    /// is unit and 0.9 up, so a world-up normal reads μ = 0.9 at every camera angle. A MESH batch
+    /// takes the SH lane and therefore `ambient + (4/17)·(0.375 + 2·0.9 + 1.875·0.81)·diffuse`
+    /// = `ambient + 0.869118·diffuse`; its own PARTICLES take the fixed-function lane and read
+    /// `ambient + 0.9·diffuse` off the same words
+    /// ([`crate::terrain_stream::interior_light_up`]). The two are meant to differ.
+    #[test]
+    fn a_world_up_normal_reads_the_fixed_interior_axis_at_a_constant() {
+        let u = Vec3::new(-0.30822, 0.9, -0.30822);
+        assert!((u.length() - 1.0).abs() < 1e-5, "the axis is authored unit");
+        let c = prop_probe_coeffs([0.1, 0.2, 0.3], &[(u, [1.0, 1.0, 1.0])]);
+        let got = eval_probe(&c, Vec3::Y);
+        for (k, ambient) in [0.1f32, 0.2, 0.3].into_iter().enumerate() {
+            assert!(
+                (got[k] - (ambient + 0.869_118)).abs() < 1e-4,
+                "ch{k}: got {} want {}",
+                got[k],
+                ambient + 0.869_118
+            );
+        }
+    }
+
     /// GOLDEN — the reference's closed form at the three anchor normals: facing the lobe the full
     /// colour arrives (`E(μ=1) = ambient + C` exactly — (4/17)·(0.375+2+1.875) = 1); side-on the
     /// authored wrap leaves (4/17)·0.375 = 0.0882·C; opposite, (4/17)·0.25 = 0.0588·C. The director's

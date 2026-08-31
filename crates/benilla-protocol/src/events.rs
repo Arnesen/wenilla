@@ -35,6 +35,11 @@ pub enum EntityKind {
     /// area effect hangs on (Blizzard's storm, Flamestrike's burn). Carries no display id; its
     /// visual resolves through the spell chain (`DYNAMICOBJECT_SPELLID`), not a model field.
     DynamicObject,
+    /// A `TYPEID_CORPSE` (7) create — a dead player's remains: a fresh body while the owner is a
+    /// ghost, or the **bone pile** it converts to once released/looted. It renders as the dead
+    /// player (decision 1706): the character-model chain, dressed from the corpse's own
+    /// `CORPSE_FIELD_BYTES_*` + `CORPSE_FIELD_ITEM` snapshot.
+    Corpse,
     Other,
 }
 

@@ -80,6 +80,24 @@ pub(super) fn resolve_char_look(
             },
         });
     }
+    // A **corpse** that is not a bone pile (decision 1706): its look is its own
+    // `CORPSE_FIELD_BYTES_1/_2` snapshot, taken at death — not the owner's live `PLAYER_BYTES`,
+    // which the corpse cannot see and which may belong to a player who has since logged out. This
+    // is the reference's own source: `0x5d6260` reads `[[corpse+0x110]+0x69..+0x6f]` into the
+    // corpse's own `CCharacterComponent`. A bone pile builds no component and reads `None` here,
+    // which is exactly `0x5d6291`'s early skip.
+    if net.kind == EntityKind::Corpse && d.is_character_body {
+        let look = super::super::corpse::corpse_char_look(stores.get(entity).ok())?;
+        return Some(CharLook {
+            race: look.race,
+            sex: look.sex,
+            skin: look.skin,
+            hair_style: look.hair_style,
+            hair_color: look.hair_color,
+            facial_hair: look.facial_hair,
+            body: BodySkin::Composite { face: look.face },
+        });
+    }
     if net.kind == EntityKind::Player && d.is_character_body {
         // A player wearing a character body. Race/sex come from `UNIT_FIELD_BYTES_0`; the
         // `PLAYER_BYTES` / `PLAYER_BYTES_2` customization is *optional on the wire* — vmangos omits an
@@ -139,7 +157,11 @@ pub(super) fn resolve_worn_equip(
     dm: Option<&DisplayModel>,
 ) -> WornEquip {
     match net.kind {
-        EntityKind::Player => equipment
+        // A **corpse** rides the player arm (decision 1706): its `Equipment` is resolved from the
+        // 19 `CORPSE_FIELD_ITEM` slots, which are already ItemDisplayInfo ids — the same values a
+        // player's items resolve to, so the geoset + region-composite law downstream is literally
+        // the same law, on a different source.
+        EntityKind::Player | EntityKind::Corpse => equipment
             .map(|e| WornEquip {
                 bodyslots: e.bodyslots,
                 cloak: e.cloak,

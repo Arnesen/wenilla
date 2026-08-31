@@ -52,7 +52,9 @@ use bevy::prelude::*;
 
 use crate::lighting::{PropProbeSlot, PropProbes};
 use crate::model_fade::{PendingAppearFade, RenderFade};
-use crate::terrain_stream::{fold_interior_probe, PropLobeLight, TerrainStreamer};
+use crate::terrain_stream::{
+    fold_interior_probe, interior_light_up, PropLobeLight, TerrainStreamer,
+};
 use crate::wmo_portal::{indoor_verdict_at, IndoorVerdict, WmoPortalInstance};
 use benilla_assets::materials::WowModelMaterial;
 
@@ -196,6 +198,42 @@ pub struct ClassifiedBy(pub Entity);
 #[derive(Component)]
 #[relationship_target(relationship = ClassifiedBy)]
 pub struct LitParts(Vec<Entity>);
+
+/// The emitter → anchor edge of the same registry: a **LIT** particle emitter names the net-entity
+/// root whose light node it draws under, exactly as a lit mesh batch names it through
+/// [`ClassifiedBy`].
+///
+/// It exists because a light node has **two** consumer classes and only one of them is a mesh. The
+/// reference creates the node from the object's TYPEID — `0x613e10` → `0x670db0` → `0x7134b0` for
+/// every UNIT/PLAYER/GAMEOBJECT/DYNAMICOBJECT/CORPSE — never from what its batches happen to do,
+/// and a particle draw commits that node's light through the same per-batch state producer a
+/// submesh does (the reference has no particle material: it synthesizes an `M2Material` from the
+/// emitter's file record every draw). wow-re `part-lit-normal-space.md` §6.2/§6.7.
+///
+/// Onyxia's lava trap is the case that proves the split: all five of `ONYZIASLAIRLAVATRAP.M2`'s
+/// mesh batches are UNLIT (`m2batch`: flags 0x13) while emitters #0/#1/#2 are lit, so the object
+/// registered no [`LitParts`] at all and the classifier never visited it — 104 of them stood in a
+/// WMO interior taking the day/night sun.
+#[derive(Component)]
+#[relationship(relationship_target = LitEmitters)]
+pub struct EmitterLitBy(pub Entity);
+
+/// The anchor-side emitter list [`EmitterLitBy`] maintains — the second reason an anchor is
+/// classified at all. Never mutated by hand; bevy removes it when the last emitter leaves, which
+/// is what releases an emitter-only anchor's probe slot when its cloud streams out.
+#[derive(Component)]
+#[relationship_target(relationship = EmitterLitBy)]
+pub struct LitEmitters(Vec<Entity>);
+
+/// The constant RGB a LIT particle of this anchor's model is multiplied by — the anchor's own
+/// committed light evaluated along the **world up axis**, which is the only normal a particle quad
+/// ever carries (one constant per draw, wow-re `part-lit-normal-space.md` §2/§3; decision 1696).
+///
+/// Present only while the anchor is on the [`AppliedLaw::Bake`] law. Its ABSENCE is the exterior
+/// lane and means "take the scene's light", which the effect shader applies by itself — so an
+/// outdoor emitter costs nothing here and reads exactly as it did before this component existed.
+#[derive(Component, Clone, Copy, PartialEq, Debug)]
+pub struct ParticleLight(pub [f32; 3]);
 
 /// The anchor's classification record (0734) — the law its parts render under, plus the
 /// movement/residency gate that used to live per part. Inserted by the classifier on the first
@@ -401,14 +439,24 @@ pub fn classify_entity_interior(
     adt_tiles: Res<Assets<AdtTile>>,
     lighting: Res<crate::lighting::WowLighting>,
     mut probes: ResMut<PropProbes>,
-    mut anchors: Query<(
-        Entity,
-        &GlobalTransform,
-        &LitParts,
-        Option<&mut InteriorAnchor>,
-        Has<ContainmentAttach>,
-        Option<&BodyBakeCenter>,
-    )>,
+    // The walk is over LIGHT NODES: an anchor is visited when it has a lit mesh part **or** a lit
+    // particle emitter, because those are the node's two consumer classes ([`EmitterLitBy`]). The
+    // filter is what keeps it a light-node walk and not a walk over every entity in the world —
+    // a node with no consumer would still ray, and would still take a probe slot from a table
+    // that has a floor.
+    mut anchors: Query<
+        (
+            Entity,
+            &GlobalTransform,
+            Option<&LitParts>,
+            Option<&mut InteriorAnchor>,
+            Has<ContainmentAttach>,
+            Option<&BodyBakeCenter>,
+            Option<&LitEmitters>,
+            Option<&mut ParticleLight>,
+        ),
+        Or<(With<LitParts>, With<LitEmitters>)>,
+    >,
     mut nodes: Query<&mut crate::entity_shade::GroundShade>,
     bake_states: Query<&BakeState>,
     seats: Query<&PropProbeSlot>,
@@ -436,7 +484,17 @@ pub fn classify_entity_interior(
     // Anchors that wanted a resolve but had every part fade-excluded — the appear-fade lockout.
     let mut n_fade_blocked = 0usize;
     let mut resolve_us = 0.0f32;
-    for (anchor, anchor_t, lit_parts, mut state, containment, bake_center) in &mut anchors {
+    for (
+        anchor,
+        anchor_t,
+        lit_parts,
+        mut state,
+        containment,
+        bake_center,
+        lit_emitters,
+        particle_light,
+    ) in &mut anchors
+    {
         n_anchors += 1;
         let pos = anchor_t.translation();
         let had_state = state.is_some();
@@ -452,29 +510,54 @@ pub fn classify_entity_interior(
                 if let AppliedLaw::Bake(slot) = state.law {
                     if let (Ok(node), Ok(bake)) = (nodes.get(anchor), bake_states.get(anchor)) {
                         if !node.ramps_settled() {
-                            let coeffs = fold_interior_probe(
+                            let words = (
                                 node.ambient.to_array(),
                                 (bake.word * node.intensity()).to_array(),
-                                bake.ref_point,
-                                &bake.lobes,
                             );
-                            probes.update_owned(slot, coeffs);
+                            probes.update_owned(
+                                slot,
+                                fold_interior_probe(words.0, words.1, bake.ref_point, &bake.lobes),
+                            );
+                            // The mesh's probe and the emitters' constant off the SAME committed
+                            // words, through the two lanes' different curves (1709).
+                            if let Some(mut light) = particle_light {
+                                light.set_if_neq(ParticleLight(interior_light_up(
+                                    words.0,
+                                    words.1,
+                                    bake.ref_point,
+                                    &bake.lobes,
+                                )));
+                            }
                         }
                     }
                 }
                 continue;
             }
         }
-        // Re-resolving: the kind comes from the anchor's first classifiable part. Since 0755 a
-        // fading part is classifiable, so this only bails on an anchor whose parts have all been
-        // despawned (a teardown mid-frame) — `fade_blocked` is kept as the tripwire that the
-        // lockout has not crept back in.
-        let Some(kind) = lit_parts
-            .iter()
-            .find_map(|part| parts.get(part).ok().map(|(lit, ..)| lit.kind.clone()))
-        else {
-            n_fade_blocked += 1;
-            continue;
+        // Re-resolving. The law is anchor-level and reduces to ONE input — the footprint fold's
+        // reference point, or `None` for the day/night matte — so this asks the anchor's first
+        // classifiable part for it. Since 0755 a fading part is classifiable, so the part arm only
+        // comes up empty on an anchor whose parts have all been despawned (a teardown mid-frame).
+        //
+        // An anchor with NO mesh part at all is the emitter-only node: nothing to ask, and every
+        // entity M2 bakes (see [`InteriorKind`]), so it takes the footprint law from its own bake
+        // centre. `fade_blocked` stays as the tripwire that the 0755 lockout has not crept back in.
+        let part_bake = lit_parts
+            .into_iter()
+            .flat_map(LitParts::iter)
+            .find_map(|part| {
+                parts.get(part).ok().map(|(lit, ..)| match &lit.kind {
+                    InteriorKind::Bake { center, .. } => Some(*center),
+                    InteriorKind::Matte => None,
+                })
+            });
+        let bake = match part_bake {
+            Some(center) => center,
+            None if lit_emitters.is_some() => Some(bake_center.map_or(Vec3::ZERO, |c| c.0)),
+            None => {
+                n_fade_blocked += 1;
+                continue;
+            }
         };
         let seated = seats.get(anchor).ok().map(|s| s.0);
         n_resolved += 1;
@@ -493,11 +576,11 @@ pub fn classify_entity_interior(
             anchor_t,
             attach,
             attach_at,
-            &kind,
+            bake,
             seated,
         );
         resolve_us += _r.elapsed().as_secs_f32() * 1e6;
-        let kind_bake = matches!(kind, InteriorKind::Bake { .. });
+        let kind_bake = bake.is_some();
         let changed = match state.as_deref_mut() {
             Some(state) => {
                 let changed = state.law != law;
@@ -529,8 +612,14 @@ pub fn classify_entity_interior(
         // ATTACH and the point it probed are printed too (0776): a line that says only "exterior"
         // can't be read without knowing which lane produced it, and the two lanes now probe
         // different points.
-        if (law != AppliedLaw::Exterior || had_state)
-            && std::env::var_os("WOW_INTERIOR_LOG").is_some()
+        // Scoped to interior verdicts (plus interior→exterior flips) so the world's exterior
+        // masses stay silent — but `WOW_INTERIOR_LOG=all` prints the first-resolve exteriors too,
+        // which is the ONLY reading that answers "this thing is standing in a room and isn't
+        // lighting like it": a node that resolves exterior and stays there is otherwise invisible
+        // to this instrument, and looks identical to a node the walk never visited.
+        let log = std::env::var("WOW_INTERIOR_LOG").ok();
+        if log.is_some()
+            && (law != AppliedLaw::Exterior || had_state || log.as_deref() == Some("all"))
         {
             // The PART COUNT is load-bearing, not decoration: a lane readout says which law the
             // model took, never which of its batches actually joined. A billboard card that
@@ -538,11 +627,17 @@ pub fn classify_entity_interior(
             // Stratholme sign baked correctly *and* its chains lit from the sky, and the anchor
             // log said only "INTERIOR bake" for weeks (decision 0778). Compare it against the
             // model's batch count (`benilla-extract m2batch <model>`).
+            //
+            // The EMITTER count is the same reading for the node's other consumer class: a model
+            // whose batches are all unlit registers zero parts and is here entirely on its lit
+            // emitters, and "0 parts / 0 emitters" is impossible — so the pair says which
+            // consumer put this node in front of the classifier, which is otherwise invisible.
             eprintln!(
-                "[interior] t {:.2} anchor {anchor:?} ({} parts) at ({:.1}, {:.1}, {:.1}) {} probe \
-                 ({:.1}, {:.1}, {:.1}) -> {}",
+                "[interior] t {:.2} anchor {anchor:?} ({} parts, {} emitters) at \
+                 ({:.1}, {:.1}, {:.1}) {} probe ({:.1}, {:.1}, {:.1}) -> {}",
                 time.elapsed_secs(),
-                lit_parts.len(),
+                lit_parts.map_or(0, |p| p.len()),
+                lit_emitters.map_or(0, |e| e.len()),
                 pos.x,
                 pos.y,
                 pos.z,
@@ -560,7 +655,7 @@ pub fn classify_entity_interior(
                 }
             );
         }
-        for part in lit_parts.iter() {
+        for part in lit_parts.into_iter().flat_map(LitParts::iter) {
             if let Ok((mut lit, mut material, mut tag, fm, ramping, pending)) = parts.get_mut(part)
             {
                 let fade = fm.filter(|_| ramping || pending);
@@ -741,7 +836,7 @@ fn resolve_anchor_law(
     anchor_t: &GlobalTransform,
     attach: crate::wmo_portal::LightAttach,
     attach_at: Vec3,
-    kind: &InteriorKind,
+    bake_center: Option<Vec3>,
     seated: Option<u16>,
 ) -> AppliedLaw {
     let verdict = indoor_verdict_at(
@@ -761,12 +856,12 @@ fn resolve_anchor_law(
             node.on_wmo = on_wmo;
         }
     }
-    let law = match kind {
-        InteriorKind::Matte => match verdict {
+    let law = match bake_center {
+        None => match verdict {
             IndoorVerdict::DayNight | IndoorVerdict::Baked { .. } => AppliedLaw::Matte,
             IndoorVerdict::Outdoors | IndoorVerdict::OutdoorsOnWmo => AppliedLaw::Exterior,
         },
-        InteriorKind::Bake { center, .. } => {
+        Some(center) => {
             match verdict {
                 IndoorVerdict::Outdoors | IndoorVerdict::OutdoorsOnWmo => AppliedLaw::Exterior,
                 IndoorVerdict::DayNight => AppliedLaw::Matte,
@@ -780,7 +875,7 @@ fn resolve_anchor_law(
                     // lobes from the model's bbox-centre reference point. Refolded per frame
                     // while the entity moves or the chases run (the reference re-runs its attach
                     // per env update — for a settled entity every input is time-independent).
-                    let ref_point = anchor_t.transform_point(*center);
+                    let ref_point = anchor_t.transform_point(center);
                     let word = Vec3::from_array(floor168(mocv));
                     let (ambient, intensity) = match nodes.get_mut(anchor) {
                         Ok(mut node) => {
@@ -799,12 +894,9 @@ fn resolve_anchor_law(
                         // committed words, directly.
                         Err(_) => (Vec3::from_array(cap96(mocv)), 1.0),
                     };
-                    let coeffs = fold_interior_probe(
-                        ambient.to_array(),
-                        (word * intensity).to_array(),
-                        ref_point,
-                        &lobes,
-                    );
+                    let words = (ambient.to_array(), (word * intensity).to_array());
+                    let coeffs = fold_interior_probe(words.0, words.1, ref_point, &lobes);
+                    let emitter_light = interior_light_up(words.0, words.1, ref_point, &lobes);
                     let slot = match seated {
                         // Staying in Bake: the anchor keeps its owned slot, rewritten in place —
                         // no component churn, no extraction churn.
@@ -819,11 +911,17 @@ fn resolve_anchor_law(
                             // `try_insert`: the anchor may have a same-frame despawn already
                             // queued (the net teardown on a stream drop) — despawn discards
                             // this pure cache, and the insert must not panic at apply time.
-                            commands.entity(anchor).try_insert(BakeState {
-                                word,
-                                lobes,
-                                ref_point,
-                            });
+                            commands.entity(anchor).try_insert((
+                                BakeState {
+                                    word,
+                                    lobes,
+                                    ref_point,
+                                },
+                                // The emitters' half of the same committed words — a different
+                                // curve, because a particle draw takes the fixed-function lane
+                                // where a mesh batch takes the SH one ([`interior_light_up`]).
+                                ParticleLight(emitter_light),
+                            ));
                             AppliedLaw::Bake(slot)
                         }
                         None => {
@@ -860,7 +958,8 @@ fn resolve_anchor_law(
             commands
                 .entity(anchor)
                 .try_remove::<PropProbeSlot>()
-                .try_remove::<BakeState>();
+                .try_remove::<BakeState>()
+                .try_remove::<ParticleLight>();
         }
         _ => {}
     }
@@ -975,6 +1074,49 @@ mod tests {
         assert_eq!(
             occupancy, 1,
             "repair neither re-allocates nor frees the live slot"
+        );
+    }
+
+    /// **The light node is the object's, not its mesh's.** An object whose every mesh batch is
+    /// UNLIT registers no [`LitParts`] at all — and before this, the classifier's walk was over
+    /// part lists, so it never visited one. Onyxia's 104 lava traps are exactly that shape
+    /// (`m2batch`: all five batches flags 0x13) with three LIT emitters each, and they stood in a
+    /// WMO interior taking the day/night sun. The reference builds the node from the object's
+    /// TYPEID and fills it every frame regardless of what its batches do (wow-re
+    /// `part-lit-normal-space.md` §6.2), so a lit EMITTER is a consumer of it exactly as a lit
+    /// batch is.
+    ///
+    /// The control is the second anchor: an object with emitters but none of them lit registers
+    /// no edge, is not visited, and costs the walk nothing.
+    #[test]
+    fn an_object_whose_only_lit_consumer_is_an_emitter_is_still_classified() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = classifier_world();
+        // A GameObject: no mesh part joins the registry, one lit emitter does.
+        let trap = world
+            .spawn((
+                GlobalTransform::default(),
+                ContainmentAttach,
+                BodyBakeCenter(Vec3::new(0.0, 1.0, 0.0)),
+            ))
+            .id();
+        world.spawn(EmitterLitBy(trap));
+        // The control: emitters, none lit, so nothing registers.
+        let unlit = world.spawn(GlobalTransform::default()).id();
+
+        world.run_system_once(classify_entity_interior).unwrap();
+
+        let state = world
+            .get::<InteriorAnchor>(trap)
+            .expect("a light node with a lit emitter is classified even with no lit mesh part");
+        assert!(
+            state.kind_bake,
+            "with no part to ask, the node takes the footprint law from its own bake centre"
+        );
+        assert!(
+            world.get::<InteriorAnchor>(unlit).is_none(),
+            "a node with no lit consumer is never visited"
         );
     }
 

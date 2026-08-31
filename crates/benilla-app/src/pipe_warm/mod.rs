@@ -636,7 +636,10 @@ fn warm_effect_lane(
                 // module exists to prevent (0937's holes, 0958's blind lanes). The lit arm is
                 // rare content (400 of 7792 emitters) which is exactly why it would otherwise
                 // never be warm when it finally shows up.
-                for lit in [false, true] {
+                for lighting in [
+                    benilla_world::particles::buffer::EffectLighting::None,
+                    benilla_world::particles::buffer::EffectLighting::Scene,
+                ] {
                     let start = quads.begin();
                     for (u, v) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
                         quads.verts.push(EffectVertex {
@@ -652,7 +655,7 @@ fn warm_effect_lane(
                             texture: tex.id(),
                             blend,
                             fog: EffectFog::Off,
-                            lit,
+                            lighting,
                             anchor: Vec3::ZERO,
                             bias: 0.0,
                             raster_bias,

@@ -208,6 +208,17 @@ fn arm_sequence_clock(
         // A loader-idle GameObject needs no driver and no transitions — the looping player IS the
         // whole animation, and nothing will ever arm over it.
         EntityKind::GameObject => {}
+        // A **corpse** gets the clock and the transitions but **no** [`AnimDriver`] (decision
+        // 1706): its pose is one settled arm ([`super::corpse::pose_corpses`]), and the driver is
+        // the *unit* gait selector — movement flags, sheath ceremony, combat, fidget — none of
+        // which an object with no movement block can answer. Enrolling it there would put a
+        // corpse in Stand.
+        EntityKind::Corpse => {
+            commands
+                .entity(entity)
+                .insert(AnimationTransitions::new())
+                .remove::<benilla_world::rig_anim::AnimParked>();
+        }
         _ => {
             commands
                 .entity(entity)
@@ -268,6 +279,8 @@ pub(super) fn attach_entity_visuals(
     assets: Res<CubeAssets>,
     creatures: Option<Res<Creatures>>,
     gameobjects: Option<Res<GameObjects>>,
+    // The bone-pile body cache (decision 1706) — the corpse lane's second model source.
+    bones: Res<super::corpse::BonesModels>,
     // Character geoset selection (decision 0041, Milestone B): the customization tables + the entity's
     // decoded appearance, to pick which body geosets a player shows. Absent ⇒ no filtering (every geoset).
     characters: Option<Res<Characters>>,
@@ -305,14 +318,38 @@ pub(super) fn attach_entity_visuals(
         if net.kind == EntityKind::Player && !equipment.is_some_and(|e| e.settled) {
             continue;
         }
+        // A **corpse** waits on the same component for a different reason (decision 1706): its gear
+        // is final on arrival, so this is not a round-trip wait but a *descriptor* wait —
+        // `resolve_corpse_equipment` runs one step earlier in this same chain and inserts the
+        // component from the store. It matters because the corpse lane has no re-dress: its gear
+        // is a death-time snapshot that cannot change, so a body composited before the descriptor
+        // landed would stay naked for as long as it lies there.
+        if net.kind == EntityKind::Corpse && equipment.is_none() {
+            continue;
+        }
         // The entity's built display model (if it has one): None ⇒ no display / not a modeled kind.
-        let dm = net.display_id.and_then(|disp| match net.kind {
-            EntityKind::Unit | EntityKind::Player => {
-                creatures.as_deref().and_then(|c| c.models.get(&disp))
-            }
-            EntityKind::GameObject => gameobjects.as_deref().and_then(|g| g.models.get(&disp)),
-            _ => None,
-        });
+        //
+        // A **corpse** is the one kind whose model cache is not chosen by its display id (decision
+        // 1706): `CORPSE_FLAG_BONES` picks between the ordinary creature chain and the
+        // `<Race><Sex>DeathSkeleton` props, exactly as the reference's `0x5d6700` does. The fork
+        // lives in one function that both this pass and the display build read, so the two can
+        // never look in different caches for the same body.
+        let dm = match net.kind {
+            EntityKind::Corpse => match super::corpse::corpse_model(net, stores.get(entity).ok()) {
+                Some(super::corpse::CorpseModel::Bones(race, sex)) => bones.0.get(&(race, sex)),
+                Some(super::corpse::CorpseModel::Flesh(disp)) => {
+                    creatures.as_deref().and_then(|c| c.models.get(&disp))
+                }
+                None => None,
+            },
+            _ => net.display_id.and_then(|disp| match net.kind {
+                EntityKind::Unit | EntityKind::Player => {
+                    creatures.as_deref().and_then(|c| c.models.get(&disp))
+                }
+                EntityKind::GameObject => gameobjects.as_deref().and_then(|g| g.models.get(&disp)),
+                _ => None,
+            }),
+        };
         // Worn equipment driving the geoset selection (and, for a player, the region composite): a
         // player from its resolved `Equipment`, a character-model NPC from its display's
         // CreatureDisplayInfoExtra columns. Zeroed (a beast / GameObject / no data) = the naked body.
@@ -512,6 +549,17 @@ pub(super) fn attach_entity_visuals(
                         skins,
                     )
                 }
+                // A **corpse** (decision 1706). A fresh body is a character model and its held
+                // Death pose is a bone pose, so it has to skin or it lies in bind pose — standing
+                // up. The `animations` guard is what keeps a **bone pile** off this path: the 16
+                // shipped skeletons are fully static two-bone props with no sequence at all, so
+                // skinning one could only reproduce the mesh it already renders, at the cost of a
+                // scarce palette slot (the same trade decision 0941 made for the poseless GOs).
+                (EntityKind::Corpse, Some(d))
+                    if !d.skeleton.joints.is_empty() && d.animations.is_some() =>
+                {
+                    setup_skinned_instance(&mut commands, &mut palettes, entity, entity, d, skins)
+                }
                 // A GameObject whose model authors a real skeleton + animation draws through the
                 // skinned twin like a creature. Two flavours share the rig: a door/button/chest
                 // (`go_animates`) runs the open/close state machine off GAMEOBJECT_STATE (decision
@@ -561,7 +609,7 @@ pub(super) fn attach_entity_visuals(
             // the flame ring's spreading spawn window) reading file slot 0 at t = 0 for ever.
             if matches!(
                 net.kind,
-                EntityKind::Unit | EntityKind::Player | EntityKind::GameObject
+                EntityKind::Unit | EntityKind::Player | EntityKind::GameObject | EntityKind::Corpse
             ) {
                 if let Some(anims) = dm.and_then(|d| d.animations.as_ref()) {
                     arm_sequence_clock(&mut commands, entity, anims, net.kind, go_state_machine);
@@ -843,6 +891,12 @@ pub(super) fn attach_entity_visuals(
                             // (appear ramp, stream-out ramp, the self-avatar feather) multiplies
                             // its clouds — decision 0827.
                             alpha: Some(entity),
+                            // …and the entity IS the light node: one node per object, created
+                            // from its TYPEID and filled every frame whether or not a mesh batch
+                            // consumes it. A LIT emitter is a consumer of that node exactly as a
+                            // lit batch is, and on the Onyxia lava traps it is the ONLY one
+                            // (`crate::entities` → `benilla_world::interior::EmitterLitBy`).
+                            light_node: Some(entity),
                         },
                         // The emitters' rate/enabled read this instance's PLAYING sequence — a
                         // unit's or GameObject's `AnimationPlayer` on the root. A quest object's
@@ -966,6 +1020,20 @@ pub(super) fn attach_entity_visuals(
                 }
                 // A DynamicObject is deliberately invisible as an *object* — its look is the
                 // spell's area effect (the dest-anchored visual lane), never a fallback cube.
+                //
+                // A **corpse** takes no cube either (decision 1706), and for the GameObject arm's
+                // reason rather than the DynamicObject's: it reached here only because its display
+                // named no model — a `CORPSE_FIELD_DISPLAY_ID` absent from `CreatureDisplayInfo`,
+                // or a bone pile whose race has no shipped skeleton. Both are the reference's own
+                // null-row legs, which draw nothing (`0x5d6700` returns 0 and the model never
+                // loads); a body-sized red box on the ground would read as a bug in itself.
+                EntityKind::Corpse => {
+                    debug!(
+                        "corpse (display {:?}) has no usable model — not rendering",
+                        net.display_id
+                    );
+                    None
+                }
                 EntityKind::DynamicObject | EntityKind::Other => None,
             };
             if let Some((material, mesh, lift)) = fallback {

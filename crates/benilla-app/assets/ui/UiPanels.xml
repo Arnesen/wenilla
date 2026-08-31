@@ -761,9 +761,10 @@
             end
             -- The colour picker next (ColorPickerFrame.xml). The reference hooks ESC on the frame
             -- itself (`<OnKeyDown>` l.177-184, whose ESCAPE arm is `HideUIPanel(this)` +
-            -- `cancelFunc(previousValues)`); this engine gives plain frames no raw key events, so
-            -- it routes through this shared chain like the stack-split spinner and the world map
-            -- do. **Cancel-CLICK, not hide** — the ref's own arm restores the previous colour, and
+            -- `cancelFunc(previousValues)`); that frame does not transcribe its OnKeyDown (see its
+            -- own header — the engine can deliver one since 1319; the deferral is now about the
+            -- existence gate, not the engine), so it routes through this shared chain like the
+            -- world map does. **Cancel-CLICK, not hide** — the ref's own arm restores the previous colour, and
             -- clicking the real button is how the options rung below already spells this (the ref's
             -- `OptionsFrameCancel:Click()`), so there is one cancel path, not two.
             local picker = getglobal("ColorPickerFrame")
@@ -805,7 +806,8 @@
                 return
             end
             -- The fullscreen world map next (the ref's OnKeyDown ESCAPE arm — WorldMapFrame.xml
-            -- l.628; ours routes through this chain since frames get no raw key events).
+            -- l.628; ours routes through this chain rather than transcribing that frame's own
+            -- OnKeyDown, which the engine could deliver since 1319).
             local worldmap = getglobal("WorldMapFrame")
             if worldmap and worldmap:IsVisible() then
                 -- HideUIPanel, not a bare Hide: the map holds the full-screen slot (decision 0203's

@@ -1081,22 +1081,38 @@ fn entity_kind(t: ObjectType) -> EntityKind {
         ObjectType::Unit => EntityKind::Unit,
         ObjectType::GameObject => EntityKind::GameObject,
         ObjectType::DynamicObject => EntityKind::DynamicObject,
+        ObjectType::Corpse => EntityKind::Corpse,
         _ => EntityKind::Other,
     }
 }
 
-/// The display id from a create packet — units, **players**, and GameObjects all carry one. A player's
-/// body model resolves through the same CreatureDisplayInfo→CreatureModelData chain as a creature's:
-/// the 1.12 client has no race/sex→path resolver, CGPlayer inherits CGUnit's displayId model-build
-/// (decision 0041), so we route `Player` alongside `Unit`. Cast from the wire `i32`; `0`/absent →
-/// `None`.
+/// The display id from a create packet — units, **players**, GameObjects **and corpses** all carry
+/// one. A player's body model resolves through the same CreatureDisplayInfo→CreatureModelData chain
+/// as a creature's: the 1.12 client has no race/sex→path resolver, CGPlayer inherits CGUnit's
+/// displayId model-build (decision 0041), so we route `Player` alongside `Unit`. A corpse's
+/// `CORPSE_FIELD_DISPLAY_ID` is the dead player's own body display (vmangos writes
+/// `GetNativeDisplayId()` straight in), so it resolves down that identical chain — the reference's
+/// `0x5d6700` does exactly this lookup (decision 1706).
+///
+/// **A bone pile's display id is deliberately still reported here.** The client ignores it (it
+/// builds `<Race><Sex>DeathSkeleton` from the BYTES instead), but that is a *model-resolution* law,
+/// not a wire fact — the field is present and it is what it is, and the fork lives where models are
+/// resolved (`entities::corpse`). Reporting `None` here would also blind the live-display differ to
+/// a flesh→bones flag flip, which the reference reacts to with a full model reload.
+///
+/// Cast from the wire `i32`; `0`/absent → `None`.
 fn display_id(t: ObjectType, mask: &ObjectFields) -> Option<u32> {
-    let raw = match t {
-        ObjectType::Unit | ObjectType::Player => mask.unit_displayid(),
-        ObjectType::GameObject => mask.gameobject_displayid(),
+    match t {
+        ObjectType::Unit | ObjectType::Player => {
+            mask.unit_displayid().filter(|&d| d > 0).map(|d| d as u32)
+        }
+        ObjectType::GameObject => mask
+            .gameobject_displayid()
+            .filter(|&d| d > 0)
+            .map(|d| d as u32),
+        ObjectType::Corpse => mask.corpse_display_id(),
         _ => None,
-    }?;
-    (raw > 0).then_some(raw as u32)
+    }
 }
 
 /// The per-object scale (`OBJECT_FIELD_SCALE_X`) units/players/GameObjects carry — the *complete*
@@ -1107,7 +1123,12 @@ fn display_id(t: ObjectType, mask: &ObjectFields) -> Option<u32> {
 /// sends a positive value on create).
 fn object_scale(t: ObjectType, mask: &ObjectFields) -> f32 {
     let raw = match t {
-        ObjectType::Unit | ObjectType::Player | ObjectType::GameObject => mask.object_scale_x(),
+        // A corpse joins them: `OBJECT_FIELD_SCALE_X` is an OBJECT-block field and vmangos sets it
+        // (`Corpse::Create` → `SetObjectScale(DEFAULT_OBJECT_SCALE)`), so the same one-field law
+        // sizes it (decision 1706).
+        ObjectType::Unit | ObjectType::Player | ObjectType::GameObject | ObjectType::Corpse => {
+            mask.object_scale_x()
+        }
         _ => None,
     };
     raw.filter(|s| *s > 0.0).unwrap_or(1.0)

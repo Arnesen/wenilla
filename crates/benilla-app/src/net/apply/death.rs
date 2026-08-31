@@ -15,8 +15,9 @@ use crate::ui_action::UiErrorTexts;
 use super::super::SelfGuid;
 
 /// OUR corpse streaming into range (a `TYPEID_CORPSE` create whose owner is us): remember its guid
-/// for the reclaim send (decision 0308 §5). Corpses classify as [`EntityKind::Other`], and the
-/// owner field is corpse-only, so the filter is exact. Rides the `ObjectCreate` arm.
+/// for the reclaim send (decision 0308 §5). The kind is exact ([`EntityKind::Corpse`] since 1706 —
+/// it was `Other` while nothing rendered a corpse), and the owner field is corpse-only, so nothing
+/// else can match. Rides the `ObjectCreate` arm.
 pub(super) fn note_corpse(
     guid: u64,
     kind: EntityKind,
@@ -24,7 +25,7 @@ pub(super) fn note_corpse(
     self_guid: &SelfGuid,
     death_net: &mut DeathNet,
 ) {
-    if kind == EntityKind::Other && fields.corpse_owner() == self_guid.0 {
+    if kind == EntityKind::Corpse && fields.corpse_owner() == self_guid.0 {
         death_net.corpse_guid = Some(guid);
     }
 }

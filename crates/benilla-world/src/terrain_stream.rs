@@ -57,7 +57,7 @@ pub use window::StreamWindow;
 // The WMO prop-light machinery lives spawn-side (0830's named carve, executed in 0832); the two
 // outside consumers — `crate::interior` and `crate::entities`' `wmo_props` — keep their
 // `terrain_stream::X` paths, same as the `queries` items below.
-pub use spawn::prop_light::{fold_interior_probe, PropLobeLight};
+pub use spawn::prop_light::{fold_interior_probe, interior_light_up, PropLobeLight};
 // The shared placed-model assembler + the off-thread collider build — also the WMO-gameobject
 // doodad-prop path's spawner (`crate::entities`' `wmo_props`: the ship's sails ride the streamed
 // gameobject entity, and its cargo hulls ride the boat's kinematic body).
