@@ -128,6 +128,15 @@ pub(crate) struct Equipment {
     /// The head slot's display id (0 = no helm) — an attach sub-model, plus the HelmetGeosetVisData
     /// hide-masks that tuck hair/facial/ears under it (wow-re RF-0083).
     pub(crate) helm: u32,
+    /// The wearer's guild tabard (decision 1704) — the emblem five, joined off their own PUBLIC
+    /// `PLAYER_GUILDID` against the guild identity cache. `None` for a guildless player **and**
+    /// for a guild whose `CMSG_GUILD_QUERY` has not answered yet; the tabard shows its own art
+    /// until it does.
+    ///
+    /// It lives here rather than in a component of its own because it is part of *what this body
+    /// wears*: the composite key includes it, so the re-dress diff below is the one place a change
+    /// of guild, of tabard, and a late-arriving identity all converge — no second latch.
+    pub(crate) emblem: Option<benilla_formats::GuildEmblem>,
     pub(crate) settled: bool,
 }
 

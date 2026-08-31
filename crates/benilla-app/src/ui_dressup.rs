@@ -221,6 +221,9 @@ fn feed_dressup(
     mut items: ResMut<Items>,
     commands: Res<NetCommands>,
     self_q: Query<(&ObjectStore, &NetEntity), With<SelfPlayer>>,
+    // The guild identity cache (1257) — `ResMut` because it is lazy: a miss is what sends the
+    // `CMSG_GUILD_QUERY` whose answer paints the tabard the room may be previewing (1704).
+    mut guilds: ResMut<crate::ui_guild::GuildState>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -233,8 +236,16 @@ fn feed_dressup(
 
     room.resolve_pending(&mut items, &commands);
 
+    // The guild join is the caller's, not [`player_look`]'s: that function resolves an *outfit* out
+    // of the descriptor and the room's substitutions, and the crest is neither — it comes off a
+    // separate lazy cache this system holds the handle to.
     let look = match (room.open, self_q.single().ok()) {
-        (true, Some((store, net))) => player_look(store, net, &room, &mut items, &commands),
+        (true, Some((store, net))) => {
+            player_look(store, net, &room, &mut items, &commands).map(|l| DressUpLook {
+                emblem: crate::ui_guild::unit_guild_emblem(&store.0, &mut guilds, &commands),
+                ..l
+            })
+        }
         _ => None,
     };
     if preview.look != look {
@@ -299,6 +310,8 @@ fn player_look(
         hair_color: s.player_hair_color().unwrap_or(0),
         facial_hair: s.player_facial_hair().unwrap_or(0),
         equipment,
+        // The outfit's, not the crest's: [`feed_dressup`] stamps that in (see its note there).
+        emblem: None,
     })
 }
 

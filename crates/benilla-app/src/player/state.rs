@@ -4,7 +4,7 @@
 //! the concern modules beside it (`mover`, `swim`, `arc`, `movement_net`, …) all borrow from here.
 
 use avian3d::prelude::*;
-use benilla_protocol::MoveMode;
+use benilla_protocol::{JumpInfo, MoveMode};
 use bevy::prelude::*;
 
 /// Backpedal speed as a fraction of run: vanilla `MOVE_RUN_BACK` 4.5 / `MOVE_RUN` 7.0. Moving backward
@@ -706,6 +706,11 @@ pub(crate) struct Player {
     /// on the next step. Consumed at the two take-off sites in [`super::control`], where the
     /// keyboard jump is consumed, so the seed is picked by the same code that picks it for Space.
     pub(super) hover_launch: bool,
+    /// **The knockback waiting to be flown** — one [`PendingKnockback`], armed by
+    /// [`super::wire_in`] the frame `SMSG_MOVE_KNOCK_BACK` lands and consumed by the take-off site in
+    /// [`super::control`] (the same place the keyboard jump and the hover launch are consumed, so
+    /// all three enter the mover through one door). `None` the rest of the time.
+    pub(super) knockback: Option<PendingKnockback>,
     /// The take-off vertical speed (yd/s, WoW +Z up) snapshotted when the airborne phase began — the
     /// client's `StartFalling` argument (`+0xa0`, constant per arc) and the `zspeed` we send in the
     /// jump tail: `JUMP_SPEED` for a jump, **exactly 0** for a step-off (the walk election calls
@@ -832,6 +837,27 @@ pub(super) struct PlayerRide {
     pub(super) boat_yaw: f32,
 }
 
+/// **A knockback the server has aimed at our mover, latched until the mover flies it**
+/// (`SMSG_MOVE_KNOCK_BACK`, decision 1702). A latch and not a direct write for [`Player::hover_launch`]'s
+/// reason: the reference commits the launch inside its handler and `MOVEFLAG_FALLING` then keeps the
+/// walk resolver off the body, while our mover re-derives ground contact from probes every frame and
+/// would zero the velocity again on the next step. So the take-off is taken where every other
+/// take-off is taken — inside [`super::mover::step`], by the same code that seeds a jump.
+///
+/// It carries the handshake with it because the two are inseparable: the ack is owed *only* if the
+/// launch actually happened, and it must echo `launch` back verbatim as the `MovementInfo` jump tail
+/// (the server matches all four floats within `0.01` before it will relay the knockback to anyone).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct PendingKnockback {
+    /// Our own mover guid, echoed in the ack (a **full** u64 there, packed on the way in).
+    pub(super) guid: u64,
+    /// The server's movement counter for this change — echoed, or the ack is a logged cheat.
+    pub(super) counter: u32,
+    /// The launch quad: world-XY direction + horizontal speed + the take-off vertical speed in the
+    /// jump tail's **down-positive** convention (negative is upward — decision 0054).
+    pub(super) launch: JumpInfo,
+}
+
 impl Player {
     /// **Take the jump a `SetHover(true)` owes**, consuming the latch — the reference's
     /// `CMovement::Jump(force = 0)` at `0x61a630`, minus the seed select and the commit, which are
@@ -850,6 +876,22 @@ impl Player {
         let fire = self.hover_launch && !self.modes.rooted && self.airborne_since.is_none();
         self.hover_launch = false;
         fire
+    }
+
+    /// **Take the knockback the server aimed at us**, consuming the latch (decision 1702).
+    ///
+    /// Unconditional here, unlike [`Self::take_wire_jump`]: the refusals that matter are the mover's
+    /// own — the settle hold and the root anchor, both of which freeze *every* axis and are already
+    /// the reason a rooted body cannot be launched by anything. Taking it here and letting the mover
+    /// decline keeps one refusal in one place, and keeps the ack honest: the caller sends
+    /// `CMSG_MOVE_KNOCK_BACK_ACK` only if the launch actually happened, because that ack's whole
+    /// content is a claim about the arc we are now flying.
+    ///
+    /// Take-and-clear, not a level read, for the same reason the hover launch is: the reference's
+    /// handler fires once per opcode. A knockback that arrives on a frozen body is *dropped*, never
+    /// deferred until the freeze lifts.
+    pub(super) fn take_knockback(&mut self) -> Option<PendingKnockback> {
+        self.knockback.take()
     }
 
     /// Turn the avatar's **aim** by `radians` — the scripted mouse-turn's one lever

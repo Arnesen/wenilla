@@ -284,6 +284,7 @@ pub(super) fn breach_step(
         held: false,
         grounded: false,
         jumped: true,
+        knocked: false,
         air_nudged: false,
         ground: None,
     }

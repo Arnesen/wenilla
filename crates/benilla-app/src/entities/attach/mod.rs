@@ -685,6 +685,7 @@ pub(super) fn attach_entity_visuals(
                     l,
                     equip,
                     worn.cloak,
+                    worn.emblem,
                     displays.as_deref(),
                     sections.as_deref(),
                     world_assets.as_deref(),

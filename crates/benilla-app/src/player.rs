@@ -27,6 +27,7 @@ use crate::creature_anim::{move_flags, wrap_pi, BodyTwist, MovementState};
 use crate::net::{ClientCommand, Embodied, NetCommands, TeleportMessage, WorldportMessage};
 use crate::ui_script::InspectMode;
 use crate::ui_script::PointerOverUi;
+use benilla_assets::coords::wow_to_bevy;
 use benilla_assets::AssetSet;
 use benilla_world::interact::{WorldClick, WorldRightClick, WorldRightPress};
 use benilla_world::schedule::WorldStage;
@@ -423,6 +424,9 @@ fn control(
         // than at the net drain because both answers it needs — the mover claim and the parting
         // pose — are the controller's to give.
         MessageReader<crate::net::ClientControlMessage>,
+        // A knockback the server aimed at our mover (decision 1702) — `wire_in` latches it, the
+        // take-off site below flies it, and the movement stream acks it with the post-launch pose.
+        MessageReader<crate::net::KnockBackMessage>,
     ),
     // Nested into one param to stay within Bevy's 16-element system-param tuple limit (see `mouse`).
     speed_capsule: (
@@ -757,6 +761,7 @@ fn control(
         &mut net.2,
         &mut net.4,
         &mut net.5,
+        &mut net.12,
         &mut net.9,
         &mut net.11,
         self_guid,
@@ -1117,7 +1122,14 @@ fn control(
         // director's ref observation (it stands you up) is the ground truth this keeps; the
         // byte trigger is flagged LIVE-CAPTURE in the wow-re note.
         let turned = turn_delta != 0.0 || mouse_turned;
-        if (moving || turned || binds.fired(crate::bindings::cmd::JUMP))
+        // **A knockback stands you up too** (decision 1702) — the one entry here that is nobody's
+        // input. The reference's knockback apply carries it as a side effect of the launch (the
+        // `0x60e139` block, whose indirect `call [edx+0xa4]` resolves to `GetStandState 0x60be50`),
+        // which is the same guarded wrapper every trigger above reaches. Read off the armed latch
+        // rather than the take-off, because this block runs before the mover: the latch was written
+        // by [`wire_in::apply_server_moves`] at the top of the frame and is still there.
+        let knocked_out_of_it = player.knockback.is_some();
+        if (moving || turned || knocked_out_of_it || binds.fired(crate::bindings::cmd::JUMP))
             && stand_state != 0
             && request_stand.is_none()
         {
@@ -1276,12 +1288,28 @@ fn control(
         // (`0x7c625c test ah,0x30`); the seed select at `0x7c6261` is shared, so the swim/land
         // choice is made below by the same two take-off sites Space uses.
         let wire_jump = player.take_wire_jump();
+        // **The knockback the server aimed at us** (decision 1702) — taken at the same site as the
+        // other two take-offs so all three enter the mover through one door. Resolved here from the
+        // wire quad into one Bevy launch velocity: the horizontal is `(cos, sin)·xy_speed` in
+        // **absolute world XY** (nothing to do with our facing or our keys), and the vertical is
+        // `−zspeed`, because the wire's take-off speed is DOWN-positive — the same convention the
+        // jump tail this quad is about to be echoed back as already uses (decision 0054).
+        let knockback = player.take_knockback();
+        let knock_launch = knockback.map(|k| {
+            let (c, sn, xy) = (k.launch.cos_angle, k.launch.sin_angle, k.launch.xy_speed);
+            wow_to_bevy([c * xy, sn * xy, -k.launch.zspeed])
+        });
 
+        // A knockback lifts a swimmer clear of the water like any other take-off — it sets FALLING,
+        // and FALLING and SWIMMING are exclusive. It is NOT routed through `breach_step`, though:
+        // that arm exists to seed `SWIM_JUMP_SPEED`, and a knockback brings its own seed on both
+        // axes, so it leaves the water here and is flown by the ordinary land mover below.
         let breach = swimming && (want_jump && !player.modes.hover || wire_jump);
-        if breach {
+        let knock_breach = swimming && knock_launch.is_some();
+        if breach || knock_breach {
             player.swimming = false;
         }
-        let swimming = swimming && !breach;
+        let swimming = swimming && !breach && !knock_breach;
 
         // The swim translation amounts — read by the swim mover arm AND the flag build, so the
         // two can never disagree (decision 0056: the flags mirror the avatar's motion). W/S,
@@ -1382,6 +1410,7 @@ fn control(
             held,
             grounded,
             jumped,
+            knocked,
             air_nudged,
             ground,
         } = if breach {
@@ -1460,6 +1489,10 @@ fn control(
                 held: false,
                 grounded: out.grounded,
                 jumped: false,
+                // A knockback never resolves here: it clears SWIMMING at the take-off site above
+                // (the reference's `StartFalling 0x7c61f0` clears the bit outright rather than
+                // testing it), so a knocked swimmer is flown by the land mover.
+                knocked: false,
                 air_nudged: false,
                 ground: None, // swimming detaches from any platform frame below
             }
@@ -1494,9 +1527,17 @@ fn control(
                 speed,
                 want_jump,
                 wire_jump,
+                knock_launch,
                 water_floor,
             )
         };
+
+        // The knockback's own trace line (decision 1702) — flown or refused, with the quad. Emitted
+        // here because this is the first point where both halves are known: the latch we took, and
+        // the mover's verdict on it.
+        if let Some(k) = knockback {
+            move_trace::knockback(knocked, k.launch);
+        }
 
         let now = time.elapsed_secs();
         // Airborne is a walk-only concept — swimming never falls, so the body-heading / anim-flags
@@ -2007,12 +2048,25 @@ fn control(
             swim_pitch,
             movement_net::ArcEdges {
                 jumped,
+                // **The wire's own take-offs announce themselves, and not with `MSG_MOVE_JUMP`**
+                // (decision 1702). `wire_jump` covers the hover grant's `CMovement::Jump(force = 0)`,
+                // whose handler `0x61a620` sends nothing at all — and it cannot be racing a keyboard
+                // jump, because the body it launches was granted HOVER in the same breath and hover
+                // is the first refusal Space takes (`0x7c623a`). `knocked` covers the knockback,
+                // which pushes its ack instead. This is the correction 1620 needed: benilla streamed
+                // a JUMP for the hover launch, and the reference streams nothing.
+                wire_launch: knocked || wire_jump,
                 air_nudged,
                 landed,
                 fall_time: wire_fall_time,
             },
             now,
             &speed_acks,
+            // Owed only if the mover actually flew it: a launch the settle hold or the root anchor
+            // refused is dropped in silence, exactly as the reference discards an already-popped
+            // knockback record under `MOVEFLAG_ROOT` (`0x615c71 test ah,0x10` → the kind-28 table
+            // byte is 0 → `0x615c80 je 0x616539`: no apply, and no ack).
+            knockback.filter(|_| knocked),
             wire_transport,
         );
     } else {

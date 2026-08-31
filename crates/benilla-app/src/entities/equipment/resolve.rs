@@ -203,12 +203,23 @@ pub(in crate::entities) fn resolve_equipment(
     // explicit counters and never resource change ticks: `templates` is `ResMut` in this very
     // system (ask-once misses write it), so a tick gate would read its own writes and never
     // close.
-    mut last_epochs: Local<Option<(u64, u64)>>,
+    mut last_epochs: Local<Option<(u64, u64, u64)>>,
+    // The guild identity cache (decision 1257) — `ResMut` because it is LAZY: the miss below is
+    // what sends the `CMSG_GUILD_QUERY` whose answer paints the tabard. `Option` for the same
+    // reason `creatures` is: a harness without the UI plugins still resolves equipment.
+    mut guilds: Option<ResMut<crate::ui_guild::GuildState>>,
 ) {
     let Some(mut held) = held else {
         return;
     };
-    let epochs = (templates.object_epoch(), templates.template_epoch());
+    // The guild cache's landed counter joins the item epochs for the same reason those are here:
+    // a `CMSG_GUILD_QUERY` answered three frames after a player spawned changes what that player's
+    // tabard paints, and nothing about their descriptor or the item cache moves to say so.
+    let epochs = (
+        templates.object_epoch(),
+        templates.template_epoch(),
+        guilds.as_ref().map_or(0, |g| g.identity_generation()),
+    );
     let caches_moved = last_epochs.replace(epochs) != Some(epochs)
         || creatures.as_ref().is_some_and(|c| c.is_changed())
         || enchants.as_ref().is_some_and(|e| e.is_changed());
@@ -311,6 +322,13 @@ pub(in crate::entities) fn resolve_equipment(
             if hide_helm {
                 eq.helm = 0;
             }
+            // The guild tabard (decision 1704). Resolved for every player, tabard worn or not —
+            // the composite's own gate is the tabard DISPLAY's flag, and asking here keeps the
+            // query on the same lazy-cache idiom as every other read of that cache. A miss answers
+            // `None` for this frame and re-runs when the response bumps the counter above.
+            eq.emblem = guilds
+                .as_deref_mut()
+                .and_then(|g| crate::ui_guild::unit_guild_emblem(s, g, &net));
             if current_equipment != Some(&eq) {
                 commands.entity(entity).insert(eq);
             }

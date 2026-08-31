@@ -949,6 +949,21 @@ pub enum ServerPacket {
         mode: MoveMode,
         apply: bool,
     },
+    /// **The server aimed a knockback at our mover** (`SMSG_MOVE_KNOCK_BACK`, decision 1702) —
+    /// a ballistic launch it hands the controlling client to fly. `launch` is the packet's four
+    /// floats read into the launch quad they *are*: `cos_angle`/`sin_angle` the world-XY direction,
+    /// `xy_speed` the horizontal speed, `zspeed` the take-off vertical speed in the jump tail's
+    /// **down-positive** convention (negative = upward). The wire order is `vcos, vsin, speedXY,
+    /// speedZ` — NOT [`JumpInfo`]'s own `zspeed`-first serialization order, which is why this is a
+    /// read into the type rather than the type's own reader.
+    ///
+    /// Owes `CMSG_MOVE_KNOCK_BACK_ACK` with the echoed `counter` and a `MovementInfo` whose jump
+    /// tail is exactly this quad ([`opcode::SMSG_MOVE_KNOCK_BACK`]'s note has the server's checks).
+    KnockBack {
+        guid: u64,
+        counter: u32,
+        launch: JumpInfo,
+    },
     /// `SMSG_LOGOUT_COMPLETE` — the world session is over; we are back at character select.
     LogoutComplete,
     /// `SMSG_LOGOUT_RESPONSE` — the server's answer to `CMSG_LOGOUT_REQUEST`, and the ONLY thing
@@ -1515,6 +1530,7 @@ impl ServerPacket {
                 (MoveMode::Hover, true) => "SMSG_MOVE_SET_HOVER".into(),
                 (MoveMode::Hover, false) => "SMSG_MOVE_UNSET_HOVER".into(),
             },
+            ServerPacket::KnockBack { .. } => "SMSG_MOVE_KNOCK_BACK".into(),
             ServerPacket::LogoutComplete => "SMSG_LOGOUT_COMPLETE".into(),
             ServerPacket::LogoutResponse { .. } => "SMSG_LOGOUT_RESPONSE".into(),
             ServerPacket::LogoutCancelAck => "SMSG_LOGOUT_CANCEL_ACK".into(),

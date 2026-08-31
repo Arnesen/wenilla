@@ -309,6 +309,110 @@ fn force_speed_change_parses_and_ack_body_golden() {
     assert_eq!(SpeedKind::TurnRate.ack_opcode(), 0x02DF);
 }
 
+/// **The knockback handshake, byte-exact both ways** (decision 1702).
+///
+/// The two halves are one test because the second is only correct *relative to* the first: the ack's
+/// jump tail has to be the arriving quad, and the two packets order those same four floats
+/// differently. `SMSG_MOVE_KNOCK_BACK` is direction-first (`vcos, vsin, speedXY, speedZ`); the
+/// `MovementInfo` jump tail is `zspeed, cos, sin, xyspeed`. Read one in the other's order and every
+/// field is still a plausible float, the arc flies off at a wrong angle, and
+/// `FindPendingMovementKnockbackChange` rejects the ack — so this is exactly the transposition a
+/// type alone cannot catch.
+///
+/// `speedZ` is negative here because it is **down-positive**: this is a knockback that throws the
+/// body *upward* at 12 yd/s (wow-re: `0x7c61f0` stores the wire value verbatim into the same
+/// `CMovement+0xa0` a land jump seeds with `0xc0fe93d8` = −7.955547).
+#[test]
+fn knock_back_parses_and_ack_body_golden() {
+    // packed guid 8 (mask 0x01, one byte), counter 7, then vcos 0.6, vsin 0.8, speedXY 25, speedZ −12.
+    let body = hx("0108070000009a99193fcdcc4c3f0000c841000040c1");
+    let packet = messages::parse_server(messages::opcode::SMSG_MOVE_KNOCK_BACK, &body).unwrap();
+    let launch = match &packet {
+        ServerPacket::KnockBack {
+            guid: 8,
+            counter: 7,
+            launch,
+        } => *launch,
+        other => panic!(
+            "expected KnockBack (guid 8, counter 7), got {}",
+            other.name()
+        ),
+    };
+    assert_eq!(launch.cos_angle, 0.6, "first float on the wire is vcos");
+    assert_eq!(launch.sin_angle, 0.8, "second is vsin");
+    assert_eq!(launch.xy_speed, 25.0, "third is the horizontal speed");
+    assert_eq!(
+        launch.zspeed, -12.0,
+        "fourth is speedZ, down-positive — negative throws the body up"
+    );
+    match decode(packet).as_slice() {
+        [SessionEvent::KnockBack {
+            guid: 8,
+            counter: 7,
+            launch: got,
+        }] => assert_eq!(*got, launch),
+        other => panic!("expected one KnockBack event, got {other:?}"),
+    }
+
+    // The ACK body golden: a **full** 8-byte guid (packed on the way in, never on the way out), the
+    // echoed counter, and a `MovementInfo` carrying `MOVEFLAG_JUMPING` (0x2000) — without which the
+    // jump tail is not serialized at all and the server has nothing to match against.
+    let info = MovementInfo {
+        flags: 0x2000,
+        timestamp: 12345,
+        position: Vector3d {
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+        },
+        orientation: 0.5,
+        transport: None,
+        pitch: 0.0,
+        fall_time: 0,
+        jump: Some(launch),
+    };
+    assert_eq!(
+        messages::knock_back_ack(8, 7, &info),
+        hx("08000000000000000700000000200000393000000000803f00000040000040400000003f00000000000040c19a99193fcdcc4c3f0000c841"),
+        "CMSG_MOVE_KNOCK_BACK_ACK body"
+    );
+    assert_eq!(messages::opcode::SMSG_MOVE_KNOCK_BACK, 0x00EF);
+    assert_eq!(messages::opcode::CMSG_MOVE_KNOCK_BACK_ACK, 0x00F0);
+}
+
+/// **Somebody else's knockback reaches us, and replays as an arc** (decision 1702, correcting
+/// decision 0277's "no observer-side knockback signal exists in 1.12 at all").
+///
+/// `MSG_MOVE_KNOCK_BACK` is an ordinary `[packed guid][MovementInfo]` relay with the launch quad
+/// appended — and the appendix is redundant by construction, because the server builds that
+/// `MovementInfo` from the victim's own ack, whose jump tail already carries the quad. So the
+/// trailing four floats go unread and the arc still replays: this test's assertion is that the tail
+/// the reader *does* reach is the launch, not that the packet was consumed to the last byte.
+#[test]
+fn an_observed_knockback_relays_the_arc() {
+    // packed guid 0xAA, a JUMPING MovementInfo whose tail is (zspeed −12, cos 0.6, sin 0.8, xy 25),
+    // then the same quad again in the SMSG's own direction-first order.
+    let body = hx("01aa00200000393000000000803f00000040000040400000003f00000000000040c19a99193fcdcc4c3f0000c8419a99193fcdcc4c3f0000c841000040c1");
+    let packet = messages::parse_server(messages::opcode::MSG_MOVE_KNOCK_BACK, &body).unwrap();
+    match &packet {
+        ServerPacket::PlayerMove {
+            guid: 0xAA,
+            flags: 0x2000,
+            jump: Some(j),
+            ..
+        } => {
+            assert_eq!(j.zspeed, -12.0, "the relayed arc rises, down-positive");
+            assert_eq!((j.cos_angle, j.sin_angle, j.xy_speed), (0.6, 0.8, 25.0));
+        }
+        other => panic!("expected a relayed PlayerMove, got {}", other.name()),
+    }
+    match decode(packet).as_slice() {
+        [SessionEvent::UnitMove { guid: 0xAA, .. }] => {}
+        other => panic!("expected one UnitMove event, got {other:?}"),
+    }
+    assert_eq!(messages::opcode::MSG_MOVE_KNOCK_BACK, 0x00F1);
+}
+
 /// The OBSERVER speed legs, byte-exact (decision 0441 — how an observed unit's mounted speed
 /// reaches us; no counter, no ack on either): `SMSG_SPLINE_SET_*_SPEED` is `[packed guid]
 /// [f32 speed]` (vmangos `SendSpeedChangeToAll` + the mid-spline observer branch), and

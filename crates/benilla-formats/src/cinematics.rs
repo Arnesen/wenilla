@@ -18,13 +18,23 @@
 //! shipped values include `3.14159` and `4.71239` (π and 3π/2) to five decimals, which no degree
 //! table would.
 //!
-//! **The world transform** — `world = origin + Rz(facing)·local`, `z` straight through — is the
-//! one non-obvious step, and it is checked against an independent oracle rather than assumed:
-//! vmangos walks its own server-side copy of these paths (`Player::UpdateCinematic`) off a
-//! hand-built `cinematic_waypoints` table of sampled world positions, and our evaluated path lands
-//! on those samples (tens of yards over ~600-yard offsets, on a table whose z column is
-//! ground-level, not camera-level). The three sign/axis alternatives miss by 700–1800 yards. See
+//! **The world transform** — `world = origin + Rz(+facing)·local`, `z` straight through — is the
+//! one non-obvious step, and it is now settled twice over.
+//!
+//! It was first checked against an independent oracle rather than assumed: vmangos walks its own
+//! server-side copy of these paths (`Player::UpdateCinematic`) off a hand-built
+//! `cinematic_waypoints` table of sampled world positions, and our evaluated path lands on those
+//! samples (tens of yards over ~600-yard offsets, on a table whose z column is ground-level, not
+//! camera-level). The three sign/axis alternatives miss by 700–1800 yards. See
 //! [`CinematicPath::sample`].
+//!
+//! It is now **byte-verified too** (wow-re `ui/scratch/cinematic-camera-law.md`, a §5 with a
+//! Unicorn run of the binary's own bytes as arbiter), and the earlier round's contradicting
+//! answer is explained rather than left hanging. The client applies affines as a **row vector on
+//! the left** (`out = in·M`), and the stored 3×3 is `[[cos,sin,0],[−sin,cos,0],[0,0,1]]`. Read as
+//! a diagram acting on a *column* vector that is `Rz(−facing)` — which is what a matrix picture
+//! invites, and what the earlier worker reported. The client never applies it that way. The bytes
+//! and the oracle never actually disagreed.
 //!
 //! **The shipped corpus, read out of the ten `Cameras\*.m2` files** (`fov` radians, `d₀` = how far
 //! the shot's first eye position sits from its own origin, horizontally):
@@ -52,12 +62,18 @@
 //! while one runs (decision 0196), and why the client has to stream the world from the *camera*
 //! and not the avatar for the duration.
 //!
-//! **What this module deliberately does not decide.** The authored `near`/`far` clip (`0.22222` /
-//! `27.7778` = 8/36 and 1000/36, identical on all ten) are carried, not applied: a 27.8-yard far
-//! plane would render the dwarf intro's mountains as empty sky, so whatever the reference does
-//! with those two floats, it is not "install them as the world clips". Which camera of a
-//! multi-camera row plays, what ends a shot, and how `fov` reaches the world projection are the
-//! reference's to state (the wow-re cinematic dispatch, 2026-08-29).
+//! **The optics in this table are data, not the shot's framing** (decision 1711, off wow-re
+//! `ui/scratch/cinematic-camera-law.md`, VERIFIED). A 24-site census settles it: the M2 camera
+//! record's `fov`, `nearClip` and `farClip` are written at model load and read only by `0x7ac640`,
+//! which is reachable solely from the portrait and `<Model>` frame paths. **On the cinematic path
+//! nothing reads any of the three.** A fly-by is rendered through the *world camera's own* optics,
+//! re-stamped every frame.
+//!
+//! That dissolves the puzzle this note used to record: the authored clips are `0.22222` / `27.7778`
+//! (8/36 and 1000/36, identical on every shipped shot), and a 27.8-yard far plane would render the
+//! dwarf intro's mountains as empty sky. They are not world clips because they are not clips at
+//! all here — which is what two floats nobody consumes look like. They stay parsed because they
+//! are genuinely in the record and the portrait path does read them.
 
 use std::collections::HashMap;
 
@@ -245,14 +261,25 @@ pub struct CinematicPath {
     /// The row's `SoundEntries.dbc` narration id, `0` for a silent shot — carried here so a
     /// consumer that has the shot has everything the shot plays.
     pub sound_id: u32,
-    /// The authored **diagonal** field of view, radians — `0.7854` (45°) on nine of the ten shots
-    /// and `1.5708` (90°) on the Undead intro, so it is read per shot and never assumed. The
-    /// reference's perspective builder takes the half-angle as `θ = (fov/2)/√(aspect²+1)`, so a
-    /// vertical FOV for a modern projection is `fov / √(aspect²+1)` — see [`Self::vertical_fov`].
+    /// The authored field of view, radians — `0.7854` (45°) on fifteen of the sixteen shipped
+    /// shots and `1.5708` (90°) on the Undead intro.
+    ///
+    /// **The reference reads this from nothing on the cinematic path** (wow-re
+    /// `ui/scratch/cinematic-camera-law.md`, VERIFIED by a 24-site census: the M2 camera's fov and
+    /// the two clips are written at model load and read only by `0x7ac640`, which is reachable
+    /// solely from the portrait and `<Model>` frame paths). A fly-by is rendered through the
+    /// **world camera's own** optics, re-stamped every frame. So this is a real field of the
+    /// record, and it is not what a fly-by is framed with — see decision 1711 for what benilla did
+    /// with it before that was known.
     pub fov: f32,
-    /// The authored near clip, carried unapplied — see the module doc.
+    /// The authored near clip, radians-free yards — read by nothing on this path, like [`Self::fov`].
+    ///
+    /// It is carried because it is *there*, and because its value is the tell: every shipped shot
+    /// authors `8/36` or `1000/36` — `0.2222` and `27.7778` yards. As world clips those are
+    /// nonsense (a 27.8-yard far plane renders the dwarf intro's mountains as empty sky), which is
+    /// exactly what you would expect of two floats nothing consumes.
     pub near_clip: f32,
-    /// The authored far clip, carried unapplied — see the module doc.
+    /// The authored far clip — see [`Self::near_clip`].
     pub far_clip: f32,
     /// How long the shot runs, milliseconds: the sequence band the tracks are keyed inside.
     pub duration_ms: u32,
@@ -342,13 +369,6 @@ impl CinematicPath {
             target,
             roll: self.camera.roll.sample_ms(ms).unwrap_or(0.0),
         }
-    }
-
-    /// The vertical FOV a modern projection wants, for a viewport of aspect `width/height`:
-    /// `fov / √(aspect² + 1)`, inverting the reference's diagonal-FOV perspective builder
-    /// (`m11 = 1/tan(θ)`, `θ = (fov/2)/√(aspect²+1)`, wow-re `portrait-projection-aspect.md`).
-    pub fn vertical_fov(&self, aspect: f32) -> f32 {
-        self.fov / (aspect * aspect + 1.0).sqrt()
     }
 
     fn to_world(&self, local: [f32; 3]) -> [f32; 3] {
@@ -465,7 +485,11 @@ mod tests {
                 );
             }
             // The clips are uniform across the corpus; the FOV is NOT — the Undead intro is 90°
-            // where the rest are 45°, which is exactly why it is read per shot.
+            // where the rest are 45°. Kept as a **data** assertion, and no longer as a reason to
+            // read it per shot: decision 1711 established that the reference's cinematic path
+            // reads none of these three, so the split is a fact about the files and not about how
+            // any shot is framed. It stays because a parser that silently started returning zeros
+            // for all three would otherwise pass every other test in this file.
             assert!((path.near_clip - 8.0 / 36.0).abs() < 1e-6);
             assert!((path.far_clip - 1000.0 / 36.0).abs() < 1e-4);
             let want_fov = if id == 2 {

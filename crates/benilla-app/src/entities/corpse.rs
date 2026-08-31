@@ -40,20 +40,51 @@
 //! branch is dead. We reproduce the *outcome* (a corpse wears armour, not weapons), not the
 //! mechanism: aping a dead lookup would be aping a quirk, which §3 of the contract is against.
 //!
+//! ## The ground decal, and the one divergence
+//!
+//! `[corpse+0x2b0]` is **not** a render scale (its old ledger gloss); it is `0.5 ×` the MD20 render
+//! bounding-sphere radius, read by exactly one site — `0x5d6fe0`, which sizes the corpse's
+//! `UnitSelectTexture` ground decal by it × `OBJECT_FIELD_SCALE_X`. That decal is the corpse's twin
+//! of a unit's selection ring, so it belongs with the right-click loot/reclaim route this arc still
+//! defers (0308 §7), not here.
+//!
+//! **The divergence to know about** (flagged open by wow-re's §5, not settled at the bytes): the
+//! reference computes the drowned verdict *inside* the create, from the scene node's cached liquid
+//! probe — and its own `[node+0x90] & 0x20` gate means an un-probed node falls through to `Dead`.
+//! Whether the node is already probed that early is a byte question nobody has closed. Ours asks
+//! the world directly at attach time, a frame or more later, so our `Drowned` leg is reachable
+//! whether or not theirs is. The failure is one-sided — we can only ever show `Drowned` where the
+//! reference might show `Dead`, never the reverse — and it needs a drowned corpse to observe.
+//!
 //! ## The pose
 //!
 //! `0x5d63de`/`0x5d6402` arm bone 0 through the shared M2 arm `0x7121a0` with **AnimationData id 6
-//! (`Dead`)**, or **132 (`Drowned`)** when `0x5d6540` says so. That predicate is a **liquid** query:
-//! `0x670630` over the corpse's scene node (the same call and the same `surfaceZ − subject.z` shape
-//! wow-re records for the breath classifier `0x607710` and the pivot-height glide), compared against
-//! the f32 at `[0x80abfc]` = **0.66666669** — i.e. a corpse submerged by more than ⅔ yd lies drowned
-//! rather than merely dead. Both ids resolve through the model's own fallback table before playing:
-//! `HumanMale.m2` authors neither 6 nor 132's head directly, and `AnimationData.dbc` walks
-//! `Dead → Death(1)` and `Drowned → Drown(131)`.
+//! (`Dead`)**, or **132 (`Drowned`)** when `0x5d6540` says so — all of it byte-VERIFIED by wow-re's
+//! §5 round (`object-layer/scratch/corpse-drowned-pose.md`, 2026-08-29, commissioned by this work).
+//! That predicate is a **liquid** query: `0x670630` reads the corpse scene node's cached probe,
+//! whose `[node+0x98]` is named at its *writer* (`0x69e280` → terrain's own bit-exact
+//! `liquid_status`) as the **liquid surface height**. The comparison is
 //!
-//! The clip is armed **once, seeked to its end**. A corpse object never collapses in front of you —
-//! it is created after the release, already lying down — so this is the settled-pose arm the unit
-//! driver already uses for a body that streamed in dead, not a replay.
+//! ```text
+//! liquidSurfaceZ − CORPSE_FIELD_POS_Z > [0x80abfc]        // 0x3f2aaaab = 0.66666669
+//! ```
+//!
+//! strict (`test ah,0x41` read by `jne`, so equality and NaN are both false), and 2/3 yd is this
+//! client's submersion depth generally — `0x60a740`, whose result is pushed as the `$FSD` **wading**
+//! flag, runs the same subtraction against the same constant.
+//!
+//! Both ids resolve through the model's own fallback table before playing (which is what
+//! `0x7121a0` itself does: `0x711c10` playableAnimationLookup, then `0x712470` animationLookup,
+//! before any `nSequences` bounds check): `HumanMale.m2` authors neither 6 nor 132's head directly,
+//! and `AnimationData.dbc` walks `Dead → Death(1)` and `Drowned → Drown(131)`.
+//!
+//! The clip is armed **once, seeked to its end**, which is the reference's own shape: `0x5d6260`
+//! runs exactly once per object (one call site, no data-section pointer to it anywhere in the PE),
+//! it caches the verdict in `[corpse+0x2ac]`, and nothing ever recomputes it. `0x5d6850` re-arms
+//! from that cached byte, but it is the **model-ready callback** (vtable `+0x34`, fired by the
+//! trampoline `0x613d70` that SetModel registers), not a per-frame tick. A corpse object never
+//! collapses in front of you either — it is created after the release, already lying down — so this
+//! is a settled pose, never a replay.
 
 use std::collections::HashMap;
 
@@ -151,8 +182,8 @@ pub(in crate::entities) fn ensure_bones_display(
     bones.0.insert(key, dm);
 }
 
-/// This corpse's held pose has been armed — the arm is once-only, like the reference's, whose
-/// per-frame `0x5d6850` re-arms the *same* id and so is a hold, not a replay.
+/// This corpse's held pose has been armed — once-only, like the reference's: `0x5d6260` computes
+/// the verdict once per object and caches it in `[corpse+0x2ac]`, and no site recomputes it.
 #[derive(Component)]
 pub(super) struct CorpsePosed;
 
@@ -186,7 +217,14 @@ pub(super) fn pose_corpses(
         }
         let wow = benilla_assets::coords::bevy_to_wow(tf.translation());
         // The reference's `0x5d6540`: ANY liquid, not water alone — it is the generic `0x670630`
-        // query, the same one the breath classifier runs, so lava and slime count too.
+        // probe, the same one the breath classifier runs, so lava and slime count too. Strict `>`,
+        // like the emitted `jne` (equality and NaN both read as not-submerged).
+        //
+        // The reference subtracts `CORPSE_FIELD_POS_Z` (its position getter `0x5d7690` copies
+        // `[[corpse+0x110]+0xc/0x10/0x14]`), where this reads the entity's world pose. They are the
+        // same number: vmangos writes the descriptor POS fields and the movement block's
+        // `HAS_POSITION` pose from one `Relocate` (`Corpse.cpp:100-103`), and nothing moves a
+        // corpse afterwards.
         let submerged = world
             .liquid_at(benilla_world::world_point::Subject::Unit(entity), wow)
             .is_some_and(|hit| hit.surface_z - wow[2] > DROWNED_DEPTH);

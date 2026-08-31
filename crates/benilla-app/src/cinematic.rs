@@ -48,10 +48,11 @@
 //!
 //! # What playback takes over
 //!
-//! Three things, all released on the way out. The **camera** (this module writes the
-//! [`WorldCamera`] pose and FOV after `control` has seated it, the same slot
-//! `apply_camera_shake` uses); the **streaming focus**, which has to follow the camera rather than
-//! the body, because a Tauren's shot opens 1741 yards from where the body stands and would
+//! Three things, all released on the way out. The **camera** — its *pose* only; the projection is
+//! left alone, because a fly-by is framed by the world camera's own optics and the M2 record's
+//! `fov` reaches nothing on this path (decision 1711). Written after `control` has seated it, the
+//! same slot `apply_camera_shake` uses. The **streaming focus**, which has to follow the camera
+//! rather than the body, because a Tauren's shot opens 1741 yards from where the body stands and would
 //! otherwise fly over unstreamed terrain; and the **UI's cinematic flag**, which drives
 //! `CinematicFrame`'s letterbox and makes `InCinematic()` answer truthfully so `StaticPopup`
 //! suppresses dialogs the way the reference's does.
@@ -62,7 +63,7 @@ use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 use benilla_formats::{CinematicCatalog, CinematicPath};
 use benilla_ui::script::UiScript;
 use benilla_world::schedule::WorldStage;
-use benilla_world::view::{WorldCamera, CAM_FOVY};
+use benilla_world::view::WorldCamera;
 use bevy::prelude::*;
 
 use crate::char_select::ClientState;
@@ -399,38 +400,24 @@ fn start_pending(
 /// nothing accumulates and the *pose* needs no restore — the next frame's `control` simply seats
 /// it again.
 ///
-/// The **FOV does** need one, and it is taken here rather than left to a neighbour. `scoped_view`
-/// happens to rewrite the projection unconditionally every frame ahead of `control`, so today the
-/// narrow cinematic FOV would be undone anyway — but that is its ordering, not our release, and a
-/// reorder would leave the world permanently telephoto with nothing pointing at why. Ending a
-/// cinematic puts [`CAM_FOVY`] back itself; the spyglass re-asserts its own value next frame if
-/// one is up.
+/// **The FOV is not touched at all**, and that is the correction decision 1711 landed. A fly-by is
+/// rendered through the world camera's own optics, re-stamped every frame — the M2 camera record's
+/// `fov` is written at model load and read by nothing on this path (wow-re
+/// `ui/scratch/cinematic-camera-law.md`, a 24-site census; its one raw reader is reachable only
+/// from the portrait and `<Model>` frames). Feeding the authored 45 degrees through the reference's
+/// own `theta_v = F / sqrt(aspect^2 + 1)` builder — which is otherwise right, and angle-space
+/// division really is what `0x5c3cc0` does — rendered fifteen of the sixteen shipped shots at
+/// **half** the intended vertical FOV, i.e. visibly over-zoomed. Nothing to write means nothing to
+/// release.
 fn drive(
     mut cine: ResMut<Cinematic>,
     time: Res<Time>,
     net: Option<Res<NetCommands>>,
-    mut camera: Query<(&mut Transform, &mut Projection), With<WorldCamera>>,
-    windows: Query<&Window>,
-    mut was_playing: Local<bool>,
+    mut camera: Query<&mut Transform, With<WorldCamera>>,
 ) {
-    let release_fov = |camera: &mut Query<(&mut Transform, &mut Projection), With<WorldCamera>>| {
-        if let Ok((_, mut projection)) = camera.single_mut() {
-            if let Projection::Perspective(p) = projection.as_mut() {
-                p.fov = CAM_FOVY;
-            }
-        }
-    };
-
-    // Every exit lands here: the natural end below releases immediately, and the two that happen
-    // outside this system — an ESC skip, and leaving the world — are caught on the next frame by
-    // this edge. One release path, so no exit can be the one that forgets.
     let Some(play) = cine.playing.as_mut() else {
-        if std::mem::take(&mut *was_playing) {
-            release_fov(&mut camera);
-        }
         return;
     };
-    *was_playing = true;
     play.elapsed += time.delta();
 
     // Walk past any shot this frame's delta ran clean through (a long stall, a debugger pause),
@@ -442,8 +429,6 @@ fn drive(
             cine.playing = None;
             info!("cinematic: {id} finished");
             ack(net.as_deref());
-            *was_playing = false;
-            release_fov(&mut camera);
             return;
         }
         play.index += 1;
@@ -453,7 +438,7 @@ fn drive(
         }
     }
 
-    let Ok((mut cam, mut projection)) = camera.single_mut() else {
+    let Ok(mut cam) = camera.single_mut() else {
         return;
     };
     let shot = play.shot();
@@ -474,17 +459,6 @@ fn drive(
     cam.translation = eye;
     if forward != Vec3::ZERO {
         cam.look_at(target, up);
-    }
-
-    // The authored FOV is a **diagonal** opening angle in the reference's convention, and it is
-    // not uniform across the corpus — the Undead intro is 90° where the other nine are 45° — so
-    // it is read per shot and converted against the live viewport, never assumed.
-    let aspect = windows
-        .iter()
-        .next()
-        .map_or(4.0 / 3.0, |w| w.width() / w.height().max(1.0));
-    if let Projection::Perspective(p) = projection.as_mut() {
-        p.fov = shot.vertical_fov(aspect);
     }
 }
 

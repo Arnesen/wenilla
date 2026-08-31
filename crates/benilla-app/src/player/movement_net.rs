@@ -93,8 +93,16 @@ const IN_MOTION: u32 = move_flags::ANY_MOVE
 /// than four adjacent bools in the argument list, where a miscount is silent and the symptom is a
 /// wrong opcode on the wire.
 pub(super) struct ArcEdges {
-    /// A jump launched this frame → `MSG_MOVE_JUMP`, carrying the ballistic tail.
+    /// A take-off launched this frame — the arc opened.
     pub(super) jumped: bool,
+    /// …and it came from the **wire**, not the key: a knockback, or the jump a `SetHover(true)`
+    /// grant owes ([`super::Player::hover_launch`]). Suppresses `MSG_MOVE_JUMP`, which is the
+    /// *keyboard's* packet and nothing else's: `0x615ed1`, in the move-command drain's jump arm, is
+    /// its one live emission site image-wide, and neither wire door passes through it — the hover
+    /// handler `0x61a620` sends nothing at all, and the knockback's own arm of that same drain
+    /// pushes `0xf0`, its ack. (Decision 1702; this corrects 1620, which streamed a JUMP for the
+    /// hover launch.)
+    pub(super) wire_launch: bool,
     /// The standstill air nudge fired ([`super::mover::step`]) — the one mid-air press that really
     /// moves us, and so the one that breaks the airborne send silence (decision 0627).
     pub(super) air_nudged: bool,
@@ -135,10 +143,12 @@ pub(super) fn stream_self_movement(
     arc: ArcEdges,
     now: f32,
     speed_acks: &[crate::net::SpeedChangeMessage],
+    knock_ack: Option<super::state::PendingKnockback>,
     transport: Option<TransportPose>,
 ) {
     let ArcEdges {
         jumped,
+        wire_launch,
         air_nudged,
         landed,
         fall_time,
@@ -196,6 +206,33 @@ pub(super) fn stream_self_movement(
         });
         // The ack's `MovementInfo` relocates the mover server-side exactly like a Move packet, so
         // it is also a position report — the reconcile below must not re-send what it just told.
+        player.last_pos = wow_pos;
+    }
+
+    // **The knockback ack** (decision 1702) — owed only if the mover actually took off this frame,
+    // and carrying the pose it took off from. `apply → send, inside one call` is the reference's own
+    // order (`0x61624d call 0x6179c0` → `0x616261 push 0xf0`), which is why this sits here and not
+    // back at the opcode: everything on the wire must describe the arc we are already flying.
+    //
+    // `launch` goes out verbatim rather than re-derived from `wire_jump` below, though the two agree
+    // exactly for every real knockback (the mover seeded its velocity from this quad, and the round
+    // trip through the coordinate basis is sign flips and a hypot). The reference copies its own
+    // live fields as plain dwords (`+0xa0`→`+0x3c`, `+0x68`→`+0x40`, `+0x6c`→`+0x44`,
+    // `+0x84`→`+0x48`) so its echo is bit-identical to what arrived, and vmangos's `0.01` tolerance
+    // is never exercised. Sending the quad itself is how we keep that true in the one case where a
+    // re-derivation could not: `xy_speed == 0`, where a direction has no length to recover and the
+    // tail below substitutes the facing.
+    if let Some(k) = knock_ack {
+        let _ = sender.send(ClientCommand::KnockBackAck {
+            guid: k.guid,
+            counter: k.counter,
+            launch: k.launch,
+            flags: wire_flags,
+            pos: wow_pos,
+            orientation: facing,
+            transport,
+        });
+        // Like a speed ack, this relocates us server-side — so it is a position report too.
         player.last_pos = wow_pos;
     }
     let prev = player.move_flags;
@@ -284,7 +321,13 @@ pub(super) fn stream_self_movement(
     // A chair seats you inside the collider we bake for it, where the mover's down-shapecast can
     // report nothing and the body reads airborne while moving `dy=+0.000` for six frames; this
     // packet then told the server we were falling, and stood us up (B79, decision 1458).
-    if jumped {
+    // **…and a WIRE-driven take-off sends no JUMP at all** (decision 1702). Same law read the other
+    // way — `MSG_MOVE_JUMP` is the keyboard's packet ([`ArcEdges::wire_launch`] carries the bytes).
+    // For a knockback the server agrees from its own side: `CHEAT_TYPE_OVERSPEED_JUMP` is one of the
+    // few vmangos checks with **no** knockback exemption (`MovementAnticheat.cpp:650`), and a
+    // knockback's horizontal speed is over run speed by design — so a JUMP here would be a logged
+    // cheat on every single one.
+    if jumped && !wire_launch {
         send_move!(MoveKind::Jump);
     } else if landed {
         send_move!(MoveKind::FallLand);
@@ -472,12 +515,14 @@ mod tests {
             0.0,
             ArcEdges {
                 jumped: false,
+                wire_launch: false,
                 air_nudged: false,
                 landed: false,
                 fall_time: 0,
             },
             0.0,
             &[],
+            None,
             None,
         );
 
@@ -514,6 +559,7 @@ mod tests {
             0.0,
             ArcEdges {
                 jumped: false,
+                wire_launch: false,
                 air_nudged: false,
                 landed: true,
                 fall_time: 1700,
@@ -521,6 +567,7 @@ mod tests {
             // the snapshot: ~1.7 s of fall (> the 1229 ms damage gate)
             0.0,
             &[],
+            None,
             None,
         );
 
@@ -556,12 +603,14 @@ mod tests {
             0.0,
             ArcEdges {
                 jumped: false,
+                wire_launch: false,
                 air_nudged: false,
                 landed: false,
                 fall_time: 300,
             },
             0.2,
             &[],
+            None,
             None,
         );
         assert!(rx.try_recv().is_err(), "a mid-air release sends nothing");
@@ -578,12 +627,14 @@ mod tests {
             0.0,
             ArcEdges {
                 jumped: false,
+                wire_launch: false,
                 air_nudged: false,
                 landed: true,
                 fall_time: 800,
             },
             0.8,
             &[],
+            None,
             None,
         );
         let ClientCommand::Move { kind, flags, .. } = rx.try_recv().expect("the landing packet")
@@ -620,12 +671,14 @@ mod tests {
                 0.0,
                 ArcEdges {
                     jumped: false,
+                    wire_launch: false,
                     air_nudged: false,
                     landed: false,
                     fall_time: (now * 1000.0) as u32,
                 },
                 now,
                 &[],
+                None,
                 None,
             );
         };
@@ -683,12 +736,14 @@ mod tests {
             0.0,
             ArcEdges {
                 jumped: false,
+                wire_launch: false,
                 air_nudged: true,
                 landed: false,
                 fall_time: 300,
             },
             0.3,
             &[],
+            None,
             None,
         );
         let ClientCommand::Move {
@@ -721,12 +776,14 @@ mod tests {
             0.0,
             ArcEdges {
                 jumped: false,
+                wire_launch: false,
                 air_nudged: false,
                 landed: false,
                 fall_time: 300,
             },
             0.3,
             &[],
+            None,
             None,
         );
         assert!(
@@ -753,12 +810,14 @@ mod tests {
             0.0,
             ArcEdges {
                 jumped: false,
+                wire_launch: false,
                 air_nudged: false,
                 landed: false,
                 fall_time: 200,
             },
             0.2,
             &[],
+            None,
             None,
         );
         let ClientCommand::Move { kind, flags, .. } =
@@ -780,12 +839,14 @@ mod tests {
             0.0,
             ArcEdges {
                 jumped: false,
+                wire_launch: false,
                 air_nudged: false,
                 landed: false,
                 fall_time: 900,
             },
             1.5,
             &[],
+            None,
             None,
         );
         let kinds: Vec<_> = rx
@@ -822,12 +883,14 @@ mod tests {
             0.0,
             ArcEdges {
                 jumped: false,
+                wire_launch: false,
                 air_nudged: false,
                 landed: false,
                 fall_time: 0,
             },
             0.05,
             &[],
+            None,
             None,
         );
         let ClientCommand::Move { kind, flags, .. } = rx
@@ -855,12 +918,14 @@ mod tests {
             0.0,
             ArcEdges {
                 jumped: false,
+                wire_launch: false,
                 air_nudged: false,
                 landed: false,
                 fall_time: 0,
             },
             0.06,
             &[],
+            None,
             None,
         );
         assert!(rx.try_recv().is_err(), "an unchanged facing is silent");
@@ -886,12 +951,14 @@ mod tests {
                 0.0,
                 ArcEdges {
                     jumped: false,
+                    wire_launch: false,
                     air_nudged: false,
                     landed: false,
                     fall_time: 0,
                 },
                 0.05 * (i as f32 + 1.0),
                 &[],
+                None,
                 None,
             );
             assert!(
@@ -908,12 +975,14 @@ mod tests {
             0.0,
             ArcEdges {
                 jumped: false,
+                wire_launch: false,
                 air_nudged: false,
                 landed: false,
                 fall_time: 0,
             },
             0.2,
             &[],
+            None,
             None,
         );
         let ClientCommand::Move { kind, .. } = rx.try_recv().expect("the STOP_TURN") else {
@@ -944,12 +1013,14 @@ mod tests {
             0.0,
             ArcEdges {
                 jumped: false,
+                wire_launch: false,
                 air_nudged: false,
                 landed: false,
                 fall_time: 0,
             },
             0.05,
             &[],
+            None,
             None,
         );
         let kinds: Vec<_> = rx
@@ -972,12 +1043,14 @@ mod tests {
             0.0,
             ArcEdges {
                 jumped: false,
+                wire_launch: false,
                 air_nudged: false,
                 landed: false,
                 fall_time: 0,
             },
             0.0,
             &[],
+            None,
             None,
         );
     }
@@ -1067,6 +1140,130 @@ mod tests {
             "the parked facing is normalized into [0, 2π), got {orientation}"
         );
         assert_eq!(player.move_flags, 0, "bookkeeping is zeroed after parking");
+    }
+
+    /// **A knockback launch acks, and sends no `MSG_MOVE_JUMP`** (decision 1702).
+    ///
+    /// Two laws in one frame, and they are the same law read from both ends. `MSG_MOVE_JUMP` has a
+    /// single live emission site image-wide — `0x615ed1`, the move-command drain's jump arm — and
+    /// the knockback's own arm of that same drain pushes `0xf0`, its ack, instead. So a knockback
+    /// announces itself once, on the ack, whose `MovementInfo` is what the server turns into every
+    /// observer's `MSG_MOVE_KNOCK_BACK`.
+    ///
+    /// The regression this pins is not cosmetic: `CHEAT_TYPE_OVERSPEED_JUMP` is one of the few
+    /// vmangos checks with no knockback exemption, and it fires on any `MSG_MOVE_JUMP` whose
+    /// `xyspeed` exceeds run speed — which a knockback's does by design.
+    #[test]
+    fn a_knockback_acks_and_sends_no_jump() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        // Mid-launch: the mover has seeded the arc from the quad below (Bevy −Z is WoW +X, so a
+        // due-west push of 25 yd/s lands as `horiz_vel.z = −25`), and `jump_zspeed` is +up where the
+        // wire's is down-positive.
+        let launch = benilla_protocol::JumpInfo {
+            zspeed: -12.0,
+            cos_angle: 1.0,
+            sin_angle: 0.0,
+            xy_speed: 25.0,
+        };
+        let mut player = Player {
+            horiz_vel: bevy::prelude::Vec3::new(0.0, 0.0, -25.0),
+            jump_zspeed: 12.0,
+            ..Default::default()
+        };
+        stream_self_movement(
+            &tx,
+            &mut player,
+            move_flags::FALLING,
+            0.0,
+            ArcEdges {
+                jumped: true, // the arc really opened — the bookkeeping cannot tell the two apart
+                wire_launch: true,
+                air_nudged: false,
+                landed: false,
+                fall_time: 0,
+            },
+            0.0,
+            &[],
+            Some(super::super::state::PendingKnockback {
+                guid: 0x1234,
+                counter: 7,
+                launch,
+            }),
+            None,
+        );
+
+        let ClientCommand::KnockBackAck {
+            guid,
+            counter,
+            launch: acked,
+            flags,
+            ..
+        } = rx.try_recv().expect("the launch owes an ack")
+        else {
+            panic!("expected the knockback ack first");
+        };
+        assert_eq!((guid, counter), (0x1234, 7), "the counter must be echoed");
+        assert_eq!(
+            acked, launch,
+            "the four floats go back bit-for-bit — vmangos matches them within 0.01 before it will \
+             relay the knockback to anyone"
+        );
+        assert_ne!(
+            flags & move_flags::FALLING,
+            0,
+            "the ack's MovementInfo must carry JUMPING, or the jump tail it needs is never written"
+        );
+
+        for extra in rx.try_iter() {
+            if let ClientCommand::Move { kind, .. } = extra {
+                assert_ne!(
+                    kind,
+                    MoveKind::Jump,
+                    "a knockback must not put MSG_MOVE_JUMP on the wire — instant \
+                     CHEAT_TYPE_OVERSPEED_JUMP, and the reference's jump arm is a different drain arm"
+                );
+            }
+        }
+    }
+
+    /// The other half of the same gate: an ordinary jump on an identical frame still sends its JUMP.
+    /// Without this, "no JUMP for a knockback" could be satisfied by never sending one at all.
+    #[test]
+    fn an_ordinary_jump_still_sends_its_jump() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut player = Player {
+            jump_zspeed: 7.955547,
+            ..Default::default()
+        };
+        stream_self_movement(
+            &tx,
+            &mut player,
+            move_flags::FALLING,
+            0.0,
+            ArcEdges {
+                jumped: true,
+                wire_launch: false,
+                air_nudged: false,
+                landed: false,
+                fall_time: 0,
+            },
+            0.0,
+            &[],
+            None,
+            None,
+        );
+        let ClientCommand::Move { kind, jump, .. } =
+            rx.try_recv().expect("a jump take-off is announced")
+        else {
+            panic!("expected a Move command");
+        };
+        assert_eq!(kind, MoveKind::Jump);
+        let tail = jump.expect("the JUMP carries the ballistic tail");
+        assert!(
+            (tail.zspeed + 7.955547).abs() < 1.0e-4,
+            "the wire zspeed is down-positive: a rising jump reports negative, got {}",
+            tail.zspeed
+        );
     }
 
     #[test]

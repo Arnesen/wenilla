@@ -111,6 +111,7 @@ impl Plugin for NetPlugin {
             .add_message::<SpeedChangeMessage>()
             .add_message::<ClientControlMessage>()
             .add_message::<MoveModeMessage>()
+            .add_message::<KnockBackMessage>()
             .add_message::<ServerSoundMessage>()
             .add_message::<EmoteMessage>()
             .add_message::<AiReactionMessage>()
@@ -1715,6 +1716,24 @@ pub(crate) enum ClientCommand {
         pos: [f32; 3],
         orientation: f32,
     },
+    /// **Acknowledge the knockback we just flew** (`CMSG_MOVE_KNOCK_BACK_ACK`, decision 1702): the
+    /// echoed `counter`, our live pose/flags, and `launch` — the server's own quad, echoed back as
+    /// the `MovementInfo` jump tail.
+    ///
+    /// Sent by the controller on the frame the mover actually takes off, never on receipt, and never
+    /// if the launch was refused. That order is the reference's: the knockback is queued as a
+    /// due-timed record, and the frame update drains it **apply-then-send inside one call**
+    /// (`0x61624d call 0x6179c0` → `0x616261 push 0xf0`), so the `MovementInfo` on the wire is
+    /// always the post-launch one.
+    KnockBackAck {
+        guid: u64,
+        counter: u32,
+        launch: JumpInfo,
+        flags: u32,
+        pos: [f32; 3],
+        orientation: f32,
+        transport: Option<TransportPose>,
+    },
     /// Release the spirit (`CMSG_REPOP_REQUEST`, empty body) — the DEATH popup's Release Spirit
     /// (and its timeout's server-forced twin is server-side; decision 0308 slice 1).
     RepopRequest,
@@ -2272,6 +2291,18 @@ pub(crate) struct MoveModeMessage {
     pub(crate) counter: u32,
     pub(crate) mode: MoveMode,
     pub(crate) apply: bool,
+}
+
+/// **The server aimed a knockback at our mover** (`SMSG_MOVE_KNOCK_BACK`, decision 1702). Written by
+/// [`apply_net_updates`] for our own guid only, read by the player controller — the one place that
+/// owns both the mover the launch acts on and the honest post-launch pose the ack must carry.
+#[derive(Message, Clone, Copy)]
+pub(crate) struct KnockBackMessage {
+    /// Our mover's guid (the bridge only emits ours) — echoed in the ack as a **full** u64.
+    pub(crate) guid: u64,
+    pub(crate) counter: u32,
+    /// The launch quad, in the jump tail's own convention (`zspeed` down-positive).
+    pub(crate) launch: JumpInfo,
 }
 
 /// A cross-map worldport (`.tele Orgrimmar`, initial-login map, a boat crossing the sea): snap

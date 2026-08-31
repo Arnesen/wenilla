@@ -476,6 +476,10 @@ pub(super) struct SkinKey {
     pub(super) hair_style: u8,
     pub(super) hair_color: u8,
     pub(super) equip: [u32; 8],
+    /// The wearer's guild tabard (decision 1704) — part of the key, not of `equip`, because two
+    /// guilds' members wear the *same* tabard display and must not share one atlas. Without it the
+    /// first guild to composite would lend its crest to every other guild on screen.
+    pub(super) emblem: Option<benilla_formats::GuildEmblem>,
 }
 
 /// Marks a net entity whose visual (model children or fallback cube) has been attached, so the attach

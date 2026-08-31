@@ -1066,6 +1066,20 @@ pub enum SessionEvent {
         mode: crate::messages::MoveMode,
         apply: bool,
     },
+    /// **A knockback aimed at our own mover** (`SMSG_MOVE_KNOCK_BACK`, decision 1702) — the server
+    /// hands the controlling client a ballistic launch and lets it fly the arc itself; nothing about
+    /// it is a spline or a teleport. `launch` is the packet's quad as the jump tail it becomes:
+    /// world-XY direction (`cos_angle`, `sin_angle`), horizontal speed (`xy_speed`), and the
+    /// take-off vertical speed (`zspeed`, **down-positive** — negative is upward, decision 0054).
+    ///
+    /// Must be acked with the echoed `counter` and a `MovementInfo` whose jump tail is exactly this
+    /// quad, or the server logs a cheat and observers never see the knockback at all
+    /// ([`crate::messages::opcode::SMSG_MOVE_KNOCK_BACK`]).
+    KnockBack {
+        guid: u64,
+        counter: u32,
+        launch: crate::messages::JumpInfo,
+    },
     /// Someone invited us to their group (`SMSG_GROUP_INVITE`) — the invite popup.
     GroupInvite { inviter: String },
     /// An invite we sent was declined (`SMSG_GROUP_DECLINE`).

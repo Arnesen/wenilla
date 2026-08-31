@@ -116,9 +116,14 @@ pub(super) fn apply_net_updates(
         MessageWriter<EnteredWorldMessage>,
         MessageWriter<LoggedOutMessage>,
         MessageWriter<super::SpeedChangeMessage>,
-        // The ack'd movement-mode family (decisions 0308, 0866): a mode the server granted our
-        // mover, which the player controller applies and answers with its live pose.
-        MessageWriter<super::MoveModeMessage>,
+        // The two server-authored mover edges the controller both *applies* and *answers*, paired to
+        // stay inside Bevy's 16-element tuple limit — and they do belong together: a granted mode
+        // (decisions 0308, 0866) and a knockback launch (decision 1702) are the same handshake, an
+        // edge the server may not act on until our own live pose comes back.
+        (
+            MessageWriter<super::MoveModeMessage>,
+            MessageWriter<super::KnockBackMessage>,
+        ),
         // The login screen's dialog + reconnect-policy feed (decision 0539).
         MessageWriter<super::LoginStageMessage>,
         // The login queue's position feed (decision 1681).
@@ -448,7 +453,7 @@ pub(super) fn apply_net_updates(
         mut entered_world,
         mut logged_out,
         mut speed_changes,
-        mut move_modes,
+        (mut move_modes, mut knockbacks),
         mut login_stages,
         mut login_queued,
         mut login_failures,
@@ -1258,6 +1263,11 @@ pub(super) fn apply_net_updates(
                 &mut death_net,
                 &mut move_modes,
             ),
+            SessionEvent::KnockBack {
+                guid,
+                counter,
+                launch,
+            } => session::knock_back(guid, counter, launch, &self_guid, &mut knockbacks),
             SessionEvent::ItemTemplate { entry, info } => {
                 item_template(entry, info.map(|b| *b), &mut items)
             }

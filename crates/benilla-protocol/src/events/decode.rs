@@ -478,6 +478,15 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             mode,
             apply,
         }],
+        ServerPacket::KnockBack {
+            guid,
+            counter,
+            launch,
+        } => vec![SessionEvent::KnockBack {
+            guid,
+            counter,
+            launch,
+        }],
         ServerPacket::GroupInvite { inviter } => vec![SessionEvent::GroupInvite { inviter }],
         ServerPacket::GroupDecline { name } => vec![SessionEvent::GroupDecline { name }],
         ServerPacket::GroupUninvited => vec![SessionEvent::GroupUninvited],

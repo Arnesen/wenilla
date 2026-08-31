@@ -1039,6 +1039,17 @@ fn writer_loop(
                         pos,
                         orientation,
                     } => w.move_mode_ack(guid, counter, mode, apply, flags, (pos, orientation)),
+                    ClientCommand::KnockBackAck {
+                        guid,
+                        counter,
+                        launch,
+                        flags,
+                        pos,
+                        orientation,
+                        transport,
+                    } => {
+                        w.knock_back_ack(guid, counter, launch, flags, (pos, orientation), transport)
+                    }
                     ClientCommand::RepopRequest => w.repop_request(),
                     ClientCommand::CorpseQuery => w.corpse_query(),
                     ClientCommand::ReclaimCorpse { corpse } => w.reclaim_corpse(corpse),

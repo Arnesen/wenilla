@@ -91,6 +91,12 @@ enum Command {
         /// leaves the rest empty.
         #[arg(long, value_delimiter = ',', default_value = "0")]
         slots: Vec<u32>,
+        /// The wearer's guild tabard, comma-separated in
+        /// `emblemStyle,emblemColor,borderStyle,borderColor,backgroundColor` order — the five
+        /// indices `SMSG_GUILD_QUERY_RESPONSE` carries (decision 1704). Omit for "no guild". Only
+        /// paints when the tabard slot holds a guild-emblem display (20621 is the shipped one).
+        #[arg(long, value_delimiter = ',')]
+        emblem: Option<Vec<i32>>,
         /// Write the composited atlas here as a PNG (256²).
         #[arg(long)]
         out: Option<PathBuf>,
@@ -697,6 +703,26 @@ fn yn(b: bool) -> &'static str {
     }
 }
 
+/// `--emblem` → a [`benilla_formats::GuildEmblem`]: the five wire indices in
+/// `SMSG_GUILD_QUERY_RESPONSE` order.
+fn guild_emblem(v: Vec<i32>) -> Result<benilla_formats::GuildEmblem> {
+    let [emblem_style, emblem_color, border_style, border_color, background_color]: [i32; 5] =
+        v.try_into().map_err(|v: Vec<i32>| {
+            anyhow::anyhow!(
+                "--emblem takes 5 comma-separated indices \
+                 (emblemStyle,emblemColor,borderStyle,borderColor,backgroundColor), got {}",
+                v.len()
+            )
+        })?;
+    Ok(benilla_formats::GuildEmblem {
+        emblem_style,
+        emblem_color,
+        border_style,
+        border_color,
+        background_color,
+    })
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut chain = open_chain(&cli.path)?;
@@ -719,6 +745,7 @@ fn main() -> Result<()> {
             hair_style,
             hair_color,
             slots,
+            emblem,
             out,
         } => {
             let mut worn = [0u32; 8];
@@ -736,6 +763,7 @@ fn main() -> Result<()> {
                     hair_style,
                     hair_color,
                     slots: worn,
+                    emblem: emblem.map(guild_emblem).transpose()?,
                 },
                 out.as_deref(),
             )?;
