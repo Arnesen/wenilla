@@ -155,6 +155,79 @@ fn a_player_model_is_a_model_plus_three_and_the_chain_runs_one_way() {
     );
 }
 
+/// **`SetModel(nil)` raises; `ClearModel()` clears. They are not the same verb.**
+///
+/// This binding asserted the opposite until 2026-08-30 — "the documented clear, and how the corpus
+/// writes 'no model'" — which was invented, not read. `0x76d950` is shape A (decision 1717's
+/// taxonomy): `lua_isstring` gates the argument and `Usage: %s:SetModel("file")` is raised on
+/// anything that is not a string or a number. `ClearModel 0x76db20` is a separate table entry.
+///
+/// The same gate on `ReplaceIconTexture 0x76ed70`, whose *whole* observable behaviour it is: the
+/// swap itself lands on a `CM2Model` we do not have, and with no CM2Model the reference drops the
+/// call and never replays it.
+///
+/// A NUMBER is accepted by both — `lua_isstring` takes tags 3|4 and the client renders it to
+/// decimal text — which is the half a `Value::String`-only match would get wrong.
+#[test]
+fn the_string_setters_gate_their_argument_and_a_number_is_a_string() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(r#"g = CreateFrame("Model", "GateM", UIParent)"#)
+        .unwrap();
+
+    s.run(r#"GateM:SetModel("Interface\\Buttons\\A.mdx")"#)
+        .unwrap();
+    for bad in ["nil", "{}", "true", "print", ""] {
+        assert!(
+            s.run(&format!("GateM:SetModel({bad})")).is_err(),
+            "SetModel({bad}) must raise — it is not the clear"
+        );
+    }
+    // ...and none of those raises disturbed the path that was already set.
+    assert_eq!(
+        s.eval::<String>("return GateM:GetModel()").unwrap(),
+        r"Interface\Buttons\A.mdx",
+        "a raised setter leaves the pane alone"
+    );
+    // A number IS a string to `lua_isstring`, and the client renders it to decimal text.
+    s.run("GateM:SetModel(42)").unwrap();
+    assert_eq!(s.eval::<String>("return GateM:GetModel()").unwrap(), "42");
+
+    // ClearModel is the clear, takes no argument, and empties the pane.
+    s.run("GateM:ClearModel()").unwrap();
+    assert_eq!(
+        s.eval::<Option<String>>("return GateM:GetModel()").unwrap(),
+        None
+    );
+
+    // `ReplaceIconTexture` — same gate, and that gate is all of it. A good argument is accepted
+    // and changes NOTHING observable: the swap targets the CM2Model's type-14 textures, and a
+    // pane with no CM2Model drops the call (the reference's own `[widget+0x318] == 0` leg).
+    for bad in ["nil", "{}", "true", ""] {
+        assert!(
+            s.run(&format!("GateM:ReplaceIconTexture({bad})")).is_err(),
+            "ReplaceIconTexture({bad}) must raise"
+        );
+    }
+    s.run(r#"GateM:SetModel("Interface\\Buttons\\A.mdx")"#)
+        .unwrap();
+    s.run(r#"GateM:ReplaceIconTexture("Interface\\Icons\\INV_Misc_QuestionMark")"#)
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return GateM:GetModel()").unwrap(),
+        r"Interface\Buttons\A.mdx",
+        "it is a MATERIAL swap, not a content setter — the pane's model is untouched"
+    );
+
+    // `AdvanceTime` takes nothing, returns nothing, and does nothing — verified, not stubbed.
+    assert_eq!(
+        s.eval::<usize>("return table.getn({ GateM:AdvanceTime() })")
+            .unwrap(),
+        0,
+        "AdvanceTime pushes no return value"
+    );
+}
+
 /// **The whole block, both directions** — decision 1718's rule applied to the two model tables.
 ///
 /// The lists below are the reference's OWN enumerations, transcribed entry-for-entry from
@@ -203,10 +276,11 @@ fn the_two_model_tables_are_the_references_own() {
     const PLAYERMODEL_3: [&str; 3] = ["SetUnit", "RefreshUnit", "SetRotation"];
     /// The subset of [`MODEL_23`] this client does not build. Named, not stubbed (1134 §4) — their
     /// bodies are uncarved and they have no corpus caller. Moving a name OUT of here means the
-    /// verb was actually implemented.
-    const UNBUILT: [&str; 7] = [
-        "AdvanceTime",
-        "ReplaceIconTexture",
+    /// verb was actually implemented — as `AdvanceTime` and `ReplaceIconTexture` were, once
+    /// wow-re carved them (`ui/scratch/model-advancetime-replaceicontexture.md`). The five left
+    /// are the fog near/far set, whose `ClearFog` semantics over the colour/near/far triple nobody
+    /// has read; guessing that clear would read as knowledge.
+    const UNBUILT: [&str; 5] = [
         "SetFogNear",
         "GetFogNear",
         "SetFogFar",

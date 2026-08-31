@@ -28,7 +28,7 @@ use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::schedule::WorldStage;
 
 use super::mixer::{self, StreamingSoundHandle};
-use super::{kit::SoundKits, SoundConfig, SoundOutput};
+use super::{kit::SoundKits, SoundOutput};
 use crate::cinematic::Cinematic;
 
 /// A cut-off narration is **cut**, with no fade at all — wow-re
@@ -43,9 +43,12 @@ const CUT_FADE_MS: u64 = 0;
 /// The narration channel: which shot it belongs to, and its live handle.
 #[derive(Default)]
 pub(super) struct CinematicVoice {
-    /// `(sequence id, shot index)` of the shot whose narration is playing — the identity that
-    /// decides whether the current shot's audio is already running.
-    shot: Option<(u32, usize)>,
+    /// `(run, shot index)` of the shot whose narration is playing — the identity that decides
+    /// whether the current shot's audio is already running. Keyed on the **run** rather than the
+    /// sequence id: re-triggering the sequence already on screen restarts the picture at `t = 0`,
+    /// and a sequence-keyed identity would have matched and left the voice running from wherever
+    /// it had reached.
+    shot: Option<(u64, usize)>,
     handle: Option<StreamingSoundHandle<kira::sound::FromFileError>>,
 }
 
@@ -70,20 +73,19 @@ fn drive_narration(
     mut out: NonSendMut<SoundOutput>,
     mut kits: ResMut<SoundKits>,
     assets: Option<Res<WorldAssets>>,
-    config: Res<SoundConfig>,
 ) {
     let playing = cine.as_deref().and_then(Cinematic::playing_shot);
-    let Some((sequence, index, sound_id)) = playing else {
+    let Some((run, index, sound_id)) = playing else {
         // No cinematic (or it just ended/was skipped) — cut whatever was narrating.
         voice.stop();
         return;
     };
-    if voice.shot == Some((sequence, index)) {
+    if voice.shot == Some((run, index)) {
         return;
     }
     // A new shot: the previous one's narration, if any, does not carry over.
     voice.stop();
-    voice.shot = Some((sequence, index));
+    voice.shot = Some((run, index));
     if sound_id == 0 {
         return;
     }
@@ -122,7 +124,14 @@ fn drive_narration(
     // The old reading — the Sfx category, "the same one every NPC voice line takes" — was a
     // reasonable guess at where a player's expectation points, and it was wrong: this channel has
     // no category.
-    let amp = if config.enabled { kit_vol } else { 0.0 };
+    // **The kit volume only** — the `MasterSoundEffects` gate is carried by the master track, not
+    // baked in here. `apply_master_volume` drives master to 0 whenever `enabled` is off (or the
+    // dev mute is on) and back up when it returns, so folding `config.enabled` into a one-shot
+    // starting amp was redundant in the silencing direction and *wrong* in the other: a player who
+    // started a cinematic with sound off and turned it back on mid-narration got everything else
+    // back and a narration that stayed silent for the rest of the shot. The reference re-reads its
+    // gate (`0x7a529c`) every tick; the master track is where benilla re-reads it.
+    let amp = kit_vol;
     match mixer_ref.play_stream(data.volume(mixer::amp_to_db(amp))) {
         Ok(h) => {
             info!("cinematic voice: {path}");

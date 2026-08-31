@@ -455,7 +455,9 @@ ScriptLogFrame.xml
 # requirement rather than legibility is **after BuffFrame.xml**: the toast re-anchors
 # TemporaryEnchantFrame out of its own way, and that frame is declared there.
 HelpFrame.xml
-# The cinematic letterbox (the race-intro fly-by's two black bars, and the ESC that skips it).
+# The cinematic frame: the ESC that skips a fly-by, and the SCREENSHOT chord it hands back. It
+# draws NOTHING — the letterbox moved to Bevy UI nodes in `crate::cinematic` (decision 1699),
+# because the lane this frame paints into is dark for the whole shot.
 # Needs UiPanels.xml far above for ShowUIPanel/HideUIPanel and its own UIPanelWindows row; needs
 # nothing else, and nothing needs it — the engine reaches it purely by firing CINEMATIC_START.
 # Seated late because it is an outermost, screen-owning layer, like the two windows below it.

@@ -60,15 +60,17 @@ impl WorldWriter {
         self.send(opcode::CMSG_COMPLETE_CINEMATIC, &[])
     }
 
-    /// Advance a multi-camera cinematic to its next shot (`CMSG_NEXT_CINEMATIC_CAMERA`, empty
-    /// body) — see the opcode's own note. Sent *between* cameras; the run still ends with exactly
-    /// one [`complete_cinematic`](Self::complete_cinematic).
+    /// Announce the cinematic shot being armed (`CMSG_NEXT_CINEMATIC_CAMERA`, empty body) — see
+    /// the opcode's own note. Sent once per shot, **including the first**, so a stock single-camera
+    /// race intro sends exactly one; the run still ends with exactly one
+    /// [`complete_cinematic`](Self::complete_cinematic).
     ///
-    /// No shipped 1.12 `CinematicSequences` row carries a second camera, so this never fires
-    /// against a stock server today. It exists because the sequencing is the *client's*, not the
-    /// data's: a row with two cameras is one the client must play as a single continuous
-    /// cinematic, and playing it silently — without the packet the reference sends at `0x48efe0`
-    /// — is the kind of drift that only surfaces on a server shipping its own DBCs.
+    /// The reference's send is inside the shot arm `0x48edf0` (`0x48ef11 push 0xfb` → the
+    /// `0x418190` builder → `0x5ab630` flush), immediately before that shot's narration starts —
+    /// *not* inside the shot advance `0x48efe0`, where benilla first placed it. That misreading
+    /// mattered on the shipped path rather than only on a private server's: every 1.12
+    /// `CinematicSequences` row carries exactly one camera, so "between cameras" meant benilla
+    /// sent this packet **never**.
     pub fn next_cinematic_camera(&mut self) -> Result<()> {
         self.send(opcode::CMSG_NEXT_CINEMATIC_CAMERA, &[])
     }

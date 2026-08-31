@@ -105,7 +105,7 @@ pub fn probe(root: &Path, name: &str, evals: &[String]) -> Option<ProbeOutcome> 
         &mut dep_order,
     );
 
-    let load_errors = super::load_addon_files(&script, root, name, &toc);
+    let (load_errors, _absent) = super::load_addon_files(&script, root, name, &toc);
     let session_errors = super::drive_session_start(&mut script, name, &dep_order);
 
     let answers = evals

@@ -207,7 +207,7 @@ impl Plugin for BindingsPlugin {
                         .before(benilla_world::schedule::WorldStage::Input)
                         .run_if(in_state(ClientState::InWorld)),
                     load_character_bindings.run_if(in_state(ClientState::InWorld)),
-                    save_bindings.after(load_character_bindings),
+                    drain_binding_requests.after(load_character_bindings),
                 ),
             );
     }
@@ -294,12 +294,36 @@ fn load_character_bindings(
     }
 }
 
-/// Persist on the window's SaveBindings (Okay): write the set's diff; saving account while a
-/// character file exists deletes it — the confirmed permanent delete.
-fn save_bindings(script: Option<NonSendMut<UiScript>>, files: Res<BindingFiles>) {
+/// Drain the VM's queued binding requests.
+///
+/// Two of them. `Save` persists on the window's SaveBindings (Okay): write the set's diff; saving
+/// account while a character file exists deletes it — the confirmed permanent delete. `Run` fires
+/// a named command's action outright, which is `RunBinding(name)` — the reference's own
+/// passthrough verb, whose one shipped caller is `CinematicFrame`'s `OnKeyDown` handing the
+/// SCREENSHOT chord back to its binding while it swallows every other key (decision 1724).
+fn drain_binding_requests(script: Option<NonSendMut<UiScript>>, files: Res<BindingFiles>) {
     let Some(mut script) = script else { return };
     for req in script.take_keybind_requests() {
-        let KeybindRequest::Save(which) = req;
+        // `RunBinding(name)` — fire the named command's action as if its chord had been pressed.
+        // Only the two Lua-bodied kinds can be run this way: a `Held`/`Host` command's action is a
+        // bit in the movement word, which a Lua call has no frame to assert for. The one shipped
+        // caller is `CinematicFrame`'s SCREENSHOT passthrough, and `SCREENSHOT` is `Kind::Edge`.
+        let which = match req {
+            KeybindRequest::Save(which) => which,
+            KeybindRequest::Run(name) => {
+                match SPECS.iter().find(|s| s.name == name).map(|s| &s.kind) {
+                    Some(Kind::Edge(lua)) | Some(Kind::EdgeUpDown(lua, _)) => {
+                        let lua = *lua;
+                        if let Err(e) = script.run(lua) {
+                            warn!("bindings(RunBinding {name}): {e}");
+                        }
+                    }
+                    Some(_) => warn!("RunBinding({name}): a held/engine action has no body to run"),
+                    None => warn!("RunBinding({name}): no such command"),
+                }
+                continue;
+            }
+        };
         let snapshot = script.keybind_snapshot();
         let text = store::to_diff(&snapshot);
         let path = match which {

@@ -504,6 +504,7 @@ mod macos {
         world_assets: Option<ResMut<WorldAssets>>,
         mode: Res<super::DisplayedCursor>,
         rig: Res<CameraControl>,
+        cinematic: Option<Res<crate::cinematic::Cinematic>>,
         mut focus: MessageReader<bevy::window::WindowFocused>,
         // None of the `Local`s below is a [`crate::ui_script::VmMemo`], deliberately (decision
         // 1290's sweep): every one of them remembers something about the **OS** — what we last told
@@ -551,7 +552,15 @@ mod macos {
                 }
             }
         }
-        let looking = rig.is_looking();
+        // **A cinematic hides the pointer too**, and on this platform it can only be done here:
+        // the reference's `0x58b590(0)` at StartCinematic / `(1)` at End (wow-re
+        // `ui/scratch/cinematic-camera-law.md` §3.4). `crate::cinematic` writes
+        // `CursorOptions.visible`, which is the right lever everywhere else and is *inert on
+        // macOS* for the reason this module exists — winit's cursor-rect route does not survive a
+        // continuously-redrawing Metal view. So the fly-by's pointer is hidden by joining the
+        // look session's own `NSCursor::hide()`/`unhide()` pair, which keeps AppKit's app-global
+        // hide counter balanced across both reasons instead of racing a second one against it.
+        let looking = rig.is_looking() || cinematic.is_some_and(|c| c.is_playing());
         let stem = mode.0.stem();
         // The held payload's cursor wins over the classified mode (falls back to the mode cursor
         // when nothing is held, or its icon hasn't resolved/decoded this frame). The KEY names what

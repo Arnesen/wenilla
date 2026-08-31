@@ -796,6 +796,20 @@ impl ObjectFields {
         self.get_u32(36).unwrap_or(0) & 0x01 != 0
     }
 
+    /// `CORPSE_FLAG_LOOTABLE` (`0x20`, [`Self::corpse_flags`] bit 5) — the **PvP insignia** flag,
+    /// the one the reference's corpse cursor classifier `0x482740` reads at
+    /// `[[corpse+0x110]+0x74] >> 5 & 1` for its second leg, and the corpse right-click `0x5d6bf0`
+    /// reads again at `0x5d6c9c` for the matching send.
+    ///
+    /// **It is not "reclaimable"** — `object-layer/scratch/w2a.md` calls it both things in one
+    /// file (line 264 "reclaimable", line 618 "PvP flag") and only the second survives the byte
+    /// read: both readers pair it with the `SPELL_EFFECT_SKIN_PLAYER_CORPSE` learn-time latch
+    /// `[0xb700e8]`, which is a skinning precondition and has nothing to do with recovering your
+    /// own body. Nothing in the reclaim path consults this bit.
+    pub fn corpse_pvp_insignia(&self) -> bool {
+        self.corpse_flags() & 0x20 != 0
+    }
+
     /// `DYNAMICOBJECT_CASTER` (fields 6–7, `OBJECT_END + 0x0`, a 2-field guid — vmangos
     /// `UpdateFields_1_12_1.h:325`): the unit whose ground cast anchored this object.
     /// Index-twin of [`Self::corpse_owner`] — each TYPEID reuses `OBJECT_END`; the TypeId (or

@@ -800,6 +800,11 @@ fn stop_world_soundscape(zone: &mut ZoneAudio, reason: &str) {
     zone.area = None;
     zone.interior = None;
     zone.was_underwater = false;
+    // The cinematic latch is scheduler state like the rest of this list, and leaving it set was
+    // the one field that survived a world transition. It only ever self-corrected by luck of
+    // ordering: leave the world mid-cinematic and the next entry saw a falling edge that belonged
+    // to the *previous* session, logging a resume for a world that had had no cinematic in it.
+    zone.music_suppressed = false;
     if had {
         info!("sound: world soundscape stopped ({reason})");
     }

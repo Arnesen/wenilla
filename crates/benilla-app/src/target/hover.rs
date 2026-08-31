@@ -180,6 +180,8 @@ pub(super) fn update_hover(
 ) {
     hovered.target = None;
     hovered.guid = None;
+    hovered.corpse = None;
+    hovered.corpse_guid = None;
     hovered.distance = f32::MAX;
     if rig.is_looking() || pointer_over_ui.0 {
         *last_pick = None;
@@ -217,7 +219,14 @@ pub(super) fn update_hover(
     // even when the broad phase rejects them — the reference wouldn't click them there either.
     let mut faithful: HashSet<Entity> = HashSet::new();
     for (entity, gt, net, anims, drv, store, children, mount_child, drawn, held) in &roots {
-        if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
+        // Units, players — and **corpses** (decision 1723). A corpse is a skinned character body
+        // like any other, so it belongs in this pass, not in a fourth picker duplicating it; the
+        // reference picks every CGObject in one trace and switches on type at the end. Which slot
+        // of [`Hovered`] the winner lands in is decided at the publish below, by kind.
+        if !matches!(
+            net.kind,
+            EntityKind::Unit | EntityKind::Player | EntityKind::Corpse
+        ) {
             continue;
         }
         // Not drawn ⇒ not clickable (see the query's note). Deliberately BEFORE `faithful.insert`
@@ -280,7 +289,15 @@ pub(super) fn update_hover(
                     palettes.world_palette(rig.slot, rig.bones() as usize)
                 })
             };
-        let priority = if store.is_some_and(|s| s.0.unit_is_dead()) {
+        // The halo ladder (alive 3 / dead 2), with a **corpse below every unit** (1). Deliberately
+        // conservative and deliberately not read off `unit_is_dead()`: a corpse descriptor has no
+        // UNIT fields at all, so that accessor answers "alive" for one and would rank a body above
+        // a dead mob. Ranking it last means a corpse can never steal the generous-retry pick from
+        // a unit — the direction that cannot break an existing click. (Where `CGCorpse_C` actually
+        // sits in the reference's ladder is an open RE question, dispatched with 1723.)
+        let priority = if net.kind == EntityKind::Corpse {
+            1
+        } else if store.is_some_and(|s| s.0.unit_is_dead()) {
             2
         } else {
             3
@@ -335,16 +352,19 @@ pub(super) fn update_hover(
         if faithful.contains(&parent) {
             continue; // posed-mesh-tested above
         }
-        // Not a targetable unit (the self player; or — since 1706 — a **corpse**, which is a
-        // streamed body with a guid, a character model and pickable parts, and yet is not a unit:
-        // the reference's own interact slot for `CGCorpse_C` is `0x5d6bf0` (release/loot), never
-        // `SetTarget`. The faithful path states this rule inline at its head; without it here the
-        // corpse would be pass-2-eligible through the back door and a left click on one would send
-        // a selection for a guid no unit owns.
+        // The same eligibility the faithful path states at its head — and **a bone pile lives
+        // here** (decision 1723): the skeletal corpse model ships without a skeleton, so it never
+        // reaches the posed-mesh pass and this box test is the only thing that can ever pick it.
+        // The self player is still excluded (its query filter), and so is everything that is not a
+        // body: a hit resolves to a `Guid` the click will act on, and the kind decides which slot
+        // of [`Hovered`] receives it.
         let Ok((_, parent_net)) = units.get(parent) else {
             continue;
         };
-        if !matches!(parent_net.kind, EntityKind::Unit | EntityKind::Player) {
+        if !matches!(
+            parent_net.kind,
+            EntityKind::Unit | EntityKind::Player | EntityKind::Corpse
+        ) {
             continue;
         }
         if let Some(t) = ray_mesh_bounds(origin, dir, aabb, gt) {
@@ -384,9 +404,21 @@ pub(super) fn update_hover(
     if best.is_some_and(|(t, _)| limit < t) {
         best = None;
     }
+    // **Switch on type at the end**, the reference's own shape: the one pick lands in the unit slot
+    // or the corpse slot, never both. Everything downstream that means "unit" reads `target` and so
+    // stays right by construction; the corpse legs read `corpse`.
     if let Some((t, entity)) = best {
-        hovered.target = Some(entity);
-        hovered.guid = units.get(entity).ok().map(|(g, _)| g.0);
+        if let Ok((guid, net)) = units.get(entity) {
+            if net.kind == EntityKind::Corpse {
+                hovered.corpse = Some(entity);
+                hovered.corpse_guid = Some(guid.0);
+            } else {
+                hovered.target = Some(entity);
+                hovered.guid = Some(guid.0);
+            }
+        } else {
+            hovered.target = Some(entity);
+        }
         hovered.distance = t;
     }
     *last_pick = best.map(|(_, e)| e);

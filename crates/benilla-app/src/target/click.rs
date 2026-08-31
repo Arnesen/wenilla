@@ -117,6 +117,14 @@ pub(super) fn select_on_click(
         // `deselectOnClick` (0961) gates the whole arm: "Sticky Targeting" checked = the CVar
         // at 0 = an empty-world click keeps the target (1.12's own inverted checkbox).
         _ => {
+            // A **corpse** is an object hit, not empty world (decision 1723): the reference's
+            // deselect lives in the terrain and nothing legs, and an object leg clears no
+            // selection — so a left-click on a body must leave the target exactly where it was.
+            // Without this the corpse would arrive here (its guid is in the other slot) and read
+            // as "clicked nothing", dropping the player's target every time they clicked a body.
+            if hovered.corpse.is_some() {
+                return;
+            }
             if click_cfg.deselect_on_click && (!payload_held.0 || occlusion.distance.is_finite()) {
                 clear(&mut selection, &mut seam, engaged);
             }
@@ -348,6 +356,69 @@ pub(super) fn act_on_right_click(
                             ui_error_keys.0.push(err);
                         }
                     }
+                }
+            }
+        }
+        return;
+    }
+    // ── The corpse leg: `CGCorpse_C`'s own interact slot, `0x5d6bf0` (vtable `+0x60`) ───────────
+    // A corpse is not a unit and never routes through the unit block below — the reference gives
+    // its class a *different* function in the same slot the unit class fills with `0x60bea0`.
+    // Transcribed from the disassembly at `0x5d6bf0..0x5d6cdd`, which has exactly two legs:
+    //
+    //   1. `[player descriptor + UNIT_FIELD_MOUNTDISPLAYID] <= 0` (**not mounted**, `0x5d6c2a jg`)
+    //      AND `0x5d6e20(corpse)` (**lootable** — `CORPSE_FIELD_DYNAMIC_FLAGS` bit 0) → a player-
+    //      state check on the vtable `+0xa4` slot, which on failure raises message `0x85` and
+    //      sends nothing; else `SetAutoLoot` (`0x5df460`) and then `0x5df130` — **`CMSG_LOOT`**.
+    //   2. else `CORPSE_FIELD_FLAGS` bit 5 (the PvP insignia) AND the `[0xb700e8]`
+    //      SKIN_PLAYER_CORPSE learn latch AND `!0x6067d0(player, corpse)` → the skin cast
+    //      (`0x5f05e0`). Unreachable without that latch, and nothing in 1.12.1 sets it.
+    //
+    // **Neither leg touches your own body**, which carries neither flag — the function runs and
+    // does nothing at all. Recovering your corpse is a separate route (decision 0308's
+    // `RECOVER_CORPSE` → `CMSG_RECLAIM_CORPSE`) whose click path is out for RE and is NOT
+    // guessed at here; the director reports a right-click on their own body raising the resurrect
+    // prompt, so a route exists and this function is not it.
+    if let (Some(entity), Some(guid)) = (hovered.corpse, hovered.corpse_guid) {
+        let store = stores.get(entity).ok().map(|(s, _)| s);
+        // The same one-line answer the GameObject leg gives (tag `use`): a corpse's click is three
+        // silent refusals deep — no flag, the range gray, the missing latch — and every one of them
+        // otherwise looks identical from the outside. One run says which.
+        if benilla_assets::trace::enabled_for("use") {
+            benilla_assets::trace::line(
+                "use",
+                &format!(
+                    "right-click corpse guid={guid:#x} bones={} lootable={} insignia={} cursor={:?} unable={}",
+                    store.is_some_and(|s| s.0.corpse_is_bones()),
+                    store.is_some_and(|s| s.0.corpse_lootable()),
+                    store.is_some_and(|s| s.0.corpse_pvp_insignia()),
+                    cursor.kind,
+                    cursor.unable
+                ),
+            );
+        }
+        if store.is_some_and(|s| s.0.corpse_lootable()) {
+            // Leg 1. Range rides the cursor's own gray, exactly as the unit loot branch does —
+            // the classifier and the click ask literally the same question, so the pouch can never
+            // be lit on something a click refuses.
+            if !cursor.unable {
+                debug!("right-click corpse loot: {guid:#x}");
+                let _ = seam.net.0.send(ClientCommand::Loot { guid });
+                // Same client-side prediction as the unit corpse (decision 0515): the reference's
+                // `CMSG_LOOT` sender arms `[player+0x1d28]` and kneels before any reply.
+                loot_latch.0 = Some(guid);
+            }
+        } else if store.is_some_and(|s| s.0.corpse_pvp_insignia()) {
+            // Leg 2, with its real precondition. `skin_player_corpse` is the mirror of `[0xb700e8]`
+            // and is `None` for every 1.12.1 player, so this is inert for the reference's own
+            // reason rather than by omission.
+            if let Some(spell_id) = learned.skin_player_corpse {
+                if !cursor.unable {
+                    debug!("right-click corpse insignia: {guid:#x} (spell {spell_id})");
+                    let _ = seam.net.0.send(ClientCommand::CastSpell {
+                        spell_id,
+                        target: Some(guid),
+                    });
                 }
             }
         }

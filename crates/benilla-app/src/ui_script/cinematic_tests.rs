@@ -127,3 +127,47 @@ fn the_host_has_a_reference_name_for_the_keys_it_now_delivers() {
         );
     }
 }
+
+/// **The one key a cinematic gives back.** The module doc above says the reference's `OnKeyDown`
+/// calls `RunBinding("SCREENSHOT")` by hand *because* the walk's gate is existence — and benilla
+/// shipped that transcribed line against a `RunBinding` that did not exist in the whole codebase.
+/// Every press of the screenshot key during a fly-by raised `attempt to call global 'RunBinding'`
+/// and took no picture, and the three tests above stayed green through all of it because they only
+/// ever asked about keys the frame *swallows*.
+#[test]
+fn the_screenshot_key_is_handed_back_to_its_binding() {
+    let mut s = ui_with_the_cinematic_frame();
+    // The binding table the passthrough reads: `GetBindingKey("SCREENSHOT")` has to answer, or the
+    // arm is skipped and the test proves nothing.
+    s.register_bindings(&crate::bindings::registry_commands());
+    s.seed_binding_set(1, None);
+    s.load_binding_set(1);
+    let key = s
+        .keybind_snapshot()
+        .into_iter()
+        .find(|(name, _)| name == "SCREENSHOT")
+        .and_then(|(_, keys)| keys.into_iter().next())
+        .expect("SCREENSHOT ships a default chord");
+
+    start_cinematic(&mut s);
+    let _ = s.take_keybind_requests();
+
+    // Consumed like every other key — the frame is up, so the binding layer must not also see it.
+    assert!(
+        s.frame_key_input(&key),
+        "the frame consumes {key} like any other key"
+    );
+    // …and handed straight back to its command by hand. This is the whole point of the arm: the
+    // request is what the host runs, and an error here means no screenshot.
+    assert_eq!(
+        s.take_keybind_requests(),
+        vec![benilla_ui::script::keybind::KeybindRequest::Run(
+            "SCREENSHOT".into()
+        )],
+        "the screenshot key must reach its binding through RunBinding"
+    );
+
+    // ESCAPE is still the skip, and still queues nothing on the binding channel.
+    assert!(s.frame_key_input("ESCAPE"));
+    assert!(s.take_keybind_requests().is_empty());
+}

@@ -582,6 +582,71 @@ fn main() {
         println!("    {label:>5}  {n:>4}  {}", "#".repeat(n.min(60)));
     }
 
+    // **WHOSE package is incomplete** — printed immediately before the ranked blockers, because it
+    // is the line that stops a session hunting for a client bug that is not one. A `.toc` entry
+    // whose file the addon does not ship is the ADDON's defect, and the reference client's
+    // behaviour there is what ours already does: log `Couldn't open %s` and carry on
+    // (wow-re `ui/scratch/xml-toc-path-resolution.md` §4). Nothing is subtracted from the headline
+    // — 1213 — so both readings stay available.
+    let own: Vec<&addon_harness::AddonReport> = reports
+        .iter()
+        .filter(|r| !r.absent_own_files.is_empty())
+        .collect();
+    let foreign: Vec<&addon_harness::AddonReport> = reports
+        .iter()
+        .filter(|r| !r.absent_foreign_files.is_empty())
+        .collect();
+    // **"the WHOLE reason" is a claim, and it is checked before it is printed.** An addon can be
+    // short a file AND raise somewhere else; saying "this is why it fails" on the strength of
+    // `!loaded` alone would be the same overclaim this column exists to stop. It holds only when
+    // the absent entries account for every load error the addon has.
+    let sole_cause = |r: &addon_harness::AddonReport| {
+        !r.loaded && r.errors.len() == r.absent_own_files.len() + r.absent_foreign_files.len()
+    };
+    if !own.is_empty() || !foreign.is_empty() {
+        println!(
+            "\n  MANIFEST ENTRIES WITH NO FILE — counted in the numbers above, listed here so"
+        );
+        println!("  the reader can tell a broken package from a broken client:");
+        for r in &own {
+            println!(
+                "    {} — its own .toc lists {} file(s) the package does not contain{}",
+                r.name,
+                r.absent_own_files.len(),
+                if sole_cause(r) {
+                    "  [and that is its ONLY load error]"
+                } else {
+                    ""
+                }
+            );
+            for f in r.absent_own_files.iter().take(4) {
+                println!("        missing: {f}");
+            }
+        }
+        for r in &foreign {
+            println!(
+                "    {} — wants a folder that is not installed{}",
+                r.name,
+                if sole_cause(r) {
+                    "  [and that is its ONLY load error]"
+                } else {
+                    ""
+                }
+            );
+            for f in r.absent_foreign_files.iter().take(4) {
+                println!("        missing: {f}");
+            }
+        }
+        let theirs = own.iter().filter(|r| sole_cause(r)).count();
+        let ours = foreign.iter().filter(|r| sole_cause(r)).count();
+        println!(
+            "    ({} with an incomplete package of their own, {theirs} of which fail for that \
+             alone; {} wanting a neighbour, {ours} for that alone)",
+            own.len(),
+            foreign.len()
+        );
+    }
+
     // What actually STOPPED them — the ranked first error. Read this before the demand list: a
     // wall 60 addons hit is worth more than a verb 60 addons would like (decision 1193).
     println!("\n  what stopped them (addons whose FIRST load error was each):");

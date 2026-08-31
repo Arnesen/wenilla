@@ -43,7 +43,7 @@
 //! |---|---|---|---|---|---|---|
 //! | 1 | PalantirOfAzora | 0.7854 | 14.9 s | 10 | const 0 | 205 yd |
 //! | 2 | FlybyUndead | **1.5708** | 102.0 s | 22 | 18 keys | 523 yd |
-//! | 122 | FlybyNightElf | 0.7854 | 102.3 s | 32 | 19 keys | 813 yd |
+//! | 122 | FlybyNightElf | 0.7854 | 102.0 s | 32 | 19 keys | 813 yd |
 //! | 142 | FlyByHuman | 0.7854 | 87.5 s | 20 | const 2π | 663 yd |
 //! | 162 | FlyByGnome | 0.7854 | 76.7 s | 27 | const 0 | 705 yd |
 //! | 182 | FlyByTroll | 0.7854 | 57.8 s | 21 | 12 keys | 39 yd |
@@ -281,8 +281,13 @@ pub struct CinematicPath {
     pub near_clip: f32,
     /// The authored far clip — see [`Self::near_clip`].
     pub far_clip: f32,
-    /// How long the shot runs, milliseconds: the sequence band the tracks are keyed inside.
+    /// How long the shot runs, milliseconds — the *width* of the sequence band the tracks are
+    /// keyed inside (`end − start`), not its end. See [`Self::sample`] for why the two differ.
     pub duration_ms: u32,
+    /// Where that band begins on the model's global timeline; added to the sample time so a shot
+    /// whose first key is not at zero (`FlybyNightElf`, `Scry_cam`) starts on its first key
+    /// instead of holding it.
+    band_start: u32,
     origin: [f32; 3],
     facing_sin_cos: (f32, f32),
     camera: M2Camera,
@@ -309,11 +314,15 @@ impl CinematicPath {
             .ok_or_else(|| anyhow::anyhow!("model carries no camera record"))?;
         // The shot's length is the model's own sequence band (stride 0x44 records at header
         // 0x1c/0x20, band `[start, end]` at +0x04/+0x08 — the same walk the emitter-timing bake
-        // uses). Every shipped fly-by carries exactly one sequence, `[0, end]`, whose end equals
-        // the last key timestamp on its position and target tracks alike; the band is what the
-        // file *says*, so that is what we read, with the last key as the fallback for a file that
-        // authors no sequence at all.
-        let duration_ms = sequence_band_end(bytes)
+        // uses). The reference arms this as an ordinary M2 animation on sequence 0, so the shot
+        // runs the band: it *plays* for `end − start` and its tracks are keyed at absolute
+        // global-timeline stamps inside `[start, end]`. Eight of the ten shipped cameras band at
+        // `[0, end]` and the distinction is invisible on them — but `FlybyNightElf` bands at
+        // `[333, 102333]` and `Scry_cam` at `[33, 3333]`, and reading `end` as the duration
+        // played those two 333 ms / 33 ms too long with the opening frames frozen on the first
+        // key (which is what sampling `t = 0` against a track that starts at 333 returns).
+        // The fallback, for a file that authors no sequence at all, is the last key.
+        let (band_start, band_end) = sequence_band(bytes)
             .or_else(|| {
                 [
                     camera.positions.keys.last().map(|k| k.0),
@@ -322,8 +331,10 @@ impl CinematicPath {
                 .into_iter()
                 .flatten()
                 .max()
+                .map(|end| (0, end))
             })
-            .unwrap_or(0);
+            .unwrap_or((0, 0));
+        let duration_ms = band_end.saturating_sub(band_start);
         Ok(Self {
             camera_id: row.id,
             sound_id: row.sound_id,
@@ -331,6 +342,7 @@ impl CinematicPath {
             near_clip: camera.near_clip,
             far_clip: camera.far_clip,
             duration_ms,
+            band_start,
             origin: row.origin,
             facing_sin_cos: row.origin_facing.sin_cos(),
             camera,
@@ -338,6 +350,12 @@ impl CinematicPath {
     }
 
     /// Sample the shot at `ms` from its start, **end-clamped** at both ends.
+    ///
+    /// `ms` is measured from the *shot's* start; the tracks are keyed on the model's global
+    /// timeline, so it is offset by [`Self::band_start`] before it reaches them. On eight of the
+    /// ten shipped cameras that offset is zero and the two are the same number; on
+    /// `FlybyNightElf` (band `[333, 102333]`) and `Scry_cam` (`[33, 3333]`) it is the difference
+    /// between opening on the authored first key and holding it for a third of a second first.
     ///
     /// Two steps, in this order. The reference's publish pass composes each track against its base
     /// (`eye = position_base + positions(t)`, `target = target_position_base + target(t)`); then
@@ -354,6 +372,7 @@ impl CinematicPath {
     /// the dwarf (41) and human (81) intros; the sign-flipped and axis-swapped alternatives are
     /// off by an order of magnitude (module doc).
     pub fn sample(&self, ms: u32) -> CinematicView {
+        let ms = self.band_start.saturating_add(ms);
         let eye = self.to_world(sample_against(
             &self.camera.positions,
             self.camera.position_base,
@@ -387,9 +406,17 @@ fn sample_against(track: &M2Track<M2SplineKey<[f32; 3]>>, base: [f32; 3], ms: u3
     std::array::from_fn(|i| base[i] + d[i])
 }
 
-/// The end of the model's **first** sequence band (header `0x1c` count / `0x20` offset, entry
-/// stride `0x44`, band `[start, end]` at `+0x04`/`+0x08`). `None` for a model with no sequences.
-fn sequence_band_end(b: &[u8]) -> Option<u32> {
+/// The model's **first** sequence band, `(start, end)` in global-timeline milliseconds (header
+/// `0x1c` count / `0x20` offset, entry stride `0x44`, band at `+0x04`/`+0x08`). `None` for a model
+/// with no sequences.
+///
+/// **`start` is not always zero, and the shipped corpus is its own proof of these offsets.** Eight
+/// of the ten cameras band at `[0, end]`, but `FlybyNightElf` bands at `[333, 102333]` and
+/// `Scry_cam` at `[33, 3333]` — and in both files the band's `start` is *exactly* the first
+/// timestamp on the position and target tracks, while `end` is exactly the last. Two fields that
+/// land on the first and last key of every file in the corpus are the first and last key, which
+/// is why this is read rather than assumed to be a duration.
+fn sequence_band(b: &[u8]) -> Option<(u32, u32)> {
     let le_u32 = |o: usize| -> Option<u32> {
         b.get(o..o + 4)
             .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
@@ -398,7 +425,7 @@ fn sequence_band_end(b: &[u8]) -> Option<u32> {
     if n == 0 {
         return None;
     }
-    le_u32(o + 0x08)
+    Some((le_u32(o + 0x04)?, le_u32(o + 0x08)?))
 }
 
 #[cfg(test)]
@@ -471,16 +498,26 @@ mod tests {
             // for, and the one a step/linear-only sampler would silently mangle.
             assert_eq!(path.camera.positions.interp, 2, "sequence {id} position");
             assert_eq!(path.camera.target.interp, 2, "sequence {id} target");
-            // **The end condition**: the authored sequence band ends exactly on the last key of
-            // both vector tracks, on every shipped fly-by — so "the band" and "the last key" are
-            // the same number, and reading either gives the same playback length.
+            // **The end condition, and the proof of the band offsets.** The authored sequence
+            // band brackets both vector tracks exactly: its `start` is the first key's timestamp
+            // and its `end` is the last one's, on every shipped fly-by. Two header fields that
+            // land on the first and last key of all eight files are the first and last key — and
+            // that is what licenses reading the playback length as `end − start` rather than as
+            // `end`, which is the bug this assertion now pins (`FlybyNightElf` bands at
+            // `[333, 102333]`, so the two readings differ by a third of a second and by whether
+            // the shot opens on its first key or holds it).
             for (what, track) in [
                 ("position", &path.camera.positions),
                 ("target", &path.camera.target),
             ] {
                 assert_eq!(
+                    track.keys.first().map(|k| k.0),
+                    Some(path.band_start),
+                    "sequence {id} {what} track starts on the band"
+                );
+                assert_eq!(
                     track.keys.last().map(|k| k.0),
-                    Some(path.duration_ms),
+                    Some(path.band_start + path.duration_ms),
                     "sequence {id} {what} track ends on the band"
                 );
             }

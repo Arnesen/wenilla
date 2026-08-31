@@ -211,9 +211,19 @@ fn feed_world_hold(
     }
 }
 
-/// Copy the cinematic's music stop into [`SoundConfig::music_suppressed`], once per frame in
-/// `PreUpdate` beside [`feed_world_hold`] — same shape, same reason: one answer per frame, read by
-/// every trigger system after it.
+/// Copy the cinematic's music stop into [`SoundConfig::music_suppressed`], once per frame.
+///
+/// **Ordered `WorldStage::Stream`, not `PreUpdate` beside [`feed_world_hold`]** — the two look
+/// alike and are not. The cover `feed_world_hold` reads is a state that lasts seconds, so reading
+/// last frame's answer costs nothing; the cinematic's music cut is a one-frame *edge*, and
+/// `crate::cinematic`'s driver asserts it in `WorldStage::Input` — after `PreUpdate` has already
+/// run. Read there, [`zone::zone_audio`] (`WorldStage::Present`) saw a stale `false` on exactly
+/// the frame a cinematic started: on a first-login race intro that is the first uncovered frame,
+/// where the zone's own area-change block starts a track — or, worse, the zone's *intro fanfare*,
+/// which is then stamped as played and does not come back for `MinDelayMinutes`. One frame later
+/// the suppression cut it again, so the symptom was a click and a consumed fanfare rather than
+/// anything you could hear as music. `Stream` sits between the two (`Net → Input → Stream →
+/// Present`), so the flag the pump reads is always this frame's.
 fn feed_music_suppression(
     mut config: ResMut<SoundConfig>,
     cinematic: Option<Res<crate::cinematic::Cinematic>>,
@@ -418,7 +428,11 @@ impl Plugin for SoundPlugin {
         )
         // The cover's audio hold (see [`SoundConfig::world_hold`]): fed in PreUpdate so every
         // trigger system this frame — whatever stage it runs in — reads one answer.
-        .add_systems(PreUpdate, (feed_world_hold, feed_music_suppression))
+        .add_systems(PreUpdate, feed_world_hold)
+        .add_systems(
+            Update,
+            feed_music_suppression.in_set(benilla_world::schedule::WorldStage::Stream),
+        )
         .add_systems(
             Update,
             (

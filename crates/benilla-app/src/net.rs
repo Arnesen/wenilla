@@ -1694,9 +1694,11 @@ pub(crate) enum ClientCommand {
     /// the flying cinematic camera (a first login's race intro) and every NPC around the body
     /// despawns until relog (decision 0196).
     CompleteCinematic,
-    /// Advance a multi-camera cinematic to its next shot (`CMSG_NEXT_CINEMATIC_CAMERA`) — see
-    /// [`benilla_protocol::WorldWriter::next_cinematic_camera`]. No shipped 1.12 sequence has a
-    /// second camera, so this rides only a server with its own DBCs.
+    /// Announce the shot now being armed (`CMSG_NEXT_CINEMATIC_CAMERA`) — see
+    /// [`benilla_protocol::WorldWriter::next_cinematic_camera`]. Sent for **every** shot, the
+    /// first included: the reference's send is inside the shot arm (`0x48ef11`), not the shot
+    /// advance, so a shipped single-camera race intro sends exactly one. See
+    /// [`crate::cinematic`]'s module doc.
     NextCinematicCamera,
     /// **Acknowledge a granted mover mode** — root, water-walk, feather-fall or hover (decisions
     /// 0308, 0866): the echoed `counter` + our live pose, on the opcode

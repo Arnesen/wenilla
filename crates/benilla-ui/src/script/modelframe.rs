@@ -125,6 +125,35 @@ fn int(v: &Value) -> i32 {
     num(v) as i32
 }
 
+/// **Shape A's gate** (decision 1717's taxonomy, for a *string* position): the client's
+/// `lua_isstring` accepts tags 3|4 — a string **or a number** — and nothing else. A number is
+/// rendered to decimal text and used as the path, which is why this coerces rather than matching
+/// `Value::String` alone.
+fn string_arg(v: &Value) -> Option<std::borrow::Cow<'_, str>> {
+    match v {
+        Value::String(s) => s
+            .to_str()
+            .ok()
+            .map(|t| std::borrow::Cow::Owned(t.to_string())),
+        Value::Number(n) => Some(std::borrow::Cow::Owned(n.to_string())),
+        Value::Integer(i) => Some(std::borrow::Cow::Owned(i.to_string())),
+        _ => None,
+    }
+}
+
+/// The client's own `Usage:` error, with the receiver's name interpolated the way it interpolates
+/// it — `GetName()`, or `<unnamed>` when the widget has none (`0x84c7f0`).
+fn usage(lua: &Lua, this: &Table, call: &str) -> mlua::Error {
+    let name = this
+        .get::<mlua::Function>("GetName")
+        .and_then(|f| f.call::<Option<String>>(this.clone()))
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "<unnamed>".to_string());
+    let _ = lua;
+    mlua::Error::runtime(format!("Usage: {name}:{call}"))
+}
+
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let m = lua.create_table()?;
 
@@ -135,17 +164,27 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // cannot answer a stale path from three frames ago. Only the `SetModel` arm is a `Model` verb —
     // the unit arm is `PlayerModel`'s (`playermodel_install` below), which is why the paper-doll
     // and dress-up panes are `<PlayerModel>`s and every corpus `<Model>` drives the path arm.
+    // **`SetModel(nil)` RAISES. It is not a clear** — `ClearModel` is the clear, and it is a
+    // separate entry in the same table. This binding said the opposite until 2026-08-30 ("the
+    // documented clear, and how the corpus writes 'no model'"), which was invented: the byte read
+    // (`0x76d950`, shape A) gates the argument with `lua_isstring` and raises
+    // `Usage: %s:SetModel("file")` on nil, absent, boolean, table, function, userdata and thread.
+    // Measured before changing it — all 5 corpus call sites pass a string literal and our own
+    // FrameXML never calls it — so nothing was relying on the leniency.
+    //
+    // **What is NOT reproduced, deliberately:** the reference's *second* raise,
+    // `Invalid model file: %s` (`0x878b44`), for a path that does not resolve — its model load is
+    // synchronous, so it knows. We render no FrameXML models at all, so we cannot evaluate that
+    // condition, and a raise whose predicate we have to guess is worse than a named omission
+    // (1134 §4). A path that would be invalid is simply stored.
     m.set(
         "SetModel",
         lua.create_function(|lua, (this, path): (Table, Value)| {
-            let path = match &path {
-                Value::String(s) => Some(s.to_str()?.to_string()),
-                // `SetModel(nil)` is the documented clear, and reaching it through the same setter
-                // is how the corpus writes "no model" — not everything calls ClearModel.
-                _ => None,
-            };
+            let path = string_arg(&path)
+                .ok_or_else(|| usage(lua, &this, "SetModel(\"file\")"))?
+                .to_string();
             with_model(lua, &this, |m| {
-                m.path = path;
+                m.path = Some(path);
                 m.unit = None;
             })
         })?,
@@ -287,6 +326,50 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 ]),
                 None => MultiValue::new(),
             })
+        })?,
+    )?;
+
+    // ── The two verbs that touch no pane state ──────────────────────────────────────────────
+
+    // `AdvanceTime()` — `0x878948[14]` -> `0x76eca0`. **It does nothing, and that is the verified
+    // behaviour, not a stub.** The function takes no Lua argument (no `lua_gettop`, no `tonumber`,
+    // no `tostring` anywhere in `[0x76eca0, 0x76ed65)`), returns no value, and its one reachable
+    // call is `0x76cfb0`, whose entire body is `mov eax,1; ret`. It writes no `CSimpleModel` field
+    // and no global. So there is no clock to advance here and no omission to name: a receiver
+    // check and zero returns IS the reference.
+    //
+    // Present because the shipped chain calls it three times — `Cooldown.lua`, and the glue
+    // character screens' `<OnUpdateModel>` on `<ModelFFX>`, which inherits this very table — and
+    // an addon that hooks one of those will call it too.
+    m.set(
+        "AdvanceTime",
+        lua.create_function(|lua, this: Table| with_model(lua, &this, |_| ()))?,
+    )?;
+
+    // `ReplaceIconTexture(path)` — `0x878948[15]` -> `0x76ed70`. **A material swap, not a content
+    // setter**: `0x76cfe0(0xe, path)` -> `0x710ec0` replaces the refcounted handle in
+    // `[CM2Model+0xa4][i]` for every M2 texture whose `type == 14`, plus the same-typed slots on
+    // the ribbon (`0x7b7950`) and particle (`0x7b4d20`) emitters. It sets no pane content, clears
+    // no unit, and stores nothing on the `0x3dc`-byte widget — the override lives on the CM2Model
+    // and dies with it when `SetModel`/`ClearModel` releases the instance.
+    //
+    // **Which is why storing nothing here is faithful rather than lazy.** The reference's two
+    // "not ready" cases behave OPPOSITELY: with a `CM2Model` present but its data not resident the
+    // call is queued on `[cm2+0x3c]` and replayed; with **no CM2Model at all**
+    // (`[widget+0x318] == 0`) it is **dropped and never replayed**. This engine renders no
+    // FrameXML models, so our panes are permanently the second case — dropping it is what the
+    // client does in exactly our state.
+    //
+    // The argument gate is real and is shape A: `lua_isstring` (tags 3|4) then `lua_tostring`,
+    // raising `Usage: %s:ReplaceIconTexture("texture")` on anything else. It is kept because it is
+    // the whole observable behaviour left.
+    m.set(
+        "ReplaceIconTexture",
+        lua.create_function(|lua, (this, path): (Table, Value)| {
+            if string_arg(&path).is_none() {
+                return Err(usage(lua, &this, "ReplaceIconTexture(\"texture\")"));
+            }
+            with_model(lua, &this, |_| ())
         })?,
     )?;
 

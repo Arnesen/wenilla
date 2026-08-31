@@ -109,6 +109,30 @@ pub struct AddonReport {
     pub loaded: bool,
     /// Load errors, verbatim, tagged by file.
     pub errors: Vec<String>,
+    /// **Manifest entries the addon's own package does not contain.** Already counted in
+    /// [`Self::errors`], and deliberately not removed from it — 1213's rule for the fifth time:
+    /// a new question gets a new column, because silently shrinking `errors` would move `loaded`
+    /// and make every number in every past decision record incomparable.
+    ///
+    /// The question it asks that no other column can: **whose fault is this row?** Five of the
+    /// corpus's failures are one addon family shipping a `.toc` that lists files it does not
+    /// contain — `DPSMate_CureDisease.toc` names eight files and the folder holds six, because the
+    /// three `*Received*` ones were split into a sibling addon and the manifest was never updated.
+    /// The client is behaving correctly there (the reference logs `Couldn't open %s` and carries
+    /// on, which is what our loader does), and a headline that cannot say so invites a session to
+    /// go hunting for a bug that is not ours. The director's own AtlasLoot copy is the same shape.
+    pub absent_own_files: Vec<String>,
+    /// **Manifest entries resolving OUTSIDE the addon's folder, into one that is not installed** —
+    /// resolved paths, not the raw entry, because the `..` collapse is the interesting half.
+    ///
+    /// A different question from [`Self::absent_own_files`] and kept apart from it: this addon's
+    /// package is fine, it wants a neighbour. The corpus's two are Auctioneer and BeanCounter
+    /// reaching `..\Blizzard_AuctionUI\Blizzard_AuctionUITemplates.xml` — which wow-re records as
+    /// **RESOLVING** in the real client (`ui/scratch/xml-toc-path-resolution.md` §5 case 2, by
+    /// name), because there the file layer can see `Blizzard_AuctionUI` inside `patch.MPQ`. Ours
+    /// reads the AddOns directory only, so it misses. That one IS ours, and the split is what
+    /// makes it visible instead of averaging with the row above.
+    pub absent_foreign_files: Vec<String>,
     /// Names it calls that the VM does not have — see the module doc on what this is worth.
     pub missing_globals: Vec<String>,
     /// Dependencies named in its `.toc` that are not in the folder.
@@ -520,7 +544,7 @@ fn survey_one(
     // consumer — the same rule `load_dependencies` applies to errors.
     let baseline = RenderBaseline::of(&script);
 
-    let errors = load_addon_files(&script, root, name, &toc);
+    let (errors, absent) = load_addon_files(&script, root, name, &toc);
     let wants = missing_calls(root, name, &toc, &known, &dep_methods);
     // AFTER the addon's files: a template it declares in its OWN XML is registered by then, so it
     // is not missing. The check asks the VM's live registry, not a name list.
@@ -568,6 +592,8 @@ fn survey_one(
         interface: toc.interface_versions(),
         loaded: errors.is_empty(),
         errors,
+        absent_own_files: absent.own,
+        absent_foreign_files: absent.foreign,
         missing_globals: wants.missing_globals,
         missing_deps,
         missing_templates,
@@ -1635,15 +1661,47 @@ fn globals_of(script: &UiScript) -> BTreeSet<String> {
         .collect()
 }
 
+/// What a manifest entry that does not resolve actually is — see [`AddonReport::absent_own_files`].
+#[derive(Debug, Default)]
+pub struct AbsentFiles {
+    /// Entries under the addon's **own** folder that the package does not contain.
+    pub own: Vec<String>,
+    /// Entries resolving **outside** it, into a folder that is not installed.
+    pub foreign: Vec<String>,
+}
+
 /// Run the addon's manifest through the same two arms the real loader uses — `.lua` as a chunk,
 /// anything else as FrameXML — with the AddOns root as the provider's path space (decision 1186).
-fn load_addon_files(script: &UiScript, root: &Path, name: &str, toc: &Toc) -> Vec<String> {
+///
+/// Returns the errors **and**, beside them, the split of which entries did not resolve. The
+/// absent ones are still in `errors` — 1213's rule, for the fifth time: this asks a new question
+/// and gets a new column, it does not quietly shrink an old one.
+fn load_addon_files(
+    script: &UiScript,
+    root: &Path,
+    name: &str,
+    toc: &Toc,
+) -> (Vec<String>, AbsentFiles) {
     let provider = |req: &str| -> Option<Vec<u8>> { read_under(root, req) };
     let mut errors = Vec::new();
+    let mut absent = AbsentFiles::default();
     for file in &toc.files {
         let path = benilla_ui::loader::join_ref(name, file);
         let Some(bytes) = read_under(root, &path) else {
             errors.push(format!("{file}: not found"));
+            // WHOSE package is incomplete. `join_ref` has already collapsed the `..`s the way the
+            // client does (wow-re `ui/scratch/xml-toc-path-resolution.md` §2), so the resolved
+            // path is what the real file layer would be handed — and an entry that still points
+            // inside the addon's own folder is the addon shipping a manifest it does not satisfy,
+            // while one pointing out of it wants a neighbour that is not installed.
+            let own = path
+                .strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with('/'));
+            if own {
+                absent.own.push(file.clone());
+            } else {
+                absent.foreign.push(path.clone());
+            }
             continue;
         };
         if is_lua(file) {
@@ -1665,7 +1723,7 @@ fn load_addon_files(script: &UiScript, root: &Path, name: &str, toc: &Toc) -> Ve
             Err(e) => errors.push(format!("{file}: {e}")),
         }
     }
-    errors
+    (errors, absent)
 }
 
 fn is_lua(entry: &str) -> bool {
@@ -3418,6 +3476,101 @@ mod dependency_tests {
                 .any(|e| e.contains("lib init blew up")),
             "...and it must still be reported against the library itself: {:?}",
             of("BadLib").session_errors
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// **A manifest entry with no file is split by WHOSE package is short** — the column that
+    /// stops a session hunting for a client bug that is not one.
+    ///
+    /// Both rows below are load failures and stay load failures: nothing is subtracted from
+    /// `loaded` or from `errors` (1213's rule, for the fifth time). What the split adds is the
+    /// attribution, and the two cases genuinely differ:
+    ///
+    /// - **`own`** — the addon ships a `.toc` listing a file it does not contain. Five corpus rows
+    ///   are this, all one family: `DPSMate_CureDisease.toc` names eight files and the folder
+    ///   holds six, because the three `*Received*` ones were split into a sibling addon and the
+    ///   manifest was never updated. Our loader is behaving correctly (the reference logs
+    ///   `Couldn't open %s` and carries on — wow-re `ui/scratch/xml-toc-path-resolution.md` §4).
+    /// - **`foreign`** — the entry escapes the addon's folder with `..`, which the client supports
+    ///   and `join_ref` reproduces, into a folder that is not installed. The corpus's two are
+    ///   Auctioneer and BeanCounter reaching `..\Blizzard_AuctionUI\...`, which wow-re records as
+    ///   **RESOLVING** in the real client (§5 case 2, by name) because its file layer can see that
+    ///   folder inside `patch.MPQ`. That one IS ours.
+    ///
+    /// The assertion that matters is that the two never merge: a single "files not found" count
+    /// would average a broken package with a real client gap and read as one number.
+    #[test]
+    fn an_absent_manifest_entry_is_attributed_to_whose_package_is_short() {
+        let tmp =
+            std::env::temp_dir().join(format!("benilla-harness-absent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let write = |name: &str, toc: &str, files: &[(&str, &str)]| {
+            let dir = tmp.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(format!("{name}.toc")), toc).unwrap();
+            for (f, body) in files {
+                std::fs::write(dir.join(f), body).unwrap();
+            }
+        };
+        // Ships one of the two files its own manifest lists — DPSMate_CureDisease's exact shape.
+        write(
+            "ShortPackage",
+            "## Interface: 11200\nhere.lua\ngone.lua\n",
+            &[("here.lua", "ShortPackageRan = 1\n")],
+        );
+        // Reaches a neighbour that is not installed — Auctioneer's exact shape, `..` and all.
+        write(
+            "WantsNeighbour",
+            "## Interface: 11200\nown.lua\n..\\NotInstalled\\templates.xml\n",
+            &[("own.lua", "WantsNeighbourRan = 1\n")],
+        );
+
+        let reports = survey(&tmp);
+        let of = |n: &str| reports.iter().find(|r| r.name == n).unwrap();
+
+        let short = of("ShortPackage");
+        assert_eq!(
+            short.absent_own_files,
+            vec!["gone.lua".to_string()],
+            "the entry inside its own folder is the addon's own package being short"
+        );
+        assert!(
+            short.absent_foreign_files.is_empty(),
+            "and it is NOT a missing neighbour: {:?}",
+            short.absent_foreign_files
+        );
+
+        let wants = of("WantsNeighbour");
+        assert_eq!(
+            wants.absent_foreign_files,
+            vec!["NotInstalled/templates.xml".to_string()],
+            "`..` is collapsed the way the client collapses it, and the RESOLVED path is what is \
+             reported — the collapse is the interesting half"
+        );
+        assert!(
+            wants.absent_own_files.is_empty(),
+            "its own package is complete: {:?}",
+            wants.absent_own_files
+        );
+
+        // NOTHING is subtracted. Both are still load failures, still in `errors`, still counted
+        // in every headline — the split is a new column beside them, never a quieter old one.
+        for r in [short, wants] {
+            assert!(!r.loaded, "{}: still a load failure", r.name);
+            assert!(
+                r.errors.iter().any(|e| e.contains("not found")),
+                "{}: the error is still there verbatim: {:?}",
+                r.name,
+                r.errors
+            );
+        }
+        // ...and the file that DID exist ran, because a missing entry does not abort the manifest.
+        assert!(
+            !short.errors.iter().any(|e| e.contains("here.lua")),
+            "the surviving file loads: {:?}",
+            short.errors
         );
 
         let _ = std::fs::remove_dir_all(&tmp);

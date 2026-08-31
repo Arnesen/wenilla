@@ -639,10 +639,13 @@ fn drive_mouseover_tooltip(
     // and an IN_USE object all show the gold name plate while showing NO interact cursor — 0466's
     // "no cursor AND no tooltip" coupling was the regression. Transports never reach here — they
     // are excluded from the pick set itself (0466's correct half).
-    let go = hovered_go
-        .target
-        .zip(hovered_go.guid)
-        .filter(|_| unit.is_none() || go_is_nearest(&hovered, &hovered_go));
+    // "Nothing else was picked, or the GameObject is the nearer pick." **A hovered corpse counts
+    // as something else picked** (decision 1723) — it has no tooltip of its own yet, and the
+    // `unit.is_none()` short-circuit would otherwise hand a farther GameObject the gold plate the
+    // moment the ray landed on a body instead of a unit.
+    let go = hovered_go.target.zip(hovered_go.guid).filter(|_| {
+        (unit.is_none() && hovered.corpse.is_none()) || go_is_nearest(&hovered, &hovered_go)
+    });
 
     if let Some((guid, state)) = unit.filter(|_| go.is_none()) {
         // Push first (the engine's builder + the recolor's UnitReaction read the token), then
