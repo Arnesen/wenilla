@@ -50,12 +50,22 @@ pub struct Chain {
 }
 
 /// The web build's `Chain`: no archives, just the web host's `/data` base URL every method fetches
-/// against (see the module header). Carries no cache — a sync XHR (`read`/`contains`) or the
-/// `__index` fetch (`list`) pays a round trip every call; the Bevy `AssetServer` above
-/// (`benilla-assets`) is what dedups by path, same as it would for a native disk read.
+/// against (see the module header). `read` carries no cache — a sync XHR pays a round trip (or a
+/// browser-cache hit) every call, and the Bevy `AssetServer` above (`benilla-assets`) is what
+/// dedups by path, same as it would for a native disk read.
+///
+/// **`contains` does carry one: the whole chain's name index**, fetched once from `/data/__index`
+/// on the first ask. Measured on world entry (2026-08-31): the UI's texture probes asked
+/// `contains` **2,145 times** in one entry — the same dozen chat-border and dialog icons over and
+/// over, per region per resolve — and each ask was a synchronous `HEAD`, which the browser does
+/// not serve from a `GET`-warmed cache. At 100 ms RTT that was ~125 s of a frozen tab, after every
+/// other read had been prefetched. One 4.9 MB name list, parsed once, answers all of them from
+/// memory; the `HEAD` stays only as the fallback for a host whose index route fails.
 #[cfg(target_arch = "wasm32")]
 pub struct Chain {
     base: String,
+    /// `None` inside = the index could not be fetched/parsed; `contains` falls back to `HEAD`.
+    index: std::sync::OnceLock<Option<std::collections::HashSet<String>>>,
 }
 
 /// `patch-?.MPQ` with the reference's FindFirstFileW semantics: `?` matches **exactly one**
@@ -237,6 +247,7 @@ impl Chain {
     pub fn open(_path: &Path) -> Result<Self> {
         Ok(Self {
             base: crate::web::data_base(),
+            index: std::sync::OnceLock::new(),
         })
     }
 
@@ -245,9 +256,31 @@ impl Chain {
         format!("{}/{}", self.base, crate::web::encode_name(name))
     }
 
-    /// Whether the web host has `name` — a `HEAD` request, no body.
+    /// The index's key for a name: MPQ hashing's equivalence — case-insensitive, `/` ≡ `\`.
+    fn index_key(name: &str) -> String {
+        name.replace('/', "\\").to_ascii_lowercase()
+    }
+
+    /// The chain's name index, fetched and parsed on first use (see the struct doc). `None` when
+    /// the host has no working `/data/__index`, in which case every caller falls back to the
+    /// per-name request it made before the index existed.
+    fn index(&self) -> Option<&std::collections::HashSet<String>> {
+        self.index
+            .get_or_init(|| {
+                let bytes = crate::web::fetch_sync(&format!("{}/__index", self.base)).ok()?;
+                let names: Vec<String> = serde_json::from_slice(&bytes).ok()?;
+                Some(names.iter().map(|n| Self::index_key(n)).collect())
+            })
+            .as_ref()
+    }
+
+    /// Whether the web host has `name` — from the name index when it loaded, else a `HEAD`
+    /// request (no body).
     pub fn contains(&self, name: &str) -> bool {
-        crate::web::exists_sync(&self.url_for(name))
+        match self.index() {
+            Some(set) => set.contains(&Self::index_key(name)),
+            None => crate::web::exists_sync(&self.url_for(name)),
+        }
     }
 
     /// No archive *files* exist on the web target — everything is served from the one web-host
@@ -262,6 +295,14 @@ impl Chain {
     /// that text — there are some — behaves the same on both targets.
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
         crate::web::trace(name); // boot-manifest capture; no-op unless the page armed it
+                                 // A name the index says is absent is a 404 round trip saved — the same answer, and the
+                                 // sprite-candidate walk (`Foo.blp`, then `Foo.tga`) asks for absent names by design.
+        if self
+            .index()
+            .is_some_and(|set| !set.contains(&Self::index_key(name)))
+        {
+            return Err(anyhow!("file not in patch chain: {name}"));
+        }
         crate::web::fetch_sync(&self.url_for(name)).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 anyhow!("file not in patch chain: {name}")

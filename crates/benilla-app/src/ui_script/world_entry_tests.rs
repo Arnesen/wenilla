@@ -601,12 +601,19 @@ fn the_entry_load_waits_for_the_cover_to_present() {
             "covered frame {frame}: the burst must wait for the cover to reach the glass"
         );
     }
-    // Covered frame 3: two cover renders have committed — the burst is hidden. Load.
-    super::lifecycle::run_pending_entry_load(&mut world);
+    // Covered frame 3 onward: two cover renders have committed — the load starts, behind a
+    // presented cover, and (since the slicing) spreads over as many frames as its budget needs;
+    // the latch stays up the whole way so the clear condition keeps waiting on it.
+    let mut frames = 0;
+    while world.get_resource::<super::PendingEntryUiLoad>().is_some() {
+        super::lifecycle::run_pending_entry_load(&mut world);
+        frames += 1;
+        assert!(frames < 10_000, "the sliced entry load never finished");
+    }
     assert_eq!(
         probe_saw(&world).as_deref(),
         Some("Onehunter"),
-        "the third covered frame pays the load, behind a presented cover"
+        "the load ran behind a presented cover, over {frames} frame(s)"
     );
     assert!(
         world.get_resource::<super::PendingEntryUiLoad>().is_none(),
@@ -633,10 +640,24 @@ fn no_cover_means_the_entry_load_runs_at_once() {
     world.insert_resource(super::PendingEntryUiLoad::default());
 
     super::lifecycle::run_pending_entry_load(&mut world);
+    // "At once" = the first frame takes real steps instead of counting cover frames that never
+    // come. Since the slicing, finishing takes as many frames as the budget needs.
+    assert!(
+        world
+            .get_resource::<super::PendingEntryUiLoad>()
+            .is_none_or(|p| p.fraction() > 0.0),
+        "uncovered: the load starts on the first frame"
+    );
+    let mut frames = 1;
+    while world.get_resource::<super::PendingEntryUiLoad>().is_some() {
+        super::lifecycle::run_pending_entry_load(&mut world);
+        frames += 1;
+        assert!(frames < 10_000, "the sliced entry load never finished");
+    }
     assert_eq!(
         probe_saw(&world).as_deref(),
         Some("Onehunter"),
-        "uncovered: the load runs immediately"
+        "uncovered: the load ran, over {frames} frame(s)"
     );
 
     drop(world);

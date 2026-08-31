@@ -36,12 +36,12 @@ export async function boot(init, opts = {}) {
   const q = new URLSearchParams(location.search);
   const ui = createBootUi();
   if (q.get('boottrace') === '1') window.__wenilla_boottrace = [];
-  installProgressHook(ui);
-
   const skipPrefetch = q.get('boottrace') === '1' || q.get('noprefetch') === '1';
+  installProgressHook(ui, skipPrefetch);
+
   const prefetch = skipPrefetch
     ? Promise.resolve()
-    : prefetchBootData('./boot-manifest.json', (done, total) => ui.setData(done, total)).catch(
+    : prefetchManifest('./boot-manifest.json', (done, total) => ui.setData(done, total)).catch(
         () => ui.setData(0, 0)
       );
 
@@ -103,10 +103,11 @@ async function fetchWasm(url, onBytes) {
   return new Response(counted, { status: r.status, statusText: r.statusText, headers: r.headers });
 }
 
-/// Warm the HTTP cache with the boot read-set: fetch the manifest, then a fixed-size pool of
+/// Warm the HTTP cache with a manifest's read-set: fetch the manifest, then a fixed-size pool of
 /// full-body fetches. Failures are counted as done and otherwise ignored — a miss just means
-/// that file loads the old way. A missing/invalid manifest resolves immediately (data line hides).
-async function prefetchBootData(manifestUrl, onProgress) {
+/// that file loads the old way. A missing/invalid manifest resolves immediately (line hides).
+/// Used twice: the boot set before `init()`, the world-entry set after `ready`.
+async function prefetchManifest(manifestUrl, onProgress) {
   const r = await fetch(manifestUrl);
   if (!r.ok) return onProgress(0, 0);
   const manifest = await r.json();
@@ -133,10 +134,49 @@ async function prefetchBootData(manifestUrl, onProgress) {
 }
 
 /// `window.__wenilla_progress(stage)` — the client's calls land here (webprogress.rs).
-function installProgressHook(ui) {
+///
+/// `ready` also starts the SECOND prefetch: the world-entry read-set. Entering the world used
+/// to be one frozen frame of ~200 synchronous sprite reads (184 `Interface\…\*.blp` on the
+/// first UI draw, plus a few quest-marker models and zone sounds) — 206 s on a cold 100 ms-RTT
+/// cache. That set is location-independent, so `world-manifest.json` (captured the same way
+/// as the boot manifest, minus the boot set) is warmed while the player is at the glue screens,
+/// with a corner line so it is visible but never in the way. Whatever is still in flight when
+/// they click Enter World just loads the old way.
+function installProgressHook(ui, skipPrefetch) {
   window.__wenilla_progress = (stage) => {
     if (stage === 'startup') ui.setStage('Loading interface…');
-    else if (stage === 'ready') ui.hide();
+    else if (stage === 'ready') {
+      ui.hide();
+      if (!skipPrefetch) {
+        const corner = createCornerLine();
+        prefetchManifest('./world-manifest.json', (done, total) =>
+          corner.set(total > 0 && done < total ? `preparing world data — ${done}/${total}` : '')
+        )
+          .catch(() => {})
+          .finally(() => corner.remove());
+      }
+    }
+  };
+}
+
+/// The unobtrusive bottom-left status line the world prefetch reports on.
+function createCornerLine() {
+  const el = document.createElement('div');
+  el.id = 'wenilla-corner';
+  el.style.cssText =
+    'position:fixed;left:.6rem;bottom:.5rem;z-index:15;font:12px system-ui,sans-serif;' +
+    'color:#888;background:rgba(0,0,0,.55);padding:.2rem .5rem;border-radius:4px;' +
+    'pointer-events:none;transition:opacity .4s ease';
+  document.body.appendChild(el);
+  return {
+    set(text) {
+      el.textContent = text;
+      el.style.opacity = text ? '1' : '0';
+    },
+    remove() {
+      el.style.opacity = '0';
+      setTimeout(() => el.remove(), 500);
+    },
   };
 }
 

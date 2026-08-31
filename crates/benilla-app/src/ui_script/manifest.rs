@@ -38,7 +38,7 @@ pub(super) fn manifest_files() -> Vec<String> {
 /// The ref applies `UIPARENT_MANAGED_FRAME_POSITIONS` once at load, then re-fires from the bottom
 /// bars' OnShow/OnHide. Every frame the table names exists by the time this runs, so this is that
 /// load-time application; the stance bar's show/hide handles the rest at runtime.
-fn bootstrap_positions(script: &UiScript) -> Vec<String> {
+pub(super) fn bootstrap_positions(script: &UiScript) -> Vec<String> {
     if let Err(e) = script.run("UIParent_ManageFramePositions()") {
         error!("ui_script: managed-positions bootstrap: {e}");
         return vec![format!("managed-positions bootstrap: {e}")];
