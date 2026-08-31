@@ -75,11 +75,11 @@ pub(crate) use lock::GO_FLAG_LOCKED;
 // nameplate colour gate (`crate::nameplates`), the flash's only two consumers (byte-verified).
 pub(crate) use flash::CombatFlash;
 // The action layer's "attack pressed with no target" request — the nearest-enemy auto-acquire
-// (`scan`) answers it with the same core TAB uses. `attack_order_target` + `EnemyScan` are that
+// (`scan`) answers it with the same core TAB uses. `attack_order_target` + `TargetScan` are that
 // same core called *synchronously*, by the pet bar's ATTACK arm: the pet's order has to leave in
 // the frame it was pressed carrying the acquired guid, so it cannot go round through a request.
 pub(crate) use relations::{can_assist, can_attack, can_interact};
-pub(crate) use scan::{attack_order_target, AttackNearestRequest, EnemyScan};
+pub(crate) use scan::{attack_order_target, AttackNearestRequest, TargetScan};
 // The chat layer's by-name selection asks (`/target`, `/assist` — decision 0886), answered by the
 // shared resolver the reference parameterises per caller.
 pub(crate) use by_name::{AssistRequest, TargetByNameRequest};
@@ -309,6 +309,7 @@ impl Plugin for TargetPlugin {
             .init_resource::<WorldCursor>()
             .init_resource::<CombatFlash>()
             .init_resource::<scan::TabHistory>()
+            .init_resource::<scan::LastEnemy>()
             .add_message::<AttackNearestRequest>()
             .add_message::<TargetByNameRequest>()
             .add_message::<AssistRequest>()
@@ -359,11 +360,13 @@ impl Plugin for TargetPlugin {
                     click::act_on_right_click,
                     click::clear_target_requests,
                     // The two unit-token drains, grouped as one element (the outer chain is at
-                    // Bevy's 20-tuple limit): `TargetUnit`'s selection commit, and
-                    // `DropItemOnUnit`'s pet-leg feed (decision 1055). Independent of each other —
-                    // one writes `Selection`, the other sends a cast — so they need no order.
+                    // Bevy's 20-tuple limit): the selection asks' commit (`TargetUnit`,
+                    // `AssistUnit`, `TargetLastEnemy` — one queue, one drain, as the reference has
+                    // one `0x489a40`), and `DropItemOnUnit`'s pet-leg feed (decision 1055).
+                    // Independent of each other — one writes `Selection`, the other sends a cast —
+                    // so they need no order.
                     (
-                        click::target_unit_requests,
+                        click::selection_requests,
                         crate::ui_action::drop_item::drop_item_on_unit,
                     ),
                     // The chat layer's by-name asks (decision 0886), beside the UI's token asks:
@@ -384,10 +387,17 @@ impl Plugin for TargetPlugin {
                     )
                         .chain(),
                     scan::auto_acquire_attacker,
-                    scan::tab_target,
+                    // The two sides of the one cycler (`0x493f60`, mode 1 / mode 2), grouped as
+                    // one element (the outer chain is at Bevy's 20-tuple limit) and chained
+                    // because they share `TabHistory`, whose side switch clears it.
+                    (scan::tab_target, scan::target_nearest_friend_requests).chain(),
                     scan::acquire_and_attack,
                     flash::drive_flash,
-                    ring::update_ring,
+                    // `TargetLastEnemy`'s stamp, then the ring. The order is load-bearing: the
+                    // ring's death-clear drops the selection, and a hostile that dies while
+                    // selected must still be remembered (the reference's shim has no liveness
+                    // gate — re-targeting the corpse is faithful).
+                    (scan::remember_last_enemy, ring::update_ring).chain(),
                 )
                     .chain()
                     .in_set(TargetUpdate)

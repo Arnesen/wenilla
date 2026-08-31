@@ -51,6 +51,10 @@ mod world_focus;
 // The remembered camera pose (decision 1131) — it lives inside `player/` so it can read the rig's
 // own `pub(super)` fields instead of widening them for a module outside.
 mod camera_saved;
+// The five NAMED camera poses the player can jump between (decision 1745) — `camera_saved`'s
+// complement: that one remembers where you left the camera, this one where you decided it should
+// be able to go. Same reason for living inside `player/`: it writes the rig's `pub(super)` fields.
+pub(crate) mod camera_view;
 mod drunk;
 // Which single unit the client embodies (decision 1277) — the `Embodied` marker's owner.
 mod embody;
@@ -248,6 +252,7 @@ impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         follow::plugin(app);
         camera_saved::plugin(app);
+        camera_view::plugin(app);
         // 1160's wire (a), both directions (see `world_focus`): the game answers the world's
         // "where do I stream from" before the stream stage, and reads the residency the world
         // publishes after it to end its own post-snap hold.

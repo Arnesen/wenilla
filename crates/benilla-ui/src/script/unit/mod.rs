@@ -24,6 +24,27 @@ use mlua::Lua;
 
 use super::Model;
 
+/// One queued **selection ask** from Lua, in call order — the app resolves it to a guid and
+/// commits it through the one SetSelection tail.
+///
+/// The three verbs share one queue because the reference shares one *function*: `TargetUnit`
+/// (`0x4899d0`), `AssistUnit` (`0x489b80`), `TargetLastEnemy` and `TargetLastTarget` all reach
+/// selection through the "select if it resolves" helper `0x489a40`, whose three arms are the same
+/// for every caller — resolve the guid and commit, else fall back to the group roster, else a
+/// **silent return** (wow-re `object-layer/scratch/selection-attack-seam.md` §1). Splitting them
+/// into a queue each would also lose their relative order, which a macro can observe
+/// (`TargetUnit("party1"); AssistUnit("target")` is not the same as the reverse).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SelectionRequest {
+    /// `TargetUnit(unit)` — select the unit the token names.
+    Unit(String),
+    /// `AssistUnit(unit)` — select the token's own `UNIT_FIELD_TARGET`; a basis with no target is
+    /// a silent no-op (the reference's shared assist tail bails before any send).
+    Assist(String),
+    /// `TargetLastEnemy()` — select the last *attackable* unit that was committed.
+    LastEnemy,
+}
+
 /// One unit-token's game-state snapshot, pushed by the app each frame and read by the `Unit*`
 /// bindings. Plain data (no mlua handles, no ECS types) — the engine-free seam decision 0068 §3
 /// draws between the app's net/ECS feed and the Lua API.
@@ -450,10 +471,20 @@ impl super::UiScript {
         model.combo_target = target;
     }
 
-    /// Drain the unit tokens `TargetUnit` queued since the last call — the app resolves each to a
-    /// streamed entity and commits the selection (the reference's `TargetUnit` → SetSelection path).
-    pub fn take_target_requests(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.model_mut().target_requests)
+    /// Drain the selection asks queued since the last call — the app resolves each to a guid and
+    /// commits it through the one SetSelection tail. See [`SelectionRequest`] for why the three
+    /// verbs share one ordered queue.
+    pub fn take_selection_requests(&mut self) -> Vec<SelectionRequest> {
+        std::mem::take(&mut self.model_mut().selection_requests)
+    }
+
+    /// Drain the `TargetNearestFriend([reverse])` presses queued since the last call — one `bool`
+    /// per call, the cycle direction (`false` forward, `true` backward). Its own queue rather than
+    /// a [`SelectionRequest`] variant because it names no unit: the reference runs it through the
+    /// TAB cycler `0x493f60(reverse, mode 2)` and straight into `SetSelection`, never through the
+    /// select-if-resolves helper the other three share.
+    pub fn take_target_nearest_friend_requests(&mut self) -> Vec<bool> {
+        std::mem::take(&mut self.model_mut().target_nearest_friend_requests)
     }
 
     /// Drain the `(name, exactMatch)` pairs `TargetByName` queued since the last call — the app

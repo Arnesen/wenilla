@@ -77,12 +77,18 @@
           `ColorPickerCancelButton:Click()` — the reference's own idiom for this (its game-menu
           chain cancel-clicks `OptionsFrameCancel` the same way). ESC therefore CANCELS, it does not
           merely hide, which is the half people get wrong.
-        · **`OpacityFrame` (ref l.223-335) is not transcribed.** The second frame in the reference's
-          file: a standalone 80x180 opacity popup with its own slider and a fullscreen
-          click-off-to-close button, used by FloatingChatFrame's chat-window alpha. **Zero corpus
-          callers** and no benilla consumer, so it waits for its first customer (decision 1195). Its
-          globals are `OpacityFrame`, `OpacityFrameSlider`, `OpacityFrameCloseButton`, and
-          `OpacityFrame.opacityFunc`/`.saveOpacityFunc`.
+        · **`OpacityFrame` (ref l.223-335) IS transcribed now** — the second frame in the reference's
+          file: a standalone 80x180 opacity popup with its own vertical slider and a fullscreen
+          click-off-to-close button, used by FloatingChatFrame's chat-window alpha. This note used
+          to read "**zero corpus callers** and no benilla consumer, so it waits for its first
+          customer (decision 1195)". Its first customer arrived: pfUI skins it in two files —
+          `skins/blizzard/miscellaneous.lua` l.36-41 (`CreateBackdrop(OpacityFrame)`,
+          `SkinSlider(OpacityFrameSlider)`, then a re-anchor) and
+          `skins/blizzard/battlefield_minimap.lua` l.23-24 (re-anchors `OpacityFrame` off the
+          battlefield minimap). 1195's own bar is demand, so demand is what moves it (1719).
+          It is transcribed verbatim, `opacityFunc`/`saveOpacityFunc` hooks included — those are
+          the whole contract with a caller, and a popup that drops them would move a slider that
+          changes nothing.
         · **The unguarded `ColorPickerFrame.func()` in Okay's OnClick (ref l.89) is KEPT unguarded.**
           It is one of the few places quirk-for-quirk beats tidying: an addon that opened this window
           without setting `func` errors in the real client too, and a guard here would swallow that
@@ -295,4 +301,90 @@
             <TexCoords left="0.25" right="1.0" top="0" bottom="0.875"/>
         </ColorValueThumbTexture>
     </ColorSelect>
+
+    <!-- ═══ ref l.223-335, verbatim ═══ The opacity popup: a standalone toplevel the colour
+         picker's own file ships beside it, opened by whatever wants an alpha (FloatingChatFrame's
+         chat-window alpha in the reference; pfUI re-anchors it off the battlefield minimap). It is
+         NOT a child of ColorPickerFrame — `parent="UIParent"`, its own strata, its own show/hide.
+
+         The two hook fields are the contract: `opacityFunc` fires on every slider tick,
+         `saveOpacityFunc` once on the click-off close. Both are read UNGUARDED-if-set exactly as
+         the reference writes them (an `if ( ... ) then` around each), so a caller that sets neither
+         gets a slider that moves and does nothing — which is the reference's own behaviour, not a
+         gap.
+
+         `OpacityFrameCloseButton` is the reference's click-off catcher: declared inside this
+         frame's `<Frames>` but RE-PARENTED to UIParent by its own `parent=` attr, `setAllPoints`
+         over the whole screen, and dropped one frame level in OnLoad so it sits under the popup it
+         closes. `RegisterForClicks("LeftButtonDown","RightButtonDown")` — it fires on the press,
+         not the release, so a click anywhere outside dismisses immediately. -->
+    <Frame name="OpacityFrame" toplevel="true" parent="UIParent" movable="true" enableMouse="true" hidden="true">
+        <Size><AbsDimension x="80" y="180"/></Size>
+        <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+        <Backdrop bgFile="Interface\DialogFrame\UI-DialogBox-Background" edgeFile="Interface\DialogFrame\UI-DialogBox-Border" tile="true">
+            <BackgroundInsets><AbsInset left="11" right="12" top="12" bottom="11"/></BackgroundInsets>
+            <TileSize><AbsValue val="32"/></TileSize>
+            <EdgeSize><AbsValue val="32"/></EdgeSize>
+        </Backdrop>
+        <Frames>
+            <Slider name="OpacityFrameSlider" orientation="VERTICAL" minValue="0" maxValue="1" valueStep="0.01" defaultValue="1">
+                <Size><AbsDimension x="16" y="128"/></Size>
+                <Anchors><Anchor point="TOP"><Offset><AbsDimension x="-10" y="-35"/></Offset></Anchor></Anchors>
+                <Backdrop bgFile="Interface\Buttons\UI-SliderBar-Background" edgeFile="Interface\Buttons\UI-SliderBar-Border" tile="true">
+                    <EdgeSize><AbsValue val="8"/></EdgeSize>
+                    <TileSize><AbsValue val="8"/></TileSize>
+                    <BackgroundInsets><AbsInset left="3" right="3" top="6" bottom="6"/></BackgroundInsets>
+                </Backdrop>
+                <Layers>
+                    <Layer level="ARTWORK">
+                        <!-- The title hangs off the FRAME, not the slider — the ref anchors it
+                             `relativeTo="OpacityFrame"` from inside the slider's own layers. -->
+                        <FontString name="$parentText" inherits="GameFontNormalSmall" text="OPACITY">
+                            <Anchors><Anchor point="TOP" relativeTo="OpacityFrame"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <!-- The two end labels are UNNAMED in the ref, and the literals are the
+                             ref's own: "0%"/"100%" are written as text, not as global strings. -->
+                        <FontString inherits="GameFontHighlightSmall" text="0%">
+                            <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="2" y="3"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString inherits="GameFontHighlightSmall" text="100%">
+                            <Anchors><Anchor point="TOPLEFT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-2" y="3"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnValueChanged>
+                        if ( OpacityFrame.opacityFunc ) then
+                            OpacityFrame.opacityFunc();
+                        end
+                    </OnValueChanged>
+                </Scripts>
+                <ThumbTexture file="Interface\Buttons\UI-SliderBar-Button-Vertical">
+                    <Size><AbsDimension x="32" y="32"/></Size>
+                </ThumbTexture>
+            </Slider>
+            <Button name="OpacityFrameCloseButton" parent="UIParent" setAllPoints="true" hidden="true">
+                <Scripts>
+                    <OnLoad>
+                        this:SetFrameLevel(this:GetFrameLevel()-1);
+                        this:RegisterForClicks("LeftButtonDown", "RightButtonDown");
+                    </OnLoad>
+                    <OnClick>
+                        OpacityFrame:Hide();
+                        if ( OpacityFrame.saveOpacityFunc ) then
+                            OpacityFrame.saveOpacityFunc();
+                        end
+                    </OnClick>
+                </Scripts>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnShow>
+                OpacityFrameCloseButton:Show();
+            </OnShow>
+            <OnHide>
+                OpacityFrameCloseButton:Hide();
+            </OnHide>
+        </Scripts>
+    </Frame>
 </Ui>

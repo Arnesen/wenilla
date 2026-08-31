@@ -7,7 +7,7 @@ use mlua::{Lua, Value};
 use super::super::Model;
 use super::{
     check_unit_token, classification_word, grey_band, level_reads_unknown, pick_unit_token,
-    power_token, with_unit,
+    power_token, with_unit, SelectionRequest,
 };
 
 /// The two class ids `GetComboPoints 0x51a190` accepts — the literals `4` and `0xb` it compares
@@ -889,8 +889,90 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, token: Option<String>| {
             if let Some(token) = token {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                model.target_requests.push(token);
+                model.selection_requests.push(SelectionRequest::Unit(token));
             }
+            Ok(())
+        })?,
+    )?;
+
+    // AssistUnit(unit) — select the *token's own* target (`0x489b80`; wow-re
+    // `object-layer/scratch/targeting-by-name.md` PART C, §5-cross-checked). The ASSISTTARGET
+    // binding's body is `AssistUnit("target")`, and `/assist`'s bare form is the same call.
+    //
+    // The shared assist tail (`0x489bb2`–`0x489c07`, byte-identical to `AssistByName`'s) is three
+    // steps and no more: read `UNIT_FIELD_TARGET` off the basis (`[[obj+0x110]+0x28]`), bail
+    // **silently** if it is zero, then hand the guid to the select-if-resolves helper `0x489a40`.
+    // Four things it deliberately is not:
+    //
+    //  * **not gated by `CanAssist`** — a whole-binary census of the 25 `call 0x6066f0` sites puts
+    //    none of them on this path (VERIFIED negative), so `AssistUnit("target")` on a hostile
+    //    creature assists it, and that is the common case in play.
+    //  * **not players-only** — unlike `AssistByName`'s typemask `0x10`, the token resolver takes
+    //    whatever the token names.
+    //  * **not a deselect on failure** — an unresolvable token, a basis with no target, and a
+    //    target that is not streamed all leave the current selection exactly where it was
+    //    (`0x489a40`'s arm 3 is a bare `ret`).
+    //  * **not an attack** — the tail's swing leg is gated on the `assistAttack` CVar, whose
+    //    registered default is `"0"` (VERIFIED at the registration bytes `0x48fc50`). Stock assist
+    //    selects and does not swing; the leg becomes reachable only if benilla grows the CVar.
+    //
+    // A nil/absent unit is ignored here rather than queued, like `TargetUnit`'s: the reference
+    // emits game-message `0xb8` for the token it cannot parse, and that id→string table is
+    // runtime-populated BSS wow-re could not statically recover — the same known deviation
+    // `TargetByName` already carries, and silence is better than an invented line.
+    g.set(
+        "AssistUnit",
+        lua.create_function(|lua, token: Option<String>| {
+            if let Some(token) = token {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                model
+                    .selection_requests
+                    .push(SelectionRequest::Assist(token));
+            }
+            Ok(())
+        })?,
+    )?;
+
+    // TargetLastEnemy() — re-select the last **attackable** unit that was targeted (`0x489b45`
+    // reads the pair `[0xb4e2e8]/[0xb4e2ec]`, which `SetSelection 0x493540` stamps at `0x49377d`
+    // alongside the plain last-target pair `TargetLastTarget` reads). The TARGETLASTHOSTILE
+    // binding (default `G`) is its only shipped caller.
+    //
+    // Takes no argument and routes through the same select-if-resolves helper, so a remembered
+    // guid whose unit has since streamed out is a silent no-op rather than a deselect. The app
+    // owns the memory itself (`crate::target::scan`'s `LastEnemy`) — the VM holds no guids.
+    g.set(
+        "TargetLastEnemy",
+        lua.create_function(|lua, ()| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.selection_requests.push(SelectionRequest::LastEnemy);
+            Ok(())
+        })?,
+    )?;
+
+    // TargetNearestFriend([reverse]) — the friendly half of the TAB scan. `0x489aa0` is
+    // byte-for-byte `TargetNearestEnemy`'s shim with one changed immediate: both fetch the
+    // optional Lua arg #1 as the reverse flag (`0x6f1c10`, default 0) and call the one cycler
+    // `0x493f60(ecx = reverse, edx = mode)` — `edx = 1` for enemy, **`2` for friend** (3 and 4 are
+    // the party and raid siblings). Everything downstream is the same code; only the
+    // per-candidate filter `0x493e40` forks on the mode, and mode 2's arm (`0x493eca`) is
+    // `CanAssist(player, cand)` then `UNIT_FIELD_HEALTH > 0`.
+    //
+    // TARGETNEARESTFRIEND (`CTRL-TAB`) calls it bare; TARGETPREVIOUSFRIEND (`CTRL-SHIFT-TAB`)
+    // calls `TargetNearestFriend(1)` — 1.12's own `Bindings.xml` comments the argument
+    // `-- 1 (or "true") means reverse!`, so the truthiness test below takes a number OR a boolean.
+    // A numeric 0 is forward, matching `0x6f1c10`'s "absent == 0" reading.
+    g.set(
+        "TargetNearestFriend",
+        lua.create_function(|lua, reverse: Option<Value>| {
+            let reverse = match reverse {
+                None | Some(Value::Nil) | Some(Value::Boolean(false)) => false,
+                Some(Value::Integer(n)) => n != 0,
+                Some(Value::Number(n)) => n != 0.0,
+                Some(_) => true,
+            };
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.target_nearest_friend_requests.push(reverse);
             Ok(())
         })?,
     )?;

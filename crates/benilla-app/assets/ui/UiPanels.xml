@@ -1530,6 +1530,91 @@
             end,
         }
 
+        -- ── The equip / auto-equip / use soulbind confirms (decision 1750) ────────────────────
+        -- ref GlobalStrings.lua l.1459 / l.4453 / l.2818 / l.465, fallback form.
+        EQUIP_NO_DROP = EQUIP_NO_DROP or "Equipping this item will bind it to you."
+        USE_NO_DROP = USE_NO_DROP or "Using this item will bind it to you."
+        OKAY = OKAY or "Okay"
+        CANCEL = CANCEL or "Cancel"
+
+        -- ref StaticPopup.lua l.612-647, verbatim, twice: EQUIP_BIND and AUTOEQUIP_BIND are the
+        -- SAME entry down to the last field — same text, same three hooks — and differ only in
+        -- which event raises them. Built from one factory rather than transcribed twice, because
+        -- two copies of a nine-field table is exactly how the two drift apart.
+        --
+        -- `data` is a 0-based index into the client's pending-equip array, NOT a slot (the RE
+        -- corrected benilla's assumption here). It is opaque: the event hands it out and these
+        -- hooks hand it straight back.
+        --
+        -- **OnCancel AND OnHide both cancel, and that is deliberate, not redundant.** OnHide is
+        -- what retires a record when `exclusive = 1` makes a second bind question hide this one;
+        -- without it the superseded item's pending record leaks. The doubling it causes on the
+        -- ordinary paths is harmless by construction — an Accept runs OnAccept then OnHide, so the
+        -- app sees [accept, cancel] for one index and the cancel finds the record already taken.
+        local function equip_bind_entry()
+            return {
+                text = EQUIP_NO_DROP,
+                button1 = OKAY,
+                button2 = CANCEL,
+                OnAccept = function(index)
+                    EquipPendingItem(index)
+                end,
+                OnCancel = function(index)
+                    CancelPendingEquip(index)
+                end,
+                OnHide = function(index)
+                    CancelPendingEquip(index)
+                end,
+                timeout = 0,
+                exclusive = 1,
+                whileDead = 1,
+                hideOnEscape = 1,
+            }
+        end
+        StaticPopupDialogs["EQUIP_BIND"] = equip_bind_entry()
+        StaticPopupDialogs["AUTOEQUIP_BIND"] = equip_bind_entry()
+
+        -- ref StaticPopup.lua l.648-658. No index, no cancel hook: the use arm's pending state is
+        -- a single cell in the client rather than an array element, and declining just drops it.
+        StaticPopupDialogs["USE_BIND"] = {
+            text = USE_NO_DROP,
+            button1 = OKAY,
+            button2 = CANCEL,
+            OnAccept = function()
+                ConfirmBindOnUse()
+            end,
+            timeout = 0,
+            exclusive = 1,
+            hideOnEscape = 1,
+        }
+
+        -- ref UIParent.lua l.324-343 + l.356-360, the four arms on one driver. Each equip arm
+        -- hides the OTHER dialog first — the two questions are mutually exclusive by construction
+        -- (one item, one destination), and the hide is what cancels the record the new question
+        -- replaces.
+        function BenillaBindConfirmDriver_OnEvent(frame)
+            if event == "EQUIP_BIND_CONFIRM" then
+                StaticPopup_Hide("AUTOEQUIP_BIND")
+                local dialog = StaticPopup_Show("EQUIP_BIND")
+                if dialog then
+                    dialog.data = arg1
+                end
+            elseif event == "AUTOEQUIP_BIND_CONFIRM" then
+                StaticPopup_Hide("EQUIP_BIND")
+                local dialog = StaticPopup_Show("AUTOEQUIP_BIND")
+                if dialog then
+                    dialog.data = arg1
+                end
+            elseif event == "USE_BIND_CONFIRM" then
+                StaticPopup_Show("USE_BIND")
+            elseif event == "CURSOR_UPDATE" then
+                -- ref l.356-360: the player picked something else up, so the standing question is
+                -- stale. Both hides run their OnHide, which cancels the record.
+                StaticPopup_Hide("EQUIP_BIND")
+                StaticPopup_Hide("AUTOEQUIP_BIND")
+            end
+        end
+
         -- BenillaDeleteItemConfirmDriver's OnEvent — DELETE_ITEM_CONFIRM(name, quality) is the
         -- engine's world-drop of an item payload (decision 0216 §3, cursor.rs::world_drop) →
         -- ref UIParent.lua:344-352, now whole: the ref's `arg2 >= 3` fork routes RARE-or-better
@@ -2213,6 +2298,23 @@
                 self:RegisterEvent("DELETE_ITEM_CONFIRM")
             </OnLoad>
             <OnEvent>BenillaDeleteItemConfirmDriver_OnEvent(self)</OnEvent>
+        </Scripts>
+    </Frame>
+
+    <!-- The equip/auto-equip/use soulbind confirms (decision 1750). Same shape and same reason as
+         the delete driver above: the reference handles all four of these events in UIParent.lua's
+         own OnEvent, and none of them names a frame, so they get a dedicated hidden listener. -->
+    <Frame name="BenillaBindConfirmDriver" hidden="true">
+        <Size><AbsDimension x="1" y="1"/></Size>
+        <Anchors><Anchor point="TOPLEFT"/></Anchors>
+        <Scripts>
+            <OnLoad>
+                self:RegisterEvent("EQUIP_BIND_CONFIRM")
+                self:RegisterEvent("AUTOEQUIP_BIND_CONFIRM")
+                self:RegisterEvent("USE_BIND_CONFIRM")
+                self:RegisterEvent("CURSOR_UPDATE")
+            </OnLoad>
+            <OnEvent>BenillaBindConfirmDriver_OnEvent(self)</OnEvent>
         </Scripts>
     </Frame>
 </Ui>

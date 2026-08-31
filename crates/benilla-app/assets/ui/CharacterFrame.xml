@@ -237,8 +237,8 @@
         -- verified this session), loaded before every window.
 
         -- ── This window's own constants (ref-PaperDollFrame.lua:1-4, Benilla-prefixed) ────────────
-        BENILLA_NUM_STATS = 5              -- NUM_STATS
-        BENILLA_NUM_RESISTANCE_TYPES = 5   -- NUM_RESISTANCE_TYPES
+        NUM_STATS = 5              -- NUM_STATS
+        NUM_RESISTANCE_TYPES = 5   -- NUM_RESISTANCE_TYPES
         ATTACK_POWER_MAGIC_NUMBER = 14 -- ATTACK_POWER_MAGIC_NUMBER
         -- MagicResFrame1..5's ref `id=` attrs (ref-PaperDollFrame.xml:654-759) — arcane/fire/nature/
         -- frost/shadow; Holy(1) never rides the paper doll (only 5 of the 6 schools show here).
@@ -541,7 +541,7 @@
         -- ref PaperDollFrame_SetStats (l.131-174), including its per-refresh label SetText (l.140)
         -- — the labels' one source of text (see PaperDollFrame_OnLoad's header comment).
         function PaperDollFrame_SetStats()
-            for i = 1, BENILLA_NUM_STATS do
+            for i = 1, NUM_STATS do
                 local label = getglobal("CharacterStatFrame" .. i .. "Label")
                 local text = getglobal("CharacterStatFrame" .. i .. "StatText")
                 local frame = getglobal("CharacterStatFrame" .. i)
@@ -591,7 +591,7 @@
 
         -- ref PaperDollFrame_SetResistances (l.176-228).
         function PaperDollFrame_SetResistances()
-            for i = 1, BENILLA_NUM_RESISTANCE_TYPES do
+            for i = 1, NUM_RESISTANCE_TYPES do
                 local resistId = BENILLA_MAGICRES_IDS[i]
                 local text = getglobal("MagicResText" .. i)
                 local frame = getglobal("MagicResFrame" .. i)

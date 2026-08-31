@@ -1616,6 +1616,55 @@ mod loader_tests {
         assert_eq!(widths, [Some((270.0, 0.0)); 2]);
         assert!(s.errors().is_empty(), "{:?}", s.errors());
     }
+
+    /// A state-texture element with **no `file=`, no `<Color>` and no `name=`** still builds its
+    /// region: `<NormalTexture/>` is the reference's own form on `SpellBookSkillLineTabTemplate`
+    /// (ref SpellBookFrame.xml l.36), and the real client creates from the ELEMENT, not from any
+    /// attribute on it — `Button::LoadXML 0x7788c0` routes all four `<...Texture>` children through
+    /// the same texture adder the `<Layers>` walker uses (`0x6f26f0`), each followed only by the slot
+    /// store, which does no geometry (wow-re `system/ui/scratch/region-implicit-anchor.md` §3).
+    ///
+    /// The report is pfUI's spellbook skin, which takes `SpellBookSkillLineTab<i>:GetNormalTexture()`
+    /// and immediately `:SetTexCoord()`s it; the corpus carries 38 bare `<DisabledTexture />` besides.
+    /// Before this, the loader materialized only on `file=`/`<Color>`/`name=`, so the getter answered
+    /// nil where the real client answers a live blank texture.
+    #[test]
+    fn a_bare_state_texture_element_still_builds_its_region() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Button name="BareBtn">
+                    <Size><AbsDimension x="32" y="32"/></Size>
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                    <NormalTexture/>
+                    <DisabledTexture />
+                </Button>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+
+        assert!(
+            s.eval::<bool>("return BareBtn:GetNormalTexture() ~= nil")
+                .unwrap(),
+            "a bare <NormalTexture/> builds its region"
+        );
+        assert!(
+            s.eval::<bool>("return BareBtn:GetDisabledTexture() ~= nil")
+                .unwrap(),
+            "a bare <DisabledTexture /> builds its region"
+        );
+        // Created, not painted: the region is live enough to take SetTexCoord (pfUI's next call) and
+        // still carries no art of its own.
+        s.run("BareBtn:GetNormalTexture():SetTexCoord(0.07, 0.93, 0.07, 0.93)")
+            .unwrap();
+        assert!(
+            s.eval::<bool>("return BareBtn:GetNormalTexture():GetTexture() == nil")
+                .unwrap(),
+            "blank, not painted"
+        );
+    }
 }
 
 mod layer_blend_tests {

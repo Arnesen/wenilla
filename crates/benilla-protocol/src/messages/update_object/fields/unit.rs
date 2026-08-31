@@ -400,6 +400,17 @@ impl ObjectFields {
     pub fn unit_dynamic_flags(&self) -> u32 {
         self.get_u32(FIELD_UNIT_DYNAMIC_FLAGS).unwrap_or(0)
     }
+    /// `UNIT_DYNAMIC_FLAGS` bit `0x20` alone — the **dead-looking** flag, without
+    /// [`Self::unit_reads_dead`]'s two other legs.
+    ///
+    /// It has its own accessor because one caller wants exactly this bit and not that predicate:
+    /// `SetSelection`'s last-enemy stamp gates on `HEALTH > 0 || dynflag 0x20`
+    /// (`0x49372f`-`0x493778`), with no health-zero leg and no stand-state leg, so a feigning unit
+    /// is remembered and a genuinely dead one is not. Reaching for `unit_reads_dead` there would
+    /// quietly add a third condition the reference does not have.
+    pub fn unit_dynflag_dead(&self) -> bool {
+        self.unit_dynamic_flags() & UNIT_DYNFLAG_DEAD != 0
+    }
     /// `UNIT_DYNAMIC_FLAGS` bit `0x4` — **tapped**: this unit is someone's kill credit.
     /// `UnitIsTapped 0x519c90` is exactly `0x519cd0 test BYTE PTR [eax+0x224],0x4` behind an
     /// object-presence check, nothing else — no ownership, GUID compare, party/raid or health

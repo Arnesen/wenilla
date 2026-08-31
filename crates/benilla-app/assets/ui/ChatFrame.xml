@@ -1938,11 +1938,11 @@
          the ref's PanelTemplates_TabResize(5, tab) from FCF_DockUpdate). Hidden by alpha
          (hover reveals).
 
-         ChatFrame2Tab ("Combat Log") is deliberately NOT built: the combat log renders nothing
-         real yet (window 2 gets its chat-cache groups from the router, but the combat-event →
-         line pipeline doesn't exist), so the tab just selected an empty window. ChatFrame2
-         itself stays above (the router keeps feeding it) so the tab can return whole with the
-         combat-log arc — director's call, 2026-07-11. The FCF loops guard the missing tab. ── -->
+         ChatFrame2Tab ("Combat Log") is built below; what is still missing is what goes IN it —
+         window 2 gets its chat-cache groups from the router, but the combat-event → line pipeline
+         does not exist, so the tab selects a window the combat log never writes to. That is also
+         why the four 1.12 COMBATLOG* bindings are recorded absent rather than registered
+         (`bindings::commands::ABSENT`). ── -->
     <Button name="BenillaChatTabTemplate" virtual="true" parent="UIParent" frameStrata="LOW" alpha="0">
         <Size><AbsDimension x="70" y="32"/></Size>
         <Layers>

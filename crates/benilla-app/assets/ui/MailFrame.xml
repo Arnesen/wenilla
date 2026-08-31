@@ -44,9 +44,9 @@
         CMSG_MAIL_CREATE_TEXT_ITEM, once on this list, is implemented — ref l.1732-1757.)
     -->
     <Script><![CDATA[
-        BENILLA_INBOXITEMS_TO_DISPLAY = 7   -- INBOXITEMS_TO_DISPLAY (ref MailFrame.lua l.1)
-        BENILLA_MAX_COD_AMOUNT = 10000      -- MAX_COD_AMOUNT (ref l.6)
-        BENILLA_STATIONERY_PATH = "Interface\\Stationery\\"  -- STATIONERY_PATH (ref l.5)
+        INBOXITEMS_TO_DISPLAY = 7   -- INBOXITEMS_TO_DISPLAY (ref MailFrame.lua l.1)
+        MAX_COD_AMOUNT = 10000      -- MAX_COD_AMOUNT (ref l.6)
+        STATIONERY_PATH = "Interface\\Stationery\\"  -- STATIONERY_PATH (ref l.5)
 
         -- The money entry uses the shared BenillaMoneyInput_* kit (MerchantFrame.xml, loaded first) —
         -- the send tab's three numeric edit boxes are named SendMailMoneyGold/Silver/Copper.
@@ -158,8 +158,8 @@
         --    every getglobal below reads MailItem<i>Button* / MailItem<i>Sender/Subject/ExpireTime. ─
         function InboxFrame_Update()
             local numItems = GetInboxNumItems()
-            local index = ((MailFrame.pageNum - 1) * BENILLA_INBOXITEMS_TO_DISPLAY) + 1
-            for i = 1, BENILLA_INBOXITEMS_TO_DISPLAY do
+            local index = ((MailFrame.pageNum - 1) * INBOXITEMS_TO_DISPLAY) + 1
+            for i = 1, INBOXITEMS_TO_DISPLAY do
                 if index <= numItems then
                     local packageIcon, stationeryIcon, sender, subject, money, CODAmount, daysLeft, hasItem, wasRead, x, y, z, isGM = GetInboxHeaderInfo(index)
                     local icon
@@ -230,7 +230,7 @@
             -- Page arrows (ref l.188-198): back is dead on the first page, forward is dead once
             -- this page reaches the end of the list. `lastOnPage` is the list index this page's
             -- last row would carry if it were full.
-            local lastOnPage = MailFrame.pageNum * BENILLA_INBOXITEMS_TO_DISPLAY
+            local lastOnPage = MailFrame.pageNum * INBOXITEMS_TO_DISPLAY
             if MailFrame.pageNum == 1 then InboxPrevPageButton:Disable() else InboxPrevPageButton:Enable() end
             if lastOnPage < numItems then InboxNextPageButton:Enable() else InboxNextPageButton:Disable() end
             -- InboxCurrentPage is declared in the ref XML (l.329) but NO reference Lua ever writes
@@ -396,8 +396,8 @@
             -- nothing to sit on top of.
             OpenMailBodyText:SetText(bodyText)
             if texture then
-                OpenStationeryBackgroundLeft:SetTexture(BENILLA_STATIONERY_PATH..texture.."1")
-                OpenStationeryBackgroundRight:SetTexture(BENILLA_STATIONERY_PATH..texture.."2")
+                OpenStationeryBackgroundLeft:SetTexture(STATIONERY_PATH..texture.."1")
+                OpenStationeryBackgroundRight:SetTexture(STATIONERY_PATH..texture.."2")
             end
             local hasAttachments
             -- The letter button — "make a permanent copy" (ref l.364-376): a takeable body not yet
@@ -607,7 +607,7 @@
             if string.len(SendMailSubjectEditBox:GetText()) > 0 then checks = checks + 1 end
             if SendMailCODButton:GetChecked() then
                 checksRequired = 3
-                if BenillaMoneyInput_GetCopper("SendMailMoney") > BENILLA_MAX_COD_AMOUNT * 10000 then
+                if BenillaMoneyInput_GetCopper("SendMailMoney") > MAX_COD_AMOUNT * 10000 then
                     SendMailErrorText:Show()
                     SendMailErrorCoin:Show()
                 else
@@ -946,7 +946,7 @@
                     <!-- ref SendMailScrollFrame l.544-661: the 296×257 scroll region at (21,-97) with
                          the stationery backdrop + scrollbar art; the body is a plain EditBox inside (no
                          live scrollbar — the render approximation). -->
-                    <Frame name="SendMailScrollFrame">
+                    <ScrollFrame name="SendMailScrollFrame" inherits="UIPanelScrollFrameTemplate">
                         <Size><AbsDimension x="296" y="257"/></Size>
                         <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="21" y="-97"/></Offset></Anchor></Anchors>
                         <Layers>
@@ -972,30 +972,6 @@
                                     <TexCoords left="0.515625" right="1.0" top="0" bottom="0.4140625"/>
                                 </Texture>
                             </Layer>
-                            <!-- The ref ScrollFrame inherits UIPanelScrollFrameTemplate: a live
-                                 Slider (TOPLEFT→TOPRIGHT 6,-16 / BOTTOMLEFT→BOTTOMRIGHT 6,16) with
-                                 16×16 up/down buttons capping it and a 16×16 knob (UIPanelTemplates
-                                 l.104-181). The body doesn't scroll here (the render approximation),
-                                 so the slider's RESTING look is quoted as inert art — both arrows in
-                                 their Disabled state, the knob parked at the slider top — filling
-                                 the recesses the trough art authors for them. -->
-                            <Layer level="OVERLAY">
-                                <Texture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Disabled">
-                                    <Size><AbsDimension x="16" y="16"/></Size>
-                                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
-                                    <TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/>
-                                </Texture>
-                                <Texture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Disabled">
-                                    <Size><AbsDimension x="16" y="16"/></Size>
-                                    <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
-                                    <TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/>
-                                </Texture>
-                                <Texture file="Interface\Buttons\UI-ScrollBar-Knob">
-                                    <Size><AbsDimension x="16" y="16"/></Size>
-                                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="6" y="-16"/></Offset></Anchor></Anchors>
-                                    <TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/>
-                                </Texture>
-                            </Layer>
                         </Layers>
                         <Frames>
                             <!-- ref SendMailBodyEditBox l.616-649: 270×200 at (20,-10), 500 letters. -->
@@ -1012,7 +988,7 @@
                                 </Scripts>
                             </EditBox>
                         </Frames>
-                    </Frame>
+                    </ScrollFrame>
                     <!-- ref SendMailNameEditBox l.662-738: 122×20 at (105,-46) + the To label +
                          Common-Input-Border art. -->
                     <EditBox name="SendMailNameEditBox" letters="12" historyLines="0" autoFocus="false">
@@ -1363,8 +1339,8 @@
                          the Stationery.dbc default, decision 0544). The picker itself is the named
                          omission; the default parchment is not. -->
                     <OnShow>
-                        StationeryBackgroundLeft:SetTexture(BENILLA_STATIONERY_PATH.."STATIONERYTEST1")
-                        StationeryBackgroundRight:SetTexture(BENILLA_STATIONERY_PATH.."STATIONERYTEST2")
+                        StationeryBackgroundLeft:SetTexture(STATIONERY_PATH.."STATIONERYTEST1")
+                        StationeryBackgroundRight:SetTexture(STATIONERY_PATH.."STATIONERYTEST2")
                         SendMailNameEditBox:SetFocus()
                         SendMailRadioButton_OnClick(1)
                     </OnShow>
@@ -1492,7 +1468,7 @@
             <!-- ref OpenMailScrollFrame l.1468-1731 (296×257 at 21,-97; stationery backdrop + scrollbar
                  art quoted, the body a plain FontString inside — the render approximation; the auction
                  INVOICE sub-frame l.1556-1727 is a named omission, dropped). -->
-            <Frame name="OpenMailScrollFrame">
+            <ScrollFrame name="OpenMailScrollFrame" inherits="UIPanelScrollFrameTemplate">
                 <Size><AbsDimension x="296" y="257"/></Size>
                 <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="21" y="-97"/></Offset></Anchor></Anchors>
                 <Layers>
@@ -1506,24 +1482,6 @@
                             <Size><AbsDimension x="31" y="106"/></Size>
                             <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-2" y="-2"/></Offset></Anchor></Anchors>
                             <TexCoords left="0.515625" right="1.0" top="0" bottom="0.4140625"/>
-                        </Texture>
-                        <!-- The ref's UIPanelScrollFrameTemplate slider at rest, quoted as inert
-                             art (see the send tab's twin for the geometry cites): disabled up/down
-                             arrows capping the slider span, the knob parked at its top. -->
-                        <Texture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Disabled">
-                            <Size><AbsDimension x="16" y="16"/></Size>
-                            <Anchors><Anchor point="TOPLEFT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
-                            <TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/>
-                        </Texture>
-                        <Texture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Disabled">
-                            <Size><AbsDimension x="16" y="16"/></Size>
-                            <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
-                            <TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/>
-                        </Texture>
-                        <Texture file="Interface\Buttons\UI-ScrollBar-Knob">
-                            <Size><AbsDimension x="16" y="16"/></Size>
-                            <Anchors><Anchor point="TOPLEFT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="6" y="-16"/></Offset></Anchor></Anchors>
-                            <TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/>
                         </Texture>
                     </Layer>
                     <Layer level="BACKGROUND">
@@ -1614,7 +1572,7 @@
                         </Frames>
                     </Frame>
                 </Frames>
-            </Frame>
+            </ScrollFrame>
             <!-- ref OpenMailLetterButton l.1732-1757 / OpenMailPackageButton l.1758-1796 /
                  OpenMailMoneyButton l.1797-1835 (ItemButtonTemplate; inlined 37px icon + slot +
                  count). The row chains letter → package → money off the attachment caption;

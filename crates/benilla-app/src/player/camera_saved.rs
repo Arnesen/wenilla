@@ -73,12 +73,19 @@ pub(super) struct CameraPoseFile {
 /// UP.** Our forward is `Quat::from_euler(YXZ, yaw, pitch, 0)` applied to `−Z`, whose Y component is
 /// `+sin(pitch)`, and `camera::control` seats the camera at `pivot − forward·distance`. Two opposite
 /// conventions meeting, which is exactly what these two functions exist to bridge.
-fn pitch_from_file(degrees: f32) -> f32 {
+///
+/// **Two carriers, one encoding.** The saved camera views ([`super::camera_view`]) store their
+/// pitch in the same units through a different door — the archived `cameraPitch{,A..D}` CVars,
+/// whose writer `0x50f990` scales the *same* internal field by `180/pi` before its `"%f"`
+/// (`0x50f9dc`) and whose loader `0x50fb80` multiplies back by `pi/180` (`0x50fba3`). So these two
+/// functions are the app's single bridge for both, and "file" in their names is the first carrier,
+/// not the only one.
+pub(super) fn pitch_from_file(degrees: f32) -> f32 {
     (-degrees.to_radians()).clamp(-CAM_PITCH_LIMIT, CAM_PITCH_LIMIT)
 }
 
 /// The live [`FlyCam::pitch`] → the persisted `cameraPitch` (see [`pitch_from_file`]).
-fn pitch_to_file(radians: f32) -> f32 {
+pub(super) fn pitch_to_file(radians: f32) -> f32 {
     -radians.to_degrees()
 }
 

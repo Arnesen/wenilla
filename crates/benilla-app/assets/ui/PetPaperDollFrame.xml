@@ -86,7 +86,7 @@
         PET_DIET_TEMPLATE = PET_DIET_TEMPLATE or "Diet: %s"            -- :3037
 
         NUM_PET_STATS = 5             -- (ref l.2)
-        BENILLA_NUM_PET_RESISTANCE_TYPES = 5  -- NUM_PET_RESISTANCE_TYPES (ref l.1)
+        NUM_PET_RESISTANCE_TYPES = 5  -- NUM_PET_RESISTANCE_TYPES (ref l.1)
 
         -- ── The page ────────────────────────────────────────────────────────────────────────────
         -- ref PetPaperDollFrame_OnLoad (l.4-29). The five labels live ONLY in the row template's
@@ -233,7 +233,7 @@
         -- line at all) and colours the NUMBER off its own sign rather than off pos-vs-neg
         -- magnitude — two real differences in the reference, kept rather than unified.
         function PetPaperDollFrame_SetResistances()
-            for i = 1, BENILLA_NUM_PET_RESISTANCE_TYPES do
+            for i = 1, NUM_PET_RESISTANCE_TYPES do
                 local resistId = BENILLA_MAGICRES_IDS[i]
                 local text = getglobal("PetMagicResText" .. i)
                 local frame = getglobal("PetMagicResFrame" .. i)

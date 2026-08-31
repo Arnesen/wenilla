@@ -105,6 +105,17 @@
     -->
     <Script><![CDATA[
         -- ── Constants (ref-lua l.1-11) ──────────────────────────────────────────────────────────
+        -- EACH LINE'S COMMENT IS THE REFERENCE'S OWN NAME FOR THE CONSTANT, and the reference
+        -- publishes them as globals. Nine of this codebase's other `BENILLA_*` constants took their
+        -- reference names this session (NUM_STATS, INBOXITEMS_TO_DISPLAY, MERCHANT_ITEMS_PER_PAGE,
+        -- MAX_TRADE_ITEMS, …) because 1189 says a name the reference has is the name we publish —
+        -- and because pfUI reads `INBOXITEMS_TO_DISPLAY` straight out of `_G`.
+        --
+        -- THESE EIGHT DID NOT, and the reason is verification, not preference: `AuctionFrame.lua`
+        -- ships in `Blizzard_AuctionUI`, which is not in the extracted reference tree here, so the
+        -- names below rest on this file's own comments and nothing else. A rename is a claim about
+        -- the reference; the eight claims are unchecked, so they wait for the extraction rather than
+        -- being taken on trust (§4). No corpus caller reads any of them today.
         BENILLA_BROWSE_ROWS        = 8           -- NUM_BROWSE_TO_DISPLAY
         BENILLA_BID_ROWS           = 9           -- NUM_BIDS_TO_DISPLAY
         BENILLA_AUCTIONS_ROWS      = 9           -- NUM_AUCTIONS_TO_DISPLAY

@@ -102,6 +102,12 @@ fn shipped_questlog_frame_loads_clean() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
+    // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
+    // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
+    // silently.
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 }
 
@@ -117,6 +123,12 @@ fn shipped_questlog_frame_drives_end_to_end() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
+    // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
+    // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
+    // silently.
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     s.set_quest_log(eight_entries());
@@ -145,7 +157,8 @@ fn shipped_questlog_frame_drives_end_to_end() {
         .unwrap()
         .contains("Quest 1"));
     assert_eq!(
-        s.eval::<String>("return QuestLogCount:GetText()").unwrap(),
+        s.eval::<String>("return QuestLogQuestCount:GetText()")
+            .unwrap(),
         "Quests: |cffffffff8/20|r"
     );
     assert_eq!(s.eval::<i64>("return GetQuestLogSelection()").unwrap(), 1);
@@ -163,7 +176,7 @@ fn shipped_questlog_frame_drives_end_to_end() {
     );
     // The reward row (QuestFrame.xml's item-row pattern, reused) + its money.
     assert_eq!(
-        s.eval::<String>("return QuestLogReward1Name:GetText()")
+        s.eval::<String>("return QuestLogItem1Name:GetText()")
             .unwrap(),
         "Militia Hammer"
     );
@@ -192,7 +205,9 @@ fn shipped_questlog_frame_drives_end_to_end() {
             .unwrap(),
         ""
     );
-    assert!(!s.eval::<bool>("return QuestLogChoice1:IsShown()").unwrap());
+    // No choices, so the pool's first slot IS the fixed reward and the SECOND is the first
+    // unused one. (One pool now — the ref's shape; there is no separate "choice row 1".)
+    assert!(!s.eval::<bool>("return QuestLogItem2:IsShown()").unwrap());
 
     // Wheel DOWN over an actual list ROW (delta -1) advances the faux-scroll offset by one: row 1 now
     // shows entry 2's title. Aiming over a row (not the empty margin) is the case that matters — a spin
@@ -292,6 +307,12 @@ fn shift_click_toggles_the_watch_checkbox_and_the_tracker_hud() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
+    // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
+    // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
+    // silently.
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     s.set_quest_log(eight_entries());
@@ -407,6 +428,12 @@ fn watch_guards_no_op_without_erroring() {
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
     load_xml(&s, "ErrorsFrame.xml"); // the guards' red-line surface
+                                     // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
+                                     // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
+                                     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
+                                     // silently.
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     s.set_quest_log(eight_entries());
@@ -494,6 +521,12 @@ fn progress_auto_watches_for_five_minutes() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
+    // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
+    // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
+    // silently.
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
     s.set_quest_log(eight_entries());
 
@@ -550,6 +583,12 @@ fn the_auto_watch_flag_is_the_references_uvar_and_gates_the_watch() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
+    // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
+    // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
+    // silently.
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
     s.set_quest_log(eight_entries());
     assert_eq!(s.eval::<String>("return AUTO_QUEST_WATCH").unwrap(), "1");
@@ -583,6 +622,12 @@ fn empty_quest_log_hides_rows_and_disables_abandon() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
+    // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
+    // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
+    // silently.
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     s.set_quest_log(QuestLogState::default());
@@ -592,13 +637,13 @@ fn empty_quest_log_hides_rows_and_disables_abandon() {
     // A bare FontString region has no Show/Hide/IsVisible in this engine (only Frames/Buttons do —
     // `region.rs`'s method table) — the empty-state message is a toggled SetText, read back here.
     assert_eq!(
-        s.eval::<String>("return QuestLogEmptyText:GetText()")
+        s.eval::<String>("return QuestLogNoQuestsText:GetText()")
             .unwrap(),
         "Your quest log is empty."
     );
     assert!(!s.eval::<bool>("return QuestLogTitle1:IsVisible()").unwrap());
     assert!(!s
-        .eval::<bool>("return QuestLogAbandonButton:IsEnabled() ~= 0")
+        .eval::<bool>("return QuestLogFrameAbandonButton:IsEnabled() ~= 0")
         .unwrap());
     // The Description header is now Lua-managed (BenillaQuestLogDetail_Clear blanks it) rather than
     // a static `text=` — it used to float "Description" over the empty-log parchment with no
@@ -609,7 +654,8 @@ fn empty_quest_log_hides_rows_and_disables_abandon() {
         ""
     );
     assert_eq!(
-        s.eval::<String>("return QuestLogCount:GetText()").unwrap(),
+        s.eval::<String>("return QuestLogQuestCount:GetText()")
+            .unwrap(),
         "Quests: |cffffffff0/20|r"
     );
 }
@@ -626,6 +672,12 @@ fn reward_rows_follow_the_refs_two_per_row_layout() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
+    // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
+    // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
+    // silently.
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     let mut state = eight_entries();
@@ -669,16 +721,18 @@ fn reward_rows_follow_the_refs_two_per_row_layout() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     // Both choice rows show, the rest of the 6-row cap stays hidden.
-    assert!(s.eval::<bool>("return QuestLogChoice1:IsShown()").unwrap());
-    assert!(s.eval::<bool>("return QuestLogChoice2:IsShown()").unwrap());
-    assert!(!s.eval::<bool>("return QuestLogChoice3:IsShown()").unwrap());
+    // 2 choices then 1 fixed reward, in ONE pool: Item1/Item2 are the choices, Item3 the reward,
+    // Item4 the first unused slot.
+    assert!(s.eval::<bool>("return QuestLogItem1:IsShown()").unwrap());
+    assert!(s.eval::<bool>("return QuestLogItem2:IsShown()").unwrap());
+    assert!(!s.eval::<bool>("return QuestLogItem4:IsShown()").unwrap());
     assert_eq!(
-        s.eval::<String>("return QuestLogChoice1Name:GetText()")
+        s.eval::<String>("return QuestLogItem1Name:GetText()")
             .unwrap(),
         "Worn Sword"
     );
     assert_eq!(
-        s.eval::<String>("return QuestLogChoice2Name:GetText()")
+        s.eval::<String>("return QuestLogItem2Name:GetText()")
             .unwrap(),
         "Worn Mace"
     );
@@ -700,10 +754,10 @@ fn reward_rows_follow_the_refs_two_per_row_layout() {
     );
 
     // One fixed reward shows, chained under the receive text (its own SetPoint target).
-    assert!(s.eval::<bool>("return QuestLogReward1:IsShown()").unwrap());
-    assert!(!s.eval::<bool>("return QuestLogReward2:IsShown()").unwrap());
+    assert!(s.eval::<bool>("return QuestLogItem3:IsShown()").unwrap());
+    assert!(!s.eval::<bool>("return QuestLogItem4:IsShown()").unwrap());
     assert_eq!(
-        s.eval::<String>("return QuestLogReward1Name:GetText()")
+        s.eval::<String>("return QuestLogItem3Name:GetText()")
             .unwrap(),
         "Militia Hammer"
     );
@@ -715,7 +769,7 @@ fn reward_rows_follow_the_refs_two_per_row_layout() {
     );
 }
 
-/// One entry whose selected detail overflows the 261px-tall `QuestLogDetailScroll`: 10
+/// One entry whose selected detail overflows the 261px-tall `QuestLogDetailScrollFrame`: 10
 /// objective lines (each a FIXED 12px slot, `QuestLogObjective1`'s own XML comment) plus a
 /// long description and a reward row push the child's summed height (`BenillaQuestLogDetail_
 /// ResizeChild`) well past the pane — load-bearing for the scroll/clip tests below even
@@ -761,8 +815,8 @@ fn overflowing_entry() -> QuestLogState {
 }
 
 /// The ScrollFrame clip (decision 0112 §4): every quad in the moved detail chain's subtree —
-/// `QuestLogDetailChild` and its descendants (here, a reward row's icon-slot texture) —
-/// carries `QuestLogDetailScroll`'s own resolved rect as its clip, so content that overflows
+/// `QuestLogDetailScrollChildFrame` and its descendants (here, a reward row's icon-slot texture) —
+/// carries `QuestLogDetailScrollFrame`'s own resolved rect as its clip, so content that overflows
 /// the pane never draws past its bottom edge; a sibling entirely outside the scroll child (the
 /// window's own book-icon chrome) stays unclipped, mirroring `scrollframe.rs`'s own unit test for
 /// the mechanism, just through the shipped window instead of a synthetic fixture.
@@ -774,6 +828,12 @@ fn overflowing_detail_content_clips_to_the_scrollframe_rect() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
+    // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
+    // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
+    // silently.
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     s.set_quest_log(overflowing_entry());
@@ -830,6 +890,12 @@ fn wheel_over_the_detail_pane_changes_vertical_scroll() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
+    // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
+    // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
+    // silently.
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     s.set_quest_log(overflowing_entry());
@@ -843,14 +909,14 @@ fn wheel_over_the_detail_pane_changes_vertical_scroll() {
     let (x, y) = (scroll_rect.left + 10.0, scroll_rect.top - 10.0);
 
     assert_eq!(
-        s.eval::<f32>("return QuestLogDetailScroll:GetVerticalScroll()")
+        s.eval::<f32>("return QuestLogDetailScrollFrame:GetVerticalScroll()")
             .unwrap(),
         0.0
     );
     s.mouse_wheel(x, y, -1.0); // WoW convention: -1 = down
     assert!(s.errors().is_empty(), "wheel errors: {:?}", s.errors());
     let after = s
-        .eval::<f32>("return QuestLogDetailScroll:GetVerticalScroll()")
+        .eval::<f32>("return QuestLogDetailScrollFrame:GetVerticalScroll()")
         .unwrap();
     assert!(
         after > 0.0,
@@ -870,6 +936,12 @@ fn selection_change_resets_detail_scroll_but_a_quest_log_update_refresh_does_not
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
+    // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
+    // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
+    // silently.
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     s.set_quest_log(overflowing_entry());
@@ -877,9 +949,10 @@ fn selection_change_resets_detail_scroll_but_a_quest_log_update_refresh_does_not
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     s.resolve(); // GetVerticalScrollRange (SetVerticalScroll's clamp) reads resolved rects.
 
-    s.run("QuestLogDetailScroll:SetVerticalScroll(10)").unwrap();
+    s.run("QuestLogDetailScrollFrame:SetVerticalScroll(10)")
+        .unwrap();
     assert_eq!(
-        s.eval::<f32>("return QuestLogDetailScroll:GetVerticalScroll()")
+        s.eval::<f32>("return QuestLogDetailScrollFrame:GetVerticalScroll()")
             .unwrap(),
         10.0
     );
@@ -888,7 +961,7 @@ fn selection_change_resets_detail_scroll_but_a_quest_log_update_refresh_does_not
     s.fire_event("QUEST_LOG_UPDATE", vec![]);
     assert!(s.errors().is_empty(), "refresh errors: {:?}", s.errors());
     assert_eq!(
-        s.eval::<f32>("return QuestLogDetailScroll:GetVerticalScroll()")
+        s.eval::<f32>("return QuestLogDetailScrollFrame:GetVerticalScroll()")
             .unwrap(),
         10.0,
         "QUEST_LOG_UPDATE's data-refresh path must not yank the scroll position (pin §5)"
@@ -899,7 +972,7 @@ fn selection_change_resets_detail_scroll_but_a_quest_log_update_refresh_does_not
         .unwrap();
     assert!(s.errors().is_empty(), "click errors: {:?}", s.errors());
     assert_eq!(
-        s.eval::<f32>("return QuestLogDetailScroll:GetVerticalScroll()")
+        s.eval::<f32>("return QuestLogDetailScrollFrame:GetVerticalScroll()")
             .unwrap(),
         0.0,
         "a manual reselect snaps the detail pane's scroll back to the top"
@@ -925,6 +998,12 @@ fn reward_row_hover_serves_the_shared_item_tooltip() {
     load_xml(&s, "UIDropDownMenu.xml");
     load_xml(&s, "LootFrame.xml");
     load_xml(&s, "MerchantFrame.xml");
+    // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
+    // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
+    // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
+    // silently.
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     s.set_quest_log(eight_entries());
@@ -1053,6 +1132,12 @@ fn reward_rows_preview_and_post_and_a_plain_click_stays_inert() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
+    // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
+    // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
+    // silently.
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
     load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink lives here
     load_xml(&s, "DressUpFrame.xml"); // DressUpItemLink lives here
@@ -1062,13 +1147,13 @@ fn reward_rows_preview_and_post_and_a_plain_click_stays_inert() {
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(
-        s.eval::<bool>("return QuestLogReward1:IsShown()").unwrap(),
+        s.eval::<bool>("return QuestLogItem1:IsShown()").unwrap(),
         "the fixture's one fixed reward row is laid out"
     );
     let _ = s.take_dressup_intents();
 
     // A PLAIN click is inert: no room, no chat text, no error (the row has no select arm).
-    s.run("QuestLogReward1:Click()").unwrap();
+    s.run("QuestLogItem1:Click()").unwrap();
     assert!(
         s.take_dressup_intents().is_empty(),
         "a plain click never opens the dressing room"
@@ -1084,7 +1169,7 @@ fn reward_rows_preview_and_post_and_a_plain_click_stays_inert() {
     // SHIFT + chat open → the reward's full escaped link (ref l.547-550).
     assert!(s.focus_editbox("ChatFrameEditBox"));
     s.set_modifiers(true, false, false);
-    s.run("QuestLogReward1:Click()").unwrap();
+    s.run("QuestLogItem1:Click()").unwrap();
     s.set_modifiers(false, false, false);
     assert_eq!(
         s.eval::<String>("return ChatFrameEditBox:GetText()")
@@ -1099,7 +1184,7 @@ fn reward_rows_preview_and_post_and_a_plain_click_stays_inert() {
 
     // CTRL → the room wearing the reward (ref l.543-546): re-dress first, then try it on.
     s.set_modifiers(false, true, false);
-    s.run("QuestLogReward1:Click()").unwrap();
+    s.run("QuestLogItem1:Click()").unwrap();
     s.set_modifiers(false, false, false);
     assert_eq!(
         s.take_dressup_intents(),
@@ -1126,6 +1211,12 @@ fn shift_click_on_a_title_posts_the_quest_name_with_chat_open_and_watches_with_i
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
+    // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
+    // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
+    // silently.
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
     load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink lives here
     load_xml(&s, "ChatFrame.xml"); // ChatFrameEditBox lives here
@@ -1210,6 +1301,12 @@ fn share_quest_needs_both_a_sharable_selection_and_a_party() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
+    // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
+    // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
+    // silently.
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     // Solo, quest 1 sharable and selected by the auto-selection.
@@ -1226,7 +1323,7 @@ fn share_quest_needs_both_a_sharable_selection_and_a_party() {
         "quest 1 carries the sharable bit"
     );
     assert!(
-        !s.eval::<bool>("return QuestLogPushQuestButton:IsEnabled() ~= 0")
+        !s.eval::<bool>("return QuestFramePushQuestButton:IsEnabled() ~= 0")
             .unwrap(),
         "solo: sharable is not enough"
     );
@@ -1235,7 +1332,7 @@ fn share_quest_needs_both_a_sharable_selection_and_a_party() {
     s.set_party(party(2));
     s.fire_event("PARTY_MEMBERS_CHANGED", vec![]);
     assert!(
-        s.eval::<bool>("return QuestLogPushQuestButton:IsEnabled() ~= 0")
+        s.eval::<bool>("return QuestFramePushQuestButton:IsEnabled() ~= 0")
             .unwrap(),
         "PARTY_MEMBERS_CHANGED alone re-tests the button"
     );
@@ -1249,7 +1346,7 @@ fn share_quest_needs_both_a_sharable_selection_and_a_party() {
         "quest 2 has no sharable bit"
     );
     assert!(
-        !s.eval::<bool>("return QuestLogPushQuestButton:IsEnabled() ~= 0")
+        !s.eval::<bool>("return QuestFramePushQuestButton:IsEnabled() ~= 0")
             .unwrap(),
         "in a party: an unsharable selection is still dark"
     );
@@ -1258,12 +1355,12 @@ fn share_quest_needs_both_a_sharable_selection_and_a_party() {
     s.run("SelectQuestLogEntry(1)").unwrap();
     s.run("BenillaQuestLogFrame_Update()").unwrap();
     assert!(s
-        .eval::<bool>("return QuestLogPushQuestButton:IsEnabled() ~= 0")
+        .eval::<bool>("return QuestFramePushQuestButton:IsEnabled() ~= 0")
         .unwrap());
     s.set_party(PartyState::default());
     s.fire_event("PARTY_MEMBERS_CHANGED", vec![]);
     assert!(!s
-        .eval::<bool>("return QuestLogPushQuestButton:IsEnabled() ~= 0")
+        .eval::<bool>("return QuestFramePushQuestButton:IsEnabled() ~= 0")
         .unwrap());
 }
 
@@ -1278,13 +1375,19 @@ fn share_quest_is_dark_on_an_empty_log_even_in_a_party() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
+    // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
+    // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
+    // silently.
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     s.set_quest_log(QuestLogState::default());
     s.set_party(party(4));
     s.run("ToggleQuestLog()").unwrap();
     assert!(!s
-        .eval::<bool>("return QuestLogPushQuestButton:IsEnabled() ~= 0")
+        .eval::<bool>("return QuestFramePushQuestButton:IsEnabled() ~= 0")
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -1300,6 +1403,12 @@ fn share_quest_click_queues_the_selected_quests_id() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
+    // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
+    // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
+    // silently.
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     s.set_quest_log(entries_sharable(&[1, 5]));
@@ -1308,7 +1417,7 @@ fn share_quest_click_queues_the_selected_quests_id() {
 
     s.run("SelectQuestLogEntry(5)").unwrap();
     s.run("BenillaQuestLogFrame_Update()").unwrap();
-    s.run("QuestLogPushQuestButton:Click()").unwrap();
+    s.run("QuestFramePushQuestButton:Click()").unwrap();
     assert_eq!(s.take_quest_log_pushes(), vec![5]);
     assert!(s.take_quest_log_pushes().is_empty(), "drained");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());

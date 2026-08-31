@@ -543,8 +543,10 @@ impl UnitTokens<'_, '_> {
         self.me.iter().next().map(|(e, g)| (e, g.0))
     }
 
-    /// The guid → entity map, when the net stack is present.
-    fn held(&self, guid: u64) -> Option<(Entity, u64)> {
+    /// The guid → entity map, when the net stack is present — `0x468460`'s lookup. `pub(crate)`
+    /// for the selection drain's `TargetLastEnemy` arm, which starts from a remembered **guid**
+    /// rather than a token and must land in the very same index every token arm below does.
+    pub(crate) fn held(&self, guid: u64) -> Option<(Entity, u64)> {
         Some((*self.index.as_ref()?.0.get(&guid)?, guid))
     }
 

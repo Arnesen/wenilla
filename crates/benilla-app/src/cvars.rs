@@ -103,6 +103,85 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // pitch invert). `autoLootDefault` is era's — no 1.12 CVar exists, vanilla only had the
     // shift gesture — default off, like era's engine registrar.
     ("deselectOnClick", "1"),
+    // 1.12's own `autoSelfCast` (`0x870dc0`) — a friendly cast that binds nothing falls back to
+    // the caster. The behaviour has been here since the cast arm landed, welded to a Resource
+    // default; it is a CVar now because 1.12's `TOGGLEAUTOSELFCAST` binding is `GetCVar`/`SetCVar`
+    // over this exact name and there was nothing for it to toggle (decision 1745).
+    //
+    // **benilla ships it ON and the reference registers "0"** — a named deviation that predates
+    // this row (`cast_target::AutoSelfCast`): with it off, an unbindable friendly cast falls into
+    // the reference's targeting-cursor machine, which is unmodeled, leaving no path at all. Flip
+    // to the reference's default when that machine lands.
+    ("autoSelfCast", "1"),
+    // The five saved camera views and the live index (decision 1745) — the reference's own
+    // sixteen names and its own shipped default strings, both read out of `WoW.exe` and owned by
+    // [`crate::player::camera_view`], which is also the only writer. Registered here so they are
+    // ordinary CVars: persisted as a diff like everything else, readable from a macro, and
+    // reachable by `SetCVar` — which is what makes a `SaveView` survive a restart.
+    (
+        crate::player::camera_view::CVAR_ACTIVE_VIEW,
+        crate::player::camera_view::ACTIVE_VIEW_DEFAULT,
+    ),
+    (
+        crate::player::camera_view::VIEW_CVARS[0][0],
+        crate::player::camera_view::VIEW_DEFAULTS[0][0],
+    ),
+    (
+        crate::player::camera_view::VIEW_CVARS[0][1],
+        crate::player::camera_view::VIEW_DEFAULTS[0][1],
+    ),
+    (
+        crate::player::camera_view::VIEW_CVARS[0][2],
+        crate::player::camera_view::VIEW_DEFAULTS[0][2],
+    ),
+    (
+        crate::player::camera_view::VIEW_CVARS[1][0],
+        crate::player::camera_view::VIEW_DEFAULTS[1][0],
+    ),
+    (
+        crate::player::camera_view::VIEW_CVARS[1][1],
+        crate::player::camera_view::VIEW_DEFAULTS[1][1],
+    ),
+    (
+        crate::player::camera_view::VIEW_CVARS[1][2],
+        crate::player::camera_view::VIEW_DEFAULTS[1][2],
+    ),
+    (
+        crate::player::camera_view::VIEW_CVARS[2][0],
+        crate::player::camera_view::VIEW_DEFAULTS[2][0],
+    ),
+    (
+        crate::player::camera_view::VIEW_CVARS[2][1],
+        crate::player::camera_view::VIEW_DEFAULTS[2][1],
+    ),
+    (
+        crate::player::camera_view::VIEW_CVARS[2][2],
+        crate::player::camera_view::VIEW_DEFAULTS[2][2],
+    ),
+    (
+        crate::player::camera_view::VIEW_CVARS[3][0],
+        crate::player::camera_view::VIEW_DEFAULTS[3][0],
+    ),
+    (
+        crate::player::camera_view::VIEW_CVARS[3][1],
+        crate::player::camera_view::VIEW_DEFAULTS[3][1],
+    ),
+    (
+        crate::player::camera_view::VIEW_CVARS[3][2],
+        crate::player::camera_view::VIEW_DEFAULTS[3][2],
+    ),
+    (
+        crate::player::camera_view::VIEW_CVARS[4][0],
+        crate::player::camera_view::VIEW_DEFAULTS[4][0],
+    ),
+    (
+        crate::player::camera_view::VIEW_CVARS[4][1],
+        crate::player::camera_view::VIEW_DEFAULTS[4][1],
+    ),
+    (
+        crate::player::camera_view::VIEW_CVARS[4][2],
+        crate::player::camera_view::VIEW_DEFAULTS[4][2],
+    ),
     ("mouseInvertPitch", "0"),
     ("autoLootDefault", "0"),
     // The overhead-name trio (0992): 1.12's own UnitName* CVars (UIOptionsFrame.lua indices
@@ -488,6 +567,7 @@ pub(crate) struct KnobParams<'w> {
     tex_filter: ResMut<'w, benilla_assets::TexFilterSetting>,
     pane_rate: ResMut<'w, PaneRate>,
     guild_notify: ResMut<'w, crate::ui_guild::GuildMemberNotify>,
+    auto_self_cast: ResMut<'w, crate::ui_action::AutoSelfCast>,
     realmlist: ResMut<'w, crate::realmlist::Realmlist>,
 }
 
@@ -521,6 +601,7 @@ impl KnobParams<'_> {
             tex_filter: &mut self.tex_filter,
             pane_rate: &mut self.pane_rate,
             guild_notify: &mut self.guild_notify,
+            auto_self_cast: &mut self.auto_self_cast,
             realmlist: &mut self.realmlist,
         }
     }
@@ -550,6 +631,7 @@ struct Knobs<'a> {
     tex_filter: &'a mut benilla_assets::TexFilterSetting,
     pane_rate: &'a mut PaneRate,
     guild_notify: &'a mut crate::ui_guild::GuildMemberNotify,
+    auto_self_cast: &'a mut crate::ui_action::AutoSelfCast,
     realmlist: &'a mut crate::realmlist::Realmlist,
 }
 
@@ -599,6 +681,12 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "uiscale" => knobs.scale.0 = v.clamp(0.5, 1.5),
         "farclip" => knobs.view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
         "deselectonclick" => knobs.click.deselect_on_click = v != 0.0,
+        "autoselfcast" => knobs.auto_self_cast.0 = v != 0.0,
+        // The sixteen camera-view CVars have no knob to apply to: `CameraViews` is their writer,
+        // not their reader (it seeds itself from the persisted file at startup, and `SaveView`
+        // writes back). They are claimed here so the table's own "not a knob this build knows"
+        // warning stays meaningful — an unclaimed name would look like a typo every session.
+        _ if crate::player::camera_view::is_view_cvar(name) => {}
         "mouseinvertpitch" => knobs.look.invert_pitch = v != 0.0,
         "cameradistancemaxfactor" => knobs.zoom.set_factor(v),
         // The three stops are 1 Smart / 2 Always / 3 Never; anything else reads as the registrar
@@ -916,6 +1004,7 @@ fn sync_cvars(
             render_scale,
             pane_rate,
             guild_notify,
+            auto_self_cast,
             msaa,
             msaa_formats,
             tex_filter,
@@ -952,7 +1041,7 @@ fn sync_cvars(
                 .collect(),
         );
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 40] = [
+        let session: [(&str, String); 41] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -965,6 +1054,7 @@ fn sync_cvars(
             ("uiScale", scale.0.to_string()),
             ("farclip", view.farclip.to_string()),
             ("deselectOnClick", flag(click.deselect_on_click)),
+            ("autoSelfCast", flag(auto_self_cast.0)),
             ("mouseInvertPitch", flag(look.invert_pitch)),
             ("mousespeed", look.sensitivity.to_string()),
             ("cameraDistanceMaxFactor", zoom.factor().to_string()),
@@ -1323,8 +1413,10 @@ mod tests {
         // a shell that happens to export it must not decide what this test asserts against.
         let mut realmlist =
             crate::realmlist::Realmlist::unpinned(crate::realmlist::DEFAULT_REALMLIST);
+        let mut auto_self_cast = crate::ui_action::AutoSelfCast::default();
         let mut knobs = Knobs {
             sound: &mut sound,
+            auto_self_cast: &mut auto_self_cast,
             scale: &mut scale,
             view: &mut view,
             look: &mut look,
@@ -1618,6 +1710,7 @@ mod tests {
             ))
             .init_resource::<PaneRate>()
             .init_resource::<crate::ui_guild::GuildMemberNotify>()
+            .init_resource::<crate::ui_action::AutoSelfCast>()
             .add_plugins(CvarPlugin);
         app.insert_non_send_resource(UiScript::new().unwrap());
         app

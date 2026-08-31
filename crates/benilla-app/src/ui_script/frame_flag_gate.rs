@@ -317,15 +317,9 @@ const KNOWN: &[Known] = &[
         why: "as FriendsFrameFriendsScrollFrame",
     },
     Known {
-        frame: "OpenMailScrollFrame",
+        frame: "QuestLogListScrollFrame",
         flag: Flag::Mouse,
-        why: "our open-mail body is flat art plus a FontString — the render approximation \
-              MailFrame.xml names; nothing scrolls it on either side",
-    },
-    Known {
-        frame: "SendMailScrollFrame",
-        flag: Flag::Mouse,
-        why: "as OpenMailScrollFrame",
+        why: "as FriendsFrameFriendsScrollFrame",
     },
     // ── id ─────────────────────────────────────────────────────────────────────────────────────
     //

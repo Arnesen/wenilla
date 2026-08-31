@@ -1,5 +1,11 @@
 use benilla_ui::script::{ActionSlot, QuadContent, ScriptValue, UiScript};
 
+/// The queued action ids alone — `take_action_uses` carries `UseAction`'s self-cast modifier
+/// beside the id since 1745, and every assertion in this file is about the id.
+fn action_ids(s: &mut UiScript) -> Vec<u32> {
+    s.take_action_uses().into_iter().map(|u| u.action).collect()
+}
+
 /// Load the real `assets/ui/ActionBar.xml` (the shipped default bar) into a bare engine and
 /// drive it with a synthetic action snapshot — the slice-1 chain minus Bevy: template
 /// expansion over 12 instances, the vanilla bonus-page formula, icon paint on events, empty
@@ -95,7 +101,7 @@ fn shipped_action_bar_drives_end_to_end() {
     // center is (8+18, 4+18) = (26, 22).
     s.mouse_button(26.0, 22.0, "LeftButton", true);
     s.mouse_button(26.0, 22.0, "LeftButton", false);
-    assert_eq!(s.take_action_uses(), vec![73]);
+    assert_eq!(action_ids(&mut s), vec![73]);
 
     // The keybinding entry (the app's key feed runs `ActionButtonDown/Up(i)` on the two
     // key edges — the ref's ACTIONBUTTONn binding, ActionButton.lua:15-45): UP fires UseAction
@@ -123,7 +129,7 @@ fn shipped_action_bar_drives_end_to_end() {
         "PUSHED"
     );
     s.run("ActionButtonUp(2)").unwrap();
-    assert_eq!(s.take_action_uses(), vec![74], "key '2' fires action 74");
+    assert_eq!(action_ids(&mut s), vec![74], "key '2' fires action 74");
     assert_eq!(depressed(&s), 0, "key UP restores the normal state");
 
     // Stance drops (offset 0): the bar re-pages to actions 1..12 — all empty here, icons clear.
@@ -335,7 +341,7 @@ fn a_right_click_on_an_action_button_uses_the_action() {
     s.mouse_button(26.0, 22.0, "RightButton", true);
     s.mouse_button(26.0, 22.0, "RightButton", false);
     assert_eq!(
-        s.take_action_uses(),
+        action_ids(&mut s),
         vec![1],
         "right-click queues the same UseAction a left-click does"
     );
@@ -1439,9 +1445,22 @@ fn bonus_bar_slides_up_with_sound_and_down_without() {
     // Keys route to the overlay immediately (ref ActionButton.lua:15-45's IsShown fork).
     s.run("ActionButtonDown(1) ActionButtonUp(1)").unwrap();
     assert_eq!(
-        s.take_action_uses(),
+        action_ids(&mut s),
         vec![73],
         "a key pressed mid-slide already drives the bonus page"
+    );
+
+    // …and the same button with the SELF-CAST modifier. `SELFACTIONBUTTON1`-`12` (`ALT-1`…`ALT-=`)
+    // are `ActionButtonUp(id, 1)` and nothing else, so this is the whole of what those twelve
+    // bindings do that the plain twelve do not (1745).
+    s.run("ActionButtonDown(1) ActionButtonUp(1, 1)").unwrap();
+    assert_eq!(
+        s.take_action_uses()
+            .into_iter()
+            .map(|u| (u.action, u.on_self))
+            .collect::<Vec<_>>(),
+        vec![(73, true)],
+        "ActionButtonUp's onSelf reaches UseAction's third argument"
     );
 
     // Half the slide: the replica is half-risen (top = 0.5 * 43 over the bar's bottom edge at
@@ -1536,7 +1555,7 @@ fn bonus_bar_slides_up_with_sound_and_down_without() {
     // A key mid-descent still drives the old form's page — ref GetPagedID's lastBonusBar
     // stand-in while the frame is still shown.
     s.run("ActionButtonDown(1) ActionButtonUp(1)").unwrap();
-    assert_eq!(s.take_action_uses(), vec![97]);
+    assert_eq!(action_ids(&mut s), vec![97]);
     s.tick(0.2);
     assert!(
         !s.eval::<bool>("return BonusActionBarFrame:IsShown()")

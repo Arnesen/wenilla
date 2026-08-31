@@ -21,7 +21,7 @@
         are P2. The enchant-slot spell name (slot 7's "enchantment") is decision 0592 P3.
     -->
     <Script><![CDATA[
-        BENILLA_MAX_TRADE_ITEMS = 7    -- MAX_TRADE_ITEMS (ref TradeFrame.lua l.1)
+        MAX_TRADE_ITEMS = 7    -- MAX_TRADE_ITEMS (ref TradeFrame.lua l.1)
 
         -- One side's accept glow. A column's highlight and the enchant slot's below it are one
         -- indicator in two frames — they light and drop together, never apart — so both the repaint
@@ -107,7 +107,7 @@
             SetPortraitTexture(TradeFrameRecipientPortrait, "npc")
             TradeFramePlayerNameText:SetText(UnitName("player") or "")
             TradeFrameRecipientNameText:SetText(GetTradePartnerName() or "")
-            for i = 1, BENILLA_MAX_TRADE_ITEMS do
+            for i = 1, MAX_TRADE_ITEMS do
                 TradeFrame_UpdatePlayerItem(i)
                 TradeFrame_UpdateTargetItem(i)
             end
@@ -127,7 +127,7 @@
             local icon = getglobal(prefix.."ItemButtonIcon")
             local count = getglobal(prefix.."ItemButtonCount")
             -- The enchant slot (id 7): the enchant name (P3) or the "will not be traded" note.
-            if id == BENILLA_MAX_TRADE_ITEMS then
+            if id == MAX_TRADE_ITEMS then
                 if name then
                     if enchantment then
                         nameText:SetText("|cff20ff20"..enchantment.."|r")

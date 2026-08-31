@@ -118,9 +118,39 @@ pub struct EditBoxState {
     /// `maxBytes` (`E+0x33c`; the client's `-1` sentinel = unlimited → `None` here): trim from the
     /// end while the byte length exceeds this, applied before `maxLetters`.
     pub max_bytes: Option<usize>,
-    /// The implicit FontString the text renders through (`E+0x324`, the EditBox's analogue of
-    /// ButtonText) — created lazily on first text mutation, or wired from a declared `<FontString>`.
+    /// The implicit FontString the text renders through (`E+0x328`, the EditBox's analogue of
+    /// ButtonText). **Built by the ctor**, not lazily: `0x779bee` constructs it from allocator
+    /// `0xcf4d10` with tag `0x846544` = `".?AVCSimpleFontString@@"` via `0x770d30(E, 2, 1)`, and
+    /// that is the FIRST of the five regions a `CSimpleEditBox` is born with (wow-re
+    /// `system/ui/scratch/rf85-editbox-caret.md` §1). Creation order is what `GetRegions` hands
+    /// Lua — one flat creation-ordered list off `[frame+0x1b8]`, oldest first, no filter
+    /// (`scratch/widget-list-bindings.md`) — so these five precede every `<Layers>` region.
+    ///
+    /// **DEFERRED, and named rather than silently taken:** the ctor's draw layer is 2 sub 1
+    /// (ARTWORK), while this region is still created at OVERLAY sub 0 — what ships today and what
+    /// the director has looked at. Moving it is a draw-order change to every EditBox in the client
+    /// with nothing asking for it, so it is a separate change, not a rider on this one.
     pub text_region: Option<RegionHandle>,
+    /// The **three selection-highlight quads** (`E+0x350`/`0x354`/`0x358`), built by the ctor loop
+    /// `0x779c41–0x779c72` as `CSimpleTexture`s via `0x76fc40(E, 2, 0)` — allocator `0xcf4ce0`, tag
+    /// `0x846588` = `".?AVCSimpleTexture@@"`, class-identical to the caret (RF-0085 §1). They are
+    /// members of the frame's region list like any other region (`0x76fc40`→`0x77f640`→`0x77fd10`,
+    /// the single linker into `[frame+0x1b8]`), which is why they are built here.
+    ///
+    /// **They carry no art of their own and paint nothing.** benilla draws the selection highlight
+    /// host-side, from [`sel_start`](Self::sel_start)/[`sel_end`](Self::sel_end) through the seam —
+    /// so these are the real regions the client has, not yet the regions the highlight rides.
+    /// Routing the paint through them is a separate, larger change (the host would have to read a
+    /// region rect instead of a seam field); this is stated, not stubbed.
+    pub selection_regions: [Option<RegionHandle>; 3],
+    /// The **caret** (`E+0x368`), the ctor's fifth and last region: a `CSimpleTexture` built at
+    /// `0x779c86–0x779cac` via `0x76fc40(E, 3, 1)` — a solid vertex-coloured quad, never a glyph
+    /// (no texture path is ever assigned to `E+0x368`, band-wide census; RF-0085 §1). Layer 3 over
+    /// the text's 2 is why the caret draws above the text and the selection quads below it.
+    ///
+    /// Same standing as [`selection_regions`](Self::selection_regions): the region is real and in
+    /// the list, the *painting* is still host-side off [`caret_shown`](Self::caret_shown).
+    pub caret_region: Option<RegionHandle>,
     /// The submitted-line history (`AddHistoryLine`; the XML `historyLines` cap) — oldest first,
     /// newest last; UP recalls older from the end, DOWN newer. The exact recall keys + draft
     /// model are INFERRED (wow-re's rf82 flags the 1.12 history controller as an untraced
@@ -289,6 +319,10 @@ impl Default for EditBoxState {
             blink_period: 0.5,
             blink_accum: 0.0,
             caret_shown: true,
+            // Filled by `Arena::create`'s ctor pass — `Default` cannot reach the arena, and a
+            // handle-less default is what a not-yet-created box has.
+            selection_regions: [None; 3],
+            caret_region: None,
             highlight_color: [96.0 / 255.0, 96.0 / 255.0, 96.0 / 255.0, 1.0],
             // The EditBox ctor's `0x211` minus the unread bit 0x200 — `LEFT | MIDDLE`. LEFT, not
             // the generic font default CENTER: `0x779be4` overrides the H axis at construction.

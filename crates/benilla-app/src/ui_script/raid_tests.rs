@@ -12,7 +12,8 @@
 //! sweep. Each test below fails on exactly one of those.
 
 use benilla_ui::script::{
-    PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo, UiScript,
+    PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo, SelectionRequest,
+    UiScript,
 };
 
 /// Load one shipped `assets/ui/<file>`, panicking on any loader error **or unknown-template
@@ -600,7 +601,10 @@ fn left_clicking_a_row_targets_its_raid_token() {
     open_raid_tab(&mut s);
     push_raid(&mut s, twelve());
     s.run("RaidGroupButton7:Click(\"LeftButton\")").unwrap();
-    assert_eq!(s.take_target_requests(), vec!["raid7".to_string()]);
+    assert_eq!(
+        s.take_selection_requests(),
+        vec![SelectionRequest::Unit("raid7".into())]
+    );
 }
 
 /// Right-clicking a row opens the RAID menu, and each of its four rows appears for exactly the

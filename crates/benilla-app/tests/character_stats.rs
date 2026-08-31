@@ -182,7 +182,7 @@ fn resistance_rows_colour_by_which_half_is_bigger() {
     // re-point these assertions.
     let row_of = |s: &mut UiScript, school: i64| -> usize {
         s.eval::<i64>(&format!(
-            "for i = 1, BENILLA_NUM_RESISTANCE_TYPES do \
+            "for i = 1, NUM_RESISTANCE_TYPES do \
                if BENILLA_MAGICRES_IDS[i] == {school} then return i end \
              end return 0"
         ))

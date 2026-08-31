@@ -247,7 +247,15 @@ fn seed_bindings(
         script.seed_binding_set(1, Some(store::resolve(&[])));
     }
     script.load_binding_set(1);
-    info!("bindings: {} commands registered", SPECS.len());
+    // The pair, not just the first half: `SPECS` ∪ `ABSENT` is the client's whole 1.12 command
+    // surface, and a log line that says only how many landed cannot say how much is left
+    // (decision 1745).
+    info!(
+        "bindings: {} of {} 1.12 commands registered ({} recorded absent)",
+        SPECS.len(),
+        SPECS.len() + commands::ABSENT.len(),
+        commands::ABSENT.len()
+    );
 }
 
 /// Read + parse one diff file; `None` when absent/unreadable (defaults).
@@ -378,6 +386,19 @@ fn sync_dispatch(script: Option<NonSendMut<UiScript>>, mut dispatch: ResMut<Bind
     }
     for (name, keys) in script.keybind_snapshot() {
         let Some(&bound) = by_name.get(name.as_str()) else {
+            // A name with no home: either an uninstalled addon's row (1201 keeps those on
+            // purpose) or a 1.12 command this client does not implement. The second case is the
+            // one that used to mystify — a player carrying their own bindings over presses the
+            // key they have always pressed and nothing happens, with nothing anywhere saying
+            // why. `ABSENT` knows why, so say it (decision 1745).
+            if let Some(absent) = commands::ABSENT.iter().find(|a| a.name == name) {
+                if !keys.is_empty() {
+                    warn!(
+                        "bindings: {name} is bound to {keys:?} but benilla does not implement it \u{2014} {}",
+                        absent.why
+                    );
+                }
+            }
             continue;
         };
         for key in keys {

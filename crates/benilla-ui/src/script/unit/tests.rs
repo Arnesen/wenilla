@@ -276,16 +276,65 @@ fn corpse_can_attack_and_green_range_bindings() {
 
 #[test]
 fn target_unit_queues_the_token_for_the_app_to_resolve() {
+    use crate::script::SelectionRequest;
     let mut s = UiScript::new().unwrap();
     // Nothing queued until a call lands.
-    assert!(s.take_target_requests().is_empty());
+    assert!(s.take_selection_requests().is_empty());
     // Each call queues its raw token, in order; a nil token is ignored.
     s.eval::<()>(r#"TargetUnit("player")"#).unwrap();
     s.eval::<()>(r#"TargetUnit("target")"#).unwrap();
     s.eval::<()>(r#"TargetUnit(nil)"#).unwrap();
-    assert_eq!(s.take_target_requests(), vec!["player", "target"]);
+    assert_eq!(
+        s.take_selection_requests(),
+        vec![
+            SelectionRequest::Unit("player".into()),
+            SelectionRequest::Unit("target".into()),
+        ]
+    );
     // The drain is a take — a second read is empty.
-    assert!(s.take_target_requests().is_empty());
+    assert!(s.take_selection_requests().is_empty());
+}
+
+/// The three verbs share ONE queue, and the queue keeps their call order — which is the whole
+/// reason it is one queue (`0x489a40` is one function for all of them, and a macro can observe
+/// the order). A nil `AssistUnit` argument is dropped like `TargetUnit`'s, and
+/// `TargetLastEnemy()` names no unit at all.
+#[test]
+fn the_selection_queue_carries_all_three_verbs_in_call_order() {
+    use crate::script::SelectionRequest;
+    let mut s = UiScript::new().unwrap();
+    s.eval::<()>(r#"TargetUnit("party1")"#).unwrap();
+    s.eval::<()>(r#"AssistUnit("target")"#).unwrap();
+    s.eval::<()>(r#"AssistUnit(nil)"#).unwrap();
+    s.eval::<()>("TargetLastEnemy()").unwrap();
+    assert_eq!(
+        s.take_selection_requests(),
+        vec![
+            SelectionRequest::Unit("party1".into()),
+            SelectionRequest::Assist("target".into()),
+            SelectionRequest::LastEnemy,
+        ]
+    );
+    assert!(s.take_selection_requests().is_empty());
+}
+
+/// `TargetNearestFriend`'s reverse flag, read exactly as `0x6f1c10(idx 1, default 0)` does:
+/// absent or nil is forward, and 1.12's own `Bindings.xml` note — *"1 (or \"true\") means
+/// reverse!"* — is why a boolean and a number both count. A numeric `0` is forward.
+#[test]
+fn target_nearest_friend_queues_its_reverse_flag() {
+    let mut s = UiScript::new().unwrap();
+    assert!(s.take_target_nearest_friend_requests().is_empty());
+    s.eval::<()>("TargetNearestFriend()").unwrap();
+    s.eval::<()>("TargetNearestFriend(1)").unwrap();
+    s.eval::<()>("TargetNearestFriend(true)").unwrap();
+    s.eval::<()>("TargetNearestFriend(0)").unwrap();
+    s.eval::<()>("TargetNearestFriend(nil)").unwrap();
+    assert_eq!(
+        s.take_target_nearest_friend_requests(),
+        vec![false, true, true, false, false]
+    );
+    assert!(s.take_target_nearest_friend_requests().is_empty());
 }
 
 #[test]

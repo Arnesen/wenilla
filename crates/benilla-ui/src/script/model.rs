@@ -4,12 +4,12 @@ use crate::layout::{LayoutInput, LayoutSolver, Rect};
 use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 
 use super::{
-    auction, backdrop, bank, char_stats, chat_window, colorselect, container, craft, cursor, death,
-    duel, follow, gossip, guild, inspect, item_text, loot, loot_roll, macros, mail, merchant,
-    party, petition, pvp, quest, quest_log, reputation, session, simplehtml, skills, slider,
-    social, spellbook, stable, taxi, trade, tradeskill, trainer, weapon_enchant, ActionSlot,
-    AuraState, FontObject, ItemTemplateView, PlayerReqState, RegionData, ScriptValue, SoundRequest,
-    UnitState,
+    auction, backdrop, bank, bind_confirm, camera_view, char_stats, chat_window, colorselect,
+    container, craft, cursor, death, duel, follow, gossip, guild, inspect, item_text, loot,
+    loot_roll, macros, mail, merchant, party, petition, pvp, quest, quest_log, reputation, session,
+    simplehtml, skills, slider, social, spellbook, stable, taxi, trade, tradeskill, trainer,
+    weapon_enchant, ActionSlot, AuraState, FontObject, ItemTemplateView, PlayerReqState,
+    RegionData, ScriptValue, SoundRequest, UnitState,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -402,11 +402,17 @@ pub(crate) struct Model {
     /// [`super::aura::TrackingState`]), pushed by the app's aura feed beside `auras`. `None` =
     /// no tracking active.
     pub(crate) tracking: Option<super::aura::TrackingState>,
-    /// Unit tokens `TargetUnit` queued since the app's last [`UiScript::take_target_requests`] drain
-    /// — the outbound twin of `units` above (the reference's `TargetUnit` Lua shim → SetSelection).
-    /// The app resolves each token to a streamed entity and commits the selection; a token it can't
-    /// resolve is a no-op, as the real client no-ops `TargetUnit` on a nonexistent unit ([`unit`]).
-    pub(crate) target_requests: Vec<String>,
+    /// Selection asks queued since the app's last [`UiScript::take_selection_requests`] drain — the
+    /// outbound twin of `units` above, carrying `TargetUnit` / `AssistUnit` / `TargetLastEnemy` in
+    /// call order because the reference reaches selection through one helper for all three
+    /// ([`super::SelectionRequest`]). The app resolves each to a streamed entity and commits the
+    /// selection; one it can't resolve is a no-op, as the real client no-ops `TargetUnit` on a
+    /// nonexistent unit ([`unit`]).
+    pub(crate) selection_requests: Vec<super::SelectionRequest>,
+    /// `TargetNearestFriend([reverse])` presses queued since the app's last
+    /// [`UiScript::take_target_nearest_friend_requests`] drain — one entry per call, `true` for the
+    /// reverse (backward) cycle. The app runs the friendly half of the TAB scan ([`unit`]).
+    pub(crate) target_nearest_friend_requests: Vec<bool>,
     /// `(name, exactMatch)` pairs `TargetByName` queued since the app's last
     /// [`UiScript::take_target_by_name_requests`] drain — the by-NAME twin of
     /// [`Self::target_requests`], which takes unit tokens. The app runs the shared by-name
@@ -509,6 +515,13 @@ pub(crate) struct Model {
     /// queue's twin, snapshot-less for the same reason: the only thing the UI reads back is the
     /// `AUTOFOLLOW_BEGIN`/`AUTOFOLLOW_END` pair the app fires, which carries its own argument.
     pub(crate) follow_requests: Vec<follow::FollowRequest>,
+    /// Camera-view intents (`SetView`/`SaveView`/`ResetView`/`NextView`/`PrevView`/
+    /// `FlipCameraYaw`) queued since the app's last
+    /// [`super::UiScript::take_camera_view_requests`] drain — the outbound seam
+    /// ([`camera_view`]). Snapshot-less like the follow queue: the five views live on the app's
+    /// camera rig, and they reach Lua the way the reference's do — as the
+    /// `cameraView` / `camera{Distance,Pitch,Yaw}{,A..D}` CVars — not as a second copy here.
+    pub(crate) camera_view_requests: Vec<camera_view::CameraViewRequest>,
     /// Session-exit intents (`Logout`/`Quit`/`CancelLogout`/`ForceQuit`) queued since the app's
     /// last [`super::UiScript::take_session_requests`] drain — the outbound seam ([`session`]).
     /// Snapshot-less like the duel queue above: what the UI reads back (the camp/quit countdown)
@@ -616,7 +629,7 @@ pub(crate) struct Model {
     /// reads it ([`action`]). Keyed like `actions`; an absent action reads cold/nil.
     pub(crate) action_states: HashMap<u32, super::action::StoredActionState>,
     pub(crate) bonus_bar_offset: u8,
-    pub(crate) action_uses: Vec<u32>,
+    pub(crate) action_uses: Vec<super::action::ActionUse>,
     /// `(lua action id, packed)` pairs queued by `PickupAction`/`PlaceAction` (decision 0216 §7,
     /// slice 4) — one entry per local slot mutation, `packed == 0` clearing the slot. Drained by
     /// the app into `CMSG_SET_ACTION_BUTTON`, one send per entry (client-authoritative, per-change
@@ -980,6 +993,12 @@ pub(crate) struct Model {
     /// Whether `CloseCraft` was called since the app's last [`super::UiScript::take_craft_close`]
     /// drain.
     pub(crate) craft_close: bool,
+
+    /// The `EquipPendingItem`/`CancelPendingEquip` answers the app drains, in call order, and the
+    /// `ConfirmBindOnUse()` count — the non-loot soulbind confirmations' whole Lua side
+    /// ([`bind_confirm`], decision 1750). The pending records themselves are the app's.
+    pub(crate) pending_equip_answers: Vec<bind_confirm::PendingEquipAnswer>,
+    pub(crate) bind_on_use_confirms: u32,
 
     /// The open loot's row snapshot the app pushes (`None` = no loot open), the row-pick intents it
     /// drains, and whether `CloseLoot` was called — the loot seam ([`loot`]).
@@ -1517,7 +1536,8 @@ impl Model {
             auras: HashMap::new(),
             cancel_aura_requests: Vec::new(),
             tracking: None,
-            target_requests: Vec::new(),
+            selection_requests: Vec::new(),
+            target_nearest_friend_requests: Vec::new(),
             target_by_name_requests: Vec::new(),
             drop_item_on_unit: Vec::new(),
             target_clear: false,
@@ -1543,6 +1563,7 @@ impl Model {
             default_language: None,
             duel_requests: Vec::new(),
             follow_requests: Vec::new(),
+            camera_view_requests: Vec::new(),
             session_requests: Vec::new(),
             pvp_toggles: 0,
             honor: None,
@@ -1658,6 +1679,8 @@ impl Model {
             craft_selection: 0,
             craft_close: false,
             loot: None,
+            pending_equip_answers: Vec::new(),
+            bind_on_use_confirms: 0,
             loot_picks: Vec::new(),
             loot_confirms: Vec::new(),
             loot_close: false,

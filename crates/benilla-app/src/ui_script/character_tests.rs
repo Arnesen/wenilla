@@ -665,6 +665,10 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "ScrollTemplates.xml");
+    // Not optional, though this list ran without it: a MISSING template is a loader *warning*, not
+    // an error, so an under-loaded list passes load_xml's assert and then fails later on geometry
+    // that silently never got built. SkillDetailScrollFrame inherits UIPanelScrollFrameTemplate.
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "CharacterFrame.xml");
     load_xml(&s, "SkillFrame.xml");
     s.set_unit("player", Some(player_unit()));
@@ -772,10 +776,10 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
     // name; accepting queues the CMSG_UNLEARN_SKILL intent BY SKILL ID and removes nothing
     // locally (the server's SetSkill(id,0,0) round trip owns the removal).
     assert!(
-        shown(&mut s, "SkillDetailUnlearnButton"),
+        shown(&mut s, "SkillDetailStatusBarUnlearnButton"),
         "the unlearn button shows for a profession"
     );
-    s.run("SkillDetailUnlearnButton:Click()").unwrap();
+    s.run("SkillDetailStatusBarUnlearnButton:Click()").unwrap();
     assert!(
         shown(&mut s, "StaticPopup1"),
         "the UNLEARN_SKILL confirm opens"
@@ -802,7 +806,7 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
     let defense = text_center(&mut s, "Defense");
     click(&mut s, defense);
     assert!(
-        !shown(&mut s, "SkillDetailUnlearnButton"),
+        !shown(&mut s, "SkillDetailStatusBarUnlearnButton"),
         "no unlearn button for Defense"
     );
     // Restore the profession selection so the round trip below leaves familiar state.

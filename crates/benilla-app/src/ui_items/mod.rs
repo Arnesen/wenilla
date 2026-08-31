@@ -51,6 +51,7 @@ mod drain;
 mod equip_error;
 pub(crate) mod feed;
 
+pub(crate) use drain::send_auto_equip;
 use drain::{
     drain_container_autoequips, drain_container_destroys, drain_container_moves,
     drain_container_uses, drain_inventory_uses,
@@ -772,6 +773,9 @@ pub(crate) fn send_item_use(
     it: ItemUse,
     ctx: &crate::ui_action::cast_target::CastContext,
     ladder: &mut crate::ui_action::CastLadder,
+    script: &mut benilla_ui::script::UiScript,
+    gate: &mut crate::ui_bind_confirm::BindGate,
+    suppress: bool,
 ) -> bool {
     // The toggle predicate, resolved once against the caster's live aura slots. Both inputs are
     // already here: the spell's ActiveIconID column and the caster's descriptor.
@@ -805,6 +809,27 @@ pub(crate) fn send_item_use(
                 .0
                 .send(crate::net::ClientCommand::PetitionShowSignatures { item });
             true
+        }
+        // **The bind-on-use deferral** (`0x5d91d3`-`0x5d91f2`, decision 1750), and its POSITION is
+        // half the law. The reference's bind arm is the last rung of `0x5d8d00`: every arm above —
+        // the gift, the quest offer, the petition, the readable, the charge/slot rungs and the aura
+        // toggle — has already claimed the click and exited before a bind question can be asked, so
+        // re-pressing a bind-on-use trinket to cancel its aura must NOT ask you to bind it.
+        //
+        // **But it covers `Nothing` as well as `Cast`, and that is not an accident.** `0x5d91d3`
+        // has five predecessors and four of them are on-use-spell lookup *failures* (`5d9166`
+        // id < 0, `5d916e` id past the table, `5d917a` no Spell.dbc row, `5d9184` no ActiveIconID);
+        // the reference asks the bind question even when the item has no usable on-use spell at
+        // all. Gating this on `Cast(spell)` alone — which is where it was first written — would be
+        // narrower than the reference, and wow-re said so in as many words.
+        ItemUseRoute::Nothing | ItemUseRoute::Cast(_)
+            if !suppress
+                && it
+                    .guid
+                    .is_some_and(|g| gate.use_binds(&mut ladder.items, &ladder.commands, g)) =>
+        {
+            gate.defer_use(script, it);
+            false
         }
         ItemUseRoute::Nothing => {
             debug!(
@@ -1045,6 +1070,10 @@ impl Plugin for UiItemsPlugin {
         // renderer already loads (one parse serves the world and the bags).
         app.init_resource::<EquipErrors>()
             .init_resource::<PendingItemOps>()
+            // The soulbind confirmations' pending records (decision 1750) — the client's own
+            // pending-equip array and its one bind-on-use cell.
+            .init_resource::<crate::ui_bind_confirm::PendingEquips>()
+            .init_resource::<crate::ui_bind_confirm::PendingBindOnUse>()
             .init_resource::<LockClearedByFailure>()
             // AFTER the chain opens — a bare Startup slot raced AssetSet::Open and, when it
             // won, silently skipped every item DBC (no ItemSets/ItemSubClasses resource for the
@@ -1086,6 +1115,13 @@ impl Plugin for UiItemsPlugin {
                     // UseInventoryItem's queue (decision 0208 phase 1b) → CMSG_USE_ITEM against
                     // the equipped position.
                     drain_inventory_uses.after(UiInput),
+                    // EquipPendingItem/CancelPendingEquip/ConfirmBindOnUse — the soulbind
+                    // confirmations' answers (decision 1750). After the input pass like every
+                    // other drain, and after the drains whose deferrals it answers: a dialog
+                    // raised this frame is answered in a LATER one, so the order between them is
+                    // not load-bearing, but keeping it last matches the flow.
+                    drain::drain_bind_confirm_answers.after(UiInput),
+                    drain::drain_bind_on_use_confirms.after(UiInput),
                 ),
             );
     }

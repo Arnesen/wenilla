@@ -43,9 +43,12 @@ mod auction;
 mod aura;
 mod backdrop;
 mod bank;
+mod bind_confirm;
 mod binder;
 mod binding_abi;
+// The five camera views + FlipCameraYaw — the reference's `UIUtil\Camera.cpp` Lua surface.
 mod button;
+mod camera_view;
 mod channel;
 mod char_stats;
 mod chat_send;
@@ -59,7 +62,7 @@ mod cursor;
 mod death;
 pub mod diagnostics;
 mod editbox;
-pub(crate) use editbox::adopt_text_region;
+pub(crate) use editbox::{adopt_text_region, editbox_text_region_wrapper};
 pub(crate) mod addon;
 pub mod addon_gate;
 mod client;
@@ -143,7 +146,7 @@ mod worldmap;
 mod worldstate;
 mod worn_display;
 
-pub use action::{ActionSlot, ActionState};
+pub use action::{ActionSlot, ActionState, ActionUse};
 pub use addon::AddOnInfo;
 pub use addon_message::{AddonDistribution, AddonSend};
 pub use auction::{
@@ -153,6 +156,8 @@ pub use auction::{
 pub use aura::{AuraState, TrackingState};
 pub use backdrop::{inset_atlas_bleed, pieces, Backdrop, BackdropPiece, Insets};
 pub use bank::BankState;
+pub use bind_confirm::PendingEquipAnswer;
+pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
 pub use char_stats::{
     weapon_subclass_skill, InvSlotView, InventorySlots, UnitCombatStats, INVENTORY_SLOT_COUNT,
     SKILL_DEFENSE, SKILL_UNARMED,
@@ -233,7 +238,9 @@ pub use types::{
     ScriptValue, TexCoords,
 };
 pub(crate) use types::{FontExplicit, MeasuredText, RegionData};
-pub use unit::{grey_band, level_reads_unknown, power_token, unit_is_grey, UnitState};
+pub use unit::{
+    grey_band, level_reads_unknown, power_token, unit_is_grey, SelectionRequest, UnitState,
+};
 pub use weapon_enchant::WeaponEnchant;
 pub use worldmap::{
     WorldMapContinentView, WorldMapLandmarkView, WorldMapOverlayView, WorldMapState,
@@ -561,9 +568,11 @@ impl UiScript {
         petition::install(&lua)?;
         binder::install(&lua)?;
         summon::install(&lua)?;
+        bind_confirm::install(&lua)?;
         gm_ticket::install(&lua)?;
         duel::install(&lua)?;
         follow::install(&lua)?;
+        camera_view::install(&lua)?;
         session::install(&lua)?;
         pvp::install(&lua)?;
         worn_display::install(&lua)?;

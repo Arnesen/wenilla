@@ -110,6 +110,7 @@ mod ui_action;
 mod ui_auction;
 mod ui_aura;
 mod ui_bank;
+mod ui_bind_confirm;
 mod ui_binder;
 mod ui_cast;
 mod ui_char;

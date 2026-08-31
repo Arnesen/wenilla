@@ -64,12 +64,17 @@ fn skill(
 fn shown_skills_page() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // UIPanelTemplates.xml is NOT optional even though this list ran without it for a year: a
+    // MISSING template is a loader *warning*, not an error, so an under-loaded list passes the
+    // assert in load_xml and then fails later on geometry that silently never got built.
+    // SkillDetailScrollFrame inherits UIPanelScrollFrameTemplate from that file.
     for f in [
         "Fonts.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
         "GameTooltip.xml",
         "ScrollTemplates.xml",
+        "UIPanelTemplates.xml",
         "CharacterFrame.xml",
         "SkillFrame.xml",
     ] {

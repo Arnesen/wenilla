@@ -3,11 +3,17 @@
 //! `bindings-cache.wtf`, account ONE) and each command's dispatch class.
 //!
 //! **Honest tree**: a command appears here only over a real engine action — the same law as the
-//! options rows (0954). The 1.12 commands with no benilla mechanism yet (pitch keys, walk toggle,
-//! action pages, the right multibars' MULTIACTIONBAR3/4, camera views, combat log, …)
-//! are absent, not stubbed; the page shows only what's here, and only non-empty categories (era
-//! law). Labels/headers are the 1.12
-//! GlobalStrings (`BINDING_NAME_*`/`BINDING_HEADER_*`), defined in the window's XML.
+//! options rows (0954). The 1.12 commands with no benilla mechanism yet are absent, not stubbed;
+//! the page shows only what's here, and only non-empty categories (era law). Labels/headers are
+//! the 1.12 GlobalStrings (`BINDING_NAME_*`/`BINDING_HEADER_*`), defined in the window's XML.
+//!
+//! **…and the absence is written down** ([`ABSENT`], decision 1745). The honest tree's one hole
+//! was that nothing noticed when a mechanism ARRIVED: 0997 promised "each returns the day its
+//! mechanism lands, one registry row", and then the keyring (0765), the pet book (1050), the
+//! reputation and honor pages, the six action-bar pages and the two vertical multibars (1500)
+//! all shipped their mechanism with no row — some for five hundred commits, none of them a
+//! mistake anyone could see. `SPECS` ∪ `ABSENT` is now exactly the client's 228 live bindings,
+//! and each absent row names the Lua globals whose arrival falsifies it.
 //!
 //! Three dispatch classes:
 //! - [`Kind::Held`] — press latches, base-key release unlatches (the reference's `runOnUp`
@@ -125,6 +131,7 @@ pub(crate) mod cmd {
     pub(crate) const OPEN_CHAT: Cmd = by_name("OPENCHAT");
     pub(crate) const OPEN_CHAT_SLASH: Cmd = by_name("OPENCHATSLASH");
     pub(crate) const REPLY: Cmd = by_name("REPLY");
+    pub(crate) const REPLY2: Cmd = by_name("REPLY2");
     pub(crate) const TARGET_NEAREST_ENEMY: Cmd = by_name("TARGETNEARESTENEMY");
     pub(crate) const TARGET_PREVIOUS_ENEMY: Cmd = by_name("TARGETPREVIOUSENEMY");
     pub(crate) const NAMEPLATES: Cmd = by_name("NAMEPLATES");
@@ -200,6 +207,10 @@ const TABLE: &[Spec] = &[
         None
     ),
     spec!("REPLY", CHAT, Kind::Host, Some("R"), None),
+    // The other reply: the last person YOU told, not the last who told you
+    // (`ChatEdit_GetLastToldTarget`, ChatFrame.lua l.1650). The memory was already being kept by
+    // the send path and read by nothing — 1745.
+    spec!("REPLY2", CHAT, Kind::Host, Some("SHIFT-R"), None),
     // ── Action bar (BINDING_HEADER_ACTIONBAR) ───────────────────────────────────────────
     // The ref's runOnUp pair (Bindings.xml:121: DOWN shows the pushed visual, UP fires) —
     // exactly what the old hardcoded number-row table sent.
@@ -289,6 +300,95 @@ const TABLE: &[Spec] = &[
     ),
     // The stance/shapeshift row (ref ShapeshiftBar_ChangeForm(n)) — ours clicks the bar's own
     // buttons, which carry the full form-switch law (StanceBar.xml).
+    // ── The self-cast dozen (1.12 `Bindings.xml`:257-293) ───────────────────────────────
+    // The same two halves as ACTIONBUTTON, with `ActionButtonUp`'s second argument set: the
+    // reference's own `onSelf`, which `ActionBar.xml` has always forwarded to `UseAction`'s third
+    // and the host used to drop (1745). `ALT-1`…`ALT-=` are byte-real from DefaultBindings.wtf,
+    // and they sit one modifier off the plain bar exactly as the reference lays them out.
+    spec!(
+        "SELFACTIONBUTTON1",
+        ACTIONBAR,
+        Kind::EdgeUpDown("ActionButtonDown(1)", "ActionButtonUp(1, 1)"),
+        Some("ALT-1"),
+        None
+    ),
+    spec!(
+        "SELFACTIONBUTTON2",
+        ACTIONBAR,
+        Kind::EdgeUpDown("ActionButtonDown(2)", "ActionButtonUp(2, 1)"),
+        Some("ALT-2"),
+        None
+    ),
+    spec!(
+        "SELFACTIONBUTTON3",
+        ACTIONBAR,
+        Kind::EdgeUpDown("ActionButtonDown(3)", "ActionButtonUp(3, 1)"),
+        Some("ALT-3"),
+        None
+    ),
+    spec!(
+        "SELFACTIONBUTTON4",
+        ACTIONBAR,
+        Kind::EdgeUpDown("ActionButtonDown(4)", "ActionButtonUp(4, 1)"),
+        Some("ALT-4"),
+        None
+    ),
+    spec!(
+        "SELFACTIONBUTTON5",
+        ACTIONBAR,
+        Kind::EdgeUpDown("ActionButtonDown(5)", "ActionButtonUp(5, 1)"),
+        Some("ALT-5"),
+        None
+    ),
+    spec!(
+        "SELFACTIONBUTTON6",
+        ACTIONBAR,
+        Kind::EdgeUpDown("ActionButtonDown(6)", "ActionButtonUp(6, 1)"),
+        Some("ALT-6"),
+        None
+    ),
+    spec!(
+        "SELFACTIONBUTTON7",
+        ACTIONBAR,
+        Kind::EdgeUpDown("ActionButtonDown(7)", "ActionButtonUp(7, 1)"),
+        Some("ALT-7"),
+        None
+    ),
+    spec!(
+        "SELFACTIONBUTTON8",
+        ACTIONBAR,
+        Kind::EdgeUpDown("ActionButtonDown(8)", "ActionButtonUp(8, 1)"),
+        Some("ALT-8"),
+        None
+    ),
+    spec!(
+        "SELFACTIONBUTTON9",
+        ACTIONBAR,
+        Kind::EdgeUpDown("ActionButtonDown(9)", "ActionButtonUp(9, 1)"),
+        Some("ALT-9"),
+        None
+    ),
+    spec!(
+        "SELFACTIONBUTTON10",
+        ACTIONBAR,
+        Kind::EdgeUpDown("ActionButtonDown(10)", "ActionButtonUp(10, 1)"),
+        Some("ALT-0"),
+        None
+    ),
+    spec!(
+        "SELFACTIONBUTTON11",
+        ACTIONBAR,
+        Kind::EdgeUpDown("ActionButtonDown(11)", "ActionButtonUp(11, 1)"),
+        Some("ALT--"),
+        None
+    ),
+    spec!(
+        "SELFACTIONBUTTON12",
+        ACTIONBAR,
+        Kind::EdgeUpDown("ActionButtonDown(12)", "ActionButtonUp(12, 1)"),
+        Some("ALT-="),
+        None
+    ),
     spec!(
         "SHAPESHIFTBUTTON1",
         ACTIONBAR,
@@ -457,6 +557,85 @@ const TABLE: &[Spec] = &[
         Some("CTRL-0"),
         None
     ),
+    // ── The action-bar PAGES (1.12 `Bindings.xml`:395-431) ──────────────────────────────
+    // The bar is six pages of twelve (action slots 1..72) and it has been since 1500 shipped the
+    // multibars; `ChangeActionBarPage` and the `ActionBar_Page{Up,Down}` wrap are ActionBar.xml's
+    // own, quoted 1:1 from the reference. `SHIFT-1..6` and the SHIFT-arrow / SHIFT-wheel steps are
+    // byte-real from `WTF\\DefaultBindings.wtf`.
+    spec!(
+        "ACTIONPAGE1",
+        ACTIONBAR,
+        Kind::Edge(
+            "if ( CURRENT_ACTIONBAR_PAGE ~= 1 ) then CURRENT_ACTIONBAR_PAGE = 1; \
+             ChangeActionBarPage(); end"
+        ),
+        Some("SHIFT-1"),
+        None
+    ),
+    spec!(
+        "ACTIONPAGE2",
+        ACTIONBAR,
+        Kind::Edge(
+            "if ( CURRENT_ACTIONBAR_PAGE ~= 2 ) then CURRENT_ACTIONBAR_PAGE = 2; \
+             ChangeActionBarPage(); end"
+        ),
+        Some("SHIFT-2"),
+        None
+    ),
+    spec!(
+        "ACTIONPAGE3",
+        ACTIONBAR,
+        Kind::Edge(
+            "if ( CURRENT_ACTIONBAR_PAGE ~= 3 ) then CURRENT_ACTIONBAR_PAGE = 3; \
+             ChangeActionBarPage(); end"
+        ),
+        Some("SHIFT-3"),
+        None
+    ),
+    spec!(
+        "ACTIONPAGE4",
+        ACTIONBAR,
+        Kind::Edge(
+            "if ( CURRENT_ACTIONBAR_PAGE ~= 4 ) then CURRENT_ACTIONBAR_PAGE = 4; \
+             ChangeActionBarPage(); end"
+        ),
+        Some("SHIFT-4"),
+        None
+    ),
+    spec!(
+        "ACTIONPAGE5",
+        ACTIONBAR,
+        Kind::Edge(
+            "if ( CURRENT_ACTIONBAR_PAGE ~= 5 ) then CURRENT_ACTIONBAR_PAGE = 5; \
+             ChangeActionBarPage(); end"
+        ),
+        Some("SHIFT-5"),
+        None
+    ),
+    spec!(
+        "ACTIONPAGE6",
+        ACTIONBAR,
+        Kind::Edge(
+            "if ( CURRENT_ACTIONBAR_PAGE ~= 6 ) then CURRENT_ACTIONBAR_PAGE = 6; \
+             ChangeActionBarPage(); end"
+        ),
+        Some("SHIFT-6"),
+        None
+    ),
+    spec!(
+        "PREVIOUSACTIONPAGE",
+        ACTIONBAR,
+        Kind::Edge("ActionBar_PageDown()"),
+        Some("SHIFT-UP"),
+        Some("SHIFT-MOUSEWHEELUP")
+    ),
+    spec!(
+        "NEXTACTIONPAGE",
+        ACTIONBAR,
+        Kind::Edge("ActionBar_PageUp()"),
+        Some("SHIFT-DOWN"),
+        Some("SHIFT-MOUSEWHEELDOWN")
+    ),
     // The action-bar lock (decision 1136), the ref's own binding body verbatim (Bindings.xml:433-
     // 439) — it flips the `LOCK_ACTIONBAR` uvar `ActionBar.xml` declares, the same global the
     // Options window's Action Bars row writes. It sits here because the reference files it under
@@ -469,6 +648,19 @@ const TABLE: &[Spec] = &[
         ACTIONBAR,
         Kind::Edge(
             r#"if LOCK_ACTIONBAR == "1" then LOCK_ACTIONBAR = "0" else LOCK_ACTIONBAR = "1" end"#
+        ),
+        None,
+        None
+    ),
+    // The `autoSelfCast` CVar's own toggle, the reference's body verbatim — real since 1745
+    // wired that CVar to the cast arm's `AutoSelfCast` knob, which had been welded to a Resource
+    // default with nothing able to move it. Ships unbound, like the reference.
+    spec!(
+        "TOGGLEAUTOSELFCAST",
+        ACTIONBAR,
+        Kind::Edge(
+            "if ( GetCVar(\"autoSelfCast\") == \"1\" ) then SetCVar(\"autoSelfCast\", \"0\"); \
+             else SetCVar(\"autoSelfCast\", \"1\"); end"
         ),
         None,
         None
@@ -486,6 +678,23 @@ const TABLE: &[Spec] = &[
         TARGETING,
         Kind::Host,
         Some("SHIFT-TAB"),
+        None
+    ),
+    // The friendly cone — the same scan with the reaction test flipped (1745). `CTRL-TAB` /
+    // `CTRL-SHIFT-TAB`, byte-real; the reverse flag is the reference's own
+    // `TargetNearestFriend(1)`, and its `Bindings.xml` comment says so out loud.
+    spec!(
+        "TARGETNEARESTFRIEND",
+        TARGETING,
+        Kind::Edge("TargetNearestFriend()"),
+        Some("CTRL-TAB"),
+        None
+    ),
+    spec!(
+        "TARGETPREVIOUSFRIEND",
+        TARGETING,
+        Kind::Edge("TargetNearestFriend(1)"),
+        Some("CTRL-SHIFT-TAB"),
         None
     ),
     // The self/party bodies are 1.12's own, 1:1 (Bindings.xml:460-509 — already-targeted
@@ -568,6 +777,20 @@ const TABLE: &[Spec] = &[
         TARGETING,
         Kind::Edge(r#"TargetUnit("partypet4")"#),
         Some("SHIFT-F5"),
+        None
+    ),
+    spec!(
+        "TARGETLASTHOSTILE",
+        TARGETING,
+        Kind::Edge("TargetLastEnemy()"),
+        Some("G"),
+        None
+    ),
+    spec!(
+        "ASSISTTARGET",
+        TARGETING,
+        Kind::Edge(r#"AssistUnit("target")"#),
+        Some("F"),
         None
     ),
     spec!("NAMEPLATES", TARGETING, Kind::Host, Some("V"), None),
@@ -654,24 +877,14 @@ const TABLE: &[Spec] = &[
         Some("SHIFT-B"),
         None
     ),
+    // The keyring's own toggle (1.12 `Bindings.xml`; ships UNBOUND, and the reference's page
+    // shows it as such). 0765 landed the keyring plate and its `HasKey` gate; the row it was
+    // owed has been missing since.
     spec!(
-        "TOGGLECHARACTER1",
+        "TOGGLEKEYRING",
         INTERFACE,
-        Kind::Edge(r#"ToggleCharacter("SkillFrame")"#),
-        Some("K"),
-        None
-    ),
-    // The pet paper doll is TOGGLECHARACTER**3**, not 2 — 1.12's `Bindings.xml` numbers these by
-    // page, not by tab (0 = PaperDoll, 1 = Skill, 2 = Reputation, 3 = PetPaperDoll, 4 = Honor), so
-    // the name is the reference's and has nothing to do with our tab index. `SHIFT-P` is byte-real
-    // from the client's own `bindings-cache.wtf`, and identical in two independent accounts (ONE
-    // and WINUSER) — which is what rules out a player rebind (the `TOGGLEUI` trap, 0870).
-    // Decision 1057.
-    spec!(
-        "TOGGLECHARACTER3",
-        INTERFACE,
-        Kind::Edge(r#"ToggleCharacter("PetPaperDollFrame")"#),
-        Some("SHIFT-P"),
+        Kind::Edge("ToggleKeyRing()"),
+        None,
         None
     ),
     spec!(
@@ -681,11 +894,54 @@ const TABLE: &[Spec] = &[
         Some("P"),
         None
     ),
+    // The PET book is the same window forked on `bookType` — 1050's law, and the reason this is
+    // a second command rather than a second key on the first.
+    spec!(
+        "TOGGLEPETBOOK",
+        INTERFACE,
+        Kind::Edge("ToggleSpellBook(BOOKTYPE_PET)"),
+        Some("SHIFT-I"),
+        None
+    ),
     spec!(
         "TOGGLETALENTS",
         INTERFACE,
         Kind::Edge("ToggleTalentFrame()"),
         Some("N"),
+        None
+    ),
+    // TOGGLECHARACTER**N** is the reference's PAGE number, not our tab index: 0 = PaperDoll,
+    // 1 = Skill, 2 = Reputation, 3 = PetPaperDoll, 4 = Honor. The rows run 4, 3, 2, 1 in the
+    // file, and the file's order is this table's order.
+    spec!(
+        "TOGGLECHARACTER4",
+        INTERFACE,
+        Kind::Edge(r#"ToggleCharacter("HonorFrame")"#),
+        Some("H"),
+        None
+    ),
+    // `SHIFT-P` is byte-real from the client's own `bindings-cache.wtf`, and identical in two
+    // independent accounts (ONE and WINUSER) — which is what rules out a player rebind (the
+    // `TOGGLEUI` trap, 0870). Decision 1057.
+    spec!(
+        "TOGGLECHARACTER3",
+        INTERFACE,
+        Kind::Edge(r#"ToggleCharacter("PetPaperDollFrame")"#),
+        Some("SHIFT-P"),
+        None
+    ),
+    spec!(
+        "TOGGLECHARACTER2",
+        INTERFACE,
+        Kind::Edge(r#"ToggleCharacter("ReputationFrame")"#),
+        Some("U"),
+        None
+    ),
+    spec!(
+        "TOGGLECHARACTER1",
+        INTERFACE,
+        Kind::Edge(r#"ToggleCharacter("SkillFrame")"#),
+        Some("K"),
         None
     ),
     spec!(
@@ -743,6 +999,13 @@ const TABLE: &[Spec] = &[
         "TOGGLEGUILDTAB",
         INTERFACE,
         Kind::Edge("ToggleFriendsFrame(3)"),
+        None,
+        None
+    ),
+    spec!(
+        "TOGGLERAIDTAB",
+        INTERFACE,
+        Kind::Edge("ToggleFriendsFrame(4)"),
         None,
         None
     ),
@@ -823,6 +1086,25 @@ const TABLE: &[Spec] = &[
         None
     ),
     // ── Camera (BINDING_HEADER_CAMERA) ──────────────────────────────────────────────────
+    // The five named camera views (decision 1745) — `player::camera_view`, whose defaults are the
+    // reference's own `0x84f488` table. NEXTVIEW/PREVVIEW ship on END/HOME and **do not wrap**
+    // (`0x50faa0`/`0x50fac0` are hard stops); Set/Save/Reset ship unbound, and 1.12 files no
+    // SAVEVIEW1/RESETVIEW1 row even though its engine accepts view 1 — that is a `Bindings.xml`
+    // decision, so the table follows the file.
+    spec!(
+        "NEXTVIEW",
+        CAMERA,
+        Kind::Edge("NextView()"),
+        Some("END"),
+        None
+    ),
+    spec!(
+        "PREVVIEW",
+        CAMERA,
+        Kind::Edge("PrevView()"),
+        Some("HOME"),
+        None
+    ),
     spec!(
         "CAMERAZOOMIN",
         CAMERA,
@@ -835,6 +1117,26 @@ const TABLE: &[Spec] = &[
         CAMERA,
         Kind::Host,
         Some("MOUSEWHEELDOWN"),
+        None
+    ),
+    spec!("SETVIEW1", CAMERA, Kind::Edge("SetView(1)"), None, None),
+    spec!("SETVIEW2", CAMERA, Kind::Edge("SetView(2)"), None, None),
+    spec!("SETVIEW3", CAMERA, Kind::Edge("SetView(3)"), None, None),
+    spec!("SETVIEW4", CAMERA, Kind::Edge("SetView(4)"), None, None),
+    spec!("SETVIEW5", CAMERA, Kind::Edge("SetView(5)"), None, None),
+    spec!("SAVEVIEW2", CAMERA, Kind::Edge("SaveView(2)"), None, None),
+    spec!("SAVEVIEW3", CAMERA, Kind::Edge("SaveView(3)"), None, None),
+    spec!("SAVEVIEW4", CAMERA, Kind::Edge("SaveView(4)"), None, None),
+    spec!("SAVEVIEW5", CAMERA, Kind::Edge("SaveView(5)"), None, None),
+    spec!("RESETVIEW2", CAMERA, Kind::Edge("ResetView(2)"), None, None),
+    spec!("RESETVIEW3", CAMERA, Kind::Edge("ResetView(3)"), None, None),
+    spec!("RESETVIEW4", CAMERA, Kind::Edge("ResetView(4)"), None, None),
+    spec!("RESETVIEW5", CAMERA, Kind::Edge("ResetView(5)"), None, None),
+    spec!(
+        "FLIPCAMERAYAW",
+        CAMERA,
+        Kind::Edge("FlipCameraYaw(180)"),
+        None,
         None
     ),
     // ── MultiActionBar (BINDING_HEADER_MULTIACTIONBAR) ──────────────────────────────────
@@ -1084,6 +1386,251 @@ const TABLE: &[Spec] = &[
         None,
         None
     ),
+    // ── The two VERTICAL bars (1.12 files them under its own `BLANK2`/`BLANK3` spacer
+    // headers; they join bar 2 under MULTIACTIONBAR here for the same reason 1008 folded that
+    // one — a spacer is a display device in the reference's flat list, and this page's sections
+    // are named). Both bars are real since 1500; `MultiBarRight` is bar 3, `MultiBarLeft` bar 4,
+    // and both ship UNBOUND exactly as the reference does.
+    spec!(
+        "MULTIACTIONBAR3BUTTON1",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarRight", 1)"#,
+            r#"MultiActionButtonUp("MultiBarRight", 1)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR3BUTTON2",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarRight", 2)"#,
+            r#"MultiActionButtonUp("MultiBarRight", 2)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR3BUTTON3",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarRight", 3)"#,
+            r#"MultiActionButtonUp("MultiBarRight", 3)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR3BUTTON4",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarRight", 4)"#,
+            r#"MultiActionButtonUp("MultiBarRight", 4)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR3BUTTON5",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarRight", 5)"#,
+            r#"MultiActionButtonUp("MultiBarRight", 5)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR3BUTTON6",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarRight", 6)"#,
+            r#"MultiActionButtonUp("MultiBarRight", 6)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR3BUTTON7",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarRight", 7)"#,
+            r#"MultiActionButtonUp("MultiBarRight", 7)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR3BUTTON8",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarRight", 8)"#,
+            r#"MultiActionButtonUp("MultiBarRight", 8)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR3BUTTON9",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarRight", 9)"#,
+            r#"MultiActionButtonUp("MultiBarRight", 9)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR3BUTTON10",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarRight", 10)"#,
+            r#"MultiActionButtonUp("MultiBarRight", 10)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR3BUTTON11",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarRight", 11)"#,
+            r#"MultiActionButtonUp("MultiBarRight", 11)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR3BUTTON12",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarRight", 12)"#,
+            r#"MultiActionButtonUp("MultiBarRight", 12)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR4BUTTON1",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarLeft", 1)"#,
+            r#"MultiActionButtonUp("MultiBarLeft", 1)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR4BUTTON2",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarLeft", 2)"#,
+            r#"MultiActionButtonUp("MultiBarLeft", 2)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR4BUTTON3",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarLeft", 3)"#,
+            r#"MultiActionButtonUp("MultiBarLeft", 3)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR4BUTTON4",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarLeft", 4)"#,
+            r#"MultiActionButtonUp("MultiBarLeft", 4)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR4BUTTON5",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarLeft", 5)"#,
+            r#"MultiActionButtonUp("MultiBarLeft", 5)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR4BUTTON6",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarLeft", 6)"#,
+            r#"MultiActionButtonUp("MultiBarLeft", 6)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR4BUTTON7",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarLeft", 7)"#,
+            r#"MultiActionButtonUp("MultiBarLeft", 7)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR4BUTTON8",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarLeft", 8)"#,
+            r#"MultiActionButtonUp("MultiBarLeft", 8)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR4BUTTON9",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarLeft", 9)"#,
+            r#"MultiActionButtonUp("MultiBarLeft", 9)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR4BUTTON10",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarLeft", 10)"#,
+            r#"MultiActionButtonUp("MultiBarLeft", 10)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR4BUTTON11",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarLeft", 11)"#,
+            r#"MultiActionButtonUp("MultiBarLeft", 11)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR4BUTTON12",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"MultiActionButtonDown("MultiBarLeft", 12)"#,
+            r#"MultiActionButtonUp("MultiBarLeft", 12)"#
+        ),
+        None,
+        None
+    ),
     // ── Raid targeting (BINDING_HEADER_RAID_TARGET) ─────────────────────────────────────
     // 1.12 bodies 1:1 (SetRaidTargetIcon toggles when the unit already wears the icon; 0
     // clears — party.rs's registered semantics). All unbound by default, like the client.
@@ -1149,6 +1696,224 @@ const TABLE: &[Spec] = &[
         Kind::Edge(r#"SetRaidTargetIcon("target", 0)"#),
         None,
         None
+    ),
+];
+
+/// One 1.12 binding command this client does **not** register — and the mechanism it waits on.
+///
+/// The honest tree (0997) says a command appears in [`SPECS`] only over a real engine action. That
+/// rule is right and it stays; what it never had was a way to notice when the action *arrived*.
+/// 0997's own residue promised "each returns the day its mechanism lands, one registry row" and
+/// then five mechanisms landed without their rows: the keyring (0765), the pet book (1050), the
+/// reputation and honor pages (1057-era), the six action-bar pages and the two vertical multibars
+/// (1500). Nothing was wrong with any of those commits — nothing was *watching*.
+///
+/// So the absence is written down rather than merely true, and it is written down in a form that
+/// goes stale loudly: [`needs`] names the Lua globals the reference's own binding body calls that
+/// this client does not define, and
+/// `the_absent_commands_are_still_absent` fails the day the last one lands.
+///
+/// [`needs`]: Absent::needs
+pub(crate) struct Absent {
+    /// The 1.12 command name, exactly as `Bindings.xml` spells it.
+    pub name: &'static str,
+    /// Lua globals the reference's body calls that this client does not define. **This is the
+    /// falsifier**: while at least one is missing the absence is real; when they are all defined
+    /// the mechanism has landed and the row belongs in [`SPECS`].
+    ///
+    /// Empty is allowed and means *there is no Lua-global signal* — the missing mechanism is
+    /// host-side behind a global that already exists (self-cast lives behind `UseAction`'s third
+    /// argument, which the Lua passes and the host drops). Those rows carry the whole weight in
+    /// [`why`], and they are the ones to be suspicious of.
+    ///
+    /// [`why`]: Absent::why
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the falsifier is the gate test's to read, and the gate is the whole point \
+                      of the field; an `expect` rather than an `allow` so the attribute goes by \
+                      itself the day a runtime reader wants it"
+        )
+    )]
+    pub needs: &'static [&'static str],
+    /// What would have to exist here — one line, mechanism-first.
+    pub why: &'static str,
+}
+
+macro_rules! absent {
+    ($name:literal, [$($needs:literal),* $(,)?], $why:literal) => {
+        Absent {
+            name: $name,
+            needs: &[$($needs),*],
+            why: $why,
+        }
+    };
+}
+
+/// The 1.12 commands benilla does not implement, in `Bindings.xml` order — the other half of the
+/// registry, and the half that used to be invisible. `SPECS` ∪ `ABSENT` is exactly the client's
+/// 228 live bindings, asserted by [`tests::every_1_12_command_is_registered_or_recorded_absent`].
+pub(crate) static ABSENT: &[Absent] = &[
+    // ── Movement ────────────────────────────────────────────────────────────────────────
+    absent!(
+        "PITCHUP",
+        ["PitchUpStart", "PitchUpStop"],
+        "no keyboard pitch: the mover has no pitch axis at all — swim and hover attitude ride the \
+         move flags the server echoes, and nothing steers them"
+    ),
+    absent!(
+        "PITCHDOWN",
+        ["PitchDownStart", "PitchDownStop"],
+        "no keyboard pitch — see PITCHUP"
+    ),
+    absent!(
+        "TOGGLERUN",
+        ["ToggleRun"],
+        "no walk gait: neither MSG_MOVE_SET_WALK_MODE/SET_RUN_MODE nor a walk animation exists"
+    ),
+    // ── Chat ────────────────────────────────────────────────────────────────────────────
+    absent!(
+        "COMBATLOGPAGEUP",
+        ["ToggleCombatLog"],
+        "ChatFrame2 is a real frame that nothing writes into — the combat-log line pipeline does \
+         not exist, which is why 1.12's own ToggleCombatLog has no home here"
+    ),
+    absent!(
+        "COMBATLOGPAGEDOWN",
+        ["ToggleCombatLog"],
+        "nothing writes the combat log — see COMBATLOGPAGEUP"
+    ),
+    absent!(
+        "COMBATLOGBOTTOM",
+        ["ToggleCombatLog"],
+        "nothing writes the combat log — see COMBATLOGPAGEUP"
+    ),
+    absent!(
+        "TOGGLECOMBATLOG",
+        ["ToggleCombatLog"],
+        "nothing writes the combat log — see COMBATLOGPAGEUP"
+    ),
+    // ── Action bar ──────────────────────────────────────────────────────────────────────
+    // ── Interface ───────────────────────────────────────────────────────────────────────
+    absent!(
+        "TOGGLEWORLDSTATESCORES",
+        ["ToggleWorldStateScoreFrame"],
+        "no battlegrounds"
+    ),
+    absent!(
+        "TOGGLEBATTLEFIELDMINIMAP",
+        ["ToggleBattlefieldMinimap"],
+        "no battlegrounds"
+    ),
+    // ── Misc ────────────────────────────────────────────────────────────────────────────
+    absent!(
+        "TOGGLEFPS",
+        ["ToggleFramerate"],
+        "the only framerate readout here is the dev HUD's cost pill, which is behind \
+         `#[cfg(feature = \"dev\")]` and is an instrument, not a player display (perf/hud.rs) — \
+         there is no player-facing framerate to toggle. (0997 recorded this as \"the perf pill is \
+         always-on by design\"; the pill is not the thing TOGGLEFPS toggles.)"
+    ),
+    // The nine `hidden="true" debug="true"` rows. Every one of them names an instrument benilla
+    // really has (the tri counter, the collision display, the portal draw, the perf pill) — they
+    // are absent because those instruments answer to the dev plane's chords (0702/1043), not to a
+    // binding. Whether that is right is a real question and 1745 takes it; until then the rows
+    // stay recorded rather than quietly missing.
+    absent!(
+        "TOGGLESTATS",
+        ["ToggleStats"],
+        "a dev-plane instrument (1043)"
+    ),
+    absent!(
+        "TOGGLETRIS",
+        ["ToggleTris"],
+        "a dev-plane instrument (1043)"
+    ),
+    absent!(
+        "TOGGLEPORTALS",
+        ["TogglePortals"],
+        "a dev-plane instrument (1043)"
+    ),
+    absent!(
+        "TOGGLECOLLISION",
+        ["ToggleCollision"],
+        "a dev-plane instrument (1043)"
+    ),
+    absent!(
+        "TOGGLECOLLISIONDISPLAY",
+        ["ToggleCollisionDisplay"],
+        "a dev-plane instrument (1043)"
+    ),
+    absent!(
+        "TOGGLEPLAYERBOUNDS",
+        ["TogglePlayerBounds"],
+        "a dev-plane instrument (1043)"
+    ),
+    absent!(
+        "TOGGLEPERFORMANCEDISPLAY",
+        ["TogglePerformanceDisplay"],
+        "a dev-plane instrument (1043)"
+    ),
+    absent!(
+        "TOGGLEPERFORMANCEVALUES",
+        ["TogglePerformanceValues"],
+        "a dev-plane instrument (1043)"
+    ),
+    absent!(
+        "RESETPERFORMANCEVALUES",
+        ["ResetPerformanceValues"],
+        "a dev-plane instrument (1043)"
+    ),
+    // ── The mouse's own three (hidden) ──────────────────────────────────────────────────
+    // These are the reference's mouse-look bindings — BUTTON2 turn-or-action, BUTTON1
+    // select-or-move, CTRL-BUTTON1 the sticky variant — and they are `hidden` because the window
+    // never lists them, not because they are debug. benilla's mouse-look is hardwired in
+    // `player/camera.rs` instead, which is exactly the shape 1043 spent a decision undoing for
+    // the keyboard.
+    absent!(
+        "TURNORACTION",
+        ["TurnOrActionStart", "TurnOrActionStop"],
+        "right-button mouse-look is hardwired, not routed through a binding"
+    ),
+    absent!(
+        "CAMERAORSELECTORMOVE",
+        ["CameraOrSelectOrMoveStart", "CameraOrSelectOrMoveStop"],
+        "left-button select/move is hardwired, not routed through a binding"
+    ),
+    absent!(
+        "CAMERAORSELECTORMOVESTICKY",
+        ["CameraOrSelectOrMoveStart", "CameraOrSelectOrMoveStop"],
+        "left-button select/move is hardwired, not routed through a binding"
+    ),
+    // ── iTunes remote (platform="mac") ──────────────────────────────────────────────────
+    // The one place 1.12's own binding file is OS-specific: five rows carrying `platform="mac"`,
+    // the whole use of that attribute in the client. They remote the *system* music player, not
+    // the game's, and benilla has nothing to remote.
+    absent!(
+        "ITUNES_PLAYPAUSE",
+        ["MusicPlayer_PlayPause"],
+        "platform=\"mac\", and there is no system music player to remote"
+    ),
+    absent!(
+        "ITUNES_NEXTTRACK",
+        ["MusicPlayer_NextTrack"],
+        "platform=\"mac\", and there is no system music player to remote"
+    ),
+    absent!(
+        "ITUNES_BACKTRACK",
+        ["MusicPlayer_BackTrack"],
+        "platform=\"mac\", and there is no system music player to remote"
+    ),
+    absent!(
+        "ITUNES_VOLUMEUP",
+        ["MusicPlayer_VolumeUp"],
+        "platform=\"mac\", and there is no system music player to remote"
+    ),
+    absent!(
+        "ITUNES_VOLUMEDOWN",
+        ["MusicPlayer_VolumeDown"],
+        "platform=\"mac\", and there is no system music player to remote"
     ),
 ];
 
@@ -1266,5 +2031,262 @@ mod tests {
                 s.name
             );
         }
+    }
+
+    /// **The coverage gate** (decision 1745): every one of the client's 228 live bindings is
+    /// either in [`SPECS`] or in [`ABSENT`], and never both.
+    ///
+    /// This is the half [`the_registry_matches_the_installs_own_bindings`] could not see. That
+    /// test walks OUR rows and checks them against the install, so a command we never wrote down
+    /// is invisible to it — which is how the keyring, the pet book, the reputation and honor
+    /// pages, the six action-bar pages and the two vertical multibars all shipped their mechanism
+    /// and kept their key unbound, some of them for five hundred commits. Walking the INSTALL's
+    /// rows instead makes an unwritten command a build failure the day it becomes reachable.
+    ///
+    /// `hidden` rides along: 1.12 marks twelve bindings `hidden="true"` (the nine debug toggles
+    /// and the three mouse-look ones) and the window never lists them. This client registers none
+    /// of them, and this asserts that stays true — a hidden row in `SPECS` would be a row the
+    /// Keybindings page shows and the reference does not.
+    #[test]
+    fn every_1_12_command_is_registered_or_recorded_absent() {
+        let Some(reference) = install_bindings() else {
+            return;
+        };
+
+        let registered: std::collections::HashSet<&str> = SPECS.iter().map(|s| s.name).collect();
+        let recorded: std::collections::HashSet<&str> = ABSENT.iter().map(|a| a.name).collect();
+
+        let mut unwritten = Vec::new();
+        for b in &reference {
+            let name = b.name.as_str();
+            match (registered.contains(name), recorded.contains(name)) {
+                (true, true) => panic!("{name} is both registered and recorded absent"),
+                (false, false) => unwritten.push(name),
+                (true, false) => assert!(
+                    !b.hidden,
+                    "{name} is hidden=\"true\" in 1.12 — the Keybindings page would list a row \
+                     the reference never shows"
+                ),
+                (false, true) => {}
+            }
+        }
+        assert!(
+            unwritten.is_empty(),
+            "these 1.12 bindings are neither implemented nor recorded absent — add a `spec!` row \
+             if the mechanism is here, an `absent!` row with its falsifier if it is not: {unwritten:?}"
+        );
+
+        let live: std::collections::HashSet<&str> =
+            reference.iter().map(|b| b.name.as_str()).collect();
+        for a in ABSENT {
+            assert!(
+                live.contains(a.name),
+                "ABSENT names {}, which is not a live 1.12 binding (the six MOVEVIEW* rows are \
+                 commented out in Blizzard's own file and are not commands)",
+                a.name
+            );
+        }
+
+        // The table's order IS the Keybindings page's row order, and the module claims it is the
+        // file's. It was not: TOGGLECHARACTER1/3 sat ahead of TOGGLESPELLBOOK until 1745.
+        let order: Vec<&str> = reference.iter().map(|b| b.name.as_str()).collect();
+        let mut at = 0usize;
+        for s in SPECS {
+            let Some(found) = order[at..].iter().position(|n| *n == s.name) else {
+                panic!(
+                    "{} is out of 1.12 Bindings.xml order — the page renders SPECS order, so this \
+                     is what the player sees",
+                    s.name
+                );
+            };
+            at += found + 1;
+        }
+    }
+
+    /// **The staleness half.** Each [`ABSENT`] row names the Lua globals the reference's own body
+    /// calls that this client does not define; while at least one is still missing the absence is
+    /// real. When they are all defined the mechanism has landed and the row is owed to [`SPECS`] —
+    /// which is precisely the event nothing was watching for.
+    ///
+    /// "Defined" is read from source, not from a VM: a harness would have to load the whole of
+    /// FrameXML to answer, and the question here is "has anyone written it yet", which the sources
+    /// say directly. Same posture as `tests/world_api_wall.rs`.
+    #[test]
+    fn the_absent_commands_are_still_absent() {
+        let defined = lua_globals_defined();
+        for a in ABSENT {
+            if a.needs.is_empty() {
+                continue;
+            }
+            let landed: Vec<&str> = a
+                .needs
+                .iter()
+                .copied()
+                .filter(|n| defined.contains(*n))
+                .collect();
+            assert_ne!(
+                landed.len(),
+                a.needs.len(),
+                "{}'s mechanism has landed — {:?} are all defined now, so the row belongs in \
+                 SPECS. (Recorded reason: {})",
+                a.name,
+                a.needs,
+                a.why
+            );
+        }
+    }
+
+    /// The absent table is well formed: unique names, and every row either carries a falsifier or
+    /// is one of the host-side ones the header calls out. The second half is not a formality — a
+    /// row with no `needs` can rot silently, so the count of them is pinned and moving it is a
+    /// deliberate act.
+    #[test]
+    fn the_absent_table_is_well_formed() {
+        let mut seen = std::collections::HashSet::new();
+        for a in ABSENT {
+            assert!(seen.insert(a.name), "duplicate absent command {}", a.name);
+            assert!(!a.why.is_empty(), "{}: no reason recorded", a.name);
+        }
+        let unfalsifiable: Vec<&str> = ABSENT
+            .iter()
+            .filter(|a| a.needs.is_empty())
+            .map(|a| a.name)
+            .collect();
+        assert!(
+            unfalsifiable.is_empty(),
+            "every absent row must carry a falsifier — a row with no `needs` can go stale \
+             unnoticed, which is the whole failure this table exists to end: {unfalsifiable:?}"
+        );
+    }
+
+    /// **The scanner's own falsifier.** [`the_absent_commands_are_still_absent`] is only a gate
+    /// while `lua_globals_defined` really sees both kinds of definition; a scanner that quietly
+    /// returned nothing would pass every row forever, which is the exact failure it exists to
+    /// end. So: one global of each kind that is certainly defined, and one that certainly is not.
+    #[test]
+    fn the_global_scanner_sees_both_kinds_of_definition() {
+        let defined = lua_globals_defined();
+        for host in ["TargetUnit", "UseAction", "SetBinding"] {
+            assert!(
+                defined.contains(host),
+                "the Rust scan missed the host registration `{host}`"
+            );
+        }
+        for framexml in ["ToggleKeyRing", "ToggleCharacter", "ChangeActionBarPage"] {
+            assert!(
+                defined.contains(framexml),
+                "the FrameXML scan missed `{framexml}`"
+            );
+        }
+        assert!(
+            !defined.contains("BenillaNoSuchGlobalExists"),
+            "the scanner claims to define a name nobody wrote"
+        );
+    }
+
+    /// The install's own `Bindings.xml`, parsed — `None` (and a skipped test) without a client.
+    fn install_bindings() -> Option<Vec<benilla_ui::bindings_xml::AddonBinding>> {
+        let data = benilla_formats::wow_data()?;
+        let mut chain = benilla_formats::open_chain(&data).expect("open the 1.12 patch chain");
+        let xml = String::from_utf8_lossy(
+            &chain
+                .read_file("Interface\\FrameXML\\Bindings.xml")
+                .expect("the install carries Bindings.xml"),
+        )
+        .into_owned();
+        Some(benilla_ui::bindings_xml::parse(&xml).expect("Blizzard's own file parses"))
+    }
+
+    /// Every Lua global this client defines, read out of its own sources: the host registrations
+    /// (`g.set("Name", …)` anywhere in the workspace) and the FrameXML port's own function
+    /// definitions (`function Name(` / `Name = function` inside the `<Script>` blocks).
+    ///
+    /// Deliberately syntactic and deliberately generous — a false "defined" fails the gate loudly
+    /// (it asks for a row that turns out not to work), while a false "missing" would let a landed
+    /// mechanism stay silent, which is the failure this whole gate exists to end.
+    fn lua_globals_defined() -> std::collections::HashSet<String> {
+        fn walk(dir: &std::path::Path, ext: &str, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|n| n == "target") {
+                        continue;
+                    }
+                    walk(&path, ext, out);
+                } else if path.extension().is_some_and(|e| e == ext) {
+                    out.push(path);
+                }
+            }
+        }
+
+        // `crates/benilla-app/` → the workspace root.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("the workspace root is two above the crate")
+            .to_path_buf();
+
+        let mut names = std::collections::HashSet::new();
+        let mut push = |s: &str| {
+            if s.chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            {
+                names.insert(s.to_string());
+            }
+        };
+
+        let mut rust = Vec::new();
+        walk(&root.join("crates"), "rs", &mut rust);
+        for path in rust {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            // `.set("Name"` — the host-registration idiom, over any amount of intervening
+            // whitespace (rustfmt breaks the long ones onto their own line).
+            let mut rest = text.as_str();
+            while let Some(i) = rest.find(".set(") {
+                rest = &rest[i + ".set(".len()..];
+                let head = rest.trim_start();
+                if let Some(body) = head.strip_prefix('"') {
+                    if let Some(end) = body.find('"') {
+                        push(&body[..end]);
+                    }
+                }
+            }
+        }
+
+        let mut xml = Vec::new();
+        walk(&root.join("crates/benilla-app/assets/ui"), "xml", &mut xml);
+        for path in xml {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let mut rest = text.as_str();
+            while let Some(i) = rest.find("function ") {
+                rest = &rest[i + "function ".len()..];
+                let end = rest
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(rest.len());
+                if rest[end..].trim_start().starts_with('(') {
+                    push(&rest[..end]);
+                }
+            }
+            for line in text.lines() {
+                let line = line.trim_start();
+                if let Some((lhs, rhs)) = line.split_once('=') {
+                    let lhs = lhs.trim();
+                    if rhs.trim_start().starts_with("function")
+                        && lhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    {
+                        push(lhs);
+                    }
+                }
+            }
+        }
+        names
     }
 }
