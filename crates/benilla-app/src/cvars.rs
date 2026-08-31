@@ -447,13 +447,19 @@ impl Plugin for CvarPlugin {
                     .chain()
                     .in_set(CvarLoad),
             )
-            .add_systems(Update, sync_cvars);
-        // **The flush is on the exit edge, not beside its feed** (decision 1528). It used to be
-        // `(sync_cvars, save_config).chain()` in `Update`, which made the "or the app exiting"
-        // half of its own gate dead on the exit a player actually causes: the close button's
-        // `AppExit` is not written until `PostUpdate`, so the last second of slider drags went
-        // with the process. `Last` still runs after `sync_cvars` — schedule order does what the
-        // `.chain()` did — and now also after every announcement.
+            .add_systems(Update, (sync_cvars, save_config).chain());
+        // **The flush is on the exit edge AND beside its feed** — both registrations of the same
+        // debounced, idempotent system, and both are load-bearing. 1528 found the exit half: the
+        // close button's `AppExit` is not written until `PostUpdate`, so an `Update`-only save
+        // lost the last second of slider drags with the process; the `Last`-scheduled instance
+        // below runs on the exit frame and catches it. But 1528 *moved* the system instead of
+        // adding the edge, which deleted the quiet-second mid-session save entirely — invisible
+        // on native (quitting flushes), fatal on the page, where there is no exit frame at all: a
+        // closed tab just ends the wasm, and every settings change of the session was lost
+        // (found live on realm.txcb.io, 2026-08-31; the regression test is
+        // `a_setcvar_is_saved_after_the_quiet_second_without_an_app_exit`). The two instances
+        // cannot double-write: whichever runs first clears `dirty`, the other sees clean and
+        // returns.
         crate::shutdown::on_app_exit(app, save_config.into_configs());
     }
 }
@@ -1547,6 +1553,46 @@ mod tests {
         assert_eq!(out.get("uiScale").map(String::as_str), Some("0.8"));
         assert!(!out.contains_key("farclip"));
         assert_eq!(out.get("FutureKnob").map(String::as_str), Some("3"));
+    }
+
+    /// **The web's whole persistence path, and native's crash-safety.** A `SetCVar` must reach
+    /// `config.toml` after the one quiet second **with no `AppExit` ever fired**: on the page
+    /// there IS no exit frame — the tab closes and the wasm is simply gone — so an exit-only
+    /// flush means every settings change a browser player makes is silently lost on reload
+    /// (found live on realm.txcb.io, 2026-08-31). Decision 1528 moved `save_config` from
+    /// `Update` onto the exit edge to catch the close-button's late `AppExit`; the move fixed
+    /// that frame and deleted the debounced mid-session save this test pins down.
+    #[test]
+    fn a_setcvar_is_saved_after_the_quiet_second_without_an_app_exit() {
+        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = std::env::temp_dir().join(format!("benilla-cvar-quiet-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        let _c = EnvGuard::unset("WOW_CAPTURE");
+        let _u = EnvGuard::unset("WOW_UI_SCALE");
+        let _f = EnvGuard::unset("WOW_FARCLIP");
+        let _d = EnvGuard::unset("WOW_CLUTTER_DENSITY");
+        let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
+
+        let mut app = cvar_app();
+        app.update();
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run(r#"SetCVar("MusicVolume", 0.33)"#)
+            .unwrap();
+        app.update(); // sync_cvars drains the change and stamps last_change
+        assert!(
+            !tmp.join("config.toml").exists(),
+            "inside the quiet second nothing is written yet"
+        );
+        std::thread::sleep(SAVE_QUIET + std::time::Duration::from_millis(100));
+        app.update(); // the debounce has elapsed — this frame must write, exit or not
+        let text = std::fs::read_to_string(tmp.join("config.toml"))
+            .expect("config.toml written by the quiet-second save, with no AppExit in sight");
+        assert!(text.contains("MusicVolume = \"0.33\""), "{text}");
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     /// End to end on a real App: a pre-written `config.toml` loads into the knobs at Startup, a
