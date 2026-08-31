@@ -711,8 +711,12 @@
         GroupLootFrame1..4: LootFrame_OnEvent hands ToggleDropDownMenu this frame by literal global
         lookup, and a 1.12 addon that wants to extend the master-loot menu expects to find it here.
         Hidden and unanchored: ToggleDropDownMenu positions it at the clicked loot row.
+
+        No `parent=`, which is the reference's own declaration (l.233, a top-level sibling of
+        LootFrame) and the dropdown family's rule since 1757: a menu host under `UIParent` goes
+        invisible with it under an `area = "full"` panel, and a hidden host seats a hidden list.
     -->
-    <Frame name="GroupLootDropDown" parent="UIParent" inherits="UIDropDownMenuTemplate" id="1" hidden="true">
+    <Frame name="GroupLootDropDown" inherits="UIDropDownMenuTemplate" id="1" hidden="true">
         <Anchors>
             <Anchor point="TOPLEFT"/>
         </Anchors>

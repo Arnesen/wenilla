@@ -342,6 +342,21 @@ pub(super) fn stream_self_movement(
     } else if removed & move_flags::SWIMMING != 0 {
         send_move!(MoveKind::StopSwim);
     }
+    // The gait toggle: `MSG_MOVE_SET_WALK_MODE` (0xc3) entering walk, `MSG_MOVE_SET_RUN_MODE`
+    // (0xc2) leaving it — the same "a dedicated opcode the frame the bit flips" shape as the swim
+    // pair above, and for the same reason. It sits OUTSIDE the `if !falling || air_nudged` axis
+    // block on purpose: a mode flip is not an axis transition, so the airborne silence (which
+    // exists because mid-air direction presses are deferred into an inert latch) does not apply —
+    // the reference's `ToggleRun` refuses nothing about being airborne and enqueues its event
+    // regardless. And it must fire while standing perfectly still, which is the whole reason the
+    // reference gives the toggle its own enqueue rather than letting the move-state broadcaster
+    // find it: that broadcaster gates on the locomotion nibble (`0x61a99d test al,0xf`) and would
+    // drop it. This differ has no such gate (decision 1752).
+    if added & move_flags::WALK_MODE != 0 {
+        send_move!(MoveKind::SetWalkMode);
+    } else if removed & move_flags::WALK_MODE != 0 {
+        send_move!(MoveKind::SetRunMode);
+    }
     // Forward/back axis — silent while airborne (the flag state rides the next packet instead),
     // except on the nudge frame. The **stop** arms stay silent while falling no matter what: a
     // mid-air release is the deferred-latch case, always, and the nudge frame is a press by
@@ -496,6 +511,128 @@ pub(super) fn park_mover(sender: &Sender<ClientCommand>, player: &mut Player) {
 mod tests {
     use super::*;
     use std::f32::consts::TAU;
+
+    /// **The gait toggle announces itself standing perfectly still** — which is the whole reason
+    /// the reference gives `ToggleRun` its own move-event enqueue instead of letting the
+    /// move-state broadcaster find the flag change: that broadcaster gates every send on the
+    /// locomotion nibble (`0x61a99d test al,0xf`), so a toggle with no direction bit set would
+    /// never leave the client through it. Ours rides the flag differ, which has no such gate.
+    /// Observers derive a walker's speed from the relayed bit, so a swallowed packet is a
+    /// remote body that keeps running at 7 yd/s while its owner walks (decision 1752).
+    #[test]
+    fn the_walk_toggle_sends_its_own_opcode_with_no_movement_at_all() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut player = Player::default();
+        let arc = || ArcEdges {
+            jumped: false,
+            wire_launch: false,
+            air_nudged: false,
+            landed: false,
+            fall_time: 0,
+        };
+        // Entering walk: MSG_MOVE_SET_WALK_MODE (0xc3), and it carries the bit it announces.
+        stream_self_movement(
+            &tx,
+            &mut player,
+            move_flags::WALK_MODE,
+            0.0,
+            arc(),
+            0.0,
+            &[],
+            None,
+            None,
+        );
+        let ClientCommand::Move { kind, flags, .. } =
+            rx.try_recv().expect("a standing walk toggle still sends")
+        else {
+            panic!("expected a Move command");
+        };
+        assert_eq!(kind, MoveKind::SetWalkMode);
+        assert_eq!(kind.opcode(), 0x00C3);
+        assert_eq!(flags & move_flags::WALK_MODE, move_flags::WALK_MODE);
+
+        // …and leaving it is the OTHER opcode, not a repeat of the same one.
+        stream_self_movement(&tx, &mut player, 0, 0.0, arc(), 0.0, &[], None, None);
+        let ClientCommand::Move { kind, flags, .. } =
+            rx.try_recv().expect("the run half sends too")
+        else {
+            panic!("expected a Move command");
+        };
+        assert_eq!(kind, MoveKind::SetRunMode);
+        assert_eq!(kind.opcode(), 0x00C2);
+        assert_eq!(flags & move_flags::WALK_MODE, 0);
+
+        // A steady walk announces nothing further — it is an edge, not a per-frame report.
+        stream_self_movement(
+            &tx,
+            &mut player,
+            move_flags::WALK_MODE,
+            0.0,
+            arc(),
+            0.0,
+            &[],
+            None,
+            None,
+        );
+        while let Ok(ClientCommand::Move { kind, .. }) = rx.try_recv() {
+            assert_eq!(kind, MoveKind::SetWalkMode, "the re-entry edge only");
+        }
+        stream_self_movement(
+            &tx,
+            &mut player,
+            move_flags::WALK_MODE,
+            0.1,
+            arc(),
+            0.1,
+            &[],
+            None,
+            None,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a walk already announced is silent until it flips back"
+        );
+    }
+
+    /// The toggle is not an axis transition, so the airborne silence must not swallow it: a
+    /// mid-air press flips the bit and the packet goes out (the reference's `ToggleRun` refuses
+    /// nothing about being airborne, and the fall's own heartbeats would carry the bit anyway).
+    #[test]
+    fn a_walk_toggle_taken_mid_air_is_not_swallowed_by_the_airborne_silence() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut player = Player {
+            move_flags: move_flags::FORWARD | move_flags::FALLING,
+            ..Default::default()
+        };
+        stream_self_movement(
+            &tx,
+            &mut player,
+            move_flags::FORWARD | move_flags::FALLING | move_flags::WALK_MODE,
+            0.0,
+            ArcEdges {
+                jumped: false,
+                wire_launch: false,
+                air_nudged: false,
+                landed: false,
+                fall_time: 400,
+            },
+            0.0,
+            &[],
+            None,
+            None,
+        );
+        let kinds: Vec<_> = rx
+            .try_iter()
+            .map(|c| match c {
+                ClientCommand::Move { kind, .. } => kind,
+                _ => panic!("expected Move commands"),
+            })
+            .collect();
+        assert!(
+            kinds.contains(&MoveKind::SetWalkMode),
+            "the walk edge rides out mid-arc: {kinds:?}"
+        );
+    }
 
     #[test]
     fn wire_orientation_is_normalized_into_0_2pi() {

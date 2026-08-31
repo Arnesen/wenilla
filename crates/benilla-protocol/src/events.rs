@@ -1170,6 +1170,28 @@ pub enum SessionEvent {
     RaidInstanceInfo {
         entries: Vec<crate::messages::RaidInstanceEntry>,
     },
+    // ── The instance/raid lockout family (decision 1748) ────────────────────────────────────
+    //
+    // Four of these become a `CHAT_MSG_SYSTEM` line the client composes itself out of
+    // GlobalStrings; two are pure bookkeeping behind `CanShowResetInstances()`. The map NAME is
+    // never on the wire — the app resolves the id through `Map.dbc`.
+    /// A raid lockout's welcome/countdown line (`SMSG_RAID_INSTANCE_MESSAGE`).
+    RaidInstanceMessage {
+        message: crate::messages::RaidInstanceMessage,
+    },
+    /// We just became permanently saved to the instance we are in (`SMSG_INSTANCE_SAVE_CREATED`).
+    /// `flag` is the wire value: vmangos always sends 0, and 1 is the reference's debug wrapper.
+    InstanceSaveCreated { flag: u32 },
+    /// An instance reset took (`SMSG_INSTANCE_RESET`) — `map` is the `Map.dbc` id.
+    InstanceReset { map: u32 },
+    /// An instance reset was refused (`SMSG_INSTANCE_RESET_FAILED`).
+    InstanceResetFailed {
+        failure: crate::messages::InstanceResetFailed,
+    },
+    /// The `Map.dbc` id of the dungeon we were last inside (`SMSG_UPDATE_LAST_INSTANCE`).
+    UpdateLastInstance { map: u32 },
+    /// Whether we hold any permanent bind (`SMSG_UPDATE_INSTANCE_OWNERSHIP`).
+    UpdateInstanceOwnership { owns: bool },
     /// A duel challenge (`SMSG_DUEL_REQUESTED`, decision 0633) — delivered to challenger and
     /// challenged alike. `arbiter` is the duel-flag GameObject that identifies the duel and is
     /// echoed on accept/cancel; `challenger` equal to our own guid means we are the one asking.

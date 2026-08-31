@@ -474,8 +474,18 @@
          **The kind still differs and is not papered over**: `GetObjectType()` answers "Frame"
          here and "Texture" in the reference. Every corpus caller only Shows/Hides it, which both
          kinds answer identically; an addon that asked its type would see the deviation, and that
-         is the honest cost of the structural choice above. -->
-    <Frame name="BlackoutWorld" frameStrata="FULLSCREEN" hidden="true" enableMouse="true" parent="UIParent">
+         is the honest cost of the structural choice above.
+
+         **And it carries NO `parent=`, for the reason WorldMapFrame does not** (see that frame's
+         note below). The reference's blackout is a region *inside* WorldMapFrame, so it belongs to
+         the very panel `SetFullScreenFrame` shows and cannot be reached by the `UIParent:Hide()`
+         that showing it performs. Ours is a separate frame — the structural deviation above — and
+         while that frame hung off `UIParent` it inherited the opposite property: opening the map
+         hid the blackout, and the 3D world came back through the margins beside the 4:3 sheet
+         (director-reported, decision 1757). Top-level restores the reference's own relationship;
+         the TOPLEFT/BOTTOMRIGHT pair then pins to the screen root, which is the same rect
+         `parent="UIParent"` was resolving to. -->
+    <Frame name="BlackoutWorld" frameStrata="FULLSCREEN" hidden="true" enableMouse="true">
         <Anchors>
             <Anchor point="TOPLEFT"/>
             <Anchor point="BOTTOMRIGHT"/>

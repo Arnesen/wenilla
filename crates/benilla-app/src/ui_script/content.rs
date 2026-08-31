@@ -92,6 +92,10 @@ pub(crate) fn digest() -> String {
         eat(toc.as_bytes());
     }
     for name in super::addons::Addon::builtin().toc.files {
+        // A chain entry (1751) contributes its NAME only: its bytes are the player's install,
+        // which does not move between two runs on one machine — and this stamp's only question is
+        // *were these two runs looking at the same interface*. Migrating a window still changes the
+        // digest, because the manifest line changes.
         eat(name.as_bytes());
         if let Some(text) = read(&name) {
             eat(text.as_bytes());
@@ -116,7 +120,7 @@ mod tests {
     /// `WOW_CAPTURE_UI=1`, so nothing failed. Now a name that is not in the binary fails here.
     #[test]
     fn every_manifest_entry_is_compiled_in() {
-        for name in crate::ui_script::manifest::manifest_files() {
+        for name in crate::ui_script::manifest::shipped_manifest_files() {
             assert!(
                 super::read(&name).is_some(),
                 "benilla.toc names {name}, which is not in assets/ui"

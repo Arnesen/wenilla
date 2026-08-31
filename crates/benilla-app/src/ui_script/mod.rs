@@ -765,6 +765,9 @@ impl benilla_ui::script::TextMeasure for FixedWidthFont {
 }
 
 #[cfg(test)]
+mod test_ui;
+
+#[cfg(test)]
 mod cinematic_tests;
 
 #[cfg(test)]
@@ -907,6 +910,8 @@ mod options_tests;
 
 #[cfg(test)]
 mod delete_item_tests;
+#[cfg(test)]
+mod instance_tests;
 
 #[cfg(test)]
 mod static_popup_tests;

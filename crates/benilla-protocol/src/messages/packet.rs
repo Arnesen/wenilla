@@ -1116,6 +1116,31 @@ pub enum ServerPacket {
     RaidInstanceInfo {
         entries: Vec<super::group::RaidInstanceEntry>,
     },
+    /// `SMSG_RAID_INSTANCE_MESSAGE` — a raid lockout's welcome/countdown line (decision 1748).
+    RaidInstanceMessage {
+        message: super::instance::RaidInstanceMessage,
+    },
+    /// `SMSG_INSTANCE_SAVE_CREATED` — "you are now saved to this instance". vmangos always sends
+    /// `0`; the flag is kept raw because the client's `== 1` arm is a different line.
+    InstanceSaveCreated {
+        flag: u32,
+    },
+    /// `SMSG_INSTANCE_RESET` — the reset took; the payload is the `Map.dbc` id that was reset.
+    InstanceReset {
+        map: u32,
+    },
+    /// `SMSG_INSTANCE_RESET_FAILED` — the reset was refused (decision 1748).
+    InstanceResetFailed {
+        failure: super::instance::InstanceResetFailed,
+    },
+    /// `SMSG_UPDATE_LAST_INSTANCE` — the `Map.dbc` id of the dungeon we were last in.
+    UpdateLastInstance {
+        map: u32,
+    },
+    /// `SMSG_UPDATE_INSTANCE_OWNERSHIP` — non-zero while we hold at least one permanent bind.
+    UpdateInstanceOwnership {
+        owns: u32,
+    },
     /// `SMSG_DUEL_REQUESTED` — a duel challenge. Sent to challenger and challenged alike; which
     /// one we are is `challenger == our guid` (decision 0633).
     DuelRequested {
@@ -1613,6 +1638,12 @@ impl ServerPacket {
             }
             ServerPacket::RaidInstanceInfo { .. } => "SMSG_RAID_INSTANCE_INFO".into(),
             ServerPacket::DuelRequested { .. } => "SMSG_DUEL_REQUESTED".into(),
+            ServerPacket::RaidInstanceMessage { .. } => "SMSG_RAID_INSTANCE_MESSAGE".into(),
+            ServerPacket::InstanceSaveCreated { .. } => "SMSG_INSTANCE_SAVE_CREATED".into(),
+            ServerPacket::InstanceReset { .. } => "SMSG_INSTANCE_RESET".into(),
+            ServerPacket::InstanceResetFailed { .. } => "SMSG_INSTANCE_RESET_FAILED".into(),
+            ServerPacket::UpdateLastInstance { .. } => "SMSG_UPDATE_LAST_INSTANCE".into(),
+            ServerPacket::UpdateInstanceOwnership { .. } => "SMSG_UPDATE_INSTANCE_OWNERSHIP".into(),
             ServerPacket::DuelOutOfBounds => "SMSG_DUEL_OUTOFBOUNDS".into(),
             ServerPacket::DuelInBounds => "SMSG_DUEL_INBOUNDS".into(),
             ServerPacket::DuelComplete { .. } => "SMSG_DUEL_COMPLETE".into(),

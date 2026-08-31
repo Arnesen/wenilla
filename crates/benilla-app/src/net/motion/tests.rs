@@ -166,6 +166,42 @@ fn remote_motion_backpedal_uses_run_back_speed() {
     assert_eq!(speed, 4.5);
 }
 
+/// **A walking remote is a walking remote in every direction** (decision 1752). This block used to
+/// test the backpedal ahead of the walk bit, so an observed player who toggled walk and pressed S
+/// extrapolated at run-back speed (4.5) — fast enough to clear the `> 2× walkSpeed` boundary and
+/// play the *run* clip while its owner walked. The bytes take the walk arm (`0x7c4d11` →
+/// `0x7c4d4d`) before the run arm's backward min (`0x7c4d1d`), so both directions are
+/// `min(walk, run)` = 2.5.
+#[test]
+fn a_walking_remote_backpedals_at_walk_speed_not_run_back() {
+    let s = speeds();
+    let (pos, _o, _vz, speed) =
+        motion(move_flags::FORWARD | move_flags::WALK_MODE, 0.0).advance(s, 1.0);
+    assert!(
+        (pos[0] - 2.5).abs() < 1e-3,
+        "a walk advances +X by 2.5: {pos:?}"
+    );
+    assert_eq!(speed, 2.5);
+
+    let (pos, _o, _vz, speed) =
+        motion(move_flags::BACKWARD | move_flags::WALK_MODE, 0.0).advance(s, 1.0);
+    assert!(
+        (pos[0] + 2.5).abs() < 1e-3,
+        "…and a WALKING backpedal is still 2.5, not run_back's 4.5: {pos:?}"
+    );
+    assert_eq!(speed, 2.5);
+    // The control: without the walk bit the same press is the run-back min, unchanged.
+    let (_pos, _o, _vz, speed) = motion(move_flags::BACKWARD, 0.0).advance(s, 1.0);
+    assert_eq!(speed, 4.5);
+    // …and swimming still pre-empts the walk bit entirely — there is no swim-walk.
+    let (_pos, _o, _vz, speed) = motion(
+        move_flags::FORWARD | move_flags::SWIMMING | move_flags::WALK_MODE,
+        0.0,
+    )
+    .advance(s, 1.0);
+    assert_eq!(speed, 4.0, "a walker who wades strokes at full swim speed");
+}
+
 #[test]
 fn remote_motion_swim_backpedal_takes_min_of_the_swim_pair() {
     // The byte law (`0x7c4c90`'s backward arms, swim-feel §5 TU-H): backward speed is

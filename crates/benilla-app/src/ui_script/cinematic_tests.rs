@@ -226,3 +226,50 @@ fn a_cinematic_hides_the_hud_through_uiparent_and_spares_the_cinematic_frame() {
     assert!(visible(&s, "UIParent"), "and the world's UI comes back");
     assert!(visible(&s, "StaticPopup1"), "with the child that was up");
 }
+
+/// **The screenshot confirmation survives the HUD hide — because the reference seats it outside
+/// the HUD.** `WorldFrame.xml`'s own header states the law in one line: *"Children of the world
+/// frame are visible even when the UI is turned off."* `ScreenshotStatus` is declared inside that
+/// frame, and the case that needs it is this file's: `CinematicFrame`'s `OnKeyDown` hands the
+/// SCREENSHOT key back to its binding by hand (1701) precisely so a fly-by can be captured, so the
+/// one moment the confirmation is most certainly wanted is the one where `UIParent` is hidden.
+///
+/// Ours sat on `UIParent` until decision 1757, on a note that read the two seats as equivalent
+/// because both frames are full-screen and their CENTERs coincide — true of the geometry, and
+/// silent about the hide.
+#[test]
+fn the_screenshot_confirmation_shows_during_a_cinematic() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    s.resolve();
+
+    let visible = |s: &UiScript, f: &str| {
+        s.eval::<i64>(&format!(
+            "local x = getglobal('{f}') if not x then return -1 end return x:IsVisible() and 1 or 0"
+        ))
+        .unwrap()
+    };
+
+    start_cinematic(&mut s);
+    assert_eq!(visible(&s, "UIParent"), 0, "the fly-by hid the HUD");
+
+    // The engine's own report of a finished capture (`crate::screenshot` → SCREENSHOT_SUCCEEDED).
+    s.fire_event("SCREENSHOT_SUCCEEDED", vec![]);
+    s.resolve();
+    assert_eq!(
+        visible(&s, "ScreenshotStatus"),
+        1,
+        "\"Screen Captured\" is readable over the fly-by — a confirmation that cannot appear \
+         while the UI is hidden is no confirmation, and the cinematic is the case the reference \
+         hands the key back for"
+    );
+    assert_eq!(
+        s.eval::<String>("return ScreenshotStatusText:GetText()")
+            .unwrap(),
+        "Screen Captured",
+        "with the reference's own string"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

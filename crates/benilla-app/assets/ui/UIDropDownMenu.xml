@@ -1119,8 +1119,15 @@
            it is ONE library file replicated, and only that one of its two sites is unguarded (the
            other is `info.textHeight or UIDROPDOWNMENU_DEFAULT_TEXT_HEIGHT or 10`). Writing a
            literal here would have been a silent fidelity divergence, not a fix. -->
-    <!-- `toplevel` is authored on the ref's INSTANCES, not its template (decision 1318). -->
-    <Button name="DropDownList1" inherits="UIDropDownListTemplate" id="1" toplevel="true" parent="UIParent">
+    <!-- `toplevel` is authored on the ref's INSTANCES, not its template (decision 1318).
+
+         **Neither list carries a `parent=`, and neither does the reference's** (UIDropDownMenu.xml
+         l.5/l.20 — `toplevel="true" frameStrata="FULLSCREEN_DIALOG"` and nothing else). That is
+         not incidental. A dropdown has to open over whatever opened it, an `area = "full"` panel
+         included — and a `full` panel is shown through `SetFullScreenFrame`, which hides
+         `UIParent`. A list under `UIParent` opens into a hidden tree, so the world map's own
+         continent and zone pickers answered a click with nothing at all (decision 1757). -->
+    <Button name="DropDownList1" inherits="UIDropDownListTemplate" id="1" toplevel="true">
         <Scripts>
             <OnLoad>
                 local fontName, fontHeight, fontFlags = getglobal("DropDownList1Button1NormalText"):GetFont();
@@ -1132,7 +1139,7 @@
             </OnHide>
         </Scripts>
     </Button>
-    <Button name="DropDownList2" inherits="UIDropDownListTemplate" id="2" toplevel="true" parent="UIParent">
+    <Button name="DropDownList2" inherits="UIDropDownListTemplate" id="2" toplevel="true">
         <Scripts>
             <OnHide>
                 CloseDropDownMenus(3);

@@ -501,6 +501,11 @@ pub(super) fn control(
         // `turn_delta` the same way) or a real mouse TURN of the body. One of the movement inputs
         // that stands a seated avatar back up, and the camera's rigid carry below.
         let turned = turn_delta != 0.0 || mouse_turned;
+        // The gait toggle (`TOGGLERUN`) — the walk/run latch, run here so the speed select
+        // below reads the bit this frame's press left, which is the reference's own order
+        // (`ToggleRun` is an input-phase command; the mover reads `CMovement+0x40` after it).
+        // [`super::walk`] owns the latch and the refusal chain.
+        walk::update(&mut player, &body, binds);
         // Posture ([`posture`]) — the stand state (`X` and the `/sit` family) and the sheath
         // toggle (`Z`), which interlock: the stow rider fires off the stand state this commits,
         // and the toggle's guard chain refuses on it. Returns the **committed** state, which the
@@ -517,26 +522,45 @@ pub(super) fn control(
         );
         // Backpedaling is slower: the backward move-flag selects the backward speed, dominating
         // strafe (binary-VERIFIED — see RUN_BACK_RATIO). Net-backward = the S key held without a
-        // forward override (W or both-button run). The backward arm is a **min**, not a plain
-        // select — `0x7c4d1d` computes `min(runBack, run)` (the swim §5's TU-H; observably the
-        // plain runBack whenever it's the slower, i.e. always at vanilla values, but a server
-        // that force-sets runBack above run is clamped like the ref). The resulting (slower)
-        // speed also feeds jump takeoff, so a backward jump lands shorter for free.
+        // forward override (W or both-button run). The resulting (slower) speed also feeds jump
+        // takeoff, so a backward jump lands shorter for free.
         let net_backward = fwd_axis < 0;
-        // Run/runback are server-authoritative (`UnitSpeeds`: seeded by our create's LIVING block,
-        // updated live by SMSG_FORCE_*_SPEED_CHANGE — so `.modify speed`, mounts and slows actually
-        // move us at the server's number). `$WOW_MOVE_SPEED` stays the absolute dev override
-        // (backpedal keeps the vanilla 4.5/7.0 ratio under it); pre-create frames fall back the
-        // same way.
-        let (run_speed, run_back_speed) = match mover_speeds {
-            Some(s) if !move_speed.env_override => (s.run, s.run_back),
-            _ => (move_speed.value, move_speed.value * RUN_BACK_RATIO),
+        // The mover's speed SET this frame: server-authoritative (`UnitSpeeds` — seeded by our
+        // create's LIVING block, moved live by SMSG_FORCE_*_SPEED_CHANGE, so `.modify speed`,
+        // mounts and slows actually move us at the server's number), or the `$WOW_MOVE_SPEED` dev
+        // override's synthetic set, which keeps the vanilla 2.5/4.5/7.0 ratios so that walking and
+        // backpedaling stay themselves under it. Pre-create frames take the same fallback.
+        let speeds = match mover_speeds {
+            Some(s) if !move_speed.env_override => s,
+            _ => benilla_protocol::MoveSpeeds {
+                walk: move_speed.value * WALK_RATIO,
+                run: move_speed.value,
+                run_back: move_speed.value * RUN_BACK_RATIO,
+                ..Default::default()
+            },
         };
-        let speed = if net_backward {
-            run_back_speed.min(run_speed)
-        } else {
-            run_speed
-        };
+        // …turned into a yards/second by the ONE statement of the reference's
+        // `GetCurrentSpeed 0x7c4c90` ([`crate::net::current_speed`]), the same call the remote
+        // extrapolator makes — so our own body and every body we watch agree about the cascade,
+        // including the part that is easy to get backwards: **the walk arm is taken before the
+        // backward min**, so walking backwards is walk speed (2.5), not run-back (4.5).
+        //
+        // The flag word handed over is this frame's *gait intent*, not the wire word — that one is
+        // built later, after the mover has run ([`super::flags::this_frame`]). Only the three bits
+        // the ground cascade reads are needed and all three are known here; swimming never reaches
+        // this arm ([`super::swim`] owns its own leg of the same getter).
+        let speed = crate::net::current_speed(
+            &speeds,
+            if net_backward {
+                move_flags::BACKWARD
+            } else {
+                move_flags::FORWARD
+            } | if player.walking {
+                move_flags::WALK_MODE
+            } else {
+                0
+            },
+        );
         // Root is refused HERE (the reference refuses it twice upstream of the handler: the Lua
         // gate's `test ch,0x12` and the replay allow-list `0x615c71`/`0x618030`, where command
         // id 7 is blocked). HOVER's refusal is NOT here — it belongs to the movement handler

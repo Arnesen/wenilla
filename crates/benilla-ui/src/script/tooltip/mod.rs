@@ -266,7 +266,12 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
 }
 
 /// One text cell's write: text + color + shown. `color` alpha defaults opaque.
-fn write_cell(model: &mut Model, rh: crate::widget::RegionHandle, text: &str, color: [f32; 4]) {
+pub(super) fn write_cell(
+    model: &mut Model,
+    rh: crate::widget::RegionHandle,
+    text: &str,
+    color: [f32; 4],
+) {
     let d = model.region_data.entry(rh).or_default();
     d.text = Some(text.to_string());
     d.vertex_color = Some(color);

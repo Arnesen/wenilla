@@ -13,7 +13,7 @@
 //! numeric FileDataID — 5875 has no FileDataIDs, and every measured consumer feeds the value
 //! straight to `SetTexture`, which takes both shapes in the live client.
 
-use mlua::{Lua, Value};
+use mlua::{Lua, Table, Value};
 
 use super::cursor::{self, CursorItem, CursorPayload};
 use super::Model;
@@ -446,6 +446,71 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             } else {
                 t.wrapping_add(60)
             }))
+        })?,
+    )?;
+
+    // SetBagPortaitTexture(texture, containerID) — `0x4fa4f0` (374 B), the reference's own
+    // spelling, typo included, and CARVED (wow-re `system/ui/scratch/bag-portrait-and-appendtext.md`,
+    // §5 four-worker round). The bag window's portrait: `ContainerFrame_GenerateFrame` sets it for
+    // every container except the keyring, which takes `SetPortraitToTexture` with a fixed path one
+    // line above (ContainerFrame.lua l.418-423). benilla runs that file off the player's chain
+    // (1751), so this is a live call site.
+    //
+    // Three arms, and the FIRST is the one nobody would have guessed:
+    //
+    // 1 · **`id == 0` does nothing at all.** `0x4fa5b8 dec edi` / `0x4fa5b9 js 0x4fa65d` returns
+    //     before the clear at `0x4fa5c8` — no texture is set and none is cleared. It is not an
+    //     oversight: `ContainerFrame.xml:67` gives `$parentPortrait` no `file=`, and the backpack
+    //     takes a different ARTWORK background (`UI-BackpackBackground`) that covers the portrait
+    //     slot outright. (`Button-Backpack-Up` is nowhere on this path — its only stock use is the
+    //     main bar's own button, MainMenuBarBagButtons.xml:79.)
+    // 2 · **`id` in 1..=10** clears the texture first, then sets
+    //     `Interface\Icons\<ItemDisplayInfo.InventoryIcon_1>` for the bag in that inventory slot
+    //     — `StringLookups.dbc` row 3 measured as `"Interface\Icons"`, `.TGA` stripped,
+    //     `INV_Misc_QuestionMark` on a display-info miss. Ids 5..10 are additionally gated on the
+    //     bank being open. **An empty slot leaves the texture CLEARED** — there is no fallback art.
+    // 3 · **`id >= 11` raises** `"Invalid slot in SetBagPortaitTexture"`.
+    //
+    // Our icon comes from the same place the item's own button icon does (`GetInventoryItemTexture`
+    // reads the item template's icon), so the DBC walk above is the reference's route to the value
+    // this client already has resolved; the observable — which icon lands on the portrait — is the
+    // same one.
+    lua.globals().set(
+        "SetBagPortaitTexture",
+        lua.create_function(|lua, (region, container): (Table, i64)| {
+            // Arm 3, before anything is touched.
+            if container >= 11 {
+                return Err(mlua::Error::runtime("Invalid slot in SetBagPortaitTexture"));
+            }
+            // Arm 1: the backpack is a silent return, not a clear.
+            if container <= 0 {
+                return Ok(());
+            }
+            // `ContainerIDToInventoryID`'s arithmetic, deliberately re-expressed rather than
+            // called: that binding is a Lua global an addon may replace, and the engine's own
+            // portrait read does not go through Lua.
+            let t = container.wrapping_sub(1);
+            let inv = if t < 4 {
+                t.wrapping_add(20)
+            } else {
+                t.wrapping_add(60)
+            };
+            let path = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                usize::try_from(inv)
+                    .ok()
+                    .and_then(|slot| model.inv_slot("player", slot))
+                    .and_then(|v| v.icon.clone())
+            };
+            let rh = crate::script::region::region_handle_of(lua, &region)?;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let data = model.region_data.entry(rh).or_default();
+            // Arm 2. `path` is `None` for an empty slot, and that IS the answer: the reference
+            // clears unconditionally and only then tries to set.
+            data.texture = path;
+            data.circular = true;
+            data.portrait_unit = None;
+            Ok(())
         })?,
     )?;
 

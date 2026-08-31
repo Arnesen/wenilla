@@ -165,6 +165,18 @@ pub(super) fn this_frame(
             move_flags_now = 0;
         }
     }
+    // **The walk gait rides every packet** — `MOVEFLAG_WALK_MODE` `0x100`, latched by the
+    // `TOGGLERUN` keybind ([`super::walk`], decision 1752). Deliberately OUTSIDE the branches
+    // above, and after the settle's `move_flags_now = 0`: this is a MODE, not a motion. The
+    // settle's wipe exists so a frozen avatar reports no locomotion, and clearing the walk bit
+    // with it would tell the server we went back to running — a spurious SET_RUN_MODE, then a
+    // SET_WALK_MODE the frame the settle releases, on every teleport. Nothing below strips it
+    // either: `incapacitated_flags` touches only the direction and turn bits, which is the
+    // reference's own answer too — its input allow-list (`0x615c71` → the table at `0x618054`)
+    // blocks the translation commands while rooted and **explicitly permits run/walk**.
+    if player.walking {
+        move_flags_now |= move_flags::WALK_MODE;
+    }
     // **A knockback arc streams FORWARD for its whole length** (decision 1740). The reference's
     // apply plants it as part of the launch (`0x6179c0`'s `0x617a18 or edx,0x8001` — set bit 0,
     // clear bit 1) and nothing clears it until the arc ends, and the send mask
@@ -223,6 +235,89 @@ mod tests {
             turn_left: false,
             turn_right: false,
         }
+    }
+
+    /// **Walk mode is a MODE, so it survives everything that clears locomotion** (decision 1752).
+    /// Three states that each wipe or narrow the word, and the bit must be in both the wire and
+    /// the pose word out of every one of them:
+    ///
+    /// * the post-teleport/login **settle** (`held`), whose `move_flags_now = 0` exists so a
+    ///   frozen avatar reports no walking — clearing the gait with it would tell the server we
+    ///   went back to running, then re-announce a frame later: a SET_RUN_MODE/SET_WALK_MODE pair
+    ///   on every single teleport;
+    /// * **rooted**, which drops the direction bits — and the reference agrees the gait stays: its
+    ///   input allow-list (`0x615c71` → `0x618054`) blocks the translation commands while rooted
+    ///   and **explicitly permits** run/walk;
+    /// * **stunned**, which drops the turn bits.
+    #[test]
+    fn the_walk_gait_outlives_the_settle_the_root_and_the_stun() {
+        let case = |held: bool, rooted: bool, stunned: bool| {
+            let mut player = Player {
+                walking: true,
+                ..Default::default()
+            };
+            player.modes.rooted = rooted;
+            let mut axes = still();
+            axes.fwd = 1;
+            axes.translating = true;
+            this_frame(
+                &mut player,
+                &axes,
+                None,
+                false,
+                false,
+                held,
+                false,
+                stunned,
+                1.0,
+                0.0,
+            )
+        };
+        for (name, held, rooted, stunned) in [
+            ("moving", false, false, false),
+            ("settling", true, false, false),
+            ("rooted", false, true, false),
+            ("stunned", false, false, true),
+        ] {
+            let f = case(held, rooted, stunned);
+            assert_eq!(
+                f.wire & move_flags::WALK_MODE,
+                move_flags::WALK_MODE,
+                "{name}: the gait rides the wire ({:#x})",
+                f.wire
+            );
+            assert_eq!(
+                f.pose & move_flags::WALK_MODE,
+                move_flags::WALK_MODE,
+                "{name}: …and the animation sees it too ({:#x})",
+                f.pose
+            );
+        }
+        // The settle really is wiping the locomotion — the control that says the assertion above
+        // is about a mode surviving a wipe, not about there being no wipe.
+        assert_eq!(
+            case(true, false, false).wire & move_flags::ANY_MOVE,
+            0,
+            "the settle still clears the direction bits"
+        );
+        // …and a runner never carries the bit.
+        let mut runner = Player::default();
+        let mut axes = still();
+        axes.fwd = 1;
+        axes.translating = true;
+        let f = this_frame(
+            &mut runner,
+            &axes,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            1.0,
+            0.0,
+        );
+        assert_eq!(f.wire & move_flags::WALK_MODE, 0);
     }
 
     /// **A knockback arc streams FORWARD for its whole length** (decision 1740). The reference's

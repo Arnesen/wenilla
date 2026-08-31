@@ -92,6 +92,8 @@ mod swim;
 /// What the camera orbits, when that is not our own body — the far-sight anchor (B151, and Mind
 /// Control's camera half in B211, which rides the same field).
 mod view_subject;
+/// The walk/run gait toggle (`TOGGLERUN`) — one latched bit and the reference's refusal chain.
+mod walk;
 mod wire_in;
 
 // `apply_self_model_fade` is `pub(crate)`-visible: it is the LAST writer of a self body part's
@@ -115,8 +117,8 @@ use state::{
     MoveSpeed, PlayerRide, AIR_NUDGE_SPEED, FALL_FAR_DROP, FALL_FAR_TIME, FOOT_CONE_HEIGHT,
     GROUND_COS, GROUND_PROBE, JUMP_SPEED, LAND_PROBE, MOUSELOOK_PITCH_CLAMP, RUN_BACK_RATIO,
     SKIN_WIDTH, STATIONARY_CHASE_RATE, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_ADVANCE,
-    STEP_UP_HEIGHT, TURN_RATE, TURN_RATE_MOVING, WATER_WALK_PITCH_FLOOR, WEDGE_MIN_FALL,
-    WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
+    STEP_UP_HEIGHT, TURN_RATE, TURN_RATE_MOVING, WALK_RATIO, WATER_WALK_PITCH_FLOOR,
+    WEDGE_MIN_FALL, WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
 };
 // `SETTLE_TIMEOUT` is `pub(crate)`: the settle release lives in the terrain streamer (decision
 // 0737 — residency releases the hold, not ground contact), which owns the deadline push while the

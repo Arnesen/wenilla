@@ -4486,12 +4486,50 @@ mod dependency_tests {
     /// Without this, a probe arm that is simply broken would charge its own failure to all 218
     /// addons — the mis-attribution 1209 exists about, arriving through the instrument instead of
     /// through a claim.
+    ///
+    /// **"Silent" has to mean "ran and said nothing", never "had nothing to run"** — the same
+    /// distinction the hover-arm test above is built around ("found nothing" vs "ran nothing"),
+    /// and decision 1751 put this test one step from the wrong side of it: `ToggleBackpack`, the
+    /// probe's first and most-hooked entry point, is defined in the reference's own
+    /// `ContainerFrame.lua` now, which `load_default_ui` reads off the PLAYER'S INSTALL. On a
+    /// machine without one the global is simply absent, `drive_ui_probe`'s `try` guard skips it,
+    /// and an empty error list would mean the probe drove nothing at all. So the entry points are
+    /// asserted to EXIST before the silence is asserted, and the test gates on client data like
+    /// every other reader of the chain.
+    ///
+    /// What is deliberately NOT asserted here is `load_default_ui`'s own failure list. It is not
+    /// empty on a seated session today — `TargetFrame`'s OnLoad reaches
+    /// `BenillaTargetAuras_Update` (UnitFrames.xml:956), which indexes `TargetofTargetFrame`
+    /// ~1150 lines before that frame is declared (UnitFrames.xml:2103), so a seated TARGET raises
+    /// there at load. That is a real bug in that file and a separate one from anything this test
+    /// measures; pinning it here would make the probe's gate hostage to it. Recorded rather than
+    /// worked around.
     #[test]
     fn the_ui_probe_is_silent_on_a_clean_vm() {
+        let _data = benilla_formats::wow_data_or_skip!();
         let mut script = UiScript::new().unwrap();
         script.set_screen_size(1024.0, 768.0);
         seat_a_session(&mut script);
         let _ = crate::ui_script::load_default_ui(&script);
+        // The probe's entry points are here to be driven. Each is `try`-guarded inside
+        // `drive_ui_probe`, so a missing one is silent — which would make the assertion below
+        // pass by having done nothing.
+        for entry in [
+            "ToggleBackpack",
+            "UnitFrame_OnEnter",
+            "UnitFrame_OnLeave",
+            "ActionButton_Update",
+            "GameTooltip_SetDefaultAnchor",
+        ] {
+            assert_eq!(
+                script
+                    .eval::<String>(&format!("return type({entry})"))
+                    .unwrap(),
+                "function",
+                "{entry} is not in the VM, so the probe would skip it and this test would pass \
+                 without driving anything"
+            );
+        }
 
         let errs = drive_ui_probe(&mut script);
         assert!(

@@ -9,23 +9,21 @@ use benilla_ui::script::{
     QuadContent, ScriptValue, SoundRequest, UiScript,
 };
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error and returning the
-/// frame count it materialized (each test file keeps its own small copy — the folder's pattern).
-fn load_xml(s: &UiScript, file: &str) -> usize {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
+use super::test_ui::{bag_open, load_ui as load_xml, BAG_UI};
+
+/// Put a bag carrying `num_slots` empty slots in bag `id` — the fixture the three bag tests below
+/// need, and one they did NOT need before 1751's swap. The reference's `OpenBag` opens nothing for
+/// a container whose `GetContainerNumSlots` is 0 (ContainerFrame.lua l.144-165); our five
+/// hand-authored windows showed either way, so these tests used to name no container at all.
+fn equip_bag(s: &mut UiScript, id: i64, name: &str, num_slots: u32) {
+    s.set_container(
+        id,
+        Some(ContainerState {
+            name: Some(name.into()),
+            num_slots,
+            slots: std::collections::HashMap::new(),
+        }),
     );
-    report.frames
 }
 
 /// Find a bare frame's own rect via its `QuadContent::Frame` entry (every frame emits one, at its
@@ -366,26 +364,33 @@ fn merchant_show_hide_plays_open_and_close_kits() {
     );
 }
 
-/// With the bag loaded, opening the vendor also opens your bags (the real MerchantFrame_OnShow →
-/// OpenBackpack, decision 0095; ALL equipped bags since decision 0561 — here only the backpack
-/// exists), so the backpack kit plays ALONGSIDE the panel kit — the "two sounds go together" the
+/// With the bags loaded, opening the vendor also opens them (the real MerchantFrame_OnShow →
+/// OpenBackpack, decision 0095; ALL equipped bags since decision 0561 — here only the backpack is
+/// carried), so the backpack kit plays ALONGSIDE the panel kit — the "two sounds go together" the
 /// director heard. On close, CloseBackpack hides the bag it opened, so both close kits play. The
-/// bag's own OnShow/OnHide fire first (OpenBackpack shows it before the panel sound), so the
+/// bag window's own OnShow/OnHide fire first (OpenBackpack shows it before the panel sound), so the
 /// backpack kit leads each pair.
+///
+/// **What 1751's swap changed, and what it did not.** The behaviour is the same and the sound
+/// pairs are unchanged; the window is now the reference's own recycled `ContainerFrame` rather than
+/// `BenillaBagFrame`, so the open assertion asks `IsBagOpen(0)` instead of naming a frame, and the
+/// two bag kits come from `ContainerFrame_OnShow`/`_OnHide`'s own `PlaySound` calls
+/// (ContainerFrame.lua l.140 / l.120). The seeded backpack is new and load-bearing — see
+/// [`equip_bag`].
 #[test]
 fn vendor_open_opens_the_backpack_and_layers_the_sound() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
-    load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
+    // `BAG_UI` already carries GameTooltip.xml, so the app's tooltip-before-merchant order holds.
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
     load_xml(&s, "MerchantFrame.xml");
+    s.set_money(0);
+    equip_bag(&mut s, 0, "Backpack", 16);
     let _ = s.take_sounds(); // ignore anything from load (frames are hidden; nothing should)
 
-    s.set_money(0);
     s.set_merchant(Some(MerchantState::default()));
     s.fire_event("MERCHANT_SHOW", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -397,10 +402,7 @@ fn vendor_open_opens_the_backpack_and_layers_the_sound() {
         ],
         "vendor open opens the backpack (bag kit) then plays its own panel kit"
     );
-    assert!(
-        s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
-        "the backpack is open alongside the vendor"
-    );
+    assert!(bag_open(&s, 0), "the backpack is open alongside the vendor");
 
     s.fire_event("MERCHANT_CLOSED", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -412,27 +414,36 @@ fn vendor_open_opens_the_backpack_and_layers_the_sound() {
         ],
         "vendor close closes the backpack it opened, both close kits play"
     );
+    assert!(!bag_open(&s, 0), "…and the window goes with it");
 }
 
-/// A backpack the player already had open is NOT closed when the vendor closes (the real
-/// `backpackWasOpen` guard): opening the vendor over an already-open bag plays only the panel kit,
-/// and closing plays only the panel close kit — the bag stays.
+/// A backpack the player already had open is NOT closed when the vendor closes: opening the vendor
+/// over an already-open bag plays only the panel kit, and closing plays only the panel close kit —
+/// the bag stays.
+///
+/// The guard is a **was-open memory**, and 1751 left two spellings of it in the tree: the
+/// reference's own single `ContainerFrame1.backpackWasOpen` flag (ContainerFrame.lua l.187-202) and
+/// `UiPanels.xml`'s bag-id-keyed `BENILLA_BAG_WAS_OPEN`, which 0561's all-bags `OpenBackpack` needs
+/// because the windows are recycled now (frame N is a different bag every time it opens). Whichever
+/// body the manifest leaves live, they spell bag 0's case identically — so this test pins the
+/// PROPERTY and stays honest either way. Which one is actually live is the next test's subject,
+/// not this one's.
 #[test]
 fn vendor_leaves_an_already_open_backpack_alone() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
-    load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
     load_xml(&s, "MerchantFrame.xml");
+    s.set_money(0);
+    equip_bag(&mut s, 0, "Backpack", 16);
 
     // Open the bag first (the 'B' toggle), then the vendor over it.
     s.run("BenillaBagToggle_OnClick()").unwrap();
+    assert!(bag_open(&s, 0), "fixture: the player's own bag is up first");
     let _ = s.take_sounds();
-    s.set_money(0);
     s.set_merchant(Some(MerchantState::default()));
     s.fire_event("MERCHANT_SHOW", vec![]);
     assert_eq!(
@@ -448,7 +459,7 @@ fn vendor_leaves_an_already_open_backpack_alone() {
         "the pre-opened bag is left open → only the panel close kit"
     );
     assert!(
-        s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
+        bag_open(&s, 0),
         "the player's own open bag survives the vendor closing"
     );
 }
@@ -457,56 +468,41 @@ fn vendor_leaves_an_already_open_backpack_alone() {
 /// with it — not only the backpack like the ref's OpenBackpack — and closes every bag it opened.
 /// Backpack + one equipped bag in slot 2 (bags 1/3/4 unequipped → no window): MERCHANT_SHOW opens
 /// both windows, MERCHANT_CLOSED closes both.
+///
+/// This is also the test that decides WHOSE `OpenBackpack` is live. 1751 keeps 0561 by shadowing:
+/// `UiPanels.xml` redefines `OpenBackpack`/`CloseBackpack`/`CloseAllBags` over the sourced
+/// `ContainerFrame.lua`'s, and its body now loops the reference's `OpenBag`/`CloseBag` rather than
+/// five windows by name — so the "unequipped slot" arm below is the reference's own `size > 0` test
+/// rather than ours. A shadow only wins if it loads LATER (`reference_ui`'s rule: order decides,
+/// the manifest is the order), so this test is exactly the falsifier for that ordering: with the
+/// reference's own body live, bag 2 never opens and only the backpack does.
 #[test]
 fn vendor_opens_and_closes_all_equipped_bags() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
-    load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
     load_xml(&s, "MerchantFrame.xml");
-
-    s.set_container(
-        0,
-        Some(ContainerState {
-            name: Some("Backpack".into()),
-            num_slots: 16,
-            slots: std::collections::HashMap::new(),
-        }),
-    );
-    s.set_container(
-        2,
-        Some(ContainerState {
-            name: Some("Small Pouch".into()),
-            num_slots: 6,
-            slots: std::collections::HashMap::new(),
-        }),
-    );
-
-    let shown =
-        |s: &mut UiScript, name: &str| s.eval::<bool>(&format!("return {name}:IsShown()")).unwrap();
-
     s.set_money(0);
+    equip_bag(&mut s, 0, "Backpack", 16);
+    equip_bag(&mut s, 2, "Small Pouch", 6);
+
     s.set_merchant(Some(MerchantState::default()));
     s.fire_event("MERCHANT_SHOW", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-    assert!(shown(&mut s, "BenillaBagFrame"), "backpack opens");
+    assert!(bag_open(&s, 0), "backpack opens");
+    assert!(bag_open(&s, 2), "the equipped bag opens with the vendor");
     assert!(
-        shown(&mut s, "BenillaBagFrame2"),
-        "the equipped bag opens with the vendor"
-    );
-    assert!(
-        !shown(&mut s, "BenillaBagFrame1"),
-        "an unequipped slot's window stays hidden"
+        !bag_open(&s, 1) && !bag_open(&s, 3) && !bag_open(&s, 4),
+        "an unequipped slot has no container, so nothing opens for it"
     );
 
     s.fire_event("MERCHANT_CLOSED", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(
-        !shown(&mut s, "BenillaBagFrame") && !shown(&mut s, "BenillaBagFrame2"),
+        !bag_open(&s, 0) && !bag_open(&s, 2),
         "every bag the vendor opened closes with it"
     );
 }

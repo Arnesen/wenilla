@@ -1243,3 +1243,33 @@ pub const SMSG_AUCTION_REMOVED_NOTIFICATION: u16 = 0x028D; // 653
 // later.
 pub const SMSG_INIT_WORLD_STATES: u16 = 0x02C2; // 706
 pub const SMSG_UPDATE_WORLD_STATE: u16 = 0x02C3; // 707
+
+// ── The instance/raid lockout family (decision 1748) ──────────────────────────────────────────
+//
+// The five inbound handlers WoW.exe registers together at `0x498680`-`0x4986cf`, plus the
+// save-created one registered apart at `0x4e7e48`, plus the one thing the player can ask for.
+// Bodies (and the client's own read order) in [`super::instance`]; server side VERIFIED vmangos
+// `Server/Packets/Misc.{h,cpp}` + `Maps/Map.cpp`.
+
+/// "You are now saved to this instance" (`u32` flag; handler `0x4e7e60`). vmangos always sends
+/// `0`; the client's `== 1` arm wraps the same string in a `"(Debug-Only Lock Notice) %s"`
+/// literal, and anything ≥ 2 prints an uninitialized buffer (a real 1.12 bug — we print nothing).
+pub const SMSG_INSTANCE_SAVE_CREATED: u16 = 0x02CB; // 715
+/// The raid-lockout welcome/countdown line: `u32 type`, `u32 mapId`, `u32 secondsUntilReset`
+/// (handler `0x49e1c0`; the four types in [`super::instance::RaidInstanceWarning`]).
+pub const SMSG_RAID_INSTANCE_MESSAGE: u16 = 0x02FA; // 762
+/// "Reset all instances" — empty body (the `ResetInstances` binding `0x48a6b0`; vmangos
+/// `HandleResetInstancesOpcode`).
+pub const CMSG_RESET_INSTANCES: u16 = 0x031D; // 797
+/// "%s has been reset." — `u32 mapId` (handler `0x49e470`, which also clears the last-instance
+/// latch `0x495d00` *before* reading the body).
+pub const SMSG_INSTANCE_RESET: u16 = 0x031E; // 798
+/// The reset refusal: `u32 reason`, `u32 mapId` (handler `0x49e540`; the three reasons in
+/// [`super::instance::InstanceResetFailure`]).
+pub const SMSG_INSTANCE_RESET_FAILED: u16 = 0x031F; // 799
+/// The dungeon we were last in: `u32 mapId` (handler `0x49e670` → `0x495d10`). Shows no line —
+/// it is half of what `CanShowResetInstances()` reads.
+pub const SMSG_UPDATE_LAST_INSTANCE: u16 = 0x0320; // 800
+/// Whether we hold any permanent bind: `u32` flag (handler `0x49e6c0` → `0x495d50`). The other
+/// half of `CanShowResetInstances()`.
+pub const SMSG_UPDATE_INSTANCE_OWNERSHIP: u16 = 0x032B; // 811

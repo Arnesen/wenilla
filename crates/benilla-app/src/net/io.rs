@@ -1094,6 +1094,7 @@ fn writer_loop(
                     ClientCommand::ReadyCheckStart => w.ready_check_start(),
                     ClientCommand::ReadyCheckAnswer { ready } => w.ready_check_answer(ready),
                     ClientCommand::RequestRaidInfo => w.request_raid_info(),
+                    ClientCommand::ResetInstances => w.reset_instances(),
                     ClientCommand::DuelAccepted { arbiter } => w.duel_accepted(arbiter),
                     ClientCommand::DuelCancelled { arbiter } => w.duel_cancelled(arbiter),
                     ClientCommand::TogglePvp => w.toggle_pvp(),

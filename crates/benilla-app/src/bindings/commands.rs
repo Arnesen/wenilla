@@ -128,6 +128,7 @@ pub(crate) mod cmd {
     pub(crate) const SIT_OR_STAND: Cmd = by_name("SITORSTAND");
     pub(crate) const TOGGLE_SHEATH: Cmd = by_name("TOGGLESHEATH");
     pub(crate) const TOGGLE_AUTORUN: Cmd = by_name("TOGGLEAUTORUN");
+    pub(crate) const TOGGLE_RUN: Cmd = by_name("TOGGLERUN");
     pub(crate) const OPEN_CHAT: Cmd = by_name("OPENCHAT");
     pub(crate) const OPEN_CHAT_SLASH: Cmd = by_name("OPENCHATSLASH");
     pub(crate) const REPLY: Cmd = by_name("REPLY");
@@ -174,6 +175,13 @@ const TABLE: &[Spec] = &[
         Kind::Host,
         Some("NUMLOCK"),
         Some("BUTTON4")
+    ),
+    spec!(
+        "TOGGLERUN",
+        MOVEMENT,
+        Kind::Host,
+        Some("NUMPADDIVIDE"),
+        None
     ),
     spec!(
         "FOLLOWTARGET",
@@ -1767,11 +1775,6 @@ pub(crate) static ABSENT: &[Absent] = &[
         ["PitchDownStart", "PitchDownStop"],
         "no keyboard pitch — see PITCHUP"
     ),
-    absent!(
-        "TOGGLERUN",
-        ["ToggleRun"],
-        "no walk gait: neither MSG_MOVE_SET_WALK_MODE/SET_RUN_MODE nor a walk animation exists"
-    ),
     // ── Chat ────────────────────────────────────────────────────────────────────────────
     absent!(
         "COMBATLOGPAGEUP",
@@ -2160,9 +2163,20 @@ mod tests {
     }
 
     /// **The scanner's own falsifier.** [`the_absent_commands_are_still_absent`] is only a gate
-    /// while `lua_globals_defined` really sees both kinds of definition; a scanner that quietly
+    /// while `lua_globals_defined` really sees every kind of definition; a scanner that quietly
     /// returned nothing would pass every row forever, which is the exact failure it exists to
     /// end. So: one global of each kind that is certainly defined, and one that certainly is not.
+    ///
+    /// **There are THREE kinds since decision 1751, and this test found the third the hard way.**
+    /// `ToggleKeyRing` sat in the FrameXML row below and started failing the day the bag windows
+    /// migrated: it is defined in `ContainerFrame.lua`, which this client no longer ships — it
+    /// EXECUTES it off the player's own patch chain. The honest repair was not to swap the name
+    /// for one still in `assets/ui`; it was that the scan had gone blind to a whole store, and
+    /// blind to it in exactly the direction that matters (1751 §4 makes "ship the stock files off
+    /// the chain" the default for a NEW window, so the global that retires an ABSENT row —
+    /// `ToggleBattlefieldMinimap`, say — will appear in neither Rust nor `assets/ui`). So
+    /// `lua_globals_defined` reads the chain half of the manifest too, and `ToggleKeyRing` stays
+    /// here as the witness for it.
     #[test]
     fn the_global_scanner_sees_both_kinds_of_definition() {
         let defined = lua_globals_defined();
@@ -2172,11 +2186,25 @@ mod tests {
                 "the Rust scan missed the host registration `{host}`"
             );
         }
-        for framexml in ["ToggleKeyRing", "ToggleCharacter", "ChangeActionBarPage"] {
+        // Each is defined ONLY in `assets/ui` — the reference's own homes for them
+        // (CharacterFrame.lua, ActionBarFrame.lua, UIParent.lua) are not among the files
+        // `benilla.toc` sources, so the chain scan below cannot cover for a broken one.
+        for shipped in ["ToggleCharacter", "ChangeActionBarPage", "ShowUIPanel"] {
             assert!(
-                defined.contains(framexml),
-                "the FrameXML scan missed `{framexml}`"
+                defined.contains(shipped),
+                "the assets/ui scan missed `{shipped}`"
             );
+        }
+        // The chain half needs a client, like every other reader of install content — and the
+        // two rows above still run without one, so the test keeps its teeth either way.
+        if benilla_formats::wow_data().is_some() {
+            for sourced in ["ToggleKeyRing", "ToggleBag", "OpenAllBags"] {
+                assert!(
+                    defined.contains(sourced),
+                    "the chain scan missed `{sourced}` — it is defined in the reference's own \
+                     ContainerFrame.lua, which benilla.toc sources off the player's install"
+                );
+            }
         }
         assert!(
             !defined.contains("BenillaNoSuchGlobalExists"),
@@ -2197,13 +2225,25 @@ mod tests {
         Some(benilla_ui::bindings_xml::parse(&xml).expect("Blizzard's own file parses"))
     }
 
-    /// Every Lua global this client defines, read out of its own sources: the host registrations
-    /// (`g.set("Name", …)` anywhere in the workspace) and the FrameXML port's own function
-    /// definitions (`function Name(` / `Name = function` inside the `<Script>` blocks).
+    /// Every Lua global this client defines, read out of its own sources — **all three stores**:
+    /// the host registrations (`g.set("Name", …)` anywhere in the workspace), our own FrameXML
+    /// port's function definitions (`function Name(` / `Name = function` inside the `<Script>`
+    /// blocks of `assets/ui`), and the reference's own FrameXML that decision 1751 executes off
+    /// the player's installed patch chain.
+    ///
+    /// The third store is not decoration. Until the bag windows migrated, "the FrameXML this
+    /// client runs" and "the files in `assets/ui`" were the same set; they are not any more, and
+    /// 1751 §4 makes the divergence grow — a NEW window ships as the stock files off the chain
+    /// plus the engine verbs they call, so the global that would retire an [`ABSENT`] row can land
+    /// without a line changing in either half this scan used to read. `benilla.toc` is the one
+    /// ordered list of both stores (a manifest entry carrying a path is the reference's file), so
+    /// it is what the chain half walks. No install ⇒ no chain half, the standard degradation.
     ///
     /// Deliberately syntactic and deliberately generous — a false "defined" fails the gate loudly
     /// (it asks for a row that turns out not to work), while a false "missing" would let a landed
-    /// mechanism stay silent, which is the failure this whole gate exists to end.
+    /// mechanism stay silent, which is the failure this whole gate exists to end. A reference
+    /// file's `local function name()` is therefore counted as well; that is the generous direction
+    /// on purpose.
     fn lua_globals_defined() -> std::collections::HashSet<String> {
         fn walk(dir: &std::path::Path, ext: &str, out: &mut Vec<std::path::PathBuf>) {
             let Ok(entries) = std::fs::read_dir(dir) else {
@@ -2222,6 +2262,59 @@ mod tests {
             }
         }
 
+        fn push(names: &mut std::collections::HashSet<String>, s: &str) {
+            if s.chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            {
+                names.insert(s.to_string());
+            }
+        }
+
+        /// One Lua-carrying text's own definitions — a `<Script>` block of ours or a reference
+        /// `.lua` off the chain, the same two shapes either way.
+        fn scan_lua(text: &str, names: &mut std::collections::HashSet<String>) {
+            let mut rest = text;
+            while let Some(i) = rest.find("function ") {
+                rest = &rest[i + "function ".len()..];
+                let end = rest
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(rest.len());
+                if rest[end..].trim_start().starts_with('(') {
+                    push(names, &rest[..end]);
+                }
+            }
+            for line in text.lines() {
+                let line = line.trim_start();
+                if let Some((lhs, rhs)) = line.split_once('=') {
+                    let lhs = lhs.trim();
+                    if rhs.trim_start().starts_with("function")
+                        && lhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    {
+                        push(names, lhs);
+                    }
+                }
+            }
+        }
+
+        /// The `.lua` files an XML document pulls in through `<Script file="…"/>`. Only a script
+        /// reference ends in `.lua` — a `<Texture file=>` names art — so the extension is the
+        /// whole test, and the paths come back relative to the document's own directory, which is
+        /// how the loader resolves them (1186).
+        fn script_files(text: &str) -> Vec<String> {
+            let mut out = Vec::new();
+            let mut rest = text;
+            while let Some(i) = rest.find("file=\"") {
+                rest = &rest[i + "file=\"".len()..];
+                let Some(end) = rest.find('"') else { break };
+                if rest[..end].to_ascii_lowercase().ends_with(".lua") {
+                    out.push(rest[..end].to_string());
+                }
+                rest = &rest[end..];
+            }
+            out
+        }
+
         // `crates/benilla-app/` → the workspace root.
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -2230,14 +2323,6 @@ mod tests {
             .to_path_buf();
 
         let mut names = std::collections::HashSet::new();
-        let mut push = |s: &str| {
-            if s.chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            {
-                names.insert(s.to_string());
-            }
-        };
 
         let mut rust = Vec::new();
         walk(&root.join("crates"), "rs", &mut rust);
@@ -2253,37 +2338,53 @@ mod tests {
                 let head = rest.trim_start();
                 if let Some(body) = head.strip_prefix('"') {
                     if let Some(end) = body.find('"') {
-                        push(&body[..end]);
+                        push(&mut names, &body[..end]);
                     }
                 }
             }
         }
 
+        let ui = root.join("crates/benilla-app/assets/ui");
         let mut xml = Vec::new();
-        walk(&root.join("crates/benilla-app/assets/ui"), "xml", &mut xml);
+        walk(&ui, "xml", &mut xml);
         for path in xml {
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let mut rest = text.as_str();
-            while let Some(i) = rest.find("function ") {
-                rest = &rest[i + "function ".len()..];
-                let end = rest
-                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                    .unwrap_or(rest.len());
-                if rest[end..].trim_start().starts_with('(') {
-                    push(&rest[..end]);
-                }
+            scan_lua(&text, &mut names);
+        }
+
+        // The chain half of the manifest — the reference's own files, read the way the client
+        // reads them.
+        let Some(data) = benilla_formats::wow_data() else {
+            return names;
+        };
+        let Ok(mut chain) = benilla_formats::open_chain(&data) else {
+            return names;
+        };
+        let manifest =
+            std::fs::read_to_string(ui.join("benilla.toc")).expect("the manifest is committed");
+        for entry in manifest
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            // The manifest's own rule for which store an entry names
+            // (`ui_script::reference_ui::is_chain_entry`): our tree is flat, so a separator is a
+            // path and a path is the reference's. The bare names were walked above.
+            .filter(|l| l.contains('\\') || l.contains('/'))
+        {
+            let Ok(bytes) = chain.read_file(entry) else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            scan_lua(&text, &mut names);
+            if !entry.to_ascii_lowercase().ends_with(".xml") {
+                continue;
             }
-            for line in text.lines() {
-                let line = line.trim_start();
-                if let Some((lhs, rhs)) = line.split_once('=') {
-                    let lhs = lhs.trim();
-                    if rhs.trim_start().starts_with("function")
-                        && lhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                    {
-                        push(lhs);
-                    }
+            let dir = entry.rfind('\\').map_or("", |i| &entry[..=i]);
+            for script in script_files(&text) {
+                if let Ok(b) = chain.read_file(&format!("{dir}{script}")) {
+                    scan_lua(&String::from_utf8_lossy(&b), &mut names);
                 }
             }
         }

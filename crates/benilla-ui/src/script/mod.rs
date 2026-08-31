@@ -62,6 +62,7 @@ mod cursor;
 mod death;
 pub mod diagnostics;
 mod editbox;
+pub mod instance;
 pub(crate) use editbox::{adopt_text_region, editbox_text_region_wrapper};
 pub(crate) mod addon;
 pub mod addon_gate;
@@ -569,6 +570,7 @@ impl UiScript {
         binder::install(&lua)?;
         summon::install(&lua)?;
         bind_confirm::install(&lua)?;
+        instance::install(&lua)?;
         gm_ticket::install(&lua)?;
         duel::install(&lua)?;
         follow::install(&lua)?;

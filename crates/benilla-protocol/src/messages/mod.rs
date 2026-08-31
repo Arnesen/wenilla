@@ -33,6 +33,7 @@ mod gm_ticket;
 mod gossip;
 mod group;
 mod guild;
+mod instance;
 mod items;
 mod loot;
 mod mail;
@@ -141,6 +142,10 @@ pub use guild::{
     GuildQueryResponse, GuildRoster, GuildRosterMember, GUILD_INFO_MAX_LENGTH,
     GUILD_MOTD_MAX_LENGTH, GUILD_NAME_MAX_LENGTH, GUILD_NOTE_MAX_LENGTH, GUILD_RANKS_MAX_COUNT,
     GUILD_RANKS_MIN_COUNT, GUILD_RANK_MAX_LENGTH, GUILD_RANK_RIGHT_ORDER,
+};
+pub use instance::{
+    reset_instances, InstanceResetFailed, InstanceResetFailure, RaidInstanceMessage,
+    RaidInstanceWarning,
 };
 pub use items::{
     auto_equip_item, auto_store_bag_item, destroy_item, item_query, open_item, set_ammo,

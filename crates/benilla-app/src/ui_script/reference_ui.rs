@@ -1,154 +1,171 @@
-//! **Reference FrameXML this client EXECUTES off the patch chain, rather than transcribing.**
+//! **The reference FrameXML this client EXECUTES off the player's own patch chain**, rather than
+//! shipping a copy of it — the mechanism half of decision 1751.
 //!
-//! ## The rule, and why it is a rule
+//! ## The rule
 //!
-//! Some of `Interface\FrameXML` is not *our* logic to re-derive — it is a library of globals that
-//! every 1.12 addon calls, or replaces, by name. `ContainerFrameItemButton_OnEnter` is one: Bagnon
-//! builds its own item buttons and then hands them to the client's own handler, and four other
-//! corpus addons overwrite that global outright. Those bodies do not encode anything benilla wants
-//! to decide differently; they encode *the contract addons were written against*.
+//! The end state for the in-game interface is the stock 1.12 FrameXML, run off the file the player
+//! already owns. `assets/ui` is scaffolding: it retires file by file, and a migrated window means
+//! *its stock XML + Lua run off the chain and our counterpart file is deleted* (1751 §2). Fidelity
+//! by construction — the reference's text cannot drift from itself, and every frame name, id,
+//! template and stratum an addon reaches for is right because it **is** the reference's.
 //!
-//! Two ways to have them, and only one is available to us:
+//! What stays ours permanently: the glue screens (0068 §8 — GlueXML is a separate engine surface
+//! even in the real client), dev-only frames, and adapter shims only while a genuine engine
+//! difference forces one.
 //!
-//! | | |
-//! |---|---|
-//! | transcribe the file into `assets/ui` | **forbidden.** Blizzard's Lua, committed to a repo that mirrors public under MIT/Apache. the contract: never commit Blizzard assets. |
-//! | read it out of the player's own installed patch chain at runtime | what we do. Nothing is committed; a player runs the file they already own. |
+//! ## Where the list lives — the manifest, not a second list in Rust
 //!
-//! This is not a new mechanism — it is [`super::load_global_strings`]'s, generalised. That already
-//! executes the real `GlobalStrings.lua` off the chain at boot for exactly the same reason
-//! (~5,000 localized globals nobody should retype), and this module is that pattern with a list.
+//! Until 1751 this module carried its own `SOURCED` array and ran it *before* `assets/ui`, which
+//! was the only ordering a Lua-only mechanism could express. Sourcing **XML** needs a real
+//! position in the load order instead: stock `ContainerFrame.xml` inherits `ItemButtonTemplate`,
+//! `CooldownFrameTemplate`, `SmallMoneyFrameTemplate` and `UIPanelCloseButton`, so it has to load
+//! *after* the files that declare them.
 //!
-//! ## Where the reference file and our own UI collide, and which one wins
+//! So there is exactly one ordered list of what loads and when, and it is `assets/ui/benilla.toc`
+//! — the manifest that already had that job. **A manifest entry carrying a path separator is
+//! sourced off the chain; a bare filename is a file we ship** ([`is_chain_entry`]). Our tree is
+//! flat, so the two can never be confused, and the migration reads as what it is: the line
+//! `BagFrame.xml` becomes `Interface\FrameXML\ContainerFrame.xml`, and `BagFrame.xml` is deleted.
 //!
-//! `ContainerFrame.lua` is not only handlers. Two thirds of it drives the reference's OWN twelve
-//! `ContainerFrame1..12` windows, which benilla does not build — our bag UI is `BagFrame.xml`
-//! (decision 0068 T2). So sourcing the file wholesale would put reference bodies on top of working
-//! benilla ones. **The rule, applied consistently and stated here once:**
+//! Everything else — the XML parse, `<Include>` / `<Script file=>` resolution against the
+//! document's own directory, chunk naming, the error reporting that reaches the player — is
+//! [`super::addons::Addon`]'s, unchanged. This module is only a third [`super::addons::Source`]:
+//! *the player's install*.
 //!
-//! 1. **Order decides.** The sourced reference file runs **before** our own `assets/ui`, so every
-//!    global we define ourselves — `ToggleBag`, `ToggleBackpack`, `OpenAllBags`, `OpenBag`,
-//!    `CloseBag`, `IsBagOpen`, `CloseAllBags`, `OpenBackpack`, `CloseBackpack`, `ToggleKeyRing`,
-//!    `PutKeyInKeyRing`, `GetKeyRingSize` — **overwrites** the reference's. Ours drive our windows.
-//! 2. **What only the reference defines, we keep, unmodified.** The item-button family
-//!    (`ContainerFrameItemButton_OnLoad`/`_OnClick`/`_OnEnter`/`_OnUpdate`, `KeyRingItemButton_OnClick`)
-//!    is frame-agnostic: every one of them works on whatever button the caller passes, through the
-//!    contract "the button's own ID is the slot, its parent's ID is the bag". Bagnon's buttons obey
-//!    it. So does anything else written for the real client. It also brings the file's constants
-//!    (`NUM_BAG_FRAMES`, read by 8 corpus addons; `NUM_CONTAINER_FRAMES` by 5) for free.
-//! 3. **Where a reference body needs something benilla genuinely does not have, we ADAPT it in our
-//!    own file** — `assets/ui/ContainerFrameAdapters.xml`, which loads after this and wraps the
-//!    global. Exactly one function needs that today; the file names it and says why.
-//! 4. **Nothing is stubbed silently.** The reference's frame-driven functions
-//!    (`ContainerFrame_GetOpenFrame`, `updateContainerFrameAnchors`, `ContainerFrame_OnLoad` and
-//!    kin) are left as the reference wrote them. Driven against frames that do not exist they raise
-//!    — naming the frame — which is loud, correct, and strictly better than a no-op that pretends
-//!    (1203, 1205, 1211, 1230 are four records of exactly that pretending). `ContainerFrame_Update`
-//!    and `ContainerFrame_GenerateFrame` are NOT in that set: both take the frame as an argument
-//!    and touch nothing global, so an addon that passes its own conforming frame gets the real
-//!    behaviour.
+//! ## Where a reference file and our own UI still collide, and which one wins
+//!
+//! **Order decides, and the manifest is the order.** A name defined by both goes to whichever line
+//! is later. That is the whole rule; there is no precedence machinery. A file sourced *before* our
+//! own (`PaperDollFrame.lua`, which is there for one frame-agnostic button family and collides on
+//! eighteen names we drive ourselves) has its collisions overwritten by ours; a file sourced at the
+//! position of the window it replaces owns its names outright, which is what migrating a window
+//! means.
+//!
+//! **Nothing is stubbed silently.** A reference body that reaches for something this client does
+//! not have raises, naming it — which is loud, correct, and strictly better than a no-op that
+//! pretends (1203, 1205, 1211, 1230). The answer is to build the verb, or to adapt the body in one
+//! of our own files and say why at the site.
 //!
 //! ## No install, no file
 //!
-//! A machine with no client data (CI, a bare checkout) simply does not get these globals, and says
-//! so once, loudly. Every consumer already had to survive that: it is the same condition under
-//! which `GlobalStrings` is absent, and the addon survey prints which mode it ran in for that
-//! reason. Tests that need the file gate on the install the way every other client-data test does.
+//! A machine with no client data (CI, a bare checkout) simply does not get these files, and says so
+//! once, loudly. It is the same condition under which `GlobalStrings` is absent, and the addon
+//! survey already prints which mode it ran in for that reason. An install-less checkout cannot run
+//! most meaningful UI tests anyway — the art, fonts and MPQs come from the install too — so tests
+//! that need these files gate on the install like every other client-data test.
 
-use benilla_ui::script::UiScript;
+use std::sync::OnceLock;
+
+use benilla_formats::Chain;
+use benilla_ui::toc::Toc;
 use bevy::prelude::*;
 
-/// The reference FrameXML files benilla sources instead of transcribing, in load order.
-///
-/// **Adding to this list is a decision, not a convenience.** A file earns a place when its globals
-/// are a *contract addons call by name* AND benilla has no reason to compute them differently.
-/// Anything we want to own — because our own windows are the consumer — belongs in `assets/ui` as
-/// our own code, under the reference's names (`BagFrame.xml`'s `ToggleBackpack` is the pattern).
-pub(crate) const SOURCED: &[&str] = &[
-    "Interface\\FrameXML\\ContainerFrame.lua",
-    // PaperDollFrame.lua earns its place for ONE family: `PaperDollItemSlotButton_OnLoad`/
-    // `_OnEvent`/`_OnClick`/`_Update`/`_UpdateLock`/`_OnEnter`/`_OnUpdate`. Every one of them is
-    // frame-agnostic in exactly the sense rule 2 above means — it acts on `this` and `this:GetID()`
-    // through live APIs, never on a named reference window — which is what makes it safe to hand
-    // an addon's own button. `PaperDollItemSlotButtonTemplate` and `BagSlotButtonTemplate` are
-    // declared over them (CharacterFrame.xml, BagFrame.xml), and pfUI builds its bag bar from the
-    // latter.
-    //
-    // Checked before adding, because this list is a decision:
-    //  · TOP-LEVEL is four constants (NUM_RESISTANCE_TYPES, NUM_STATS, NUM_SHOPPING_TOOLTIPS,
-    //    ATTACK_POWER_MAGIC_NUMBER). Nothing touches a frame at load, so sourcing cannot raise.
-    //  · 18 of its 29 functions COLLIDE with ours (the PaperDollFrame_Set* stat family, the two
-    //    damage-frame hovers, PaperDollFormatStat, PaperDollStatTooltip). Order settles all of
-    //    them the documented way: this runs before assets/ui, so OUR bodies overwrite the
-    //    reference's and keep driving our character sheet. Not one of the seven names we are here
-    //    for is in that overlap.
-    //  · Our own doll slots keep calling `BenillaPaperDollSlot_*` and are untouched — the sourced
-    //    family is new surface for addons, not a replacement for ours.
-    "Interface\\FrameXML\\PaperDollFrame.lua",
-];
+use super::addons::{Addon, Source};
 
-/// Execute every [`SOURCED`] file into `script`, read off the install's patch chain.
+/// The addon name the reference's own files load under — the reference's word for its interface.
 ///
-/// Returns whether the chain was available at all. Read **once per process** and cached: the
-/// addon survey stands up 218 VMs, and this is per-VM work otherwise.
-pub(crate) fn load_sourced(script: &UiScript) -> bool {
-    let Some(files) = sources() else {
-        warn!(
-            "ui_script: no client data — the reference FrameXML this client sources ({}) is \
-             absent, so its globals are nil; addons that call them will raise",
-            SOURCED.join(", ")
-        );
-        return false;
-    };
-    for (path, src) in files {
-        if let Err(e) = script.run_chunk_named(src.as_bytes(), path) {
-            error!("ui_script: sourced reference file {path} failed to run: {e}");
-        }
-    }
-    true
+/// It is not `Interface\AddOns\…` anything: FrameXML is not an addon, gets no `ADDON_LOADED`, and
+/// an addon that derives its folder from a `debugstack` pattern (`"\\AddOns\\(.*)\\"` —
+/// `benilla_ui::script::addon_chunk_name`'s reason for existing) must not match a FrameXML frame.
+/// [`Addon::chunk_name`] is what keeps that true: a chain file's chunk is named after its own
+/// chain path, which is exactly what the real client names it.
+pub(super) const NAME: &str = "FrameXML";
+
+/// Is this manifest entry **sourced off the player's chain**, rather than shipped by us?
+///
+/// The test is a path separator, and it is decidable because our own shipped tree is *flat*: every
+/// `assets/ui` entry is a bare filename, and every chain entry is a full internal path
+/// (`Interface\FrameXML\ContainerFrame.xml`). `manifest::tests` pins both halves so the day
+/// somebody adds a subdirectory to `assets/ui` is a failing test rather than a file that silently
+/// stops loading.
+pub(super) fn is_chain_entry(entry: &str) -> bool {
+    entry.contains('\\') || entry.contains('/')
 }
 
-/// The [`SOURCED`] files' text, or `None` with no install to read them from.
+/// The reference interface as an [`Addon`] whose files come off the chain — the peer of
+/// [`Addon::builtin`], and the thing [`super::manifest`] hands a manifest's chain entries to.
 ///
-/// A file listed here and missing from the chain is an `error!`, not a silent skip: the list is
-/// short and deliberate, so a miss means the chain is not what we think it is.
-fn sources() -> Option<&'static [(&'static str, String)]> {
-    use std::sync::OnceLock;
-    static SRC: OnceLock<Option<Vec<(&'static str, String)>>> = OnceLock::new();
-    SRC.get_or_init(|| {
-        let data = benilla_formats::wow_data()?;
-        let mut chain = benilla_formats::open_chain(&data).ok()?;
-        let mut out = Vec::new();
-        for &path in SOURCED {
-            match chain.read_file(path) {
-                Ok(bytes) => out.push((path, benilla_ui::source::decode(&bytes).into_owned())),
+/// `files` are full chain paths, so the addon's prefix is empty and each entry is already in its
+/// source's path space.
+pub(super) fn addon(files: Vec<String>) -> Addon {
+    Addon::new(
+        NAME.to_string(),
+        Toc {
+            directives: Vec::new(),
+            files,
+        },
+        Source::Chain,
+    )
+}
+
+/// One file's bytes, read off the player's installed patch chain by internal path.
+///
+/// **Bytes, not text** (1193): a `.lua` chunk goes to Lua as it sits in the archive, and only an
+/// XML parse decodes — a `read_to_string` here would not make a cp1252 file lose a glyph, it would
+/// make the file *not exist*.
+pub(super) fn read(req: &str) -> Option<Vec<u8>> {
+    let chain = chain()?;
+    match chain.read(req) {
+        Ok(bytes) => Some(bytes),
+        Err(e) => {
+            debug!("ui_script: {req} is not in the patch chain: {e:#}");
+            None
+        }
+    }
+}
+
+/// The player's patch chain, opened once per process and cached.
+///
+/// Cached because the addon survey stands up 218 VMs and this would otherwise be per-VM work. A
+/// process-local chain rather than the one [`benilla_assets`] holds: the interface loads from
+/// places that have no Bevy world to ask (the tests, the addon harness, a bare `UiScript`), and
+/// `Chain`'s reads are `&self` and lock-free, so a second handle costs the mount and nothing else.
+fn chain() -> Option<&'static Chain> {
+    static CHAIN: OnceLock<Option<Chain>> = OnceLock::new();
+    CHAIN
+        .get_or_init(|| {
+            let Some(data) = benilla_formats::wow_data() else {
+                warn!(
+                    "ui_script: no client data — every interface file this client SOURCES off the \
+                     player's install (benilla.toc's `Interface\\…` entries) is absent, so the \
+                     windows they build do not exist and addons that call their globals will raise"
+                );
+                return None;
+            };
+            match benilla_formats::open_chain(&data) {
+                Ok(chain) => Some(chain),
                 Err(e) => {
-                    error!("ui_script: sourced reference file {path} not in the chain: {e:#}")
+                    error!("ui_script: opening the patch chain to source the reference UI: {e:#}");
+                    None
                 }
             }
-        }
-        Some(out)
-    })
-    .as_deref()
+        })
+        .as_ref()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use benilla_ui::script::UiScript;
 
-    /// **The item-button family arrives, and the bag verbs stay OURS** — rule 1 and rule 2 of this
-    /// module's header, asserted rather than described, because the order between the two is the
-    /// whole design and nothing else would notice if it flipped.
+    /// **A chain entry really loads off the player's install, and order really decides.**
+    ///
+    /// The two halves of this module's rule, asserted rather than described, because nothing else
+    /// would notice if either flipped: a chain entry that silently resolved to nothing would leave
+    /// its globals nil (the failure mode is a window that does not exist, not an error), and the
+    /// collision direction is invisible until an addon calls the wrong body.
     ///
     /// Skips without client data, like every other test that reads the install.
     #[test]
-    fn sourcing_the_reference_file_adds_its_handlers_without_taking_our_bag_verbs() {
+    fn a_chain_entry_loads_and_the_later_line_owns_the_collision() {
         let _data = benilla_formats::wow_data_or_skip!();
         let mut s = UiScript::new().expect("VM");
         s.set_screen_size(1024.0, 768.0);
 
-        assert!(load_sourced(&s), "the chain opened");
-        // Rule 2: what only the reference defines is now here.
+        let failures = super::super::manifest::load_default_ui(&s);
+        assert!(failures.is_empty(), "the default UI: {failures:#?}");
+
+        // The item-button family the `ContainerFrame.lua` line is there for — nothing but the
+        // sourced file defines these.
         for name in [
             "ContainerFrameItemButton_OnEnter",
             "ContainerFrameItemButton_OnClick",
@@ -162,33 +179,37 @@ mod tests {
                 "{name} must come from the sourced reference file"
             );
         }
-        // …including its constants, which the corpus reads directly.
+        // …and its constants, which the corpus reads directly.
         assert_eq!(s.eval::<i64>("return NUM_BAG_FRAMES").unwrap(), 4);
         assert_eq!(s.eval::<i64>("return NUM_CONTAINER_FRAMES").unwrap(), 12);
-
-        // Rule 1: the reference's own bag verbs are here for the moment…
+        // The `PaperDollFrame.lua` line's own reason to exist.
         assert!(s
-            .eval::<bool>("return type(ToggleBackpack) == \"function\"")
+            .eval::<bool>("return type(PaperDollItemSlotButton_OnLoad) == \"function\"")
             .unwrap());
-        // …and our interface, loading after, takes them over. `BENILLA_BAG_WINDOWS` is the tell:
-        // it is the table OUR ToggleBackpack walks, and the reference's body cannot mention it.
-        let failures = super::super::load_default_ui(&s);
-        assert!(failures.is_empty(), "our own FrameXML: {failures:#?}");
+
+        // Order decides: `PaperDollFrame.lua` is sourced ABOVE CharacterFrame.xml, so OUR body of
+        // a colliding name is the live one. `PaperDollFrame_SetLevel` is in the 18-name overlap.
         assert!(
             s.eval::<bool>(
-                "local f = ToggleBackpack \
-                 for _, name in ipairs(BENILLA_BAG_WINDOWS) do end \
-                 return BenillaBagFrame ~= nil"
+                "return type(PaperDollFrame_SetLevel) == \"function\" \
+                 and BenillaPaperDollSlot_OnLoad ~= nil"
             )
             .unwrap(),
-            "our bag windows exist"
-        );
-        s.run("ToggleBackpack()")
-            .expect("ours runs — the reference's body would die on a nil ContainerFrame1");
-        assert!(
-            s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
-            "ToggleBackpack must be OURS after our files load, not the reference's"
+            "our character sheet's own bodies must still be the live ones"
         );
         assert!(s.errors().is_empty(), "{:#?}", s.errors());
+    }
+
+    /// A path is a chain entry; a bare name is ours. The one-line rule the manifest rests on.
+    #[test]
+    fn a_separator_is_what_makes_an_entry_the_players_own_file() {
+        assert!(super::is_chain_entry(
+            "Interface\\FrameXML\\ContainerFrame.xml"
+        ));
+        assert!(super::is_chain_entry(
+            "Interface/FrameXML/ContainerFrame.xml"
+        ));
+        assert!(!super::is_chain_entry("BagFrame.xml"));
+        assert!(!super::is_chain_entry("Fonts.xml"));
     }
 }

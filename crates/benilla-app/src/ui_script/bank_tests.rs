@@ -1,47 +1,58 @@
 //! The shipped **bank window** driven end-to-end, engine-only (no Bevy): the real
-//! `assets/ui/BankFrame.xml` loaded behind `UiPanels.xml`/`BagFrame.xml`/`MerchantFrame.xml` (the
-//! coin rig + the container-slot family it reuses) — decision 0604 phase 4's machine checks. Split
-//! from `merchant_tests`/`bag_tests` along the folder's one-file-per-window convention.
+//! `assets/ui/BankFrame.xml` loaded behind the bag chain (the coin rig, our bag bar, and the
+//! reference's own `ContainerFrame.xml` off the player's install) — decision 0604 phase 4's
+//! machine checks. Split from `merchant_tests`/`bag_tests` along the folder's one-file-per-window
+//! convention.
+//!
+//! **What decision 1751 changed in here.** The bank used to own six popout windows of its own —
+//! `BenillaBankBagFrame1..6`, six copies of `BagFrame.xml`'s window template — and the tests drove
+//! them by name. They are gone: a bank bag is an ordinary `ContainerFrame` at container id
+//! `NUM_BAG_SLOTS + slot` (5..10), which is what the real client always did and what decision 0604
+//! already said it did. So the popout assertions below ask [`bag_open`] — the reference's own
+//! `IsBagOpen` scan — instead of naming a window. The twelve windows are RECYCLED across every
+//! container, so which `ContainerFrame<N>` a bank bag lands in is a coincidence and never an
+//! assertion.
+//!
+//! The knock-on for the fixtures: the reference generates a window only for a container that
+//! exists (`OpenBag`'s `size > 0` gate), where our own `BenillaBagFrame*` were static frames that
+//! `Show()` regardless. So a test that wants the backpack open has to feed a backpack, and one
+//! that wants a bank bag open has to feed a bag at id 5 — which is the honest fixture anyway: a
+//! player always has a 16-slot backpack, and an empty bank-bag slot has no window in the real
+//! client either.
 
 use benilla_ui::script::{
     BankState, ContainerSlot, ContainerState, ExtractedQuad, QuadContent, ScriptValue,
     SoundRequest, UiScript,
 };
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error (the folder's own
-/// per-file copy of the same helper — merchant_tests/bag_tests keep one each too).
-fn load_xml(s: &UiScript, file: &str) -> usize {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-    report.frames
+use super::test_ui::{bag_open, load_ui as load_xml, BAG_UI};
+
+/// A container fixture with no items in it — the shape every "is this window open" test wants.
+fn empty_bag(name: &str, num_slots: u32) -> Option<ContainerState> {
+    Some(ContainerState {
+        name: Some(name.into()),
+        num_slots,
+        slots: std::collections::HashMap::new(),
+    })
 }
 
-/// The bank's own dependency chain (the app's real load order — `ui_script/mod.rs`): Fonts before
-/// anything with a font `inherits`, UiPanels before any UIPanel/StaticPopup use, Cooldown+BagFrame
-/// before BankFrame reuses their slot/window templates and Lua family, GameTooltip before any
-/// slot's hover, MerchantFrame before BankFrame's `BenillaMoney_*` coin-rig calls.
+/// The bank's own dependency chain, in `benilla.toc` order: [`BAG_UI`] carries it whole — Fonts
+/// before anything with a font `inherits`, the four templates stock `ContainerFrame.xml` inherits,
+/// UiPanels before any UIPanel/StaticPopup use, GameTooltip before any slot's hover, the
+/// reference's own container file, our bag bar, and `BankFrame.xml` itself (which BAG_UI already
+/// needs, because `updateContainerFrameAnchors` measures every open bag against
+/// `BankFrame:GetRight()`). Then `MerchantFrame.xml` for the `BenillaMoney_*` coin rig the bank's
+/// purse and cost rows call — a global resolved at call time, so it may land after.
+///
+/// **Every caller needs client data**: `BAG_UI` names a chain entry, so each test below opens with
+/// `wow_data_or_skip!`.
 fn setup() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
     load_xml(&s, "MerchantFrame.xml");
-    load_xml(&s, "BankFrame.xml");
     s
 }
 
@@ -53,10 +64,15 @@ fn has_icon(quads: &[ExtractedQuad], needle: &str) -> bool {
 
 /// Test 1 — BANKFRAME_OPENED shows the frame (through ShowUIPanel, landing at the left slot — the same
 /// NPC-session chain Merchant/Trainer use), sets the title to the event arg (falling back to
-/// "Banker" before any event ever fires), and opens the backpack windows (the 0561 assertion
+/// "Banker" before any event ever fires), and opens the backpack window (the 0561 assertion
 /// pattern — `vendor_opens_and_closes_all_equipped_bags` in merchant_tests).
+///
+/// The backpack it opens is the reference's own `ContainerFrame` now (1751), so the assertion is
+/// `IsBagOpen(0)` rather than a window name — and the backpack has to be FED, because the
+/// reference builds a window only for a container that exists.
 #[test]
 fn bankframe_opened_shows_sets_title_and_opens_backpack() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
 
     // Pre-open default: the XML-authored placeholder.
@@ -70,6 +86,7 @@ fn bankframe_opened_shows_sets_title_and_opens_backpack() {
     let _ = s.take_sounds(); // ignore anything from load (every frame is hidden; nothing should fire)
 
     s.set_money(0);
+    s.set_container(0, empty_bag("Backpack", 16));
     s.set_bank(Some(BankState::default()));
     s.fire_event(
         "BANKFRAME_OPENED",
@@ -84,7 +101,7 @@ fn bankframe_opened_shows_sets_title_and_opens_backpack() {
         "Grumnus Steelshaper"
     );
     assert!(
-        s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
+        bag_open(&s, 0),
         "opening the bank opens the backpack (the 0561 OpenBackpack contract)"
     );
     assert!(
@@ -103,24 +120,34 @@ fn bankframe_opened_shows_sets_title_and_opens_backpack() {
 }
 
 /// Test 2 — Hiding the frame (BANKFRAME_CLOSED, routed through HideUIPanel) queues the CloseBankFrame
-/// intent (`take_bank_close()`), closes any open bank-bag popout with it, and plays the close
+/// intent (`take_bank_close()`), closes any open bank bag with it, and plays the close
 /// sound — the reference's own OnHide order (CloseBankBagFrames(); CloseBankFrame(); PlaySound).
+///
+/// **"Popout" is this test's own history, not a widget any more** (1751). It was
+/// `BenillaBankBagFrame1`, one of six copies of `BagFrame.xml`'s window template that this file
+/// owned, and the assertion was `:Show()` it then check `:IsShown()`. A bank bag is an ordinary
+/// container now — id `NUM_BAG_SLOTS + 1` = 5 — so it is OPENED with the reference's own `OpenBag`
+/// and asked for with `IsBagOpen`, and `CloseBankBagFrames` is the reference's verbatim
+/// `CloseBag(5..10)` loop. The property is unchanged and is the point of the test: closing the
+/// bank must close the bank BAGS, not merely play a sound.
 #[test]
 fn bankframe_closed_queues_close_closes_open_popouts_and_plays_the_close_kit() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.set_money(0);
+    // The backpack (the bank's own OnShow opens it) and a bag in the FIRST bank bag slot —
+    // container 5, which is where `BenillaBankBagButton_OnClick` sends `BankBagButton1`.
+    s.set_container(0, empty_bag("Backpack", 16));
+    s.set_container(5, empty_bag("Bank Bag", 8));
     s.set_bank(Some(BankState::default()));
     s.fire_event("BANKFRAME_OPENED", vec![ScriptValue::Str("Banker".into())]);
     let _ = s.take_sounds();
     let _ = s.take_bank_close(); // nothing queued yet — the drain would otherwise see a stale flag
 
-    // A bank-bag popout open when the main window closes (ref CloseBankBagFrames' own reason to
-    // exist) — Show() directly, exercising the SAME BenillaBagFrame_OnShow the equipped-bag
-    // windows use (BagFrame.xml, reused verbatim).
-    s.run("BenillaBankBagFrame1:Show()").unwrap();
-    assert!(s
-        .eval::<bool>("return BenillaBankBagFrame1:IsShown()")
-        .unwrap());
+    // A bank bag open when the main window closes (ref CloseBankBagFrames' own reason to exist) —
+    // opened through the reference's own verb, which is what the bag button calls.
+    s.run("OpenBag(5)").unwrap();
+    assert!(bag_open(&s, 5), "the bank bag's window is up");
     let _ = s.take_sounds();
 
     s.fire_event("BANKFRAME_CLOSED", vec![]);
@@ -131,9 +158,8 @@ fn bankframe_closed_queues_close_closes_open_popouts_and_plays_the_close_kit() {
         "BANKFRAME_CLOSED hides the window"
     );
     assert!(
-        !s.eval::<bool>("return BenillaBankBagFrame1:IsShown()")
-            .unwrap(),
-        "closing the bank closes the popout it left open (CloseBankBagFrames)"
+        !bag_open(&s, 5),
+        "closing the bank closes the bank bag it left open (CloseBankBagFrames)"
     );
     assert!(
         s.take_bank_close(),
@@ -154,6 +180,7 @@ fn bankframe_closed_queues_close_closes_open_popouts_and_plays_the_close_kit() {
 /// PLAYERBANKSLOTS_CHANGED(3) repaints it after a later change.
 #[test]
 fn item_slot_paints_from_container_minus_one_and_repaints_on_playerbankslots_changed() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.set_money(0);
     s.set_bank(Some(BankState::default()));
@@ -223,6 +250,7 @@ fn item_slot_paints_from_container_minus_one_and_repaints_on_playerbankslots_cha
 /// button 1's icon.
 #[test]
 fn bag_buttons_tint_by_purchase_count_and_texture_from_the_bank_bag_feed() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.set_money(0);
     let mut state = BankState {
@@ -305,6 +333,7 @@ fn bag_buttons_tint_by_purchase_count_and_texture_from_the_bank_bag_feed() {
 /// 6 (`GetNumBankSlots()`'s `full`).
 #[test]
 fn purchase_flow_shows_popup_queues_the_intent_and_the_row_hides_when_full() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.set_money(1_000_000);
     s.set_bank(Some(BankState {
@@ -360,12 +389,20 @@ fn purchase_flow_shows_popup_queues_the_intent_and_the_row_hides_when_full() {
 /// `BankItemButtonBagTemplate` OnLoad runs `BankFrameBagButton_OnLoad` →
 /// `BankFrameBaseButton_OnLoad`, which registers `("LeftButtonUp","RightButtonUp")`
 /// (BankFrame.lua:12), and `BankFrameItemButtonBag_OnClick` reads no button. Ours registered
-/// nothing, so the widget default (`{"LeftButtonUp"}`) swallowed every right-click. Asserted on
-/// the click sound the handler plays before any of its own forks — the one observable that does
-/// not need a bag object fed into the slot.
+/// nothing, so the widget default (`{"LeftButtonUp"}`) swallowed every right-click.
+///
+/// It was asserted on the click sound alone, because "the one observable that does not need a bag
+/// object fed into the slot" was all there was while the popout was a `BenillaBankBagFrame` this
+/// window drove by hand. 1751 gave the handler a real tail — `ToggleBag(NUM_BAG_SLOTS + id)` — so
+/// a bag IS fed here now and the right-click is followed all the way to the window it opens.
+/// That is strictly more of the same property: the right button reaches the whole OnClick body,
+/// not just its first line.
 #[test]
 fn a_bank_bag_button_answers_the_right_button_too() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
+    // A bag in bank slot 1 ⇒ container id NUM_BAG_SLOTS + 1 = 5, the id the button toggles.
+    s.set_container(5, empty_bag("Bank Bag", 8));
     s.set_bank(Some(BankState::default()));
     s.fire_event("BANKFRAME_OPENED", vec![]);
     s.resolve();
@@ -382,10 +419,18 @@ fn a_bank_bag_button_answers_the_right_button_too() {
     assert!(consumed, "the right-click lands on the button");
     assert_eq!(
         s.take_sounds(),
-        vec![benilla_ui::script::SoundRequest::KitName(
-            "BAGMENUBUTTONPRESS".into()
-        )],
-        "a right-click runs the same OnClick a left-click does"
+        vec![
+            benilla_ui::script::SoundRequest::KitName("BAGMENUBUTTONPRESS".into()),
+            benilla_ui::script::SoundRequest::KitName("igBackPackOpen".into()),
+        ],
+        "a right-click runs the same OnClick a left-click does — the button's own press kit, \
+         then the window the ToggleBag tail opened"
+    );
+    assert!(bag_open(&s, 5), "the right-click opened the bank bag");
+    assert!(
+        s.eval::<bool>("return BankBagButton1:GetChecked() and true or false")
+            .unwrap(),
+        "…and lit the button (UpdateBagButtonHighlight, this file's SetChecked divergence)"
     );
     assert!(s.errors().is_empty(), "click errors: {:?}", s.errors());
 }
@@ -396,6 +441,7 @@ fn a_bank_bag_button_answers_the_right_button_too() {
 /// actually under test).
 #[test]
 fn clicking_item_slot_one_with_an_empty_cursor_queues_the_pickup() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.set_money(0);
 

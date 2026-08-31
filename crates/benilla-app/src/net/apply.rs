@@ -270,6 +270,11 @@ pub(super) fn apply_net_updates(
                 // summoner's guid, zone and expiry here and `crate::ui_summon` turns it into the
                 // CONFIRM_SUMMON dialog, whose Accept is the only packet in the flow.
                 ResMut<crate::ui_summon::SummonState>,
+                // The instance-lockout bookkeeping (decision 1748) — four of its six packets
+                // queue a GlobalStrings-templated chat line here for `crate::ui_instance` to
+                // resolve against the VM, and two write the latch behind
+                // `CanShowResetInstances()`.
+                ResMut<crate::ui_instance::InstanceState>,
             ),
         ),
     ),
@@ -455,6 +460,7 @@ pub(super) fn apply_net_updates(
                 mut registrar,
                 mut petition,
                 mut summon,
+                mut instances,
             ),
         ),
     ) = caches;
@@ -1134,6 +1140,28 @@ pub(super) fn apply_net_updates(
                 self_guid.0,
                 social.is_ignored(challenger),
             ),
+            // ── The instance/raid lockout family (decision 1748): four lines the client
+            // composes itself out of GlobalStrings, and the two-packet latch behind the SELF
+            // menu's reset row. The lines are QUEUED — resolving them needs the VM, which this
+            // drain has no access to (decision 0669's split) ──
+            SessionEvent::RaidInstanceMessage { message } => {
+                crate::ui_instance::apply::raid_instance_message(&mut instances, message);
+            }
+            SessionEvent::InstanceSaveCreated { flag } => {
+                crate::ui_instance::apply::instance_save_created(&mut instances, flag);
+            }
+            SessionEvent::InstanceReset { map } => {
+                crate::ui_instance::apply::instance_reset(&mut instances, map);
+            }
+            SessionEvent::InstanceResetFailed { failure } => {
+                crate::ui_instance::apply::instance_reset_failed(&mut instances, failure);
+            }
+            SessionEvent::UpdateLastInstance { map } => {
+                crate::ui_instance::apply::update_last_instance(&mut instances, map);
+            }
+            SessionEvent::UpdateInstanceOwnership { owns } => {
+                crate::ui_instance::apply::update_instance_ownership(&mut instances, owns);
+            }
             SessionEvent::DuelOutOfBounds => crate::ui_duel::apply::bounds(&mut duel, true),
             SessionEvent::DuelInBounds => crate::ui_duel::apply::bounds(&mut duel, false),
             SessionEvent::DuelComplete { started } => {

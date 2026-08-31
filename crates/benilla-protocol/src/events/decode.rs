@@ -555,6 +555,22 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             arbiter,
             challenger,
         }],
+        // The instance/raid lockout family (decision 1748) — straight relays; the ownership flag
+        // is narrowed to a bool here because the reference's own reader is a `test eax,eax`.
+        ServerPacket::RaidInstanceMessage { message } => {
+            vec![SessionEvent::RaidInstanceMessage { message }]
+        }
+        ServerPacket::InstanceSaveCreated { flag } => {
+            vec![SessionEvent::InstanceSaveCreated { flag }]
+        }
+        ServerPacket::InstanceReset { map } => vec![SessionEvent::InstanceReset { map }],
+        ServerPacket::InstanceResetFailed { failure } => {
+            vec![SessionEvent::InstanceResetFailed { failure }]
+        }
+        ServerPacket::UpdateLastInstance { map } => vec![SessionEvent::UpdateLastInstance { map }],
+        ServerPacket::UpdateInstanceOwnership { owns } => {
+            vec![SessionEvent::UpdateInstanceOwnership { owns: owns != 0 }]
+        }
         ServerPacket::DuelOutOfBounds => vec![SessionEvent::DuelOutOfBounds],
         ServerPacket::DuelInBounds => vec![SessionEvent::DuelInBounds],
         ServerPacket::DuelComplete { started } => vec![SessionEvent::DuelComplete { started }],

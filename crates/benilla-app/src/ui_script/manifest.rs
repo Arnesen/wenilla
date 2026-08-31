@@ -1,32 +1,55 @@
-//! **benilla's own interface** — its manifest, and the boot split that loads it in two phases.
+//! **The in-game interface** — its manifest, and the boot split that loads it in two phases.
 //!
 //! The *how* of loading any interface lives in [`super::addons`]: an [`Addon`] is a name, a parsed
-//! `.toc`, and a source its files come from, and ours is simply the one whose source is the
-//! compiled-in tree (decision 1184). What is specific to us, and therefore still here, is the
-//! **seam at index 0** — see [`load_default_ui`].
+//! `.toc`, and a source its files come from (decision 1184). What is specific to the default UI,
+//! and therefore still here, is the **seam at index 0** — see [`load_default_ui`] — and the
+//! **two sources one manifest names**, see [`load_manifest`].
 //!
 //! The manifest itself is not here either. It is [`MANIFEST`] — `assets/ui/benilla.toc`, an
 //! ordinary addon manifest read by the ordinary `.toc` parser ([`benilla_ui::toc`]), exactly as a
 //! third-party addon's is (decision 1178). Until then it was a hand-ordered `&[&str]` in this file,
 //! which meant our own interface loaded by a private door and the addon path was untested by
 //! construction.
+//!
+//! ## One ordered list, two stores (decision 1751)
+//!
+//! The end state for this interface is the stock 1.12 FrameXML run off the player's own install;
+//! `assets/ui` is scaffolding that retires file by file ([`super::reference_ui`], whose header is
+//! the rule). A manifest entry carrying a **path** is sourced off the chain, a **bare filename** is
+//! one we ship — so the migration of a window is one line changing in `benilla.toc` plus the
+//! deletion of our copy, and the manifest stays the single ordered truth of what loads when. That
+//! ordering is the point: stock `ContainerFrame.xml` inherits four templates our earlier files
+//! declare, so "source the reference first" — the only order a Lua-only mechanism could express —
+//! is not a position it can load at.
 
 use bevy::prelude::*;
 
 use benilla_ui::script::UiScript;
 
 use super::addons::Addon;
+use super::reference_ui;
 
 /// The built-in interface's manifest, relative to `assets/ui`. Its `## Interface:`/`## Title:`
 /// directives are what `GetAddOnInfo` will read once the AddOn API lands (1178 step 4); nothing
 /// consumes them yet.
 pub(super) const MANIFEST: &str = "benilla.toc";
 
-/// The built-in manifest's file list, in load order — a convenience over [`Addon::builtin`] for the
-/// tests and the content sweep, which want the names rather than a loader.
+/// The manifest's file list, in load order — a convenience over [`Addon::builtin`] for the tests
+/// and the content sweep, which want the names rather than a loader. **Both stores**: filter with
+/// [`reference_ui::is_chain_entry`] for one or the other.
 #[cfg(test)]
 pub(super) fn manifest_files() -> Vec<String> {
     Addon::builtin().toc.files
+}
+
+/// The manifest's entries that name a file **we ship** — everything [`reference_ui`] does not
+/// source off the player's install. This is what a check about `assets/ui` wants.
+#[cfg(test)]
+pub(super) fn shipped_manifest_files() -> Vec<String> {
+    manifest_files()
+        .into_iter()
+        .filter(|f| !reference_ui::is_chain_entry(f))
+        .collect()
 }
 
 /// Run decision 0272's load-time `UIParent_ManageFramePositions()` pass.
@@ -67,10 +90,41 @@ fn bootstrap_positions(script: &UiScript) -> Vec<String> {
 /// the addon harness ([`crate::addon_harness`]), which needs our entire interface under each
 /// surveyed addon.
 pub(crate) fn load_default_ui(script: &UiScript) -> Vec<String> {
-    super::reference_ui::load_sourced(script);
-    let builtin = Addon::builtin();
-    let mut failures = builtin.load_files(script, &builtin.toc.files);
+    let mut failures = load_manifest(script, &Addon::builtin().toc.files);
     failures.extend(bootstrap_positions(script));
+    failures
+}
+
+/// Load a slice of [`MANIFEST`] entries, **each from its own store** (decision 1751).
+///
+/// A bare filename is a file we ship and comes from [`Addon::builtin`]; a path is the reference's
+/// own file and comes off the player's installed chain ([`reference_ui`]). The dispatch is
+/// per-entry rather than per-run so the manifest's order is the load order verbatim — the whole
+/// reason the list is a manifest and not two lists.
+///
+/// Both stores answer `<Include>` / `<Script file=>` the same way: the loader resolves a reference
+/// against the *including document's own* directory in its source's path space (1186), which for a
+/// chain document means `Interface\FrameXML\ContainerFrame.xml`'s `<Script
+/// file="ContainerFrame.lua"/>` reaches `Interface\FrameXML\ContainerFrame.lua` without anything
+/// here knowing about it.
+fn load_manifest(script: &UiScript, files: &[String]) -> Vec<String> {
+    let builtin = Addon::builtin();
+    let reference = reference_ui::addon(
+        files
+            .iter()
+            .filter(|f| reference_ui::is_chain_entry(f))
+            .cloned()
+            .collect(),
+    );
+    let mut failures = Vec::new();
+    for file in files {
+        let from = if reference_ui::is_chain_entry(file) {
+            &reference
+        } else {
+            &builtin
+        };
+        failures.extend(from.load_files(script, std::slice::from_ref(file)));
+    }
     failures
 }
 
@@ -81,8 +135,10 @@ pub(crate) fn load_default_ui(script: &UiScript) -> Vec<String> {
 /// (`GameFontNormalMed1` 13, `OptionsFontHighlightMedium` 14, `OptionsFontHighlightHuge` 20) are
 /// un-outlined and their heights are already declared here, so they add nothing to the bake plan.
 pub(crate) fn load_font_registry(script: &UiScript) -> Vec<String> {
-    let builtin = Addon::builtin();
-    builtin.load_files(script, builtin.toc.files.get(..1).unwrap_or_default())
+    load_manifest(
+        script,
+        Addon::builtin().toc.files.get(..1).unwrap_or_default(),
+    )
 }
 
 /// The in-game UI — everything after the font registry — loaded on entering the world, and then
@@ -117,13 +173,10 @@ pub(crate) fn load_ingame_ui(
     // the client on the loading screen; the caller disarms once the edge is done
     // (`lifecycle::load_ingame_ui_on_world_entry`), so the session's steady state runs unhooked.
     script.set_instruction_budget(super::addons::LOAD_INSTRUCTION_BUDGET);
-    // The reference FrameXML this client SOURCES off the patch chain rather than transcribing
-    // ([`super::reference_ui`], whose header is the rule). It runs FIRST, before our own files,
-    // precisely so that every global we define ourselves overwrites the reference's — its
-    // `ToggleBackpack` walks twelve `ContainerFrame`s we do not build; ours walks our windows.
-    super::reference_ui::load_sourced(script);
-    let builtin = Addon::builtin();
-    let mut failures = builtin.load_files(script, builtin.toc.files.get(1..).unwrap_or_default());
+    let mut failures = load_manifest(
+        script,
+        Addon::builtin().toc.files.get(1..).unwrap_or_default(),
+    );
     failures.extend(bootstrap_positions(script));
     // `&mut` from here down: each addon's `ADDON_LOADED` fires as that addon finishes, which is
     // the reference's own interleaving (`0x51f5ad`, per addon) rather than a batch at the end.
@@ -163,7 +216,7 @@ mod tests {
     /// simply never loaded, and the symptom is a window that does not exist rather than an error.
     #[test]
     fn the_manifest_lists_every_shipped_file_and_nothing_else() {
-        let mut listed = manifest_files();
+        let mut listed = shipped_manifest_files();
         let mut shipped: Vec<String> = super::super::content::shipped_files()
             .filter(|f| f.ends_with(".xml"))
             .map(str::to_owned)
@@ -171,6 +224,42 @@ mod tests {
         listed.sort();
         shipped.sort();
         assert_eq!(listed, shipped);
+    }
+
+    /// **The shipped tree is FLAT, and that is what makes the two stores tellable apart.**
+    ///
+    /// [`reference_ui::is_chain_entry`] decides where a manifest entry comes from by asking
+    /// whether it carries a path separator (1751). That is only decidable while every file we
+    /// ship is a bare name — the day somebody adds `assets/ui/templates/Foo.xml`, its manifest
+    /// entry would be read as a chain path, and the symptom would be a window that silently does
+    /// not exist rather than an error. This is that day's failing test.
+    #[test]
+    fn every_file_we_ship_is_a_bare_name_so_a_path_can_only_mean_the_chain() {
+        for name in super::super::content::shipped_files() {
+            assert!(
+                !reference_ui::is_chain_entry(name),
+                "assets/ui is flat by construction, but ships {name} — a manifest entry with a                  separator is read as a file to source off the player's install"
+            );
+        }
+    }
+
+    /// Every `Interface\…` entry the manifest names is really in the 1.12 chain, and is really
+    /// **not** something we also ship under that basename.
+    ///
+    /// Skips without client data, like every other test that reads the install.
+    #[test]
+    fn every_chain_entry_resolves_off_the_players_install() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        let chain: Vec<String> = manifest_files()
+            .into_iter()
+            .filter(|f| reference_ui::is_chain_entry(f))
+            .collect();
+        for entry in &chain {
+            assert!(
+                reference_ui::read(entry).is_some(),
+                "benilla.toc sources {entry} off the patch chain, which does not hold it"
+            );
+        }
     }
 
     /// **Nothing may declare `parent="UIParent"` before `UIParent.xml` has loaded.**
@@ -193,6 +282,12 @@ mod tests {
             .expect("the manifest lists UIParent.xml");
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
         for early in &files[..at] {
+            // A chain entry is the player's file, not one on this machine — and the reference's
+            // own load order is what this test exists to preserve, so it cannot be the thing that
+            // violates it. `every_chain_entry_resolves_off_the_players_install` covers those.
+            if reference_ui::is_chain_entry(early) {
+                continue;
+            }
             let text = std::fs::read_to_string(dir.join(early)).unwrap();
             assert!(
                 !text.contains(r#"parent="UIParent""#),

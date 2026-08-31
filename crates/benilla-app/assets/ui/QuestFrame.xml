@@ -475,7 +475,7 @@
 
             -- Arm the write-on (ref l.538-551): objectives/rewards invisible and Accept dead
             -- until the description has finished writing itself onto the parchment.
-            getglobal("QuestDetailTextAlphaFrame"):SetAlpha(0)
+            getglobal("TextAlphaDependentFrame"):SetAlpha(0)
             getglobal("QuestFrameAcceptButton"):Disable()
             local panel = getglobal("QuestFrameDetailPanel")
             panel.fading = 1
@@ -503,10 +503,10 @@
                 if not getglobal("QuestDescription"):SetAlphaGradient(panel.fadingProgress, QUEST_DESCRIPTION_GRADIENT_LENGTH) then
                     panel.fading = nil
                     if QUEST_FADING_DISABLE == "0" then
-                        UIFrameFadeIn(getglobal("QuestDetailTextAlphaFrame"), QUESTINFO_FADE_IN)
+                        UIFrameFadeIn(getglobal("TextAlphaDependentFrame"), QUESTINFO_FADE_IN)
                     else
                         -- instant: the block snaps on, no fade (ref l.561-564)
-                        getglobal("QuestDetailTextAlphaFrame"):SetAlpha(1)
+                        getglobal("TextAlphaDependentFrame"):SetAlpha(1)
                     end
                     getglobal("QuestFrameAcceptButton"):Enable()
                 end
@@ -1093,8 +1093,16 @@
                                          QuestFrame.xml l.553): 1.12 SetAlpha overwrite-cascades into
                                          the child item buttons/coins (wow-re propagation.md,
                                          CORRECTED), so the whole block hides while the text writes
-                                         and fades in as one. -->
-                                    <Frame name="QuestDetailTextAlphaFrame">
+                                         and fades in as one.
+
+                                         **The reference's own bare name.** This was spelled
+                                         `QuestDetailTextAlphaFrame` until decision 1757, with the
+                                         citation above already naming what it should have been —
+                                         the slip 1189 describes and `BlackoutWorld` paid for: a
+                                         published global spelled to our taste is a global the
+                                         reference has and we do not, and the reference's own
+                                         QuestFrame.lua indexes this one by hand (l.543/562/564). -->
+                                    <Frame name="TextAlphaDependentFrame">
                                         <Size><AbsDimension x="1" y="1"/></Size>
                                         <Anchors><Anchor point="TOPLEFT" relativeTo="QuestDescription" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
                                         <Layers>

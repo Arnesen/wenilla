@@ -430,7 +430,7 @@ fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
         .eval::<bool>("return QuestFrameAcceptButton:IsEnabled() ~= 0")
         .unwrap());
     assert_eq!(
-        s.eval::<f32>("return QuestDetailTextAlphaFrame:GetAlpha()")
+        s.eval::<f32>("return TextAlphaDependentFrame:GetAlpha()")
             .unwrap(),
         1.0,
         "the block snaps straight to opaque — no QUESTINFO_FADE_IN ramp in instant mode"
@@ -498,7 +498,7 @@ fn write_on_still_fades_when_instant_text_is_off() {
         .eval::<bool>("return QuestFrameAcceptButton:IsEnabled() ~= 0")
         .unwrap());
     let alpha = s
-        .eval::<f32>("return QuestDetailTextAlphaFrame:GetAlpha()")
+        .eval::<f32>("return TextAlphaDependentFrame:GetAlpha()")
         .unwrap();
     assert!(
         alpha < 1.0,
@@ -506,7 +506,7 @@ fn write_on_still_fades_when_instant_text_is_off() {
     );
     s.tick(1.1);
     assert_eq!(
-        s.eval::<f32>("return QuestDetailTextAlphaFrame:GetAlpha()")
+        s.eval::<f32>("return TextAlphaDependentFrame:GetAlpha()")
             .unwrap(),
         1.0,
         "the fade completes at opaque"

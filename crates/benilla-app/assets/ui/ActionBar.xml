@@ -290,9 +290,9 @@
                 if show then button:Show() else button:Hide() end
             end
             -- Losing the last key with the keyring open would strand an orphan window; the ref
-            -- can't reach this state (its latch is one-way), so this is ours to decide.
-            local frame = getglobal("BenillaKeyRingFrame")
-            if frame and not show and frame:IsShown() then frame:Hide() end
+            -- can't reach this state (its latch is one-way), so this is ours to decide. The window
+            -- is an ordinary ContainerFrame since 1751, so this is the reference's own CloseBag.
+            if not show then CloseBag(KEYRING_CONTAINER) end
         end
 
         -- ── The bonus-bar slide (decision 1524; ref BonusActionBarFrame.lua:1-98) ──────────────
@@ -1262,12 +1262,11 @@
         -- `< MAX_PLAYER_LEVEL`, unwatched on `== MAX_PLAYER_LEVEL`, which is the reference's own
         -- asymmetry and only differs above the cap, where nothing can go.
         --
-        -- ONE GUARD ADDED, at the tail: `updateContainerFrameAnchors` is defined by
-        -- ContainerFrameAdapters.xml (manifest 206, below this file), and a harness that shows this
-        -- bar without it would take a nil call on a line that only ever runs on a visibility flip.
-        -- The `if <global> then` shape is this codebase's own subset-load idiom (CharacterFrame.xml's
-        -- `if UpdateMicroButtons then`). `UIParent_ManageFramePositions` needs no such guard:
-        -- UIParent.xml is manifest 42, above every consumer.
+        -- The tail used to call `updateContainerFrameAnchors()` itself, guarded, because that
+        -- global was a benilla no-op standing in for a body that had no windows to anchor.
+        -- Decision 1751 gave it the reference's real body and put the call where the reference
+        -- puts it — the end of `UIParent_ManageFramePositions` (UIParent.lua:1774) — so this
+        -- caller gets it for free, along with every other one.
         function ReputationWatchBar_Update(newLevel)
             newLevel = newLevel or UnitLevel("player")
             local name, reaction, rankMin, rankMax, standing = GetWatchedFactionInfo()
@@ -1308,7 +1307,6 @@
             end
             if wasShown ~= ReputationWatchBar:IsShown() then
                 UIParent_ManageFramePositions()
-                if updateContainerFrameAnchors then updateContainerFrameAnchors() end
             end
         end
 

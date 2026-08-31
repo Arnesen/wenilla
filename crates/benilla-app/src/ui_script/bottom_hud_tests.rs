@@ -188,6 +188,15 @@ const BOTTOM_EXEMPT: &[(&str, &str)] = &[
     ("ChatFrame5", "as ChatFrame3"),
     ("ChatFrame6", "as ChatFrame3"),
     ("ChatFrame7", "as ChatFrame3"),
+    (
+        "BlackoutWorld",
+        "the world map's full-screen cover (WorldMapFrame.xml) — TOPLEFT+BOTTOMRIGHT is how it \
+         fills the screen, not a seat in the contested band, and clearance is the opposite of \
+         what it wants: a blackout lifted over the action bars would leave a strip of world \
+         showing under the map. It joins this population at all only because decision 1757 took \
+         its parent=UIParent away, which is what lets it survive the UIParent:Hide() that \
+         showing the map performs",
+    ),
 ];
 
 /// **A top-level frame anchored to the screen's bottom edge is either managed, or exempt with a

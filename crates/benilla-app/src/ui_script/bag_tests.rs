@@ -3,23 +3,22 @@ use benilla_ui::script::{
     UiScript,
 };
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error and returning the
-/// frame count (the panel/loot tests' loader, duplicated so this file is self-contained).
-fn load_xml(s: &UiScript, file: &str) -> usize {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-    report.frames
+use super::test_ui::{
+    bag_slot_button, bag_window, centre_of, click, hover, load_ui as load_xml, unhover, BAG_UI,
+};
+
+/// Is bag `id`'s window open? `IsBagOpen` is the reference's own name for the scan over
+/// `ContainerFrame1..12`, and it is what these tests ask instead of naming a frame — the windows
+/// are RECYCLED (1751), so which `ContainerFrame` a bag lands in is not a property to assert on.
+fn open(s: &UiScript, id: i64) -> bool {
+    super::test_ui::bag_open(s, id)
+}
+
+/// The frame currently showing bag `id`, by name — for the tests that need to reach INTO the
+/// window (its slots, its title, its money row). Panics if that bag is not open, which is the
+/// right failure: every caller has just opened it.
+fn window(s: &UiScript, id: i64) -> String {
+    bag_window(s, id).unwrap_or_else(|| panic!("bag {id} is not open"))
 }
 
 /// The equipped-bag BAR icons must draw ABOVE the action-bar art, not under it. The bar buttons are
@@ -30,21 +29,14 @@ fn load_xml(s: &UiScript, file: &str) -> usize {
 /// This locks that: no bag-slot icon quad may be covered by a higher-z art texture at its center.
 #[test]
 fn bag_bar_icons_draw_above_the_action_bar_art() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     // The screen the client defaults to; the action bar centers here and the bag bar lands over its
     // right end, where the dwarf-notch strip overlaps — the exact geometry that reproduced the bug.
     s.set_screen_size(1600.0, 900.0);
-    // ActionBar.xml carries both the anchor target (MainMenuBarArtFrame) and the occluder (the
-    // ExpBar dwarf art); MerchantFrame.xml is BagFrame's documented purse-helper dep.
-    for file in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        "MerchantFrame.xml",
-        "Cooldown.xml",
-        "ActionBar.xml",
-        "BagFrame.xml",
-    ] {
+    // `BAG_UI` carries ActionBar.xml — both the anchor target (MainMenuBarArtFrame) and the
+    // occluder (the ExpBar dwarf art) — in its manifest position.
+    for file in BAG_UI {
         load_xml(&s, file);
     }
     s.resolve();
@@ -78,28 +70,33 @@ fn bag_bar_icons_draw_above_the_action_bar_art() {
 /// binding runs the bare `ToggleBackpack()`, the same one hop deeper).
 #[test]
 fn backpack_toggle_plays_open_and_close_kits() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    // BenillaMoney_Set (the bag's purse helper) lives in MerchantFrame.xml — the bag's documented
-    // isolation dep; Fonts.xml first so both files' `inherits=` FontStrings resolve.
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
     s.set_money(0);
+    // The backpack has to have slots before `ToggleBag` will open it — its `size > 0` guard.
+    s.set_container(
+        0,
+        Some(ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 16,
+            slots: std::collections::HashMap::new(),
+        }),
+    );
 
-    // Hidden at load: no sound queued, the frame starts hidden.
+    // Hidden at load: no sound queued, every window starts hidden.
     assert!(
         s.take_sounds().is_empty(),
         "no sound at load (never transitions)"
     );
-    assert!(!s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap());
+    assert!(!open(&s, 0));
 
     // Toggle open → OnShow → igBackPackOpen.
     s.run("BenillaBagToggle_OnClick()").unwrap();
-    assert!(s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap());
+    assert!(open(&s, 0));
     assert_eq!(
         s.take_sounds(),
         vec![SoundRequest::KitName("igBackPackOpen".into())],
@@ -108,7 +105,7 @@ fn backpack_toggle_plays_open_and_close_kits() {
 
     // Toggle closed → OnHide → igBackPackClose.
     s.run("BenillaBagToggle_OnClick()").unwrap();
-    assert!(!s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap());
+    assert!(!open(&s, 0));
     assert_eq!(
         s.take_sounds(),
         vec![SoundRequest::KitName("igBackPackClose".into())],
@@ -130,14 +127,13 @@ fn backpack_toggle_plays_open_and_close_kits() {
 /// ESC's CloseAllWindows must still sweep all of them.
 #[test]
 fn b_opens_the_backpack_alone_and_closes_every_bag() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
     load_xml(&s, "MerchantFrame.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
     s.set_money(0);
 
     // Backpack (16) + one equipped bag in slot 2 (6). Bags 1/3/4 are left unset → 0 slots.
@@ -158,32 +154,27 @@ fn b_opens_the_backpack_alone_and_closes_every_bag() {
         }),
     );
 
-    let shown =
-        |s: &mut UiScript, name: &str| s.eval::<bool>(&format!("return {name}:IsShown()")).unwrap();
-
     // Toggle open: the BACKPACK, and only the backpack — bag 2 is equipped and stays shut.
     s.run("BenillaBagToggle_OnClick()").unwrap();
     let _ = s.take_sounds();
-    assert!(shown(&mut s, "BenillaBagFrame"), "backpack opens");
+    assert!(open(&s, 0), "backpack opens");
     assert!(
-        !shown(&mut s, "BenillaBagFrame2"),
+        !open(&s, 2),
         "the equipped bag stays shut — this is the backpack's own toggle, not open-all"
     );
     assert!(
-        !shown(&mut s, "BenillaBagFrame1")
-            && !shown(&mut s, "BenillaBagFrame3")
-            && !shown(&mut s, "BenillaBagFrame4"),
+        !open(&s, 1) && !open(&s, 3) && !open(&s, 4),
         "and the empty slots have no window to show either way"
     );
 
     // The close arm IS the all-bags one: with bag 2 also open by some other path, one toggle
     // takes the lot down.
     s.run("ToggleBag(2)").unwrap();
-    assert!(shown(&mut s, "BenillaBagFrame2"));
+    assert!(open(&s, 2));
     s.run("BenillaBagToggle_OnClick()").unwrap();
     let _ = s.take_sounds();
     assert!(
-        !shown(&mut s, "BenillaBagFrame") && !shown(&mut s, "BenillaBagFrame2"),
+        !open(&s, 0) && !open(&s, 2),
         "bag 0 open ⇒ the toggle hides every container window"
     );
 
@@ -193,14 +184,14 @@ fn b_opens_the_backpack_alone_and_closes_every_bag() {
     s.run("BenillaBagToggle_OnClick()").unwrap();
     let _ = s.take_sounds();
     assert!(
-        shown(&mut s, "BenillaBagFrame") && shown(&mut s, "BenillaBagFrame2"),
+        open(&s, 0) && open(&s, 2),
         "with only another bag open, B opens the backpack beside it"
     );
 
     // ESC's CloseAllWindows sweeps every open bag, not just the backpack.
     s.run("CloseAllWindows()").unwrap();
     assert!(
-        !shown(&mut s, "BenillaBagFrame") && !shown(&mut s, "BenillaBagFrame2"),
+        !open(&s, 0) && !open(&s, 2),
         "CloseAllWindows hides every bag window"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -217,14 +208,13 @@ fn b_opens_the_backpack_alone_and_closes_every_bag() {
 /// own `GetID() ~= KEYRING_CONTAINER` exclusion.
 #[test]
 fn shift_b_toggles_every_bag_at_once() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
     load_xml(&s, "MerchantFrame.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
     s.set_money(0);
     s.set_container(
         0,
@@ -242,28 +232,24 @@ fn shift_b_toggles_every_bag_at_once() {
             slots: std::collections::HashMap::new(),
         }),
     );
-    let shown =
-        |s: &mut UiScript, name: &str| s.eval::<bool>(&format!("return {name}:IsShown()")).unwrap();
 
     // From nothing open: the backpack AND the equipped bag; the empty slots have no window.
     s.run("OpenAllBags()").unwrap();
     let _ = s.take_sounds();
-    assert!(shown(&mut s, "BenillaBagFrame") && shown(&mut s, "BenillaBagFrame2"));
+    assert!(open(&s, 0) && open(&s, 2));
     assert!(
-        !shown(&mut s, "BenillaBagFrame1")
-            && !shown(&mut s, "BenillaBagFrame3")
-            && !shown(&mut s, "BenillaBagFrame4"),
+        !open(&s, 1) && !open(&s, 3) && !open(&s, 4),
         "empty bag slots (no container) have no window to show"
     );
     assert!(
-        !shown(&mut s, "BenillaKeyRingFrame"),
+        !open(&s, -2),
         "the keyring is not one of your bags — open-all never opens it"
     );
 
     // Everything open ⇒ the next one closes the lot.
     s.run("OpenAllBags()").unwrap();
     let _ = s.take_sounds();
-    assert!(!shown(&mut s, "BenillaBagFrame") && !shown(&mut s, "BenillaBagFrame2"));
+    assert!(!open(&s, 0) && !open(&s, 2));
 
     // PARTIAL is the open arm, not the close arm — the count is what decides. Backpack alone up
     // (1 of 2) ⇒ open-all still opens rather than closing what is there.
@@ -271,31 +257,28 @@ fn shift_b_toggles_every_bag_at_once() {
     s.run("OpenAllBags()").unwrap();
     let _ = s.take_sounds();
     assert!(
-        shown(&mut s, "BenillaBagFrame") && shown(&mut s, "BenillaBagFrame2"),
+        open(&s, 0) && open(&s, 2),
         "1 of 2 open is not 'all open': the lot opens"
     );
 
     // An open keyring rides the sweep down without ever counting toward "all open" — so this
     // still reads 2-of-2 and closes.
     s.run("ToggleKeyRing()").unwrap();
-    assert!(shown(&mut s, "BenillaKeyRingFrame"));
+    assert!(open(&s, -2));
     s.run("OpenAllBags()").unwrap();
     let _ = s.take_sounds();
     assert!(
-        !shown(&mut s, "BenillaBagFrame") && !shown(&mut s, "BenillaBagFrame2"),
+        !open(&s, 0) && !open(&s, 2),
         "the keyring does not count as an open bag"
     );
-    assert!(
-        !shown(&mut s, "BenillaKeyRingFrame"),
-        "…but it IS swept by the same pass"
-    );
+    assert!(!open(&s, -2), "…but it IS swept by the same pass");
 
     // forceOpen skips the close arm: from all-open, everything stays open.
     s.run("OpenAllBags(1)").unwrap();
     s.run("OpenAllBags(1)").unwrap();
     let _ = s.take_sounds();
     assert!(
-        shown(&mut s, "BenillaBagFrame") && shown(&mut s, "BenillaBagFrame2"),
+        open(&s, 0) && open(&s, 2),
         "forceOpen means open, never toggle"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -306,14 +289,13 @@ fn shift_b_toggles_every_bag_at_once() {
 /// so the ring tracks opens from every path (the all-toggle, a bar click, ESC's sweep).
 #[test]
 fn bag_bar_buttons_light_while_their_bag_is_open() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
     load_xml(&s, "MerchantFrame.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
     s.set_money(0);
     s.set_container(
         0,
@@ -377,7 +359,7 @@ fn bag_bar_buttons_light_while_their_bag_is_open() {
     );
 
     // Closing ONE window (its close button / any Hide path) clears just its ring.
-    s.run("BenillaBagFrame2:Hide()").unwrap();
+    s.run("CloseBag(2)").unwrap();
     assert!(
         !checked(&mut s, "CharacterBag1Slot"),
         "closing bag 2 clears its ring"
@@ -420,15 +402,13 @@ fn bag_bar_buttons_light_while_their_bag_is_open() {
 /// keeps a bag tooltip from running off the right edge (the bag lives at the bottom-right).
 #[test]
 fn bag_tooltip_hangs_left_when_the_slot_sits_in_the_right_half() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
     load_xml(&s, "MerchantFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
     s.set_money(0);
 
     let mut slots = std::collections::HashMap::new();
@@ -470,17 +450,13 @@ fn bag_tooltip_hangs_left_when_the_slot_sits_in_the_right_half() {
     // The bag window anchors bottom-right, so every slot button is in the right half. The bag
     // numbers its buttons visually (reversed from container slots) — find the button showing
     // container slot 1, where the fixture item lives.
-    s.run(
-        "for i = 1, 16 do local b = getglobal(\"BenillaBagSlot\" .. i) \
-           if b and b.slot == 1 then BENILLA_TEST_BTN = b end end",
-    )
-    .unwrap();
+    let btn = bag_slot_button(&s, 0, 1);
     let ok: bool = s
-        .eval("return BENILLA_TEST_BTN:GetRight() >= GetScreenWidth() / 2")
+        .eval(&format!("return {btn}:GetRight() >= GetScreenWidth() / 2"))
         .unwrap();
     assert!(ok, "fixture: the slot must sit in the right half");
 
-    s.run("BenillaBagSlot_OnEnter(BENILLA_TEST_BTN)").unwrap();
+    hover(&mut s, &btn);
     assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
 
     assert!(s.eval::<bool>("return GameTooltip:IsVisible()").unwrap());
@@ -488,10 +464,10 @@ fn bag_tooltip_hangs_left_when_the_slot_sits_in_the_right_half() {
     // ANCHOR_LEFT seats the tooltip's BOTTOMRIGHT on the slot's TOPLEFT: the whole tooltip stays
     // left of the slot, i.e. on-screen — never past the right edge.
     let ok: bool = s
-        .eval(
-            "return GameTooltip:GetRight() <= BENILLA_TEST_BTN:GetLeft() \
-               and GameTooltip:GetRight() <= GetScreenWidth()",
-        )
+        .eval(&format!(
+            "return GameTooltip:GetRight() <= {btn}:GetLeft() \
+               and GameTooltip:GetRight() <= GetScreenWidth()"
+        ))
         .unwrap();
     assert!(ok, "tooltip hangs LEFT of a right-half slot");
 }
@@ -502,15 +478,13 @@ fn bag_tooltip_hangs_left_when_the_slot_sits_in_the_right_half() {
 /// hiding the tooltip drops ownership so the loop can never resurrect it.
 #[test]
 fn hovered_bag_tooltip_fills_itself_when_the_stats_land() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
     load_xml(&s, "MerchantFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
     s.set_money(0);
 
     let mut slots = std::collections::HashMap::new();
@@ -545,14 +519,10 @@ fn hovered_bag_tooltip_fills_itself_when_the_stats_land() {
     );
     s.run("BenillaBagToggle_OnClick()").unwrap();
     s.resolve();
-    s.run(
-        "for i = 1, 16 do local b = getglobal(\"BenillaBagSlot\" .. i) \
-           if b and b.slot == 1 then BENILLA_TEST_BTN = b end end",
-    )
-    .unwrap();
+    let btn = bag_slot_button(&s, 0, 1);
 
     // Hover with the stats store empty: the fallback one-line tooltip, and the miss recorded.
-    s.run("BenillaBagSlot_OnEnter(BENILLA_TEST_BTN)").unwrap();
+    hover(&mut s, &btn);
     assert!(s.eval::<bool>("return GameTooltip:IsVisible()").unwrap());
     assert_eq!(
         s.eval::<i64>("return GameTooltip:NumLines()").unwrap(),
@@ -595,7 +565,7 @@ fn hovered_bag_tooltip_fills_itself_when_the_stats_land() {
     );
 
     // Leaving drops ownership: the loop must not resurrect the hidden tooltip.
-    s.run("BenillaBagSlot_OnLeave(BENILLA_TEST_BTN)").unwrap();
+    unhover(&mut s);
     s.tick(0.016);
     assert!(
         !s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
@@ -614,13 +584,10 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
 
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
     load_xml(&s, "MerchantFrame.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
     s.set_money(0);
 
     let mut slots = std::collections::HashMap::new();
@@ -694,21 +661,17 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
         },
     );
     s.set_merchant(Some(MerchantState::default()));
+    // MERCHANT_SHOW already opens the bags (the window's OnShow calls `OpenBackpack`, decision
+    // 0561), so this needs no toggle of its own — and must not have one: with bag 0 already up,
+    // `ToggleBackpack` takes its close-all arm and the window this test hovers in would go away.
     s.fire_event("MERCHANT_SHOW", vec![ScriptValue::Str("Vendor".into())]);
-    s.run("BenillaBagToggle_OnClick()").unwrap();
     s.take_sounds();
     s.resolve();
-    s.run(
-        "BENILLA_TEST_B1, BENILLA_TEST_B2 = nil, nil\n\
-         for i = 1, 16 do local b = getglobal(\"BenillaBagSlot\" .. i)\n\
-           if b and b.slot == 1 then BENILLA_TEST_B1 = b end\n\
-           if b and b.slot == 2 then BENILLA_TEST_B2 = b end\n\
-         end",
-    )
-    .unwrap();
+    let b1 = bag_slot_button(&s, 0, 1);
+    let b2 = bag_slot_button(&s, 0, 2);
 
     // The sellable stack: a money row (52c → the copper coin slot shows "52") + the pouch armed.
-    s.run("BenillaBagSlot_OnEnter(BENILLA_TEST_B1)").unwrap();
+    hover(&mut s, &b1);
     assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
     assert!(s
         .eval::<bool>(
@@ -723,14 +686,14 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     );
 
     // Leaving resets the cursor and the money row dies with the tooltip.
-    s.run("BenillaBagSlot_OnLeave(BENILLA_TEST_B1)").unwrap();
+    unhover(&mut s);
     assert_eq!(s.ui_cursor(), None, "ResetCursor on leave");
     assert!(s
         .eval::<bool>("return not GameTooltipMoneyCoin1:IsShown()")
         .unwrap());
 
     // The unsellable item: the ITEM_UNSELLABLE line, no coins.
-    s.run("BenillaBagSlot_OnEnter(BENILLA_TEST_B2)").unwrap();
+    hover(&mut s, &b2);
     let has_line: bool = s
         .eval(
             "for i = 1, GameTooltip:NumLines() do \
@@ -755,13 +718,10 @@ fn readable_letter_hover_shows_the_inspect_magnifier() {
 
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "MerchantFrame.xml"); // BenillaMoney_Set — the bag window's money strip
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
+    load_xml(&s, "MerchantFrame.xml");
     s.set_money(0);
 
     let mut slots = std::collections::HashMap::new();
@@ -799,26 +759,20 @@ fn readable_letter_hover_shows_the_inspect_magnifier() {
     s.run("BenillaBagToggle_OnClick()").unwrap();
     s.take_sounds();
     s.resolve();
-    s.run(
-        "BENILLA_TEST_B1, BENILLA_TEST_B2 = nil, nil\n\
-         for i = 1, 16 do local b = getglobal(\"BenillaBagSlot\" .. i)\n\
-           if b and b.slot == 1 then BENILLA_TEST_B1 = b end\n\
-           if b and b.slot == 2 then BENILLA_TEST_B2 = b end\n\
-         end",
-    )
-    .unwrap();
+    let b1 = bag_slot_button(&s, 0, 1);
+    let b2 = bag_slot_button(&s, 0, 2);
 
-    s.run("BenillaBagSlot_OnEnter(BENILLA_TEST_B1)").unwrap();
+    hover(&mut s, &b1);
     assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
     assert_eq!(
         s.ui_cursor(),
         Some(UiCursorMode::Inspect),
         "the magnifier over the letter"
     );
-    s.run("BenillaBagSlot_OnLeave(BENILLA_TEST_B1)").unwrap();
+    unhover(&mut s);
     assert_eq!(s.ui_cursor(), None, "ResetCursor on leave");
 
-    s.run("BenillaBagSlot_OnEnter(BENILLA_TEST_B2)").unwrap();
+    hover(&mut s, &b2);
     assert_eq!(s.ui_cursor(), None, "no magnifier over the jerky");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -830,15 +784,13 @@ fn readable_letter_hover_shows_the_inspect_magnifier() {
 /// wiring itself is under test, not just the handler body.
 #[test]
 fn drag_across_two_slots_queues_the_same_move_a_click_pickup_would() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
     load_xml(&s, "MerchantFrame.xml");
-    load_xml(&s, "GameTooltip.xml"); // BenillaBagSlot_OnClick's :Hide() dep
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
     s.set_money(0);
 
     let mut slots = std::collections::HashMap::new();
@@ -875,25 +827,19 @@ fn drag_across_two_slots_queues_the_same_move_a_click_pickup_would() {
     s.take_sounds();
     s.resolve();
 
-    s.run(
-        "BENILLA_TEST_B1, BENILLA_TEST_B5 = nil, nil\n\
-         for i = 1, 16 do local b = getglobal(\"BenillaBagSlot\" .. i)\n\
-           if b and b.slot == 1 then BENILLA_TEST_B1 = b end\n\
-           if b and b.slot == 5 then BENILLA_TEST_B5 = b end\n\
-         end",
-    )
-    .unwrap();
+    let b1 = bag_slot_button(&s, 0, 1);
+    let b5 = bag_slot_button(&s, 0, 5);
     let (x1, y1): (f64, f64) = s
-        .eval(
-            "return (BENILLA_TEST_B1:GetLeft() + BENILLA_TEST_B1:GetRight()) / 2, \
-                    (BENILLA_TEST_B1:GetTop() + BENILLA_TEST_B1:GetBottom()) / 2",
-        )
+        .eval(&format!(
+            "return ({b1}:GetLeft() + {b1}:GetRight()) / 2, \
+                        ({b1}:GetTop() + {b1}:GetBottom()) / 2"
+        ))
         .unwrap();
     let (x5, y5): (f64, f64) = s
-        .eval(
-            "return (BENILLA_TEST_B5:GetLeft() + BENILLA_TEST_B5:GetRight()) / 2, \
-                    (BENILLA_TEST_B5:GetTop() + BENILLA_TEST_B5:GetBottom()) / 2",
-        )
+        .eval(&format!(
+            "return ({b5}:GetLeft() + {b5}:GetRight()) / 2, \
+                        ({b5}:GetTop() + {b5}:GetBottom()) / 2"
+        ))
         .unwrap();
 
     // Press on slot 1 (picks up), drag past the threshold onto slot 5, release there.
@@ -921,14 +867,13 @@ fn drag_across_two_slots_queues_the_same_move_a_click_pickup_would() {
 /// (`BenillaBagBarSlot_OnClick`, not the backpack toggle) and painting its own slot 1 icon.
 #[test]
 fn a_second_bag_window_feeds_and_paints_via_the_bag_bar() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
     load_xml(&s, "MerchantFrame.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
     s.set_money(0);
 
     let mut slots = std::collections::HashMap::new();
@@ -962,20 +907,15 @@ fn a_second_bag_window_feeds_and_paints_via_the_bag_bar() {
         }),
     );
 
-    assert!(
-        !s.eval::<bool>("return BenillaBagFrame1:IsShown()").unwrap(),
-        "hidden by default"
-    );
+    assert!(!open(&s, 1), "hidden by default");
     // CharacterBag0Slot == bag id 1 (BenillaBagBarSlot_OnLoad(self, 1) in BagFrame.xml).
     s.run("BenillaBagBarSlot_OnClick(CharacterBag0Slot)")
         .unwrap();
     let _ = s.take_sounds();
-    assert!(
-        s.eval::<bool>("return BenillaBagFrame1:IsShown()").unwrap(),
-        "the bag-bar click opened bag 1's window"
-    );
+    assert!(open(&s, 1), "the bag-bar click opened bag 1's window");
+    let w = window(&s, 1);
     assert_eq!(
-        s.eval::<String>("return BenillaBagFrame1Name:GetText()")
+        s.eval::<String>(&format!("return {w}Name:GetText()"))
             .unwrap(),
         "Small Pouch",
         "the title reads the live GetBagName"
@@ -1000,14 +940,13 @@ fn a_second_bag_window_feeds_and_paints_via_the_bag_bar() {
 /// core fix: a small bag is far shorter than the old fixed height.
 #[test]
 fn equipped_bag_window_snug_fits_its_row_count() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
     load_xml(&s, "MerchantFrame.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
     s.set_money(0);
 
     // (bag id, slot count, expected window height). 6 → 2 rows plus-two-top (72+32+10); 8 → 2 rows
@@ -1030,8 +969,14 @@ fn equipped_bag_window_snug_fits_its_row_count() {
                 slots: std::collections::HashMap::new(),
             }),
         );
-        let frame = format!("BenillaBagFrame{bag}");
-        s.run(&format!("BenillaBagWindow_Update({frame})")).unwrap();
+        // The window is SIZED at generation, so re-open it after each resize: `ToggleBag` twice
+        // is the reference's own way of regenerating a frame for a bag whose size changed.
+        if open(&s, bag) {
+            s.run(&format!("ToggleBag({bag})")).unwrap();
+        }
+        s.run(&format!("ToggleBag({bag})")).unwrap();
+        let _ = s.take_sounds();
+        let frame = window(&s, bag);
         let h = s
             .eval::<f64>(&format!("return {frame}:GetHeight()"))
             .unwrap();
@@ -1039,11 +984,14 @@ fn equipped_bag_window_snug_fits_its_row_count() {
             (h - expected).abs() < 0.5,
             "bag {bag} ({size} slots): height {h}, expected {expected}"
         );
+        s.run(&format!("ToggleBag({bag})")).unwrap();
+        let _ = s.take_sounds();
     }
     // The core regression: a 6-slot bag is much shorter than the old fixed 260-tall slab.
-    let h6 = s
-        .eval::<f64>("return BenillaBagFrame1:GetHeight()")
-        .unwrap();
+    s.run("ToggleBag(1)").unwrap();
+    let _ = s.take_sounds();
+    let w1 = window(&s, 1);
+    let h6 = s.eval::<f64>(&format!("return {w1}:GetHeight()")).unwrap();
     assert!(
         h6 < 200.0,
         "a 6-slot bag must not fill the old 260 slab, got {h6}"
@@ -1054,13 +1002,10 @@ fn equipped_bag_window_snug_fits_its_row_count() {
 /// A fixture backpack with a 5-stack of Tough Jerky in slot 1, the bag opened — shared setup for
 /// the shift-click/split tests below. Returns the slot-1 button's screen center.
 fn open_backpack_with_a_five_stack(s: &mut UiScript) -> (f32, f32) {
-    load_xml(s, "Fonts.xml");
-    load_xml(s, "MoneyFrame.xml");
-    load_xml(s, "UiPanels.xml");
+    for file in BAG_UI {
+        load_xml(s, file);
+    }
     load_xml(s, "MerchantFrame.xml");
-    load_xml(s, "GameTooltip.xml");
-    load_xml(s, "Cooldown.xml");
-    load_xml(s, "BagFrame.xml");
     load_xml(s, "StackSplit.xml");
     s.set_money(0);
 
@@ -1098,18 +1043,8 @@ fn open_backpack_with_a_five_stack(s: &mut UiScript) -> (f32, f32) {
     let _ = s.take_sounds();
     s.resolve();
 
-    s.run(
-        "BENILLA_TEST_BTN = nil\n\
-         for i = 1, 16 do local b = getglobal(\"BenillaBagSlot\" .. i)\n\
-           if b and b.slot == 1 then BENILLA_TEST_BTN = b end\n\
-         end",
-    )
-    .unwrap();
-    s.eval(
-        "return (BENILLA_TEST_BTN:GetLeft() + BENILLA_TEST_BTN:GetRight()) / 2, \
-                (BENILLA_TEST_BTN:GetTop() + BENILLA_TEST_BTN:GetBottom()) / 2",
-    )
-    .unwrap()
+    let btn = bag_slot_button(s, 0, 1);
+    centre_of(s, &btn)
 }
 
 /// The stack-split trigger — SHIFT + left-click on an unlocked stack of ≥2, the reference fork
@@ -1117,6 +1052,7 @@ fn open_backpack_with_a_five_stack(s: &mut UiScript) -> (f32, f32) {
 /// arc landed. Nothing is picked up: the spinner opens against the still-seated stack.
 #[test]
 fn shift_click_on_a_stack_opens_the_split_frame() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     let (x, y) = open_backpack_with_a_five_stack(&mut s);
@@ -1147,6 +1083,7 @@ fn shift_click_on_a_stack_opens_the_split_frame() {
 /// corners) and restored the ref's own text — this pins the render through the real mechanism.
 #[test]
 fn the_split_frame_plate_fills_the_dialog() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     let (x, y) = open_backpack_with_a_five_stack(&mut s);
@@ -1201,6 +1138,7 @@ fn the_split_frame_plate_fills_the_dialog() {
 /// Bagnon: same stratum, shown after load, overlapping the dialog.
 #[test]
 fn the_split_frame_raises_over_a_same_stratum_window() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     let (x, y) = open_backpack_with_a_five_stack(&mut s);
@@ -1266,6 +1204,7 @@ fn the_split_frame_raises_over_a_same_stratum_window() {
 /// BACKSPACE drops a digit, and ENTER commits exactly as Okay does.
 #[test]
 fn typing_a_number_into_the_split_spinner_sets_the_count() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     let (x, y) = open_backpack_with_a_five_stack(&mut s);
@@ -1323,6 +1262,7 @@ fn typing_a_number_into_the_split_spinner_sets_the_count() {
 /// `ContainerMove` with `count: Some(n)`, drained the same way any other container move is.
 #[test]
 fn split_okay_then_a_placement_queues_the_split_move() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     let (x, y) = open_backpack_with_a_five_stack(&mut s);
@@ -1349,15 +1289,8 @@ fn split_okay_then_a_placement_queues_the_split_move() {
     );
 
     // Place the carry on slot 5 (empty) — NOW the move queues, carrying the split count.
-    s.run(
-        "BENILLA_TEST_B5 = nil\n\
-         for i = 1, 16 do local b = getglobal(\"BenillaBagSlot\" .. i)\n\
-           if b and b.slot == 5 then BENILLA_TEST_B5 = b end\n\
-         end",
-    )
-    .unwrap();
-    s.run("BenillaBagSlot_OnClick(BENILLA_TEST_B5, \"LeftButton\")")
-        .unwrap();
+    let b5 = bag_slot_button(&s, 0, 5);
+    click(&mut s, &b5, "LeftButton");
     assert!(s.cursor_item().is_none());
     assert_eq!(
         s.take_container_moves(),
@@ -1376,6 +1309,7 @@ fn split_okay_then_a_placement_queues_the_split_move() {
 /// unrelated, empty slot.
 #[test]
 fn a_plain_click_hides_an_open_split_frame() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     let (x, y) = open_backpack_with_a_five_stack(&mut s);
@@ -1385,15 +1319,8 @@ fn a_plain_click_hides_an_open_split_frame() {
     s.set_modifiers(false, false, false);
     assert!(s.eval::<bool>("return StackSplitFrame:IsShown()").unwrap());
 
-    s.run(
-        "BENILLA_TEST_B9 = nil\n\
-         for i = 1, 16 do local b = getglobal(\"BenillaBagSlot\" .. i)\n\
-           if b and b.slot == 9 then BENILLA_TEST_B9 = b end\n\
-         end",
-    )
-    .unwrap();
-    s.run("BenillaBagSlot_OnClick(BENILLA_TEST_B9, \"LeftButton\")")
-        .unwrap();
+    let b9 = bag_slot_button(&s, 0, 9);
+    click(&mut s, &b9, "LeftButton");
     assert!(
         !s.eval::<bool>("return StackSplitFrame:IsShown()").unwrap(),
         "the plain click on an unrelated slot hid the spinner"
@@ -1408,15 +1335,13 @@ fn a_plain_click_hides_an_open_split_frame() {
 /// with the cooldown gone hides it again.
 #[test]
 fn bag_slot_cooldown_sweeps_through_the_xml() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
     load_xml(&s, "MerchantFrame.xml");
-    load_xml(&s, "Cooldown.xml"); // the shared CooldownFrame_SetTimer
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
     s.set_money(0);
     s.tick(100.0); // a nonzero clock epoch, like the engine cooldown tests
 
@@ -1471,24 +1396,16 @@ fn bag_slot_cooldown_sweeps_through_the_xml() {
 /// the empty-slot fallback, and that they seat BESIDE the button rather than at the screen corner.
 #[test]
 fn the_bar_bag_buttons_name_themselves_on_hover() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     // The suffix reads GetBindingKey live since 0997 — register the real command set the way
     // the app's seed does, so the pin below is OPENALLBAGS's actual default.
     s.register_bindings(&crate::bindings::registry_commands());
     s.set_screen_size(1024.0, 768.0);
-    for file in [
-        "Fonts.xml",
-        "UIParent.xml",
-        "GameTooltip.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        "MerchantFrame.xml",
-        "Cooldown.xml",
-        "ActionBar.xml",
-        "BagFrame.xml",
-    ] {
+    for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "MerchantFrame.xml");
     s.resolve();
 
     // The backpack: its label plus OPENALLBAGS's live key (default B; 0997's divergence note).
@@ -1584,6 +1501,21 @@ fn keyring(size: u32, occupied: bool) -> ContainerState {
     }
 }
 
+/// Seat a player at `level`. **The keyring's size is the REFERENCE's own level ladder now** —
+/// `GetKeyRingSize` (ContainerFrame.lua l.773-786: 4, then 8 at 40, 12 at 50, 16 above 60) reads
+/// `UnitLevel("player")`, where ours read the container's fed `num_slots` back (decision 0765).
+/// Both derive from the same ladder the server enforces (`Player::GetMaxKeyringSize`), so this is
+/// the swap becoming FAITHFUL rather than a behaviour change — but the level is now the input, and
+/// a fixture that leaves it 0 gets a 4-slot ring.
+fn seat_player_at_level(s: &mut UiScript, level: u32) {
+    let mut player = benilla_ui::script::UnitState {
+        level,
+        ..Default::default()
+    };
+    player.name = Some("Tester".into());
+    s.set_unit("player", Some(player));
+}
+
 /// How many drawn quads carry a texture path containing `needle`. The engine exposes no
 /// `GetTexture`, so "which art is this frame wearing" is asked of the resolved draw list — which is
 /// the stronger question anyway (it answers what would actually be on screen).
@@ -1595,21 +1527,16 @@ fn drawn_with(s: &mut UiScript, needle: &str) -> usize {
         .count()
 }
 
-/// Load the whole bar+bag surface the keyring spans (its button seats on the action bar and its
-/// window is a BagFrame container, so both files are load-bearing).
+/// Load the whole bar+bag surface the keyring spans: its button seats on the action bar (BAG_UI
+/// carries ActionBar.xml) and its window is an ordinary `ContainerFrame` at `KEYRING_CONTAINER`
+/// since decision 1751, so the reference's own file is load-bearing too. `ErrorsFrame.xml` is the
+/// extra: `PutKeyInKeyRing` reports a full ring through `UIErrorsFrame`.
 fn keyring_surface(s: &UiScript) {
-    for file in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        "MerchantFrame.xml",
-        "Cooldown.xml",
-        "ErrorsFrame.xml",
-        "ActionBar.xml",
-        "BagFrame.xml",
-    ] {
+    for file in BAG_UI {
         load_xml(s, file);
     }
+    load_xml(s, "MerchantFrame.xml");
+    load_xml(s, "ErrorsFrame.xml");
 }
 
 /// **The gate** (decision 0765): no key ⇒ no keyring anywhere on the bar — the button is hidden and
@@ -1621,6 +1548,7 @@ fn keyring_surface(s: &UiScript) {
 /// This is the director-reported symptom itself: a character holding a key saw no keyring at all.
 #[test]
 fn the_first_key_puts_the_keyring_on_the_bar() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     keyring_surface(&s);
@@ -1707,33 +1635,31 @@ fn the_first_key_puts_the_keyring_on_the_bar() {
 /// rustling (KeyRingOpen/KeyRingClose, ref ContainerFrame.lua l.116-138).
 #[test]
 fn the_keyring_button_opens_a_keyring_window() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     keyring_surface(&s);
     s.set_money(0);
     s.set_has_key(true);
-    // A level-44 character: 8 usable slots (the ladder's 40..49 rung).
+    // A level-44 character: 8 usable slots (the ladder's 40..49 rung). The LEVEL is what decides
+    // now — see `seat_player_at_level` — and the feed carries the same 8 so the two agree.
+    seat_player_at_level(&mut s, 44);
     s.set_container(-2, Some(keyring(8, true)));
     s.fire_event("BAG_UPDATE", vec![benilla_ui::script::ScriptValue::Int(-2)]);
     let _ = s.take_sounds();
 
-    assert!(!s
-        .eval::<bool>("return BenillaKeyRingFrame:IsShown()")
-        .unwrap());
+    assert!(!open(&s, -2));
     s.run("BenillaKeyRingButton_OnClick(KeyRingButton)")
         .unwrap();
-    assert!(
-        s.eval::<bool>("return BenillaKeyRingFrame:IsShown()")
-            .unwrap(),
-        "the button opens the keyring"
-    );
+    assert!(open(&s, -2), "the button opens the keyring");
     assert_eq!(
         s.take_sounds(),
         vec![SoundRequest::KitName("KeyRingOpen".into())],
         "the keyring has its own open kit, not the backpack's"
     );
+    let w = window(&s, -2);
     assert_eq!(
-        s.eval::<String>("return BenillaKeyRingFrameName:GetText()")
+        s.eval::<String>(&format!("return {w}Name:GetText()"))
             .unwrap(),
         "Keyring",
         "titled from the KEYRING string, not a bag item's name"
@@ -1742,13 +1668,14 @@ fn the_keyring_button_opens_a_keyring_window() {
         drawn_with(&mut s, "UI-Bag-Components-Keyring") > 0,
         "stitched from the keyring plate, not the ordinary bag sheet"
     );
-    // 8 usable slots: buttons 1..8 shown, the template's remaining 12 hidden — the ordinary
-    // physIndex-past-size branch, no keyring-specific code.
+    // 8 usable slots: the window is GENERATED at the keyring's own size, so exactly 8 of the
+    // template's 36 item buttons are shown — the reference's own
+    // `for j = size + 1, MAX_CONTAINER_ITEMS do …:Hide() end` tail, no keyring-specific code.
     let shown = s
-        .eval::<i64>(
-            "local n = 0 for i = 1, 20 do \
-             if getglobal('BenillaKeyRingFrameSlot' .. i):IsShown() then n = n + 1 end end return n",
-        )
+        .eval::<i64>(&format!(
+            "local n = 0 for i = 1, MAX_CONTAINER_ITEMS do \
+             if getglobal('{w}Item' .. i):IsShown() then n = n + 1 end end return n"
+        ))
         .unwrap();
     assert_eq!(shown, 8, "only the level-unlocked keyring slots are drawn");
     // The key is in the window (slot 1 of 8 is the LAST chain button — size - physIndex + 1).
@@ -1760,9 +1687,7 @@ fn the_keyring_button_opens_a_keyring_window() {
 
     s.run("BenillaKeyRingButton_OnClick(KeyRingButton)")
         .unwrap();
-    assert!(!s
-        .eval::<bool>("return BenillaKeyRingFrame:IsShown()")
-        .unwrap());
+    assert!(!open(&s, -2));
     assert_eq!(
         s.take_sounds(),
         vec![SoundRequest::KitName("KeyRingClose".into())],
@@ -1775,6 +1700,7 @@ fn the_keyring_button_opens_a_keyring_window() {
 /// GlobalStrings name that was never defined.
 #[test]
 fn a_key_dropped_on_the_button_files_itself() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     keyring_surface(&s);
@@ -1817,6 +1743,9 @@ fn a_key_dropped_on_the_button_files_itself() {
     );
 
     // Now full: the click refuses with the error line instead of queueing anything.
+    // Every slot needs a TEXTURE, not just an item id: the reference's `PutKeyInKeyRing` decides
+    // "is this slot free" from `GetContainerItemInfo`'s first return, which is the icon path
+    // (ContainerFrame.lua l.744-746). A slot carrying an id and no texture reads EMPTY.
     let mut full = keyring(4, true);
     for slot in 2..=4 {
         full.slots.insert(
@@ -1824,12 +1753,17 @@ fn a_key_dropped_on_the_button_files_itself() {
             ContainerSlot {
                 item_id: 7146,
                 count: 1,
+                texture: Some("Interface\\Icons\\INV_Misc_Key_07".into()),
                 ..Default::default()
             },
         );
     }
     s.set_container(-2, Some(full));
     s.run("PickupContainerItem(0, 3)").unwrap();
+    // The refusal is now the REFERENCE's own `PutKeyInKeyRing`, reporting through the name its
+    // own line asks for — which 1.12 never defines. `BagFrame.xml` supplies it from the string the
+    // reference meant, and that repair is what this half of the test guards (its comment there
+    // carries the reasoning).
     s.run("BenillaKeyRingButton_OnClick(KeyRingButton)")
         .unwrap();
     assert!(
@@ -1860,19 +1794,13 @@ fn a_key_dropped_on_the_button_files_itself() {
 /// gate — an anim frame left shown would keep ticking forever.
 #[test]
 fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1600.0, 900.0);
-    for file in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        "MerchantFrame.xml",
-        "Cooldown.xml",
-        "ActionBar.xml",
-        "BagFrame.xml",
-    ] {
+    for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "MerchantFrame.xml");
     s.resolve();
 
     let shown = |s: &UiScript, name: &str| {
@@ -2114,14 +2042,13 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
 /// UI calls a benilla-named equivalent. This test pins the bag path; the rule is general.
 #[test]
 fn an_addon_that_hooks_toggle_backpack_receives_the_click() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
     load_xml(&s, "MerchantFrame.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
     s.set_money(0);
 
     // Bagnon's exact idiom: capture the original, replace the global.
@@ -2144,7 +2071,7 @@ fn an_addon_that_hooks_toggle_backpack_receives_the_click() {
     );
     // And the addon's override SUPPRESSED the stock behaviour, which is the point of hooking.
     assert!(
-        !s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
+        !open(&s, 0),
         "the stock bag must not open when an addon has taken the verb over"
     );
 
@@ -2171,14 +2098,13 @@ fn an_addon_that_hooks_toggle_backpack_receives_the_click() {
 /// `PaperDollItemSlotButtonTemplate`.
 #[test]
 fn the_bag_slots_carry_the_references_names_and_icon_names() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
     load_xml(&s, "MerchantFrame.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
 
     for i in 0..4 {
         assert!(
@@ -2222,20 +2148,24 @@ fn the_bag_slots_carry_the_references_names_and_icon_names() {
 /// its OnShow lights the button, the next click closes everything and the OnHide clears it.
 #[test]
 fn the_backpack_buttons_ring_follows_its_own_window_through_real_clicks() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for file in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        "MerchantFrame.xml",
-        "Cooldown.xml",
-        "ActionBar.xml",
-        "BagFrame.xml",
-    ] {
+    for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "MerchantFrame.xml");
     s.set_money(0);
+    // The reference's `ToggleBag` opens nothing for a container of size 0, so the backpack has to
+    // be fed — our own windows existed statically and opened regardless.
+    s.set_container(
+        0,
+        Some(benilla_ui::script::ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 16,
+            slots: std::collections::HashMap::new(),
+        }),
+    );
     s.set_container(
         1,
         Some(benilla_ui::script::ContainerState {
@@ -2250,7 +2180,7 @@ fn the_backpack_buttons_ring_follows_its_own_window_through_real_clicks() {
     };
     // Bag 1's window alone is open; the backpack window and its button are dark.
     s.run("ToggleBag(1)").unwrap();
-    assert!(!s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap());
+    assert!(!open(&s, 0));
     assert!(!checked(&mut s));
 
     // A REAL click on the backpack button (the widget flip fires only on real input): close-all.
@@ -2265,13 +2195,10 @@ fn the_backpack_buttons_ring_follows_its_own_window_through_real_clicks() {
     s.mouse_button(r[0], r[1], "LeftButton", true);
     s.mouse_button(r[0], r[1], "LeftButton", false);
     assert!(
-        s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
+        open(&s, 0),
         "the click opens the backpack (ToggleBackpack's open arm reads bag 0, not 'anything open')"
     );
-    assert!(
-        s.eval::<bool>("return BenillaBagFrame1:IsShown()").unwrap(),
-        "…and leaves the bag that was already up alone"
-    );
+    assert!(open(&s, 1), "…and leaves the bag that was already up alone");
     assert!(
         checked(&mut s),
         "open ⇒ lit, written by the window's OnShow over the widget flip"
@@ -2281,11 +2208,8 @@ fn the_backpack_buttons_ring_follows_its_own_window_through_real_clicks() {
     // and the OnHide write clears the ring.
     s.mouse_button(r[0], r[1], "LeftButton", true);
     s.mouse_button(r[0], r[1], "LeftButton", false);
-    assert!(!s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap());
-    assert!(
-        !s.eval::<bool>("return BenillaBagFrame1:IsShown()").unwrap(),
-        "the close arm takes every container down"
-    );
+    assert!(!open(&s, 0));
+    assert!(!open(&s, 1), "the close arm takes every container down");
     assert!(
         !checked(&mut s),
         "shut ⇒ dark, written by the window's OnHide"

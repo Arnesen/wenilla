@@ -448,6 +448,15 @@ pub(crate) struct Model {
     pub(crate) saved_instances: Vec<party::SavedInstanceInfo>,
     /// `SetRaidRosterSelection`'s cursor — a client-side raid row index, never sent anywhere.
     pub(crate) raid_selection: i64,
+    /// The current map's `Map.dbc` `InstanceType`, pushed by the app — `IsInInstance()`'s whole
+    /// input ([`instance`]). `None` = the map id has no DBC row.
+    pub(crate) instance_type: Option<u32>,
+    /// `CanShowResetInstances()`'s answer, pushed by the app (decision 1748) — the four-term
+    /// predicate the reference computes at `0x495c90` over state only the app holds.
+    pub(crate) can_reset_instances: bool,
+    /// `ResetInstances()` calls queued since the app's last
+    /// [`super::UiScript::take_reset_instance_asks`] drain — the outbound seam ([`instance`]).
+    pub(crate) reset_instance_asks: u32,
     /// The social snapshot the app pushes (friends, ignores, the last `/who` — decision 0668):
     /// `GetNumFriends`/`GetFriendInfo`/`GetWhoInfo`/… read it ([`social`]). Already
     /// display-resolved (names, class/zone names) because the reference resolves them
@@ -1546,6 +1555,9 @@ impl Model {
             party_requests: Vec::new(),
             saved_instances: Vec::new(),
             raid_selection: 0,
+            instance_type: None,
+            can_reset_instances: false,
+            reset_instance_asks: 0,
             social: social::SocialState::default(),
             social_requests: Vec::new(),
             guild: guild::GuildState::default(),

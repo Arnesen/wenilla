@@ -13,6 +13,25 @@
 # The FIRST entry is the font-object registry, and the loader splits there: it alone loads at
 # startup, ahead of the glue screens that share our one glyph atlas, and everything after it
 # materializes on entering the world (decision 1051).
+#
+# ── TWO STORES, ONE LIST (decision 1751) ──────────────────────────────────────────────────────
+# A **bare filename** is a file we ship, from `assets/ui` (compiled into the binary, 1175).
+# A **path** — `Interface\FrameXML\ContainerFrame.xml` — is the reference's OWN file, executed off
+# the player's installed patch chain. Nothing of Blizzard's is copied here; the player runs the
+# file they already own, and it cannot drift from itself.
+#
+# That is the end state for this interface: the stock 1.12 FrameXML, off the player's chain, and
+# `assets/ui` is scaffolding that retires window by window. Migrating one is one line here changing
+# from ours to theirs, plus the deletion of our copy — which is why the two stores share ONE
+# ordered list instead of the reference getting a private "load everything first" pass. It could
+# not have that pass: stock `ContainerFrame.xml` inherits `ItemButtonTemplate`,
+# `CooldownFrameTemplate`, `SmallMoneyFrameTemplate` and `UIPanelCloseButton`, so it has to sit
+# after the files that declare them, exactly like any other entry.
+#
+# Order still decides every collision, in both directions. A reference file sourced ABOVE ours has
+# its colliding globals overwritten by ours (that is why `PaperDollFrame.lua` is where it is); a
+# reference file sourced AT the position of the window it replaces owns its names outright, which
+# is what migrating a window means. `ui_script::reference_ui` is the rule; this list is the order.
 
 ## Interface: 11200
 ## Title: benilla
@@ -20,6 +39,26 @@
 # The named virtual Font objects (decision 0084) — must load first so any FontString's
 # `inherits="GameFontNormal"` resolves against a registered object.
 Fonts.xml
+# ── A reference file sourced ABOVE ours, so OUR bodies win every collision ─────────────────────
+# This one is not a migrated window: it is here for one family of frame-agnostic globals that
+# addons call by name, while the window that file also drives is still ours. So it loads first and
+# our later files overwrite the names we own. (A migrated window is the other case, and sits at its
+# window's own position — `Interface\FrameXML\ContainerFrame.xml` below is the first of them.)
+#
+# PaperDollFrame.lua earns its place for ONE family: `PaperDollItemSlotButton_OnLoad`/`_OnEvent`/
+# `_OnClick`/`_Update`/`_UpdateLock`/`_OnEnter`/`_OnUpdate` — frame-agnostic in the same sense,
+# acting on `this`/`this:GetID()` through live APIs and never on a named reference window.
+# `PaperDollItemSlotButtonTemplate` and `BagSlotButtonTemplate` are declared over them
+# (ItemSlotButtonTemplates.xml), and pfUI builds its bag bar from the latter.
+#
+# Its top level is four constants (NUM_RESISTANCE_TYPES, NUM_STATS, NUM_SHOPPING_TOOLTIPS,
+# ATTACK_POWER_MAGIC_NUMBER) — nothing touches a frame at load, so sourcing it cannot raise. 18 of
+# its 29 functions collide with ours (the PaperDollFrame_Set* stat family, the two damage-frame
+# hovers, PaperDollFormatStat, PaperDollStatTooltip) and this position settles all of them the
+# documented way: CharacterFrame.xml loads far below and its bodies win. Not one of the seven
+# names we are here for is in that overlap, and our own doll slots keep calling
+# `BenillaPaperDollSlot_*`, untouched.
+Interface\FrameXML\PaperDollFrame.lua
 # The reference's own second file, in its own position: TEXT/message/_ERRORMESSAGE, the
 # ScriptErrors dialog, and the DialogBoxFrame + DialogButton*Texture kit it is built from.
 # Straight after Fonts.xml because those are the only things it needs (GameFontRedLarge,
@@ -244,16 +283,35 @@ BuffFrame.xml
 # MinimapCluster (its anchor) — loaded above.
 DurabilityFrame.xml
 ErrorsFrame.xml
+# ══ THE BAG WINDOWS — the reference's own, off the player's chain (decision 1751, window 1) ══
+# `ContainerFrame1..12`, `ContainerFrameTemplate`, `ContainerFrameItemButtonTemplate` and the whole
+# `ToggleBag`/`ToggleBackpack`/`OpenAllBags`/`IsBagOpen`/`ToggleKeyRing` verb family — the real
+# 1.12 file, running as the file, with `ContainerFrame.lua` arriving through its own
+# `<Script file=>`. Our `BagFrame.xml` used to build five windows here; it is the bag BAR only now,
+# and the bank's six popouts (BankFrame.xml) became ContainerFrames at ids 5..10, which is what the
+# reference does.
+#
+# THE POSITION IS THE REQUIREMENT, and it is why 1751 moved sourcing into this manifest at all:
+# this file's `inherits=` are resolved at LOAD and reach four templates above it —
+# `ItemButtonTemplate`, `SmallMoneyFrameTemplate` (MoneyFrame.xml), `CooldownFrameTemplate`
+# (Cooldown.xml), `UIPanelCloseButton` (UIPanelTemplates.xml) — plus `parent="UIParent"`. It
+# cannot load "first" the way a Lua-only sourcing had to.
+Interface\FrameXML\ContainerFrame.xml
+# The bag BAR: MainMenuBarBackpackButton / CharacterBag0..3Slot / KeyRingButton and the item-push
+# card — this client's stand-in for the reference's own MainMenuBarBagButtons.xml, which cannot be
+# sourced until `PutItemInBag`/`PickupBagFromSlot` are bound (the file says so at the site). After
+# ContainerFrame.xml for legibility, not necessity: every verb it calls resolves at click time. It
+# also owns `KEYRING_CONTAINER`, which is where the reference puts it and which the file above
+# reads — again a global resolved at call time, so the order does not bind.
 BagFrame.xml
-# The stack-split spinner (decision 0216 §6/slice 2): loaded beside BagFrame, whose slot
-# click handler (`BenillaBagSlot_OnClick`) calls `OpenStackSplitFrame`. Order between the
-# two doesn't matter for correctness (Lua globals resolve at call time, and neither file's
-# XML `inherits=` reaches into the other's templates) — kept adjacent for legibility.
+# The stack-split spinner (decision 0216 §6/slice 2): loaded beside the bag windows, whose slot
+# click handler (the reference's `ContainerFrameItemButton_OnClick`) calls `OpenStackSplitFrame`.
+# Order between the two doesn't matter for correctness (Lua globals resolve at call time, and
+# neither file's XML `inherits=` reaches into the other's templates) — adjacent for legibility.
 StackSplit.xml
-# Our ADAPTERS over the reference's own `Interface\\FrameXML\\ContainerFrame.lua`, which this
-# client EXECUTES off the patch chain rather than transcribing (`ui_script::reference_ui`) — see
-# that file's header for the rule. Must load AFTER the sourced reference file (every builtin does)
-# and after BagFrame/StackSplit, whose globals it leans on.
+# Our ADAPTERS over the reference's own container files — one wrapper, for the keyring tooltip
+# detour benilla answers differently (0765). Must load AFTER them, since it captures at load the
+# body it wraps; its own header says what it stopped needing to do when the XML became sourceable.
 ContainerFrameAdapters.xml
 # The character window (decision 0208 phase 1a): the C-key paper doll. Loaded after BagFrame
 # (needs nothing from it, but keeps player-state windows grouped) and before the NPC session

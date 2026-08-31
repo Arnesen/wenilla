@@ -18,7 +18,9 @@
 //! `ui/scratch/scripts-auto-enable.md` §1, VERIFIED — an `<OnEnter>`/`<OnLeave>`/`<OnMouseDown>`/
 //! `<OnMouseUp>`/`<OnDragStart>` reaches the same enable primitive `0x76af00(2,-1)` the attribute
 //! does) makes `enableMouse=` a poor proxy for whether the frame actually takes the mouse. Asking
-//! the loaded engine — `IsToplevel()`, `IsMouseEnabled()`, `GetID()` — is immune to both.
+//! the loaded engine — `IsToplevel()`, `IsMouseEnabled()`, `GetID()`, `GetParent()` — is immune to
+//! both, and to a third: a `parent=` can arrive from a template or from nesting, and `GetParent()`
+//! answers the same whichever way it came.
 //!
 //! **Divergences are an explicit list with a reason each, never a pattern.** [`KNOWN`] carries
 //! them, in both directions; a new one cannot hide inside a tolerance. The list is where the
@@ -26,16 +28,36 @@
 //! those want the handler (and its tooltip), never a bare `enableMouse="true"` that would swallow
 //! the click and give nothing back.
 //!
-//! ## Three flags, and only three
+//! ## Four flags, and only four
 //!
-//! `toplevel`, the effective mouse enable, and `id` are mechanical: the reference's value is right
-//! for any frame we transcribe, and a difference is a defect. The neighbours are **not**, and are
-//! deliberately out of scope rather than silently tolerated — `movable` is an inert flag for all
-//! but two reference frames (nothing calls `StartMoving` on the rest, so copying it would be
-//! cargo-cult), `frameStrata` decides what draws over what and is the director's call,
-//! `setAllPoints` has an exact `<Size>`+`<Anchors>` equivalent that five of our pages deliberately
-//! use, and `hidden` is equivalent whenever the reference hides in `OnLoad` instead. Decision 1739
-//! carries the reasoning per attribute.
+//! `toplevel`, the effective mouse enable, `id` and the **parent** are mechanical: the reference's
+//! value is right for any frame we transcribe, and a difference is a defect. The neighbours are
+//! **not**, and are deliberately out of scope rather than silently tolerated — `movable` is an
+//! inert flag for all but two reference frames (nothing calls `StartMoving` on the rest, so
+//! copying it would be cargo-cult), `frameStrata` decides what draws over what and is the
+//! director's call, `setAllPoints` has an exact `<Size>`+`<Anchors>` equivalent that five of our
+//! pages deliberately use, and `hidden` is equivalent whenever the reference hides in `OnLoad`
+//! instead. Decision 1739 carries the reasoning per attribute.
+//!
+//! **The parent joined them at decision 1757, and it is the flag with teeth.** Until 1734 restored
+//! `SetFullScreenFrame`'s `UIParent:Hide()`, a `parent=` was little more than a coordinate space;
+//! after it, the seat decides whether a frame can be on screen *at all* while a fullscreen panel
+//! is up. 1734 swept the direction it went looking for — 72 declarations the reference has and we
+//! had dropped — and nothing asked the opposite question, so the frames we parent that the
+//! reference leaves top-level went the other way in silence: opening the world map hid the map's
+//! own blackout (the 3D world came back through the margins beside the 4:3 sheet — the director
+//! reported it), the shared dropdown lists could not open over it, and the screenshot
+//! confirmation could not appear during the fly-by whose SCREENSHOT key `CinematicFrame` hands
+//! back by name. A gate that reads one direction of a two-directional property is a gate someone
+//! has to remember to run backwards.
+//!
+//! Both ways a frame acquires a parent count, because the XML makes them look unrelated: the
+//! `parent=` attribute — **on the element or on a template it inherits**, which is where the
+//! reference keeps the chat frames' — and nesting inside another frame's `<Frames>`. Reading only
+//! instances reports all fourteen chat frames as top-level; reading only attributes reports
+//! `ScreenshotStatus` as parentless when the reference nests it in `WorldFrame` for the property
+//! `WorldFrame.xml`'s header states outright: *"Children of the world frame are visible even when
+//! the UI is turned off."*
 //!
 //! ## What it can and cannot see
 //!
@@ -118,7 +140,7 @@ const MOUSE_BY_CTOR: &[&str] = &[
 
 /// One accepted difference between benilla and the reference, with the reason it is accepted.
 ///
-/// `frame` is benilla's name for it; `flag` is which of the three; `why` is why the difference is
+/// `frame` is benilla's name for it; `flag` is which of the four; `why` is why the difference is
 /// right (or, for the handler gaps, why the honest fix is not this flag).
 struct Known {
     frame: &'static str,
@@ -131,6 +153,7 @@ enum Flag {
     Toplevel,
     Mouse,
     Id,
+    Parent,
 }
 
 impl std::fmt::Display for Flag {
@@ -139,6 +162,7 @@ impl std::fmt::Display for Flag {
             Flag::Toplevel => "toplevel",
             Flag::Mouse => "mouse",
             Flag::Id => "id",
+            Flag::Parent => "parent",
         })
     }
 }
@@ -360,6 +384,36 @@ const KNOWN: &[Known] = &[
         why: "id=\"-1\" is ours: the bank window's own sentinel for \"not a container slot\", \
               which the reference has no equivalent of",
     },
+    // ── parent ─────────────────────────────────────────────────────────────────────────────────
+    //
+    // Three, and each is a seat inside the SAME tree the reference seats it in — which is the
+    // question this flag exists to ask (decision 1757). A frame whose seat crosses the boundary
+    // between UIParent's tree and the top level is a defect, because `SetFullScreenFrame` hides
+    // `UIParent` and everything below it; a frame seated one rung along inside that tree is not.
+    Known {
+        frame: "FriendsDropDown",
+        flag: Flag::Parent,
+        why: "the reference nests this menu HOST in FriendsFrame; ours sits on UIParent in \
+              ItemRef.xml, beside the SetItemRef branch that is its only caller — and it has to, \
+              because FriendsFrame.xml loads 262 lines further down the manifest and a forward \
+              parent reference resolves to nothing. Both seats are inside UIParent's tree, and a \
+              host frame is never shown: ToggleDropDownMenu seats the visible DropDownList1, \
+              which is top-level on both sides.",
+    },
+    Known {
+        frame: "SendMailBodyEditBox",
+        flag: Flag::Parent,
+        why: "the reference interposes SendMailScrollChildFrame between the pane and its content; \
+              our mail panes are the render approximation MailFrame.xml names at the site (flat \
+              art, no live scrollbar), so the body hangs off SendMailScrollFrame directly. Wants \
+              the real scroll child, not a re-seat.",
+    },
+    Known {
+        frame: "OpenMailInvoiceFrame",
+        flag: Flag::Parent,
+        why: "as SendMailBodyEditBox — OpenMailScrollChildFrame is the scroll child we do not \
+              build",
+    },
 ];
 
 /// The extracted reference FrameXML directory, or `None` when the install isn't there.
@@ -412,6 +466,64 @@ fn collect_named(el: &Element, out: &mut HashMap<String, Element>) {
     for child in &el.children {
         collect_named(child, out);
     }
+}
+
+/// Every named reference frame's **enclosing frame**, if it is nested inside one.
+///
+/// A frame acquires its parent one of two ways, and the XML gives no hint that they are the same
+/// question: `parent="X"` (on the element, or on a template it inherits — see [`resolved_attr`]),
+/// or *nesting* inside another frame's `<Frames>`. The reference uses both heavily —
+/// `DropDownList1` is top-level with neither, `ScreenshotStatus` carries no attribute at all and
+/// is nested in `WorldFrame` — so reading only one of them is worse than reading neither. This
+/// half is the nesting; `resolved_attr` is the other, and the attribute wins where both exist.
+/// `enclosing` is the nearest named frame ancestor, threaded down the walk.
+fn collect_nesting(
+    el: &Element,
+    enclosing: Option<&str>,
+    out: &mut HashMap<String, Option<String>>,
+) {
+    let mut inner = enclosing;
+    if FRAME_TAGS.iter().any(|t| t.eq_ignore_ascii_case(&el.tag)) {
+        if let Some(name) = el.attr("name") {
+            if !name.contains("$parent") {
+                out.entry(name.to_string())
+                    .or_insert_with(|| enclosing.map(str::to_string));
+                inner = Some(name);
+            }
+        }
+    }
+    for child in &el.children {
+        collect_nesting(child, inner, out);
+    }
+}
+
+/// The reference's nesting table, built over the same corpus [`reference_frames`] reads.
+fn reference_nesting() -> Option<HashMap<String, Option<String>>> {
+    let dir = reference_dir()?;
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("xml")))
+        .collect();
+    paths.sort();
+
+    let mut out: HashMap<String, Option<String>> = HashMap::new();
+    for path in paths {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        let Ok(doc) = framexml::parse(text.trim_start_matches('\u{feff}')) else {
+            continue;
+        };
+        for item in &doc.items {
+            if let TopLevel::Template(el) | TopLevel::Instance(el) = item {
+                collect_nesting(el, None, &mut out);
+            }
+        }
+    }
+    Some(out)
 }
 
 /// The templates `el` inherits, **right to left** — a later name in the list overrides an earlier
@@ -503,16 +615,18 @@ fn describe(frame: &str, flag: Flag, ours: &str, theirs: &str) -> String {
     format!("  {frame} — {flag}: ours {ours}, reference {theirs}")
 }
 
-/// **Every frame both UIs name carries the reference's `toplevel`, mouse enable and `id`** — read
-/// off the loaded engine, with [`KNOWN`] the only accepted differences.
+/// **Every frame both UIs name carries the reference's `toplevel`, mouse enable, `id` and
+/// parent** — read off the loaded engine, with [`KNOWN`] the only accepted differences.
 ///
 /// Verified to fail: delete `toplevel="true"` from `CharacterFrame.xml` and this names
-/// `CharacterFrame`; delete `id="1"` from `ActionButton1` and it names that.
+/// `CharacterFrame`; delete `id="1"` from `ActionButton1` and it names that; put
+/// `parent="UIParent"` back on `BlackoutWorld` and it names that.
 #[test]
 fn the_shipped_frames_carry_the_references_flags() {
     let Some(reference) = reference_frames() else {
         return; // no install — the same skip every client-data test here takes
     };
+    let nesting = reference_nesting().expect("the same corpus the frames came from");
     assert!(
         reference.len() > 500,
         "only {} reference frames parsed — the corpus scan broke, and a sweep over nothing \
@@ -526,7 +640,19 @@ fn the_shipped_frames_carry_the_references_flags() {
     assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
     s.resolve();
 
-    // Read the three flags off the ENGINE, not off our XML — the whole point of the module.
+    // The loaded frame's own parent, by name — `GetParent()`, not the `parent=` attribute, so a
+    // frame that acquires its parent by NESTING reads the same as one that declares it. An empty
+    // string is a top-level frame.
+    let parent_of = |n: &str| -> Option<String> {
+        s.eval::<String>(&format!(
+            "local f = getglobal(\"{n}\") if not f or not f.GetParent then return \"\" end \
+             local p = f:GetParent() return (p and p:GetName()) or \"\""
+        ))
+        .ok()
+        .filter(|v| !v.is_empty())
+    };
+
+    // Read the flags off the ENGINE, not off our XML — the whole point of the module.
     let flags = |n: &str| -> Option<(bool, bool, i64)> {
         s.eval::<i64>(&format!(
             "local f = getglobal(\"{n}\") \
@@ -566,6 +692,24 @@ fn the_shipped_frames_carry_the_references_flags() {
         let want_id: i64 = resolved_attr(theirs, &reference, "id", 0)
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(0);
+        // The declared parent wins over the nesting, and `resolved_attr` follows `inherits=` —
+        // which is not a detail: the reference puts the chat frames' `parent="UIParent"` on
+        // `FloatingChatFrameTemplate`/`ChatTabTemplate`, and reading instances alone would report
+        // all fourteen as top-level. That template blind spot is the one 1734's own gap analysis
+        // fell into (commit "the chat templates carry parent=UIParent").
+        //
+        // Parent names are then compared through the same rename map the frames themselves are: a
+        // benilla-only prefix on the PARENT would otherwise report every child of it as diverged.
+        let want_parent = resolved_attr(theirs, &reference, "parent", 0)
+            .map(str::to_string)
+            .or_else(|| nesting.get(theirs).cloned().flatten());
+        let parent = parent_of(name);
+        let parent_matches = match (&parent, &want_parent) {
+            (None, None) => true,
+            (Some(p), Some(w)) => p == w || p.strip_prefix("Benilla") == Some(w.as_str()),
+            _ => false,
+        };
+        let show = |p: &Option<String>| p.clone().unwrap_or_else(|| "(top-level)".into());
 
         for (flag, differs, ours_s, theirs_s) in [
             (
@@ -581,6 +725,12 @@ fn the_shipped_frames_carry_the_references_flags() {
                 want_mouse.to_string(),
             ),
             (Flag::Id, id != want_id, id.to_string(), want_id.to_string()),
+            (
+                Flag::Parent,
+                !parent_matches,
+                show(&parent),
+                show(&want_parent),
+            ),
         ] {
             if !differs {
                 continue;

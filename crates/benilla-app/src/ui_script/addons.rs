@@ -69,12 +69,12 @@ const ADDONS_DIR: &str = "AddOns";
 /// loading screen with zero diagnostics (B271's class).
 pub(crate) const LOAD_INSTRUCTION_BUDGET: u64 = 200_000_000;
 
-/// Where one addon's files come from.
+/// Where one interface's files come from.
 ///
-/// The two arms are the same question asked of two stores, and keeping them one enum is what lets
-/// [`Addon::load`] be written once: our own interface and a third-party folder differ in where the
-/// bytes live, not in how they load.
-enum Source {
+/// The three arms are the same question asked of three stores, and keeping them one enum is what
+/// lets [`Addon::load`] be written once: our own interface, a third-party folder and the player's
+/// own install differ in where the bytes live, not in how they load.
+pub(super) enum Source {
     /// benilla's own interface — the compiled-in tree, which a dev build shadows with `assets/ui`
     /// on disk so editing FrameXML costs no recompile ([`content`], 1175).
     Builtin,
@@ -83,6 +83,11 @@ enum Source {
     /// `BagBrother/core/core.xml` it includes are both expressible — which is the point, since a
     /// shared library addon exists to be reached from its dependents.
     Dir(PathBuf),
+    /// **The player's own installed patch chain** — the reference FrameXML this client sources
+    /// rather than shipping a copy of (decision 1751, [`super::reference_ui`]). Paths are full
+    /// chain-internal paths (`Interface\FrameXML\ContainerFrame.xml`), so the prefix is empty and
+    /// the chain resolves `/` and `\` alike, case-insensitively.
+    Chain,
 }
 
 /// One loadable interface: a name, its parsed manifest, and where its files come from.
@@ -96,6 +101,12 @@ pub(super) struct Addon {
 }
 
 impl Addon {
+    /// An interface from an explicit source — [`super::reference_ui::addon`]'s constructor, and
+    /// the only one that is not derived from a `.toc` on some store.
+    pub(super) fn new(name: String, toc: Toc, source: Source) -> Self {
+        Addon { name, toc, source }
+    }
+
     /// benilla's own interface. Always present — it is in the binary (1175), so unlike a
     /// discovered addon it cannot be missing.
     pub(super) fn builtin() -> Self {
@@ -144,15 +155,37 @@ impl Addon {
                     .map(String::into_bytes)
             }
             Source::Dir(root) => read_under(root, req),
+            Source::Chain => super::reference_ui::read(req),
         }
     }
 
     /// This addon's own folder in its source's path space — the `base` its manifest entries are
-    /// relative to. `""` for the builtin's flat tree, the addon's folder name for a `Dir`.
+    /// relative to. `""` for the builtin's flat tree, the addon's folder name for a `Dir`, and
+    /// `""` again for the chain, whose manifest entries are already full internal paths.
     fn prefix(&self) -> &str {
         match &self.source {
-            Source::Builtin => "",
+            Source::Builtin | Source::Chain => "",
             Source::Dir(_) => &self.name,
+        }
+    }
+
+    /// The name Lua gives a chunk from this source — **not cosmetic**, because addons parse it.
+    ///
+    /// An addon's file is named the way the client names it, `Interface\AddOns\<Folder>\<File>`
+    /// ([`benilla_ui::script::addon_chunk_name`], whose header carries the FuBar `debugstack`
+    /// story). A **chain** file is named after its own chain path, `@Interface\FrameXML\…`, which
+    /// is both what the real client names it and what keeps FrameXML *out* of the `\AddOns\`
+    /// pattern those addons match against — FrameXML is not an addon.
+    ///
+    /// The loader gives an inline `<Script>` and a `<Script file=>` exactly this shape already
+    /// (`loader::Loader::run`), so a chain document's Lua is named identically whether it arrives
+    /// as a manifest entry or through its own `<Script file=>`.
+    fn chunk_name(&self, file: &str) -> String {
+        match &self.source {
+            Source::Builtin | Source::Dir(_) => {
+                benilla_ui::script::addon_chunk_name(&self.name, file)
+            }
+            Source::Chain => format!("@{}", file.replace('/', "\\")),
         }
     }
 
@@ -193,7 +226,11 @@ impl Addon {
                 // a broken addon must not read as a client ERROR, which is gate-fatal to
                 // `smoke.sh`'s zero-ERROR count (1450).
                 match self.source {
-                    Source::Builtin => error!("ui_script: {e}"),
+                    // Ours, and the chain list is ours too: a `benilla.toc` line naming a file the
+                    // player's install does not hold is our manifest being wrong about the 1.12
+                    // chain, not the player's copy being wrong. (No install at all is a different
+                    // thing, warned once by `reference_ui::chain`.)
+                    Source::Builtin | Source::Chain => error!("ui_script: {e}"),
                     Source::Dir(_) => warn!("ui_script: {e}"),
                 }
                 // Retained where the player can read it (1495). This is the single commonest way
@@ -207,10 +244,7 @@ impl Addon {
                 // The same execution `<Script file=>` gets (`loader::mod.rs`): one chunk, run in
                 // the one global state, in manifest order. The reference does exactly this —
                 // `AddOn_Load 0x51f240` hands each listed file to `0x6edb90` regardless of kind.
-                match script.run_chunk_named(
-                    &bytes,
-                    &benilla_ui::script::addon_chunk_name(&self.name, file),
-                ) {
+                match script.run_chunk_named(&bytes, &self.chunk_name(file)) {
                     Ok(()) => info!("ui_script: {}/{file} ran", self.name),
                     Err(e) => {
                         let e = format!("{}/{file}: {e}", self.name);

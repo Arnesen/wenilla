@@ -12,7 +12,7 @@ use crate::wire::{
 
 use super::{
     action_bar, area_trigger, attack, auction, bank, binder, channel, chat, combat_log, death,
-    duel, gameobject, gm_ticket, gossip, group, guild, items, loot, mail, mirror_timer,
+    duel, gameobject, gm_ticket, gossip, group, guild, instance, items, loot, mail, mirror_timer,
     monster_move, movement, opcode, page_text, pet, petition, progression, pvp, quest, social,
     spellbook, spells, stable, summon, taxi, trade, trainer, update_object, vendor, world_state,
     Character, CreatureQueryInfo, JumpInfo, MoveMode, ServerPacket, SpeedKind,
@@ -1097,6 +1097,26 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             group::ReadyCheck::Answer { guid, ready } => {
                 ServerPacket::ReadyCheckAnswer { guid, ready }
             }
+        },
+        // The instance/raid lockout family (decision 1748; bodies in `instance`). Every one of
+        // these is read here in the client's own field order.
+        opcode::SMSG_RAID_INSTANCE_MESSAGE => ServerPacket::RaidInstanceMessage {
+            message: instance::read_raid_instance_message(&mut r)?,
+        },
+        opcode::SMSG_INSTANCE_SAVE_CREATED => ServerPacket::InstanceSaveCreated {
+            flag: instance::read_u32_body(&mut r)?,
+        },
+        opcode::SMSG_INSTANCE_RESET => ServerPacket::InstanceReset {
+            map: instance::read_u32_body(&mut r)?,
+        },
+        opcode::SMSG_INSTANCE_RESET_FAILED => ServerPacket::InstanceResetFailed {
+            failure: instance::read_instance_reset_failed(&mut r)?,
+        },
+        opcode::SMSG_UPDATE_LAST_INSTANCE => ServerPacket::UpdateLastInstance {
+            map: instance::read_u32_body(&mut r)?,
+        },
+        opcode::SMSG_UPDATE_INSTANCE_OWNERSHIP => ServerPacket::UpdateInstanceOwnership {
+            owns: instance::read_u32_body(&mut r)?,
         },
         // The duel family (decision 0633; bodies in `duel`). Both empty-body arms carry their
         // whole meaning in the opcode.

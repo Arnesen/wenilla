@@ -19,6 +19,14 @@ use bevy::prelude::*;
 /// ~36% shorter — no separate constant.
 pub(super) const RUN_BACK_RATIO: f32 = 4.5 / 7.0;
 
+/// Walk speed as a fraction of run: vanilla `MOVE_WALK` 2.5 / `MOVE_RUN` 7.0 — the sibling of
+/// [`RUN_BACK_RATIO`], and used the same way and only for the same reason: `$WOW_MOVE_SPEED`
+/// replaces the server's speed set outright, and the walk gait has to stay a walk under it
+/// rather than becoming a second run. The live number is always the server's (`MoveSpeeds::walk`,
+/// seeded by the create block and moved by `SMSG_FORCE_WALK_SPEED_CHANGE`); this ratio never
+/// reaches a real session (decision 1752).
+pub(super) const WALK_RATIO: f32 = 2.5 / 7.0;
+
 /// Turn rate (rad/s) **fallback** — how fast A/D rotate the facing when not mouse-looking, used
 /// only until the mover's own sixth movement speed arrives.
 ///
@@ -520,6 +528,23 @@ pub(crate) struct Player {
     /// places the other forward sources do — the direction vector, the wire flags, the swim
     /// amounts, and the turn-rate's "am I translating" test.
     pub(super) autorun: bool,
+    /// **Walk mode latched on** — the reference's `MOVEMENTFLAGS` bit `0x100`
+    /// (`CMovement+0x40`), flipped by `ToggleRun 0x513d50` → `0x60e080`, which reads the CURRENT
+    /// bit out of the cached word (`0x60e083 mov eax,[ecx+0x9e8]; 0x60e08c and eax,0x100`) and
+    /// hands it down to be inverted. The other true *toggle* in the movement family, beside
+    /// [`autorun`](Self::autorun) — and unlike it, this one is a real wire bit rather than an
+    /// input-word bit, so it rides every outbound packet ([`super::flags`]) and observers read our
+    /// gait straight off it.
+    ///
+    /// **Typed state, not the flag word.** [`Player::move_flags`] is last-streamed wire
+    /// bookkeeping, rebuilt from state every frame, so a latch parked only there is gone by the
+    /// next frame — the same trap [`MoveModes`] exists to avoid. It is *also* inside the
+    /// `SERVER_AUTHORED` merge mask, so a server-authored move for our mover can flip it; that
+    /// merge lands here, in [`super::wire_in`], not in the word.
+    ///
+    /// It is **not** a [`MoveModes`] entry: that family is the four ack'd server grants, each with
+    /// its own SMSG/ack pair. This one owes no ack, is granted by nobody, and is ours to set.
+    pub(super) walking: bool,
     /// **`/follow` is holding the forward key this frame** (decision 0890). Not a mode of its own:
     /// the reference's follow owns no translation and simply pushes the same move-forward bit the W
     /// key does (`0x60e790`), so this folds into [`forward_axis`] beside `autorun` and the

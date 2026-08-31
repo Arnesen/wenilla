@@ -824,26 +824,17 @@ impl RemoteMotion {
         let dz = fwd_amt * vp;
 
         let len = (dx * dx + dy * dy + dz * dz).sqrt();
-        // The speed the move-flags imply — the ref's `GetCurrentSpeed 0x7c4c90` (the swim §5's
-        // TU-H): swimming → swim, backward bit → `min(swimBack, swim)`; on land a net-backward
-        // move (S with no forward override) → `min(runBack, run)`; a /walk-toggled mover → walk;
-        // otherwise run. The min is the byte law — a plain back-speed select whenever it's the
-        // slower (always, at vanilla values).
-        let backpedal =
-            self.flags & move_flags::BACKWARD != 0 && self.flags & move_flags::FORWARD == 0;
-        let base = if swimming {
-            if backpedal {
-                speeds.swim_back.min(speeds.swim)
-            } else {
-                speeds.swim
-            }
-        } else if backpedal {
-            speeds.run_back.min(speeds.run)
-        } else if self.flags & move_flags::WALK_MODE != 0 {
-            speeds.walk
-        } else {
-            speeds.run
-        };
+        // The speed this mover's flags imply — the reference's `GetCurrentSpeed 0x7c4c90`, stated
+        // once in [`crate::net::current_speed`] so this side and the local controller cannot drift
+        // apart about a cascade whose whole content is its ORDER. Everything it reads is the
+        // sender's own word, relayed verbatim: the direction bits, the swim bit and the walk bit.
+        //
+        // **The walk arm outranks the backward min, and this block used to have it backwards**
+        // (decision 1752): it tested the backpedal first, so a walking backpedaller extrapolated
+        // at `min(runBack, run)` = 4.5 yd/s. The bytes take the walk arm at `0x7c4d11` *before*
+        // the run arm's `0x7c4d1d`, so the answer is `min(walk, run)` = 2.5 — a walking backpedal
+        // is exactly as slow as a walk, and the observed body now plays Walk instead of Run.
+        let base = crate::net::current_speed(&speeds, self.flags);
         let mut pos = self.wow_pos;
         let speed = if len > 1.0e-4 {
             let step = base * dt / len; // normalize the 3D direction, then advance by base·dt

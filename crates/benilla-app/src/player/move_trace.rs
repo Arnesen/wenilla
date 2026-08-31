@@ -18,6 +18,13 @@
 //!   a granted sit and a refused one look identical on screen, and the granted-underwater bug and a
 //!   gate that refuses everything are the same picture. Covers the `X` key and the `/sit` family
 //!   alike, because both land on the one commit it is emitted from.
+//! - **`gait`** — one line per **walk/run toggle** decision ([`gait`]): the `TOGGLERUN` press and
+//!   what the reference's guard chain did with it. Same argument as `sit`, half applied: the
+//!   *granted* half is observable twice over (the body's gait changes and `snd` logs the
+//!   `SET_WALK_MODE`/`SET_RUN_MODE` that went out), but a **refused** press is silent by design —
+//!   indistinguishable from a key that isn't bound, or from a binding whose dispatch never fired.
+//!   The chain also has an open byte (`0x1200`'s second bit, decision 1752 §6), so a live run is
+//!   how the §5's answer gets checked against a real refusal instead of re-reasoned.
 //! - **`knb`** — one line per **knockback** ([`knockback`]): the launch quad the server aimed and
 //!   whether the mover flew it. The one mover edge with no observable of its own — its ack is not a
 //!   `MSG_MOVE_*` so `snd` misses it, its refusal is silent by design, and a wrong ack's whole
@@ -104,6 +111,28 @@ pub(super) fn posture(what: &str, state: u8, from: u8, flags: u32) {
             "{what} state={state} from={from} flags={flags:#x} swim={} moving={}",
             u8::from(flags & f::SWIMMING != 0),
             u8::from(flags & f::ANY_MOVE != 0),
+        ),
+    );
+}
+
+/// One `gait` line per **walk/run toggle** decision, granted or refused (decision 1752).
+///
+/// `what` is `commit` or `REFUSED`; `to` is the gait the press asked for, and the three flags are
+/// the reference's own guard chain at `0x513d8e`–`0x513dcd` spelled out one by one — because
+/// "why did nothing happen?" is exactly the question this tag exists to stop anyone answering from
+/// memory, and three silent gates share the same silence.
+pub(super) fn gait(what: &str, to: bool, dead: bool, rooted: bool, on_spline: bool) {
+    if !trace::enabled() {
+        return;
+    }
+    trace::line(
+        "gait",
+        &format!(
+            "{what} to={} dead={} rooted={} spline={}",
+            if to { "walk" } else { "run" },
+            u8::from(dead),
+            u8::from(rooted),
+            u8::from(on_spline),
         ),
     );
 }

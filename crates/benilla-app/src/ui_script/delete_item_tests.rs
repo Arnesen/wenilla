@@ -12,24 +12,7 @@
 
 use benilla_ui::script::{ContainerSlot, ContainerState, UiScript};
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error (the panel/loot
-/// tests' loader, duplicated so this file is self-contained).
-fn load_xml(s: &UiScript, file: &str) -> usize {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-    report.frames
-}
+use super::test_ui::{bag_open, bag_slot_button, load_ui as load_xml, BAG_UI};
 
 /// A one-item, one-slot backpack holding `item_id`/`name` at `quality`, so the confirm text and
 /// the wire's destroy count are exercisable end to end. Quality is what forks the driver, so it is
@@ -64,15 +47,33 @@ fn one_item_backpack(item_id: u32, name: &str, quality: u32) -> ContainerState {
     }
 }
 
+/// The popup engine and its driver, and nothing else: `UiPanels.xml` owns both `StaticPopup*` and
+/// `BenillaDeleteItemConfirmDriver`, and every test but the repaint one below only ever asks about
+/// the dialog. It carried `MerchantFrame.xml` + `Cooldown.xml` + `BagFrame.xml` until 1751 for one
+/// reason — the repaint test used to count `BenillaBagFrame_Update` — and that test now brings the
+/// reference's own bag stack itself ([`bag_setup`]), so the whole tail went with it.
 fn setup() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml"); // BenillaMoney_Set, BagFrame's isolation dep
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
+    s.set_money(0);
+    s
+}
+
+/// [`setup`] plus the reference's bag stack — the harness for the one test that has to watch a bag
+/// WINDOW repaint. The windows are `ContainerFrame1..12` off the player's chain now (1751), so
+/// this needs client data and the caller opens with `wow_data_or_skip!`.
+fn bag_setup() -> UiScript {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
+    // `ContainerFrame_Update` reads `MerchantFrame:IsShown()` on any slot the tooltip owns, and
+    // `BankFrame` (BAG_UI's last entry) fills its purse through `BenillaMoney_Set`.
+    load_xml(&s, "MerchantFrame.xml");
     s.set_money(0);
     s
 }
@@ -142,17 +143,39 @@ fn delete_item_confirm_shows_the_real_strings_and_yes_deletes() {
 /// No runs the entry's OnCancel (`ClearCursor()`) instead — the item is dropped, not destroyed (no
 /// wire send) — and the bag REPAINTS off the clear's `ITEM_LOCK_CHANGED`, un-darkening the source
 /// slot. The repaint is the 0218 stuck-darkening regression: the popup's No is a clear the bag
-/// never clicked through, so only the event wiring (BagFrame's ITEM_LOCK_CHANGED registration)
-/// can reach it.
+/// never clicked through, so only the event wiring (the container window's own ITEM_LOCK_CHANGED
+/// registration) can reach it.
+///
+/// **What 1751 changed, and what it did not.** The repaint counted here used to be
+/// `BenillaBagFrame_Update`; the window is the reference's `ContainerFrame` now, so the body is
+/// its own `ContainerFrame_Update(frame)` (`ContainerFrame.lua:234`) off the player's chain. Two
+/// consequences, both faithful: the window has to be OPEN (`ContainerFrame_OnEvent` gates the
+/// repaint on `this:IsShown()` at l.39-42, where ours repainted a hidden window too), and the
+/// darkening the repaint undoes is the reference's own `SetItemButtonDesaturated(button, locked)`
+/// at l.245 — so the slot's greyscale flag is asserted directly here rather than only through the
+/// repaint that clears it.
 #[test]
 fn delete_item_confirm_no_clears_without_destroying() {
-    let mut s = setup();
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = bag_setup();
+    s.set_container(0, Some(one_item_backpack(117, "Tough Jerky", 1)));
+    s.run("ToggleBackpack()").unwrap();
+    assert!(bag_open(&s, 0), "the backpack window is up");
+    // Asked of the buttons' own GetID: `ContainerFrame_GenerateFrame` numbers a window's buttons
+    // BACKWARDS, so slot 1 is the LAST `…Item<j>`, and index arithmetic would pin a coincidence.
+    let slot1 = bag_slot_button(&s, 0, 1);
+
     pick_up_and_drop_in_world(&mut s);
+    assert!(
+        desaturated(&mut s, &slot1),
+        "held on the cursor, the source slot draws dark (ref SetItemButtonDesaturated(_, locked))"
+    );
+
     // Count repaints from here — the No-click path must trigger one via the event, not a click.
     s.run(
         "repaints = 0\n\
-         local real = BenillaBagFrame_Update\n\
-         BenillaBagFrame_Update = function(...) repaints = repaints + 1; return real(...) end",
+         local real = ContainerFrame_Update\n\
+         ContainerFrame_Update = function(...) repaints = repaints + 1; return real(...) end",
     )
     .unwrap();
 
@@ -173,7 +196,29 @@ fn delete_item_confirm_no_clears_without_destroying() {
             .unwrap(),
         "the source slot reads unlocked again"
     );
+    assert!(
+        !desaturated(&mut s, &slot1),
+        "…and the repaint un-darkened it — the 0218 stuck-dark slot"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// Is `button`'s icon drawn greyscale? The renderer-facing answer, off the quad stream, because
+/// the engine publishes `Texture:SetDesaturated` with no getter to ask — and a *drawn* grey is
+/// what "the slot is stuck dark" means to the player anyway.
+fn desaturated(s: &mut UiScript, button: &str) -> bool {
+    s.resolve();
+    s.extract()
+        .into_iter()
+        .filter(|q| s.quad_owner_name(q.target).as_deref() == Some(button))
+        .any(|q| match &q.content {
+            benilla_ui::script::QuadContent::Texture {
+                path: Some(p),
+                desaturated,
+                ..
+            } => p.contains("INV_Misc_Food_16") && *desaturated,
+            _ => false,
+        })
 }
 
 /// ESC routes through the ref's `StaticPopup_EscapePressed` — DELETE_ITEM is `hideOnEscape`, so

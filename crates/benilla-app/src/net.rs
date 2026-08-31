@@ -213,6 +213,51 @@ pub(crate) struct NetEntity {
 #[derive(Component, Clone, Copy)]
 pub(crate) struct UnitSpeeds(pub(crate) MoveSpeeds);
 
+/// **`CMovement::GetCurrentSpeed 0x7c4c90`** — the one place a mover's move-flags become a
+/// yards/second, for our own body and for every remote one. It is a *cascade*, and its ORDER is
+/// the whole of it (VERIFIED bytes, wow-re `collision/scratch/airborne-steerability.md` §2.4 +
+/// `object-layer/scratch/swim-mechanism.md` TU-H):
+///
+/// 1. `0x7c4c99 test dl,0xf` — **no direction bit at all → 0.0** (`[0x7ffd74]`), never a stale
+///    speed. A standing mover is standing however its speed fields read.
+/// 2. `0x7c4cd9 test edx,0x200000` — **SWIMMING first**, and its arm returns from inside: there
+///    is no "swim-walk", so the walk bit below cannot reach a swimmer. Backward → the `min`.
+/// 3. `0x7c4d11 test dh,0x1` — **WALK mode (`0x100`) next**, and this is the ordering that is easy
+///    to get backwards: the walk arm `0x7c4d4d fld [ecx+0x88]; fld [ecx+0x8c]; fcompp` is taken
+///    **before** the run arm's backward `min`, so a **walking backpedal is walk speed, not
+///    run-back speed**. The arm is `min(MOVE_WALK, MOVE_RUN)` — not a plain select — so a
+///    walk-speed buff above run speed is clamped exactly as the reference clamps it.
+/// 4. `0x7c4d1d` — the run arm: backward → `min(MOVE_RUN_BACK, MOVE_RUN)`, else `MOVE_RUN`.
+///
+/// Both backward arms are a **min**, not a select: x87 `fcompp` + `test ah,0x41` + `jp` returns
+/// the smaller (ties/NaN → the forward field). At vanilla values the min is always the back field,
+/// so the clamp is only visible under a server that force-sets a back speed above its forward one.
+///
+/// A **zero** `walk` is the ctor state, not a rate (`0x7c48e8`–`0x7c4906` zeroes all six speed
+/// fields and only the create block or a `SMSG_FORCE_WALK_SPEED_CHANGE` fills them), so a mover
+/// whose speeds have not landed falls back to the run arm rather than freezing solid — the same
+/// treatment `turn_rate` already gets in [`crate::player`]'s controller.
+pub(crate) fn current_speed(s: &MoveSpeeds, flags: u32) -> f32 {
+    use crate::creature_anim::move_flags as f;
+    if flags & f::ANY_MOVE == 0 {
+        return 0.0;
+    }
+    if flags & f::SWIMMING != 0 {
+        return if flags & f::BACKWARD != 0 {
+            s.swim_back.min(s.swim)
+        } else {
+            s.swim
+        };
+    }
+    if flags & f::WALK_MODE != 0 && s.walk > 0.0 {
+        return s.walk.min(s.run);
+    }
+    if flags & f::BACKWARD != 0 {
+        return s.run_back.min(s.run);
+    }
+    s.run
+}
+
 /// A streamed object's descriptor field set (`UpdateFields`) — the ECS's mirror of the object's
 /// server-side values array (decision 0061). Seeded from the create mask and [`ObjectFields::merge`]d
 /// with each `Values` delta, so it accumulates the object's full descriptor state over its life.
@@ -654,6 +699,13 @@ pub(crate) enum MoveKind {
     FallLand,
     StartSwim,
     StopSwim,
+    /// The walk/run gait flipped — the `TOGGLERUN` keybind's own packet. The reference sends it
+    /// from the toggle handler itself (`ToggleRun 0x513d50` → `0x60e080` → `0x617de0`, which
+    /// picks move-event kind `0xf`/`0xe` off the CURRENT walk bit and enqueues it), not from the
+    /// move-state broadcaster — so it goes out **standing still**, where the broadcaster's
+    /// locomotion-nibble gate (`0x61a99d test al,0xf`) would have swallowed it.
+    SetWalkMode,
+    SetRunMode,
     SetFacing,
     Heartbeat,
 }
@@ -676,6 +728,8 @@ impl MoveKind {
             MoveKind::FallLand => op::MSG_MOVE_FALL_LAND,
             MoveKind::StartSwim => op::MSG_MOVE_START_SWIM,
             MoveKind::StopSwim => op::MSG_MOVE_STOP_SWIM,
+            MoveKind::SetWalkMode => op::MSG_MOVE_SET_WALK_MODE,
+            MoveKind::SetRunMode => op::MSG_MOVE_SET_RUN_MODE,
             MoveKind::SetFacing => op::MSG_MOVE_SET_FACING,
             MoveKind::Heartbeat => op::MSG_MOVE_HEARTBEAT,
         }
@@ -1876,6 +1930,10 @@ pub(crate) enum ClientCommand {
     },
     /// Ask for our saved raid lockouts (`CMSG_REQUEST_RAID_INFO`) — the Raid Info panel.
     RequestRaidInfo,
+    /// Reset every dungeon we own (`CMSG_RESET_INSTANCES`, empty body) — the SELF menu's "Reset
+    /// all instances" (decision 1748). Answered per instance: an `SMSG_INSTANCE_RESET` for each
+    /// map that reset, an `SMSG_INSTANCE_RESET_FAILED` for each that would not.
+    ResetInstances,
     // ── The duel family (decision 0633; writer bodies in benilla-protocol
     //    `world/writer/duel.rs`). Challenging is a `CastSpell` of the duel spell, not a verb here.
     /// Accept a duel challenge (`CMSG_DUEL_ACCEPTED`) — the popup's Accept, and the challenger's
@@ -2423,6 +2481,105 @@ pub(crate) struct AiReactionMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The vanilla player set, and the one every number below is read against:
+    /// walk 2.5 · run 7.0 · runBack 4.5 · swim 4.722 · swimBack 2.5 (vmangos `baseMoveSpeed`).
+    fn vanilla() -> MoveSpeeds {
+        MoveSpeeds {
+            walk: 2.5,
+            run: 7.0,
+            run_back: 4.5,
+            swim: 4.722,
+            swim_back: 2.5,
+            turn_rate: std::f32::consts::PI,
+        }
+    }
+
+    /// **The cascade's ORDER is the whole feature, and one rung of it is counter-intuitive.**
+    /// `0x7c4c90` takes the walk arm at `0x7c4d11` *before* the run arm's backward min at
+    /// `0x7c4d1d`, so a walking backpedal is walk speed — not run-back. Our remote extrapolator
+    /// tested the backpedal first and got 4.5 here for five hundred commits (decision 1752); this
+    /// is the assertion that pins the fix, in the one place both callers now go through.
+    #[test]
+    fn the_walk_arm_outranks_the_backward_min() {
+        use crate::creature_anim::move_flags as f;
+        let s = vanilla();
+        assert_eq!(current_speed(&s, f::FORWARD), 7.0, "plain run");
+        assert_eq!(current_speed(&s, f::BACKWARD), 4.5, "the backward min");
+        assert_eq!(current_speed(&s, f::FORWARD | f::WALK_MODE), 2.5, "walk");
+        assert_eq!(
+            current_speed(&s, f::BACKWARD | f::WALK_MODE),
+            2.5,
+            "walking backwards is a WALK, not a run-back: the walk arm is taken first"
+        );
+        // …and a strafing walker likewise — the walk arm is ahead of everything on land.
+        assert_eq!(current_speed(&s, f::STRAFE_LEFT | f::WALK_MODE), 2.5);
+    }
+
+    /// SWIMMING pre-empts the walk bit entirely (`0x7c4cd9` precedes `0x7c4d11`): there is no
+    /// "swim-walk" in this client, so a walker who wades in strokes at full swim speed.
+    #[test]
+    fn swimming_is_tested_first_so_there_is_no_swim_walk() {
+        use crate::creature_anim::move_flags as f;
+        let s = vanilla();
+        assert_eq!(
+            current_speed(&s, f::FORWARD | f::SWIMMING | f::WALK_MODE),
+            s.swim
+        );
+        assert_eq!(
+            current_speed(&s, f::BACKWARD | f::SWIMMING | f::WALK_MODE),
+            2.5,
+            "the swim arm's own backward min — reached, and unaffected by the walk bit"
+        );
+    }
+
+    /// Both backward arms are a **min**, not a select (x87 `fcompp` + `test ah,0x41` + `jp`), and
+    /// so is the walk arm. Only visible under a server that force-sets a slower field above its
+    /// faster one — which is exactly why it is a test and not a comment.
+    #[test]
+    fn every_arm_that_looks_like_a_select_is_really_a_min() {
+        use crate::creature_anim::move_flags as f;
+        let s = MoveSpeeds {
+            walk: 12.0, // a walk-speed buff above run
+            run: 7.0,
+            run_back: 9.0, // a run-back above run
+            swim: 4.0,
+            swim_back: 9.0, // a swim-back above swim
+            turn_rate: std::f32::consts::PI,
+        };
+        assert_eq!(current_speed(&s, f::FORWARD | f::WALK_MODE), 7.0);
+        assert_eq!(current_speed(&s, f::BACKWARD), 7.0);
+        assert_eq!(current_speed(&s, f::FORWARD | f::SWIMMING), 4.0);
+        assert_eq!(current_speed(&s, f::BACKWARD | f::SWIMMING), 4.0);
+    }
+
+    /// The two guards at the ends of the cascade. No direction bit → 0.0 (`0x7c4c99 test dl,0xf`),
+    /// never a stale speed: a mover standing still is standing however its fields read, and the
+    /// turn/pitch/mode bits are not translation. And a **zero walk speed is the ctor state, not a
+    /// rate** — a mover whose speed block has not landed falls back to the run arm rather than
+    /// freezing solid the moment somebody toggles walk (the same treatment `turn_rate` gets).
+    #[test]
+    fn no_direction_bit_is_zero_and_an_unfilled_walk_speed_is_not_a_freeze() {
+        use crate::creature_anim::move_flags as f;
+        let s = vanilla();
+        assert_eq!(current_speed(&s, 0), 0.0);
+        assert_eq!(
+            current_speed(&s, f::WALK_MODE),
+            0.0,
+            "a mode is not a motion"
+        );
+        assert_eq!(current_speed(&s, f::TURN_LEFT | f::ROOT | f::SWIMMING), 0.0);
+
+        let unfilled = MoveSpeeds {
+            run: 7.0,
+            ..Default::default()
+        };
+        assert_eq!(
+            current_speed(&unfilled, f::FORWARD | f::WALK_MODE),
+            7.0,
+            "walk 0.0 is the ctor, not a rate — fall back rather than freeze"
+        );
+    }
 
     /// **The addon lane's four wire bytes** (decision 1235) — the client's own whitelist at
     /// `0x49fa3f`-`0x49fa4e`, and the last link in the chain between an addon's Lua call and the

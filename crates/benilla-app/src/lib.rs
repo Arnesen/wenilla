@@ -126,6 +126,7 @@ mod ui_guild;
 mod ui_hide;
 mod ui_honor;
 mod ui_inspect;
+mod ui_instance;
 mod ui_item_text;
 mod ui_items;
 mod ui_layout;
@@ -206,6 +207,7 @@ use ui_follow::UiFollowPlugin;
 use ui_gm_ticket::UiGmTicketPlugin;
 use ui_gossip::UiGossipPlugin;
 use ui_guild::UiGuildPlugin;
+use ui_instance::UiInstancePlugin;
 use ui_item_text::UiItemTextPlugin;
 use ui_items::UiItemsPlugin;
 use ui_layout::UiLayoutPlugin;
@@ -630,6 +632,11 @@ pub fn run(build: BuildId) -> AppExit {
     // Auto-follow's UI seam: the popup's Follow row + `FollowUnit`/`FollowByName` inbound, and
     // the AUTOFOLLOW_BEGIN/END pair that drives the centre-screen status line outbound.
     .add_plugins(UiFollowPlugin)
+    // Instance/raid lockouts (decision 1748): the four CHAT_MSG_SYSTEM lines the client composes
+    // itself out of GlobalStrings, the last-dungeon/ownership bookkeeping behind
+    // `CanShowResetInstances()`, and the SELF menu's one send. Beside the binder family for the
+    // same feed/drain shape; it needs the map catalog, which is up long before Update runs.
+    .add_plugins(UiInstancePlugin)
     // Leaving (decision 0674): the game menu's Logout/Exit Game — the request, the server's
     // 20-second answer narrated as the CAMP/QUIT countdown, and the process exit.
     .add_plugins(UiLogoutPlugin)
