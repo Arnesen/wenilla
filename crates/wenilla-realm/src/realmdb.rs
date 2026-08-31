@@ -28,7 +28,16 @@ pub struct Character {
 
 pub async fn characters(db: &MySqlPool, game_username: &str) -> Result<Vec<Character>> {
     Ok(sqlx::query_as(
-        "SELECT c.guid, c.name, c.race, c.class, c.level, c.online, c.totaltime, c.zone \
+        // Every integer column cmangos ships is UNSIGNED (`int(11) unsigned`, `tinyint(3)
+        // unsigned`), and sqlx refuses to decode one into a signed Rust field ("mismatched
+        // types … not compatible with SQL type INT UNSIGNED") — which the dashboard's
+        // unwrap_or_default then dressed as "no characters yet" for every player (live bug,
+        // 2026-09-01; tests/realmdb_live.rs is the regression). CAST AS SIGNED at the query is
+        // the same answer online_count() below already used for its SUMs.
+        "SELECT CAST(c.guid AS SIGNED) AS guid, c.name, CAST(c.race AS SIGNED) AS race, \
+         CAST(c.class AS SIGNED) AS class, CAST(c.level AS SIGNED) AS level, \
+         CAST(c.online AS SIGNED) AS online, CAST(c.totaltime AS SIGNED) AS totaltime, \
+         CAST(c.zone AS SIGNED) AS zone \
          FROM classiccharacters.characters c JOIN classicrealmd.account a ON a.id = c.account \
          WHERE a.username = ? ORDER BY c.level DESC, c.name",
     )
@@ -50,7 +59,9 @@ pub struct OnlineRow {
 /// Every online character except the random bots (their accounts are `RNDBOT…`).
 pub async fn online(db: &MySqlPool) -> Result<Vec<OnlineRow>> {
     Ok(sqlx::query_as(
-        "SELECT c.name, c.level, c.race, c.class, c.zone, a.username AS account \
+        // Same UNSIGNED cast story as characters() above.
+        "SELECT c.name, CAST(c.level AS SIGNED) AS level, CAST(c.race AS SIGNED) AS race, \
+         CAST(c.class AS SIGNED) AS class, CAST(c.zone AS SIGNED) AS zone, a.username AS account \
          FROM classiccharacters.characters c JOIN classicrealmd.account a ON a.id = c.account \
          WHERE c.online = 1 AND a.username NOT LIKE 'RNDBOT%' ORDER BY c.name",
     )
@@ -78,7 +89,10 @@ pub struct ActiveBan {
 
 pub async fn active_bans(db: &MySqlPool) -> Result<Vec<ActiveBan>> {
     Ok(sqlx::query_as(
-        "SELECT a.username, b.banned_at, b.expires_at, b.reason FROM classicrealmd.account_banned b \
+        // Defensive twin of the casts above: these columns are signed in this cmangos vintage, but
+        // the schema has varied and a cast on a signed column costs nothing.
+        "SELECT a.username, CAST(b.banned_at AS SIGNED) AS banned_at, \
+         CAST(b.expires_at AS SIGNED) AS expires_at, b.reason FROM classicrealmd.account_banned b \
          JOIN classicrealmd.account a ON a.id = b.account_id \
          WHERE b.active = 1 AND (b.expires_at = b.banned_at OR b.expires_at > UNIX_TIMESTAMP())",
     )
