@@ -3,6 +3,11 @@
 //! the client needs (login 3724, world 8085) over WebSocket, since a browser tab cannot open a
 //! raw socket. See `web/README.md` for
 //! the exact URL/encoding rules the client lanes code against.
+//!
+//! This host is a **local development tool**. `/data` hands out the operator's game files to
+//! anyone who can reach the socket, with no login, so it binds to loopback by default and must
+//! never be exposed on the open internet. Multi-user hosting is `wenilla-realm`, which mounts the
+//! same routers behind a session cookie.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,10 +17,17 @@ use benilla_formats::Chain;
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(about = "Serve the benilla browser build, its game data, and its net proxy")]
+#[command(
+    about = "Serve the benilla browser build, its game data, and its net proxy (local testing only)",
+    after_help = "wenilla-host is for local testing. /data serves the game files under --data to \
+                  anyone who can reach the socket, without any login. Keep it on loopback or a \
+                  private network; never expose it on the open internet. For hosting players, \
+                  use wenilla-realm."
+)]
 struct Cli {
-    /// Address to listen on.
-    #[arg(long, default_value = "0.0.0.0:8090")]
+    /// Address to listen on. Loopback by default; anything else exposes `/data` to that
+    /// network unauthenticated (see `--help`).
+    #[arg(long, default_value = "127.0.0.1:8090")]
     bind: String,
     /// Directory holding the wasm-bindgen output (`index.html`, `wenilla.js`, `*.wasm`) —
     /// `scripts/web-build.sh`'s `web/dist/`.
@@ -53,6 +65,22 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&cli.bind)
         .await
         .with_context(|| format!("binding {}", cli.bind))?;
+    if !binds_loopback(&listener) {
+        tracing::warn!(
+            bind = %cli.bind,
+            "wenilla-host is a local testing tool: /data serves your game files to anyone who \
+             can reach this address, with no login. Do not expose it on the open internet — use \
+             wenilla-realm to host players."
+        );
+    }
     tracing::info!(bind = %cli.bind, www = %cli.www.display(), upstream = %cli.upstream, "wenilla-host listening");
     axum::serve(listener, app).await.context("serving")
+}
+
+/// Is the listener bound to a loopback address (the only place `/data` is safe unauthenticated)?
+fn binds_loopback(listener: &tokio::net::TcpListener) -> bool {
+    listener
+        .local_addr()
+        .map(|a| a.ip().is_loopback())
+        .unwrap_or(false)
 }

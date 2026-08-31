@@ -36,8 +36,13 @@ cargo run --release -p wenilla-host -- --www web/dist --data /path/to/WoW/Data -
 `wenilla-host` (`crates/wenilla-host`) is the whole server side: static files
 (precompressed), `GET /data/{name}` (`HEAD` too; `GET /data/__index` lists the chain), and
 `GET /ws/{port}` — a WebSocket↔TCP proxy that only ever dials `--upstream` on 3724 or 8085.
-Put it behind any https front (a reverse proxy, `tailscale serve`, …) to reach it from other
-machines; the page derives `ws://`/`wss://` from its own origin.
+**`wenilla-host` is for local testing only.** `/data` serves the game files you point it at to
+anyone who can reach the socket, with no login, so it binds to `127.0.0.1` by default and must
+not be exposed on the open internet — the files are Blizzard's, and whoever serves them is
+distributing them. A private network you control (a `tailscale serve` front, a LAN) is fine
+for your own testing (`--bind 0.0.0.0:8090` logs a warning); hosting for other players is
+[`wenilla-realm`](../crates/wenilla-realm/README.md), which puts the same routers behind a
+session cookie. The page derives `ws://`/`wss://` from its own origin, so any https front works.
 
 Each tab is a full independent client with its own upstream connection; players need their
 own accounts (a second login on one account kicks the first, as in the real client).

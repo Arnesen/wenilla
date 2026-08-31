@@ -30,6 +30,9 @@ cargo run --release -p wenilla-host -- --www web/dist --data /path/to/WoW/Data
 # open http://127.0.0.1:8090/
 ```
 
+`wenilla-host` is a local testing tool: it serves the game data you point it at with no login,
+so keep it on loopback or a private network and never on the open internet. Hosting players
+is [`wenilla-realm`](crates/wenilla-realm/README.md), which gates everything behind a session.
 See [`web/README.md`](web/README.md) for the how and the porting notes. Everything else
 below is upstream benilla's README, unchanged; upstream is
 [samwhosung/benilla](https://github.com/samwhosung/benilla), and the web work is meant to be
