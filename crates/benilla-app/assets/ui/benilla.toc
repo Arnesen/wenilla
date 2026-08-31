@@ -102,6 +102,10 @@ DeathFrame.xml
 # The two duel dialogs + their event driver (decision 0633): registry entries on the same
 # StaticPopup engine, and DUEL_OUTOFBOUNDS leans on its per-tick countdown branch.
 DuelFrame.xml
+# The escort-quest confirm + its event driver (decision 1733): one more registry entry on the same
+# StaticPopup engine. Not QuestFrame.xml's or QuestLogFrame.xml's — it belongs to no window, the
+# way the duel dialogs above belong to none.
+QuestShareFrame.xml
 # The two enchant-apply confirms + their event driver (decision 0928): the same StaticPopup
 # registry again. Not CraftFrame's — the gate that raises them is the generic item-target
 # bind, reached by a poison or a sharpening stone with no profession window open.

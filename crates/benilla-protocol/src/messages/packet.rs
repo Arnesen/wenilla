@@ -14,12 +14,13 @@ use super::{
     LevelUpInfo, LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry,
     MirrorTimerStart, MoveMode, Object, PartyKillLog, PartyMemberStatsInfo, PeriodicAuraLog,
     PetMode, PetSpells, PetitionQueryResponse, PetitionRename, PetitionShowList,
-    PetitionShowSignatures, PetitionSignResults, PvpCredit, QuestComplete, QuestDetails,
-    QuestGiverList, QuestOfferReward, QuestOption, QuestRequestItems, QuestTemplate,
-    ResurrectRequestBody, SpeedKind, SpellChainTargets, SpellCooldown, SpellDamageLog,
-    SpellDispelLog, SpellEnergizeLog, SpellGo, SpellHealLog, SpellInstaKillLog, SpellLogExecute,
-    SpellLogMiss, SpellOutcomeLog, SpellStart, StabledPet, TaxiMask, TradeStatus,
-    TradeStatusExtended, TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
+    PetitionShowSignatures, PetitionSignResults, PvpCredit, QuestComplete, QuestConfirmAccept,
+    QuestDetails, QuestGiverList, QuestOfferReward, QuestOption, QuestPushResult,
+    QuestRequestItems, QuestTemplate, ResurrectRequestBody, SpeedKind, SpellChainTargets,
+    SpellCooldown, SpellDamageLog, SpellDispelLog, SpellEnergizeLog, SpellGo, SpellHealLog,
+    SpellInstaKillLog, SpellLogExecute, SpellLogMiss, SpellOutcomeLog, SpellStart, StabledPet,
+    TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose, VendorItem,
+    WhoResults, XpGain,
 };
 
 /// The **final facing** a `SMSG_MONSTER_MOVE` dictates (its `moveType`): the unit snaps to face this
@@ -747,6 +748,14 @@ pub enum ServerPacket {
     /// `SMSG_QUESTLOG_FULL` — the log has no free slot for a new quest; empty body (vmangos
     /// `Quest.cpp:87`).
     QuestLogFull,
+    /// `MSG_QUEST_PUSH_RESULT` — one party member's verdict on a quest we shared, relayed to the
+    /// SHARER (layout + the direction trap on [`QuestPushResult`], decision 1733). Arrives once per
+    /// member per push, and more than once per member: the server opens with `SHARING_QUEST` and
+    /// then sends the real outcome.
+    QuestPushResult(QuestPushResult),
+    /// `SMSG_QUEST_CONFIRM_ACCEPT` — a party member started a `QUEST_FLAGS_PARTY_ACCEPT` (escort)
+    /// quest and we are being asked whether to start it too (layout in [`QuestConfirmAccept`]).
+    QuestConfirmAccept(QuestConfirmAccept),
     /// `SMSG_QUESTUPDATE_COMPLETE` — every objective on this quest is now complete (vmangos
     /// `Quest.cpp:91`); the log slot's state byte gets `QUEST_STATE_COMPLETE`.
     QuestUpdateComplete {
@@ -1516,6 +1525,8 @@ impl ServerPacket {
             ServerPacket::QuestGiverFailed { .. } => "SMSG_QUESTGIVER_QUEST_FAILED".into(),
             ServerPacket::QuestQueryResponse(_) => "SMSG_QUEST_QUERY_RESPONSE".into(),
             ServerPacket::QuestLogFull => "SMSG_QUESTLOG_FULL".into(),
+            ServerPacket::QuestPushResult(_) => "MSG_QUEST_PUSH_RESULT".into(),
+            ServerPacket::QuestConfirmAccept(_) => "SMSG_QUEST_CONFIRM_ACCEPT".into(),
             ServerPacket::QuestUpdateComplete { .. } => "SMSG_QUESTUPDATE_COMPLETE".into(),
             ServerPacket::QuestUpdateFailed { .. } => "SMSG_QUESTUPDATE_FAILED".into(),
             ServerPacket::QuestUpdateFailedTimer { .. } => "SMSG_QUESTUPDATE_FAILEDTIMER".into(),

@@ -1082,6 +1082,15 @@ pub(crate) struct Model {
     pub(crate) quest_log_selection: u32,
     pub(crate) quest_log_abandon_mark: u32,
     pub(crate) quest_log_abandons: Vec<u32>,
+    /// Quest ids `QuestLogPushQuest()` queued for the app to push to the party (decision 1733).
+    /// **Ids, not entry indices** — unlike the abandon mark above, whose two-step confirm is the
+    /// whole reason it pins an index: a push is one click, so the id is resolved right then and a
+    /// log shuffle between click and drain cannot retarget it.
+    pub(crate) quest_log_pushes: Vec<u32>,
+    /// How many times `ConfirmAcceptQuest()` was called — the escort confirm's Yes. A counter, not
+    /// a quest id: the reference's verb takes no argument and answers whatever confirm the client
+    /// is holding, so the id lives app-side with the pending confirm (decision 1733).
+    pub(crate) quest_confirms: u32,
     /// The shared item-template store: `item id → full tooltip view` ([`item_stats`] module doc,
     /// decision 0274 P1).
     pub(crate) item_templates: HashMap<u32, ItemTemplateView>,
@@ -1669,6 +1678,8 @@ impl Model {
             quest_log_selection: 0,
             quest_log_abandon_mark: 0,
             quest_log_abandons: Vec::new(),
+            quest_log_pushes: Vec::new(),
+            quest_confirms: 0,
             item_templates: HashMap::new(),
             item_sets: HashMap::new(),
             item_set_asks: HashSet::new(),

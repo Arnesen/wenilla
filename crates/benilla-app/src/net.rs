@@ -1464,11 +1464,37 @@ pub(crate) enum ClientCommand {
     QuestgiverStatusQuery {
         npc: u64,
     },
+    /// Greet a questgiver (`CMSG_QUESTGIVER_HELLO`) — the quest session's END on a non-gossip
+    /// NPC, which is what re-opens its quest list after a decline (decision 1738). The gossip
+    /// twin of this send is [`Self::GossipHello`].
+    QuestgiverHello {
+        npc: u64,
+    },
     /// Abandon a quest-log slot (`CMSG_QUESTLOG_REMOVE_QUEST`): the log window's confirmed abandon
     /// (`AbandonQuest()`'s two-step). No ack SMSG — the server clears the `PLAYER_QUEST_LOG` slot
     /// fields directly, which the next feed pass reads as the slot going empty.
     QuestlogRemove {
         slot: u8,
+    },
+    // ── The party quest-share (decision 1733; bodies in benilla-protocol `messages/quest/share.rs`). ──
+    /// Share the selected quest with the party (`CMSG_PUSHQUESTTOPARTY`) — the quest log's *Share
+    /// Quest* button. The server walks the group itself; the answers come back as one
+    /// `MSG_QUEST_PUSH_RESULT` per member (usually two: the opener, then the outcome).
+    PushQuestToParty {
+        quest: u32,
+    },
+    /// Answer the escort confirm with Yes (`CMSG_QUEST_CONFIRM_ACCEPT`) — a
+    /// `QUEST_FLAGS_PARTY_ACCEPT` quest a party member started. There is no No command: the
+    /// reference sends nothing at all when the popup is dismissed.
+    QuestConfirmAccept {
+        quest: u32,
+    },
+    /// Report our verdict on a quest a party member shared with us (`MSG_QUEST_PUSH_RESULT`) —
+    /// today only the decline; every other verdict on the share is the server's own. `sharer` is
+    /// the giver guid the shared `SMSG_QUESTGIVER_QUEST_DETAILS` arrived under.
+    QuestPushResult {
+        sharer: u64,
+        msg: benilla_protocol::messages::QuestShareMsg,
     },
     // ── The mail arc (decision 0544; writer bodies in benilla-protocol `world/writer/mail.rs`). ──
     /// Ask the mailbox's inbox page (`CMSG_GET_MAIL_LIST`) — the window's open verb and its

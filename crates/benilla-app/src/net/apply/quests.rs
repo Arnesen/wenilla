@@ -4,7 +4,8 @@
 //! dispatcher, one call per arm.
 
 use benilla_protocol::messages::{
-    QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward, QuestRequestItems, QuestTemplate,
+    QuestComplete, QuestConfirmAccept, QuestDetails, QuestGiverList, QuestOfferReward,
+    QuestRequestItems, QuestShareMsg, QuestTemplate,
 };
 use bevy::prelude::*;
 
@@ -12,8 +13,9 @@ use crate::ui_action::{MsgSurface, UiError};
 use crate::ui_chat::ChatLog;
 use crate::ui_quest::QuestGiver;
 use crate::ui_quest_log::QuestLog;
+use crate::ui_quest_share::QuestShare;
 
-use super::super::NetCommands;
+use super::super::{ClientCommand, NetCommands};
 
 /// A questgiver dialog status for one NPC (`SMSG_QUESTGIVER_STATUS`) — the `!`/`?` marker's
 /// [`crate::messages::dialog_status`] value. Stored per guid now; the world marker is a later
@@ -33,8 +35,26 @@ pub(super) fn quest_greeting(list: QuestGiverList, quest: &mut QuestGiver) {
 }
 
 /// The accept panel: full quest text + rewards on offer (`SMSG_QUESTGIVER_QUEST_DETAILS`).
-pub(super) fn quest_detail(d: QuestDetails, quest: &mut QuestGiver) {
+pub(super) fn quest_detail(d: QuestDetails, quest: &mut QuestGiver, commands: &NetCommands) {
     debug!("net: quest detail — quest {} on {:#x}", d.quest_id, d.npc);
+    // **A share that arrives on top of an open window is refused, by the client** (`0x5dbf85`,
+    // decision 1738): `MSG_QUEST_PUSH_RESULT{sharer, BUSY}` and the panel we are reading stays.
+    // `BUSY` is the second and last verdict the client originates. The server has a busy test of
+    // its own (`Player::GetQuestShareInfo`), but it only knows about shares — it cannot see that we
+    // are mid-turn-in at an NPC, which is exactly the case this covers.
+    if benilla_protocol::guid::is_player(d.npc) && quest.is_open() {
+        debug!(
+            "net: busy — refusing {:#x}'s shared quest {}",
+            d.npc, d.quest_id
+        );
+        let _ = commands.0.send(ClientCommand::QuestPushResult {
+            sharer: d.npc,
+            msg: QuestShareMsg::BUSY,
+        });
+        return;
+    }
+    // The trailing flag is a latch, not a field of the view (see `QuestGiver::detail_flag`).
+    quest.detail_flag = d.auto_finish;
     quest.open(d.npc, crate::ui_quest::QuestView::Detail(d));
 }
 
@@ -205,6 +225,30 @@ pub(super) fn quest_giver_failed(
     quest.clear();
 }
 
+/// One party member's verdict on a quest we shared (`MSG_QUEST_PUSH_RESULT`, decision 1733).
+///
+/// Parked rather than shown: the line's `%s` is the member's NAME, which may still need a
+/// `CMSG_NAME_QUERY` round trip, and this pass has no VM to resolve GlobalStrings through either.
+/// [`crate::ui_quest_share`] owns both.
+pub(super) fn quest_push_result(member: u64, msg: QuestShareMsg, share: &mut QuestShare) {
+    debug!(
+        "net: quest push result — member {member:#x} verdict {}",
+        msg.0
+    );
+    share.push_verdict(member, msg);
+}
+
+/// A party member started a `QUEST_FLAGS_PARTY_ACCEPT` (escort) quest and we are being asked
+/// whether to start it too (`SMSG_QUEST_CONFIRM_ACCEPT`). Parked for the same reason: the popup
+/// names the member, and the name may not be cached yet.
+pub(super) fn quest_confirm_accept(c: QuestConfirmAccept, share: &mut QuestShare) {
+    debug!(
+        "net: quest confirm accept — quest {} ({:?}) from {:#x}",
+        c.quest_id, c.title, c.sender
+    );
+    share.set_confirm(c);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +342,83 @@ mod tests {
         let msgs = giver.take_messages();
         assert_eq!(msgs[0].1.key, "ERR_QUEST_FAILED_MAX_COUNT_S");
         assert_eq!(msgs[0].1.fill_s.as_deref(), Some(""));
+    }
+
+    // ── The share's BUSY refusal (decision 1738) ─────────────────────────────────────────────────
+
+    fn detail(npc: u64, quest_id: u32) -> QuestDetails {
+        QuestDetails {
+            npc,
+            quest_id,
+            title: "A Threat Within".into(),
+            details: String::new(),
+            objectives: String::new(),
+            auto_finish: 0,
+            choices: Vec::new(),
+            rewards: Vec::new(),
+            money: 0,
+            reward_spell: 0,
+        }
+    }
+
+    /// **A share arriving on top of an open window is refused by the CLIENT**, with `BUSY` — the
+    /// second and last verdict the client originates (`0x5dbf85`). The window we are already
+    /// reading is not replaced, which is the point: the server's own busy test only knows about
+    /// other shares, so a player mid-turn-in at an NPC is invisible to it.
+    #[test]
+    fn a_share_on_top_of_an_open_window_is_refused_as_busy() {
+        const SHARER: u64 = 0x0000_0000_0000_002A;
+        const NPC: u64 = 0xF130_0000_0000_0007;
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let commands = NetCommands(tx);
+        let mut quest = QuestGiver::default();
+
+        // An NPC's panel is up…
+        quest_detail(detail(NPC, 100), &mut quest, &commands);
+        assert_eq!(quest.npc, Some(NPC));
+        assert!(rx.try_iter().next().is_none(), "opening sends nothing");
+
+        // …and a party member's share lands on top of it.
+        quest_detail(detail(SHARER, 200), &mut quest, &commands);
+        assert_eq!(quest.npc, Some(NPC), "the open window survives the refusal");
+        let sent: Vec<_> = rx.try_iter().collect();
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [ClientCommand::QuestPushResult {
+                    sharer: SHARER,
+                    msg: QuestShareMsg::BUSY,
+                }]
+            ),
+            "the sharer is told we are busy: {sent:?}"
+        );
+    }
+
+    /// With nothing open, the same share opens the panel normally and answers nothing — the
+    /// control the refusal above would pass without.
+    #[test]
+    fn a_share_with_no_window_open_just_opens() {
+        const SHARER: u64 = 0x0000_0000_0000_002A;
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let commands = NetCommands(tx);
+        let mut quest = QuestGiver::default();
+
+        quest_detail(detail(SHARER, 200), &mut quest, &commands);
+        assert_eq!(quest.npc, Some(SHARER));
+        assert!(rx.try_iter().next().is_none(), "no verdict, no refusal");
+    }
+
+    /// The DETAILS trailing flag is LATCHED on the packet, not read off the open view — the
+    /// reference's `0xbe0824`, whose one reader runs whichever panel is up.
+    #[test]
+    fn the_detail_flag_latches_from_the_packet() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let commands = NetCommands(tx);
+        let mut quest = QuestGiver::default();
+
+        let mut d = detail(0xF130_0000_0000_0007, 100);
+        d.auto_finish = 3;
+        quest_detail(d, &mut quest, &commands);
+        assert_eq!(quest.detail_flag, 3);
     }
 }

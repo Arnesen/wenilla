@@ -689,6 +689,15 @@ pub const SMSG_QUESTUPDATE_COMPLETE: u16 = 0x0198; // 408
 pub const SMSG_QUESTUPDATE_ADD_KILL: u16 = 0x0199; // 409
 pub const SMSG_QUESTUPDATE_ADD_ITEM: u16 = 0x019A; // 410
 
+// The party quest-**share** set (VERIFIED vmangos `Opcodes_1_12_1.h`: 411-413 + 630) — decision
+// 1733. `MSG_QUEST_PUSH_RESULT` is the one bidirectional opcode of the quest family: the receiver
+// sends its own verdict up, the server relays every verdict (its own and the receiver's) back down
+// to the SHARER. Bodies in [`super::quest`]'s `share` submodule.
+pub const CMSG_QUEST_CONFIRM_ACCEPT: u16 = 0x019B; // 411
+pub const SMSG_QUEST_CONFIRM_ACCEPT: u16 = 0x019C; // 412
+pub const CMSG_PUSHQUESTTOPARTY: u16 = 0x019D; // 413
+pub const MSG_QUEST_PUSH_RESULT: u16 = 0x0276; // 630
+
 pub const CMSG_LIST_INVENTORY: u16 = 0x019E; // 414
 pub const SMSG_LIST_INVENTORY: u16 = 0x019F; // 415
 pub const CMSG_SELL_ITEM: u16 = 0x01A0; // 416

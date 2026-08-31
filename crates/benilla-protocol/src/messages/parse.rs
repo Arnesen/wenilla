@@ -665,6 +665,12 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             ServerPacket::QuestQueryResponse(Box::new(quest::read_quest_query_response(&mut r)?))
         }
         opcode::SMSG_QUESTLOG_FULL => ServerPacket::QuestLogFull,
+        opcode::MSG_QUEST_PUSH_RESULT => {
+            ServerPacket::QuestPushResult(quest::read_quest_push_result(&mut r)?)
+        }
+        opcode::SMSG_QUEST_CONFIRM_ACCEPT => {
+            ServerPacket::QuestConfirmAccept(quest::read_quest_confirm_accept(&mut r)?)
+        }
         opcode::SMSG_QUESTUPDATE_COMPLETE => ServerPacket::QuestUpdateComplete {
             quest_id: quest::read_quest_update_complete(&mut r)?,
         },

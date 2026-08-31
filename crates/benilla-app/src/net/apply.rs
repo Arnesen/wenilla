@@ -45,9 +45,10 @@ use loot::{
     loot_response, loot_roll, loot_roll_won, loot_start_roll,
 };
 use quests::{
-    quest_complete, quest_detail, quest_failed, quest_giver_failed, quest_giver_invalid,
-    quest_giver_status, quest_greeting, quest_log_full, quest_objective_item, quest_objective_kill,
-    quest_objectives_complete, quest_offer, quest_progress, quest_template,
+    quest_complete, quest_confirm_accept, quest_detail, quest_failed, quest_giver_failed,
+    quest_giver_invalid, quest_giver_status, quest_greeting, quest_log_full, quest_objective_item,
+    quest_objective_kill, quest_objectives_complete, quest_offer, quest_progress,
+    quest_push_result, quest_template,
 };
 use spells::{
     action_buttons, aura_duration, cancel_auto_repeat, cast_result, channel_start, channel_update,
@@ -166,7 +167,14 @@ pub(super) fn apply_net_updates(
         ),
         ResMut<crate::ui_chat::ChatLog>,
         ResMut<crate::ui_quest::QuestGiver>,
-        ResMut<crate::ui_quest_log::QuestLog>,
+        // Nested pair (the tuple is at the 16-param ceiling): the quest-log template cache, and
+        // the party quest-share state (decision 1733) — the verdicts on a quest we pushed and the
+        // escort confirm. Same family, one slot; unlike most nestings here these two genuinely
+        // belong together, since a share is a quest-log verb.
+        (
+            ResMut<crate::ui_quest_log::QuestLog>,
+            ResMut<crate::ui_quest_share::QuestShare>,
+        ),
         ResMut<crate::go_templates::GameObjectTemplates>,
         ResMut<crate::net::HomeBind>,
         ResMut<crate::net::Proficiencies>,
@@ -404,7 +412,7 @@ pub(super) fn apply_net_updates(
         (mut loot, mut loot_latch, mut loot_rolls),
         mut chat_log,
         mut quest,
-        mut quest_log,
+        (mut quest_log, mut quest_share),
         mut go_templates,
         mut home_bind,
         mut proficiencies,
@@ -549,6 +557,7 @@ pub(super) fn apply_net_updates(
                     &mut chat_log,
                     &mut quest,
                     &mut quest_log,
+                    &mut quest_share,
                     &mut death_net,
                     &mut group,
                     &mut taxi,
@@ -1658,7 +1667,7 @@ pub(super) fn apply_net_updates(
                 quest_giver_status(npc, status, &mut quest)
             }
             SessionEvent::QuestGreeting(list) => quest_greeting(list, &mut quest),
-            SessionEvent::QuestDetail(d) => quest_detail(d, &mut quest),
+            SessionEvent::QuestDetail(d) => quest_detail(d, &mut quest, &net_commands),
             SessionEvent::QuestProgress(p) => quest_progress(p, &mut quest),
             SessionEvent::QuestOffer(o) => quest_offer(o, &mut quest),
             SessionEvent::QuestComplete(c) => quest_complete(c, &mut quest),
@@ -1690,6 +1699,13 @@ pub(super) fn apply_net_updates(
                 &mut quest,
             ),
             SessionEvent::QuestLogFull => quest_log_full(&mut quest),
+            // The party quest-share (decision 1733): one member's verdict on a quest we pushed,
+            // and the escort-quest confirm. Both park in `QuestShare` for `crate::ui_quest_share`
+            // to name and raise — the guid needs a name query the apply pass has no VM to await.
+            SessionEvent::QuestPushResult { member, msg } => {
+                quest_push_result(member, msg, &mut quest_share)
+            }
+            SessionEvent::QuestConfirmAccept(c) => quest_confirm_accept(c, &mut quest_share),
             SessionEvent::QuestGiverInvalid { reason } => quest_giver_invalid(reason, &mut quest),
             SessionEvent::QuestGiverFailed { quest_id, reason } => {
                 quest_giver_failed(quest_id, reason, &mut quest, &mut quest_log, &net_commands)

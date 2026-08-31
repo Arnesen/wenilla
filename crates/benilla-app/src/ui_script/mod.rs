@@ -958,6 +958,9 @@ mod petition_tests;
 mod raid_tests;
 
 #[cfg(test)]
+mod quest_share_tests;
+
+#[cfg(test)]
 mod quest_tests;
 
 #[cfg(test)]

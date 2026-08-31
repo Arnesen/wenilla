@@ -145,6 +145,7 @@ mod ui_pet_stats;
 mod ui_petition;
 mod ui_quest;
 mod ui_quest_log;
+mod ui_quest_share;
 mod ui_reputation;
 mod ui_saved;
 mod ui_script;
@@ -222,6 +223,7 @@ use ui_pet_stats::UiPetStatsPlugin;
 use ui_petition::UiPetitionPlugin;
 use ui_quest::UiQuestPlugin;
 use ui_quest_log::UiQuestLogPlugin;
+use ui_quest_share::QuestSharePlugin;
 use ui_saved::UiSavedPlugin;
 use ui_script::UiScriptPlugin;
 use ui_shapeshift::UiShapeshiftPlugin;
@@ -764,6 +766,10 @@ pub fn run(build: BuildId) -> AppExit {
     // PLAYER_QUEST_LOG descriptor slots + the SMSG_QUEST_QUERY_RESPONSE template cache, and drives
     // QuestLogFrame.xml over the Era quest-log API.
     .add_plugins(UiQuestLogPlugin)
+    // The party quest-share (decision 1733): the verdict lines on a quest we pushed, and the
+    // escort-quest confirm. Neither is bound to a window, so it is its own plugin rather than a
+    // lodger in either quest plugin above.
+    .add_plugins(QuestSharePlugin)
     .add_plugins(UiChatPlugin)
     // The layout cache: the geometry of every window the player has dragged or resized, restored
     // at world entry and written back a quiet second after the last drag

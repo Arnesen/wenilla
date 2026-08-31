@@ -19,11 +19,11 @@ use crate::messages::{
     LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart, MonsterMoveFacing,
     ObjectFields, PartyKillLog, PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells,
     PetitionQueryResponse, PetitionRename, PetitionShowList, PetitionShowSignatures,
-    PetitionSignResults, PvpCredit, QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward,
-    QuestRequestItems, QuestTemplate, SpellDamageLog, SpellDispelLog, SpellEnergizeLog,
-    SpellHealLog, SpellInstaKillLog, SpellLogExecute, SpellLogMiss, SpellOutcomeLog, StabledPet,
-    TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose, VendorItem,
-    WhoResults, XpGain,
+    PetitionSignResults, PvpCredit, QuestComplete, QuestConfirmAccept, QuestDetails,
+    QuestGiverList, QuestOfferReward, QuestRequestItems, QuestShareMsg, QuestTemplate,
+    SpellDamageLog, SpellDispelLog, SpellEnergizeLog, SpellHealLog, SpellInstaKillLog,
+    SpellLogExecute, SpellLogMiss, SpellOutcomeLog, StabledPet, TaxiMask, TradeStatus,
+    TradeStatusExtended, TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
 };
 
 /// Coarse entity classification, free of wire types so the app can branch on it without depending on
@@ -850,6 +850,13 @@ pub enum SessionEvent {
     QuestFailed { quest_id: u32, timed: bool },
     /// The log refused a new quest — no free slot (`SMSG_QUESTLOG_FULL`).
     QuestLogFull,
+    /// One party member's verdict on a quest WE shared (`MSG_QUEST_PUSH_RESULT`) — decision 1733.
+    /// `member` is the member the verdict is about (never the sharer; see the direction trap on
+    /// [`crate::messages::QuestPushResult`]), and fills the `%s` of the `ERR_QUEST_PUSH_*` line.
+    QuestPushResult { member: u64, msg: QuestShareMsg },
+    /// A party member started a `QUEST_FLAGS_PARTY_ACCEPT` (escort) quest and the server is asking
+    /// whether we want it too (`SMSG_QUEST_CONFIRM_ACCEPT`) — the `QUEST_ACCEPT` confirm box.
+    QuestConfirmAccept(QuestConfirmAccept),
     /// The giver won't OFFER the quest (`SMSG_QUESTGIVER_QUEST_INVALID`): one `QuestFailedReason`
     /// msg code and no quest id — vmangos' `SendCanTakeQuestResponse`, the answer to a query or an
     /// accept that fails `CanTakeQuest` ("already on that quest", "not high enough level").

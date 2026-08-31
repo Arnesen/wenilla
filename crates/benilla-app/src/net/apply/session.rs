@@ -160,6 +160,7 @@ pub(super) fn disconnected(
     chat_log: &mut ChatLog,
     quest: &mut QuestGiver,
     quest_log: &mut QuestLog,
+    quest_share: &mut crate::ui_quest_share::QuestShare,
     death_net: &mut crate::death::DeathNet,
     group: &mut crate::ui_party::GroupState,
     taxi: &mut TaxiState,
@@ -226,6 +227,9 @@ pub(super) fn disconnected(
     chat_log.clear_session();
     quest.clear_session();
     quest_log.clear_session();
+    // A verdict on a share nobody is listening for any more, and a confirm whose server-side
+    // latch died with the socket (decision 1733).
+    quest_share.clear_session();
     group.clear_session();
     taxi.clear_session();
     mail.clear_session();

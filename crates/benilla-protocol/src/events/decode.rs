@@ -347,6 +347,11 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             timed: true,
         }],
         ServerPacket::QuestLogFull => vec![SessionEvent::QuestLogFull],
+        ServerPacket::QuestPushResult(r) => vec![SessionEvent::QuestPushResult {
+            member: r.member,
+            msg: r.msg,
+        }],
+        ServerPacket::QuestConfirmAccept(c) => vec![SessionEvent::QuestConfirmAccept(c)],
         ServerPacket::QuestGiverInvalid { msg } => {
             vec![SessionEvent::QuestGiverInvalid { reason: msg }]
         }

@@ -40,16 +40,15 @@ use bevy::prelude::*;
 
 use benilla_protocol::messages::{auction_filter, AuctionListEntry};
 use benilla_ui::script::{
-    AuctionCategory, AuctionItemRow, AuctionListState, AuctionState, AuctionSubCategory,
-    ScriptValue, UiScript, BIDDER, LIST, OWNER,
+    AuctionCategory, AuctionItemRow, AuctionListState, AuctionState, AuctionSubCategory, UiScript,
+    BIDDER, LIST, OWNER,
 };
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_action::{ui_error_text, MsgSurface, UiError};
-use crate::ui_chat::{ChatEvent, ChatEventKind};
+use crate::ui_action::{show_messages, ui_error_text, MsgSurface, UiError};
 use crate::ui_script::UiInput;
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 
@@ -630,19 +629,7 @@ fn feed_auction(
             }
         }
         auction.messages = deferred;
-        for (surface, text) in lines {
-            // Greppable, because the chat path has no log of its own — without this a live probe
-            // can count lines but never read one (0669's in-app leg).
-            debug!("ui_auction: message ({surface:?}) {text:?}");
-            match surface {
-                MsgSurface::Chat => {
-                    chat.push_event(ChatEvent::text_only(ChatEventKind::System, text));
-                }
-                MsgSurface::Error => {
-                    script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
-                }
-            }
-        }
+        show_messages(&mut script, &mut chat, "ui_auction", lines);
     }
 
     let self_guid = self_q.iter().next().map(|g| g.0);

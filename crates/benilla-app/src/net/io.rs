@@ -917,7 +917,13 @@ fn writer_loop(
                     }
                     ClientCommand::QuestQuery { quest } => w.quest_query(quest),
                     ClientCommand::QuestgiverStatusQuery { npc } => w.questgiver_status_query(npc),
+                    ClientCommand::QuestgiverHello { npc } => w.questgiver_hello(npc),
                     ClientCommand::QuestlogRemove { slot } => w.questlog_remove_quest(slot),
+                    ClientCommand::PushQuestToParty { quest } => w.push_quest_to_party(quest),
+                    ClientCommand::QuestConfirmAccept { quest } => w.quest_confirm_accept(quest),
+                    ClientCommand::QuestPushResult { sharer, msg } => {
+                        w.quest_push_result(sharer, msg)
+                    }
                     ClientCommand::GetMailList { mailbox } => w.get_mail_list(mailbox),
                     ClientCommand::SendMail {
                         mailbox,

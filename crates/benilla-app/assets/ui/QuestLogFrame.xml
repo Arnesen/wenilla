@@ -297,6 +297,15 @@
                 abandonButton:Enable()
             end
 
+            -- Share Quest (ref QuestLog_Update's tail, QuestLogFrame.lua:299-305) — the predicate
+            -- verbatim, in the ref's own guard order: an EMPTY log disables outright, otherwise the
+            -- quest must be sharable AND we must be in a party. Both halves matter and neither is
+            -- redundant. GetQuestLogPushable() reads the SELECTION's QUEST_FLAGS_SHARABLE bit off
+            -- the template cache, which is the client's own test and the server's only reliance:
+            -- vmangos never re-checks the bit on the push, only on the receiver's accept, so a
+            -- button we wrongly lit would push a quest the party is then refused (decision 1733).
+            BenillaQuestLogPushButton_Update(numEntries)
+
             -- Clamp the faux-scroll offset (pin §2's FauxScrollFrame_Update clamp).
             local maxOffset = numEntries - QUESTS_DISPLAYED
             if maxOffset < 0 then maxOffset = 0 end
@@ -1091,8 +1100,32 @@
             end
         end
 
+        -- The Share Quest button's enable state (ref QuestLogFrame.lua:299-305 and :74-79, which
+        -- are the same three lines twice: the full update runs it with the entry count to hand,
+        -- and PARTY_MEMBERS_CHANGED runs it alone because a party you just joined or left changes
+        -- the answer without changing the log). `numEntries` is optional — omitted, it is read
+        -- here, which is what the event path wants.
+        function BenillaQuestLogPushButton_Update(numEntries)
+            if not numEntries then
+                numEntries = GetNumQuestLogEntries()
+            end
+            local pushButton = getglobal("QuestLogPushQuestButton")
+            if numEntries == 0 then
+                pushButton:Disable()
+            elseif GetQuestLogPushable() and GetNumPartyMembers() > 0 then
+                pushButton:Enable()
+            else
+                pushButton:Disable()
+            end
+        end
+
         function BenillaQuestLogFrame_OnLoad(frame)
             frame:RegisterEvent("QUEST_LOG_UPDATE")
+            -- ref QuestLog_OnLoad (QuestLogFrame.lua:44-54) registers this for exactly one reason:
+            -- the Share Quest button's second conjunct. Joining or leaving a party changes whether
+            -- the selected quest can be shared without changing the quest log at all, so
+            -- QUEST_LOG_UPDATE alone would leave the button stale (decision 1733).
+            frame:RegisterEvent("PARTY_MEMBERS_CHANGED")
         end
 
         function BenillaQuestLogFrame_OnEvent(frame)
@@ -1101,6 +1134,11 @@
                 -- passes `1`) — a quest updating while already being read must not yank the reader's
                 -- scroll position back to the top.
                 BenillaQuestLogFrame_Update(true)
+            elseif event == "PARTY_MEMBERS_CHANGED" then
+                -- The ref runs a whole QuestLog_Update here (its else-branch, QuestLogFrame.lua:71-81)
+                -- and then re-tests the button; the list cannot have changed, so only the button is
+                -- repainted. Same observable state, no scroll or selection churn.
+                BenillaQuestLogPushButton_Update()
             end
         end
 
@@ -1813,14 +1851,24 @@
                 <Scripts><OnClick>HideUIPanel(getglobal("QuestLogFrame"))</OnClick></Scripts>
             </Button>
             <!-- Share Quest (ref QuestFramePushQuestButton, QuestLogFrame.xml:499-521): 123×21 flush
-                 LEFT of Exit. Party quest-sharing is a named deferral (no QuestLogPushQuest wire yet),
-                 so this ships permanently DISABLED — exactly how the ref presents it solo (its lua
-                 disables it whenever the party can't receive the quest); the button existing is what
-                 fills the bottom row's middle slot the frame art reserves for it. -->
+                 LEFT of Exit. Live since decision 1733; it starts DISABLED because that is the
+                 solo/no-selection state the ref's own predicate produces, and
+                 BenillaQuestLogPushButton_Update re-tests it on every list update and every
+                 PARTY_MEMBERS_CHANGED. The newbie tooltip is the ref's (NEWBIE_TOOLTIP_SHAREQUEST,
+                 GlobalStrings.lua:2764), through the same GameTooltip_AddNewbieTip the ref calls. -->
             <Button name="QuestLogPushQuestButton" inherits="BenillaQuestLogPanelButtonTemplate" text="Share Quest">
                 <Size><AbsDimension x="123" y="21"/></Size>
                 <Anchors><Anchor point="RIGHT" relativeTo="QuestLogExitButton" relativePoint="LEFT"/></Anchors>
-                <Scripts><OnLoad>self:Disable()</OnLoad></Scripts>
+                <Scripts>
+                    <OnLoad>self:Disable()</OnLoad>
+                    <OnClick>QuestLogPushQuest()</OnClick>
+                    <OnEnter>
+                        if GameTooltip_AddNewbieTip then
+                            GameTooltip_AddNewbieTip(SHARE_QUEST, 1.0, 1.0, 1.0, NEWBIE_TOOLTIP_SHAREQUEST, 1)
+                        end
+                    </OnEnter>
+                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                </Scripts>
             </Button>
         </Frames>
         <Scripts>

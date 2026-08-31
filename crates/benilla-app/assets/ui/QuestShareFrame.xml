@@ -1,0 +1,64 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+    <!--
+        The escort-quest confirm (decision 1733): one StaticPopup entry on our shared engine
+        (UiPanels.xml) plus its event driver. The patch-chain FrameXML is the SPECIFICATION —
+        StaticPopup.lua l.727-737 (the QUEST_ACCEPT entry) and UIParent.lua l.93 + l.353-356 (the
+        registration and the one-line arm) — and it fixes the dialog key, the field names and the
+        one verb by name, so those are reproduced exactly.
+
+        WHY THIS IS ITS OWN FILE, next to QuestFrame.xml and QuestLogFrame.xml rather than inside
+        either. It belongs to neither window. The confirm has no window at all — it is raised by
+        `crate::ui_quest_share` off `SMSG_QUEST_CONFIRM_ACCEPT`, exactly as DuelFrame.xml's two
+        dialogs are raised off the duel packets, and answering it sends a packet neither quest
+        window knows about. Putting it in QuestFrame.xml would say the questgiver panel owns it
+        (it does not — no panel is open when this arrives) and putting it in QuestLogFrame.xml
+        would say the log window does (it does not either: the log is closed for most players when
+        a party member starts an escort).
+
+        WHAT RAISES IT. `QUEST_FLAGS_PARTY_ACCEPT` (0x2) quests — escorts. When a party member
+        accepts one, the server asks every other eligible member whether they want it too
+        (vmangos `QuestHandler.cpp:172-193`). That is a DIFFERENT flow from the quest-log's *Share
+        Quest* button, which needs no dialog at all: a pushed quest arrives on the ordinary
+        questgiver detail panel (QuestFrame.xml) with the sharer's player guid where an NPC's
+        would be, and Accept/Decline there are the whole answer.
+
+        THE ONE ASYMMETRY, and it is the reference's, not ours: Yes calls ConfirmAcceptQuest() and
+        sends `CMSG_QUEST_CONFIRM_ACCEPT`; **No sends nothing at all**. There is no OnCancel below
+        because there is no packet for one — the server's pending-share latch is simply cleared by
+        the next thing that touches it. The same is true of ESC (hideOnEscape).
+    -->
+    <Script><![CDATA[
+        -- The shipped enUS GlobalStrings.lua values, quoted as data (l.3227, and the YES/NO pair).
+        -- First %s is the party member's name, second is the quest title — the argument order
+        -- QUEST_ACCEPT_CONFIRM fires with.
+        local QUEST_ACCEPT = "%s is starting %s\nWould you like to as well?"
+
+        StaticPopupDialogs["QUEST_ACCEPT"] = {
+            text = QUEST_ACCEPT,
+            button1 = "Yes",  -- YES
+            button2 = "No",   -- NO
+            OnAccept = function()
+                ConfirmAcceptQuest()
+            end,
+            timeout = 0,
+            exclusive = 1,
+            hideOnEscape = 1,
+        }
+
+        -- spec: UIParent.lua l.353-356 — one arm, both args straight through.
+        function BenillaQuestShareDriver_OnEvent()
+            if event == "QUEST_ACCEPT_CONFIRM" then
+                StaticPopup_Show("QUEST_ACCEPT", arg1, arg2)
+            end
+        end
+    ]]></Script>
+
+    <Frame name="BenillaQuestShareDriver" hidden="true">
+        <Size><AbsDimension x="1" y="1"/></Size>
+        <Anchors><Anchor point="TOPLEFT"/></Anchors>
+        <Scripts>
+            <OnLoad>self:RegisterEvent("QUEST_ACCEPT_CONFIRM")</OnLoad>
+            <OnEvent>BenillaQuestShareDriver_OnEvent()</OnEvent>
+        </Scripts>
+    </Frame>
+</Ui>

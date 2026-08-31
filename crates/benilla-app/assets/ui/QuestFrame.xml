@@ -484,9 +484,12 @@
         end
 
         function QuestDetailDeclineButton_OnClick()
-            -- vanilla's client-side decline sends no packet; hide immediately (no one-frame lag,
-            -- the same convention every NPC window's close button already uses — e.g.
-            -- BenillaMerchantCloseButton_OnClick).
+            -- DeclineQuest() DOES send (decision 1738, byte-verified — this comment used to claim
+            -- the opposite for years): the app's session-end routine re-opens the giver's list
+            -- (CMSG_QUESTGIVER_HELLO / CMSG_GOSSIP_HELLO), which is what puts you back in an NPC's
+            -- menu after a decline, or answers a party member's share. Either way the panel is
+            -- hidden here immediately rather than waiting on a packet — the same convention every
+            -- NPC window's close button already uses (e.g. BenillaMerchantCloseButton_OnClick).
             DeclineQuest()
             PlaySound("igQuestCancel") -- ref QuestDetailDeclineButton_OnClick, QuestFrame.lua:577
             HideUIPanel(getglobal("QuestFrame"))

@@ -57,6 +57,17 @@ pub(crate) trait NpcSession: Resource {
     fn npc(&self) -> Option<u64>;
     /// The window's client-side close (no packet) — the same clear its close button does.
     fn close(&mut self);
+    /// Whether the OPEN session is subject to the service-range guard below. Almost always yes,
+    /// which is why it is defaulted — but "bound to a live unit" and "must stay inside NPC service
+    /// range" are two claims, and a party quest-share separates them: its giver is a live *player*
+    /// with a name and a portrait (so [`Self::npc`] must report it) whose distance rule is the
+    /// server's 14 yd share bound, not this 5.56 yd counter reach (decision 1733).
+    ///
+    /// Contrast [`crate::ui_quest::QuestGiver`]'s item filter, which answers the *other* question
+    /// by returning `None`: a quest-starter item is not a unit at all (decision 0664).
+    fn range_guarded(&self) -> bool {
+        true
+    }
 }
 
 /// Did an NPC-bound window switch to a **different** NPC of the same kind while it was already open
@@ -78,6 +89,9 @@ pub(crate) fn close_npc_session_out_of_range<T: NpcSession>(
     transforms: Query<&Transform>,
 ) {
     let Some(npc) = session.npc() else { return };
+    if !session.range_guarded() {
+        return;
+    }
     let Some(self_tf) = self_q.iter().next() else {
         return;
     };
@@ -206,6 +220,89 @@ mod tests {
         app.world_mut().resource_mut::<GuidIndex>().0.remove(&0x42);
         app.update();
         assert!(!app.world().resource::<MerchantOpen>().is_open());
+    }
+
+    /// **A party quest-share is exempt from the guard, and still a full session.** The two are one
+    /// test because they are the two halves of decision 1733's split: the giver is a live player,
+    /// so `npc()` must keep reporting it (the QuestFrame portrait and name banner read it through
+    /// [`InteractNpc`]) — while the *distance* rule is the server's 14 yd share bound, not this
+    /// 5.56 yd NPC-counter reach. Before the split, a sharer standing six yards off had the panel
+    /// yanked away from a quest the server would have granted.
+    #[test]
+    fn a_shared_quest_panel_survives_the_service_range_but_stays_a_session() {
+        use crate::ui_quest::{QuestGiver, QuestView};
+
+        // The panel's wire view, whichever giver opened it — only the GUID differs between an NPC
+        // offer and a share, which is the whole point.
+        fn detail(npc: u64) -> QuestView {
+            QuestView::Detail(benilla_protocol::messages::QuestDetails {
+                npc,
+                quest_id: 1,
+                title: "A Threat Within".into(),
+                details: String::new(),
+                objectives: String::new(),
+                auto_finish: 1,
+                choices: Vec::new(),
+                rewards: Vec::new(),
+                money: 0,
+                reward_spell: 0,
+            })
+        }
+
+        const SHARER: u64 = 0x0000_0000_0000_002A; // HIGHGUID_PLAYER: a zero high word
+        const VENDOR: u64 = 0xF130_0000_0000_0007; // HIGHGUID_UNIT
+
+        let mut app = App::new();
+        app.init_resource::<QuestGiver>();
+        app.init_resource::<GuidIndex>();
+        app.init_resource::<InteractNpc>();
+        app.add_systems(
+            Update,
+            (
+                close_npc_session_out_of_range::<QuestGiver>,
+                feed_interact_npc,
+            )
+                .chain(),
+        );
+        app.world_mut()
+            .spawn((SelfPlayer, Transform::from_xyz(0.0, 0.0, 0.0)));
+        // Ten yards away: well past the NPC service gate, well inside the share bound.
+        let sharer = app
+            .world_mut()
+            .spawn(Transform::from_xyz(10.0, 0.0, 0.0))
+            .id();
+        app.world_mut()
+            .resource_mut::<GuidIndex>()
+            .0
+            .insert(SHARER, sharer);
+
+        app.world_mut()
+            .resource_mut::<QuestGiver>()
+            .open(SHARER, detail(SHARER));
+        app.update();
+        assert!(
+            app.world().resource::<QuestGiver>().is_open(),
+            "a shared quest's panel is not NPC-range-guarded"
+        );
+        assert_eq!(
+            app.world().resource::<InteractNpc>().1,
+            Some(SHARER),
+            "it is still a session: the panel's portrait and name banner point at the sharer"
+        );
+
+        // The control: the identical distance with an NPC giver closes, as it always has.
+        app.world_mut()
+            .resource_mut::<GuidIndex>()
+            .0
+            .insert(VENDOR, sharer);
+        app.world_mut()
+            .resource_mut::<QuestGiver>()
+            .open(VENDOR, detail(VENDOR));
+        app.update();
+        assert!(
+            !app.world().resource::<QuestGiver>().is_open(),
+            "an NPC giver ten yards off still closes"
+        );
     }
 
     /// The `"npc"` portrait token's resolver ([`feed_interact_npc`]): the open NPC session's guid,

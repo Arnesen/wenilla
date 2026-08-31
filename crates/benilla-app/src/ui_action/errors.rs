@@ -21,10 +21,12 @@
 //! absent key shows nothing (the reference's data-suppression face) and localization rides
 //! for free.
 
-use crate::ui_items::{count_of, InventoryScope};
+use benilla_ui::script::{ScriptValue, UiScript};
 use bevy::prelude::*;
 
 use crate::net::ObjectStore;
+use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
+use crate::ui_items::{count_of, InventoryScope};
 
 /// Cast failures queued for the UI error line — the wire triple from `SMSG_CAST_RESULT` and the
 /// local refusals alike. The spell id rides along because the display layer keys several messages
@@ -177,6 +179,34 @@ pub(crate) fn ui_error_text(e: &UiError, get: &dyn Fn(&str) -> Option<String>) -
         text = text.replace("%d", &d.to_string());
     }
     (!text.is_empty()).then_some(text)
+}
+
+/// Show already-resolved [`UiError`] lines on the surface each message record names — the second
+/// half of every [`MsgSurface`] tenant's drain, factored out once it had three (the questgiver
+/// refusals 0669, the auction house 1523, the party quest-share 1733). The tenants differ only in
+/// how they *build* their lines (a window's queue, a deferred item template, a guid awaiting a
+/// name); what they do with a resolved one is this, identically, down to the debug line — which
+/// exists because the chat path keeps no log of its own, so without it a live probe can count
+/// lines but never read one (0669's in-app leg).
+///
+/// `who` is the caller's module tag for that debug line.
+pub(crate) fn show_messages(
+    script: &mut UiScript,
+    chat: &mut ChatLog,
+    who: &str,
+    lines: impl IntoIterator<Item = (MsgSurface, String)>,
+) {
+    for (surface, text) in lines {
+        debug!("{who}: message ({surface:?}) {text:?}");
+        match surface {
+            MsgSurface::Chat => {
+                chat.push_event(ChatEvent::text_only(ChatEventKind::System, text));
+            }
+            MsgSurface::Error => {
+                script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
+            }
+        }
+    }
 }
 
 /// `UNIT_FIELD_FLAGS` bits the attack-start validator refuses on, paired with the message each

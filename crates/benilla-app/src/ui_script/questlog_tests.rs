@@ -4,8 +4,8 @@
 //! `quest_tests.rs`/`bag_tests.rs`'s engine-only harness for the quest-log slice (decision 0088 arc).
 
 use benilla_ui::script::{
-    ExtractedQuad, QuadContent, QuestItemView, QuestLogDetail, QuestLogEntryView,
-    QuestLogObjectiveView, QuestLogState, SoundRequest, UiScript,
+    ExtractedQuad, PartyMemberInfo, PartyState, QuadContent, QuestItemView, QuestLogDetail,
+    QuestLogEntryView, QuestLogObjectiveView, QuestLogState, SoundRequest, UiScript,
 };
 
 /// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error (the panel/quest
@@ -1170,5 +1170,146 @@ fn shift_click_on_a_title_posts_the_quest_name_with_chat_open_and_watches_with_i
     );
     // The tail runs either way (ref l.503-504): the click still selects the row.
     assert_eq!(s.eval::<i64>("return GetQuestLogSelection()").unwrap(), 1);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+// ── The Share Quest button (decision 1733) ───────────────────────────────────────────────────────
+
+/// A party of `n` others; `GetNumPartyMembers` is that list's length.
+fn party(n: usize) -> PartyState {
+    PartyState {
+        members: (0..n)
+            .map(|i| PartyMemberInfo {
+                name: format!("Mate{i}"),
+                guid: 0x300 + i as u64,
+            })
+            .collect(),
+        ..PartyState::default()
+    }
+}
+
+/// The 8-entry fixture with `pushable` set on the entries named by `ids` — the app sets it from
+/// the cached template's `QUEST_FLAGS_SHARABLE` bit, so a fixture is how the button's predicate is
+/// exercised without a wire.
+fn entries_sharable(ids: &[u32]) -> QuestLogState {
+    let mut state = eight_entries();
+    for e in &mut state.entries {
+        e.pushable = ids.contains(&e.quest_id);
+    }
+    state
+}
+
+/// The button's predicate is a CONJUNCTION, and each half is tested by moving only itself: a
+/// sharable quest with no party is dark, a party with an unsharable selection is dark, and only
+/// both together light it (ref `QuestLogFrame.lua:299-305`).
+#[test]
+fn share_quest_needs_both_a_sharable_selection_and_a_party() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "QuestLogFrame.xml");
+
+    // Solo, quest 1 sharable and selected by the auto-selection.
+    s.set_quest_log(entries_sharable(&[1]));
+    s.set_party(PartyState::default());
+    s.run("ToggleQuestLog()").unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(s.eval::<i64>("return GetQuestLogSelection()").unwrap(), 1);
+    // `1`/nil, never true/false (decision 1738) — compared the way the reference's own predicate
+    // does, which is why the button below reads the same either way.
+    assert!(
+        s.eval::<bool>("return GetQuestLogPushable() ~= nil")
+            .unwrap(),
+        "quest 1 carries the sharable bit"
+    );
+    assert!(
+        !s.eval::<bool>("return QuestLogPushQuestButton:IsEnabled()")
+            .unwrap(),
+        "solo: sharable is not enough"
+    );
+
+    // Join a party — the event alone must light it, with no quest-log change at all.
+    s.set_party(party(2));
+    s.fire_event("PARTY_MEMBERS_CHANGED", vec![]);
+    assert!(
+        s.eval::<bool>("return QuestLogPushQuestButton:IsEnabled()")
+            .unwrap(),
+        "PARTY_MEMBERS_CHANGED alone re-tests the button"
+    );
+
+    // Select an unsharable quest: party unchanged, button goes dark.
+    s.run("SelectQuestLogEntry(2)").unwrap();
+    s.run("BenillaQuestLogFrame_Update()").unwrap();
+    assert!(
+        s.eval::<bool>("return GetQuestLogPushable() == nil")
+            .unwrap(),
+        "quest 2 has no sharable bit"
+    );
+    assert!(
+        !s.eval::<bool>("return QuestLogPushQuestButton:IsEnabled()")
+            .unwrap(),
+        "in a party: an unsharable selection is still dark"
+    );
+
+    // Leaving the party darkens it again from the other side.
+    s.run("SelectQuestLogEntry(1)").unwrap();
+    s.run("BenillaQuestLogFrame_Update()").unwrap();
+    assert!(s
+        .eval::<bool>("return QuestLogPushQuestButton:IsEnabled()")
+        .unwrap());
+    s.set_party(PartyState::default());
+    s.fire_event("PARTY_MEMBERS_CHANGED", vec![]);
+    assert!(!s
+        .eval::<bool>("return QuestLogPushQuestButton:IsEnabled()")
+        .unwrap());
+}
+
+/// An EMPTY log disables the button outright, ahead of both other conjuncts — the ref's own first
+/// guard, and the one that matters because `GetQuestLogPushable()` on no selection is false anyway
+/// but `GetNumPartyMembers() > 0` is not.
+#[test]
+fn share_quest_is_dark_on_an_empty_log_even_in_a_party() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "QuestLogFrame.xml");
+
+    s.set_quest_log(QuestLogState::default());
+    s.set_party(party(4));
+    s.run("ToggleQuestLog()").unwrap();
+    assert!(!s
+        .eval::<bool>("return QuestLogPushQuestButton:IsEnabled()")
+        .unwrap());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The click queues the SELECTION's quest id — not its list index, and not the row under the
+/// mouse. The fixture's ids are deliberately not equal to their 1-based positions after a
+/// selection move, so an index/id confusion shows up here.
+#[test]
+fn share_quest_click_queues_the_selected_quests_id() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "QuestLogFrame.xml");
+
+    s.set_quest_log(entries_sharable(&[1, 5]));
+    s.set_party(party(1));
+    s.run("ToggleQuestLog()").unwrap();
+
+    s.run("SelectQuestLogEntry(5)").unwrap();
+    s.run("BenillaQuestLogFrame_Update()").unwrap();
+    s.run("QuestLogPushQuestButton:Click()").unwrap();
+    assert_eq!(s.take_quest_log_pushes(), vec![5]);
+    assert!(s.take_quest_log_pushes().is_empty(), "drained");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

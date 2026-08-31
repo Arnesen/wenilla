@@ -65,8 +65,8 @@ pub(crate) struct CooldownEvents;
 // `cast_send`, so a second send path cannot be written by accident (decision 0914).
 pub(crate) use cast_send::{CastCommit, CastLadder};
 pub(crate) use errors::{
-    attack_actor_refusal, reagent_totem_refusal, ui_error_text, CastErrors, CastFail, MountErrors,
-    MsgSurface, UiError, UiErrorKeys, UiErrorTexts,
+    attack_actor_refusal, reagent_totem_refusal, show_messages, ui_error_text, CastErrors,
+    CastFail, MountErrors, MsgSurface, UiError, UiErrorKeys, UiErrorTexts,
 };
 // `pub(crate)`: the target chain registers the cursor pre-empt + the click commit, and the
 // spellbook/stance/craft drains thread the mode through the one cast-send path (decision 0792).
