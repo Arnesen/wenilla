@@ -1451,6 +1451,7 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
         item_id: 4496,
         icon: Some("Interface\\Icons\\INV_Misc_Bag_08".into()),
         count: 1,
+        contents_count: Some(0), // an equipped bag, whose subclass row carries no count gate
         quality: 1,
         name: Some("Small Brown Pouch".into()),
         link: Some("|cffffffff|Hitem:4496:0:0:0|h[Small Brown Pouch]|h|r".into()),

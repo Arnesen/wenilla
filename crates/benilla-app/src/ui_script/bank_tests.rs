@@ -221,7 +221,7 @@ fn item_slot_paints_from_container_minus_one_and_repaints_on_playerbankslots_cha
             slots,
         }),
     );
-    s.fire_event("PLAYERBANKSLOTS_CHANGED", vec![ScriptValue::Int(3)]);
+    s.fire_event("PLAYERBANKSLOTS_CHANGED", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     s.resolve();
     assert!(
@@ -247,7 +247,7 @@ fn item_slot_paints_from_container_minus_one_and_repaints_on_playerbankslots_cha
             slots: slots2,
         }),
     );
-    s.fire_event("PLAYERBANKSLOTS_CHANGED", vec![ScriptValue::Int(3)]);
+    s.fire_event("PLAYERBANKSLOTS_CHANGED", vec![]);
     s.resolve();
     let quads = s.extract();
     assert!(
@@ -562,5 +562,124 @@ fn clicking_item_slot_one_with_an_empty_cursor_queues_the_pickup() {
     assert!(
         s.take_container_moves().is_empty(),
         "a bare pickup (nothing to swap into) queues no move yet"
+    );
+}
+
+/// The icon-texture quad whose path contains `needle`, for the desaturation assertions below.
+fn icon_quad<'a>(quads: &'a [ExtractedQuad], needle: &str) -> Option<&'a ExtractedQuad> {
+    quads.iter().find(
+        |q| matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p.contains(needle)),
+    )
+}
+
+/// Whether that icon is drawn desaturated (`SetItemButtonDesaturated`'s shader arm).
+fn is_greyed(quads: &[ExtractedQuad], needle: &str) -> bool {
+    match icon_quad(quads, needle).map(|q| &q.content) {
+        Some(QuadContent::Texture { desaturated, .. }) => *desaturated,
+        _ => panic!("no icon quad matching {needle}"),
+    }
+}
+
+/// A bag view for one bank BAG slot — the drop the director made. `contents_count: Some(_)` is
+/// what makes it a CONTAINER to `GetInventoryItemCount`, and the value is deliberately non-zero:
+/// the binding's `0x16` short-circuit has to be what zeroes it, not an already-zero sum.
+fn a_bag(locked: bool) -> benilla_ui::script::InvSlotView {
+    benilla_ui::script::InvSlotView {
+        item_id: 4500,
+        icon: Some(r"Interface\Icons\INV_Misc_Bag_08".into()),
+        count: 1,
+        contents_count: Some(3),
+        name: Some("Traveler's Backpack".into()),
+        locked,
+        ..Default::default()
+    }
+}
+
+/// **The bug of 1771, both halves.** A bag dropped into a bank bag slot came up greyed and stayed
+/// greyed until the window was reopened, and a bag moved between two bag slots stayed drawn in the
+/// one it left.
+///
+/// Both are the same defect: the six bag buttons repaint from `BankFrameItemButton_OnUpdate`,
+/// which is reached ONLY from `BankFrameItemButton_OnEvent` on `PLAYERBANKSLOTS_CHANGED` or
+/// `BANKFRAME_OPENED` — despite the name, it is not an `OnUpdate` handler
+/// (`BankItemButtonTemplate`'s `<OnUpdate>` is `CursorOnUpdate()`). benilla fired that event only
+/// for the vault's 24 slots, so the bag buttons showed whatever had been true at the last
+/// *unrelated* vault change, and `ITEM_LOCK_CHANGED` — the one event that did reach them — repaints
+/// the desaturation only, never the icon.
+///
+/// This test drives the reference's own file through the exact sequence and asserts what the
+/// player sees at each step.
+#[test]
+fn a_bank_bag_button_paints_the_drop_and_lets_go_of_the_lock() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = setup();
+    s.set_money(0);
+    s.set_container(0, empty_bag("Backpack", 16));
+    s.set_bank(Some(BankState {
+        num_purchased: 2,
+        next_cost: 10_000,
+    }));
+    s.set_unit(
+        "npc",
+        Some(benilla_ui::script::UnitState {
+            name: Some("Grumnus Steelshaper".into()),
+            ..Default::default()
+        }),
+    );
+    s.fire_event("BANKFRAME_OPENED", vec![]);
+    assert!(
+        icon_quad(&s.extract(), "INV_Misc_Bag_08").is_none(),
+        "no bag in the slot yet"
+    );
+
+    // The drop lands and the server has not answered: the send locks both ends.
+    let mut bags: benilla_ui::script::BankBagSlots = Default::default();
+    bags[0] = Some(a_bag(true));
+    s.set_bank_bag_slots(bags.clone());
+    // The event carries NO arguments (`0x703e50`, `__fastcall(ecx = id)`, no vararg push) — it is
+    // a broadcast, and every bank button repaints from its own `GetInventorySlot()`.
+    s.fire_event("PLAYERBANKSLOTS_CHANGED", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert!(
+        is_greyed(&s.extract(), "INV_Misc_Bag_08"),
+        "in flight, the button greys — BankFrameItemButton_UpdateLock's desaturate arm"
+    );
+    // **And no digit.** `BankFrameBagButton_OnLoad` sets `isBag = 1`, so `SetItemButtonCount`'s
+    // `isBag and count > 0` arm would print any positive number in the corner — the "1" the
+    // director saw. `GetInventoryItemCount 0x4c8680` short-circuits every container past 0-based
+    // slot 0x16 to a literal 0, and the bank's six bag slots are all in that band.
+    assert!(
+        !s.eval::<bool>("return BankFrameBag1Count:IsShown()")
+            .unwrap(),
+        "a bank bag counts nothing — the count fontstring stays hidden"
+    );
+
+    // The lock lets go. `ITEM_LOCK_CHANGED` is all the button gets, and it is enough — PROVIDED
+    // the snapshot it reads has already been corrected, which is what moving the resolving clear
+    // ahead of both feeds buys (`ui_items::feed::resolve_item_locks`).
+    bags[0] = Some(a_bag(false));
+    s.set_bank_bag_slots(bags.clone());
+    s.fire_event("ITEM_LOCK_CHANGED", vec![]);
+    assert!(
+        !is_greyed(&s.extract(), "INV_Misc_Bag_08"),
+        "the stuck grey: unlocked, the button must come back to full colour"
+    );
+
+    // Moved to the next bag slot: the icon has to LEAVE the first button, which only the repaint
+    // event can do — the lock event never touches the texture.
+    bags[0] = None;
+    bags[1] = Some(a_bag(false));
+    s.set_bank_bag_slots(bags);
+    s.fire_event("PLAYERBANKSLOTS_CHANGED", vec![]);
+    s.fire_event("PLAYERBANKSLOTS_CHANGED", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    let quads = s.extract();
+    let bag = icon_quad(&quads, "INV_Misc_Bag_08").expect("the bag is still drawn, once");
+    let drawn = bag.rect.expect("the icon resolved a rect").left;
+    let bag2_left = s.eval::<f32>("return BankFrameBag2:GetLeft()").unwrap();
+    let bag1_left = s.eval::<f32>("return BankFrameBag1:GetLeft()").unwrap();
+    assert!(
+        (drawn - bag2_left).abs() < (drawn - bag1_left).abs(),
+        "the bag is drawn on button 2, not the one it left ({drawn} vs {bag1_left}/{bag2_left})"
     );
 }

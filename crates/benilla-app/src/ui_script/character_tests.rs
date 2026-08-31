@@ -89,6 +89,7 @@ fn inventory_with_head_item() -> InventorySlots {
         item_id: 1234,
         icon: Some("Interface\\Icons\\INV_Helmet_01".into()),
         count: 1,
+        contents_count: None,
         quality: 2,
         name: Some("Test Helm".into()),
         link: Some("|cff1eff00|Hitem:1234:0:0:0|h[Test Helm]|h|r".into()),

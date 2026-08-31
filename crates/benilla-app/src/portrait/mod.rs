@@ -1163,8 +1163,13 @@ impl Plugin for PortraitPlugin {
                     // to flush its children) before the booth can mirror it.
                     sync_stable_standin,
                     sync_stable_booth,
-                    glue_booth::sync_glue_booth,
+                    // **The scene FIRST, then the character standing in it** — the two are one
+                    // committed pair (`glue_booth::PendingSwap`), and the booth reads the stage's
+                    // spot, facing and light rig off the scene. Running the booth first meant it
+                    // always baked against LAST frame's stage, which is one frame of the wrong
+                    // character in the new race's scene on every click.
                     glue_booth::sync_glue_scene,
+                    glue_booth::sync_glue_booth,
                     // The glue screens' FFX state, off the same look every screen already writes.
                     glue_booth::sync_glue_ffx,
                     // After the scene's framing: the viewport/clear its law decided (1619).
@@ -2744,6 +2749,7 @@ fn gate_booth_cameras(
     panes: Res<BoothPanes>,
     images: Res<Assets<Image>>,
     warm: Res<crate::pipe_warm::WarmPass>,
+    cover: Res<crate::loading_screen::EntryCover>,
     // The pipeline settle's input ([`Booth::pipes_settling`]) — is the render world still
     // building variants, i.e. is it still dropping draws on the floor.
     pipes: Res<crate::pipe_warm::PipeWatch>,
@@ -2766,7 +2772,14 @@ fn gate_booth_cameras(
     let test = test_mode(&mut env_cache);
     // `satisfied()` is false exactly while the covered warm window runs (the loading screen
     // holds on it), so this term costs nothing outside that window.
-    let warming = !warm.satisfied();
+    //
+    // **…and not before the cover has reached the glass.** The warm window opens on the
+    // state-flip frame, so without the second term all fifteen booth cameras woke on the one
+    // frame that owes the glass a loading screen — fifteen extra render passes in front of the
+    // present the player is waiting for, and nothing to pick up yet (the menagerie has not
+    // spawned; that is what these bakes are awake FOR). 0962's rule, held once in
+    // [`crate::loading_screen::EntryCover`].
+    let warming = !warm.satisfied() && cover.presented();
     for (cam_entity, BoothCam(token), mut cam, was_paced) in &mut cams {
         let Some(booth) = booths.0.get_mut(token.as_str()) else {
             continue;

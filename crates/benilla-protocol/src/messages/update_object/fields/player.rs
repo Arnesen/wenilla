@@ -909,6 +909,18 @@ impl ObjectFields {
         self.get_u32(FIELD_GAMEOBJECT_LEVEL).unwrap_or(0)
     }
 
+    /// `OBJECT_FIELD_TYPE & TYPEMASK_CONTAINER` — whether this object is a **bag**, not merely an
+    /// item. The reference's own test, byte for byte: `mov ecx,[eax+8]` / `shr ecx,2` /
+    /// `test cl,1` (`0x4c879d`–`0x4c87a6` in `GetInventoryItemCount`, repeated verbatim at
+    /// `0x4c7dbb`–`0x4c7dc4` in `PutItemInBag`). A container's mask carries the ITEM bit too, so
+    /// this is a widening test and not an alternative to it.
+    ///
+    /// `false` when the field is absent — an item whose create block has not landed is not yet
+    /// known to be a bag, and every caller's fallback is the ordinary-item answer.
+    pub fn is_container(&self) -> bool {
+        self.get_u32(FIELD_OBJECT_TYPE).unwrap_or(0) & 0x4 != 0
+    }
+
     /// The object's class from the type field (`OBJECT_FIELD_TYPE`), used for `Values`/`Movement`
     /// updates that carry no separate `TypeId`. Also the reference's own "is this a Player" test
     /// (`[obj->descriptorBlock[2] + 8] >> 4 & 1`), which is how `CanAttack`/`CanInteract` ask.

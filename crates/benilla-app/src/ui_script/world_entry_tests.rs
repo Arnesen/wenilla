@@ -589,11 +589,15 @@ fn the_entry_load_waits_for_the_cover_to_present() {
     let mut world = booted_world();
     world.insert_resource(State::new(crate::char_select::ClientState::InWorld));
     world.insert_resource(crate::loading_screen::LoadingScreen::test_covering());
+    world.insert_resource(crate::loading_screen::EntryCover::default());
     world.insert_resource(roster_named("Onehunter", 1));
-    world.insert_resource(super::PendingEntryUiLoad::default());
+    world.insert_resource(super::PendingEntryUiLoad);
 
     // Covered frames 1 and 2: the cover has not provably presented yet — no load.
     for frame in 1..=2 {
+        world
+            .resource_mut::<crate::loading_screen::EntryCover>()
+            .tick(true);
         super::lifecycle::run_pending_entry_load(&mut world);
         assert_eq!(
             probe_saw(&world),
@@ -602,6 +606,9 @@ fn the_entry_load_waits_for_the_cover_to_present() {
         );
     }
     // Covered frame 3: two cover renders have committed — the burst is hidden. Load.
+    world
+        .resource_mut::<crate::loading_screen::EntryCover>()
+        .tick(true);
     super::lifecycle::run_pending_entry_load(&mut world);
     assert_eq!(
         probe_saw(&world).as_deref(),
@@ -630,7 +637,7 @@ fn no_cover_means_the_entry_load_runs_at_once() {
     world.insert_resource(State::new(crate::char_select::ClientState::InWorld));
     world.insert_resource(crate::loading_screen::LoadingScreen::default());
     world.insert_resource(roster_named("Onehunter", 1));
-    world.insert_resource(super::PendingEntryUiLoad::default());
+    world.insert_resource(super::PendingEntryUiLoad);
 
     super::lifecycle::run_pending_entry_load(&mut world);
     assert_eq!(
@@ -658,8 +665,12 @@ fn leaving_inside_the_deferral_window_drops_the_load_and_writes_nothing() {
     world.insert_resource(State::new(crate::char_select::ClientState::InWorld));
     world.insert_resource(crate::loading_screen::LoadingScreen::test_covering());
     world.insert_resource(roster_named("Onehunter", 1));
-    world.insert_resource(super::PendingEntryUiLoad::default());
+    world.insert_resource(crate::loading_screen::EntryCover::default());
+    world.insert_resource(super::PendingEntryUiLoad);
 
+    world
+        .resource_mut::<crate::loading_screen::EntryCover>()
+        .tick(true);
     super::lifecycle::run_pending_entry_load(&mut world); // covered frame 1 — still pending
     super::end_ui_session(&mut world);
 
@@ -749,7 +760,7 @@ fn the_login_one_shots_wait_for_the_in_game_ui() {
     };
 
     // …but the in-game UI is still owed. Three frames inside the deferral window.
-    app.insert_resource(super::PendingEntryUiLoad::default());
+    app.insert_resource(super::PendingEntryUiLoad);
     for frame in 1..=3 {
         app.update();
         assert_eq!(

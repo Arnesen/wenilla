@@ -1382,7 +1382,7 @@ fn bagnon_forevers_records_survive_the_logout_boundary() {
     // The logout boundary: the despawn frame (no self store) and then the shutdown's own events.
     // The record the write persists must be the bags the player actually had.
     let mut memory = crate::ui_items::feed::FeedMemory::default();
-    crate::ui_items::feed::apply_container_source(&mut s, &mut memory, None, Vec::new());
+    crate::ui_items::feed::apply_container_source(&mut s, &mut memory, None, [0; 10], Vec::new());
     s.fire_event("PLAYER_LEAVING_WORLD", Vec::new());
     s.fire_event("PLAYER_LOGOUT", Vec::new());
     let (size, item) = s

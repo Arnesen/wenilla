@@ -137,24 +137,20 @@ fn ui_wanted(world: &World) -> bool {
 /// reference sourcing + 55 files + addons + saved vars + `PLAYER_LOGIN` → 48.83) — the
 /// director's "frozen char for 1 sec" at every Enter World.
 ///
-/// The counter counts covered+in-world frames, exactly like the warm pass: renders are serial,
-/// so at [`ENTRY_LOAD_COVER_FRAMES`] the two intermediate frames' renders — which draw the
-/// cover — have committed their presents before this frame's stall begins. The loading screen
-/// folds this resource's existence into its clear condition, so a reveal can never precede the
-/// UI it is supposed to reveal.
+/// The wait itself is [`crate::loading_screen::EntryCover`]'s — one count of covered+in-world
+/// frames for the whole client. This used to keep its own, beside the warm pass's identical one,
+/// and the duplication is not incidental: the third consumer of the same rule (the world camera,
+/// which renders the whole new world on that same frame) had no counter at all until it was
+/// measured. So the latch here is a *marker* — is the entry UI still owed? — and the timing
+/// question is answered in one place. The loading screen folds this resource's existence into
+/// its clear condition, so a reveal can never precede the UI it is supposed to reveal.
 #[derive(Resource, Default)]
-pub(crate) struct PendingEntryUiLoad {
-    covered_frames: u32,
-}
-
-/// Covered+in-world frames before the entry load runs — the same present proxy, and the same
-/// value, as `pipe_warm::WARM_COVER_PRESENT_FRAMES` (0962's argument, restated there).
-const ENTRY_LOAD_COVER_FRAMES: u32 = 3;
+pub(crate) struct PendingEntryUiLoad;
 
 /// `OnEnter(InWorld)`: arm the deferred entry load. The load itself runs a few frames later —
 /// see [`PendingEntryUiLoad`].
 pub(crate) fn arm_entry_ui_load(mut commands: Commands) {
-    commands.insert_resource(PendingEntryUiLoad::default());
+    commands.insert_resource(PendingEntryUiLoad);
 }
 
 /// **Is the in-game UI still owed for this world entry?** True from `OnEnter(InWorld)` until
@@ -169,7 +165,7 @@ pub(crate) fn arm_entry_ui_load(mut commands: Commands) {
 /// the frames built moments later do their first paint with no first paint. That is not a
 /// hypothetical ordering — it is a RACE against the wire, which is why it took some logins and not
 /// others, and why the symptom moved between characters. The self descriptor arriving inside the
-/// [`ENTRY_LOAD_COVER_FRAMES`] deferral window is all it takes.
+/// deferral window is all it takes.
 ///
 /// The reference has no such window: `UI_Init 0x48fbf0` loads all of FrameXML and *then* fires the
 /// world-enter cascade (`PLAYER_LOGIN` at `0x49094b`, `PLAYER_ENTERING_WORLD` at `0x490965`) from
@@ -205,12 +201,15 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     let covering = world
         .get_resource::<crate::loading_screen::LoadingScreen>()
         .is_some_and(|s| s.covering());
-    if covering {
-        let mut pending = world.resource_mut::<PendingEntryUiLoad>();
-        pending.covered_frames += 1;
-        if pending.covered_frames < ENTRY_LOAD_COVER_FRAMES {
-            return;
-        }
+    // The wait is [`crate::loading_screen::EntryCover`]'s, not a second count of the same frames
+    // (1345 wrote its own beside the warm pass's, and the third consumer — the world camera —
+    // then had none at all). `presented()` is already true with no cover up, which is the
+    // "nothing watching the previous present, load now" arm.
+    if !world
+        .get_resource::<crate::loading_screen::EntryCover>()
+        .is_none_or(|c| c.presented())
+    {
+        return;
     }
     world.remove_resource::<PendingEntryUiLoad>();
     let start = std::time::Instant::now();

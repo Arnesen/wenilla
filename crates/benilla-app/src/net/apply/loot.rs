@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use super::super::SelfGuid;
 use crate::items::Items;
 use crate::net::ClientCommand;
-use crate::pending_item_ops::{LockClearedByFailure, PendingItemOps};
+use crate::pending_item_ops::{LockTransitions, PendingItemOps};
 use crate::ui_action::{UiError, UiErrorKeys};
 use crate::ui_items::{EquipError, EquipErrors};
 use crate::ui_loot::{LootErrors, LootLatch, LootState};
@@ -250,7 +250,7 @@ pub(super) fn item_template(entry: u32, info: Option<ItemInfo>, items: &mut Item
 /// 0218 §3): every arrival here already has reason ≠ 0 (reason 0 is filtered before this event
 /// exists at all — `benilla_protocol::events`'s `if reason != 0` guard), so it always tries a
 /// [`PendingItemOps::clear_by_failure`]. This site has no `UiScript` to fire `ITEM_LOCK_CHANGED`
-/// through, so the transitioned slots queue in [`LockClearedByFailure`] for the container feed
+/// through, so the transitioned slots queue in [`LockTransitions`] for the container feed
 /// (`ui_items::feed::feed_containers`) to drain and fire next time it runs.
 #[allow(clippy::too_many_arguments)] // one dispatch arm's full input set
 pub(super) fn inventory_failure(
@@ -260,7 +260,7 @@ pub(super) fn inventory_failure(
     bag_slot: u8,
     equip_errors: &mut EquipErrors,
     pending: &mut PendingItemOps,
-    lock_cleared: &mut LockClearedByFailure,
+    lock_cleared: &mut LockTransitions,
     latch: &mut LootLatch,
 ) {
     debug!("net: inventory failure {reason:#04x} (item {item_guid:#x}, bag slot {bag_slot})");
@@ -409,7 +409,7 @@ mod tests {
         const LOCKBOX: u64 = 0x4000_0000_0000_0007;
         let mut errs = EquipErrors::default();
         let mut pending = PendingItemOps::default();
-        let mut cleared = LockClearedByFailure::default();
+        let mut cleared = LockTransitions::default();
         let mut latch = LootLatch(Some(LOCKBOX));
 
         // An unrelated item's failure must not end the session.

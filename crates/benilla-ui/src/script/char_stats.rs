@@ -219,8 +219,20 @@ pub struct InvSlotView {
     pub bar_placeable: bool,
     /// Icon texture path (`Interface\Icons\…`); `None` while the template answer is in flight.
     pub icon: Option<String>,
-    /// Stack count (`GetInventoryItemCount` — 1 for equipment, the bag-summed count for ammo).
+    /// `ITEM_FIELD_STACK_COUNT` — what `GetInventoryItemCount 0x4c8680` pushes for an ordinary
+    /// item (1 for equipment; the ammo slot's own leg puts the carried total here).
     pub count: u32,
+    /// What that same function pushes when the item is a **CONTAINER** (`OBJECT_FIELD_TYPE`'s
+    /// `TYPEMASK_CONTAINER` bit — `0x4c87a6`), which is a different number entirely: the sum of
+    /// its contents' stack counts when its `(class, subclass)` row carries `ItemSubClass.dbc`'s
+    /// `DisplayFlags & 0x4` (`0x4c881a`, set on Soul Bag and the quivers only), and **0**
+    /// otherwise. `None` = not a container, and [`Self::count`] answers.
+    ///
+    /// The slot-dependent half of the law is NOT here — it is at the binding, where the reference
+    /// keeps it: a container whose 0-based slot is past `0x16` (everything but the four equipped
+    /// bag slots — the bank's six bag slots included) short-circuits to 0 at `0x4c87af` before any
+    /// of this is read.
+    pub contents_count: Option<u32>,
     /// Item quality 0..6 (`GetInventoryItemQuality`).
     pub quality: i32,
     /// The item's name, when known (tooltip/link consumers).
@@ -432,12 +444,18 @@ impl super::UiScript {
         self.fire_event("UPDATE_INVENTORY_ALERTS", vec![]);
     }
 
-    /// Push the six bank-bag slots ([`BankBagSlots`] — live ids 64..=69). No event of its own:
-    /// the app pushes it in the same step as [`Self::set_inventory_slots`], whose
-    /// `UNIT_INVENTORY_CHANGED` is the repaint signal the reference's bank buttons already
-    /// register for (`BankFrameBaseButton_OnLoad` takes `PLAYERBANKSLOTS_CHANGED` /
-    /// `ITEM_LOCK_CHANGED` / `BANKFRAME_OPENED`, and `BankFrameItemButton_OnUpdate` re-reads
-    /// every frame besides).
+    /// Push the six bank-bag slots ([`BankBagSlots`] — live ids 64..=69).
+    ///
+    /// **The repaint signal is `PLAYERBANKSLOTS_CHANGED`, and nothing else will do** (1771). The
+    /// reference's bank buttons register exactly `BANKFRAME_OPENED`, `PLAYERBANKSLOTS_CHANGED`,
+    /// `ITEM_LOCK_CHANGED` and `CURSOR_UPDATE` (`BankFrameBaseButton_OnLoad`); of those, only the
+    /// first two reach `BankFrameItemButton_OnUpdate`, the icon/count/lock repaint. That function
+    /// is NOT an `OnUpdate` handler despite the name — `BankItemButtonTemplate`'s `<OnUpdate>` is
+    /// `CursorOnUpdate()`, and the repaint is only ever reached from
+    /// `BankFrameItemButton_OnEvent`. `UNIT_INVENTORY_CHANGED`, which rides
+    /// [`Self::set_inventory_slots`] beside this push, is not registered by these buttons at all.
+    /// So `ui_char::feed_char` fires `PLAYERBANKSLOTS_CHANGED` for every bag slot whose ITEM
+    /// changed, and leaves the lock to `ITEM_LOCK_CHANGED`.
     pub fn set_bank_bag_slots(&mut self, slots: BankBagSlots) {
         self.model_mut().bank_bag_slots = slots;
     }
@@ -578,6 +596,23 @@ impl Model {
     }
 }
 
+/// The shared inventory-slot reader's whitelist (`0x4c8520`), on the **0-based** value it hands
+/// back (`0x4c8546 dec eax`) — Lua ids are one higher. Anything outside it raises the calling
+/// binding's own "Invalid inventory slot in …", which is not the same thing as an empty answer.
+///
+/// The bands are the reader's own, kept apart rather than merged into one 39..=68 range because
+/// they are different stores: the ammo pseudo-slot, the doll (equipment + the four equipped bag
+/// icons), the bank's 24 vault slots, its 6 bag slots, and the keyring. Note what is NOT here —
+/// the backpack's own 16 item slots (0-based 23..=38) and buyback (69..=80): both are addressed
+/// through the container API instead, and a macro handing either to an inventory binding raises.
+fn inventory_slot_reader_accepts(slot0: i32) -> bool {
+    slot0 == -1                            // Lua 0      the ammo leg
+        || (0x00..=0x16).contains(&slot0)  // Lua 1..=23   the doll + the four equipped bags
+        || (0x27..=0x3e).contains(&slot0)  // Lua 40..=63  the bank vault
+        || (0x3f..=0x44).contains(&slot0)  // Lua 64..=69  the bank bag slots
+        || (0x51..=0x70).contains(&slot0) // Lua 82..=113 the keyring
+}
+
 /// The display name inside an item link — the text between `|h[` and `]|h`.
 fn link_item_name(link: &str) -> Option<String> {
     let (_, rest) = link.split_once("|h[")?;
@@ -608,6 +643,13 @@ impl InvSlotView {
             locked: slot.locked,
             creator: slot.creator.clone(),
             enchants: slot.enchants.clone(),
+            // Every band this mapper serves — the bank vault, Lua 40..=63 — sits past the
+            // binding's `0x16` short-circuit, so a container met here answers 0 whatever is inside
+            // it and only the `Some`/`None` distinction carries information. "Names Bag0Slot as a
+            // place it could be worn" is the same set as TYPEMASK_CONTAINER (`INVTYPE_BAG` is the
+            // only inventory type `FindEquipSlot` maps there — `cursor::bag_verbs::is_container`
+            // states the equivalence in full), and it is what a container slot carries.
+            contents_count: slot.equip_slots.contains(&20).then_some(0),
             ..Default::default()
         }
     }
@@ -934,13 +976,53 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetInventoryItemCount("player", slot) → the stack count; **0 for an empty slot** (the
-    // wiki's documented shape — warcraft.wiki.gg: "1 for most items", 0 when nothing's there;
-    // the ammo slot carries the bag-summed count the app resolves).
+    // The binding's own two `.data` literals, read out of the shipped 5875 image and NOT
+    // paraphrased (the house rule `GetInventorySlotInfo` set: an addon may compare on the text).
+    // Neither carries a period or a newline.
+    //
+    //   `0x8489b4`  arg 1 fails `is-number-or-string 0x6f3510`
+    //   `0x848984`  arg 2 fails `lua_isnumber`, OR names a slot outside the reader's whitelist
+    //
+    // (`0x848b54` is the sibling `Invalid inventory slot in IsInventoryItemLocked`, unclaimed
+    // here: that binding's own argument reader has not been carved, and guessing it is exactly
+    // what this block exists to stop.)
+    const USAGE_GET_INVENTORY_ITEM_COUNT: &str = "Usage: GetInventoryItemCount(unit, slot)";
+    const INVALID_SLOT_GET_INVENTORY_ITEM_COUNT: &str =
+        "Invalid inventory slot in GetInventoryItemCount";
+    // GetInventoryItemCount("player", slot) — CARVED (`0x4c8680`, wow-re
+    // `system/ui/scratch/inventory-item-count-law.md`), and it is nothing like the shape every
+    // secondary source describes. Four answers, in the reference's own order:
+    //
+    //  · an EMPTY slot pushes **1**, not 0 (`0x4c8797`). Both FrameXML callers gate on
+    //    `GetInventoryItemTexture` first, which is why nobody ever noticed.
+    //  · a non-container pushes `ITEM_FIELD_STACK_COUNT`.
+    //  · a CONTAINER (`OBJECT_FIELD_TYPE & 4`, `0x4c87a6`) in a slot whose 0-based id is **past
+    //    `0x16`** pushes a literal 0 (`0x4c87af cmp …,0x16` / `jg 0x4c8813`) — before any lookup.
+    //    The bank's six bag slots (Lua 64..69 → 0-based 63..68) are all in that band, which is the
+    //    whole reason `BankFrameBag1` shows no digit in the real client: `SetItemButtonCount`'s
+    //    `isBag and count > 0` arm never fires.
+    //  · a CONTAINER in one of the four equipped bag slots pushes the `ItemSubClass.dbc`-gated
+    //    sum of its contents — see [`InvSlotView::contents_count`].
     g.set(
         "GetInventoryItemCount",
-        lua.create_function(|lua, (token, slot): (Option<String>, i64)| {
-            Ok(player_inv_slot(lua, &token, slot).map_or(0i64, |v| i64::from(v.count)))
+        lua.create_function(|lua, (unit, slot): (Value, Value)| {
+            let token = super::binding_abi::string_arg(lua, unit, USAGE_GET_INVENTORY_ITEM_COUNT)?;
+            let slot0 =
+                super::binding_abi::number_arg(lua, slot, INVALID_SLOT_GET_INVENTORY_ITEM_COUNT)?;
+            let slot0 = slot0.wrapping_sub(1);
+            if !inventory_slot_reader_accepts(slot0) {
+                return Err(mlua::Error::RuntimeError(
+                    INVALID_SLOT_GET_INVENTORY_ITEM_COUNT.into(),
+                ));
+            }
+            let Some(v) = player_inv_slot(lua, &Some(token), i64::from(slot0) + 1) else {
+                return Ok(1i64);
+            };
+            Ok(match v.contents_count {
+                None => i64::from(v.count),
+                Some(_) if slot0 > 0x16 => 0,
+                Some(n) => i64::from(n),
+            })
         })?,
     )?;
 
@@ -1618,6 +1700,96 @@ mod tests {
         assert!(s.eval::<bool>("return HasWandEquipped()").unwrap());
     }
 
+    /// **`GetInventoryItemCount`'s container fork** (`0x4c8680`, wow-re
+    /// `system/ui/scratch/inventory-item-count-law.md`). Four answers, and three of them are not
+    /// the stack count:
+    ///
+    /// · an equipped QUIVER (its `ItemSubClass.dbc` row has `DisplayFlags & 0x4`) answers the sum
+    ///   of its arrows — the number that shows on the bag bar;
+    /// · an equipped PLAIN BAG answers **0**, which is why the bar shows it no digit even though
+    ///   `BagSlotButtonTemplate` sets `isBag = 1` and `SetItemButtonCount` would print any
+    ///   positive number;
+    /// · the SAME plain bag in a BANK BAG slot answers 0 too, but for a different reason and
+    ///   earlier: `cmp …,0x16 / jg` short-circuits every container past the four equipped bag
+    ///   slots before the DBC is ever consulted. This is the digit the director saw on
+    ///   `BankFrameBag1` (decision 1771's sibling), and asserting it here rather than only through
+    ///   the window is the point — the window can only ever show that the two agree.
+    #[test]
+    fn get_inventory_item_count_forks_on_the_container_bit_and_the_slot() {
+        let mut s = UiScript::new().unwrap();
+        let bag = |contents: Option<u32>| {
+            Some(InvSlotView {
+                item_id: 4496,
+                count: 1,
+                contents_count: contents,
+                ..Default::default()
+            })
+        };
+        let mut slots: crate::script::InventorySlots = Default::default();
+        slots[20] = bag(Some(162)); // a quiver: the gate is set, the sum is its arrows
+        slots[21] = bag(Some(0)); // a plain bag: the gate is clear
+        slots[22] = Some(InvSlotView {
+            item_id: 2263,
+            count: 7,
+            ..Default::default()
+        }); // not a container at all
+        s.set_inventory_slots(slots);
+        let mut bank: crate::script::BankBagSlots = Default::default();
+        bank[0] = bag(Some(162)); // the very same quiver, in a bank bag slot
+        s.set_bank_bag_slots(bank);
+
+        let count = |slot: i64| {
+            s.eval::<i64>(&format!(
+                r#"return GetInventoryItemCount("player", {slot})"#
+            ))
+            .unwrap()
+        };
+        assert_eq!(count(20), 162, "a quiver counts what is inside it");
+        assert_eq!(
+            count(21),
+            0,
+            "a plain bag counts nothing — not its own stack"
+        );
+        assert_eq!(count(22), 7, "an ordinary item is still its stack count");
+        assert_eq!(
+            count(64),
+            0,
+            "0-based 63 is past 0x16: every container short-circuits, quiver or not"
+        );
+
+        // The two `.data` literals, and the fact that both arms RAISE rather than answer. A slot
+        // outside the shared reader's whitelist is not an empty slot: the backpack's own item
+        // slots (Lua 24..=39) are addressed through the container API, and handing one here
+        // abandons the statement.
+        let err = |code: &str| s.run(code).unwrap_err().to_string();
+        assert!(
+            err(r#"GetInventoryItemCount("player", 30)"#)
+                .contains("Invalid inventory slot in GetInventoryItemCount"),
+            "the backpack band raises"
+        );
+        assert!(
+            err(r#"GetInventoryItemCount("player", 200)"#)
+                .contains("Invalid inventory slot in GetInventoryItemCount"),
+            "and so does anything past the keyring"
+        );
+        assert!(
+            err(r#"GetInventoryItemCount("player", {})"#)
+                .contains("Invalid inventory slot in GetInventoryItemCount"),
+            "a non-number slot takes the SAME string, not the Usage one"
+        );
+        assert!(
+            err("GetInventoryItemCount({}, 1)")
+                .contains("Usage: GetInventoryItemCount(unit, slot)"),
+            "…and only a bad unit takes the Usage string"
+        );
+        assert_eq!(
+            count(0),
+            1,
+            "the ammo pseudo-slot (0-based -1) is in the whitelist, so it ANSWERS — and with no \
+             ammo seated the answer is the empty one, which is 1"
+        );
+    }
+
     #[test]
     fn inventory_item_bindings_serve_occupied_empty_and_absent_shapes() {
         let mut s = UiScript::new().unwrap();
@@ -1672,7 +1844,9 @@ mod tests {
                 .unwrap(),
             200
         );
-        // An empty slot: nil id/texture/quality, count 0 (the wiki's documented empty shape).
+        // An empty slot: nil id/texture/quality — and **count 1, not 0** (`0x4c8797`). Every
+        // secondary source says 0; the image pushes the literal 1, and both FrameXML callers gate
+        // on `GetInventoryItemTexture` first, which is why nobody ever caught it.
         assert!(s
             .eval::<bool>(r#"return GetInventoryItemID("player", 5) == nil"#)
             .unwrap());
@@ -1682,7 +1856,7 @@ mod tests {
         assert_eq!(
             s.eval::<i64>(r#"return GetInventoryItemCount("player", 5)"#)
                 .unwrap(),
-            0
+            1
         );
         assert!(s
             .eval::<bool>(r#"return GetInventoryItemQuality("player", 5) == nil"#)
@@ -1694,7 +1868,8 @@ mod tests {
         assert_eq!(
             s.eval::<i64>(r#"return GetInventoryItemCount("target", 1)"#)
                 .unwrap(),
-            0
+            1,
+            "no item behind the token is the empty answer, and the empty answer is 1"
         );
         // Out-of-range slots: the empty shape, no error.
         assert!(s

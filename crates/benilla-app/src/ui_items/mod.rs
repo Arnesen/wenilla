@@ -43,7 +43,7 @@ use bevy::prelude::*;
 
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore};
-use crate::pending_item_ops::{LockClearedByFailure, PendingItemOps};
+use crate::pending_item_ops::{LockTransitions, PendingItemOps};
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
@@ -1074,7 +1074,7 @@ impl Plugin for UiItemsPlugin {
             // pending-equip array and its one bind-on-use cell.
             .init_resource::<crate::ui_bind_confirm::PendingEquips>()
             .init_resource::<crate::ui_bind_confirm::PendingBindOnUse>()
-            .init_resource::<LockClearedByFailure>()
+            .init_resource::<LockTransitions>()
             // AFTER the chain opens — a bare Startup slot raced AssetSet::Open and, when it
             // won, silently skipped every item DBC (no ItemSets/ItemSubClasses resource for the
             // whole session: set tooltips lost their SET block, the crafting book its headers).
@@ -1086,6 +1086,11 @@ impl Plugin for UiItemsPlugin {
             .add_systems(
                 Update,
                 (
+                    // The pending-lock resolving clear, ahead of BOTH feeds that read the lock
+                    // set into a pushed `locked` (1771 — its own doc has the why).
+                    feed::resolve_item_locks
+                        .before(feed_containers)
+                        .before(crate::ui_char::feed_char),
                     // `.before(CooldownEvents)`: the slot cooldown triples must be in the VM
                     // before `feed_action_state`'s synchronous `BAG_UPDATE_COOLDOWN` makes the
                     // bag handlers re-read them (the set's own doc — else a fresh cooldown's

@@ -281,7 +281,7 @@ pub(super) fn apply_net_updates(
     // One tuple param (the 16-SystemParam ceiling again): the action-bar- + merchant-facing errors
     // and the cast-bar feed (decision 0137), plus the item-lock bookkeeping the inventory-failure
     // arm also drains (decision 0216 §4 / 0218 §3 — this apply site has no `UiScript` to fire
-    // `ITEM_LOCK_CHANGED` through, so the transitioned slots queue in `LockClearedByFailure` for
+    // `ITEM_LOCK_CHANGED` through, so the transitioned slots queue in `LockTransitions` for
     // the container feed to pick up).
     mut ui_actions: (
         ResMut<crate::ui_action::PlayerActions>,
@@ -305,7 +305,7 @@ pub(super) fn apply_net_updates(
         ResMut<crate::ui_loot::LootErrors>,
         ResMut<crate::ui_cast::CastBarFeed>,
         ResMut<crate::pending_item_ops::PendingItemOps>,
-        ResMut<crate::pending_item_ops::LockClearedByFailure>,
+        ResMut<crate::pending_item_ops::LockTransitions>,
         // Nested pair (the tuple is at the ceiling): the two NPC-service windows' error queues,
         // each drained onto its window's red line by its own feed.
         (

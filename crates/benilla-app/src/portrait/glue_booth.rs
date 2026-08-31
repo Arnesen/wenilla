@@ -254,7 +254,50 @@ pub(crate) struct CreateScene {
     /// Bumped on every scene spawn — folded into `sync_glue_booth`'s change key so the character
     /// re-lights the moment the scene (and its rig) lands.
     rev: u64,
+    /// **The stage the selection has asked for but has not been given yet** — see
+    /// [`PendingSwap`]. `None` = the standing scene IS the requested one.
+    pending: Option<PendingSwap>,
 }
+
+/// A requested stage swap, waiting for its half of the pair.
+///
+/// **The two halves of a glue booth swap independently, and that is the whole defect.** Clicking a
+/// row rewrites [`GluePreview`] in one frame; the background scene is an M2 that loads in one or
+/// two more, and the character is an *assembly* — body display, composited skin, every worn item's
+/// model — that [`crate::entities::attach::preview::build_glue_preview`] deliberately withholds
+/// until all of it is ready. Whichever half wins is what the screen shows in the meantime:
+///
+/// ```text
+/// t=8.484  click Orcshafour (orc)          ← from a human
+/// t=8.487  create scene: UI_Orc up
+/// t=8.487  [booth] glue rebake display=49  ← the HUMAN, standing in the ORC stage, by=scene
+/// t=8.540  [booth] glue rebake display=51  ← 53 ms later, the orc
+/// ```
+///
+/// and the reverse order for a body whose model is already cached under a stage whose art is not
+/// (measured the same run, 34 ms of a human standing in the orc stage). That is the director's
+/// *"switching between chars that haven't been loaded before briefly shows a different model —
+/// a clear jump from something else to what it eventually turns out to look like"*.
+///
+/// The reference cannot express this state: `SelectCharacter` loads the background model and
+/// builds the character inside one blocking call, so the pair is atomic by construction. Ours
+/// makes it atomic by **holding the committed pair until the requested one is whole** — the loads
+/// still start the instant the row is clicked, so nothing is slower; only the *swap* waits.
+struct PendingSwap {
+    /// The requested scene token (`UI_<token>`).
+    token: &'static str,
+    /// Its model, loading since the click — the hold is about when the stage swaps, never about
+    /// when its art starts arriving.
+    handle: Handle<M2Model>,
+    /// `Time<Real>` at the click, for [`GLUE_SWAP_HOLD_SECS`].
+    since: f32,
+}
+
+/// 0737's never-hold-unbounded rule, applied to the swap above: a look whose assembly can never
+/// complete (a display the cache will not resolve, an item model that is not there) must not
+/// freeze the screen on the previous character. Generous, because the cost of waiting is a stale
+/// but COHERENT stage and the cost of releasing early is exactly the defect.
+const GLUE_SWAP_HOLD_SECS: f32 = 2.0;
 
 /// The scene's model-name token: `Interface\Glues\Models\UI_<token>\UI_<token>.mdx`. The race
 /// mapping is the ref's (`GlueParent.lua`'s `SetBackgroundModel` HACK block); the main menu is
@@ -271,6 +314,20 @@ fn scene_token(scene: GlueScene) -> &'static str {
             _ => "Human",
         },
     }
+}
+
+/// **May the stage swap to the requested scene this frame?** — [`PendingSwap`]'s whole law, as one
+/// function, because *when a glue selection is allowed to become visible* is the thing that was
+/// wrong and it should be readable (and testable) without standing up a booth.
+///
+/// - `standing` — is there a coherent pair on the stage to protect? With nothing standing there is
+///   no mispairing to avoid and the swap is free (the login → select hop, an empty account).
+/// - `art_ready` / `body_ready` — the requested scene's model is loaded, and the requested look's
+///   assembly has landed.
+/// - `waited` — seconds held, against [`GLUE_SWAP_HOLD_SECS`]'s fail-open bound (0737's rule: a
+///   cover — or a hold — is never unbounded).
+fn may_swap(standing: bool, art_ready: bool, body_ready: bool, waited: f32) -> bool {
+    !standing || (art_ready && body_ready) || waited >= GLUE_SWAP_HOLD_SECS
 }
 
 /// A glue scene's authored M2 light rig, folded for the booth's light buffer under the
@@ -724,6 +781,7 @@ pub(super) fn spawn_glue_booth(
         light: None,
         variants: default(),
         rev: 0,
+        pending: None,
     });
 }
 
@@ -797,8 +855,13 @@ pub(super) fn sync_glue_scene(
         ResMut<Assets<Mesh>>,
         ResMut<benilla_world::instance_tint::InstanceTintMirrors>,
     ),
+    // The swap gate's two inputs ([`PendingSwap`]) — the character assembly this stage must land
+    // beside, and the real clock its bound is measured on. One tuple param: the 16-SystemParam
+    // ceiling, same reason as `particle_assets` above.
+    swap: (Res<GluePreviewBake>, Res<Time<bevy::time::Real>>),
 ) {
     let (mut palettes, mut mirrors, mut forms, mut mesh_assets, mut tint_mirrors) = particle_assets;
+    let (bake, real) = swap;
     let Some(booth) = booths.0.get(GLUE_SLOT) else {
         return;
     };
@@ -854,11 +917,47 @@ pub(super) fn sync_glue_scene(
         preview.look,
         Some(GlueLook::Select(l)) if l.flags & benilla_protocol::CHARACTER_FLAG_GHOST != 0
     );
+    if scene.token == Some(token) {
+        // The request came back to the stage already standing (a re-click, a same-race row) —
+        // whatever swap was in flight is moot.
+        scene.pending = None;
+    }
     if scene.token != Some(token) {
+        // **The pair swaps together, or not at all** — see [`PendingSwap`] for the defect this
+        // exists to close and the measurements behind it. The load starts on the click; only the
+        // commit waits, and only while there is a coherent pair on the stage to protect.
+        let now = real.elapsed_secs();
+        let pending = match scene.pending.take() {
+            Some(p) if p.token == token => p,
+            _ => PendingSwap {
+                token,
+                handle: asset_server.load(m2_url(&format!(
+                    "Interface\\Glues\\Models\\UI_{token}\\UI_{token}.mdx"
+                ))),
+                since: now,
+            },
+        };
+        // Both halves of the REQUESTED selection: this stage's art, and the assembly for the look
+        // that asked for it (`build_glue_preview` publishes the look it actually built, so this
+        // compares "what stands" against "what was clicked" without re-deriving either).
+        let art_ready = m2s.get(&pending.handle).is_some();
+        let body_ready = bake.look == preview.look;
+        // An empty stage has no pair to break — the login → select hop, an empty account, a
+        // capture booting onto a glue screen.
+        let standing = bake.look.is_some() && !bake.parts.is_empty();
+        let waited = now - pending.since;
+        if !may_swap(standing, art_ready, body_ready, waited) {
+            scene.pending = Some(pending);
+            return; // hold the coherent pair already on the stage
+        }
+        if standing && waited >= GLUE_SWAP_HOLD_SECS {
+            warn!(
+                "glue scene: UI_{token} swapping after {waited:.1}s without its pair (art \
+                 {art_ready}, body {body_ready}) — the bound is GLUE_SWAP_HOLD_SECS"
+            );
+        }
         scene.token = Some(token);
-        scene.handle = Some(asset_server.load(m2_url(&format!(
-            "Interface\\Glues\\Models\\UI_{token}\\UI_{token}.mdx"
-        ))));
+        scene.handle = Some(pending.handle);
         scene.spawned = false;
         scene.cam = None;
         scene.art = None;
@@ -1223,7 +1322,15 @@ pub(super) fn sync_glue_booth(
                 }
             });
     let (last_rev, last_yaw, last_scene) = last.unwrap_or((u64::MAX, f32::NAN, u64::MAX));
-    let rebake = last_rev != bake.revision || last_scene != scene_rev;
+    // **The other half of [`PendingSwap`]'s law**, for the arrival order it cannot catch: a body
+    // whose models are already cached assembles in a frame, under a stage whose art is still
+    // loading — measured at 34 ms of a human standing in the orc stage. `sync_glue_scene` runs
+    // ahead of this system and commits both halves in the frame they are both ready, so "the
+    // standing stage is the requested one" is exactly "this bake may be shown".
+    let staged = scene
+        .as_deref()
+        .is_none_or(|s| s.token == preview.scene.map(scene_token));
+    let rebake = staged && (last_rev != bake.revision || last_scene != scene_rev);
     let reyaw = last_yaw != preview.yaw;
     if !rebake && !reyaw {
         return;
@@ -1347,6 +1454,21 @@ pub(super) fn sync_glue_booth(
                 twins: relight_twins(&b.twins, &mut scene, &mut booth_light, &mut materials),
             })
             .collect();
+        // `WOW_BOOTH_LOG=1` — **which body is standing, and what put it there.** The gate timeline
+        // says the glue camera drew; only this says whose display it drew, and whether the re-bake
+        // was the look changing (`look`) or the SCENE's rig landing under an unchanged look
+        // (`scene`) — the second of which stands the OUTGOING character in the INCOMING race's
+        // stage until the new assembly is ready.
+        if super::booth_log() {
+            println!(
+                "[booth] glue rebake display={} parts={} riders={} bake_rev={} scene_rev={scene_rev} by={}",
+                bake.display_id,
+                bake.parts.len(),
+                bake.riders.len(),
+                bake.revision,
+                if last_rev != bake.revision { "look" } else { "scene" },
+            );
+        }
         commands.entity(booth.root).despawn_related::<Children>();
         let mut booth_rig = spawn_booth_model(
             &mut commands,
@@ -1427,23 +1549,30 @@ pub(super) fn sync_glue_booth(
         // framing here does not matter, because `sync_glue_scene` re-aims onto the scene's authored
         // camera the frame the art lands, and this rig only ever shows for those few loading
         // frames.
+        // …and ONLY with no scene up. It always was "the fallback" in intent (a scene re-aims
+        // onto its authored camera), but it used to rely on `sync_glue_scene` running *after* this
+        // system to overwrite it — which is also what made the character read last frame's stage
+        // and gave [`PendingSwap`] its one-frame gap. With the order corrected, the fallback has
+        // to know it is one.
         let (t, _) = body_frame(&anchors, 1.0);
         let record_fov = anchors
             .pane_camera
             .map_or(super::framing::PANE_FIXED_FOV, |c| c.fov);
-        aim(
-            &mut cams,
-            GLUE_SLOT,
-            &(
-                t,
-                Projection::from(PerspectiveProjection {
-                    fov: diag_to_vert(record_fov, PORTRAIT_ASPECT),
-                    near: 0.02,
-                    far: 100.0,
-                    ..default()
-                }),
-            ),
-        );
+        if !scene.as_deref().is_some_and(|s| s.spawned) {
+            aim(
+                &mut cams,
+                GLUE_SLOT,
+                &(
+                    t,
+                    Projection::from(PerspectiveProjection {
+                        fov: diag_to_vert(record_fov, PORTRAIT_ASPECT),
+                        near: 0.02,
+                        far: 100.0,
+                        ..default()
+                    }),
+                ),
+            );
+        }
     }
     apply_yaw(
         &mut commands,
@@ -1453,7 +1582,13 @@ pub(super) fn sync_glue_booth(
         stage_scale,
         preview.yaw,
     );
-    *last = Some((bake.revision, preview.yaw, scene_rev));
+    // A yaw-only pass must not record the bake/scene revisions it did NOT commit, or the held
+    // pair above would never be re-tried once the stage lands.
+    *last = Some((
+        if rebake { bake.revision } else { last_rev },
+        preview.yaw,
+        if rebake { scene_rev } else { last_scene },
+    ));
 }
 
 /// Stand the select screen's **pet** on scene attachment 1 — the hunter/warlock companion beside
@@ -2011,5 +2146,36 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// **The glue booth swaps as a PAIR** ([`PendingSwap`], [`may_swap`]). The defect it closes,
+    /// measured on a cold walk of a seven-character roster: clicking an orc from a human stood the
+    /// human's display in the orc stage for 53 ms, and clicking a human back from an orc — a body
+    /// already cached, a stage still loading — stood the human in the *orc* stage for 34 ms. The
+    /// reference cannot express either state: `SelectCharacter` loads the background and builds
+    /// the character inside one blocking call.
+    #[test]
+    fn a_stage_swaps_only_beside_the_character_that_asked_for_it() {
+        // Nothing standing (the login → select hop, an empty account): no pair to break.
+        assert!(may_swap(false, false, false, 0.0));
+
+        // A character IS standing: neither half alone may swap the stage.
+        assert!(
+            !may_swap(true, true, false, 0.0),
+            "the stage's art landed first — swapping now stands the OUTGOING body in it"
+        );
+        assert!(
+            !may_swap(true, false, true, 0.0),
+            "the body assembled first — swapping now is the same mispairing, reversed"
+        );
+        assert!(
+            may_swap(true, true, true, 0.0),
+            "both halves ready: swap, in one frame"
+        );
+
+        // 0737's rule: the hold is bounded. A look whose assembly can never complete must not
+        // freeze the screen on the previous character.
+        assert!(!may_swap(true, true, false, GLUE_SWAP_HOLD_SECS - 0.01));
+        assert!(may_swap(true, true, false, GLUE_SWAP_HOLD_SECS));
     }
 }
