@@ -477,11 +477,16 @@ fn main() -> Result<()> {
     // Report the entities we decoded, with raw WoW coordinates.
     let self_guid = world.self_guid;
     println!("\n--- tracked {} entit(ies) ---", world.tracked.len());
+    // Every `EntityKind`, or the dump silently drops a whole class of streamed object. `Corpse`
+    // was missing from here since 1706 gave TYPEID_CORPSE its own variant: a hardcoded list is not
+    // a `match`, so nothing warned, and a streamed body simply never appeared in the census (found
+    // by 1723, alongside the same omission in the --death corpse capture).
     for kind in [
         EntityKind::Player,
         EntityKind::Unit,
         EntityKind::GameObject,
         EntityKind::DynamicObject,
+        EntityKind::Corpse,
         EntityKind::Other,
     ] {
         let mut group: Vec<(&u64, &Tracked)> = world

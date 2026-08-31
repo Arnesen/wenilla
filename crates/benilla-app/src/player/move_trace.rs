@@ -1,4 +1,4 @@
-//! The mover's side of the `WOW_MOVE_TRACE` debug trace ([`benilla_assets::trace`]), three tags:
+//! The mover's side of the `WOW_MOVE_TRACE` debug trace ([`benilla_assets::trace`]):
 //!
 //! - **`move`** — one line per *interesting* frame of the player mover ([`frame`]): a step-down snap,
 //!   a grounded flip, an airborne frame, or any sizeable vertical delta — so a movement-feel report
@@ -27,7 +27,9 @@
 //!   compare it against the reference's — the 1.12.1 sniff's client stream is a list of exactly these
 //!   fields, so `grep snd` on a run of mouse-turning and strafing is directly diffable against it.
 //!
-//! The anim driver writes its own `anim` lines into the same file, on the same clock.
+//! The anim driver writes its own `anim` lines into the same file, on the same clock, and the
+//! transport carry writes `ride` from [`super::ride`] — beside the mechanism it measures, because
+//! reading it needs the deck's transform and the attach walk, neither of which belongs here.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

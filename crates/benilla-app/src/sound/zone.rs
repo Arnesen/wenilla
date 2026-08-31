@@ -379,7 +379,7 @@ fn zone_audio(
             // wrongly reused it on a change, leaving a newly-entered zone silent for 3–5 min, and
             // the 6 s "cold start" that used to sit here was `0x4601f0`'s unreachable arm applied
             // to an entry that never calls it (1553).
-            if !slot_taken && !config.music_suppressed {
+            if !slot_taken {
                 if let Some(kit) = zone_music_row(&areas.0, music_row).map(|m| m.sounds[phase]) {
                     if kit != 0 {
                         start_music_stream(zone, &mut out, &mut kits, &assets, &config, kit);
@@ -452,10 +452,7 @@ fn zone_audio(
     // 3.0 s resume after a cinematic). The pump is dead while suppressed, which is the reference's
     // own shape — `0x460040` bails at its first instruction on the flag, so no track is selected,
     // opened or scheduled for the duration.
-    if !config.music_suppressed
-        && zone.next_track_at.is_some_and(|t| now >= t)
-        && zone.music.is_none()
-    {
+    if zone.next_track_at.is_some_and(|t| now >= t) && zone.music.is_none() {
         zone.next_track_at = None;
         if let Some(m) = zone_music_row(&areas.0, zone.zone_music) {
             let kit = m.sounds[phase];
@@ -572,6 +569,19 @@ fn start_music_stream(
     config: &SoundConfig,
     kit_id: u32,
 ) -> bool {
+    // **Nothing opens the music slot while a cinematic is running** — and the guard belongs here,
+    // at the slot, not at each caller. The reference's music pump dies at its own first
+    // instruction (`0x460040 mov al,[0xb06cc8]; test al,al; jne 0x4600f8`), so suppression is a
+    // property of the slot whatever asked for it. benilla gated two of this function's four
+    // callers, which left the zone **intro fanfare** and `SMSG_PLAY_MUSIC` free to start a track
+    // over a cinematic's narration and play it to the end — a cut only ever happens on the
+    // suppression *edge*, so anything that starts after that edge is never cut. The fanfare was
+    // the worse half: it stamped itself as played on success, so it was consumed for
+    // `MinDelayMinutes` by a shot the player could not hear it under. Refusing here means the
+    // stamp never happens, because it is gated on this returning `true`.
+    if config.music_suppressed {
+        return false;
+    }
     let Some(mixer_ref) = out.mixer.as_mut() else {
         return false;
     };

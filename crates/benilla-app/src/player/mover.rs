@@ -1,5 +1,6 @@
 //! The kinematic mover step — the walk/fall physics and the step-down snap, split out of the
-//! `control` system ([`super`] keeps the input/camera/wire glue and the knob table this reads).
+//! `control` system ([`super::controller`] keeps the frame order; [`super`] the knob table this
+//! reads).
 //! One call per frame: [`step`].
 //!
 //! Thin kinematic controller (decision 0009) over the **one-sided** mirror of avian's

@@ -53,6 +53,15 @@ pub(super) struct CinematicVoice {
 }
 
 impl CinematicVoice {
+    /// Is this owner holding a voice the device is actually mixing? The budget's question — see
+    /// [`drive_narration`]. `Stopped` covers a stream that reached its end on its own, which is
+    /// the ordinary case for a narration shorter than its shot.
+    fn is_live(&self) -> bool {
+        self.handle
+            .as_ref()
+            .is_some_and(|h| !matches!(h.state(), kira::sound::PlaybackState::Stopped))
+    }
+
     fn stop(&mut self) {
         self.shot = None;
         if let Some(mut h) = self.handle.take() {
@@ -67,12 +76,35 @@ pub(super) fn plugin(app: &mut App) {
     app.add_systems(Update, drive_narration.in_set(WorldStage::Present));
 }
 
+/// The narration channel, plus its line in the voice budget.
+///
+/// The **budget** half is why this wrapper exists. `SoundOutput::live_voices()` — the number
+/// [`super::kit::SOFTWARE_CHANNELS`] bounds, and which gates real play decisions, not just a
+/// readout — summed the kit channels, the zone streams and the glue streams. The narration is a
+/// *third* long-lived stream owner and it was in none of them, so for the whole length of a
+/// cinematic the client believed it had one more free voice than it did. `SoundOutput`'s own doc
+/// already states the law this now follows: "each owner **rewrites its own** every frame from its
+/// own live handles", because a shared counter with two writers drifts the first time a fade is
+/// interrupted. So the count is written here, once, from this owner's handle — after the body
+/// below has settled it, never from a stale read.
 fn drive_narration(
     cine: Option<Res<Cinematic>>,
-    mut voice: Local<CinematicVoice>,
-    mut out: NonSendMut<SoundOutput>,
-    mut kits: ResMut<SoundKits>,
+    voice: Local<CinematicVoice>,
+    out: NonSendMut<SoundOutput>,
+    kits: ResMut<SoundKits>,
     assets: Option<Res<WorldAssets>>,
+) {
+    let (mut voice, mut out, mut kits) = (voice, out, kits);
+    narrate(&cine, &mut voice, &mut out, &mut kits, &assets);
+    out.cinematic_streams = usize::from(voice.is_live());
+}
+
+fn narrate(
+    cine: &Option<Res<Cinematic>>,
+    voice: &mut CinematicVoice,
+    out: &mut SoundOutput,
+    kits: &mut SoundKits,
+    assets: &Option<Res<WorldAssets>>,
 ) {
     let playing = cine.as_deref().and_then(Cinematic::playing_shot);
     let Some((run, index, sound_id)) = playing else {
