@@ -49,6 +49,7 @@ async fn main() -> Result<()> {
             .await?;
             db::meta_set(&sqlite, "setup_complete", "0").await?;
             db::meta_set(&sqlite, "setup_mode", "reset").await?;
+            db::meta_del(&sqlite, "setup_token").await?;
             let token = write_setup_token(&cfg, &sqlite).await?;
             audit::log(&sqlite, None, None, "admin.reset", None, None).await;
             println!(
@@ -118,11 +119,19 @@ async fn main() -> Result<()> {
     axum::serve(listener, app).await.context("serving")
 }
 
-/// A one-time token that gates the wizard, printed to the log and written to
-/// `<state>/setup-token` (0600) so `realmctl` can show it.
+/// The token that gates the wizard, printed to the log and written to `<state>/setup-token`
+/// (0600) so `realmctl` can show it. Minted once and REUSED across restarts until setup
+/// completes (a restart mid-onboarding must not invalidate the token the operator copied —
+/// learned on the first real deployment); `reset-admin` overwrites it deliberately.
 async fn write_setup_token(cfg: &Config, sqlite: &sqlx::SqlitePool) -> Result<String> {
-    let token = secrets::random_string(secrets::ALNUM, 24);
-    db::meta_set(sqlite, "setup_token", &token).await?;
+    let token = match db::meta_get(sqlite, "setup_token").await? {
+        Some(existing) if !existing.is_empty() => existing,
+        _ => {
+            let token = secrets::random_string(secrets::ALNUM, 24);
+            db::meta_set(sqlite, "setup_token", &token).await?;
+            token
+        }
+    };
     secrets::write_private(&cfg.state_dir.join("setup-token"), &token)?;
     Ok(token)
 }
