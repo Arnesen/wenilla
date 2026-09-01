@@ -56,11 +56,25 @@ own accounts (a second login on one account kicks the first, as in the real clie
   panel for the server. The packaged one-VM deployment is github.com/Arnesen/wenilla-realm.
 - **Sound** starts on the first click or key in the page — browsers suspend every AudioContext
   until a user gesture; `index.html` resumes it then.
+- **Full screen** — the "full screen" button on both pages (`web/platform.js`) is not just
+  `requestFullscreen`: in full screen it also takes a Keyboard Lock on `Escape`, `Tab` and
+  `KeyW`, so Esc opens the game menu instead of leaving full screen, Tab cycles targets instead
+  of walking browser focus, and Ctrl+W doesn't close the tab mid-pull. Chrome then exits on a
+  *press-and-hold* of Esc (it says so once, in its own toast). The lock follows F11 and every
+  other way in or out too — it is driven by `fullscreenchange`, not by the button. Chromium
+  only; elsewhere the button is plain full screen.
 - **Persistence** — the state folder (`config.toml`, macros, key bindings, layouts, chat
   settings, saved variables, the remembered account name) lives in the browser's `localStorage`,
   one entry per file keyed by its path (`benilla:/benilla-config/config.toml`, …). Per browser
   and per origin, like a `benilla-config/` beside each native install; the server never sees it.
-  Clearing site data resets it.
+  Clearing site data resets it. Both pages also call `navigator.storage.persist()`
+  (`web/platform.js`), which asks the browser not to *evict* that storage under disk pressure —
+  the difference between "the player cleared site data" and "the player silently lost their
+  keybinds". The grant is heuristic and often only arrives after repeat visits; there is no
+  fallback if it is refused. It covers quota storage only, so the downloaded `/data/*` archives
+  — which live in the ordinary HTTP cache, warmed by `boot.js` — are **not** protected by it;
+  holding those across eviction would mean rehosting them in the Cache API, which nothing here
+  does today.
 - **Performance** — the client is CPU-bound on its single wasm thread (Bevy's task pools are
   single-threaded on `wasm32`): ~11 ms/frame in an outdoor scene on a laptop iGPU, scaling
   with visible objects, not pixels. `scripts/web-build.sh` runs `wasm-opt -O3` (+6 %). Any CVar
