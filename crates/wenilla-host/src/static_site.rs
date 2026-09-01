@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use axum::http::HeaderValue;
+use axum::http::{HeaderName, HeaderValue};
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 
@@ -28,6 +28,33 @@ pub fn router(www: &Path) -> axum::Router {
             .layer(SetResponseHeaderLayer::overriding(
                 axum::http::header::CACHE_CONTROL,
                 no_cache,
+            ))
+            // Cross-origin isolation. Together these two put the page in the state where
+            // `SharedArrayBuffer` is constructible and `crossOriginIsolated` is true — the
+            // browser's precondition for ever running this client's wasm on more than one
+            // thread, and for `performance.measureUserAgentSpecificMemory()`.
+            //
+            // Groundwork, not a feature: nothing in the tree uses either yet (the client is
+            // single-threaded, and `sound/mix_tap.rs` and `sound/probe.rs` say so in as many
+            // words). It is here because it is nearly free to be correct about now and
+            // genuinely awkward to retrofit later — the headers have to be on the *document*
+            // response, and every subresource has to consent.
+            //
+            // Safe here because the page has no cross-origin subresources at all: `index.html`
+            // links nothing external, and the wasm, the glue, `/data/*` and `/ws/*` are all
+            // served by this one process on one origin. `require-corp` rather than
+            // `credentialless` for that reason — there is nothing to be lenient towards.
+            //
+            // The cost is real but narrow: COOP `same-origin` severs `window.opener`, so a page
+            // that embeds this client in a cross-origin iframe, or opens it as a popup and then
+            // talks to it, stops working. Nothing in this repo does either.
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("cross-origin-opener-policy"),
+                HeaderValue::from_static("same-origin"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("cross-origin-embedder-policy"),
+                HeaderValue::from_static("require-corp"),
             ))
             .service(serve),
     )

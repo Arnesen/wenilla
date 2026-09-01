@@ -1,6 +1,7 @@
 {
 "version": 1,
 "names": [
+"__index",
 "DBFilesClient\\EmotesText.dbc",
 "DBFilesClient\\EmotesTextData.dbc",
 "DBFilesClient\\ChatChannels.dbc",
