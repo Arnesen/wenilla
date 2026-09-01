@@ -9,7 +9,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
 
-use crate::auth::local::{set_password, valid_password, valid_username};
+use crate::auth::local::{set_bootstrap_password, valid_password, valid_username};
 use crate::db::{meta_get, meta_set, now};
 use crate::secrets::{random_string, ALNUM};
 use crate::session::{client_ip, Session};
@@ -295,7 +295,7 @@ async fn create_user(
     .execute(&state.db)
     .await?
     .last_insert_rowid();
-    set_password(&state.db, id, &password, true).await?;
+    set_bootstrap_password(&state.db, id, &password, state.cfg.bootstrap_ttl_hours).await?;
     if let Err(e) = accounts::provision(&state.db, &state.soap, &state.secrets, id).await {
         // Keep the web user; the game account is provisioned again on their first play.
         tracing::warn!(error = %e, user = %username, "game account provisioning deferred");
@@ -377,7 +377,7 @@ async fn user_action(
         }
         "reset-web-password" => {
             let pw = random_string(ALNUM, 14);
-            set_password(&state.db, id, &pw, true).await?;
+            set_bootstrap_password(&state.db, id, &pw, state.cfg.bootstrap_ttl_hours).await?;
             session::delete_for_user(&state.db, id).await?;
             Ok(format!(
                 "new web password for {username}: {pw} (they must change it at first login)"

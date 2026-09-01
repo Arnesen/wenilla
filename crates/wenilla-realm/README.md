@@ -42,11 +42,27 @@ repo is the place to start: `realmctl up`, then `/setup`). This crate is what ru
 | `SOAP_URL` | `http://mangosd:7878/` | mangosd's SOAP console |
 | `SOAP_BOOTSTRAP_USER/PASS` | `ADMINISTRATOR`/`ADMINISTRATOR` | console login until the wizard has made `WRSOAP` |
 | `REALMD_HOST`, `MANGOSD_HOST` | `realmd`, `mangosd` | where `/ws/3724` and `/ws/8085` are relayed |
+| `REALM_BOOTSTRAP_TTL_HOURS` | `48` | how long an admin-issued first-login password stays usable (`0` = forever) |
 | `WENILLA_DEV_QUERY_CREDS` | `0` | `1` lets `?user=&pass=` links log in (development only) |
 | `REALM_COOKIE_INSECURE` | `0` | `1` drops the cookie's `Secure` flag (plain-http development only) |
 
+### The admin-issued password is a bootstrap credential
+
+An admin creating a user (or pressing *reset web password*) gets a generated password shown once,
+to hand over out of band. That password is not an account password: it exists to get the person to
+their first login. Two things enforce that, because a password pasted into a chat scrollback
+otherwise stays a permanent key to a playing account:
+
+- **The forced change is a gate, not a suggestion.** A session that still holds such a password
+  reaches `/account/password` and nothing else — not `/`, not `/api/play`, `/data/*` or `/ws/*`.
+- **It expires** after `REALM_BOOTSTRAP_TTL_HOURS` (default 48). A password the user chose
+  themselves never expires. An expired one is refused at login with an explanation, and the
+  recovery path is the admin panel's *reset web password*, which issues a fresh one with a fresh
+  clock.
+
 `wenilla-realm reset-admin` forgets the admin's password and prints a fresh setup token; the
-wizard then only sets a new admin password.
+wizard then only sets a new admin password. That is also the break-glass path if every admin's
+password has expired — it needs no password at all, only shell access to the host.
 
 ## Developing
 

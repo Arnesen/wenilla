@@ -53,20 +53,43 @@ pub fn valid_password(p: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-pub async fn set_password(
+/// A password the user chose for themselves: theirs to keep, no forced change, no expiry.
+pub async fn set_password(db: &SqlitePool, user_id: i64, password: &str) -> anyhow::Result<()> {
+    store(db, user_id, password, false, None).await
+}
+
+/// A password an admin issued to get someone to their first login. It forces a change (which
+/// [`session::require_session`] now enforces rather than merely suggesting) and it expires:
+/// `ttl_hours` after now, or never when `ttl_hours` is 0.
+///
+/// The two are separate functions on purpose. They used to be one call with a `must_change: bool`,
+/// and a bare bool at a call site is exactly how a credential ends up forced-but-immortal.
+pub async fn set_bootstrap_password(
+    db: &SqlitePool,
+    user_id: i64,
+    password: &str,
+    ttl_hours: i64,
+) -> anyhow::Result<()> {
+    let expires_at = (ttl_hours > 0).then(|| now() + ttl_hours * 3600);
+    store(db, user_id, password, true, expires_at).await
+}
+
+async fn store(
     db: &SqlitePool,
     user_id: i64,
     password: &str,
     must_change: bool,
+    expires_at: Option<i64>,
 ) -> anyhow::Result<()> {
     let hash = hash_password(password)?;
     sqlx::query(
-        "INSERT INTO local_credentials (user_id, password_hash, must_change, updated_at) VALUES (?, ?, ?, ?) \
-         ON CONFLICT(user_id) DO UPDATE SET password_hash = excluded.password_hash, must_change = excluded.must_change, updated_at = excluded.updated_at",
+        "INSERT INTO local_credentials (user_id, password_hash, must_change, expires_at, updated_at) VALUES (?, ?, ?, ?, ?) \
+         ON CONFLICT(user_id) DO UPDATE SET password_hash = excluded.password_hash, must_change = excluded.must_change, expires_at = excluded.expires_at, updated_at = excluded.updated_at",
     )
     .bind(user_id)
     .bind(hash)
     .bind(must_change as i64)
+    .bind(expires_at)
     .bind(now())
     .execute(db)
     .await?;
@@ -128,14 +151,14 @@ async fn login_submit(
         return Ok(fail("too many attempts — wait 15 minutes"));
     }
 
-    let row: Option<(i64, String, i64, i64)> = sqlx::query_as(
-        "SELECT u.id, c.password_hash, c.must_change, u.disabled FROM users u JOIN local_credentials c ON c.user_id = u.id WHERE u.username = ?",
+    let row: Option<(i64, String, i64, i64, Option<i64>)> = sqlx::query_as(
+        "SELECT u.id, c.password_hash, c.must_change, u.disabled, c.expires_at FROM users u JOIN local_credentials c ON c.user_id = u.id WHERE u.username = ?",
     )
     .bind(&username)
     .fetch_optional(&state.db)
     .await?;
     let ok = match &row {
-        Some((_, hash, _, disabled)) => *disabled == 0 && verify_password(hash, &form.password),
+        Some((_, hash, _, disabled, _)) => *disabled == 0 && verify_password(hash, &form.password),
         // Burn the same time on unknown users so the response does not say which it was.
         None => {
             let _ = verify_password("$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$Wf1yQwVQqk4jTfGCe3Fj5UOX0f8kO0m6mOQWhNfR2nY", &form.password);
@@ -161,7 +184,26 @@ async fn login_submit(
         .await;
         return Ok(fail("wrong username or password"));
     }
-    let (user_id, _, must_change, _) = row.expect("checked");
+    let (user_id, _, must_change, _, expires_at) = row.expect("checked");
+    // Only a bootstrap credential carries an expiry, and only now — after the password itself
+    // verified — is it safe to say so: an attacker without the password still cannot tell an
+    // expired account from a wrong guess.
+    if let Some(exp) = expires_at.filter(|_| must_change != 0) {
+        if exp <= now() {
+            audit::log(
+                &state.db,
+                Some(user_id),
+                ip.as_deref(),
+                "login.expired",
+                Some(&username),
+                None,
+            )
+            .await;
+            return Ok(fail(
+                "that first-login password has expired — ask an admin to issue a new one",
+            ));
+        }
+    }
     let token = session::create(
         &state.db,
         user_id,
@@ -281,7 +323,7 @@ async fn password_submit(
     if let Err(e) = valid_password(&f.new) {
         return Ok(fail(e));
     }
-    set_password(&state.db, session.user.id, &f.new, false).await?;
+    set_password(&state.db, session.user.id, &f.new).await?;
     audit::log(
         &state.db,
         Some(session.user.id),

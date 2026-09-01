@@ -346,6 +346,52 @@ async fn admin_creates_player_who_can_fetch_hidden_game_credentials() {
         "first login forces a password change"
     );
     let alice = r.cookie().unwrap();
+
+    // …and "forces" means it: until the password is changed, the session opens the change page
+    // and nothing else. This assertion is the fix for a real hole — the redirect above used to be
+    // the whole of it, so a player who simply typed "/" played on the admin-issued password
+    // forever.
+    let r = send(&h.app, get("/", Some(&alice))).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    assert_eq!(r.location(), "/account/password");
+    for path in ["/api/play", "/data/__index", "/ws/8085", "/wenilla.js"] {
+        let r = send(
+            &h.app,
+            Request::get(path)
+                .header(header::COOKIE, &alice)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            r.status,
+            StatusCode::FORBIDDEN,
+            "{path} is closed until the password changes"
+        );
+    }
+
+    // The change page itself is reachable, and going through it opens everything else.
+    let page = send(&h.app, get("/account/password", Some(&alice))).await;
+    assert_eq!(page.status, StatusCode::OK);
+    let alice_csrf = csrf_of(&page.body);
+    let r = send(
+        &h.app,
+        form(
+            "/account/password",
+            Some(&alice),
+            &[
+                ("_csrf", &alice_csrf),
+                ("current", &password),
+                ("new", "a much better secret"),
+                ("confirm", "a much better secret"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    assert_eq!(r.location(), "/");
+
+    // A player still cannot open the admin panel.
     assert_eq!(
         send(&h.app, get("/admin", Some(&alice))).await.status,
         StatusCode::FORBIDDEN
@@ -490,5 +536,99 @@ async fn config_page_saves_and_applies() {
             || r.body.contains("setup.complete"),
         "{}",
         r.body
+    );
+}
+
+/// The admin-issued password is a *bootstrap* credential: it gets someone to their first login
+/// and then stops working. It travels out of band — pasted into a chat, read aloud — so its
+/// lifetime is the real control on who can claim the account.
+#[tokio::test]
+async fn an_expired_first_login_password_stops_working() {
+    let h = harness().await;
+    let admin = run_setup(&h).await;
+    let page = send(&h.app, get("/admin/users", Some(&admin))).await;
+    let csrf = csrf_of(&page.body);
+    let r = send(
+        &h.app,
+        form(
+            "/admin/users",
+            Some(&admin),
+            &[
+                ("_csrf", &csrf),
+                ("username", "bob"),
+                ("display_name", "Bob"),
+                ("password", ""),
+                ("role", "player"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let i = r.body.find("is <code>").expect("generated password") + "is <code>".len();
+    let password = r.body[i..].split('<').next().unwrap().to_string();
+
+    // It was issued with an expiry (the default TTL is hours away, so this is not yet in force).
+    let exp: (Option<i64>,) =
+        sqlx::query_as("SELECT expires_at FROM local_credentials WHERE user_id = 2")
+            .fetch_one(&h.state.db)
+            .await
+            .unwrap();
+    assert!(
+        exp.0.unwrap() > 0,
+        "an admin-issued password carries an expiry"
+    );
+
+    // Age it past its deadline — the only way forward in time from out here.
+    sqlx::query("UPDATE local_credentials SET expires_at = 1 WHERE user_id = 2")
+        .execute(&h.state.db)
+        .await
+        .unwrap();
+    let r = send(
+        &h.app,
+        form(
+            "/login",
+            None,
+            &[("username", "bob"), ("password", &password)],
+        ),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "no session is issued");
+    assert!(r.body.contains("expired"), "{}", r.body);
+    assert!(r.cookie().is_none(), "and no cookie either");
+
+    // The admin re-issues, which is the whole recovery path: a fresh password with a fresh clock.
+    let r = send(
+        &h.app,
+        form(
+            "/admin/users/2/reset-web-password",
+            Some(&admin),
+            &[("_csrf", &csrf)],
+        ),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    let exp: (Option<i64>,) =
+        sqlx::query_as("SELECT expires_at FROM local_credentials WHERE user_id = 2")
+            .fetch_one(&h.state.db)
+            .await
+            .unwrap();
+    assert!(exp.0.unwrap() > 1, "the reset re-arms the clock");
+}
+
+/// A password the user chose for themselves is theirs to keep: no forced change, no expiry.
+#[tokio::test]
+async fn a_self_chosen_password_never_expires() {
+    let h = harness().await;
+    let admin = run_setup(&h).await;
+    let row: (i64, Option<i64>) =
+        sqlx::query_as("SELECT must_change, expires_at FROM local_credentials WHERE user_id = 1")
+            .fetch_one(&h.state.db)
+            .await
+            .unwrap();
+    assert_eq!(row, (0, None), "the wizard's own admin password");
+    // …and it opens the panel immediately, with no change demanded.
+    assert_eq!(
+        send(&h.app, get("/admin", Some(&admin))).await.status,
+        StatusCode::OK
     );
 }
