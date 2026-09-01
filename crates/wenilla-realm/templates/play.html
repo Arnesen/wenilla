@@ -31,7 +31,7 @@
 <script type="importmap">{"imports":{"wasi_snapshot_preview1":"./wasi_stubs.js"}}</script>
 </head>
 <body>
-<div id="bar">{{ user.display_name }} {% if user.is_admin() %}<a href="/admin">admin</a>{% endif %}<a href="/account/password">password</a><form style="display:inline" method="post" action="/logout"><button type="submit">sign out</button></form></div>
+<div id="bar">{{ user.display_name }} {% if user.is_admin() %}<a href="/admin">admin</a>{% endif %}<a href="/account/password">password</a><button type="button" id="fs" title="Full screen. Captures Esc, Tab and Ctrl+W for the game — press and hold Esc to leave.">full screen</button><form style="display:inline" method="post" action="/logout"><button type="submit">sign out</button></form></div>
 <div id="msg">Loading the realm…</div>
 <canvas id="benilla"></canvas>
 <script type="module">
@@ -43,6 +43,19 @@
     msg.textContent = 'This browser has no WebGPU. Use a current Chrome or Edge (on Linux: chrome://flags/#enable-unsafe-webgpu).';
     throw new Error('no webgpu');
   }
+  // Full-screen key capture + durable settings storage (web/platform.js). Imported dynamically
+  // and never awaited: these are conveniences, and a *static* import that failed to resolve —
+  // one forgotten line in scripts/web-build.sh — would stop this whole module from executing,
+  // costing the credential fetch and the boot. Both calls sit after the WebGPU gate so a
+  // browser that cannot run the client is never asked for storage nor shown a dead button.
+  import('./platform.js')
+    .then(({ installFullscreenToggle, requestPersistentStorage }) => {
+      requestPersistentStorage();
+      installFullscreenToggle(document.getElementById('fs'), {
+        focusTarget: document.getElementById('benilla'),
+      });
+    })
+    .catch((e) => console.warn('platform.js:', e));
   // The game credentials come over this authenticated session, never through the URL. The
   // client reads them from `window.__wenilla_env` once during boot, then the global is dropped.
   const r = await fetch('/api/play', { headers: { 'X-Requested-With': 'wenilla' }, credentials: 'same-origin' });

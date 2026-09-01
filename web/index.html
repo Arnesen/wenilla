@@ -4,6 +4,10 @@
 <style>
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #000; }
   #benilla { display: block; width: 100vw; height: 100vh; }
+  /* Matches the realm page's #bar corner, so the two pages behave the same. */
+  #fs { position: fixed; top: 0; right: 0; z-index: 10; padding: .3rem .6rem; color: #ddd;
+        background: rgba(0,0,0,.55); border: 0; border-bottom-left-radius: 6px; cursor: pointer;
+        font: 12px system-ui, sans-serif; text-decoration: underline; }
 </style>
 <script>
   // Sound: the browser suspends any AudioContext created before the first user gesture (autoplay
@@ -57,6 +61,7 @@
     };
   }
 </script>
+<button type="button" id="fs" title="Full screen. Captures Esc, Tab and Ctrl+W for the game — press and hold Esc to leave.">full screen</button>
 <canvas id="benilla"></canvas>
 <script>
   // Dev page: allow `?user=&pass=&char=` links to log in. A hosting page that fetched the
@@ -75,6 +80,18 @@
   // here). `bind(w.memory)` comes AFTER on purpose: the wasm Lua VM's WASI shims
   // (`wasi_stubs.js`'s own header) can only zero a WASI caller's out-pointers once the module's
   // linear memory exists to write into, and `init()` is what creates it.
+  // Full-screen key capture (Esc/Tab/Ctrl+W reach the game) + durable settings storage. Same
+  // module and same contract as the realm page: dynamic, unawaited, and never load-bearing —
+  // see web/platform.js. The dev page has no WebGPU gate to sit behind, so on a browser that
+  // prompts for persistent storage (Firefox) this is where the player would see it.
+  import('./platform.js')
+    .then(({ installFullscreenToggle, requestPersistentStorage }) => {
+      requestPersistentStorage();
+      installFullscreenToggle(document.getElementById('fs'), {
+        focusTarget: document.getElementById('benilla'),
+      });
+    })
+    .catch((e) => console.warn('platform.js:', e));
   const w = await boot(init);
   bind(w.memory);
 </script>
