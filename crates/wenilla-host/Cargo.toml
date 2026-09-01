@@ -32,3 +32,6 @@ tracing-subscriber = "0.3"
 # Only the WebSocket proxy test needs a client library (framing is fiddly to hand-roll); the
 # plain-HTTP tests talk raw sockets — one GET request doesn't need a whole HTTP client crate.
 tokio-tungstenite = "0.30"
+# `ServiceExt::oneshot`, so `data`'s compression predicate can be exercised as a router without
+# a socket or a 5 GB game install behind it — the feature the non-dev `tower` dep doesn't need.
+tower = { version = "0.5", features = ["util"] }

@@ -1,7 +1,6 @@
 {
 "version": 1,
 "names": [
-"__index",
 "interface\\glues\\loadingscreens\\loadscreeneasternkingdom.blp",
 "Interface\\FrameXML\\ContainerFrame.lua",
 "interface\\buttons\\ui-panel-button-up.blp",
