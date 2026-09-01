@@ -48,7 +48,13 @@ pub struct Session {
     pub csrf_token: String,
     /// Set when the token was rotated during this request — the response must re-set the cookie.
     pub fresh_token: Option<String>,
+    /// The user still holds the password an admin issued them. [`require_session`] lets such a
+    /// session reach [`PASSWORD_CHANGE_PATH`] and nothing else.
+    pub must_change_password: bool,
 }
+
+/// The only path a session that still owes a password change may reach.
+pub const PASSWORD_CHANGE_PATH: &str = "/account/password";
 
 impl<S: Send + Sync> FromRequestParts<S> for Session {
     type Rejection = Response;
@@ -129,11 +135,26 @@ pub async fn lookup(db: &SqlitePool, token: &str) -> Result<Option<Session>> {
     let Some((id, user_id, csrf_token, rotated_at, last_seen)) = row else {
         return Ok(None);
     };
-    let user: Option<User> = sqlx::query_as("SELECT id, username, display_name, role, disabled FROM users WHERE id = ? AND disabled = 0")
-        .bind(user_id)
-        .fetch_optional(db)
-        .await?;
-    let Some(user) = user else { return Ok(None) };
+    // The join rides along with the user row rather than costing a second round trip: this runs
+    // on every request behind a session, `/data/*` included (hundreds per boot).
+    let row: Option<(i64, String, String, String, i64, i64)> = sqlx::query_as(
+        "SELECT u.id, u.username, u.display_name, u.role, u.disabled, COALESCE(c.must_change, 0) \
+         FROM users u LEFT JOIN local_credentials c ON c.user_id = u.id \
+         WHERE u.id = ? AND u.disabled = 0",
+    )
+    .bind(user_id)
+    .fetch_optional(db)
+    .await?;
+    let Some((id_, username, display_name, role, disabled, must_change)) = row else {
+        return Ok(None);
+    };
+    let user = User {
+        id: id_,
+        username,
+        display_name,
+        role,
+        disabled,
+    };
     let mut fresh_token = None;
     if t - rotated_at > ROTATE_AFTER_SECS {
         let token = new_token();
@@ -158,6 +179,7 @@ pub async fn lookup(db: &SqlitePool, token: &str) -> Result<Option<Session>> {
         user,
         csrf_token,
         fresh_token,
+        must_change_password: must_change != 0,
     }))
 }
 
@@ -212,7 +234,28 @@ fn unauthorized(req: &Request) -> Response {
     }
 }
 
+fn must_change_first(req: &Request) -> Response {
+    if wants_html(req) {
+        Redirect::to(PASSWORD_CHANGE_PATH).into_response()
+    } else {
+        let mut r = (
+            StatusCode::FORBIDDEN,
+            "change your web password before playing",
+        )
+            .into_response();
+        r.headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        r
+    }
+}
+
 /// Middleware: require a live session; inserts [`Session`] into extensions.
+///
+/// It also enforces the forced password change, and does so *here* rather than in a layer of its
+/// own: this middleware is what every route needing a login already goes through, so a route
+/// cannot be added that forgets the gate. Before, `must_change` only chose the redirect target
+/// after login — a player who ignored it could open `/`, `/api/play`, `/data/*` and `/ws/*` and
+/// play indefinitely on the password an admin had handed them.
 pub async fn require_session(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
@@ -230,6 +273,9 @@ pub async fn require_session(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
+    if session.must_change_password && req.uri().path() != PASSWORD_CHANGE_PATH {
+        return must_change_first(&req);
+    }
     let fresh = session.fresh_token.clone();
     req.extensions_mut().insert(session);
     let mut resp = next.run(req).await;

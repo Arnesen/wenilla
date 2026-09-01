@@ -203,7 +203,7 @@ async fn submit(
         insert_admin(&state, &admin_username).await?
     };
 
-    set_password(&state.db, admin_id, &f.admin_password, false).await?;
+    set_password(&state.db, admin_id, &f.admin_password).await?;
     let _ = accounts::provision(&state.db, &state.soap, &state.secrets, admin_id).await;
     meta_set(&state.db, "setup_complete", "1").await?;
     meta_del(&state.db, "setup_token").await?;

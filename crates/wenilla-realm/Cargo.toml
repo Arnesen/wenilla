@@ -37,3 +37,6 @@ time = "0.3"
 [dev-dependencies]
 tempfile = "3"
 http-body-util = "0.1"
+# Integration tests reach into the service's own sqlite to age a credential (there is no way
+# to travel forward in time through the HTTP surface).
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite"] }

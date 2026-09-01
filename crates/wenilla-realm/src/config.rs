@@ -24,6 +24,12 @@ pub struct Config {
     pub soap_bootstrap_pass: String,
     pub realmd_host: String,
     pub mangosd_host: String,
+    /// How long an admin-issued first-login password stays usable, in hours; `0` disables the
+    /// expiry. It is handed over out of band (a chat message, a spoken word), so its lifetime is
+    /// the real control on who can claim the account — not the password itself, which the
+    /// recipient must replace on first login anyway. Also the operator's escape hatch: raise it
+    /// if an invite must survive a weekend.
+    pub bootstrap_ttl_hours: i64,
     /// Let the page's `?user=&pass=` query log a player in — development only.
     pub dev_query_creds: bool,
     /// Drop the cookie's `Secure` flag — plain-http development only.
@@ -58,6 +64,12 @@ impl Config {
             soap_bootstrap_pass: env_or("SOAP_BOOTSTRAP_PASS", "ADMINISTRATOR"),
             realmd_host: env_or("REALMD_HOST", "realmd"),
             mangosd_host: env_or("MANGOSD_HOST", "mangosd"),
+            bootstrap_ttl_hours: {
+                let raw = env_or("REALM_BOOTSTRAP_TTL_HOURS", "48");
+                raw.parse().with_context(|| {
+                    format!("REALM_BOOTSTRAP_TTL_HOURS {raw:?} is not a whole number of hours")
+                })?
+            },
             dev_query_creds: env_or("WENILLA_DEV_QUERY_CREDS", "0") == "1",
             cookie_insecure: env_or("REALM_COOKIE_INSECURE", "0") == "1",
         })
