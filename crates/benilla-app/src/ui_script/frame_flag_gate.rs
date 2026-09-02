@@ -219,74 +219,11 @@ const KNOWN: &[Known] = &[
     },
     // ── We take the mouse where the reference does not ─────────────────────────────────────────
     //
-    // The merchant rows: ours are one mouse-taking row each; the reference splits every row into
-    // an inert container plus a `$parentItemButton` that takes the mouse on its behalf. Same
-    // clicks, a different frame under them.
-    Known {
-        frame: "MerchantItem1",
-        flag: Flag::Mouse,
-        why: "inherits BenillaMerchantItemTemplate",
-    },
-    Known {
-        frame: "MerchantItem2",
-        flag: Flag::Mouse,
-        why: "inherits BenillaMerchantItemTemplate",
-    },
-    Known {
-        frame: "MerchantItem3",
-        flag: Flag::Mouse,
-        why: "inherits BenillaMerchantItemTemplate",
-    },
-    Known {
-        frame: "MerchantItem4",
-        flag: Flag::Mouse,
-        why: "inherits BenillaMerchantItemTemplate",
-    },
-    Known {
-        frame: "MerchantItem5",
-        flag: Flag::Mouse,
-        why: "inherits BenillaMerchantItemTemplate",
-    },
-    Known {
-        frame: "MerchantItem6",
-        flag: Flag::Mouse,
-        why: "inherits BenillaMerchantItemTemplate",
-    },
-    Known {
-        frame: "MerchantItem7",
-        flag: Flag::Mouse,
-        why: "inherits BenillaMerchantItemTemplate",
-    },
-    Known {
-        frame: "MerchantItem8",
-        flag: Flag::Mouse,
-        why: "inherits BenillaMerchantItemTemplate",
-    },
-    Known {
-        frame: "MerchantItem9",
-        flag: Flag::Mouse,
-        why: "inherits BenillaMerchantItemTemplate",
-    },
-    Known {
-        frame: "MerchantItem10",
-        flag: Flag::Mouse,
-        why: "inherits BenillaMerchantItemTemplate",
-    },
-    Known {
-        frame: "MerchantItem11",
-        flag: Flag::Mouse,
-        why: "inherits BenillaMerchantItemTemplate",
-    },
-    Known {
-        frame: "MerchantItem12",
-        flag: Flag::Mouse,
-        why: "inherits BenillaMerchantItemTemplate",
-    },
-    Known {
-        frame: "MerchantBuyBackItem",
-        flag: Flag::Mouse,
-        why: "inherits BenillaMerchantItemTemplate",
-    },
+    // The merchant rows' divergence RETIRED (1751): our `MerchantFrame.xml` is gone and the
+    // reference's own file is on the player's chain, so its rows are its rows. There were 13
+    // entries here — twelve `MerchantItem<N>` plus `MerchantBuyBackItem` — saying ours took the
+    // mouse on the row itself where the reference splits each row into an inert container plus a
+    // `$parentItemButton`. That is exactly what this gate exists to notice going away.
     Known {
         frame: "WorldMapFrame",
         flag: Flag::Mouse,

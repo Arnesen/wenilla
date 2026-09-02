@@ -10,6 +10,9 @@
 
 use benilla_ui::script::{ItemTextState, UiScript};
 
+#[path = "common/mod.rs"]
+mod common;
+
 const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 
 /// The reader's dependency prefix, in the manifest's own order. `ScrollTemplates.xml` and
@@ -442,18 +445,11 @@ fn a_quest_givers_gossip_displaces_the_open_reader() {
 
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
-    // The other rival, loaded exactly as the app's manifest does (after the reader's prefix).
-    {
-        let dir = std::path::Path::new(UI_DIR);
-        let text = std::fs::read_to_string(dir.join("GossipFrame.xml")).unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(
-            report.errors.is_empty(),
-            "GossipFrame.xml: {:?}",
-            report.errors
-        );
-    }
+    // The other rival — the reference's own window since 1751, so it goes through the shared
+    // both-stores loader rather than a disk read off `assets/ui`. A hand-rolled reader here is
+    // exactly what `tests/common` exists to replace: it broke the moment this file became the
+    // player's own, and a disk-only provider would leave `GossipFrame.lua`'s globals nil besides.
+    common::load_ui(&s, "Interface\\FrameXML\\GossipFrame.xml");
 
     // The note is open and holding the left slot.
     s.set_item_text(Some(letter()));

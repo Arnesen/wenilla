@@ -389,10 +389,17 @@ mod tests {
     /// mostly noise. Here the manifest is loaded first and `_G` is read after, so the answer is
     /// what this client *actually* answers to.
     ///
-    /// **Three columns, and the third one exists because its absence cost a swap.** `engine=` and
-    /// `fx=` read bare `Name(` globals. `method=` reads `:Name(` calls against the method surface
-    /// this engine actually exposes — built by walking `getmetatable(w).__index` over one widget
-    /// of every type, plus the tooltip.
+    /// **Four columns, because a window can be blocked four ways and this could once see one.**
+    /// `engine=` and `fx=` read bare `Name(` globals. `method=` reads `:Name(` calls against the
+    /// method surface this engine actually exposes. `LOAD:` is the stock file loaded on top of our
+    /// manifest in a fresh VM — the same pass [`chain_readiness_report`] makes, run here so the
+    /// answer is in one table.
+    ///
+    /// That last one is 1790, and it is the same mistake as the third column one step later.
+    /// `<LootButton>` and `<TaxiRouteFrame>` are element TAGS: no census of `Name(` or `:Name(`
+    /// can reach them, so `LootFrame.xml` sat in this report's "needs NO engine work" list while
+    /// the readiness probe was printing `4 issue(s)` for it in a different table. Both tables were
+    /// right. Joining them was left to whoever read them, and I read it wrong.
     ///
     /// Until 1787 the method sites were **silently dropped**: a name in neither the engine nor the
     /// FrameXML half of `1.12-globals.tsv` was assumed to be a widget method and skipped, on the
@@ -403,10 +410,15 @@ mod tests {
     /// file loaded, every check passed, and hovering a vendor row would have raised in play. Both
     /// instruments were right about what they measure. Neither measured the window.
     ///
-    /// Two crudenesses remain, stated because they decide how to read the output. Both scans count
-    /// a call inside an XML comment (1.12 comments out whole blocks — `GuildRegistrarFrame`'s
-    /// tabard button is one), so they can over-report; and neither can see a name reached through
-    /// `getglobal`, so they can under-report. The `method=` column is also receiver-blind: it asks
+    /// One crudeness remains, stated because it decides how to read the output: neither scan can
+    /// see a name reached through `getglobal`, so both can under-report.
+    ///
+    /// They no longer over-report on comments. Both counted commented-out calls until 1789 — 1.12
+    /// comments out whole blocks, and `PaperDollFrame.lua:754-756`'s `ShowInventorySellCursor` is
+    /// three commented lines that this report named as that window's last engine gap. A real
+    /// binding, never called, blocking a window that was not blocked. [`strip_comments`] takes
+    /// Lua `--`/`--[[ ]]` and XML `<!-- -->` out first; it does not track string literals, so it
+    /// can only ever under-report, which is the safe direction here. The `method=` column is also receiver-blind: it asks
     /// "does ANY widget type answer to this name", not "does *this* receiver", so a method that
     /// exists on the wrong type still reads as present. It is for ranking work, not for proving a
     /// window done — [`chain_readiness_report`] and the window's own tests are that, and the
@@ -443,6 +455,79 @@ mod tests {
             .expect("dump _G")
             .into_iter()
             .collect();
+
+        // Strip what is not code before either scan. Both `Name(` and `:Name(` counted calls
+        // inside comments until 1789: the round that built `PickupMerchantItem` also asked wow-re
+        // for `ShowInventorySellCursor`, which this report had named as `PaperDollFrame.xml`'s
+        // last engine gap — and the answer was that stock `PaperDollFrame.lua:754-756` has the
+        // call **commented out**, all three lines. A real binding, never called, blocking a window
+        // that was not blocked.
+        //
+        // Line-based and deliberately simple: Lua `--` to end of line (but not `--[[`, which opens
+        // a block), Lua `--[[ … ]]` blocks, and XML `<!-- … -->` blocks. It does not track string
+        // literals, so a `"--"` inside a string truncates that line — which can only ever cause an
+        // UNDER-report, the safe direction for an instrument that ranks work.
+        let strip_comments = |text: &str| -> String {
+            let mut out = String::with_capacity(text.len());
+            let mut in_xml = false;
+            let mut in_lua_block = false;
+            for line in text.lines() {
+                let mut rest = line;
+                let mut kept = String::new();
+                loop {
+                    if in_xml {
+                        match rest.find("-->") {
+                            Some(i) => {
+                                in_xml = false;
+                                rest = &rest[i + 3..];
+                            }
+                            None => break,
+                        }
+                    } else if in_lua_block {
+                        match rest.find("]]") {
+                            Some(i) => {
+                                in_lua_block = false;
+                                rest = &rest[i + 2..];
+                            }
+                            None => break,
+                        }
+                    } else {
+                        let xml = rest.find("<!--");
+                        let lua = rest.find("--");
+                        match (xml, lua) {
+                            (Some(x), Some(l)) if x <= l => {
+                                kept.push_str(&rest[..x]);
+                                in_xml = true;
+                                rest = &rest[x + 4..];
+                            }
+                            (_, Some(l)) => {
+                                kept.push_str(&rest[..l]);
+                                if rest[l..].starts_with("--[[") {
+                                    in_lua_block = true;
+                                    rest = &rest[l + 4..];
+                                } else {
+                                    // A plain `--` comment runs to end of line.
+                                    rest = "";
+                                    break;
+                                }
+                            }
+                            (Some(x), None) => {
+                                kept.push_str(&rest[..x]);
+                                in_xml = true;
+                                rest = &rest[x + 4..];
+                            }
+                            (None, None) => break,
+                        }
+                    }
+                }
+                if !in_xml && !in_lua_block {
+                    kept.push_str(rest);
+                }
+                out.push_str(&kept);
+                out.push('\n');
+            }
+            out
+        };
 
         // `:Name(` — a method call, receiver unknown.
         let called_methods = |text: &str| -> std::collections::HashSet<String> {
@@ -598,8 +683,15 @@ mod tests {
         };
 
         println!("\n=== 1751 gap report — what each unmigrated window would cost ===");
-        #[allow(clippy::type_complexity)] // (engine count, file, engine, fx, method)
-        let mut rows: Vec<(usize, String, Vec<String>, Vec<String>, Vec<String>)> = Vec::new();
+        #[allow(clippy::type_complexity)] // (blockers, file, engine, fx, method, load errors)
+        let mut rows: Vec<(
+            usize,
+            String,
+            Vec<String>,
+            Vec<String>,
+            Vec<String>,
+            Vec<String>,
+        )> = Vec::new();
         for f in &stock {
             if migrated.contains(f) {
                 continue;
@@ -610,6 +702,7 @@ mod tests {
                     text.push_str(&String::from_utf8_lossy(&b));
                 }
             }
+            let text = strip_comments(&text);
             let own: std::collections::HashSet<String> = text
                 .lines()
                 .filter_map(|l| l.trim_start().strip_prefix("function "))
@@ -637,37 +730,176 @@ mod tests {
             }
             // The method half. `own`/`have` do not apply: a method is never a global, so the only
             // question is whether this engine's widgets answer to the name.
+            // …and does it LOAD? A window can be blocked on a global, on a widget method, or on a
+            // widget TYPE — and the two scans above see only the first two. `<LootButton>` and
+            // `<TaxiRouteFrame>` are element tags: nothing in a `Name(` or `:Name(` census can
+            // reach them, and `LootFrame.xml` sat in this report's "needs NO engine work" list
+            // while `chain_readiness_report` was printing `4 issue(s)` for it in another table.
+            //
+            // Both tables were right. Joining them was left to whoever read them, and I got it
+            // wrong (1790). So this one runs the load itself — the same fresh-VM-plus-manifest
+            // pass the readiness probe does — and reports it in the same row.
+            let loads = {
+                let mut probe = UiScript::new().expect("VM");
+                probe.set_screen_size(1024.0, 768.0);
+                let base = super::super::manifest::load_default_ui(&probe);
+                assert!(base.is_empty(), "the shipped manifest itself: {base:#?}");
+                probe.resolve();
+                let before = probe.errors().len();
+                let path = format!("Interface\\FrameXML\\{f}");
+                let addon = super::addon(vec![path.clone()]);
+                let mut said = addon.load_files(&probe, std::slice::from_ref(&path));
+                probe.resolve();
+                said.extend(probe.errors().into_iter().skip(before));
+                said
+            };
+
             let mut asked: Vec<String> = called_methods(&text).into_iter().collect();
             asked.sort();
             let known = answers(&s, &asked);
             let mut meth: Vec<String> = asked.into_iter().filter(|m| !known.contains(m)).collect();
             meth.sort();
-            rows.push((eng.len() + meth.len(), f.clone(), eng, fx, meth));
+            rows.push((
+                eng.len() + meth.len() + loads.len(),
+                f.clone(),
+                eng,
+                fx,
+                meth,
+                loads,
+            ));
         }
         rows.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-        for (n, f, eng, fx, meth) in &rows {
-            println!("{n:>3} engine  {f}");
+        for (n, f, eng, fx, meth, loads) in &rows {
+            println!("{n:>3} blocker(s)  {f}");
             if !eng.is_empty() {
                 println!("            engine: {}", eng.join(" "));
             }
             if !meth.is_empty() {
                 println!("            method: {}", meth.join(" "));
             }
+            for e in loads {
+                let one = e.replace('\n', " ");
+                println!("            LOAD:   {}", &one[..one.len().min(150)]);
+            }
             if !fx.is_empty() {
                 println!("            fx:     {}", fx.join(" "));
             }
         }
-        // "Free" now means free of BOTH — the count above is engine names plus missing methods,
-        // because a window blocked on a widget method is exactly as blocked as one missing a
-        // global, and reading it as free is the mistake 1787 is about.
+        // "Free" means free of ALL THREE. A window blocked on a widget method, or on a widget type
+        // its XML declares, is exactly as blocked as one missing a global — and the `fx=` column
+        // is deliberately NOT counted, because a FrameXML function another stock file defines
+        // arrives with that file rather than needing to be built.
         let free: Vec<&String> = rows.iter().filter(|r| r.0 == 0).map(|r| &r.1).collect();
         println!(
-            "\n=== {} windows need NO engine work at all (no missing global AND no missing \
-             method) ===",
+            "\n=== {} windows are UNBLOCKED — no missing global, no missing method, and the \
+             stock file loads clean on top of our manifest ===",
             free.len()
         );
         for f in free {
             println!("  {f}");
+        }
+    }
+
+    /// **Every function of ours that shadows one the player's own chain already defines.**
+    ///
+    /// A window that reads unblocked in [`chain_gap_report`] can still fail to swap, and the third
+    /// reason found (after a missing widget type and a missing widget method) is this one: our
+    /// `assets/ui` file defines a global the reference defines too, our manifest loads a CHAIN file
+    /// that also defines it, and whichever lands second wins. `PartyFrame.xml` is the worked
+    /// example — `UnitFrames.xml` redefines `UnitFrame_OnEvent`/`UnitFrame_Update` nine manifest
+    /// lines after stock `UnitFrame.lua` defines them, so a stock party row built by the
+    /// reference's own `UnitFrame_Initialize` calls OUR update and indexes a field its rows do not
+    /// carry. It loads clean and raises on the first event.
+    ///
+    /// Shadowing is not automatically wrong — where we ship a file the reference would have
+    /// shipped, defining its names is the whole job. It is wrong precisely when **both** copies
+    /// load, which is what this reports: a name ours defines that a chain entry in our own
+    /// manifest also defines.
+    ///
+    /// Run it before attempting a swap. It predicts which ones will fail without attempting them.
+    #[test]
+    #[ignore = "instrument: run by hand before attempting a window swap"]
+    fn shadowed_reference_functions() {
+        let _data = benilla_formats::wow_data_or_skip!();
+
+        let defined_in = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter_map(|l| l.trim_start().strip_prefix("function "))
+                .map(|r| {
+                    r.chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect::<String>()
+                })
+                .filter(|n| !n.is_empty())
+                .collect()
+        };
+
+        // Everything the manifest pulls OFF THE CHAIN, and every name each of those defines —
+        // including the `.lua` a chain `.xml` sources, which is where most of them live.
+        let toc = &super::super::addons::Addon::builtin().toc.files;
+        let pos: std::collections::HashMap<&String, usize> =
+            toc.iter().enumerate().map(|(i, f)| (f, i)).collect();
+        let mut chain_home: std::collections::HashMap<String, (String, usize)> =
+            std::collections::HashMap::new();
+        for entry in toc.iter().filter(|f| super::is_chain_entry(f)) {
+            let leaf = entry.rsplit(['\\', '/']).next().unwrap_or(entry);
+            let mut cands = vec![entry.clone()];
+            if let Some(stem) = entry.strip_suffix(".xml") {
+                cands.push(format!("{stem}.lua"));
+            }
+            for cand in cands {
+                let Some(b) = super::read(&cand.replace('\\', "/")) else {
+                    continue;
+                };
+                let text = String::from_utf8_lossy(&b).into_owned();
+                for name in defined_in(&text) {
+                    let at = pos[entry];
+                    chain_home.entry(name).or_insert_with(|| {
+                        (cand.rsplit('/').next().unwrap_or(leaf).to_string(), at)
+                    });
+                }
+            }
+        }
+
+        // …against everything OUR files define.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
+        let mut hits: Vec<(String, String, String, bool)> = Vec::new();
+        for entry in toc.iter().filter(|f| !super::is_chain_entry(f)) {
+            let Ok(text) = std::fs::read_to_string(dir.join(entry)) else {
+                continue;
+            };
+            for name in defined_in(&text) {
+                if let Some((home, at)) = chain_home.get(&name) {
+                    // Load order settles it: the later definition is the one that stands.
+                    let ours_wins = pos[entry] > *at;
+                    hits.push((name, entry.clone(), home.clone(), ours_wins));
+                }
+            }
+        }
+        hits.sort();
+        hits.dedup();
+
+        println!("\n=== names ours redefines that a CHAIN entry already defines ===");
+        println!("{:<36} {:<28} {:<34} winner", "name", "ours", "chain");
+        for (name, ours, home, ours_wins) in &hits {
+            let w = if *ours_wins { "OURS" } else { "the chain's" };
+            println!("{name:<36} {ours:<28} {home:<34} {w}");
+        }
+
+        // Grouped by our file, because that is the unit of work: a window cannot swap while OUR
+        // file is still standing on the names its stock counterpart needs.
+        let mut by_file: std::collections::BTreeMap<&String, usize> =
+            std::collections::BTreeMap::new();
+        for (_, ours, _, _) in &hits {
+            *by_file.entry(ours).or_default() += 1;
+        }
+        println!(
+            "\n=== {} collisions, across {} of our files ===",
+            hits.len(),
+            by_file.len()
+        );
+        for (f, n) in &by_file {
+            println!("  {n:>3}  {f}");
         }
     }
 

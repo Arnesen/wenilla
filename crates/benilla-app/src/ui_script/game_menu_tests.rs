@@ -199,7 +199,7 @@ fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
 #[test]
 fn escape_opens_the_menu_only_when_nothing_else_wants_the_press_and_then_closes_it() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = bag_harness_with(&[], &["MerchantFrame.xml"]);
+    let mut s = bag_harness_with(&[], &["Interface\\FrameXML\\MerchantFrame.xml"]);
     s.set_money(0);
     s.set_container(0, Some(backpack()));
 
@@ -236,7 +236,7 @@ fn escape_opens_the_menu_only_when_nothing_else_wants_the_press_and_then_closes_
 #[test]
 fn the_clicked_form_closes_everything_and_opens_the_menu_in_one_go() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = bag_harness_with(&[], &["MerchantFrame.xml"]);
+    let mut s = bag_harness_with(&[], &["Interface\\FrameXML\\MerchantFrame.xml"]);
     s.set_money(0);
     s.set_container(0, Some(backpack()));
     s.run("MainMenuBarBackpackButton:Click()").unwrap();
@@ -263,7 +263,7 @@ fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
     let mut s = bag_harness_with(
         &[],
         &[
-            "MerchantFrame.xml",
+            "Interface\\FrameXML\\MerchantFrame.xml",
             // The loot window is the reference's own since 1751 — `test_ui::LOOT_UI` carries
             // what it needs and why, and PartyFrame's `MAX_PARTY_MEMBERS` is needed at LOAD.
             "UIDropDownMenu.xml",
@@ -594,7 +594,7 @@ fn nothing_opens_behind_the_world_map_and_escape_closes_it_first() {
         "UIDropDownMenu.xml",
         "ScrollTemplates.xml",
         "WorldMapFrame.xml",
-        "MerchantFrame.xml",
+        "Interface\\FrameXML\\MerchantFrame.xml",
         // The loot window is the reference's own since 1751 — see `test_ui::LOOT_UI` for what
         // each of these buys; `PartyFrame`'s MAX_PARTY_MEMBERS is needed at LOAD time.
         "UnitPopup.xml",
@@ -638,7 +638,10 @@ fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
     // ActionBar.xml goes AHEAD of the bag stack: it declares MainMenuBarArtFrame, which the bag
     // bar anchors into and seats itself above (`BenillaActionBarArt_SeatAbove`, nil-guarded in
     // BagFrame.xml precisely because most harnesses load no bar).
-    let mut s = bag_harness_with(&["Cooldown.xml", "ActionBar.xml"], &["MerchantFrame.xml"]);
+    let mut s = bag_harness_with(
+        &["Cooldown.xml", "ActionBar.xml"],
+        &["Interface\\FrameXML\\MerchantFrame.xml"],
+    );
     s.set_money(0);
     s.set_container(0, Some(backpack()));
     s.resolve();

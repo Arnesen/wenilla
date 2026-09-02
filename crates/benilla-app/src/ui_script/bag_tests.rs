@@ -133,7 +133,7 @@ fn b_opens_the_backpack_alone_and_closes_every_bag() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
     // Backpack (16) + one equipped bag in slot 2 (6). Bags 1/3/4 are left unset → 0 slots.
@@ -214,7 +214,7 @@ fn shift_b_toggles_every_bag_at_once() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.set_container(
         0,
@@ -295,7 +295,7 @@ fn bag_bar_buttons_light_while_their_bag_is_open() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.set_container(
         0,
@@ -408,7 +408,7 @@ fn bag_tooltip_hangs_left_when_the_slot_sits_in_the_right_half() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
     let mut slots = std::collections::HashMap::new();
@@ -484,7 +484,7 @@ fn hovered_bag_tooltip_fills_itself_when_the_stats_land() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
     let mut slots = std::collections::HashMap::new();
@@ -587,7 +587,7 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
     let mut slots = std::collections::HashMap::new();
@@ -721,7 +721,7 @@ fn readable_letter_hover_shows_the_inspect_magnifier() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
     let mut slots = std::collections::HashMap::new();
@@ -791,7 +791,7 @@ fn drag_across_two_slots_queues_the_same_move_a_click_pickup_would() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
     let mut slots = std::collections::HashMap::new();
@@ -874,7 +874,7 @@ fn a_second_bag_window_feeds_and_paints_via_the_bag_bar() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
     let mut slots = std::collections::HashMap::new();
@@ -946,7 +946,7 @@ fn equipped_bag_window_snug_fits_its_row_count() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
     // (bag id, slot count, expected window height). 6 → 2 rows plus-two-top (72+32+10); 8 → 2 rows
@@ -1005,7 +1005,7 @@ fn open_backpack_with_a_five_stack(s: &mut UiScript) -> (f32, f32) {
     for file in BAG_UI {
         load_xml(s, file);
     }
-    load_xml(s, "MerchantFrame.xml");
+    load_xml(s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(s, "Interface\\FrameXML\\StackSplitFrame.xml");
     s.set_money(0);
 
@@ -1345,7 +1345,7 @@ fn bag_slot_cooldown_sweeps_through_the_xml() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.tick(100.0); // a nonzero clock epoch, like the engine cooldown tests
 
@@ -1418,7 +1418,7 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.resolve();
 
     // The backpack: its label plus OPENALLBAGS's live key (default B; 0997's divergence note).
@@ -1551,7 +1551,7 @@ fn keyring_surface(s: &UiScript) {
     for file in BAG_UI {
         load_xml(s, file);
     }
-    load_xml(s, "MerchantFrame.xml");
+    load_xml(s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(s, "Interface\\FrameXML\\UIErrorsFrame.xml");
 }
 
@@ -1823,7 +1823,7 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.resolve();
 
     let shown = |s: &UiScript, name: &str| {
@@ -2079,7 +2079,7 @@ fn an_addon_that_hooks_toggle_backpack_receives_the_click() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
     // Bagnon's exact idiom: capture the original, replace the global.
@@ -2135,7 +2135,7 @@ fn the_bag_slots_carry_the_references_names_and_icon_names() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     for i in 0..4 {
         assert!(
@@ -2195,7 +2195,7 @@ fn the_backpack_buttons_ring_follows_its_own_window_through_real_clicks() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     // The reference's `ToggleBag` opens nothing for a container of size 0, so the backpack has to
     // be fed — our own windows existed statically and opened regardless.

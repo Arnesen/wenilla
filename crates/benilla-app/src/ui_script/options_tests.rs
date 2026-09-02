@@ -734,7 +734,7 @@ fn interface_harness() -> UiScript {
             "ActionBar.xml",
             "ScrollTemplates.xml",
             "Interface\\FrameXML\\BuffFrame.xml",
-            "MerchantFrame.xml",
+            "Interface\\FrameXML\\MerchantFrame.xml",
             "QuestFrame.xml",
             "QuestLogFrame.xml",
         ],

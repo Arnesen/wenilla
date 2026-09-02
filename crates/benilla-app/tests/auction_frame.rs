@@ -17,9 +17,10 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// Every one of these is a real dependency: UiPanels for the panel manager + tab kit + StaticPopup
 /// engine, ScrollTemplates for the faux lists, UIPanelTemplates for the button/input/checkbox
 /// templates, UIDropDownMenu for the rarity capsule, MoneyFrame for `SmallMoneyFrameTemplate` +
-/// the `MoneyTypeInfo` table this window registers `AUCTION_DEPOSIT` into, MerchantFrame for the
-/// `BenillaMoneyInput_*` money-entry helpers.
-const FILES: [&str; 9] = [
+/// the `MoneyTypeInfo` table this window registers `AUCTION_DEPOSIT` into, The `BenillaMoneyInput_*` money-entry
+/// helpers used to mean loading MerchantFrame.xml as well; 1751 moved that kit to MoneyFrame.xml
+/// on its way to the chain, so the dependency is gone.
+const FILES: [&str; 8] = [
     "Fonts.xml",
     "MoneyFrame.xml",
     "UiPanels.xml",
@@ -27,7 +28,6 @@ const FILES: [&str; 9] = [
     "UIDropDownMenu.xml",
     "ScrollTemplates.xml",
     "UIPanelTemplates.xml",
-    "MerchantFrame.xml",
     "AuctionFrame.xml",
 ];
 

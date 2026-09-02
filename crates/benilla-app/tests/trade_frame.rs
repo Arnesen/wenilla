@@ -13,12 +13,11 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// The trade window's load prefix — the app's own order (`ui_script/mod.rs`), members only.
 /// MerchantFrame.xml rides along because TradeFrame.xml reuses its global `BenillaMoney_*` coin
 /// helpers (the two gold displays), so a load error in either fails here.
-const FILES: [&str; 6] = [
+const FILES: [&str; 5] = [
     "Fonts.xml",
     "MoneyFrame.xml",
     "UiPanels.xml",
     "GameTooltip.xml",
-    "MerchantFrame.xml",
     "TradeFrame.xml",
 ];
 

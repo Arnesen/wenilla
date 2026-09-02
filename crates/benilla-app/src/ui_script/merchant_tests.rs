@@ -52,18 +52,19 @@ fn shipped_merchant_frame_drives_end_to_end() {
     s.set_screen_size(1024.0, 768.0);
     // The named virtual Font objects the re-skinned rows/title inherit through — loaded first at
     // runtime (ui_script's shipped list) so `inherits="GameFontNormalSmall"` resolves here too.
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
-                                     // The window's frame census: window 1 + item rows 12 (10 merchant + the 2 buyback-only) +
-                                     // close 1 + row-price coin slots 36 + purse coin slots 3 + the buyback slot 1 + its 3 coins +
-                                     // the repair pair 2 + the page pair 2 + the tab pair 2 = 63 (the title/quadrant art are
-                                     // FontString/Texture layers, not frames).
+    for f in super::test_ui::MERCHANT_UI {
+        load_xml(&s, f);
+    }
+    // The STOCK file's frame census (1751). Ours materialized 63 — window, twelve rows, close, the
+    // three-slot coin kit's 39 slots, the buyback slot, and the repair/page/tab pairs. The reference's
+    // shape is different in kind, not just in count: every row is an inert container PLUS a
+    // `$parentItemButton` that carries `ItemButtonTemplate`'s own children, and the prices are
+    // `SmallMoneyFrameTemplate` instances rather than our `<prefix>Coin1..3` chain. A count is a
+    // fingerprint of a file; this one is the reference's.
     assert_eq!(
-        load_xml(&s, "MerchantFrame.xml"),
-        63,
-        "window + 12 rows + close + 39 coin slots + buyback slot + repair/page/tab pairs"
+        load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"),
+        90,
+        "the stock file's own shape — see the census note above"
     );
 
     // Hidden by default: no vendor icon on screen.
@@ -155,18 +156,22 @@ fn shipped_merchant_frame_drives_end_to_end() {
         11,
         "10 merchant rows + the buyback slot render their socket plate"
     );
+    // THREE, not two, and the third is the buyback slot. Our file dimmed an empty buyback socket
+    // with the empty rows; the reference's `MerchantFrame_UpdateBuybackInfo` does not run the
+    // empty-row arm on it at all, so it keeps the bright plate whether or not a sold item is
+    // there. Same census, one socket moved sides.
     assert_eq!(
         socket_colors.iter().filter(|c| c[0] > 0.9).count(),
-        2,
-        "the 2 filled rows keep the socket full-bright"
+        3,
+        "the 2 filled rows and the buyback slot keep the socket full-bright"
     );
     assert_eq!(
         socket_colors
             .iter()
             .filter(|c| (c[0] - 0.4).abs() < 0.01)
             .count(),
-        9,
-        "the 8 empty rows + the empty buyback slot dim the socket to 0.4"
+        8,
+        "the 8 empty rows dim the socket to 0.4 (ref MerchantFrame.lua l.115)"
     );
     assert_eq!(
         quads
@@ -335,11 +340,10 @@ fn shipped_merchant_frame_drives_end_to_end() {
 fn merchant_show_hide_plays_open_and_close_kits() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
-    load_xml(&s, "MerchantFrame.xml");
+    for f in super::test_ui::MERCHANT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     // Hidden at load: no open sound (never transitions on startup).
     assert!(
@@ -388,7 +392,7 @@ fn vendor_open_opens_the_backpack_and_layers_the_sound() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     equip_bag(&mut s, 0, "Backpack", 16);
     let _ = s.take_sounds(); // ignore anything from load (frames are hidden; nothing should)
@@ -438,7 +442,7 @@ fn vendor_leaves_an_already_open_backpack_alone() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     equip_bag(&mut s, 0, "Backpack", 16);
 
@@ -486,7 +490,7 @@ fn vendor_opens_and_closes_all_equipped_bags() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     equip_bag(&mut s, 0, "Backpack", 16);
     equip_bag(&mut s, 2, "Small Pouch", 6);
@@ -519,11 +523,10 @@ fn vendor_opens_and_closes_all_equipped_bags() {
 fn merchant_switch_plays_close_then_open_and_queues_the_consumable_close() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
-    load_xml(&s, "MerchantFrame.xml");
+    for f in super::test_ui::MERCHANT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     // Vendor A open.
     s.set_money(0);
@@ -562,10 +565,9 @@ fn merchant_switch_plays_close_then_open_and_queues_the_consumable_close() {
 fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
+    for f in super::test_ui::MERCHANT_UI {
+        load_xml(&s, f);
+    }
     // The quality→colour table is `ITEM_QUALITY_COLORS`, and Fonts.xml is its home — this used
     // to load the whole loot window for `BENILLA_LOOT_QUALITY_COLORS`, an alias our own
     // LootFrame.xml set to that same table. 1751 took that window to the chain and the alias went
@@ -573,7 +575,7 @@ fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
     // every FrameXML file loads before any hover fires, so load it here too — with the dropdown
     // kit its GroupLootDropDown initializes against at load (benilla.toc l.64 vs 383).
     load_xml(&s, "UIDropDownMenu.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     s.set_merchant(Some(MerchantState {
         items: vec![
@@ -659,10 +661,17 @@ fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
     assert!(!has_text(&quads, "Main Hand"), "no tooltip before hover");
     let sword_icon = rect_of_tex(&quads, "INV_Sword_04");
 
-    // Hover the row over its NAME PLATE (well right of the icon): the whole row is the button, but
-    // the highlight must still cover only the 37px icon at the row's TOPLEFT.
+    // Hover the ICON, and that is the whole change 1751 made here. Our `MerchantFrame.xml` made
+    // the WHOLE ROW take the mouse — this hovered 60px right of the icon, over the name plate,
+    // and expected the tooltip. The reference splits every row into an inert container plus a
+    // `$parentItemButton` the size of the icon, which takes the mouse on its behalf; the twelve
+    // `MerchantItem<N>` entries in the flag gate's KNOWN list said exactly that, and they retired
+    // with our file.
+    //
+    // So on the reference's window, hovering a vendor row's NAME shows nothing. That is not a
+    // regression to fix — it is what the client does.
     let (hx, hy) = (
-        sword_icon.right + 60.0,
+        (sword_icon.left + sword_icon.right) * 0.5,
         (sword_icon.bottom + sword_icon.top) * 0.5,
     );
     s.mouse_move(hx, hy);
@@ -777,148 +786,21 @@ fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// Pin the real SmallMoneyFrame *shrink* (MoneyFrame.lua l.202 `SetWidth(GetTextWidth() +
-/// iconWidth)`, l.269 `frame:SetWidth`) that `BenillaMoney_Set` reproduces from the app's
-/// digit-advance feed ([`benilla_ui::script::UiScript::set_digit_advances`]): price groups pack
-/// number+coin with the real 4px spacing and start left-flush at the plate's left edge whatever
-/// the leading denomination (the "silver rows indent" bug), the purse packs the same
-/// right-to-left off its RIGHT anchor, and collapsed denominations HIDE (never a blank
-/// fixed-width box — the "copper-to-silver gap" bug).
-#[test]
-fn money_display_shrinks_to_content_and_stays_flush() {
-    let mut s = UiScript::new().unwrap();
-    s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
-    load_xml(&s, "MerchantFrame.xml");
-    // The app's synchronous number metrics (ui_script feeds NumberFontNormal's real advances once
-    // per atlas bake; a uniform 6px here keeps the arithmetic below legible).
-    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
-
-    s.set_money(12_345); // 1g 23s 45c → purse digits "1" / "23" / "45"
-    s.set_merchant(Some(MerchantState {
-        items: vec![
-            MerchantItem {
-                name: Some("Refreshing Spring Water".into()),
-                texture: Some("Interface\\Icons\\INV_Drink_18".into()),
-                price: 25, // copper only → "25"
-                quantity: 1,
-                num_available: -1,
-                item_id: 159,
-                stats: None,
-                link: None,
-                max_stack: Some(1),
-            },
-            MerchantItem {
-                name: Some("Linen Bandage".into()),
-                texture: Some("Interface\\Icons\\INV_Misc_Bandage_01".into()),
-                price: 204, // 2s 4c → "2" + "4" (silver-led — the row that used to indent)
-                quantity: 1,
-                num_available: -1,
-                item_id: 1251,
-                stats: None,
-                link: None,
-                max_stack: Some(1),
-            },
-        ],
-        ..Default::default()
-    }));
-    s.fire_event("MERCHANT_SHOW", vec![]);
-    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-    s.resolve();
-    let quads = s.extract();
-
-    let text_rect = |t: &str| {
-        quads
-            .iter()
-            .find(|q| matches!(&q.content, QuadContent::Text { text: Some(x), .. } if x == t))
-            .and_then(|q| q.rect)
-            .unwrap_or_else(|| panic!("no text quad for {t:?}"))
-    };
-    let near = |a: f32, b: f32| (a - b).abs() < 0.01;
-
-    // The real collapse HIDES unused slots: exactly 6 coin icons are on screen — row 1's copper,
-    // row 2's silver+copper, the purse's gold+silver+copper. (8 empty rows × 3 + all the unused
-    // slots of the filled displays draw nothing.)
-    let coin_icons = quads
-        .iter()
-        .filter(|q| {
-            matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
-                if p.contains("UI-MoneyIcons"))
-        })
-        .count();
-    assert_eq!(coin_icons, 6, "only the filled denominations draw a coin");
-
-    // Left-flush prices: both rows' leading numbers start at rowLeft + 46 (the name box's own
-    // column — 2px of breathing room off the plate border the director asked for; the ref quote
-    // was 44), whether the row leads with copper ("25") or silver ("2"). Row 1 sits at abs left
-    // 24 (window 0 + 24), row 2 at 189 (24 + 153-wide row + 12 column gap).
-    let p1 = text_rect("25");
-    let p2 = text_rect("2");
-    assert!(
-        near(p1.left - 24.0, 46.0),
-        "copper-led price starts at the plate edge, got {}",
-        p1.left - 24.0
-    );
-    assert!(
-        near(p2.left - 189.0, 46.0),
-        "silver-led price starts at the SAME plate edge (the indent bug), got {}",
-        p2.left - 189.0
-    );
-
-    // The shrink + the real 4px MONEY_BUTTON_SPACING: row 2's copper number starts exactly
-    // number-width + 13px coin + 4px gap after the silver number's left edge — no dead air from a
-    // fixed-width slot (the gap bug). "2" is 6px wide, its coin 13, the gap 4 → "4" at +23.
-    let p2c = text_rect("4");
-    assert!(
-        near(p2c.left, p2.right + 13.0 + 4.0),
-        "silver→copper packs number+coin+4px, got {} vs {}",
-        p2c.left,
-        p2.right + 13.0 + 4.0
-    );
-
-    // The purse packs the same but right-to-left, right-flush at window right -53 (the ref
-    // MerchantMoneyFrame anchor -40 minus the template's built-in 13px right pad — see the purse
-    // XML comment): copper "45" ends 13px (its coin) short of x=331, silver "23" ends its coin
-    // 4px left of copper's slot, gold "1" likewise.
-    let purse_c = text_rect("45");
-    let purse_s = text_rect("23");
-    let purse_g = text_rect("1");
-    assert!(
-        near(purse_c.right + 13.0, 384.0 - 53.0),
-        "purse copper coin right-flush at window right -53, got {}",
-        purse_c.right + 13.0
-    );
-    assert!(
-        near(purse_c.left, purse_s.right + 13.0 + 4.0),
-        "purse silver→copper packs rtl with the 4px gap, got {} vs {}",
-        purse_c.left,
-        purse_s.right + 13.0 + 4.0
-    );
-    assert!(
-        near(purse_s.left, purse_g.right + 13.0 + 4.0),
-        "purse gold→silver packs rtl with the 4px gap, got {} vs {}",
-        purse_s.left,
-        purse_g.right + 13.0 + 4.0
-    );
-    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-
-    // A sell changes only the coinage — no MERCHANT_UPDATE rides along. The purse repaints on the
-    // real client's PLAYER_MONEY event (the app fires it whenever the pushed money changes).
-    s.set_money(12_349); // +4c: the purse copper becomes "49"
-    s.fire_event("PLAYER_MONEY", vec![]);
-    s.resolve();
-    let quads = s.extract();
-    assert!(
-        quads
-            .iter()
-            .any(|q| matches!(&q.content, QuadContent::Text { text: Some(t), .. } if t == "49")),
-        "the merchant purse live-updates on PLAYER_MONEY"
-    );
-    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-}
+// ── `money_display_shrinks_to_content_and_stays_flush` RETIRED (1751) ────────────────────────
+//
+// It pinned `BenillaMoney_Set`'s geometry inside OUR `MerchantFrame.xml`: price groups left-flush
+// at `rowLeft + 46`, the purse right-flush at window-right −53, denominations packed with the real
+// 4px `MONEY_BUTTON_SPACING`. The 46 was a director call — 2px of breathing room off the plate
+// border where the reference quotes 44 — and it was a fact about a file we no longer ship.
+//
+// The reference's vendor rows use `SmallMoneyFrameTemplate` and `MoneyFrame_Update`, a different
+// kit with its own geometry. **The rules the test protected are not lost**: the shrink, the
+// collapse and the per-type `showSmallerCoins`/`fixedWidth` behaviour are `money_frame_tests.rs`'s
+// subject, against the kit that now draws these rows. What is gone is the merchant-specific pixel
+// geometry, which had nothing left to describe.
+//
+// **The vendor window's coin columns therefore look different now** — the reference's spacing, not
+// our approved 2px indent. Said here rather than left inside a changed constant.
 
 /// The merchant/buyback tab pair drives the two pages (ref MerchantFrame_Update l.57-64 +
 /// UpdateMerchantInfo/UpdateBuybackInfo): the merchant page shows the single most-recent buyback
@@ -929,11 +811,10 @@ fn money_display_shrinks_to_content_and_stays_flush() {
 fn merchant_tabs_drive_buyback_page_and_repair_pair() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    for f in super::test_ui::MERCHANT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(500);
 
     let buyback_item = |name: &str, price: u32| MerchantItem {
@@ -990,17 +871,19 @@ fn merchant_tabs_drive_buyback_page_and_repair_pair() {
         .unwrap());
 
     // The slot click buys back the most recent sale (slot 2 of 2).
-    s.run("BenillaMerchantBuyBackItem_OnClick()").unwrap();
+    // The stock row is a container plus a `$parentItemButton` that takes the mouse on its
+    // behalf — the split the retired flag-gate entries used to record as our divergence.
+    s.run("MerchantBuyBackItemItemButton:Click()").unwrap();
     assert_eq!(s.take_merchant_buybacks(), vec![2]);
 
     // Repair-all queues its intent.
-    s.run("BenillaMerchantRepairAllButton_OnClick()").unwrap();
+    s.run("MerchantRepairAllButton:Click()").unwrap();
     assert!(s.take_repair_all());
     s.take_sounds();
 
     // Tab 2: the buyback page — retitled, rows off GetBuybackItemInfo, merchant-only pieces down,
     // buyback art up, tab 2 selected (its Active slices showing).
-    s.run("BenillaMerchantFrameTab_OnClick(2)").unwrap();
+    s.run("MerchantFrameTab2:Click()").unwrap();
     assert!(s.errors().is_empty(), "tab errors: {:?}", s.errors());
     assert!(s
         .eval::<bool>("return MerchantNameText:GetText() == 'Merchant Buyback'")
@@ -1026,12 +909,12 @@ fn merchant_tabs_drive_buyback_page_and_repair_pair() {
         .unwrap());
 
     // A row click on the buyback page buys that slot back.
-    s.run("BenillaMerchantItem_OnClick(MerchantItem1, 'LeftButton')")
+    s.run("MerchantItem1ItemButton:Click(\"LeftButton\")")
         .unwrap();
     assert_eq!(s.take_merchant_buybacks(), vec![1]);
 
     // Back to tab 1: the merchant row returns, the buyback art drops.
-    s.run("BenillaMerchantFrameTab_OnClick(1)").unwrap();
+    s.run("MerchantFrameTab1:Click()").unwrap();
     assert!(s
         .eval::<bool>(
             "return MerchantItem1Name:GetText() == 'Refreshing Spring Water' \
@@ -1049,11 +932,10 @@ fn merchant_tabs_drive_buyback_page_and_repair_pair() {
 fn merchant_tabs_fit_their_labels() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    for f in super::test_ui::MERCHANT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.set_merchant(Some(MerchantState::default()));
     s.fire_event("MERCHANT_SHOW", vec![ScriptValue::Str("Vendor".into())]);
@@ -1091,7 +973,7 @@ fn merchant_tabs_fit_their_labels() {
 
 /// Hovering a buy-tab row arms the vendor **Buy** cursor (the grayed **UnableBuy** when you can't
 /// afford the row), swaps to **Inspect** while Ctrl is held, and clears on leave — the whole reason
-/// this window exists to a first-time visitor. Drives the real `BenillaMerchantItem_OnEnter` +
+/// this window exists to a first-time visitor. Drives the stock row button's own `<OnEnter>` +
 /// the frame's `OnUpdate` (a `tick`) exactly as the app does, since the coin is re-armed per frame.
 #[test]
 fn shipped_merchant_frame_arms_the_buy_cursor_on_hover() {
@@ -1099,11 +981,10 @@ fn shipped_merchant_frame_arms_the_buy_cursor_on_hover() {
 
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    for f in super::test_ui::MERCHANT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     // A purse of 50c: row 1 (25c) is affordable, row 2 (100c) is not.
     s.set_money(50);
@@ -1139,7 +1020,10 @@ fn shipped_merchant_frame_arms_the_buy_cursor_on_hover() {
     assert_eq!(s.ui_cursor(), None, "no override before any hover");
 
     // Row 1 hover: OnEnter remembers the row, the frame's OnUpdate arms the coin — affordable → Buy.
-    s.run("BenillaMerchantItem_OnEnter(MerchantItem1)").unwrap();
+    // The stock `<OnEnter>` is inline on the row button, so it is fired the way the engine
+    // fires it: `this` bound, then the compiled handler.
+    s.run("this = MerchantItem1ItemButton MerchantItem1ItemButton:GetScript(\"OnEnter\")() this = nil")
+        .unwrap();
     s.tick(0.016);
     assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
     assert_eq!(
@@ -1159,12 +1043,14 @@ fn shipped_merchant_frame_arms_the_buy_cursor_on_hover() {
     s.set_modifiers(false, false, false);
 
     // Leaving clears the override (OnLeave ResetCursor + the itemHover poll stops).
-    s.run("BenillaMerchantItem_OnLeave(MerchantItem1)").unwrap();
+    s.run("this = MerchantItem1ItemButton MerchantItem1ItemButton:GetScript(\"OnLeave\")() this = nil")
+        .unwrap();
     s.tick(0.016);
     assert_eq!(s.ui_cursor(), None, "leaving the row resets the cursor");
 
     // Row 2 hover: 100c against a 50c purse → the grayed UnableBuy.
-    s.run("BenillaMerchantItem_OnEnter(MerchantItem2)").unwrap();
+    s.run("this = MerchantItem2ItemButton MerchantItem2ItemButton:GetScript(\"OnEnter\")() this = nil")
+        .unwrap();
     s.tick(0.016);
     assert_eq!(
         s.ui_cursor(),
@@ -1188,11 +1074,10 @@ fn shipped_merchant_frame_arms_the_buy_cursor_on_hover() {
 fn trade_recipient_money_renders_the_digit_not_ellipsis() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "MerchantFrame.xml"); // the BenillaMoney_* helpers
+    for f in super::test_ui::MERCHANT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // the BenillaMoney_* helpers
     load_xml(&s, "TradeFrame.xml");
     s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
 
@@ -1244,13 +1129,12 @@ fn ctrl_and_shift_on_a_vendor_row_preview_and_post_without_buying() {
     const WATER_LINK: &str = "|cffffffff|Hitem:159:0:0:0|h[Refreshing Spring Water]|h|r";
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    for f in super::test_ui::MERCHANT_UI {
+        load_xml(&s, f);
+    }
     for file in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
         "UIParent.xml", // BenillaChatEdit_InsertLink, the shared shift-insert helper
-        "GameTooltip.xml",
-        "MerchantFrame.xml",
+        "Interface\\FrameXML\\MerchantFrame.xml",
         "DressUpFrame.xml",
         "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
         "ChatFrame.xml",

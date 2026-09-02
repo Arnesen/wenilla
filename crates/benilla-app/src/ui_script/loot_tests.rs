@@ -479,7 +479,7 @@ fn shipped_loot_pushed_to_center_by_merchant() {
     }
     load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
     load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     // Loot opens onto the empty left slot.
     s.set_loot(Some(coin_and_two_items()));

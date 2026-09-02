@@ -31,87 +31,20 @@
         real job is the timeout/override/escape paths.
     -->
     <Script><![CDATA[
-        -- ── MAX_RAID_MEMBERS (ref RaidFrame.lua l.2) ─────────────────────────────────────────
-        -- A fact about the protocol, not about our implementation: a 1.12 raid is 40, and the
-        -- `raid1`..`raid40` token space is 40 wide whether or not we build a raid UI. Declared
-        -- here rather than in a RaidFrame.xml because we ship none; party and raid are the same
-        -- subsystem family, and this is the file that already owns the group surface.
-        --
-        -- **The loop it feeds already works.** `for i = 1, MAX_RAID_MEMBERS do UnitName("raid"..i)`
-        -- answers nil for every absent token, which is exactly right for a player not in a raid —
-        -- so the constant is not a promise of a raid UI, it is the bound the token space has.
-        --
-        -- Reached by following a `'for' limit must be a number` five addons shared:
-        -- `CT_RaidAssist.lua:3283` is `for i = 1, MAX_RAID_MEMBERS, 1 do`. Read with `grep -a`,
-        -- because this corpus's Ace files are ISO-8859 and plain grep silently skips them.
-        MAX_RAID_MEMBERS = 40
-        -- Its two siblings, each reached one line further along the same chain
-        -- (`CT_RAOptions.lua:75`, then `:231`). The reference declares all three together at
-        -- RaidFrame.lua l.2-4, and they agree: 40 = 8 x 5. Adding them one at a time as an addon
-        -- asked was the wrong shape — they are one fact about the raid token space, so they land
-        -- as one.
-        NUM_RAID_GROUPS = 8
-        MEMBERS_PER_RAID_GROUP = 5
+        -- MAX_RAID_MEMBERS / NUM_RAID_GROUPS / MEMBERS_PER_RAID_GROUP moved out. They were
+        -- declared here on the stated grounds that "we ship no RaidFrame.xml", which stopped being
+        -- true — RaidFrame.xml declares all three, which is the reference's own home for them
+        -- (RaidFrame.lua l.2-4). Nothing between the two manifest positions reads them at load.
         -- The party's own bound (ref PartyMemberFrame.lua l.1) — four *other* members, so a full
         -- party sweep that includes the player runs `1, MAX_PARTY_MEMBERS+1`, which is exactly how
         -- GroupLootDropDown_Initialize walks the master-loot candidates (LootFrame.lua l.219).
         -- Published for the same reason as its raid siblings: the addon corpus reads it.
         MAX_PARTY_MEMBERS = 4
 
-        -- ── The group-invite popup ────────────────────────────────────────────────────────────
-        -- The strings and the three flags are the reference's own (INVITATION = "%s invites you to
-        -- a group.", GlobalStrings:2586-area; a 60 s silent timeout, answerable while dead,
-        -- closable with ESC).
-        --
-        -- The whole of its behaviour turns on ONE latch, `inviteAccepted`, and the four hooks below
-        -- are just the four moments that read or write it. It lives on the registry entry rather
-        -- than in an upvalue here because that is where the reference keeps it and an addon
-        -- inspecting the dialog expects to find it there — which is why each hook goes back through
-        -- `StaticPopupDialogs["PARTY_INVITE"]` instead of closing over a local.
-        --
-        -- They are named rather than inlined so the entry below reads as the manifest it is: four
-        -- strings, three flags, four hooks.
-
-        -- Every showing starts unanswered — including a re-show of the same entry, which is what a
-        -- second invite arriving while the first is up does.
-        local function PartyInvite_OnShow()
-            StaticPopupDialogs["PARTY_INVITE"].inviteAccepted = nil
-        end
-
-        -- The only path that answers the server affirmatively, and the only one that latches.
-        local function PartyInvite_OnAccept()
-            AcceptGroup()
-            StaticPopupDialogs["PARTY_INVITE"].inviteAccepted = 1
-        end
-
-        local function PartyInvite_OnCancel()
-            DeclineGroup()
-        end
-
-        -- The catch-all. EVERY way this dialog leaves the screen lands here — Decline, the 60 s
-        -- timeout, ESC, and another dialog overriding it — and the latch is what tells the one
-        -- that already said yes from the four that never answered at all. A clicked Decline
-        -- therefore declines twice (OnCancel, then here); see DOUBLE-DECLINE in the header, which
-        -- is the reference's behaviour and the wire tolerates it.
-        local function PartyInvite_OnHide()
-            if not StaticPopupDialogs["PARTY_INVITE"].inviteAccepted then
-                DeclineGroup()
-            end
-        end
-
-        StaticPopupDialogs["PARTY_INVITE"] = {
-            text = INVITATION,
-            button1 = ACCEPT,
-            button2 = DECLINE,
-            sound = "igPlayerInvite",
-            timeout = 60,
-            whileDead = 1,
-            hideOnEscape = 1,
-            OnShow = PartyInvite_OnShow,
-            OnAccept = PartyInvite_OnAccept,
-            OnCancel = PartyInvite_OnCancel,
-            OnHide = PartyInvite_OnHide,
-        }
+        -- The PARTY_INVITE dialog and its PARTY_INVITE_REQUEST/_CANCEL driver MOVED OUT, to
+        -- UiPanels.xml — the reference's own homes for both (StaticPopup.lua l.526, UIParent.lua).
+        -- They were here only because this is where they were first needed; 1751 walked them back,
+        -- so this file is that much smaller when it follows them onto the chain.
 
         -- ref PartyMemberFrame.lua's OnLoad: cache children, register, first paint.
         function BenillaPartyFrame_OnLoad(frame)
@@ -280,15 +213,6 @@
             end
         end
 
-        -- The invite driver (ref UIParent.lua): PARTY_INVITE_REQUEST shows the popup with the
-        -- inviter's name; PARTY_INVITE_CANCEL hides it.
-        function BenillaPartyInviteDriver_OnEvent()
-            if event == "PARTY_INVITE_REQUEST" then
-                StaticPopup_Show("PARTY_INVITE", arg1)
-            elseif event == "PARTY_INVITE_CANCEL" then
-                StaticPopup_Hide("PARTY_INVITE")
-            end
-        end
 
         -- The right-click dropdown (decision 0434 phase 5; ref PartyMemberFrame.lua l.369-381)
         -- + the ref's click law (l.226-237): left targets the member, right opens the PARTY
@@ -433,16 +357,4 @@
         <Anchors><Anchor point="TOPLEFT" relativeTo="PartyMemberFrame3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
     </Frame>
 
-    <!-- The invite event driver (hidden; the DeathFrame driver pattern). -->
-    <Frame name="BenillaPartyInviteDriver" parent="UIParent" hidden="true">
-        <Size><AbsDimension x="1" y="1"/></Size>
-        <Anchors><Anchor point="TOPLEFT"/></Anchors>
-        <Scripts>
-            <OnLoad>
-                this:RegisterEvent("PARTY_INVITE_REQUEST")
-                this:RegisterEvent("PARTY_INVITE_CANCEL")
-            </OnLoad>
-            <OnEvent>BenillaPartyInviteDriver_OnEvent()</OnEvent>
-        </Scripts>
-    </Frame>
 </Ui>

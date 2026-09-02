@@ -355,3 +355,206 @@ fn set_trade_skill_item_indexes_visible_rows_not_raw_recipes() {
     // rather than a neighbouring recipe's tooltip appearing under the cursor.
     assert_eq!(name_at(&mut s, 4, ""), "Alpha Cloak Reagent");
 }
+
+/// `SetMerchantCompareItem(index [, offset])` — the shopping tooltip the stock vendor row raises.
+///
+/// The contract that decides ghost tooltips versus none is the RETURN, so that is what this pins:
+/// the **number** 1 on success, `nil` on every failure, one value always. Stock's
+/// `if ( ShoppingTooltip1:SetMerchantCompareItem(id, 1) ) then … end` reads it directly, so a
+/// boolean `false` where nil belongs shows an empty tooltip and a truthy nil-case shows two.
+#[test]
+fn set_merchant_compare_item_answers_one_or_nil_per_candidate_slot() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+
+    // Both finger slots worn, both class 4 (ARMOR) like the ring on the shelf.
+    let mut inv: InventorySlots = Default::default();
+    for (slot, id, name) in [(11usize, 7000u32, "Old Loop"), (12, 7001, "Older Loop")] {
+        inv[slot] = Some(InvSlotView {
+            item_id: id,
+            name: Some(name.into()),
+            quality: 1,
+            ..Default::default()
+        });
+        s.set_item_template(
+            id,
+            ItemTemplateView {
+                name: name.into(),
+                quality: 1,
+                class: 4,
+                inventory_type: 11,
+                ..Default::default()
+            },
+        );
+    }
+    // …and a shield, class 4, in the off hand — the case that makes offset 2 nil for a WEAPON.
+    inv[17] = Some(InvSlotView {
+        item_id: 7100,
+        name: Some("Battered Buckler".into()),
+        quality: 1,
+        ..Default::default()
+    });
+    s.set_item_template(
+        7100,
+        ItemTemplateView {
+            name: "Battered Buckler".into(),
+            quality: 1,
+            class: 4, // ARMOR
+            inventory_type: 14,
+            ..Default::default()
+        },
+    );
+    inv[16] = Some(InvSlotView {
+        item_id: 7101,
+        name: Some("Bent Sword".into()),
+        quality: 1,
+        ..Default::default()
+    });
+    s.set_item_template(
+        7101,
+        ItemTemplateView {
+            name: "Bent Sword".into(),
+            quality: 1,
+            class: 2, // WEAPON
+            inventory_type: 13,
+            ..Default::default()
+        },
+    );
+    s.set_inventory_slots(inv);
+
+    s.set_merchant(Some(MerchantState {
+        items: vec![
+            MerchantItem {
+                name: Some("Shiny Loop".into()),
+                item_id: 8000,
+                ..Default::default()
+            },
+            MerchantItem {
+                name: Some("Sharp Sword".into()),
+                item_id: 8001,
+                ..Default::default()
+            },
+            MerchantItem {
+                name: Some("Unseen Thing".into()),
+                item_id: 8999, // no template — the uncached leg
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    }));
+    s.set_item_template(
+        8000,
+        ItemTemplateView {
+            name: "Shiny Loop".into(),
+            quality: 3,
+            class: 4,
+            inventory_type: 11, // finger — two candidate slots
+            ..Default::default()
+        },
+    );
+    s.set_item_template(
+        8001,
+        ItemTemplateView {
+            name: "Sharp Sword".into(),
+            quality: 3,
+            class: 2,
+            inventory_type: 13, // one-hand — main hand then off hand
+            ..Default::default()
+        },
+    );
+
+    // The two shopping tooltips are ordinary GameTooltip frames — the engine knows nothing about
+    // them (the substring `ShoppingTooltip` does not occur in the image at all).
+    s.run(
+        r#"
+        CreateFrame("GameTooltip", "ShoppingTooltip1"):Hide()
+        CreateFrame("GameTooltip", "ShoppingTooltip2"):Hide()
+    "#,
+    )
+    .unwrap();
+
+    let call =
+        |s: &mut UiScript, expr: &str| s.eval::<String>(&format!("return type({expr})")).unwrap();
+
+    // A ring against two worn rings: both offsets answer, and the answer is the NUMBER 1.
+    assert_eq!(
+        s.eval::<String>(r#"return tostring(ShoppingTooltip1:SetMerchantCompareItem(1, 1))"#)
+            .unwrap(),
+        "1",
+        "the truthy leg is lua_pushnumber(1.0), not a boolean"
+    );
+    assert_eq!(
+        call(&mut s, "ShoppingTooltip2:SetMerchantCompareItem(1, 2)"),
+        "number"
+    );
+    // …and it filled with the WORN item, headed by the gray compare line.
+    assert!(
+        s.eval::<bool>(
+            r#"local n = ShoppingTooltip1:NumLines()
+               for i = 1, n do
+                 if getglobal("ShoppingTooltip1TextLeft"..i):GetText() == "Currently Equipped" then
+                   return true
+                 end
+               end
+               return false"#
+        )
+        .unwrap(),
+        "the fill is the equipped item's own tooltip with the CURRENTLY_EQUIPPED header"
+    );
+
+    // A one-hand weapon: main hand matches (class 2), the off-hand SHIELD does not (class 4), so
+    // offset 2 is nil. This is the reference's class test doing the work, and it is the case a
+    // slot-only reading would get wrong.
+    assert_eq!(
+        call(&mut s, "ShoppingTooltip1:SetMerchantCompareItem(2, 1)"),
+        "number"
+    );
+    assert_eq!(
+        call(&mut s, "ShoppingTooltip1:SetMerchantCompareItem(2, 2)"),
+        "nil",
+        "a shield is not a candidate for a weapon — class, not slot"
+    );
+
+    // Offset defaults to 1 when absent, and does NOT raise.
+    assert_eq!(
+        call(&mut s, "ShoppingTooltip1:SetMerchantCompareItem(1)"),
+        "number"
+    );
+    // An explicit 0 or a negative is nil — the counter starts below zero and only decrements.
+    for bad in ["0", "-1"] {
+        assert_eq!(
+            call(
+                &mut s,
+                &format!("ShoppingTooltip1:SetMerchantCompareItem(1, {bad})")
+            ),
+            "nil",
+            "offset {bad}"
+        );
+    }
+    // Out of range, and the uncached template, are both nil — never an error.
+    for expr in [
+        "ShoppingTooltip1:SetMerchantCompareItem(0, 1)",
+        "ShoppingTooltip1:SetMerchantCompareItem(99, 1)",
+        "ShoppingTooltip1:SetMerchantCompareItem(3, 1)",
+    ] {
+        assert_eq!(call(&mut s, expr), "nil", "{expr}");
+    }
+    // 2.7 re-bases in f64 and THEN truncates: 2.7 - 1 = 1.7 -> row 1, the sword. Doing it the
+    // other way round would land on row 2.
+    assert_eq!(
+        call(&mut s, "ShoppingTooltip1:SetMerchantCompareItem(2.7, 1)"),
+        "number"
+    );
+
+    // A non-number index RAISES, with the client's own usage text.
+    let e = s
+        .run(r#"ShoppingTooltip1:SetMerchantCompareItem({}, 1)"#)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("Usage: SetMerchantCompareItem"), "{e}");
+    // …but a numeric STRING is a number to `lua_isnumber`.
+    assert_eq!(
+        call(&mut s, r#"ShoppingTooltip1:SetMerchantCompareItem("1", 1)"#),
+        "number"
+    );
+}

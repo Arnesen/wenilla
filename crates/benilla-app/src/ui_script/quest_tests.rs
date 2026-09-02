@@ -22,7 +22,7 @@ fn questgiver_show_hide_plays_open_and_close_kits() {
     load_xml(&s, "UiPanels.xml");
     // The BenillaMoney_* purse helpers the quest reward/progress panels repaint through live in
     // MerchantFrame.xml (the same documented cross-window dep the bag tests load).
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
 
@@ -79,7 +79,7 @@ fn panel_events_show_exactly_one_child_panel_and_hide_the_others() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
 
@@ -156,7 +156,7 @@ fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
 
@@ -239,7 +239,7 @@ fn reward_panel_choice_click_selects_and_completes_with_zero_based_index() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
 
@@ -302,7 +302,7 @@ fn greeting_goodbye_button_closes_the_window() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
 
@@ -337,7 +337,7 @@ fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
     s.set_quest(Some(QuestState {
@@ -446,7 +446,7 @@ fn write_on_still_fades_when_instant_text_is_off() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
     s.eval::<()>(r#"QUEST_FADING_DISABLE = "0""#).unwrap();
@@ -507,7 +507,7 @@ fn npc_name_reaches_the_title_bar_on_open_and_on_refresh() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
 
@@ -570,7 +570,7 @@ fn greeting_panel_title_rows_grow_to_their_wrapped_titles() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
 
@@ -654,7 +654,7 @@ fn reward_rows_preview_and_post_without_selecting_the_choice() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, "QuestFrame.xml");
     load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink lives here

@@ -785,7 +785,7 @@ fn shipped_bag_frame_drives_end_to_end() {
         }
     }
     load_ui(&s, "Interface\\FrameXML\\StackSplitFrame.xml");
-    load_ui(&s, "MerchantFrame.xml");
+    load_ui(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     assert_eq!(
         bar_frames, 16,

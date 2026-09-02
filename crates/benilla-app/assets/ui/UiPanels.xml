@@ -1488,9 +1488,120 @@
 
         -- ref GlobalStrings.lua l.2612 / l.2818 / l.465, fallback form (the player's own localized
         -- file runs off the patch chain first).
+        -- ── The group-invite popup (ref StaticPopup.lua l.526-548) ───────────────────────────
+        -- Moved here from our `PartyFrame.xml` when 1751 took that window to the player's chain.
+        -- This file is our `StaticPopup.lua`, which is where the reference declares it; the party
+        -- frames were only where ours was first needed.
+        -- The strings and the three flags are the reference's own (INVITATION = "%s invites you to
+        -- a group.", GlobalStrings:2586-area; a 60 s silent timeout, answerable while dead,
+        -- closable with ESC).
+        --
+        -- The whole of its behaviour turns on ONE latch, `inviteAccepted`, and the four hooks below
+        -- are just the four moments that read or write it. It lives on the registry entry rather
+        -- than in an upvalue here because that is where the reference keeps it and an addon
+        -- inspecting the dialog expects to find it there — which is why each hook goes back through
+        -- `StaticPopupDialogs["PARTY_INVITE"]` instead of closing over a local.
+        --
+        -- They are named rather than inlined so the entry below reads as the manifest it is: four
+        -- strings, three flags, four hooks.
+
+        -- Every showing starts unanswered — including a re-show of the same entry, which is what a
+        -- second invite arriving while the first is up does.
+        local function PartyInvite_OnShow()
+            StaticPopupDialogs["PARTY_INVITE"].inviteAccepted = nil
+        end
+
+        -- The only path that answers the server affirmatively, and the only one that latches.
+        local function PartyInvite_OnAccept()
+            AcceptGroup()
+            StaticPopupDialogs["PARTY_INVITE"].inviteAccepted = 1
+        end
+
+        local function PartyInvite_OnCancel()
+            DeclineGroup()
+        end
+
+        -- The catch-all. EVERY way this dialog leaves the screen lands here — Decline, the 60 s
+        -- timeout, ESC, and another dialog overriding it — and the latch is what tells the one
+        -- that already said yes from the four that never answered at all. A clicked Decline
+        -- therefore declines twice (OnCancel, then here); see DOUBLE-DECLINE in the header, which
+        -- is the reference's behaviour and the wire tolerates it.
+        local function PartyInvite_OnHide()
+            if not StaticPopupDialogs["PARTY_INVITE"].inviteAccepted then
+                DeclineGroup()
+            end
+        end
+
+        StaticPopupDialogs["PARTY_INVITE"] = {
+            text = INVITATION,
+            button1 = ACCEPT,
+            button2 = DECLINE,
+            sound = "igPlayerInvite",
+            timeout = 60,
+            whileDead = 1,
+            hideOnEscape = 1,
+            OnShow = PartyInvite_OnShow,
+            OnAccept = PartyInvite_OnAccept,
+            OnCancel = PartyInvite_OnCancel,
+            OnHide = PartyInvite_OnHide,
+        }
+
+        -- ── The logout countdowns ────────────────────────────────────────────────────────────
+        -- The CAMP and QUIT dialogs, moved here from our `GameMenuFrame.xml` when 1751 took that
+        -- window to the player's chain. This file is our `StaticPopup.lua`, which is where the
+        -- reference declares both (l.564 / l.586) — the ESC menu never owned them, it just
+        -- happened to be where ours were first needed.
+        CAMP_TIMER = CAMP_TIMER or "%d %s until logout"
+        QUIT_TIMER = QUIT_TIMER or "%d %s until exit"
+        QUIT_NOW = QUIT_NOW or "Exit now"
+        -- CANCEL before the tables below, not after: a dialog entry captures its button labels BY
+        -- VALUE at load, so a `button1 = CANCEL` built while CANCEL is still nil silently falls
+        -- back to the popup engine's default ("Yes") rather than failing. It reads as a wrong
+        -- label on a real dialog and as nothing at all in a test that does not check the text.
+        CANCEL = CANCEL or "Cancel"
+
+        -- Dismissing a running countdown means "I didn't mean it": call the logout off. Only while
+        -- it is still RUNNING, though — the popup engine zeroes `timeleft` before hiding a dialog
+        -- that expired, so reaching zero leaves the logout alone. (Backwards, and every logout in
+        -- the field is cancelled by its own dialog at t=0 and the character never leaves.) One
+        -- function because both dialogs mean exactly this; `this` is the popup frame, which the
+        -- engine has bound around the handler.
+        local function CancelLogoutIfStillCounting()
+            if this.timeleft > 0 then
+                CancelLogout()
+            end
+        end
+
+        StaticPopupDialogs["CAMP"] = {
+            text = CAMP_TIMER,
+            button1 = CANCEL,
+            timeout = 20,
+            whileDead = 1,
+            hideOnEscape = 1,
+            OnAccept = function()
+                CancelLogout()
+            end,
+            OnHide = CancelLogoutIfStillCounting,
+        }
+
+        StaticPopupDialogs["QUIT"] = {
+            text = QUIT_TIMER,
+            button1 = QUIT_NOW,
+            button2 = CANCEL,
+            timeout = 20,
+            whileDead = 1,
+            hideOnEscape = 1,
+            -- A force-quit needs no server round trip, so the countdown it was narrating is over
+            -- the moment the button is pressed: zero `timeleft` so the OnHide below stands down.
+            OnAccept = function()
+                ForceQuit()
+                this.timeleft = 0
+            end,
+            OnHide = CancelLogoutIfStillCounting,
+        }
+
         LOOT_NO_DROP = LOOT_NO_DROP or "Looting this item will bind it to you."
         OKAY = OKAY or "Okay"
-        CANCEL = CANCEL or "Cancel"
 
         -- ref StaticPopup.lua l.601-611, verbatim. `OnAccept`'s argument is `dialog.data`, the
         -- event's row — and `LootSlot` is the CONTINUATION verb, so this line is the only thing in
@@ -1769,6 +1880,25 @@
                 if dialog then
                     dialog.data = arg1
                 end
+            elseif event == "PARTY_INVITE_REQUEST" then
+                -- ref UIParent.lua's own arms. Same move as the logout three and the loot bind
+                -- confirm: the popup-raising event belongs beside the popup, not in whichever
+                -- window happened to need it first.
+                StaticPopup_Show("PARTY_INVITE", arg1)
+            elseif event == "PARTY_INVITE_CANCEL" then
+                StaticPopup_Hide("PARTY_INVITE")
+            elseif event == "PLAYER_CAMPING" then
+                -- ref UIParent.lua l.304-315. These three lived on our GameMenuFrame.xml's own
+                -- hidden listener, on the reasoning that benilla has no UIParent frame; they are
+                -- here now for the same reason the loot bind confirm is — 1751 took that window
+                -- to the chain, and the reference's placement (UIParent, beside every other
+                -- popup-raising event) is the one that survives the window being someone else's.
+                StaticPopup_Show("CAMP")
+            elseif event == "PLAYER_QUITING" then
+                StaticPopup_Show("QUIT")
+            elseif event == "LOGOUT_CANCEL" then
+                StaticPopup_Hide("CAMP")
+                StaticPopup_Hide("QUIT")
             elseif event == "LOOT_BIND_CONFIRM" then
                 -- ref UIParent.lua l.317-323. The row rides on `dialog.data` rather than as a
                 -- text arg — LOOT_NO_DROP has no format specifier, so the sentence is the same
@@ -2601,6 +2731,11 @@
                 self:RegisterEvent("AUTOEQUIP_BIND_CONFIRM")
                 self:RegisterEvent("USE_BIND_CONFIRM")
                 self:RegisterEvent("LOOT_BIND_CONFIRM")
+                self:RegisterEvent("PLAYER_CAMPING")
+                self:RegisterEvent("PLAYER_QUITING")
+                self:RegisterEvent("LOGOUT_CANCEL")
+                self:RegisterEvent("PARTY_INVITE_REQUEST")
+                self:RegisterEvent("PARTY_INVITE_CANCEL")
                 self:RegisterEvent("CURSOR_UPDATE")
             </OnLoad>
             <OnEvent>BenillaBindConfirmDriver_OnEvent(self)</OnEvent>

@@ -814,6 +814,14 @@ fn every_texture_frame_outranks_its_status_bars() {
     }
     // Player + target (health/power) and four party members (health/mana) — never let this pass by
     // matching nothing, which is exactly how a renamed frame would silently retire the check.
+    //
+    // **This number drops to 6 the day `PartyFrame.xml` goes to the chain, and that will be a real
+    // reduction rather than a rename.** Stock `PartyFrameTemplates.xml` has no
+    // `$parentTextureFrame` at all: it gets the same result a different way, with the art inside a
+    // pair of ANONYMOUS nested `<Frame setAllPoints="true">` wrappers, so it outranks the bars by
+    // nesting depth rather than by a level on a named frame. There is nothing to look up, so the
+    // party rows will move from this assertion's cover to the loader's nesting rule. Written down
+    // now, while the reason is in front of somebody, rather than discovered as a number to lower.
     assert!(
         checked >= 12,
         "only {checked} texture-frame/bar pairs checked — the name sweep found nothing"

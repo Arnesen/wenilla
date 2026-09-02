@@ -257,8 +257,31 @@ Interface\FrameXML\ComboFrame.xml
 # transcription; consumes COMBAT_TEXT_UPDATE + the regen/health/power events, needs
 # only Fonts.xml (CombatTextFont) + UIParent before it.
 CombatText.xml
-# The party member frames + the PARTY_INVITE popup + its event driver (decision 0434
-# phase 2): a StaticPopup registry entry, so after UiPanels.xml.
+# The player buff/debuff bar (decisions 0255/0257 — the player aura arc): the HUD row of aura
+# icons under the minimap, driven by the UnitAura feed (`crate::ui_aura`).
+#
+# MOVED UP HERE from below the world-state frame when PartyFrame went to the chain (1751). It
+# has to precede PartyFrame, because stock `PartyMemberFrame.lua:60` calls `RefreshBuffs` from
+# each row's OnLoad and `BuffFrame.lua` is where that lives — which is exactly the reference's
+# own order (its toc: BuffFrame 40, UnitFrame 43, PartyFrame 45; ours had them inverted).
+#
+# The note this entry used to carry — "needs ActionBar's `BENILLA_FALLBACK_ICON`" — was stale:
+# that was true of OUR BuffFrame.xml, and the chain file does not mention the name. The only
+# readers left are MerchantFrame, StanceBar and TradeSkillFrame, all at runtime.
+Interface\FrameXML\BuffFrame.xml
+# The party member frames (decision 0434 phase 2).
+#
+# NOT yet on the chain, and the blocker is ours, not a missing verb: **`UnitFrames.xml` below
+# redefines `UnitFrame_OnEvent` and `UnitFrame_Update`**, two names stock `UnitFrame.lua` (l.232
+# above) has already defined. Ours win, so stock party rows — built by stock
+# `PartyMemberFrame.lua` and initialized by the reference's own `UnitFrame_Initialize` — end up
+# calling OUR update, which indexes a `nameText` the reference's rows do not carry. The swap
+# loads and then raises on the first PARTY_MEMBERS_CHANGED. So PartyFrame waits on the
+# player/target/pet frames, not on anything of its own.
+#
+# What HAS moved out: the PARTY_INVITE dialog and its driver, to UiPanels.xml (StaticPopup.lua
+# l.526, UIParent.lua), and the three raid constants, which RaidFrame.xml already declared —
+# that is the reference's home for them (RaidFrame.lua l.2-4).
 PartyFrame.xml
 # The death arc's dialogs + event driver (decision 0308): registry entries on the shared
 # StaticPopup engine, so after UiPanels.xml.
@@ -455,10 +478,6 @@ Interface\FrameXML\MirrorTimer.xml
 # `crate::world_state_ui` fires. Needs Fonts (GameFontNormalSmall) and GameTooltip; sits beside the
 # mirror timers, which share its top-centre lane.
 WorldStateFrame.xml
-# The player buff/debuff bar (decisions 0255/0257 — the player aura arc): the HUD row of
-# aura icons under the minimap, driven by the UnitAura feed (`crate::ui_aura`). Needs Fonts
-# (its FontStrings) and ActionBar's `BENILLA_FALLBACK_ICON` global (both already loaded).
-Interface\FrameXML\BuffFrame.xml
 # ══ THE DURABILITY ALERT — the reference's own, off the player's chain (1751, window 4) ══
 # The "armor guy" under the minimap: `DurabilityFrame`, its eleven glyph textures, and
 # `DurabilityFrame_SetAlerts` / `_OnUpdate` with `INVENTORY_ALERT_STATUS_SLOTS` and
@@ -649,18 +668,21 @@ FriendsFrame.xml
 # a child cannot be declared before its parent — the reference splits it the same way and for the
 # same reason (its FrameXML.toc has RaidFrame.xml on the very next line). Decision 1549.
 RaidFrame.xml
-GossipFrame.xml
-# NOT YET on the chain, and the reason is worth keeping. `PickupMerchantItem` (1786) was the
-# last name the *gap report* wanted, the readiness probe then called the stock file CLEAN, and
-# both were right about what they measure and wrong about the window: the stock row's `<OnEnter>`
-# calls `ShoppingTooltip1:SetMerchantCompareItem(...)`, which we do not have. That is a METHOD,
-# and the gap report only reads bare `Name(` globals — see 1787, which fixes the instrument.
-# A hover would have raised in play with every check green. The swap waits on that one method.
+# ══ THE GOSSIP WINDOW — the reference's own, off the player's chain (1751) ══════════════════
+# No engine verb, no widget method, no shadowed name — all three instruments clean. It was
+# deferred once on `GossipResize` reading `GetTextHeight()` in the same repaint that sets the
+# label, our measurement being a frame late; that is what the swap tests.
+Interface\FrameXML\GossipFrame.xml
+# ══ THE VENDOR WINDOW — the reference's own, off the player's chain (1751) ══════════════════
+# It took three things, in this order: `PickupMerchantItem` (the vendor cursor, 1786), the
+# `BenillaMoney_*` coin kit moving out to MoneyFrame.xml where eight other windows can reach it
+# without loading this one, and `SetMerchantCompareItem` (1791) — which the gap report could not
+# see at all until 1787 taught it to read `:Method(` sites, and which would have raised on the
+# first vendor-row hover with every check green.
 #
-# Its shared `BenillaMoney_*` coin kit HAS moved out, to MoneyFrame.xml where the reference keeps
-# money code and where eight windows can reach it without loading this one. That is why the notes
-# below now say "grouping" rather than "reuses that file's helpers".
-MerchantFrame.xml
+# That is why the notes below say "grouping" rather than "reuses that file's helpers": the
+# windows still cluster here, but nothing depends on this file any more.
+Interface\FrameXML\MerchantFrame.xml
 # The mail window (decision 0544 P1/P2): the mailbox inbox, open-letter, and send tab over
 # the Era mail API (`benilla-ui/src/script/mail.rs`) + `crate::ui_mail`'s feed/drain. Kept
 # beside MerchantFrame in the NPC-window cluster; its postage/enclosed/COD coin displays use
@@ -862,9 +884,18 @@ KeyBindingsPage.xml
 # (all far above); sits right before GameMenuFrame so the menu — which reaches it by
 # name at click time — stays the last, outermost layer.
 OptionsFrame.xml
-# The game menu (decision 0674): the frame ESC opens, plus the CAMP/QUIT dialogs and their
-# event driver. LAST on purpose — it is the outermost layer of the shell, it depends on
-# everything it touches being loaded (UiPanels' popup engine + panel manager, MicroMenu's
-# UpdateMicroButtons, BagFrame's Disable_BagButtons), and nothing depends on it: the ESC
-# chain and the micro button both reach it by name at call time.
+# The game menu (decision 0674): the frame ESC opens. LAST on purpose — it is the outermost
+# layer of the shell, it depends on everything it touches being loaded (UiPanels' popup engine
+# + panel manager, MicroMenu's UpdateMicroButtons, BagFrame's Disable_BagButtons), and nothing
+# depends on it: the ESC chain and the micro button both reach it by name at call time.
+#
+# NOT yet on the chain, and the reason is not in the gap report: the stock file's buttons reach
+# `UIOptionsFrame`, and stock `UIParent.lua:997` indexes it — so the ESC menu drags in the whole
+# options family, the same chain `MainMenuBarMicroButtons` is deferred behind. All three columns
+# read clean because the file LOADS clean; what it needs is a sibling window, not a verb.
+#
+# Its CAMP/QUIT dialogs and their event driver HAVE moved out, to UiPanels.xml — the reference's
+# own homes (StaticPopup.lua l.564/586 for the dialogs, UIParent.lua l.304-315 for the three
+# events). The ESC menu never owned them; it was just where ours were first needed. That is one
+# less thing to move when the options family lands.
 GameMenuFrame.xml

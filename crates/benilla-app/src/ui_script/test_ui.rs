@@ -110,6 +110,28 @@ fn read(req: &str) -> Option<Vec<u8>> {
 ///   constant by hand would pass and teach nothing about the real load.
 ///
 /// Needs client data, like [`BAG_UI`]: open with `benilla_formats::wow_data_or_skip!()`.
+/// What the **vendor window** needs before `Interface\FrameXML\MerchantFrame.xml` will load and
+/// behave — the same shape as [`BAG_UI`] and [`LOOT_UI`], and it grew for 1751 the same way.
+///
+/// The two that fail in the ways worth naming:
+///
+/// * **`BasicControls.xml`** — for `TEXT()`, the reference's identity-function wrapper, which
+///   stock `MerchantFrame.lua:70` calls while building every row. Absent, it raises on the first
+///   `MerchantFrame_UpdateMerchantInfo`, which is the first thing the window does when it shows.
+/// * **`Interface\FrameXML\ItemButtonTemplate.xml`** — the stock rows' `$parentItemButton`
+///   inherits it, and a missing template is a loader *warning*: the rows load clean with no art.
+///
+/// Needs client data: open with `benilla_formats::wow_data_or_skip!()`.
+pub(super) const MERCHANT_UI: &[&str] = &[
+    "Interface\\FrameXML\\GlobalStrings.lua",
+    "Fonts.xml",
+    "BasicControls.xml", // TEXT()
+    "Interface\\FrameXML\\ItemButtonTemplate.xml",
+    "MoneyFrame.xml",
+    "UiPanels.xml",
+    "GameTooltip.xml", // app load order: tooltip before merchant
+];
+
 pub(super) const LOOT_UI: &[&str] = &[
     "Interface\\FrameXML\\GlobalStrings.lua",
     "Fonts.xml", // ITEM_QUALITY_COLORS — the row-name palette

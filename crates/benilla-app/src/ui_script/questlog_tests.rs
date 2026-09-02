@@ -85,7 +85,7 @@ fn shipped_questlog_frame_loads_clean() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
     // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
@@ -106,7 +106,7 @@ fn shipped_questlog_frame_drives_end_to_end() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
     // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
@@ -290,7 +290,7 @@ fn shift_click_toggles_the_watch_checkbox_and_the_tracker_hud() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
     // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
@@ -410,7 +410,7 @@ fn watch_guards_no_op_without_erroring() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\UIErrorsFrame.xml"); // the guards' red-line surface
                                                             // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
                                                             // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
@@ -504,7 +504,7 @@ fn progress_auto_watches_for_five_minutes() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
     // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
@@ -566,7 +566,7 @@ fn the_auto_watch_flag_is_the_references_uvar_and_gates_the_watch() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
     // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
@@ -605,7 +605,7 @@ fn empty_quest_log_hides_rows_and_disables_abandon() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
     // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
@@ -655,7 +655,7 @@ fn reward_rows_follow_the_refs_two_per_row_layout() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
     // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
@@ -811,7 +811,7 @@ fn overflowing_detail_content_clips_to_the_scrollframe_rect() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
     // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
@@ -873,7 +873,7 @@ fn wheel_over_the_detail_pane_changes_vertical_scroll() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
     // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
@@ -919,7 +919,7 @@ fn selection_change_resets_detail_scroll_but_a_quest_log_update_refresh_does_not
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
     // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
@@ -982,7 +982,7 @@ fn reward_row_hover_serves_the_shared_item_tooltip() {
     // Fonts.xml alone is the source now. Formerly: it
     // needs the dropdown kit its GroupLootDropDown initializes against (benilla.toc l.64 vs 383).
     load_xml(&s, "UIDropDownMenu.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
     // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
@@ -1116,7 +1116,7 @@ fn reward_rows_preview_and_post_and_a_plain_click_stays_inert() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
     // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
@@ -1196,7 +1196,7 @@ fn shift_click_on_a_title_posts_the_quest_name_with_chat_open_and_watches_with_i
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
     // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
@@ -1287,7 +1287,7 @@ fn share_quest_needs_both_a_sharable_selection_and_a_party() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
     // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
@@ -1361,7 +1361,7 @@ fn share_quest_is_dark_on_an_empty_log_even_in_a_party() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
     // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
@@ -1389,7 +1389,7 @@ fn share_quest_click_queues_the_selected_quests_id() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
     // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar

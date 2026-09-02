@@ -31,7 +31,7 @@ const ROOM_UI: &[&str] = &[
     "UIDropDownMenu.xml",
     "UnitPopup.xml",
     "Interface\\FrameXML\\ItemRef.xml",
-    "MerchantFrame.xml",
+    "Interface\\FrameXML\\MerchantFrame.xml",
     "Interface\\FrameXML\\StackSplitFrame.xml",
     "DressUpFrame.xml",
     "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
