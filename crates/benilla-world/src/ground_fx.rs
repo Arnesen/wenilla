@@ -260,6 +260,7 @@ pub(crate) fn update_ground_fx_decals(
                 anchor: decal.center,
                 bias: crate::sky_order::Rung::GROUND_FX,
                 raster_bias: crate::sky_order::Rung::GROUND_FX as i32,
+                raster_slope: 0.0,
                 cam_relative: false,
                 main_entity: entity,
                 light: None,

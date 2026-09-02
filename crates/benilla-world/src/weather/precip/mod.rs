@@ -663,6 +663,7 @@ fn push_precip(
         anchor: cam_pos,
         bias: 0.0,
         raster_bias: 0,
+        raster_slope: 0.0,
         // Streaks, patters and mist are all centimetre-scale or bigger, so absolute world verts
         // cost them nothing; the flake draw below overrides this (its quads are millimetres).
         cam_relative: false,

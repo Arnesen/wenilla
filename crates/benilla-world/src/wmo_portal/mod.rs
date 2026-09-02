@@ -161,9 +161,7 @@ impl WmoGroupVis {
     /// fail-open: a missing bit here must not paint a room's fog onto the open world, and the scene
     /// fog is what every un-gated surface already wears.
     pub fn interior_fogged_by(&self, inst: &WmoPortalInstance) -> bool {
-        self.groups
-            .iter()
-            .any(|&g| inst.interior_fog.get(g as usize).copied().unwrap_or(false))
+        self.groups.iter().any(|&g| inst.fogs_group(g))
     }
 }
 
@@ -240,6 +238,21 @@ pub struct WmoPortalInstance {
     /// the room is already what the liquid query carries ([`crate::liquid::LiquidClaim`]). Empty on
     /// a placement spawned before its model resolved.
     pub flooded: Vec<Option<benilla_formats::LiquidKind>>,
+}
+
+impl WmoPortalInstance {
+    /// **Is one group on this frame's interior-fog chain?** — the client's `[0xca7f00]` read for a
+    /// single group, which is the grain every consumer of the gate actually asks at: a WMO piece
+    /// ORs it over the groups that name it ([`WmoGroupVis::interior_fogged_by`]), and a unit asks
+    /// it of the one room its light node attached to (`crate::interior`, the `[P+0x98]` conjunct
+    /// of decision 1792 §4). A group past the set reads FALSE — see `interior_fogged_by` for why
+    /// this one fails closed where `drawn_by` fails open.
+    pub fn fogs_group(&self, group: u16) -> bool {
+        self.interior_fog
+            .get(group as usize)
+            .copied()
+            .unwrap_or(false)
+    }
 }
 
 /// One WMO **room**: a placed building's instance entity plus the absolute group index inside it.

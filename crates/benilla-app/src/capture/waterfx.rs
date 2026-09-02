@@ -8,6 +8,13 @@
 //! `WOW_WFX_AGE` (s of motion before the shot), `WOW_WFX_DEPTH` (yd below the surface; > ~0.8
 //! also exercises the step-in one-shot), camera `WOW_WFX_AZ`/`EL`/`DIST`. Not a golden scenario —
 //! output depends on the knobs.
+//!
+//! **`WOW_WFX_AT=x,y,z` wades the dummy in the REAL world instead** (`z` = the liquid surface
+//! height there, which `benilla-formats --example water_here` prints). The synthetic lattice and
+//! backdrop stand down and the rig wades in the streamed ADT/WMO liquid at that pin — which is the
+//! only way to see the two things a synthetic square of water cannot show: how a patch **clips at a
+//! real bank**, and how it **sorts against the neighbouring water chunks** (B348 — one square of
+//! water has no neighbour to be painted over by). `WOW_MAP` picks the map.
 
 use bevy::prelude::*;
 
@@ -42,6 +49,10 @@ pub(crate) struct WaterFxView {
     pub(crate) center: [f32; 3],
     /// Feet depth below the surface (yd) — must land inside the wading gate.
     pub(crate) depth: f32,
+    /// Wade in the **real** streamed liquid at [`Self::center`] (`WOW_WFX_AT`) rather than over the
+    /// synthetic lattice: no backdrop, no fixture water, just the dummy. A real shoreline is the
+    /// only rig that exercises bank clipping and multi-chunk sorting.
+    pub(crate) live: bool,
 }
 
 /// Marks the rig's entities (spawn-once guard).
@@ -70,6 +81,13 @@ pub(crate) fn spawn(
         return;
     }
     let [cx, cy, surf] = view.center;
+
+    if view.live {
+        spawn_dummy(&mut commands, &view, cx, cy, surf);
+        state.attached_at = Some(time.elapsed_secs());
+        info!("waterfx: rig armed in LIVE water at ({cx}, {cy}, {surf})");
+        return;
+    }
 
     // A big flat mid-gray "water body" backdrop 0.15 yd under the surface, so the additive foam
     // reads against a stable tone (the real liquid shader is beside the point here).
@@ -111,8 +129,25 @@ pub(crate) fn spawn(
         Transform::IDENTITY,
     ));
 
-    // The wading dummy: a plain streamed-unit shape (no display id, visual pre-attached so the
-    // entity subsystem never gives it a fallback cube over the foam).
+    spawn_dummy(&mut commands, &view, cx, cy, surf);
+    state.attached_at = Some(time.elapsed_secs());
+    info!(
+        "waterfx: rig armed (mode {}, speed {}, depth {}, age {})",
+        match view.mode {
+            WfxMode::Ring => "ring",
+            WfxMode::Wake => "wake",
+            WfxMode::Turn => "turn",
+        },
+        view.speed,
+        view.depth,
+        view.age
+    );
+}
+
+/// The wading dummy: a plain streamed-unit shape (no display id, visual pre-attached so the entity
+/// subsystem never gives it a fallback cube over the foam). A wake starts far enough back that its
+/// trail ENDS at the rig centre after `age` seconds.
+fn spawn_dummy(commands: &mut Commands, view: &WaterFxView, cx: f32, cy: f32, surf: f32) {
     let start_x = if view.mode == WfxMode::Wake {
         cx - view.speed * view.age
     } else {
@@ -140,18 +175,6 @@ pub(crate) fn spawn(
         crate::entities::VisualAttached,
         Transform::from_translation(wow_to_bevy([start_x, cy, surf - view.depth])),
     ));
-    state.attached_at = Some(time.elapsed_secs());
-    info!(
-        "waterfx: rig armed (mode {}, speed {}, depth {}, age {})",
-        match view.mode {
-            WfxMode::Ring => "ring",
-            WfxMode::Wake => "wake",
-            WfxMode::Turn => "turn",
-        },
-        view.speed,
-        view.depth,
-        view.age
-    );
 }
 
 /// Drive the dummy each frame: translate (wake) or spin (turn) until the age elapses; the foam

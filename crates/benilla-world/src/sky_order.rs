@@ -123,6 +123,22 @@ pub(crate) const FAR_SIDE_BIAS: f32 = -4.0e4;
 /// `StandardMaterial` base, so it IS also a depth-test bias — ~0.24% depth pull, half of what
 /// the nameplates ship at +4e4; the water-noon/name-water capture diffs are the shoreline check).
 pub(crate) const WATER_BIAS: f32 = -2.0e4;
+/// **The water pass's own foam** — `CWater0Ripple`'s wade wake / standing ring, which the reference
+/// draws INSIDE the water group and AFTER every liquid queue has drained (`0x6816d0`: ocean → river
+/// → WMO liquid → foam). So foam is unconditionally over every water surface in the frame and still
+/// under the near-side world transparents that follow the pass.
+///
+/// It rode [`WATER_BIAS`]` + 1.0` until B348: `+1` is a *coplanar* tie-break, and the thing it has to
+/// beat is not one surface but the whole water band. A water chunk's key is `WATER_BIAS + its own
+/// view-z`, so the chunk one lattice over — 33 yd nearer the eye — outranks a foam patch by ~33,
+/// thirty times the tie-break, and paints over it: the director's "the wake goes dull, like another
+/// layer without the effect is over it". A rung, not an epsilon, is the fix, and the window is
+/// arithmetic: above every water key (`WATER_BIAS` + 0) even from the far plane, below every
+/// unbiased near-side transparent (view-z ≥ [`WORLD_VIEW_Z_FLOOR`]) even at the eye — i.e.
+/// `(WATER_BIAS − WORLD_VIEW_Z_FLOOR, WORLD_VIEW_Z_FLOOR)` = `(−1.7e4, −3e3)`, taken centred with
+/// 7e3 of margin at each end. Both ends are asserted below; the blanket 1e4 does not fit a 1.4e4
+/// window and is not claimed (the decal band's precedent).
+pub(crate) const FOAM_BIAS: f32 = -1.0e4;
 /// The sun/moon glare quads — the frame's last render (`0x483740` tail): over the clouds and the
 /// rain, under the nameplates; the z-buffer (their forced far depth, `celestial.wgsl`) is what
 /// occludes them. Only ~6× the far plane, not ~10⁵: a rung this far up is also a rasterizer bias
@@ -241,6 +257,37 @@ impl Rung {
     /// every zoom ≥1 yd and stays centimetre-order at 30 yd. Sizing pinned by
     /// `raised_bias_dominates_the_bake_residual` (particles/render.rs).
     pub const SHADOW_RASTER: i32 = 32768;
+
+    /// **The wade-foam decal's rasterizer settle — the reference's own, both halves** (VERIFIED,
+    /// wow-re `terrain/scratch/foam-decal-depth-and-drain-slot.md` §3; folded back as 1809).
+    ///
+    /// `0x68fd0f` arms EGxRs id `0` for the foam draw, and arming that id non-zero is what issues
+    /// the client's sole `glPolygonOffset` — `factor` a hardcoded `0xc0800000` = **−4.0**
+    /// (`0x59bf0a`, in capability arm `0x41`, whose only image-wide call site is inside the id-`0`
+    /// applicator), `units` = `footstepBias(0.125) × [0x810390]` ⇒ **−8.0001**. So the reference
+    /// settles this decal with a **slope-scaled** term plus a near-zero constant, which is the
+    /// right instrument and not an accident: a near-horizontal decal seen at a grazing angle has a
+    /// depth gradient a constant cannot follow, and the shoreline is exactly that view.
+    ///
+    /// **The signs invert here.** GL depth runs 0 = near, so its negative offset pulls toward the
+    /// eye; ours is reversed-Z (`CompareFunction::GreaterEqual`, near = 1), where toward the eye is
+    /// *larger* depth — so both terms are positive. [`DECAL_RASTER`](Rung::DECAL_RASTER) being
+    /// positive for the same job corroborates the convention independently.
+    ///
+    /// **Two things here are ours, not transcribed.** `factor` multiplies the primitive's *window*
+    /// depth slope, and reversed-Z gives a plane a different gradient than GL's mapping does, so
+    /// 4.0 is the reference's number in a frame where it means something slightly different.
+    /// And the constant is in ULPs of a **float** depth buffer (per-primitive, the quantisation
+    /// 1806 is about) rather than GL's fixed `2⁻²⁴` — same order, not the same unit. The client's
+    /// *D3D* backend arms no slope term at all and compensates with a flat bias ~256× the GL
+    /// constant; which of the two encodings is canonical turns on the `gxApi` device-identity
+    /// question, which is open on wow-re's `gx` board. The GL shape is ported because it is the
+    /// one that is *correct* in any depth format, and because a flat constant is described at the
+    /// bytes as standing in for the missing slope term.
+    pub const FOAM_RASTER: i32 = 8;
+    /// The slope-scale half of [`FOAM_RASTER`](Rung::FOAM_RASTER) — see its doc for the bytes,
+    /// the sign inversion, and what is ported vs transcribed.
+    pub const FOAM_RASTER_SLOPE: f32 = 4.0;
     /// **World text** — above the celestial glare, so a flare never washes a nameplate, and above
     /// every sky rung. The reference draws its world text late in the frame (decision 0519).
     /// Small on purpose: 6× the far plane is all the ordering needs, and this same field doubles
@@ -268,12 +315,22 @@ const _: () = {
     assert!(FAR_SIDE_BIAS - CLOUDS_BIAS > 1.0e4);
     assert!(WATER_BIAS - FAR_SIDE_BIAS > 1.0e4);
     assert!(-3.0e3 - WATER_BIAS > 1.0e4); // world view-z floor = −far (the ~3 km projection) stays above
+                                          // Foam sits in the water pass, over every liquid surface and under the near-side default,
+                                          // whatever the two draws' distances are (B348).
+    assert!(FOAM_BIAS + WORLD_VIEW_Z_FLOOR - WATER_BIAS > 1.0e3);
+    assert!(WORLD_VIEW_Z_FLOOR - FOAM_BIAS > 1.0e3);
     assert!(Rung::GROUND_FX - CLOUDS_BIAS > 1.0e4);
     assert!(GLARE_BIAS - Rung::GROUND_FX > 1.0e4);
     assert!(Rung::NAMEPLATE - GLARE_BIAS > 1.0e4);
     // The two raster margins are their own axis (B131) — not comparable to the sort rungs above,
     // only to zero and to each other: the shadow's is the raised one.
     assert!(Rung::SHADOW_RASTER > Rung::DECAL_RASTER && Rung::DECAL_RASTER > 0);
+    // The foam's settle is the reference's own and is deliberately the SMALL one: its work is done
+    // by the slope term, which the other three decal lanes do not carry (their own arming is
+    // unread — see FOAM_RASTER). Both halves pull toward the eye under reversed-Z, so both are
+    // positive; a negative here would push the decal INTO its receiver.
+    assert!(Rung::FOAM_RASTER > 0 && Rung::FOAM_RASTER < Rung::DECAL_RASTER);
+    assert!(Rung::FOAM_RASTER_SLOPE > 0.0);
 
     // ─── The pre-water decal band (B347, 1785/1789) ─────────────────────────────────────────
     // Internally ordered as the reference's frame emits them — ring then shadow, both from

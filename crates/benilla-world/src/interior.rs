@@ -241,6 +241,12 @@ pub struct ParticleLight(pub [f32; 3]);
 #[derive(Component)]
 pub struct InteriorAnchor {
     law: AppliedLaw,
+    /// The room the law's own attach ray claimed — `None` on the exterior law. It is the key the
+    /// per-frame interior-FOG gate is asked at, which is why a settled anchor keeps it: the gate's
+    /// answer moves with the CAMERA, so an anchor that never rays again still needs its room.
+    room: Option<crate::wmo_portal::WmoRoom>,
+    /// The standing fog verdict for that room, re-read every frame (see [`anchor_room_fogged`]).
+    fog: bool,
     /// Anchor position at the last down-ray + the residency generation then — the re-test gate.
     last_pos: Vec3,
     generation: u32,
@@ -290,6 +296,11 @@ pub struct InteriorLit {
     /// Last applied law — the part's last-written record (the anchor's [`InteriorAnchor`] is the
     /// authority): the write gate, and [`Self::is_bake`]'s source. `None` until first written.
     applied: Option<AppliedLaw>,
+    /// The [`crate::mesh_tag::INTERIOR_FOG_BIT`] as last written, beside the law rather than inside
+    /// it: the two are decided by different questions (the law by where this part STANDS, the fog
+    /// by whether that room is on the camera's chain this frame — decision 1792 §4), so a part can
+    /// need a rewrite for one with the other unchanged. Meaningless while `applied` is `None`.
+    fogged: bool,
 }
 
 impl InteriorLit {
@@ -343,6 +354,7 @@ impl InteriorLit {
             kind,
             exterior,
             applied: None,
+            fogged: false,
         }
     }
 
@@ -359,6 +371,7 @@ impl InteriorLit {
             kind,
             exterior,
             applied: Some(AppliedLaw::Bake(0)),
+            fogged: true,
         }
     }
 }
@@ -398,7 +411,15 @@ impl Plugin for InteriorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<WmoResidency>()
             .init_resource::<InteriorReauthor>()
-            .add_systems(Update, classify_entity_interior)
+            // **After the flood**, like every other reader of the per-group gate
+            // (`model_render::ModelVisSet`): since the interior-FOG half of a part's channel is
+            // `[0xca7f00]` (decision 1792 §4), classifying before the flood would answer a
+            // camera-move with last frame's rooms. The ray half wants the same order anyway — the
+            // placements it rays are the ones this frame's residency published.
+            .add_systems(
+                Update,
+                classify_entity_interior.after(crate::wmo_portal::WmoPvsSet),
+            )
             .add_observer(enqueue_on_fade_latch);
     }
 }
@@ -434,7 +455,7 @@ pub fn classify_entity_interior(
     time: Res<Time>,
     residency: Res<WmoResidency>,
     wmos: Res<Assets<WmoModel>>,
-    instances: Query<&WmoPortalInstance>,
+    instances: Query<(Entity, &WmoPortalInstance)>,
     streamer: Res<TerrainStreamer>,
     adt_tiles: Res<Assets<AdtTile>>,
     lighting: Res<crate::lighting::WowLighting>,
@@ -470,14 +491,7 @@ pub fn classify_entity_interior(
     // no fight. Excluding them is what left a streamed indoor entity with no law at all for the
     // whole 2 s ramp, so it appeared under exterior light and swapped to its room's in one frame
     // at the latch.
-    mut parts: Query<(
-        &mut InteriorLit,
-        &mut MeshMaterial3d<WowModelMaterial>,
-        &mut MeshTag,
-        Option<&crate::model_fade::FadeMaterials>,
-        Has<RenderFade>,
-        Has<PendingAppearFade>,
-    )>,
+    mut parts: PartWrite,
 ) {
     let _t0 = std::time::Instant::now();
     let (mut n_anchors, mut n_resolved, mut n_written) = (0usize, 0usize, 0usize);
@@ -531,6 +545,16 @@ pub fn classify_entity_interior(
                         }
                     }
                 }
+                // The law is settled; the FOG is not. Its gate is the camera's chain, not this
+                // anchor's position (decision 1792 §4) — a unit standing perfectly still leaves
+                // and rejoins its building's MFOG as the camera walks between rooms — so the one
+                // thing a settled anchor still re-reads is this bit. A compare per anchor, and a
+                // part write only on the frames the verdict actually moves.
+                let fog = anchor_room_fogged(state.room, &instances);
+                if state.fog != fog {
+                    state.fog = fog;
+                    n_written += write_anchor_parts(state.law, fog, lit_parts, &mut parts);
+                }
                 continue;
             }
         }
@@ -563,7 +587,7 @@ pub fn classify_entity_interior(
         n_resolved += 1;
         let _r = std::time::Instant::now();
         let (attach, attach_at) = attach_anchor(containment, bake_center, anchor_t);
-        let law = resolve_anchor_law(
+        let (law, room) = resolve_anchor_law(
             &mut commands,
             &mut probes,
             &wmos,
@@ -580,11 +604,14 @@ pub fn classify_entity_interior(
             seated,
         );
         resolve_us += _r.elapsed().as_secs_f32() * 1e6;
+        let fog = anchor_room_fogged(room, &instances);
         let kind_bake = bake.is_some();
         let changed = match state.as_deref_mut() {
             Some(state) => {
-                let changed = state.law != law;
+                let changed = state.law != law || state.fog != fog;
                 state.law = law;
+                state.room = room;
+                state.fog = fog;
                 state.last_pos = pos;
                 state.generation = residency.generation;
                 state.kind_bake = kind_bake;
@@ -594,6 +621,8 @@ pub fn classify_entity_interior(
                 // `try_insert`: the anchor may carry a same-frame despawn already queued.
                 commands.entity(anchor).try_insert(InteriorAnchor {
                     law,
+                    room,
+                    fog,
                     last_pos: pos,
                     generation: residency.generation,
                     kind_bake,
@@ -632,9 +661,22 @@ pub fn classify_entity_interior(
             // whose batches are all unlit registers zero parts and is here entirely on its lit
             // emitters, and "0 parts / 0 emitters" is impossible — so the pair says which
             // consumer put this node in front of the classifier, which is otherwise invisible.
+            // The ROOM and its fog gate ride the same line as the law, because since 1792 §5 they
+            // are the other half of what a part's channel says: "INTERIOR matte" alone cannot
+            // distinguish a unit wearing its building's MFOG from one on the scene fog two rooms
+            // out, and that difference is the whole of B335's colour.
+            let room = match room {
+                Some(r) => format!(
+                    " room g{} of {:?} · fog {}",
+                    r.group,
+                    r.instance,
+                    if fog { "INTERIOR" } else { "scene (off-chain)" }
+                ),
+                None => String::new(),
+            };
             eprintln!(
                 "[interior] t {:.2} anchor {anchor:?} ({} parts, {} emitters) at \
-                 ({:.1}, {:.1}, {:.1}) {} probe ({:.1}, {:.1}, {:.1}) -> {}",
+                 ({:.1}, {:.1}, {:.1}) {} probe ({:.1}, {:.1}, {:.1}) -> {}{room}",
                 time.elapsed_secs(),
                 lit_parts.map_or(0, |p| p.len()),
                 lit_emitters.map_or(0, |e| e.len()),
@@ -655,20 +697,7 @@ pub fn classify_entity_interior(
                 }
             );
         }
-        for part in lit_parts.into_iter().flat_map(LitParts::iter) {
-            if let Ok((mut lit, mut material, mut tag, fm, ramping, pending)) = parts.get_mut(part)
-            {
-                let fade = fm.filter(|_| ramping || pending);
-                n_written += usize::from(write_part_law(
-                    law,
-                    &mut lit,
-                    &mut material,
-                    &mut tag,
-                    false,
-                    fade,
-                ));
-            }
-        }
+        n_written += write_anchor_parts(law, fog, lit_parts, &mut parts);
     }
     // Drain the convergence queue: each entry re-authors from its anchor's standing law. Forced
     // through the part's change gate — the enqueuing edges (fade latch, zoom release) mean a
@@ -696,6 +725,7 @@ pub fn classify_entity_interior(
         }
         n_written += usize::from(write_part_law(
             state.law,
+            state.fog,
             &mut lit,
             &mut material,
             &mut tag,
@@ -738,6 +768,49 @@ pub fn classify_entity_interior(
     }
 }
 
+/// The classifier's part-write query: a part's law record, the material and tag the law authors,
+/// and the fade state that picks the material's blend twin. Named because both the system and its
+/// shared write loop ([`write_anchor_parts`]) take it.
+type PartWrite<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut InteriorLit,
+        &'static mut MeshMaterial3d<WowModelMaterial>,
+        &'static mut MeshTag,
+        Option<&'static crate::model_fade::FadeMaterials>,
+        Has<RenderFade>,
+        Has<PendingAppearFade>,
+    ),
+>;
+
+/// Author every part of one anchor from its standing `(law, fog)` — the classifier's ONE part-write
+/// loop, shared by the law resolve and by the per-frame fog gate, so the two can never write the
+/// channel differently. Returns how many parts actually took a write.
+fn write_anchor_parts(
+    law: AppliedLaw,
+    fog: bool,
+    lit_parts: Option<&LitParts>,
+    parts: &mut PartWrite,
+) -> usize {
+    let mut written = 0;
+    for part in lit_parts.into_iter().flat_map(LitParts::iter) {
+        if let Ok((mut lit, mut material, mut tag, fm, ramping, pending)) = parts.get_mut(part) {
+            let fade = fm.filter(|_| ramping || pending);
+            written += usize::from(write_part_law(
+                law,
+                fog,
+                &mut lit,
+                &mut material,
+                &mut tag,
+                false,
+                fade,
+            ));
+        }
+    }
+    written
+}
+
 /// Write one part's material + tag for `law` — the single place a part's channel is authored.
 /// Change-gated on the part's last-written record unless `force` (a transient author — the zoom
 /// feather — overwrote the channel while `applied` stayed current). Returns whether it wrote.
@@ -745,13 +818,15 @@ pub fn classify_entity_interior(
 /// The tag: the Bake law's payload carries the probe SLOT in its bits-6..=18 field; the other laws
 /// reset to the plain exterior payload (shade byte 0 — `entity_shade` runs after the classifier and
 /// re-asserts the ramped intensity byte the same frame; it skips only Bake parts). Both writes
-/// carry the tag's **alpha** field through, so a law change lands cleanly mid-fade. BOTH indoor
-/// laws carry the INTERIOR_FOG_BIT (Bake bakes it in): the reference fogs a unit by the unit's OWN
-/// interior classification, so an indoor day/night character keeps the room's fog — never the
-/// storm's near veil — while the exterior law returns it to the scene fog (wow-re
-/// `m2-unit-interior-fog.md`; the director's corridor-vs-porch walk-out). Every arm carries the
-/// part's rig field through (decision 0720): a skinned part keeps its palette across the
-/// indoor/outdoor transition.
+/// carry the tag's **alpha** field through, so a law change lands cleanly mid-fade. Every arm
+/// carries the part's rig field through (decision 0720): a skinned part keeps its palette across
+/// the indoor/outdoor transition.
+///
+/// `fog` is the INTERIOR_FOG_BIT, decided by the CALLER and orthogonal to the law: the reference
+/// fogs a unit by its own interior classification **and** by whether the room it attached to is on
+/// the camera's `[0xca7f00]` chain this frame — `[node+0xc]&2` is necessary, `[P+0x98] != 0` is the
+/// other half (decision 1792 §4). An exterior-law part is never fogged, which the caller asserts by
+/// passing `false`; that is the only coupling left between the two.
 ///
 /// `fade` is `Some` only while an appear/despawn ramp owns the part (live **or** pending), and it
 /// selects the law's BLEND twin instead of its steady material (decision 0755). It is the same
@@ -765,16 +840,18 @@ pub fn classify_entity_interior(
 /// exterior material, where the shader decodes those bits as a ground-shade byte.
 fn write_part_law(
     law: AppliedLaw,
+    fog: bool,
     lit: &mut InteriorLit,
     material: &mut MeshMaterial3d<WowModelMaterial>,
     tag: &mut MeshTag,
     force: bool,
     fade: Option<&crate::model_fade::FadeMaterials>,
 ) -> bool {
-    if lit.applied == Some(law) && !force {
+    if lit.applied == Some(law) && lit.fogged == fog && !force {
         return false;
     }
     lit.applied = Some(law);
+    lit.fogged = fog;
     let want = match fade {
         Some(fm) => fm.material_for(Some(&*lit), true).clone(),
         None => lit.steady_material().clone(),
@@ -782,14 +859,34 @@ fn write_part_law(
     if material.0 != want {
         material.0 = want;
     }
-    tag.0 = match law {
+    let payload = match law {
         AppliedLaw::Bake(slot) => crate::mesh_tag::with_interior_probe(tag.0, slot),
-        AppliedLaw::Matte => {
-            crate::mesh_tag::INTERIOR_FOG_BIT | crate::mesh_tag::with_exterior_reset(tag.0)
-        }
-        AppliedLaw::Exterior => crate::mesh_tag::with_exterior_reset(tag.0),
+        AppliedLaw::Matte | AppliedLaw::Exterior => crate::mesh_tag::with_exterior_reset(tag.0),
     };
+    tag.0 = crate::mesh_tag::with_interior_fog(payload, fog);
     true
+}
+
+/// **Is this anchor's room on the camera's interior-fog chain this frame?** — the `[P+0x98]` half
+/// of a unit's fog lane (decision 1792 §4), resolved through the same chain the room-visibility
+/// leg walks: anchor record → placement instance → the flood's per-group gate.
+///
+/// Fails CLOSED at every seam (no room, despawned placement, a group past the set), which is
+/// [`crate::wmo_portal::WmoPortalInstance::fogs_group`]'s own convention: the scene fog is what
+/// every un-gated draw already wears, and a lookup miss must not paint a building's MFOG onto
+/// something the flood never placed in it. An exterior-law anchor holds no room, so it answers
+/// `false` without a lookup.
+fn anchor_room_fogged(
+    room: Option<crate::wmo_portal::WmoRoom>,
+    instances: &Query<(Entity, &WmoPortalInstance)>,
+) -> bool {
+    let Some(room) = room else {
+        return false;
+    };
+    let Ok((_, inst)) = instances.get(room.instance) else {
+        return false;
+    };
+    inst.fogs_group(room.group)
 }
 
 /// The attach and its anchor point — one choice, because `0x6a86d0`'s mode fork picks both the
@@ -827,7 +924,7 @@ fn resolve_anchor_law(
     commands: &mut Commands,
     probes: &mut PropProbes,
     wmos: &Assets<WmoModel>,
-    instances: &Query<&WmoPortalInstance>,
+    instances: &Query<(Entity, &WmoPortalInstance)>,
     streamer: &TerrainStreamer,
     adt_tiles: &Assets<AdtTile>,
     lighting: &crate::lighting::WowLighting,
@@ -838,8 +935,8 @@ fn resolve_anchor_law(
     attach_at: Vec3,
     bake_center: Option<Vec3>,
     seated: Option<u16>,
-) -> AppliedLaw {
-    let verdict = indoor_verdict_at(
+) -> (AppliedLaw, Option<crate::wmo_portal::WmoRoom>) {
+    let (verdict, claimed) = indoor_verdict_at(
         wmos,
         instances.iter(),
         streamer,
@@ -963,7 +1060,17 @@ fn resolve_anchor_law(
         }
         _ => {}
     }
-    law
+    // The room rides back with the law, but only for the indoor laws: the exterior law is the
+    // "no record" arm, and holding a room there would let the fog gate fire on a unit standing on
+    // a porch. (`claimed` is already `None` on both outdoor verdicts; the probe-table-full fallback
+    // to Matte is the one arm that keeps a room the verdict resolved.)
+    let room = claimed
+        .filter(|_| law != AppliedLaw::Exterior)
+        .map(|(instance, group)| crate::wmo_portal::WmoRoom {
+            instance,
+            group: group as u16,
+        });
+    (law, room)
 }
 
 /// Queue the Bake slot swap on `anchor`, tolerant at APPLY time: the anchor may carry a
@@ -1029,12 +1136,17 @@ mod tests {
         world.resource_mut::<PropProbes>().release(stale);
 
         let generation = world.resource::<WmoResidency>().generation;
+        // In a room whose gate is on, so the reauthored tag is the whole Bake payload — slot and
+        // fog flag together, which is what `probe_bits` names.
+        let instance = placement_with_gate(&mut world, true);
         let anchor = world
             .spawn((
                 GlobalTransform::default(),
                 PropProbeSlot(live),
                 InteriorAnchor {
                     law: AppliedLaw::Bake(live),
+                    room: Some(crate::wmo_portal::WmoRoom { instance, group: 0 }),
+                    fog: true,
                     last_pos: Vec3::ZERO, // matches the transform: the settled gate sees NO movement
                     generation,
                     kind_bake: true,
@@ -1120,6 +1232,22 @@ mod tests {
         );
     }
 
+    /// A one-group placement whose interior-fog gate is `on`/`off` this frame — the `[0xca7f00]`
+    /// half of a unit's fog lane, as something the classifier tests can actually set.
+    fn placement_with_gate(world: &mut World, gate: bool) -> Entity {
+        world
+            .spawn(WmoPortalInstance {
+                handle: Handle::default(),
+                world_from_local: bevy::math::Affine3A::IDENTITY,
+                name_set: 0,
+                visible: vec![true],
+                interior_fog: vec![gate],
+                liquid_visited: vec![false],
+                flooded: vec![None],
+            })
+            .id()
+    }
+
     /// A part spawned onto a SETTLED anchor (the gear-swap-indoors case) takes the standing law
     /// through the `on_add` hook + drain — no law change, no anchor movement, and still the fresh
     /// part's material/tag land on the anchor's law the very next classifier run.
@@ -1129,11 +1257,14 @@ mod tests {
 
         let mut world = classifier_world();
         let generation = world.resource::<WmoResidency>().generation;
+        let instance = placement_with_gate(&mut world, true);
         let anchor = world
             .spawn((
                 GlobalTransform::default(),
                 InteriorAnchor {
                     law: AppliedLaw::Matte,
+                    room: Some(crate::wmo_portal::WmoRoom { instance, group: 0 }),
+                    fog: true,
                     last_pos: Vec3::ZERO,
                     generation,
                     kind_bake: false,
@@ -1156,8 +1287,70 @@ mod tests {
         assert_ne!(
             world.get::<MeshTag>(part).unwrap().0 & crate::mesh_tag::INTERIOR_FOG_BIT,
             0,
-            "the day/night law carries the room's fog bit"
+            "the day/night law in a room whose gate is on carries the room's fog bit"
         );
+    }
+
+    /// **The `[P+0x98]` conjunct** (decision 1792 §4): standing indoors is not enough. A settled
+    /// anchor whose room drops off the camera's interior-fog chain must return to the SCENE fog
+    /// without moving an inch and without changing its light law — the camera walked, not the
+    /// unit. This is B335's own artifact seen from one room further in: at Shadowfang the walls of
+    /// a room across the courtyard already read the scene fog (1787), and before this the mob
+    /// standing in it did not.
+    #[test]
+    fn a_settled_anchor_follows_its_rooms_fog_gate_without_moving() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = classifier_world();
+        let generation = world.resource::<WmoResidency>().generation;
+        let instance = placement_with_gate(&mut world, true);
+        let anchor = world
+            .spawn((
+                GlobalTransform::default(),
+                InteriorAnchor {
+                    law: AppliedLaw::Matte,
+                    room: Some(crate::wmo_portal::WmoRoom { instance, group: 0 }),
+                    fog: true,
+                    last_pos: Vec3::ZERO, // settled: the walk never re-rays this anchor
+                    generation,
+                    kind_bake: false,
+                },
+            ))
+            .id();
+        let part = world
+            .spawn((
+                InteriorLit::new(InteriorKind::Matte, Handle::default()),
+                ClassifiedBy(anchor),
+                MeshMaterial3d::<WowModelMaterial>(Handle::default()),
+                MeshTag(0),
+            ))
+            .id();
+        world.run_system_once(classify_entity_interior).unwrap();
+        let fog_of = |world: &World, part| {
+            world.get::<MeshTag>(part).unwrap().0 & crate::mesh_tag::INTERIOR_FOG_BIT != 0
+        };
+        assert!(fog_of(&world, part), "gate on ⇒ the room's fog");
+
+        // The camera moves out of the chain; the anchor does not move at all.
+        world
+            .get_mut::<WmoPortalInstance>(instance)
+            .unwrap()
+            .interior_fog[0] = false;
+        world.run_system_once(classify_entity_interior).unwrap();
+        assert!(!fog_of(&world, part), "gate off ⇒ back on the scene fog");
+        assert_eq!(
+            world.get::<InteriorLit>(part).unwrap().applied,
+            Some(AppliedLaw::Matte),
+            "and the LIGHT law is untouched — the unit is still standing in the same room"
+        );
+
+        // …and back, so the gate is a live read rather than a one-way latch.
+        world
+            .get_mut::<WmoPortalInstance>(instance)
+            .unwrap()
+            .interior_fog[0] = true;
+        world.run_system_once(classify_entity_interior).unwrap();
+        assert!(fog_of(&world, part), "the camera comes back into the chain");
     }
 
     /// Decision 0778: a model's BILLBOARD batch takes the same law as its mesh batches. The card
@@ -1185,6 +1378,8 @@ mod tests {
                 PropProbeSlot(slot),
                 InteriorAnchor {
                     law: AppliedLaw::Bake(slot),
+                    room: None,
+                    fog: false,
                     last_pos: Vec3::ZERO,
                     generation,
                     kind_bake: true,
@@ -1253,6 +1448,8 @@ mod tests {
                 GlobalTransform::default(),
                 InteriorAnchor {
                     law: AppliedLaw::Exterior,
+                    room: None,
+                    fog: false,
                     last_pos: Vec3::ZERO,
                     generation,
                     kind_bake: false,
@@ -1340,6 +1537,8 @@ mod tests {
                 PropProbeSlot(slot),
                 InteriorAnchor {
                     law: AppliedLaw::Bake(slot),
+                    room: None,
+                    fog: false,
                     last_pos: Vec3::ZERO, // settled: the walk skips the ray, the drain does the work
                     generation,
                     kind_bake: true,

@@ -542,6 +542,30 @@ impl MaterialExtension for LiquidExt {
     fn fragment_shader() -> ShaderRef {
         "embedded://benilla_assets/shaders/liquid.wgsl".into()
     }
+
+    /// **`WATER_BIAS` is a SORT rung; keep it out of the rasterizer** — the same split the far-side
+    /// twin and the WMO skybox make above, for the one surface that most needs it.
+    ///
+    /// The water pass has a fixed frame slot (`sky_order::WATER_BIAS`, −2e4), and the base
+    /// `StandardMaterial::specialize` packs that same f32 into `depth_stencil.bias.constant` (bevy
+    /// 0.18 `pbr_material.rs`). At −2e4 ULPs that shoves every water fragment ~0.24 % of its view
+    /// distance *away* from the eye — and the water plane is the one world surface that meets the
+    /// ground at a grazing angle over tens of yards, so a relative depth pull there does not settle
+    /// a tie, it moves the waterline. Worse, a float depth buffer's bias unit is the ULP at the
+    /// primitive's own depth, so the pull **doubles at every exponent boundary**: two water
+    /// triangles either side of one land in different buckets and their shorelines stop agreeing.
+    /// The ordering job needs none of it — the rung exists for the transparent phase's sort key.
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        if let Some(ds) = descriptor.depth_stencil.as_mut() {
+            ds.bias.constant = 0;
+        }
+        Ok(())
+    }
 }
 
 /// Per-tile splat inputs: a `texture_2d_array` of the tile's ground textures, a `texture_2d_array`

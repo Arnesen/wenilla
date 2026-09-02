@@ -638,10 +638,11 @@ impl Plugin for CapturePlugin {
                     ui: None,
                 }
             } else if name == "waterfx" {
-                // The water-foam viewer (see `water_fx::view`): a synthetic wading unit over a
-                // synthetic wet lattice, framed by a fixed orbit around the rig centre. Knobs:
-                // WOW_WFX_MODE (ring|wake|turn), WOW_WFX_SPEED (yd/s), WOW_WFX_AGE (s),
-                // WOW_WFX_DEPTH (yd), camera WOW_WFX_AZ/EL/DIST. Not a golden scenario.
+                // The water-foam viewer (see `capture::waterfx`): a wading unit over a synthetic
+                // wet lattice — or, with WOW_WFX_AT=x,y,z, in the real streamed liquid at that pin
+                // — framed by a fixed orbit around the rig centre. Knobs: WOW_WFX_MODE
+                // (ring|wake|turn), WOW_WFX_SPEED (yd/s), WOW_WFX_AGE (s), WOW_WFX_DEPTH (yd),
+                // camera WOW_WFX_AZ/EL/DIST. Not a golden scenario.
                 let knob = |k: &str, d: f32| {
                     std::env::var(k)
                         .ok()
@@ -653,9 +654,17 @@ impl Plugin for CapturePlugin {
                     Ok("turn") => waterfx::WfxMode::Turn,
                     _ => waterfx::WfxMode::Ring,
                 };
-                // Rig centre in raw WoW coords: over the Northshire ground scene, the synthetic
-                // surface a few yards above the terrain so the backdrop plane reads clean.
-                let center = [-8961.0_f32, -145.0, 95.0];
+                // Rig centre in raw WoW coords. Default: over the Northshire ground scene, the
+                // synthetic surface a few yards above the terrain so the backdrop plane reads
+                // clean. `WOW_WFX_AT=x,y,z` moves it anywhere and switches the rig to the REAL
+                // streamed liquid there (`z` = that water's surface height) — a synthetic square
+                // of water has no bank to clip against and no neighbour to be sorted against.
+                let at = std::env::var("WOW_WFX_AT").ok().and_then(|v| {
+                    let c: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+                    (c.len() == 3).then(|| [c[0], c[1], c[2]])
+                });
+                let live = at.is_some();
+                let center = at.unwrap_or([-8961.0_f32, -145.0, 95.0]);
                 let az = knob("WOW_WFX_AZ", 180.0).to_radians();
                 let el = knob("WOW_WFX_EL", 35.0).to_radians();
                 let dist = knob("WOW_WFX_DIST", 14.0);
@@ -670,11 +679,17 @@ impl Plugin for CapturePlugin {
                     age: knob("WOW_WFX_AGE", 1.5),
                     center,
                     depth: knob("WOW_WFX_DEPTH", 0.5),
+                    live,
                 })
                 .init_resource::<FxViewState>();
                 Scenario {
                     name: "waterfx",
-                    map: scenarios::MAP_AZEROTH, // the synthetic lattice sits over the Northshire slope
+                    // The synthetic lattice sits over the Northshire slope; a live rig
+                    // (`WOW_WFX_AT`) goes wherever its pin is, so its map is a knob like `vista`'s.
+                    map: std::env::var("WOW_MAP")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(scenarios::MAP_AZEROTH),
                     eye,
                     look: center,
                     minute: 720,

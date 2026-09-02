@@ -261,6 +261,8 @@ pub struct EffectDraw {
     /// the draw's verts skip the cam-relative rebase and run the world-mesh `clip_from_world`,
     /// so the depth tie the bias settles is against the same arithmetic.
     pub(crate) raster_bias: i32,
+    /// The slope-scale half of the settle — see [`EffectDrawSpec::raster_slope`].
+    pub(crate) raster_slope: f32,
     /// Are this draw's vertices **already camera-relative**? See [`EffectDrawSpec::cam_relative`].
     pub(crate) cam_relative: bool,
     /// Vertex range in [`EffectQuads::verts`] (a multiple of 4 for quads, 3 for tris).
@@ -327,6 +329,15 @@ pub struct EffectDrawSpec {
     pub anchor: Vec3,
     pub bias: f32,
     pub raster_bias: i32,
+    /// The rasterizer `DepthBiasState` **slope-scale** half of this draw's settle — the term that
+    /// scales with the primitive's own depth slope, and the one a near-horizontal decal seen at a
+    /// grazing angle actually needs (a constant cannot follow a surface whose depth gradient runs
+    /// away from the eye). `0.0` for every family with no coplanar receiver.
+    ///
+    /// It exists because the reference has one: the sole `glPolygonOffset` site (`0x59bf0a`, a
+    /// hardcoded `0xc0800000`) arms `factor = −4.0` alongside the units term whenever EGxRs id `0`
+    /// is set non-zero, which is what the foam draw's `0x68fd0f` does. 1809.
+    pub raster_slope: f32,
     /// Set when the producer has **already** written camera-relative vertices, so
     /// [`super::render`]'s rebase must skip this draw. The default (`false`) is the lane's
     /// contract: producers write ABSOLUTE world positions and the rebase subtracts the camera
@@ -391,6 +402,7 @@ impl EffectQuads {
                 anchor: spec.anchor,
                 bias: spec.bias,
                 raster_bias: spec.raster_bias,
+                raster_slope: spec.raster_slope,
                 cam_relative: spec.cam_relative,
                 range: start..end,
                 main_entity: spec.main_entity,
@@ -505,6 +517,7 @@ mod tests {
                     anchor: Vec3::ZERO,
                     bias: 0.0,
                     raster_bias: 0,
+                    raster_slope: 0.0,
                     cam_relative: false,
                     main_entity: Entity::PLACEHOLDER,
                     light: None,
@@ -602,6 +615,7 @@ impl<'w> WorldEffectDraw<'w> {
                 anchor: Vec3::ZERO,
                 bias: 0.0,
                 raster_bias: 0,
+                raster_slope: 0.0,
                 cam_relative: false,
                 main_entity: Entity::PLACEHOLDER,
                 light: None,
@@ -653,7 +667,8 @@ impl EffectBatch<'_> {
     }
 
     /// This batch's rung on the draw-order ladder: the transparent sort bias and the rasterizer
-    /// depth-bias constant (`crate::sky_order::Rung`).
+    /// depth-bias constant (`crate::sky_order::Rung`). The slope-scale half stays 0 — only the
+    /// foam lane carries one, and it builds its spec directly.
     pub fn rung(mut self, sort: f32, raster: i32) -> Self {
         self.spec.bias = sort;
         self.spec.raster_bias = raster;

@@ -613,10 +613,19 @@ fn warm_effect_lane(
             EffectBlend::Multiply,
             EffectBlend::Mod2x,
         ] {
-            for raster_bias in [
-                0,
-                benilla_world::sky_order::Rung::DECAL_RASTER,
-                benilla_world::sky_order::Rung::SHADOW_RASTER,
+            // The rasterizer settle is a PAIR — constant and slope-scale — and both halves are
+            // pipeline-key axes, so they are warmed as the pairs that actually ship, not as a
+            // cross product. The foam's is the reference's own (`Rung::FOAM_RASTER`, 1809) and is
+            // the only one carrying a slope term; a hole here is a live compile the first time
+            // anyone wades.
+            for (raster_bias, raster_slope) in [
+                (0, 0.0),
+                (benilla_world::sky_order::Rung::DECAL_RASTER, 0.0),
+                (benilla_world::sky_order::Rung::SHADOW_RASTER, 0.0),
+                (
+                    benilla_world::sky_order::Rung::FOAM_RASTER,
+                    benilla_world::sky_order::Rung::FOAM_RASTER_SLOPE,
+                ),
             ] {
                 // `lit` is a pipeline-key axis (a shader def), so BOTH arms are warmed — a hole
                 // here is a first-lit-emitter compile mid-play, which is the whole failure this
@@ -646,6 +655,7 @@ fn warm_effect_lane(
                             anchor: Vec3::ZERO,
                             bias: 0.0,
                             raster_bias,
+                            raster_slope,
                             cam_relative: false,
                             main_entity: cam,
                             light: None,

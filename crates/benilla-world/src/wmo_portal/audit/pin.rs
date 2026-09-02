@@ -7,6 +7,8 @@
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use bevy::math::{Mat4, Vec3};
 
+use super::super::seed::down_ray_claim;
+use super::super::EXTERIOR_LIT;
 use super::{
     load_subject, Site, BLACKSMITH, DEADMINES, EXTERIOR, FARGODEEP, GOLDSHIRE, IRONFORGE,
     SHADOWFANG, UNDERCITY,
@@ -627,5 +629,101 @@ fn shadowfang_courtyard_leaves_the_far_room_on_the_scene_fog() {
     assert!(
         inside_pvs.interior_fog[61],
         "control: the room seeds its own flood, so it wears the building's MFOG from inside"
+    );
+}
+
+/// **1792 §5's fixture** — the sibling case to [`shadowfang_courtyard_leaves_the_far_room_on_the_scene_fog`],
+/// one room further in. Stand *inside* g61 (the director's own "standing inside it" pin) and look
+/// back the way they came: the flood reaches three more true-interior rooms across the courtyards,
+/// and every one of them is off the interior-fog chain. Their walls take the scene fog, which is
+/// 1787 working — but a unit standing in one classifies indoors by its OWN down-ray, so before the
+/// `[P+0x98]` conjunct it wore this building's MFOG regardless. g13 is a 14x18x13 room whose centre
+/// is 91 yd from the eye, where that MFOG (start 10.7, end 106.9) is ~84 % saturated toward
+/// rgb(40,68,79) while the scene fog at map 33 noon (start 83, end 333) is ~3 %: the mob reads as a
+/// flat teal cut-out in an unfogged room.
+///
+/// The invariant this pins is that the case is REACHABLE — a visible true interior off the chain —
+/// because it is what makes the conjunct load-bearing rather than theoretical. The conjunct itself
+/// is `crate::interior`'s `a_settled_anchor_follows_its_rooms_fog_gate_without_moving`.
+#[test]
+#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
+fn shadowfang_sees_true_interiors_that_are_off_the_fog_chain() {
+    let site = SHADOWFANG;
+    let subject = load_subject(site.wmo, Some(&site));
+    let placed = subject
+        .placed
+        .as_ref()
+        .expect("the fixture needs a placement");
+    let to_local =
+        |wow: [f32; 3]| bevy_to_wow(placed.local_from_world.transform_point3(wow_to_bevy(wow)));
+    let inside = to_local([-213.90, 2236.15, 81.5]);
+    let look = to_local([-227.1, 2157.0, 83.7]);
+    let inside_bevy = placed
+        .world_from_local
+        .transform_point3(wow_to_bevy(inside));
+    let look_bevy = placed.world_from_local.transform_point3(wow_to_bevy(look));
+    let clip = Mat4::perspective_rh(crate::view::CAM_FOVY, 16.0 / 9.0, 0.1, 1000.0)
+        * Mat4::look_at_rh(inside_bevy, look_bevy, Vec3::Y);
+    let pvs = crate::wmo_portal::compute_pvs_traced(
+        &subject.model,
+        inside,
+        subject.terrain_z(inside),
+        &clip,
+        &placed.world_from_local,
+        &mut (),
+    );
+
+    assert!(
+        pvs.interior_fog[61],
+        "the camera's own room is on the chain — otherwise nothing here is being tested"
+    );
+    let off_chain: Vec<usize> = (0..subject.model.group_nav.len())
+        .filter(|&g| {
+            pvs.visible[g] && !pvs.interior_fog[g] && subject.model.group_nav[g].flags & 0x48 == 0
+        })
+        .collect();
+    // And the other half of the verdict, end to end on the real data: a unit standing in one of
+    // those rooms attaches to it. Same ray and same `0x48` mask the light classifier's attach uses
+    // (`crate::interior` → `indoor_verdict_at`), cast from a point the body occupies — so the room
+    // it claims is the key the fog gate is asked at. g13 claims g13 (indoor, off the chain ⇒ the
+    // scene fog), and the control g61 claims g61 (indoor, ON the chain ⇒ the building's MFOG).
+    let attach_room = |gi: usize| {
+        let g = &subject.model.group_nav[gi];
+        let centre = [
+            (g.bbox_min[0] + g.bbox_max[0]) * 0.5,
+            (g.bbox_min[1] + g.bbox_max[1]) * 0.5,
+            (g.bbox_min[2] + g.bbox_max[2]) * 0.5,
+        ];
+        down_ray_claim(
+            &subject.model.group_collision_tris,
+            &subject.model.group_collision_bounds,
+            &subject.model.group_collision_grids,
+            &subject.model.group_nav,
+            centre,
+            None,
+            EXTERIOR | EXTERIOR_LIT,
+        )
+        .map(|c| (c.group, c.outdoor))
+    };
+    assert_eq!(
+        attach_room(13),
+        Some((13, false)),
+        "a body standing in g13 attaches to g13 and classifies INDOORS — the light law says fog it"
+    );
+    assert!(
+        !pvs.interior_fog[13],
+        "…and its room is off the chain, so the fog it takes is the SCENE's (1792 §5's fix)"
+    );
+    assert_eq!(
+        attach_room(61),
+        Some((61, false)),
+        "the control: a body in the camera's own room attaches to it"
+    );
+
+    assert_eq!(
+        off_chain,
+        vec![1, 2, 13],
+        "three true-interior rooms are in frame across the courtyards and none is on the chain: \
+         this is the population a unit's fog gate has to answer for"
     );
 }

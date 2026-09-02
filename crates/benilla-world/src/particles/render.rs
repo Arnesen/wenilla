@@ -84,6 +84,8 @@ struct ExtractedDraw {
     anchor: Vec3,
     bias: f32,
     raster_bias: i32,
+    /// The slope-scale half of the settle — see [`super::buffer::EffectDrawSpec::raster_slope`].
+    raster_slope: f32,
     /// Vertices are already camera-relative — the prepare rebase skips this draw. See
     /// [`super::buffer::EffectDrawSpec::cam_relative`].
     cam_relative: bool,
@@ -190,6 +192,9 @@ pub struct EffectPipelineKey {
     /// keeps absolute verts and runs the mesh path's `clip_from_world`, so its depth ties
     /// against the drawn ground within the bias.
     raster_bias: i32,
+    /// The **slope-scale** half of the settle, keyed by bits because `f32` is not `Hash`/`Eq`.
+    /// Two values exist ({0.0, the foam's}), so the key space stays as small as `raster_bias`'s.
+    raster_slope_bits: u32,
     /// Does the fragment multiply by the scene's matte light? The reference decides this per
     /// emitter through a synthesized `M2Material` (`EffectDrawSpec::lit`), and it is a shader
     /// def rather than a uniform bit so the 95% unlit majority keeps the identical instruction
@@ -315,7 +320,7 @@ impl SpecializedRenderPipeline for EffectPipeline {
                 stencil: StencilState::default(),
                 bias: DepthBiasState {
                     constant: key.raster_bias,
-                    slope_scale: 0.0,
+                    slope_scale: f32::from_bits(key.raster_slope_bits),
                     clamp: 0.0,
                 },
             }),
@@ -361,6 +366,7 @@ fn extract_effects(
         anchor: d.anchor,
         bias: d.bias,
         raster_bias: d.raster_bias,
+        raster_slope: d.raster_slope,
         cam_relative: d.cam_relative,
         range: d.range.clone(),
         light: d.light.clone(),
@@ -416,6 +422,7 @@ fn queue_effects(
                     hdr: view.hdr,
                     blend: draw.blend,
                     raster_bias: draw.raster_bias,
+                    raster_slope_bits: draw.raster_slope.to_bits(),
                     lit: draw.lit,
                 },
             );
