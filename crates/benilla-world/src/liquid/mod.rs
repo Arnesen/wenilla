@@ -67,6 +67,10 @@
 //!   through. The once-a-frame askers keep the plain walk.
 //! * [`surface`] — **the Bevy render glue.** The per-kind animated materials, the two spawn paths
 //!   (MCLQ and WMO MLIQ), the flat mesh build, and the 24 fps frame cycler.
+//! * [`drift`] — **the underwater drift cloud**: the 4000-mote field the reference draws while the
+//!   camera eye is inside a liquid (decision 1814). It is here rather than under `weather` because
+//!   the reference keeps it that way too — the pool is CWorld's, not the weather manager's, and
+//!   the two share no state and no code — and because [`Underwater`] is its whole trigger.
 //!
 //! The one cross-feed runs query → lighting: `detect_submersion` publishes WHICH liquid the eye is
 //! in, and `lighting::update_time_lighting` selects the whole submerged atmosphere from it.
@@ -77,6 +81,7 @@ use bevy::prelude::*;
 use benilla_assets::materials::LiquidMaterial;
 use benilla_assets::AssetSet;
 
+mod drift;
 mod query;
 #[cfg(test)]
 mod real_data;
@@ -93,8 +98,8 @@ mod surface; // the against-real-client-files tests — they span both halves
 // terrain cells is a leg that could reach nothing at all and never show it.
 pub use query::{
     camera_claim, describe_at, liquid_at, player_claim, surfaces_at, unit_claim, water_surface_at,
-    FoamPatch, LiquidClaim, LiquidHit, LiquidSource, RoomPlacements, Underwater, WaterChunkInfo,
-    WmoPool,
+    EyeLiquid, FoamPatch, LiquidClaim, LiquidHit, LiquidSource, RoomPlacements, SubmergedEye,
+    Underwater, WaterChunkInfo, WmoPool,
 };
 pub(crate) use spatial::{maintain_water_index, WaterIndex};
 pub(crate) use surface::{
@@ -119,6 +124,7 @@ impl Plugin for LiquidPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<LiquidMaterial>::default())
             .init_resource::<Underwater>()
+            .init_resource::<SubmergedEye>()
             .init_resource::<WaterIndex>()
             // PreUpdate: surfaces stream in/out via Update-side commands, so the edge is visible
             // here the frame after — before any of that frame's consumers ask. A despawn's stale
@@ -155,5 +161,8 @@ impl Plugin for LiquidPlugin {
                     .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate)
                     .run_if(|| std::env::var_os("WOW_NO_LIQUID").is_some()),
             );
+        // The underwater drift cloud — the one thing in this subsystem that RENDERS because the
+        // eye is submerged, rather than answering where the liquid is (see the layout note above).
+        drift::register(app);
     }
 }

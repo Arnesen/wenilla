@@ -796,7 +796,7 @@
             </Layer>
         </Layers>
         <Frames>
-            <!-- The row menu's host, the FriendsFrame's own pattern (`BenillaFriendsDropDown`). The
+            <!-- The row menu's host, the FriendsFrame's own pattern (`FriendsDropDown`). The
                  reference reuses `FriendsDropDown` for this; ours is its own frame so the raid
                  menu's userData cannot collide with a friends-row menu left half-open. -->
             <Frame name="BenillaRaidDropDown" inherits="UIDropDownMenuTemplate"/>

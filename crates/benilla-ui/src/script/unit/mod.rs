@@ -163,6 +163,18 @@ pub struct UnitState {
     /// the ref's stat-tooltip lookups key on (`getglobal(strupper(class).."_STAT_TOOLTIP")` —
     /// the ref uppercases it again defensively; we store it already uppercase).
     pub class_file: Option<String>,
+    /// This unit's INVSLOT 17 is a **relic** slot rather than a ranged-weapon slot —
+    /// `UnitHasRelicSlot`'s whole answer (`0x519e50`).
+    ///
+    /// Resolved app-side off `ChrClasses.dbc` field 16, for the same reason [`Self::class_file`]
+    /// is resolved app-side: it is a static per-class column of a table this crate cannot read.
+    /// The reference gates on TYPEMASK_PLAYER before it looks at the class byte, so the feed sets
+    /// this only for a player — a creature, a pet and an unstreamed unit all leave it `false`,
+    /// which is the nil leg.
+    ///
+    /// True for exactly Paladin, Shaman and Druid in 1.12 (Libram, Totem, Idol). It was believed
+    /// here for a long time that no 1.12 class had one; see decision 1796 for how that survived.
+    pub has_relic_slot: bool,
     /// The unit's sex on the `UnitSex` scale: `2` male, `3` female (`1` = neuter/unknown). `0`
     /// (the unfilled default) reports as nil — the API's "can't tell", like [`Self::reaction`].
     /// The app maps `UNIT_FIELD_BYTES_0` byte 2 (0 male / 1 female) onto this shape.
@@ -170,6 +182,15 @@ pub struct UnitState {
     /// This token is a PLAYER character (guid family) — the unit tooltip's level line renders
     /// "Race Class (Player)" instead of the creature type (decision 0276's verified law).
     pub is_player: bool,
+    /// This token is **player-CONTROLLED** — `UNIT_FIELD_FLAGS` bit 3
+    /// (`UNIT_FLAG_PVP_ATTACKABLE 0x8`, behaviourally "player-controlled"; the same bit
+    /// `target::relations::ring_reaction`'s duel leg selects on). Wider than
+    /// [`Self::is_player`]: a player's pet and a charmed creature are player-controlled without
+    /// being players, which is exactly the distinction stock `UnitFrame_OnEnter`
+    /// (UnitFrame.lua:58) needs when it decides whether the hovered plate gets the
+    /// player-options newbie tip. `UnitIsPlayer`'s note used to call this reach a gap we did not
+    /// carry; the unit-frame migration is what closed it.
+    pub player_controlled: bool,
     /// The unit's guild membership (`GetGuildInfo(unit)`, decision 1257). `None` = guildless, or
     /// a creature, or a player whose `PLAYER_GUILDID` has not streamed yet. Filled from the
     /// PUBLIC descriptor fields 191/192 joined against the app's guild-identity cache — see
@@ -209,12 +230,16 @@ pub struct UnitState {
     pub faction_name: Option<String>,
     /// Connection to the server is live (`UnitIsConnected`) — an offline party member's portrait
     /// desaturates (decision 0434 §2/§3: the `GROUP_LIST` status byte's `0x01` online bit).
-    /// **v1 default gap, stated not hidden:** the zero value is `false`, so a snapshot built via
-    /// `..Default::default()` reports a unit disconnected unless the app sets this explicitly; the
-    /// per-frame feed must set it `true` for every *live* unit token it pushes (mirroring
-    /// [`Self::exists`]) — a pending app-side change, not yet wired as of this field's addition. A
-    /// token absent from the store (`UnitExists` false) still reports nil regardless, via the same
-    /// "no snapshot" path every other predicate here uses.
+    /// **The zero value is `false`**, so a snapshot built via `..Default::default()` reports a unit
+    /// DISCONNECTED — which matters more than it reads: stock `UnitFrameManaBar_Update`
+    /// (UnitFrame.lua:213) greys a disconnected unit's bar and never reaches the power colour at
+    /// all. A synthetic unit that means to be live must say so.
+    ///
+    /// The app's own feed does (`ui_unit::snapshot`, "the stated `is_connected` gap, closed"), and
+    /// the party feed reads the roster status byte's `0x01` for its tokens. This doc used to call
+    /// that "a pending app-side change, not yet wired"; it has been wired since, and the note
+    /// outlived it. A token absent from the store (`UnitExists` false) still reports nil
+    /// regardless, via the same "no snapshot" path every other predicate here uses.
     pub is_connected: bool,
     /// Away-from-keyboard (`UnitIsAFK` — decision 0434 §2's status-byte `0x40` bit). The party
     /// frame's name line and chat both key off it. App-resolved; `false` until the feed lands.
@@ -254,9 +279,21 @@ pub struct UnitState {
     /// only one that can name a shipped `UI-PVP-<group>` texture. `None` for Monster/neutral
     /// templates is a state the icon callers explicitly handle (`if ( factionGroup and … )`).
     ///
-    /// The Era binding returns it twice — English token first, localized name second; enUS ships
-    /// the same word for both (FactionGroup.dbc's `InternalName` and `Name0`).
+    /// This is the **English** half — FactionGroup.dbc's `InternalName` — because that is what
+    /// `UnitFactionGroup`'s first return must carry: every stock consumer concatenates it into a
+    /// texture path (`"…\UI-PVP-"..factionGroup` at `PlayerFrame.lua:68`, `TargetFrame.lua:198`,
+    /// `PartyMemberFrame.lua:125`; `"…\Battleground-"..` at `BattlefieldFrame.lua:195`), and
+    /// `HonorFrame.lua:68` compares it against the literal `"Alliance"`.
+    ///
+    /// This field's doc used to say the binding "returns it twice … enUS ships the same word for
+    /// both". That is true of enUS and of nothing else: `Name0` is localized, so on any other
+    /// client the texture path would name a file that does not exist. The localized half lives in
+    /// [`Self::faction_group_localized`] now.
     pub faction_group: Option<String>,
+    /// The **localized** group name — FactionGroup.dbc's `Name0`, and `UnitFactionGroup`'s SECOND
+    /// return, which stock uses as display text (`PlayerFrame.lua`'s PvP hit-area tooltip title).
+    /// Never interchangeable with the English half above.
+    pub faction_group_localized: Option<String>,
     /// The unit's GUID (`OBJECT_FIELD_GUID`) — the identity the cross-token predicates compare
     /// (`UnitIsUnit`, `UnitInParty`; decision 0434 §5's popup gating). `0` = the app's feed didn't
     /// resolve one; two zero guids never compare equal.
@@ -439,6 +476,38 @@ impl super::UiScript {
         model.resting = resting;
     }
 
+    /// Push the two **play-time** bits of `PLAYER_FLAGS` — 12 (`PartialPlayTime`) and 13
+    /// (`NoPlayTime`), decision 1746. Taken together for the same reason the rest trio is:
+    /// stock `PlayerFrame_UpdatePlaytime` (PlayerFrame.lua:244) tests them as an if/elseif pair
+    /// and a half-updated pair would paint the wrong one of the two icons.
+    pub fn set_play_time(&mut self, partial: bool, none: bool) {
+        let mut model = self.model_mut();
+        model.partial_play_time = partial;
+        model.no_play_time = none;
+    }
+
+    /// Push the account's **rested billing minutes**, from the `SMSG_AUTH_RESPONSE` that admitted
+    /// the session — what `GetBillingTimeRested()` returns (decision 1820). Set once at login: the
+    /// client parks it in a process-lifetime global and nothing else on the wire ever writes it.
+    pub fn set_billing_time_rested(&mut self, minutes: u32) {
+        self.model_mut().billing_time_rested = minutes;
+    }
+
+    /// Enter the **UI-load sound-suppression scope** — the reference's `0x458f50`, an `inc` on the
+    /// counted depth every name-keyed `PlaySound` reads. Counted, not a flag, exactly as the
+    /// client has it: nesting is legal and only the outermost exit re-enables sound.
+    pub fn push_sound_suppression(&self) {
+        let mut model = self.model_mut();
+        model.sound_suppression = model.sound_suppression.saturating_add(1);
+    }
+
+    /// Leave it — `0x458f60`'s `dec`. Saturating on the way down too: an unbalanced pop is a bug
+    /// in the caller, and silently wrapping to a permanently-muted UI would be the worse failure.
+    pub fn pop_sound_suppression(&self) {
+        let mut model = self.model_mut();
+        model.sound_suppression = model.sound_suppression.saturating_sub(1);
+    }
+
     /// Push whether a cinematic is playing — what `InCinematic()` answers.
     pub fn set_in_cinematic(&mut self, playing: bool) {
         self.model_mut().in_cinematic = playing;
@@ -575,9 +644,14 @@ pub(crate) fn token_recognised(token: &str) -> bool {
 /// 1203's shape pointed the other way: a failure the client reports, silently swallowed.
 ///
 /// The split is THREE-way, not two, and the two quiet legs are as carved:
-///   * **absent argument** — quiet nil (the per-binding argument gates are NOT uniform; `UnitName`
-///     has its own `lua_isstring` gate and `UnitExists` has none at all, and only those two poles
-///     are verified, so this does not invent a gate for the other ~102);
+///   * **absent argument** — quiet nil *here*, because this helper is only the resolver's half.
+///     Whether a nil ever reaches it is the BINDING's question, and it is settled per binding:
+///     wow-re's census of all 83 entries at `0x850438` found 53 that gate the token position with
+///     `lua_isstring` and raise `Usage:`, against 13 unit-token bindings with no gate at all
+///     (decision 1834). The gated ones call `binding_abi::string_arg` before they get here, so a
+///     nil never arrives; the quiet 13 pass it straight through. This comment used to say the
+///     gates were "NOT uniform … only those two poles are verified" and decline to guess, which
+///     was the right call at the time — the table now exists, so it is applied rather than feared;
 ///   * **`""`** — quiet nil;
 ///   * a **recognised** token naming nothing (`"party5"` solo, `"playerfoo"`) — quiet nil.
 pub(crate) fn check_unit_token(token: &Option<String>) -> mlua::Result<()> {

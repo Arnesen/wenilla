@@ -12,7 +12,7 @@ use super::{
     AiReactionMessage, CharActionResultMessage, CharListMessage, EmoteMessage, EnteredWorldMessage,
     Guid, GuidIndex, LoggedOutMessage, NetCommands, NetEvents, NetStatus, ObjectStore,
     PendingTransfer, RemoteMotion, Reputations, SelfGuid, SelfPlayer, ServerSoundMessage,
-    ServerTime, ServerWallClock, TeleportMessage, WorldportMessage,
+    ServerTime, ServerWallClock, TeleportMessage, UnitMoveModes, WorldportMessage,
 };
 use benilla_world::weather::WeatherMessage;
 
@@ -106,7 +106,11 @@ pub(super) fn apply_net_updates(
     mut reputations: ResMut<Reputations>,
     mut transforms: Query<&mut Transform>,
     mut stores: Query<&mut ObjectStore>,
-    mut remote_motion: Query<&mut RemoteMotion>,
+    // One tuple param (the 16-SystemParam ceiling this signature already lives against): the two
+    // per-unit motion states the drain writes. [`RemoteMotion`] is a relayed player's dead-reckon;
+    // [`UnitMoveModes`] is any unit's server-granted movement modes (decision 1780). Different
+    // components, one concern — what the wire says about how a body we don't control is moving.
+    mut motion: (Query<&mut RemoteMotion>, Query<&mut UnitMoveModes>),
     // One tuple param (the 16-SystemParam ceiling): the session-lifecycle one-shot writers — the
     // player's teleport/worldport snaps + the glue-screen edges (decision 0193).
     session_msgs: (
@@ -374,7 +378,8 @@ pub(super) fn apply_net_updates(
     ),
     // The aura feed's duration side-table + the clock to stamp arrivals (decisions 0255/0257): the
     // self-only `SMSG_UPDATE_AURA_DURATION` lands here keyed by raw slot, timestamped for the
-    // `ui_aura` slot-join — plus the ping clock the Pong arm measures round trips against.
+    // `ui_aura` slot-join — plus the ping clock, which this drain now only CLEARS on a
+    // disconnect: the measuring moved to the read thread with B346's fix.
     // Grouped as a tuple to stay under Bevy's 16-SystemParam ceiling.
     //
     // The stamp clock is `Time<Real>`, NOT the default virtual one, and both its readers
@@ -487,6 +492,9 @@ pub(super) fn apply_net_updates(
     // This also removes a latent clobber: a plain per-delta `insert` on a not-yet-spawned entity would
     // overwrite an earlier partial rather than merge it (decision 0061).
     let mut pending: HashMap<u64, ObjectFields> = HashMap::new();
+    // The drain's staged [`UnitMoveModes`] grants — see [`objects::StagedModes`]. A grant and the
+    // `SMSG_MONSTER_MOVE` it refuses can land in the same drain, and the refusal has to see it.
+    let mut staged_modes = objects::StagedModes::new();
     // The same deferral trap for movers' speeds, and the one B213 fell into: a create's
     // `UnitSpeeds` insert is a Command, so a `SMSG_FORCE_*_SPEED_CHANGE` arriving later in this
     // same drain could not land on top of it. Both stage here in packet order (decision 1478).
@@ -532,9 +540,11 @@ pub(super) fn apply_net_updates(
             SessionEvent::Connected {
                 self_guid: guid,
                 name,
+                billing_time_rested,
             } => session::connected(
                 guid,
                 name,
+                billing_time_rested,
                 &mut self_guid,
                 &mut status,
                 &mut names,
@@ -593,6 +603,7 @@ pub(super) fn apply_net_updates(
                 orientation,
                 scale,
                 speeds,
+                mover,
                 transport_progress,
                 transport,
                 spline,
@@ -607,6 +618,7 @@ pub(super) fn apply_net_updates(
                     orientation,
                     scale,
                     speeds,
+                    mover,
                     transport_progress,
                     transport,
                     spline,
@@ -672,7 +684,7 @@ pub(super) fn apply_net_updates(
                     &mut commands,
                     &index,
                     &self_guid,
-                    &mut remote_motion,
+                    &mut motion.0,
                     &mut transforms,
                     &mut audio.13,
                     &mut self_moves,
@@ -723,6 +735,7 @@ pub(super) fn apply_net_updates(
                 duration_ms,
                 flying,
                 run_mode,
+                objects::modes_of(guid, &index, &motion.1, &staged_modes).rooted(),
                 &mut commands,
                 &index,
                 &mut transforms,
@@ -1360,6 +1373,18 @@ pub(super) fn apply_net_updates(
                 &mut death_net,
                 &mut move_modes,
             ),
+            // ── The observer movement-mode family (decision 1780) — the same modes, on a body
+            //    somebody else is driving. No ack, so this arm ends the packet.
+            SessionEvent::SplineMoveMode { guid, mode, apply } => objects::spline_move_mode(
+                guid,
+                mode,
+                apply,
+                &mut commands,
+                &index,
+                &mut motion.1,
+                &mut motion.0,
+                &mut staged_modes,
+            ),
             SessionEvent::KnockBack {
                 guid,
                 counter,
@@ -1837,8 +1862,12 @@ pub(super) fn apply_net_updates(
                 new_count,
                 ..
             } => npc::vendor_buy_result(vendor, slot, new_count, &mut merchant),
-            SessionEvent::VendorBuyFailed { reason, .. } => {
-                npc::vendor_buy_failed(reason, &mut ui_actions.3)
+            SessionEvent::VendorBuyFailed {
+                vendor,
+                item_entry,
+                reason,
+            } => {
+                npc::vendor_buy_failed(vendor, item_entry, reason, &mut merchant, &mut ui_actions.3)
             }
             SessionEvent::VendorSellFailed { reason, .. } => {
                 npc::vendor_sell_failed(reason, &mut ui_actions.3)
@@ -1875,7 +1904,15 @@ pub(super) fn apply_net_updates(
             SessionEvent::ClientControl { mover, allow_move } => {
                 client_control.write(super::ClientControlMessage { mover, allow_move });
             }
-            SessionEvent::Pong { sequence } => session::pong(sequence, &aura.2, &mut status),
+            // **The pong never gets here** — the read thread measures it against the ping clock
+            // the instant it lands and stops it, the way the reference's `OnData 0x537b10` hands
+            // `SMSG_PONG` to `HandlePong 0x537d60` inline instead of queueing it (`net::io`).
+            // Reaching this arm means that bypass was undone and every latency reading is a
+            // client frame too slow again, which is B346 exactly — so it says so out loud rather
+            // than measuring here and hiding it.
+            SessionEvent::Pong { sequence } => {
+                warn!("net: pong seq={sequence} reached the drain — the read thread's RTT bypass is gone (B346)");
+            }
             SessionEvent::PacketDropped {
                 opcode,
                 unparseable,

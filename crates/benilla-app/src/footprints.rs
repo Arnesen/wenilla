@@ -29,11 +29,15 @@
 //! - **Caps**: ring pools of **64 local-player + 512 everyone-else** slots, unconditional
 //!   rotation (ring-select = GUID == local player, `0xca05f0`).
 //! - **Suppressions**: hover (`MOVEFLAG 0x4000_0000`) · stealth (`BYTES_1` byte 3 bit 0x2 —
-//!   NOT death) · player ghost (`PLAYER_FLAGS & 0x10`) · farther than **50 yd** from the local
-//!   player · the terrain flag / printless id / no ground triangles. Water does NOT suppress
-//!   the decal (only the spray branch wades). The reference's `showfootprints` cvar is the
-//!   master toggle (default on) — we are always-on until a settings page wires the knob (the
-//!   cvar-policy line, like the blob shadow's `shadowLOD`).
+//!   NOT death) · player ghost (`PLAYER_FLAGS & 0x10`) · farther than **50 yd** from the
+//!   **camera eye** ([`footfall_culls`] — the handler's own gate, shared with the footstep
+//!   camera shake, and applied to the local player's feet like anyone else's; decision 1856) ·
+//!   the terrain flag / printless id / no ground triangles. Water does NOT suppress
+//!   the decal (only the spray branch wades). The reference's `showfootprints` cvar (default on)
+//!   is the **decal's** toggle and only the decal's: `0x5fc023` skips the decal block alone, so
+//!   the footstep camera shake and the spray branch both still run with prints switched off. We
+//!   are always-on until a settings page wires the knob (the cvar-policy line, like the blob
+//!   shadow's `shadowLOD`).
 //!
 //! Draw state per the RE: src-alpha blend, depth-write off, unlit, white vertex RGB with the
 //! fade in vertex alpha — the ink darkness lives in the texture. Still open there (none
@@ -47,7 +51,9 @@ use std::collections::VecDeque;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
-use crate::creature_anim::{footfall_side, move_flags, AnimSoundEvent, MovementState};
+use crate::creature_anim::{
+    footfall_culls, footfall_side, move_flags, AnimSoundEvent, MovementState,
+};
 use crate::entities::{BoneAttach, Creatures};
 use crate::net::{Embodied, NetEntity, ObjectStore};
 use crate::sound::footsteps::Footsteps;
@@ -65,11 +71,6 @@ const LIFETIME: f32 = 6.0;
 const OWN_CAP: usize = 64;
 /// Everyone else shares 512 slots (the table's tail), same rotation.
 const SHARED_CAP: usize = 512;
-/// Prints farther than this from the local player never spawn (the reference's 2500 yd² gate).
-const MAX_DISTANCE_SQ: f32 = 2500.0;
-/// The print's sort-ladder rung: below the blob shadow's 4096 — where both decals stack the
-/// shadow draws later, deterministically (the reference's frame order is the RE's open §13 item).
-const PRINT_SORT_BIAS: f32 = 2048.0;
 /// Vertical reach of the projection slab about the planted foot: enough to catch the ground
 /// through a slightly-lifted foot bone and drape a step edge, small enough not to paint a
 /// terrace below (the blob shadow's slab is the model box; a print has no box to read).
@@ -174,7 +175,7 @@ fn spawn_footprints(
     // rider's SCALE_X — RE-corrected), and the state gates all read the root.
     parents: Query<&ChildOf>,
     roots: Query<RootState>,
-    self_pos: Query<&Transform, With<Embodied>>,
+    camera: Query<&GlobalTransform, With<WorldCamera>>,
     joints: Query<&GlobalTransform>,
     footsteps: Option<Res<Footsteps>>,
     creatures: Option<Res<Creatures>>,
@@ -187,6 +188,11 @@ fn spawn_footprints(
         return;
     }
     let (Some(footsteps), Some(creatures), Some(ink)) = (footsteps, creatures, ink) else {
+        return;
+    };
+    // The distance gate's origin — the same read `camera_shake::fire_shakes` makes for the same
+    // gate. No world camera, no world to print into.
+    let Ok(eye) = camera.single().map(|t| t.translation()) else {
         return;
     };
     let now = time.elapsed_secs();
@@ -234,12 +240,9 @@ fn spawn_footprints(
                 p.posed_point(joints.get(p.joints_root).ok()?, bone, offset)
             })
             .unwrap_or_else(|| transform.translation());
-        // The reference's 50-yd radius about the local player (2500 yd², self always passes).
-        if !is_self
-            && self_pos
-                .single()
-                .is_ok_and(|p| p.translation.distance_squared(foot) > MAX_DISTANCE_SQ)
-        {
+        // The handler's own 50 yd radius about the CAMERA EYE — every unit's feet, the
+        // player's included ([`footfall_culls`]).
+        if footfall_culls(eye, foot) {
             continue;
         }
         // The surface gate, on the SAME terrain type the footstep sound used: the reference
@@ -367,8 +370,8 @@ fn push_footprints(
             .batch(cam, print.texture)
             .anchored(print.anchor)
             .rung(
-                PRINT_SORT_BIAS,
-                benilla_world::sky_order::Rung::SHADOW_RASTER,
+                benilla_world::sky_order::Rung::FOOTPRINT,
+                benilla_world::sky_order::Rung::DECAL_RASTER,
             )
             .owner(lane.0);
         batch.extend(print.verts.iter().map(|v| EffectVertex {

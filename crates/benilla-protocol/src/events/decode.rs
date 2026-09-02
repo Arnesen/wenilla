@@ -318,7 +318,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             options,
             quests: quests
                 .into_iter()
-                .map(|q| (q.quest_id, q.icon, q.title))
+                .map(|q| (q.quest_id, q.icon, q.level, q.title))
                 .collect(),
         }],
         ServerPacket::QuestGiverStatus { npc, status } => {
@@ -501,6 +501,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             mode,
             apply,
         }],
+        ServerPacket::SplineMoveMode { guid, mode, apply } => {
+            vec![SessionEvent::SplineMoveMode { guid, mode, apply }]
+        }
         ServerPacket::KnockBack {
             guid,
             counter,
@@ -1099,6 +1102,7 @@ fn decode_objects(objects: Vec<Object>) -> Vec<SessionEvent> {
                         orientation,
                         scale,
                         speeds,
+                        mover: movement.mover,
                         transport_progress: movement.transport_progress,
                         transport: movement.transport,
                         spline: movement.spline,

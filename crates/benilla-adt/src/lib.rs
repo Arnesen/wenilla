@@ -157,8 +157,10 @@ pub struct MclqChunk {
     pub min_height: f32,
     pub max_height: f32,
     pub vertices: Vec<LiquidVertex>,
-    /// Per-cell flags, row-major 8×8. Low nibble = liquid type (`0xf` = dry/hole); `0x40` fishable,
-    /// `0x80` shared.
+    /// Per-cell flags, row-major 8×8. Low nibble = liquid type (`0xf` = dry/hole); `0x80` shared.
+    /// `0x40` ("fishable") is carried but deliberately unread: its only compiled reader, the
+    /// reference's fishable query `0x69b5d0`, is a zero-caller dead island — fishability is the
+    /// server's verdict (`SPELL_FAILED_NOT_FISHABLE` passthru). Decision 1825.
     pub tile_flags: [u8; 64],
 }
 

@@ -7,22 +7,7 @@
 
 use benilla_ui::script::UiScript;
 
-/// One shipped file into `s`, asserting it loaded clean.
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// Fonts then BasicControls — the manifest's own order, and the whole dependency this file has.
 fn basic_controls() -> UiScript {

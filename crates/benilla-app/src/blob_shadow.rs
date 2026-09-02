@@ -9,6 +9,19 @@
 //!   selection ring uses** (`0x6d7330 → 0x6d6fa0 → 0x6d7480`), collector flags `0x2f0122` = the
 //!   ring's `0x200122` **+ the liquid receivers** (a gap here: liquid isn't in the
 //!   [`GroundDecalSurface`] set yet — the shadow lands on terrain + WMO faces only).
+//! - **Frame slot**: PHASE 1, among the opaque drains — `0x6812c5 call 0x683dd0`, fifth of the
+//!   row `0x6812b1`–`0x6812ca` inside `0x681070`, which the driver `0x483460` calls at
+//!   `0x48361d` (wow-re `water-frame-straddle.md` §1 + `unit-blob-shadow.md` Q1). `0x683dd0` is
+//!   the **M2 node drain**, and the same loop body ticks each node's object first
+//!   (`0x48160c call [obj vt+0x38]` → the selection ring) and gates its shadow second
+//!   (`0x683ec3`) — so per unit the additive ring goes down and this modulate darkens it, never
+//!   the other way round (wow-re `decal-frame-slot.md`). So the shadow
+//!   lands after terrain and WMO and **before** everything else: the footprint decals
+//!   (`0x483654`), the M2 opaque pass (`0x4836a6`), the water surfaces (phase 3, drawn *between*
+//!   the two M2 transparent passes) and both of those passes. Every transparent in the world
+//!   paints over it — which is what [`Rung::SHADOW_SORT`](benilla_world::sky_order::Rung) now
+//!   expresses, and what it did not until B347: at the old positive rung the shadow was the one
+//!   thing in the scene a river or a portal effect could not attenuate.
 //! - **Texture**: `Textures\ShadowBlob.blp` — a 32×32 grayscale radial blob (flat gray-160 core,
 //!   linear rim to white) under a binary alpha disc. The reference multitextures a procedural 64×8
 //!   trapezoid ramp on a second stage (`0x6d81a0`/`0x6d82d0`, blend-mode-selected); its combine
@@ -463,7 +476,8 @@ fn update_shadows(
 }
 
 /// Push every shown shadow's cached triangles onto the stream — one Multiply draw per unit at
-/// the shadow rung, fog off (the reference's shadow pass state).
+/// the shadow rung (the pre-water decal band's floor, the module header's frame slot), fog off:
+/// the reference's shadow pass state.
 fn push_shadows(
     assets: Option<Res<ShadowAssets>>,
     cam: Query<Entity, With<WorldCamera>>,
@@ -484,7 +498,7 @@ fn push_shadows(
             .anchored(key.feet)
             .rung(
                 benilla_world::sky_order::Rung::SHADOW_SORT,
-                benilla_world::sky_order::Rung::SHADOW_RASTER,
+                benilla_world::sky_order::Rung::DECAL_RASTER,
             )
             .owner(entity);
         batch.vertices(&verts.0);

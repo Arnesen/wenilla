@@ -39,26 +39,59 @@
 # The named virtual Font objects (decision 0084) — must load first so any FontString's
 # `inherits="GameFontNormal"` resolves against a registered object.
 Fonts.xml
-# ── A reference file sourced ABOVE ours, so OUR bodies win every collision ─────────────────────
-# This one is not a migrated window: it is here for one family of frame-agnostic globals that
-# addons call by name, while the window that file also drives is still ours. So it loads first and
-# our later files overwrite the names we own. (A migrated window is the other case, and sits at its
-# window's own position — `Interface\FrameXML\ContainerFrame.xml` below is the first of them.)
+
+# ══ THE STRINGS — the reference's own first line, seated second here (1848) ══
+# **Second, not first, and that is deliberate.** Manifest entry 0 is the FONT REGISTRY:
+# `load_font_registry` takes entry 0 and `load_ingame_ui` takes the rest, so entry 0 is the boot
+# boundary itself (1051). Putting the strings there would move `Fonts.xml` across it.
+# `GlobalStrings.lua` is line 1 of the reference's `FrameXML.toc`, and it was missing from ours
+# entirely: the app loaded it out of band at Startup (`ui_script::setup_script`, "the VM's first
+# load is the real GlobalStrings.lua"), so the running client was right and the MANIFEST was not
+# self-sufficient. Every harness that loads the manifest without that pre-step got a VM with no
+# strings, which is a gap four separate windows tripped over before anyone looked at the toc.
 #
-# PaperDollFrame.lua earns its place for ONE family: `PaperDollItemSlotButton_OnLoad`/`_OnEvent`/
-# `_OnClick`/`_Update`/`_UpdateLock`/`_OnEnter`/`_OnUpdate` — frame-agnostic in the same sense,
-# acting on `this`/`this:GetID()` through live APIs and never on a named reference window.
-# `PaperDollItemSlotButtonTemplate` and `BagSlotButtonTemplate` are declared over them
-# (ItemSlotButtonTemplates.xml), and pfUI builds its bag bar from the latter.
+# The stock files read these at LOAD, not just at paint: `Blizzard_MacroUI.xml`'s character tab
+# does `format(CHARACTER_SPECIFIC_MACROS, UnitName("player"))` inside its own OnLoad, and a nil
+# format string there aborts the handler.
 #
-# Its top level is four constants (NUM_RESISTANCE_TYPES, NUM_STATS, NUM_SHOPPING_TOOLTIPS,
-# ATTACK_POWER_MAGIC_NUMBER) — nothing touches a frame at load, so sourcing it cannot raise. 18 of
-# its 29 functions collide with ours (the PaperDollFrame_Set* stat family, the two damage-frame
-# hovers, PaperDollFormatStat, PaperDollStatTooltip) and this position settles all of them the
-# documented way: CharacterFrame.xml loads far below and its bodies win. Not one of the seven
-# names we are here for is in that overlap, and our own doll slots keep calling
-# `BenillaPaperDollSlot_*`, untouched.
-Interface\FrameXML\PaperDollFrame.lua
+# The app's Startup load stays where it is — the cast-fail display (0427) resolves messages before
+# the in-game UI materializes at all (1051) — so this is a second, idempotent assignment pass.
+Interface\FrameXML\GlobalStrings.lua
+# ══ THE LOCALE ADJUSTMENTS — the reference's own, off the player's chain (1751, window 5) ══
+# `Localize()` (which this file also CALLS at load, exactly as the reference's own two-part
+# `<Script>` does) and `LocalizeFrames()`. Nothing of ours ever shipped either, and the gap was
+# recorded in two places: `GameTime.xml` set `TwentyFourHourTime = 1` itself with a note saying the
+# reference sets it in `LocalizeFrames`, and `HelpFrame.xml` names a whole family of strings that
+# "`LocalizeFrames()`, which benilla does not ship, so it never fired here either" would have set.
+#
+# It is the reference's own slot (FrameXML.toc l.3, straight after Fonts.xml) and the order is the
+# point: `Localize` overwrites `GlobalStrings.lua` keys, and GlobalStrings is loaded ahead of this
+# whole manifest at VM setup (`ui_script/mod.rs`) — which is FrameXML.toc l.1, so the two land in
+# the reference's own order. The file it patches is the PLAYER'S, so the locale is theirs by
+# construction rather than ours to guess.
+#
+# `LocalizeFrames()` is called from `UIParent_OnEvent`'s VARIABLES_LOADED arm — the reference's own
+# caller (UIParent.lua l.230-235), added to our UIParent.xml with this window.
+Interface\FrameXML\Localization.xml
+# ══ THE LOCALE LOOKUP — the reference's own, off the player's chain (1751, window 19) ══
+# `GetText(token, gender, ordinal)` and its three helpers (`GetPluralIndex`/`GetPluralTag`/
+# `GetGenderTag`) plus `GenderTagInfo` / `MAX_GENDER_INDICES` / `MAX_PLURAL_INDICES`.
+#
+# It is a `.lua` entry because the reference has no XML for it: 1.12 pulls it in through
+# `<Script file="LocaleProperties.lua"/>` at the top of `UIParent.xml`, and until that window
+# migrates this is where it comes from.
+#
+# WORTH KNOWING, because it saved building the wrong thing: `GetText` LOOKS like an engine binding
+# — `reference/1.12-globals.tsv` has it, and the exe's `FrameScript_GetText 0x703bf0` is a real
+# function — but the exe's one CALLS this Lua global. So there is nothing to implement; the whole
+# selector is fifty lines of FrameXML, and sourcing them is the entire fix. It composes a suffix
+# from the gender (`_FEMALE` at 3, and five more tags 1.12 never uses in enGB) and the plural
+# (`_P1` for any ordinal that is not 1), then falls back suffix-by-suffix to the bare token.
+#
+# The reputation page is what needed it — `ReputationFrame.lua:65` reads its standing
+# words with `GetText("FACTION_STANDING_LABEL"..id, gender)` — and fourteen more call sites across
+# FriendsFrame, StaticPopup and the quest windows are waiting behind it.
+Interface\FrameXML\LocaleProperties.lua
 # The reference's own second file, in its own position: TEXT/message/_ERRORMESSAGE, the
 # ScriptErrors dialog, and the DialogBoxFrame + DialogButton*Texture kit it is built from.
 # Straight after Fonts.xml because those are the only things it needs (GameFontRedLarge,
@@ -77,11 +110,18 @@ BasicControls.xml
 # mechanism that re-anchors the cast bar / chat over the bottom bars) are called later, applied by
 # the loader's post-load bootstrap (ui_script/manifest.rs).
 UIParent.xml
-# The `SetItemButton*` family (ref ItemButtonTemplate.lua) — script-only, no frames and no
-# dependencies of its own, so it sits as early as it can be read. Every window that paints an item
-# slot calls these, ours and third-party alike: their absence is what left the director's Bagnon
-# window with a title, a gold line and no bag slots at all (see the file's own header).
-ItemButtonTemplate.xml
+# ══ THE ITEM-SLOT BASE — the reference's own, off the player's chain (1751, window 24) ══
+# `ItemButtonTemplate` and the eight `SetItemButton*` verbs out of `ItemButtonTemplate.lua`. It
+# sits as early as it can be read: no frames, no dependencies of its own, and every window that
+# paints an item slot inherits or calls it — ours and third-party alike. Their absence is what left
+# the director's Bagnon window with a title, a gold line and no bag slots at all.
+#
+# Our copy called the reference's file "the specification" in its own header and re-implemented the
+# eight verbs against it; the specification is now the thing that runs. The template's regions and
+# size are identical either way (`$parentIconTexture` / `$parentCount` / `$parentStock` /
+# `$parentNormalTexture`, 37x37) — which is what makes this the safest of the foundational swaps
+# rather than the widest: everything that inherits it asks for the same four names.
+Interface\FrameXML\ItemButtonTemplate.xml
 # The reference's money-frame kit: MoneyFrameTemplate/SmallMoneyFrameTemplate + MoneyTypeInfo
 # + the MoneyFrame_* API. Needs only Fonts (NumberFontNormal/NumberFontNormalLarge) — and it must
 # come BEFORE UiPanels.xml, because the shared StaticPopup's coin row is a child frame declaring
@@ -90,9 +130,32 @@ ItemButtonTemplate.xml
 # used to sit 140 lines lower, beside the other shared widget kits, which was only ever tenable
 # while nothing above it showed coins. AuctionFrame far below is laid out on it as well (its price
 # columns need a money TYPE, which the other kit has no notion of); our other eight coin displays
-# still run on MerchantFrame.xml's BenillaMoney_* slot kit, and MoneyFrame.xml's header is where
+# still run on the BenillaMoney_* slot kit (which now lives HERE), and this file's header is where
 # the two are reconciled.
 MoneyFrame.xml
+# ══ THE MONEY INPUT KIT — the reference's own, off the player's chain (1751, window 23) ══
+# `MoneyInputFrameTemplate` and the ten `MoneyInputFrame_*` verbs out of `MoneyInputFrame.lua` —
+# the three-box gold/silver/copper editor a player types an amount into. Nothing of ours ever
+# shipped it, and it declares no frames, so this is a pure addition: a template and ten globals.
+#
+# THE REFERENCE'S OWN SLOT, straight after MoneyFrame.xml (FrameXML.toc l.9-10) and for the same
+# reason ours is here — the coin art and `MONEY_ICON_WIDTH` family it lays its boxes out against.
+#
+# It is groundwork rather than a window, and the windows it is groundwork FOR are named so the
+# next session does not have to re-derive it: stock `TradeFrame.xml` and `MailFrame.xml` both build
+# their amount entry from this template and call `MoneyInputFrame_SetMode`/`_GetCopper`/
+# `_SetCopper`/`_ClearFocus`/`_SetTextColor`/`_SetOnvalueChangedFunc` — six of the names below —
+# and neither can be sourced until they exist. (Trade still needs four ENGINE verbs beyond this:
+# `AddTradeMoney`, `GetCursorMoney`, `GetTradePlayerItemLink`, `GetTradeTargetItemLink`.)
+#
+# **TWO entries, and the `.lua` was missing.** This `.xml` declares only the template and does not
+# source its `.lua`; the reference's toc lists both (l.11-12). Listing the `.xml` alone brought the
+# template and none of the ten verbs — the header above has claimed otherwise since the day it was
+# written, and a probe of a full manifest load answered `nil` for every one of them. Same shape as
+# `TextStatusBar`, found by sweeping every chain entry for it once that one bit;
+# `every_chain_xml_brings_its_own_lua` is now a gate so neither can recur.
+Interface\FrameXML\MoneyInputFrame.lua
+Interface\FrameXML\MoneyInputFrame.xml
 # The UIPanel slot manager (decision 0084 §2): script-only, no frames of its own — must load
 # before any panel frame (Gossip/Merchant today) so ShowUIPanel/HideUIPanel already exist
 # when those frames' OnLoad/OnEvent reference them.
@@ -104,37 +167,139 @@ UiPanels.xml
 # requirement: ItemRef.xml below expands one, and so do the 27 corpus addons that name
 # GameTooltipTemplate in an XML inherits=.
 GameTooltip.xml
-# The dropdown kit (0203 phase 2's closing sub-slice, widened for 0434 phase 5):
-# UIDropDownMenuTemplate + DropDownList1/2 + the UIDropDownMenu_* API — before its
-# first customers (the unit popups below, the world map's pickers, the trainer filter).
-UIDropDownMenu.xml
+# ══ THE DROPDOWN KIT — the reference's own, off the player's chain (1751) ══
+# UIDropDownMenuTemplate + the DropDownList frames + the whole `UIDropDownMenu_*` API — before its
+# first customers (the unit popups below, the world map's pickers, the trainer filter). The stock
+# file pulls its own `UIDropDownMenu.lua` and `<Include>`s UIDropDownMenuTemplates.xml, so this one
+# line carries all three. We also gain `DropDownList3`, which our transcription stopped short of.
+#
+# Ours (0203 phase 2, widened for 0434 phase 5) defined every stock global plus six helpers of its
+# own. Five were named nowhere outside the file. The sixth, `CloseMenus`, moved to UiPanels.xml —
+# the reference keeps it in `UIParent.lua`, not its dropdown file, and UiPanels is both where our
+# slice of UIParent.lua lives and ahead of all five of its consumers.
+Interface\FrameXML\UIDropDownMenu.xml
+# ══ THE UIMenu KIT — the reference's own, off the player's chain (1751, window 21) ══
+# `UIMenuTemplate` and `UIMenuButtonTemplate`, with `UIMenu.lua`'s `UIMenu_OnShow`/`_OnUpdate` and
+# the four `UIMenuButton_*` handlers arriving through the file's own `<Script file=>`.
+#
+# The kit was a block inside our ChatFrame.xml — a transcription that kept the reference's names
+# for the addon surface and said so, and whose own note recorded a divergence it had to make (the
+# row label authored LEFT-anchored, because the reference leans on 1.12's ButtonText default rect
+# and our lazy label slot did not reproduce it). Sourcing the file retires the transcription and
+# the divergence together.
+#
+# THE POSITION is the reference's own (FrameXML.toc l.12, straight after GameTooltip.xml, which it
+# needs for the tooltip backdrop its menu wears). Far above ChatFrame.xml, which is the one thing
+# that used it here — resolved at load, and now satisfied earlier rather than in the same file.
+Interface\FrameXML\UIMenu.xml
 # The unit right-click popups (0434 phase 5): UnitPopupMenus/Buttons + UnitPopup_ShowMenu
 # — after the dropdown kit it drives, before the unit/party frames whose DropDown
 # children's OnLoad initialize into it.
 UnitPopup.xml
-# The chat-link click router (SetItemRef): item links → ItemRefTooltip:SetHyperlink; a
-# player name → left-click whisper / right-click FRIEND dropdown. After GameTooltip.xml —
-# ItemRefTooltip inherits=GameTooltipTemplate, so this order is now REQUIRED, not just legible
-# (GameTooltip_OnLoad was the old, runtime-only reason) — AND after the dropdown kit +
-# UnitPopup, since its FriendsDropDown inherits UIDropDownMenuTemplate and opens a UnitPopup
-# FRIEND menu.
-ItemRef.xml
+# ══ THE CHAT-LINK TOOLTIP — the reference's own, off the player's chain (1751, window 6) ══
+# `SetItemRef` (the chat-link click router) and `ItemRefTooltip` / `ItemRefCloseButton`.
+#
+# THE POSITION IS THE REQUIREMENT: `inherits="GameTooltipTemplate"` is resolved at LOAD, so this
+# sits below GameTooltip.xml. The dropdown kit and UnitPopup above it are a call-time need only,
+# but the reference's own TOC has the same shape and the order costs nothing.
+#
+# THREE THINGS OUR COPY CARRIED THAT THE REFERENCE'S DOES NOT, each moved to the reference's own
+# home rather than deleted:
+# · `FriendsFrame_ShowDropdown` + its initializer, and the `FriendsDropDown` frame they toggle.
+#   1.12 keeps all three in `FriendsFrame.lua`/`.xml`; ours had a second private copy here because
+#   nothing else called them. FriendsFrame.xml (far below) owns the one body now and publishes the
+#   reference's name over it — resolved at call time, so the order does not bind.
+# · `ValidateFramePosition`, which the sourced `ItemRef.xml`'s OnDragStop calls (l.48). It lives in
+#   `UIParent.lua` in 1.12, so it is transcribed into our UIParent.xml with this window.
+# · Two divergences in `SetItemRef` itself, both now the reference's own body: the shift-click arm
+#   fills a visible ADD_IGNORE/ADD_FRIEND/ADD_GUILDMEMBER/ADD_RAIDMEMBER popup's editbox before it
+#   considers the chat box, and falls through to `SendWho("n-"..name)`. Ours guarded both away as
+#   "the friends/who arc, deferred"; `StaticPopup_Visible` and `SendWho` both exist, so the guards
+#   were outliving their reason.
+#
+# AND ONE THING IT GAINS: the reference's tooltip is `movable` and drag-armed, so a chat-link
+# tooltip can be dragged off the middle of the screen. Ours declared "benilla has no
+# user-moved-frame affordance yet" — `StartMoving`/`StopMovingOrSizing` are bindings
+# (`script/object/movable.rs`), so that note was stale too.
+Interface\FrameXML\ItemRef.xml
 # The shared status-bar numerals machinery (decision 1082): TextStatusBar_* + the opt-in
-# template — before its customers (the XP bar in ActionBar.xml today; the unit-frame
-# health/mana numerals are the ref's other users, when that slice lands). The ref's own TOC
-# loads TextStatusBar right before its unit frames, same seat as here.
-TextStatusBar.xml
-UnitFrames.xml
-# The combo-point dots (decision 0869) — anchored to TargetFrame, so after
-# UnitFrames.xml; its fade chain needs UiPanels.xml's UIFrameFade above.
-ComboFrame.xml
+# template. The ref's own TOC loads TextStatusBar right before its unit frames, same seat.
+#
+# ══ THE STATUS-BAR NUMERALS — the reference's own, off the player's chain (1751) ═══════════
+# `TextStatusBar_*` + the `TextStatusBar` template. The reference's own toc loads it right
+# before its unit frames; this is the same seat.
+#
+# Nothing of ours inherits the template — it exists for the reference's windows, whose rows
+# carry `inherits="TextStatusBar"` and would have found ours. What blocked the swap was a
+# signature WE widened (`TextStatusBar_Initialize`), fixed by giving our own bars the OnLoad
+# the reference's have.
+#
+# **TWO entries, because the reference has two** (its toc l.32-33). This `.xml` declares only the
+# template and does NOT source its `.lua` — unlike most stock windows, whose `<Script file=>`
+# brings their code in. Listing the `.xml` alone loads a template whose OnLoad calls a function
+# nothing defined: every `TextStatusBar_*` name reads nil, every guarded call is a silent no-op,
+# and the numerals simply never appear. The `.lua` comes first, as it does there.
+Interface\FrameXML\TextStatusBar.lua
+Interface\FrameXML\TextStatusBar.xml
+# ══ THE PLAYER AURA BAR — the reference's own, off the player's chain (1751) ══
+# The HUD row of buff/debuff icons under the minimap, driven by the UnitAura feed
+# (`crate::ui_aura`; decisions 0255/0257).
+#
+# FIRST OF THE KIT, which is the reference's own order (its toc: BuffFrame 40, CombatFeedback 41,
+# UnitFrame 43, PlayerFrame 44, PartyFrame 45, TargetFrame 46, PetFrame 47). It has to precede
+# PartyFrame because stock `PartyMemberFrame.lua:60` calls `RefreshBuffs` from each row's OnLoad
+# and `BuffFrame.lua` is where that lives. Ours had BuffFrame below the unit frames; that
+# inversion is gone.
+Interface\FrameXML\BuffFrame.xml
+# ══ THE UNIT-FRAME KIT — the reference's own, off the player's chain (1751, window 22) ══
+# `UnitFrame.xml` declares NO frames — it is a `<Script file="UnitFrame.lua"/>` and nothing else —
+# so it is a pure addition of thirteen globals: `UnitFrame_Initialize`, `_Update`, `_OnEvent`,
+# `_OnEnter`, `_OnLeave`, `_OnUpdate`, `_UpdateManaType`, the `UnitFrameHealthBar_*` /
+# `UnitFrameManaBar_*` pairs, and `GetUnitName`. `UnitFrame_Initialize` is what stock
+# `PlayerFrame.xml`, `TargetFrame.xml`, `PartyFrame.xml` and `PetFrame.xml` each call in their
+# OnLoad.
+#
+# Until the four windows below arrived, our own UnitFrames.xml loaded underneath this and
+# redefined four of the thirteen — `_Update`, `_OnEvent`, `_OnEnter`, `_OnLeave` — so the
+# reference's bodies were dead the whole time and stock party rows would have called OUR update,
+# which indexed a `nameText` the reference's rows do not carry. That file is gone; these are live.
+Interface\FrameXML\UnitFrame.xml
+# The same shape and the same reason. `CombatFeedback.xml` declares no frames either: three timing
+# constants plus `CombatFeedback_Initialize` / `_OnCombatEvent` / `_OnUpdate`, the floating
+# hit/miss text a unit frame's portrait carries. Two of the three used to collide with bodies our
+# UnitFrames.xml owned; with that file gone the reference's three are what run.
+Interface\FrameXML\CombatFeedback.xml
+# ── The four unit windows themselves (1751, window 22) ─────────────────────────────────────────
+# `PlayerFrame` + `PlayerStatusGlow` + `PlayerPlayTime` + `PlayerPVPIconHitArea` +
+# `PlayerFrameGroupIndicator` + the dropdown, out of `PlayerFrame.lua`.
+Interface\FrameXML\PlayerFrame.xml
+# `PartyMemberFrame1..4`, `PartyMemberBuffTooltip` and `PartyMemberBackground`, out of
+# `PartyMemberFrame.lua` (decision 0434 phase 2). Its `<Script>` list names `TextStatusBar.lua`
+# a second time, which is the reference's own doing and harmless — the file is idempotent.
+#
+# What moved out of our copy before it went: the PARTY_INVITE dialog and its driver, to
+# UiPanels.xml (StaticPopup.lua l.526, UIParent.lua), and the three raid constants, which
+# RaidFrame.xml already declared — that is the reference's home for them (RaidFrame.lua l.2-4).
+Interface\FrameXML\PartyFrame.xml
+# `TargetFrame`, its texture frame and dropdown, the sixteen debuff and five buff buttons with
+# their three templates, and the whole `TargetofTarget*` family — out of `TargetFrame.lua`, which
+# is also where `MAX_COMBO_POINTS` (l.1) and `SetRaidTargetIconTexture` live. `TargetofTarget_Update`
+# is what OptionsFrame.xml's two ToT settings drive.
+Interface\FrameXML\TargetFrame.xml
+# `PetFrame`, its health/mana bars, `PetFrameHappiness` and the dropdown, out of `PetFrame.lua`.
+Interface\FrameXML\PetFrame.xml
+# ══ THE COMBO-POINT DOTS — the reference's own, off the player's chain (1751, window 10) ══
+# `ComboFrame`, `ComboPoint1..5`, `ComboPointTemplate` and the `ComboPointsFrame_OnEvent` /
+# `ComboPointShineFade*` chain with its five duration constants, out of `ComboFrame.lua`.
+#
+# THE POSITION IS THE REQUIREMENT: `relativeTo="TargetFrame"` is resolved at LOAD, so this sits
+# below TargetFrame.xml. Its fade chain needs UiPanels.xml's `UIFrameFade` family, far above, at
+# call time. `MAX_COMBO_POINTS` comes from TargetFrame.lua now, which is where 1.12 declares it.
+Interface\FrameXML\ComboFrame.xml
 # The center-screen scrolling combat text (decision 0578) — the Blizzard_CombatText
 # transcription; consumes COMBAT_TEXT_UPDATE + the regen/health/power events, needs
 # only Fonts.xml (CombatTextFont) + UIParent before it.
 CombatText.xml
-# The party member frames + the PARTY_INVITE popup + its event driver (decision 0434
-# phase 2): a StaticPopup registry entry, so after UiPanels.xml.
-PartyFrame.xml
 # The death arc's dialogs + event driver (decision 0308): registry entries on the shared
 # StaticPopup engine, so after UiPanels.xml.
 DeathFrame.xml
@@ -206,55 +371,116 @@ MicroMenu.xml
 # <Minimap> widget hole (`crate::minimap` fills it). After GameTooltip (its zone-text
 # hover uses the shared tooltip).
 MinimapCluster.xml
-# The minimap's time-of-day indicator (GameTimeFrame): the reference's own file split — its
-# TOC loads GameTime.xml right after Minimap.xml. After MinimapCluster (its parent) and
-# GameTooltip (the hover tooltip); driven by the app's game clock (`minimap::feed_game_time`).
-GameTime.xml
+# ══ THE TIME-OF-DAY INDICATOR — the reference's own, off the player's chain (1751, window 5) ══
+# `GameTimeFrame`, `GameTimeTexture`, and `GameTime_GetTime` / `GameTimeFrame_Update` /
+# `_UpdateTooltip` / `GAMETIME_DAWN`/`_DUSK` out of `GameTime.lua`. Ours was a re-implementation of
+# the same behaviour under the same published names, and it is deleted.
+#
+# THE POSITION IS THE REQUIREMENT: `parent="MinimapCluster"` is resolved at LOAD, so this sits
+# below MinimapCluster.xml — which is also the reference's own order (its TOC loads GameTime.xml
+# right after Minimap.xml). GameTooltip above it for the hover; the clock itself is the app's
+# `GetGameTime` (`minimap::feed_game_time`), resolved at call time.
+#
+# BOTH of our recorded divergences went away rather than being carried (1751 §2). The `TEXT()`
+# wrapper the ref puts round its format strings is real here now — `BasicControls.xml` defines it.
+# And `TwentyFourHourTime = 1`, which our file set itself with a note saying the reference sets it
+# in `LocalizeFrames`, now comes from exactly there: `Interface\FrameXML\Localization.xml` is
+# sourced at the top of this manifest and `UIParent_OnEvent`'s VARIABLES_LOADED arm calls it. The
+# value is the PLAYER's locale rather than our assumption about it.
+Interface\FrameXML\GameTime.xml
 # Print screen's UI half (decision 1487): the centred "Screen Captured"/"Screen Capture Failed"
 # line, and the `TakeScreenshot()` the SCREENSHOT binding runs. Needs Fonts.xml (SystemFont) and
 # UIParent.xml (its seat) — both far above — and nothing else; seated beside ZoneText.xml, whose
 # AutoFollowStatus is the same full-screen-frame-with-a-centred-line shape.
 ScreenshotStatus.xml
-# The zone-entry splash (decision 0287): ZoneTextFrame/SubZoneTextFrame + the inlined
-# FadingFrame kit, driven by the ZONE_CHANGED family `crate::area` fires. Needs only
-# Fonts (ZoneTextFont/SubZoneTextFont) + UIParent; kept by the minimap cluster — the
-# other consumer of the zone-text host globals.
-ZoneText.xml
+# ══ THE ZONE SPLASH — the reference's own, off the player's chain (1751, window 8) ══
+# Two files, in the reference's own order and for its own reason.
+#
+# `FadingFrame.lua`'s kit first (`FadingFrame_OnLoad`/`_Show`/`_OnUpdate` and the three
+# `_Set*Time` setters). Our copy inlined it into ZoneText.xml on the argument that
+# ZoneTextFrame/SubZoneTextFrame are its only consumers in the whole 1.12 FrameXML — true, and
+# still the wrong shape once the file could simply be sourced: an addon that wants a fading frame
+# reaches for the kit's published names, not for the splash. The reference gives it its own TOC
+# line (l.25) and so do we. It declares no frames at all — it is a `<Script file=>` and nothing
+# else — so it needs nothing above it.
+Interface\FrameXML\FadingFrame.xml
+# …then the splash itself: `ZoneTextFrame` / `SubZoneTextFrame` / `AutoFollowStatus`, `SetZoneText`
+# and the three `Zone*Duration` constants, driven by the ZONE_CHANGED family `crate::area` fires
+# and by AUTOFOLLOW_BEGIN/END. Needs Fonts (ZoneTextFont/SubZoneTextFont) + UIParent, both far
+# above; kept by the minimap cluster, the other consumer of the zone-text host globals.
+#
+# Our copy's own header called its Lua "OURS: our own implementation of the behaviour
+# ref-ZoneText.xml specifies", with the published names and the measurements quoted. The
+# reference's file is that specification, so it replaces it whole — including the
+# `CONTESTED_TERRITORY`/`FACTION_CONTROLLED_TERRITORY`/`FREE_FOR_ALL_TERRITORY`/`AUTOFOLLOW*`
+# strings, which came from ours as `X = X or "…"` fallbacks and now come from the player's own
+# GlobalStrings.lua like every other string in this interface.
+Interface\FrameXML\ZoneText.xml
 # The faux-scroll kit (decisions 0247/0250/0251): BenillaScrollBarTemplate (the draggable
 # Slider scroll bar) + FauxScrollFrameTemplate + the reference's own FauxScrollFrame_*
 # API (Update/GetOffset/SetOffset/OnVerticalScroll + ScrollFrame_OnLoad) —
 # before its first customer (the trainer list) below.
 ScrollTemplates.xml
-# The reference's SHARED widget kit (decision 1203's queue): UIPanelButtonTemplate,
-# UICheckButtonTemplate, UIPanelCloseButton, InputBoxTemplate, the UIPanelScroll* family and
-# their siblings, under the reference's own names — the templates a third-party addon names in
-# `CreateFrame(kind, name, parent, "Template")`, which nothing in benilla's own XML consumes
-# yet (each of our windows still carries its private copy; see the file's header). After
-# ScrollTemplates.xml because UIPanelScrollFrameTemplate's OnLoad is that file's
-# ScrollFrame_OnLoad, and this file supplies the two remaining handlers of that same kit
-# (ScrollFrameTemplate_OnMouseWheel, ScrollFrame_OnScrollRangeChanged).
-UIPanelTemplates.xml
-# The reference's shared OPTIONS widgets: OptionsCheckButtonTemplate /
-# UIOptionsCheckButtonTemplate / OptionsSliderTemplate / OptionsButtonTemplate /
-# OptionFrameBoxTemplate. Straight after UIPanelTemplates.xml — two of them inherit its
-# UICheckButtonTemplate and UIPanelButtonTemplate. Not benilla's own options window
-# (OptionsFrame.xml, far below): these are the shared names addons build panels out of.
+# ══ THE PANEL TEMPLATE KIT — the reference's own, off the player's chain (1751, window 31) ══
+# TWO entries, because the reference splits this kit the way it splits every other: the `.lua`
+# carries the verbs and the `.xml` the templates. Listing the `.xml` alone brings none of the verbs
+# (`every_chain_xml_brings_its_own_lua` is a gate because that already bit twice).
+#
+# ONE swap, THREE of our files, which is why it had to move as a unit and why 1837 measured it
+# before anyone executed it:
+#   * `UIPanelTemplates.xml` — DELETED. Our 18 templates were a strict SUBSET of the reference's,
+#     zero benilla-only additions, so the template half is a pure gain.
+#   * the scroll half of `ScrollTemplates.xml` — `FauxScrollFrameTemplate`, `FauxScrollFrame_*`,
+#     `ScrollFrame_*` — now the chain's. What stays there is `BenillaScrollBarTemplate` and
+#     `BenillaScrollTroughTemplate`, which are ours and which six windows still inherit.
+#   * the `PanelTemplates_*` family out of `UiPanels.xml`.
+#
+# It could not be split: `ScrollTemplates.xml` sits ABOVE this entry, so the chain's
+# `FauxScrollFrameTemplate` lands after ours and wins (registration is last-in). There is no
+# ordering that takes the templates without also taking Faux.
+#
+# GAINED: `TabButtonTemplate`, and the whole `ScrollingEdit_*` family, which we had NOWHERE — that
+# is HelpFrame's named blocker, answered as a side effect. And it unblocks MacroFrame (1835).
+Interface\FrameXML\UIPanelTemplates.lua
+Interface\FrameXML\UIPanelTemplates.xml
+# ══ THE OPTIONS WIDGET KIT — the reference's own, off the player's chain (1751, window 29) ══
+# The four templates addons name for an options panel: `OptionFrameBoxTemplate`,
+# `OptionsButtonTemplate`, `OptionsCheckButtonTemplate`, `OptionsSliderTemplate`. Self-contained —
+# no `.lua`, no `<Include>` — and a descendant of UIPanelTemplates (`OptionsCheckButtonTemplate`
+# inherits `UICheckButtonTemplate`, `OptionsButtonTemplate` inherits `UIPanelButtonTemplate`), so
+# it stays seated after that file.
+#
+# `framexml-transcription-diff.py` reports no handler our transcription was missing, and the swap
+# GIVES BACK the reference's own inline hover: ours had factored it into a shared
+# `BenillaOptionsWidget_ShowTooltip`, where the reference open-codes it once per widget.
+Interface\FrameXML\OptionsFrameTemplates.xml
+# …and ours, shrunk to the ONE template the chain's file does not carry:
+# `UIOptionsCheckButtonTemplate`, whose reference home is `UIOptionsFrame.xml` — a file we do not
+# build, because benilla's options window is `OptionsFrame.xml`, a different design. The corpus
+# names it at 8 `CreateFrame` sites, so it cannot simply go. Same basename as the entry above by
+# design: bare = ours, path = the reference's. Retires when UIOptionsFrame.xml migrates.
 OptionsFrameTemplates.xml
-# The shared colour dialog + its opacity slider (`ColorPickerFrame`, `OpacitySliderFrame`,
-# `ColorPickerOkayButton`, `ColorPickerCancelButton`). Last of the "shared FrameXML surface with no
-# benilla consumer yet" cluster that runs from UIPanelTemplates.xml down — the same posture as
-# MoneyFrame.xml above, and for the same reason: 86 of the 218 corpus addons reach this window (64
-# of those files are `Dewdrop-2.0.lua`, which drives THIS one rather than rolling its own), and
-# nothing we ship opens it. The seat is a REQUIREMENT, not tidiness: its Okay/Cancel buttons
-# `inherits="GameMenuButtonTemplate"`, which is resolved at LOAD, and that template lives in
+# ══ THE COLOUR DIALOG — the reference's own, off the player's chain (1751, window 11) ══
+# `ColorPickerFrame` (a `<ColorSelect>`), `OpacitySliderFrame`, `ColorPickerOkayButton`,
+# `ColorPickerCancelButton`, and the separate `OpacityFrame` beside them. The file ships no `.lua`
+# — its whole script is inline, and the one function that drives it
+# (`UIDropDownMenuButton_OpenColorPicker`) lives in UIDropDownMenu.lua.
+#
+# Last of the "shared FrameXML surface with no benilla consumer yet" cluster that runs from
+# UIPanelTemplates.xml down, and the swap is exactly why that posture was worth holding: **86 of
+# the 218 corpus addons reach this window** (64 of those files are `Dewdrop-2.0.lua`, which drives
+# THIS one rather than rolling its own), and nothing we ship opens it — so every one of them is now
+# talking to the reference's own frames rather than to our re-expression of them.
+#
+# THE SEAT IS A REQUIREMENT, not tidiness: the Okay/Cancel buttons
+# `inherits="GameMenuButtonTemplate"`, resolved at LOAD, and that template lives in
 # UIPanelTemplates.xml six lines up (it moved there from GameMenuFrame.xml — the reference's own
-# file for it — precisely because GameMenuFrame.xml is deliberately LAST). Everything else it needs
-# is far above (Fonts' GameFontNormal/…Small trio; UiPanels' ShowUIPanel/HideUIPanel, its
-# UISpecialFrames entry and the ESC rung that cancel-clicks it). UIDropDownMenu.xml, which owns the
-# colour-swatch row that OPENS this window, sits above too — but that direction is call-time only
-# (`UIDropDownMenuButton_OpenColorPicker` reaches `ColorPickerFrame` by name when the swatch is
-# clicked), so the two could sit either way round.
-ColorPickerFrame.xml
+# file for it — precisely because GameMenuFrame.xml is deliberately LAST, which is also why this
+# entry does not follow the reference's own position below it). Everything else it needs is far
+# above: Fonts' GameFontNormal trio, and UiPanels' ShowUIPanel/HideUIPanel plus its UISpecialFrames
+# entry and the ESC rung that cancel-clicks it. UIDropDownMenu.xml sits above too, but that
+# direction is call-time only, so the two could sit either way round.
+Interface\FrameXML\ColorPickerFrame.xml
 # The fullscreen world map (decision 0203 phase 2), over the worldmap host API
 # (`crate::ui_world_map` feeds it); the 'M' binding (ui_script/input.rs) calls its
 # ToggleWorldMap().
@@ -265,24 +491,79 @@ WorldMapFrame.xml
 # The cast bar (decision 0137 phase 1) — the extracted 1.12 CastingBarFrame, driven by
 # the SPELLCAST_* events `crate::ui_cast` fires. Only needs Fonts before it.
 CastingBar.xml
-# The mirror timers (decision 0874): the breath/fatigue bars at top-center, driven by the
-# MIRROR_TIMER_* events `crate::ui_mirror` fires. Needs only Fonts (GameFontHighlight)
-# before it; kept beside the cast bar, whose border art it shares.
-MirrorTimer.xml
+# ══ THE MIRROR TIMERS — the reference's own, off the player's chain (1751, window 7) ══
+# `MirrorTimer1..3`, `MIRRORTIMER_NUMTIMERS`, `MirrorTimerColors` and the `MirrorTimer_Show` /
+# `MirrorTimerFrame_*` family out of `MirrorTimer.lua`. The breath/fatigue bars at top-centre,
+# driven by the `MIRROR_TIMER_*` events `crate::ui_mirror` fires off the wire. Needs only Fonts
+# (GameFontHighlight) before it; kept beside the cast bar, whose border art it shares.
+#
+# ALL THREE of our copy's recorded divergences resolved at the swap (1751 §2), and two of them had
+# already stopped being true:
+# · THE START DRIVER. Ours hosted `MIRROR_TIMER_START` on a hidden `MirrorTimerDriver` frame
+#   because "our UIParent.xml is script-only — it has no frame of its own to register events on".
+#   It has one now, so the registration and the `MirrorTimer_Show` call moved into
+#   `UIParent_OnEvent` where the reference keeps them (UIParent.lua l.97 + l.374-377), and the
+#   extra frame is gone.
+# · THE POOL WALK. The reference asks its two questions in two loops and bounds the SECOND by
+#   `STATICPOPUP_NUMDIALOGS` — a copy-paste from StaticPopup.lua, and its own bug. Ours folded
+#   them into one walk to avoid it. Now faithful, which forced the real fix in the right place:
+#   our `STATICPOPUP_NUMDIALOGS` was 2 against the reference's 4, so the third mirror bar could
+#   never be claimed by a new timer. UiPanels.xml grew instances 3 and 4 with this window.
+# · THE PAUSE ARG is now the reference's own bug, reproduced: `MirrorTimerFrame_OnEvent` reads
+#   `arg1` as a timer NAME and then as a number (`arg1 > 0`), so a real MIRROR_TIMER_PAUSE raises.
+#   1.12 never reaches it — vmangos refuses to send that packet and substitutes a full START,
+#   saying so in `Player::SendMirrorTimers` — and `ui_mirror.rs`'s Pause edge carries the note.
+Interface\FrameXML\MirrorTimer.xml
 # The always-up world-state readout (decision 1586, report B190): the tower/flag/base counters an
 # outdoor-PvP zone or a battleground shows at top-centre, driven by the UPDATE_WORLD_STATES event
 # `crate::world_state_ui` fires. Needs Fonts (GameFontNormalSmall) and GameTooltip; sits beside the
 # mirror timers, which share its top-centre lane.
 WorldStateFrame.xml
-# The player buff/debuff bar (decisions 0255/0257 — the player aura arc): the HUD row of
-# aura icons under the minimap, driven by the UnitAura feed (`crate::ui_aura`). Needs Fonts
-# (its FontStrings) and ActionBar's `BENILLA_FALLBACK_ICON` global (both already loaded).
-BuffFrame.xml
-# The durability alert (the "armor guy"): under the minimap beside BuffFrame, driven by
-# UPDATE_INVENTORY_ALERTS off the same inventory push the character window reads. Needs
-# MinimapCluster (its anchor) — loaded above.
-DurabilityFrame.xml
-ErrorsFrame.xml
+# ══ THE DURABILITY ALERT — the reference's own, off the player's chain (1751, window 4) ══
+# The "armor guy" under the minimap: `DurabilityFrame`, its eleven glyph textures, and
+# `DurabilityFrame_SetAlerts` / `_OnUpdate` with `INVENTORY_ALERT_STATUS_SLOTS` and
+# `INVENTORY_ALERT_COLORS`, all from `DurabilityFrame.lua` through its own `<Script file=>`.
+#
+# Ours was a measurement-faithful transcription and it is deleted. The swap re-examined its one
+# recorded divergence (1751 §2) and made it faithful: our copy OMITTED the ref's `OnUpdate`,
+# because the whole body is an `enchantTimer` countdown and that timer is provably dead in 1.12
+# (`SetAlerts` nils it; the only line that sets it is commented out, and so are the two colours it
+# would have painted). The reference runs the handler anyway, so we do too — the cost is one call
+# per frame on one frame, and it is the reference's own behaviour rather than our judgment of it.
+#
+# THE POSITION: `parent="UIParent"` and `relativeTo="MinimapCluster"` are both resolved at LOAD, so
+# this sits below UIParent.xml and MinimapCluster.xml. It is far above the reference's own slot
+# (FrameXML.toc l.86) and that is fine — nothing else reaches it at load, and its seat is decided
+# at runtime regardless: like every managed HUD frame the authored anchor is dead on arrival, with
+# `UIParent_ManageFramePositions` re-seating it on the loader's post-load pass and on every
+# OnShow/OnHide (ref UIParent.lua l.1758-1768).
+#
+# `UpdateInventoryAlertStatus` is the one global the sourced file names that this client does not
+# bind. It is reachable only from the dead `enchantTimer` branch above, so it is left absent rather
+# than stubbed (1203) — the honest state is "nothing calls it", not "we answer it with a lie".
+Interface\FrameXML\DurabilityFrame.xml
+# ══ THE ERROR TOASTS AND THE RAID WARNING — the reference's own (1751, window 14) ══
+# `UIErrorsFrame` (the red/yellow toast strip) and `UIErrorsFrame_OnLoad`/`_OnEvent`, then
+# `RaidWarningFrame` and `RaidBossEmoteFrame` with `RaidWarningFrame_OnLoad`/`_OnEvent`. Two files,
+# in the reference's own split and its own order: the warning frame anchors `relativeTo=
+# "UIErrorsFrame"`, resolved at LOAD, so it cannot precede it.
+#
+# Our single `ErrorsFrame.xml` held both and is deleted. It declared `RaidWarningFrame` with **no
+# `<Scripts>` at all**, and the reason it gave was wrong: *"we already deliver that chat type
+# through `ui_chat::feed`, so wiring a second consumer would print every raid warning TWICE"*.
+# Checked rather than inherited — `ui_chat` fires `CHAT_MSG_RAID_WARNING` as an ordinary chat event
+# and nothing of ours consumes it for a display. So the reference's handler adds the big centre
+# text and its `PlaySound("RaidWarning")` **beside** the chat line, which is exactly what 1.12
+# does: the chat window and the warning frame are two consumers of one event there too.
+#
+# It also brings `RaidBossEmoteFrame`, which our copy withheld on the "no corpus caller, and a
+# shadowed name with no caller is building against a guess" rule (1222). That rule is about names
+# WE would invent; this one is the reference's own declaration, so there is nothing left to guess.
+#
+# `ChatTypeInfo["RAID_WARNING"]` comes from ChatFrame.xml far below — read at call time, so the
+# order does not bind.
+Interface\FrameXML\UIErrorsFrame.xml
+Interface\FrameXML\RaidWarning.xml
 # ══ THE BAG WINDOWS — the reference's own, off the player's chain (decision 1751, window 1) ══
 # `ContainerFrame1..12`, `ContainerFrameTemplate`, `ContainerFrameItemButtonTemplate` and the whole
 # `ToggleBag`/`ToggleBackpack`/`OpenAllBags`/`IsBagOpen`/`ToggleKeyRing` verb family — the real
@@ -297,39 +578,88 @@ ErrorsFrame.xml
 # (Cooldown.xml), `UIPanelCloseButton` (UIPanelTemplates.xml) — plus `parent="UIParent"`. It
 # cannot load "first" the way a Lua-only sourcing had to.
 Interface\FrameXML\ContainerFrame.xml
-# The bag BAR: MainMenuBarBackpackButton / CharacterBag0..3Slot / KeyRingButton and the item-push
-# card — this client's stand-in for the reference's own MainMenuBarBagButtons.xml, which cannot be
-# sourced until `PutItemInBag`/`PickupBagFromSlot` are bound (the file says so at the site). After
-# ContainerFrame.xml for legibility, not necessity: every verb it calls resolves at click time. It
-# also owns `KEYRING_CONTAINER`, which is where the reference puts it and which the file above
-# reads — again a global resolved at call time, so the order does not bind.
-BagFrame.xml
+# ══ THE CHARACTER WINDOW — the reference's own, off the player's chain (decision 1751) ══
+# `CharacterFrame` + its five-tab row and portrait/name header (CharacterFrame.xml), the paper doll
+# itself — model pane, 19 equipment slots, the ammo slot, the five attributes, the melee and ranged
+# stat blocks, the five resistances (PaperDollFrame.xml) — and the pet page over the same templates
+# (PetPaperDollFrame.xml). Our `CharacterFrame.xml` (2027 lines) and `PetPaperDollFrame.xml` (773)
+# stood here and are deleted.
+#
+# THREE FILES IN THE REFERENCE'S OWN ORDER, and every edge between them is resolved at LOAD:
+#   - CharacterFrame.xml declares `CharacterFrame`, which the other two name in `parent=` (1734).
+#   - PaperDollFrame.xml declares `StatFrameTemplate`, `AttributeFrameTemplate` and
+#     `MagicResistanceFrameTemplate`, which PetPaperDollFrame.xml inherits on 11 frames.
+#   - PaperDollFrame.xml also declares `PaperDollItemSlotButtonTemplate`, which stock
+#     `MainMenuBarBagButtons.xml` below inherits on all five bag buttons.
+#
+# THAT LAST EDGE IS WHY THE BLOCK SITS HERE rather than below the bag bar where ours did.
+# `ItemSlotButtonTemplates.xml` held a transcribed copy of that template for exactly one reason:
+# our CharacterFrame.xml loaded after the bag bar and could not declare it in time. The reference's
+# own toc has no such problem (CharacterFrame 53, PaperDollFrame 54, MainMenuBarBagButtons 59), so
+# the copy is deleted and the reference's declaration is the live one — the same retirement
+# `BagSlotButtonTemplate` took one window earlier.
+#
+# `PaperDollFrame.lua` used to be a manifest line of its own, sourced far above everything so that
+# our bodies would win its 18 collisions. It arrives through PaperDollFrame.xml's own
+# `<Script file=>` now, at this position, and the collisions went with the file that had them.
+#
+# What the block needs from above, all far up: Fonts.xml (every `inherits=` font object),
+# ItemButtonTemplate.xml (the slot template's base, and the `SetItemButton*` family),
+# Cooldown.xml (`CooldownFrameTemplate` + `CooldownFrame_SetTimer`), GameTooltip.xml, UiPanels.xml
+# (`CharacterFrameTabButtonTemplate`, `UIPanelWindows`), UIPanelTemplates.xml (`UIPanelCloseButton`,
+# `UIPanelButtonTemplate`, and `PanelTemplates_SetNumTabs`, which `CharacterFrame_OnLoad` calls at
+# LOAD), TextStatusBar.xml (`SetTextStatusBarTextPrefix`, called at load too, plus the
+# `TextStatusBar` the pet page's XP bar inherits), UnitFrames.xml (`PlayerFrameHealthBar` /
+# `PlayerFrameManaBar`, named in that same OnLoad), ActionBar.xml (`MainMenuExpBar`, likewise),
+# MicroMenu.xml (`MicroButtonTooltipText`, the five tab hovers) and UIParent.xml
+# (`Model_OnLoad`/`_RotateLeft`/`_RotateRight`/`_OnUpdate` — the model pane's turntable, the
+# reference's own code living in our UIParent.lua counterpart).
+#
+# Two names it writes live BELOW it, and that is fine because both are runtime rather than load:
+# `HonorLevelText` and `HonorGuildText` (HonorFrame.xml), which `PaperDollFrame_SetLevel` and
+# `_SetGuild` fill "while we're at it" — reached only from OnShow and the UNIT_* events, long after
+# that file has loaded.
+Interface\FrameXML\CharacterFrame.xml
+Interface\FrameXML\PaperDollFrame.xml
+# Tab 2, the reference's file as well. `PetTab_Update` shows or hides `CharacterFrameTab2` off
+# `HasPetUI()` and re-anchors tab 3 over the gap, so a classless character's row has no hole.
+Interface\FrameXML\PetPaperDollFrame.xml
+# ══ THE BAG BAR — the reference's own, off the player's chain (decision 1751, window 3) ══
+# `MainMenuBarBackpackButton`, `CharacterBag0Slot`..`CharacterBag3Slot`, `KeyRingButton`,
+# `BagSlotButtonTemplate` and the `BagSlotButton_*`/`BackpackButton_*`/`Disable_BagButtons` family
+# — the real 1.12 file, with `MainMenuBarBagButtons.lua` arriving through its own `<Script file=>`.
+# It also owns `KEYRING_CONTAINER = -2`, which is where the reference puts it (l.1).
+#
+# Our `BagFrame.xml` stood here and is deleted. Its own header named the condition it was waiting
+# on — "replaced by the reference's own file the day `PutItemInBag` / `PickupBagFromSlot` are
+# bound" — and both are bindings now (`script/cursor/bag_verbs.rs`), so the ref's own click arms
+# work: its `PutItemInBag(id)` is the equip/swap our `BenillaBagBarSlot_Place` open-coded.
+#
+# THE POSITION IS THE REQUIREMENT: `inherits="PaperDollItemSlotButtonTemplate"` on the four bag
+# slots and `inherits="ItemButtonTemplate"` on the backpack are resolved at LOAD, and so is
+# `parent="MainMenuBarArtFrame"` — so this sits below the character-window block (above, which is
+# where stock `PaperDollFrame.xml` declares that template) and below ActionBar.xml (which declares
+# the art frame). It sat below a transcribed copy of the template in `ItemSlotButtonTemplates.xml`
+# until the character window migrated and made that copy redundant (decision 1810). Being BELOW the sourced ContainerFrame.xml is
+# legibility, not necessity, in either direction: every verb each file calls of the other resolves
+# at call time, `KEYRING_CONTAINER` included (no top-level read of it exists in ContainerFrame.lua).
+#
+# TWO THINGS THE SWAP DID NOT INHERIT, and both live in ContainerFrameAdapters.xml below rather
+# than being edited into anything of Blizzard's: the item-push card (0887 — the reference's is a
+# `<Model>` playing an .mdx and this engine renders no FrameXML models, so ours samples that
+# model's own tracks and draws a quad), and the GlobalStrings fallbacks the install-less harnesses
+# need. The keyring's SHOW trigger moved the other way — into ActionBar.xml, our MainMenuBar.xml,
+# which is exactly where the reference keeps it (MainMenuBar.xml l.323-341).
+Interface\FrameXML\MainMenuBarBagButtons.xml
 # The stack-split spinner (decision 0216 §6/slice 2): loaded beside the bag windows, whose slot
 # click handler (the reference's `ContainerFrameItemButton_OnClick`) calls `OpenStackSplitFrame`.
 # Order between the two doesn't matter for correctness (Lua globals resolve at call time, and
 # neither file's XML `inherits=` reaches into the other's templates) — adjacent for legibility.
-StackSplit.xml
+Interface\FrameXML\StackSplitFrame.xml
 # Our ADAPTERS over the reference's own container files — one wrapper, for the keyring tooltip
 # detour benilla answers differently (0765). Must load AFTER them, since it captures at load the
 # body it wraps; its own header says what it stopped needing to do when the XML became sourceable.
 ContainerFrameAdapters.xml
-# The character window (decision 0208 phase 1a): the C-key paper doll. Loaded after BagFrame
-# (needs nothing from it, but keeps player-state windows grouped) and before the NPC session
-# windows (Gossip/Merchant/Quest*) — it depends only on Fonts/UiPanels/GameTooltip, all
-# already loaded above.
-CharacterFrame.xml
-# The reference's item-SLOT button templates (PaperDollItemSlotButtonTemplate <-
-# BagSlotButtonTemplate), published for addons rather than used by our own windows. Here
-# rather than beside their subjects because the chain crosses BagFrame.xml (241) ->
-# CharacterFrame.xml (256) the wrong way; needs ItemButtonTemplate.xml (45) above it for the
-# base and Cooldown.xml (124) for the $parentCooldown the doll template carries.
-ItemSlotButtonTemplates.xml
-# The Pet tab (decision 1057): the same separate-top-level-file shape as SkillFrame below,
-# and ahead of it because it is the earlier tab. It leans on CharacterFrame.xml for real —
-# the `(unit, prefix)` stat setters, the `BenillaStatRow`/`BenillaMagicResistanceFrame`
-# templates and the tab row it raises tab 2 of — all of which only exist once that file has
-# loaded, so this order is a requirement here, not just tidiness.
-PetPaperDollFrame.xml
 # The Reputation tab: the same separate-top-level-file shape as the two pages around it, seated
 # BETWEEN them because that is the real client's tab order (Character 1, Pet 2, Reputation 3,
 # Skills 4 — ref CharacterFrame.xml:79-168), and the page's `id=` is that slot. Its hard
@@ -366,15 +696,37 @@ SkillFrame.xml
 # declared here, and `inherits=` resolves at LOAD. The reference has the identical edge — its
 # `HonorFrameTemplates.xml` is `<Include>`d by `HonorFrame.xml` and inherited by the LoadOnDemand
 # `Blizzard_InspectUI`, which loads later still.
-HonorFrame.xml
-# The inspect window (decision 0631): another player's paper doll. Beside the character
-# window it mirrors — it needs the same three (Fonts/UiPanels/GameTooltip) plus
-# `CharacterFrameTabButtonTemplate` from UiPanels.xml, and nothing from CharacterFrame.xml
-# itself (its slot template, handlers, and booth slot are all its own — the two windows
-# share only the reference's art). ONE cross-window dependency does bind, and it is on the
-# entry directly above: this window's honor page inherits HonorFrame.xml's five row templates
-# and calls its two shared painters, the same sharing the reference does.
-InspectFrame.xml
+Interface\FrameXML\HonorFrame.xml
+# ══ THE INSPECT WINDOW — the reference's own, off the player's chain (1751, window 24) ══
+# Another player's paper doll (decision 0631), and the FIRST LoadOnDemand ADDON we take off the
+# chain rather than a FrameXML file. Everything below it in this manifest that names a
+# `Blizzard_*` addon follows the shape set here.
+#
+# **The addon is inside patch.MPQ, not the loose folder.** `Interface\AddOns\Blizzard_InspectUI\`
+# on disk holds one `Blizzard_InspectUI.pub` decoy and nothing else; the real four files sit in
+# the archive, which the chain mounts. Believing the decoy is what kept this window (and Macro,
+# Talent, Raid, Trainer) on a transcription for months.
+#
+# No LoadOnDemand: we list the addon's files here and they load with everything else. The
+# reference reaches them through `InspectUnit` → `InspectFrame_LoadUI`; ours keeps `InspectUnit`
+# (in UIParent.xml, the reference's own home for that name) and drops the LoadUI call.
+#
+# The addon's own toc order, which is load order — the `.xml` files pull their `.lua` siblings
+# through `<Script file=.../>` relative to the addon directory, exactly as a FrameXML file does.
+# Its toc lists a fourth entry, `Localization.lua`, which is omitted here because it holds no code
+# at all: the whole file is the comment `-- This file is executed at the end of addon load`.
+#
+# Dependencies are unchanged from the file this replaces: Fonts/UiPanels/GameTooltip, plus
+# `CharacterFrameTabButtonTemplate` from UiPanels.xml, plus ItemButtonTemplate.xml far above
+# (`InspectPaperDollItemSlotButtonTemplate` inherits it, resolved at LOAD). And the one that
+# binds hardest is the entry directly above: the honor page inherits HonorFrame.xml's five row
+# templates — the reference has the identical edge, which is why its own toc has the same order.
+#
+# What we GAIN by swapping: `InspectGuildText` and `InspectTitleText`, two FontStrings our
+# transcription never had.
+Interface\AddOns\Blizzard_InspectUI\Blizzard_InspectUI.xml
+Interface\AddOns\Blizzard_InspectUI\InspectPaperDollFrame.xml
+Interface\AddOns\Blizzard_InspectUI\InspectHonorFrame.xml
 # The dressing room (decision 1060): the ctrl-click item preview. Loaded right after the
 # windows whose slots feed it (the character window above, the bags before that) and before
 # everything else that ctrl-clicks into it — order is legibility only, since `DressUpItemLink`
@@ -386,13 +738,23 @@ DressUpFrame.xml
 # windows grouped" posture, same Fonts/UiPanels/GameTooltip-only dependency set); the
 # 'P' binding (ui_script/input.rs) calls its bare ToggleSpellBook(BOOKTYPE_SPELL).
 SpellBookFrame.xml
-# The talent window (decision 0304 §4): the N-key window, the class talent grid over the
-# `benilla-ui::script::talent` engine seam. Loaded right after SpellBookFrame (the same
-# "player-state windows grouped" posture; needs Fonts/UiPanels/GameTooltip plus
-# ScrollTemplates.xml — its real ScrollFrame's scrollbar reuses BenillaScrollBarTemplate —
-# all already loaded above). The 'N' binding (ui_script/input.rs) calls its bare
-# ToggleTalentFrame().
-TalentFrame.xml
+# ══ THE TALENT WINDOW — the reference's own, off the player's chain (1751, window 25) ══
+# The second LoadOnDemand addon (1832 was the first, and its header carries the mechanics).
+# `Blizzard_TalentUI` is FIVE files behind one manifest line: the `.xml` sources its own `.lua`
+# and `<Include>`s `Blizzard_TalentUITemplates.xml`, which is where the four templates every
+# talent button, branch, arrow and tab inherits actually live. Its toc's only other entry is the
+# empty `Localization.lua`.
+#
+# It needs NOTHING built — every engine verb the five files call was already registered, checked
+# name by name against our bindings. What it needs LOADED is UIPanelTemplates (its scroll frame
+# is `UIPanelScrollFrameTemplate`, its close and cancel buttons `UIPanelCloseButton` /
+# `UIPanelButtonTemplate`) and Fonts, both far above.
+#
+# `ToggleTalentFrame` moved to UIParent.xml, the reference's own home for it — see 1833.
+#
+# What we GAIN: `TalentFrameTab4` and `TalentFrameTab5`. The reference lays out five tab slots
+# where our transcription stopped at the three a 1.12 class actually has.
+Interface\AddOns\Blizzard_TalentUI\Blizzard_TalentUI.xml
 # The social window (decision 0668): the O-key friends/ignore/who window over the social
 # API (`benilla-ui/src/script/social.rs`) + `crate::ui_social`'s feed/drain. Needs
 # UiPanels (the panel manager, `CharacterFrameTabButtonTemplate`, and the StaticPopup
@@ -404,23 +766,44 @@ FriendsFrame.xml
 # a child cannot be declared before its parent — the reference splits it the same way and for the
 # same reason (its FrameXML.toc has RaidFrame.xml on the very next line). Decision 1549.
 RaidFrame.xml
-GossipFrame.xml
-MerchantFrame.xml
+# ══ THE GOSSIP WINDOW — the reference's own, off the player's chain (1751) ══════════════════
+# No engine verb, no widget method, no shadowed name — all three instruments clean. It was
+# deferred once on `GossipResize` reading `GetTextHeight()` in the same repaint that sets the
+# label, our measurement being a frame late; that is what the swap tests.
+Interface\FrameXML\GossipFrame.xml
+# ══ THE VENDOR WINDOW — the reference's own, off the player's chain (1751) ══════════════════
+# It took three things, in this order: `PickupMerchantItem` (the vendor cursor, 1797), the
+# `BenillaMoney_*` coin kit moving out to MoneyFrame.xml where eight other windows can reach it
+# without loading this one, and `SetMerchantCompareItem` (1802) — which the gap report could not
+# see at all until 1798 taught it to read `:Method(` sites, and which would have raised on the
+# first vendor-row hover with every check green.
+#
+# That is why the notes below say "grouping" rather than "reuses that file's helpers": the
+# windows still cluster here, but nothing depends on this file any more.
+Interface\FrameXML\MerchantFrame.xml
 # The mail window (decision 0544 P1/P2): the mailbox inbox, open-letter, and send tab over
-# the Era mail API (`benilla-ui/src/script/mail.rs`) + `crate::ui_mail`'s feed/drain. Loaded
-# right after MerchantFrame because it REUSES that file's global BenillaMoney_Set/_Clear
-# coin helpers (postage/enclosed/COD displays) — they must be defined first.
+# the Era mail API (`benilla-ui/src/script/mail.rs`) + `crate::ui_mail`'s feed/drain. Kept
+# beside MerchantFrame in the NPC-window cluster; its postage/enclosed/COD coin displays use
+# the BenillaMoney_* kit, which is defined in MoneyFrame.xml far above.
 MailFrame.xml
 # The player-to-player trade window (decision 0592 P1): the two-sided offer over the trade
-# API (`benilla-ui/src/script/trade.rs`) + `crate::ui_trade`'s feed/drain. Loaded after
-# MerchantFrame because it REUSES that file's global BenillaMoney_Set coin helpers (the two
-# gold displays) — they must be defined first.
+# API (`benilla-ui/src/script/trade.rs`) + `crate::ui_trade`'s feed/drain. Kept beside
+# MerchantFrame in the NPC-window cluster; its two gold displays use the BenillaMoney_* kit,
+# defined in MoneyFrame.xml far above.
 TradeFrame.xml
-# The item-text reader: letters (mail-made permanent copies) and, later, books/plaques —
-# the ItemTextGet* seam (`benilla-ui/src/script/item_text.rs`) over `crate::ui_item_text`'s
-# feed/drain. Loaded right after MailFrame (the same arc; needs only Fonts/UiPanels, both
-# loaded above).
-ItemTextFrame.xml
+# ══ THE ITEM-TEXT READER — the reference's own, off the player's chain (1751, window 9) ══
+# `ItemTextFrame` and its page chrome, over the `ItemTextGet*` seam
+# (`benilla-ui/src/script/item_text.rs`) and `crate::ui_item_text`'s feed/drain. Letters (mail-made
+# permanent copies) and, later, books and plaques. Right after MailFrame, the same arc; needs
+# Fonts/UiPanels/ScrollTemplates, all above.
+#
+# ONE THING OUR COPY CARRIED THAT THE REFERENCE'S DOES NOT, moved to the reference's own home:
+# `GetMaterialTextColors` and the two colour tables it reads. 1.12 keeps the function in
+# `UIParent.lua` and the tables in `Fonts.xml`, and both of ours now do the same — under the
+# reference's published names (`MATERIAL_TEXT_COLOR_TABLE` / `MATERIAL_TITLETEXT_COLOR_TABLE`)
+# rather than the `BENILLA_`-prefixed pair this file kept privately. Fonts.xml's own note said
+# those two tables would arrive "the day something does" read them; the sourced file is that day.
+Interface\FrameXML\ItemTextFrame.xml
 # The trainer window (decision 0237 phase 3): the read-only class/profession trainer list.
 # Loaded right after MerchantFrame per the director's brief (kept adjacent even though this
 # v1 uses plain-text costs, not MerchantFrame's coin helpers) and before the other NPC
@@ -453,27 +836,42 @@ TrainerFrame.xml
 #
 # Kept in the "NPC session windows grouped" cluster beside Trainer/Taxi, and after MerchantFrame.
 Interface\FrameXML\BankFrame.xml
-# The taxi-map window (decision 0484 phase 2): the flight-master session, driven by the
-# taxi engine seam (`benilla-ui/src/script/taxi.rs`) over `crate::ui_taxi`'s feed/drain.
-# Loaded right after TrainerFrame per the same "NPC session windows grouped" posture — it
-# needs only Fonts/UiPanels/GameTooltip (SetTooltipMoney), both already loaded above.
-TaxiFrame.xml
+# ══ THE FLIGHT MAP — the reference's own, off the player's chain (1751) ══
+# The flight-master session (decision 0484 phase 2), driven by the taxi engine seam
+# (`benilla-ui/src/script/taxi.rs`) over `crate::ui_taxi`'s feed/drain — unchanged; only the window
+# in front of it is the reference's now. Our 557-line transcription carried the same five stock
+# globals plus eight helpers of its own, none of which anything outside that file named.
+#
+# The one thing it needed was the `<TaxiRouteFrame>` widget type, which is registered now (1828) —
+# a `CSimpleFrame` and nothing else, so it is `FrameKind::Frame` and the route lines stay what the
+# reference makes them: plain `<Texture>` children rotated by an 8-argument `SetTexCoord`.
+#
+# Pulls only `TaxiFrame.lua`, and still needs only Fonts/UiPanels/GameTooltip (SetTooltipMoney),
+# all loaded above — so it keeps its seat in the "NPC session windows grouped" cluster.
+Interface\FrameXML\TaxiFrame.xml
 # The stable-master window (decision 1676): the hunter's three-slot pet stable over the stable
 # API (`benilla-ui/src/script/stable.rs`) + the app's feed/drain. Kept in the "NPC session
 # windows grouped" cluster beside Trainer/Bank/Taxi. Two of its dependencies are resolved at
 # LOAD and so must sit above it: MoneyFrame (its purse and cost displays inherit
 # SmallMoneyFrameTemplate) and UIPanelTemplates (UIPanelButtonTemplate / UIPanelCloseButton).
-# A third is resolved at load too, and is the reason this cannot sit up with the other NPC
-# windows' dependencies: the model pane's own <OnLoad> calls CharacterFrame.xml's shared
-# `BenillaPaperDollModel_OnLoad`, so that file must already have run. The rest
+# A third is resolved at load too: the model pane is a `<PlayerModel>` whose own <OnLoad> calls
+# the reference's `Model_OnLoad` (UIParent.xml, far above). That used to be CharacterFrame.xml's
+# `BenillaPaperDollModel_OnLoad`, which is why this entry sat below the character window; it no
+# longer has to, and stays here only because the NPC-session cluster is where it belongs. The rest
 # (ItemButtonTemplate's SetItemButtonTexture, GameTooltip, UiPanels' ShowUIPanel/HideUIPanel,
 # UIParent's BuildListString) are resolved when the window repaints, so their order is free.
-PetStable.xml
+#
+# ══ THE REFERENCE'S OWN, off the player's chain (1751) ══
+# A true 1:1 swap: our transcription and the stock file declare the SAME frame names and the SAME
+# four globals (`PetStable_OnLoad`/`_OnEvent`/`_Update`/`_NoPetsAllowed`), so nothing that names
+# either moves — `ui_stable.rs`, `names.rs` and `net/apply/npc.rs` all reach it by stock names
+# already, and `portrait`'s booth keys on `PetStableModel`, which both spell the same.
+Interface\FrameXML\PetStable.xml
 # The auction house (decision 1511): the three-tab doublewide window over the auction API
 # (`benilla-ui/src/script/auction.rs`) + the app's feed/drain. Kept in the "NPC session
 # windows grouped" cluster beside Trainer/Bank/Taxi, and loaded AFTER MoneyFrame (its eight
 # money displays are SmallMoneyFrameTemplate, and it registers the AUCTION_DEPOSIT money type
-# into that file's MoneyTypeInfo), after MerchantFrame (it reuses that file's global
+# into that file's MoneyTypeInfo), after MerchantFrame (grouping only now — that file's global
 # BenillaMoneyInput_* helpers for its four money inputs), after ScrollTemplates (four faux lists), after
 # UIPanelTemplates (UIPanelButtonTemplate / UIPanelCloseButton / InputBoxTemplate /
 # UICheckButtonTemplate), after UIDropDownMenu (the rarity capsule) and after UiPanels (the
@@ -492,29 +890,44 @@ TradeSkillFrame.xml
 # TradeSkillFrame.xml defines) already exists when CraftFrame.xml reuses it without
 # redefining (CraftFrame.xml's own header comment, deviation 2).
 CraftFrame.xml
-LootFrame.xml
-# The group-loot roll popups (decision 0591): the Need/Greed/Pass dialogs, a sibling of
-# LootFrame.xml (loaded right after it) over the `benilla-ui::script::loot_roll` seam
-# (`crate::ui_loot_roll`'s feed/drain). NOT a UIPanel — four `frameStrata="DIALOG"` toplevel
-# popups with their own hardcoded anchors — so it needs only Fonts (GameFontNormalSmall) +
-# GameTooltip (the item/PASS/NEED/GREED hovers), both already loaded above.
-GroupLootFrame.xml
+# ══ THE LOOT WINDOW — the reference's own, off the player's chain (1751) ════════════════════
+# It never needed an engine VERB. It needed a widget TYPE: `<LootButton>` is a real registered
+# `CreateFrame` type (decision 1799), and registering it as a plain Button would have loaded the
+# file and left every row dead — 1.12 has no Lua verb for "take slot N".
+#
+# Its ONE method, `SetSlot`, is also what the gap report's new `method=` column found from the
+# call site while wow-re was deriving it from the vtable (1798). Both columns read 0 now, and
+# every verb the stock file calls at runtime — not just at load — was checked by hand against
+# the bindings before this line changed.
+Interface\FrameXML\LootFrame.xml
 # The questgiver window (decision 0088): four sub-panels over the Era quest API. Loaded after
-# MerchantFrame (the BenillaMoney coin helpers live there) and GossipFrame (shared parchment
+# MerchantFrame (grouping; the BenillaMoney coin helpers now live in MoneyFrame.xml) and GossipFrame (shared parchment
 # art conventions); its title/panel-button labels use the auto-centred ButtonText slot.
 QuestFrame.xml
 # The two guild-charter windows (decision 1672): the guild registrar — the window the "How do I
-# form a guild?" gossip row opens — and the charter itself, the sheet nine people sign. Loaded
-# here, right after QuestFrame, because both wear the QuestGreeting parchment and its QuestFont /
+# form a guild?" gossip row opens — and the charter itself, the sheet nine people sign. **Both are
+# the reference's own files off the player's chain now** (1751, windows 12 and 13). Loaded here,
+# right after QuestFrame, because both wear the QuestGreeting parchment and its QuestFont /
 # QuestTitleFont objects and read as that family; they need UiPanels (the panel manager seats both,
-# and PetitionFrame registers its RENAME_GUILD dialog on the shared popup engine), MoneyFrame (the
-# registrar's price rides MoneyFrameTemplate, resolved at LOAD — decision 1580's ordering rule) and
-# UIPanelTemplates (the close/action buttons), all far above. The registrar must come first: no
-# load-order dependency links them, but the flow does, and the pair reads in the order it is used.
-GuildRegistrarFrame.xml
-PetitionFrame.xml
+# and the RENAME_GUILD dialog the charter raises is registered there, where 1.12 keeps every
+# dialog), MoneyFrame (the registrar's price rides MoneyFrameTemplate, resolved at LOAD — decision
+# 1580's ordering rule) and UIPanelTemplates (the close/action buttons), all far above. The
+# registrar must come first: no load-order dependency links them, but the flow does, and the pair
+# reads in the order it is used.
+Interface\FrameXML\GuildRegistrarFrame.xml
+# ══ THE GUILD CHARTER — the reference's own, off the player's chain (1751, window 12) ══
+# `PetitionFrame` and its nine signature rows, `PetitionFrame_Update`, `MAX_PETITION_SIGNATURES`,
+# and the leader/signer button pair that share one anchor. Ours was the same window under the same
+# names (decision 1672) with a different expression of the same painter; the reference's file is
+# what that expression was written from.
+#
+# The seat is unchanged and every dependency it names is above: UiPanels (the panel manager seats
+# it, and its RENAME_GUILD dialog rides the shared popup engine), MoneyFrame, UIPanelTemplates (the
+# close/action buttons `inherits=` at LOAD), and the QuestGreeting parchment family it shares with
+# GuildRegistrarFrame directly above.
+Interface\FrameXML\PetitionFrame.xml
 # The quest log window (decision 0088 arc, the quest-log slice): durable player state, not an
-# NPC session — loaded after MerchantFrame (the BenillaMoney coin helpers it reuses) and
+# NPC session — loaded after MerchantFrame (grouping; the coin helpers are in MoneyFrame.xml now) and
 # alongside QuestFrame (same arc); the 'L' binding (ui_script/input.rs) calls its
 # ToggleQuestLog().
 QuestLogFrame.xml
@@ -522,16 +935,23 @@ QuestLogFrame.xml
 # file split. After MinimapCluster (its anchor), UIParent (the manage pass that re-seats it,
 # and SecondsToTime), GameTooltip (its row hover), and QuestLogFrame — whose window a row
 # click opens, and whose MAX_QUESTS it shares.
-QuestTimerFrame.xml
+Interface\FrameXML\QuestTimerFrame.xml
 ChatFrame.xml
-# The macro window (decision 0983): the editor + its name/icon popup, driven over the
-# engine's OWN macro table (`benilla_ui::script::macros` — 1.12 macros have no server
-# side, so this is the one window whose model is not an app feed). Needs UiPanels (the
-# panel manager + `TabButtonTemplate`), ScrollTemplates (BOTH kits — the real one scrolls
-# the body box, the faux one the icon grid), MicroMenu (`UpdateMicroButtons` on
-# show/hide), and it must come AFTER SpellBookFrame, whose shift-click reaches
-# `BenillaMacroFrame_AddMacroLine`. Before GameMenuFrame, whose Macros button opens it.
-MacroFrame.xml
+# ══ THE MACRO WINDOW — the reference's own, off the player's chain (1751, window 32) ══
+# The fourth LoadOnDemand addon (1832's header carries the mechanics). ONE manifest line: its toc
+# lists `Blizzard_MacroUI.xml`, which sources its own `.lua`, plus the empty `Localization.lua`.
+#
+# Nothing to build. 1835 recorded `SaveMacros` as a missing engine verb and it is not one — the
+# only occurrence in the reference's own file is COMMENTED OUT (`--SaveMacros();` in
+# `MacroFrame_OnHide`); the triage that found it was not stripping Lua comments.
+#
+# It was BLOCKED until 1846: `MacroPopupScrollFrame` inherits FrameXML's
+# `ClassTrainerListScrollFrameTemplate`, which inherits `FauxScrollFrameTemplate` — and ours was a
+# same-named `<Frame>` with a Benilla slider that shadowed the reference's `<ScrollFrame>`. With the
+# panel kit on the chain that shadow is gone, so this window went from blocked to a plain swap.
+#
+# `ShowMacroFrame` moved to UIParent.xml, the reference's own home for it — see 1848.
+Interface\AddOns\Blizzard_MacroUI\Blizzard_MacroUI.xml
 # The script error log (decision 1495): the window `/errors` opens — the list B293's two
 # reporters asked for, which the reference's one-message-at-a-time ScriptErrors modal cannot
 # be. Ours entirely (1.12 has no counterpart), reading the retained log on the model rather
@@ -562,7 +982,7 @@ HelpFrame.xml
 # Needs UiPanels.xml far above for ShowUIPanel/HideUIPanel and its own UIPanelWindows row; needs
 # nothing else, and nothing needs it — the engine reaches it purely by firing CINEMATIC_START.
 # Seated late because it is an outermost, screen-owning layer, like the two windows below it.
-CinematicFrame.xml
+Interface\FrameXML\CinematicFrame.xml
 # The Keybindings page MODULE (decision 1008, superseding 0997's standalone window):
 # the templates + script of the Options window's Keybindings category, over the
 # engine's binding table (benilla_ui::script::keybind + crate::bindings — the 1.12
@@ -578,9 +998,18 @@ KeyBindingsPage.xml
 # (all far above); sits right before GameMenuFrame so the menu — which reaches it by
 # name at click time — stays the last, outermost layer.
 OptionsFrame.xml
-# The game menu (decision 0674): the frame ESC opens, plus the CAMP/QUIT dialogs and their
-# event driver. LAST on purpose — it is the outermost layer of the shell, it depends on
-# everything it touches being loaded (UiPanels' popup engine + panel manager, MicroMenu's
-# UpdateMicroButtons, BagFrame's Disable_BagButtons), and nothing depends on it: the ESC
-# chain and the micro button both reach it by name at call time.
+# The game menu (decision 0674): the frame ESC opens. LAST on purpose — it is the outermost
+# layer of the shell, it depends on everything it touches being loaded (UiPanels' popup engine
+# + panel manager, MicroMenu's UpdateMicroButtons, BagFrame's Disable_BagButtons), and nothing
+# depends on it: the ESC chain and the micro button both reach it by name at call time.
+#
+# NOT yet on the chain, and the reason is not in the gap report: the stock file's buttons reach
+# `UIOptionsFrame`, and stock `UIParent.lua:997` indexes it — so the ESC menu drags in the whole
+# options family, the same chain `MainMenuBarMicroButtons` is deferred behind. All three columns
+# read clean because the file LOADS clean; what it needs is a sibling window, not a verb.
+#
+# Its CAMP/QUIT dialogs and their event driver HAVE moved out, to UiPanels.xml — the reference's
+# own homes (StaticPopup.lua l.564/586 for the dialogs, UIParent.lua l.304-315 for the three
+# events). The ESC menu never owned them; it was just where ours were first needed. That is one
+# less thing to move when the options family lands.
 GameMenuFrame.xml

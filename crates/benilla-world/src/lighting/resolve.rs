@@ -1,6 +1,6 @@
 //! The per-frame time-of-day RESOLVE: samples `Light.dbc` against the effective game clock (server
 //! clock, manual debug-panel scrub, or the pre-connect noon fallback) into a fresh [`super::WowLighting`]
-//! — the scene-fog stage, the camera-in-WMO interior-fog crossfade ([`WmoFogRamp`]), and the startup
+//! — the scene-fog stage, the camera-in-WMO interior-fog crossfade ([`WmoCrossfade`]), and the startup
 //! seed ([`setup_lighting`]) all live here. Split from the resource type + plugin registration in
 //! `super`.
 
@@ -31,22 +31,31 @@ fn scene_fog(fog_end_raw: f32, fog_start_frac: f32, farclip: f32) -> (f32, f32) 
 /// out (`0x6cefcb–0x6cf051`, wow-re `rf-weather-emission-timeline` ROUND 5).
 const WMO_FOG_RAMP_PER_SEC: f32 = 0.25;
 
-/// The camera-in-WMO **interior fog** blend (`[0xce9bdc]` + the staging `0x6cef43–62`): while the
-/// camera stands in a WMO interior, the scene fog — storm veil included — crossfades toward the
-/// building's own MFOG fog over 4 s, and back out over 4 s on leaving. This is why the reference's
-/// Goldshire inn keeps its warm authored haze while a storm rages outside (the storm's
-/// negative-start veil never reaches the room). The staged triple LATCHES while the camera exits so
-/// the fade-out lerps from the room's fog instead of popping. A mid-interior fog-record switch
-/// (tavern → corridor) snaps the staged target — the client's source-identity guard (`0x6cef92–b5`)
-/// re-arms a lerp there whose exact semantics are un-carved (flagged in 0338); at room scales both
-/// records' fog is ≈0 so the step is invisible.
-#[derive(Default)]
-pub(super) struct WmoFogRamp {
+/// The camera-in-WMO **interior crossfade** — the reference's `[0xce9bdc]` (+ the staging
+/// `0x6cef43–62`), ONE number with exactly two consumers: while the camera stands in a WMO
+/// interior, the scene fog — storm veil included — crossfades toward the building's own MFOG fog
+/// over 4 s and back out over 4 s on leaving, **and the same `t` is the WMO skybox's slot alpha**
+/// ("the skybox alpha and the interior fog blend are the same number" — wow-re `wmo-skybox.md` §3,
+/// VERIFIED; `crate::skybox` reads it through [`Self::t`], never a ramp of its own). This is why
+/// the reference's Goldshire inn keeps its warm authored haze while a storm rages outside (the
+/// storm's negative-start veil never reaches the room), and why Stratholme's painted sky fades in
+/// at exactly the rate its streets shed the scene fog. The staged triple LATCHES while the camera
+/// exits so the fade-out lerps from the room's fog instead of popping. A mid-interior fog-record
+/// switch (tavern → corridor) snaps the staged target — the client's source-identity guard
+/// (`0x6cef92–b5`) re-arms a lerp there whose exact semantics are un-carved (flagged in 0338); at
+/// room scales both records' fog is ≈0 so the step is invisible.
+#[derive(Resource, Default)]
+pub struct WmoCrossfade {
     t: f32,
     staged: Option<crate::wmo_portal::WmoFogTarget>,
 }
 
-impl WmoFogRamp {
+impl WmoCrossfade {
+    /// The crossfade weight this frame, `[0, 1]` — advanced only by [`update_time_lighting`]'s
+    /// blend, read by the skybox weight resolve.
+    pub fn t(&self) -> f32 {
+        self.t
+    }
     /// Advance the ramp by `dt` toward `target` and return the committed `(color, start, end)`.
     /// The staging transform is the record's own law: `end = min(end, farclip)`,
     /// `start = end × start_scalar` (`fmul 0x6cef56` — MFOG start IS a fraction of end in 1.12.1).
@@ -184,6 +193,24 @@ pub(super) fn setup_lighting(
 /// sun sets (that's how the real client does it). **Phase 0:** this only writes the resolved values
 /// into [`WowLighting`] (consumed by `apply_wow_lighting` → the materials). No PBR sun / ambient /
 /// fog / sky are touched — those are rebuilt in-shader step by step.
+/// The reference's `0x6d1620` — an HSV **VALUE-only** scale of a colour, as used by the ocean depth
+/// ramp: unpack to RGB floats, `RGB → HSV` (`0x7bbc80`), multiply the third member (V) alone,
+/// `HSV → RGB` (`0x7bbd60`), repack.
+///
+/// **It is a uniform RGB multiply, and that is a fact rather than an approximation.** HSV keeps
+/// `V = max(r,g,b)` and `S = (max − min)/max`; scaling V while H and S are untouched scales the max
+/// by `f`, and the min by `new_V·(1 − S) = f·min`, and the middle channel by the same ratio — so
+/// every channel comes back multiplied by `f`. The detour is an identity for a V-only scale, so we
+/// transcribe the identity. `the_hsv_detour_is_a_plain_multiply` checks that against an actual
+/// round trip rather than leaving it as an argument in a comment.
+///
+/// The one thing we do NOT carry over is the reference's byte repack (`×255 + 512 >> 14`): its
+/// light lane is 8-bit and ours is float end to end, and re-quantizing here would be inventing a
+/// step this pipeline does not otherwise have.
+fn hsv_value_scale(c: [f32; 3], f: f32) -> [f32; 3] {
+    [c[0] * f, c[1] * f, c[2] * f]
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn update_time_lighting(
     world_time: Res<super::WorldTime>,
@@ -191,13 +218,13 @@ pub(super) fn update_time_lighting(
     debug: Res<DebugState>,
     cam: Query<&GlobalTransform, With<WorldCamera>>,
     current_map: Option<Res<CurrentMap>>,
-    underwater: Option<Res<crate::liquid::Underwater>>,
+    eye_liquid: crate::liquid::EyeLiquid,
     viewer: Res<crate::view::Viewer>,
     weather: Option<Res<crate::weather::WeatherState>>,
     view: Res<crate::view::ViewDistance>,
     time: Res<Time>,
     wmo_fog: Res<crate::wmo_portal::CameraWmoFog>,
-    mut wmo_ramp: Local<WmoFogRamp>,
+    mut wmo_ramp: ResMut<WmoCrossfade>,
     mut clock: ResMut<GameClock>,
     mut lighting: ResMut<WowLighting>,
     mut last_dump: Local<Option<u32>>,
@@ -253,10 +280,7 @@ pub(super) fn update_time_lighting(
     // fog + cool light. Feeding it through the normal atmosphere → `WowLighting` path means every
     // existing consumer (terrain/model/water/WDL fog + the clear colour) becomes underwater for free
     // (VERIFIED apitrace WoW.18: the reference just switches the active param; no overlay quad).
-    let submerged = underwater
-        .as_ref()
-        .map(|u| u.0)
-        .unwrap_or(benilla_formats::Submersion::Dry);
+    let submerged = eye_liquid.submersion();
     // The ghost-world atmosphere (decision 0308 §7, byte-VERIFIED death-light.md): while
     // PLAYER_FLAGS_GHOST is up the active LightParams slot is 4 — the death profile — applied
     // instantly (the client rebuilds its color tables per frame off the single active slot).
@@ -297,7 +321,7 @@ pub(super) fn update_time_lighting(
     // commits 125/500 clear and −139/278 at full storm — the storm's −0.5 fraction yields the
     // negative start = the near veil; the short storm end whites out the middle distance.
     let (fog_start, fog_end) = scene_fog(atmo.fog_end, atmo.fog_start_frac, view.farclip);
-    // The camera-in-WMO interior-fog crossfade (see [`WmoFogRamp`]) — computed as its OWN triple;
+    // The camera-in-WMO interior-fog crossfade (see [`WmoCrossfade`]) — computed as its OWN triple;
     // the scene fog above stays untouched (the round-5 global-overwrite washed the outside view
     // golden through the door — director-caught, corrected per the round-6 Q-I lane map).
     // Submerged, the submerged Light param owns everything — the MFOG record's own underwater
@@ -319,9 +343,17 @@ pub(super) fn update_time_lighting(
         )
     };
     let moon02 = daynight::moon02_state(day_f);
+    // **The ocean depth ramp** (decision 1829, wow-re `submerged-atmosphere.md` §3). Ocean alone
+    // runs it, and it darkens the two committed light triples — the first (`DNState+0x178`) by
+    // `fac1` down to 0.5, the second (`+0x174`) by `fac2` down to 0.75, over the first 30 yards.
+    // Every other submersion state, ocean's own fog colour included, is untouched: the fog-colour
+    // commit in the same block is dead code, overwritten from the bands immediately after.
+    let (fac1, fac2) = submerged
+        .ocean_depth_factors(eye_liquid.eye_z())
+        .unwrap_or((1.0, 1.0));
     let resolved = WowLighting {
-        ambient: atmo.ambient,
-        diffuse: atmo.sun_diffuse,
+        ambient: hsv_value_scale(atmo.ambient, fac1),
+        diffuse: hsv_value_scale(atmo.sun_diffuse, fac2),
         spec: atmo.sun_color, // row 9 (warm-white) — WoW's specular color
         sun_dir,
         celestial_dir,
@@ -424,11 +456,26 @@ pub(super) fn update_time_lighting(
     // recomputes the same call offline — so a line from a live run can be replayed against the DBC
     // instead of argued about. Without the map printed, "is this the atmosphere the zone actually
     // authored, or the one next door?" costs a session (Stratholme, 2026-07-29).
-    if *last_dump != Some(minute) && std::env::var_os("WOW_LIGHT_DUMP").is_some() {
-        *last_dump = Some(minute);
+    // `WOW_LIGHT_DUMP=frame` drops the minute throttle, exactly as `WOW_FOG_DUMP=frame` does. The
+    // minute gate is right for comparing colours against a DBC replay, and useless for anything
+    // POSITIONAL: game minutes advance slowly enough that a whole probe logs two lines, and both of
+    // them land in the first moments after world entry — before the submersion verdict has settled,
+    // so the line reports `Dry` at a position that is plainly underwater (1829, chasing exactly
+    // that contradiction).
+    if let Some(mode) = std::env::var_os("WOW_LIGHT_DUMP") {
+        let key = (mode != *"frame").then_some(minute);
+        if key.is_some() && *last_dump == key {
+            return;
+        }
+        *last_dump = key;
         let b = |c: [f32; 3]| [c[0] * 255.0, c[1] * 255.0, c[2] * 255.0].map(|v| v.round() as i32);
         eprintln!(
-            "[light] map {map} at ({:.1}, {:.1}, {:.1}) minute {minute} ({source:?}) ambient {:?} diffuse {:?} spec {:?} sun_dir {:.3} fog {:?} start/end {:.0}/{:.0}",
+            // The submersion tail (1829) reports the RAMP ITSELF, not just its result. Comparing
+            // two dives at different depths cannot prove the ramp fired — the light row moves with
+            // the clock between runs, and the dump only fires on a game-minute change, so the two
+            // samples are never the same row. Printing the factors and their input settles it in
+            // one line instead.
+            "[light] map {map} at ({:.1}, {:.1}, {:.1}) minute {minute} ({source:?}) ambient {:?} diffuse {:?} spec {:?} sun_dir {:.3} fog {:?} start/end {:.0}/{:.0} submersion {submerged:?} eye_z {:.1} ocean_fac {:.4}/{:.4}",
             wow_pos[0],
             wow_pos[1],
             wow_pos[2],
@@ -439,6 +486,9 @@ pub(super) fn update_time_lighting(
             b(resolved.fog_color),
             resolved.fog_start,
             resolved.fog_end,
+            eye_liquid.eye_z(),
+            fac1,
+            fac2,
         );
     }
 }
@@ -473,6 +523,73 @@ pub(super) fn apply_sky_backdrop(
 }
 
 #[cfg(test)]
+mod ocean_ramp_tests {
+    use super::hsv_value_scale;
+
+    /// A textbook `RGB → HSV → RGB` round trip, written out here so the identity claim in
+    /// [`hsv_value_scale`]'s doc is *checked* rather than argued. If it were ever false, our one
+    /// multiply would be silently wrong in colour rather than obviously wrong in code.
+    fn round_trip_v_scale(c: [f32; 3], f: f32) -> [f32; 3] {
+        let (r, g, b) = (c[0], c[1], c[2]);
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        let v = max;
+        let sat = if max == 0.0 { 0.0 } else { (max - min) / max };
+        let hue = if max == min {
+            0.0
+        } else if max == r {
+            60.0 * (((g - b) / (max - min)) % 6.0)
+        } else if max == g {
+            60.0 * ((b - r) / (max - min) + 2.0)
+        } else {
+            60.0 * ((r - g) / (max - min) + 4.0)
+        };
+        // V *= f, H and S untouched — the reference's `0x6d1620`.
+        let v = v * f;
+        // HSV -> RGB
+        let cc = v * sat;
+        let x = cc * (1.0 - (((hue / 60.0) % 2.0) - 1.0).abs());
+        let m = v - cc;
+        let (r1, g1, b1) = match (hue / 60.0).floor() as i32 {
+            0 => (cc, x, 0.0),
+            1 => (x, cc, 0.0),
+            2 => (0.0, cc, x),
+            3 => (0.0, x, cc),
+            4 => (x, 0.0, cc),
+            _ => (cc, 0.0, x),
+        };
+        [r1 + m, g1 + m, b1 + m]
+    }
+
+    /// The reference scales HSV **V** alone; we transcribe that as a plain RGB multiply. This is an
+    /// identity, not an approximation — and the round trip above says so for real colours,
+    /// including the degenerate greys and blacks where the hue is undefined.
+    #[test]
+    fn the_hsv_detour_is_a_plain_multiply() {
+        let colours = [
+            [0.8, 0.4, 0.1],
+            [0.1, 0.1, 0.1],
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [0.2, 0.9, 0.55],
+            [0.0, 0.3, 0.7],
+        ];
+        for c in colours {
+            for f in [1.0f32, 0.875, 0.75, 0.5] {
+                let want = round_trip_v_scale(c, f);
+                let got = hsv_value_scale(c, f);
+                for i in 0..3 {
+                    assert!(
+                        (want[i] - got[i]).abs() < 1e-6,
+                        "{c:?} × {f}: HSV round trip {want:?} vs multiply {got:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::wmo_portal::WmoFogTarget;
@@ -482,7 +599,7 @@ mod tests {
     /// releases the latch at zero.
     #[test]
     fn wmo_fog_ramp_fades_in_and_out_over_four_seconds() {
-        let mut ramp = WmoFogRamp::default();
+        let mut ramp = WmoCrossfade::default();
         let target = WmoFogTarget {
             color: [1.0, 0.5, 0.0],
             end: 194.4,
@@ -514,7 +631,7 @@ mod tests {
     /// vs `[0xce9b94]`), and start scales off the CLAMPED end.
     #[test]
     fn wmo_fog_staging_clamps_end_to_farclip() {
-        let mut ramp = WmoFogRamp::default();
+        let mut ramp = WmoCrossfade::default();
         let target = WmoFogTarget {
             color: [1.0; 3],
             end: 444.4,

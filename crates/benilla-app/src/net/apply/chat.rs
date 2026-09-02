@@ -404,7 +404,7 @@ mod tests {
             errors.0,
             [(
                 "GM mode is ON".to_string(),
-                crate::ui_action::MsgKind::Error
+                benilla_ui::messages::MsgKind::Error
             )],
             "the SendNotification half is the RED toast (0x4945b0's flag 1), never a second line"
         );
@@ -425,7 +425,7 @@ mod tests {
             errors.0,
             [(
                 "You must be at least level 58 to enter.".to_string(),
-                crate::ui_action::MsgKind::Info
+                benilla_ui::messages::MsgKind::Info
             )]
         );
     }

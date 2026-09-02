@@ -48,7 +48,7 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_action::{show_messages, ui_error_text, UiError};
+use crate::ui_action::{show_messages, ui_error_text, MessageSink, Shown, UiError};
 use crate::ui_script::UiInput;
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 
@@ -570,7 +570,7 @@ fn feed_auction(
     time: Res<Time>,
     catalogs: AuctionCatalogs,
     houses: Option<Res<AuctionHouses>>,
-    mut chat: ResMut<crate::ui_chat::ChatLog>,
+    mut sink: MessageSink,
     self_q: Query<&crate::net::Guid, With<SelfPlayer>>,
     mut last: Local<crate::ui_script::VmMemo<Option<AuctionState>>>,
     mut last_open: Local<crate::ui_script::VmMemo<Option<u64>>>,
@@ -614,11 +614,11 @@ fn feed_auction(
                 fill_d: None,
             };
             if let Some(text) = ui_error_text(&err, &get) {
-                lines.push((benilla_ui::messages::kind_of(msg.key), text));
+                lines.push(Shown::keyed(msg.key, text));
             }
         }
         auction.messages = deferred;
-        show_messages(&mut script, &mut chat, "ui_auction", lines);
+        show_messages(&mut script, &mut sink, "ui_auction", lines);
     }
 
     let self_guid = self_q.iter().next().map(|g| g.0);

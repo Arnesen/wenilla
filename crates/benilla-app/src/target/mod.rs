@@ -66,6 +66,26 @@ mod reticle;
 pub(crate) mod ring;
 mod scan;
 
+/// The standing pair — `Faction.dbc` and our own reputation table — as ONE [`SystemParam`].
+///
+/// Every consumer of either takes both: [`ring_reaction`], [`can_attack`], [`can_assist`],
+/// [`can_interact`] and `ui_unit::faction_group` are all `(factions, reputations)` functions, and
+/// no system has ever wanted one without the other. Bundling them says that, and buys back a slot
+/// against Bevy's 16-param tuple limit — which `ui_tooltip`'s hover system hit the moment it
+/// legitimately needed one more resource.
+///
+/// `factions` is `Option` for the reason its flat form always was: it belongs to the asset layer,
+/// and a UI-only harness runs with no client data rather than panicking on system validation.
+///
+/// `ui_unit::feed_units` is the other system that takes the pair (22 call sites). It has not
+/// adopted this yet — its own crowding was solved by [`crate::ui_unit::UnitStores`] — and it
+/// should, next time that file is opened for anything.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct ReactionInputs<'w> {
+    pub(crate) factions: Option<Res<'w, Factions>>,
+    pub(crate) reputations: Res<'w, crate::net::Reputations>,
+}
+
 pub(crate) use cursor_mode::{
     corpse_mouseover_eligible, CursorKind, WorldCursor, GO_TYPE_GENERIC, SERVICE_RANGE_SQ,
 };

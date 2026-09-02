@@ -18,9 +18,9 @@ use super::{
     QuestDetails, QuestGiverList, QuestOfferReward, QuestOption, QuestPushResult,
     QuestRequestItems, QuestTemplate, ResurrectRequestBody, SpeedKind, SpellChainTargets,
     SpellCooldown, SpellDamageLog, SpellDispelLog, SpellEnergizeLog, SpellGo, SpellHealLog,
-    SpellInstaKillLog, SpellLogExecute, SpellLogMiss, SpellOutcomeLog, SpellStart, StabledPet,
-    TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose, VendorItem,
-    WhoResults, XpGain,
+    SpellInstaKillLog, SpellLogExecute, SpellLogMiss, SpellOutcomeLog, SpellStart, SplineMode,
+    StabledPet, TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose,
+    VendorItem, WhoResults, XpGain,
 };
 
 /// The **final facing** a `SMSG_MONSTER_MOVE` dictates (its `moveType`): the unit snaps to face this
@@ -85,6 +85,15 @@ pub enum ServerPacket {
         /// Our place in the login queue, when `result` is [`super::AUTH_WAIT_QUEUE`] — `None` for
         /// every other result, and also for a queue packet whose body was too short to carry one.
         queue_position: Option<u32>,
+        /// The account's accumulated **rested billing minutes**, the third field of the billing
+        /// group — what `GetBillingTimeRested()` reports (decision 1820). `None` when the body was
+        /// too short to carry the group, which is the same length branch `queue_position` takes.
+        ///
+        /// The unit is the server's convention, not the engine's: the client applies no conversion
+        /// at any point (the binding `0x48ec50` does a bare unsigned u32→double, and the parser
+        /// `0x418eb0` a bare `mov`). Minutes is what the reference's own FrameXML assumes —
+        /// `PlayerFrame.lua:246` divides by 60 to get hours against `REQUIRED_REST_HOURS = 5`.
+        billing_time_rested: Option<u32>,
     },
     CharEnum {
         characters: Vec<Character>,
@@ -1018,6 +1027,16 @@ pub enum ServerPacket {
         mode: MoveMode,
         apply: bool,
     },
+    /// **Some unit's movement mode changed** — the `SMSG_SPLINE_MOVE_*` twelve (decision 1780), the
+    /// observer half of [`Self::MoveMode`]'s family. A bare packed guid: no counter, **no ack**, and
+    /// `guid` is any unit — normally a creature, which is exactly the case the ack'd family cannot
+    /// reach. `apply` is always the direction of [`SplineMode::flag`]'s bit (the run/walk pair's
+    /// inversion is folded at the parse).
+    SplineMoveMode {
+        guid: u64,
+        mode: SplineMode,
+        apply: bool,
+    },
     /// **The server aimed a knockback at our mover** (`SMSG_MOVE_KNOCK_BACK`, decision 1702) —
     /// a ballistic launch it hands the controlling client to fly. `launch` is the packet's four
     /// floats read into the launch quad they *are*: `cos_angle`/`sin_angle` the world-XY direction,
@@ -1638,6 +1657,21 @@ impl ServerPacket {
                 (MoveMode::FeatherFall, false) => "SMSG_MOVE_NORMAL_FALL".into(),
                 (MoveMode::Hover, true) => "SMSG_MOVE_SET_HOVER".into(),
                 (MoveMode::Hover, false) => "SMSG_MOVE_UNSET_HOVER".into(),
+            },
+            ServerPacket::SplineMoveMode { mode, apply, .. } => match (mode, apply) {
+                (SplineMode::Root, true) => "SMSG_SPLINE_MOVE_ROOT".into(),
+                (SplineMode::Root, false) => "SMSG_SPLINE_MOVE_UNROOT".into(),
+                (SplineMode::WaterWalk, true) => "SMSG_SPLINE_MOVE_WATER_WALK".into(),
+                (SplineMode::WaterWalk, false) => "SMSG_SPLINE_MOVE_LAND_WALK".into(),
+                (SplineMode::FeatherFall, true) => "SMSG_SPLINE_MOVE_FEATHER_FALL".into(),
+                (SplineMode::FeatherFall, false) => "SMSG_SPLINE_MOVE_NORMAL_FALL".into(),
+                (SplineMode::Hover, true) => "SMSG_SPLINE_MOVE_SET_HOVER".into(),
+                (SplineMode::Hover, false) => "SMSG_SPLINE_MOVE_UNSET_HOVER".into(),
+                (SplineMode::Swimming, true) => "SMSG_SPLINE_MOVE_START_SWIM".into(),
+                (SplineMode::Swimming, false) => "SMSG_SPLINE_MOVE_STOP_SWIM".into(),
+                // Inverted on purpose — see [`SplineMode::WalkMode`].
+                (SplineMode::WalkMode, true) => "SMSG_SPLINE_MOVE_SET_WALK_MODE".into(),
+                (SplineMode::WalkMode, false) => "SMSG_SPLINE_MOVE_SET_RUN_MODE".into(),
             },
             ServerPacket::KnockBack { .. } => "SMSG_MOVE_KNOCK_BACK".into(),
             ServerPacket::LogoutComplete => "SMSG_LOGOUT_COMPLETE".into(),

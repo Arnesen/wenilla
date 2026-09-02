@@ -8,22 +8,7 @@
 
 use benilla_ui::script::UiScript;
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error.
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// The three bindings answer with the reference's own shapes — `IsInInstance` a PAIR, both
 /// readers `1`/`nil` rather than `true`/`false` (the reference pushes the double 1.0), and
@@ -101,10 +86,20 @@ fn the_self_menu_row_gates_on_the_binding_and_confirms_before_sending() {
         "UIParent.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "GameTooltip.xml",
-        "UIDropDownMenu.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
         "UnitPopup.xml",
-        "UnitFrames.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\BuffFrame.xml",
+        "Interface\\FrameXML\\UnitFrame.xml",
+        "Interface\\FrameXML\\CombatFeedback.xml",
+        "Interface\\FrameXML\\PlayerFrame.xml",
+        "Interface\\FrameXML\\PartyFrame.xml",
+        "Interface\\FrameXML\\TargetFrame.xml",
+        "Interface\\FrameXML\\PetFrame.xml",
         "RaidFrame.xml",
     ] {
         load_xml(&s, file);

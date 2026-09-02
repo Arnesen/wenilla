@@ -15,9 +15,12 @@
 //! query-cache seam): the feed resolves each token's guid, which asks the server once on a miss and
 //! fills in a later frame; the transition fires `UNIT_NAME_UPDATE` so frames repaint.
 //!
-//! The event surface is the Era set, fired per field on transitions: `UNIT_HEALTH`/`UNIT_MAXHEALTH`/
-//! `UNIT_LEVEL` (arg1 = token), `UNIT_POWER_UPDATE`/`UNIT_MAXPOWER` (token, power token e.g.
-//! `"MANA"`), `UNIT_DISPLAYPOWER` (power *type* changed), `UNIT_NAME_UPDATE`, plus
+//! The event surface is fired per field on transitions: `UNIT_HEALTH`/`UNIT_MAXHEALTH`/
+//! `UNIT_LEVEL` (arg1 = token), the **1.12** per-resource power pair `UNIT_MANA`/`UNIT_RAGE`/
+//! `UNIT_FOCUS`/`UNIT_ENERGY`/`UNIT_HAPPINESS` and their five `UNIT_MAX*` twins (arg1 = token; the
+//! resource is in the NAME, not an argument — decision 1819, which retired the Era
+//! `UNIT_POWER_UPDATE`/`UNIT_MAXPOWER` pair that no 1.12 frame listens for),
+//! `UNIT_DISPLAYPOWER` (power *type* changed), `UNIT_NAME_UPDATE`, plus
 //! `PLAYER_ENTERING_WORLD` once and `PLAYER_TARGET_CHANGED` on selection change. A token appearing
 //! counts as a transition of every present field (frames also pull on target change, so either path
 //! populates).
@@ -26,6 +29,8 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
+use benilla_formats::ChrClasses;
+use benilla_protocol::messages::ObjectType;
 use benilla_ui::script::{power_token, ScriptValue, UiScript, UnitState, WornDisplay};
 
 use crate::names::NameCache;
@@ -685,13 +690,41 @@ fn feed_unit_reach(
     script.set_unit_reach(reach);
 }
 
+/// The object stores [`feed_units`] reads, and the change tracking over them.
+///
+/// One `SystemParam` rather than three, because Bevy's tuple limit is 16 and this feed had grown
+/// to sit exactly on it — the next resource it legitimately needed (`ChrClasses.dbc`, for
+/// `UnitHasRelicSlot`) turned the ceiling into a compile error with no hint that a ceiling was
+/// what it hit. Grouping the three that always move together buys the room back and says why
+/// they belong together, which the flat list did not. Same idiom as
+/// [`crate::target::lock::GoLockInputs`].
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct UnitStores<'w, 's> {
+    /// Every streamed object's descriptor, read by guid → entity.
+    all: Query<'w, 's, &'static ObjectStore>,
+    /// Whose descriptor moved this frame — the feed's dirty gate.
+    changed: Query<'w, 's, (), Changed<ObjectStore>>,
+    /// Whose object left the manager — the other half of that gate, and cleared every run.
+    removed: RemovedComponents<'w, 's, ObjectStore>,
+}
+
 /// Build a unit snapshot from a streamed object's descriptor (decision 0061's `ObjectFields`) plus
 /// its cache-resolved name and its `UnitReaction` value (`1..8`, or `0` for tokens whose reaction we
 /// don't resolve — everything but `"target"`; see [`feed_units`]).
-pub(crate) fn snapshot(store: &ObjectStore, name: Option<String>, reaction: u8) -> UnitState {
+///
+/// `classes` is `ChrClasses.dbc`, absent when the client data failed to load. Only the relic column
+/// is read off it — the class NAMES are this file's own table, because they are localized display
+/// strings rather than a DBC column we can key on.
+pub(crate) fn snapshot(
+    store: &ObjectStore,
+    name: Option<String>,
+    reaction: u8,
+    classes: Option<&ChrClasses>,
+) -> UnitState {
     let power_type = store.0.unit_power_type();
     let race = store.0.unit_race().and_then(race_names);
-    let class = store.0.unit_class().and_then(class_names);
+    let class_id = store.0.unit_class();
+    let class = class_id.and_then(class_names);
     UnitState {
         exists: true,
         // **This function IS the reference's `0x468460` having succeeded.** It is only ever called
@@ -740,6 +773,13 @@ pub(crate) fn snapshot(store: &ObjectStore, name: Option<String>, reaction: u8) 
         race_file: race.map(|(_, f)| f.to_string()),
         class: class.map(|(n, _)| n.to_string()),
         class_file: class.map(|(_, f)| f.to_string()),
+        // `UnitHasRelicSlot 0x519e50` — the class byte against `ChrClasses.dbc` field 16, under
+        // the reference's own gate and in its order: TYPEMASK_PLAYER first (`0x519e8d`,
+        // `[[obj+8]+8] >> 4 & 1` — which is exactly what [`ObjectType::Player`] decodes), the
+        // class byte second. The player test is not decoration: a creature carries a class byte
+        // too and indexes the same table, so without it a class-2 humanoid NPC answers 1.
+        has_relic_slot: matches!(store.0.object_type(), Some(ObjectType::Player))
+            && class_id.is_some_and(|c| classes.is_some_and(|t| t.has_relic_slot(u32::from(c)))),
         // The descriptor's gender byte (0 male, 1 female) on the API's `UnitSex` scale (2 male,
         // 3 female; 0 = unknown → the binding's nil).
         sex: match store.0.unit_gender() {
@@ -751,6 +791,11 @@ pub(crate) fn snapshot(store: &ObjectStore, name: Option<String>, reaction: u8) 
         // UNIT_FIELD_FLAGS (vmangos UnitDefines.h: 0x1000 / 0x04000000, VERIFIED).
         pvp: store.0.unit_flags() & 0x1000 != 0,
         skinnable: store.0.unit_flags() & 0x0400_0000 != 0,
+        // `UnitPlayerControlled` — the same word, bit 3 (`UNIT_FLAG_PVP_ATTACKABLE 0x8`, which is
+        // behaviourally "player-controlled"; `target::relations` already carved it for the duel
+        // leg of the selection ring). Wider than `is_player` above: a pet or a charmed creature
+        // sets it without being a player.
+        player_controlled: store.0.unit_flags() & 0x8 != 0,
         // `UnitAffectingCombat 0x517e10` — the SAME `UNIT_FIELD_FLAGS` word, bit 19
         // (`shr ecx,0x13; test cl,1`). One flag for every token: wow-re's whole-image census of
         // that idiom found the local-player readers reading this identical bit, so there is no
@@ -893,6 +938,14 @@ const PLAYER_FLAGS_PVP_DESIRED: u32 = 0x200;
 /// `IsResting 0x516ea0` tests (`shr 5; test 1` — wow-re rested-xp-bindings.md §3).
 const PLAYER_FLAGS_RESTING: u32 = 0x20;
 
+/// `PLAYER_FLAGS` bit 12 / bit 13 — the two **play-time** regimes an anti-addiction realm puts an
+/// account into, read by `PartialPlayTime` (`0x48eb70`) and `NoPlayTime` (`0x48ebe0`). Decision
+/// 1746 carved both, and settled that `0x1000` is PARTIAL_PLAY_TIME on 5875 rather than the
+/// pre-1.6.1 `CAN_SELF_RESURRECT` it had been read as. Stock `PlayerFrame_UpdatePlaytime` tests
+/// them at LOAD, so their absence is a raise on the first frame, not a cosmetic gap.
+const PLAYER_FLAGS_PARTIAL_PLAY_TIME: u32 = 0x1000;
+const PLAYER_FLAGS_NO_PLAY_TIME: u32 = 0x2000;
+
 /// The PvP-preference announcement rule (decision 0652): `(toast, verbose)` on a real change of the
 /// bit, `None` otherwise.
 ///
@@ -952,6 +1005,21 @@ fn rest_state_message(prev: u8, new: u8) -> Option<&'static str> {
 pub(crate) fn faction_group(store: &ObjectStore, factions: Option<&Factions>) -> Option<String> {
     let catalog = factions?.catalog();
     let template = catalog.template(store.0.unit_faction_template()?)?;
+    // The ENGLISH name (`InternalName`), because `UnitFactionGroup`'s first return is concatenated
+    // into a texture path by every stock consumer. The localized twin is below.
+    catalog
+        .faction_group_internal_name(template.group_mask & 6)
+        .map(str::to_string)
+}
+
+/// The localized group name for the same unit — `UnitFactionGroup`'s SECOND return, which stock
+/// shows as text rather than building a path from.
+pub(crate) fn faction_group_localized(
+    store: &ObjectStore,
+    factions: Option<&Factions>,
+) -> Option<String> {
+    let catalog = factions?.catalog();
+    let template = catalog.template(store.0.unit_faction_template()?)?;
     catalog
         .faction_group_name(template.group_mask & 6)
         .map(str::to_string)
@@ -990,7 +1058,6 @@ pub(crate) fn fire_transitions(
     cur: &UnitState,
 ) {
     let tok = || ScriptValue::Str(token.to_string());
-    let ptok = || ScriptValue::Str(power_token(cur.power_type).to_string());
     let changed = |f: fn(&UnitState) -> u64| prev.is_none_or(|p| f(p) != f(cur));
 
     if changed(|u| u64::from(u.health)) {
@@ -1005,11 +1072,28 @@ pub(crate) fn fire_transitions(
     if changed(|u| u64::from(u.power_type)) {
         script.fire_event("UNIT_DISPLAYPOWER", vec![tok()]);
     }
+    // The POWER pair is named per resource in 1.12, not once with the token as arg2: the reference's
+    // `UnitFrameManaBar_Initialize` registers `UNIT_MANA`/`UNIT_RAGE`/`UNIT_FOCUS`/`UNIT_ENERGY`/
+    // `UNIT_HAPPINESS` and the five `UNIT_MAX*` twins (`UnitFrame.lua:190-199`), and nothing in
+    // 1.12 FrameXML has ever heard of `UNIT_POWER_UPDATE`. `power_token` already yields exactly the
+    // suffix, so the name is the token. Health is unaffected — `UNIT_HEALTH`/`UNIT_MAXHEALTH` are
+    // spelled the same in both eras — and so is `UNIT_DISPLAYPOWER` above.
+    //
+    // This was live breakage, not tidiness: while we fired only the Era names, the stock unit frames
+    // registered only the 1.12 ones, so a mana/rage/energy bar never moved except when something
+    // else happened to call `UnitFrame_Update` (a target change, a pet summon, a frame show).
+    // Decision 1819.
     if changed(|u| u64::from(u.power)) {
-        script.fire_event("UNIT_POWER_UPDATE", vec![tok(), ptok()]);
+        script.fire_event(
+            &format!("UNIT_{}", power_token(cur.power_type)),
+            vec![tok()],
+        );
     }
     if changed(|u| u64::from(u.max_power)) {
-        script.fire_event("UNIT_MAXPOWER", vec![tok(), ptok()]);
+        script.fire_event(
+            &format!("UNIT_MAX{}", power_token(cur.power_type)),
+            vec![tok()],
+        );
     }
     if prev.is_none_or(|p| p.name != cur.name) {
         script.fire_event("UNIT_NAME_UPDATE", vec![tok()]);
@@ -1054,17 +1138,20 @@ pub(crate) fn fire_transitions(
 #[allow(clippy::too_many_arguments)]
 fn feed_units(
     script: Option<NonSendMut<UiScript>>,
+    // `ChrClasses.dbc` field 16, the only thing `UnitHasRelicSlot` reads. Absent when the client
+    // data failed to load, in which case no class reads as having a relic slot — the reference's
+    // own bounds-check-fails leg.
+    classes: Option<Res<crate::chr_classes::ChrClassTable>>,
+
     self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
     selection: Res<Selection>,
-    stores: Query<&ObjectStore>,
     // The guid -> entity map the `"targettarget"` hop lands in, the same index `/assist` resolves
     // its basis' `UNIT_FIELD_TARGET` through (`target::by_name`). `Option` because it belongs to
     // `NetPlugin` (net.rs's `init_resource`) and this feed does not: a UI-only harness runs this
     // system with no net stack at all, and a bare `Res` turns that into a system-validation panic
     // rather than a token that names nobody. Same shape as `factions` below, same reason.
     index: Option<Res<crate::net::GuidIndex>>,
-    changed_stores: Query<(), Changed<ObjectStore>>,
-    mut removed_stores: RemovedComponents<ObjectStore>,
+    mut stores: UnitStores,
     mut feed: ResMut<UnitFeedState>,
     mut names: ResMut<NameCache>,
     commands: Res<NetCommands>,
@@ -1079,10 +1166,27 @@ fn feed_units(
     // The NPC the player is interacting with, for the `"npc"` token below. `Option` for the same
     // reason `index` and `factions` are: a UI-only harness runs this feed with no session plugin.
     interact: Option<Res<crate::ui_session::InteractNpc>>,
+    // The account's rested billing minutes ride the world-enter message, which is the only moment
+    // they ever arrive (decision 1820): the value comes off `SMSG_AUTH_RESPONSE` and the reference
+    // parks it in a process-lifetime global. `MessageReader` rather than a resource because it is
+    // an EDGE, and it is read here rather than in a system of its own because this feed already
+    // holds the script.
+    // `Option` for the same reason `index`, `factions` and `interact` above are: the message is
+    // registered by `NetPlugin`, and a UI-only harness runs this feed with no net stack at all —
+    // a bare reader turns that into a system-validation panic.
+    entered_world: Option<MessageReader<crate::net::EnteredWorldMessage>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    // Ahead of the gate below, which is about descriptor deltas: this is a login edge and has no
+    // snapshot to diff.
+    if let Some(entered) =
+        entered_world.and_then(|mut r| r.read().last().map(|m| m.billing_time_rested))
+    {
+        script.set_billing_time_rested(entered);
+    }
+    let chr = classes.as_deref().map(|t| &t.0);
     // One reborrow so the memo (`feed.vm`) and `feed.warned_sideless` can be borrowed as the
     // disjoint fields they are — through the `ResMut` deref they would alias.
     let feed = &mut *feed;
@@ -1094,8 +1198,8 @@ fn feed_units(
     let names_moved = memo.names_generation.moved(names.generation());
     let guild_moved = memo.guild_generation.moved(guild.identity_generation());
     let selection_changed = selection.is_changed();
-    let stores_changed = !changed_stores.is_empty();
-    let stores_removed = !removed_stores.is_empty();
+    let stores_changed = !stores.changed.is_empty();
+    let stores_removed = !stores.removed.is_empty();
     let group_changed = group.is_changed();
     let reps_changed = reputations.is_changed();
     let factions_changed = factions.as_ref().is_some_and(|r| r.is_changed());
@@ -1124,7 +1228,7 @@ fn feed_units(
             || reps_changed
             || factions_changed,
     );
-    removed_stores.clear();
+    stores.removed.clear();
     if gate.skip() {
         return;
     }
@@ -1135,7 +1239,7 @@ fn feed_units(
     let self_pair = self_q.iter().next();
     let player = self_pair.map(|(store, guid)| {
         let name = names.resolve(guid.0, &commands).map(str::to_string);
-        let mut s = snapshot(store, name, 0);
+        let mut s = snapshot(store, name, 0, chr);
         s.is_player = true;
         // The stated `is_connected` gap, closed for every token this feed pushes — the field's own
         // doc names the feed as what must set it ("mirroring `exists`"), and a token we push at all
@@ -1150,6 +1254,7 @@ fn feed_units(
         s.guid = guid.0;
         s.raid_target = group.raid_target_index(guid.0);
         s.faction_group = faction_group(store, factions.as_deref());
+        s.faction_group_localized = faction_group_localized(store, factions.as_deref());
         // `GetGuildInfo("player")` — the unit's own PUBLIC descriptor fields (191/192) joined
         // against the app's guild-identity cache, which the miss also asks for (decision 1257).
         // Filled here rather than in `snapshot` for the reason `faction_group` and `can_attack`
@@ -1186,7 +1291,7 @@ fn feed_units(
     // (The VM-half memo was taken at the top — the gate needs its reset flag. `warned_sideless`
     // stays server memory outside it, which the disjoint field borrows above preserve.)
     let target = selection.target.zip(selection.guid).and_then(|(e, guid)| {
-        let store = stores.get(e).ok()?;
+        let store = stores.all.get(e).ok()?;
         let name = names.resolve(guid, &commands).map(str::to_string);
         // The target's reaction toward us, on the `UnitReaction` 1..8 scale — the same decode the
         // selection ring runs (reputation-first, else the faction-template comparator). `ring_reaction`
@@ -1198,11 +1303,12 @@ fn feed_units(
             Some(store),
             self_pair.map(|(s, _)| s),
         ) + 1;
-        let mut s = snapshot(store, name, reaction);
+        let mut s = snapshot(store, name, reaction, chr);
         s.guid = guid;
         s.is_connected = true; // see the player leg
         s.raid_target = group.raid_target_index(guid);
         s.faction_group = faction_group(store, factions.as_deref());
+        s.faction_group_localized = faction_group_localized(store, factions.as_deref());
         // The byte-confirmed CanAttack 0x606980 (decision 0172) — the same predicate TAB and the
         // combat flash run; `UnitCanAttack("player","target")` gates the target frame's
         // difficulty-colored level (ref TargetFrame_CheckLevel).
@@ -1238,12 +1344,12 @@ fn feed_units(
     // descriptor we already hold.
     let tot = selection
         .target
-        .and_then(|e| stores.get(e).ok())
+        .and_then(|e| stores.all.get(e).ok())
         .and_then(|s| s.0.unit_target())
         .filter(|guid| *guid != 0)
         .and_then(|guid| Some((*index.as_ref()?.0.get(&guid)?, guid)))
         .and_then(|(entity, guid)| {
-            let store = stores.get(entity).ok()?;
+            let store = stores.all.get(entity).ok()?;
             let name = names.resolve(guid, &commands).map(str::to_string);
             let reaction = ring_reaction(
                 factions.as_deref(),
@@ -1251,11 +1357,12 @@ fn feed_units(
                 Some(store),
                 self_pair.map(|(s, _)| s),
             ) + 1;
-            let mut s = snapshot(store, name, reaction);
+            let mut s = snapshot(store, name, reaction, chr);
             s.guid = guid;
             s.is_connected = true; // see the player leg
             s.raid_target = group.raid_target_index(guid);
             s.faction_group = faction_group(store, factions.as_deref());
+            s.faction_group_localized = faction_group_localized(store, factions.as_deref());
             s.can_attack = crate::target::can_attack(
                 Some(store),
                 factions.as_deref(),
@@ -1330,7 +1437,7 @@ fn feed_units(
         .as_deref()
         .and_then(|i| Some((i.0?, i.1?)))
         .and_then(|(entity, guid)| {
-            let store = stores.get(entity).ok()?;
+            let store = stores.all.get(entity).ok()?;
             let name = names.resolve(guid, &commands).map(str::to_string);
             let reaction = ring_reaction(
                 factions.as_deref(),
@@ -1338,11 +1445,12 @@ fn feed_units(
                 Some(store),
                 self_pair.map(|(s, _)| s),
             ) + 1;
-            let mut s = snapshot(store, name, reaction);
+            let mut s = snapshot(store, name, reaction, chr);
             s.guid = guid;
             s.is_connected = true;
             s.raid_target = group.raid_target_index(guid);
             s.faction_group = faction_group(store, factions.as_deref());
+            s.faction_group_localized = faction_group_localized(store, factions.as_deref());
             s.can_attack = crate::target::can_attack(
                 Some(store),
                 factions.as_deref(),
@@ -1408,6 +1516,13 @@ fn feed_units(
             let prev = memo.last_rest;
             memo.last_rest = Some(rest);
             script.set_rest_state(rest.0, rest.1, rest.2 & PLAYER_FLAGS_RESTING != 0);
+            // The same descriptor word carries the two play-time bits, and they ride the same
+            // memo: `0x5ee990` fires PLAYER_FLAGS_CHANGED on ANY PLAYER_FLAGS delta without
+            // testing which bit moved, so one snapshot is the faithful granularity for all three.
+            script.set_play_time(
+                rest.2 & PLAYER_FLAGS_PARTIAL_PLAY_TIME != 0,
+                rest.2 & PLAYER_FLAGS_NO_PLAY_TIME != 0,
+            );
             if prev.map(|p| (p.0, p.1)) != Some((rest.0, rest.1)) {
                 script.fire_event("UPDATE_EXHAUSTION", vec![]);
             }
@@ -1923,6 +2038,7 @@ mod tests {
             &ObjectStore(ObjectFields::from_pairs(&vitals)),
             Some("Hunter".into()),
             0,
+            None,
         );
         assert_eq!((alive.health, alive.max_health), (1200, 1500));
         assert_eq!((alive.power, alive.max_power), (300, 900));
@@ -1934,6 +2050,7 @@ mod tests {
             )),
             Some("Hunter".into()),
             0,
+            None,
         );
         assert_eq!(
             (feigning.health, feigning.max_health),

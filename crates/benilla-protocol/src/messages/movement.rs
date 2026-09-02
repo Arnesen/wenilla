@@ -168,6 +168,57 @@ impl MoveMode {
     }
 }
 
+/// **A movement mode granted on a unit we do not control** — the `SMSG_SPLINE_MOVE_*` twelve
+/// (decision 1780), the observer half of [`MoveMode`]'s family.
+///
+/// Same bits, and for the four they share the same reference setters — but it is a *different
+/// message*, and the three differences are what the type exists to keep straight:
+///
+/// 1. **No counter and no ack.** The controller's family is a handshake (`packed guid + u32
+///    counter`, ack or the server never applies it); this one is a bare `packed guid` broadcast.
+///    The client's handler `0x603c80` replies to nothing.
+/// 2. **Any unit.** `0x603c80` resolves the guid with `TYPEMASK_UNIT` and applies to whatever it
+///    finds — normally a creature, since vmangos only takes this leg for a unit *not* being moved
+///    by a player (`Unit::SetRooted`/`SetWaterWalking`/`SetFeatherFall`/`SetHover`'s `else` arm,
+///    and `SendToggleRunWalkToAll` unconditionally).
+/// 3. **Two extra modes.** [`WalkMode`](Self::WalkMode) and [`Swimming`](Self::Swimming) have no
+///    ack'd counterpart at all.
+///
+/// [`Swimming`](Self::Swimming) is modelled but vmangos never sends it — nothing in the tree
+/// constructs `SMSG_SPLINE_MOVE_START_SWIM`/`_STOP_SWIM`, and `Opcodes.cpp:888` marks both
+/// `SendByServer`-only. The client handles them (`0x61a130`/`0x61a160`), so we decode them; on this
+/// server they are dead wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplineMode {
+    Root,
+    WaterWalk,
+    FeatherFall,
+    Hover,
+    /// `MOVEFLAG_WALK_MODE` (`0x100`) — the gait selector. **`apply` here is the flag's direction,
+    /// not the opcode's noun**: `SMSG_SPLINE_MOVE_SET_WALK_MODE` is `apply: true` and
+    /// `..._SET_RUN_MODE` is `apply: false`, because the reference's `0x617e80` passes the opcode's
+    /// bool to `SetRunMode 0x7c71c0`, whose argument is *run*. The inversion is folded at the parse
+    /// so every variant of this enum means the same thing by "apply".
+    WalkMode,
+    /// `MOVEFLAG_SWIMMING` (`0x20_0000`) — `SMSG_SPLINE_MOVE_START_SWIM`/`_STOP_SWIM`. Never sent by
+    /// vmangos (see the type docs).
+    Swimming,
+}
+
+impl SplineMode {
+    /// This mode's `MOVEMENTFLAGS` bit — the same word [`MoveMode::flag`] writes into.
+    pub fn flag(self) -> u32 {
+        match self {
+            SplineMode::Root => 0x0000_1000,
+            SplineMode::WaterWalk => 0x1000_0000,
+            SplineMode::FeatherFall => 0x2000_0000,
+            SplineMode::Hover => 0x4000_0000,
+            SplineMode::WalkMode => 0x0000_0100,
+            SplineMode::Swimming => 0x0020_0000,
+        }
+    }
+}
+
 /// One jump's ballistic launch parameters — the conditional `MovementInfo` tail present iff the
 /// `MOVEFLAG_JUMPING` (0x2000) flag is set. VERIFIED byte-for-byte against vmangos `MovementInfo::Read`
 /// (build 1.12.1): wire order is `zspeed, cosAngle, sinAngle, xyspeed` (note cos *before* sin). The

@@ -1422,3 +1422,90 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod doodad_sound_tests {
+    /// **The humming lamp, off the real 5875 chain** — bug B345's diagnosis, pinned as data.
+    ///
+    /// `KalidarStreetLamp01.m2` is the shape the whole doodad-ambience class takes, and every
+    /// clause here is a claim the fix rests on:
+    ///
+    /// * it has **one** sequence, `AnimationData` id 0 (Stand), **looping** — so the marker on it
+    ///   is crossed once per cycle, for ever;
+    /// * that sequence is **rest-posed** — it keys no bone at all, so decision 0130's render
+    ///   content gate builds it no rig, which is correct about pixels and was never a statement
+    ///   about the clock. Gating the *event* track on that gate is what made the lamp silent;
+    /// * it carries exactly **one** event, `$DSL` at t = 0.000 with payload **3378** — the
+    ///   `SoundEntries` id of `NightElfStreetLampLoop`.
+    ///
+    /// If any of these stops holding, the fix's premise has moved and the test should fail loudly
+    /// rather than let the lamp go quiet again.
+    #[test]
+    fn the_lamps_hum_is_one_rest_posed_looping_dsl_key() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let bytes = chain
+            .read_file("World\\Generic\\NightElf\\Passive Doodads\\Lamps\\KalidarStreetLamp01.m2")
+            .expect("the lamp is in the chain");
+        let seqs = super::parse_m2_animations(&bytes);
+        assert_eq!(seqs.len(), 1, "one authored sequence");
+
+        let stand = &seqs[0];
+        assert_eq!(stand.anim_id, 0, "Stand");
+        assert!(stand.looping, "the hum's carrier loops");
+        assert!(
+            stand.is_rest_pose(),
+            "keys no bone — the rig gate skips it, and that must not silence it"
+        );
+
+        assert_eq!(stand.events.len(), 1, "exactly one event key");
+        let ev = &stand.events[0];
+        assert_eq!(&ev.ident, b"$DSL", "a doodad sound LOOP tag");
+        assert_eq!(ev.data, 3378, "SoundEntries NightElfStreetLampLoop");
+        assert!(ev.time.abs() < 1e-6, "keyed at t = 0");
+    }
+
+    /// **The pair that pins the one-handle-per-doodad slot.** `bellows.m2` keys TWO `$DSL` at
+    /// DIFFERENT times on one looping 2 s sequence — `BellowOut` at t = 0.000 and `BellowIN` at
+    /// t = 1.100, each about 1.18 s of audio.
+    ///
+    /// This looked like proof that `$DSL` could not mean "loop" — a pair of one-shots timed to
+    /// alternate. The RE says otherwise, and the real mechanism is better: a doodad holds exactly
+    /// ONE registration (`[CMapDoodadDef+0x168]`), and crossing a marker with a DIFFERENT id
+    /// releases the held one before registering the new (`0x69521d` → `0x461f80`). So both ARE
+    /// ordinary loops, and the slot is what makes them alternate — the pumping bellows. Every
+    /// `$DSL` loops and no flag is consulted (wow-re `sound/scratch/doodad-sound-emitters.md`).
+    ///
+    /// The guard is therefore on the eviction in `sound::anim_events`: without it both start and
+    /// both drone.
+    #[test]
+    fn a_dsl_pair_on_one_cycle_alternates_through_one_slot() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let bytes = chain
+            .read_file("World\\Generic\\Human\\Passive Doodads\\Bellows\\bellows.m2")
+            .expect("the bellows is in the chain");
+        let seqs = super::parse_m2_animations(&bytes);
+        let carrier = seqs
+            .iter()
+            .find(|s| s.events.iter().any(|e| &e.ident == b"$DSL"))
+            .expect("a sequence carries the pair");
+        assert!(carrier.looping, "and it loops");
+
+        let mut keys: Vec<_> = carrier
+            .events
+            .iter()
+            .filter(|e| &e.ident == b"$DSL")
+            .map(|e| (e.data, e.time))
+            .collect();
+        keys.sort_by(|a, b| a.1.total_cmp(&b.1));
+        assert_eq!(keys.len(), 2, "a pair sharing one registration slot");
+        assert!(keys[0].1.abs() < 1e-6, "the first is keyed at t = 0");
+        assert!(
+            keys[1].1 > 1.0,
+            "the second is keyed a second later ({:.3}s) — the eviction is what makes it a pump",
+            keys[1].1
+        );
+        assert_ne!(keys[0].0, keys[1].0, "and they are different kits");
+    }
+}

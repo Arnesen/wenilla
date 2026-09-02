@@ -66,8 +66,72 @@ pub(super) fn bootstrap_positions(script: &UiScript) -> Vec<String> {
         error!("ui_script: managed-positions bootstrap: {e}");
         return vec![format!("managed-positions bootstrap: {e}")];
     }
+    if let Err(e) = install_durability_reseat(script) {
+        error!("ui_script: durability re-seat hook: {e}");
+        return vec![format!("durability re-seat hook: {e}")];
+    }
+    if let Err(e) = apply_buff_durations(script) {
+        error!("ui_script: buff-duration layout: {e}");
+        return vec![format!("buff-duration layout: {e}")];
+    }
     Vec::new()
 }
+
+/// **Apply `SHOW_BUFF_DURATIONS` to the buff bar once, at load** (1751 window 18).
+///
+/// The reference's `BuffFrame_OnLoad` seats the duration FontStrings and nothing else — the row
+/// pitch and the debuff row's anchor come from `BuffButtons_UpdatePositions`, which it never calls.
+/// In 1.12 that is applied by `UIOptionsFrame.lua`, the file that owns the setting; we have no
+/// counterpart to it (our row lives on `OptionsFrame.xml`, whose `applyFunc` fires on a CHANGE),
+/// so without this the bar ships laid out for durations-OFF while the setting says on — a 10px
+/// pitch error on every buff and a debuff row anchored to the wrong frame.
+///
+/// Here rather than in a FrameXML file for the same two reasons as the durability hook above:
+/// `assets/ui` does not grow (1779), and this is our stand-in for a file the reference has and we
+/// do not, which makes Rust the durable home.
+///
+/// Guarded, because the font-registry-only load has no buff bar.
+pub(super) fn apply_buff_durations(script: &UiScript) -> Result<(), String> {
+    script
+        .run("if BuffButtons_UpdatePositions then BuffButtons_UpdatePositions() end")
+        .map_err(|e| e.to_string())
+}
+
+/// **A stated divergence from the reference, installed rather than edited in** (1751 window 4).
+///
+/// The reference seats `DurabilityFrame` 20 further in when one of its three side glyphs is up
+/// (`UIParent.lua` l.1759-1768), and recomputes that only when something calls
+/// `UIParent_ManageFramePositions`. Stock `DurabilityFrame.xml` calls it from `OnShow`/`OnHide`
+/// only — so the case where the frame is **already shown** and a side glyph *then* appears leaves
+/// the seat stale, and the shield glyph's ~17-unit overhang hangs off the screen edge until some
+/// unrelated frame happens to trigger the next pass. That is the reference's own bug and the
+/// director caught it on their screen; it is not ours to reproduce faithfully.
+///
+/// So the fix rides on the frame's `OnEvent` — which is exactly the recompute the glyphs change on
+/// — and it is installed **here** rather than written into anything of Blizzard's. Two reasons for
+/// that home rather than a FrameXML one: `assets/ui` does not grow (1779), and this is the wrong
+/// side of the line for a `ContainerFrameAdapters`-class shim anyway — that clause is for a genuine
+/// engine difference (1751 §2), and this is a deliberate repair of a reference defect. Rust is also
+/// the durable home: our `UIParent.xml` is itself a transcription awaiting its own window, and a
+/// hook parked there would be homeless again the day it migrates.
+///
+/// Idempotent by its own latch, so a `ReloadUI` cannot stack wrappers. The reference's handler
+/// still runs first and unchanged: `this`, `event` and `arg1` are globals the engine has already
+/// set for the dispatch, so calling it through the captured reference is the same call.
+pub(super) fn install_durability_reseat(script: &UiScript) -> Result<(), String> {
+    script.run(DURABILITY_RESEAT).map_err(|e| e.to_string())
+}
+
+const DURABILITY_RESEAT: &str = r#"
+if DurabilityFrame and not DurabilityFrame.benillaReseat then
+    DurabilityFrame.benillaReseat = 1
+    local refOnEvent = DurabilityFrame:GetScript("OnEvent")
+    DurabilityFrame:SetScript("OnEvent", function()
+        if refOnEvent then refOnEvent() end
+        UIParent_ManageFramePositions()
+    end)
+end
+"#;
 
 /// Load benilla's own default UI — every file [`MANIFEST`] names — through the engine-free loader.
 /// This is our content (MIT/Apache), committed and **compiled into the binary**
@@ -90,8 +154,20 @@ pub(super) fn bootstrap_positions(script: &UiScript) -> Vec<String> {
 /// the addon harness ([`crate::addon_harness`]), which needs our entire interface under each
 /// surveyed addon.
 pub(crate) fn load_default_ui(script: &UiScript) -> Vec<String> {
+    // **Silent, the way the client's own load is.** `0x48fbf0` brackets ITSELF in the counted
+    // sound-suppression scope — `0x48fbfa call 0x458f50` on entry, `0x49016d call 0x458f60` on
+    // exit — across the TOC walk, Bindings.xml and the AddOns, so both of its callers (login
+    // `0x48f681` and `/reloadui` `0x495669`) load without a sound. The only reader of that depth
+    // is `PlaySoundByName 0x458030`, which drops the call outright.
+    //
+    // This is the mechanism, not a workaround for one noisy handler: stock `TargetFrame_OnHide`
+    // really does fire at load (the frame ships shown and its OnLoad hides it) and really does
+    // call `PlaySound("INTERFACESOUND_LOSTTARGETUNIT")`. The engine throws it away. Decision 1033
+    // reached the right rule from the director's ear; this is the binary agreeing.
+    script.push_sound_suppression();
     let mut failures = load_manifest(script, &Addon::builtin().toc.files);
     failures.extend(bootstrap_positions(script));
+    script.pop_sound_suppression();
     failures
 }
 

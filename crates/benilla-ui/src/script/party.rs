@@ -205,7 +205,7 @@ pub enum PartyRequest {
     },
     /// `SetLootThreshold(n)` — the new quality floor.
     LootThreshold(u32),
-    /// `SetRaidTargetIcon(unit, index)` — mark (1..=8) or clear (0) the raid-target icon on a
+    /// `SetRaidTarget(unit, index)` — mark (1..=8) or clear (0) the raid-target icon on a
     /// unit, addressed by token; the app resolves the token to a guid for the
     /// `MSG_RAID_TARGET_UPDATE` send (decision 0434 §5's submenu, §6's board law).
     SetRaidTarget { unit: String, index: u8 },
@@ -456,8 +456,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetLootMethod",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
+            // **`freeforall`, not `group`.** The three cells this reads sit past `.data`'s raw end
+            // in the zero-filled tail, so a client that has never been in a group answers the
+            // zeroth method — which is `freeforall`. Decision 1840.
             let method = if model.party.loot_method.is_empty() {
-                "group"
+                "freeforall"
             } else {
                 model.party.loot_method.as_str()
             };
@@ -561,8 +564,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    // SetRaidTarget(unit, index) — the ENGINE verb. `SetRaidTargetIcon` is NOT one: it is FrameXML,
+    // `function SetRaidTargetIcon(unit, index)` at `TargetFrame.lua:486`, a toggle wrapper that
+    // calls this with 0 when the unit already wears `index`. We had registered the wrapper's name on
+    // this body, which behaved correctly and so never showed — until 1751 put `TargetFrame.lua` on
+    // the chain and the wrapper started calling a `SetRaidTarget` that did not exist. Proof both
+    // ways: no `function SetRaidTarget(` anywhere in the reference's FrameXML, and both
+    // `TargetFrame.lua:488`/`:490` and `Bindings.xml:1160` call it bare.
     g.set(
-        "SetRaidTargetIcon",
+        "SetRaidTarget",
         lua.create_function(|lua, (unit, index): (String, u8)| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             model
@@ -839,7 +849,10 @@ mod tests {
         let (method, master) = s
             .eval::<(String, Option<i64>)>("return GetLootMethod()")
             .unwrap();
-        assert_eq!(method, "group");
+        // **`freeforall` is the UNGROUPED answer**, not `group`: the cells the reference reads
+        // sit in `.data`'s zero-filled tail, so a client that has never been in a group reports
+        // the zeroth method (decision 1840). The `group` above is a real party's, and stays.
+        assert_eq!(method, "freeforall");
         assert_eq!(master, None);
     }
 
@@ -1157,8 +1170,8 @@ mod tests {
     #[test]
     fn set_raid_target_icon_queues_the_token_and_index() {
         let mut s = UiScript::new().unwrap();
-        s.run(r#"SetRaidTargetIcon("target", 8)"#).unwrap();
-        s.run(r#"SetRaidTargetIcon("party2", 0)"#).unwrap();
+        s.run(r#"SetRaidTarget("target", 8)"#).unwrap();
+        s.run(r#"SetRaidTarget("party2", 0)"#).unwrap();
         assert_eq!(
             s.take_party_requests(),
             vec![

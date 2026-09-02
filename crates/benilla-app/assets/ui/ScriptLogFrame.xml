@@ -309,10 +309,10 @@
             <Button name="BenillaScriptLogRow13" inherits="BenillaScriptLogRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaScriptLogRow12" relativePoint="BOTTOMLEFT"/></Anchors></Button>
 
             <!-- The faux kit over the 13-row span; only its right-hand Slider renders. -->
-            <Frame name="BenillaScriptLogListScrollFrame" inherits="FauxScrollFrameTemplate">
+            <ScrollFrame name="BenillaScriptLogListScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="293" y="208"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-94"/></Offset></Anchor></Anchors>
-            </Frame>
+            </ScrollFrame>
 
             <!-- The detail pane: the REAL scroll kit, because a message carries its `stack
                  traceback:` tail and is genuinely variable-height. GossipFrame's greeting pane is

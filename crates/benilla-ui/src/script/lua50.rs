@@ -45,6 +45,19 @@
 //!    `foreachi`. `reference/1.12-globals.tsv` lists all three; we had the other seventeen of that
 //!    family and not these.
 //!
+//! ## What this module does NOT have to do: the vararg `arg` table
+//!
+//! Lua 5.0 gives every vararg function an implicit `arg` table with an `n` field, and 1.12's
+//! FrameXML uses it directly — `QuestTimerFrame_Update(...)` walks `for i=1, arg.n`, and so do
+//! `FCFDropDown_LoadChannels`, `TradeSkill_OnEvent` and the GM-ticket and CVar families. Three of
+//! our own transcriptions carry a note saying they rewrote it "the 5.1-native way" with
+//! `select("#", ...)`, which reads as though the dialect demanded it.
+//!
+//! **It does not.** mlua's vendored 5.1 is built with `LUA_COMPAT_VARARG`, so `arg` and `arg.n`
+//! are already there — measured, not assumed: `local function f(...) return arg.n end; f('a','b')`
+//! answers 2 in this VM. That matters for 1751: a stock file using 5.0 varargs needs nothing from
+//! this module, and the rewrite was a precaution against a problem we did not have.
+//!
 //! ## The one known divergence, stated rather than hidden
 //!
 //! `table.insert`/`table.remove` stay on 5.1's `#t` border rather than consulting `getn`. **This

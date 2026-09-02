@@ -36,7 +36,7 @@
             GuildRegistrar / PetitionFrame / TabardFrame, no charter or emblem path. Nothing in it
             is reachable until you are IN a guild, which is what this file now covers.
           · The row right-click menu IS the shared UnitPopup "FRIEND" menu, addressed by name
-            (see `BenillaFriendsFrame_ShowDropdown`). Its TARGET row stays hidden by UnitPopup's
+            (see `FriendsFrame_ShowDropdown`). Its TARGET row stays hidden by UnitPopup's
             own deferred set; its GUILD_PROMOTE/GUILD_LEAVE rows are live but gate themselves on
             `GuildFrame:IsVisible()`, so a friends-list or /who row still opens
             Whisper / Invite / Cancel and a guild roster row opens more.
@@ -274,6 +274,16 @@
         end
 
         -- ── The row right-click menu (ref FriendsFrame_ShowDropdown l.35-47) ───────────────────
+        -- **The reference's own names, in the reference's own file, since 1751 window 6.** These
+        -- three carried a `Benilla` prefix for one reason: our ItemRef.xml declared a second
+        -- private copy of the same pair under the plain names, loaded 262 entries earlier, and
+        -- two definitions of one name is the collision this manifest's order exists to settle.
+        -- That window is the reference's own file now and its `SetItemRef` calls
+        -- `FriendsFrame_ShowDropdown` by name — so the duplicate is deleted, the one body answers
+        -- to the name its home file publishes in 1.12, and `FriendsDropDown` is seated where the
+        -- reference seats it (which retired a `frame_flag_gate` KNOWN entry whose whole reasoning
+        -- was that forward-parent problem).
+
         -- A row's right-click opens the shared UnitPopup "FRIEND" menu addressed by NAME rather
         -- than by a unit token — which is the whole reason that menu exists: a friend or a /who
         -- hit is a name with no unit behind it (they need not even be in the world). The kit
@@ -282,21 +292,22 @@
         --
         -- `connected` gates the whole menu, ref-verbatim: there is nothing to offer an offline
         -- player. A /who hit is by definition online, so that call passes 1.
-        function BenillaFriendsFrame_ShowDropdown(name, connected)
+        function FriendsFrame_ShowDropdown(name, connected)
             HideDropDownMenu(1)
             if not connected or not name or name == "" then
                 return
             end
-            BenillaFriendsDropDown.initialize = BenillaFriendsFrameDropDown_Initialize
-            BenillaFriendsDropDown.displayMode = "MENU"
-            BenillaFriendsDropDown.name = name
-            ToggleDropDownMenu(1, nil, BenillaFriendsDropDown, "cursor")
+            FriendsDropDown.initialize = FriendsFrameDropDown_Initialize
+            FriendsDropDown.displayMode = "MENU"
+            FriendsDropDown.name = name
+            ToggleDropDownMenu(1, nil, FriendsDropDown, "cursor")
         end
 
-        function BenillaFriendsFrameDropDown_Initialize()
+        function FriendsFrameDropDown_Initialize()
             UnitPopup_ShowMenu(getglobal(UIDROPDOWNMENU_OPEN_MENU), "FRIEND", nil,
-                BenillaFriendsDropDown.name)
+                FriendsDropDown.name)
         end
+
 
         -- ── The window's repaint (ref FriendsFrame_Update l.81-126) ────────────────────────────
         -- Each tab swaps the four corner art textures as well as the sub-frame: the ref reuses one
@@ -820,7 +831,7 @@
                 local guildIndex = this.guildIndex
                 local name, rank, rankIndex, level, class, zone, note, officernote, online =
                     GetGuildRosterInfo(guildIndex)
-                BenillaFriendsFrame_ShowDropdown(name, online)
+                FriendsFrame_ShowDropdown(name, online)
                 return
             end
             GuildFrame.previousSelectedGuildMember = GuildFrame.selectedGuildMember
@@ -1308,7 +1319,7 @@
         function FriendsFrameFriendButton_OnClick(button)
             if button == "RightButton" then
                 local name, _, _, _, connected = GetFriendInfo(this:GetID())
-                BenillaFriendsFrame_ShowDropdown(name, connected)
+                FriendsFrame_ShowDropdown(name, connected)
                 return
             end
             SetSelectedFriend(this:GetID())
@@ -1324,7 +1335,7 @@
             local name = getglobal(this:GetName() .. "Name"):GetText()
             if button == "RightButton" then
                 -- A /who hit is online by construction, so the menu is never gated shut here.
-                BenillaFriendsFrame_ShowDropdown(name, 1)
+                FriendsFrame_ShowDropdown(name, 1)
                 return
             end
             WhoFrame.selectedWho = this.whoIndex
@@ -2081,7 +2092,7 @@
             <!-- The row right-click menu's host (ref `<Frame name="FriendsDropDown"
                  inherits="UIDropDownMenuTemplate"/>`): invisible until ToggleDropDownMenu opens
                  it at the cursor. -->
-            <Frame name="BenillaFriendsDropDown" inherits="UIDropDownMenuTemplate"/>
+            <Frame name="FriendsDropDown" inherits="UIDropDownMenuTemplate"/>
 
             <!-- Close: the ref's own UIPanelCloseButton seat (TOPRIGHT -30,-8) on the
                  minimize-button art every close button in this house uses — no UIPanelCloseButton
@@ -2195,11 +2206,22 @@
                         <Anchors><Anchor point="TOP" relativeTo="FriendsFrameFriendButton9" relativePoint="BOTTOM"/></Anchors>
                     </Button>
 
-                    <Frame name="FriendsFrameFriendsScrollFrame" inherits="FauxScrollFrameTemplate">
+                    <ScrollFrame name="FriendsFrameFriendsScrollFrame" inherits="FauxScrollFrameTemplate">
                         <Size><AbsDimension x="296" y="304"/></Size>
                         <Anchors><Anchor point="TOPRIGHT" relativeTo="FriendsFrame"><Offset><AbsDimension x="-67" y="-75"/></Offset></Anchor></Anchors>
-                        <Scripts><OnLoad>self.updateFunc = FriendsList_Update</OnLoad></Scripts>
-                    </Frame>
+                        <Scripts><OnLoad>
+                            <!-- `ScrollFrame_OnLoad()` FIRST: an instance OnLoad
+                                 REPLACES the template's, and the template's is what
+                                 seats `this.offset = 0`. Without it
+                                 `FauxScrollFrame_GetOffset` answers nil and the list
+                                 never paints. This is the reference's own idiom —
+                                 `SkillFrame.xml:556` and
+                                 `ClassTrainerFrameTemplates.xml:111` both open the
+                                 same way. Decision 1846. -->
+                            ScrollFrame_OnLoad()
+                            this.updateFunc = FriendsList_Update
+                        </OnLoad></Scripts>
+                    </ScrollFrame>
                 </Frames>
                 <Scripts>
                     <OnMouseWheel>BenillaFauxScrollFrame_OnMouseWheel(FriendsFrameFriendsScrollFrame, arg1)</OnMouseWheel>
@@ -2304,13 +2326,24 @@
                         <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton19" relativePoint="BOTTOM"/></Anchors>
                     </Button>
 
-                    <Frame name="FriendsFrameIgnoreScrollFrame" inherits="FauxScrollFrameTemplate">
+                    <ScrollFrame name="FriendsFrameIgnoreScrollFrame" inherits="FauxScrollFrameTemplate">
                         <!-- 332 tall, not the friends list's 304: 20 short rows reach further
                              down than 10 tall ones (ref l.1146-1148). -->
                         <Size><AbsDimension x="296" y="332"/></Size>
                         <Anchors><Anchor point="TOPRIGHT" relativeTo="FriendsFrame"><Offset><AbsDimension x="-67" y="-75"/></Offset></Anchor></Anchors>
-                        <Scripts><OnLoad>self.updateFunc = IgnoreList_Update</OnLoad></Scripts>
-                    </Frame>
+                        <Scripts><OnLoad>
+                            <!-- `ScrollFrame_OnLoad()` FIRST: an instance OnLoad
+                                 REPLACES the template's, and the template's is what
+                                 seats `this.offset = 0`. Without it
+                                 `FauxScrollFrame_GetOffset` answers nil and the list
+                                 never paints. This is the reference's own idiom —
+                                 `SkillFrame.xml:556` and
+                                 `ClassTrainerFrameTemplates.xml:111` both open the
+                                 same way. Decision 1846. -->
+                            ScrollFrame_OnLoad()
+                            this.updateFunc = IgnoreList_Update
+                        </OnLoad></Scripts>
+                    </ScrollFrame>
                 </Frames>
                 <Scripts>
                     <OnMouseWheel>BenillaFauxScrollFrame_OnMouseWheel(FriendsFrameIgnoreScrollFrame, arg1)</OnMouseWheel>
@@ -2443,11 +2476,22 @@
                         <FontString inherits="ChatFontNormal"/>
                     </EditBox>
 
-                    <Frame name="WhoListScrollFrame" inherits="FauxScrollFrameTemplate">
+                    <ScrollFrame name="WhoListScrollFrame" inherits="FauxScrollFrameTemplate">
                         <Size><AbsDimension x="296" y="287"/></Size>
                         <Anchors><Anchor point="TOPRIGHT" relativeTo="FriendsFrame" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-67" y="-96"/></Offset></Anchor></Anchors>
-                        <Scripts><OnLoad>self.updateFunc = WhoList_Update</OnLoad></Scripts>
-                    </Frame>
+                        <Scripts><OnLoad>
+                            <!-- `ScrollFrame_OnLoad()` FIRST: an instance OnLoad
+                                 REPLACES the template's, and the template's is what
+                                 seats `this.offset = 0`. Without it
+                                 `FauxScrollFrame_GetOffset` answers nil and the list
+                                 never paints. This is the reference's own idiom —
+                                 `SkillFrame.xml:556` and
+                                 `ClassTrainerFrameTemplates.xml:111` both open the
+                                 same way. Decision 1846. -->
+                            ScrollFrame_OnLoad()
+                            this.updateFunc = WhoList_Update
+                        </OnLoad></Scripts>
+                    </ScrollFrame>
                 </Frames>
                 <Scripts>
                     <!-- SetWhoToUI decides where the NEXT answer goes: this frame, or the chat
@@ -2702,11 +2746,22 @@
                          why the ref's two loose UI-Character-ScrollBar trough textures are omitted:
                          our kit draws a complete bar and they would double it. The other three
                          lists in this file are built exactly the same way. -->
-                    <Frame name="GuildListScrollFrame" inherits="FauxScrollFrameTemplate">
+                    <ScrollFrame name="GuildListScrollFrame" inherits="FauxScrollFrameTemplate">
                         <Size><AbsDimension x="296" y="237"/></Size>
                         <Anchors><Anchor point="TOPRIGHT" relativeTo="GuildFrame" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-67" y="-98"/></Offset></Anchor></Anchors>
-                        <Scripts><OnLoad>self.updateFunc = GuildStatus_Update</OnLoad></Scripts>
-                    </Frame>
+                        <Scripts><OnLoad>
+                            <!-- `ScrollFrame_OnLoad()` FIRST: an instance OnLoad
+                                 REPLACES the template's, and the template's is what
+                                 seats `this.offset = 0`. Without it
+                                 `FauxScrollFrame_GetOffset` answers nil and the list
+                                 never paints. This is the reference's own idiom —
+                                 `SkillFrame.xml:556` and
+                                 `ClassTrainerFrameTemplates.xml:111` both open the
+                                 same way. Decision 1846. -->
+                            ScrollFrame_OnLoad()
+                            this.updateFunc = GuildStatus_Update
+                        </OnLoad></Scripts>
+                    </ScrollFrame>
 
                     <!-- The page button that flips the two views. Its LEFT anchor is re-set by
                          `GuildStatus_Update` to 284 or 307 depending on whether the scroll bar is

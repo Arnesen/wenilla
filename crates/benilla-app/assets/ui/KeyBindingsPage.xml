@@ -320,6 +320,10 @@
             end
             FauxScrollFrame_Update(scroll, table.getn(page.items),
                 KEYBINDINGS_DISPLAYED, KEYBINDINGS_ROW_HEIGHT)
+            -- The trough is OURS — the reference has no trough at all, so nothing in its kit shows
+            -- one. The owner pairs it with the bar the reference's `_Update` just decided about
+            -- (1860); `BenillaScrollBar_SetShown` used to do it and is off this path now.
+            BenillaScrollTrough_Follow(scroll:GetName())
             KeyBindings_UpdateUnbindKey()
         end
 

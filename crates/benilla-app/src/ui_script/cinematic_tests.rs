@@ -15,17 +15,7 @@
 
 use benilla_ui::script::UiScript;
 
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
-}
+use super::test_ui::load_ui as load_xml;
 
 /// The frame tree a cinematic actually runs against: `UIParent` (whose `ShowUIPanel` the frame's
 /// `CINEMATIC_START` arm calls) and the cinematic frame itself.
@@ -36,7 +26,9 @@ fn ui_with_the_cinematic_frame() -> UiScript {
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "MoneyFrame.xml"); // StaticPopup's money row, or UiPanels errors at load
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "CinematicFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\CinematicFrame.xml");
     s.resolve();
     s
 }
@@ -241,6 +233,19 @@ fn a_cinematic_hides_the_hud_through_uiparent_and_spares_the_cinematic_frame() {
 fn the_screenshot_confirmation_shows_during_a_cinematic() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // The in-game UI materializes on world entry (1051), so a player always exists by the time the
+    // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
+    // into its label inside its own OnLoad. A manifest load with no player is a state the client
+    // never reaches (decision 1848).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
     let failures = super::load_default_ui(&s);
     assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
     s.resolve();

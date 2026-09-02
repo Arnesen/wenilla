@@ -332,7 +332,20 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// through `step`/`grounded_step`/`airborne_step` puts a gameplay argument into the movement
 /// core's signature. An `EntityHashSet` that is empty on every living frame is the smallest honest
 /// expression, and it makes the living player's query provably the one it always was.
-const CEILING: usize = 166;
+/// And 166 -> 172: **not six crossings — one measurement correction.** Nothing moved through the
+/// doorway; the scan was blind to part of every file. A `#[cfg(test)]` was cleared only on
+/// `depth < d`, and a top-level test module is seen at depth 0, rises to 1 and returns to 0 —
+/// never below it, so the first test module in a file switched the scan off for the rest of that
+/// file. [`paths_in`] carries the fix and how it surfaced (2026-09-01, a change that only *moved*
+/// a test module out of `net.rs` and pushed the count up by one with no new reference in its
+/// diff). These six were named by gameplay code all along, below a test module, uncounted:
+/// `lighting::WorldTime`, `art_scope::ArtScope`, `art_scope::ArtSlot`,
+/// `billboard::billboard_joint_palette`, `rig_anim::finalize_rig_worlds`, `world_unit::ViewerUnit`.
+/// Raising the number is what keeps the ratchet honest — a ceiling measured through a hole is not
+/// a ceiling — and it is the ratchet's own instruction: a count that cannot see the whole file
+/// cannot report a widening either, which is the one thing this test exists to do. The six are
+/// **not** hereby blessed as PUBLISH: they are un-sorted 1164 work, now visible enough to sort.
+const CEILING: usize = 172;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it
@@ -576,16 +589,31 @@ fn paths_in(text: &str, split: bool, want_engine: bool) -> Vec<(String, usize)> 
     let prefix = if split { "benilla_world::" } else { "crate::" };
     let mut found = Vec::new();
     let mut depth: i32 = 0;
-    let mut test_depth: Option<i32> = None;
+    // **A `#[cfg(test)]` guards exactly the item that follows it, and the scan has to find that
+    // item's END.** It did not, and the miss was total: the guard was cleared only on `depth < d`,
+    // but a top-level `#[cfg(test)] mod tests { … }` is seen at depth 0, rises to 1 inside and
+    // returns to 0 — never *below* it. So the first test module in a file switched this scan off
+    // for the whole rest of that file, and every engine item named below it went uncounted. The
+    // wall's whole job is to be a number nobody has to re-measure, and it was measuring a prefix.
+    //
+    // Found on 2026-09-01 by a change that only *moved* a test module out of `net.rs`: the count
+    // rose by one with no new reference anywhere in the diff, because deleting the module handed
+    // the scan back the rest of the file. An instrument that moves when the code does not is
+    // reporting on itself.
+    //
+    // The extent, for both shapes that exist here: `test_at` arms on the attribute line at depth
+    // `d`; if the guarded item opens a brace (`mod tests {`, `impl X {`) the depth rises and the
+    // item ends when it comes back to `d`; if it opens none (`#[cfg(test)] mod tests;`,
+    // `#[cfg(test)] pub(crate) use …;`) it ends at that statement's semicolon.
+    let mut test_at: Option<i32> = None;
+    let mut test_open = false;
     for (n, line) in text.lines().enumerate() {
         let t = line.trim_start();
         if t.starts_with("#[cfg(test)]") {
-            test_depth = Some(depth);
+            test_at = Some(depth);
+            test_open = false;
         }
-        if test_depth.is_some_and(|d| depth < d) {
-            test_depth = None;
-        }
-        let skip = test_depth.is_some() || t.starts_with("//") || t.starts_with('*');
+        let skip = test_at.is_some() || t.starts_with("//") || t.starts_with('*');
         if !skip {
             let mut rest = line;
             while let Some(i) = rest.find(prefix) {
@@ -660,6 +688,14 @@ fn paths_in(text: &str, split: bool, want_engine: bool) -> Vec<(String, usize)> 
             }
         }
         depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+        if let Some(d) = test_at {
+            if depth > d {
+                test_open = true;
+            } else if test_open || t.trim_end().ends_with(';') {
+                test_at = None;
+                test_open = false;
+            }
+        }
     }
     found
 }

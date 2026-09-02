@@ -28,12 +28,14 @@
         exists yet)" — false since the faux kit landed; six other windows ride it. The
         wheel handler lives on the window Frame itself: the engine bubbles a spin UP the parent chain
         (`script/pointer.rs` `mouse_wheel`), so a spin over a title row (no handler of its own) rises to
-        this window and scrolls. (A bare `<Frame>` is not a mouse HIT target — only
-        Button/CheckButton/EditBox/ScrollingMessageFrame are, `widget/mod.rs`'s ctor comment, and
-        `enableMouse` is a no-op stub — but it is still a valid bubble ANCESTOR: bubbling checks for the
-        handler, not mouse-enablement.) The `QuestLogWheelCatcher` BUTTON, declared FIRST so every
-        real row out-ranks it in hit-testing (`order::hit_test` walks the draw-order-descending list),
-        now only gives the list's EMPTY tail a hit-target whose spin also bubbles here.
+        this window and scrolls. (A bare `<Frame>` is not mouse-enabled by its ctor — that set is
+        Button/CheckButton/Slider/ColorSelect/EditBox, decision 1795 — but `enableMouse` and the
+        auto-arming `<Scripts>` names both reach it, and it is a valid bubble ANCESTOR either way:
+        bubbling checks for the handler, not mouse-enablement.) There is no wheel-catcher frame: a
+        full-area mouse-enabled `<Button>` declared FIRST would win every tie in its bucket, not lose
+        it — among equal `(strata, level)` the EARLIER-linked frame takes the point (decision 1816),
+        so such a catcher eats the whole window's clicks. The list's empty tail is covered by
+        `QuestLogListScrollFrame`, which is wheel-interactive by construction, and its spin bubbles here.
 
         v1 scope/deviations from the pin (each cited again at its own widget below):
           - Both pages sit on real scroll frames now: the LIST on a `FauxScrollFrameTemplate`
@@ -69,6 +71,16 @@
             to be the real widget method rather than a benilla global.
     -->
     <Script><![CDATA[
+        -- **`MAX_QUESTS` belongs to the quest LOG in 1.12** — `QuestLogFrame.lua:2`, the file this
+        -- one is our counterpart to — and it is here since 1751's sixteenth window. It was
+        -- declared in our QuestTimerFrame.xml as `MAX_QUESTS = MAX_QUESTS or 20`, which was the
+        -- honest shape while both files were ours; the timer window is the reference's own now and
+        -- its `QuestTimerFrame_Update` walks `for i = arg.n + 1, MAX_QUESTS` with no fallback, so
+        -- a nil there is `'for' limit must be a number` on the first repaint.
+        --
+        -- Distinct from `MAX_QUESTLOG_QUESTS` below, which the reference also has: this is the
+        -- quest-log CAPACITY (how many a character may carry), that is the display cap.
+        MAX_QUESTS = 20                 -- MAX_QUESTS (QuestLogFrame.lua:2)
         QUESTS_DISPLAYED = 6            -- QUESTS_DISPLAYED (pin §2, QuestLogFrame.lua:1)
         QUESTLOG_QUEST_HEIGHT = 16      -- the row pitch the faux kit scrolls by (ref l.4)
         MAX_QUESTLOG_QUESTS = 20     -- MAX_QUESTLOG_QUESTS (pin §2, :6) — display cap only
@@ -1059,6 +1071,44 @@
         -- `doNotScroll` (pin §5's asymmetry, threaded through to `BenillaQuestLogDetail_Update`):
         -- absent/falsy for a manual call (a row click, the window's own OnShow); `true` from the
         -- QUEST_LOG_UPDATE event handler below.
+        -- ── The reference's own two names for what this window already does ─────────────────
+        --
+        -- `QuestTimerFrame.xml` is the reference's own file, on the chain since 1751, and its
+        -- `QuestTimerButton_OnClick` (QuestTimerFrame.lua:41-45) does exactly three things:
+        -- ShowUIPanel, `QuestLog_SetSelection(...)`, `QuestLog_Update()`. Neither of the last two
+        -- existed anywhere in this tree, so clicking a quest timer raised. Defining them here is
+        -- not a stub of an engine verb (1203) — both are FrameXML functions, and this file is our
+        -- stand-in for `QuestLogFrame.lua`, which is where the reference defines them. Every other
+        -- function in this window has the same relationship to its stock twin; these two were
+        -- simply missed because nothing of ours called them.
+        --
+        -- `QuestLog_SetSelection`'s stock body (QuestLogFrame.lua:317-345) is mostly frame work
+        -- that only the stock window has — `QuestLogTitle`..id, `QuestLogHighlightFrame`,
+        -- `QuestLogSkillHighlight`. What survives the re-expression is its LAW: a header never
+        -- becomes the selection (it folds instead), and a real quest is selected and repainted.
+        -- That is the same fork `BenillaQuestLogTitle_OnClick` above already implements, so this
+        -- is the shared body rather than a second copy of it.
+        function QuestLog_SetSelection(index)
+            if not index or index == 0 then return end
+            local _, _, _, isHeader, isCollapsed = GetQuestLogTitle(index)
+            if isHeader then
+                if isCollapsed and type(ExpandQuestHeader) == "function" then
+                    ExpandQuestHeader(index)
+                elseif type(CollapseQuestHeader) == "function" then
+                    CollapseQuestHeader(index)
+                end
+                return
+            end
+            SelectQuestLogEntry(index)
+        end
+
+        -- The reference's `QuestLog_Update` (QuestLogFrame.lua:107). Ours has carried this body
+        -- under a `Benilla` prefix; the stock name is the one the chain calls, and having it here
+        -- also shrinks the delta when this window itself migrates.
+        function QuestLog_Update(doNotScroll)
+            BenillaQuestLogFrame_Update(doNotScroll)
+        end
+
         function BenillaQuestLogFrame_Update(doNotScroll)
             QuestLog_SetFirstValidSelection()
             BenillaQuestLogList_Update()
@@ -1400,16 +1450,6 @@
             </Layer>
         </Layers>
         <Frames>
-            <!-- The scroll-wheel catcher (this file's header comment) — MUST be first so every real
-                 widget below out-ranks it in hit-testing. -->
-            <Button name="QuestLogWheelCatcher">
-                <Anchors>
-                    <Anchor point="TOPLEFT" relativePoint="TOPLEFT"/>
-                    <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"/>
-                </Anchors>
-                <Scripts><OnMouseWheel>BenillaQuestLogFrame_OnMouseWheel(arg1)</OnMouseWheel></Scripts>
-            </Button>
-
             <!-- pin §1: the top-right close X (UIPanelCloseButton in the ref; our engine ships no such
                  template — QuestFrame.xml/BagFrame.xml already draw it by hand on the same art). -->
             <Button name="QuestLogFrameCloseButton">
@@ -1534,7 +1574,7 @@
                  a `questLogOffset` upvalue this file kept "because no real ScrollFrame/
                  FauxScrollFrame engine exists yet" — long false, and the reason this window
                  published no QuestLogListScrollFrame for addons to find. -->
-            <Frame name="QuestLogListScrollFrame" inherits="FauxScrollFrameTemplate">
+            <ScrollFrame name="QuestLogListScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="300" y="93"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="19" y="-75"/></Offset></Anchor></Anchors>
                 <Scripts>
@@ -1542,7 +1582,7 @@
                         FauxScrollFrame_OnVerticalScroll(QUESTLOG_QUEST_HEIGHT, BenillaQuestLogList_Update)
                     </OnVerticalScroll>
                 </Scripts>
-            </Frame>
+            </ScrollFrame>
 
             <Button name="QuestLogTitle1" inherits="QuestLogTitleButtonTemplate" id="1">
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="19" y="-75"/></Offset></Anchor></Anchors>
@@ -1556,12 +1596,11 @@
             <!-- The detail pane's real ScrollFrame (decision 0112's mechanism): 300×261, TOPLEFT of
                  this window at (19,-175) — the ref's own `QuestLogDetailScrollFrame` position, this
                  file's "Detail chain start" arithmetic that used to live above (list bottom-left
-                 (19,-168) - 7 = (19,-175)). Mouse-wheel-interactive by construction (no wheel-catcher
-                 needed — `widget/mod.rs`'s ScrollFrame ctor comment), and declared AFTER
-                 `QuestLogWheelCatcher` in this `<Frames>` list so it out-ranks the catcher for
-                 any wheel/click landing inside its own rect (this file's header comment on hit-test
-                 z-order) — scrolling over the detail text no longer scrolls the LIST underneath it,
-                 a latent mix-up the flat layout had no way to avoid. -->
+                 (19,-168) - 7 = (19,-175)). Mouse-wheel-interactive by construction
+                 (`widget/mod.rs`'s ScrollFrame ctor comment), so a spin inside its own rect is taken
+                 here and scrolling the detail text no longer scrolls the LIST underneath it — a
+                 latent mix-up the flat layout had no way to avoid. It needs no declaration-order
+                 trick to win that: nothing else in this window's bucket covers the detail rect. -->
             <ScrollFrame name="QuestLogDetailScrollFrame" inherits="UIPanelScrollFrameTemplate">
                 <Size><AbsDimension x="300" y="261"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="19" y="-175"/></Offset></Anchor></Anchors>
@@ -1822,12 +1861,11 @@
                  untimed selection nothing, and gated on the window being effectively visible by
                  `UiScript::tick`'s own OnUpdate gate, so it costs a closed window nothing. -->
             <OnUpdate>QuestLog_OnUpdate(arg1)</OnUpdate>
-            <!-- The list wheel lives on the WINDOW, not just the child catcher: the engine bubbles a
-                 spin up the PARENT chain (script/pointer.rs mouse_wheel), so a spin over a quest-title
-                 row (no OnMouseWheel of its own) must reach this window to scroll — a sibling catcher
-                 never sees it (bubbling reaches ancestors, not siblings). The QuestLogWheelCatcher
-                 button now only gives the list's empty tail a hit-target that also bubbles here. (The
-                 detail ScrollFrame keeps its own OnMouseWheel and is unaffected.) -->
+            <!-- The list wheel lives on the WINDOW: the engine bubbles a spin up the PARENT chain
+                 (script/pointer.rs mouse_wheel), so a spin over a quest-title row (no OnMouseWheel of
+                 its own) reaches this window and scrolls. That is the whole mechanism — a sibling
+                 frame could never serve it anyway, since bubbling reaches ancestors, not siblings.
+                 (The detail ScrollFrame keeps its own OnMouseWheel and is unaffected.) -->
             <OnMouseWheel>BenillaQuestLogFrame_OnMouseWheel(arg1)</OnMouseWheel>
             <!-- pin §1, QuestLog_OnShow/OnHide (QuestLogFrame.lua:85-95), wired via the frame's
                  OnShow/OnHide (QuestLogFrame.xml:949-954) — the window-sound convention (decision

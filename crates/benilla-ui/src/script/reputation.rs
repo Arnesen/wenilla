@@ -532,7 +532,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     .find(|e| e.rep_list_id == slot)
             });
             let Some(e) = watched else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                // FIVE values on the nothing-watched branch too — `0x4d6820` has four guards onto
+                // one label and no raise, so the shape is `nil, 0, 0, 0, 0` (decision 1845).
+                //
+                // Worth carrying with it: the `[0, 64)` bound is **not in the binding**.
+                // `0x4d5620` maps an out-of-range index to `0`, so the "nothing watched" sentinel
+                // passes the `< 0` and `> max` guards and dies at the NULL-DBC-row guard instead.
+                // A port that range-checks inside the binding implements a branch the reference
+                // does not have.
+                return Ok(MultiValue::from_vec(vec![
+                    Value::Nil,
+                    Value::Integer(0),
+                    Value::Integer(0),
+                    Value::Integer(0),
+                    Value::Integer(0),
+                ]));
             };
             Ok(MultiValue::from_vec(vec![
                 Value::String(lua.create_string(&e.name)?),

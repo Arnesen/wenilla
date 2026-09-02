@@ -84,6 +84,8 @@ struct ExtractedDraw {
     anchor: Vec3,
     bias: f32,
     raster_bias: i32,
+    /// The slope-scale half of the settle — see [`super::buffer::EffectDrawSpec::raster_slope`].
+    raster_slope: f32,
     /// Vertices are already camera-relative — the prepare rebase skips this draw. See
     /// [`super::buffer::EffectDrawSpec::cam_relative`].
     cam_relative: bool,
@@ -190,6 +192,9 @@ pub struct EffectPipelineKey {
     /// keeps absolute verts and runs the mesh path's `clip_from_world`, so its depth ties
     /// against the drawn ground within the bias.
     raster_bias: i32,
+    /// The **slope-scale** half of the settle, keyed by bits because `f32` is not `Hash`/`Eq`.
+    /// Two values exist ({0.0, the foam's}), so the key space stays as small as `raster_bias`'s.
+    raster_slope_bits: u32,
     /// Does the fragment multiply by the scene's matte light? The reference decides this per
     /// emitter through a synthesized `M2Material` (`EffectDrawSpec::lit`), and it is a shader
     /// def rather than a uniform bit so the 95% unlit majority keeps the identical instruction
@@ -315,7 +320,7 @@ impl SpecializedRenderPipeline for EffectPipeline {
                 stencil: StencilState::default(),
                 bias: DepthBiasState {
                     constant: key.raster_bias,
-                    slope_scale: 0.0,
+                    slope_scale: f32::from_bits(key.raster_slope_bits),
                     clamp: 0.0,
                 },
             }),
@@ -361,10 +366,27 @@ fn extract_effects(
         anchor: d.anchor,
         bias: d.bias,
         raster_bias: d.raster_bias,
+        raster_slope: d.raster_slope,
         cam_relative: d.cam_relative,
         range: d.range.clone(),
         light: d.light.clone(),
     }));
+}
+
+/// `$WOW_EFFECT_TRACE`'s lane names: which rung of the pre-water surface-decal band a draw's sort
+/// bias is, or `None` for everything else on the stream (particles, ribbons, foam, precipitation).
+/// Keyed on the sort rung — the only field that is unique per decal lane (`sky_order::Rung`).
+fn decal_lane(bias: f32) -> Option<&'static str> {
+    use crate::sky_order::Rung;
+    match bias {
+        b if b == Rung::RING => Some("ring"),
+        b if b == Rung::SHADOW_SORT => Some("shadow"),
+        b if b == Rung::FOOTPRINT => Some("footprint"),
+        b if b == Rung::RETICLE => Some("reticle"),
+        b if b == Rung::GROUND_FX => Some("ground-fx"),
+        b if b == Rung::DRIFT_CLOUD => Some("drift-cloud"),
+        _ => None,
+    }
 }
 
 /// Add one [`Transparent3d`] item per draw record to the matching camera's phase.
@@ -401,6 +423,7 @@ fn queue_effects(
                     hdr: view.hdr,
                     blend: draw.blend,
                     raster_bias: draw.raster_bias,
+                    raster_slope_bits: draw.raster_slope.to_bits(),
                     lit: draw.lit,
                 },
             );
@@ -493,10 +516,16 @@ fn prepare_effects(
     // advances past the absorbed items (`render_phase/mod.rs:1487`).
     let effect_fn = draw_functions.read().id::<DrawEffects>();
     // `$WOW_EFFECT_TRACE` — the lane's own phase probe (the WOW_PHASE shape, decision 0665,
-    // asked of effect items): during the merge walk, record each BLOB-SHADOW item (Tris
-    // topology + the shadow's own raster bias) with its sort distance and appended index
-    // range, then log the phase totals. Splits "never pushed / never queued / merged away /
-    // submitted but the GPU state ate it" — the gap no pixel reading can see into.
+    // asked of effect items): during the merge walk, record each **surface-decal** item — every
+    // rung of the pre-water band, named by [`decal_lane`] — with its **index in the sorted
+    // transparent phase**, its sort distance, and its appended index range, then log the phase
+    // totals. Splits "never pushed / never queued / merged away / submitted but the GPU state ate
+    // it" — the gap no pixel reading can see into — and, since 1789, reads the draw-order ladder
+    // straight off a live frame: `item 4` vs `item 81` is what B347 was, measured.
+    //
+    // The lane is keyed on the SORT rung because that is the one field unique per lane: the raster
+    // bias is shared (every ground decal rides `DECAL_RASTER`, and prints were being labelled
+    // shadows here for exactly that reason).
     let trace = std::env::var_os("WOW_EFFECT_TRACE").is_some();
     let mut trace_lines: Vec<String> = Vec::new();
     meta.indices.clear();
@@ -556,12 +585,9 @@ fn prepare_effects(
                 }
             }
             let index_end = meta.indices.len() as u32;
-            if trace
-                && draw.topology == EffectTopology::Tris
-                && draw.raster_bias == crate::sky_order::Rung::SHADOW_RASTER
-            {
+            if let (true, Some(lane)) = (trace, decal_lane(draw.bias)) {
                 trace_lines.push(format!(
-                    "  item {i}: shadow anchor {:.1?}, dist {:.1}, verts {}, indices \
+                    "  item {i}: {lane} anchor {:.1?}, dist {:.1}, verts {}, indices \
                      {index_start}..{index_end}, tex {:?}",
                     draw.anchor,
                     item.distance,
@@ -876,9 +902,14 @@ mod tests {
     /// street height is micro-scale), a *sloped* receiver takes the full horizontal ulps onto
     /// its tilted normal — and the confirmed flicker walk was the Stormwind gate ramp. Model
     /// the 3-ulp worst case (0781: "~1–3 ulps") at the walk's own coordinates across zoom and
-    /// slope, and pin the resize: the residual spends over half the 0781-era 4096 margin (with
-    /// the GPU's FMA-contraction noise on top, the tie is lost — the live A/B), while
-    /// `Rung::SHADOW_RASTER` dominates the same worst case with ≥2× headroom.
+    /// slope, and pin both ends of the sizing.
+    ///
+    /// **Since 1817 it pins the raise as well as the floor.** The residual is 2.59× the 0781-era
+    /// +4096 margin, so it is also **1.30× the +8192** the selection ring and the ground-target
+    /// reticle rode until the RE showed they share the blob shadow's lane and therefore its
+    /// conflict — those two were under their own residual and had simply not been walked on a
+    /// slope. The measurement is per-lane-independent by construction: the residual is the
+    /// *bake's*, and the bake is one path, so one number serves every ground decal.
     #[test]
     fn raised_bias_dominates_the_bake_residual() {
         use crate::sky_order::Rung;
@@ -897,6 +928,7 @@ mod tests {
         };
         let cam_dir = Vec3::new(0.35, 0.55, 0.76).normalize();
         let mut worst_over_old = 0.0_f32;
+        let mut worst_over_retired_ring = 0.0_f32;
         let mut worst_over_new = 0.0_f32;
         // Receiver grades from level street to a steep ramp, tilted along 8 azimuths.
         for slope in [0.0_f32, 0.08, 0.2, 0.35] {
@@ -925,14 +957,17 @@ mod tests {
                     let conflict = delta_n as f64 * grad;
                     let unit = bias_unit(depth) as f64;
                     worst_over_old = worst_over_old.max((conflict / (4096.0 * unit)) as f32);
+                    worst_over_retired_ring =
+                        worst_over_retired_ring.max((conflict / (8192.0 * unit)) as f32);
                     worst_over_new =
-                        worst_over_new.max((conflict / (Rung::SHADOW_RASTER as f64 * unit)) as f32);
+                        worst_over_new.max((conflict / (Rung::DECAL_RASTER as f64 * unit)) as f32);
                 }
             }
         }
         eprintln!(
             "bake residual worst: {worst_over_old:.3}x the 0781-era 4096 margin, \
-             {worst_over_new:.3}x Rung::SHADOW_RASTER"
+             {worst_over_retired_ring:.3}x the 8192 the ring rode until 1817, \
+             {worst_over_new:.3}x Rung::DECAL_RASTER"
         );
         assert!(
             worst_over_old > 0.5,
@@ -940,8 +975,13 @@ mod tests {
              (worst {worst_over_old:.2}×) — the resize's premise would be unfounded"
         );
         assert!(
+            worst_over_retired_ring > 1.0,
+            "the 3-ulp residual fits inside the retired +8192 (worst {worst_over_retired_ring:.2}×) \
+             — then the ring and reticle were NOT under-biased and 1817's raise wants re-arguing"
+        );
+        assert!(
             worst_over_new < 0.5,
-            "Rung::SHADOW_RASTER leaves under 2× headroom against the 3-ulp residual \
+            "Rung::DECAL_RASTER leaves under 2× headroom against the 3-ulp residual \
              (worst {worst_over_new:.2}×) — raise it"
         );
     }

@@ -56,7 +56,7 @@ pub(crate) fn drive_fx_view(
         return;
     };
     let root = *state.root.get_or_insert_with(|| {
-        let mut pos = benilla_assets::coords::wow_to_bevy(FXVIEW_POS);
+        let mut pos = benilla_assets::coords::wow_to_bevy(req.at.unwrap_or(FXVIEW_POS));
         // `WOW_FX_DISPLAY`: the UNIT lane. Spawn the live component set a streamed creature gets
         // (`net::apply`'s, the same one the `vplates` fixture's wolf uses) and let the ordinary
         // unit pipeline build the model — so what this shoots is a creature, not a model, and

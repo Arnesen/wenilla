@@ -81,6 +81,13 @@ impl SoundKits {
     pub(super) fn roll(&mut self) -> u32 {
         self.rng.next()
     }
+
+    /// The kit table itself, for the one consumer that must resolve ids **ahead of** playing them:
+    /// [`super::vocal`]'s table build, which needs a kit's variation count (the reference reads
+    /// `0x45cda0(kit) + 0x94` there for exactly the same reason).
+    pub(super) fn catalog(&self) -> &SoundKitCatalog {
+        &self.catalog
+    }
 }
 
 /// One playing channel the pump owns — the client's ~0x90-byte channel struct, benilla-shaped.
@@ -252,6 +259,13 @@ impl Bus {
     /// foley off `$FSD` is here as well, uncapped beside the capped step it accompanies.
     pub(super) const DEFAULT: Bus = Bus(0);
 
+    /// Bus 1 — **cap 1**. The **error speech** line your own character says (`0x458250`,
+    /// `0x4582d4 mov ebx,1`), and the reference's only tenant of this bus. Its cap of one is
+    /// load-bearing rather than incidental: `0x458250` attempts the annoyed line *and then falls
+    /// through and attempts the ordinary one*, and it is this cap that keeps the second attempt
+    /// from being heard on top of the first (`super::vocal` records the whole cycle).
+    pub(super) const ERROR_SPEECH: Bus = Bus(1);
+
     /// Bus 5 — **cap 1**. The attacker's exertion vocal (`CreatureSoundData.Exertion` = class 0,
     /// `ExertionCritical` = class 1), routed through `0x624786` → `0x623b10`. One exertion voice
     /// in the whole world at a time: a pack of mobs swinging together grunts *once*.
@@ -307,6 +321,21 @@ const BUS_CAP: [u32; 13] = [0x7fff_ffff, 1, 2, 2, 1, 1, 2, 2, 1, 6, 4, 1, 2];
 /// flag 0x20. See the gate in [`play_kit_ext`] for the measurement that set it, and decision 1560
 /// for why this is ours to add rather than a fidelity port.
 const SAME_KIT_MAX: usize = 2;
+
+/// The reference's own per-id suppressor: kit flag `0x20` set AND a same-kit instance still
+/// audible (`0x458f40` lifts `SoundEntries +0x7c` bit 0x20 into the FMOD flags word, consumed by
+/// the pre-play gate `0x7a66a0`). Named rather than inlined so the tests read the *gate*, not a
+/// copy of it.
+fn no_duplicates_blocks(dedupe_exempt: bool, flags: u32, live_same_kit: usize) -> bool {
+    !dedupe_exempt && flags & sound_kit_flags::NO_DUPLICATES != 0 && live_same_kit > 0
+}
+
+/// [`SAME_KIT_MAX`], decision 1560's looser fallback for the 1 847 rows the reference left
+/// ungated. Both suppressors belong to the **one-shot lane**; see [`PlayExtras::dedupe_exempt`]
+/// for the caller that is exempt from them and why.
+fn same_kit_cap_blocks(dedupe_exempt: bool, live_same_kit: usize) -> bool {
+    !dedupe_exempt && live_same_kit >= SAME_KIT_MAX
+}
 
 /// The reference's **global voice ceiling** — the number this whole hunt came down to.
 ///
@@ -467,6 +496,19 @@ pub(super) struct PlayExtras {
     /// Loop regardless of the kit's own 0x200 flag, for the drivers whose *column* is the loop
     /// authority (the creature body-loop; see [`play_kit_ext`]'s own note).
     pub(super) force_loop: bool,
+    /// **Skip the per-id duplicate suppressors** — the kit's own `NO_DUPLICATES` flag and
+    /// [`SAME_KIT_MAX`]. Those are the **one-shot lane's** gate (`0x458f40` lifting `SoundEntries`
+    /// bit 0x20 into the FMOD flags word, consumed by `0x7a66a0`), and a caller that already
+    /// guarantees one channel per kit by construction must not be held to it a second time. The
+    /// ambient emitter pool ([`super::doodad_pool`]) is that caller: it dedupes **structurally**,
+    /// one entry per SoundEntries id (wow-re `doodad-sound-emitters.md` §15), and its opens go
+    /// through `0x7a5680` → `0x7a54d0`, which never reaches that gate at all.
+    ///
+    /// It is not a nicety. `NightElfStreetLampLoop` is Flags **0x220**, so with the gate applied a
+    /// pool entry could not replace its own 3.0 s fade-out — the lamp's hum would drop out for
+    /// three seconds every time its entry was re-admitted past the cap, and 2 776 of the 4 623
+    /// shipped rows carry the bit.
+    pub(super) dedupe_exempt: bool,
     /// Which per-unit latch this play takes, if any ([`Latch`]). Defaults to [`Latch::None`] —
     /// tagging a `source` is about ownership, and taking a latch has to be asked for.
     pub(super) latch: Latch,
@@ -501,7 +543,8 @@ pub(crate) enum KitRef<'a> {
 /// Resolve → gate → pick → decode → play. `pos: None` is the 2D path (UI, self sounds);
 /// `category` is the caller's volume bucket (module docs — the client's per-driver flag bits).
 /// Silently succeeds without playing when the kit is out of range or duplicate-suppressed
-/// (matching the client: gates are not errors).
+/// (matching the client: gates are not errors) — `Ok(false)` is that outcome, see
+/// [`play_kit_ext`]'s return.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn play_kit(
     kits: &mut SoundKits,
@@ -512,7 +555,7 @@ pub(crate) fn play_kit(
     kit_ref: KitRef<'_>,
     pos: Option<Vec3>,
     category: SoundCategory,
-) -> Result<()> {
+) -> Result<bool> {
     play_kit_ext(
         kits,
         assets,
@@ -537,6 +580,12 @@ pub(crate) fn play_kit(
 /// handling is unpinned; decision record with the drone build), and a **voice category** — the
 /// category latched on the unit's one-shot bark slot ([`ActiveChannel::voice`]); `Some` only for
 /// the barks the reference stores in `[unit+0xb20]`.
+///
+/// **Returns whether a channel actually opened** — the reference's own answer: its play core
+/// `0x45ce60` hands back the FMOD channel, `0` when any gate refused (an unresolvable kit, the
+/// per-bus cap, the duplicate walk), and callers that care read that zero. Almost none do, and
+/// `Ok(false)` reads exactly like `Ok(())` did for them; [`super::vocal`]'s escalation counter is
+/// the one place the distinction is the mechanism.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn play_kit_ext(
     kits: &mut SoundKits,
@@ -548,11 +597,12 @@ pub(super) fn play_kit_ext(
     pos: Option<Vec3>,
     category: SoundCategory,
     extras: PlayExtras,
-) -> Result<()> {
+) -> Result<bool> {
     let PlayExtras {
         variant,
         source,
         force_loop,
+        dedupe_exempt,
         latch,
         bus,
         volume_mult: Volume(mult),
@@ -563,7 +613,7 @@ pub(super) fn play_kit_ext(
     // reveal. A dropped one-shot under an opaque cover is a sound the reference never played:
     // its world load blocks, and the events these sounds voice happen unheard.
     if config.world_hold {
-        return Ok(());
+        return Ok(false);
     }
     let kit = match kit_ref {
         KitRef::Id(id) => kits.catalog.get(id),
@@ -585,13 +635,13 @@ pub(super) fn play_kit_ext(
     let d_sq = pos.map(|p| math::dist_sq(listener, p));
     if let Some(d_sq) = d_sq {
         if cutoff > 0.0 && !math::audible(d_sq, cutoff) {
-            return Ok(());
+            return Ok(false);
         }
     }
 
     let weights: Vec<u32> = kit.files.iter().map(|(_, w)| *w).collect();
     if weights.is_empty() {
-        return Ok(()); // a kit with no files is playable-as-nothing, not an error
+        return Ok(false); // a kit with no files is playable-as-nothing, not an error
     }
 
     // The **per-bus concurrency cap** — the always-on arm of the pre-play gate `0x7a66a0`, checked
@@ -601,7 +651,7 @@ pub(super) fn play_kit_ext(
     // distance-culled one only because the cull hands the channel back — and benilla's pump reaps a
     // culled channel out of this list on the same edge.
     if bus_at_cap(out.channels.iter().map(|c| c.bus), bus) {
-        return Ok(());
+        return Ok(false);
     }
 
     // Duplicate suppression — byte-verified (wow-re uisound-tables.md, corrected §5): the FMOD
@@ -609,8 +659,9 @@ pub(super) fn play_kit_ext(
     // still audible (0x458f40 lifts SoundEntries +0x7c bit 0x20 into the FMOD flags word). The
     // gate's OTHER arm — an always-on per-category concurrent cap (count[0xcf553c] >=
     // limit[0x87ce60], 13 categories) — stays a deferral until that limit table is read out.
-    if flags & sound_kit_flags::NO_DUPLICATES != 0 && out.channels.iter().any(|c| c.kit == id) {
-        return Ok(());
+    let live_same_kit = out.channels.iter().filter(|c| c.kit == id).count();
+    if no_duplicates_blocks(dedupe_exempt, flags, live_same_kit) {
+        return Ok(false);
     }
 
     // **The coherent-copy cap** (decision 1560) — the fallback for the rows the reference leaves
@@ -630,16 +681,16 @@ pub(super) fn play_kit_ext(
     // reference's own idea applied, more loosely, where the data left a hole. Two rather than one
     // deliberately: it keeps some sense that several things happened (and cannot silence two
     // genuinely distinct mobs' impacts), while removing the coherent stack that does the damage.
-    if out.channels.iter().filter(|c| c.kit == id).count() >= SAME_KIT_MAX {
+    if same_kit_cap_blocks(dedupe_exempt, live_same_kit) {
         out.copies_dropped += 1;
-        return Ok(());
+        return Ok(false);
     }
 
     // The variation: an explicit index when the caller drives the cycle (the client's
     // `variant != -1`), else the weighted pick with depletion.
     let pick = match variant {
         Some(i) if i < weights.len() => i,
-        Some(_) => return Ok(()), // out-of-range explicit variant: playable-as-nothing
+        Some(_) => return Ok(false), // out-of-range explicit variant: playable-as-nothing
         None => kits.pick_variation(id, &weights),
     };
     let path = kits.catalog.get(id).expect("resolved above").files[pick]
@@ -677,7 +728,7 @@ pub(super) fn play_kit_ext(
     // that can *stop another sound*, and it must not do that for a play the cheaper gates above
     // were going to drop anyway.
     if !claim_voice(out, amp) {
-        return Ok(());
+        return Ok(false);
     }
 
     let mixer = out.mixer.as_mut().context("no audio device")?;
@@ -731,7 +782,7 @@ pub(super) fn play_kit_ext(
         bus,
         latch,
     });
-    Ok(())
+    Ok(true)
 }
 
 /// Does `unit` hold a **live one-shot voice channel** — the reference's `[unit+0xb20]` handle,
@@ -806,6 +857,13 @@ pub(super) fn source_kit_playing(out: &SoundOutput, source: Entity, kit_id: u32)
         .any(|c| c.source == Some(source) && c.kit == kit_id)
 }
 
+/// The kit's catalog name, or `None` when the id resolves to no `SoundEntries` row — the
+/// reference's `0x45cda0(id)` null test, which is what permanently fails a doodad emitter pool
+/// entry (`[+0xE00] = -id`). The pool is outside this module, and the catalog is not.
+pub(super) fn kit_name(kits: &SoundKits, id: u32) -> Option<&str> {
+    kits.catalog.get(id).map(|k| k.name.as_str())
+}
+
 /// Whether kit `id` is a LOOPING kit (`SoundEntries` flag 0x200) — the client's `0x458830` test
 /// that splits tracked-loop playback from fire-and-forget one-shots (decision 0107).
 pub(super) fn kit_looping(kits: &SoundKits, id: u32) -> bool {
@@ -842,7 +900,11 @@ pub(super) fn stop_source_kit(out: &mut SoundOutput, source: Entity, kit_id: u32
 
 /// Force-stop every channel tagged with `source` — the unit-teardown stop (`0x5fbb6c`: the client
 /// stops + clears the greeting handle when the unit's record is torn down). Called on despawn.
-pub(super) fn stop_source(out: &mut SoundOutput, source: Entity) {
+/// Returns **how many channels it actually stopped** — the caller's only way to tell "this source
+/// held a loop and we reaped it" from "this source was silent", which is the pair a streaming
+/// retest has to distinguish (the doodad reaper in [`super::anim_events`]).
+pub(super) fn stop_source(out: &mut SoundOutput, source: Entity) -> usize {
+    let before = out.channels.len();
     out.channels.retain_mut(|c| {
         if c.source == Some(source) {
             c.handle.stop(mixer::declick());
@@ -851,6 +913,7 @@ pub(super) fn stop_source(out: &mut SoundOutput, source: Entity) {
             true
         }
     });
+    before - out.channels.len()
 }
 
 /// The `PlaySoundFile` path — a raw file play, no kit: no audibility/duplicate gates, no
@@ -1442,8 +1505,10 @@ mod tests {
     /// [`SAME_KIT_MAX`] however many targets the buff had.
     #[test]
     fn a_mass_buff_collapses_to_the_same_kit_cap() {
-        // What the gate sees: N already-live copies of kit 3116, asked for one more.
-        let live_copies = |n: usize| n >= SAME_KIT_MAX;
+        // What the gate sees: N already-live copies of kit 3116, asked for one more. The real
+        // predicate, not a restatement of it — a mirrored copy here would keep passing after the
+        // gate itself changed.
+        let live_copies = |n: usize| same_kit_cap_blocks(false, n);
         assert!(!live_copies(0), "the first copy always plays");
         assert!(
             !live_copies(1),
@@ -1456,6 +1521,35 @@ mod tests {
                 already + 1
             );
         }
+    }
+
+    /// **The lane split.** Both suppressors are the ONE-SHOT lane's (`0x458f40` → `0x7a66a0`);
+    /// the ambient emitter pool's opens go through `0x7a5680` → `0x7a54d0` and never reach them
+    /// (wow-re `doodad-sound-emitters.md` §15), because that lane already guarantees one channel
+    /// per SoundEntries id structurally.
+    ///
+    /// `NightElfStreetLampLoop` is the case that proves it matters rather than tidies: Flags
+    /// **0x220**, so an un-exempt pool entry could not replace its own 3.0 s fade-out — the lamp's
+    /// hum would drop out for three seconds every time its entry came back under the cap.
+    #[test]
+    fn the_emitter_pool_lane_is_exempt_from_the_one_shot_suppressors() {
+        const LAMP: u32 = 0x220;
+        assert!(
+            no_duplicates_blocks(false, LAMP, 1),
+            "the one-shot lane still honours the reference's own 0x20"
+        );
+        assert!(
+            !no_duplicates_blocks(true, LAMP, 1),
+            "a pool entry must be able to replace its own fading channel"
+        );
+        assert!(
+            !same_kit_cap_blocks(true, 8),
+            "…and the coherent-copy fallback is the same lane's, so it is exempt too"
+        );
+        assert!(
+            same_kit_cap_blocks(false, SAME_KIT_MAX),
+            "the exemption is scoped to the caller that asks for it, not global"
+        );
     }
 
     /// The looser cap only exists for rows the reference left ungated. A row carrying flag 0x20 is

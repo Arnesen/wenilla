@@ -25,7 +25,7 @@
         paints ON TOP of it (later file = higher z, the established house convention every top-level
         window already relies on implicitly). Because a true engine Hide-cascade doesn't reach a
         non-child, `CharacterFrame.xml`'s own `CharacterFrame_OnHide` was extended (its own
-        header comment) to loop-hide every `BENILLA_CHARACTERFRAME_SUBFRAMES` entry — the fix this
+        header comment) to loop-hide every `CHARACTERFRAME_SUBFRAMES` entry — the fix this
         page's non-nested shape requires, done once so later non-nested tabs (Pet/Reputation/Honor)
         inherit it for free.
 
@@ -542,7 +542,7 @@
          ToggleCharacter selects the tab from it (ref CharacterFrame.lua:11). This was 3 while
          Reputation (the ref's 3) was not built; ReputationFrame.xml landed and took that slot, so
          Skills is back on the reference's number. `character_tests.rs` pins every page's id against
-         its slot in BENILLA_CHARACTERFRAME_SUBFRAMES, which is what made the renumber loud rather
+         its slot in CHARACTERFRAME_SUBFRAMES, which is what made the renumber loud rather
          than silent — exactly as this comment predicted. -->
     <Frame name="SkillFrame" enableMouse="true" parent="CharacterFrame" hidden="true" id="4">
         <!-- The real 384×512 page. No <Anchors relativeTo> substitute for true parenting exists
@@ -593,19 +593,6 @@
             </Layer>
         </Layers>
         <Frames>
-            <!-- The scroll-wheel catcher (TrainerFrame.xml's own note) — MUST be first so every real
-                 row below out-ranks it in hit-testing, and sized to the LIST REGION ONLY (rows span
-                 y -79..-295, x 22..309), NEVER the whole page: unlike the trainer's standalone
-                 window, this page is CharacterFrame's LAST child, so a full-page catcher
-                 out-ranks every EARLIER CharacterFrame child — it ate the tab row and the close X
-                 whenever Skills was up (the 2026-07-17 "can't switch back to Character" report;
-                 character_tests.rs's tab_round_trip_with_a_selected_skill_by_point is the repro). -->
-            <Button name="SkillWheelCatcher">
-                <Size><AbsDimension x="290" y="222"/></Size>
-                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="20" y="-76"/></Offset></Anchor></Anchors>
-                <Scripts><OnMouseWheel>BenillaSkillFrame_OnMouseWheel(arg1)</OnMouseWheel></Scripts>
-            </Button>
-
             <!-- The expand/collapse-all tab (ref SkillFrameExpandButtonFrame, l.242-317 — the SAME
                  QuestLogSortTab art TrainerFrame.xml's own BenillaTrainerExpandButtonFrame uses).
                  The tab is SIZED BY ITS LABEL, the ref's own OnLoad law (l.312-316:
@@ -725,10 +712,10 @@
                  container over the 12 rows; only its right-hand Slider scroll bar renders. Sized to the
                  12-row span (SKILLS_TO_DISPLAY × 18px pitch), TrainerFrame.xml's own
                  same-TOPLEFT-as-row1 convention. updateFunc set in SkillFrame_OnLoad. -->
-            <Frame name="SkillListScrollFrame" inherits="FauxScrollFrameTemplate">
+            <ScrollFrame name="SkillListScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="296" y="216"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-79"/></Offset></Anchor></Anchors>
-            </Frame>
+            </ScrollFrame>
 
             <!-- ═══ THE DETAIL PANE ═══ ref SkillFrame.xml l.513-747, transcribed as the ref
                  declares it (header: the FLAT-layout claim this file used to carry is retracted,

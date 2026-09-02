@@ -39,8 +39,8 @@ use crate::net::{NetCommands, ObjectStore, SelfPlayer};
 use super::errors::{first_missing_totem, first_short_reagent, mount_result_key};
 use super::weapon_icon::{auto_attack_icon, substitutes_weapon_icon};
 use super::{
-    cast_fail, show_messages, ui_error_text, CastErrors, MountErrors, MsgKind, PlayerActions,
-    Spells, UiError, UiErrorKeys, UiErrorTexts,
+    cast_fail, show_messages, ui_error_text, CastErrors, MessageSink, MountErrors, PlayerActions,
+    Shown, Spells, UiError, UiErrorKeys, UiErrorTexts,
 };
 
 /// What an ITEM action shows when its icon cannot be resolved — the reference's own hardcoded
@@ -94,9 +94,9 @@ pub(super) fn feed_actions(
     areas: Option<Res<crate::area::AreaTableRes>>,
     commands: Res<NetCommands>,
     mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
-    // The combat log's own record of a failed cast (1703) — a different frame, a different
-    // sentence, and the reference emits both from the one routine (`0x6e1a00`).
-    mut chat_log: ResMut<crate::ui_chat::ChatLog>,
+    // Where a displayed message lands: the chat window (the combat log's own record of a failed
+    // cast, 1703, rides the same resource) and the catalog's sound queue (1815).
+    mut sink: MessageSink,
 ) {
     let Some(mut script) = script else {
         return;
@@ -255,15 +255,13 @@ pub(super) fn feed_actions(
         .collect();
     cast_errors.0.extend(await_template);
     for line in fail_lines {
-        chat_log.push_combat(line);
+        sink.chat.push_combat(line);
     }
     show_messages(
         &mut script,
-        &mut chat_log,
+        &mut sink,
         "ui_action",
-        texts
-            .into_iter()
-            .map(|l| (benilla_ui::messages::kind_of(l.key), l.text)),
+        texts.into_iter().map(|l| Shown::keyed(l.key, l.text)),
     );
 
     // (Dis)mount refusals ride the same route, keyed straight into GlobalStrings
@@ -278,35 +276,35 @@ pub(super) fn feed_actions(
         .collect();
     show_messages(
         &mut script,
-        &mut chat_log,
+        &mut sink,
         "ui_action",
         mount_texts
             .into_iter()
-            .map(|(key, text)| (benilla_ui::messages::kind_of(key), text)),
+            .map(|(key, text)| Shown::keyed(key, text)),
     );
 
     // Client-local by-key refusals (the `DisplayError` route — [`UiErrorKeys`]); the key IS the
     // GlobalStrings lookup, no code table between, and the key is also what names the surface:
     // [`UiError::kind`] reads the message record straight out of the catalog instead of the queue
     // carrying a hand-set flag alongside every push (decision 1770).
-    let key_lines: Vec<(MsgKind, String)> = ui_error_keys
+    let key_lines: Vec<Shown> = ui_error_keys
         .0
         .drain(..)
         .filter_map(|e| {
             ui_error_text(&e, &|key| script.lua().globals().get::<String>(key).ok())
-                .map(|t| (e.kind(), t))
+                .map(|t| Shown::keyed(e.key, t))
         })
         .collect();
-    show_messages(&mut script, &mut chat_log, "ui_action", key_lines);
+    show_messages(&mut script, &mut sink, "ui_action", key_lines);
 
     // Already-resolved lines ([`UiErrorTexts`]) — the wire's own text, no key to look up and no
     // record behind it; the queued kind IS the reference's `0x4945b0` flag.
-    let resolved: Vec<(MsgKind, String)> = ui_error_texts
+    let resolved: Vec<Shown> = ui_error_texts
         .0
         .drain(..)
-        .map(|(text, kind)| (kind, text))
+        .map(|(text, kind)| Shown::unkeyed(kind, text))
         .collect();
-    show_messages(&mut script, &mut chat_log, "ui_action", resolved);
+    show_messages(&mut script, &mut sink, "ui_action", resolved);
 
     // The ENGINE's own by-key refusals ride the very same line. `benilla_ui` is engine-free and
     // cannot reach [`UiErrorKeys`], so a refusal raised inside the script crate (today: dropping a
@@ -315,15 +313,15 @@ pub(super) fn feed_actions(
     // frame late by construction (the refusal happens during the input pass this feed precedes),
     // which is invisible on a toast.
     let engine_keys = script.take_ui_errors();
-    let engine_lines: Vec<(MsgKind, String)> = engine_keys
+    let engine_lines: Vec<Shown> = engine_keys
         .into_iter()
         .filter_map(|key| {
             let e = UiError::key(key);
             ui_error_text(&e, &|k| script.lua().globals().get::<String>(k).ok())
-                .map(|t| (e.kind(), t))
+                .map(|t| Shown::keyed(e.key, t))
         })
         .collect();
-    show_messages(&mut script, &mut chat_log, "ui_action", engine_lines);
+    show_messages(&mut script, &mut sink, "ui_action", engine_lines);
 
     let store = self_q.iter().next();
 

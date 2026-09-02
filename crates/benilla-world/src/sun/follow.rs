@@ -255,6 +255,12 @@ pub(super) struct FlareGate<'w, 's> {
     /// ring (the same surface that draws the distant horizon mountains). Absent in assetless dev.
     wdl: Option<Res<'w, WdlStreamer>>,
     camera_interior: Res<'w, CameraInteriorClaim>,
+    /// The submerged-eye depth — the glare's own submersion fade (decision 1829). The glare is
+    /// NOT part of the sky pass the client skips underwater: it draws in its own top-level pass
+    /// (`0x6cf490` ← `0x6d48c0` ← `0x483740`, unconditional), while the sky is `0x6d4940` *inside*
+    /// `0x681070`, which is what `0x6812a4` skips. Both facts are true at once, which is why the
+    /// fade is live code and not a ramp on a pass that never runs.
+    submerged: Res<'w, crate::liquid::SubmergedEye>,
     /// The live cloud coverage field — the occ1 sample source (one field serves the glare and
     /// the visible layer, like the reference).
     clouds: Res<'w, CloudCoverage>,
@@ -266,6 +272,26 @@ pub(super) struct FlareGate<'w, 's> {
     mask: Local<'s, u16>,
     cursor: Local<'s, u32>,
     primed: Local<'s, bool>,
+}
+
+/// The glare's **submersion fade** — `1 − clamp(depth × 0.1, 0, 1)`, a 10-yard linear ramp on the
+/// glare alpha (wow-re `submerged-consumer-census.md`; decision 1829). `depth` is
+/// `liquidSurfaceHeight − probeZ` in world-Z yards, positive when submerged, so a dry camera reads
+/// `0` and the fade is the exact identity.
+///
+/// **This was a published negative until this round.** Two wow-re notes recorded the glare as
+/// having no submersion term; the read is one indirection out (`0x6cf4fe call [edx+0x10]` → the
+/// glare vtable's slot 4 → `0x6cf800`), which a direct-call census cannot see. It is worth
+/// implementing rather than filing as trivia: the glare is additive, so a black underwater
+/// celestial band would make it invisible anyway — and **288 of 374 `Light.dbc` rows (77%) carry a
+/// non-zero one**, so on most of the map there is a glare down there to fade.
+///
+/// Applies to the **sun and moon glares alike** (`0x6d48cf` / `0x6d48ea`; slot 4 of both glare
+/// vtables is `0x6cf800`, and they differ only at slot 3) and to **neither disc** — the discs have
+/// no submerged path at all, so suppressing them outright with the skipped sky pass is right. Both
+/// confirmed by census rather than assumed.
+fn submersion_glare_fade(depth: f32) -> f32 {
+    1.0 - (depth * 0.1).clamp(0.0, 1.0)
 }
 
 /// The weather **celestial-alpha seed** (Addendum #6): under active weather the recompute writes
@@ -281,7 +307,22 @@ impl FlareGate<'_, '_> {
     /// The slewed `[0, 1]` flare envelope along `dir` from the camera: slew target = `dn` (the
     /// body's dnCurve sample) × the horizon smoothstep × `occ1` (the body's cloud occlusion) ×
     /// the visible fraction of the body's quad (`half` = its angular half-size; the interior
-    /// claim zeroes it), approached at `rise`/[`FLARE_FALL`] per second.
+    /// claim zeroes it) and the **submersion fade** ([`submersion_glare_fade`]), all approached at
+    /// `rise`/[`FLARE_FALL`] per second.
+    ///
+    /// The fade is INSIDE the slew — one of the factors composed into the target, not a multiply on
+    /// the drawn alpha. `[glare+0x34]` is the per-frame target accumulator (reset to 1.0 at
+    /// `0x6cf499`); `0x6cf501`/`0x6cf504` multiply the fade into it, and the limiter first reads it
+    /// 158 bytes later at `0x6cf59b`, writing the envelope `[glare+0x30]` at `0x6cf5ea`. So
+    /// surfacing ramps the glare back in over the rise time rather than snapping.
+    ///
+    /// We shipped it the other way first, on the reasoning that a rate limiter should smooth
+    /// *visibility* and depth is not visibility. That reasoning was fine and the fact was against
+    /// it — wow-re's summary said the fade goes "into the glare alpha", which is the drawn byte
+    /// `[glare+0x1b]` and is not where it goes. Asked, and corrected at the bytes.
+    ///
+    /// It falls out that a deep camera (`fade == 0`) drives `base` to zero, which skips the terrain
+    /// ray march entirely — the reference's own `0x6cf58c` shortcut, for free.
     fn envelope(
         &mut self,
         cam_pos: Vec3,
@@ -291,7 +332,7 @@ impl FlareGate<'_, '_> {
         half: f32,
         rise: f32,
     ) -> f32 {
-        let base = dn * horizon_gate(dir) * occ1;
+        let base = dn * horizon_gate(dir) * occ1 * submersion_glare_fade(self.submerged.depth);
         let target = if base > 0.0 && self.camera_interior.0.is_none() {
             // Resident detailed terrain first; the coarse WDL surface everywhere else (it
             // covers the whole map, so it also plugs the ADT-ring-to-farclip gap).
@@ -646,6 +687,30 @@ pub(super) fn follow_stars(
 }
 
 #[cfg(test)]
+mod glare_fade_tests {
+    use super::submersion_glare_fade;
+
+    /// The 10-yard linear ramp, and — the half that matters most — the exact identity when dry.
+    /// A dry camera reads `depth = 0`, so this multiplies every glare in the game by 1.0; if that
+    /// were ever not exact, the feature would be a global dimmer rather than an underwater one.
+    #[test]
+    fn the_glare_fades_linearly_over_ten_yards() {
+        assert_eq!(submersion_glare_fade(0.0), 1.0, "dry is the exact identity");
+        assert_eq!(submersion_glare_fade(5.0), 0.5);
+        assert_eq!(submersion_glare_fade(10.0), 0.0);
+        assert_eq!(submersion_glare_fade(200.0), 0.0, "clamped, never negative");
+        // Linear in between, and monotone all the way down.
+        let mut prev = 1.0;
+        for i in 1..=10 {
+            let f = submersion_glare_fade(i as f32);
+            assert!(f <= prev && f >= 0.0);
+            assert!((f - (1.0 - i as f32 * 0.1)).abs() < 1e-6);
+            prev = f;
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::dev_state::DebugState;
@@ -668,6 +733,9 @@ mod tests {
         app.init_resource::<CameraInteriorClaim>();
         app.init_resource::<CloudCoverage>();
         app.init_resource::<DebugState>();
+        // Dry (depth 0) — this fixture is about the glare tracking the camera within one frame,
+        // and the submersion fade is the exact identity there, so it cannot perturb the assertion.
+        app.init_resource::<crate::liquid::SubmergedEye>();
         app.insert_resource(WowLighting {
             moon_dir_white: dir,
             moon_disc_scale: 1.0,

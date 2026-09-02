@@ -29,8 +29,7 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_action::{show_messages, ui_error_text, MsgKind, UiError};
-use crate::ui_chat::ChatLog;
+use crate::ui_action::{show_messages, ui_error_text, MessageSink, Shown, UiError};
 use crate::ui_script::UiInput;
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
 
@@ -446,7 +445,7 @@ fn feed_quest(
     mut names: ResMut<NameCache>,
     states: Res<crate::world_state::WorldStates>,
     self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
-    mut chat: ResMut<ChatLog>,
+    mut sink: MessageSink,
     mut last: Local<crate::ui_script::VmMemo<Option<QuestState>>>,
     mut last_name: Local<crate::ui_script::VmMemo<Option<String>>>,
     mut last_npc: Local<crate::ui_script::VmMemo<Option<u64>>>,
@@ -466,15 +465,15 @@ fn feed_quest(
     // VM's own GlobalStrings first (immutable script), then show each on the surface its message
     // record names — decision 0669's `DisplayError` kind. Drained BEFORE the snapshot's early-out
     // so a refusal that also closes the panel still gets its line out this frame.
-    let lines: Vec<(MsgKind, String)> = giver
+    let lines: Vec<Shown> = giver
         .take_messages()
         .into_iter()
         .filter_map(|msg| {
             let get = |key: &str| script.lua().globals().get::<String>(key).ok();
-            ui_error_text(&msg, &get).map(|text| (msg.kind(), text))
+            ui_error_text(&msg, &get).map(|text| Shown::keyed(msg.key, text))
         })
         .collect();
-    show_messages(&mut script, &mut chat, "ui_quest", lines);
+    show_messages(&mut script, &mut sink, "ui_quest", lines);
     let player = crate::npc_text::player_identity(&self_q, &mut names, &commands);
     let fresh = snapshot(
         &giver,

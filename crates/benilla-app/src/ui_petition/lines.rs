@@ -36,8 +36,6 @@
 
 use benilla_protocol::messages::petition_result;
 
-use crate::ui_action::MsgKind;
-
 /// One message this module composes: the **catalog key**, which names both the row and — through
 /// [`benilla_ui::messages`] — the surface it goes to, and the 1.12 text.
 ///
@@ -109,20 +107,22 @@ const ERR_GUILD_NAME_TOO_SHORT: Msg = msg(
     "That name is too short.  Enter a new name.",
 ); // :1622
 
-/// One composed line: the surface its message record names, and the text.
-pub(super) type Line = (MsgKind, String);
+/// One composed line: the **message key** and the text.
+///
+/// It carries the key rather than the resolved [`MsgKind`] because the record answers more than
+/// where the line goes — `ERR_PETITION_SIGNED` and its neighbours name a sound cue too
+/// (`igPlayerInviteAccept`/`Decline`), and `crate::ui_action::Shown` reads all of it from the one
+/// row at the sink (decision 1815).
+pub(super) type Line = (&'static str, String);
 
 /// A line with nothing to fill.
 fn line(m: Msg) -> Line {
-    (benilla_ui::messages::kind_of(m.key), m.text.to_string())
+    (m.key, m.text.to_string())
 }
 
 /// A line with one `%s` substitution.
 fn fill(m: Msg, arg: &str) -> Line {
-    (
-        benilla_ui::messages::kind_of(m.key),
-        m.text.replacen("%s", arg, 1),
-    )
+    (m.key, m.text.replacen("%s", arg, 1))
 }
 
 /// The line one `SMSG_PETITION_SIGN_RESULTS` prints **when the signer is us** — the switch at
@@ -209,6 +209,13 @@ pub(super) fn name_refused_line(key: &str) -> Line {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use benilla_ui::messages::MsgKind;
+
+    /// A composed line resolved the way the sink resolves it — key → catalog row → surface. The
+    /// assertions below are about *where a line goes*, and this is the join that answers it.
+    fn shown(line: Line) -> (MsgKind, String) {
+        (benilla_ui::messages::kind_of(line.0), line.1)
+    }
 
     /// **The channel split, which does not follow the key names.** Success to chat, refusal to the
     /// red frame — swept out of the message catalog, not guessed. This test is the one that would
@@ -216,22 +223,22 @@ mod tests {
     #[test]
     fn successes_go_to_chat_and_refusals_go_to_the_red_line() {
         assert_eq!(
-            my_sign_line(petition_result::OK),
+            my_sign_line(petition_result::OK).map(shown),
             Some((MsgKind::Chat, "Guild charter signed.".into()))
         );
         assert_eq!(
-            signed_by_other("Bob"),
+            shown(signed_by_other("Bob")),
             (MsgKind::Chat, "Bob has signed your guild charter.".into())
         );
         assert_eq!(
-            declined_line("Bob"),
+            shown(declined_line("Bob")),
             (
                 MsgKind::Chat,
                 "Bob has declined your guild invitation.".into()
             )
         );
         assert_eq!(
-            offered_line("Bob"),
+            shown(offered_line("Bob")),
             (MsgKind::Chat, "You have requested Bob's signature.".into())
         );
 
@@ -254,13 +261,13 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                my_sign_line(code),
+                my_sign_line(code).map(shown),
                 Some((MsgKind::Error, text.into())),
                 "code {code} is a RED line"
             );
         }
         assert_eq!(
-            no_charter_line(),
+            shown(no_charter_line()),
             (MsgKind::Error, "You don't have a guild charter.".into())
         );
     }
@@ -276,7 +283,7 @@ mod tests {
             "the sign switch's default arm reaches only the debug console"
         );
         assert_eq!(
-            turn_in_line(petition_result::NEED_MORE),
+            turn_in_line(petition_result::NEED_MORE).map(shown),
             Some((MsgKind::Error, "You need more signatures.".into()))
         );
     }
@@ -341,18 +348,18 @@ mod tests {
     #[test]
     fn refused_names_resolve_their_key_and_degrade_safely() {
         assert_eq!(
-            name_refused_line("ERR_GUILD_ENTER_NAME"),
+            shown(name_refused_line("ERR_GUILD_ENTER_NAME")),
             (MsgKind::Error, "Enter a name for your guild.".into())
         );
         assert_eq!(
-            name_refused_line("ERR_GUILD_NAME_INVALID_SPACE"),
+            shown(name_refused_line("ERR_GUILD_NAME_INVALID_SPACE")),
             (
                 MsgKind::Error,
                 "Guild names cannot start or end with a space.  Enter a new name.".into()
             )
         );
         assert_eq!(
-            name_refused_line("ERR_SOMETHING_UNCARVED"),
+            shown(name_refused_line("ERR_SOMETHING_UNCARVED")),
             (
                 MsgKind::Error,
                 "That name contains invalid characters,  Enter a new name.".into()

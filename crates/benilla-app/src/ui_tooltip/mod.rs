@@ -19,9 +19,9 @@ use benilla_ui::script::{TooltipTint, UiScript, UnitState};
 
 use crate::items::Items;
 use crate::names::NameCache;
-use crate::net::{NetCommands, ObjectStore, Reputations, SelfPlayer};
+use crate::net::{NetCommands, ObjectStore, SelfPlayer};
 use crate::target::{
-    go_is_nearest, ring_reaction, Factions, Hovered, HoveredObject, GO_FLAG_LOCKED, GO_TYPE_GENERIC,
+    go_is_nearest, ring_reaction, Hovered, HoveredObject, GO_FLAG_LOCKED, GO_TYPE_GENERIC,
 };
 use crate::ui_action::{PlayerActions, Spells};
 use crate::ui_script::UiInput;
@@ -602,8 +602,9 @@ fn drive_mouseover_tooltip(
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     mut names: ResMut<NameCache>,
     commands: Res<NetCommands>,
-    factions: Option<Res<Factions>>,
-    reputations: Res<Reputations>,
+    // The standing pair as one param — see [`crate::target::ReactionInputs`]. Bundled here and
+    // not elsewhere because this system sits on Bevy's tuple limit.
+    rx: crate::target::ReactionInputs,
     // The lock chain's own data set, shared verbatim with the click router (`target::lock`) so the
     // hover and the click can never disagree about whether a lock is satisfiable — the same reason
     // `usable` and the click share one resolver (0752). Carries the go-template, Lock.dbc and
@@ -615,6 +616,9 @@ fn drive_mouseover_tooltip(
     ui_scale: Res<crate::ui_script::UiScaleCvar>,
     mut last: Local<crate::ui_script::VmMemo<LastHover>>,
     mut last_lines: Local<crate::ui_script::VmMemo<Option<UnitState>>>,
+    // `ChrClasses.dbc` field 16 — `UnitHasRelicSlot`'s only input. Absent when the client data
+    // failed to load, in which case no class reads as having a relic slot.
+    classes: Option<Res<crate::chr_classes::ChrClassTable>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -622,15 +626,27 @@ fn drive_mouseover_tooltip(
     let last = last.get(&script);
     let last_lines = last_lines.get(&script);
     let self_store = self_q.iter().next();
+    let chr = classes.as_deref().map(|t| &t.0);
 
     // The hovered UNIT's snapshot (a hovered non-unit resolves no store here).
     let unit = hovered.target.zip(hovered.guid).and_then(|(entity, guid)| {
         let store = stores.get(entity).ok()?;
         let name = names.resolve(guid, &commands).map(str::to_string);
-        let reaction =
-            ring_reaction(factions.as_deref(), &reputations, Some(store), self_store) + 1;
-        let mut s = snapshot(store, name, reaction);
-        enrich_unit(&mut s, guid, &names, store, factions.as_deref(), self_store);
+        let reaction = ring_reaction(
+            rx.factions.as_deref(),
+            &rx.reputations,
+            Some(store),
+            self_store,
+        ) + 1;
+        let mut s = snapshot(store, name, reaction, chr);
+        enrich_unit(
+            &mut s,
+            guid,
+            &names,
+            store,
+            rx.factions.as_deref(),
+            self_store,
+        );
         Some((guid, s))
     });
     // The hovered GAMEOBJECT, when it is the nearer pick (the click router's own arbitration).

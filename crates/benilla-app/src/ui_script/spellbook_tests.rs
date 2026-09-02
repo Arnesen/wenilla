@@ -5,23 +5,7 @@
 
 use benilla_ui::script::{SpellBookState, SpellSlotView, SpellTabView, UiScript};
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error (the
-/// character/questlog tests' loader, duplicated so this file is self-contained).
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// Two tabs' worth of a small book: "Fire" (Fireball, Fire Blast — slots 0-1) and "Frost" (Frost
 /// Armor — slot 2), the flat `slots` in tab order. `offset` is each tab's 0-based start index into
@@ -105,6 +89,8 @@ fn shipped_spellbook_loads_clean() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "GameTooltip.xml");
     let text = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/SpellBookFrame.xml"),
@@ -136,6 +122,8 @@ fn shipped_spellbook_drives_end_to_end() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "ActionBar.xml");
@@ -229,6 +217,8 @@ fn shipped_spellbook_shows_the_cooldown_pie() {
         "Fonts.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "GameTooltip.xml",
         "Cooldown.xml",
         "SpellBookFrame.xml",
@@ -306,6 +296,8 @@ fn shipped_spellbook_empty_slot_draws_only_the_background() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "SpellBookFrame.xml");
     // An EMPTY book: every slot takes the `id > offset + numSpells` disable path.
@@ -411,6 +403,8 @@ fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "SpellBookFrame.xml");
@@ -649,16 +643,39 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
         "#,
     )
     .unwrap();
+    // The stock macro window's character tab formats `UnitName("player")` into its label in its
+    // own OnLoad, so the player exists before the load (decision 1848).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
     for file in [
+        r"Interface\FrameXML\GlobalStrings.lua",
         "Fonts.xml",
+        "BasicControls.xml", // `TEXT`
         "MoneyFrame.xml",
         "UiPanels.xml",
+        // `ShowMacroFrame` lives here since 1848.
+        "UIParent.xml",
         "GameTooltip.xml",
         "Cooldown.xml",
+        // **ScrollTemplates BEFORE UIPanelTemplates, which is the manifest's own order.** Ours
+        // still carries dead `FauxScrollFrame_*` copies that the chain overrides by loading after
+        // (1846's step 3, deliberately not done); load them the other way round and OUR copies win
+        // — which is exactly the silent drift that record names.
         "ScrollTemplates.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        // The icon chooser's scroll frame inherits `ClassTrainerListScrollFrameTemplate`.
+        r"Interface\FrameXML\ClassTrainerFrameTemplates.xml",
         "MicroMenu.xml",
         "ActionBar.xml",
-        "MacroFrame.xml",
+        r"Interface\AddOns\Blizzard_MacroUI\Blizzard_MacroUI.xml",
         "SpellBookFrame.xml",
     ] {
         load_xml(&s, file);
@@ -684,15 +701,16 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
 
     s.run(r#"CreateMacro("Ambush", 1, "")"#).unwrap();
     s.run("ShowMacroFrame()").unwrap();
+    // The reference selects NOTHING on open — `MacroFrame_Update` only highlights an existing
+    // selection, it never assigns one — so the details pane stays down until a macro is clicked.
+    // Our retired file auto-selected the first (decision 1848).
+    s.run("MacroButton1:Click()").unwrap();
     s.run("ToggleSpellBook(BOOKTYPE_SPELL)").unwrap();
     assert!(s.errors().is_empty(), "open errors: {:?}", s.errors());
-    let body = |s: &UiScript| -> String {
-        s.eval::<String>("return BenillaMacroFrameText:GetText()")
-            .unwrap()
-    };
+    let body =
+        |s: &UiScript| -> String { s.eval::<String>("return MacroFrameText:GetText()").unwrap() };
     assert!(
-        s.eval::<bool>("return BenillaMacroFrameText:IsVisible()")
-            .unwrap(),
+        s.eval::<bool>("return MacroFrameText:IsVisible()").unwrap(),
         "the editor's body box is up — the ref's own `MacroFrame_AddMacroLine` gate"
     );
     assert_eq!(body(&s), "");
@@ -738,8 +756,11 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
         s.cursor_payload().is_none(),
         "with the editor open a shift-click writes instead of picking up"
     );
+    // The dirty flag is set by the box's own `OnTextChanged`, which is deferred to the drain — the
+    // write landed in the buffer synchronously, the notification did not (decision 1831).
+    s.tick(0.0);
     assert!(
-        s.eval::<bool>("return BenillaMacroFrame.textChanged == 1")
+        s.eval::<bool>("return MacroFrame.textChanged == 1")
             .unwrap(),
         "the write goes through the box's own OnTextChanged, so the window is dirty"
     );
@@ -763,19 +784,17 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
     assert!(s.cursor_payload().is_none());
 
     // The name/icon popup hides the body box; the ref's AddMacroLine gates on exactly that.
-    s.run("BenillaMacroNewButton_OnClick()").unwrap();
-    assert!(!s
-        .eval::<bool>("return BenillaMacroFrameText:IsVisible()")
-        .unwrap());
+    s.run("MacroNewButton_OnClick()").unwrap();
+    assert!(!s.eval::<bool>("return MacroFrameText:IsVisible()").unwrap());
     click(&mut s, "SpellButton1", "LeftButton");
     assert!(s.errors().is_empty(), "popup-open errors: {:?}", s.errors());
     assert!(s.cursor_payload().is_none(), "still not a pickup");
-    s.run("BenillaMacroPopupFrame:Hide()").unwrap();
-    s.run("BenillaMacroFrame_Update()").unwrap();
+    s.run("MacroPopupFrame:Hide()").unwrap();
+    s.run("MacroFrame_Update()").unwrap();
     assert_eq!(body(&s), before, "nothing landed while the popup was up");
 
     // ── Editor hidden: the shift-click is a PICKUP again (ref l.281-282's else) ───────────────
-    s.run("HideUIPanel(BenillaMacroFrame)").unwrap();
+    s.run("HideUIPanel(MacroFrame)").unwrap();
     click(&mut s, "SpellButton1", "LeftButton");
     s.set_modifiers(false, false, false);
     assert!(s.errors().is_empty(), "pickup errors: {:?}", s.errors());

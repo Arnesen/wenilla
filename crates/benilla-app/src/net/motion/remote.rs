@@ -131,9 +131,10 @@ pub(in crate::net) fn trace_relay(
     benilla_assets::trace::line(
         "rly",
         &format!(
-            "guid={guid:#x} {kind} wire={} flags={:#x} out={} lead={lead:7.1} q={queued}",
+            "guid={guid:#x} {kind} wire={} flags={:#x} pitch={:+.3} out={} lead={lead:7.1} q={queued}",
             mv.wire_ms,
             mv.flags,
+            mv.pitch,
             out.tag()
         ),
     );
@@ -180,6 +181,21 @@ fn trace_runaway(guid_hint: Entity, rm: &RemoteMotion, now_ms: f64, silent_s: u3
 /// How often the remote-pose watch samples a mover (ms) — see [`trace_remote`].
 const REMOTE_TRACE_MS: f64 = 500.0;
 
+/// What the swim-pitch render law will actually *present* for this mover — `rm.pitch` passed
+/// through [`crate::creature_anim::swim_body_rotation`]'s gate, so the `rem` line reports the two
+/// numbers side by side: what the wire said (`pitch=`) and what the body is tilted by (`tilt=`).
+///
+/// The pair is the whole point. A reported pitch with a zero tilt is the gate refusing (idle or
+/// strafe-only swim, or not swimming at all); a zero on *both* is a mover whose client never sent
+/// a pitch. Before this, neither number appeared anywhere — the observed-swimmer tilt landed in
+/// July 2026 (decision 0464 TU-A) with no trace and no test, so "do other swimmers tilt?" was a
+/// question only the director's eye could answer.
+fn rendered_pitch(rm: &RemoteMotion) -> f32 {
+    let (_, x, _) = crate::creature_anim::swim_body_rotation(0.0, rm.flags, rm.pitch)
+        .to_euler(bevy::math::EulerRot::YXZ);
+    x
+}
+
 /// The **remote-pose watch** (tag `rem`): one line per mover per [`REMOTE_TRACE_MS`], reporting what
 /// the dead-reckon asked for and what the world gave back. Until decision 0626 nothing measured the
 /// *pose* of a watched player at all — `rly` measures the packets that arrive and `run` only fires
@@ -205,16 +221,25 @@ const REMOTE_TRACE_MS: f64 = 500.0;
 ///   measured 2.14 yd. A sustained nonzero `drop` on a mover whose `age` keeps climbing is us
 ///   inventing a height the server never described.
 ///
+/// - **`pitch` / `tilt`** — what this mover *reported* as its swim pitch, and what the body-pitch
+///   render law actually *presents* for it ([`rendered_pitch`]). The pair, not either alone: a zero
+///   tilt is correct three ways (an idle floater, a strafe-only swim, dry land), so a single number
+///   makes every one of those look like the defect the director reported. Reported-nonzero with
+///   tilt-zero is the gate refusing; zero on both is a mover whose client never sent a pitch.
+///
 /// `age` (ms since a packet last applied) rides along so a sample is never read as server truth.
-fn trace_remote(e: Entity, rm: &RemoteMotion, held: f32, dz: f32, now_ms: f64) {
+fn trace_remote(e: Entity, guid: u64, rm: &RemoteMotion, held: f32, dz: f32, now_ms: f64) {
     benilla_assets::trace::line(
         "rem",
         &format!(
-            "{e} flags={:#x} pos=[{:.2},{:.2},{:.2}] dz={dz:+.3} drop={:+.3} held={held:.3} age={:.0}ms",
+            "{e} guid={guid:#x} flags={:#x} pos=[{:.2},{:.2},{:.2}] pitch={:+.3} tilt={:+.3} dz={dz:+.3} \
+             drop={:+.3} held={held:.3} age={:.0}ms",
             rm.flags,
             rm.wow_pos[0],
             rm.wow_pos[1],
             rm.wow_pos[2],
+            rm.pitch,
+            rendered_pitch(rm),
             rm.last_apply_pos[2] - rm.wow_pos[2],
             now_ms - rm.last_apply_ms,
         ),
@@ -345,7 +370,8 @@ pub(in crate::net) fn apply_move(
                 .remove::<crate::transport::TransportRider>();
         }
     }
-    let (vertical_velocity, jump_xy_vel) = jump_seed(ev.jump, ev.fall_time);
+    let (vertical_velocity, jump_xy_vel) =
+        jump_seed(ev.jump, ev.fall_time, ev.flags & move_flags::SAFE_FALL != 0);
     let now_falling = ev.flags & FALLING != 0;
     // The remote landing predictor (decision 0415): on the FALLING → grounded edge the fall
     // height gates the grunt + dust puff, exactly as the self controller does for us.
@@ -436,12 +462,17 @@ pub(in crate::net) fn drain_pending_moves(
 /// ([`drain_pending_moves`]); a dead-reckon that advanced on a different (virtual, clamped) clock
 /// than the fire-times it converges toward would never land on them.
 #[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)] // a Bevy system signature: one param per resource/query
 pub(in crate::net) fn extrapolate_remote_units(
     time: Res<Time<Real>>,
     mut commands: Commands,
     // Avian's kinematic move-and-slide + the player-body capsule — the *same* pair the local
     // controller sweeps (decision 0626): one controller, every mover.
     world: benilla_world::collision::WorldCollision,
+    // The liquid query, for a water-walking mover's surface (decision 1780). Liquid is asked on our
+    // side rather than swept, so — exactly as the local controller does — the plane has to be handed
+    // to the step ([`crate::player::mover::Support::water`]).
+    points: benilla_world::world_point::WorldPoint,
     capsule: Res<crate::player::PlayerCapsule>,
     // The runaway watch's per-mover throttle: the last whole silent second reported, so a stuck
     // mover writes one line a second rather than one a frame. Trace-only, hence a `Local` and not
@@ -458,6 +489,19 @@ pub(in crate::net) fn extrapolate_remote_units(
             Option<&mut crate::creature_anim::BodyTwist>,
             Has<super::FacingStep>,
             Has<crate::transport::TransportRider>,
+            // Trace-only: the mover's wire guid, so a `rem` line can be JOINED to the `rly` lines
+            // that fed it. `rem` printed a Bevy `Entity` and nothing else, which correlates with
+            // nothing in the file — not `rly`'s `guid=`, not the sender's own trace, not a `.gps`
+            // report — so two movers in one capture could not be told apart at all. `spl` has
+            // carried its guid since it was written; this was the odd one out.
+            Option<&crate::net::Guid>,
+            // The server-granted modes this unit was handed by the `SMSG_SPLINE_MOVE_*` family
+            // (decision 1780). Normally empty on a relayed **player** — vmangos only broadcasts
+            // that family for a unit it is driving itself — which is exactly why it is OR'd with
+            // the pose's own flags below rather than replacing them: for a player the modes ride
+            // the pose (they are inside the server-authored merge mask), for a creature they ride
+            // this component, and the union is the reference's one `CMovement+0x40` word.
+            Option<&crate::net::UnitMoveModes>,
         ),
         (Without<Spline>, Without<ActiveMover>),
     >,
@@ -465,7 +509,7 @@ pub(in crate::net) fn extrapolate_remote_units(
     use crate::creature_anim::{ease_strafe_yaw, strafe_body_offset, wrap_pi};
     let dt = time.delta_secs();
     let now_ms = time.elapsed_secs_f64() * 1000.0;
-    for (e, mut t, mut rm, speeds, twist, latched, riding) in &mut q {
+    for (e, mut t, mut rm, speeds, twist, latched, riding, guid, granted) in &mut q {
         // The runaway watch (trace-only): a mover still carrying a direction flag, with nothing
         // queued behind it and nothing applied for seconds, is running on our extrapolation alone.
         if benilla_assets::trace::enabled() {
@@ -534,6 +578,12 @@ pub(in crate::net) fn extrapolate_remote_units(
         // this resolve for a flag-still mover whose answer was proven identical (1473 §3), and the
         // gate skips it strictly earlier and for a stated reason — taking the last un-dated
         // collision cache (1384's part 3, never fixed on this lane) with it.
+        //
+        // **This mover's whole `MOVEMENTFLAGS` word, as the reference holds it** (decision 1780):
+        // the pose's own flags plus whatever the `SMSG_SPLINE_MOVE_*` family granted. Read by the
+        // ground step's `Support` below — not by the integration gate on the next line, which is
+        // the reference's own `0x20ff` over the *pose's* direction bits and none of the modes.
+        let modes = rm.flags | granted.map_or(0, |m| m.0);
         let integrating = rm.flags & move_flags::INTEGRATED != 0 || idle_gate_disabled();
         if integrating && !afloat && !riding && !flat_extrapolation() {
             let half_h = Vec3::Y * (crate::player::CAPSULE_HEIGHT * 0.5);
@@ -549,24 +599,53 @@ pub(in crate::net) fn extrapolate_remote_units(
             let resolved_center = if airborne {
                 crate::player::mover::airborne_step(&world, &capsule.0, from, vel, time.delta())
             } else {
+                // **The observed mover's own granted modes, honoured** (decision 1780 — 0866 built
+                // the family for our own mover and left this site reading `Support::default()`,
+                // which drew a hovering watched player a yard low and sagged a water-walker
+                // through the surface between packets). `modes` is the union of the pose's flags
+                // and the `SMSG_SPLINE_MOVE_*` component, which is the reference's single
+                // `CMovement+0x40` word; see the query docs for why a union is exact here.
+                //
+                // Both halves are the local controller's, unchanged: [`Support::offset`] is
+                // HOVER's yard (`0x636e81`) and [`Support::water`] is the liquid plane
+                // `MOVEFLAG_WATERWALKING` ORs into the reference's trace mask (`0x63162e`), which
+                // ours has to be handed because liquid is queried rather than swept.
+                //
+                // `swimming` is read off the same word — the water plane is **not** floor while
+                // swimming (`moveflag-family.md` §2.2: the arm is taken only when the swim bit is
+                // clear), which is what keeps a water-walker who is already in deep water from
+                // being popped onto the surface. The pitch gate the local mover applies is the
+                // *aim* pitch of a diving player and has no meaning for an observed one, so it is
+                // deliberately not reproduced: `water_floor`'s three gates are asked here as the
+                // two that apply.
+                //
+                // Still **no carried steep-support bit** (1129): it is per-frame state the
+                // dead-reckon does not keep between packets, so a watched player descending a
+                // steep face gets the ordinary cone reach, and the next packet's wire Z corrects
+                // whatever that misses.
+                let water = (modes & move_flags::WATER_WALKING != 0
+                    && modes & move_flags::SWIMMING == 0)
+                    .then(|| {
+                        points
+                            .liquid_at(benilla_world::world_point::Subject::Unit(e), pos)
+                            .map(|hit| wow_to_bevy(pos).y + (hit.surface_z - pos[2]))
+                    })
+                    .flatten();
                 let g = crate::player::mover::grounded_step(
                     &world,
                     &capsule.0,
                     from,
                     vel,
                     time.delta(),
-                    // Default support: **no hover offset and no water plane**, because a remote's
-                    // own granted modes are not modelled yet — decision 0866 builds the family for
-                    // our own mover. A hovering *observed* player draws a yard low until the
-                    // relayed `MSG_MOVE_HOVER` is read into per-unit mode state, and an observed
-                    // water-walker's dead-reckon steps down through the surface between packets
-                    // (decision 1623's sag, unfought here because nothing climbs it back) until the
-                    // next wire Z corrects it; the same shape as every other unmodelled remote
-                    // mode. And **no carried steep-support bit** (1129):
-                    // it is per-frame state the dead-reckon does not keep between packets, so a
-                    // watched player descending a steep face gets the ordinary cone reach, and the
-                    // next packet's wire Z corrects whatever that misses.
-                    crate::player::mover::Support::default(),
+                    crate::player::mover::Support {
+                        offset: if modes & move_flags::HOVER != 0 {
+                            crate::player::HOVER_HEIGHT
+                        } else {
+                            0.0
+                        },
+                        water,
+                        steep: false,
+                    },
                 );
                 g.center
             };
@@ -642,7 +721,14 @@ pub(in crate::net) fn extrapolate_remote_units(
                 .is_none_or(|t| now_ms - t >= REMOTE_TRACE_MS)
         {
             sampled.insert(e, now_ms);
-            trace_remote(e, &rm, held, pos[2] - prev[2], now_ms);
+            trace_remote(
+                e,
+                guid.map_or(0, |g| g.0),
+                &rm,
+                held,
+                pos[2] - prev[2],
+                now_ms,
+            );
         }
         t.translation = wow_to_bevy(pos);
         // The strafe body pose, same as our own avatar's (the client's display-facing blend): a
@@ -663,15 +749,10 @@ pub(in crate::net) fn extrapolate_remote_units(
         } else {
             orientation
         };
-        // The swim body pitch (TU-A, `0x60a110`→`0x710620`): a swimmer moving fwd/back renders its
-        // root pitched by the reported swim pitch (nose-up positive) about the body's local X;
-        // strafe-only and idle swims render level — the same per-frame gate the client's `+0x3c`
-        // model-transform sync branches on.
-        t.rotation = if swimming && rm.flags & (move_flags::FORWARD | move_flags::BACKWARD) != 0 {
-            Quat::from_rotation_y(yaw) * Quat::from_rotation_x(rm.pitch)
-        } else {
-            Quat::from_rotation_y(yaw)
-        };
+        // The swim body pitch — [`crate::creature_anim::swim_body_rotation`], the same law our own
+        // avatar's pose owner calls, on the pitch this mover reported. TU-A is explicit that the
+        // observed mover takes the *reported* pitch here, exactly as the local one takes its own.
+        t.rotation = crate::creature_anim::swim_body_rotation(yaw, rm.flags, rm.pitch);
         if let Some(mut twist) = twist {
             twist.yaw_gap = wrap_pi(orientation - yaw);
         }
@@ -688,11 +769,20 @@ pub(in crate::net) fn extrapolate_remote_units(
 /// and the current up-speed is `-zspeed - g·t`. Mirrors vmangos `Unit.cpp` `ExtrapolateMovement`
 /// (`z = start.z + jumpInitialSpeed·t - ½g·t²`, `jumpInitialSpeed = -zspeed`) under the same `gravity`
 /// (decision 0053; sign corrected by the sniff — decision 0054).
-pub(crate) fn jump_seed(jump: Option<JumpInfo>, fall_time: u32) -> (f32, [f32; 2]) {
+///
+/// `feather` picks the clamp the recovered speed lands on — the reference's `0x7c5d20` chooses
+/// `[0x87d898]` = 7.0 over `[0x87d894]` = 60.148 on `MOVEFLAG_SAFE_FALL`, and it is the *mover's*
+/// bit, so a watched Slow Fall recovers to 7 yd/s exactly as ours does (decisions 0866, 1780).
+pub(crate) fn jump_seed(jump: Option<JumpInfo>, fall_time: u32, feather: bool) -> (f32, [f32; 2]) {
+    let terminal = if feather {
+        crate::player::FEATHER_TERMINAL_VELOCITY
+    } else {
+        TERMINAL_VELOCITY
+    };
     match jump {
         Some(j) => {
             let t = fall_time as f32 / 1000.0;
-            let vertical = (-j.zspeed - GRAVITY * t).max(-TERMINAL_VELOCITY);
+            let vertical = (-j.zspeed - GRAVITY * t).max(-terminal);
             (
                 vertical,
                 [j.cos_angle * j.xy_speed, j.sin_angle * j.xy_speed],
@@ -772,8 +862,18 @@ impl RemoteMotion {
             // watched player's jump overshot by `½·g·dt²` every frame and floated; the local mover
             // had the mirror-image bug in the other direction. The mean velocity is the exact
             // displacement rate under constant acceleration, so neither drifts now.
+            //
+            // **Feather fall is the mover's own bit** (decision 1780): `MOVEFLAG_SAFE_FALL` is
+            // inside the reference's server-authored merge mask, so a watched player under Slow
+            // Fall or Levitate arrives carrying it in every relayed pose — this word IS the word
+            // `0x7c5d23` tests, and picking the clamp off it is the whole of the mechanism.
+            let terminal = if self.flags & move_flags::SAFE_FALL != 0 {
+                crate::player::FEATHER_TERMINAL_VELOCITY
+            } else {
+                TERMINAL_VELOCITY
+            };
             let (vertical, mean_vy) =
-                crate::player::mover::fall_step(self.vertical_velocity, dt, TERMINAL_VELOCITY);
+                crate::player::mover::fall_step(self.vertical_velocity, dt, terminal);
             pos[2] += mean_vy * dt;
             let speed = self.jump_xy_vel[0].hypot(self.jump_xy_vel[1]);
             return (pos, self.orientation, vertical, speed);
@@ -937,6 +1037,10 @@ mod under_floor {
             PhysicsPlugins::new(bevy::app::PostUpdate),
         ));
         app.init_asset::<Mesh>().init_resource::<ColliderEpoch>();
+        // The liquid/room facade the clamp and the dead-reckon both ask for a water-walker's
+        // surface (decision 1780). Seeded empty: this harness is about geometry, and an empty
+        // world answers "no liquid here", which is the case every test below is written for.
+        benilla_world::world_point::init_world_point_resources(app.world_mut());
         app.insert_resource(PlayerCapsule(Collider::capsule(
             CAPSULE_RADIUS,
             CAPSULE_HEIGHT - 2.0 * CAPSULE_RADIUS,

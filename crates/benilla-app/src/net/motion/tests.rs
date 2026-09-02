@@ -66,6 +66,95 @@ fn motion(flags: u32, orientation: f32) -> RemoteMotion {
     }
 }
 
+/// **The observed swimmer's body actually tilts** — the render half of TU-A (decision 0464 §1),
+/// which shipped in July 2026 with no test of its own and no trace field, so the only instrument
+/// that could contradict it was the director's eye.
+///
+/// The law is [`crate::creature_anim::swim_body_rotation`] and it is now *one* function: this
+/// asserts the observed lane end to end — a relayed `MSG_MOVE_*` carrying `SWIMMING | FORWARD`
+/// and a nose-up pitch lands on [`RemoteMotion::pitch`], and the rotation the extrapolator writes
+/// decomposes back to exactly that pitch about the body's local X, with the yaw untouched and no
+/// roll. Then the three gates that must render LEVEL, because a zero tilt is only correct when
+/// one of them is the reason.
+#[test]
+fn a_relayed_swimmer_renders_pitched_and_the_gates_render_level() {
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::math::EulerRot;
+
+    use crate::creature_anim::swim_body_rotation;
+
+    // What the rotation the pose owners write decomposes back to: (yaw, pitch, roll).
+    let decompose = |flags: u32, pitch: f32, yaw: f32| {
+        swim_body_rotation(yaw, flags, pitch).to_euler(EulerRot::YXZ)
+    };
+
+    // The relay lands the wire pitch on the component (`apply_move`), and the extrapolator
+    // renders it: a swimmer nose-down 0.6 rad on a 1.2 rad heading.
+    let mut rm = motion(0, 0.0);
+    let mv = super::relay::RelayMove {
+        wire_ms: 0,
+        position: [0.0; 3],
+        orientation: 1.2,
+        flags: move_flags::SWIMMING | move_flags::FORWARD,
+        pitch: -0.6,
+        fall_time: 0,
+        jump: None,
+        transport: None,
+        heartbeat: false,
+    };
+    // Through the real arrival path, not a hand-set field: `apply_move` is what the relay and
+    // the queue drain both go through, so this is the seam that would drop the pitch.
+    let mut world = bevy::prelude::World::new();
+    world.init_resource::<bevy::ecs::message::Messages<crate::creature_anim::HardLanding>>();
+    let e = world.spawn_empty().id();
+    world
+        .run_system_once(
+            move |mut commands: bevy::prelude::Commands,
+                  mut landings: bevy::prelude::MessageWriter<crate::creature_anim::HardLanding>| {
+                let mut rm = motion(0, 0.0);
+                super::remote::apply_move(e, &mv, &mut rm, 0.0, &mut commands, &mut landings);
+                rm
+            },
+        )
+        .map(|applied| rm = applied)
+        .expect("the one-shot apply runs");
+    assert_eq!(rm.pitch, -0.6, "the wire pitch reaches the component");
+    assert_eq!(
+        rm.flags,
+        move_flags::SWIMMING | move_flags::FORWARD,
+        "…and so do the flags its render gate reads"
+    );
+
+    let (yaw, pitch, roll) = decompose(rm.flags, rm.pitch, rm.orientation);
+    assert!((yaw - 1.2).abs() < 1e-5, "the heading is untouched: {yaw}");
+    assert!(
+        (pitch + 0.6).abs() < 1e-5,
+        "nose-down 0.6 rad renders: {pitch}"
+    );
+    assert!(roll.abs() < 1e-5, "a swimmer never banks: {roll}");
+
+    // Nose-UP is the opposite sign through the same axis — the two must not collapse.
+    let (_, up, _) = decompose(rm.flags, 0.6, 0.0);
+    assert!((up - 0.6).abs() < 1e-5, "nose-up 0.6 rad renders: {up}");
+
+    // The three LEVEL gates. Each is a *correct* zero, which is exactly why the trace reports
+    // the reported pitch beside the rendered one — otherwise they are indistinguishable from a
+    // swimmer whose pitch never arrived.
+    for (name, flags) in [
+        ("an idle floater", move_flags::SWIMMING),
+        (
+            "a strafe-only swim",
+            move_flags::SWIMMING | move_flags::STRAFE_LEFT,
+        ),
+        ("a walker on dry land", move_flags::FORWARD),
+    ] {
+        let (yaw, pitch, roll) = decompose(flags, 0.9, 1.2);
+        assert!((yaw - 1.2).abs() < 1e-5, "{name} keeps its heading");
+        assert_eq!(pitch, 0.0, "{name} renders level");
+        assert_eq!(roll, 0.0, "{name} never banks");
+    }
+}
+
 #[test]
 fn swim_dead_reckon_folds_the_pitch_into_the_travel() {
     // A swimmer's wire pitch folds into the travel direction the way the client's swim velocity
@@ -272,7 +361,7 @@ fn jump_seed_derives_velocity_and_clamps() {
         sin_angle: 0.0,
         xy_speed: 7.0,
     };
-    let (vz, xy) = jump_seed(Some(j), 0);
+    let (vz, xy) = jump_seed(Some(j), 0, false);
     assert!(
         (vz - 7.955_547).abs() < 1e-3,
         "take-off up-speed = -zspeed (positive, rising): {vz}"
@@ -282,19 +371,19 @@ fn jump_seed_derives_velocity_and_clamps() {
         "horizontal +X: {xy:?}"
     );
     // Mid-fall (1s in): up-speed = -zspeed − g·t (now negative, descending).
-    let (vz1, _) = jump_seed(Some(j), 1000);
+    let (vz1, _) = jump_seed(Some(j), 1000, false);
     assert!(
         (vz1 - (7.955_547 - GRAVITY)).abs() < 1e-3,
         "vertical decays by gravity: {vz1}"
     );
     // A long fall is clamped to terminal velocity.
-    let (vzt, _) = jump_seed(Some(j), 10_000);
+    let (vzt, _) = jump_seed(Some(j), 10_000, false);
     assert!(
         (vzt + TERMINAL_VELOCITY).abs() < 1e-3,
         "clamped to −terminal: {vzt}"
     );
     // A non-jumping packet → grounded: no vertical, no horizontal freeze.
-    assert_eq!(jump_seed(None, 0), (0.0, [0.0, 0.0]));
+    assert_eq!(jump_seed(None, 0, false), (0.0, [0.0, 0.0]));
 }
 
 #[test]
@@ -972,6 +1061,9 @@ fn a_flag_still_remote_is_left_where_the_wire_put_it() {
     ));
     app.init_asset::<Mesh>()
         .init_resource::<benilla_world::collision::ColliderEpoch>();
+    // The liquid/room facade the dead-reckon asks for a water-walker's surface (decision 1780),
+    // seeded empty — no mover here has the mode, and an empty world answers "no liquid".
+    benilla_world::world_point::init_world_point_resources(app.world_mut());
     app.finish();
     app.cleanup();
     app.insert_resource(crate::player::PlayerCapsule(Collider::capsule(

@@ -222,7 +222,10 @@ fn feed_inspect(
     };
 
     booth.unit = Some(entity);
-    booth.yaw = script.inspect_yaw();
+    // The stock `InspectPaperDollFrame.lua` turns the doll by writing the PANE
+    // (`InspectModelFrame:SetRotation`), the same way the character sheet, the pet doll and the
+    // stable booth already read theirs (decision 1832).
+    booth.yaw = script.model_pane_facing("InspectModelFrame");
 
     let Ok(store) = stores.get(entity) else {
         return;

@@ -59,15 +59,42 @@ pub fn list_inventory(vendor_guid: u64) -> Vec<u8> {
 
 /// Body of `CMSG_BUY_ITEM` (vmangos `Item.cpp:104-110`): `u64 vendorGuid, u32 item` (the template
 /// **entry**, not the vendor row's `muid`), `u8 count` (stacks to buy), `u8 unk1` (always 0).
-/// Auto-places into the first free bag slot — the specific-bag-slot variant
-/// (`CMSG_BUY_ITEM_IN_SLOT`, [`super::opcode::CMSG_BUY_ITEM_IN_SLOT`]) is out of scope for v1
-/// (decision 0081). Handler → `BuyItemFromVendor` (`ItemHandler.cpp:688`).
+/// Auto-places into the first free bag slot — the specific-bag-slot variant is
+/// [`buy_item_in_slot`]. Handler → `BuyItemFromVendor` (`ItemHandler.cpp:688`).
 pub fn buy_item(vendor_guid: u64, entry: u32, count: u8) -> Vec<u8> {
     let mut body = Vec::with_capacity(14);
     body.extend_from_slice(&vendor_guid.to_le_bytes());
     body.extend_from_slice(&entry.to_le_bytes());
     body.push(count);
     body.push(0); // unk1
+    body
+}
+
+/// Body of `CMSG_BUY_ITEM_IN_SLOT` (vmangos `Item.cpp:113-120`): `u64 vendorGuid, u32 item`
+/// (the template **entry**, like [`buy_item`]), `u64 bagGuid`, `u8 bagSlot`, `u8 count`.
+///
+/// The buy-into-a-named-slot variant, and the packet the **merchant cursor** sends: the reference
+/// puts a vendor row on the cursor as payload mode 5 (`PickupMerchantItem 0x4fb760`) and the
+/// three container drop handlers each call the sender `0x5e1f30` with `count = 1`
+/// (wow-re `system/ui/scratch/merchant-cursor-law.md` §5). Clicking a row is the auto-place
+/// [`buy_item`]; dragging it into a slot is this.
+///
+/// `bag_guid` is the **container object's** guid, or the player's own for the backpack and the
+/// equipment slots; `bag_slot` is the destination within it. Handler → `BuyItemFromVendor`, the
+/// same one `CMSG_BUY_ITEM` reaches, with the slot pair filled instead of `NULL_BAG`/`NULL_SLOT`.
+pub fn buy_item_in_slot(
+    vendor_guid: u64,
+    entry: u32,
+    bag_guid: u64,
+    bag_slot: u8,
+    count: u8,
+) -> Vec<u8> {
+    let mut body = Vec::with_capacity(22);
+    body.extend_from_slice(&vendor_guid.to_le_bytes());
+    body.extend_from_slice(&entry.to_le_bytes());
+    body.extend_from_slice(&bag_guid.to_le_bytes());
+    body.push(bag_slot);
+    body.push(count);
     body
 }
 

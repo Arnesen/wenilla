@@ -46,8 +46,6 @@ const RETICLE_DEFAULT_RADIUS: f32 = 1.388_889;
 /// The projection box's vertical slab: ± 2.0 around the picked point (`0x4837b0` — fixed, not
 /// radius-scaled like the ring's).
 const RETICLE_VERT: f32 = 2.0;
-/// Same coplanarity treatment as the ring (`sky_order::Rung::RING` rationale).
-const RETICLE_DEPTH_BIAS: f32 = 8192.0;
 
 /// The two state textures (the render-side residency gate withholds the draw until loaded).
 #[derive(Resource)]
@@ -193,7 +191,14 @@ pub(super) fn push_reticle(
     let mut batch = draw
         .batch(cam, texture)
         .anchored(state.key.center)
-        .rung(RETICLE_DEPTH_BIAS, RETICLE_DEPTH_BIAS as i32);
+        // Sort rung from the pre-water decal band — the reference draws this pass at `0x4836c5`
+        // with flags `0x200122`, before the water (B347); its liquid-receiver twin at `0x483727`
+        // is the half that draws after it, and has no counterpart here until liquid becomes a
+        // receiving surface. Raster margin from the family's shared coplanarity constant.
+        .rung(
+            benilla_world::sky_order::Rung::RETICLE,
+            benilla_world::sky_order::Rung::DECAL_RASTER,
+        );
     batch.extend(state.verts.iter().map(|v| EffectVertex {
         pos: v.pos,
         uv: v.uv,

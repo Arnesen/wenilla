@@ -27,9 +27,10 @@
 //!   `locked` (decision 0208 phase 1b — the doll twin of `ui_items::feed_containers`'s bag-slot
 //!   `.locked`), and its resolved `equip_slots` (`ui_items::find_equip_slot` over the item
 //!   template's `inventoryType` — the cursor arc's "fit rule", decision 0216/0218).
-//! - **The paper-doll booth yaw**: the pane's `Model:SetRotation` transcription writes the VM-side
-//!   value ([`UiScript::paperdoll_yaw`]); the feed mirrors it onto [`PaperDollBooth`] so the booth
-//!   re-bakes at the new facing (decision 0208 §5).
+//! - **The paper-doll booth yaw**: the stock pane's rotate buttons call the reference's own
+//!   `Model_RotateLeft`/`_RotateRight`, which write `CharacterModelFrame:SetRotation`; the feed
+//!   mirrors that pane's facing onto [`PaperDollBooth`] so the booth re-bakes at the new angle
+//!   (decision 0208 §5, off the pane itself since 1751).
 //!
 //! Events, fired on snapshot transitions (grouped by the ref's own registration set,
 //! `PaperDollFrame.lua:14-28` — arg1 `"player"`): `UNIT_STATS`, `UNIT_RESISTANCES`, `UNIT_DAMAGE`,
@@ -408,16 +409,38 @@ fn weapon_skill_id(
     weapon_subclass_skill(t.subclass).unwrap_or(SKILL_UNARMED)
 }
 
-/// Read a skill line's `(value, temp+perm bonus)` pair from the `PLAYER_SKILL_INFO` triplets;
-/// `(0, 0)` when the line isn't known (a ranged pair with nothing equipped).
-fn skill_pair(store: &ObjectStore, skill_id: u32) -> (u32, i32) {
+/// Read a skill line's `(value + PERM bonus, TEMP bonus)` pair from the `PLAYER_SKILL_INFO`
+/// triplets; `(0, 0)` when the line isn't known (a ranged pair with nothing equipped).
+///
+/// **The split is not `(value, temp + perm)`, which is what this returned until decision 1812.**
+/// The reader every skill-shaped binding goes through is `0x5ea460`, and it writes
+/// `*out1 = value + permBonus` / `*out2 = tempBonus` — the permanent half folds into the BASE and
+/// only the temporary half is the modifier (VERIFIED, wow-re
+/// `ui/scratch/unitrangedattack-skill-pair.md` §3; the field reads are `+0x84C` `movzx` value,
+/// `+0x850` `movsx` temp — the block's only sign-extended read — and `+0x852` `movzx` perm).
+///
+/// The old shape had the right TOTAL and the wrong halves, which is why nothing caught it: the
+/// paper doll's Attack row prints `base` and colours `base + mod`, so a 300-value line with a +5
+/// talent and a +10 aura read "300" with a green +15 where the reference reads "305" with a green
+/// +10. wow-re's own `object-layer/scratch/w2b2.md` had the two inverted as well, and that is
+/// where ours came from; the same round corrected it there.
+///
+/// **The perm add is skipped when the value is 0** (`0x5ea4b4 jle`), so an unknown line stays a
+/// flat 0 rather than reading back a bare talent bonus.
+///
+/// Signed, because the sum is: `fild dword` on both pushes, and a perm malus deeper than the skill
+/// is representable on the wire even if no live server sends one.
+fn skill_pair(store: &ObjectStore, skill_id: u32) -> (i32, i32) {
     for i in 0..PLAYER_SKILL_SLOTS {
         if let Some(s) = store.0.player_skill(i) {
             if u32::from(s.skill_id) == skill_id {
-                return (
-                    u32::from(s.value),
-                    i32::from(s.temp_bonus) + i32::from(s.perm_bonus),
-                );
+                let value = i32::from(s.value);
+                let base = if value == 0 {
+                    0
+                } else {
+                    value + i32::from(s.perm_bonus)
+                };
+                return (base, i32::from(s.temp_bonus));
             }
         }
     }
@@ -505,6 +528,7 @@ pub(crate) fn unit_combat_stats(store: &ObjectStore) -> UnitCombatStats {
         has_offhand: false,
         has_wand: false,
         main_weapon_skill: (0, 0),
+        offhand_weapon_skill: (0, 0),
         ranged_weapon_skill: (0, 0),
         defense_skill: (0, 0),
     }
@@ -524,6 +548,7 @@ fn combat_stats(store: &ObjectStore, items: &mut Items, commands: &NetCommands) 
         .is_some_and(|t| t.class == ITEM_CLASS_WEAPON && t.subclass == SUBCLASS_WAND);
 
     let main_skill = weapon_skill_id(store, items, commands, SLOT_MAIN_HAND);
+    let offhand_skill = weapon_skill_id(store, items, commands, SLOT_OFF_HAND);
     let ranged_skill_id = slot_entry(store, items, SLOT_RANGED)
         .and_then(|e| items.template(e, 0, commands))
         .filter(|t| t.class == ITEM_CLASS_WEAPON)
@@ -533,6 +558,10 @@ fn combat_stats(store: &ObjectStore, items: &mut Items, commands: &NetCommands) 
         has_offhand,
         has_wand,
         main_weapon_skill: skill_pair(store, main_skill),
+        // `UnitAttackBothHands`'s SECOND pair (decision 1810) — the binding pushes one per hand,
+        // and `weapon_skill_id` already answers Unarmed for an empty or non-weapon off hand, which
+        // is what a shield or an empty hand reads as.
+        offhand_weapon_skill: skill_pair(store, offhand_skill),
         ranged_weapon_skill: ranged_skill_id.map_or((0, 0), |id| skill_pair(store, id)),
         // `UnitDefense`'s pair. Its repaint wire is `SKILL_LINES_CHANGED` (which the ref's
         // `PaperDollFrame` registers, l.28, and `watch_skill_ups` already fires), NOT a
@@ -565,6 +594,9 @@ fn slot_view(
     // `ItemSubClass.dbc` — the count gate below reads its `DisplayFlags` bit 2. `None` (the DBC
     // failed to load) leaves every bag at 0, which is the plain-bag answer and the safe one.
     sub_classes: Option<&crate::ui_items::ItemSubClasses>,
+    // The player's own `ChrClasses.dbc` relic flag — `find_equip_slot`'s second half (1803). It
+    // decides INVSLOT 17 both ways, so it reaches every fit-rule read rather than one of them.
+    has_relic_slot: bool,
     guid: u64,
     live_id: u32,
 ) -> Option<InvSlotView> {
@@ -630,7 +662,7 @@ fn slot_view(
                 Some(crate::ui_items::item_link_full(
                     entry, 0, roll, 0, &name, t.quality,
                 )),
-                find_equip_slot(t.inventory_type),
+                find_equip_slot(t.inventory_type, has_relic_slot),
                 (t.class, t.subclass),
                 t.placeable_on_action_bar(),
             )
@@ -725,7 +757,14 @@ fn inventory_slots(
     pending: &PendingItemOps,
     names: &mut crate::names::NameCache,
     sub_classes: Option<&crate::ui_items::ItemSubClasses>,
+    classes: Option<&benilla_formats::ChrClasses>,
 ) -> InventorySlots {
+    // Resolved once from the player's own class byte, right here — the store is already in scope,
+    // so nothing new is threaded through the callers for the class half.
+    let has_relic_slot = store
+        .0
+        .unit_class()
+        .is_some_and(|c| classes.is_some_and(|t| t.has_relic_slot(u32::from(c))));
     let mut inv: InventorySlots = Default::default();
     let ammo_id = store.0.player_ammo_id().unwrap_or(0);
     if ammo_id != 0 {
@@ -786,6 +825,7 @@ fn inventory_slots(
             pending,
             names,
             sub_classes,
+            has_relic_slot,
             guid,
             live,
         );
@@ -825,6 +865,10 @@ fn bank_bag_slots(
             pending,
             names,
             sub_classes,
+            // A bank bag slot holds a BAG, and `find_equip_slot(INVTYPE_BAG)` answers the four
+            // bag slots whatever this says — the flag decides INVSLOT 17 alone, which no item in
+            // this band can reach. `false` here is provable, not a default.
+            false,
             guid,
             BANK_BAG_LIVE_FIRST + i as u32,
         );
@@ -941,6 +985,9 @@ pub(crate) fn fire_stat_transitions(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn feed_char(
+    // `ChrClasses.dbc` field 16, for the fit rule's relic half — `ui_items::find_equip_slot`
+    // (1803). Absent client data reads every class as an ordinary ranged wielder.
+    classes: Option<Res<crate::chr_classes::ChrClassTable>>,
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     changed_self: Query<(), (With<SelfPlayer>, Changed<ObjectStore>)>,
@@ -961,9 +1008,13 @@ pub(crate) fn feed_char(
     let Some(mut script) = script else {
         return;
     };
-    // The pane's Model:SetRotation transcription owns the yaw; the booth mirrors it (0208 §5).
+    // The pane owns the yaw and the booth mirrors it (0208 §5). Read off the widget's own
+    // `SetRotation` state since decision 1751 put the reference's `PaperDollFrame.xml` on the
+    // chain: the stock file declares a real `<PlayerModel name="CharacterModelFrame">` and drives
+    // it with `Model_OnLoad`/`Model_Rotate*`/`Model_OnUpdate`, where ours used to call a
+    // benilla-named `BenillaPaperDollModel_SetFacing` into a scalar on the VM.
     // Write-if-different: an unconditional write would mark the booth changed every frame.
-    let yaw = script.paperdoll_yaw();
+    let yaw = script.model_pane_facing("CharacterModelFrame");
     if booth.yaw != yaw {
         booth.yaw = yaw;
     }
@@ -1075,6 +1126,7 @@ pub(crate) fn feed_char(
         &pending,
         &mut names,
         sub_classes.as_deref(),
+        classes.as_deref().map(|t| &t.0),
     );
     let bank_bags = bank_bag_slots(
         store,
@@ -1192,6 +1244,57 @@ mod tests {
     use super::*;
     use benilla_protocol::messages::ObjectFields;
     use bevy::ecs::system::RunSystemOnce;
+
+    /// **The skill pair splits `(value + PERM, TEMP)`, not `(value, temp + perm)`** — the reader
+    /// every skill-shaped binding goes through (`0x5ea460`, VERIFIED: wow-re
+    /// `ui/scratch/unitrangedattack-skill-pair.md` §3).
+    ///
+    /// It reported the right TOTAL and the wrong halves until decision 1812, which is exactly why
+    /// nothing caught it: `UnitAttackBothHands`'s caller prints the base and colours `base + mod`,
+    /// so both shapes agree on the number a player adds up and disagree on the two they read. The
+    /// fixture below is the one the record quotes — 300 / +5 talent / +10 aura — where the
+    /// reference shows **305** with a green **+10** and ours showed 300 with a green +15.
+    ///
+    /// The zero-value leg is the other half of the law (`0x5ea4b4 jle`): an unknown line must stay
+    /// a flat 0 rather than reading back a bare talent bonus.
+    #[test]
+    fn a_skill_pair_folds_the_permanent_bonus_into_the_base() {
+        /// `PLAYER_SKILL_INFO_1_1` — id|step, then value|max, then temp|perm, per slot.
+        const F_SKILL: u16 = 718;
+        let pair = |lo: u16, hi: u16| u32::from(lo) | (u32::from(hi) << 16);
+        // Slot 0: Defense (95) at 300, +10 temporary, +5 permanent.
+        // Slot 1: Swords (43) at 0 — known id, no value, a +7 permanent that must NOT surface.
+        let store = ObjectStore(ObjectFields::from_pairs(&[
+            (F_SKILL, pair(95, 0)),
+            (F_SKILL + 1, pair(300, 300)),
+            (F_SKILL + 2, pair(10, 5)),
+            (F_SKILL + 3, pair(43, 0)),
+            (F_SKILL + 4, pair(0, 300)),
+            (F_SKILL + 5, pair(0, 7)),
+        ]));
+        assert_eq!(
+            skill_pair(&store, 95),
+            (305, 10),
+            "the permanent bonus belongs to the base and the temporary one is the modifier"
+        );
+        assert_eq!(
+            skill_pair(&store, 43),
+            (0, 0),
+            "a line at value 0 skips the perm add — a bare talent bonus is not a skill"
+        );
+        assert_eq!(
+            skill_pair(&store, 162),
+            (0, 0),
+            "a line the player does not have at all"
+        );
+        // A malus deeper than the skill is representable, which is why the pair is signed.
+        let cursed = ObjectStore(ObjectFields::from_pairs(&[
+            (F_SKILL, pair(95, 0)),
+            (F_SKILL + 1, pair(5, 300)),
+            (F_SKILL + 2, pair(0, u16::MAX - 9)), // perm = -10
+        ]));
+        assert_eq!(skill_pair(&cursed, 95), (-5, 0));
+    }
 
     /// `PLAYER_FIELD_BANK_BAG_SLOT_1` — bank bag slot 0's guid pair (protocol test `bank.rs`).
     const F_BANK_BAG_1: u16 = 612;

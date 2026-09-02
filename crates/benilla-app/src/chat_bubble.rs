@@ -41,9 +41,11 @@
 //!   nothing interleaves. ([`level_z`]; benilla read the bytes for this one, 1504 — wow-re's
 //!   `chat-bubble.md` covers the spawn/geometry/anchor and never reached the manager tick.)
 //!
-//! Named divergences (all deliberate, decisions 0598/0599):
-//! - **`ChatBubblesParty` defaults ON** (binary default "0") — the director asked for `/p`
-//!   bubbles; same posture as [`crate::vplates::VPlateMode`].
+//! Named divergences (all deliberate):
+//! - ~~**`ChatBubblesParty` defaults ON**~~ — **no longer a divergence (1804).** It shipped `"1"`
+//!   against the binary's `"0"` from 0598, on the director's `/p` ask; both CVars now boot at the
+//!   registrar's own values and the Chat page's row is the way back on. Same walk-back as
+//!   [`crate::vplates::VPlateMode`], whose enemy plates were the same shape of pin.
 //! - **The v1 kind set is SAY/YELL/PARTY + monster say/yell.** The byte gate is
 //!   "sender resolves", not a type whitelist, which *implies* guild/officer/whisper/emote
 //!   bubbles too — but that category claim is INFERRED on an OPEN wire-type remap
@@ -87,10 +89,11 @@ use benilla_world::view::WorldCamera;
 
 /// The two CVars (registrar `0x603280`), host side. **Registered knobs since decision 1139** —
 /// they were a pair of `const bool` from 0598 until the options window had a page to put
-/// them on, which is exactly the shape 1134 calls a row over a frozen gate. The defaults are the
-/// values that were frozen: `ChatBubbles` the reference's own "1"; `ChatBubblesParty` flipped ON
-/// against the binary's "0" (the director's ask: `/p` bubbles), the same deliberate deviation
-/// [`crate::vplates::VPlateMode`]'s boot default carries.
+/// them on, which is exactly the shape 1134 calls a row over a frozen gate.
+///
+/// **Both defaults are the binary's own** (`ChatBubbles` `"1"`, `ChatBubblesParty` `"0"` — wow-re
+/// `object-layer/scratch/chat-bubble.md`). `party` shipped ON from 0598 to 1804 on the director's
+/// `/p` ask; the row is on the Chat page, one click from where it was.
 #[derive(Resource)]
 pub(crate) struct BubbleConfig {
     /// `ChatBubbles` — say/yell and their monster variants.
@@ -103,7 +106,7 @@ impl Default for BubbleConfig {
     fn default() -> Self {
         Self {
             all: true,
-            party: true,
+            party: false,
         }
     }
 }
@@ -863,20 +866,30 @@ mod tests {
     }
 
     /// The v1 kind set: say/yell + monster say/yell on `ChatBubbles`, party on
-    /// `ChatBubblesParty` (benilla default ON — the 0598 deviation); everything else out
-    /// pending the OPEN remap capture. And the two switches are genuinely separate: the client
-    /// gates party lines on their own CVar, so turning one off leaves the other bubbling.
+    /// `ChatBubblesParty`; everything else out pending the OPEN remap capture. And the two
+    /// switches are genuinely separate: the client gates party lines on their own CVar, so
+    /// turning one off leaves the other bubbling.
+    ///
+    /// The sweep runs on a config with **both switches planted on**, which is not what a fresh
+    /// client boots at: `ChatBubblesParty` shipped `"1"` from 0598's `/p` ask until 1804 put both
+    /// defaults back on the binary's (`ChatBubbles` `"1"`, `ChatBubblesParty` `"0"`). Planted,
+    /// because the question here is which *kinds* the gate admits, and a kind whose switch is off
+    /// cannot answer it. The shipped pair is asserted below, where it is exactly the
+    /// party-off half of the independence check.
     #[test]
     fn the_kind_set_is_the_uncontested_v1() {
         use ChatEventKind as K;
-        let on = BubbleConfig::default();
+        let on = BubbleConfig {
+            all: true,
+            party: true,
+        };
         for k in [K::Say, K::Yell, K::MonsterSay, K::MonsterYell] {
             assert_eq!(bubble_cvar(k, &on), Some(true));
         }
         assert_eq!(
             bubble_cvar(K::Party, &on),
             Some(true),
-            "the director's /p ask"
+            "party on its own CVar"
         );
         for k in [
             K::Guild,
@@ -891,11 +904,15 @@ mod tests {
             assert_eq!(bubble_cvar(k, &on), None, "{k:?} must not bubble in v1");
         }
 
-        let no_party = BubbleConfig {
-            all: true,
-            party: false,
-        };
-        assert_eq!(bubble_cvar(K::Party, &no_party), Some(false));
+        // Party off with say on — which is the SHIPPED pair since 1804, so this half of the
+        // independence check is [`BubbleConfig::default`] itself and pins the boot state too.
+        let no_party = BubbleConfig::default();
+        assert!(no_party.all && !no_party.party, "the shipped pair");
+        assert_eq!(
+            bubble_cvar(K::Party, &no_party),
+            Some(false),
+            "/p does not bubble out of the box"
+        );
         assert_eq!(
             bubble_cvar(K::Say, &no_party),
             Some(true),

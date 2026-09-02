@@ -14,7 +14,7 @@ use benilla_assets::materials::{WowModelExt, WowModelMaterial, VANILLA_ALPHA_KEY
 mod batch;
 mod visibility;
 
-pub use batch::{BatchVariants, M2BatchMaterials, ModelMaterials};
+pub use batch::{BatchVariants, M2BatchMaterials, ModelMaterials, SkyboxBatch};
 
 /// Yards of transparent-pass sort bias per authored batch-order step (`MatKey::batch_order` ×
 /// this, on `StandardMaterial::depth_bias` — bevy adds that field to the phase item's sort

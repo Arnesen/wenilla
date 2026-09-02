@@ -78,8 +78,11 @@
         -- engine binding over wow-5875-re RF-0055's byte-verified table, so the rounding and
         -- the second source both go.
         --
-        -- The loop starts at -1 like the reference's: `UIParent.lua` reads one index before the
-        -- array there, and our binding answers Poor for it rather than reproducing that.
+        -- The loop starts at -1 like the reference's, and the -1 row is not a curiosity: it is the
+        -- colour a loot row wears while its item template is uncached, which is the value
+        -- `GetLootSlotInfo` answers there. `GetItemQualityColor`'s clamp is UNSIGNED, so -1 lands
+        -- on Common/white with 7-and-up (decision 1805, correcting 1199's "reads before the
+        -- array").
         ITEM_QUALITY_COLORS = { }
         for i = -1, 6 do
             ITEM_QUALITY_COLORS[i] = { }
@@ -135,10 +138,31 @@
         -- iterates it). Still zero corpus addons, so the demand here is ours, not theirs.
         CHAT_FONT_HEIGHTS = { 12, 14, 16, 18 }
 
-        -- The two OTHER tables the reference's Fonts.xml `<Script>` block carries —
-        -- MATERIAL_TEXT_COLOR_TABLE and MATERIAL_TITLETEXT_COLOR_TABLE — are deliberately not
-        -- here: **zero corpus addons name either**, and nothing benilla ships reads them. They
-        -- cost nine lines each the day something does.
+        -- The page ink and the title ink per readable-material, ref Fonts.xml l.27-42 verbatim.
+        --
+        -- These were deliberately absent for a long time — "zero corpus addons name either, and
+        -- nothing benilla ships reads them; they cost nine lines each the day something does".
+        -- 1751's ninth window is that day: the reference's own `GetMaterialTextColors`
+        -- (UIParent.lua l.1880-1888) reads them by these names, and it is what the sourced
+        -- `ItemTextFrame.xml` calls. Our ItemTextFrame carried a private
+        -- `BENILLA_MATERIAL_*_COLOR_TABLE` pair; both are deleted, and this is where 1.12 keeps
+        -- the one that remains.
+        MATERIAL_TEXT_COLOR_TABLE = {
+            ["Default"] = {0.18, 0.12, 0.06},
+            ["Stone"] = {1.0, 1.0, 1.0},
+            ["Parchment"] = {0.18, 0.12, 0.06},
+            ["Marble"] = {0, 0, 0},
+            ["Silver"] = {0.12, 0.12, 0.12},
+            ["Bronze"] = {0.18, 0.12, 0.06},
+        }
+        MATERIAL_TITLETEXT_COLOR_TABLE = {
+            ["Default"] = {0, 0, 0},
+            ["Stone"] = {0.93, 0.82, 0},
+            ["Parchment"] = {0, 0, 0},
+            ["Marble"] = {0.93, 0.82, 0},
+            ["Silver"] = {0.93, 0.82, 0},
+            ["Bronze"] = {0.93, 0.82, 0},
+        }
     ]]></Script>
 
     <!-- MasterFont: the shadow-only root the GameFont* families chain through (ref l.56). -->

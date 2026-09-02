@@ -105,6 +105,27 @@ pub(super) fn pickup_inventory_item(model: &mut Model, id: u32) -> bool {
             queue_lock_changed(model, held.bag, held.slot);
             true
         }
+        // Mode 5 — the buy, aimed at an equipment slot. `0x4c78fd` tests `[0xb4d900] == 5` inside
+        // the paper-doll click and sends the same `CMSG_BUY_ITEM_IN_SLOT 0x1a3` the bag drop does;
+        // the server equips it or refuses. Reported in the ONE bag space ([`EQUIPMENT_BAG`] + the
+        // 1-based inventory slot), the seam this file already uses for every other doll intent.
+        //
+        // Of the reference's three drop consumers this is the one that handles a stale vendor row
+        // correctly — the other two dereference it (`0x4f9f35`, `0x4c7ea5`) — so its refusal is
+        // what we reproduce in all three.
+        Some(CursorPayload::Merchant(held)) => {
+            let entry = model
+                .merchant
+                .as_ref()
+                .and_then(|m| m.items.get(held.row as usize))
+                .filter(|it| it.item_id == held.item_id)
+                .map(|it| it.item_id);
+            if let Some(entry) = entry {
+                model.merchant_slot_buys.push((EQUIPMENT_BAG, id, entry));
+            }
+            queue_cursor_update(model);
+            true
+        }
         Some(
             other @ (CursorPayload::Spell(_)
             | CursorPayload::Action(_)

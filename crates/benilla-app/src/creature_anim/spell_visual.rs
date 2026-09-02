@@ -91,6 +91,28 @@ pub(crate) enum SpellKitSound {
     StopKit { entity: Entity, kit_sound: u32 },
 }
 
+/// A spell-visual kit's **camera shake** (kit field 14 → a `SpellEffectCameraShakes.dbc` group id,
+/// decision 1849). Written here, consumed by [`crate::camera_shake`], and deliberately shaped like
+/// [`SpellKitSound`]'s two play arms: the reference reaches both through the same leg of the same
+/// one-time node arm pass, one field apart.
+///
+/// **Exactly once per `PlaySpellVisualKit` call, and always** (wow-re
+/// `spell/scratch/camera-shake-producers.md`, §5 2026-09-02). The primary site is `0x620e11`,
+/// inside the first-created effect node's one-time arm pass `0x620be0`, gated on that node's
+/// flags snapshot carrying bit `0x10` — which `0x60edf0` sets iff `kit+0x38 != 0` and every later
+/// spawner clears via `(flags & ~0x11) | 0x400`, so exactly the FIRST node carries it. `0x60f4e6`
+/// in the kit tail is the **no-node fallback**, gated on "nothing was created" rather than on a
+/// flag. There is no stage gate and no cancel path: a shake outlives its source and plays out.
+#[derive(Message, Clone, Copy, Debug)]
+pub(crate) enum SpellKitShake {
+    /// Shake at the playing unit's own world position — the ordinary kit play.
+    Play { entity: Entity, group: u32 },
+    /// Shake at a bare world point — the kit play's `extra` override (`0x60f4c1`'s `[ebx+0x14]`),
+    /// the same arm [`SpellKitSound::PlayAt`] serves: a missile's ground arrival belongs where it
+    /// landed, not at the thrower.
+    PlayAt { pos: Vec3, group: u32 },
+}
+
 /// A persistent effect instance's **lifetime class** — which owner's reap can kill it.
 /// Byte-verified (wow-re `state-kit-aura-lifecycle.md`, §5 2026-07-14): the client's reap walk
 /// `0x614150(spellId, force)` discriminates by node flags — every SPELL_GO / SPELL_FAILED reap
@@ -451,13 +473,15 @@ pub(crate) struct KitPush {
 
 /// The writer set one discrete kit play fans out to — bundled so [`play_kit`] threads through the
 /// router's arms as one argument (each writer keeps its own system-param lifetime).
-struct KitOut<'a, 'w1, 'w2, 'w3, 'w4, 'w5> {
+struct KitOut<'a, 'w1, 'w2, 'w3, 'w4, 'w5, 'w6> {
     oneshots: &'a mut MessageWriter<'w1, EmoteAnim>,
     wounds: &'a mut MessageWriter<'w2, WoundAnim>,
     sounds: &'a mut MessageWriter<'w3, SpellKitSound>,
     fx: &'a mut MessageWriter<'w4, SpellKitFx>,
     /// The kit's beam, if its `CharProc` slots name one — the dispatcher's chain case (0955).
     chain: &'a mut MessageWriter<'w5, ChainProcPlay>,
+    /// The kit's camera shake, if field 14 names a group (1849).
+    shakes: &'a mut MessageWriter<'w6, SpellKitShake>,
 }
 
 /// One kit played as a **discrete event** on a unit — the client's `PlaySpellVisualKit`
@@ -517,6 +541,14 @@ fn play_kit(
     }
     if let Some(kit_sound) = kit.sound.filter(|_| play.sound) {
         out.sounds.write(SpellKitSound::Play { entity, kit_sound });
+    }
+    // The kit's CAMERA SHAKE (field 14, decision 1849) — once per play, at the unit, at every
+    // stage. Not gated by `play.sound` or `play.effects`: the reference's shake leg sits in the
+    // first-created node's arm pass with no stage test, and the no-node fallback is gated only on
+    // "nothing was created". A kit that spawns no models still shakes — 28 of the 58 shipped
+    // shake kits carry nothing but the shake.
+    if let Some(group) = kit.shake {
+        out.shakes.write(SpellKitShake::Play { entity, group });
     }
     // The CharProc dispatcher's beam case — run for EVERY kit play, at every stage, exactly as
     // `PlaySpellVisualKit`'s tail runs it (`0x60f35c`). It is not gated by `play.effects`: the
@@ -613,12 +645,13 @@ pub(super) fn route_cast_visuals(
     mut fx: MessageWriter<SpellKitFx>,
     mut sheaths: MessageWriter<super::SheathRequest>,
     // One tuple param (the 16-SystemParam ceiling): the missile spawns, the dest one-shot orders
-    // (0797) and the beam plays (0955) — the spawn lanes resolved here where the catalogs live,
-    // built by `crate::entities`.
+    // (0797), the beam plays (0955) and the camera shakes (1849) — the lanes resolved here where
+    // the catalogs live, built by `crate::entities` and `crate::camera_shake`.
     mut spawns: (
         MessageWriter<MissileSpawn>,
         MessageWriter<crate::entities::dest_fx::GroundBurst>,
         MessageWriter<ChainProcPlay>,
+        MessageWriter<SpellKitShake>,
     ),
     visuals: Option<Res<SpellVisuals>>,
     spells: Option<Res<crate::ui_action::Spells>>,
@@ -632,13 +665,15 @@ pub(super) fn route_cast_visuals(
     };
     // Disjoint field borrows: the beam writer rides `out` for the whole body while the missile and
     // burst writers stay free for the GO loop below.
-    let (missiles, bursts, chains) = (&mut spawns.0, &mut spawns.1, &mut spawns.2);
+    let (missiles, bursts, chains, shakes) =
+        (&mut spawns.0, &mut spawns.1, &mut spawns.2, &mut spawns.3);
     let mut out = KitOut {
         oneshots: &mut oneshots,
         wounds: &mut wounds,
         sounds: &mut sounds,
         fx: &mut fx,
         chain: chains,
+        shakes,
     };
 
     // The `holds` query is one command-flush stale: an instant cast's START and GO drain from
@@ -881,11 +916,16 @@ pub(super) fn route_cast_visuals(
                 // `|| None`: the weapon merge pointedly skips the dest-anchored `+0x2c/+0x30/
                 // +0x34` block ([`VisualStages::merged_over_weapon`]), so even Volley's area kit
                 // is its own row's — the lookup would be paid for nothing.
-                if let Some(kit_sound) =
-                    resolve_kit(spells, &visuals.0, ev.spell_id, |s| s.area_kit, || None)
-                        .and_then(|k| k.sound)
-                {
+                let area = resolve_kit(spells, &visuals.0, ev.spell_id, |s| s.area_kit, || None);
+                if let Some(kit_sound) = area.and_then(|k| k.sound) {
                     out.sounds.write(SpellKitSound::PlayAt { pos, kit_sound });
+                }
+                // …and its shake, at the same landing point (1849). Unlike the sound this is NOT
+                // dead data on the reachable rows: kit 1285 (Cannon Ball, Bolt Charge Bramble,
+                // Kill Urok Minion) carries no anim, no sound and no slots — it is a camera shake
+                // and nothing else.
+                if let Some(group) = area.and_then(|k| k.shake) {
+                    out.shakes.write(SpellKitShake::PlayAt { pos, group });
                 }
             }
             CastEventKind::Fail => {
@@ -1532,6 +1572,7 @@ pub(super) fn replay_morph_kit(
     mut sounds: MessageWriter<SpellKitSound>,
     mut fx: MessageWriter<SpellKitFx>,
     mut chain: MessageWriter<ChainProcPlay>,
+    mut shakes: MessageWriter<SpellKitShake>,
 ) {
     for swap in swaps.read() {
         // Consume-and-clear even when the kit resolves to nothing — the reference clears
@@ -1552,6 +1593,7 @@ pub(super) fn replay_morph_kit(
             sounds: &mut sounds,
             fx: &mut fx,
             chain: &mut chain,
+            shakes: &mut shakes,
         };
         play_kit(
             swap.entity,

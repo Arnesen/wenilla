@@ -30,17 +30,7 @@
 
 use benilla_ui::script::UiScript;
 
-/// One shipped file into `s`, asserting it loaded clean.
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(ui_dir().join(file)).unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 fn ui_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui")
@@ -59,7 +49,9 @@ fn harness() -> UiScript {
         "UiPanels.xml",
         "GameTooltip.xml",
         "ScrollTemplates.xml",
-        "UIPanelTemplates.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        r"Interface\FrameXML\OptionsFrameTemplates.xml",
         "OptionsFrameTemplates.xml",
     ] {
         load_xml(&s, file);
@@ -88,6 +80,7 @@ fn drawn_textures(s: &mut UiScript) -> Vec<String> {
 /// `SetText` dies — with the `CreateFrame` itself having succeeded and returned an object.
 #[test]
 fn a_check_button_from_the_template_names_its_label_after_the_caller() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = harness();
     s.run(r#"MyCheck = CreateFrame("CheckButton", "MyCheck", UIParent, "UICheckButtonTemplate")"#)
         .unwrap();
@@ -129,6 +122,7 @@ fn a_check_button_from_the_template_names_its_label_after_the_caller() {
 /// all — no error, no warning, 69 invisible checkboxes.
 #[test]
 fn the_templated_check_button_draws_the_reference_checkbox_art() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.run(
         r#"MyCheck = CreateFrame("CheckButton", "MyCheck", UIParent, "UICheckButtonTemplate")
@@ -170,6 +164,7 @@ fn the_templated_check_button_draws_the_reference_checkbox_art() {
 /// options panel in the corpus is written against (`if this:GetChecked() then …`).
 #[test]
 fn a_templated_check_button_toggles_before_its_on_click_runs() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = harness();
     s.run(
         r#"MyCheck = CreateFrame("CheckButton", "MyCheck", UIParent, "UICheckButtonTemplate")
@@ -207,6 +202,7 @@ fn a_templated_check_button_toggles_before_its_on_click_runs() {
 /// addon idiom is `btn:SetText(...)` and the published global is still `$parentText`.
 #[test]
 fn a_panel_button_from_the_template_labels_and_paints() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.run(
         r#"MyBtn = CreateFrame("Button", "MyBtn", UIParent, "UIPanelButtonTemplate")
@@ -240,6 +236,7 @@ fn a_panel_button_from_the_template_labels_and_paints() {
 /// `UiPanels.xml`.
 #[test]
 fn the_templated_close_button_hides_the_frame_it_sits_on() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = harness();
     s.run(
         r#"MyPanel = CreateFrame("Frame", "MyPanel", UIParent)
@@ -270,6 +267,7 @@ fn the_templated_close_button_hides_the_frame_it_sits_on() {
 /// region, not a layer.
 #[test]
 fn an_input_box_from_the_template_carries_its_border_and_takes_text() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.run(
         r#"MyBox = CreateFrame("EditBox", "MyBox", UIParent, "InputBoxTemplate")
@@ -316,6 +314,7 @@ fn an_input_box_from_the_template_carries_its_border_and_takes_text() {
 /// is exactly how someone later introduces a real one by "restoring" it.)
 #[test]
 fn a_scroll_frame_from_the_template_wires_its_bar_two_parents_deep() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.run(
         r#"MyScroll = CreateFrame("ScrollFrame", "MyScroll", UIParent, "UIPanelScrollFrameTemplate")
@@ -393,6 +392,7 @@ fn a_scroll_frame_from_the_template_wires_its_bar_two_parents_deep() {
 /// `CreateFrame`'s fourth argument the same way it resolves through XML `inherits=`.
 #[test]
 fn the_options_check_button_resolves_its_whole_inheritance_chain() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.run(
         r#"MyOpt = CreateFrame("CheckButton", "MyOpt", UIParent, "UIOptionsCheckButtonTemplate")"#,
@@ -440,6 +440,7 @@ fn the_options_check_button_resolves_its_whole_inheritance_chain() {
 /// plausible-but-absent here is a template no addon will ever name.
 #[test]
 fn every_template_these_files_declare_is_a_real_1_12_name() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let tsv =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference/1.12-globals.tsv");
     let text = std::fs::read_to_string(&tsv).unwrap_or_else(|e| {
@@ -455,7 +456,12 @@ fn every_template_these_files_declare_is_a_real_1_12_name() {
         .collect();
 
     let mut checked = 0;
-    for file in ["UIPanelTemplates.xml", "OptionsFrameTemplates.xml"] {
+    // OUR files only. This reads the source tree directly, so it cannot name a chain entry — and
+    // it has no reason to: asserting that the reference's own file declares 1.12 names is
+    // tautological. What it guards is us inventing one (decision 1841).
+    // Our remaining file only. `UIPanelTemplates.xml` was ours until 1846 put the whole kit on the
+    // chain; what is left to guard is the one template we still declare.
+    for file in ["OptionsFrameTemplates.xml"] {
         let src = std::fs::read_to_string(ui_dir().join(file)).unwrap();
         let doc = benilla_ui::framexml::parse(&src).unwrap();
         for item in &doc.items {
@@ -472,7 +478,103 @@ fn every_template_these_files_declare_is_a_real_1_12_name() {
         }
     }
     assert!(
-        checked >= 18,
+        checked >= 1,
         "only {checked} templates swept — the sweep, not the files, is what broke"
+    );
+}
+
+/// **`PanelTemplates_TabResize`'s `tab` argument is OPTIONAL, and omitting it means `this`.**
+///
+/// The reference opens with `if ( tab ) then tabName = tab:GetName(); else tabName =
+/// this:GetName(); tab = this; end`. Ours had only the first half, so `tab:GetName()` on a nil
+/// threw — and nothing in our tree noticed, because every caller we wrote passed a tab explicitly.
+/// The stock files do not: `Blizzard_MacroUI.xml`'s two tabs each call
+/// `PanelTemplates_TabResize(0)` from their own `OnLoad` and nothing else, so both threw at load
+/// and the window came up with unsized tabs. Decision 1835.
+///
+/// Driven through a real `OnLoad` rather than a direct call, because `this` is exactly what is
+/// under test: a plain function call would not set it.
+#[test]
+fn tab_resize_falls_back_to_this_when_no_tab_is_passed() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = harness();
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
+    let doc = benilla_ui::framexml::parse(
+        r#"<Ui>
+            <Button name="ProbeTab" inherits="CharacterFrameTabButtonTemplate" text="Macros">
+                <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                <Scripts><OnLoad>PanelTemplates_TabResize(0)</OnLoad></Scripts>
+            </Button>
+        </Ui>"#,
+    )
+    .unwrap();
+    let report = benilla_ui::loader::load_in(&s, &doc, "test", &|_: &str| None);
+    assert!(
+        report.errors.is_empty(),
+        "the OnLoad must not throw: {:?}",
+        report.errors
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    // It sized the tab it was never handed: wider than the bare label, because the end slices are
+    // added on top.
+    let width = s.eval::<f64>("return ProbeTab:GetWidth()").unwrap();
+    assert!(width > 0.0, "the tab got a width, got {width}");
+}
+
+/// **The window tab's structural clamp, driven the way the client drives it — from `OnUpdate`.**
+///
+/// 1002's law is that a tab may never grow past its window's drawn right edge, whatever fit the
+/// instance asked for. `BenillaTabButton_OnUpdate` enforces it by comparing the fitted width
+/// against the room, and it used to read that width from `PanelTemplates_TabResize`'s return —
+/// a benilla-only line on OUR copy of that verb.
+///
+/// 1837 put `Interface\FrameXML\UIPanelTemplates.lua` on the chain BELOW `UiPanels.xml`, so the
+/// reference's `PanelTemplates_TabResize` is the one that runs, and it returns nothing. The
+/// comparison became `nil > number`: a raise, once per tab per width change, with the clamp
+/// silently off the air and the tab already sized by the unclamped first call.
+///
+/// The existing tab test drives `OnLoad` and never ticks, which is why nothing caught it.
+#[test]
+fn a_tab_never_grows_past_its_windows_right_edge() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = harness();
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
+    // A deliberately narrow window and a long label: the natural fit does not fit.
+    let doc = benilla_ui::framexml::parse(
+        r#"<Ui>
+            <Frame name="ProbeWindow">
+                <Size><AbsDimension x="160" y="200"/></Size>
+                <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                <Frames>
+                    <Button name="ProbeTab" inherits="CharacterFrameTabButtonTemplate"
+                            text="A Very Long Tab Label Indeed">
+                        <Anchors>
+                            <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-10"/></Offset></Anchor>
+                        </Anchors>
+                    </Button>
+                </Frames>
+            </Frame>
+        </Ui>"#,
+    )
+    .unwrap();
+    let report = benilla_ui::loader::load_in(&s, &doc, "test", &|_: &str| None);
+    assert!(report.errors.is_empty(), "load: {:?}", report.errors);
+
+    // Two ticks: the first lands the measure, the second settles against it.
+    s.tick(0.1);
+    s.tick(0.1);
+    assert!(
+        s.errors().is_empty(),
+        "the settle must not raise — the clamp reads the fit back, not a return value: {:?}",
+        s.errors()
+    );
+
+    let (left, width) = s
+        .eval::<(f64, f64)>("return ProbeTab:GetLeft(), ProbeTab:GetWidth()")
+        .unwrap();
+    let right = s.eval::<f64>("return ProbeWindow:GetRight()").unwrap();
+    assert!(
+        left + width <= right + 0.5,
+        "the tab ran past its window: left {left} + width {width} > right {right}"
     );
 }

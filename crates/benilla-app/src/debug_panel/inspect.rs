@@ -39,6 +39,28 @@ fn kind_color(kind: ModelKind) -> egui::Color32 {
     }
 }
 
+/// The granted movement modes as the card names them (decision 1780) — `None` when the unit has
+/// none, which is nearly all of them, so the common line is unchanged. Named rather than derived
+/// from the raw word on the card: `0x40001000` says nothing to the eye, and the whole reason this
+/// is on the card is that the modes explain a body that looks wrong and is not.
+fn granted_modes(modes: Option<&crate::net::UnitMoveModes>) -> Option<String> {
+    use crate::creature_anim::move_flags as f;
+    let w = modes?.0;
+    let named = [
+        (f::ROOT, "rooted"),
+        (f::HOVER, "hover"),
+        (f::WATER_WALKING, "waterwalk"),
+        (f::SAFE_FALL, "feather"),
+        (f::WALK_MODE, "walk-mode"),
+        (f::SWIMMING, "swim"),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| w & bit != 0)
+    .map(|(_, name)| name)
+    .collect::<Vec<_>>();
+    (!named.is_empty()).then(|| format!("granted {}", named.join("+")))
+}
+
 /// The inspector's GameObject collision readout (decision 0763): does a hull exist, is it disabled
 /// right now, and what stored state does the passability gate see. Named so the bundled `stores`
 /// param stays readable.
@@ -56,9 +78,16 @@ type GoCollisionReadout = (
 /// fast?* The AQ drakes are the case that earned it — a Brood of Nozdormu 190 yd overhead beating
 /// its wings at a flat 1× while its path crawls at walk pace reads as frozen, and nothing on the
 /// card said the path was the slow half.
+///
+/// …and, since 1780, the third producer: the modes the server **granted** this unit
+/// ([`crate::net::UnitMoveModes`]). They belong on the same line because they answer the same
+/// report from the other side — a body a yard off the floor, standing on water, or refusing every
+/// path the server sends it looks broken and is not, and the mode word is the only place that
+/// difference is written down. A unit with none reads nothing extra, which is nearly all of them.
 type MotionReadout = (
     Option<&'static crate::net::Spline>,
     Option<&'static crate::net::RemoteMotion>,
+    Option<&'static crate::net::UnitMoveModes>,
 );
 
 /// The inspector's entity LIGHT readout (decision 0776): the lane this object's parts render
@@ -444,18 +473,24 @@ pub(super) fn inspect_ui(
     let motion_line = net_entity
         .filter(|_| is_unit)
         .and_then(|p| motion.get(p).ok())
-        .map(|(spline, remote)| match (spline, remote) {
-            (Some(sp), _) => format!(
-                "motion {:.2} yd/s · {} path {:.0}% of {:.0}s",
-                sp.speed(),
-                if sp.grounded { "ground" } else { "flying" },
-                100.0 * sp.elapsed_frac(),
-                sp.duration.as_secs_f32(),
-            ),
-            (None, Some(r)) if r.speed > 0.0 => {
-                format!("motion {:.2} yd/s · dead-reckoned", r.speed)
+        .map(|(spline, remote, modes)| {
+            let moving = match (spline, remote) {
+                (Some(sp), _) => format!(
+                    "motion {:.2} yd/s · {} path {:.0}% of {:.0}s",
+                    sp.speed(),
+                    if sp.grounded { "ground" } else { "flying" },
+                    100.0 * sp.elapsed_frac(),
+                    sp.duration.as_secs_f32(),
+                ),
+                (None, Some(r)) if r.speed > 0.0 => {
+                    format!("motion {:.2} yd/s · dead-reckoned", r.speed)
+                }
+                _ => "motion still".to_string(),
+            };
+            match granted_modes(modes) {
+                Some(m) => format!("{moving} · {m}"),
+                None => moving,
             }
-            _ => "motion still".to_string(),
         });
     // An `AnimationData` id as the card names it — shared by the creature and GameObject anim
     // lines below, which read the same id space.

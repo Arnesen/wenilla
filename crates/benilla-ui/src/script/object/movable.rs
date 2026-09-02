@@ -404,14 +404,18 @@ fn set_flag(lua: &Lua, this: &Table, which: Flag, value: bool) -> mlua::Result<(
     Ok(())
 }
 
-fn get_flag(lua: &Lua, this: &Table, which: Flag) -> mlua::Result<bool> {
+/// `IsMovable`/`IsResizable`/`IsUserPlaced` — the NUMBER 1 or nil, never a boolean (1830,
+/// [`crate::script::binding_abi::predicate`]).
+fn get_flag(lua: &Lua, this: &Table, which: Flag) -> mlua::Result<Value> {
     let h = frame_handle_of(lua, this)?;
     let model = lua.app_data_ref::<Model>().expect("model");
-    Ok(model.arena.frame(h).is_some_and(|f| match which {
-        Flag::Movable => f.movable,
-        Flag::Resizable => f.resizable,
-        Flag::UserPlaced => f.user_placed,
-    }))
+    Ok(crate::script::binding_abi::predicate(
+        model.arena.frame(h).is_some_and(|f| match which {
+            Flag::Movable => f.movable,
+            Flag::Resizable => f.resizable,
+            Flag::UserPlaced => f.user_placed,
+        }),
+    ))
 }
 
 /// The family's refusal, named frame and all — the reference's own shape (it formats the frame's

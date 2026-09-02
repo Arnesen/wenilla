@@ -56,10 +56,9 @@ impl PickSource for StaticGx {
                         continue;
                     };
                     gather(region, origin, dir, &mut candidates, |region, i| {
-                        region.items[i]
-                            .prop
-                            .as_ref()
-                            .is_some_and(|p| sets.get(usize::from(p.set)).copied().unwrap_or(false))
+                        region.items[i].prop.as_ref().is_some_and(|p| {
+                            sets.drawn.get(usize::from(p.set)).copied().unwrap_or(false)
+                        })
                     });
                 }
             }
@@ -69,10 +68,13 @@ impl PickSource for StaticGx {
                 continue;
             };
             gather(region, origin, dir, &mut candidates, |region, i| {
-                region.items[i]
-                    .wmo
-                    .as_ref()
-                    .is_some_and(|w| groups.get(usize::from(w.group)).copied().unwrap_or(false))
+                region.items[i].wmo.as_ref().is_some_and(|w| {
+                    groups
+                        .drawn
+                        .get(usize::from(w.group))
+                        .copied()
+                        .unwrap_or(false)
+                })
             });
         }
         candidates.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));

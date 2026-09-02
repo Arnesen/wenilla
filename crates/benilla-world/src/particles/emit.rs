@@ -17,7 +17,7 @@ pub(super) fn next_u32(state: &mut u32) -> u32 {
 }
 
 /// A uniform random `f32` in `[0, 1)`.
-pub(super) fn rand01(state: &mut u32) -> f32 {
+pub(crate) fn rand01(state: &mut u32) -> f32 {
     (next_u32(state) >> 8) as f32 / (1u32 << 24) as f32
 }
 

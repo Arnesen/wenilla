@@ -389,12 +389,22 @@
         end
 
         -- Left click drills into whatever the host finds at that map position; every other button
-        -- is the zoom-out shortcut (ref WorldMapButton_OnClick — ours takes no button argument,
-        -- since nothing but the map button itself routes here).
-        function WorldMapButton_OnClick(mouseButton)
+        -- is the zoom-out shortcut. ref WorldMapFrame.lua l.277-296. The SECOND argument is the button the click landed on,
+        -- defaulting to `this` — restored in 1793's sweep, having been dropped in favour of naming
+        -- `WorldMapButton` directly.
+        --
+        -- Equivalent for 1.12's own caller, which passes exactly that button
+        -- (`WorldMapFrame.lua:174`) — and not equivalent for anyone else, which is the whole
+        -- reason the reference takes it: a caller aiming the click at a different map surface was
+        -- silently redirected to the main one, because Lua discards a surplus argument without
+        -- complaint.
+        function WorldMapButton_OnClick(mouseButton, button)
             CloseDropDownMenus();
             if ( mouseButton == "LeftButton" ) then
-                ProcessMapClick(cursorMapPosition(WorldMapButton));
+                if ( not button ) then
+                    button = this
+                end
+                ProcessMapClick(cursorMapPosition(button));
             else
                 WorldMapZoomOutButton_OnClick();
             end

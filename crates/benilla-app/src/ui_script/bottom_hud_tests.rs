@@ -318,6 +318,19 @@ const RAISABLE_BARS: &[&str] = &[
 fn no_bottom_band_frame_overlaps_a_raised_bar() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1600.0, 900.0);
+    // The in-game UI materializes on world entry (1051), so a player always exists by the time the
+    // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
+    // into its label inside its own OnLoad. A manifest load with no player is a state the client
+    // never reaches (decision 1848).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
     let failures = super::load_default_ui(&s);
     assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
 
@@ -439,6 +452,19 @@ fn overlaps(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
 fn the_item_push_card_shares_the_band_with_a_raised_bar_exactly_as_the_reference_does() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1600.0, 900.0);
+    // The in-game UI materializes on world entry (1051), so a player always exists by the time the
+    // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
+    // into its label inside its own OnLoad. A manifest load with no player is a state the client
+    // never reaches (decision 1848).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
     let failures = super::load_default_ui(&s);
     assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
     s.run("MultiBarBottomLeft:Show() MultiBarBottomRight:Show() UIParent_ManageFramePositions()")
@@ -455,11 +481,11 @@ fn the_item_push_card_shares_the_band_with_a_raised_bar_exactly_as_the_reference
     s.tick(0.133); // the opaque peak — the instant the card is most visible
     s.resolve();
     assert!(
-        shown(&s, "MainMenuBarBackpackButtonItemAnim"),
+        shown(&s, "MainMenuBarBackpackButtonBenillaItemPush"),
         "the card plays"
     );
 
-    let card = rect(&s, "MainMenuBarBackpackButtonItemAnim");
+    let card = rect(&s, "MainMenuBarBackpackButtonBenillaItemPush");
     let bar = rect(&s, "MultiBarBottomRight");
     assert!(
         (card.1 - 48.9).abs() < 0.5 && (card.3 - 93.1).abs() < 0.5,

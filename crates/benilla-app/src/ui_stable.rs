@@ -36,9 +36,7 @@
 use benilla_protocol::messages::StabledPet;
 use bevy::prelude::*;
 
-use benilla_ui::script::{
-    ScriptValue, StableIntent, StablePetSlot, StableState, UiScript, NUM_STABLE_SLOTS,
-};
+use benilla_ui::script::{StableIntent, StablePetSlot, StableState, UiScript, NUM_STABLE_SLOTS};
 
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
@@ -230,16 +228,23 @@ fn feed_stable(
     mut errors: ResMut<StableErrors>,
     mut last: Local<crate::ui_script::VmMemo<Option<StableState>>>,
     mut last_npc: Local<crate::ui_script::VmMemo<Option<u64>>>,
+    mut sink: crate::ui_action::MessageSink,
 ) {
     let Some(mut script) = script else {
         return;
     };
     let last = last.get(&script);
     let last_npc = last_npc.get(&script);
-    // Refusals surface as the client's red error line (the trainer/merchant path's exact shape).
-    for text in errors.0.drain(..) {
-        script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
-    }
+    // Refusals go to the surface — and the voice — their message record names (1815).
+    let lines: Vec<_> = errors
+        .0
+        .drain(..)
+        .filter_map(|key| {
+            let text = script.lua().globals().get::<String>(key).ok()?;
+            (!text.is_empty()).then(|| crate::ui_action::Shown::keyed(key, text))
+        })
+        .collect();
+    crate::ui_action::show_messages(&mut script, &mut sink, "ui_stable", lines);
 
     // The next slot's price is the client's own job (the wire never sends it) — `StableSlotPrices`
     // row `purchased + 1`, the bank's arrangement. `0` past the table, a state in which the
@@ -366,7 +371,7 @@ fn feed_stable_booth(
     };
     // Written every frame, selection or none — a stale yaw would snap the model the moment one is
     // picked (the pet paper doll's arrangement).
-    booth.yaw = script.stable_yaw();
+    booth.yaw = script.model_pane_facing("PetStableModel");
 
     // `GetSelectedStablePet()`'s own answer: `0` = the summoned pet, `1..=2` a bought stable slot,
     // `-1` nothing. Reading the binding's translation rather than the raw petNumber is deliberate —
@@ -412,10 +417,13 @@ fn stable_subject(
     (unit, display)
 }
 
-/// Stable refusals staged for the feed to surface on the window's error line — only ever
-/// `ERR_NOT_ENOUGH_MONEY`, the single code the client speaks for (decision 1677).
+/// Stable refusals staged for the feed, as **message-catalog keys** — only ever
+/// `ERR_NOT_ENOUGH_MONEY`, the single code the client speaks for (decision 1677), reached through
+/// `DisplayError(0x25)` (wow-re `system/ui/scratch/stable-master-window.md` §5, VERIFIED). A key
+/// rather than the resolved text because that row carries error-speech line `0x28` too — the
+/// character says it aloud (decision 1815).
 #[derive(Resource, Default)]
-pub(crate) struct StableErrors(pub(crate) Vec<String>);
+pub(crate) struct StableErrors(pub(crate) Vec<&'static str>);
 
 /// `StableSlotPrices.dbc`, loaded once at startup — the purchase row's price oracle. A missing
 /// table quotes `0`, which is the same shape as "past the ladder": degraded, never wrong.

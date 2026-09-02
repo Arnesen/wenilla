@@ -110,7 +110,7 @@
         -- The inspect window (decision 0631, InspectFrame.xml): the ref's own InspectFrame row
         -- (`Blizzard_InspectUI.lua:4` — area "left", pushable 0), so inspecting swaps out whichever
         -- left-slot window was open, exactly as the character window does.
-        UIPanelWindows["BenillaInspectFrame"] = { area = "left", pushable = 0 }
+        UIPanelWindows["InspectFrame"] = { area = "left", pushable = 0 }
         -- The spellbook (decision 0216 §8, SpellBookFrame.xml): the ref's own SpellBookFrame row
         -- verbatim (`{ area = "left", pushable = 0, whileDead = 1 }`, UIParent.lua l.21; whileDead
         -- carried since 1507) — same left-slot competition as every window above.
@@ -120,7 +120,7 @@
         -- pushable 6 one tier above the plain NPC-session/player-state windows' 0. whileDead was
         -- omitted here while `UnitIsDead` didn't exist; it is a live unit binding now, so 1507
         -- carries the ref's flag on every row that has one.
-        UIPanelWindows["BenillaTalentFrame"] = { area = "left", pushable = 6, whileDead = 1 }
+        UIPanelWindows["TalentFrame"] = { area = "left", pushable = 6, whileDead = 1 }
         -- The social window (decision 0668) — the ref's own registration line verbatim
         -- (`UIPanelWindows["FriendsFrame"] = { area = "left", pushable = 0, whileDead = 1 }`,
         -- UIParent.lua l.29). whileDead: a corpse run is exactly when you want to whisper someone.
@@ -138,7 +138,7 @@
         -- verbatim (`UIPanelWindows["MacroFrame"] = { area = "left", pushable = 5, whileDead = 1 }`,
         -- Blizzard_MacroUI.lua:7). whileDead is the ref's and it earns its keep: writing a macro
         -- during a corpse run is a real thing people do.
-        UIPanelWindows["BenillaMacroFrame"] = { area = "left", pushable = 5, whileDead = 1 }
+        UIPanelWindows["MacroFrame"] = { area = "left", pushable = 5, whileDead = 1 }
         -- The crafting window (decision 0437 phase 2, TradeSkillFrame.xml): NOT an NPC session (it
         -- opens off your own cast, TradeSkillFrame.xml's own header comment) — the ref Lua's own
         -- registration line (Blizzard_TradeSkillUI.lua:13) is `{ area = "left", pushable = 3 }`,
@@ -399,6 +399,35 @@
         -- surface (a focused test VM, and the reference's own `ADDON_LOADED` ordering), and this
         -- runs on the first line of every `ToggleBag`/`ToggleBackpack`/`ToggleKeyRing`, so it is
         -- the last place that should be the thing to raise.
+        -- ── Moved here when UIDropDownMenu.xml went to the chain (1751) ──────────────────────
+        -- The reference keeps `CloseMenus` in `UIParent.lua:984`, not in its dropdown file, and
+        -- this file is already where our slice of UIParent.lua lives (`IsOptionFrameOpen` below,
+        -- `CloseAllWindows`, `ToggleGameMenu`). It sits at manifest line 144, ahead of all five
+        -- consumers — the stock dropdown at 155, MicroMenu, GameMenuFrame and two test kits.
+        --
+        -- The BOUND is inlined rather than read from `UIDROPDOWNMENU_MAXLEVELS`, which lives in the
+        -- dropdown file: a kit that loads this file and not that one would otherwise fail on
+        -- `'for' limit must be a number`. Two is the reference's own list count (DropDownList1/2 are
+        -- what `UIDropDownMenu.xml` declares; the third exists only in later builds).
+        --
+        -- The BODY stays ours and is deliberately not the reference's: stock iterates a `UIMenus`
+        -- table nothing here declares, ours asks the dropdown lists directly. Same answer, and it
+        -- retires with this file rather than pretending to be stock.
+        function CloseMenus()
+            local closed
+            for i=1, 2, 1 do
+                local list = getglobal("DropDownList"..i)
+                if list and list:IsVisible() then
+                    closed = 1
+                end
+            end
+            if closed then
+                CloseDropDownMenus()
+            end
+            return closed
+        end
+
+
         function IsOptionFrameOpen()
             if (GameMenuFrame and GameMenuFrame:IsVisible())
                 or (OptionsFrame and OptionsFrame:IsVisible())
@@ -972,9 +1001,15 @@
         -- the StaticPopupDialogs registry + StaticPopup_Show(which, arg1, arg2) + the OnUpdate
         -- countdown/StartDelay machinery — the death arc's dialogs exercise nearly all of it, and
         -- StaticPopup_Show/StaticPopupDialogs are 1.14 addon-API surface (0068). v1 scope:
-        --   · TWO dialog instances (STATICPOPUP_NUMDIALOGS = 2; the ref runs 4) — the deepest
-        --     nesting exercised so far is decline-res re-showing DEATH (Show precedes the click's
-        --     hide, so a free second instance is required). Grow toward 4 when a third coexists.
+        --   · FOUR dialog instances, the reference's own count. It was 2 for a long time, on the
+        --     reasoning that the deepest nesting exercised was decline-res re-showing DEATH (Show
+        --     precedes the click's hide, so a free second instance is required) and that it should
+        --     "grow toward 4 when a third coexists". 1751 window 7 supplied that third caller from
+        --     an unexpected direction: the reference's own `MirrorTimer_Show` bounds its free-bar
+        --     search by this constant rather than by `MIRRORTIMER_NUMTIMERS` (MirrorTimer.lua
+        --     l.32, a copy-paste from StaticPopup.lua), so at 2 the third mirror bar was
+        --     unreachable for a new timer. The coupling is the reference's bug and this is not the
+        --     file to fix it in; matching its count is.
         --   · info fields honored: text, button1, button2, DisplayButton2, OnShow(data),
         --     OnHide(data), OnAccept(data, data2) (truthy return = keep open — RECOVER_CORPSE
         --     waits for the server, XP_LOSS's first Accept re-asks), OnCancel(data, reason)
@@ -1007,7 +1042,7 @@
         --   · Resize runs per tick while shown, not only on text swaps: GetHeight's measure has a
         --     frame of latency (the measured-width convention below), so the height self-corrects
         --     the frame after any text change.
-        STATICPOPUP_NUMDIALOGS = 2
+        STATICPOPUP_NUMDIALOGS = 4
         StaticPopupDialogs = {}
 
         local function StaticPopupTimeUnit(n, minutes)
@@ -1019,10 +1054,24 @@
             return "seconds"
         end
 
-        function StaticPopup_FindVisible(which)
+        -- ref StaticPopup.lua l.1414-1426, `data` included. Ours took `which` alone until 1793
+        -- found the arity drift; the reference's second argument is what makes a `multiple` dialog
+        -- addressable, and dropping it is silent in both directions (Lua discards a surplus
+        -- argument without complaint).
+        --
+        -- The `info.multiple` gate is the reference's own and is why `data` is not simply an
+        -- equality: a dialog kind declared `multiple` can have several instances up at once, so it
+        -- is matched by data; every other kind has at most one, so its data is not consulted at
+        -- all. An unknown `which` answers nil rather than scanning — the reference's own early out.
+        function StaticPopup_FindVisible(which, data)
+            local info = StaticPopupDialogs[which]
+            if not info then
+                return nil
+            end
             for index = 1, STATICPOPUP_NUMDIALOGS do
                 local frame = getglobal("StaticPopup" .. index)
-                if frame:IsShown() and frame.which == which then
+                if frame:IsShown() and frame.which == which
+                    and (not info.multiple or frame.data == data) then
                     return frame
                 end
             end
@@ -1038,11 +1087,19 @@
             return nil
         end
 
-        function StaticPopup_Hide(which)
+        -- ref StaticPopup.lua l.1703-1710, `data` included (1793). With a `data` the reference
+        -- hides only the instance carrying it; without one it hides every instance of the kind,
+        -- which is what every one-argument caller means and gets.
+        --
+        -- Note the reference does NOT test `IsShown()` here, where `FindVisible` does — hiding an
+        -- already-hidden dialog is a no-op, and the missing test is not an oversight to correct:
+        -- `Hide()` on a hidden frame still runs nothing, and adding the guard would change which
+        -- frames the loop touches for no visible difference. Transcribed as it is.
+        function StaticPopup_Hide(which, data)
             for index = 1, STATICPOPUP_NUMDIALOGS do
-                local frame = getglobal("StaticPopup" .. index)
-                if frame:IsShown() and frame.which == which then
-                    frame:Hide()
+                local dialog = getglobal("StaticPopup" .. index)
+                if dialog.which == which and (not data or data == dialog.data) then
+                    dialog:Hide()
                 end
             end
         end
@@ -1480,10 +1537,204 @@
         YES = YES or "Yes"
         NO = NO or "No"
 
+        -- ref GlobalStrings.lua l.2612 / l.2818 / l.465, fallback form (the player's own localized
+        -- file runs off the patch chain first).
+        -- ── The group-invite popup (ref StaticPopup.lua l.526-548) ───────────────────────────
+        -- Moved here from our `PartyFrame.xml` when 1751 took that window to the player's chain.
+        -- This file is our `StaticPopup.lua`, which is where the reference declares it; the party
+        -- frames were only where ours was first needed.
+        -- The strings and the three flags are the reference's own (INVITATION = "%s invites you to
+        -- a group.", GlobalStrings:2586-area; a 60 s silent timeout, answerable while dead,
+        -- closable with ESC).
+        --
+        -- The whole of its behaviour turns on ONE latch, `inviteAccepted`, and the four hooks below
+        -- are just the four moments that read or write it. It lives on the registry entry rather
+        -- than in an upvalue here because that is where the reference keeps it and an addon
+        -- inspecting the dialog expects to find it there — which is why each hook goes back through
+        -- `StaticPopupDialogs["PARTY_INVITE"]` instead of closing over a local.
+        --
+        -- They are named rather than inlined so the entry below reads as the manifest it is: four
+        -- strings, three flags, four hooks.
+
+        -- Every showing starts unanswered — including a re-show of the same entry, which is what a
+        -- second invite arriving while the first is up does.
+        local function PartyInvite_OnShow()
+            StaticPopupDialogs["PARTY_INVITE"].inviteAccepted = nil
+        end
+
+        -- The only path that answers the server affirmatively, and the only one that latches.
+        local function PartyInvite_OnAccept()
+            AcceptGroup()
+            StaticPopupDialogs["PARTY_INVITE"].inviteAccepted = 1
+        end
+
+        local function PartyInvite_OnCancel()
+            DeclineGroup()
+        end
+
+        -- The catch-all. EVERY way this dialog leaves the screen lands here — Decline, the 60 s
+        -- timeout, ESC, and another dialog overriding it — and the latch is what tells the one
+        -- that already said yes from the four that never answered at all. A clicked Decline
+        -- therefore declines twice (OnCancel, then here); see DOUBLE-DECLINE in the header, which
+        -- is the reference's behaviour and the wire tolerates it.
+        local function PartyInvite_OnHide()
+            if not StaticPopupDialogs["PARTY_INVITE"].inviteAccepted then
+                DeclineGroup()
+            end
+        end
+
+        StaticPopupDialogs["PARTY_INVITE"] = {
+            text = INVITATION,
+            button1 = ACCEPT,
+            button2 = DECLINE,
+            sound = "igPlayerInvite",
+            timeout = 60,
+            whileDead = 1,
+            hideOnEscape = 1,
+            OnShow = PartyInvite_OnShow,
+            OnAccept = PartyInvite_OnAccept,
+            OnCancel = PartyInvite_OnCancel,
+            OnHide = PartyInvite_OnHide,
+        }
+
+        -- ── The logout countdowns ────────────────────────────────────────────────────────────
+        -- The CAMP and QUIT dialogs, moved here from our `GameMenuFrame.xml` when 1751 took that
+        -- window to the player's chain. This file is our `StaticPopup.lua`, which is where the
+        -- reference declares both (l.564 / l.586) — the ESC menu never owned them, it just
+        -- happened to be where ours were first needed.
+        CAMP_TIMER = CAMP_TIMER or "%d %s until logout"
+        QUIT_TIMER = QUIT_TIMER or "%d %s until exit"
+        QUIT_NOW = QUIT_NOW or "Exit now"
+        -- CANCEL before the tables below, not after: a dialog entry captures its button labels BY
+        -- VALUE at load, so a `button1 = CANCEL` built while CANCEL is still nil silently falls
+        -- back to the popup engine's default ("Yes") rather than failing. It reads as a wrong
+        -- label on a real dialog and as nothing at all in a test that does not check the text.
+        CANCEL = CANCEL or "Cancel"
+
+        -- Dismissing a running countdown means "I didn't mean it": call the logout off. Only while
+        -- it is still RUNNING, though — the popup engine zeroes `timeleft` before hiding a dialog
+        -- that expired, so reaching zero leaves the logout alone. (Backwards, and every logout in
+        -- the field is cancelled by its own dialog at t=0 and the character never leaves.) One
+        -- function because both dialogs mean exactly this; `this` is the popup frame, which the
+        -- engine has bound around the handler.
+        local function CancelLogoutIfStillCounting()
+            if this.timeleft > 0 then
+                CancelLogout()
+            end
+        end
+
+        StaticPopupDialogs["CAMP"] = {
+            text = CAMP_TIMER,
+            button1 = CANCEL,
+            timeout = 20,
+            whileDead = 1,
+            hideOnEscape = 1,
+            OnAccept = function()
+                CancelLogout()
+            end,
+            OnHide = CancelLogoutIfStillCounting,
+        }
+
+        StaticPopupDialogs["QUIT"] = {
+            text = QUIT_TIMER,
+            button1 = QUIT_NOW,
+            button2 = CANCEL,
+            timeout = 20,
+            whileDead = 1,
+            hideOnEscape = 1,
+            -- A force-quit needs no server round trip, so the countdown it was narrating is over
+            -- the moment the button is pressed: zero `timeleft` so the OnHide below stands down.
+            OnAccept = function()
+                ForceQuit()
+                this.timeleft = 0
+            end,
+            OnHide = CancelLogoutIfStillCounting,
+        }
+
+        LOOT_NO_DROP = LOOT_NO_DROP or "Looting this item will bind it to you."
+        OKAY = OKAY or "Okay"
+
+        -- ref StaticPopup.lua l.601-611, verbatim. `OnAccept`'s argument is `dialog.data`, the
+        -- event's row — and `LootSlot` is the CONTINUATION verb, so this line is the only thing in
+        -- the client that ever completes a bind-deferred take (decision 1744).
+        --
+        -- It lives here rather than in the loot window because this file is our `StaticPopup.lua`
+        -- and that is the reference's own home for it. Our transcription of `LootFrame.xml`
+        -- declared it; the stock file does not, so 1751 moved it where it always belonged.
+        --
+        -- No OnCancel (declining leaves the row in the window, and the app drops the pending stash
+        -- when the window turns over) and no OnUpdate poll: the loot window's own LOOT_CLOSED
+        -- hides it (`LootFrame.lua:53-54`).
+        StaticPopupDialogs["LOOT_BIND"] = {
+            text = LOOT_NO_DROP,
+            button1 = OKAY,
+            button2 = CANCEL,
+            OnAccept = function(slot)
+                LootSlot(slot)
+            end,
+            timeout = 0,
+            exclusive = 1,
+            hideOnEscape = 1,
+        }
+
+        CONFIRM_LOOT_DISTRIBUTION = CONFIRM_LOOT_DISTRIBUTION
+            or "You wish to assign %s to %s.  Is this correct?" -- GlobalStrings.lua l.848
+
+        -- The master-loot confirmation the group-loot dropdown raises for an at-or-above-threshold
+        -- item (ref StaticPopup.lua l.85-94, verbatim). It lives HERE because that is the
+        -- reference's own home for it — this file is our `StaticPopup.lua` — and because 1751 took
+        -- `LootFrame.xml` to the player's chain: our transcription used to declare this dialog
+        -- itself, and the stock file does not.
+        --
+        -- `data` is the candidate index the dropdown stashed; the SLOT is re-read live from
+        -- `LootFrame.selectedSlot` at accept time, exactly as the reference does. That is not a
+        -- shortcut — it is why the row click hides this popup first (`LootFrame.lua:156`), so an
+        -- accept can never land on a row the player has since clicked away from.
+        StaticPopupDialogs["CONFIRM_LOOT_DISTRIBUTION"] = {
+            text = CONFIRM_LOOT_DISTRIBUTION,
+            button1 = YES,
+            button2 = NO,
+            OnAccept = function(data)
+                GiveMasterLoot(LootFrame.selectedSlot, data)
+            end,
+            timeout = 0,
+            hideOnEscape = 1,
+        }
+
         -- Ref StaticPopup.lua l.659-679, verbatim — its own OnUpdate poll (cursor emptied by any
         -- other path → hide) replaces the old bespoke `deleteItemFlow` CURSOR_UPDATE driver.
         -- exclusive is v1-inert (engine header note); showAlert is live since 1068 — the ref's
         -- own "display the error image" case is this very dialog.
+        -- CONFIRM_LOOT_ROLL — the BoP roll's "this will bind to you" gate, keyed BARE like every
+        -- other entry (the key is `StaticPopup_Show`'s argument, not a frame name).
+        --
+        -- It moved here from our own GroupLootFrame.xml when 1838 retired that file. The reference
+        -- keeps it in `StaticPopup.lua`; we have no counterpart to that file, and our own
+        -- convention is that a dialog whose window has migrated comes to sit beside DELETE_ITEM
+        -- below — the same move `CloseMenus` made when the dropdown kit went to the chain.
+        --
+        -- The C `RollOnLoot` is what diverts a BoP Need/Greed here rather than rolling: the gate
+        -- lives in the binding, not in Lua (decision 0594, verified in the 5875 binary), and only
+        -- `OnAccept`'s `ConfirmLootRoll` re-enters past it. `id`/`rollType` arrive as data/data2,
+        -- set by the `CONFIRM_LOOT_ROLL` arm in UIParent.xml's own OnEvent.
+        --
+        -- The three strings are quoted verbatim rather than read from GlobalStrings, which is this
+        -- file's existing idiom for exactly one reason: a bare global is nil in a harness that has
+        -- not loaded the chain's GlobalStrings, and a `format()` over nil aborts the whole inline
+        -- chunk — taking every function defined after it down with it.
+        StaticPopupDialogs["CONFIRM_LOOT_ROLL"] = {
+            text = "Looting this item will bind it to you.", -- LOOT_NO_DROP
+            button1 = "Okay",                                -- OKAY
+            button2 = "Cancel",                              -- CANCEL
+            OnAccept = function(id, rollType)
+                ConfirmLootRoll(id, rollType)
+            end,
+            timeout = 0,
+            whileDead = 1,
+            exclusive = 1,
+            hideOnEscape = 1
+        }
+
         StaticPopupDialogs["DELETE_ITEM"] = {
             text = DELETE_ITEM,
             button1 = YES,
@@ -1654,6 +1905,45 @@
             hideOnEscape = 1,
         }
 
+        -- The guild-charter rename box, ref StaticPopup.lua l.133-160 — **in the reference's own
+        -- home, which is this file**. It lived in our PetitionFrame.xml on the reasoning that "a
+        -- popup belongs to the window that raises it"; that is a fine rule and it is not 1.12's,
+        -- which keeps every dialog in one registry. 1751's twelfth window made the charter the
+        -- reference's own file, whose Rename button calls `StaticPopup_Show("RENAME_GUILD")` and
+        -- registers nothing, so the entry had to come here.
+        --
+        -- 24 letters is the server's MAX_CHARTER_NAME, so the box cannot compose a name that will
+        -- be refused for length. Accept and Enter run the same two lines; the reference spells
+        -- them out twice (l.139-147), and its Enter arm hides the dialog while its Accept arm does
+        -- not — the popup engine hides on a plain Accept anyway.
+        StaticPopupDialogs["RENAME_GUILD"] = {
+            text = RENAME_GUILD_LABEL,
+            button1 = ACCEPT,
+            button2 = CANCEL,
+            hasEditBox = 1,
+            maxLetters = 24,
+            OnAccept = function()
+                RenamePetition(getglobal(this:GetParent():GetName() .. "EditBox"):GetText())
+            end,
+            EditBoxOnEnterPressed = function()
+                RenamePetition(getglobal(this:GetParent():GetName() .. "EditBox"):GetText())
+                this:GetParent():Hide()
+            end,
+            OnShow = function()
+                getglobal(this:GetName() .. "EditBox"):SetFocus()
+            end,
+            OnHide = function()
+                if ChatFrameEditBox and ChatFrameEditBox:IsVisible() then
+                    ChatFrameEditBox:SetFocus()
+                end
+                getglobal(this:GetName() .. "EditBox"):SetText("")
+            end,
+            timeout = 0,
+            exclusive = 1,
+            whileDead = 1,
+            hideOnEscape = 1,
+        }
+
         -- ref UIParent.lua l.324-343 + l.356-360, the four arms on one driver. Each equip arm
         -- hides the OTHER dialog first — the two questions are mutually exclusive by construction
         -- (one item, one destination), and the hide is what cancels the record the new question
@@ -1668,6 +1958,39 @@
             elseif event == "AUTOEQUIP_BIND_CONFIRM" then
                 StaticPopup_Hide("EQUIP_BIND")
                 local dialog = StaticPopup_Show("AUTOEQUIP_BIND")
+                if dialog then
+                    dialog.data = arg1
+                end
+            elseif event == "PARTY_INVITE_REQUEST" then
+                -- ref UIParent.lua's own arms. Same move as the logout three and the loot bind
+                -- confirm: the popup-raising event belongs beside the popup, not in whichever
+                -- window happened to need it first.
+                StaticPopup_Show("PARTY_INVITE", arg1)
+            elseif event == "PARTY_INVITE_CANCEL" then
+                StaticPopup_Hide("PARTY_INVITE")
+            elseif event == "PLAYER_CAMPING" then
+                -- ref UIParent.lua l.304-315. These three lived on our GameMenuFrame.xml's own
+                -- hidden listener, on the reasoning that benilla has no UIParent frame; they are
+                -- here now for the same reason the loot bind confirm is — 1751 took that window
+                -- to the chain, and the reference's placement (UIParent, beside every other
+                -- popup-raising event) is the one that survives the window being someone else's.
+                StaticPopup_Show("CAMP")
+            elseif event == "PLAYER_QUITING" then
+                StaticPopup_Show("QUIT")
+            elseif event == "LOGOUT_CANCEL" then
+                StaticPopup_Hide("CAMP")
+                StaticPopup_Hide("QUIT")
+            elseif event == "LOOT_BIND_CONFIRM" then
+                -- ref UIParent.lua l.317-323. The row rides on `dialog.data` rather than as a
+                -- text arg — LOOT_NO_DROP has no format specifier, so the sentence is the same
+                -- whatever binds; the number is only there to hand back to `LootSlot`.
+                --
+                -- This arm used to live in our own `LootFrame.xml`, on the window's event
+                -- listener, on the reasoning that LOOT_CLOSED already had to hide the dialog and
+                -- the arc stayed in one file. 1751 took that window to the chain, and the
+                -- reference's placement — UIParent, beside every other bind confirm — turned out
+                -- to be the one that survives the window being someone else's.
+                local dialog = StaticPopup_Show("LOOT_BIND")
                 if dialog then
                     dialog.data = arg1
                 end
@@ -1905,161 +2228,12 @@
             tDeleteItem(PULSEBUTTONS, button)
         end
 
-        -- ── The tab kit (ref UIPanelTemplates.lua l.1-29/90-133, transcribed VERBATIM shape) ──
-        -- One selected tab per group: the frame carries numTabs/selectedTab, tabs are named
-        -- <frame>Tab1..N (CharacterFrameTabButtonTemplate instances — the template lives in this
-        -- file). SelectTab swaps the InActive art for the Active art and disables the button (a
-        -- selected tab doesn't re-click); DeselectTab reverses it. Omitted vs ref: the
-        -- isDisabled/SetDisabledTabState arm (no window has a disabled tab yet) and the SelectTab
-        -- tab-tooltip hide (our tabs set no tooltip). First consumer: the merchant's
-        -- Merchant/Buyback pair.
-        -- The kit's XML-facing entry point (ref l.2-4), and the one member of it this client never
-        -- had. Not an omission anyone decided: our own windows wire each tab's OnClick to their own
-        -- handler (the merchant's Merchant/Buyback pair, CharacterFrame's pages), so nothing here
-        -- ever reached for the generic one. An ADDON does the opposite — it puts the reference's
-        -- name straight in its <OnClick> and lets the kit do the work:
-        --
-        --     Enchantrix        EnchantrixBarker.xml:61    (Enchantrix_BarkerOptions_Frame)
-        --     Outfitter         Outfitter.xml:7            (OutfitterFrame)
-        --     SimpleActionSets  SimpleActionSets.xml:342   (this:GetParent())
-        --     TheoryCraft       TheoryCraft.xml:163        (TheoryCraft)
-        --
-        -- Four addons, four separate files, so 1207's one-library caveat does not apply. A raw grep
-        -- says FIVE: QuestItemTemplates.xml:17 has the call commented out. Reading the line is what
-        -- tells those apart, and the survey's own count of 4 was the right one.
-        --
-        -- Missing, every one of them raises on each click of the tab, so the addon's options window
-        -- stays on whatever page it opened with and cannot be navigated at all. `this` is the
-        -- clicked tab button, whose id is its slot in the row; the frame is passed in separately
-        -- because the tab's parent is not always the frame owning the row — SimpleActionSets is the
-        -- case that proves it, passing `this:GetParent()` explicitly.
-        function PanelTemplates_Tab_OnClick(frame)
-            PanelTemplates_SetTab(frame, this:GetID())
-        end
-
-        function PanelTemplates_SetNumTabs(frame, numTabs)
-            frame.numTabs = numTabs
-        end
-
-        function PanelTemplates_SetTab(frame, id)
-            frame.selectedTab = id
-            PanelTemplates_UpdateTabs(frame)
-        end
-
-        function PanelTemplates_GetSelectedTab(frame)
-            return frame.selectedTab
-        end
-
-        function PanelTemplates_UpdateTabs(frame)
-            if not frame.selectedTab then return end
-            for i = 1, frame.numTabs do
-                local tab = getglobal(frame:GetName() .. "Tab" .. i)
-                if tab.isDisabled then
-                    PanelTemplates_SetDisabledTabState(tab)
-                elseif i == frame.selectedTab then
-                    PanelTemplates_SelectTab(tab)
-                else
-                    PanelTemplates_DeselectTab(tab)
-                end
-            end
-        end
-
-        -- The disabled-tab arm (ref UIPanelTemplates.lua l.94-105 + l.135-148) — the piece this
-        -- kit deliberately omitted until a window needed it. First customer: the social window's
-        -- GUILD tab, which `InGuildCheck` disables for a character in no guild — i.e. permanently
-        -- until the guild arc exists (decision 0668). A disabled tab wears the INACTIVE
-        -- three-slice art (like an unselected tab) but is un-clickable with a greyed label, so it
-        -- reads as "there, not for you" rather than as the selected one.
-        function PanelTemplates_DisableTab(frame, index)
-            getglobal(frame:GetName() .. "Tab" .. index).isDisabled = 1
-            PanelTemplates_UpdateTabs(frame)
-        end
-
-        function PanelTemplates_EnableTab(frame, index)
-            local tab = getglobal(frame:GetName() .. "Tab" .. index)
-            tab.isDisabled = nil
-            tab:SetDisabledTextColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
-            PanelTemplates_UpdateTabs(frame)
-        end
-
-        function PanelTemplates_SetDisabledTabState(tab)
-            local name = tab:GetName()
-            getglobal(name .. "Left"):Show()
-            getglobal(name .. "Middle"):Show()
-            getglobal(name .. "Right"):Show()
-            tab:Disable()
-            tab.text = tab:GetText()
-            tab:SetDisabledTextColor(GRAY_FONT_COLOR.r, GRAY_FONT_COLOR.g, GRAY_FONT_COLOR.b)
-            getglobal(name .. "LeftDisabled"):Hide()
-            getglobal(name .. "MiddleDisabled"):Hide()
-            getglobal(name .. "RightDisabled"):Hide()
-        end
-
-        function PanelTemplates_DeselectTab(tab)
-            local name = tab:GetName()
-            getglobal(name .. "Left"):Show()
-            getglobal(name .. "Middle"):Show()
-            getglobal(name .. "Right"):Show()
-            tab:Enable()
-            getglobal(name .. "LeftDisabled"):Hide()
-            getglobal(name .. "MiddleDisabled"):Hide()
-            getglobal(name .. "RightDisabled"):Hide()
-        end
-
-        function PanelTemplates_SelectTab(tab)
-            local name = tab:GetName()
-            getglobal(name .. "Left"):Hide()
-            getglobal(name .. "Middle"):Hide()
-            getglobal(name .. "Right"):Hide()
-            tab:Disable()
-            getglobal(name .. "LeftDisabled"):Show()
-            getglobal(name .. "MiddleDisabled"):Show()
-            getglobal(name .. "RightDisabled"):Show()
-        end
-
-        -- The text-fit (ref PanelTemplates_TabResize, UIPanelTemplates.lua l.31-88 — now the WHOLE
-        -- function, `(padding, tab, absoluteSize, maxWidth)`): the tab is text + padding wide, plus
-        -- the two end slices; both middle slices stretch to the text; the text box itself un-sizes
-        -- to natural. `maxWidth` CAPS it and pins the label's box to the cap instead — the arm that
-        -- keeps a long tab inside its window, which the first transcription dropped and the macro
-        -- window's character tab then overran (0983 → 0991). `absoluteSize` is the ref's third arm,
-        -- transcribed with it so the next caller has it.
-        --
-        -- One deviation: the ref reads the label's laid-out GetWidth (its C measure is synchronous);
-        -- ours reads GetStringWidth — the same number once the measure round-trip lands, which is
-        -- why the caller below re-checks from OnUpdate instead of OnShow.
-        function PanelTemplates_TabResize(padding, tab, absoluteSize, maxWidth)
-            local name = tab:GetName()
-            local text = getglobal(name .. "Text")
-            local sideWidths = 2 * getglobal(name .. "Left"):GetWidth()
-            local width, tabWidth
-            if absoluteSize then
-                if absoluteSize < sideWidths then
-                    width, tabWidth = 1, sideWidths
-                else
-                    width, tabWidth = absoluteSize - sideWidths, absoluteSize
-                end
-                text:SetWidth(width)
-            else
-                width = text:GetStringWidth() + (padding or 24)
-                if maxWidth and width > maxWidth then
-                    width = maxWidth + (padding or 24)
-                    text:SetWidth(width)
-                else
-                    text:SetWidth(0)
-                end
-                tabWidth = width + sideWidths
-            end
-            getglobal(name .. "Middle"):SetWidth(width)
-            getglobal(name .. "MiddleDisabled"):SetWidth(width)
-            tab:SetWidth(tabWidth)
-            -- benilla addition: hand back the width just declared. `tab:GetWidth()` cannot serve
-            -- it — that reads the last RESOLVED rect, which inside a settle is this frame's stale
-            -- input, not the value one line above just set. A clamp that read it back saw the old
-            -- width, declined to fire, and the settle's gate then locked the un-clamped result in
-            -- for good (decision 1002).
-            return tabWidth
-        end
+        -- The tab kit — `PanelTemplates_*` — is the REFERENCE's, off the player's chain
+        -- (`Interface\FrameXML\UIPanelTemplates.lua`, seated below this file in the manifest).
+        -- Our eleven transcribed copies stood here dead from the day that entry landed, and one
+        -- of them was carrying a benilla-only return the settle below read (1855/1860). What
+        -- stays is that settle, which is ours because our text measure is a frame late and the
+        -- reference's is not.
 
         -- The tab template's per-frame settle: the ref does TabResize(0) once, in OnShow
         -- (CharacterFrameTemplates.xml l.77-80), trusting a synchronous text measure. Our
@@ -2104,16 +2278,36 @@
         end
 
         function BenillaTabButton_OnUpdate(tab)
-            local text = getglobal(tab:GetName() .. "Text")
+            local name = tab:GetName()
+            local text = getglobal(name .. "Text")
             local w = (text and text:GetStringWidth()) or 0
             if w <= 0 then return end
             local pad = tab.benillaTabPadding or 0
             local room = BenillaTab_Room(tab)
             if tab.benillaFitWidth == w and tab.benillaFitRoom == room then return end
             tab.benillaFitWidth, tab.benillaFitRoom = w, room
-            local fitted = PanelTemplates_TabResize(pad, tab, nil, tab.benillaTabMaxWidth)
-            if room and fitted > room then
-                PanelTemplates_TabResize(pad, tab, room)
+            PanelTemplates_TabResize(pad, tab, nil, tab.benillaTabMaxWidth)
+            -- THE CLAMP READS THE FIT BACK OFF THE ART, not off a return value and not off the
+            -- button. `PanelTemplates_TabResize` is the REFERENCE's now (1837 put
+            -- `UIPanelTemplates.lua` on the chain below this file, so its definition wins) and it
+            -- returns nothing; our own copy's benilla-only `return tabWidth` had already stopped
+            -- running, which is what took 1002's clamp off the air silently. `tab:GetWidth()`
+            -- cannot serve either — it reads the last RESOLVED rect, this frame's stale input
+            -- inside a settle, which is the whole reason 1002 added that return.
+            --
+            -- `$parentMiddle` can. `PanelTemplates_TabResize` sets it on its way out, a Texture's
+            -- width is its AUTHORED size, and a region's GetWidth reports the authored value
+            -- without consulting a resolved rect (region::virtual_span) — so it is the number the
+            -- verb just computed, same tick. The tab is that plus its two end caps, which is the
+            -- reference's own `tabWidth = width + sideWidths`.
+            if room then
+                local middle = getglobal(name .. "Middle")
+                local left = getglobal(name .. "Left")
+                local fitted = (middle and middle:GetWidth() or 0)
+                    + 2 * (left and left:GetWidth() or 0)
+                if fitted > room then
+                    PanelTemplates_TabResize(pad, tab, room)
+                end
             end
             -- No highlight sizing here on purpose — BOTH tab templates anchor their highlight to
             -- their own two side edges, so it IS the tab by construction (decision 1004).
@@ -2154,10 +2348,36 @@
         pre-fit state). Its OnShow *also* sets the highlight width, which is dead code in the
         reference and dropped here: this highlight is anchored LEFT/RIGHT, and two opposing anchors
         resolve the size from the span without consulting the width at all (wow-re layout.md,
-        VERIFIED). The small tab now says the same thing the same way (1004). One deviation: the ref's OnLoad
-        SetFrameLevel(+4) raise (our loader has no cross-frame level raise wired into templates
-        yet; the tabs sit below the window art's hit-rect so nothing overlaps them). OnClick is
-        the instance's to define (the ref merchant overrides it too).
+        VERIFIED). The small tab now says the same thing the same way (1004).
+
+        **The OnLoad raise and the OnClick are the reference's own, and both were dropped here
+        until decision 1810.** The note that stood in their place said the raise was unnecessary —
+        "the tabs sit below the window art's hit-rect so nothing overlaps them" — and that "OnClick
+        is the instance's to define". Both were true of our own CharacterFrame.xml, and both are
+        false of the reference's, which is the file that runs now:
+
+          - the reference's `PaperDollFrame` is `setAllPoints enableMouse="true"` with a
+            `bottom=45` hit inset, and the reference's tabs are anchored INSIDE the window (CENTER
+            to BOTTOMLEFT +60,+62), so the page's hit rect covers the whole row. Frame levels come
+            out CharacterFrame 1 / PaperDollFrame 2 / tabs 2, later-created winning — the page eats
+            every tab click. `SetFrameLevel(+4)` is what lifts the row out, and is why the
+            reference has it.
+          - stock `CharacterFrame.xml` gives its five tabs only `<OnEnter>`/`<OnLeave>`; the
+            dispatch lives HERE. Without it `CharacterFrameTab4:GetScript("OnClick")` is nil and
+            the character window's tabs do nothing at all.
+
+        The body hardcodes `CharacterFrame`, which reads odd on a shared template until you check
+        the other consumers: the reference's `MerchantFrameTab1/2` and every one of ours
+        (Auction/Friends/Inspect/Mail/Talent) declares its own `<OnClick>`, and an instance's
+        handler REPLACES the inherited one rather than adding to it. So this reaches exactly the
+        window it names, which is the reference's own arrangement.
+
+        Still ours, and still why this template is not simply sourced off the chain:
+        `Interface\FrameXML\CharacterFrameTemplates.xml` fits its text in `<OnShow>` through
+        `PanelTemplates_TabResize(0)`, which needs the reference's SYNCHRONOUS string measure. Ours
+        lands a frame late, so the fit runs from `BenillaTabButton_OnUpdate` instead and an
+        OnShow-only fit would leave every tab at its pre-fit 115px. That divergence is 1004's, it
+        spans six windows, and it is what this template's own migration waits on.
     -->
     <Button name="CharacterFrameTabButtonTemplate" virtual="true">
         <Size><AbsDimension x="115" y="32"/></Size>
@@ -2208,88 +2428,22 @@
             </Anchors>
         </HighlightTexture>
         <Scripts>
+            <!-- ref CharacterFrameTemplates.xml:69-81, verbatim. -->
+            <OnLoad>this:SetFrameLevel(this:GetFrameLevel() + 4)</OnLoad>
+            <OnClick>
+                PanelTemplates_Tab_OnClick(CharacterFrame)
+                CharacterFrameTab_OnClick()
+            </OnClick>
             <OnUpdate>BenillaTabButton_OnUpdate(self)</OnUpdate>
         </Scripts>
     </Button>
 
-    <!--
-        The SMALL tab button (ref `TabButtonTemplate`, UIPanelTemplates.xml l.303-402, transcribed
-        VERBATIM: the HelpFrameTab Active/Inactive three-slice pair on 16/32/16 slices, text at
-        BOTTOM +5, the ADD highlight at +2,-8 — anchored to both side edges rather than sized in
-        Lua, the one departure, and why: see the highlight below). Not the same thing as
-        `CharacterFrameTabButtonTemplate` above — that one is the big *window* tab along a panel's
-        bottom edge; this is the compact tab a panel uses to switch a list INSIDE itself. The
-        social window's Friends/Ignore pair is the first customer (decision 0668); the reference
-        also uses it for the help frame and the raid pane.
-
-        Slice naming matches the big tab's, so the shared PanelTemplates_SelectTab/DeselectTab kit
-        drives both unchanged — "Disabled" is "selected" here too. Same OnUpdate text-fit for the
-        same reason (our GetStringWidth lands a frame late).
-    -->
-    <Button name="TabButtonTemplate" virtual="true">
-        <Size><AbsDimension x="115" y="32"/></Size>
-        <Layers>
-            <Layer level="BACKGROUND">
-                <Texture name="$parentLeftDisabled" file="Interface\HelpFrame\HelpFrameTab-Active">
-                    <Size><AbsDimension x="16" y="32"/></Size>
-                    <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors>
-                    <TexCoords left="0" right="0.25" top="0" bottom="1.0"/>
-                </Texture>
-                <Texture name="$parentMiddleDisabled" file="Interface\HelpFrame\HelpFrameTab-Active">
-                    <Size><AbsDimension x="32" y="32"/></Size>
-                    <Anchors><Anchor point="LEFT" relativeTo="$parentLeftDisabled" relativePoint="RIGHT"/></Anchors>
-                    <TexCoords left="0.25" right="0.75" top="0" bottom="1.0"/>
-                </Texture>
-                <Texture name="$parentRightDisabled" file="Interface\HelpFrame\HelpFrameTab-Active">
-                    <Size><AbsDimension x="16" y="32"/></Size>
-                    <Anchors><Anchor point="LEFT" relativeTo="$parentMiddleDisabled" relativePoint="RIGHT"/></Anchors>
-                    <TexCoords left="0.75" right="1.0" top="0" bottom="1.0"/>
-                </Texture>
-                <Texture name="$parentLeft" file="Interface\HelpFrame\HelpFrameTab-Inactive">
-                    <Size><AbsDimension x="16" y="32"/></Size>
-                    <Anchors><Anchor point="BOTTOMLEFT"/></Anchors>
-                    <TexCoords left="0" right="0.25" top="0" bottom="1.0"/>
-                </Texture>
-                <Texture name="$parentMiddle" file="Interface\HelpFrame\HelpFrameTab-Inactive">
-                    <Size><AbsDimension x="32" y="32"/></Size>
-                    <Anchors><Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/></Anchors>
-                    <TexCoords left="0.25" right="0.75" top="0" bottom="1.0"/>
-                </Texture>
-                <Texture name="$parentRight" file="Interface\HelpFrame\HelpFrameTab-Inactive">
-                    <Size><AbsDimension x="16" y="32"/></Size>
-                    <Anchors><Anchor point="LEFT" relativeTo="$parentMiddle" relativePoint="RIGHT"/></Anchors>
-                    <TexCoords left="0.75" right="1.0" top="0" bottom="1.0"/>
-                </Texture>
-            </Layer>
-        </Layers>
-        <ButtonText name="$parentText">
-            <Size><AbsDimension x="0" y="13"/></Size>
-            <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="5"/></Offset></Anchor></Anchors>
-        </ButtonText>
-        <NormalFont inherits="GameFontNormalSmall"/>
-        <HighlightFont inherits="GameFontHighlightSmall"/>
-        <DisabledFont inherits="GameFontHighlightSmall"/>
-        <!-- The highlight spans the tab's own two side edges, so it tracks any fit for free. The
-             ref sizes it in Lua instead — `SetWidth(GetTextWidth() + 31)` at OnLoad, which on the
-             template's own +0 fit (tab = text + 32) lands at tab − 1: "the highlight is the tab",
-             said in arithmetic. It only stops meaning that when an instance passes a padding or a
-             cap, and the macro window's tabs pass both — which is how the director got a highlight
-             13 units proud of tab 1 and 35 short of tab 2 in the same screenshot (decision 1004).
-             The big tab template above already says it this way (LEFT/RIGHT, no Lua); this is the
-             same statement on 16-unit end slices. Two opposing anchors resolve the size from the
-             span and never consult the width, so the declared 5 is inert on x (wow-re layout.md,
-             VERIFIED); the y anchors are both BOTTOM, so 32 still sets the height. -->
-        <HighlightTexture name="$parentHighlightTexture" file="Interface\PaperDollInfoFrame\UI-Character-Tab-Highlight" alphaMode="ADD">
-            <Size><AbsDimension x="5" y="32"/></Size>
-            <Anchors>
-                <Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="2" y="-8"/></Offset></Anchor>
-                <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="2" y="-8"/></Offset></Anchor>
-            </Anchors>
-        </HighlightTexture>
-        <Scripts>
-            <OnUpdate>BenillaTabButton_OnUpdate(self)</OnUpdate>
-        </Scripts>
-    </Button>
+    <!-- The SMALL tab button (`TabButtonTemplate`, the compact tab a panel uses to switch a list
+         INSIDE itself — the social window's Friends/Ignore pair, decision 0668) is the
+         REFERENCE's, off the chain: `Interface\FrameXML\UIPanelTemplates.xml` declares it and
+         our transcription here was overwritten from that day (1860). `FriendsFrame.xml` is its
+         only consumer and loads long after that entry, so it has been inheriting the reference's
+         since the swap. -->
 
     <!--
         The shared dialog instance — the ref's StaticPopup1 (decision 0308 §3; the engine lives in
@@ -2448,6 +2602,19 @@
     <Frame name="StaticPopup2" inherits="StaticPopupTemplate" parent="UIParent">
         <Anchors><Anchor point="TOP" relativeTo="StaticPopup1" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-8"/></Offset></Anchor></Anchors>
     </Frame>
+    <!-- The ref's four (StaticPopup.xml l.245-254), each stacked under the last. Instances 3 and 4
+         joined with 1751's seventh window and the reason is a cross-file coupling worth naming:
+         `STATICPOPUP_NUMDIALOGS` is not only this engine's pool size — the reference's own
+         `MirrorTimer_Show` bounds its free-bar search by it (MirrorTimer.lua l.32, a copy-paste
+         from StaticPopup.lua). At 2 against MIRRORTIMER_NUMTIMERS = 3 the third mirror bar could
+         never be claimed by a new timer, silently. The v1 note above said "grow toward 4 when a
+         third coexists"; the reference's own body is that third caller. -->
+    <Frame name="StaticPopup3" inherits="StaticPopupTemplate" parent="UIParent">
+        <Anchors><Anchor point="TOP" relativeTo="StaticPopup2" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-8"/></Offset></Anchor></Anchors>
+    </Frame>
+    <Frame name="StaticPopup4" inherits="StaticPopupTemplate" parent="UIParent">
+        <Anchors><Anchor point="TOP" relativeTo="StaticPopup3" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-8"/></Offset></Anchor></Anchors>
+    </Frame>
 
     <!-- The delete-item confirm driver (decision 0216 §3): DELETE_ITEM_CONFIRM names no frame of
          its own (the ref handles it in UIParent.lua's OnEvent), so this is a dedicated hidden
@@ -2475,6 +2642,12 @@
                 self:RegisterEvent("EQUIP_BIND_CONFIRM")
                 self:RegisterEvent("AUTOEQUIP_BIND_CONFIRM")
                 self:RegisterEvent("USE_BIND_CONFIRM")
+                self:RegisterEvent("LOOT_BIND_CONFIRM")
+                self:RegisterEvent("PLAYER_CAMPING")
+                self:RegisterEvent("PLAYER_QUITING")
+                self:RegisterEvent("LOGOUT_CANCEL")
+                self:RegisterEvent("PARTY_INVITE_REQUEST")
+                self:RegisterEvent("PARTY_INVITE_CANCEL")
                 self:RegisterEvent("CURSOR_UPDATE")
             </OnLoad>
             <OnEvent>BenillaBindConfirmDriver_OnEvent(self)</OnEvent>

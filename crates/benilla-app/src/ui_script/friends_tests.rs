@@ -9,39 +9,7 @@
 
 use benilla_ui::script::{FriendInfo, SocialRequest, SocialState, UiScript, WhoInfo};
 
-/// Load one shipped `assets/ui/<file>`, panicking on any loader error — **and on any
-/// unknown-template warning**.
-///
-/// That second check is not decoration. `inherits=` a template this house doesn't ship is a
-/// *warning*, not an error: the frame is still created, just with none of the template's art or
-/// size. Every test below stayed green while all eight action buttons and the close button were
-/// invisible, because a bare Button still clicks. Only a live run showed it. The guard is here so
-/// the next window cannot repeat it.
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-    let missing: Vec<&String> = report
-        .warnings
-        .iter()
-        .filter(|w| w.contains("unknown template"))
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "{file}: inherits a template this house does not ship (the frame loads, its ART does \
-         not): {missing:?}"
-    );
-}
+use super::test_ui::load_ui_strict as load_xml;
 
 /// The window's own manifest slice, in `load_default_ui` order.
 fn setup() -> UiScript {
@@ -51,7 +19,7 @@ fn setup() -> UiScript {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     // The row right-click menu is the shared UnitPopup "FRIEND" menu, so the window's slice of
     // the manifest includes it (it loads well before FriendsFrame.xml in the real order).
     load_xml(&s, "UnitPopup.xml");
@@ -60,7 +28,8 @@ fn setup() -> UiScript {
     // UIPanelCloseButton / UIPanelScrollFrameTemplate rather than a private copy (decision 1257),
     // so this file's slice needs the shared kit — and the strict `load_xml` above is what would
     // otherwise let those frames load art-less and silent.
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "FriendsFrame.xml");
     // The social window's fourth tab lives in its own file, and it is part of THIS window's
     // manifest slice now: `BENILLA_FRIENDS_SUBFRAMES` names "RaidFrame", and both
@@ -103,6 +72,7 @@ fn push(s: &mut UiScript, state: SocialState, event: &str) {
 /// every character starts a session in.
 #[test]
 fn the_window_opens_on_friends_with_the_guild_tab_disabled() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = setup();
     s.run("ToggleFriendsFrame(1)").unwrap();
     assert!(s.eval::<bool>("return FriendsFrame:IsVisible()").unwrap());
@@ -161,6 +131,7 @@ fn the_window_opens_on_friends_with_the_guild_tab_disabled() {
 /// `GetFriendInfo`'s six returns ever come back in the wrong order.
 #[test]
 fn friend_rows_render_the_online_and_offline_templates() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("ToggleFriendsFrame(1)").unwrap();
     push(
@@ -210,6 +181,7 @@ fn friend_rows_render_the_online_and_offline_templates() {
 /// whispered or invited, and an empty list disables all three.
 #[test]
 fn the_friend_buttons_follow_the_selection() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("ToggleFriendsFrame(1)").unwrap();
 
@@ -249,6 +221,7 @@ fn the_friend_buttons_follow_the_selection() {
 /// from this index), and Group Invite addresses the NAME.
 #[test]
 fn the_friend_buttons_queue_their_verbs() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("ToggleFriendsFrame(1)").unwrap();
     push(
@@ -285,6 +258,7 @@ fn the_friend_buttons_queue_their_verbs() {
 /// their names. `ShowIgnorePanel()` (what `/ignore` with no name runs) lands on the same list.
 #[test]
 fn the_ignore_list_is_the_other_half_of_tab_one() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("ToggleFriendsFrame(1)").unwrap();
     push(
@@ -345,6 +319,7 @@ fn the_ignore_list_is_the_other_half_of_tab_one() {
 /// makes the column order worth pinning.
 #[test]
 fn who_rows_fill_their_columns() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("ShowWhoPanel()").unwrap();
     push(
@@ -397,6 +372,7 @@ fn who_rows_fill_their_columns() {
 /// The variable column really is variable: picking Guild re-paints it and sorts by that key.
 #[test]
 fn the_who_dropdown_switches_the_variable_column() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("ShowWhoPanel()").unwrap();
     push(
@@ -437,6 +413,7 @@ fn the_who_dropdown_switches_the_variable_column() {
 /// the selection — row 3 of the last query is not row 3 of this one.
 #[test]
 fn the_who_buttons_need_a_selected_row() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("ShowWhoPanel()").unwrap();
     let rows = vec![
@@ -498,6 +475,7 @@ fn the_who_buttons_need_a_selected_row() {
 /// closed would print nothing at all.
 #[test]
 fn showing_the_who_frame_claims_the_next_answer() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("ShowWhoPanel()").unwrap();
     assert!(
@@ -516,6 +494,7 @@ fn showing_the_who_frame_claims_the_next_answer() {
 /// The `/who` edit box sends its filter verbatim — the string the app parses into wire fields.
 #[test]
 fn the_who_edit_box_sends_its_filter() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("ShowWhoPanel()").unwrap();
     let _ = s.take_social_requests();
@@ -532,6 +511,7 @@ fn the_who_edit_box_sends_its_filter() {
 /// bare `/who` opens the panel and fills the edit box with the default filter.
 #[test]
 fn the_slash_bodies_match_the_reference() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     // The WhoFrame's OnLoad routes results to chat until it is shown; drain that so each
     // assertion below sees only what its own call queued.
@@ -582,6 +562,7 @@ fn the_slash_bodies_match_the_reference() {
 /// customer of the popup engine's `hasEditBox` capability. Accepting sends what was typed.
 #[test]
 fn add_friend_without_a_target_opens_the_name_dialog() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("ToggleFriendsFrame(1)").unwrap();
     s.run("FriendsFrameAddFriendButton:Click()").unwrap();
@@ -618,6 +599,7 @@ fn add_friend_without_a_target_opens_the_name_dialog() {
 /// typed last time.
 #[test]
 fn the_name_dialog_reopens_empty() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = setup();
     s.run("ToggleFriendsFrame(1)").unwrap();
     s.run("StaticPopup_Show(\"ADD_FRIEND\")").unwrap();
@@ -636,6 +618,7 @@ fn the_name_dialog_reopens_empty() {
 /// survive UnitPopup's gating, and each one acts on the name.
 #[test]
 fn right_clicking_a_who_row_opens_the_friend_menu() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("ShowWhoPanel()").unwrap();
     push(
@@ -658,8 +641,7 @@ fn right_clicking_a_who_row_opens_the_friend_menu() {
         "the menu opens"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaFriendsDropDown.name")
-            .unwrap(),
+        s.eval::<String>("return FriendsDropDown.name").unwrap(),
         "Tigole",
         "addressed by name, not by a unit token"
     );
@@ -689,6 +671,7 @@ fn right_clicking_a_who_row_opens_the_friend_menu() {
 /// ref's own `connected` gate on the whole menu.
 #[test]
 fn right_clicking_an_offline_friend_opens_nothing() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("ToggleFriendsFrame(1)").unwrap();
     push(
@@ -712,6 +695,7 @@ fn right_clicking_an_offline_friend_opens_nothing() {
 /// read `FriendsList_Update` does right after `SetSelectedFriend`.
 #[test]
 fn selecting_a_row_reads_back_in_the_same_tick() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("ToggleFriendsFrame(1)").unwrap();
     push(
@@ -755,6 +739,7 @@ fn selecting_a_row_reads_back_in_the_same_tick() {
 /// exemption. Skips without the extracted reference.
 #[test]
 fn the_window_geometry_matches_the_reference_framexml() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let Some(reference) = super::framexml_diff::reference("FriendsFrame.xml") else {
         eprintln!("skipping: no extracted FrameXML");
         return;

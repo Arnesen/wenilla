@@ -4,6 +4,10 @@
 //! The GameObject substate arm (`goanimscan`), the effect-model Stand/Hold/Decay lifecycle
 //! (`fxlifescan`), the loader-idle slot the per-sequence bakes degrade away from (`idleslotscan`),
 //! and the models with no keyed bone at all, so no clock ever advances (`seqclockscan`).
+//!
+//! Plus the arm's *reach*: which models author a sound-event marker the rig gate never arms
+//! (`soundeventscan`) — the same failure one level down, where the sequence is right and nothing
+//! runs its clock.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -594,6 +598,150 @@ pub fn seqclockscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
          {frozen_go} of them GameObject display models (the hosted lane, frozen at slot 0 t=0). \
          {partial} PARTIAL models have unkeyed sequences a clip lookup can never reach; \
          {inert} more are boneless with nothing to sample (a clock there is inert)."
+    );
+    Ok(())
+}
+
+/// Sweep every `.m2` and census the **animation-driven sound emitters**: the models whose
+/// sequences carry a `$DSL` (doodad sound loop) / `$DSO` (doodad sound one-shot) / `$SND` (generic
+/// one-shot) event marker, the `SoundEntries` kit each names, and — the column this exists for —
+/// whether the carrying sequence is **rest-posed**.
+///
+/// Why that column decides everything: `benilla_assets`' render content gate
+/// (`idle_pose_differs` → [`benilla_formats::ModelAnimation::is_rest_pose`], decision 0130) skips
+/// building a rig for a sequence that would render as the static mesh, and the whole point of
+/// that gate is that it is a question **about pixels only**. A placed lamp's Stand band keys no
+/// bone at all — it is pure rest pose — yet it carries the one `$DSL` marker that is its hum. So
+/// every model in the `REST` column is one whose sound the arm can never reach through a rig: its
+/// events need a clock that does not depend on there being anything to animate.
+///
+/// Reports the per-model rows, then a tag/kit histogram and the `REST`-gated share.
+pub fn soundeventscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    const SOUND_TAGS: [&[u8; 4]; 3] = [b"$DSL", b"$DSO", b"$SND"];
+    let kits = benilla_formats::load_sound_kit_catalog(chain).ok();
+    let names = super::m2_names(chain, prefix)?;
+    let (mut scanned, mut carriers, mut rest_gated, mut hostless) = (0u32, 0u32, 0u32, 0u32);
+    let mut per_tier: BTreeMap<&str, u32> = BTreeMap::new();
+    let mut per_tag: BTreeMap<String, (u32, u32)> = BTreeMap::new(); // tag -> (markers, rest-gated)
+    let mut per_kit: BTreeMap<u32, u32> = BTreeMap::new();
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        let anims = benilla_formats::parse_m2_animations(&bytes);
+        if anims.is_empty() {
+            continue;
+        }
+        scanned += 1;
+        // The spawn tier `benilla_world::doodad_anim::classify` would give this model, from the
+        // same three inputs it reads: a boneless model is `Static` outright (the 0035 guard);
+        // otherwise the 0130 content gate picks `FirstSeq` when the loader-idle clip's pose
+        // differs from bind, else `GlobalSeqOnly` when free-running channels exist, else
+        // `Static`. `is_rest_pose` is the gate's own predicate (decision 0936 pushed it down
+        // beside the parse so this census cannot drift from it); the tier matters here because
+        // only the two animated tiers get an anim-root ENTITY at all — a `Static` carrier has
+        // nothing but loose submeshes to hang an emitter on.
+        let bones = benilla_m2::parse_m2(&mut std::io::Cursor::new(&bytes))
+            .map_or(0, |f| f.model().bones.len());
+        let idle_id = benilla_formats::parse_m2_playable_animation_lookup(&bytes)
+            .unwrap_or_default()
+            .first()
+            .map_or(0, |p| p.resolved_id);
+        let gseq = !benilla_formats::parse_m2_global_sequence_bones(&bytes).is_empty();
+        let tier = if bones == 0 {
+            "Static"
+        } else if anims
+            .iter()
+            .any(|a| a.anim_id == idle_id && !a.is_rest_pose())
+        {
+            "FirstSeq"
+        } else if gseq {
+            "GlobalSeq"
+        } else {
+            "Static"
+        };
+        let mut rows = Vec::new();
+        let mut model_rest_gated = false;
+        for a in &anims {
+            let marks: Vec<_> = a
+                .events
+                .iter()
+                .filter(|e| SOUND_TAGS.contains(&&e.ident))
+                .collect();
+            if marks.is_empty() {
+                continue;
+            }
+            // The gate is asked of the sequence that CARRIES the marker: that is the one whose
+            // clock has to run for the marker to be reached at all.
+            let rest = a.is_rest_pose();
+            model_rest_gated |= rest;
+            for e in &marks {
+                let tag = String::from_utf8_lossy(&e.ident).into_owned();
+                let slot = per_tag.entry(tag).or_default();
+                slot.0 += 1;
+                slot.1 += u32::from(rest);
+                *per_kit.entry(e.data).or_default() += 1;
+            }
+            let list: Vec<String> = marks
+                .iter()
+                .map(|e| {
+                    let tag = String::from_utf8_lossy(&e.ident);
+                    let kit = kits
+                        .as_ref()
+                        .and_then(|c| c.get(e.data))
+                        .map_or_else(|| "?".to_string(), |k| k.name.clone());
+                    format!("{:.3}s {tag}({}) {kit}", e.time, e.data)
+                })
+                .collect();
+            rows.push(format!(
+                "    seq {:>2} anim {:>3} {:<5} {:>6.3}s  {}  {}",
+                a.seq_index,
+                a.anim_id,
+                if a.looping { "loop" } else { "clamp" },
+                a.duration,
+                if rest { "REST" } else { "rig " },
+                list.join(", "),
+            ));
+        }
+        if rows.is_empty() {
+            continue;
+        }
+        carriers += 1;
+        rest_gated += u32::from(model_rest_gated);
+        *per_tier.entry(tier).or_default() += 1;
+        if tier == "Static" {
+            hostless += 1;
+        }
+        println!("{name}  [{tier}]");
+        for r in rows {
+            println!("{r}");
+        }
+    }
+    println!("\n=== tag histogram (markers, and how many sit on a REST-posed sequence) ===");
+    for (tag, (n, rest)) in &per_tag {
+        println!("  {tag}  {n:>5} marker(s), {rest:>5} on a REST-posed sequence");
+    }
+    println!("\n=== distinct sound kits named ({}) ===", per_kit.len());
+    for (id, n) in &per_kit {
+        let k = kits.as_ref().and_then(|c| c.get(*id));
+        println!(
+            "  {id:>6}  x{n:<4} {:<40} vol {:>4.2}  minDist {:>7.2}  cutoff {:>8.2}  flags 0x{:03x}",
+            k.map_or("MISSING", |k| k.name.as_str()),
+            k.map_or(0.0, |k| k.volume),
+            k.map_or(0.0, |k| k.min_distance),
+            k.map_or(0.0, |k| k.distance_cutoff),
+            k.map_or(0, |k| k.flags),
+        );
+    }
+    println!("\n=== spawn tier of the carriers ===");
+    for (t, n) in &per_tier {
+        println!("  {t:<10} {n:>4} model(s)");
+    }
+    eprintln!(
+        "{scanned} models with sequences scanned; {carriers} carry a $DSL/$DSO/$SND marker, \
+         {hostless} of them on the Static tier (no anim-root entity exists to hang an emitter \
+         on today); {rest_gated} carry the marker on a REST-posed sequence — the class benilla's rig gate \
+         (decision 0130) never arms, so the marker is unreachable through an AnimationPlayer."
     );
     Ok(())
 }

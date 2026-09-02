@@ -1088,16 +1088,21 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // — the level-up fix), WHITE for Mod, GREY for Mod2x; policy 4 (render flag 0x02) = unfogged.
     // Encoded in clutter_fade.z bits 4-6.
     // Interior lanes fog with the INTERIOR triple — the room keeps its warm MFOG haze while the
-    // storm's veil stays on everything seen through the door. Two routes in: the MATERIAL flag
-    // (WMO interior-group batches and their doodad props, m.model_flags.z — round-6 Q-I:
-    // `0x6b5190`/`0x6b62e0` push DNState+0x80/84/88) and the per-INSTANCE tag bit 30 (an entity
-    // M2 whose model stands in a WMO interior — the reference stages a unit's fog by the unit's
-    // own light-node classification, `0x71c110`/`[node+0xc]`, wow-re m2-unit-interior-fog.md;
-    // at camera-out the triples are equal, so the bit only diverges inside a fogged WMO).
-    // Every other lane inherits the scene fog.
+    // storm's veil stays on everything seen through the door. ONE route in, the per-INSTANCE tag
+    // bit 30, written by two disjoint owners for the two mechanisms the reference has:
+    //   * room-bound WMO content (group geometry, its doodad props) takes the client's per-group
+    //     `[0xca7f00]` gate on the two interior-fog pushes `0x6b5190`/`0x6b62e0` (round-6 Q-I),
+    //     resolved per frame by the portal flood (`wmo_portal::GroupPvs::interior_fog`);
+    //   * an entity M2 takes its OWN light-node classification (`0x71c110`/`[node+0xc]`, wow-re
+    //     m2-unit-interior-fog.md), which is a different gate on the same triple.
+    // The material's own `model_flags.z` is NOT that test: it is static per batch, so before
+    // decision 1787 every true-interior group in a building wore the building's MFOG the moment
+    // the camera stood anywhere inside it — B335, where the Shadowfang room two exterior-lit
+    // courtyards away read as a flat teal wash at 70 yd. At camera-out the two triples are equal,
+    // so the bit only ever diverges inside a fogged WMO. Every other lane inherits the scene fog.
     var fog_color = wow_light.fog_color;
     var fog_span = wow_light.fog_params.xy;
-    if (m.model_flags.z > 0.5 || interior_fogged) {
+    if (interior_fogged) {
         fog_color = wow_light.wmo_fog_color;
         fog_span = wow_light.wmo_fog_params.xy;
     }

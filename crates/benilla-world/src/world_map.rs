@@ -17,6 +17,23 @@ use benilla_assets::{AssetSet, WorldAssets};
 /// arrives and tells us the character's real map. A worldport then bumps [`CurrentMap`].
 pub(crate) const DEFAULT_MAP_ID: u32 = 0;
 
+/// `$WOW_MAP` — the map a **server-less** run starts on, as a `Map.dbc` id (`0` = Azeroth,
+/// `1` = Kalimdor). Unset gives [`DEFAULT_MAP_ID`].
+///
+/// **Set-but-unparseable is a hard error, deliberately.** This used to fall back to Azeroth, so
+/// `WOW_MAP=Kalimdor` silently photographed the wrong continent — the capture came back as empty
+/// ocean with the subject floating in it, which reads as a renderer bug and costs a session the
+/// time to chase one. An instrument that answers the wrong question quietly is worse than one that
+/// refuses.
+fn map_id_from_env() -> u32 {
+    match std::env::var("WOW_MAP") {
+        Err(_) => DEFAULT_MAP_ID,
+        Ok(v) => v.trim().parse().unwrap_or_else(|_| {
+            panic!("WOW_MAP={v:?} is not a Map.dbc id — it takes a NUMBER (0 = Azeroth, 1 = Kalimdor), not a name")
+        }),
+    }
+}
+
 /// The map the player is currently on. Written by `player::control` when it drains the world stream's
 /// worldport; watched by the terrain + WDL streamers (reload ADTs/WDL for the new map), the loading
 /// screen (cover the swap), and time-of-day lighting (per-map outdoor light).
@@ -93,10 +110,7 @@ fn load_world_map(mut commands: Commands, world_assets: Option<Res<WorldAssets>>
             // A named capture scenario carries its own map (`capture::scenarios::Scenario::map`)
             // and writes it here before this runs, so the golden sweep's Kalimdor shots need no env
             // at all — see `capture::CapturePlugin::build` (decision 0743).
-            let map = std::env::var("WOW_MAP")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(DEFAULT_MAP_ID);
+            let map = map_id_from_env();
             commands.insert_resource(CurrentMap(map));
         }
         Err(e) => error!("failed to load Map.dbc, cross-map teleport disabled: {e:#}"),

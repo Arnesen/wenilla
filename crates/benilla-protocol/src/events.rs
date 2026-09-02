@@ -17,8 +17,8 @@ use crate::messages::{
     GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse, GuildRoster,
     InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo, LootAllPassed, LootItem,
     LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart, MonsterMoveFacing,
-    ObjectFields, PartyKillLog, PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells,
-    PetitionQueryResponse, PetitionRename, PetitionShowList, PetitionShowSignatures,
+    MoverState, ObjectFields, PartyKillLog, PartyMemberStatsInfo, PeriodicAuraLog, PetMode,
+    PetSpells, PetitionQueryResponse, PetitionRename, PetitionShowList, PetitionShowSignatures,
     PetitionSignResults, PvpCredit, QuestComplete, QuestConfirmAccept, QuestDetails,
     QuestGiverList, QuestOfferReward, QuestRequestItems, QuestShareMsg, QuestTemplate,
     SpellDamageLog, SpellDispelLog, SpellEnergizeLog, SpellHealLog, SpellInstaKillLog,
@@ -195,7 +195,15 @@ pub enum SessionEvent {
     CharActionResult { action: CharAction, code: u8 },
     /// We are in the world: `self_guid` is our player, `name` its character name. The IO thread emits
     /// this first, before any object updates.
-    Connected { self_guid: u64, name: String },
+    Connected {
+        self_guid: u64,
+        name: String,
+        /// The account's accumulated **rested billing minutes**, from the `SMSG_AUTH_RESPONSE`
+        /// that admitted this session — what `GetBillingTimeRested()` reports (decision 1820).
+        /// Rides the connect event because that is the only moment it ever arrives: the reference
+        /// keeps it in a process-lifetime global written once by the auth parser.
+        billing_time_rested: u32,
+    },
     /// The server confirmed our logout (`SMSG_LOGOUT_COMPLETE`) — we are back at character select.
     /// The IO thread cycles the connection immediately; a fresh [`Self::CharacterList`] follows.
     LoggedOut,
@@ -228,6 +236,17 @@ pub enum SessionEvent {
         /// animation selector's walk-vs-run boundary (RF-0057) and the net bridge's remote-mover
         /// extrapolation. (Movement-block data, not a descriptor field — hence not in `fields`.)
         speeds: Option<MoveSpeeds>,
+        /// The **live mover state** this unit is already in as it streams into view — its
+        /// `MOVEMENTFLAGS` word and swim pitch ([`MoverState`]); `None` for a GameObject. The
+        /// reference applies both from the create block (byte-VERIFIED — wow-5875-re
+        /// `system/collision/scratch/create-block-swim-pitch.md`; the flags through the very same
+        /// `0x75a07dff` merge a relayed `MSG_MOVE_*` uses, the pitch through the shared pose commit
+        /// `0x7c6420`), and it does so *before* the model or its render callback exist — so a unit
+        /// that comes into view mid-motion is already in that motion on its first drawn frame. We
+        /// used to drop the whole word: a player who swam into view rendered level and untilted
+        /// until their next relay packet, and an idle floater — who sends none — stayed level for
+        /// as long as they floated.
+        mover: Option<MoverState>,
         /// A transport GameObject's (`UPDATE_FLAG_TRANSPORT`) path-progress anchor — `Some` only for a
         /// type-15/type-11 transport create (a boat/zeppelin/elevator). Decision 0438's cycle anchor:
         /// `anchor = this value`, `t₀ = Instant::now()` on create/re-create; per frame `progress =
@@ -839,7 +858,7 @@ pub enum SessionEvent {
         npc: u64,
         text_id: u32,
         options: Vec<GossipOption>,
-        quests: Vec<(u32, u32, String)>,
+        quests: Vec<(u32, u32, u32, String)>,
     },
     /// A questgiver dialog status for one NPC (`SMSG_QUESTGIVER_STATUS`) — the `!`/`?` marker's
     /// [`crate::messages::dialog_status`] value. Stored per guid now; the world marker is a later
@@ -1117,6 +1136,21 @@ pub enum SessionEvent {
         guid: u64,
         counter: u32,
         mode: crate::messages::MoveMode,
+        apply: bool,
+    },
+    /// **Some unit's movement mode changed** — the `SMSG_SPLINE_MOVE_*` twelve (decision 1780),
+    /// the observer half of [`Self::MoveMode`]'s family. Nothing to ack; `guid` is any unit, and on
+    /// vmangos it is one the server is driving itself (a creature), which is precisely the case the
+    /// ack'd family structurally cannot reach. `apply` is always the direction of the mode's
+    /// `MOVEMENTFLAGS` bit ([`crate::messages::SplineMode::flag`]).
+    ///
+    /// The app folds it into that unit's granted-mode word, which the animation selector, the
+    /// creature ground clamp and the remote dead-reckon all read — the reference does the same and
+    /// then re-runs the unit's gait selector on the spot (`0x6014ec`), which is what makes the
+    /// family *visual* rather than bookkeeping.
+    SplineMoveMode {
+        guid: u64,
+        mode: crate::messages::SplineMode,
         apply: bool,
     },
     /// **A knockback aimed at our own mover** (`SMSG_MOVE_KNOCK_BACK`, decision 1702) — the server

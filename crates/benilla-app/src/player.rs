@@ -132,6 +132,9 @@ pub(crate) use state::{
 /// in-liquid-but-not-swimming state and the two cannot be different numbers. Read by the creature
 /// swim marker and the footstep splash slot, which have no `Player` of their own.
 pub(crate) use swim::{may_swim, swim_enter_depth};
+/// The camera's followed unit when that is not our own body — read by [`crate::camera_shake`] for
+/// the shake's body frame and its two suspend gates, which the reference takes off `[cam+0x88]`.
+pub(crate) use view_subject::ViewSubject;
 
 /// **`UNIT_FLAG_STUNNED`** — the `UNIT_FIELD_FLAGS` bit that freezes a character's *turning*
 /// (decision 0872). Not a movement flag and not an aura: the reference reads it straight off the

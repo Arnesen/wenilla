@@ -98,29 +98,38 @@ impl PressGesture {
 /// the camera CVars, wow-re `follow-camera`): max orbit = `cameraDistanceMax × cameraDistanceMaxFactor`,
 /// **hard-capped at 50**; the low clamp is **0** — zoom-to-first-person (at distance 0 the eye sits at
 /// the framing pivot, inside the head, and the avatar fades to invisible — see
-/// [`benilla_world::model_fade::self_model_fade_alpha`]). The out-of-box *default* max is 15 (`15 × 1`); we use
-/// **30** as the max zoom-out — the "Max Camera Distance" setting fully raised (`cameraDistanceMax 15 ×
-/// cameraDistanceMaxFactor 2.0`, well under the 50 cap), matched against the reference client. (The 2.0
-/// factor cap is inferred from the ref-client comparison, not byte-verified — the RE pinned the CVar
-/// *defaults* and the 50 hard cap, not the factor slider's own max.) Our starting zoom is 15 — pulled
-/// back a bit further than vanilla's own default for a wider view.
+/// [`benilla_world::model_fade::self_model_fade_alpha`]). The out-of-box max is **15** (`15 × 1`) —
+/// the reference's, and since 1804 ours. This file shipped the factor fully raised (30 yd) from
+/// the day it was written — a taste call ("a wider view") that nobody had weighed against the
+/// client it imitates. The slider is still there and still reaches 30; it just is not where a
+/// fresh install starts. Our starting zoom
+/// is 15 — the reference's own shipped `cameraDistance` is 5.55 (wow-re
+/// `camera-settings-persistence.md` §2), a divergence this file has always carried in its own words
+/// ("pulled back a bit further than vanilla's own default for a wider view") and one 1804 leaves
+/// alone: it is the camera's *initial state*, not a settings row, and it is the director's look.
 pub(super) const CAM_DIST_MIN: f32 = 0.0;
 /// The reference's `cameraDistanceMax` — the BASE the factor multiplies (registrar default 15).
 /// Not exposed: 1.12's panel offers only the factor, so this stays the constant it is there.
 pub(super) const CAM_DIST_BASE_MAX: f32 = 15.0;
 /// `cameraDistanceMaxFactor`'s slider range — 1.12's own (MAX_FOLLOW_DIST: 1 … 2, step 0.1).
 pub(crate) const CAM_DIST_FACTOR_RANGE: std::ops::RangeInclusive<f32> = 1.0..=2.0;
-/// The shipped max orbit: the factor slider fully raised, which is where benilla has always sat.
+/// The orbit ceiling at the factor slider's **top** — the furthest any saved view or restored
+/// camera pose may sit. Not the shipped default any more (1804): [`ZoomLimit::default`] is the
+/// slider at rest, `1 × 15`. This is what a distance read back off disk is clamped to, which has
+/// to admit the whole slider range rather than only its resting point.
 pub(super) const CAM_DIST_MAX: f32 = CAM_DIST_BASE_MAX * 2.0;
 pub(super) const CAM_DIST_DEFAULT: f32 = 15.0;
 
 /// The max-orbit knob (decision 1140) — 1.12's `cameraDistanceMaxFactor` over the base above.
 /// A fourth frozen constant made reachable: [`CAM_DIST_MAX`] was the only zoom ceiling there was.
 ///
-/// **Our registered default is the factor at 2.0, the reference's registrar ships 1.0** — a named
-/// divergence, and the one this file has always carried in its own words ("pulled back a bit
-/// further than vanilla's own default for a wider view"). Lowering the slider re-clamps the live
-/// target on the next frame, so the view comes in rather than waiting for the next wheel notch.
+/// **The default is the reference's 1.0** — `15 yd`, byte-pinned (wow-re
+/// `ui/scratch/follow-camera.md`: "cameraDistanceMax 15.0, cameraDistanceMaxFactor 1.0"). It was
+/// 2.0 from 1140 until 1804, which is the whole reason that record exists: the raised factor was a
+/// reasonable taste call on its day and it was never weighed as a *default*, so benilla shipped a
+/// camera that started 15 yd further out than the client it imitates. Raising the slider re-clamps
+/// nothing; lowering it re-clamps the live target on the next frame, so the view comes in rather
+/// than waiting for the next wheel notch.
 #[derive(Resource)]
 pub(crate) struct ZoomLimit {
     /// Max orbit distance in yards — `CAM_DIST_BASE_MAX × factor`, hard-capped like the client's 50.
@@ -129,7 +138,11 @@ pub(crate) struct ZoomLimit {
 
 impl Default for ZoomLimit {
     fn default() -> Self {
-        Self { max: CAM_DIST_MAX }
+        // The slider at rest — `cameraDistanceMaxFactor` 1.0 × the 15 yd base, i.e. the reference's
+        // own out-of-box ceiling. `CAM_DIST_MAX` is the slider's TOP, and belongs to the clamps.
+        Self {
+            max: CAM_DIST_BASE_MAX,
+        }
     }
 }
 

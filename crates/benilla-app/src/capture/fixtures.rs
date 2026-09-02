@@ -228,7 +228,7 @@ pub(super) fn seed_ui_fixture(
             // Quest rows ride above the options (decision 0088) — an available quest (its own
             // AvailableQuestIcon dot) so the capture covers the quest-row icon/text seating, not
             // just the option rows.
-            gossip.quests = vec![(783, 0, "Eagan Peltskinner".into())];
+            gossip.quests = vec![(783, 0, 5, "Eagan Peltskinner".into())];
             // One short option AND four that WRAP — the live shape both gossip bugs came in as
             // (the director's screenshots), and a menu deliberately TALLER than the parchment so
             // the capture covers the whole chain: the per-row auto-height
@@ -991,7 +991,7 @@ pub(super) fn seed_ui_fixture(
             // The Audio page (0957): register the real CVar set first — the hermetic capture has
             // no CvarPlugin file load to race, and the rows must read real values, not the
             // nil-tolerant zeros — then open and select through the live paths.
-            script.register_cvars(crate::cvars::REGISTERED.iter().copied());
+            script.register_cvars(crate::cvars::registered_pairs());
             if let Err(e) =
                 script.run("ShowUIPanel(OptionsFrame); OptionsFrameCategoryListRowAudio:Click()")
             {
@@ -1004,7 +1004,7 @@ pub(super) fn seed_ui_fixture(
             };
             // The Graphics page (0959), same posture as the Audio fixture: real CVar set, live
             // open-and-select paths.
-            script.register_cvars(crate::cvars::REGISTERED.iter().copied());
+            script.register_cvars(crate::cvars::registered_pairs());
             if let Err(e) =
                 script.run("ShowUIPanel(OptionsFrame); OptionsFrameCategoryListRowGraphics:Click()")
             {
@@ -1019,7 +1019,7 @@ pub(super) fn seed_ui_fixture(
             // open path. Its Remove Chat Hover Delay row reads a saved-variable global that
             // `ChatFrame.xml` declares at file scope, so a hermetic capture sees the shipped "0"
             // and the row paints unchecked — which is the shipped default, not a missing load.
-            script.register_cvars(crate::cvars::REGISTERED.iter().copied());
+            script.register_cvars(crate::cvars::registered_pairs());
             if let Err(e) =
                 script.run("ShowUIPanel(OptionsFrame); OptionsFrameCategoryListRowChat:Click()")
             {
@@ -1051,7 +1051,7 @@ pub(super) fn seed_ui_fixture(
             // posture as the page fixtures: real CVar set, the live open-select-toggle path. The
             // list's width settles from its OnUpdate a frame later (the kit's WIDTH SETTLE law) —
             // inside the capture's settle frames.
-            script.register_cvars(crate::cvars::REGISTERED.iter().copied());
+            script.register_cvars(crate::cvars::registered_pairs());
             if let Err(e) = script.run(
                 "ShowUIPanel(OptionsFrame); OptionsFrameCategoryListRowControls:Click(); \
                  OptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownButton:Click()",
@@ -1068,7 +1068,7 @@ pub(super) fn seed_ui_fixture(
             // PostStartup seed isn't raced, the register_cvars precedent), then the live open
             // path; CVars registered too so the sibling category rows behave. Movement is
             // expanded so the lens sees both a header row and the byte-real default capsules.
-            script.register_cvars(crate::cvars::REGISTERED.iter().copied());
+            script.register_cvars(crate::cvars::registered_pairs());
             script.register_bindings(&crate::bindings::registry_commands());
             if let Err(e) = script.run(
                 "ShowUIPanel(OptionsFrame); \
@@ -1088,7 +1088,7 @@ pub(super) fn seed_ui_fixture(
             // pull-in has its unit test). Focused (0989): captures pin the caret visible, so
             // this baseline also pins the caret hugging the text's end — the drawn-space
             // advance law's visual regression guard.
-            script.register_cvars(crate::cvars::REGISTERED.iter().copied());
+            script.register_cvars(crate::cvars::registered_pairs());
             if let Err(e) = script.run(
                 "ShowUIPanel(OptionsFrame); OptionsFrameSearchBox:SetText(\"volume\"); OptionsFrameSearchBox:SetFocus()",
             )
@@ -1184,9 +1184,9 @@ pub(super) fn seed_ui_fixture(
             // Slot 2 selected: the multi-line body, so the detail pane and the body box both have
             // something in them. The popup fixture then opens the chooser over that selection via
             // the ref's `MacroEditButton` path — an EDIT, so the name box arrives pre-filled.
-            seed.push_str("ShowMacroFrame()\nBenillaMacroButton2:Click()\n");
+            seed.push_str("ShowMacroFrame()\nMacroButton2:Click()\n");
             if fixture == UiFixture::MacroPopup {
-                seed.push_str("BenillaMacroEditButton:Click()\n");
+                seed.push_str("MacroEditButton:Click()\n");
             }
             if let Err(e) = script.run(&seed) {
                 warn!("capture: ui-macro seed failed: {e}");

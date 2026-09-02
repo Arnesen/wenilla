@@ -18,7 +18,7 @@ pub use fields::{
     FIELD_PLAYER_SKILL_INFO_1_1, PLAYER_EXPLORED_ZONES_SLOTS, PLAYER_QUEST_LOG_SLOTS,
     PLAYER_SKILL_SLOTS, UNIT_AURA_POSITIVE_SLOTS, UNIT_AURA_SLOTS,
 };
-pub use movement::{CreateSpline, MovementBlock, ObjectType};
+pub use movement::{CreateSpline, MovementBlock, MoverState, ObjectType};
 
 /// One entry in an `SMSG_UPDATE_OBJECT` object list.
 pub enum Object {

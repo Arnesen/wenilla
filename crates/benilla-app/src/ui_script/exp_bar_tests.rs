@@ -11,27 +11,19 @@ use benilla_ui::script::{QuadContent, ScriptValue, UiScript, UnitState};
 fn exp_bar_harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // Through the shared both-stores loader, not a disk read off `assets/ui`: `TextStatusBar.xml`
+    // is the reference's own since 1751, and a hand-rolled reader here would look for it in the
+    // wrong store — and would leave its `<Script file="TextStatusBar.lua"/>` unresolved besides.
     for file in [
         "Fonts.xml",
         "UIParent.xml",
         "GameTooltip.xml",
-        "TextStatusBar.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
         "Cooldown.xml",
         "ActionBar.xml",
     ] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(
-            report.errors.is_empty(),
-            "{file}: loader errors: {:?}",
-            report.errors
-        );
+        super::test_ui::load_ui(&s, file);
     }
     s
 }
@@ -309,7 +301,12 @@ fn the_xp_bar_numerals_show_on_hover() {
         .eval::<bool>("return MainMenuBarExpText:IsShown()")
         .unwrap());
 
-    s.run("BenillaExpBar_OnLeave(MainMenuExpBar)").unwrap();
+    // `this` bound, because the engine binds it: the stock `HideTextStatusBarText` reads
+    // `this.isZero` on one line where every other line reads `bar` (TextStatusBar.lua:95 — the
+    // reference's own slip, benign there because `this` is always SOME frame during dispatch, and
+    // a nil index only from bare Lua). Called from the bar's own `<OnLeave>` in play.
+    s.run("this = MainMenuExpBar BenillaExpBar_OnLeave(MainMenuExpBar) this = nil")
+        .unwrap();
     assert!(
         !s.eval::<bool>("return MainMenuBarExpText:IsShown()")
             .unwrap(),

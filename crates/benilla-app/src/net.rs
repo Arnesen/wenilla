@@ -14,7 +14,7 @@
 //! The bridge runs in [`WorldStage::Net`], before `Input`, so a server teleport snaps → streams →
 //! covers in one frame. Coordinates cross from raw WoW into Bevy space here (`wow_to_bevy`).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::time::Duration;
 use bevy::platform::time::Instant;
 
@@ -45,7 +45,7 @@ use motion::{
 // `creature_anim`, and the cross-seam test that pins the pair runs both systems in one app.
 pub(crate) use motion::drive_display_facing;
 pub(crate) use motion::{
-    jump_seed, CreatureSwimming, FacingStep, RemoteMotion, Spline, SplineStopped,
+    jump_seed, CreatureSwimming, FacingStep, RemoteMotion, Spline, SplineStopped, UnitMoveModes,
 };
 // `GroundClamped`'s only consumer outside `net::motion::spline` is the ground-census probe, and a
 // probe is an instrument — a build with the instruments compiled out contains nothing that names
@@ -482,89 +482,13 @@ pub(crate) struct SelfGuid(pub(crate) Option<u64>);
 pub(crate) struct NetStatus {
     pub(crate) connected: bool,
     pub(crate) last_reason: Option<String>,
-    /// The last measured ping round trip (ms), from the `SMSG_PONG` echo against [`PingShared`]'s
-    /// clock. `None` until the first pong of a connection (and again after a disconnect).
-    pub(crate) latency_ms: Option<u32>,
-    /// The most recent [`RTT_RING`] round trips (ms), oldest first — the real client's own RTT
-    /// history (wow-re net W1: `HandlePong 0x537d60` puts each sample into a ring with "head/tail
-    /// wrap 16", which `0x537f20`'s avg-RTT math averages). [`Self::avg_latency_ms`] is what the UI
-    /// reports through `GetNetStats`; the *last* sample stays separate because that is the one the
-    /// wire echoes back in the next `CMSG_PING`'s lastRtt field. Cleared with the connection.
-    pub(crate) rtt_ring: VecDeque<u32>,
 }
 
-/// How many round trips [`NetStatus::rtt_ring`] keeps — the reference ring's depth (wow-re net W1,
-/// `HandlePong 0x537d60`: "head/tail wrap 16").
-pub(crate) const RTT_RING: usize = 16;
-
-impl NetStatus {
-    /// Record one measured round trip: the newest sample in, the oldest out at depth.
-    pub(crate) fn record_rtt(&mut self, ms: u32) {
-        self.latency_ms = Some(ms);
-        if self.rtt_ring.len() == RTT_RING {
-            self.rtt_ring.pop_front();
-        }
-        self.rtt_ring.push_back(ms);
-    }
-
-    /// Forget this connection's measurements — the next one's latency is its own.
-    pub(crate) fn clear_rtt(&mut self) {
-        self.latency_ms = None;
-        self.rtt_ring.clear();
-    }
-
-    /// The reported latency: the mean of the ring, truncated — `None` while it is empty (no pong
-    /// since the connection came up). The reference averages its ring rather than reporting the
-    /// last sample; the exact rounding is ours (`0x537f20`'s math is recorded as "avg-RTT" without
-    /// a byte-level form), and at a 30 s ping cadence one sample's rounding is invisible anyway.
-    pub(crate) fn avg_latency_ms(&self) -> Option<u32> {
-        if self.rtt_ring.is_empty() {
-            return None;
-        }
-        let sum: u64 = self.rtt_ring.iter().map(|&ms| u64::from(ms)).sum();
-        Some((sum / self.rtt_ring.len() as u64) as u32)
-    }
-}
-
-#[cfg(test)]
-mod rtt_tests {
-    use super::{NetStatus, RTT_RING};
-
-    /// The reported latency is the ring's mean, and the ring is bounded at the reference depth —
-    /// so a single spike moves the meter by a sixteenth, not the whole way (which is the point of
-    /// averaging at all: the ping cadence is 30 s, and one bad sample must not sit on a red bar
-    /// for eight minutes).
-    #[test]
-    fn the_reported_latency_is_the_mean_of_a_bounded_ring() {
-        let mut status = NetStatus::default();
-        assert_eq!(status.avg_latency_ms(), None, "no pong yet");
-
-        status.record_rtt(40);
-        assert_eq!(status.avg_latency_ms(), Some(40));
-        status.record_rtt(60);
-        assert_eq!(status.avg_latency_ms(), Some(50), "the mean, not the last");
-
-        // Fill past the ring: only the newest RTT_RING samples count, so the two above age out.
-        for _ in 0..RTT_RING {
-            status.record_rtt(100);
-        }
-        assert_eq!(status.rtt_ring.len(), RTT_RING);
-        assert_eq!(status.avg_latency_ms(), Some(100));
-        assert_eq!(
-            status.latency_ms,
-            Some(100),
-            "the last sample stays separate"
-        );
-
-        status.clear_rtt();
-        assert_eq!(status.avg_latency_ms(), None, "a disconnect forgets it all");
-        assert_eq!(status.latency_ms, None);
-    }
-}
-
-/// The ping clock shared with the write thread's 30 s keepalive sender ([`io::PingClock`]): the
-/// apply drain matches each `SMSG_PONG` echo against it to measure the round trip (stored back for
-/// the next ping's lastRtt field, and surfaced in [`NetStatus::latency_ms`]).
+/// The connection's ping clock and RTT history ([`io::PingClock`]), shared with both net threads:
+/// the write thread stamps each `CMSG_PING` on it, and the **read thread** measures the
+/// `SMSG_PONG` echo against it the moment the packet lands. The app only ever *reads* it — for
+/// `GetNetStats` ([`crate::ui_net`]) and the debug panel — and clears it when a connection dies.
+/// It does not measure: doing that from the drain is what B346 was.
 #[derive(Resource)]
 pub(crate) struct PingShared(pub(crate) std::sync::Arc<std::sync::Mutex<io::PingClock>>);
 
@@ -1316,6 +1240,18 @@ pub(crate) enum ClientCommand {
     BuyItem {
         vendor: u64,
         entry: u32,
+        count: u8,
+    },
+    /// Buy into a **named** container slot (`CMSG_BUY_ITEM_IN_SLOT`, decision 1797) — what a
+    /// vendor row dragged off the merchant window and dropped into a bag or an equipment slot
+    /// sends, as against [`ClientCommand::BuyItem`]'s auto-place from a plain row click.
+    /// `bag_guid` is the container object's guid, or the player's own for the backpack and the
+    /// equipment slots. Same refusal shape as `BuyItem` — `SMSG_BUY_FAILED`.
+    BuyItemInSlot {
+        vendor: u64,
+        entry: u32,
+        bag_guid: u64,
+        bag_slot: u8,
         count: u8,
     },
     /// Sell an item to a vendor (`CMSG_SELL_ITEM`, decision 0081 phase 4's sell affordance):
@@ -2330,7 +2266,12 @@ pub(crate) struct CharActionResultMessage {
 /// We entered the world (the IO thread's `Connected`, bridged from the Net drain): flips
 /// [`crate::char_select::ClientState`] to `InWorld`.
 #[derive(Message)]
-pub(crate) struct EnteredWorldMessage;
+pub(crate) struct EnteredWorldMessage {
+    /// The account's accumulated **rested billing minutes**, from the `SMSG_AUTH_RESPONSE` that
+    /// admitted the session — pushed into the script here because this is the only moment it ever
+    /// arrives (decision 1820).
+    pub(crate) billing_time_rested: u32,
+}
 
 /// The server asked us to play a cinematic (`SMSG_TRIGGER_CINEMATIC`) — a `CinematicSequences.dbc`
 /// id. Read by [`crate::cinematic`], which owns the playback *and* the ack (decision 0196: the ack

@@ -161,24 +161,30 @@ fn render_by_id(
 /// `ui_items::find_equip_slot` (the equip-click fit rule) — one law, two consumers.
 fn equip_slots_for(inventory_type: u32) -> &'static [u32] {
     match inventory_type {
-        1 => &[1],                  // head
-        2 => &[2],                  // neck
-        3 => &[3],                  // shoulder
-        4 => &[4],                  // shirt
-        5 | 20 => &[5],             // chest / robe
-        6 => &[6],                  // waist
-        7 => &[7],                  // legs
-        8 => &[8],                  // feet
-        9 => &[9],                  // wrist
-        10 => &[10],                // hands
-        11 => &[11, 12],            // finger
-        12 => &[13, 14],            // trinket
-        16 => &[15],                // back
-        19 => &[19],                // tabard
-        13 => &[16, 17],            // one-hand
-        21 => &[16],                // main hand
-        14 | 22 | 23 => &[17],      // shield / off-hand weapon / held
-        17 => &[16, 17],            // two-hand (displaces both hands)
+        1 => &[1],             // head
+        2 => &[2],             // neck
+        3 => &[3],             // shoulder
+        4 => &[4],             // shirt
+        5 | 20 => &[5],        // chest / robe
+        6 => &[6],             // waist
+        7 => &[7],             // legs
+        8 => &[8],             // feet
+        9 => &[9],             // wrist
+        10 => &[10],           // hands
+        11 => &[11, 12],       // finger
+        12 => &[13, 14],       // trinket
+        16 => &[15],           // back
+        19 => &[19],           // tabard
+        13 => &[16, 17],       // one-hand
+        21 => &[16],           // main hand
+        14 | 22 | 23 => &[17], // shield / off-hand weapon / held
+        // Two-hand: **main hand ONLY**, which is not the obvious answer. A 2H displaces both
+        // hands when equipped, and this table was written `[16, 17]` on that reasoning. The
+        // reference's own mask disagrees: `0x809200[17]` is `0x8000`, bit 15, main hand alone
+        // (wow-re `merchant-compare-item-law.md` §3). It is a COMPARE-CANDIDATE table, not an
+        // occupancy one — the question it answers is "which worn item is this offering to
+        // replace", and for a two-hander that is the weapon in your main hand.
+        17 => &[16],
         15 | 25 | 26 | 28 => &[18], // bow / thrown / wand-gun / relic
         _ => &[],
     }
@@ -675,6 +681,143 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             show_or_hide_empty(lua, h);
             Ok(())
         })?,
+    )?;
+
+    // GameTooltip:SetMerchantCompareItem(index [, offset]) — `0x536080`, GameTooltip method-table
+    // entry 43 (wow-re `system/ui/scratch/merchant-compare-item-law.md`). The shopping tooltip the
+    // stock vendor row raises beside the main one: "here is what you are wearing that this would
+    // replace".
+    //
+    // **`offset` is not a slot.** It is the 1-based ordinal among CANDIDATE slots, and a slot is a
+    // candidate only when all three of these hold — the reference's own conjunction:
+    //
+    //   1. its bit is set in `0x809200[InventoryType]` (our [`equip_slots_for`]),
+    //   2. the slot is OCCUPIED,
+    //   3. the equipped item's **class** equals the vendor item's class. Class only — subclass is
+    //      never read.
+    //
+    // Empty slots are skipped **without** decrementing, so offset 1 finds the first occupied
+    // matching slot wherever it sits. The consequences are the reference's and they are not
+    // obvious: a shield in the off hand makes offset 2 nil for a one-hand weapon (ARMOR ≠ WEAPON),
+    // and an equipped wand DOES compare against a bow on the shelf (both class 2, both bit 17).
+    // Any type with one candidate slot answers nil for offset 2, which is what makes stock's
+    // second `if` cheap.
+    //
+    // **The return contract decides ghost tooltips versus none**, so it is transcribed exactly:
+    // ONE Lua value on every non-raising path — the NUMBER 1 on success (`lua_pushnumber`, not a
+    // boolean), `nil` on every failure. A bad `this` or a non-number index RAISES; a missing
+    // `offset` does not, and defaults to 1. An explicit `offset` of 0 or less is nil, because the
+    // counter starts below zero and only ever decrements.
+    //
+    // An uncached vendor template answers nil AND fires the query ([`view_of`] does both), so the
+    // first hover of an unseen vendor item shows no shopping tooltip and a later one does. That is
+    // the reference's behaviour, not a race we lost.
+    m.set(
+        "SetMerchantCompareItem",
+        lua.create_function(
+            |lua, (this, index, offset): (Table, Value, Option<Value>)| {
+                let h = frame_handle_of(lua, &this)?;
+                let as_number = |v: &Value| -> Option<f64> {
+                    match v {
+                        Value::Integer(i) => Some(*i as f64),
+                        Value::Number(n) => Some(*n),
+                        // `lua_isnumber` accepts a numeric string, here as everywhere.
+                        Value::String(s) => s.to_str().ok().and_then(|s| s.parse::<f64>().ok()),
+                        _ => None,
+                    }
+                };
+                // The one argument whose absence is an ERROR, with the client's own usage text.
+                let Some(idx) = as_number(&index) else {
+                    return Err(mlua::Error::runtime(
+                        "Usage: SetMerchantCompareItem(\"slot\" [, offset])",
+                    ));
+                };
+                // The reference re-bases the index in f64 and THEN truncates toward zero, so 2.7
+                // is row 1 (1.7 → 1) rather than row 2. Doing it the other way round differs by
+                // one for every fractional index.
+                let row = (idx - 1.0).trunc();
+                if row.is_nan() || row < 0.0 || row > f64::from(u32::MAX) {
+                    return Ok(Value::Nil);
+                }
+                // `offset` re-bases as an INTEGER, and its absence means 1.
+                let mut left = match offset.as_ref().and_then(as_number) {
+                    Some(n) if n.is_nan() => return Ok(Value::Nil),
+                    Some(n) => n.trunc() - 1.0,
+                    None => 0.0,
+                };
+                if left < 0.0 {
+                    return Ok(Value::Nil);
+                }
+
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let row = row as usize;
+                let Some(item_id) = ({
+                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    model
+                        .merchant
+                        .as_ref()
+                        .and_then(|m| m.items.get(row))
+                        .map(|it| it.item_id)
+                }) else {
+                    return Ok(Value::Nil);
+                };
+                // The vendor item's own template — the class this compares by, and the miss that
+                // fires the query.
+                let Some(offered) = view_of(lua, item_id) else {
+                    return Ok(Value::Nil);
+                };
+
+                let found = {
+                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let mut hit = None;
+                    for &slot in equip_slots_for(offered.inventory_type) {
+                        let Some(worn) = model
+                            .inv_slot("player", slot as usize)
+                            .filter(|s| s.item_id != 0)
+                        else {
+                            continue; // empty: skipped WITHOUT decrementing
+                        };
+                        let same_class = model
+                            .item_templates
+                            .get(&worn.item_id)
+                            .is_some_and(|w| w.class == offered.class);
+                        if !same_class {
+                            continue;
+                        }
+                        if left <= 0.0 {
+                            hit = Some(slot as usize);
+                            break;
+                        }
+                        left -= 1.0;
+                    }
+                    hit
+                };
+                let Some(slot) = found else {
+                    // A failing call does NOT clear the tooltip — the reference's nil exit pushes
+                    // nil and touches nothing else.
+                    return Ok(Value::Nil);
+                };
+
+                // …and the fill is the ordinary EQUIPPED-item tooltip with the compare header
+                // on: the FULL body, because compact mode is off (`p4 = 0`) and there is no delta
+                // arithmetic anywhere in the client — it draws two whole tooltips side by side —
+                // plus one gray `CURRENTLY_EQUIPPED` line first (`p5 = 1`).
+                //
+                // Reached by arming the same `compare_armed` latch the shift-compare path uses and
+                // running `SetInventoryItem`, which is what the reference does too: `0x536080`
+                // calls the ordinary item builder `0x52b650` with the header flag set, not a
+                // second builder of its own.
+                {
+                    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                    if let Ok(t) = super::tooltip::tip_mut(&mut model, h) {
+                        t.compare_armed = true;
+                    }
+                }
+                this.get::<mlua::Function>("SetInventoryItem")?
+                    .call::<mlua::MultiValue>((this.clone(), "player", slot))?;
+                Ok(Value::Integer(1))
+            },
+        )?,
     )?;
 
     // GameTooltip:SetMerchantItem(index) / SetBuybackItem(index) — template-id sources through

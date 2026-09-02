@@ -16,6 +16,7 @@ use super::{
     mirror_timer, monster_move, movement, opcode, page_text, pet, petition, progression, pvp,
     quest, social, spellbook, spells, stable, summon, taxi, trade, trainer, update_object, vendor,
     world_state, Character, CreatureQueryInfo, JumpInfo, MoveMode, ServerPacket, SpeedKind,
+    SplineMode,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -190,14 +191,21 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             // position as current is a bug we decline to reproduce.
             let result = read_u8(&mut r)?;
             let queued = result == super::AUTH_WAIT_QUEUE;
+            let mut billing_time_rested = None;
             if (result == super::AUTH_OK || queued) && r.len() >= 5 {
                 let _billing_time_remaining = read_u32_le(&mut r)?;
                 let _billing_plan_flags = read_u8(&mut r)?;
-                let _billing_time_rested = read_u32_le(&mut r)?;
+                // Kept rather than dropped since 1820: this is the only place the value ever
+                // arrives, and `GetBillingTimeRested()` is a plain read of it. The client parks it
+                // in a process-lifetime global (`[ClientServices+0x1af8]`, sole writer `0x5b421a`);
+                // ours rides the session, which has the same lifetime and cannot go stale across a
+                // reconnect the way that global does.
+                billing_time_rested = Some(read_u32_le(&mut r)?);
             }
             ServerPacket::AuthResponse {
                 result,
                 queue_position: queued.then(|| read_u32_le(&mut r).ok()).flatten(),
+                billing_time_rested,
             }
         }
         opcode::SMSG_CHAR_ENUM => {
@@ -887,6 +895,45 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             ServerPacket::MoveMode {
                 guid,
                 counter,
+                mode,
+                apply,
+            }
+        }
+        // **The observer movement-mode family** (decision 1780) — the spline-move twelve. Body is a
+        // BARE packed guid: no counter, no `MovementInfo`, and nothing to ack (VERIFIED vmangos
+        // `MovementPacketSender::SendMovementFlagChangeToAll`/`SendToggleRunWalkToAll`, and the
+        // reference's single handler `0x603c80`, which reads one packed guid and dispatches).
+        // `guid` is any unit, not our mover — the constants block in `opcode` carries the arm map.
+        opcode::SMSG_SPLINE_MOVE_ROOT
+        | opcode::SMSG_SPLINE_MOVE_UNROOT
+        | opcode::SMSG_SPLINE_MOVE_WATER_WALK
+        | opcode::SMSG_SPLINE_MOVE_LAND_WALK
+        | opcode::SMSG_SPLINE_MOVE_FEATHER_FALL
+        | opcode::SMSG_SPLINE_MOVE_NORMAL_FALL
+        | opcode::SMSG_SPLINE_MOVE_SET_HOVER
+        | opcode::SMSG_SPLINE_MOVE_UNSET_HOVER
+        | opcode::SMSG_SPLINE_MOVE_START_SWIM
+        | opcode::SMSG_SPLINE_MOVE_STOP_SWIM
+        | opcode::SMSG_SPLINE_MOVE_SET_RUN_MODE
+        | opcode::SMSG_SPLINE_MOVE_SET_WALK_MODE => {
+            let (mode, apply) = match opcode {
+                opcode::SMSG_SPLINE_MOVE_ROOT => (SplineMode::Root, true),
+                opcode::SMSG_SPLINE_MOVE_UNROOT => (SplineMode::Root, false),
+                opcode::SMSG_SPLINE_MOVE_WATER_WALK => (SplineMode::WaterWalk, true),
+                opcode::SMSG_SPLINE_MOVE_LAND_WALK => (SplineMode::WaterWalk, false),
+                opcode::SMSG_SPLINE_MOVE_FEATHER_FALL => (SplineMode::FeatherFall, true),
+                opcode::SMSG_SPLINE_MOVE_NORMAL_FALL => (SplineMode::FeatherFall, false),
+                opcode::SMSG_SPLINE_MOVE_SET_HOVER => (SplineMode::Hover, true),
+                opcode::SMSG_SPLINE_MOVE_UNSET_HOVER => (SplineMode::Hover, false),
+                opcode::SMSG_SPLINE_MOVE_START_SWIM => (SplineMode::Swimming, true),
+                opcode::SMSG_SPLINE_MOVE_STOP_SWIM => (SplineMode::Swimming, false),
+                // The one inverted pair: RUN_MODE *clears* `MOVEFLAG_WALK_MODE`, because the
+                // reference's `0x617e80` feeds the opcode's bool to `SetRunMode 0x7c71c0`.
+                opcode::SMSG_SPLINE_MOVE_SET_WALK_MODE => (SplineMode::WalkMode, true),
+                _ => (SplineMode::WalkMode, false),
+            };
+            ServerPacket::SplineMoveMode {
+                guid: read_packed_guid(&mut r)?,
                 mode,
                 apply,
             }

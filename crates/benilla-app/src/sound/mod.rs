@@ -18,34 +18,44 @@ mod anim_events;
 mod cinematic;
 mod combat;
 mod creature;
+mod doodad_pool;
 mod emote;
 pub(crate) mod footsteps;
 mod gameobject;
 mod glue;
 mod greeting;
-mod hal_overload;
 pub(crate) mod interior;
 mod kit;
 mod limiter;
 mod liquid_loop;
 mod math;
+mod message;
 mod meter;
 mod missile;
 mod mix_tap;
 mod mixer;
 mod money;
 mod mount;
+// Crate-visible for one reader: the dev-only stall watchdog asks `output::device_open` before
+// it suspends the process (decision 1857). Dev may see anything; nothing here knows dev exists.
+// Off macOS the mixer runs on kira's own cpal backend (`mixer::MixBackend`), so everything here
+// below `Window` and `device_open` goes unreferenced. It stays compiled rather than cfg'd out, so
+// the CoreAudio path cannot rot behind a feature gate while we are off it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) mod output;
 mod probe;
 mod reverb;
 mod sheathe;
 mod spell;
 mod ui;
+mod vocal;
 mod water;
 mod weather;
 mod zone;
 pub(crate) use emote::EmoteSounds;
 pub(crate) use glue::GlueSound;
 pub(crate) use greeting::NpcGreetingRequest;
+pub(crate) use message::MessageSounds;
 pub(crate) use mixer::Mixer;
 pub(crate) use ui::{AutoEquipSound, LootPickupSound};
 pub(crate) use zone::ExplorationSounds;
@@ -89,6 +99,55 @@ pub(crate) struct SoundConfig {
     /// the stream alive at zero, so re-enabling resumes mid-track where the reference re-picks.
     pub music_enabled: bool,
     pub ambience_enabled: bool,
+    /// **Error speech** — 1.12's `EnableErrorSpeech` CVar (`CVar::Register` at `0x457877`,
+    /// registrar default `"1"`, the stock Sound panel's fourth checkbox). Gates the race/sex
+    /// refusal lines your own character says ([`vocal`], decision 1815) and nothing else: it is
+    /// read inside `0x458250` alongside `MasterSoundEffects`, *before* any escalation state moves,
+    /// so turning it off is silence rather than a muted play.
+    pub error_speech: bool,
+    /// **Sound while the window is in the background** — the era engine's
+    /// `Sound_EnableSoundWhenGameIsInBG`, over a setting 1.12 hardcodes and never made settable
+    /// (decision 1847). `false` = the reference's own behaviour: alt-tab away and the client goes
+    /// quiet; come back and it returns.
+    ///
+    /// The reference's mechanism, VERIFIED end to end in wow-re
+    /// `sound/scratch/focus-mute-law.md` (§5 round, 2026-09-02, dispatched from here): **`WM_ACTIVATE`
+    /// and nothing else** — `WM_ACTIVATEAPP`, `WM_SETFOCUS` and `WM_KILLFOCUS` all fall through the
+    /// WndProc's remap table to `DefWindowProcA` — normalised to a 0/1 flag at `0x42d080`, enqueued
+    /// as OS-event tag 6 (`0x42d0cb`, the only tag-6 producer image-wide), raised as event-bus
+    /// category 2 (`0x423cc5`, the only direct category-2 raise), handled by `0x7a4860`:
+    /// `FSOUND_SetMute(-3, active ? 0 : 1)`. (`-3` is `FSOUND_ALL`; the *name* is inferred — macro
+    /// names do not survive compilation — the value and its behaviour are not.)
+    ///
+    /// **Everything goes silent, music included.** The behaviour-flag bit `0x2` that exempts music
+    /// from the `MasterSoundEffects` pause and from the open-refusal does **not** exempt it here:
+    /// `-3` sweeps `[0, FSOUND_GetMaxChannels())`, which FMOD 3.75's own allocation pools tile
+    /// exactly, and WoW plays every sound — music and SFX alike — as an ordinary stream on a channel
+    /// from those pools (it imports no `FSOUND_PlaySound` at all). This was the open question when
+    /// the gate was built and the answer decided its scope: whole output, not per category.
+    ///
+    /// A **mute, not a pause**, also verified: `SetMute` sets `[chan+0x3c]` bit `0x02` and every
+    /// software mixer gates on bit `0x10` (`SetPaused`) alone, so the playback cursor keeps being
+    /// written. A five-second sound started before you alt-tabbed is over when you come back, and
+    /// each channel's own stored volume comes back verbatim. benilla inherits that rather than
+    /// implementing it: a gate on the output cannot stop the schedulers.
+    ///
+    /// **Divergence, disclosed.** While inactive the reference also *refuses to open* a new
+    /// non-music stream (`0x7a52bf`), where a new music stream is opened and individually muted;
+    /// benilla starts everything and gates the output, so a sound that begins while you are away is
+    /// still audible on return if it outlives your absence. Bounded by an SFX's own length — the
+    /// long-lived classes are the music/ambience ones the reference start-and-mutes too — and taken
+    /// deliberately: a refusal at the kit-start layer would make an unattended capture record
+    /// silence, which is the false negative [`mixer::Mixer::set_output_gate`]'s position exists to
+    /// prevent.
+    ///
+    /// There is **no 1.12 CVar and no 1.12 checkbox** for this — `SoundOptionsFrame.lua` declares
+    /// seven checkboxes (indices 1, 2, 4–8) and four sliders, none of them this, and none of the
+    /// reference's 214 `CVar::Register` sites names it (wow-re `re/cvar/cvar-register-sites.tsv`;
+    /// `Register` is the only creation path, so `Config.wtf` can hold no such key either). So the
+    /// row is the `autoLootDefault` posture: benilla's persistence is the CVar store (0954), and a
+    /// setting with no 1.12 CVar takes the later-era engine's spelling rather than an invented one.
+    pub background_sound: bool,
     /// Zone reverb — 1.12's `SoundReverb` CVar (`0x4573be` registration, callback `0x4574d0`,
     /// flag byte `[0x835a4c]`). The flag gates **both** EAX paths: the zone/environment preset
     /// (`0x45a75b`: flag zero ⇒ `FSOUND_Reverb_SetProperties` is never called) and the
@@ -187,6 +246,8 @@ impl Default for SoundConfig {
             ambience: 0.6,
             music_enabled: true,
             ambience_enabled: true,
+            error_speech: true,
+            background_sound: false,
             reverb: false,
             world_hold: false,
             music_suppressed: false,
@@ -208,6 +269,37 @@ fn feed_world_hold(
     let hold = screen.covering();
     if config.world_hold != hold {
         config.world_hold = hold;
+    }
+}
+
+/// The **focus gate** (decision 1847): shut the output while the window is in the background,
+/// unless [`SoundConfig::background_sound`] says otherwise.
+///
+/// Reads the window's own focus rather than a live bit on [`SoundConfig`] — unlike `world_hold`
+/// and `music_suppressed`, nothing else in the frame needs to agree about it, because this gate
+/// changes exactly one thing: the level of the last effect in the main chain. No trigger, no
+/// scheduler and no meter consults it, which is the whole point (see
+/// [`mixer::Mixer::set_output_gate`]).
+///
+/// **A missing window opens the gate**, never shuts it: "we cannot tell whether anyone is looking"
+/// must not be heard as silence.
+///
+/// The `Local` snapshot is what turns a per-frame read into an **edge**: focus is polled off the
+/// window rather than watched as an event, so without it every frame would re-issue a tween and
+/// the 16 ms ramp would restart forever instead of ever landing.
+fn apply_focus_gate(
+    mut out: NonSendMut<SoundOutput>,
+    config: Res<SoundConfig>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut last: Local<Option<bool>>,
+) {
+    let open = config.background_sound || windows.single().map_or(true, |w| w.focused);
+    if *last == Some(open) {
+        return;
+    }
+    *last = Some(open);
+    if let Some(mixer) = out.mixer.as_mut() {
+        mixer.set_output_gate(open);
     }
 }
 
@@ -425,7 +517,6 @@ impl Plugin for SoundPlugin {
         })
         .init_resource::<SoundConfig>()
         .init_resource::<AudioListener>()
-        .add_systems(Startup, hal_overload::setup)
         // `Material.dbc` — shared by the foley and the melee impact, so it loads here rather
         // than inside either consumer.
         .add_systems(
@@ -447,8 +538,8 @@ impl Plugin for SoundPlugin {
                 update_audio_listener.in_set(WorldStage::Stream),
                 toggle_mute,
                 apply_master_volume.after(toggle_mute),
+                apply_focus_gate,
                 poll_mix_health,
-                hal_overload::poll,
             ),
         );
         probe::plugin(app);
@@ -458,6 +549,7 @@ impl Plugin for SoundPlugin {
         cinematic::plugin(app);
         gameobject::plugin(app);
         anim_events::plugin(app);
+        doodad_pool::plugin(app);
         spell::plugin(app);
         missile::plugin(app);
         creature::plugin(app);
@@ -469,6 +561,8 @@ impl Plugin for SoundPlugin {
         emote::plugin(app);
         greeting::plugin(app);
         ui::plugin(app);
+        vocal::plugin(app);
+        message::plugin(app);
         glue::plugin(app);
         money::plugin(app);
         reverb::plugin(app);
@@ -581,7 +675,6 @@ fn poll_mix_health(
     time: Res<Time>,
     mut exit: MessageReader<bevy::app::AppExit>,
     mut since_report: Local<std::time::Duration>,
-    mut last_overruns: Local<u64>,
     mut last_refused: Local<u64>,
     mut peak_voices: Local<usize>,
 ) {
@@ -610,19 +703,9 @@ fn poll_mix_health(
     let peak = mixer.take_health_peak();
     let level = mixer.take_level();
     let rate = mixer.sample_rate();
+    let window = mixer.take_output_window();
     let voices = std::mem::take(&mut *peak_voices);
-    let new_overruns = health.overruns - *last_overruns;
-    *last_overruns = health.overruns;
-    if new_overruns > 0 {
-        warn!(
-            "audio: {new_overruns} missed mix deadline(s) in the last {}s (peak load {:.0}% of \
-             budget) — this is what a crackle sounds like",
-            MIX_HEALTH_REPORT.as_secs(),
-            peak * 100.0,
-        );
-    } else {
-        debug!("audio: mix load peak {:.0}% of budget", peak * 100.0);
-    }
+    report_output(window, peak);
     let new_refused = health.voices_refused - *last_refused;
     *last_refused = health.voices_refused;
     if new_refused > 0 {
@@ -640,6 +723,58 @@ fn poll_mix_health(
 /// and without the limiter kira's `clamp` would have squared it off. The line names what the game
 /// asked for, how long it was over, what the limiter had to pull, and how many voices were live —
 /// which together say *why* (thirty voices at once is a different bug from one voice at 4×).
+/// The output-side story of one report window (decision 1857): every layer between the mix
+/// and the speaker, each with its own number, so a crackle names its layer here.
+fn report_output(w: mixer::OutputWindow, peak_load: f32) {
+    if w.cycles == 0 {
+        // No stream ran this window; `Mixer::poll_health` already said why, per event.
+        return;
+    }
+    let lead = w
+        .lead_min_ms
+        .map_or_else(|| "n/a".to_string(), |v| format!("{v:.1} ms"));
+    let ring = w
+        .ring_min_ms
+        .map_or_else(|| "n/a".to_string(), |v| format!("{v:.0} ms"));
+    let shape = format!(
+        "{} cycles: lead ≥ {lead}, IO copy ≤ {:.2} ms, cycle gap ≤ {:.1} ms (nominal {:.1}), \
+         render ≤ {:.2} ms per {:.1} ms chunk (peak load {:.0}%), ring ≥ {ring}",
+        w.cycles,
+        w.io_wall_max_ms,
+        w.gap_max_ms,
+        w.cycle_ms,
+        w.render_wall_max_ms,
+        w.chunk_ms,
+        peak_load * 100.0,
+    );
+    if w.underruns > 0 {
+        warn!(
+            "audio: {} output underrun(s) — ~{:.0} ms of silence reached the device: the render \
+             thread fell the whole mix-ahead behind. This is what a crackle sounds like. {shape}",
+            w.underruns, w.underrun_ms,
+        );
+    }
+    if w.overloads > 0 {
+        let ago = w
+            .last_overload_ago_ms
+            .map_or_else(String::new, |v| format!(", last {v:.0} ms ago"));
+        warn!(
+            "audio: {} HAL processor overload(s){ago} — the OS says our IO cycle ran past its \
+             deadline. The copy's own wall time and the lead say which: a long copy is the IO \
+             thread parked inside the callback (page-in, preemption), a short lead is it woken \
+             late. {shape}",
+            w.overloads,
+        );
+    } else if w.lead_min_ms.is_some_and(|l| l < 0.0)
+        || w.io_wall_max_ms > w.cycle_ms * 0.5
+        || w.gap_max_ms > w.cycle_ms * 1.5
+    {
+        warn!("audio: IO cycle strain without an overload — {shape}");
+    } else {
+        debug!("audio: output steady — {shape}");
+    }
+}
+
 fn report_level(level: meter::LevelReading, voices: usize, rate: Option<u32>) {
     // Ahead of the level story on purpose: a non-finite sample is not a loud mix, it is a broken
     // one, and it is invisible to every other counter we have — including the limiter's own

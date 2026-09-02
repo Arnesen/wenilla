@@ -9,57 +9,90 @@
 //! `ContainerFrameItemButton_OnEnter` on one of its recycled `ContainerFrame1..12` now. Same two
 //! calls arm the compare (`GameTooltip:SetOwner` + `SetBagItem`), so what these tests pin is
 //! unchanged — but the handler reads `this`, so they drive the mouse
-//! ([`super::test_ui::hover`]) instead of calling it. The doll end is still ours
-//! (`BenillaPaperDollSlot_OnEnter`) and is still called directly.
+//! ([`super::test_ui::hover`]) instead of calling it.
+//!
+//! **The doll end went the same way.** `CharacterFrame.xml` and `PaperDollFrame.xml` are the
+//! reference's own too now, so `BenillaPaperDollSlot_OnEnter` is gone and the hover is stock
+//! `PaperDollItemSlotButton_OnEnter` (`PaperDollFrame.lua:739-764`), which reads `this` as well.
+//! The doll-slot names (`CharacterHeadSlot` and kin) are unchanged; the mouse is what reaches them.
 
 use benilla_ui::script::{
     ContainerSlot, ContainerState, InvSlotView, InventorySlots, ItemTemplateView, UiScript,
     UnitState,
 };
 
-use super::test_ui::{bag_slot_button, hover, load_ui as load_xml, BAG_UI};
+use super::test_ui::{bag_slot_button, hover, BAG_UI, CHARACTER_UI};
 
-/// The window set the compare flow crosses **without a bag window**: fonts, UIParent, panels, both
-/// tooltip files and the character window (the listener's doll slots). Deliberately install-free,
-/// so the chat-link test still runs on a bare checkout.
+/// The two shared lists overlap heavily — `GlobalStrings`, the fonts, `UIParent`, the tooltip,
+/// `Cooldown`, the action bar and `Interface\FrameXML\PaperDollFrame.xml` are in both — and
+/// loading one file twice redeclares its frames. So a list is walked once and anything already
+/// loaded is skipped, which also keeps the ORDER the first list asked for.
+fn load_once(s: &UiScript, seen: &mut Vec<&'static str>, files: &[&'static str]) {
+    for f in files {
+        if seen.contains(f) {
+            continue;
+        }
+        seen.push(f);
+        super::test_ui::load_ui_strict(s, f);
+    }
+}
+
+/// The window set the compare flow crosses **without a bag window**: the whole character window
+/// (the listener's doll slots), plus [`ROUTER_UI`].
+///
+/// **Needs client data.** It always did — `Interface\FrameXML\ItemRef.xml` has been a chain entry
+/// since it was pointed there — but the comment here claimed "deliberately install-free" until
+/// 1751 made the claim impossible to miss. Callers open with `wow_data_or_skip!`.
 fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for f in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        "UIParent.xml",
-        "GameTooltip.xml",
-        "ItemRef.xml",
-        "MerchantFrame.xml",
-        "Cooldown.xml",
-        "BagFrame.xml",
-        "CharacterFrame.xml",
-    ] {
-        load_xml(&s, f);
-    }
+    let mut seen = Vec::new();
+    load_once(&s, &mut seen, CHARACTER_UI);
+    load_once(&s, &mut seen, &ROUTER_UI);
     s.set_money(0);
+    s.set_unit("player", Some(player()));
     s
 }
 
+/// The two reference files this harness carries beyond the character window: `MerchantFrame.xml`,
+/// the other window the compare flow crosses, and `ItemRef.xml`, which declares the chat-link
+/// router's own `ItemRefTooltip`. Both were in this harness's hand-copied list before 1751; the
+/// manifest's order is the one kept (`FrameXML.toc` 63 → 77).
+const ROUTER_UI: [&str; 2] = [
+    "Interface\\FrameXML\\MerchantFrame.xml",
+    "Interface\\FrameXML\\ItemRef.xml",
+];
+
+/// A level-60 player carrying **both** halves of the race and class pairs: `UnitRace`/`UnitClass`
+/// answer `(localized, file)` or `nil, nil` — the binding `zip`s them — and stock
+/// `PaperDollFrame_SetLevel` formats all three into `CharacterLevelText` unguarded
+/// (`PaperDollFrame.lua:100-104`) on every show of the character window.
+fn player() -> UnitState {
+    UnitState {
+        exists: true,
+        level: 60,
+        race: Some("Human".into()),
+        race_file: Some("Human".into()),
+        class: Some("Warrior".into()),
+        class_file: Some("WARRIOR".into()),
+        ..UnitState::default()
+    }
+}
+
 /// [`harness`] with the REFERENCE's bag windows (1751) — the hover source. `BAG_UI` is the ordered
-/// set a test needs before it can open one and already carries the fonts, panels, tooltip,
-/// item-button template and bag bar; `UIParent.xml` leads because it inherits nothing and every
-/// window below parents to it.
+/// set a test needs before it can open one; `CHARACTER_UI` leads because the manifest seats the
+/// character block above the containers (`FrameXML.toc` 53-58 → 65) and because it carries
+/// `PaperDollFrame.xml`, which `MainMenuBarBagButtons` inherits its `BagSlotButtonTemplate` body
+/// from.
 ///
-/// **Needs client data**: `BAG_UI` names a chain entry, so its callers open with
-/// `wow_data_or_skip!`.
+/// **Needs client data**: both lists name chain entries, so callers open with `wow_data_or_skip!`.
 fn harness_with_bags() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "UIParent.xml");
-    for f in BAG_UI {
-        load_xml(&s, f);
-    }
-    for f in ["ItemRef.xml", "MerchantFrame.xml", "CharacterFrame.xml"] {
-        load_xml(&s, f);
-    }
+    let mut seen = Vec::new();
+    load_once(&s, &mut seen, CHARACTER_UI);
+    load_once(&s, &mut seen, BAG_UI);
+    load_once(&s, &mut seen, &ROUTER_UI);
     s.set_money(0);
     s
 }
@@ -153,13 +186,13 @@ fn seed_items(s: &mut UiScript) {
 fn shift_compare_over_a_bag_item_seats_on_the_doll_slot() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness_with_bags();
-    s.set_unit("player", Some(UnitState::default()));
+    s.set_unit("player", Some(player()));
     seed_items(&mut s);
 
     // Open the bag and hover the helm slot. The button is ASKED for by its own `GetID()` — the
     // reference numbers a window's buttons backwards and recycles the windows (1751), so neither
     // the frame name nor the button index is a property to assume.
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     s.take_sounds();
     let btn = bag_slot_button(&s, 0, 1);
     hover(&mut s, &btn);
@@ -233,6 +266,7 @@ fn shift_compare_over_a_bag_item_seats_on_the_doll_slot() {
 /// close button hides it.
 #[test]
 fn item_ref_tooltip_renders_a_chat_link() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     seed_items(&mut s);
     s.run(
@@ -269,7 +303,7 @@ fn item_ref_tooltip_renders_a_chat_link() {
 fn doll_hover_renders_the_live_instance_and_never_self_compares() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness_with_bags();
-    s.set_unit("player", Some(UnitState::default()));
+    s.set_unit("player", Some(player()));
     seed_items(&mut s);
     // Break the equipped helm: instance pair (0, 40); the template stays authored-full.
     let mut inv: InventorySlots = Default::default();
@@ -308,7 +342,7 @@ fn doll_hover_renders_the_live_instance_and_never_self_compares() {
     // Arm a compare first through a BAG hover (the stale-arm hazard the doll hover must clear) —
     // the reference's own `ContainerFrameItemButton_OnEnter` since 1751, reached by moving the
     // mouse onto the button rather than by calling the handler.
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     s.take_sounds();
     let btn = bag_slot_button(&s, 0, 1);
     hover(&mut s, &btn);
@@ -323,9 +357,10 @@ fn doll_hover_renders_the_live_instance_and_never_self_compares() {
     );
     s.set_modifiers(false, false, false);
 
-    // The doll hover: the live pair, not the template's 40/40.
-    s.run("BenillaPaperDollSlot_OnEnter(CharacterHeadSlot)")
-        .unwrap();
+    // The doll hover: the live pair, not the template's 40/40. Stock
+    // `PaperDollItemSlotButton_OnEnter` reads `this`, so the mouse is what reaches it — and moving
+    // OFF the bag button is part of what this test needs anyway.
+    hover(&mut s, "CharacterHeadSlot");
     assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
     let found: String = s
         .eval(

@@ -534,6 +534,9 @@ const GROUND_CLAMP_DOWN: f32 = 4.0;
 #[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(in crate::net) fn ground_clamp_creatures(
     world: benilla_world::collision::WorldCollision,
+    // The liquid query — a water-walking creature's floor is the surface, not the lakebed
+    // (decision 1780).
+    points: benilla_world::world_point::WorldPoint,
     epoch: Res<benilla_world::collision::ColliderEpoch>,
     mut commands: Commands,
     mut q: Query<(
@@ -543,6 +546,10 @@ pub(in crate::net) fn ground_clamp_creatures(
         &mut Transform,
         Option<&mut GroundClamped>,
         Has<CreatureSwimming>,
+        // The server-granted movement modes (decision 1780). Two of them move this answer: HOVER
+        // rests the body a yard clear of the floor it found, and WATERWALKING makes the liquid
+        // surface one of the floors it can find.
+        Option<&crate::net::UnitMoveModes>,
     )>,
 ) {
     let cost = clamp_cost_enabled();
@@ -555,7 +562,7 @@ pub(in crate::net) fn ground_clamp_creatures(
     // `armed` means the collider set is churning and the gate is holding nothing.
     let (mut reseat, mut armed) = (0u32, 0u32);
 
-    for (entity, net, spline, mut t, mut clamped, swimming) in &mut q {
+    for (entity, net, spline, mut t, mut clamped, swimming, modes) in &mut q {
         visited += 1;
         if net.kind != EntityKind::Unit {
             skipped += 1;
@@ -570,6 +577,11 @@ pub(in crate::net) fn ground_clamp_creatures(
             continue; // in-liquid: the wire Z is the creature's swim depth
         }
         let xz = [t.translation.x, t.translation.z];
+        // The granted-mode word is a *fourth input to the ray's answer*, so it joins the cache
+        // gate below: a creature that is handed HOVER while standing perfectly still has not moved
+        // and the world has not changed, and without this its cached ground answer would outlive
+        // the grant (decision 1780).
+        let granted = modes.copied().unwrap_or_default();
         // **Re-seat on any write that wasn't ours.** The Y standing here differs from the one this
         // unit's last clamp left behind exactly when somebody who owns this unit's position moved
         // it — the wire, its spline, a transport deck — and *that* Y is the authority the probe
@@ -592,7 +604,7 @@ pub(in crate::net) fn ground_clamp_creatures(
             let same_question = if legacy {
                 c.y_written == t.translation.y
             } else {
-                c.seat_y == seat_y && c.epoch == epoch.get()
+                c.seat_y == seat_y && c.epoch == epoch.get() && c.modes == granted
             };
             if c.hit && c.xz == xz && same_question {
                 held += 1;
@@ -615,13 +627,41 @@ pub(in crate::net) fn ground_clamp_creatures(
         let hit = world.ray_body(origin, Dir3::NEG_Y, reach);
         // The down-ray's hit point Y = feet on the surface; no surface in reach = the seat, i.e.
         // where the server put it.
-        let y = match &hit {
+        let mut y = match &hit {
             Some(h) => {
                 hit_n += 1;
                 origin.y - h.distance
             }
             None => seat_y,
         };
+        // **Water walking** (decision 1780): `MOVEFLAG_WATERWALKING` ORs the two ADT liquid layers
+        // into the reference's walk trace mask (`0x63162e or edi,0x30000`), so the surface simply
+        // *is* floor and the one trace elects between it and the terrain. Ours queries liquid
+        // separately, so the election is written out: the higher of the two wins, which is what a
+        // single trace against both would have returned. Reached only by a creature the swim mark
+        // has already let through — the reference takes this arm only when the swim bit is clear
+        // (wow-re `moveflag-family.md` §2.2), and a swimming creature `continue`d above.
+        if granted.water_walking() {
+            let wow = bevy_to_wow(t.translation);
+            let who = benilla_world::world_point::Subject::Unit(entity);
+            if let Some(l) = points.liquid_at(who, wow) {
+                y = y.max(t.translation.y + (l.surface_z - wow[2]));
+            }
+        }
+        // **Hover** (decision 1780): the body rests [`crate::player::HOVER_HEIGHT`] above the floor
+        // — and, faithfully, **does not descend at all when the floor is under a yard away**. The
+        // reference's finalize is `z_final = z_before_snap − max(L − 1.0, 0)` (`0x636e81`-`0x636ea9`,
+        // wow-re `moveflag-family.md` §4.1), with `L` the achieved down-probe distance; here `L` is
+        // `seat_y − y`, so the same expression is `(y + 1.0).min(seat_y)`.
+        //
+        // The reference's second, rate-limited pass (`0x636fa1`, climbing back toward the clearance
+        // at 7 yd/s) is deliberately NOT reproduced: this clamp is a pure function of (server pose,
+        // colliders) by construction, which is what makes its cache gate sound (decision 1384), and
+        // a per-frame ramp is state. A creature's seat is the server's, so the static answer is the
+        // one it converges to anyway.
+        if granted.hovering() {
+            y = (y + crate::player::HOVER_HEIGHT).min(seat_y);
+        }
         // Exact bit equality is deliberate, not a sloppy float compare: the question is "would the
         // write change anything" — Bevy's change detection fires on the DerefMut regardless of
         // value, so writing an equal Y every frame marked every standing creature's transform
@@ -637,6 +677,7 @@ pub(in crate::net) fn ground_clamp_creatures(
             y_written: t.translation.y,
             hit: hit.is_some(),
             epoch: epoch.get(),
+            modes: granted,
         };
         match clamped.as_deref_mut() {
             Some(c) => *c = state,
@@ -806,6 +847,10 @@ pub(crate) struct GroundClamped {
     /// The collider-set stamp the answer was computed against — a cached answer outlives neither
     /// the unit's own pose nor the world it described.
     epoch: u64,
+    /// The granted-mode word the answer was computed under (decision 1780). HOVER and WATERWALKING
+    /// both change what the same ray, from the same seat, in the same world, resolves to — so they
+    /// are as much an input to the cached answer as the other three.
+    modes: crate::net::UnitMoveModes,
 }
 
 /// The reference's `0x6030c0` decision for one creature, as a pure function of everything it
@@ -952,6 +997,10 @@ mod under_floor {
             PhysicsPlugins::new(bevy::app::PostUpdate),
         ));
         app.init_asset::<Mesh>().init_resource::<ColliderEpoch>();
+        // The liquid/room facade the clamp and the dead-reckon both ask for a water-walker's
+        // surface (decision 1780). Seeded empty: this harness is about geometry, and an empty
+        // world answers "no liquid here", which is the case every test below is written for.
+        benilla_world::world_point::init_world_point_resources(app.world_mut());
         // `update()` never runs plugin `finish()`, where avian seats its diagnostics resources —
         // and the second `update()` below (the one that lands the late floor) does step physics.
         app.finish();
@@ -1013,6 +1062,74 @@ mod under_floor {
             y_of(&app, npc),
             FLOOR_Y,
             "the floor arrived under an NPC that never moved; it belongs on it"
+        );
+    }
+
+    /// **A hovering creature rests exactly a yard over the floor it found** — and, faithfully,
+    /// **does not descend at all when that floor is under a yard away** (decision 1780). The
+    /// reference finalises `z = z_before_snap − max(L − 1.0, 0)` (`0x636e81`-`0x636ea9`), so the
+    /// grant is not "+1 yd" but "stop a yard short of the snap, and never move *up*".
+    ///
+    /// The second half is the one worth pinning: written as a plain `floor + 1.0` the same grant
+    /// would *raise* a creature the server had already placed inside that yard, which is a body
+    /// popping upward on an aura that is supposed to leave it where it is.
+    #[test]
+    fn a_hovering_creature_floats_a_yard_and_never_climbs() {
+        let (mut app, npc) = half_arrived_world();
+        clamp(&mut app);
+        assert_eq!(y_of(&app, npc), TERRAIN_Y, "the plain snap, for reference");
+
+        // The grant arrives on a body that has not moved: the cached answer must not outlive it.
+        app.world_mut()
+            .entity_mut(npc)
+            .insert(crate::net::UnitMoveModes(
+                crate::creature_anim::move_flags::HOVER,
+            ));
+        clamp(&mut app);
+        assert_eq!(
+            y_of(&app, npc),
+            TERRAIN_Y + crate::player::HOVER_HEIGHT,
+            "a yard clear of the floor — and the grant alone re-armed the cast"
+        );
+
+        // Now the near case: seat the body less than a yard over its floor. `min(seat)` holds it
+        // where the server put it rather than lifting it to the clearance.
+        let near = TERRAIN_Y + 0.25;
+        app.world_mut()
+            .entity_mut(npc)
+            .get_mut::<Transform>()
+            .unwrap()
+            .translation
+            .y = near;
+        clamp(&mut app);
+        assert_eq!(
+            y_of(&app, npc),
+            near,
+            "inside the clearance the reference subtracts nothing — it must not climb"
+        );
+    }
+
+    /// The water-walker's floor election, and the one that proves it is an *election*: the surface
+    /// wins over a lakebed below it, and loses to ground above it. The reference gets this for
+    /// free — `MOVEFLAG_WATERWALKING` ORs the liquid layers into the walk trace's class mask
+    /// (`0x63162e`), so one trace returns whichever is nearer the feet. Ours queries liquid
+    /// separately, so the max() is that election written out (decision 1780).
+    ///
+    /// With no liquid in this harness the mode must be inert — which is the assertion that would
+    /// catch a `max` against a garbage surface (a `f32::MIN` sentinel, an unwrapped `None`).
+    #[test]
+    fn water_walking_with_no_liquid_changes_nothing() {
+        let (mut app, npc) = half_arrived_world();
+        app.world_mut()
+            .entity_mut(npc)
+            .insert(crate::net::UnitMoveModes(
+                crate::creature_anim::move_flags::WATER_WALKING,
+            ));
+        clamp(&mut app);
+        assert_eq!(
+            y_of(&app, npc),
+            TERRAIN_Y,
+            "no liquid over this NPC: the terrain is still the only floor"
         );
     }
 

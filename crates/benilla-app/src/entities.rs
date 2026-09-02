@@ -329,10 +329,15 @@ impl Creatures {
         self.catalog.model_scale(display_id)
     }
 
-    /// A display's resolved blood id (decision 0137 phase 3 — see [`CreatureModel::blood`]):
-    /// the UnitBloodLevels key the melee spurt chain starts from; `None` = unknown display.
-    pub(crate) fn blood(&self, display_id: u32) -> Option<i32> {
-        self.catalog.model(display_id).map(|m| m.blood)
+    /// A display's two **blood-row candidates** — `CreatureDisplayInfo.BloodLevel` and
+    /// `CreatureModelData.BloodID`, tiers 1 and 2 of the reference's UnitBloodLevels resolve.
+    /// `None` = unknown display. The tiers themselves need the table, so they live in
+    /// [`benilla_formats::BloodCatalog::level_key`] — which is where tier 3 is, and 1850's whole
+    /// point is that tier 3 is not optional.
+    pub(crate) fn blood_candidates(&self, display_id: u32) -> Option<(i32, i32)> {
+        self.catalog
+            .model(display_id)
+            .map(|m| (m.blood_display, m.blood_model))
     }
 
     /// A built display's booth framing — the model's own **authored cameras**, which is what both

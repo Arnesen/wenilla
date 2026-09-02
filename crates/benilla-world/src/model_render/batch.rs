@@ -58,6 +58,16 @@ pub struct BatchVariants {
     pub zfill: Option<Handle<WowModelMaterial>>,
 }
 
+/// The pair one skybox batch draws with ([`M2BatchMaterials::skybox`]): the authored blend at full
+/// weight, and the promoted SRC_ALPHA twin the 4-second crossfade rides (equal to `steady` when the
+/// authored blend already blends).
+pub struct SkyboxBatch {
+    /// The batch at slot weight 1.0 — its authored blend mode, the material it has always had.
+    pub steady: Handle<WowModelMaterial>,
+    /// The blend-promotion twin for `0 < weight < 1` (wow-re `m2-blend-promotion-zfill.md`).
+    pub fade_blend: Handle<WowModelMaterial>,
+}
+
 /// Build the material(s) an authored render batch draws with.
 ///
 /// Every method returns `None` until the shared light buffer exists (it is created at startup in
@@ -101,7 +111,7 @@ impl M2BatchMaterials<'_> {
         ))
     }
 
-    /// One material for a batch of a **WMO skybox** — the painted sky a building owns
+    /// The material pair for a batch of a **WMO skybox** — the painted sky a building owns
     /// ([`crate::skybox`]), which is an ordinary M2 and is drawn as one (decision 1264).
     ///
     /// Everything that makes it a *skybox* rather than a doodad is here, and it is only three
@@ -125,47 +135,67 @@ impl M2BatchMaterials<'_> {
     ///   (`[0.975, 0.98]`, painter's order, depth-write off); our port of that ordering is the sort
     ///   rung ([`super::skybox_sort_bias`]), so honouring the flag here would be reading it twice.
     ///
-    /// No variant set: a skybox never feathers, never primes depth, and is never indoors or
-    /// outdoors — it *is* the outdoors.
+    /// **The skybox DOES feather** — that is what the second handle is. The slot weight
+    /// (`[CM2Model+0x180]`, written per frame from the interior crossfade `[0xce9bdc]`) multiplies
+    /// into every batch's combined alpha, and a batch at `0 < A < 1` is *promoted* to
+    /// SRC_ALPHA/INV_SRC_ALPHA blending whatever its authored mode (wow-re
+    /// `m2-blend-promotion-zfill.md` — the same promotion every entity fade rides). So the 4-second
+    /// crossfade draws the sky alpha-blended over the still-standing celestial pass. `fade_blend`
+    /// is that promoted twin; a batch whose steady material already blends (authored Blend, or a
+    /// multiply batch riding the source-colour lerp) is its own twin, exactly
+    /// [`Self::entity_variants`]' law. No depth-prime twin: the sky never writes depth, so there
+    /// is nothing to prime ([`Self::zfill_for`]'s own rule).
     pub fn skybox(
         &mut self,
         sub: &benilla_formats::RenderSubmesh,
         texture: Option<Handle<Image>>,
         order: u16,
-    ) -> Option<Handle<WowModelMaterial>> {
+    ) -> Option<SkyboxBatch> {
         let light = self.light.as_ref()?.0.clone();
-        Some(model_material(
-            &mut self.cache.0,
-            &mut self.materials,
-            texture,
+        let mut mk = |fade: bool| {
+            model_material(
+                &mut self.cache.0,
+                &mut self.materials,
+                texture.clone(),
+                sub.blend,
+                sub.two_sided,
+                false, // an M2, whichever building names it
+                false,
+                sub.emissive,
+                sub.additive,
+                fade,
+                true,  // never writes depth
+                false, // …and never skips the test — see above
+                sub.fog_policy,
+                sub.env_map,
+                ShadeSel::Lit, // unread: every skybox batch the chain ships authors UNLIT (0x01)
+                order,
+                // No texture-transform or M2Color loop is wired on this lane, and neither shipped
+                // skybox authors one (`CavernsOfTimeSky` has 0 texture transforms and 0 animated colour
+                // tracks; `StratholmeSkybox` is fully static). Wiring them means loading the skybox
+                // through the `M2Model` asset lane — which holds these as the `Arc`s the material key
+                // identifies them by, and is also what the asteroid belts' BONE animation needs. One
+                // move, when that lands; a locally-minted `Arc` here would be a dedup key with no owner.
+                None,
+                None,
+                None, // M2: no MOBA class, no SIDN, no WINDOW
+                None,
+                false,
+                true, // the sky lane
+                &light,
+                None, // one shared sky material — no per-sequence channel to key on
+            )
+        };
+        let steady = mk(false);
+        let fade_blend = if matches!(
             sub.blend,
-            sub.two_sided,
-            false, // an M2, whichever building names it
-            false,
-            sub.emissive,
-            sub.additive,
-            false, // never feathers
-            true,  // …never writes depth
-            false, // …and never skips the test — see above
-            sub.fog_policy,
-            sub.env_map,
-            ShadeSel::Lit, // unread: every skybox batch the chain ships authors UNLIT (0x01)
-            order,
-            // No texture-transform or M2Color loop is wired on this lane, and neither shipped
-            // skybox authors one (`CavernsOfTimeSky` has 0 texture transforms and 0 animated colour
-            // tracks; `StratholmeSkybox` is fully static). Wiring them means loading the skybox
-            // through the `M2Model` asset lane — which holds these as the `Arc`s the material key
-            // identifies them by, and is also what the asteroid belts' BONE animation needs. One
-            // move, when that lands; a locally-minted `Arc` here would be a dedup key with no owner.
-            None,
-            None,
-            None, // M2: no MOBA class, no SIDN, no WINDOW
-            None,
-            false,
-            true, // the sky lane
-            &light,
-            None, // one shared sky material — no per-sequence channel to key on
-        ))
+            ModelBlend::Blend | ModelBlend::Mod | ModelBlend::Mod2x
+        ) {
+            steady.clone()
+        } else {
+            mk(true)
+        };
+        Some(SkyboxBatch { steady, fade_blend })
     }
 
     /// One steady material for a batch drawn **off-world**, against a render target's own light

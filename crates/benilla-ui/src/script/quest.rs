@@ -318,7 +318,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // GetRewardSpell() → nil (spell-reward rows out of scope in v1, decision 0088).
     g.set(
         "GetRewardSpell",
-        lua.create_function(|_, ()| Ok(Value::Nil))?,
+        // THREE values on every reachable path, and the reference's own kinds include
+        // `(nil,nil,nil)` — so the empty answer is three nils, not one (decision 1842).
+        lua.create_function(|_, ()| Ok((Value::Nil, Value::Nil, Value::Nil)))?,
     )?;
 
     // ── Intents ───────────────────────────────────────────────────────────────────────────────────

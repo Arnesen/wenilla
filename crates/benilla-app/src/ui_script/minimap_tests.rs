@@ -5,23 +5,7 @@
 
 use benilla_ui::script::UiScript;
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error (the other tests'
-/// loader, duplicated so this file is self-contained).
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 fn enabled(s: &UiScript, button: &str) -> bool {
     s.eval::<bool>(&format!("return {button}:IsEnabled() ~= 0"))
@@ -30,6 +14,7 @@ fn enabled(s: &UiScript, button: &str) -> bool {
 
 #[test]
 fn minimap_zoom_buttons_resync_when_switching_inside_and_outside() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // Host globals the cluster's OnLoad/clicks lean on that a bare engine doesn't install.
@@ -93,6 +78,7 @@ fn minimap_zoom_buttons_resync_when_switching_inside_and_outside() {
 /// tracking state pushed, hide when it clears.
 #[test]
 fn tracking_frame_follows_get_tracking_texture_across_player_auras_changed() {
+    let _data = benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::TrackingState;
 
     let mut s = UiScript::new().unwrap();
@@ -134,25 +120,37 @@ fn game_time_session(hour: u32, minute: u32) -> UiScript {
     s.run("function GetMinimapZoneText() return '' end")
         .unwrap();
     s.run("function PlaySound() end").unwrap();
-    // Byte-exact 1.12 GlobalStrings (l.4251-4253) — the engine-only session loads no
-    // GlobalStrings off a chain.
-    s.run("TIME_TWELVEHOURAM = \"%d:%02d AM\"; TIME_TWELVEHOURPM = \"%d:%02d PM\"; TIME_TWENTYFOURHOURS = \"%d:%02d\"")
-        .unwrap();
     s.run(&format!(
         "__benilla_game_hour = {hour}; __benilla_game_minute = {minute}"
     ))
     .unwrap();
+    // The player's own strings and locale rather than a hand-typed copy of three of them: the
+    // window is the reference's file since 1751 window 5, and `TIME_TWENTYFOURHOURS` and
+    // `TwentyFourHourTime` are exactly what it reads. `Localization.xml` only DEFINES
+    // `LocalizeFrames`; the reference calls it from `UIParent_OnEvent`'s VARIABLES_LOADED arm, and
+    // this session has no UIParent, so it calls it directly.
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\Localization.xml");
+    s.run("LocalizeFrames()").unwrap();
     load_xml(&s, "Fonts.xml");
+    // `TEXT()`, which the reference's own tooltip and label formatting passes every string through.
+    load_xml(&s, "BasicControls.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "MinimapCluster.xml");
-    load_xml(&s, "GameTime.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTime.xml");
     s
 }
 
-/// `GameTimeTexture`'s current 4-edge texcoord window.
+/// `GameTimeTexture`'s current texcoord window, as the `(left, right, top, bottom)` rect this
+/// file reasons in.
+///
+/// `GetTexCoord` answers EIGHT values since decision 1840 — `ULx, ULy, LLx, LLy, URx, URy, LRx,
+/// LRy` — so the rect is positions 1, 5, 2, 4. Folded here rather than at each call site because
+/// the window really is axis-aligned and every assertion below is about its edges.
 fn tod_window(s: &UiScript) -> (f64, f64, f64, f64) {
-    s.eval::<(f64, f64, f64, f64)>("return GameTimeTexture:GetTexCoord()")
-        .unwrap()
+    let (ulx, uly, _, lly, urx, ..): (f64, f64, f64, f64, f64, f64, f64, f64) =
+        s.eval("return GameTimeTexture:GetTexCoord()").unwrap();
+    (ulx, urx, uly, lly)
 }
 
 /// `GameTimeFrame_Update`'s law, exactly: the 50-px window over the 128×64 UI-TOD-Indicator
@@ -161,6 +159,7 @@ fn tod_window(s: &UiScript) -> (f64, f64, f64, f64) {
 /// the ref compares (`< DAWN or >= DUSK`).
 #[test]
 fn game_time_frame_slides_the_sun_moon_window_on_the_game_clock() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = game_time_session(10, 30);
     // OnLoad seeded `timeOfDay = 0` and 10:30 ≠ 0, so the very first update already seated the
     // window — no OnUpdate tick needed for the initial state.
@@ -194,6 +193,7 @@ fn game_time_frame_slides_the_sun_moon_window_on_the_game_clock() {
 /// hit-test never captures) and the `<HitRectInsets>` hull.
 #[test]
 fn hovering_the_indicator_shows_and_live_updates_the_game_time_tooltip() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = game_time_session(21, 7);
     s.resolve();
 
@@ -239,6 +239,7 @@ fn hovering_the_indicator_shows_and_live_updates_the_game_time_tooltip() {
 /// Calling `Minimap_OnClick()` from `s.run` would prove none of it (1234 §2).
 #[test]
 fn a_click_on_the_minimap_parks_a_centre_relative_ping_request() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     s.run("function GetMinimapZoneText() return '' end")
@@ -282,6 +283,7 @@ fn a_click_on_the_minimap_parks_a_centre_relative_ping_request() {
 /// under its own feet.
 #[test]
 fn get_ping_position_is_nil_until_there_is_a_ping() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     s.run("function GetMinimapZoneText() return '' end")

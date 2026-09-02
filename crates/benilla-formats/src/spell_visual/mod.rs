@@ -42,8 +42,13 @@
 //!   Flamestrike's 420, Vanish's 389). Same `CEffect` lifecycle as the nine (spell-id-tagged on
 //!   the unit's `+0xb4` list, the stage sets lifetime — §1.5). Placement is byte-pinned (wow-re
 //!   `kit30-effect-slot.md`, folded back 0850): no bone — a one-time **world plant** at the
-//!   owner's position/facing/scale, [`WORLD_EFFECT_TAG`]. Field 14 is a visual-group fallback
-//!   id — not read here. **Fields 15–34 are the four `CharProc` slots** — the
+//!   owner's position/facing/scale, [`WORLD_EFFECT_TAG`]. **Field 14 is the kit's CAMERA SHAKE**
+//!   ([`VisualKit::shake`]) — a `SpellEffectCameraShakes.dbc` **group** id, not the "visual-group
+//!   fallback" earlier notes called it: 58 shipped kits carry one and all 58 values land on that
+//!   table's nine sparse ids, `Spell.dbc` 12816 is literally named *"Idom Rool Camera Shake"*, and
+//!   the set reads as nothing else (kit 356 = War Stomp/Thunder Clap/Kodo Stomp, kit 348 = the
+//!   Knockdown/Slam/Charge impacts, kit 138 = every summon). **Fields 15–34 are the four
+//!   `CharProc` slots** — the
 //!   *character* half of a kit (the body's own alpha/tint, as opposed to the attach-point emitters):
 //!   five parallel 4-element arrays, `CharProcType[4]` @+0x3c then `CharParamZero/One/Two/Three[4]`
 //!   @+0x4c/+0x5c/+0x6c/+0x7c (wow-re `spellvisual-schema.md`, byte-pinned: all 20 consumed by the
@@ -355,6 +360,11 @@ pub struct VisualKit {
     /// (the real missile is `SpellVisual` field 7's, [`VisualStages::missile_model`]). Folded
     /// into [`Self::effects`] at [`WORLD_EFFECT_TAG`].
     pub world_effect: Option<u32>,
+    /// Kit field 14 (`kit+0x38`) — the **`SpellEffectCameraShakes.dbc` group** this kit shakes the
+    /// camera with (`None` = no shake). Community name `ShakeID`; the value is a *group* id, never a
+    /// `CameraShakes` row id — see [`crate::SpellShakeGroup`]. 58 of the 1772 shipped kits carry
+    /// one, and every value lands on the group table's nine sparse ids `{3, 4, 5, 6, 7, 26, 66}`.
+    pub shake: Option<u32>,
     /// The four `CharProc` slots (kit fields 15–34, transposed out of the five parallel arrays).
     /// An unfilled slot is `None` — see [`char_proc_slot`] for the sentinel law; iterate the filled
     /// ones via [`Self::char_procs`]. **Two consumers, two halves of the same table:** the *body*
@@ -480,6 +490,13 @@ impl SpellVisualCatalog {
 
     pub fn is_empty(&self) -> bool {
         self.visuals.is_empty()
+    }
+
+    /// Every loaded `SpellVisual` row as `(id, stages)`, unordered — for whole-table census
+    /// instruments (`benilla-extract shakecensus` walks it to find which effect models a
+    /// **DynamicObject** can host). Runtime consumers resolve one by id through [`Self::stages`].
+    pub fn visuals(&self) -> impl Iterator<Item = (u32, &VisualStages)> + '_ {
+        self.visuals.iter().map(|(id, s)| (*id, s))
     }
 
     /// Every loaded `SpellVisualKit` id, ascending — for whole-table census instruments
@@ -669,6 +686,7 @@ pub fn load_spell_visual_catalog(chain: &mut Chain) -> Result<SpellVisualCatalog
                 sound,
                 effect_slots,
                 world_effect: u32_at(r, 12).and_then(some_unless_none),
+                shake: u32_at(r, 14).and_then(some_unless_none),
                 char_proc_slots,
             },
         );

@@ -9,8 +9,9 @@
 //! units tall every frame, and [`seam_scale`] carries quads ×s out / mouse ÷s in. The quad pass
 //! wants y-down window px, so extraction also flips through the window height.
 //!
-//! Benilla's own **unit frames** (`assets/ui/UnitFrames.xml` — a template + the player and target
-//! instances) load at startup by default through [`benilla_ui::loader`] — the decision 0068 slice-1
+//! The **unit frames** (the reference's own `Interface\FrameXML\{PlayerFrame,PartyFrame,
+//! TargetFrame,PetFrame}.xml`, off the player's chain since 1751 — our `UnitFrames.xml`
+//! transcription is retired) load at startup through [`benilla_ui::loader`] — the decision 0068 slice-1
 //! game-shell: real FrameXML+Lua rendering unit health/power/level/name through the whole chain
 //! (snapshot → `Unit*` bindings → Lua → event → StatusBars+text → quad pass). Since captures run
 //! server-less (no real game state), `WOW_CAPTURE_UI=1` also feeds synthetic `"player"`/`"target"`
@@ -555,6 +556,7 @@ fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<VmMemo<
             class_file: Some("WARRIOR".into()),
             sex: 2,
             is_player: true,
+            player_controlled: true,
             ..Default::default()
         }),
     );
@@ -772,6 +774,13 @@ impl benilla_ui::script::TextMeasure for FixedWidthFont {
 #[cfg(test)]
 mod test_ui;
 
+/// [`test_ui::load_ui`] for a test module OUTSIDE `ui_script` — `ui_action::feed_tests` drives the
+/// real `UIErrorsFrame` end to end and needs the same both-stores reader everything else uses.
+#[cfg(test)]
+pub(crate) fn load_ui_for_test(script: &benilla_ui::script::UiScript, entry: &str) -> usize {
+    test_ui::load_ui(script, entry)
+}
+
 #[cfg(test)]
 mod cinematic_tests;
 
@@ -842,6 +851,12 @@ mod faux_scroll_tests;
 /// through `CreateFrame`'s fourth argument the way an addon drives it — decision 1203's queue.
 #[cfg(test)]
 mod panel_template_tests;
+
+/// The RETURN-SHAPE gate (decision 1842): `reference/1.12-shapes.tsv` against what this client
+/// actually answers. `reference_surface` gates names; nothing gated shapes, and that gap produced
+/// six decisions in two days.
+#[cfg(test)]
+mod shape_gate;
 
 /// The reference's BasicControls.xml — TEXT/message/_ERRORMESSAGE and the ScriptErrors dialog,
 /// none of which benilla itself calls: every test enters from Lua the way an addon does.

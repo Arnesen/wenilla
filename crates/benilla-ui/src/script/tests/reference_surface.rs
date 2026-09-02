@@ -67,15 +67,18 @@ fn allowed_beyond_1_12() -> HashSet<&'static str> {
         // Every one of these predates 1189 and is used by our own transcribed FrameXML today.
         // Resolving each means either replacing it with its 1.12 equivalent (`UnitPower` →
         // `UnitMana`, which 1.12 has and we do not) or recording why it stays.
+        //
+        // Three left with 1751's gossip work: `GetNumGossipQuests`, `GetGossipQuestInfo` and
+        // `SelectGossipQuest` were benilla's own single-list shape over the gossip packet's quest
+        // rows, and 1.12 has none of them — it publishes `GetGossipAvailableQuests` /
+        // `GetGossipActiveQuests` and a select for each, which is what this client answers now.
+        // The window that needed them is ours until it migrates; it calls the reference's four.
         "CancelUnitBuff",
         "GetCursorInfo",
-        "GetGossipQuestInfo",
         "GetInventoryItemID",
-        "GetNumGossipQuests",
         "GetPlayerFacing",
         "GetTradePartnerName",
         "IsGossipOptionCoded",
-        "SelectGossipQuest",
         "SubmitChatInput",
         "UnitAura",
         "UnitIsAFK",

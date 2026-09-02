@@ -107,6 +107,11 @@ impl UiScript {
         }
         // The focused edit box's caret blink (`0x77a790` runs on the client's frame tick).
         editbox::tick_blink(&self.lua, elapsed);
+        // …and, from inside that same `0x77a790` (`0x77a7a1`), the dirty-word drain that fires the
+        // `OnTextChanged`s an edit only marked (decision 1831). It runs BEFORE this tick's
+        // OnUpdate sweep, matching the reference's order: the box's own OnUpdate override drains
+        // before the FrameXML handlers that read the box get their turn.
+        editbox::drain_text_changed(&self.lua);
         // Events queued by Lua bindings last tick (`Model::pending_events` — e.g. `SetMapZoom` →
         // `WORLD_MAP_UPDATE`; the cursor arc's `CURSOR_UPDATE`/`ITEM_LOCK_CHANGED`/
         // `DELETE_ITEM_CONFIRM`, decision 0216) fire first, so handlers see them before this

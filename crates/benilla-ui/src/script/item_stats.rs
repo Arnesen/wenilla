@@ -490,19 +490,26 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // the table is FrameXML's and the verb underneath is the engine's. 23 corpus addons call it,
     // and three of our own XML files carry a private copy of the palette this replaces.
     //
-    // **The clamp is the reference's, not a guess**: the accessor `0x52ad70` clamps `quality >= 7`
-    // to index **1** (Common) — not to 6, not to an error — so an addon passing a quality from a
-    // later client gets white rather than a nil it will then concatenate.
+    // **The clamp is the reference's, not a guess** — and it is ONE clamp, not two, because the
+    // comparison is UNSIGNED. `0x52ad70`/`0x52ad90` both do `cmp ecx,7` / `jb`, so anything at or
+    // above 7 selects index **1** (Common) — not 6, not an error — and a NEGATIVE quality takes the
+    // same branch, because as a `u32` it is at or above 7 too. `GetItemQualityColor(-1)` is
+    // therefore **white**, and so is `ITEM_QUALITY_COLORS[-1]`, the row `UIParent.lua`'s
+    // `for i = -1, 6` builds.
     //
-    // Negative qualities are the other end, and the reference does not clamp them at all:
-    // `UIParent.lua`'s own loop starts at `-1`, which reads *before* the array. We answer index 0
-    // (Poor) there. That is the one place this binding is deliberately not bit-faithful, because
-    // the faithful answer is an out-of-bounds read.
+    // This corrects 1199, which called the negative arm "the one place this binding is deliberately
+    // not bit-faithful … because the faithful answer is an out-of-bounds read" and answered Poor
+    // (grey). There is no out-of-bounds read: the unsigned compare catches it first. The value
+    // stopped being academic when the loot window went to the chain — `-1` is what
+    // `GetLootSlotInfo` answers for a row whose item template is not cached, and that row's text
+    // colour is this table's `-1` row (wow-re `system/ui/scratch/loot-slot-record.md` §10,
+    // decision 1805).
     lua.globals().set(
         "GetItemQualityColor",
         lua.create_function(|lua, quality: i64| {
-            let i = match quality {
-                q if q < 0 => 0,
+            // The reference reads its argument as a 32-bit int (`ftol`) and then compares it
+            // unsigned, which is exactly this pair of casts.
+            let i = match quality as i32 as u32 {
                 q if q >= 7 => 1,
                 q => q as usize,
             };
@@ -1096,8 +1103,11 @@ mod quality_color_tests {
         // and never to nil, because the caller concatenates the result.
         assert_eq!(hex(7), "|cffffffff");
         assert_eq!(hex(99), "|cffffffff");
-        // ...and a negative reads Poor here rather than reproducing the reference's out-of-bounds
-        // read. `UIParent.lua`'s own loop starts at -1, so this path is exercised by real FrameXML.
-        assert_eq!(hex(-1), "|cff9d9d9d");
+        // …and the compare is UNSIGNED, so every negative takes the SAME branch and reads Common.
+        // This is the row `UIParent.lua`'s `for i = -1, 6` builds, and the colour a loot row wears
+        // while its item template is uncached (`GetLootSlotInfo` answers -1 there). It read Poor
+        // until 1805; there is no out-of-bounds read to reproduce, the `jb` catches it first.
+        assert_eq!(hex(-1), "|cffffffff");
+        assert_eq!(hex(-99), "|cffffffff");
     }
 }

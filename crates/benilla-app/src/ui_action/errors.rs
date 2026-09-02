@@ -22,10 +22,12 @@
 //! absent key shows nothing (the reference's data-suppression face) and localization rides
 //! for free.
 
+use benilla_ui::messages::MessageRecord;
 use benilla_ui::script::{ScriptValue, UiScript};
 use bevy::prelude::*;
 
 use crate::net::ObjectStore;
+use crate::sound::MessageSounds;
 use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
 use crate::ui_items::{count_of, InventoryScope};
 
@@ -108,12 +110,6 @@ impl UiError {
             fill_d: None,
         }
     }
-
-    /// Where this message is shown, straight off the catalog row its key names — the reference's
-    /// `DisplayError` reading `[record+0x04]`, which is the only place that answer has ever lived.
-    pub(crate) fn kind(&self) -> MsgKind {
-        benilla_ui::messages::kind_of(self.key)
-    }
 }
 
 /// Client-LOCAL refusals queued for the UI error line straight by GlobalStrings key — the
@@ -166,13 +162,72 @@ pub(crate) fn ui_error_text(e: &UiError, get: &dyn Fn(&str) -> Option<String>) -
     (!text.is_empty()).then_some(text)
 }
 
-/// **The one sink** for a resolved message line: put it on the surface its [`MsgKind`] names.
+/// One resolved line on its way to the screen — the text, where it goes, and the **catalog row it
+/// came from** when it has one.
+///
+/// The record rides along because a message's *sound* is one of its fields (`+0x08`/`+0x0c`) just
+/// as its surface is (`+0x04`), and the reference reads all three in the same breath inside
+/// `CGGameUI::DisplayError`. Carrying only the [`MsgKind`], as this did before 1815, threw the
+/// other two away at the call site and left the catalog's sound columns unreadable by anything.
+pub(crate) struct Shown {
+    record: Option<&'static MessageRecord>,
+    kind: MsgKind,
+    text: String,
+}
+
+impl Shown {
+    /// A **catalog** message, named by its GlobalStrings key — the reference's `DisplayError(id)`,
+    /// which is nearly every line benilla shows. One lookup answers both "where does it go" and
+    /// "what does it sound like".
+    ///
+    /// A key with no row falls back to [`MsgKind::Error`] and no sound. That cannot arise in the
+    /// reference (a message is an *index*, so an unknown key is not expressible), so it only ever
+    /// means benilla named a key the client does not have — and
+    /// `every_error_key_in_the_source_is_a_catalog_row` is what keeps it unreachable.
+    pub(crate) fn keyed(key: &str, text: String) -> Self {
+        let record = benilla_ui::messages::by_key(key);
+        Self {
+            record,
+            kind: record.map_or(MsgKind::Error, |r| r.kind),
+            text,
+        }
+    }
+
+    /// A line with **no catalog row** — the wire's own already-resolved text ([`UiErrorTexts`]),
+    /// which reaches the reference's sink `0x4945b0` directly and never passes a record. Silent,
+    /// faithfully: there is no `+0x08`/`+0x0c` to read.
+    pub(crate) fn unkeyed(kind: MsgKind, text: String) -> Self {
+        Self {
+            record: None,
+            kind,
+            text,
+        }
+    }
+}
+
+/// Resolve a message key against the VM's own `GlobalStrings.lua` into a [`Shown`] — or `None`
+/// when the key has no string there, which is the reference's own data-suppression face
+/// (`0x4967bd`/`0x4967c5`) and the reason every raise site carries a *key* rather than text.
+///
+/// Lives here rather than in each window because every keyed raise site needs exactly this and
+/// four of them had grown their own copy (decision 1821).
+pub(crate) fn keyed_line(script: &UiScript, key: &'static str) -> Option<Shown> {
+    let text = script.lua().globals().get::<String>(key).ok()?;
+    (!text.is_empty()).then(|| Shown::keyed(key, text))
+}
+
+/// **The one sink** for a resolved message line: put it on the surface its [`MsgKind`] names, and
+/// queue the sound its catalog row names.
 ///
 /// Every route into the client's message display ends here — the window queues that resolve a
 /// [`UiError`] (the questgiver refusals 0669, the auction house 1523, the party quest-share 1733),
 /// the client-local [`UiErrorKeys`], and the already-resolved [`UiErrorTexts`] off the wire. They
 /// differ only in how they *build* a line and where the kind comes from; what happens to a built
 /// one is this, once, so the three cannot drift apart.
+///
+/// The sound is **queued, not played** — this runs deep inside the UI feeds, which have no audio
+/// resources and should not grow them; `crate::sound::message` drains the queue after the input
+/// pass, on the same frame (decision 1815).
 ///
 /// `who` is the caller's module tag for the debug line — which exists because the chat path keeps
 /// no log of its own, so without it a live probe can count lines but never read one (0669's
@@ -183,15 +238,21 @@ pub(crate) fn ui_error_text(e: &UiError, get: &dyn Fn(&str) -> Option<String>) -
 /// and benilla raises none of them yet; when it does, this is the line that has to read the field.
 pub(crate) fn show_messages(
     script: &mut UiScript,
-    chat: &mut ChatLog,
+    sink: &mut MessageSink,
     who: &str,
-    lines: impl IntoIterator<Item = (MsgKind, String)>,
+    lines: impl IntoIterator<Item = Shown>,
 ) {
-    for (kind, text) in lines {
+    for Shown { record, kind, text } in lines {
         debug!("{who}: message ({kind:?}) {text:?}");
+        // The reference sounds a message on the way past its text, not instead of it — so this
+        // sits with the display and inherits its every guard (an empty line never gets here).
+        if let Some(record) = record {
+            sink.sounds.push(record);
+        }
         match kind {
             MsgKind::Chat => {
-                chat.push_event(ChatEvent::text_only(ChatEventKind::System, text));
+                sink.chat
+                    .push_event(ChatEvent::text_only(ChatEventKind::System, text));
             }
             MsgKind::Info => {
                 script.fire_event("UI_INFO_MESSAGE", vec![ScriptValue::Str(text)]);
@@ -201,6 +262,16 @@ pub(crate) fn show_messages(
             }
         }
     }
+}
+
+/// Everywhere a displayed message lands, besides the script VM: the chat window and the sound
+/// queue. One [`SystemParam`] rather than two, because [`show_messages`] writes both on every
+/// line and no caller wants one without the other — and because the feeds that raise messages are
+/// already at Bevy's parameter ceiling.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct MessageSink<'w> {
+    pub(crate) chat: ResMut<'w, ChatLog>,
+    pub(crate) sounds: ResMut<'w, MessageSounds>,
 }
 
 /// `UNIT_FIELD_FLAGS` bits the attack-start validator refuses on, paired with the message each
@@ -246,12 +317,37 @@ pub(crate) fn attack_actor_refusal(
     self_guid: Option<u64>,
     errors: &mut UiErrorKeys,
 ) -> bool {
+    let Some(key) = attack_actor_blocked(actor, self_guid) else {
+        return false;
+    };
+    debug!("attack refused locally by the actor's own state — {key}");
+    errors.0.push(UiError::key(key));
+    true
+}
+
+/// The same ladder **without the message** — which condition blocks the swing, or `None`.
+///
+/// It exists because `0x612df0` is not on every attack-start path, and 1851's §5 pinned which:
+/// its three callers image-wide are the pet-attack command (`0x4bd40d`), the Attack
+/// action/keybind (`0x6131aa`) and TryCast (`0x6e4efb`) — and **not** the world right-click.
+/// That click runs `0x60bea0` → `0x60c247 call 0x5ecb70`, whose whole extent
+/// `[0x5ecb70, 0x5ecda3)` contains no `call 0x496720` and no `push` of `0xa0`–`0xa9`: it has its
+/// own short, silent conjunct set (`0x5ecc06` is its mounted bail) and every failure lands on
+/// `0x5ecc37`, which bails or stops attacking. **A right-click on a hostile shows no error text
+/// under any condition** — not mounted, dead, charmed, stunned, pacified, fleeing or confused.
+///
+/// So the click asks this, and the bar asks [`attack_actor_refusal`]. The *predicate* is still
+/// `0x612df0`'s rather than `0x5ecb70`'s own — the two sets overlap but are not identical, and
+/// transcribing `0x5ecb70`'s is its own slice — but the **silence** is now the verified law, and
+/// the swing is still suppressed, which is the half that keeps us off the wire.
+pub(crate) fn attack_actor_blocked(
+    actor: Option<&ObjectStore>,
+    self_guid: Option<u64>,
+) -> Option<&'static str> {
     // No descriptor is no refusal. The reference resolves the actor object first and skips the
     // whole chain when it cannot (`0x4bd403`: no pet ⇒ send unmodified) — an un-streamed unit is
     // not an ineligible one.
-    let Some(fields) = actor.map(|s| &s.0) else {
-        return false;
-    };
+    let fields = &actor?.0;
     let key = if fields.unit_health().is_some_and(|h| h == 0) {
         "ERR_ATTACK_DEAD"
     } else if fields
@@ -269,11 +365,9 @@ pub(crate) fn attack_actor_refusal(
     } else if fields.unit_mount_display_id() > 0 {
         "ERR_ATTACK_MOUNTED"
     } else {
-        return false;
+        return None;
     };
-    debug!("attack refused locally by the actor's own state — {key}");
-    errors.0.push(UiError::key(key));
-    true
+    Some(key)
 }
 
 /// The ref's pre-send totem/reagent possession check — `CheckReagentsAndTotems 0x6e4000`,
@@ -368,6 +462,70 @@ pub(super) fn mount_result_key(mount: bool, code: u32) -> Option<&'static str> {
         }
     }
 }
+#[cfg(test)]
+mod shown_tests {
+    use super::{MessageSink, MessageSounds, MsgKind, Shown};
+    use crate::ui_chat::ChatLog;
+    use benilla_ui::script::UiScript;
+    use bevy::prelude::*;
+
+    /// The producer half of the message-sound path (decision 1815), driven through the real
+    /// [`super::show_messages`] rather than around it: a **keyed** line queues its catalog row for
+    /// `crate::sound::message` to sound, an **unkeyed** one queues nothing (the wire's own text has
+    /// no record), and a key the client does not have queues nothing either — the same fallback
+    /// that makes it a red line.
+    #[test]
+    fn a_keyed_line_queues_its_row_and_an_unkeyed_one_queues_nothing() {
+        let mut world = World::new();
+        world.init_resource::<ChatLog>();
+        world.init_resource::<MessageSounds>();
+        let mut state = bevy::ecs::system::SystemState::<MessageSink>::new(&mut world);
+        let mut script = UiScript::new().expect("VM");
+
+        {
+            let mut sink = state.get_mut(&mut world);
+            super::show_messages(
+                &mut script,
+                &mut sink,
+                "test",
+                [
+                    // A voiced refusal, a cue row, a chat row that still speaks, and one with
+                    // neither — every arm of the record's two sound columns.
+                    Shown::keyed("ERR_OUT_OF_MANA", "Not enough mana".into()),
+                    Shown::keyed("ERR_NEWTAXIPATH", "New flight path discovered!".into()),
+                    Shown::keyed("ERR_ALREADY_IN_GROUP_S", "Bob is already in a group".into()),
+                    Shown::keyed("ERR_CANT_STACK", "That item cannot stack".into()),
+                    Shown::unkeyed(MsgKind::Error, "the server said so".into()),
+                    Shown::keyed("ERR_NOT_A_REAL_MESSAGE", "invented".into()),
+                ],
+            );
+        }
+        state.apply(&mut world);
+
+        let queued = world.resource::<MessageSounds>().queued().to_vec();
+        let keys: Vec<&str> = queued.iter().map(|r| r.key).collect();
+        assert_eq!(
+            keys,
+            [
+                "ERR_OUT_OF_MANA",
+                "ERR_NEWTAXIPATH",
+                "ERR_ALREADY_IN_GROUP_S",
+                "ERR_CANT_STACK",
+            ],
+            "the unkeyed line and the unknown key have no row to sound"
+        );
+        // …and what each of them asks the drain for.
+        assert_eq!(queued[0].type_tag, 0x0f, "the voice line");
+        assert_eq!(queued[1].sound, Some("TaxiNodeDiscovered"), "the named cue");
+        assert_eq!(queued[2].kind, MsgKind::Chat, "a chat row sounds too");
+        assert_eq!(
+            (queued[3].type_tag, queued[3].sound),
+            (0x44, None),
+            "queued and silent — the drain's own no-op"
+        );
+    }
+}
+
 #[cfg(test)]
 mod mount_error_tests {
     use super::mount_result_key;

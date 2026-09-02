@@ -54,12 +54,19 @@
             return name or link
         end
 
-        -- Reuse the quality→colour source the loot window already ships (BENILLA_LOOT_QUALITY_COLORS,
-        -- LootFrame.xml — itself matching ui_items.rs quality_color / the client's GetItemQualityColor).
-        -- Unknown/nil quality falls back to common white. All FrameXML files load before any hover
-        -- fires, so the table is defined by the time this runs regardless of file order.
+        -- The shared quality→colour table, `ITEM_QUALITY_COLORS` — Fonts.xml's, matching
+        -- `ui_items.rs`'s `quality_color` and the client's `GetItemQualityColor`. Unknown/nil
+        -- quality falls back to common white. All FrameXML files load before any hover fires, so
+        -- the table is defined by the time this runs regardless of file order.
+        --
+        -- This read `BENILLA_LOOT_QUALITY_COLORS` until 1751 took the loot window to the player's
+        -- chain. That name was only ever an alias our own `LootFrame.xml` set to this same table
+        -- ("the local name kept for this file's existing readers"), and the stock file does not
+        -- set it — so the alias went from harmless indirection to a nil the moment its definer
+        -- stopped shipping. The `t and` guard would have made that silent: every tooltip would
+        -- have quietly gone white.
         function BenillaTooltip_QualityColor(quality)
-            local t = BENILLA_LOOT_QUALITY_COLORS
+            local t = ITEM_QUALITY_COLORS
             local c = (t and (t[quality] or t[1])) or { r = 1, g = 1, b = 1 }
             return c.r, c.g, c.b
         end

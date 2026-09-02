@@ -19,7 +19,9 @@
 //! This module only picks the **target** triple ([`CameraWmoFog`], written by the PVS pass — the
 //! camera's group falls out of the portal flood's down-ray seed for free). The 4-second crossfade
 //! ramp and the actual scene-fog lerp live in `crate::lighting` (`update_time_lighting`), the
-//! benilla twin of `0x6cee30`.
+//! benilla twin of `0x6cee30` — and the ramp value it publishes (`WmoCrossfade`) is ALSO the WMO
+//! skybox's slot alpha: "the skybox alpha and the interior fog blend are the same number"
+//! (wow-re `wmo-skybox.md` §3; `crate::skybox`).
 //!
 //! One explicitly-chosen reading remains: portal-less props never run the flood (all-visible fast
 //! path), so they never engage — no shipped prop is an enterable room. (The claim mask itself is
