@@ -46,7 +46,9 @@ use benilla_world::schedule::WorldStage;
 /// picks, playback-rate math) — kept in its own file as it carries the bulk of the unit-tested selector
 /// logic, separate from the Bevy driver systems in [`driver`].
 pub(crate) mod select;
-pub(crate) use select::{ease_strafe_yaw, move_flags, strafe_body_offset, MovementState};
+pub(crate) use select::{
+    ease_strafe_yaw, move_flags, strafe_body_offset, swim_body_rotation, MovementState,
+};
 use select::{Mode, Special};
 
 /// The display-facing counter-twist (the strafe body pose): the [`BodyTwist`] component + the

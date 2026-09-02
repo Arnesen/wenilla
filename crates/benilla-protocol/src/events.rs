@@ -17,8 +17,8 @@ use crate::messages::{
     GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse, GuildRoster,
     InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo, LootAllPassed, LootItem,
     LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart, MonsterMoveFacing,
-    ObjectFields, PartyKillLog, PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells,
-    PetitionQueryResponse, PetitionRename, PetitionShowList, PetitionShowSignatures,
+    MoverState, ObjectFields, PartyKillLog, PartyMemberStatsInfo, PeriodicAuraLog, PetMode,
+    PetSpells, PetitionQueryResponse, PetitionRename, PetitionShowList, PetitionShowSignatures,
     PetitionSignResults, PvpCredit, QuestComplete, QuestConfirmAccept, QuestDetails,
     QuestGiverList, QuestOfferReward, QuestRequestItems, QuestShareMsg, QuestTemplate,
     SpellDamageLog, SpellDispelLog, SpellEnergizeLog, SpellHealLog, SpellInstaKillLog,
@@ -236,6 +236,17 @@ pub enum SessionEvent {
         /// animation selector's walk-vs-run boundary (RF-0057) and the net bridge's remote-mover
         /// extrapolation. (Movement-block data, not a descriptor field — hence not in `fields`.)
         speeds: Option<MoveSpeeds>,
+        /// The **live mover state** this unit is already in as it streams into view — its
+        /// `MOVEMENTFLAGS` word and swim pitch ([`MoverState`]); `None` for a GameObject. The
+        /// reference applies both from the create block (byte-VERIFIED — wow-5875-re
+        /// `system/collision/scratch/create-block-swim-pitch.md`; the flags through the very same
+        /// `0x75a07dff` merge a relayed `MSG_MOVE_*` uses, the pitch through the shared pose commit
+        /// `0x7c6420`), and it does so *before* the model or its render callback exist — so a unit
+        /// that comes into view mid-motion is already in that motion on its first drawn frame. We
+        /// used to drop the whole word: a player who swam into view rendered level and untilted
+        /// until their next relay packet, and an idle floater — who sends none — stayed level for
+        /// as long as they floated.
+        mover: Option<MoverState>,
         /// A transport GameObject's (`UPDATE_FLAG_TRANSPORT`) path-progress anchor — `Some` only for a
         /// type-15/type-11 transport create (a boat/zeppelin/elevator). Decision 0438's cycle anchor:
         /// `anchor = this value`, `t₀ = Instant::now()` on create/re-create; per frame `progress =

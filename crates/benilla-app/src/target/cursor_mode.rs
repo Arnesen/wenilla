@@ -169,7 +169,7 @@ pub(crate) mod npc_flags {
 }
 
 /// `UNIT_FLAG_SKINNABLE` in `UNIT_FIELD_FLAGS` (vanilla).
-const UNIT_FLAG_SKINNABLE: u32 = 0x0400_0000;
+pub(super) const UNIT_FLAG_SKINNABLE: u32 = 0x0400_0000;
 
 /// NPC-service range gate: gray beyond 5.5556 yd (squared 30.864 — the client's `0xb4b32c` cell,
 /// `[0x804328]²`; checked at `0x482320`, boundary-inclusive). Shared with the merchant window's

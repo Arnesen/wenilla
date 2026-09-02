@@ -194,6 +194,20 @@ pub(super) fn act_on_right_click(
     if clicks.read().last().is_none() {
         return;
     }
+    // ── The interact family's ACTOR gate: am I in the saddle? ────────────────────────────────
+    // One predicate, the reference's own — the PLAYER's `UNIT_FIELD_MOUNTDISPLAYID` (decision
+    // 0481's "one mounted predicate"; wow-re `mounted-action-gate.md`: no aura, no taxi
+    // distinction, this field and nothing else). 0481 built the gate for the two action families
+    // the director reported then — casts (`0x6094f0`'s reason `0x39` "You are mounted") and
+    // attack-start (`0x612df0`'s `ERR_ATTACK_MOUNTED`) — and wrote interaction explicitly out of
+    // scope. This is that third family (decision 1851): the right-click interact dispatchers read
+    // the very same field, in their own ladders, and until now we read it in none of them.
+    let self_store = self_player
+        .single()
+        .ok()
+        .and_then(|(e, _, _)| stores.get(e).ok())
+        .map(|(s, _)| s);
+    let self_mounted = self_store.is_some_and(|s| s.0.unit_mount_display_id() != 0);
     // A GameObject is the nearest thing under the cursor → use it (decision 0236), and never fall
     // through to unit handling: a GO is not selectable, and a right-click on it acts on the GO or
     // does nothing. The reference's `OnUse 0x5f8660` gates on the same two predicates the cursor
@@ -222,7 +236,7 @@ pub(super) fn act_on_right_click(
             benilla_assets::trace::line(
                 "use",
                 &format!(
-                    "right-click go guid={:?} type={ty} cursor={:?} unable={}",
+                    "right-click go guid={:?} type={ty} mounted={self_mounted} cursor={:?} unable={}",
                     hovered_object.guid.map(|g| format!("{g:#x}")),
                     cursor.kind,
                     cursor.unable
@@ -235,6 +249,55 @@ pub(super) fn act_on_right_click(
                     .target
                     .and_then(|e| stores.get(e).ok())
                     .map(|(s, anim)| (s, crate::go_anim::go_state(anim, s)));
+                // ── The GameObject leg's OWN mounted gate — not the cast validator's ────────
+                // The strategy's usable predicate `0x5f3130` carries a mounted arm of its own at
+                // `0x5f31a8`: errorId `0x19f` `ERR_NOT_WHILE_MOUNTED`, then `0x5f31d6 xor al,al`,
+                // so `0x5f86b0` never reaches the opener it would invoke at `0x5f86eb`. No
+                // `CMSG_GAMEOBJ_USE`, no cast, no state write — the gate returns before the
+                // opener, not merely before the message (wow-re `mounted-interaction-gate.md`
+                // §5.1, the §5 this session dispatched).
+                //
+                // **It applies only to LOCK-LESS objects.** The gate sits behind
+                // `0x5f3195 call 0x5f8180` / `0x5f319c jne 0x5f3231`, which resolves the object's
+                // **Lock.dbc row** and skips the whole thing when one exists. So a mining node, a
+                // herb or a locked chest bypasses this and is refused further down by its opener
+                // CAST's own mounted block — loudly, "You are mounted" — while a spellcaster, a
+                // chair, a `lockId 0` quest goober and a readable sign are refused HERE, in
+                // silence. What buys the bypass is a **lock**, not a spell; the round's first
+                // draft had that backwards and its own cross-check caught it.
+                //
+                // The test is pure **row existence**: `0x5f819c` tests the row *pointer*, and
+                // nothing reads `Type[]`/`Index[]`/`Skill[]` until `0x5f83d0`. So it is
+                // deliberately NOT [`benilla_formats::LockCatalog::is_locked`], which also demands
+                // a non-empty slot — an all-empty Lock row is "no lock" to our opener resolver and
+                // "a lock" to this gate, and the reference lets that object be used from the
+                // saddle. Collapsing the two is the one divergence the RE explicitly warned about.
+                //
+                // **MAILBOX (type 19) is the only exemption**, and it lives inside the gate on the
+                // mounted arm alone (`0x5f31bb` → `0x47cff0`: a sixteen-byte `type == 0x13`
+                // equality, no table, no range). TEXT is NOT exempt — the reference refuses a sign
+                // from horseback even though its opener is every bit as client-side as the
+                // mailbox's, which is why this sits ABOVE both local-open branches below.
+                //
+                // Silent by Blizzard's omission, not our choice: `ERR_NOT_WHILE_MOUNTED` is one of
+                // 1.12.1's orphan keys with no GlobalStrings value, and both of `DisplayError`'s
+                // side-effect branches skip for this row (`[row+0xc] == 0x44` takes the no-sound
+                // jump; `[row+0x8]` is the literal `"NONE"`), so nothing is shown, sounded or
+                // fired. Whether that leaves any visible artifact at all is the one thing the
+                // round could not settle from the binary — it wants one mounted click on a sign.
+                let lock_id = go_inputs.templates.get(guid).map_or(0, |t| t.lock_id);
+                let has_lock_row = lock_id != 0
+                    && go_inputs
+                        .locks
+                        .as_deref()
+                        .is_some_and(|l| l.0.slots(lock_id).is_some());
+                let go_type = go.map_or(-1, |(s, _)| s.0.gameobject_type_id());
+                if self_mounted && !has_lock_row && go_type != cursor_mode::GO_TYPE_MAILBOX {
+                    debug!(
+                        "right-click gameobject {guid:#x}: refused, mounted (lock-less type {go_type}, silent)"
+                    );
+                    return;
+                }
                 // Mailbox (GO type 19): open the mail window client-side (decision 0544), BEFORE the
                 // lock fork (a mailbox is never locked). The wow-re §5 confirms the MAILBOX use
                 // handler overrides the shared use-sender to a LOCAL open — it sends NO packet (no
@@ -277,17 +340,12 @@ pub(super) fn act_on_right_click(
                 // locked.", "Requires Herbalism", "Requires Mining 100", "Requires <key item>" —
                 // and sends nothing (the ref's validate/error block `0x5f3427..` fires
                 // `DisplayError` with no packet; wow-re cursor-system.md §8.4/§8.8).
-                let me_store = self_player
-                    .single()
-                    .ok()
-                    .and_then(|(e, _, _)| stores.get(e).ok())
-                    .map(|(s, _)| s);
                 match resolve_go_action(
                     guid,
                     &mut go_inputs,
                     &player_actions.spells,
                     go,
-                    me_store,
+                    self_store,
                     &seam.net,
                 ) {
                     GoAction::Use if cursor.unable => {}
@@ -308,16 +366,29 @@ pub(super) fn act_on_right_click(
                         // `0x6e4000` gates it too (decision 0552): a pickless Mining cast
                         // refuses HERE with the local red "Requires Mining Pick" and sends
                         // nothing — vmangos would answer the sent cast with the wrong code.
+                        let def = go_inputs
+                            .spells
+                            .as_ref()
+                            .and_then(|s| s.catalog.get(spell_id));
                         if crate::ui_action::reagent_totem_refusal(
                             spell_id,
-                            go_inputs
-                                .spells
-                                .as_ref()
-                                .and_then(|s| s.catalog.get(spell_id)),
-                            me_store,
+                            def,
+                            self_store,
                             &go_inputs.items,
                             &mut cast_errors,
                         ) {
+                            return;
+                        }
+                        // Same funnel, same requirement validator: a mounted opener refuses with
+                        // reason `0x39` and sends nothing (`0x609c6c`). Mining and Herbalism are
+                        // exactly the gathering casts a rider tries without dismounting, and the
+                        // server would silently dismount us instead of saying so. **After** the
+                        // reagent check, which is TryCast's own order — step 5 (`0x6e4dec`) before
+                        // step 7 (`0x6e4f3b`) — so a pickless mounted miner still reads "Requires
+                        // Mining Pick", exactly as [`CastLadder`] orders its own two rungs.
+                        if crate::ui_action::cast_mounted_refusal(self_mounted, def) {
+                            debug!("right-click gameobject open-lock: refused locally — mounted");
+                            cast_errors.push_local(spell_id, 0x39);
                             return;
                         }
                         debug!("right-click gameobject open-lock: cast {spell_id} at {guid:#x}");
@@ -334,6 +405,26 @@ pub(super) fn act_on_right_click(
                         // No reagent/totem pre-check here, unlike the skill arm above: that gate is
                         // about a Mining cast without a pick, and a key has no reagents — the ref's
                         // `0x6e4000` would pass every key trivially.
+                        //
+                        // The MOUNTED gate is not skippable the same way: an item use IS a cast
+                        // (decision 0908) and reaches the same requirement validator, so a rider
+                        // turning a key refuses and sends nothing. The key's ON_USE *spell* is
+                        // exactly what this arm does not resolve (the stated 0914 gap below), so
+                        // the record is `None` — which the predicate reads as "no exemption to
+                        // claim" and refuses. That is the right way to be wrong: no 1.12 key
+                        // carries Attributes bit 24. Raised by KEY rather than through
+                        // [`CastErrors`], because a reason-coded entry wants a spell id and we
+                        // have none — the red line is identical either way; what a spell-less
+                        // entry would cost is the combat-log twin, which needs the spell's name
+                        // and cannot have it here. A disclosed shortfall of 0914's gap, not a new
+                        // one.
+                        if crate::ui_action::cast_mounted_refusal(self_mounted, None) {
+                            debug!("right-click gameobject open-by-key: refused locally — mounted");
+                            ui_error_keys
+                                .0
+                                .push(crate::ui_action::UiError::key("SPELL_FAILED_NOT_MOUNTED"));
+                            return;
+                        }
                         debug!(
                             "right-click gameobject open-by-key: use item ({bag_index},{slot}) blk {spell_index} at {guid:#x}"
                         );
@@ -391,7 +482,7 @@ pub(super) fn act_on_right_click(
             benilla_assets::trace::line(
                 "use",
                 &format!(
-                    "right-click corpse guid={guid:#x} bones={} lootable={} insignia={} cursor={:?} unable={}",
+                    "right-click corpse guid={guid:#x} bones={} lootable={} insignia={} mounted={self_mounted} cursor={:?} unable={}",
                     store.is_some_and(|s| s.0.corpse_is_bones()),
                     store.is_some_and(|s| s.0.corpse_lootable()),
                     store.is_some_and(|s| s.0.corpse_pvp_insignia()),
@@ -400,19 +491,22 @@ pub(super) fn act_on_right_click(
                 ),
             );
         }
-        if store.is_some_and(|s| s.0.corpse_lootable()) {
+        // **Leg 1's first conjunct is `!mounted`** (`0x5d6c2a jg`, the player's MOUNTDISPLAYID read
+        // one test before the lootable one). The block comment above has named this conjunct since
+        // the leg was transcribed and the code never carried it — a rider could loot bones from the
+        // saddle. A mounted click is **not** an error here: it falls through to leg 2 exactly as the
+        // unit dispatcher falls through to skin, and since no 1.12.1 player has the insignia latch,
+        // what the rider actually gets is silence.
+        if !self_mounted && store.is_some_and(|s| s.0.corpse_lootable()) {
             // **`GetStandState() != 0` refuses before the send** (`0x5d6c3b call [playerVtbl+0xa4]`
             // = `0x5ed570`, non-zero → `0x496720(0x85)`): sitting, kneeling or asleep, the click
             // raises the client-local red **`ERR_LOOT_NOTSTANDING`** as a `UI_ERROR_MESSAGE` and
             // sends nothing. Client-local, so the line shows even where the server would also have
             // refused — and unlike the range gray it is loud, because the player can fix it.
-            // Scoped to the corpse leg: this is the gate the §5 round read, and the unit loot
-            // branch's own copy of it is unverified here (1729).
-            let standing = self_player
-                .single()
-                .ok()
-                .and_then(|(e, _, _)| stores.get(e).ok())
-                .is_none_or(|(s, _)| s.0.unit_stand_state() == 0);
+            // No longer scoped to the corpse leg: 1851 read the unit dispatcher's own copy
+            // (`0x60bfb7` → `0x60c007 push 0x85`) off the same fork and built it too, so the
+            // "unverified here" caveat this comment carried since 1729 is retired.
+            let standing = self_store.is_none_or(|s| s.0.unit_stand_state() == 0);
             if !standing {
                 debug!("right-click corpse loot: refused, not standing ({guid:#x})");
                 ui_error_keys
@@ -436,11 +530,26 @@ pub(super) fn act_on_right_click(
             // reason rather than by omission.
             if let Some(spell_id) = learned.skin_player_corpse {
                 if !cursor.unable {
-                    debug!("right-click corpse insignia: {guid:#x} (spell {spell_id})");
-                    let _ = seam.net.0.send(ClientCommand::CastSpell {
-                        spell_id,
-                        target: Some(guid),
-                    });
+                    // Same TryCast funnel as the unit skin leg, so the same mounted block — and
+                    // this is the leg a mounted bones-click FALLS INTO, which makes the gate here
+                    // the difference between "nothing happens" and a rider yanking insignias.
+                    // The record comes off [`GoLockInputs`]'s catalog because that bundle is this
+                    // system's only handle on `Spells` and the param list is at the 16 ceiling —
+                    // the bundle is named for its first tenant, not scoped to it.
+                    let def = go_inputs
+                        .spells
+                        .as_ref()
+                        .and_then(|s| s.catalog.get(spell_id));
+                    if crate::ui_action::cast_mounted_refusal(self_mounted, def) {
+                        debug!("right-click corpse insignia: refused locally — mounted (0x39)");
+                        cast_errors.push_local(spell_id, 0x39);
+                    } else {
+                        debug!("right-click corpse insignia: {guid:#x} (spell {spell_id})");
+                        let _ = seam.net.0.send(ClientCommand::CastSpell {
+                            spell_id,
+                            target: Some(guid),
+                        });
+                    }
                 }
             }
         }
@@ -450,13 +559,56 @@ pub(super) fn act_on_right_click(
         return;
     };
     let attack = cursor.kind == cursor_mode::CursorKind::Attack;
+    let target = stores.get(entity).ok().map(|(s, _)| s);
+    // ── The dead-target fork of the reference's unit interact dispatcher `0x60bea0` ──────────
     // Loot routes by the same CLASSIFICATION the cursor used — dead + `UNIT_DYNFLAG_LOOTABLE` —
     // not by the cursor kind (wow-re cursor-system.md §6: the right-click "routes the same hovered
     // object by the same classification"; its dead-unit row sends CMSG_LOOT). The loot cursor's
     // base mode is Pickup(8), which a live vendor also shows, so the kind alone can't name loot.
-    let loot = stores
-        .get(entity)
-        .is_ok_and(|(s, _)| s.0.unit_is_dead() && s.0.unit_lootable());
+    //
+    // **The fork's first test is the rider**, and we never carried it (decision 1851): `0x60bf98`
+    // reads `[ecx+0x1fc]` off the *player's* descriptor block — the one still in `ecx` from
+    // `0x60bee5` — and `jg 0x60c01f` skips the whole loot leg for a mounted player, landing on the
+    // skin leg. That is a **fall-through, not a refusal**: no packet, no red line, no "You are
+    // mounted". The cast and attack families of this same gate (0481) each announce themselves;
+    // this one is silent, which is exactly why it could sit here unbuilt without ever looking
+    // broken from the inside.
+    // Step 0 of the fork, hoisted because the trace prints it too: a corpse the dispatcher will
+    // actually treat as one.
+    let dead_fork = target.is_some_and(|s| s.0.unit_is_dead() && !s.0.unit_dynflag_dead());
+    let leg = dead_unit_leg(
+        self_mounted,
+        dead_fork,
+        target.is_some_and(|s| s.0.unit_lootable()),
+        target.is_some_and(|s| s.0.unit_flags() & cursor_mode::UNIT_FLAG_SKINNABLE != 0),
+        learned.skinning.is_some(),
+    );
+    let (loot, skin) = (leg == DeadUnitLeg::Loot, leg == DeadUnitLeg::Skin);
+    // The unit twin of the GO/corpse legs' one-line answer (tag `use`). Every refusal on this
+    // ladder is silent from the outside — the range gray, the mounted fall-through, a corpse
+    // somebody else owns — and they are indistinguishable on screen. One run says which.
+    if benilla_assets::trace::enabled_for("use") {
+        benilla_assets::trace::line(
+            "use",
+            &format!(
+                "right-click unit guid={guid:#x} dead={} lootable={} skinnable={} mounted={self_mounted} leg={} cursor={:?} unable={}",
+                target.is_some_and(|s| s.0.unit_is_dead()),
+                target.is_some_and(|s| s.0.unit_lootable()),
+                target.is_some_and(|s| s.0.unit_flags() & cursor_mode::UNIT_FLAG_SKINNABLE != 0),
+                if attack {
+                    "attack"
+                } else if dead_fork {
+                    leg.tag()
+                } else {
+                    // The alive branch (`0x60c162`): `CanInteract` → the service send. Not this
+                    // fork's to name, and NOT mounted-gated — a rider talks to a flight master.
+                    "service"
+                },
+                cursor.kind,
+                cursor.unable
+            ),
+        );
+    }
     let me = self_player.single().ok();
     // The one SetSelection law ([`scan::commit`]): dedup + selection + the engaged-switch
     // stop→select→re-swing. The Attack cursor kind is Attack `0x5ecb70`'s new-target validation
@@ -472,16 +624,23 @@ pub(super) fn act_on_right_click(
         attack,
     );
     if attack {
-        // The actor-eligibility block (decision 0481, widened to `0x612df0`'s full Phase A): the
-        // click still SELECTED — the commit above already ran, matching the ref's
-        // select-then-refuse order — but the melee auto-draw and the swing never happen; the red
-        // `ERR_ATTACK_*` line shows instead.
-        if crate::ui_action::attack_actor_refusal(
-            me.and_then(|(e, _, _)| stores.get(e).ok()).map(|(s, _)| s),
-            me.map(|(_, g, _)| g.0),
-            &mut ui_error_keys,
-        ) {
-            // refused — selection stands, no swing
+        // The actor-eligibility block — **silent here**, and that is 1851 correcting 0481. The
+        // click still SELECTED (the commit above already ran, the ref's select-then-refuse order)
+        // and the melee auto-draw and swing still never happen; what changed is that no red
+        // `ERR_ATTACK_*` line shows any more.
+        //
+        // 0481 attached `0x612df0`'s Phase A ladder to this path. The §5 this session dispatched
+        // found that validator has exactly three callers image-wide — pet-attack `0x4bd40d`, the
+        // Attack action/keybind `0x6131aa`, and TryCast `0x6e4efb` — and the world right-click is
+        // none of them: it runs `0x60c247 call 0x5ecb70`, an extent containing no `DisplayError`
+        // at all. So all eight of those red lines belong to the bar and the pet command, never to
+        // the click, and the fix is not to delete six of them but to move where they are asked
+        // for. [`attack_actor_blocked`] is the same ladder with the message removed; the bar keeps
+        // [`attack_actor_refusal`]. (The predicate is still `0x612df0`'s and not `0x5ecb70`'s own
+        // overlapping set — a separate slice — but the SILENCE is the verified law, and the swing
+        // is suppressed either way.)
+        if crate::ui_action::attack_actor_blocked(self_store, me.map(|(_, g, _)| g.0)).is_some() {
+            // refused — selection stands, no swing, and nothing is said
         } else {
             debug!("right-click attack: {guid:#x}");
             // The right-click's own StartAttack, through the one seam (auto-draw + the swing +
@@ -498,7 +657,21 @@ pub(super) fn act_on_right_click(
         // its loot (`CMSG_LOOT`). Range-gated like the interact branch — the cursor grays a corpse
         // beyond the melee interact reach (`unable`), and we don't send then (no auto-approach yet).
         // No EmoteTalk: looting is not an NPC interaction, the corpse plays no talk.
-        if !cursor.unable {
+        //
+        // **The unit leg's own stand-state gate** (`0x60bfb7 call [playerVtbl+0xa4]`, non-zero →
+        // `0x60c007 push 0x85; call DisplayError 0x496720`) — the exact instruction pair the corpse
+        // leg carries at `0x5d6c3b`/`0x496720(0x85)`, in the same fork, one test after the lootable
+        // one. The corpse leg's comment has said since 1729 that "the unit loot branch's own copy of
+        // it is unverified here"; it is the same `push 0x85` and the same virtual, read off the same
+        // dispatcher this session's `0x60bf98` mounted gate came out of. So the caveat retires and
+        // the two legs say the same thing: sitting, kneeling or asleep, the click raises the
+        // client-local red `ERR_LOOT_NOTSTANDING` and sends nothing.
+        if self_store.is_some_and(|s| s.0.unit_stand_state() != 0) {
+            debug!("right-click loot: refused, not standing ({guid:#x})");
+            ui_error_keys
+                .0
+                .push(crate::ui_action::UiError::key("ERR_LOOT_NOTSTANDING"));
+        } else if !cursor.unable {
             debug!("right-click loot: {guid:#x}");
             let _ = seam.net.0.send(ClientCommand::Loot { guid });
             // The kneel is client-predicted AT THE SEND: the real client's `CMSG_LOOT` sender
@@ -507,20 +680,32 @@ pub(super) fn act_on_right_click(
             // reads for the self unit; the release/refusal drops it.
             loot_latch.0 = Some(guid);
         }
-    } else if cursor.kind == cursor_mode::CursorKind::Skin {
-        // A dead, unlootable, SKINNABLE corpse (the classifier's own gate): cast our known
-        // Skinning spell at it — the unit-side mirror of the GO lock split (0239; decision 0437's
-        // gathering finish). The spell comes from the reference's own learn-time latch
+    } else if skin {
+        // A dead SKINNABLE corpse the loot leg declined (`0x60c01f`): cast our known Skinning spell
+        // at it — the unit-side mirror of the GO lock split (0239; decision 0437's gathering
+        // finish). The spell comes from the reference's own learn-time latch
         // ([`crate::ui_action::LearnedAbilities`] = `[0xb700e4]`, decision 0752), which is the same
-        // thing the classifier gated the Skin cursor on — so reaching here at all means we know it.
+        // thing the classifier gated the Skin cursor on. Ordinarily that means an unlootable
+        // corpse; **while mounted it also means a still-lootable one**, and the cast then meets the
+        // cast family's own mounted gate (`0x6094f0`'s reason `0x39`) and says "You are mounted" —
+        // the one leg of this dispatcher where the rider is told anything at all.
         // Range rides the cursor's melee-reach gray, like loot.
         if !cursor.unable {
             if let Some(spell_id) = learned.skinning {
-                debug!("right-click skin: {guid:#x} (spell {spell_id})");
-                let _ = seam.net.0.send(ClientCommand::CastSpell {
-                    spell_id,
-                    target: Some(guid),
-                });
+                let def = go_inputs
+                    .spells
+                    .as_ref()
+                    .and_then(|s| s.catalog.get(spell_id));
+                if crate::ui_action::cast_mounted_refusal(self_mounted, def) {
+                    debug!("right-click skin: refused locally — mounted (0x39)");
+                    cast_errors.push_local(spell_id, 0x39);
+                } else {
+                    debug!("right-click skin: {guid:#x} (spell {spell_id})");
+                    let _ = seam.net.0.send(ClientCommand::CastSpell {
+                        spell_id,
+                        target: Some(guid),
+                    });
+                }
             }
         }
     } else if !cursor.unable {
@@ -759,6 +944,73 @@ fn route_lock_refusal(
         }
         _ => Some(UiError::key("ERR_USE_CANT_OPEN")),
     }
+}
+
+/// Which leg the reference's unit interact dispatcher `0x60bea0` takes on a **dead** target — its
+/// `0x60bf75` fork, transcribed. Pure, because every conjunct in it is a fact about two units'
+/// wire state and nothing else, and because the conjunct this project was missing is invisible
+/// from the outside (see [`DeadUnitLeg::Nothing`]).
+///
+/// The reference's order, and ours:
+///
+/// 0. **`0x60bf75`/`0x60bf86` — is it a corpse at all?** `HEALTH <= 0` **and** the target's
+///    `UNIT_DYNFLAG_DEAD` (`[+0x224]` bit 5, the feign-death bit — decision 1022) **clear**; either
+///    failing routes to the alive branch `0x60c162` instead. The caller passes this as `dead`.
+/// 1. **`0x60bf98` — am I mounted?** `mov eax,[ecx+0x1fc]` on the *player's* descriptor block
+///    (`UNIT_FIELD_MOUNTDISPLAYID`, the one mounted signal — decision 0481), `jg 0x60c01f`. A
+///    rider does not loot. It is a jump into the skin leg, not a refusal: nothing is sent and
+///    nothing is said.
+/// 2. **`0x6003a0` — is it lootable?** (`UNIT_DYNFLAG_LOOTABLE`, plus the decay deadline the server
+///    owns.) Yes ⇒ [`DeadUnitLeg::Loot`] and `CMSG_LOOT`.
+/// 3. **`0x60c01f` — is it skinnable?** `UNIT_FIELD_FLAGS` bit 26, on the TARGET, plus the
+///    learn-time latch `[0xb700e4]` that says we know a Skinning spell (decision 0752). Yes ⇒
+///    [`DeadUnitLeg::Skin`] and the skin cast — which, being a cast, meets the mounted gate's cast
+///    face (`0x6094f0`, reason `0x39`) and is where a rider finally gets told something.
+/// 4. Otherwise nothing at all (`0x60c25f`, the bare epilogue).
+///
+/// Note what step 1 does **not** do: it does not consult the target. A lootable-*and*-skinnable
+/// corpse — an already-looted one, which is the common case for a skinner — routes to Skin while
+/// mounted and to Loot on foot, off the same two units.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum DeadUnitLeg {
+    /// `CMSG_LOOT` (`0x60bff7` → `0x5df2a0`).
+    Loot,
+    /// The skin cast (`0x60c082` → `0x5f05e0`).
+    Skin,
+    /// **The silent leg.** No packet, no message, no state write — the dispatcher just returns.
+    /// A mounted click on an ordinary lootable corpse lands here, and that silence is why the
+    /// missing gate looked like working code: the loot window simply opened, as it would on foot.
+    Nothing,
+}
+
+impl DeadUnitLeg {
+    /// The one-word tag the `use` trace prints.
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Loot => "loot",
+            Self::Skin => "skin",
+            Self::Nothing => "none",
+        }
+    }
+}
+
+fn dead_unit_leg(
+    mounted: bool,
+    dead: bool,
+    lootable: bool,
+    skinnable: bool,
+    know_skinning: bool,
+) -> DeadUnitLeg {
+    if !dead {
+        return DeadUnitLeg::Nothing;
+    }
+    if !mounted && lootable {
+        return DeadUnitLeg::Loot;
+    }
+    if skinnable && know_skinning {
+        return DeadUnitLeg::Skin;
+    }
+    DeadUnitLeg::Nothing
 }
 
 /// The interact packet a right-click on a friendly service NPC sends, by its classified
@@ -1093,6 +1345,65 @@ mod tests {
         };
         let e = route_lock_refusal(&odd, false, false, 3, 0, None, KeyFact::Unknown).unwrap();
         assert_eq!(e.key, "ERR_USE_CANT_OPEN");
+    }
+
+    /// The dead-target fork of `0x60bea0`, and the conjunct that was missing: **the rider does not
+    /// loot** (`0x60bf98`). The director found it from the saddle, over a Young Wolf, with the loot
+    /// window open — the one shape of bug that never looks like one from inside the client.
+    #[test]
+    fn a_mounted_player_never_takes_the_loot_leg() {
+        // On foot, a lootable corpse loots. This is the control: the fix must not touch it.
+        assert_eq!(
+            dead_unit_leg(false, true, true, false, false),
+            DeadUnitLeg::Loot
+        );
+        // Mounted, the same corpse: the loot leg is skipped and, with nothing to skin, the
+        // dispatcher returns having done nothing. Silent — no packet and no red line.
+        assert_eq!(
+            dead_unit_leg(true, true, true, false, false),
+            DeadUnitLeg::Nothing
+        );
+        // Mounted over a corpse that is BOTH lootable and skinnable (an already-looted body a
+        // skinner rides up to): the fall-through reaches the skin leg, which `cursor.kind` alone
+        // could never have routed — the classifier names Skin only on an unlootable corpse.
+        assert_eq!(
+            dead_unit_leg(true, true, true, true, true),
+            DeadUnitLeg::Skin
+        );
+        // ...and on foot the very same body loots instead. Step 1 never consults the target.
+        assert_eq!(
+            dead_unit_leg(false, true, true, true, true),
+            DeadUnitLeg::Loot
+        );
+    }
+
+    /// The rest of the fork's ladder, so the mounted conjunct above cannot be "fixed" by
+    /// collapsing a leg it shares with the others.
+    #[test]
+    fn the_dead_fork_keeps_its_other_three_gates() {
+        // A live unit is not this fork's business at all (`0x60bf75 jg` → the alive branch).
+        assert_eq!(
+            dead_unit_leg(false, false, true, true, true),
+            DeadUnitLeg::Nothing
+        );
+        // Dead, unlootable, skinnable, and we know the trade → Skin (`0x60c01f`).
+        assert_eq!(
+            dead_unit_leg(false, true, false, true, true),
+            DeadUnitLeg::Skin
+        );
+        // The learn-time latch `[0xb700e4]` is the leg's second precondition (0752): a
+        // non-skinner gets nothing on the same corpse.
+        assert_eq!(
+            dead_unit_leg(false, true, false, true, false),
+            DeadUnitLeg::Nothing
+        );
+        // A plain looted corpse: nothing, mounted or not.
+        for mounted in [false, true] {
+            assert_eq!(
+                dead_unit_leg(mounted, true, false, false, true),
+                DeadUnitLeg::Nothing
+            );
+        }
     }
 
     #[test]

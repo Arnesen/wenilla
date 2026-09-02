@@ -66,9 +66,18 @@ pub(crate) struct CooldownEvents;
 pub(crate) use cast_send::{CastCommit, CastLadder};
 pub(crate) use cast_target::AutoSelfCast;
 pub(crate) use errors::{
-    attack_actor_refusal, keyed_line, reagent_totem_refusal, show_messages, ui_error_text,
-    CastErrors, CastFail, MessageSink, MountErrors, Shown, UiError, UiErrorKeys, UiErrorTexts,
+    attack_actor_blocked, attack_actor_refusal, keyed_line, reagent_totem_refusal, show_messages,
+    ui_error_text, CastErrors, CastFail, MessageSink, MountErrors, Shown, UiError, UiErrorKeys,
+    UiErrorTexts,
 };
+// `pub(crate)`: the requirement validator's mounted block is ONE gate in the reference
+// (`0x6094f0` @ `0x609c6c`) sitting under the ONE cast entry `TryCast 0x6e4b60` — but benilla still
+// has cast sends outside [`CastLadder`]: the world click's skin cast, the corpse insignia cast and
+// the GameObject opener (decisions 0552/0914). Each of them reaches TryCast in the reference
+// (`0x5f05e0 → 0x6e5a90 → 0x6e4b60`; `0x5f35c0 → 0x6e5a90 → 0x6e4b60`), so each of them must ask
+// this question — the same reason `reagent_totem_refusal` above is already exported. Exporting the
+// predicate is the honest interim; the ladder refactor that would retire it is 0914's, not 1851's.
+pub(crate) use state::cast_mounted_refusal;
 // `pub(crate)`: the target chain registers the cursor pre-empt + the click commit, and the
 // spellbook/stance/craft drains thread the mode through the one cast-send path (decision 0792).
 // `TargetingWants` travels with it because the chain also holds a *seam-specific* consumer — the

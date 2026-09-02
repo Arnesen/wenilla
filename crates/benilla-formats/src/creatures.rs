@@ -50,11 +50,14 @@ pub struct CreatureModel {
     /// `ExtendedDisplayInfoID`). `None` for a plain beast/monster (ExtendedDisplayInfoID 0) — those
     /// skin from [`Self::textures`], not here.
     pub npc_appearance: Option<NpcAppearance>,
-    /// The resolved **UnitBloodLevels** key for the melee blood spurt (decision 0137 phase 3,
-    /// wow-re `melee-blood-spurt.md`): `CreatureDisplayInfo.BloodLevel` when nonzero, else
-    /// `CreatureModelData.BloodID`; `≤ 0` = a bloodless model (elementals, ghosts — the client's
-    /// negative-id skip). Consumed via [`crate::BloodCatalog::effect_id`].
-    pub blood: i32,
+    /// `CreatureDisplayInfo.BloodLevel` (+0x28) — **tier 1** of the reference's UnitBloodLevels
+    /// row resolve. Not a resolved key: the three tiers need the table to know which candidate
+    /// lands, so they live in [`crate::BloodCatalog::level_key`], which is what a consumer calls.
+    pub blood_display: i32,
+    /// `CreatureModelData.BloodID` (+0x14) — **tier 2** of the same resolve. `−1` in 122 of the
+    /// 430 shipped models; that is *not* "bloodless", it is a tier-2 miss that falls through to
+    /// tier 3 (see [`crate::BloodCatalog::level_key`]).
+    pub blood_model: i32,
     /// `CreatureModelData.collisionHeight` — the unit's collision box height in **raw model units**
     /// (multiply by the unit's render scale for world yards; see
     /// [`CreatureCatalog::collision_height`], which is the accessor every consumer should use).
@@ -97,8 +100,9 @@ struct DisplayRow {
     extended_id: u32,
     scale: f32,
     textures: [Option<String>; 3],
-    /// `BloodLevel` (field 10) — a per-display UnitBloodLevels override; 0 = fall through to the
-    /// model's `BloodID`.
+    /// `BloodLevel` (field 10) — a per-display UnitBloodLevels override. `0` in 10498 of the
+    /// 10534 shipped displays, and `0` is not a row of that table, so it falls through to the
+    /// model's `BloodID` (see [`CreatureModel::blood_display`]).
     blood_level: u32,
     /// `CreatureModelAlpha` (field 5, @+0x14) — the display's **base render opacity**, 0..=255.
     /// This is the `baseAlpha` of the reference's per-unit alpha product (`0x60d2d0`, the CGUnit
@@ -116,7 +120,8 @@ struct ModelRow {
     scale: f32,
     /// `Flags` (field 1) — see [`CreatureCatalog::breathes`] for the one bit we read.
     flags: u32,
-    /// `BloodID` — see [`CreatureModel::blood`]. Reads signed: `−1` marks a bloodless model.
+    /// `BloodID` — see [`CreatureModel::blood_model`]. Reads signed: `−1` in 122 of the 430
+    /// shipped rows, which the reference treats as a tier-2 miss, not as bloodlessness.
     blood: i32,
     /// `FootprintTextureID` (field 6) — the `FootprintTextures.dbc` key. Reads signed: `−1`
     /// (133 of 430 shipped rows) marks a model that leaves no prints.
@@ -324,11 +329,8 @@ impl CreatureCatalog {
             scale: model.scale * row.scale,
             textures: row.textures.clone(),
             npc_appearance,
-            blood: if row.blood_level != 0 {
-                row.blood_level as i32
-            } else {
-                model.blood
-            },
+            blood_display: row.blood_level as i32,
+            blood_model: model.blood,
             collision_height: model.collision_height,
         })
     }
@@ -441,7 +443,9 @@ pub fn load_creature_catalog(chain: &mut Chain) -> Result<CreatureCatalog> {
                         path: name,
                         scale: f32_at(r, 4).unwrap_or(1.0),
                         flags: u32_at(r, 1).unwrap_or(0),
-                        // BloodID (field 5) reads signed: −1 marks a bloodless model in the real data.
+                        // BloodID (field 5) reads signed: −1 in 122 of the 430 shipped rows.
+                        // That is a tier-2 MISS, not bloodlessness — the resolve falls through
+                        // to the records base (1850). Kept signed so the miss is visible.
                         blood: u32_at(r, 5).map_or(0, |v| v as i32),
                         // FootprintTextureID reads signed too: −1 = no prints (see ModelRow docs).
                         footprint_texture: u32_at(r, 6).map_or(-1, |v| v as i32),
@@ -543,6 +547,45 @@ mod tests {
     /// → 1/3 × 5/18 yards (the client's ×1/36 cache conversion, byte-verified at `0x607a00`);
     /// a display whose model authors `FootprintTextureID = −1` resolves `None`. Guards the
     /// schema columns (a shifted field would misread every print) and the inches→yards space.
+    /// **The blood-row tier populations** over the shipped tables — the measurement behind 1850.
+    /// `CreatureModelData.BloodID = −1` (122 of 430 models) is a tier-2 *miss*, not a bloodless
+    /// marker, so those displays fall through to the reference's tier-3 records base and bleed
+    /// RED. benilla read `−1` as bloodless and dropped the spurt on all 595 of them.
+    #[test]
+    fn blood_row_tiers_over_the_shipped_displays() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_creature_catalog(&mut chain).expect("load creature catalog");
+        let blood = crate::load_blood_catalog(&mut chain).expect("blood tables");
+
+        // A tier resolves iff its id names a real UnitBloodLevels row — which is exactly what
+        // `level_key` reports when the *other* tier is forced to miss.
+        let resolves = |v: i32| {
+            u32::try_from(v)
+                .ok()
+                .is_some_and(|k| blood.level_key(v, i32::MIN) == Some(k))
+        };
+        let mut tiers = [0usize; 3];
+        for &display_id in cat.display.keys() {
+            let Some(m) = cat.model(display_id) else {
+                continue;
+            };
+            tiers[if resolves(m.blood_display) {
+                0
+            } else if resolves(m.blood_model) {
+                1
+            } else {
+                2
+            }] += 1;
+        }
+        assert_eq!(
+            tiers,
+            [36, 9903, 595],
+            "tier 1 / tier 2 / tier 3 over the 10534 shipped displays"
+        );
+        assert_eq!(tiers.iter().sum::<usize>(), cat.display.len());
+    }
+
     #[test]
     fn footprints_resolve_on_real_data() {
         let data = crate::wow_data_or_skip!();

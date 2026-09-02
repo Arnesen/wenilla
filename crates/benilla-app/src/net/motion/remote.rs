@@ -131,9 +131,10 @@ pub(in crate::net) fn trace_relay(
     benilla_assets::trace::line(
         "rly",
         &format!(
-            "guid={guid:#x} {kind} wire={} flags={:#x} out={} lead={lead:7.1} q={queued}",
+            "guid={guid:#x} {kind} wire={} flags={:#x} pitch={:+.3} out={} lead={lead:7.1} q={queued}",
             mv.wire_ms,
             mv.flags,
+            mv.pitch,
             out.tag()
         ),
     );
@@ -180,6 +181,21 @@ fn trace_runaway(guid_hint: Entity, rm: &RemoteMotion, now_ms: f64, silent_s: u3
 /// How often the remote-pose watch samples a mover (ms) — see [`trace_remote`].
 const REMOTE_TRACE_MS: f64 = 500.0;
 
+/// What the swim-pitch render law will actually *present* for this mover — `rm.pitch` passed
+/// through [`crate::creature_anim::swim_body_rotation`]'s gate, so the `rem` line reports the two
+/// numbers side by side: what the wire said (`pitch=`) and what the body is tilted by (`tilt=`).
+///
+/// The pair is the whole point. A reported pitch with a zero tilt is the gate refusing (idle or
+/// strafe-only swim, or not swimming at all); a zero on *both* is a mover whose client never sent
+/// a pitch. Before this, neither number appeared anywhere — the observed-swimmer tilt landed in
+/// July 2026 (decision 0464 TU-A) with no trace and no test, so "do other swimmers tilt?" was a
+/// question only the director's eye could answer.
+fn rendered_pitch(rm: &RemoteMotion) -> f32 {
+    let (_, x, _) = crate::creature_anim::swim_body_rotation(0.0, rm.flags, rm.pitch)
+        .to_euler(bevy::math::EulerRot::YXZ);
+    x
+}
+
 /// The **remote-pose watch** (tag `rem`): one line per mover per [`REMOTE_TRACE_MS`], reporting what
 /// the dead-reckon asked for and what the world gave back. Until decision 0626 nothing measured the
 /// *pose* of a watched player at all — `rly` measures the packets that arrive and `run` only fires
@@ -205,16 +221,25 @@ const REMOTE_TRACE_MS: f64 = 500.0;
 ///   measured 2.14 yd. A sustained nonzero `drop` on a mover whose `age` keeps climbing is us
 ///   inventing a height the server never described.
 ///
+/// - **`pitch` / `tilt`** — what this mover *reported* as its swim pitch, and what the body-pitch
+///   render law actually *presents* for it ([`rendered_pitch`]). The pair, not either alone: a zero
+///   tilt is correct three ways (an idle floater, a strafe-only swim, dry land), so a single number
+///   makes every one of those look like the defect the director reported. Reported-nonzero with
+///   tilt-zero is the gate refusing; zero on both is a mover whose client never sent a pitch.
+///
 /// `age` (ms since a packet last applied) rides along so a sample is never read as server truth.
-fn trace_remote(e: Entity, rm: &RemoteMotion, held: f32, dz: f32, now_ms: f64) {
+fn trace_remote(e: Entity, guid: u64, rm: &RemoteMotion, held: f32, dz: f32, now_ms: f64) {
     benilla_assets::trace::line(
         "rem",
         &format!(
-            "{e} flags={:#x} pos=[{:.2},{:.2},{:.2}] dz={dz:+.3} drop={:+.3} held={held:.3} age={:.0}ms",
+            "{e} guid={guid:#x} flags={:#x} pos=[{:.2},{:.2},{:.2}] pitch={:+.3} tilt={:+.3} dz={dz:+.3} \
+             drop={:+.3} held={held:.3} age={:.0}ms",
             rm.flags,
             rm.wow_pos[0],
             rm.wow_pos[1],
             rm.wow_pos[2],
+            rm.pitch,
+            rendered_pitch(rm),
             rm.last_apply_pos[2] - rm.wow_pos[2],
             now_ms - rm.last_apply_ms,
         ),
@@ -464,6 +489,12 @@ pub(in crate::net) fn extrapolate_remote_units(
             Option<&mut crate::creature_anim::BodyTwist>,
             Has<super::FacingStep>,
             Has<crate::transport::TransportRider>,
+            // Trace-only: the mover's wire guid, so a `rem` line can be JOINED to the `rly` lines
+            // that fed it. `rem` printed a Bevy `Entity` and nothing else, which correlates with
+            // nothing in the file — not `rly`'s `guid=`, not the sender's own trace, not a `.gps`
+            // report — so two movers in one capture could not be told apart at all. `spl` has
+            // carried its guid since it was written; this was the odd one out.
+            Option<&crate::net::Guid>,
             // The server-granted modes this unit was handed by the `SMSG_SPLINE_MOVE_*` family
             // (decision 1780). Normally empty on a relayed **player** — vmangos only broadcasts
             // that family for a unit it is driving itself — which is exactly why it is OR'd with
@@ -478,7 +509,7 @@ pub(in crate::net) fn extrapolate_remote_units(
     use crate::creature_anim::{ease_strafe_yaw, strafe_body_offset, wrap_pi};
     let dt = time.delta_secs();
     let now_ms = time.elapsed_secs_f64() * 1000.0;
-    for (e, mut t, mut rm, speeds, twist, latched, riding, granted) in &mut q {
+    for (e, mut t, mut rm, speeds, twist, latched, riding, guid, granted) in &mut q {
         // The runaway watch (trace-only): a mover still carrying a direction flag, with nothing
         // queued behind it and nothing applied for seconds, is running on our extrapolation alone.
         if benilla_assets::trace::enabled() {
@@ -690,7 +721,14 @@ pub(in crate::net) fn extrapolate_remote_units(
                 .is_none_or(|t| now_ms - t >= REMOTE_TRACE_MS)
         {
             sampled.insert(e, now_ms);
-            trace_remote(e, &rm, held, pos[2] - prev[2], now_ms);
+            trace_remote(
+                e,
+                guid.map_or(0, |g| g.0),
+                &rm,
+                held,
+                pos[2] - prev[2],
+                now_ms,
+            );
         }
         t.translation = wow_to_bevy(pos);
         // The strafe body pose, same as our own avatar's (the client's display-facing blend): a
@@ -711,15 +749,10 @@ pub(in crate::net) fn extrapolate_remote_units(
         } else {
             orientation
         };
-        // The swim body pitch (TU-A, `0x60a110`→`0x710620`): a swimmer moving fwd/back renders its
-        // root pitched by the reported swim pitch (nose-up positive) about the body's local X;
-        // strafe-only and idle swims render level — the same per-frame gate the client's `+0x3c`
-        // model-transform sync branches on.
-        t.rotation = if swimming && rm.flags & (move_flags::FORWARD | move_flags::BACKWARD) != 0 {
-            Quat::from_rotation_y(yaw) * Quat::from_rotation_x(rm.pitch)
-        } else {
-            Quat::from_rotation_y(yaw)
-        };
+        // The swim body pitch — [`crate::creature_anim::swim_body_rotation`], the same law our own
+        // avatar's pose owner calls, on the pitch this mover reported. TU-A is explicit that the
+        // observed mover takes the *reported* pitch here, exactly as the local one takes its own.
+        t.rotation = crate::creature_anim::swim_body_rotation(yaw, rm.flags, rm.pitch);
         if let Some(mut twist) = twist {
             twist.yaw_gap = wrap_pi(orientation - yaw);
         }

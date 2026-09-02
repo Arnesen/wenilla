@@ -140,15 +140,18 @@ use scenarios::GlueScreen;
 use scenarios::{Scenario, SubjectKind, UiFixture, GLUE_SCENARIOS, GROUND_EYE, SCENARIOS};
 
 pub(crate) mod fxview;
-// The two scripted probe drivers, which lived in `player/` until decision 1174: they turn the
-// avatar's aim and park the camera rig, and both order themselves BEFORE `player::control`. An
-// instrument may name the gameplay system it runs against; gameplay may not name the instrument.
+// The three scripted probe drivers, which lived in `player/` until decision 1174: they turn the
+// avatar's aim, aim its swim pitch, and park the camera rig, and all three order themselves BEFORE
+// `player::control`. An instrument may name the gameplay system it runs against; gameplay may not
+// name the instrument.
 mod probe_cam;
 mod probe_look;
+mod probe_pitch;
 pub(crate) mod waterfx;
 
 pub(crate) use probe_cam::ProbeCamPlugin;
 pub(crate) use probe_look::ProbeLookPlugin;
+pub(crate) use probe_pitch::ProbePitchPlugin;
 
 /// Which screen a capture starts the client on — the dev arm of [`crate::run_mode::start_state`],
 /// which is what `main` actually calls. A glue capture boots onto the screen it photographs; any

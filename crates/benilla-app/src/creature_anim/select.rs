@@ -278,6 +278,46 @@ pub(crate) fn strafe_body_offset(flags: u32) -> f32 {
     }
 }
 
+/// The **swim body pitch** — the one render law, for every mover that has a reported pitch
+/// (TU-A, decision 0464 §1; `0x60a110`→`0x710620`, the Euler-ZYX builder).
+///
+/// The reference composes `T·S·Rz(facing)·Ry(2π − pitch)`: yaw about WoW +Z, pitch about WoW +Y
+/// from `CMovement+0x20`, +pitch = nose up. That is this expression, worked through the basis
+/// rather than assumed — WoW +Z → Bevy +Y (so `Rz(facing)` is `Quat::from_rotation_y`, the mapping
+/// `net::motion::wire_yaw` already rests on, no 180° offset) and WoW +Y → Bevy **−X**
+/// (`coords::wow_bevy_basis_is_golden`), so `Ry(2π − pitch)` = `Ry(−pitch)` about −X is `+pitch`
+/// about Bevy +X. Same multiplication order, so the pitch stays body-local; and `Rx(+θ)` carries
+/// Bevy forward (−Z) to `(0, sin θ, −cos θ)`, i.e. up — nose-up positive on both sides.
+///
+/// The facing it reads is `+0xc94`, the **render** facing rather than the raw movement one
+/// (`+0x1c`); for a swimmer the two coincide, because SWIMMING is on the display-facing SNAP list
+/// (`mov [esi+0xc94],[esi+0xc98]`, wow-re `body-facing-pipeline.md`) — the same gate our callers
+/// apply before handing a yaw in.
+///
+/// The gate is `SWIMMING` **and** a forward/back bit: strafe-only, idle, and grounded all render
+/// **level** (the ground path). It is `CMovement+0x40 & 3`, read at `0x60857d` off the very word
+/// the create-block apply and every relayed `MSG_MOVE_*` merge into under `0x75a07dff` — **not**
+/// a `CM2Model+0x3c & 3` dirty gate, which is what an earlier reading of this law named and which
+/// a wow-re §5 has since scanned for exhaustively and found does not exist (`0x710620` is an
+/// unconditional 16-dword copy). Recorded in wow-re
+/// `system/collision/scratch/create-block-swim-pitch.md`.
+///
+/// One function rather than one per pose owner: the law has three consumers — our own avatar
+/// ([`crate::player::body_pose`]), an observed relay mover
+/// ([`crate::net::motion::extrapolate_remote_units`]), and the create-block seed
+/// ([`crate::net::apply::objects`]) — and TU-A is explicit that all of them present the *same*
+/// pitch. Held apart, they drift: the remote lane shipped in July 2026 with no test and no trace
+/// of its own, so "does an observed swimmer tilt?" had no answer short of the director's eye.
+pub(crate) fn swim_body_rotation(yaw: f32, flags: u32, pitch: f32) -> Quat {
+    if flags & move_flags::SWIMMING != 0
+        && flags & (move_flags::FORWARD | move_flags::BACKWARD) != 0
+    {
+        Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch)
+    } else {
+        Quat::from_rotation_y(yaw)
+    }
+}
+
 /// The per-frame movement descriptor that drives a unit's animation (wow-5875-re RF-0057). The player
 /// controller fills it for our avatar from input; a streamed unit's is derived from its [`Spline`].
 #[derive(Component, Clone, Copy, Default)]

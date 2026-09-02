@@ -105,7 +105,7 @@ pub(super) fn cast_range_refusal(
 /// the unsheathed leg), arm B is `ChannelInterruptFlags & 0x40` at `0x609c3a` — corrected by
 /// the 1063 §5 in wow-re `mounted-action-gate.md`. Note the plain mounted gate above is NOT in
 /// that family: it is single-armed on `Attributes`.
-pub(super) fn cast_mounted_refusal(mounted: bool, spell: Option<&SpellDisplay>) -> bool {
+pub(crate) fn cast_mounted_refusal(mounted: bool, spell: Option<&SpellDisplay>) -> bool {
     mounted && spell.is_none_or(|d| d.attributes & 0x0100_0000 == 0)
 }
 

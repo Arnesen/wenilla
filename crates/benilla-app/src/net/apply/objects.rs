@@ -72,6 +72,7 @@ pub(super) fn object_create(
     orientation: f32,
     scale: f32,
     speeds: Option<MoveSpeeds>,
+    mover: Option<benilla_protocol::MoverState>,
     transport_progress: Option<u32>,
     transport: Option<benilla_protocol::TransportPose>,
     spline: Option<benilla_protocol::CreateSpline>,
@@ -127,9 +128,25 @@ pub(super) fn object_create(
     // Where this object is *pointed*. A mover carries one yaw; a GameObject is placed by its
     // `GAMEOBJECT_ROTATION` quaternion, which is the reference's own placement input and is a
     // strictly wider answer than the facing (decision 1459, `motion::gameobject_rotation`).
+    //
+    // **A mover's create pose is not a bare yaw.** The reference's create-block apply seeds both
+    // halves of the body-pitch law from this very block — the flags word through `0x618c30`'s
+    // `0x75a07dff` merge, the pitch through the pose commit `0x7c6420`'s unconditional
+    // `fst [ecx+0x20]` — and it does so *before* `0x613e10` builds the model or registers the
+    // per-frame render callback that reads them, so the tilt is in force on the unit's **first
+    // drawn frame** (byte-VERIFIED; wow-5875-re
+    // `system/collision/scratch/create-block-swim-pitch.md`). A player who swims into view
+    // nose-down renders nose-down, not level: [`crate::creature_anim::swim_body_rotation`], the
+    // same one law our own avatar and the relay extrapolator call. Without the block's flags +
+    // pitch — which we parsed and threw away until now — every observed swimmer entered the world
+    // flat, and an *idle* floater (who sends no packets at all) stayed flat for as long as they
+    // floated.
     let placement = match kind {
         EntityKind::GameObject => gameobject_rotation(go_quat, orientation),
-        _ => wire_yaw(orientation),
+        _ => mover.map_or_else(
+            || wire_yaw(orientation),
+            |m| crate::creature_anim::swim_body_rotation(orientation, m.flags, m.pitch),
+        ),
     };
     // A unit/player created already ON a transport (deck NPCs stream in this way): its LIVING
     // block's rider tail is its local pose — `compose_riders` re-anchors it through the boat's

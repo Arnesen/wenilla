@@ -317,12 +317,37 @@ pub(crate) fn attack_actor_refusal(
     self_guid: Option<u64>,
     errors: &mut UiErrorKeys,
 ) -> bool {
+    let Some(key) = attack_actor_blocked(actor, self_guid) else {
+        return false;
+    };
+    debug!("attack refused locally by the actor's own state — {key}");
+    errors.0.push(UiError::key(key));
+    true
+}
+
+/// The same ladder **without the message** — which condition blocks the swing, or `None`.
+///
+/// It exists because `0x612df0` is not on every attack-start path, and 1851's §5 pinned which:
+/// its three callers image-wide are the pet-attack command (`0x4bd40d`), the Attack
+/// action/keybind (`0x6131aa`) and TryCast (`0x6e4efb`) — and **not** the world right-click.
+/// That click runs `0x60bea0` → `0x60c247 call 0x5ecb70`, whose whole extent
+/// `[0x5ecb70, 0x5ecda3)` contains no `call 0x496720` and no `push` of `0xa0`–`0xa9`: it has its
+/// own short, silent conjunct set (`0x5ecc06` is its mounted bail) and every failure lands on
+/// `0x5ecc37`, which bails or stops attacking. **A right-click on a hostile shows no error text
+/// under any condition** — not mounted, dead, charmed, stunned, pacified, fleeing or confused.
+///
+/// So the click asks this, and the bar asks [`attack_actor_refusal`]. The *predicate* is still
+/// `0x612df0`'s rather than `0x5ecb70`'s own — the two sets overlap but are not identical, and
+/// transcribing `0x5ecb70`'s is its own slice — but the **silence** is now the verified law, and
+/// the swing is still suppressed, which is the half that keeps us off the wire.
+pub(crate) fn attack_actor_blocked(
+    actor: Option<&ObjectStore>,
+    self_guid: Option<u64>,
+) -> Option<&'static str> {
     // No descriptor is no refusal. The reference resolves the actor object first and skips the
     // whole chain when it cannot (`0x4bd403`: no pet ⇒ send unmodified) — an un-streamed unit is
     // not an ineligible one.
-    let Some(fields) = actor.map(|s| &s.0) else {
-        return false;
-    };
+    let fields = &actor?.0;
     let key = if fields.unit_health().is_some_and(|h| h == 0) {
         "ERR_ATTACK_DEAD"
     } else if fields
@@ -340,11 +365,9 @@ pub(crate) fn attack_actor_refusal(
     } else if fields.unit_mount_display_id() > 0 {
         "ERR_ATTACK_MOUNTED"
     } else {
-        return false;
+        return None;
     };
-    debug!("attack refused locally by the actor's own state — {key}");
-    errors.0.push(UiError::key(key));
-    true
+    Some(key)
 }
 
 /// The ref's pre-send totem/reagent possession check — `CheckReagentsAndTotems 0x6e4000`,

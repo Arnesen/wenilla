@@ -10,8 +10,6 @@
 
 use bevy::prelude::*;
 
-use crate::creature_anim::move_flags;
-
 use super::{model_pivot_height, wrap_pi, BodyQuery, CameraPivot, Player};
 
 /// Write this frame onto the driven body and return the camera-pivot **target** height it carries.
@@ -41,19 +39,16 @@ pub(super) fn drive(
     let mut cam_pivot_target = None;
     if let Ok((entity, mut t, motion, pivot, .., twist, _, net_entity)) = body.single_mut() {
         t.translation = player.pos;
-        // The swim body pitch (TU-A, `0x60a110`→`0x710620`): while swimming AND moving fwd/back
-        // the model root renders `Rz(yaw)·Ry(−pitch)` — in Bevy axes, the yaw then a nose-up
-        // pitch about the body's local X. Strafe-only, idle, and grounded all render LEVEL (the
-        // ground path) — exactly the gate the client's per-frame `+0x3c` sync branches on.
-        // The pitch presented is this frame's `swim_pitch` — the raw aim, except leveled by
-        // the 0499 surface redirect when the rest-line cap bites (the body swims flat along
-        // the surface, not pitched against it); the wire tail streams the same value.
+        // The swim body pitch — [`crate::creature_anim::swim_body_rotation`], the one law shared
+        // with every observed mover. The pitch presented is this frame's `swim_pitch` — the raw
+        // aim, except leveled by the 0499 surface redirect when the rest-line cap bites (the body
+        // swims flat along the surface, not pitched against it); the wire tail streams the same
+        // value, so what an observer renders for us is what we render for ourselves.
+        //
+        // `swimming` is not passed separately: it is `move_flags_now`'s own SWIMMING bit (the
+        // controller sets the wire word from the same state), and the law reads it there.
         t.rotation =
-            if swimming && move_flags_now & (move_flags::FORWARD | move_flags::BACKWARD) != 0 {
-                Quat::from_rotation_y(player.model_yaw) * Quat::from_rotation_x(swim_pitch)
-            } else {
-                Quat::from_rotation_y(player.model_yaw)
-            };
+            crate::creature_anim::swim_body_rotation(player.model_yaw, move_flags_now, swim_pitch);
         // Report every landing's fall height for the client-side landing predictor
         // (`0x602d00`, decision 0412): its consumers gate on the descent and, past the HARD
         // floor, play the wound grunt + a locally-predicted dust puff at THIS frame — the
