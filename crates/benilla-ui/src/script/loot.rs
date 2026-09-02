@@ -50,21 +50,60 @@ use super::Model;
 /// length, so it cannot drift.
 pub(super) const REG_LOOTBUTTON_METHODS: &str = "__benilla_lootbutton_methods";
 
+/// The **item-cache miss** quality `GetLootSlotInfo` answers for a row whose item template has not
+/// landed yet — the reference's own sentinel, and emphatically **not** a nil. `0x4c23a0` reads the
+/// item-cache record's `[rec+0x1c]` and hands back `-1` when the cache has no record for the id
+/// (wow-re `system/ui/scratch/loot-slot-record.md` §4, a §5 trio round).
+///
+/// It is why stock `UIParent.lua` builds `ITEM_QUALITY_COLORS` over **`for i = -1, 6`** (l.66):
+/// index `-1` exists *for this value*. `LootFrame_Update` indexes the table with the raw return and
+/// no guard — `color = ITEM_QUALITY_COLORS[quality]` (`LootFrame.lua:82`), dereferenced one line
+/// later at `color.r` (`:85`) — so a nil here is a Lua runtime error on every loot opened before
+/// its templates arrive, which is every loot on a cold item cache (decision 1805).
+const CACHE_MISS_QUALITY: i64 = -1;
+
+/// The row text on that same miss. The reference composes every loot row's name through `0x5d8b00`,
+/// which leaves its destination buffer **empty** when the item cache has no record (`0x5d8b25`
+/// stores the terminator and returns); the binding then pushes that empty string. Four values, one
+/// of them `""` — never three values, and never a nil.
+const CACHE_MISS_NAME: &str = "";
+
+/// The icon on an `ItemDisplayInfo` miss — a row that HAS an item, whose display id the catalog has
+/// no icon for. The reference appends the literal `INV_Misc_QuestionMark` (`0x847fe4`, `0x4c252b`)
+/// to the same `StringLookups.dbc` row-3 prefix (`Interface\\Icons`) a hit uses.
+///
+/// It is deliberately **not** the answer for a slot with no item: `0x4c2460` returns NULL on each of
+/// its three guards (`0x4c2470` no window, `0x4c24a6` out of range, `0x4c24b7` itemId == 0) and
+/// `lua_pushstring 0x6f3890` tail-jumps a NULL to `lua_pushnil`. The question mark needs a live
+/// itemId to be reached at all.
+const MISSING_ICON: &str = "Interface\\Icons\\INV_Misc_QuestionMark";
+
+/// The quality a slot with **no item at all** answers — a slot past the end, Lua slot 0, or any slot
+/// while no loot window is open. `0x4c23a0` returns 0 on each of its three guards, and the binding
+/// `fild`s that. Distinct from [`CACHE_MISS_QUALITY`]: a **cleared** slot still has a record, whose
+/// itemId is now 0, and `0x55ba30` short-circuits an entryId of 0 to a NULL record
+/// (`0x55ba3d`/`0x55ba42`) — a guaranteed cache miss, so it takes the `-1` arm at `0x4c2435`.
+const NO_SLOT_QUALITY: i64 = 0;
+
 /// One loot-window row, resolved by the app (decision 0084). Plain data — its 1-based order in the
 /// window is its position in [`LootState::rows`]; the coin row (when present) is always position 1.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LootRow {
     /// The row text (`GetLootSlotInfo`'s `item` return): an item's name, or the coin row's formatted
     /// money amount. `None` while the ask-once item-template query is still in flight (items only —
-    /// the coin row's text is always set); the API reports `nil` and the XML shows a placeholder.
+    /// the coin row's text is always set), and the API reports [`CACHE_MISS_NAME`] — the empty
+    /// string the reference's own name formatter leaves behind on a cache miss — never a nil.
     pub name: Option<String>,
     /// Icon texture path (`Interface\Icons\…` — from the wire `display_info_id`, or the coin
-    /// texture). `None` only if the display catalog had no icon for the id.
+    /// texture). `None` only if the display catalog had no icon for the id, which the API reports as
+    /// [`MISSING_ICON`], the reference's own `INV_Misc_QuestionMark`.
     pub texture: Option<String>,
     /// The stack size looted (`GetLootSlotInfo`'s `quantity`); the coin row is always `1`.
     pub quantity: u32,
-    /// Item quality 0..6, for the quality-coloured row text; `None` while the template is in flight
-    /// (the XML falls back to common/white). The coin row carries a fixed quality.
+    /// Item quality 0..6, for the quality-coloured row text; `None` while the template is in flight,
+    /// which the API reports as [`CACHE_MISS_QUALITY`] (`-1`, the reference's cache-miss sentinel and
+    /// a real row of `ITEM_QUALITY_COLORS`) — never a nil, which is what raised in the stock
+    /// `LootFrame_Update` (decision 1805). The coin row carries a fixed quality.
     pub quality: Option<u32>,
     /// Whether this is the synthesized coin pile (`LootSlotIsCoin` true, `LootSlotIsItem` false).
     pub is_coin: bool,
@@ -76,9 +115,9 @@ pub struct LootRow {
     /// `None` for the synthesized coin row (there is no item to link) and while the ask-once
     /// template answer is in flight — the link embeds the name, so it cannot exist before `name`
     /// does; the same `Option` shape [`super::char_stats::InvSlotView::link`] carries. Both arms of
-    /// the row click take a nil in stride: `DressUpItemLink` returns on one (its own guard,
-    /// `DressUpFrame.lua:10-16`) and the shift arm goes through `BenillaChatEdit_InsertLink`, which
-    /// drops it — our `EditBox:Insert` binding is typed `String` and would raise.
+    /// the STOCK row click take a nil in stride: `DressUpItemLink` returns on one (its own guard,
+    /// `DressUpFrame.lua:10-16`), and `ChatFrameEditBox:Insert` takes an `Option<String>`
+    /// ([`super::editbox`]) so the other drops it silently.
     pub link: Option<String>,
     /// The wire's `randomPropertyId` — the drop's **random-suffix roll**, the id the tooltip
     /// resolves against [`super::Model::random_properties`] for its enchant lines (decision 1547).
@@ -174,36 +213,60 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetLootSlotInfo(slot) → texture, item, quantity, quality (the Era flat-tuple shape,
-    // `LootFrame.lua:81`). `slot` is 1-based; out of range → nil, and so is a cleared (already
-    // looted) slot. `item`/`quality` are nil while the item-template query is in flight; `texture`
-    // rides the wire display id, so it's there at once.
+    // GetLootSlotInfo(slot) → texture, item, quantity, quality — the reference's four, in its order
+    // (`0x4c2c60`, `mov eax,4` at `0x4c2d07`; `LootFrame.lua:81`). `slot` is 1-based.
+    //
+    // **It answers four values on every leg — never three, never a bare nil** (decision 1805).
+    // A slot with no item at all (past the end, slot 0, no window) is `nil, "", 0, 0`; a CLEARED
+    // slot is `nil, "", 0, -1`, because its record survives with a zeroed itemId and that is a
+    // guaranteed item-cache miss.
+    //
+    // A LIVE row is the same story one level down: each producer has a sentinel for the case where
+    // the value it wants is not resolved yet — [`CACHE_MISS_QUALITY`] (`-1`) and [`CACHE_MISS_NAME`]
+    // (`""`) while the item template is in flight, [`MISSING_ICON`] when the display catalog has no
+    // icon for the wire display id. The quality is the load-bearing one: the reference's
+    // `ITEM_QUALITY_COLORS` has a `-1` row precisely so this value can index it.
+    //
+    // The in-flight row is nonetheless one the REFERENCE never paints, because it does not open the
+    // window until every template has landed ([`crate::script`] has no say in that; the app's
+    // `ui_loot` holds `LOOT_OPENED` back). These sentinels are the floor under that, not the plan.
     g.set(
         "GetLootSlotInfo",
         lua.create_function(|lua, slot: usize| {
-            let row = {
+            // `Some(Some(row))` is a live row; `Some(None)` is a CLEARED one (the slot survives with
+            // its record zeroed); `None` is no such slot at all.
+            let slot_state = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 model
                     .loot
                     .as_ref()
                     .and_then(|l| slot.checked_sub(1).and_then(|n| l.rows.get(n)))
-                    .and_then(|r| r.clone())
+                    .cloned()
             };
-            let Some(row) = row else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+            let Some(Some(row)) = slot_state else {
+                // No row — and the reference still pushes four (`0x4c2d07 mov eax,4` is
+                // unconditional; there is no short-return path). A cleared slot's record has a
+                // zeroed itemId, which `0x55ba30` short-circuits to a NULL cache record, so it takes
+                // the cache-miss quality where a genuinely absent slot takes the guard's zero.
+                let cleared = slot_state.is_some();
+                return Ok(MultiValue::from_vec(vec![
+                    Value::Nil,
+                    Value::String(lua.create_string(CACHE_MISS_NAME)?),
+                    Value::Integer(0),
+                    Value::Integer(if cleared {
+                        CACHE_MISS_QUALITY
+                    } else {
+                        NO_SLOT_QUALITY
+                    }),
+                    // Benilla's trailing item id: there is no item here.
+                    Value::Integer(0),
+                ]));
             };
-            let texture = match &row.texture {
-                Some(t) => Value::String(lua.create_string(t)?),
-                None => Value::Nil,
-            };
-            let item = match &row.name {
-                Some(n) => Value::String(lua.create_string(n)?),
-                None => Value::Nil,
-            };
-            let quality = match row.quality {
-                Some(q) => Value::Integer(i64::from(q)),
-                None => Value::Nil,
-            };
+            let texture =
+                Value::String(lua.create_string(row.texture.as_deref().unwrap_or(MISSING_ICON))?);
+            let item =
+                Value::String(lua.create_string(row.name.as_deref().unwrap_or(CACHE_MISS_NAME))?);
+            let quality = Value::Integer(row.quality.map_or(CACHE_MISS_QUALITY, i64::from));
             Ok(MultiValue::from_vec(vec![
                 texture,
                 item,
@@ -219,9 +282,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // like GetLootSlotInfo beside it; nil out of range, nil for the coin row, and nil while the
     // item-template query is in flight (the link embeds the name). The reference's row click reads
     // it for BOTH modifier arms — `DressUpItemLink(GetLootSlotLink(this.slot))` (`LootFrame.lua:149`)
-    // and `ChatFrameEditBox:Insert(GetLootSlotLink(this.slot))` (`:152`); ours routes the second
-    // through `BenillaChatEdit_InsertLink`, whose whole job is the nil this getter can answer.
-    // Decision 1059.
+    // and `ChatFrameEditBox:Insert(GetLootSlotLink(this.slot))` (`:152`). Since 1751 put the stock
+    // file on the chain both of those are the live call sites — our own `BenillaChatEdit_InsertLink`
+    // detour is not on this path any more — and both survive the nil on their own. Decision 1059.
     g.set(
         "GetLootSlotLink",
         lua.create_function(|lua, slot: usize| {
@@ -471,13 +534,29 @@ mod tests {
             .unwrap();
         assert_eq!((name.as_str(), qty), ("Wool Cloth", 3));
 
-        // Row 3: in flight — item name + quality nil, texture + quantity still present.
-        assert!(s
-            .eval::<bool>(
-                "local t, i, q, ql = GetLootSlotInfo(3)\n\
-                 return i == nil and ql == nil and t ~= nil and q == 1",
-            )
-            .unwrap());
+        // Row 3: in flight — the reference's cache-miss SENTINELS, not nils (decision 1805). The
+        // quality is the load-bearing one: stock `LootFrame_Update` does
+        // `ITEM_QUALITY_COLORS[quality].r` with no guard, and `-1` is a real row of that table
+        // (`UIParent.lua` builds it `for i = -1, 6`) while a nil is a runtime error.
+        let (texture, item, quantity, quality) = s
+            .eval::<(String, String, i64, i64)>("return GetLootSlotInfo(3)")
+            .unwrap();
+        assert_eq!(
+            (item.as_str(), quantity, quality),
+            ("", 1, -1),
+            "an in-flight row answers \"\" / -1, never nil"
+        );
+        assert_eq!(texture, "Interface\\Icons\\INV_Misc_QuestionMark");
+        // …and the same row with NO display-info icon either still answers a texture path.
+        let mut iconless = loot();
+        iconless.rows[2].as_mut().unwrap().texture = None;
+        s.set_loot(Some(iconless));
+        assert_eq!(
+            s.eval::<String>("return (GetLootSlotInfo(3))").unwrap(),
+            "Interface\\Icons\\INV_Misc_QuestionMark",
+            "a display-info miss answers the reference's question mark, not nil"
+        );
+        s.set_loot(Some(loot()));
 
         // GetLootSlotLink: the resolved item's link, nil for the coin row and for the in-flight one
         // (both arms of the reference's row click hand this straight on — decision 1059).

@@ -650,3 +650,55 @@ fn the_roll_template_carries_the_reference_name_and_the_parts_addons_reach_for()
         .eval::<bool>(r#"return getglobal("BenillaGroupLootFrameTemplate") == nil"#)
         .unwrap());
 }
+
+/// The **stock** `GroupLootFrame_OnShow` over an in-flight roll — the same defect 1805 fixed one
+/// window over, proven at the file that has not been migrated yet.
+///
+/// `GroupLootFrame1..4`, their template and `GroupLootFrame_OnShow` all live in the stock
+/// `LootFrame.xml`/`.lua`, which has been on the player's chain since 1800; our `GroupLootFrame.xml`
+/// loads after it and shadows the lot. So the stock body is dormant, not absent — and it does
+/// `local color = ITEM_QUALITY_COLORS[quality]` (`LootFrame.lua:275`) then `color.r` (`:276`) off
+/// `GetLootRollItemInfo`, with none of the `or ITEM_QUALITY_COLORS[1]` our copy carries.
+///
+/// This test loads the stock file WITHOUT ours, so the dormant body runs. It is the guard that stops
+/// the eventual GroupLootFrame migration from shipping the loot bug a second time.
+#[test]
+fn the_stock_group_loot_frame_survives_an_in_flight_roll() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for f in super::test_ui::LOOT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
+    s.set_loot_rolls(rolls());
+
+    // Roll 9 is the in-flight one; roll 99 does not exist at all (a stale id from a torn-down
+    // frame). Both take the reference's miss tail, so both must paint rather than raise.
+    for roll in [9, 99] {
+        s.run(&format!("GroupLootFrame_OpenNewFrame({roll}, 55000)"))
+            .unwrap_or_else(|e| panic!("stock OpenNewFrame raised on roll {roll}: {e}"));
+        assert!(
+            s.errors().is_empty(),
+            "stock GroupLootFrame_OnShow raised on roll {roll}: {:?}",
+            s.errors()
+        );
+    }
+    assert!(s
+        .eval::<bool>("return GroupLootFrame1:IsVisible() and GroupLootFrame2:IsVisible()")
+        .unwrap());
+
+    // …and the colour it painted is the miss tail's Common, read back off the FontString that
+    // `:276` set — not a nil, and not the Epic of the resolved roll sitting beside it.
+    let painted: (f64, f64, f64) = s
+        .eval("local r, g, b = GroupLootFrame1Name:GetTextColor()\nreturn r, g, b")
+        .unwrap();
+    let common: (f64, f64, f64) = s
+        .eval("local r, g, b = GetItemQualityColor(1)\nreturn r, g, b")
+        .unwrap();
+    assert!(
+        (painted.0 - common.0).abs() < 1e-6
+            && (painted.1 - common.1).abs() < 1e-6
+            && (painted.2 - common.2).abs() < 1e-6,
+        "the stock roll popup paints the miss tail's Common, got {painted:?} want {common:?}"
+    );
+}

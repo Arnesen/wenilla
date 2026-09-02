@@ -152,6 +152,105 @@ fn is_word(c: char) -> bool {
 mod tests {
     use benilla_ui::script::UiScript;
 
+    /// **Every saved UI global we declare defaults to what the reference's own file declares**
+    /// (decision 1804) — the FrameXML half of the "a default is the reference's" standard that
+    /// `cvars::REGISTERED`'s [`crate::cvars::Reference`] column holds for the CVar half.
+    ///
+    /// Two stores carry a player's settings in this client and the standard has to cover both.
+    /// CVars are the engine's, and their table now states the reference's value per row. The other
+    /// store is FrameXML's own: the `RegisterForSave`'d globals — *Instant Quest Text*, *Show Buff
+    /// Durations*, *Lock Action Bar* — whose default is a plain assignment in whichever of our
+    /// `assets/ui` files still owns that window. Nothing tied those to anything, and two had
+    /// drifted: `QUEST_FADING_DISABLE` and `SHOW_BUFF_DURATIONS` both shipped `"1"` where 1.12
+    /// ships `"0"`, each a reasonable call on its own day (2026-07-17 and 0255) and neither
+    /// visible as a *divergence from the reference* without opening its file.
+    ///
+    /// The reference's declarations are read off the player's own chain rather than copied here,
+    /// so this cannot rot the way a transcribed list would: `UIOptionsFrame.lua`'s
+    /// `UIOptionsFrame_Init` assigns every options-panel uvar its factory value, and that file is
+    /// the authority. A name we persist that the reference declares **somewhere else**
+    /// (`SHOW_OFFLINE_GUILD_MEMBERS` lives in `FriendsFrame.lua`) or not at all (our own
+    /// `TRAINER_FILTER_*`) is reported as uncovered, not failed — and the covered count is
+    /// asserted, so the day our last options window migrates and this covers nothing, it says so
+    /// instead of passing vacuously.
+    ///
+    /// **This test retires as `assets/ui` does** (1751): a migrated window runs the reference's
+    /// own file, whose assignment IS the reference's value, and the question stops existing.
+    ///
+    /// Skips without client data, like every other test that reads the install.
+    #[test]
+    fn our_saved_ui_globals_default_to_the_references_own_values() {
+        let _data = benilla_formats::wow_data_or_skip!();
+
+        // The reference's own factory assignments, parsed out of the file that makes them. Only
+        // `NAME = "literal"` / `NAME = number` at the head of a line — an assignment guarded by an
+        // `if`, or one that copies another global, is not a factory default and must not be read
+        // as one.
+        let src = String::from_utf8_lossy(
+            &super::read("Interface\\FrameXML\\UIOptionsFrame.lua")
+                .expect("the reference's own UIOptionsFrame.lua"),
+        )
+        .into_owned();
+        let mut theirs = std::collections::BTreeMap::new();
+        for line in src.lines() {
+            let line = line.trim();
+            let Some((name, value)) = line.split_once('=') else {
+                continue;
+            };
+            let name = name.trim();
+            if name.is_empty() || !name.chars().all(|c| super::is_word(c) && !c.is_lowercase()) {
+                continue; // a uvar is SHOUTED; anything else is a local, a field or a comparison
+            }
+            let value = value.trim().trim_end_matches(';').trim();
+            let literal = value.strip_prefix('"').and_then(|v| v.strip_suffix('"'));
+            let Some(v) = literal.or_else(|| value.parse::<i64>().ok().map(|_| value)) else {
+                continue; // not a literal — an expression, so not a factory default
+            };
+            theirs.insert(name.to_string(), v.to_string());
+        }
+        assert!(
+            theirs.len() > 20,
+            "parsed only {} declarations out of UIOptionsFrame.lua — the parse is broken, not the \
+             reference",
+            theirs.len()
+        );
+
+        let mut s = UiScript::new().expect("VM");
+        s.set_screen_size(1024.0, 768.0);
+        let failures = super::super::manifest::load_default_ui(&s);
+        assert!(failures.is_empty(), "the default UI: {failures:#?}");
+
+        let (mut checked, mut uncovered, mut wrong) = (0usize, Vec::new(), Vec::new());
+        for name in s.saved_variable_names() {
+            let Some(want) = theirs.get(&name) else {
+                uncovered.push(name);
+                continue;
+            };
+            // Through `tostring`, because the reference is inconsistent about it itself:
+            // `AUTO_QUEST_WATCH` is declared as the number 1 and every other uvar as a string.
+            let got = s
+                .eval::<String>(&format!("return tostring({name})"))
+                .unwrap_or_else(|e| panic!("{name} is registered for save but unreadable: {e}"));
+            checked += 1;
+            if &got != want {
+                wrong.push(format!("{name}: ours {got:?}, the reference's {want:?}"));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "saved UI globals that do not default to the reference's own value — either match it, \
+             or make the divergence explicit at the assignment the way `cvars::REGISTERED` does:\n  \
+             {}",
+            wrong.join("\n  "),
+        );
+        assert!(
+            checked >= 9,
+            "only {checked} of our saved globals are declared in the reference's \
+             UIOptionsFrame.lua (uncovered: {uncovered:?}) — if a window migrated, lower this; if \
+             the parse broke, fix it",
+        );
+    }
+
     /// **A chain entry really loads off the player's install, and order really decides.**
     ///
     /// The two halves of this module's rule, asserted rather than described, because nothing else

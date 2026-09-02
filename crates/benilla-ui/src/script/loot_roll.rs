@@ -25,7 +25,8 @@
 //!
 //! `rollID` is **client-internal** — it never reaches the wire (`CMSG_LOOT_ROLL` addresses a roll by
 //! `(lootedTarget, itemSlot)` instead), so the app allocates its own monotonic id per open roll.
-//! An unknown `rollID` answers `nil` / `0`, exactly as an out-of-range loot slot does.
+//! An unknown `rollID` answers the reference's own miss values — `nil` for the strings, `0` for
+//! `GetLootRollTimeLeft`, and `GetLootRollItemInfo`'s five-value tail (`0x4c31a3`).
 
 use mlua::Lua;
 
@@ -33,6 +34,19 @@ use super::Model;
 
 /// `rollType` 0 — the one vote the bind-on-pickup gate never intercepts (passing binds nothing).
 const PASS: u8 = 0;
+
+/// What `GetLootRollItemInfo` answers for `count` and `quality` when the item-template cache has no
+/// record — the reference's own shared miss tail `nil, nil, 1.0, 1.0, nil` at `0x4c31a3` (wow-re
+/// `system/object-layer/scratch/lootroll-chat-and-lifecycle.md` §5). `count` is a literal `1.0` on
+/// the hit path too (`0x4c3160` — a group roll is always one stack), so only the quality is really a
+/// sentinel, and it is **`1` (Common), not `GetLootSlotInfo`'s `-1`**: each accessor carries its own,
+/// and copying one to the other would be a guess.
+///
+/// It matters for the same reason 1805's did. Stock `GroupLootFrame_OnShow` reads this value straight
+/// into `ITEM_QUALITY_COLORS[quality]` and dereferences it on the next line (`LootFrame.lua:275-276`)
+/// with no guard; our `GroupLootFrame.xml` carries the `or ITEM_QUALITY_COLORS[1]` that the stock
+/// file does not, so the nil this used to answer is a raise waiting for that file's migration.
+const CACHE_MISS_QUALITY: i64 = 1;
 
 /// One open group loot roll, resolved by the app (decision 0591). Plain data — the app rebuilds the
 /// whole list each frame, so `time_left_ms` is simply re-derived rather than ticked here.
@@ -48,7 +62,9 @@ pub struct LootRollEntry {
     pub texture: Option<String>,
     /// The stack size being rolled for (`GetLootRollItemInfo`'s `count`).
     pub quantity: u32,
-    /// Item quality 0..6, for the quality-coloured name; `None` while the template is in flight.
+    /// Item quality 0..6, for the quality-coloured name; `None` while the template is in flight,
+    /// which the API reports as [`CACHE_MISS_QUALITY`] (`1`, Common) rather than a nil — the
+    /// reference's own miss tail, and a real row of `ITEM_QUALITY_COLORS`.
     pub quality: Option<u32>,
     /// Whether the item binds when picked up — the gold-backdrop swap in `GroupLootFrame_OnShow`.
     /// `false` while the template is in flight (the plain backdrop is the safe default).
@@ -112,20 +128,31 @@ fn find(model: &Model, roll_id: u32) -> Option<&LootRollEntry> {
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
-    // GetLootRollItemInfo(rollID) → texture, name, count, quality, bindOnPickUp, itemID.
-    // An unknown id answers nil (the frame is mid-teardown, or an addon asked for a stale roll).
+    // GetLootRollItemInfo(rollID) → texture, name, count, quality, bindOnPickUp, itemID (`0x4c3050`;
+    // the sixth is ours). An unknown id — the frame is mid-teardown, or an addon asked for a stale
+    // roll — is the reference's own miss leg, and it does not return *nothing*: `0x4c31a3` pushes
+    // `nil, nil, 1.0, 1.0, nil`. So does a roll whose item template has not landed, because the
+    // reference reads every one of these off the item-template cache record and takes the same tail
+    // when it is absent. See [`CACHE_MISS_QUALITY`] — the quality is the one a stock caller indexes.
     g.set(
         "GetLootRollItemInfo",
         lua.create_function(|lua, roll_id: u32| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(r) = find(&model, roll_id) else {
-                return Ok(mlua::MultiValue::new());
+                return lua.pack_multi((
+                    mlua::Value::Nil,
+                    mlua::Value::Nil,
+                    1,
+                    CACHE_MISS_QUALITY,
+                    mlua::Value::Nil,
+                    mlua::Value::Nil,
+                ));
             };
             let vals = (
                 r.texture.clone(),
                 r.name.clone(),
                 r.quantity,
-                r.quality,
+                r.quality.map_or(CACHE_MISS_QUALITY, i64::from),
                 r.bind_on_pickup,
                 r.item_id,
             );
@@ -276,11 +303,13 @@ mod tests {
             17182
         );
 
-        // The in-flight roll: name/texture/quality nil, count + BoP default still readable.
+        // The in-flight roll: name/texture nil as the reference's miss tail has them, but the
+        // QUALITY is its sentinel `1` and not a nil — stock `GroupLootFrame_OnShow` indexes it into
+        // `ITEM_QUALITY_COLORS` and dereferences the result with no guard (`LootFrame.lua:275-276`).
         assert!(s
             .eval::<bool>(
                 "local t, n, c, q, b = GetLootRollItemInfo(8)\n\
-                 return t == nil and n == nil and q == nil and c == 2 and b == false",
+                 return t == nil and n == nil and q == 1 and c == 2 and b == false",
             )
             .unwrap());
 
@@ -294,10 +323,22 @@ mod tests {
             .eval::<bool>("return GetLootRollItemLink(8) == nil")
             .unwrap());
 
-        // An unknown id → nil / 0, never an error.
+        // An unknown id → the reference's five-value miss tail (`0x4c31a3`), never an error and
+        // never *nothing*: nil, nil, 1, 1, nil — so a stock caller that unpacks all five and indexes
+        // the quality still finds a colour.
         assert!(s
             .eval::<bool>("return GetLootRollItemInfo(99) == nil")
             .unwrap());
+        let (count, quality) = s
+            .eval::<(i64, i64)>("local _, _, c, q = GetLootRollItemInfo(99)\nreturn c, q")
+            .unwrap();
+        assert_eq!((count, quality), (1, 1), "the miss tail is 1, 1");
+        assert_eq!(
+            s.eval::<i64>("return select('#', GetLootRollItemInfo(99))")
+                .unwrap(),
+            6,
+            "five reference returns plus benilla's trailing item id"
+        );
         assert!(s
             .eval::<bool>("return GetLootRollItemLink(99) == nil")
             .unwrap());

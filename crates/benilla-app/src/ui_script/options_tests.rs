@@ -670,7 +670,7 @@ fn a_slider_rows_readout_sits_on_its_labels_line() {
 /// the app's boot order (register → seed → load → select).
 fn audio_harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
-    s.register_cvars(crate::cvars::REGISTERED.iter().copied());
+    s.register_cvars(crate::cvars::registered_pairs());
     s
 }
 
@@ -1219,30 +1219,34 @@ fn the_nameplates_page_toggles_the_unit_name_cvars() {
     assert!(s
         .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
         .unwrap());
-    // The plate pair leads the page and rides `VPlateMode::default()`: enemy on (the 0167 boot
-    // divergence), friendly off (faithful, 0599).
-    assert!(
-        s.eval::<bool>(
-            "return OptionsFrameContainerBodyNameplatesRowEnemyPlatesCheck:GetChecked()"
-        )
-        .unwrap(),
-        "Enemy Name Plates defaults checked"
-    );
-    assert!(
-        !s.eval::<bool>(
-            "return OptionsFrameContainerBodyNameplatesRowFriendlyPlatesCheck:GetChecked()"
-        )
-        .unwrap(),
-        "Friendly Name Plates defaults unchecked"
-    );
-    // All three name rows ride their registered "1" defaults.
-    for row in ["RowPlayerNames", "RowNpcNames", "RowOwnName"] {
+    // The plate pair leads the page and rides `VPlateMode::default()`: since 1804 both are OFF,
+    // which is the reference's own boot state (its bitmask starts clear and FrameXML's
+    // `NAMEPLATES_ON`/`FRIENDNAMEPLATES_ON` start nil). Enemy was 0167's pin until then.
+    for row in ["RowEnemyPlates", "RowFriendlyPlates"] {
         assert!(
-            s.eval::<bool>(&format!(
+            !s.eval::<bool>(&format!(
                 "return OptionsFrameContainerBodyNameplates{row}Check:GetChecked()"
             ))
             .unwrap(),
-            "{row} defaults checked"
+            "{row} defaults unchecked"
+        );
+    }
+    // The name rows ride their registered defaults, which are the binary's: player "1", NPC and
+    // own "0" (1804 — the last two were director pins from 2026-07-12 until then).
+    assert!(
+        s.eval::<bool>(
+            "return OptionsFrameContainerBodyNameplatesRowPlayerNamesCheck:GetChecked()"
+        )
+        .unwrap(),
+        "Player Names defaults checked"
+    );
+    for row in ["RowNpcNames", "RowOwnName"] {
+        assert!(
+            !s.eval::<bool>(&format!(
+                "return OptionsFrameContainerBodyNameplates{row}Check:GetChecked()"
+            ))
+            .unwrap(),
+            "{row} defaults unchecked"
         );
     }
     let _ = s.take_sounds();
@@ -1259,12 +1263,22 @@ fn the_nameplates_page_toggles_the_unit_name_cvars() {
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
-        vec![(crate::vplates::CVAR_ENEMIES.to_string(), "0".to_string())]
+        vec![(crate::vplates::CVAR_ENEMIES.to_string(), "1".to_string())]
     );
     let _ = s.take_sounds();
 
-    // Unchecking NPC Names queues the flag off and plays the OFF kit (no quirk here — the
-    // 1.12 interface panel's PlayClickSound mapping, not the sound panel's inverted one).
+    // Checking NPC Names queues the flag on and plays the ON kit; unchecking plays OFF (no quirk
+    // here — the 1.12 interface panel's PlayClickSound mapping, not the sound panel's inverted
+    // one).
+    s.run("OptionsFrameContainerBodyNameplatesRowNpcNamesCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("UnitNameNPC".to_string(), "1".to_string())]
+    );
+    assert!(s
+        .take_sounds()
+        .contains(&SoundRequest::KitName("igMainMenuOptionCheckBoxOn".into())));
     s.run("OptionsFrameContainerBodyNameplatesRowNpcNamesCheck:Click()")
         .unwrap();
     assert_eq!(
@@ -1274,12 +1288,6 @@ fn the_nameplates_page_toggles_the_unit_name_cvars() {
     assert!(s
         .take_sounds()
         .contains(&SoundRequest::KitName("igMainMenuOptionCheckBoxOff".into())));
-    s.run("OptionsFrameContainerBodyNameplatesRowNpcNamesCheck:Click()")
-        .unwrap();
-    assert_eq!(
-        s.take_cvar_changes(),
-        vec![("UnitNameNPC".to_string(), "1".to_string())]
-    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -2281,9 +2289,10 @@ fn the_combat_page_writes_saved_variable_globals_and_applies_them() {
         .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
         .unwrap());
 
-    // Read: each box shows its global, at CombatText.xml's own file-scope value.
+    // Read: each box shows its global, at CombatText.xml's own file-scope value — the whole
+    // family at the reference's own defaults since 1804, master included (it was "1" from 0578).
     for (row, checked) in [
-        ("RowCombatText", true),
+        ("RowCombatText", false),
         ("RowAuras", true),
         ("RowAuraFade", false),
         ("RowDodgeParryMiss", false),
@@ -2307,7 +2316,20 @@ fn the_combat_page_writes_saved_variable_globals_and_applies_them() {
     );
 
     // Write: the global moves, the CVar table is untouched, and the applyFunc lands.
+    //
+    // The master goes first, and it is a write under test in its own right — but it is also the
+    // gate: every other row on this page is greyed while `SHOW_COMBAT_TEXT` is "0" (the shipped
+    // state since 1804; the dependency rule is pinned next door in
+    // `the_combat_master_greys_the_family_and_combo_points_is_class_gated`), and a greyed control
+    // eats its click. So the two clicks below only mean anything with this one ahead of them.
     let _ = s.take_cvar_changes();
+    s.run("OptionsFrameContainerBodyCombatRowCombatTextCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return SHOW_COMBAT_TEXT").unwrap(),
+        "1",
+        "the master writes its own global"
+    );
     s.run("OptionsFrameContainerBodyCombatRowDodgeParryMissCheck:Click()")
         .unwrap();
     assert_eq!(
@@ -2347,6 +2369,10 @@ fn the_combat_page_writes_saved_variable_globals_and_applies_them() {
 /// The master's dependency rule, 1.12's verbatim: `SHOW_COMBAT_TEXT` off greys **every** other
 /// row on the page including the dropdown, and back on wakes them — except Combo Points, which
 /// carries the reference's second gate and stays greyed for anyone who is not a rogue or druid.
+///
+/// Since 1804 the page **opens** in the greyed state, because the master ships at the reference's
+/// "0" (0578's `"1"` was the pin). So the walk here is off → on → off, and the sub-rows' first
+/// wake is the master's own click rather than the load: the same rule, entered from the other end.
 #[test]
 fn the_combat_master_greys_the_family_and_combo_points_is_class_gated() {
     let mut s = combat_harness();
@@ -2359,8 +2385,18 @@ fn the_combat_master_greys_the_family_and_combo_points_is_class_gated() {
         ))
         .unwrap()
     };
-    // No player class in this VM, so Combo Points is greyed from the start while its siblings
+    // The shipped state: the master is off, so the whole family is greyed on arrival — and the
+    // master itself is not, because it is the way in.
+    assert_eq!(s.eval::<String>("return SHOW_COMBAT_TEXT").unwrap(), "0");
+    assert!(!enabled(&mut s, "RowAuras", "Check"));
+    assert!(!enabled(&mut s, "RowFloatMode", "DropdownButton"));
+    assert!(enabled(&mut s, "RowCombatText", "Check"));
+
+    // On: the siblings wake. No player class in this VM, so Combo Points stays greyed while they
     // are live — the two gates are independent.
+    s.run("OptionsFrameContainerBodyCombatRowCombatTextCheck:Click()")
+        .unwrap();
+    assert_eq!(s.eval::<String>("return SHOW_COMBAT_TEXT").unwrap(), "1");
     assert!(enabled(&mut s, "RowAuras", "Check"));
     assert!(!enabled(&mut s, "RowComboPoints", "Check"));
     assert!(enabled(&mut s, "RowFloatMode", "DropdownButton"));
@@ -2380,14 +2416,9 @@ fn the_combat_master_greys_the_family_and_combo_points_is_class_gated() {
         enabled(&mut s, "RowCombatText", "Check"),
         "the master itself stays live — it is the way back"
     );
-
-    s.run("OptionsFrameContainerBodyCombatRowCombatTextCheck:Click()")
-        .unwrap();
-    assert!(enabled(&mut s, "RowAuras", "Check"));
-    assert!(enabled(&mut s, "RowFloatMode", "DropdownButton"));
     assert!(
         !enabled(&mut s, "RowComboPoints", "Check"),
-        "the class gate outlives the master's return"
+        "the class gate outlives the master's departure too"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -2395,20 +2426,26 @@ fn the_combat_master_greys_the_family_and_combo_points_is_class_gated() {
 /// Defaults on a saved-variable page restores each global to **the value its own XML assigned at
 /// file scope** — captured at the row's OnLoad, which the load order guarantees runs before the
 /// saved chunk (1128). The panel restates no defaults of its own, so it cannot drift from
-/// CombatText.xml the way the reference's hand-copied `default` field can.
+/// CombatText.xml the way the reference's hand-copied `default` field can. Since 1804 that
+/// assignment is the reference's own value for all fourteen, so this is now also the check that
+/// Defaults lands a player back on a stock 1.12 combat-text family.
 #[test]
 fn defaults_resets_the_combat_page_to_the_shipped_assignments() {
     let s = combat_harness();
     s.run("ShowUIPanel(OptionsFrame)").unwrap();
     s.run("OptionsFrameCategoryListRowCombat:Click()").unwrap();
-    // Move three of them off their shipped values, in both directions and both flavors.
+    // Move FOUR of them off their shipped values, in both directions and both flavors. The master
+    // leads because the page ships with it off (1804) and a greyed row eats its click — so it is
+    // both the way in and the fourth value Defaults has to walk back.
     s.run(
-        "OptionsFrameContainerBodyCombatRowAurasCheck:Click() \
+        "OptionsFrameContainerBodyCombatRowCombatTextCheck:Click() \
+         OptionsFrameContainerBodyCombatRowAurasCheck:Click() \
          OptionsFrameContainerBodyCombatRowReputationCheck:Click() \
          OptionsFrameContainerBodyCombatRowFloatModeDropdownButton:Click() \
          DropDownList1Button3:Click()",
     )
     .unwrap();
+    assert_eq!(s.eval::<String>("return SHOW_COMBAT_TEXT").unwrap(), "1");
     assert_eq!(
         s.eval::<String>("return COMBAT_TEXT_SHOW_AURAS").unwrap(),
         "0"
@@ -2424,6 +2461,11 @@ fn defaults_resets_the_combat_page_to_the_shipped_assignments() {
     );
 
     s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    assert_eq!(
+        s.eval::<String>("return SHOW_COMBAT_TEXT").unwrap(),
+        "0",
+        "the master walks back too — the reference's own value since 1804"
+    );
     assert_eq!(
         s.eval::<String>("return COMBAT_TEXT_SHOW_AURAS").unwrap(),
         "1"
@@ -2456,6 +2498,11 @@ fn what_the_combat_page_writes_survives_a_restart() {
     let s = combat_harness();
     s.run("ShowUIPanel(OptionsFrame)").unwrap();
     s.run("OptionsFrameCategoryListRowCombat:Click()").unwrap();
+    // The master first: the page ships with it off (1804) and a greyed row eats its click, so
+    // without this the Honor Gained click below would be a silent no-op. Both writes are then
+    // held to the same standard — they have to come back after the restart.
+    s.run("OptionsFrameContainerBodyCombatRowCombatTextCheck:Click()")
+        .unwrap();
     s.run("OptionsFrameContainerBodyCombatRowHonorGainedCheck:Click()")
         .unwrap();
 
@@ -2463,6 +2510,10 @@ fn what_the_combat_page_writes_survives_a_restart() {
     assert!(
         saved.contains("COMBAT_TEXT_SHOW_HONOR_GAINED = \"0\""),
         "the toggle is in the saved text:\n{saved}"
+    );
+    assert!(
+        saved.contains("SHOW_COMBAT_TEXT = \"1\""),
+        "and so is the master:\n{saved}"
     );
 
     // The restart: a fresh tree at its shipped defaults, then the saved chunk over the top.
@@ -2473,6 +2524,10 @@ fn what_the_combat_page_writes_survives_a_restart() {
             .unwrap(),
         "1"
     );
+    assert_eq!(
+        fresh.eval::<String>("return SHOW_COMBAT_TEXT").unwrap(),
+        "0"
+    );
     fresh.run(&saved).unwrap();
     assert_eq!(
         fresh
@@ -2480,6 +2535,11 @@ fn what_the_combat_page_writes_survives_a_restart() {
             .unwrap(),
         "0",
         "the saved value wins over the file-scope default"
+    );
+    assert_eq!(
+        fresh.eval::<String>("return SHOW_COMBAT_TEXT").unwrap(),
+        "1",
+        "…and so does the master the player turned on"
     );
     // And the page paints the restored value the next time it is opened.
     fresh.run("ShowUIPanel(OptionsFrame)").unwrap();
@@ -2582,15 +2642,22 @@ fn the_interface_page_writes_the_three_stock_globals() {
         .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
         .unwrap());
 
-    // Read: all three ship on — QuestFrame.xml's "1" (the director's pin), QuestLogFrame.xml's "1"
-    // (the reference's advertised default, as a STRING — see that file on 1.12's own number/string
-    // break), GameTooltip.xml's "1".
-    for row in ["RowInstantQuestText", "RowAutoQuestWatch", "RowNewbieTips"] {
-        assert!(
+    // Read: each box shows its definer's own file-scope value. Two ship on — QuestLogFrame.xml's
+    // "1" (the reference's advertised default, as a STRING — see that file on 1.12's own
+    // number/string break) and GameTooltip.xml's "1" — and Instant Quest Text ships OFF, which is
+    // QuestFrame.xml's `QUEST_FADING_DISABLE = "0"`: the reference's value, and ours since 1804
+    // (it was pinned "1" by direction on 2026-07-17).
+    for (row, checked) in [
+        ("RowInstantQuestText", false),
+        ("RowAutoQuestWatch", true),
+        ("RowNewbieTips", true),
+    ] {
+        assert_eq!(
             s.eval::<bool>(&format!(
                 "return OptionsFrameContainerBodyInterface{row}Check:GetChecked() and true or false"
             ))
             .unwrap(),
+            checked,
             "{row} reads its global"
         );
     }
@@ -2609,12 +2676,12 @@ fn the_interface_page_writes_the_three_stock_globals() {
     );
 
     // No applyFunc, because the write IS the apply: the questgiver's fade arm reads the global as
-    // the panel shows, so turning instant text OFF makes the very next show write on.
+    // the panel shows, so turning instant text ON makes the very next show land its text whole.
     s.run("OptionsFrameContainerBodyInterfaceRowInstantQuestTextCheck:Click()")
         .unwrap();
     assert_eq!(
         s.eval::<String>("return QUEST_FADING_DISABLE").unwrap(),
-        "0"
+        "1"
     );
     assert!(
         s.eval::<bool>(
@@ -2843,12 +2910,18 @@ fn defaults_sends_a_flip_only_for_the_row_that_moved() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// Defaults here restores **our** shipped assignments, which is the visible payoff of capturing the
-/// default at OnLoad instead of restating it (1134 §1): `QUEST_FADING_DISABLE` ships `"1"` by
-/// direction (2026-07-17) where 1.12's own table hand-writes `default = "0"`. The page walks back
-/// to the value QuestFrame.xml actually assigns — there is no second copy to disagree with it.
+/// Defaults here restores the value **each global's own definer file assigns**, which is the
+/// visible payoff of capturing the default at OnLoad instead of restating it (1134 §1): the page
+/// holds no second copy that could disagree with QuestFrame.xml or GameTooltip.xml.
+///
+/// This test was `defaults_on_the_interface_page_restores_our_pin_not_the_references` until 1804,
+/// and its premise is now inverted. `QUEST_FADING_DISABLE` shipped `"1"` by direction
+/// (2026-07-17) where 1.12's own table hand-writes `default = "0"`, so Defaults used to walk the
+/// page back to a value the reference did not have. It walks back to `"0"` now — not because the
+/// mechanism changed, but because the assignment it reads **is** the reference's. That is the
+/// property worth holding: the capture follows the definer wherever the definer stands.
 #[test]
-fn defaults_on_the_interface_page_restores_our_pin_not_the_references() {
+fn defaults_on_the_interface_page_restores_the_definers_own_assignment() {
     let s = interface_harness();
     s.run("ShowUIPanel(OptionsFrame)").unwrap();
     s.run("OptionsFrameCategoryListRowInterface:Click()")
@@ -2860,18 +2933,18 @@ fn defaults_on_the_interface_page_restores_our_pin_not_the_references() {
     .unwrap();
     assert_eq!(
         s.eval::<String>("return QUEST_FADING_DISABLE").unwrap(),
-        "0"
+        "1"
     );
     assert_eq!(s.eval::<String>("return SHOW_NEWBIE_TIPS").unwrap(), "0");
 
     s.run("OptionsFrameContainerDefaults:Click()").unwrap();
     assert_eq!(
         s.eval::<String>("return QUEST_FADING_DISABLE").unwrap(),
-        "1",
-        "back to OUR default, not the reference's \"0\""
+        "0",
+        "back to QuestFrame.xml's own assignment, which is the reference's \"0\""
     );
     assert_eq!(s.eval::<String>("return SHOW_NEWBIE_TIPS").unwrap(), "1");
-    assert!(s
+    assert!(!s
         .eval::<bool>(
             "return OptionsFrameContainerBodyInterfaceRowInstantQuestTextCheck:GetChecked() \
              and true or false"
@@ -2929,16 +3002,23 @@ fn what_the_interface_page_writes_survives_a_restart() {
 
 /// **A saved value that has a SIDE EFFECT has to be applied when the chunk lands.** The whole UI's
 /// XML runs before `benilla-config/saved-variables.lua` executes over it (1128), so every file-scope
-/// consumer of a global ran against the *shipped* default: `CombatText_OnLoad` armed its six event
-/// registrations from `SHOW_COMBAT_TEXT = "1"`, and nothing re-ran when the saved `"0"` replaced it.
-/// The player's "off" came back on at every restart. 1.12 closes this with a hand-written ladder in
-/// `UIOptionsFrame`'s `VARIABLES_LOADED` arm ("Option specific function calls", UIOptionsFrame.lua
-/// l.204-220); we hold each side effect on its own row already, so the window runs them there.
+/// consumer of a global ran against the *shipped* default: `CombatText_OnLoad` decides its six
+/// event registrations from `SHOW_COMBAT_TEXT` once, at load, and nothing re-runs when the saved
+/// value replaces it. The player's choice came back undone at every restart. 1.12 closes this with
+/// a hand-written ladder in `UIOptionsFrame`'s `VARIABLES_LOADED` arm ("Option specific function
+/// calls", UIOptionsFrame.lua l.204-220); we hold each side effect on its own row already, so the
+/// window runs them there.
+///
+/// **The saved value here is `"1"`, and the direction is the whole point.** Until 1804 the master
+/// shipped `"1"`, so the bug was a saved `"0"` coming back ON and the test drove the switch down.
+/// The master ships at the reference's `"0"` now, so driving it down would assert nothing — the
+/// file-scope default already leaves the six events unregistered. The load-bearing case is the
+/// other one: the registrations were never armed at all, and only the walk can arm them.
 #[test]
 fn a_saved_switch_with_a_side_effect_is_applied_when_the_variables_land() {
     let mut s = combat_harness();
     // What the saved chunk does, verbatim: assign over the file-scope default, then the event.
-    s.run("SHOW_COMBAT_TEXT = \"0\"").unwrap();
+    s.run("SHOW_COMBAT_TEXT = \"1\"").unwrap();
     s.fire_event("VARIABLES_LOADED", vec![]);
 
     s.fire_event(
@@ -2949,9 +3029,9 @@ fn a_saved_switch_with_a_side_effect_is_applied_when_the_variables_land() {
         ],
     );
     assert!(
-        s.eval::<bool>("return getn(COMBAT_TEXT_TO_ANIMATE) == 0")
+        s.eval::<bool>("return getn(COMBAT_TEXT_TO_ANIMATE) == 1")
             .unwrap(),
-        "the saved-off master is armed at load: the registrations were never re-run"
+        "the saved-on master is applied at load: the walk armed the registrations the XML did not"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -2962,6 +3042,12 @@ fn a_saved_switch_with_a_side_effect_is_applied_when_the_variables_land() {
 /// timers the buff bar's three rows sit 45px apart, without them 35px — the reference's own two
 /// geometries (`BuffButtons_UpdatePositions`). The click has to move it, and so does the saved
 /// value landing at load, which is what the VARIABLES_LOADED walk is for.
+///
+/// The walk runs OFF → ON, because the bar ships without timers: `SHOW_BUFF_DURATIONS` is the
+/// reference's `"0"` since 1804. It shipped `"1"` from 0255, which put the durations-shown
+/// geometry in on the director's call, through 1139, which turned it into a setting without
+/// re-weighing what it ships as. Nothing about the two geometries or the apply hook changed —
+/// only which of them a fresh install opens on.
 #[test]
 fn the_buff_durations_row_repitches_the_bar_and_the_pitch_survives_a_restart() {
     let gap = |s: &mut UiScript| -> f64 {
@@ -2971,17 +3057,17 @@ fn the_buff_durations_row_repitches_the_bar_and_the_pitch_survives_a_restart() {
     };
 
     let mut s = interface_harness();
-    assert_eq!(s.eval::<String>("return SHOW_BUFF_DURATIONS").unwrap(), "1");
+    assert_eq!(s.eval::<String>("return SHOW_BUFF_DURATIONS").unwrap(), "0");
     assert!(
-        (gap(&mut s) - 15.0).abs() < 1e-3,
-        "the shipped default is the durations-SHOWN geometry: {}",
+        (gap(&mut s) - 5.0).abs() < 1e-3,
+        "the shipped default is the durations-HIDDEN geometry: {}",
         gap(&mut s)
     );
 
     s.run("ShowUIPanel(OptionsFrame)").unwrap();
     s.run("OptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
-    assert!(s
+    assert!(!s
         .eval::<bool>(
             "return OptionsFrameContainerBodyInterfaceRowBuffDurationsCheck:GetChecked() \
              and true or false"
@@ -2990,10 +3076,10 @@ fn the_buff_durations_row_repitches_the_bar_and_the_pitch_survives_a_restart() {
 
     s.run("OptionsFrameContainerBodyInterfaceRowBuffDurationsCheck:Click()")
         .unwrap();
-    assert_eq!(s.eval::<String>("return SHOW_BUFF_DURATIONS").unwrap(), "0");
+    assert_eq!(s.eval::<String>("return SHOW_BUFF_DURATIONS").unwrap(), "1");
     assert!(
-        (gap(&mut s) - 5.0).abs() < 1e-3,
-        "the click closed the timer gutter: {}",
+        (gap(&mut s) - 15.0).abs() < 1e-3,
+        "the click opened the timer gutter: {}",
         gap(&mut s)
     );
 
@@ -3001,18 +3087,18 @@ fn the_buff_durations_row_repitches_the_bar_and_the_pitch_survives_a_restart() {
     // VARIABLES_LOADED is what puts the bar where the value says.
     let saved = s.saved_variables_text();
     assert!(
-        saved.contains("SHOW_BUFF_DURATIONS = \"0\""),
+        saved.contains("SHOW_BUFF_DURATIONS = \"1\""),
         "the switch is in the saved text:\n{saved}"
     );
     let mut fresh = interface_harness();
     fresh.run(&saved).unwrap();
     assert!(
-        (gap(&mut fresh) - 15.0).abs() < 1e-3,
+        (gap(&mut fresh) - 5.0).abs() < 1e-3,
         "the chunk moved the variable, not the bar"
     );
     fresh.fire_event("VARIABLES_LOADED", vec![]);
     assert!(
-        (gap(&mut fresh) - 5.0).abs() < 1e-3,
+        (gap(&mut fresh) - 15.0).abs() < 1e-3,
         "the apply walk re-derives the geometry from the saved value: {}",
         gap(&mut fresh)
     );
@@ -3087,9 +3173,9 @@ fn the_defaults_button_is_armed_by_rows_not_by_a_category() {
 /// say/yell bubbles off).
 #[test]
 fn the_chat_page_toggles_the_chat_bubble_cvars() {
-    let mut s = audio_harness();
-    s.set_cvar_host("ChatBubblesParty", "0");
-    let mut s = harness_on(s);
+    // No host override: since 1804 the registered pair IS bubbles-on / party-off, so the page's
+    // read below is of the shipped table rather than of a value this test planted.
+    let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(OptionsFrame)").unwrap();
     s.run("OptionsFrameCategoryListRowChat:Click()").unwrap();
 
@@ -3129,13 +3215,14 @@ fn the_chat_page_toggles_the_chat_bubble_cvars() {
         .eval::<bool>("return OptionsFrameContainerBodyChatRowPartyChatBubblesCheck:GetChecked()")
         .unwrap());
 
-    // Defaults walks the page back to the registered pair — including the ChatBubblesParty "1"
-    // that deliberately disagrees with the binary's registered "0" (the director's /p ask, 0598).
+    // Defaults walks the page back to the registered pair, which is the binary's own since 1804:
+    // `ChatBubbles` "1", `ChatBubblesParty` "0" (the party half was the director's /p ask, 0598).
+    // The party row was clicked ON above, so this is a real walk-back, not a no-op.
     s.run("OptionsFrameContainerDefaults:Click()").unwrap();
     assert!(s
         .eval::<bool>("return OptionsFrameContainerBodyChatRowChatBubblesCheck:GetChecked()")
         .unwrap());
-    assert!(s
+    assert!(!s
         .eval::<bool>("return OptionsFrameContainerBodyChatRowPartyChatBubblesCheck:GetChecked()")
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -3364,8 +3451,12 @@ fn the_mouse_sensitivity_slider_snaps_to_the_reference_step() {
 /// **Max Camera Distance** (decision 1140) — the fourth frozen constant, and the one with a wrinkle
 /// worth pinning: 1.12 stores a FACTOR over `cameraDistanceMax`'s 15 yd base, so the value that
 /// persists is `1.0 … 2.0` while the thing the player is choosing is a distance. The readout shows
-/// the distance; the CVar carries the factor. Our default is the factor fully raised — the 30 yd
-/// ceiling benilla has always had — where the reference's registrar ships 1.0.
+/// the distance; the CVar carries the factor.
+///
+/// The slider's RANGE is unchanged and still reaches the 30 yd ceiling benilla used to ship at;
+/// what moved is where it rests. Since 1804 the default is the registrar's own `1.0` — 15 yd, the
+/// distance a fresh 1.12 client stops the wheel at — so the walk here is up the range and back
+/// rather than down it.
 #[test]
 fn the_max_camera_distance_slider_stores_a_factor_and_reads_out_yards() {
     let mut s = harness_on(audio_harness());
@@ -3379,15 +3470,46 @@ fn the_max_camera_distance_slider_stores_a_factor_and_reads_out_yards() {
             "return OptionsFrameContainerBodyControlsRowMaxCameraDistanceControlValue:GetText()"
         )
         .unwrap(),
-        "30 yd"
+        "15 yd",
+        "vanilla's own out-of-box ceiling"
     );
 
-    // Down to the reference's own default: the factor is what persists, the yards are the label.
-    s.run("OptionsFrameContainerBodyControlsRowMaxCameraDistanceControlSlider:SetValue(1.0)")
+    // A move off the notch: the factor is what persists, the yards are the label — and the two
+    // disagree numerically, which is why a mid-range stop is worth a step of its own.
+    s.run("OptionsFrameContainerBodyControlsRowMaxCameraDistanceControlSlider:SetValue(1.4)")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
-        vec![("cameraDistanceMaxFactor".to_string(), "1".to_string())]
+        vec![("cameraDistanceMaxFactor".to_string(), "1.4".to_string())]
+    );
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyControlsRowMaxCameraDistanceControlValue:GetText()"
+        )
+        .unwrap(),
+        "21 yd"
+    );
+
+    // All the way up — the slider's top, which is where this row's default sat until 1804.
+    s.run("OptionsFrameContainerBodyControlsRowMaxCameraDistanceControlSlider:SetValue(2.0)")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("cameraDistanceMaxFactor".to_string(), "2".to_string())]
+    );
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyControlsRowMaxCameraDistanceControlValue:GetText()"
+        )
+        .unwrap(),
+        "30 yd"
+    );
+
+    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    assert_eq!(
+        s.eval::<String>("return GetCVar(\"cameraDistanceMaxFactor\")")
+            .unwrap(),
+        "1"
     );
     assert_eq!(
         s.eval::<String>(
@@ -3395,14 +3517,7 @@ fn the_max_camera_distance_slider_stores_a_factor_and_reads_out_yards() {
         )
         .unwrap(),
         "15 yd",
-        "vanilla's own out-of-box ceiling"
-    );
-
-    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
-    assert_eq!(
-        s.eval::<String>("return GetCVar(\"cameraDistanceMaxFactor\")")
-            .unwrap(),
-        "2"
+        "the readout follows the reset"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

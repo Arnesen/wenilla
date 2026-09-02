@@ -11,8 +11,10 @@
         frame registers. Where our behaviour departs from the spec, it is named:
         - The ref is load-on-demand (`UIParentLoadAddOn` when SHOW_COMBAT_TEXT == "1"); we load
           always and let CombatText_UpdateDisplayedMessages gate registration, ref-identically.
-        - SHOW_COMBAT_TEXT defaults "1" here (ref "0") — the director's ask IS the enabled
-          experience; every sub-toggle keeps its ref default (UIOptionsFrame.lua l.69-84).
+        - SHOW_COMBAT_TEXT defaulted "1" here against the ref's "0" from 0578 (the director's ask
+          was the enabled experience) until 1804 put the whole option family back on the
+          reference's own values. All fourteen now sit at the spec's defaults
+          (UIOptionsFrame.lua l.69-84), and the Combat page's checkbox is where it turns on.
         - The ref's virtual FontString template (CombatTextTemplate) expands to 20 identical
           strings; region templates are outside the v1 loader's object model (BuffFrame.xml has
           the precedent note), so the 20 instances inherit the CombatTextFont Font object and
@@ -76,9 +78,11 @@
         COMBAT_TEXT_LOW_MANA_THRESHOLD = 0.2
 
         -- The option family: every saved global this feature owns, next to the value it ships
-        -- with. All fourteen sit at the spec's defaults (UIOptionsFrame.lua l.69-84) except the
-        -- master SHOW_COMBAT_TEXT, which ships "1" against the spec's "0" — the director's ask IS
-        -- the enabled experience (see the header).
+        -- with. **All fourteen are the spec's own defaults** (UIOptionsFrame.lua l.69-84), the
+        -- master SHOW_COMBAT_TEXT included — it shipped "1" against the spec's "0" from 0578 to
+        -- 1804 (see the header). Held to that by
+        -- `reference_ui::tests::our_saved_ui_globals_default_to_the_references_own_values`, which
+        -- reads the reference's file off the player's chain rather than trusting this comment.
         --
         -- Each name is assigned AT FILE SCOPE and registered for saving in the same pass, because
         -- the load order is what makes a saved value stick (decision 1128): defaults first, the
@@ -88,7 +92,7 @@
         -- saved chunk — so a default lives in exactly one place, this table, and the panel cannot
         -- drift from it.
         local combatTextOptions = {
-            {"SHOW_COMBAT_TEXT", "1"},
+            {"SHOW_COMBAT_TEXT", "0"},
             {"COMBAT_TEXT_SHOW_LOW_HEALTH_MANA", "1"},
             {"COMBAT_TEXT_SHOW_AURAS", "1"},
             {"COMBAT_TEXT_SHOW_AURA_FADE", "0"},

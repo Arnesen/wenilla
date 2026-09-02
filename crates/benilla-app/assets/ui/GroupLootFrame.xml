@@ -85,10 +85,13 @@
         LootFrame.xml's own "not implemented yet" caveat was written) — `$parentName`'s
         `inherits="GameFontNormalSmall"` below resolves for real; no stale caveat needed here.
 
-        IN-FLIGHT ITEMS: `GetLootRollItemInfo`'s `name`/`texture`/`quality` are `nil` while the item
-        template query hasn't landed yet (`loot_roll.rs`). `GroupLootFrame_OnShow` falls back to
-        `BENILLA_FALLBACK_ICON` / an empty name / common (quality 1) — the same fallback shape
-        `LootFrame_Update` uses for an in-flight loot row.
+        IN-FLIGHT ITEMS: `GetLootRollItemInfo`'s `name` and `texture` are `nil` while the item
+        template query hasn't landed yet (`loot_roll.rs`); its `count` and `quality` are the
+        reference's own miss tail, `1` and `1` (decision 1805 — 0x4c31a3), never nil. So the
+        `or ITEM_QUALITY_COLORS[1]` below is dead weight rather than load-bearing, and the stock
+        `GroupLootFrame_OnShow` this file shadows survives the same state without it. The
+        `BENILLA_FALLBACK_ICON` / empty-name fallbacks are still doing work: the reference leaves
+        both of those nil.
 
         The Era API this drives (`benilla-ui/src/script/loot_roll.rs`, decision 0591):
         `GetLootRollItemInfo(rollID)` -> texture,name,count,quality,bindOnPickUp,itemID;

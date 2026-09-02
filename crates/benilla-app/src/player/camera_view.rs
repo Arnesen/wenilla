@@ -637,8 +637,8 @@ mod tests {
         let registered = |name: &str| {
             crate::cvars::REGISTERED
                 .iter()
-                .find(|(n, _)| n.eq_ignore_ascii_case(name))
-                .map(|(_, d)| *d)
+                .find(|r| r.name.eq_ignore_ascii_case(name))
+                .map(|r| r.default)
         };
         for view in 0..VIEW_COUNT {
             for field in 0..3 {

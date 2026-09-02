@@ -1072,3 +1072,122 @@ fn a_row_click_takes_rather_than_continues() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// **The state every loot on a cold item cache opens in** — the rows are on the wire, the item
+/// templates are not back yet — driven through the STOCK `LootFrame.lua`. Decision 1805.
+///
+/// The hole this closes: every loot fixture in this file (and in `benilla-ui`'s own) handed the
+/// window fully-resolved rows, so nothing in the suite ever ran `LootFrame_Update` over a row whose
+/// template was still in flight. Our deleted `LootFrame.xml` could not have noticed either — it
+/// carried an `ITEM_QUALITY_COLORS[quality] or ITEM_QUALITY_COLORS[1]` guard, the way
+/// `GroupLootFrame.xml` and `AuctionFrame.xml` still do. The stock file has no guard: it does
+/// `color = ITEM_QUALITY_COLORS[quality]` (`LootFrame.lua:82`) and dereferences `color.r` on the
+/// next line, so a nil quality raised
+/// `LootFrame.lua:85: attempt to index local 'color' (a nil value)` out of `LootFrame_OnShow` —
+/// on the director's screen, on an ordinary corpse.
+///
+/// The window must therefore come up clean, paint the row, and paint it in the cache-miss colour —
+/// `ITEM_QUALITY_COLORS[-1]`, the row `UIParent.lua`'s `for i = -1, 6` exists to provide.
+#[test]
+fn loot_row_awaiting_its_template_opens_clean() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for f in super::test_ui::LOOT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
+
+    // One row, in flight: the wire gave us the icon (it rides the display id) and the stack size,
+    // and nothing else yet.
+    s.set_loot(Some(LootState {
+        fishing: false,
+        master_candidates: Vec::new(),
+        rows: vec![Some(LootRow {
+            item_id: 2582,
+            name: None,
+            texture: Some("Interface\\Icons\\INV_Gauntlets_17".into()),
+            quantity: 1,
+            quality: None,
+            is_coin: false,
+            link: None,
+            random_property_id: 0,
+        })],
+    }));
+    s.fire_event("LOOT_OPENED", vec![]);
+    assert!(
+        s.errors().is_empty(),
+        "an in-flight loot row must not raise in LootFrame_Update: {:?}",
+        s.errors()
+    );
+    assert!(
+        s.eval::<bool>("return LootFrame:IsVisible() and LootButton1:IsVisible()")
+            .unwrap(),
+        "the window opened and drew the row"
+    );
+
+    // The binding answered the reference's sentinels rather than nils, and the quality one indexes
+    // `ITEM_QUALITY_COLORS` — which is the whole of what `LootFrame.lua:82` needs to be true.
+    let (item, quantity, quality) = s
+        .eval::<(String, i64, i64)>("local _, i, n, q = GetLootSlotInfo(1)\nreturn i, n, q")
+        .unwrap();
+    assert_eq!((item.as_str(), quantity, quality), ("", 1, -1));
+    assert!(
+        s.eval::<bool>("return ITEM_QUALITY_COLORS[select(4, GetLootSlotInfo(1))] ~= nil")
+            .unwrap(),
+        "the cache-miss quality must be a real row of ITEM_QUALITY_COLORS"
+    );
+
+    // And line 85 — the line that raised — actually ran: the row text wears the cache-miss colour,
+    // read back off the FontString rather than off the table. `ITEM_QUALITY_COLORS[-1]` is Common
+    // (`GetItemQualityColor`'s clamp is unsigned, so -1 takes the same branch as 7-and-up), not the
+    // Poor it used to be here — 1805 corrects 1199 on that.
+    let painted: (f64, f64, f64) = s
+        .eval("local r, g, b = LootButton1Text:GetTextColor()\nreturn r, g, b")
+        .unwrap();
+    let miss: (f64, f64, f64) = s
+        .eval("local r, g, b = GetItemQualityColor(-1)\nreturn r, g, b")
+        .unwrap();
+    assert_eq!(miss, (1.0, 1.0, 1.0), "the cache-miss row is Common/white");
+    // (f32 region storage vs the f64 the binding computes — compare, don't equate.)
+    assert!(
+        (painted.0 - miss.0).abs() < 1e-6
+            && (painted.1 - miss.1).abs() < 1e-6
+            && (painted.2 - miss.2).abs() < 1e-6,
+        "LootFrame_Update:85 must paint the -1 colour, got {painted:?} want {miss:?}"
+    );
+
+    // The template lands and the window is reopened: the row reads its name in its own quality's
+    // colour, so the sentinel state poisons nothing downstream.
+    //
+    // It is a REOPEN and not a repaint on purpose. The app fires `LOOT_UPDATE` when an open
+    // window's content changes, and `LOOT_UPDATE` is not a 1.12 event — it appears nowhere in the
+    // reference's FrameXML and `LootFrame_OnLoad` does not register it — so nothing in the stock
+    // file listens. What the real client does when a template arrives mid-window is out at wow-re
+    // (the arrival callback `0x4c2ac0` is recorded as clearing the pending flag and nothing else);
+    // this test deliberately asserts only what is settled.
+    s.fire_event("LOOT_CLOSED", vec![]);
+    s.set_loot(Some(LootState {
+        fishing: false,
+        master_candidates: Vec::new(),
+        rows: vec![Some(LootRow {
+            item_id: 2582,
+            name: Some("Thin Cloth Gloves".into()),
+            texture: Some("Interface\\Icons\\INV_Gauntlets_17".into()),
+            quantity: 1,
+            quality: Some(1),
+            is_coin: false,
+            link: None,
+            random_property_id: 0,
+        })],
+    }));
+    s.fire_event("LOOT_OPENED", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    s.resolve();
+    let white = text_color(&s.extract(), "Thin Cloth Gloves").expect("the resolved name renders");
+    assert!(
+        (white[0] - 1.0).abs() < 0.02
+            && (white[1] - 1.0).abs() < 0.02
+            && (white[2] - 1.0).abs() < 0.02,
+        "the resolved row is white, got {white:?}"
+    );
+}

@@ -37,9 +37,11 @@ fn harness() -> UiScript {
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "ActionBar.xml"); // BENILLA_FALLBACK_ICON (the unknown-icon fallback)
-                                   // The timer switch, seeded BEFORE the bar loads. 1.12 declares it in UIOptionsFrame.lua
-                                   // (default "0"); we have no counterpart to that file, so it lives with the row that drives it
-                                   // (OptionsFrame.xml) and ships as "1" — the director's call, 0255/1139. Order matters: the
+                                   // The timer switch, PLANTED ON — not the shipped value. 1.12 declares it in
+                                   // UIOptionsFrame.lua (default "0"); we have no counterpart to that file, so it lives with the
+                                   // row that drives it (OptionsFrame.xml), where it shipped "1" from 0255/1139 until 1804 put
+                                   // it back on the reference's "0". These tests are about the timer text and the geometry it
+                                   // buys, so the harness turns it on the way the Interface page's row does. Order matters: the
                                    // reference's `BuffFrame_OnLoad` calls `BuffButtons_UpdatePositions`, which seats the debuff
                                    // row 20px differently depending on this value, so setting it afterwards leaves the bar laid
                                    // out for the wrong one.
@@ -436,10 +438,11 @@ fn a_refreshed_duration_reaches_the_bar_with_no_aura_event() {
 
 /// **`SHOW_BUFF_DURATIONS`** (decision 1139) — 0255 shipped the durations-shown geometry with no
 /// switch because there was no panel to hang one on, and said the other branch was already there
-/// waiting. This is it: the global (ours "1", the reference's "0") hides the timer text and closes
-/// the 15px gutter each row leaves for it, down to the 5px the columns use. What it does NOT touch
-/// is the warning flash — with the numbers gone, the pulse is the only thing left saying an aura is
-/// about to drop, and the reference pulses from `BuffButton_OnUpdate` regardless of the setting.
+/// waiting. This is it: the global — the reference's "0" since 1804, planted "1" by this file's
+/// harness — hides the timer text and closes the 15px gutter each row leaves for it, down to the
+/// 5px the columns use. What it does NOT touch is the warning flash — with the numbers gone, the
+/// pulse is the only thing left saying an aura is about to drop, and the reference pulses from
+/// `BuffButton_OnUpdate` regardless of the setting.
 #[test]
 fn the_duration_switch_hides_the_timers_and_closes_their_gutter() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -458,7 +461,10 @@ fn the_duration_switch_hides_the_timers_and_closes_their_gutter() {
         )],
     );
     frame(&mut s, 0.1);
-    assert!(shown(&s, "BuffButton0Duration"), "timers on by default");
+    assert!(
+        shown(&s, "BuffButton0Duration"),
+        "timers on — the harness planted the switch"
+    );
     assert_eq!(text(&s, "BuffButton0Duration"), "19 s");
     s.resolve();
     let shown_gap = s

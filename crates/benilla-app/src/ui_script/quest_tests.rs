@@ -330,6 +330,12 @@ fn greeting_goodbye_button_closes_the_window() {
 /// is a virtual template declared `hidden="true"` (never itself drawn) — an instance that doesn't
 /// explicitly `:Show()` stays invisible even though it isn't declared `hidden="true"` itself. Every
 /// panel's action buttons must show, extracted at real on-window rects (never dropped/hidden).
+///
+/// It runs the **instant-text** arm, which is not the shipped one: `QUEST_FADING_DISABLE` boots at
+/// the reference's `"0"` since 1804 (it was pinned `"1"` by direction from 2026-07-17 until then),
+/// so the flag is planted below. That arm is the one this guard wants — it is the shorter path to
+/// a settled panel, and its one-frame Accept-disabled window is a state the rects have to survive.
+/// The write-on arm is `write_on_still_fades_when_instant_text_is_off`'s subject.
 #[test]
 fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
     let mut s = UiScript::new().unwrap();
@@ -340,6 +346,8 @@ fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
+    // Planted, not shipped: instant text is OFF out of the box (see the doc comment).
+    s.eval::<()>(r#"QUEST_FADING_DISABLE = "1""#).unwrap();
     s.set_quest(Some(QuestState {
         panel: QuestPanel::Detail,
         title: "A Threat Within".into(),
@@ -374,8 +382,8 @@ fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
         v
     };
 
-    // The instant-text arm (QUEST_FADING_DISABLE pinned "1"): OnShow still disables Accept and
-    // zeroes the block for the ref's one-frame window — the reveal edge just starts at 1024.
+    // The instant-text arm (QUEST_FADING_DISABLE planted "1" above): OnShow still disables Accept
+    // and zeroes the block for the ref's one-frame window — the reveal edge just starts at 1024.
     let writing = button_art(&mut s);
     assert_eq!(
         writing.len(),
@@ -435,10 +443,11 @@ fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
     );
 }
 
-/// The ref write-on survives verbatim behind the flag: with QUEST_FADING_DISABLE = "0" (the
-/// ref's own default, our pin is "1"), the description writes on at 40 chars/s scratching the
-/// quill each tick, Accept stays dead mid-write, and the objectives/rewards block FADES in over
-/// QUESTINFO_FADE_IN rather than snapping.
+/// The ref write-on runs verbatim: with QUEST_FADING_DISABLE = "0" — the ref's own default, and
+/// ours too since 1804 (it was pinned "1" from 2026-07-17 until then, which is why this file
+/// still says the value out loud rather than leaning on the shipped one) — the description writes
+/// on at 40 chars/s scratching the quill each tick, Accept stays dead mid-write, and the
+/// objectives/rewards block FADES in over QUESTINFO_FADE_IN rather than snapping.
 #[test]
 fn write_on_still_fades_when_instant_text_is_off() {
     let mut s = UiScript::new().unwrap();

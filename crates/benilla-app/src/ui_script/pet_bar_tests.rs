@@ -660,7 +660,7 @@ fn hovered_pet_bar() -> UiScript {
     // them — so `GetBindingKey("BONUSACTIONBUTTON1")` answers CTRL-1 (its byte-real default) and
     // `GetCVar("UberTooltips")` answers "1" (its byte-read registrar value) rather than nil.
     s.register_bindings(&crate::bindings::registry_commands());
-    s.register_cvars(crate::cvars::REGISTERED.iter().copied());
+    s.register_cvars(crate::cvars::registered_pairs());
     load_pet_bar_with_tooltip(&s);
     declare_token_strings(&s);
     s.set_pet_actions(true, true, true, hunter_slots());

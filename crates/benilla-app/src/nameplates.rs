@@ -37,16 +37,15 @@
 //!   the face's own ascent fraction ([`UiFontAtlas::ascent_ratio`], the `[0x17c]` load_param); the
 //!   sub-pitch ascent/descent extents inside the top/bottom lines remain the gx-boundary
 //!   INFERRED residual (a director A/B pins the exact pixels).
-//! - **Show gate** (`ShouldShowName 0x6070a0`): own unit → `UnitNameOwn` (binary default OFF,
-//!   checked before the rescue; benilla defaults **ON** — the director's directive — plus a
-//!   benilla-side fade gate: the own name hides with the fully-faded first-person avatar, our
-//!   reading of the gate's INFERRED `vtable+0x58` can-show leg); the **current TARGET shows
+//! - **Show gate** (`ShouldShowName 0x6070a0`): own unit → `UnitNameOwn` (binary default OFF —
+//!   ours too since 1804 — checked before the rescue; plus a benilla-side fade gate: the own name
+//!   hides with the fully-faded first-person avatar, our reading of the gate's INFERRED
+//!   `vtable+0x58` can-show leg); the **current TARGET shows
 //!   regardless of cvars** — the rescue global `[0xb4e2d8]` is the *selection*, pinned by the
 //!   combat-flash RE; the earlier "mouseover" reading of the same global is CORRECTED here; a
 //!   **dead creature shows only via the target rescue** (director-verified on the reference; the
-//!   byte leg is a flagged pin); players → `UnitNamePlayer` (ON); NPCs → `UnitNameNPC` (binary
-//!   default OFF; benilla defaults **ON** — the director's directive; the reference install's
-//!   effective default is a flagged open).
+//!   byte leg is a flagged pin); players → `UnitNamePlayer` (default ON); NPCs → `UnitNameNPC`
+//!   and own → `UnitNameOwn` (both default OFF, the binary's own — see [`NameConfig`]).
 //! - **Lines** (`0x608f50`): NPC = name + `<Subname>` (an empty wire subname is no line); player =
 //!   [flag prefixes +] name (guild/PVP-title lines wait on data that doesn't stream yet). The
 //!   prefixes are the a1–a3 vtable-slot decorations of the line stack (`+0x7c/+0x80/+0x84`),
@@ -77,9 +76,15 @@ const SCALE_RATE: f32 = 1.5; // [0x8112ac]
 /// benilla's nameplate config (the client's `0xce8720` cvar mask, reduced to what streams today),
 /// player-settable since 0992: 1.12's own `UnitNamePlayer`/`UnitNameNPC`/`UnitNameOwn` CVars over
 /// these gates (the Options window's Nameplates page, through the 0954 store — the arms live in
-/// [`crate::cvars`]). Defaults: `npc` and `own` are ON by the director's directives ("figure out
-/// text name over NPCs"; "we should show our name", 2026-07-12) — the byte-verified binary
-/// defaults are both "0"; `player` ON is the byte-verified default.
+/// [`crate::cvars`]).
+///
+/// **The defaults are the reference's, byte-verified** (wow-re
+/// `object-layer/scratch/overhead-name.md`, the `0x6c7470` registrar: `UnitNamePlayer` `"1"`,
+/// `UnitNameNPC` `"0"`, `UnitNameOwn` `"0"`). `npc` and `own` shipped ON from 2026-07-12 to
+/// 1804 — a pair of director directives ("figure out text name over NPCs"; "we should show our
+/// name") that were about making the feature *visible while it was being built*, and stayed as
+/// the shipped default long after it worked. Both rows are on the Nameplates page; turning them
+/// back on is a click.
 #[derive(Resource, Clone, Copy)]
 pub(crate) struct NameConfig {
     pub(crate) player: bool,
@@ -91,8 +96,8 @@ impl Default for NameConfig {
     fn default() -> Self {
         Self {
             player: true,
-            npc: true,
-            own: true,
+            npc: false,
+            own: false,
         }
     }
 }

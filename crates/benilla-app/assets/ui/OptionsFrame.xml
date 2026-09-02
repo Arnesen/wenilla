@@ -198,16 +198,16 @@
         -- moved it: it lived in our BuffFrame.xml, and the buff bar is the reference's own file
         -- now, which reads the global and declares nothing.
         --
-        -- **`"1"` is a stated divergence, not the reference's default.** 0255 shipped the
-        -- durations-shown geometry on the director's call, and 1139 turned it into a setting
-        -- without changing what it ships as. This assignment is the ONLY statement of it: the
-        -- saved chunk executes over it at load (1128), and the Interface page's row captures it as
-        -- its Defaults value at OnLoad, which runs first — so Defaults honours the director's
-        -- choice rather than the reference's table.
+        -- **`"0"` — the reference's own, since 1804.** It shipped `"1"` from 0255, which put the
+        -- durations-shown geometry in on the director's call, through 1139, which turned it into a
+        -- setting without re-weighing what it ships as. This assignment is the ONLY statement of
+        -- the default: the saved chunk executes over it at load (1128), and the Interface page's
+        -- row captures it as its Defaults value at OnLoad, which runs first — so Defaults now
+        -- walks back to the reference's table because this line IS the reference's table.
         --
         -- Read at CALL time by `BuffButton_Update` / `BuffButtons_UpdatePositions` /
         -- `BuffFrame_UpdateDuration`, so this file sitting far below the bar does not bind.
-        SHOW_BUFF_DURATIONS = "1"
+        SHOW_BUFF_DURATIONS = "0"
         RegisterForSave("SHOW_BUFF_DURATIONS")
 
         -- The static category tree (era Game tab, Classic tocs), in list order. Keys are the row
@@ -2183,8 +2183,9 @@
                                              base — the reference's own arrangement, and the reason
                                              the readout is raw yards here rather than a percent:
                                              "22" means the wheel stops at 22 yards, which is the
-                                             thing being chosen. Our default is the factor fully
-                                             raised (30 yd), where 1.12 ships 1.0. -->
+                                             thing being chosen. The slider rests at 1.0 (15 yd),
+                                             1.12's own registered default — it sat at the top of
+                                             the range (30 yd) from 1140 until 1804. -->
                                         <!-- Camera Following Style (1493, values re-pinned by
                                              1502): 1.12's own dropdown
                                              (UIOptionsFrameCameraDropDown) in its own order —

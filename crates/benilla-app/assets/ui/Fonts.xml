@@ -78,8 +78,11 @@
         -- engine binding over wow-5875-re RF-0055's byte-verified table, so the rounding and
         -- the second source both go.
         --
-        -- The loop starts at -1 like the reference's: `UIParent.lua` reads one index before the
-        -- array there, and our binding answers Poor for it rather than reproducing that.
+        -- The loop starts at -1 like the reference's, and the -1 row is not a curiosity: it is the
+        -- colour a loot row wears while its item template is uncached, which is the value
+        -- `GetLootSlotInfo` answers there. `GetItemQualityColor`'s clamp is UNSIGNED, so -1 lands
+        -- on Common/white with 7-and-up (decision 1805, correcting 1199's "reads before the
+        -- array").
         ITEM_QUALITY_COLORS = { }
         for i = -1, 6 do
             ITEM_QUALITY_COLORS[i] = { }

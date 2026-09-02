@@ -6,12 +6,23 @@ use benilla_ui::script::{ScriptValue, UiScript, UnitState};
 
 use super::test_ui::load_ui as load_xml;
 
+/// The window loaded **with the feature switched on** — which is not how it ships.
+///
+/// `SHOW_COMBAT_TEXT` boots at the reference's `"0"` since 1804 (it was `"1"` from 0578, when the
+/// director's ask for scrolling combat text was read as the shipped experience). The master is
+/// enforced at the source: `CombatText_UpdateDisplayedMessages` registers no events at all while
+/// it is off, so a fresh VM answers every question below with "nothing happened". These tests are
+/// about what the feature *does* once a player ticks the Combat page's box, so the harness ticks
+/// it for them exactly the way that row does — assign the global, then re-run the family's
+/// applyFunc. The gating itself is [`combat_text_master_toggle_unregisters`]'s subject, not theirs.
 fn load_combat_text() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "CombatText.xml");
+    s.run("SHOW_COMBAT_TEXT = \"1\"; CombatText_UpdateDisplayedMessages()")
+        .unwrap();
     s.resolve();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     s
@@ -245,13 +256,31 @@ fn combat_text_crit_peak_is_uncapped() {
 }
 
 /// The master toggle: SHOW_COMBAT_TEXT = "0" + CombatText_UpdateDisplayedMessages unregisters
-/// everything — a subsequent damage event paints nothing (ref-identical gating; our default is
-/// "1", the ref ships "0" — decision 0578's named divergence).
+/// everything — a subsequent damage event paints nothing (ref-identical gating). Since 1804 that
+/// "0" is also what a fresh client ships (it was 0578's named divergence, `"1"`, until then), so
+/// the test walks the switch **down from the harness's planted ON**: it fires a damage message
+/// first and watches it paint, because "nothing painted" only means the toggle worked if
+/// something would otherwise have.
 #[test]
 fn combat_text_master_toggle_unregisters() {
     let mut s = load_combat_text();
+    s.fire_event(
+        "COMBAT_TEXT_UPDATE",
+        vec![
+            ScriptValue::Str("DAMAGE".into()),
+            ScriptValue::Str("17".into()),
+        ],
+    );
+    let painted: bool = s
+        .eval("return getn(COMBAT_TEXT_TO_ANIMATE) == 1 and CombatText1:IsShown() ~= nil")
+        .unwrap();
+    assert!(painted, "enabled: the message paints ({:?})", s.errors());
+
+    // The switch, then the file's own list clear — the message already in flight belongs to the
+    // planted ON state, and the claim under test is about what arrives AFTER the gate closes.
     s.run("SHOW_COMBAT_TEXT = \"0\"; CombatText_UpdateDisplayedMessages()")
         .unwrap();
+    s.run("CombatText_ClearAnimationList()").unwrap();
     s.fire_event(
         "COMBAT_TEXT_UPDATE",
         vec![
