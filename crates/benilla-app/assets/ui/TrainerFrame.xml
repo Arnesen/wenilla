@@ -797,10 +797,10 @@
                  container over the 11 rows; only its right-hand Slider scroll bar renders. Sized to the
                  11-row span so the bar sits in the window's right gutter. updateFunc is set in
                  BenillaTrainerFrame_OnLoad. -->
-            <Frame name="BenillaTrainerListScrollFrame" inherits="FauxScrollFrameTemplate">
+            <ScrollFrame name="BenillaTrainerListScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="293" y="176"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-100"/></Offset></Anchor></Anchors>
-            </Frame>
+            </ScrollFrame>
 
             <!-- The detail spell icon (ref ClassTrainerSkillIcon): a 37×37 button over a 64×64 UI-EmptySlot
                  ring, at the detail area's top-left. Icon via SetNormalTexture; Hide()n when unselected.

@@ -208,7 +208,28 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, key: Value| {
             let model = lua.app_data_ref::<Model>().expect("model");
             let Some(i) = resolve(&model, &key) else {
-                return Ok(MultiValue::new());
+                // **The two argument forms miss differently** (decision 1845), and ours answered
+                // zero values for both.
+                //
+                // A NUMERIC index out of range **raises**, and the bounds check is *unsigned* — so
+                // index `0` raises too, not just a negative or an over-count. That is not an arity
+                // divergence at all, which is why a gate comparing counts alone would have pushed
+                // this toward a placeholder branch that does not exist for numbers.
+                if matches!(key, Value::Integer(_) | Value::Number(_)) {
+                    return Err(mlua::Error::runtime("GetAddOnInfo: index out of range"));
+                }
+                // The STRING form is not existence-checked at all: it answers seven placeholders,
+                // two of which are not nil. Slot 4 is `enabled` in-game (the glue table's fourth is
+                // `url`, and its eighth is an appended `newVersion` — nothing shifts).
+                return Ok(MultiValue::from_vec(vec![
+                    lua_str(lua, "NoSuchAddon")?,
+                    Value::Nil,
+                    Value::Nil,
+                    Value::Nil,
+                    Value::Nil,
+                    lua_str(lua, "MISSING")?,
+                    lua_str(lua, "INSECURE")?,
+                ]));
             };
             // The one arbiter (decision 1292): loaded short-circuit, then `AddOn_CanLoad` in the
             // in-game flavour — so NOT_DEMAND_LOADED and INTERFACE_VERSION are reachable here,

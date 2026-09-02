@@ -21,7 +21,8 @@ fn setup() -> UiScript {
     for file in [
         "Fonts.xml",
         "BasicControls.xml",
-        "UIPanelTemplates.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "ScrollTemplates.xml",
         "GameTooltip.xml",
         // Before UiPanels.xml: the shared StaticPopup carries a `SmallMoneyFrameTemplate` coin
@@ -77,6 +78,7 @@ fn open_ticket_args(
 /// "Unknown" instead of a heading the player never chose.
 #[test]
 fn one_click_from_home_files_an_uncategorised_ticket() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("ToggleHelpFrame()").unwrap();
     let _ = s.take_gm_ticket_intents(); // the OnShow GetGMStatus
@@ -114,6 +116,7 @@ fn one_click_from_home_files_an_uncategorised_ticket() {
 /// existence on Home *is* the change.
 #[test]
 fn auto_unstuck_is_a_button_on_home() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("ToggleHelpFrame()").unwrap();
     s.run("BenillaHelpFrameHomeUnstick:Click()").unwrap();
@@ -133,6 +136,7 @@ fn auto_unstuck_is_a_button_on_home() {
 /// fit that never ran still leaves every other test green.
 #[test]
 fn the_two_home_buttons_sit_side_by_side_without_overlapping() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("ToggleHelpFrame()").unwrap();
     s.resolve();
@@ -173,6 +177,7 @@ fn the_two_home_buttons_sit_side_by_side_without_overlapping() {
 /// looks fine until you try to file a second ticket.
 #[test]
 fn an_open_ticket_turns_the_form_into_an_editor_and_a_zero_turns_it_back() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("ShowUIPanel(HelpFrame) HelpFrame_ShowFrame(\"OpenTicket\")")
         .unwrap();
@@ -224,6 +229,7 @@ fn an_open_ticket_turns_the_form_into_an_editor_and_a_zero_turns_it_back() {
 /// moment the player fixes a typo. Nothing on screen would ever show that.
 #[test]
 fn a_create_files_under_zero_and_an_edit_gives_the_server_its_category_back() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("ShowUIPanel(HelpFrame) HelpFrame_ShowFrame(\"OpenTicket\")")
         .unwrap();
@@ -263,6 +269,7 @@ fn a_create_files_under_zero_and_an_edit_gives_the_server_its_category_back() {
 /// The `1` leg must put it back — a one-way gate would lock the player out for the session.
 #[test]
 fn a_downed_queue_refuses_the_editor_and_says_so_and_comes_back_up() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.fire_event("UPDATE_GM_STATUS", vec![ScriptValue::Int(0)]);
     s.run("ShowUIPanel(HelpFrame) HelpFrame_ShowFrame(\"OpenTicket\")")
@@ -291,6 +298,7 @@ fn a_downed_queue_refuses_the_editor_and_says_so_and_comes_back_up() {
 /// on screen that says a ticket exists at all once the window is closed.
 #[test]
 fn the_ticket_toast_follows_the_ticket() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.fire_event(
         "UPDATE_TICKET",
@@ -314,6 +322,7 @@ fn the_ticket_toast_follows_the_ticket() {
 /// answers instead of diffing them, so it is worth a test on this side too.
 #[test]
 fn the_toast_repolls_the_server_only_after_the_full_interval() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.fire_event(
         "UPDATE_TICKET",
@@ -340,6 +349,7 @@ fn the_toast_repolls_the_server_only_after_the_full_interval() {
 /// nothing would look identical to one that worked, right up until the ticket reappeared.
 #[test]
 fn abandoning_a_ticket_confirms_first_and_only_yes_sends_it() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("StaticPopup_Show(\"HELP_TICKET_ABANDON_CONFIRM\")")
         .unwrap();
@@ -357,6 +367,7 @@ fn abandoning_a_ticket_confirms_first_and_only_yes_sends_it() {
 /// life of the session.
 #[test]
 fn toggling_the_window_opens_it_and_asks_for_the_queue_status() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("ToggleHelpFrame()").unwrap();
     assert!(s.eval::<bool>("return HelpFrame:IsVisible()").unwrap());
@@ -388,6 +399,7 @@ fn toggling_the_window_opens_it_and_asks_for_the_queue_status() {
 /// a different key.
 #[test]
 fn the_home_page_advertises_no_dead_retail_links() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = setup();
     s.run("ShowUIPanel(HelpFrame) HelpFrame_ShowFrame(\"Home\")")
         .unwrap();
@@ -438,6 +450,7 @@ fn the_home_page_advertises_no_dead_retail_links() {
 /// compares stops guarding and never says so.
 #[test]
 fn the_windows_geometry_matches_the_reference_file() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let Some(reference) = super::framexml_diff::reference("HelpFrame.xml") else {
         return; // no install — this test is a no-op rather than a failure
     };

@@ -3433,7 +3433,7 @@
                                              seating). The wheel handler is NOT here: a spin over a row
                                              bubbles up the PARENT chain (pointer.rs), and this frame is
                                              the rows' sibling — it lives on the body below. -->
-                                        <Frame name="$parentScrollFrame" inherits="FauxScrollFrameTemplate">
+                                        <ScrollFrame name="$parentScrollFrame" inherits="FauxScrollFrameTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-47"/></Offset></Anchor>
                                                 <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-32" y="28"/></Offset></Anchor>
@@ -3444,7 +3444,7 @@
                                                     this.updateFunc = KeyBindingsPage_Update
                                                 </OnLoad>
                                             </Scripts>
-                                        </Frame>
+                                        </ScrollFrame>
                                     </Frames>
                                     <!-- The page's wheel: rows and the bar all bubble here (the
                                          QuestLog/Trainer lesson — a handler on the sibling catcher

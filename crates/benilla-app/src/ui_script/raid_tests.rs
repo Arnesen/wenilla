@@ -32,7 +32,8 @@ fn setup() -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "UnitPopup.xml");
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "FriendsFrame.xml");
     load_xml(&s, "RaidFrame.xml");
     s
@@ -140,6 +141,7 @@ fn open_raid_tab(s: &mut UiScript) {
 /// so in its header, and the tab strip is the one place a missing pane is visible without a raid.
 #[test]
 fn the_fourth_tab_opens_the_raid_pane() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     assert_eq!(
         s.eval::<i64>("return FriendsFrame.numTabs").unwrap(),
@@ -168,6 +170,7 @@ fn the_fourth_tab_opens_the_raid_pane() {
 /// Closing the window closes the Raid Info flyout with it — the ref's fourth satellite.
 #[test]
 fn hiding_the_window_closes_the_raid_info_panel() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     open_raid_tab(&mut s);
     s.run("RaidInfoFrame:Show()").unwrap();
@@ -187,6 +190,7 @@ fn hiding_the_window_closes_the_raid_info_panel() {
 /// leader of an actual party — the three states, in order.
 #[test]
 fn convert_to_raid_is_live_only_for_a_party_leader() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     open_raid_tab(&mut s);
     assert!(visible(&s, "RaidFrameRaidDescription"), "solo: the blurb");
@@ -256,6 +260,7 @@ fn convert_to_raid_is_live_only_for_a_party_leader() {
 /// menu action downstream addresses a row by the index this seating implies.
 #[test]
 fn the_grid_seats_each_row_in_its_own_subgroups_next_free_slot() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     open_raid_tab(&mut s);
     push_raid(&mut s, twelve());
@@ -323,6 +328,7 @@ fn the_grid_seats_each_row_in_its_own_subgroups_next_free_slot() {
 /// the names still read, the clicks still fire.
 #[test]
 fn a_rows_colour_is_offline_then_dead_then_class() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     open_raid_tab(&mut s);
     push_raid(
@@ -395,6 +401,7 @@ fn a_rows_colour_is_offline_then_dead_then_class() {
 /// field: a 40-row rebuild per point of damage taken is what the other choice costs.
 #[test]
 fn a_units_health_and_level_repaint_only_that_row() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     open_raid_tab(&mut s);
     let mut raid = twelve();
@@ -445,6 +452,7 @@ fn a_units_health_and_level_repaint_only_that_row() {
 /// outright out of one — they share their seat with Convert To Raid.
 #[test]
 fn ready_check_is_the_leaders_and_add_member_is_everyones() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     open_raid_tab(&mut s);
     push_raid(&mut s, twelve());
@@ -494,6 +502,7 @@ fn ready_check_is_the_leaders_and_add_member_is_everyones() {
 /// needs a live cursor this harness has no way to place.
 #[test]
 fn dragging_a_row_moves_swaps_or_springs_back() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     open_raid_tab(&mut s);
     push_raid(&mut s, twelve());
@@ -538,6 +547,7 @@ fn dragging_a_row_moves_swaps_or_springs_back() {
 /// never stops.
 #[test]
 fn only_the_leader_may_drag() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     open_raid_tab(&mut s);
     let raid = twelve();
@@ -569,6 +579,7 @@ fn only_the_leader_may_drag() {
 /// Left-clicking a row targets that row's `raidN` token — the same token the tooltip reads.
 #[test]
 fn left_clicking_a_row_targets_its_raid_token() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     open_raid_tab(&mut s);
     push_raid(&mut s, twelve());
@@ -586,6 +597,7 @@ fn left_clicking_a_row_targets_its_raid_token() {
 /// opened on the wrong index would offer Promote on somebody who is already an assistant.
 #[test]
 fn the_row_menu_offers_the_rank_verbs_by_rank() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     open_raid_tab(&mut s);
     push_raid(&mut s, twelve());
@@ -633,6 +645,7 @@ fn the_row_menu_offers_the_rank_verbs_by_rank() {
 /// the kick by the row index.
 #[test]
 fn the_menu_verbs_queue_the_right_requests() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     open_raid_tab(&mut s);
     push_raid(&mut s, twelve());
@@ -673,6 +686,7 @@ fn the_menu_verbs_queue_the_right_requests() {
 /// the server has answered with something.
 #[test]
 fn the_raid_info_panel_lists_the_saved_lockouts() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     open_raid_tab(&mut s);
     // The first UPDATE_INSTANCE_INFO only arms the ref's latch (`RaidFrame.hasRaidInfo`).
@@ -743,6 +757,7 @@ fn the_raid_info_panel_lists_the_saved_lockouts() {
 /// left live over an empty panel is exactly what the director saw.
 #[test]
 fn a_player_with_no_lockouts_loses_the_raid_info_button_on_the_second_answer() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     open_raid_tab(&mut s);
 
@@ -801,6 +816,7 @@ fn a_player_with_no_lockouts_loses_the_raid_info_button_on_the_second_answer() {
 /// the bar is shown.
 #[test]
 fn the_scroll_bar_is_seated_on_the_trough_the_panel_draws_behind_it() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     open_raid_tab(&mut s);
     s.fire_event("UPDATE_INSTANCE_INFO", Vec::new());
@@ -854,6 +870,7 @@ fn the_scroll_bar_is_seated_on_the_trough_the_panel_draws_behind_it() {
 /// including the No button's argument-less call, which is the reference's own spelling.
 #[test]
 fn the_ready_check_popup_opens_and_answers() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     open_raid_tab(&mut s);
     push_raid(&mut s, twelve());
@@ -905,6 +922,7 @@ fn the_ready_check_popup_opens_and_answers() {
 /// the window's geometry guarded by nothing.
 #[test]
 fn the_geometry_matches_both_reference_files() {
+    let _data = benilla_formats::wow_data_or_skip!();
     // The FrameXML half: the pane, its two buttons, the info flyout and the lockout row template.
     if let Some(reference) = super::framexml_diff::reference("RaidFrame.xml") {
         super::framexml_diff::assert_geometry_matches(
@@ -952,6 +970,7 @@ fn the_geometry_matches_both_reference_files() {
 /// the row goes home, the pane forgets it, and the next row still drags.
 #[test]
 fn a_drag_carried_off_the_window_edge_ends_instead_of_gluing_the_row_to_the_cursor() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     open_raid_tab(&mut s);
     push_raid(&mut s, twelve());
@@ -1032,6 +1051,7 @@ fn a_drag_carried_off_the_window_edge_ends_instead_of_gluing_the_row_to_the_curs
 /// mattered — never drags a SECOND row. This one does all four.
 #[test]
 fn one_drag_does_not_cost_the_next_one() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     open_raid_tab(&mut s);
     let mut raid = vec![row("Me", 2, 1, "Warrior", true, false)];

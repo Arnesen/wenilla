@@ -903,7 +903,7 @@
                  bracketing the 4-row grid. 0983 sized it to the grid instead (252x152 at TOPLEFT
                  24,-85) and the bar came out at x 282..298: hanging half off the plate's right
                  edge, over the world. -->
-            <Frame name="BenillaMacroPopupScrollFrame" inherits="FauxScrollFrameTemplate">
+            <ScrollFrame name="BenillaMacroPopupScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="296" y="195"/></Size>
                 <Anchors>
                     <Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-39" y="-67"/></Offset></Anchor>
@@ -916,7 +916,7 @@
                         self.updateFunc = BenillaMacroPopupFrame_Update
                     </OnLoad>
                 </Scripts>
-            </Frame>
+            </ScrollFrame>
 
             <CheckButton name="BenillaMacroPopupButton1" inherits="BenillaMacroPopupButtonTemplate" id="1">
                 <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="24" y="-85"/></Offset></Anchor></Anchors>

@@ -24,7 +24,8 @@ fn picker() -> UiScript {
         "GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
-        "UIPanelTemplates.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "Interface\\FrameXML\\ColorPickerFrame.xml",
     ] {
         load_xml(&s, file);

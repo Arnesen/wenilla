@@ -456,8 +456,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetLootMethod",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
+            // **`freeforall`, not `group`.** The three cells this reads sit past `.data`'s raw end
+            // in the zero-filled tail, so a client that has never been in a group answers the
+            // zeroth method — which is `freeforall`. Decision 1840.
             let method = if model.party.loot_method.is_empty() {
-                "group"
+                "freeforall"
             } else {
                 model.party.loot_method.as_str()
             };
@@ -846,7 +849,10 @@ mod tests {
         let (method, master) = s
             .eval::<(String, Option<i64>)>("return GetLootMethod()")
             .unwrap();
-        assert_eq!(method, "group");
+        // **`freeforall` is the UNGROUPED answer**, not `group`: the cells the reference reads
+        // sit in `.data`'s zero-filled tail, so a client that has never been in a group reports
+        // the zeroth method (decision 1840). The `group` above is a real party's, and stays.
+        assert_eq!(method, "freeforall");
         assert_eq!(master, None);
     }
 

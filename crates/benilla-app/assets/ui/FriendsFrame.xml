@@ -2206,11 +2206,22 @@
                         <Anchors><Anchor point="TOP" relativeTo="FriendsFrameFriendButton9" relativePoint="BOTTOM"/></Anchors>
                     </Button>
 
-                    <Frame name="FriendsFrameFriendsScrollFrame" inherits="FauxScrollFrameTemplate">
+                    <ScrollFrame name="FriendsFrameFriendsScrollFrame" inherits="FauxScrollFrameTemplate">
                         <Size><AbsDimension x="296" y="304"/></Size>
                         <Anchors><Anchor point="TOPRIGHT" relativeTo="FriendsFrame"><Offset><AbsDimension x="-67" y="-75"/></Offset></Anchor></Anchors>
-                        <Scripts><OnLoad>self.updateFunc = FriendsList_Update</OnLoad></Scripts>
-                    </Frame>
+                        <Scripts><OnLoad>
+                            <!-- `ScrollFrame_OnLoad()` FIRST: an instance OnLoad
+                                 REPLACES the template's, and the template's is what
+                                 seats `this.offset = 0`. Without it
+                                 `FauxScrollFrame_GetOffset` answers nil and the list
+                                 never paints. This is the reference's own idiom —
+                                 `SkillFrame.xml:556` and
+                                 `ClassTrainerFrameTemplates.xml:111` both open the
+                                 same way. Decision 1846. -->
+                            ScrollFrame_OnLoad()
+                            this.updateFunc = FriendsList_Update
+                        </OnLoad></Scripts>
+                    </ScrollFrame>
                 </Frames>
                 <Scripts>
                     <OnMouseWheel>BenillaFauxScrollFrame_OnMouseWheel(FriendsFrameFriendsScrollFrame, arg1)</OnMouseWheel>
@@ -2315,13 +2326,24 @@
                         <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton19" relativePoint="BOTTOM"/></Anchors>
                     </Button>
 
-                    <Frame name="FriendsFrameIgnoreScrollFrame" inherits="FauxScrollFrameTemplate">
+                    <ScrollFrame name="FriendsFrameIgnoreScrollFrame" inherits="FauxScrollFrameTemplate">
                         <!-- 332 tall, not the friends list's 304: 20 short rows reach further
                              down than 10 tall ones (ref l.1146-1148). -->
                         <Size><AbsDimension x="296" y="332"/></Size>
                         <Anchors><Anchor point="TOPRIGHT" relativeTo="FriendsFrame"><Offset><AbsDimension x="-67" y="-75"/></Offset></Anchor></Anchors>
-                        <Scripts><OnLoad>self.updateFunc = IgnoreList_Update</OnLoad></Scripts>
-                    </Frame>
+                        <Scripts><OnLoad>
+                            <!-- `ScrollFrame_OnLoad()` FIRST: an instance OnLoad
+                                 REPLACES the template's, and the template's is what
+                                 seats `this.offset = 0`. Without it
+                                 `FauxScrollFrame_GetOffset` answers nil and the list
+                                 never paints. This is the reference's own idiom —
+                                 `SkillFrame.xml:556` and
+                                 `ClassTrainerFrameTemplates.xml:111` both open the
+                                 same way. Decision 1846. -->
+                            ScrollFrame_OnLoad()
+                            this.updateFunc = IgnoreList_Update
+                        </OnLoad></Scripts>
+                    </ScrollFrame>
                 </Frames>
                 <Scripts>
                     <OnMouseWheel>BenillaFauxScrollFrame_OnMouseWheel(FriendsFrameIgnoreScrollFrame, arg1)</OnMouseWheel>
@@ -2454,11 +2476,22 @@
                         <FontString inherits="ChatFontNormal"/>
                     </EditBox>
 
-                    <Frame name="WhoListScrollFrame" inherits="FauxScrollFrameTemplate">
+                    <ScrollFrame name="WhoListScrollFrame" inherits="FauxScrollFrameTemplate">
                         <Size><AbsDimension x="296" y="287"/></Size>
                         <Anchors><Anchor point="TOPRIGHT" relativeTo="FriendsFrame" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-67" y="-96"/></Offset></Anchor></Anchors>
-                        <Scripts><OnLoad>self.updateFunc = WhoList_Update</OnLoad></Scripts>
-                    </Frame>
+                        <Scripts><OnLoad>
+                            <!-- `ScrollFrame_OnLoad()` FIRST: an instance OnLoad
+                                 REPLACES the template's, and the template's is what
+                                 seats `this.offset = 0`. Without it
+                                 `FauxScrollFrame_GetOffset` answers nil and the list
+                                 never paints. This is the reference's own idiom —
+                                 `SkillFrame.xml:556` and
+                                 `ClassTrainerFrameTemplates.xml:111` both open the
+                                 same way. Decision 1846. -->
+                            ScrollFrame_OnLoad()
+                            this.updateFunc = WhoList_Update
+                        </OnLoad></Scripts>
+                    </ScrollFrame>
                 </Frames>
                 <Scripts>
                     <!-- SetWhoToUI decides where the NEXT answer goes: this frame, or the chat
@@ -2713,11 +2746,22 @@
                          why the ref's two loose UI-Character-ScrollBar trough textures are omitted:
                          our kit draws a complete bar and they would double it. The other three
                          lists in this file are built exactly the same way. -->
-                    <Frame name="GuildListScrollFrame" inherits="FauxScrollFrameTemplate">
+                    <ScrollFrame name="GuildListScrollFrame" inherits="FauxScrollFrameTemplate">
                         <Size><AbsDimension x="296" y="237"/></Size>
                         <Anchors><Anchor point="TOPRIGHT" relativeTo="GuildFrame" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-67" y="-98"/></Offset></Anchor></Anchors>
-                        <Scripts><OnLoad>self.updateFunc = GuildStatus_Update</OnLoad></Scripts>
-                    </Frame>
+                        <Scripts><OnLoad>
+                            <!-- `ScrollFrame_OnLoad()` FIRST: an instance OnLoad
+                                 REPLACES the template's, and the template's is what
+                                 seats `this.offset = 0`. Without it
+                                 `FauxScrollFrame_GetOffset` answers nil and the list
+                                 never paints. This is the reference's own idiom —
+                                 `SkillFrame.xml:556` and
+                                 `ClassTrainerFrameTemplates.xml:111` both open the
+                                 same way. Decision 1846. -->
+                            ScrollFrame_OnLoad()
+                            this.updateFunc = GuildStatus_Update
+                        </OnLoad></Scripts>
+                    </ScrollFrame>
 
                     <!-- The page button that flips the two views. Its LEFT anchor is re-set by
                          `GuildStatus_Update` to 284 or 307 depending on whether the scroll bar is

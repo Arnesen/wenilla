@@ -1574,7 +1574,7 @@
                  a `questLogOffset` upvalue this file kept "because no real ScrollFrame/
                  FauxScrollFrame engine exists yet" — long false, and the reason this window
                  published no QuestLogListScrollFrame for addons to find. -->
-            <Frame name="QuestLogListScrollFrame" inherits="FauxScrollFrameTemplate">
+            <ScrollFrame name="QuestLogListScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="300" y="93"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="19" y="-75"/></Offset></Anchor></Anchors>
                 <Scripts>
@@ -1582,7 +1582,7 @@
                         FauxScrollFrame_OnVerticalScroll(QUESTLOG_QUEST_HEIGHT, BenillaQuestLogList_Update)
                     </OnVerticalScroll>
                 </Scripts>
-            </Frame>
+            </ScrollFrame>
 
             <Button name="QuestLogTitle1" inherits="QuestLogTitleButtonTemplate" id="1">
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="19" y="-75"/></Offset></Anchor></Anchors>

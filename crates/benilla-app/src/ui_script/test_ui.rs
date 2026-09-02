@@ -223,7 +223,8 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     "UiPanels.xml", // CharacterFrameTabButtonTemplate, UIPanelWindows, Show/HideUIPanel
     "GameTooltip.xml",
     "Cooldown.xml", // CooldownFrameTemplate + CooldownFrame_SetTimer, per equipment slot
-    "UIPanelTemplates.xml",
+    r"Interface\FrameXML\UIPanelTemplates.lua",
+    r"Interface\FrameXML\UIPanelTemplates.xml",
     // The unit frames' four right-click dropdowns call `UIDropDownMenu_Initialize` at LOAD, so the
     // kit and the menu table it initialises from both precede them — the manifest's own order
     // (175 → 189 → 193 → 263).
@@ -252,7 +253,10 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     // (`CharacterFrame.lua:25-32`), unguarded. A missing page is `attempt to index a nil value` on
     // the very first `ToggleCharacter` — load-clean, then dead on the first click. Their own
     // template dependencies come with them.
-    "ScrollTemplates.xml",       // SkillFrame's faux list + trough
+    "ScrollTemplates.xml", // SkillFrame's faux list + trough
+    // The four options templates off the chain, then ours for the one it does not carry
+    // (`UIOptionsCheckButtonTemplate` — decision 1841).
+    "Interface\\FrameXML\\OptionsFrameTemplates.xml",
     "OptionsFrameTemplates.xml", // ReputationFrame's detail check boxes
     "Interface\\FrameXML\\CharacterFrame.xml",
     "Interface\\FrameXML\\PaperDollFrame.xml",
@@ -294,7 +298,8 @@ pub(super) const BAG_UI: &[&str] = &[
     // `UpdateMicroButtons` — the KEYRING's own OnShow/OnHide calls it (ContainerFrame.lua l.117,
     // l.137), because in the reference the keyring's existence moves the micro-button row.
     "MicroMenu.xml",
-    "UIPanelTemplates.xml",
+    r"Interface\FrameXML\UIPanelTemplates.lua",
+    r"Interface\FrameXML\UIPanelTemplates.xml",
     "Interface\\FrameXML\\ContainerFrame.xml",
     // `PaperDollItemSlotButtonTemplate` and the `PaperDollItemSlotButton_*` family behind it,
     // which every bag button inherits and runs — resolved at load, so this has to precede the bar

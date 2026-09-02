@@ -74,7 +74,8 @@ fn setup() -> UiScript {
                                // The loot window's slots inherit it — the same dependency the inspect window needed (1832).
     load_xml(&s, r"Interface\FrameXML\ItemButtonTemplate.xml");
     // `UIPanelCloseButton`, which the loot window's four close buttons inherit.
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml"); // PASS/NEED/GREED + item hovers

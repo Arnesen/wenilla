@@ -410,10 +410,18 @@ pub struct ModelState {
     /// no lighting model, and inventing a typed one would be asserting a scene semantics we have
     /// not verified.
     pub light: Option<Vec<f32>>,
-    /// `SetFogColor(r, g, b)` — `None` until set. The client's fog surface is seven verbs, not two:
-    /// this pair plus `SetFogNear`/`GetFogNear`/`SetFogFar`/`GetFogFar`/`ClearFog`, which the
-    /// struct doc names as unbuilt.
-    pub fog_color: Option<(f32, f32, f32)>,
+    /// `SetFogColor(r, g, b, a)` as the reference stores it: **one packed `0xAARRGGBB` dword**,
+    /// which is why its getter is four values wide and why a Set→Get round trip is **lossy** —
+    /// eight bits per channel (decision 1845).
+    ///
+    /// `0xffff_ffff` is the ctor's own terminal write, so the never-set answer is `1, 1, 1, 1` and
+    /// not four zeros. It used to be `Option<(f32, f32, f32)>` here: three components, no alpha,
+    /// and `None` for unset — every one of those three wrong.
+    ///
+    /// The client's fog surface is seven verbs, not two: this pair plus
+    /// `SetFogNear`/`GetFogNear`/`SetFogFar`/`GetFogFar`/`ClearFog`, which the struct doc names as
+    /// unbuilt.
+    pub fog_color: u32,
 }
 
 /// A fresh `Model` pane: no content, sequence 0, unrotated, unit scale, camera 0, at the origin.
@@ -433,7 +441,7 @@ impl Default for ModelState {
             camera: 0,
             position: (0.0, 0.0, 0.0),
             light: None,
-            fog_color: None,
+            fog_color: 0xffff_ffff,
         }
     }
 }

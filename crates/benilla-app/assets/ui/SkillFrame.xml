@@ -712,10 +712,10 @@
                  container over the 12 rows; only its right-hand Slider scroll bar renders. Sized to the
                  12-row span (SKILLS_TO_DISPLAY × 18px pitch), TrainerFrame.xml's own
                  same-TOPLEFT-as-row1 convention. updateFunc set in SkillFrame_OnLoad. -->
-            <Frame name="SkillListScrollFrame" inherits="FauxScrollFrameTemplate">
+            <ScrollFrame name="SkillListScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="296" y="216"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-79"/></Offset></Anchor></Anchors>
-            </Frame>
+            </ScrollFrame>
 
             <!-- ═══ THE DETAIL PANE ═══ ref SkillFrame.xml l.513-747, transcribed as the ref
                  declares it (header: the FLAT-layout claim this file used to carry is retracted,

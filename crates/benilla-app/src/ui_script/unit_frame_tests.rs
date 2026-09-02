@@ -1913,9 +1913,12 @@ fn the_raid_mark_helper_maps_each_index_to_its_cell() {
     for (i, l, r, t, b) in cells {
         s.run(&format!("SetRaidTargetIconTexture(RTMark, {i})"))
             .unwrap();
-        let got: (f64, f64, f64, f64) = s.eval("return RTMark:GetTexCoord()").unwrap();
+        // `GetTexCoord` answers EIGHT (UL, LL, UR, LR as x,y pairs) since 1840; the old
+        // `(l, r, t, b)` rect is `ULx, URx, ULy, LLy` — positions 1, 5, 2, 4.
+        let (gl, gt, _, gb, gr, ..): (f64, f64, f64, f64, f64, f64, f64, f64) =
+            s.eval("return RTMark:GetTexCoord()").unwrap();
         assert_eq!(
-            got,
+            (gl, gr, gt, gb),
             (l, r, t, b),
             "mark {i} must sample the cell at ({l}, {r}, {t}, {b})"
         );

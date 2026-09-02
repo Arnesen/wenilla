@@ -36,6 +36,7 @@ fn toast_lines(s: &mut UiScript) -> Vec<(String, [f32; 4], f32)> {
 
 #[test]
 fn info_and_error_messages_stack_hold_and_expire() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -105,6 +106,7 @@ fn info_and_error_messages_stack_hold_and_expire() {
 /// defect as the party frame's in decision 0597, one stratum up.
 #[test]
 fn an_error_toast_draws_over_an_open_panel_window() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -118,7 +120,8 @@ fn an_error_toast_draws_over_an_open_panel_window() {
                                                             // pane's UIPanelScrollFrameTemplate). A MISSING template is a loader *warning*, so an
                                                             // under-loaded list passes and then dies on the first FauxScrollFrame_Update.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     // A left-slot panel open, and the toast raised after it — the order that must not decide.

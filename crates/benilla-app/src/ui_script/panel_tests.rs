@@ -40,6 +40,7 @@ fn frame_rect(quads: &[ExtractedQuad], w: f32, h: f32) -> benilla_ui::layout::Re
 /// gets its own dedicated test below (`shipped_gossip_frame_renders_quest_rows_above_options`).
 #[test]
 fn shipped_gossip_frame_drives_end_to_end() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // A measurer: `GossipResize` reads `GetTextHeight()` on the line after `SetText`, so a bare
@@ -53,7 +54,8 @@ fn shipped_gossip_frame_drives_end_to_end() {
                                          // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
                                          // optional: a missing template is a loader *warning*, not an error, so an under-loaded
                                          // list passes load_xml and then loses the scrollbar silently.
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     // The window + its scroll frame (bar + child) + the 32-row shared pool (quest rows and option
     // rows both draw from it, decision 0088 §3 — the reference's own NUMGOSSIPBUTTONS) + the close
     // button + the GOODBYE button. The greeting and the NPC-name banner are FontString layers (the
@@ -243,6 +245,7 @@ fn shipped_gossip_frame_drives_end_to_end() {
 /// right 1-based position on `take_gossip_quest_selects` (`benilla-ui` `script/gossip.rs`).
 #[test]
 fn shipped_gossip_frame_renders_quest_rows_above_options() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
@@ -251,7 +254,8 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
                                          // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
                                          // optional: a missing template is a loader *warning*, not an error, so an under-loaded
                                          // list passes load_xml and then loses the scrollbar silently.
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
 
     s.set_gossip(Some(GossipMenu {
@@ -388,6 +392,7 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
 /// an edge — not any glyph metric.
 #[test]
 fn shipped_gossip_rows_grow_to_their_wrapped_labels() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // **A measurer, because the reference measures inside the tick it sets the text.**
@@ -407,7 +412,8 @@ fn shipped_gossip_rows_grow_to_their_wrapped_labels() {
                                          // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
                                          // optional: a missing template is a loader *warning*, not an error, so an under-loaded
                                          // list passes load_xml and then loses the scrollbar silently.
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
 
     // Three long options — the shape of a real judgement/roleplay menu, every one of them wrapping
@@ -510,6 +516,7 @@ fn shipped_gossip_rows_grow_to_their_wrapped_labels() {
 /// OnHide. Nothing queues at load (the frame is authored hidden="true").
 #[test]
 fn gossip_show_hide_plays_open_and_close_kits() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
@@ -518,7 +525,8 @@ fn gossip_show_hide_plays_open_and_close_kits() {
                                          // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
                                          // optional: a missing template is a loader *warning*, not an error, so an under-loaded
                                          // list passes load_xml and then loses the scrollbar silently.
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
 
     // Hidden at load: no open sound (never transitions on startup).
@@ -551,6 +559,7 @@ fn gossip_show_hide_plays_open_and_close_kits() {
 
 #[test]
 fn shipped_panel_slot_replaces_gossip_with_merchant() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
@@ -559,7 +568,8 @@ fn shipped_panel_slot_replaces_gossip_with_merchant() {
                                          // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
                                          // optional: a missing template is a loader *warning*, not an error, so an under-loaded
                                          // list passes load_xml and then loses the scrollbar silently.
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
     load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
                                      // The vendor window is the reference's own since 1751, and its `MerchantFrame_UpdateMerchantInfo`
@@ -643,6 +653,7 @@ fn shipped_panel_slot_replaces_gossip_with_merchant() {
 /// director's gossip↔vendor lockup. This drives the exact displacement and asserts the intents.
 #[test]
 fn displacing_an_npc_window_ends_the_displaced_session() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
@@ -651,7 +662,8 @@ fn displacing_an_npc_window_ends_the_displaced_session() {
                                          // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
                                          // optional: a missing template is a loader *warning*, not an error, so an under-loaded
                                          // list passes load_xml and then loses the scrollbar silently.
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
     load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
                                      // The vendor window is the reference's own since 1751, and its `MerchantFrame_UpdateMerchantInfo`
@@ -699,6 +711,7 @@ fn displacing_an_npc_window_ends_the_displaced_session() {
 /// enough to prove the slot math without a real loot window.
 #[test]
 fn shipped_panel_slot_pushable_promotes_to_center() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
@@ -792,6 +805,7 @@ fn shipped_panel_slot_pushable_promotes_to_center() {
 /// center-parked "left-area" occupant back — UIParent.lua l.777-782).
 #[test]
 fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
+    let _data = benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::BankState;
 
     // The bank window is the reference's own file off the player's chain (1751).
@@ -813,7 +827,8 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
                                              // list passes load_xml and then loses the scrollbar silently.
                                              // Before BankFrame, not after: its close and purchase buttons inherit UIPanelCloseButton
                                              // and UIPanelButtonTemplate, and an `inherits=` is resolved at LOAD.
-        load_xml(&s, "UIPanelTemplates.xml");
+        load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+        load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
         load_xml(&s, "Interface\\FrameXML\\BankFrame.xml");
         load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
 
@@ -877,6 +892,7 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
 /// scrolling moves the content up under that clip. Same deterministic measure fake as the row test.
 #[test]
 fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // A measurer: `GossipResize` reads `GetTextHeight()` on the line after `SetText`, so a bare
@@ -887,7 +903,8 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml"); // UIPanelScrollFrameTemplate — see the note above
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml"); // UIPanelScrollFrameTemplate — see the note above
     load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
 
     // Eight wrapping options: ~4 lines each, far past the 334 px scroll frame.
@@ -1036,12 +1053,14 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
 /// it is where a client window would be.
 #[test]
 fn an_addons_own_frame_registered_in_uipanelwindows_takes_the_left_slot() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml"); // UIPanelScrollFrameTemplate — see the note above
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml"); // UIPanelScrollFrameTemplate — see the note above
     load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
 
     // The addon's three lines, in the order an addon writes them.
@@ -1111,6 +1130,7 @@ fn an_addons_own_frame_registered_in_uipanelwindows_takes_the_left_slot() {
 /// either now fails a named test instead of waiting for a player with a Verdant Note.
 #[test]
 fn the_1507_registry_rows_match_the_reference_bytes() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
@@ -1146,6 +1166,7 @@ fn the_1507_registry_rows_match_the_reference_bytes() {
 /// not take a slot; a `whileDead = 1` row (the quest log, l.25) opens exactly as alive.
 #[test]
 fn a_dead_player_opens_only_whiledead_windows() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
@@ -1211,6 +1232,7 @@ fn a_dead_player_opens_only_whiledead_windows() {
 /// dependency chain.
 #[test]
 fn a_frame_arriving_at_center_puts_the_child_windows_away() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");

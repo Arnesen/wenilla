@@ -403,20 +403,44 @@ Interface\FrameXML\ZoneText.xml
 # API (Update/GetOffset/SetOffset/OnVerticalScroll + ScrollFrame_OnLoad) —
 # before its first customer (the trainer list) below.
 ScrollTemplates.xml
-# The reference's SHARED widget kit (decision 1203's queue): UIPanelButtonTemplate,
-# UICheckButtonTemplate, UIPanelCloseButton, InputBoxTemplate, the UIPanelScroll* family and
-# their siblings, under the reference's own names — the templates a third-party addon names in
-# `CreateFrame(kind, name, parent, "Template")`, which nothing in benilla's own XML consumes
-# yet (each of our windows still carries its private copy; see the file's header). After
-# ScrollTemplates.xml because UIPanelScrollFrameTemplate's OnLoad is that file's
-# ScrollFrame_OnLoad, and this file supplies the two remaining handlers of that same kit
-# (ScrollFrameTemplate_OnMouseWheel, ScrollFrame_OnScrollRangeChanged).
-UIPanelTemplates.xml
-# The reference's shared OPTIONS widgets: OptionsCheckButtonTemplate /
-# UIOptionsCheckButtonTemplate / OptionsSliderTemplate / OptionsButtonTemplate /
-# OptionFrameBoxTemplate. Straight after UIPanelTemplates.xml — two of them inherit its
-# UICheckButtonTemplate and UIPanelButtonTemplate. Not benilla's own options window
-# (OptionsFrame.xml, far below): these are the shared names addons build panels out of.
+# ══ THE PANEL TEMPLATE KIT — the reference's own, off the player's chain (1751, window 31) ══
+# TWO entries, because the reference splits this kit the way it splits every other: the `.lua`
+# carries the verbs and the `.xml` the templates. Listing the `.xml` alone brings none of the verbs
+# (`every_chain_xml_brings_its_own_lua` is a gate because that already bit twice).
+#
+# ONE swap, THREE of our files, which is why it had to move as a unit and why 1837 measured it
+# before anyone executed it:
+#   * `UIPanelTemplates.xml` — DELETED. Our 18 templates were a strict SUBSET of the reference's,
+#     zero benilla-only additions, so the template half is a pure gain.
+#   * the scroll half of `ScrollTemplates.xml` — `FauxScrollFrameTemplate`, `FauxScrollFrame_*`,
+#     `ScrollFrame_*` — now the chain's. What stays there is `BenillaScrollBarTemplate` and
+#     `BenillaScrollTroughTemplate`, which are ours and which six windows still inherit.
+#   * the `PanelTemplates_*` family out of `UiPanels.xml`.
+#
+# It could not be split: `ScrollTemplates.xml` sits ABOVE this entry, so the chain's
+# `FauxScrollFrameTemplate` lands after ours and wins (registration is last-in). There is no
+# ordering that takes the templates without also taking Faux.
+#
+# GAINED: `TabButtonTemplate`, and the whole `ScrollingEdit_*` family, which we had NOWHERE — that
+# is HelpFrame's named blocker, answered as a side effect. And it unblocks MacroFrame (1835).
+Interface\FrameXML\UIPanelTemplates.lua
+Interface\FrameXML\UIPanelTemplates.xml
+# ══ THE OPTIONS WIDGET KIT — the reference's own, off the player's chain (1751, window 29) ══
+# The four templates addons name for an options panel: `OptionFrameBoxTemplate`,
+# `OptionsButtonTemplate`, `OptionsCheckButtonTemplate`, `OptionsSliderTemplate`. Self-contained —
+# no `.lua`, no `<Include>` — and a descendant of UIPanelTemplates (`OptionsCheckButtonTemplate`
+# inherits `UICheckButtonTemplate`, `OptionsButtonTemplate` inherits `UIPanelButtonTemplate`), so
+# it stays seated after that file.
+#
+# `framexml-transcription-diff.py` reports no handler our transcription was missing, and the swap
+# GIVES BACK the reference's own inline hover: ours had factored it into a shared
+# `BenillaOptionsWidget_ShowTooltip`, where the reference open-codes it once per widget.
+Interface\FrameXML\OptionsFrameTemplates.xml
+# …and ours, shrunk to the ONE template the chain's file does not carry:
+# `UIOptionsCheckButtonTemplate`, whose reference home is `UIOptionsFrame.xml` — a file we do not
+# build, because benilla's options window is `OptionsFrame.xml`, a different design. The corpus
+# names it at 8 `CreateFrame` sites, so it cannot simply go. Same basename as the entry above by
+# design: bare = ours, path = the reference's. Retires when UIOptionsFrame.xml migrates.
 OptionsFrameTemplates.xml
 # ══ THE COLOUR DIALOG — the reference's own, off the player's chain (1751, window 11) ══
 # `ColorPickerFrame` (a `<ColorSelect>`), `OpacitySliderFrame`, `ColorPickerOkayButton`,

@@ -18,7 +18,7 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// The reader's dependency prefix, in the manifest's own order. `ScrollTemplates.xml` and
 /// `UIPanelTemplates.xml` joined it with decisions 1337/1338: the page sits in a real ScrollFrame
 /// now, whose template is in the second and whose `ScrollFrame_OnLoad` is in the first.
-const FILES: [&str; 8] = [
+const FILES: [&str; 9] = [
     // `ITEM_TEXT_FROM`, which the reference's READY arm concatenates into the creator tail — and
     // `attempt to concatenate a nil value` kills the handler before it reaches its `ShowUIPanel`,
     // so the window simply never opens. Our deleted copy carried the string as a local fallback.
@@ -30,7 +30,8 @@ const FILES: [&str; 8] = [
     // page and title ink. 1.12 keeps it in UIParent.lua and ours does the same (1751 window 9).
     "UIParent.xml",
     "ScrollTemplates.xml",
-    "UIPanelTemplates.xml",
+    r"Interface\FrameXML\UIPanelTemplates.lua",
+    r"Interface\FrameXML\UIPanelTemplates.xml",
     "Interface\\FrameXML\\ItemTextFrame.xml",
 ];
 
@@ -322,6 +323,7 @@ fn the_reported_html_page_draws_as_blocks_not_as_its_own_markup() {
 /// with. It skips on a machine with no client data, like every other archive-backed sweep.
 #[test]
 fn the_reported_book_crest_draws_at_the_blps_own_size() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let data = benilla_formats::wow_data_or_skip!();
     let chain = std::sync::Mutex::new(benilla_formats::open_chain(&data).expect("open chain"));
 

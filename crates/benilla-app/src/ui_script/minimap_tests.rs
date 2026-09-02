@@ -141,10 +141,16 @@ fn game_time_session(hour: u32, minute: u32) -> UiScript {
     s
 }
 
-/// `GameTimeTexture`'s current 4-edge texcoord window.
+/// `GameTimeTexture`'s current texcoord window, as the `(left, right, top, bottom)` rect this
+/// file reasons in.
+///
+/// `GetTexCoord` answers EIGHT values since decision 1840 — `ULx, ULy, LLx, LLy, URx, URy, LRx,
+/// LRy` — so the rect is positions 1, 5, 2, 4. Folded here rather than at each call site because
+/// the window really is axis-aligned and every assertion below is about its edges.
 fn tod_window(s: &UiScript) -> (f64, f64, f64, f64) {
-    s.eval::<(f64, f64, f64, f64)>("return GameTimeTexture:GetTexCoord()")
-        .unwrap()
+    let (ulx, uly, _, lly, urx, ..): (f64, f64, f64, f64, f64, f64, f64, f64) =
+        s.eval("return GameTimeTexture:GetTexCoord()").unwrap();
+    (ulx, urx, uly, lly)
 }
 
 /// `GameTimeFrame_Update`'s law, exactly: the 50-px window over the 128×64 UI-TOD-Indicator

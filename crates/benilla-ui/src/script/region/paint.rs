@@ -503,13 +503,39 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let rh = region_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            let [l, r, t, b] = model
+            // EIGHT values — a 4-iteration loop of 2 pushes, `mov eax,8`. There is no 4-value
+            // getter in this API at all: the 4-argument `(minX, maxX, minY, maxY)` min/max rect is
+            // **setter-only**, and returning it here was a shape that exists nowhere in the client.
+            // Order is `SetTexCoord`'s own usage string (`0x87c538`):
+            // `ULx, ULy, LLx, LLy, URx, URy, LRx, LRy`. Decision 1840.
+            //
+            // `GetTexCoord` has zero call sites in 1.12 FrameXML, so nothing on the chain could
+            // ever have caught this — only the binary could.
+            let corners = model
                 .region_data
                 .get(&rh)
                 .and_then(|d| d.tex_coords)
-                .map(|tc| tc.edges())
-                .unwrap_or([0.0, 1.0, 0.0, 1.0]);
-            Ok((l, r, t, b))
+                .map_or([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]], |tc| {
+                    match tc {
+                        // Stored per corner in SCREEN order `[TL, TR, BR, BL]`; Lua wants
+                        // UL, LL, UR, LR.
+                        crate::script::types::TexCoords::Corners(c) => [c[0], c[3], c[1], c[2]],
+                        crate::script::types::TexCoords::Rect(_) => {
+                            let [l, r, t, b] = tc.edges();
+                            [[l, t], [l, b], [r, t], [r, b]]
+                        }
+                    }
+                });
+            Ok((
+                corners[0][0],
+                corners[0][1],
+                corners[1][0],
+                corners[1][1],
+                corners[2][0],
+                corners[2][1],
+                corners[3][0],
+                corners[3][1],
+            ))
         })?,
     )?;
     Ok(())

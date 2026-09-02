@@ -81,6 +81,7 @@ const HAMMER_LINK: &str = "|cffffffff|Hitem:2024:0:0:0|h[Militia Hammer]|h|r";
 /// The loader itself: every file the window depends on parses and materializes with no errors.
 #[test]
 fn shipped_questlog_frame_loads_clean() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
@@ -91,7 +92,8 @@ fn shipped_questlog_frame_loads_clean() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 }
 
@@ -101,6 +103,7 @@ fn shipped_questlog_frame_loads_clean() {
 /// close kit.
 #[test]
 fn shipped_questlog_frame_drives_end_to_end() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -112,7 +115,8 @@ fn shipped_questlog_frame_drives_end_to_end() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     s.set_quest_log(eight_entries());
@@ -209,13 +213,21 @@ fn shipped_questlog_frame_drives_end_to_end() {
             _ => None,
         })
         .expect("a 'Quest 3' row text quad");
+    let before = s
+        .eval::<String>("return QuestLogTitle1Text:GetText()")
+        .unwrap();
     s.mouse_wheel(wx, wy, -1.0);
     assert!(s.errors().is_empty(), "wheel errors: {:?}", s.errors());
-    assert!(
+    // **Not "by one row" any more.** That was our own `ScrollFrameTemplate_OnMouseWheel`, which
+    // stepped one `valueStep`. The reference's moves the bar by **half its own height** in value
+    // units (`UIPanelTemplates.lua`), which over a 16px row and a 237px bar is roughly seven rows.
+    // The migration reverts our step; how far a notch should travel is a look call, recorded in
+    // 1846 rather than re-authored back in.
+    assert_ne!(
         s.eval::<String>("return QuestLogTitle1Text:GetText()")
-            .unwrap()
-            .contains("Quest 2"),
-        "wheel-down scrolled the list by one row"
+            .unwrap(),
+        before,
+        "wheel-down scrolled the list"
     );
     // Selection itself is untouched by scrolling.
     assert_eq!(s.eval::<i64>("return GetQuestLogSelection()").unwrap(), 1);
@@ -285,6 +297,7 @@ fn shipped_questlog_frame_drives_end_to_end() {
 /// own or gate on visibility.
 #[test]
 fn shift_click_toggles_the_watch_checkbox_and_the_tracker_hud() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -296,7 +309,8 @@ fn shift_click_toggles_the_watch_checkbox_and_the_tracker_hud() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     s.set_quest_log(eight_entries());
@@ -405,6 +419,7 @@ fn shift_click_toggles_the_watch_checkbox_and_the_tracker_hud() {
 /// selects the row exactly like any other click (pin §5).
 #[test]
 fn watch_guards_no_op_without_erroring() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -417,7 +432,8 @@ fn watch_guards_no_op_without_erroring() {
                                                             // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
                                                             // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     s.set_quest_log(eight_entries());
@@ -499,6 +515,7 @@ fn watch_guards_no_op_without_erroring() {
 /// re-arms it, and expiry (the watch frame's OnUpdate) unwatches and hides the empty HUD.
 #[test]
 fn progress_auto_watches_for_five_minutes() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -510,7 +527,8 @@ fn progress_auto_watches_for_five_minutes() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
     s.set_quest_log(eight_entries());
 
@@ -561,6 +579,7 @@ fn progress_auto_watches_for_five_minutes() {
 /// client's auto-watch is dead until the player toggles the box. Ours ships the string.
 #[test]
 fn the_auto_watch_flag_is_the_references_uvar_and_gates_the_watch() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -572,7 +591,8 @@ fn the_auto_watch_flag_is_the_references_uvar_and_gates_the_watch() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
     s.set_quest_log(eight_entries());
     assert_eq!(s.eval::<String>("return AUTO_QUEST_WATCH").unwrap(), "1");
@@ -600,6 +620,7 @@ fn the_auto_watch_flag_is_the_references_uvar_and_gates_the_watch() {
 /// disables Abandon, and shows the centered empty-state message instead of `EmptyQuestLogFrame`.
 #[test]
 fn empty_quest_log_hides_rows_and_disables_abandon() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -611,7 +632,8 @@ fn empty_quest_log_hides_rows_and_disables_abandon() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     s.set_quest_log(QuestLogState::default());
@@ -650,6 +672,7 @@ fn empty_quest_log_hides_rows_and_disables_abandon() {
 /// of the last choice row, the fixed reward below that, unused rows/choices past the count hidden.
 #[test]
 fn reward_rows_follow_the_refs_two_per_row_layout() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -661,7 +684,8 @@ fn reward_rows_follow_the_refs_two_per_row_layout() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     let mut state = eight_entries();
@@ -806,6 +830,7 @@ fn overflowing_entry() -> QuestLogState {
 /// the mechanism, just through the shipped window instead of a synthetic fixture.
 #[test]
 fn overflowing_detail_content_clips_to_the_scrollframe_rect() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -817,7 +842,8 @@ fn overflowing_detail_content_clips_to_the_scrollframe_rect() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     s.set_quest_log(overflowing_entry());
@@ -867,6 +893,7 @@ fn overflowing_detail_content_clips_to_the_scrollframe_rect() {
 /// window's bucket covering the detail rect, so the spin lands on it outright.
 #[test]
 fn wheel_over_the_detail_pane_changes_vertical_scroll() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -878,7 +905,8 @@ fn wheel_over_the_detail_pane_changes_vertical_scroll() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     s.set_quest_log(overflowing_entry());
@@ -913,6 +941,7 @@ fn wheel_over_the_detail_pane_changes_vertical_scroll() {
 /// reader's scroll position out from under them.
 #[test]
 fn selection_change_resets_detail_scroll_but_a_quest_log_update_refresh_does_not() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -924,7 +953,8 @@ fn selection_change_resets_detail_scroll_but_a_quest_log_update_refresh_does_not
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     s.set_quest_log(overflowing_entry());
@@ -968,6 +998,7 @@ fn selection_change_resets_detail_scroll_but_a_quest_log_update_refresh_does_not
 /// renders the full stat head — the identical lines a vendor row/bag slot gets for this item.
 #[test]
 fn reward_row_hover_serves_the_shared_item_tooltip() {
+    let _data = benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::ItemTemplateView;
 
     let mut s = UiScript::new().unwrap();
@@ -987,7 +1018,8 @@ fn reward_row_hover_serves_the_shared_item_tooltip() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     s.set_quest_log(eight_entries());
@@ -1062,6 +1094,7 @@ fn reward_row_hover_serves_the_shared_item_tooltip() {
 /// dialog's dark buttons, pixel-diffed against the raw UI-DialogBox-Button-Up art).
 #[test]
 fn popup_children_inherit_the_dialog_stratum() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -1110,6 +1143,7 @@ fn popup_children_inherit_the_dialog_stratum() {
 /// arm runs last — opening the room closes the log, exactly as it does in play.
 #[test]
 fn reward_rows_preview_and_post_and_a_plain_click_stays_inert() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -1121,7 +1155,8 @@ fn reward_rows_preview_and_post_and_a_plain_click_stays_inert() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
     load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink lives here
     load_xml(&s, "DressUpFrame.xml"); // DressUpItemLink lives here
@@ -1190,6 +1225,7 @@ fn reward_rows_preview_and_post_and_a_plain_click_stays_inert() {
 /// eaten it. The select-and-repaint tail (l.503-504) runs either way.
 #[test]
 fn shift_click_on_a_title_posts_the_quest_name_with_chat_open_and_watches_with_it_closed() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -1201,7 +1237,8 @@ fn shift_click_on_a_title_posts_the_quest_name_with_chat_open_and_watches_with_i
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
     load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink lives here
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit its menus build from
@@ -1281,6 +1318,7 @@ fn entries_sharable(ids: &[u32]) -> QuestLogState {
 /// both together light it (ref `QuestLogFrame.lua:299-305`).
 #[test]
 fn share_quest_needs_both_a_sharable_selection_and_a_party() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -1292,7 +1330,8 @@ fn share_quest_needs_both_a_sharable_selection_and_a_party() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     // Solo, quest 1 sharable and selected by the auto-selection.
@@ -1355,6 +1394,7 @@ fn share_quest_needs_both_a_sharable_selection_and_a_party() {
 /// but `GetNumPartyMembers() > 0` is not.
 #[test]
 fn share_quest_is_dark_on_an_empty_log_even_in_a_party() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -1366,7 +1406,8 @@ fn share_quest_is_dark_on_an_empty_log_even_in_a_party() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     s.set_quest_log(QuestLogState::default());
@@ -1383,6 +1424,7 @@ fn share_quest_is_dark_on_an_empty_log_even_in_a_party() {
 /// selection move, so an index/id confusion shows up here.
 #[test]
 fn share_quest_click_queues_the_selected_quests_id() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -1394,7 +1436,8 @@ fn share_quest_click_queues_the_selected_quests_id() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     s.set_quest_log(entries_sharable(&[1, 5]));

@@ -35,13 +35,14 @@ use super::Model;
 const VERSION: &str = "1.12.1";
 const BUILD: &str = "5875";
 const BUILD_DATE: &str = "Sep 19 2006";
-/// The `## Interface` number a 1.12 `.toc` declares — and what `benilla.toc` declares too.
-const TOC_VERSION: i64 = 11200;
+// There was a `TOC_VERSION = 11200` here, and `GetBuildInfo` pushed it as a fourth value. The
+// in-game registrar pushes three (decision 1842); the interface number is a later expansion's
+// return, and `benilla.toc`'s own `## Interface` line is where that number belongs.
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
-    // version, build, date, tocversion
+    // version, build, date — three, and no fourth (decision 1842)
     g.set(
         "GetBuildInfo",
         lua.create_function(|lua, ()| {
@@ -49,7 +50,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Value::String(lua.create_string(VERSION)?),
                 Value::String(lua.create_string(BUILD)?),
                 Value::String(lua.create_string(BUILD_DATE)?),
-                Value::Integer(TOC_VERSION),
+                // **THREE, not four.** The reference's in-game `GetBuildInfo 0x4884a0` pushes
+                // `(string, string, string)`; the interface/TOC number is a later-expansion return
+                // and 1.12 has no fourth value here. (Its GLUE twin `0x46cd70` pushes five — the
+                // same name with a different shape per registrar table, which is why 1842's gate
+                // keys on the table and not the name.) Decision 1842.
             ]))
         })?,
     )?;
@@ -202,20 +207,32 @@ impl super::UiScript {
 mod tests {
     use crate::script::UiScript;
 
-    /// `GetBuildInfo` answers as the 1.12.1 client, in the reference's 4-value shape.
+    /// `GetBuildInfo` answers as the 1.12.1 client: **three strings, and no fourth value.**
     ///
-    /// The shape is what addons destructure (`local version, build, date, toc = GetBuildInfo()`),
-    /// and the `tocversion` is the one they compare against their own `## Interface` to decide
-    /// whether to run at all — so a wrong or missing fourth value makes an addon disable itself.
+    /// This used to assert four and explain the fourth as the `tocversion` an addon compares
+    /// against its own `## Interface` — which is a TBC-and-later idiom. The in-game registrar
+    /// `0x4884a0` pushes `(string, string, string)` and nothing else (decision 1842); the
+    /// interface number arrives in a later expansion.
+    ///
+    /// The corpus agrees, and it is worth the count: **458 sites** write
+    /// `local version = GetBuildInfo()` and take one value. **Four** destructure a fourth — and on
+    /// the real 1.12 client those four read `nil`, which is what their authors shipped against.
+    /// Handing them `11200` was benilla being more generous than the client, which is the superset
+    /// 1189 exists to stop.
+    ///
+    /// **The same name has a different shape in the glue registrar** (`0x46cd70`, five strings).
+    /// This VM is the in-game one. That pair is why 1842's gate keys on the table, not the name.
     #[test]
     fn get_build_info_answers_as_the_1_12_1_client() {
         let s = UiScript::new().unwrap();
         assert_eq!(
-            s.eval::<Vec<String>>(
-                "local v, b, d, t = GetBuildInfo() return { v, b, d, tostring(t) }"
-            )
-            .unwrap(),
-            vec!["1.12.1", "5875", "Sep 19 2006", "11200"]
+            s.eval::<Vec<String>>("return { GetBuildInfo() }").unwrap(),
+            vec!["1.12.1", "5875", "Sep 19 2006"]
+        );
+        assert_eq!(
+            s.eval::<i64>("return select('#', GetBuildInfo())").unwrap(),
+            3,
+            "three values, never a fourth"
         );
     }
 

@@ -47,8 +47,12 @@ pub enum TexCoords {
 }
 
 impl TexCoords {
-    /// The tightest axis-aligned `[left, right, top, bottom]` containing the mapping — what the
-    /// 4-value `GetTexCoord()` reports (exact for `Rect`, the bounding box for `Corners`).
+    /// The tightest axis-aligned `[left, right, top, bottom]` containing the mapping (exact for
+    /// `Rect`, the bounding box for `Corners`).
+    ///
+    /// **Not what `GetTexCoord()` reports** — that answers eight per-corner values, and the 4-value
+    /// rect it used to return is a shape the reference has nowhere (decision 1840). This is the
+    /// renderer's and the app's convenience view, and it keeps its callers.
     pub fn edges(&self) -> [f32; 4] {
         match *self {
             TexCoords::Rect(e) => e,

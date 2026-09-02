@@ -1168,10 +1168,10 @@
                  container over the 8 rows; only its right-hand Slider scroll bar renders. Sized to the
                  8-row span (TRADE_SKILLS_DISPLAYED × TRADE_SKILL_HEIGHT), TrainerFrame.xml's own
                  same-TOPLEFT-as-row1 convention. updateFunc set in BenillaTradeSkillFrame_OnLoad. -->
-            <Frame name="BenillaTradeSkillListScrollFrame" inherits="FauxScrollFrameTemplate">
+            <ScrollFrame name="BenillaTradeSkillListScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="293" y="128"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-96"/></Offset></Anchor></Anchors>
-            </Frame>
+            </ScrollFrame>
 
             <!-- The detail product icon (ref TradeSkillSkillIcon, l.539-591): a 37×37 button over a
                  64×64 UI-EmptySlot ring (TrainerFrame.xml's own BenillaTrainerSkillIcon shape) at the

@@ -847,6 +847,12 @@ mod faux_scroll_tests;
 #[cfg(test)]
 mod panel_template_tests;
 
+/// The RETURN-SHAPE gate (decision 1842): `reference/1.12-shapes.tsv` against what this client
+/// actually answers. `reference_surface` gates names; nothing gated shapes, and that gap produced
+/// six decisions in two days.
+#[cfg(test)]
+mod shape_gate;
+
 /// The reference's BasicControls.xml — TEXT/message/_ERRORMESSAGE and the ScriptErrors dialog,
 /// none of which benilla itself calls: every test enters from Lua the way an addon does.
 #[cfg(test)]

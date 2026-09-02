@@ -49,7 +49,9 @@ fn harness() -> UiScript {
         "UiPanels.xml",
         "GameTooltip.xml",
         "ScrollTemplates.xml",
-        "UIPanelTemplates.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        r"Interface\FrameXML\OptionsFrameTemplates.xml",
         "OptionsFrameTemplates.xml",
     ] {
         load_xml(&s, file);
@@ -78,6 +80,7 @@ fn drawn_textures(s: &mut UiScript) -> Vec<String> {
 /// `SetText` dies — with the `CreateFrame` itself having succeeded and returned an object.
 #[test]
 fn a_check_button_from_the_template_names_its_label_after_the_caller() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = harness();
     s.run(r#"MyCheck = CreateFrame("CheckButton", "MyCheck", UIParent, "UICheckButtonTemplate")"#)
         .unwrap();
@@ -119,6 +122,7 @@ fn a_check_button_from_the_template_names_its_label_after_the_caller() {
 /// all — no error, no warning, 69 invisible checkboxes.
 #[test]
 fn the_templated_check_button_draws_the_reference_checkbox_art() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.run(
         r#"MyCheck = CreateFrame("CheckButton", "MyCheck", UIParent, "UICheckButtonTemplate")
@@ -160,6 +164,7 @@ fn the_templated_check_button_draws_the_reference_checkbox_art() {
 /// options panel in the corpus is written against (`if this:GetChecked() then …`).
 #[test]
 fn a_templated_check_button_toggles_before_its_on_click_runs() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = harness();
     s.run(
         r#"MyCheck = CreateFrame("CheckButton", "MyCheck", UIParent, "UICheckButtonTemplate")
@@ -197,6 +202,7 @@ fn a_templated_check_button_toggles_before_its_on_click_runs() {
 /// addon idiom is `btn:SetText(...)` and the published global is still `$parentText`.
 #[test]
 fn a_panel_button_from_the_template_labels_and_paints() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.run(
         r#"MyBtn = CreateFrame("Button", "MyBtn", UIParent, "UIPanelButtonTemplate")
@@ -230,6 +236,7 @@ fn a_panel_button_from_the_template_labels_and_paints() {
 /// `UiPanels.xml`.
 #[test]
 fn the_templated_close_button_hides_the_frame_it_sits_on() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = harness();
     s.run(
         r#"MyPanel = CreateFrame("Frame", "MyPanel", UIParent)
@@ -260,6 +267,7 @@ fn the_templated_close_button_hides_the_frame_it_sits_on() {
 /// region, not a layer.
 #[test]
 fn an_input_box_from_the_template_carries_its_border_and_takes_text() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.run(
         r#"MyBox = CreateFrame("EditBox", "MyBox", UIParent, "InputBoxTemplate")
@@ -306,6 +314,7 @@ fn an_input_box_from_the_template_carries_its_border_and_takes_text() {
 /// is exactly how someone later introduces a real one by "restoring" it.)
 #[test]
 fn a_scroll_frame_from_the_template_wires_its_bar_two_parents_deep() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.run(
         r#"MyScroll = CreateFrame("ScrollFrame", "MyScroll", UIParent, "UIPanelScrollFrameTemplate")
@@ -383,6 +392,7 @@ fn a_scroll_frame_from_the_template_wires_its_bar_two_parents_deep() {
 /// `CreateFrame`'s fourth argument the same way it resolves through XML `inherits=`.
 #[test]
 fn the_options_check_button_resolves_its_whole_inheritance_chain() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.run(
         r#"MyOpt = CreateFrame("CheckButton", "MyOpt", UIParent, "UIOptionsCheckButtonTemplate")"#,
@@ -430,6 +440,7 @@ fn the_options_check_button_resolves_its_whole_inheritance_chain() {
 /// plausible-but-absent here is a template no addon will ever name.
 #[test]
 fn every_template_these_files_declare_is_a_real_1_12_name() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let tsv =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference/1.12-globals.tsv");
     let text = std::fs::read_to_string(&tsv).unwrap_or_else(|e| {
@@ -445,7 +456,12 @@ fn every_template_these_files_declare_is_a_real_1_12_name() {
         .collect();
 
     let mut checked = 0;
-    for file in ["UIPanelTemplates.xml", "OptionsFrameTemplates.xml"] {
+    // OUR files only. This reads the source tree directly, so it cannot name a chain entry — and
+    // it has no reason to: asserting that the reference's own file declares 1.12 names is
+    // tautological. What it guards is us inventing one (decision 1841).
+    // Our remaining file only. `UIPanelTemplates.xml` was ours until 1846 put the whole kit on the
+    // chain; what is left to guard is the one template we still declare.
+    for file in ["OptionsFrameTemplates.xml"] {
         let src = std::fs::read_to_string(ui_dir().join(file)).unwrap();
         let doc = benilla_ui::framexml::parse(&src).unwrap();
         for item in &doc.items {
@@ -462,7 +478,7 @@ fn every_template_these_files_declare_is_a_real_1_12_name() {
         }
     }
     assert!(
-        checked >= 18,
+        checked >= 1,
         "only {checked} templates swept — the sweep, not the files, is what broke"
     );
 }
@@ -480,6 +496,7 @@ fn every_template_these_files_declare_is_a_real_1_12_name() {
 /// under test: a plain function call would not set it.
 #[test]
 fn tab_resize_falls_back_to_this_when_no_tab_is_passed() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     let doc = benilla_ui::framexml::parse(

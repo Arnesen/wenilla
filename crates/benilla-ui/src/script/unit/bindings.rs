@@ -7,7 +7,7 @@ use mlua::{Lua, Value};
 use super::super::Model;
 use super::{
     check_unit_token, classification_word, grey_band, level_reads_unknown, pick_unit_token,
-    power_token, with_unit, SelectionRequest,
+    with_unit, SelectionRequest,
 };
 
 /// The two class ids `GetComboPoints 0x51a190` accepts — the literals `4` and `0xb` it compares
@@ -160,11 +160,23 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 token,
                 r#"Usage: UnitName("unit")"#,
             )?);
+            // TWO values on every live path (`eax = 2` at `0x5170ae` and `0x517289`): the name and
+            // the **realm**. Slot 2 is nil for a same-realm player, and *structurally* nil for a
+            // pet, creature, game object or item — `0x609210` writes the out-parameter only on its
+            // PLAYER branch. benilla is single-realm, so the second is always nil here; the day a
+            // cross-realm name arrives it is `UnitState`'s to carry, and `UnitPopup.lua:106`'s
+            // `name.."-"..server` join is what will read it. Decision 1840.
+            //
+            // Not to be confused with `showServerName`: that is the parameter of FrameXML's own
+            // `GetUnitName(unit, showServerName)` wrapper, which calls this binding with ONE
+            // argument. The engine's real second argument is a strict `LUA_TBOOLEAN` and is not
+            // modelled — no consumer passes it.
             let name = with_unit(lua, &token, None, |u| u.name.clone())?;
-            match name {
-                Some(n) => Ok(Value::String(lua.create_string(&n)?)),
-                None => Ok(Value::Nil),
-            }
+            let name = match name {
+                Some(n) => Value::String(lua.create_string(&n)?),
+                None => Value::Nil,
+            };
+            Ok((name, Value::Nil))
         })?,
     )?;
 
@@ -931,8 +943,15 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 token,
                 r#"Usage: UnitPowerType("unit")"#,
             )?);
+            // ONE value, not the Era pair. `0x517940` has four live `ret`s and `eax = 1` at every
+            // one, four `lua_pushnumber` sites and zero `lua_pushstring` — the `(type, "MANA")`
+            // tuple does not exist in 5875 (decision 1840). `power_token` stays: 1819's per-resource
+            // event names are its real caller.
+            //
+            // The miss default is the NUMBER 0, the same value as Mana and never nil, which is
+            // load-bearing rather than tidy: `UnitFrame.lua:122` indexes `ManaBarColor[...]` with it.
             let ty = with_unit(lua, &token, 0u8, |u| u.power_type)?;
-            Ok((i64::from(ty), power_token(ty).to_string()))
+            Ok(i64::from(ty))
         })?,
     )?;
 

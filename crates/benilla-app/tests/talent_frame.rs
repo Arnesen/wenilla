@@ -20,7 +20,7 @@ use benilla_ui::script::{
 /// `ItemButtonTemplate.xml` is the `SetItemButton*` family the talent buttons grey through (the
 /// reference's own verb; see TalentFrame.xml's header) — it sits at .toc line 32, above every
 /// other entry here bar `Fonts.xml`.
-const FILES: [&str; 12] = [
+const FILES: [&str; 13] = [
     // `PLAYER_LEVEL` and the rest of the strings the stock file formats through.
     "Interface\\FrameXML\\GlobalStrings.lua",
     "Fonts.xml",
@@ -36,7 +36,8 @@ const FILES: [&str; 12] = [
     // Slider AND its `<OnMouseWheel>`. Nothing else in the tree declares it, and a missing template
     // is a loader WARNING, not an error, so without this the window still built — just with no
     // scrollbar and no wheel (decision 1833). `load_ui_strict` below is what makes that loud.
-    "UIPanelTemplates.xml",
+    r"Interface\FrameXML\UIPanelTemplates.lua",
+    r"Interface\FrameXML\UIPanelTemplates.xml",
     "ScrollTemplates.xml",
     // Stock `TalentFrame_OnShow` opens with `SetButtonPulse(TalentMicroButton, 0, 1)` and then
     // `UpdateMicroButtons()` — both live here, and a nil `TalentMicroButton` throws out of OnShow

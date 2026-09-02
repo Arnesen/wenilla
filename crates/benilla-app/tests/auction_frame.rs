@@ -20,14 +20,15 @@ mod common;
 /// the `MoneyTypeInfo` table this window registers `AUCTION_DEPOSIT` into, The `BenillaMoneyInput_*` money-entry
 /// helpers used to mean loading MerchantFrame.xml as well; 1751 moved that kit to MoneyFrame.xml
 /// on its way to the chain, so the dependency is gone.
-const FILES: [&str; 8] = [
+const FILES: [&str; 9] = [
     "Fonts.xml",
     "MoneyFrame.xml",
     "UiPanels.xml",
     "GameTooltip.xml",
     "Interface\\FrameXML\\UIDropDownMenu.xml",
     "ScrollTemplates.xml",
-    "UIPanelTemplates.xml",
+    r"Interface\FrameXML\UIPanelTemplates.lua",
+    r"Interface\FrameXML\UIPanelTemplates.xml",
     "AuctionFrame.xml",
 ];
 
@@ -112,6 +113,7 @@ fn seat_player(s: &mut UiScript, money: u64) {
 
 #[test]
 fn auction_frame_loads_and_key_regions_exist() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
     load_ui(&s);
     for name in [
@@ -158,6 +160,7 @@ fn auction_frame_loads_and_key_regions_exist() {
 /// it ShowUIPanel takes its unregistered branch and the window flips `IsShown()` without landing.
 #[test]
 fn the_window_is_registered_doublewide() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
     load_ui(&s);
     assert_eq!(
@@ -169,6 +172,7 @@ fn the_window_is_registered_doublewide() {
 
 #[test]
 fn auction_house_show_opens_the_window_on_the_browse_tab() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     seat_player(&mut s, 500_000);
@@ -226,6 +230,7 @@ fn auction_house_show_opens_the_window_on_the_browse_tab() {
 /// The part that proves it works: a fed snapshot paints the Browse rows.
 #[test]
 fn the_browse_list_populates_from_the_fed_snapshot() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     seat_player(&mut s, 500_000);
@@ -325,6 +330,7 @@ fn the_browse_list_populates_from_the_fed_snapshot() {
 /// only when the purse can actually cover it.
 #[test]
 fn the_bid_and_buyout_gates_read_the_purse() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     // 2 gold. Row 1 costs 10s to bid and 50s to buy out — affordable. Row 2 wants 5 gold.
@@ -408,6 +414,7 @@ fn the_bid_and_buyout_gates_read_the_purse() {
 /// that is not about affordability.
 #[test]
 fn you_cannot_bid_on_your_own_auction() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     seat_player(&mut s, 10_000_000);
@@ -438,6 +445,7 @@ fn you_cannot_bid_on_your_own_auction() {
 /// setting a level band and clicking a class row queue no query at all until Search fires.
 #[test]
 fn search_reads_the_filters_and_nothing_queries_before_it() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     seat_player(&mut s, 0);
@@ -487,6 +495,7 @@ fn search_reads_the_filters_and_nothing_queries_before_it() {
 /// own arithmetic over the stack's vendor value and the RUN TIME — never over what you ask for.
 #[test]
 fn the_create_gate_and_the_deposit() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     seat_player(&mut s, 100_000);
@@ -629,6 +638,7 @@ fn the_create_gate_and_the_deposit() {
 /// Closing the window ends the session client-side and takes both confirmations with it.
 #[test]
 fn hiding_the_window_closes_the_session() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     seat_player(&mut s, 0);
@@ -657,6 +667,7 @@ fn hiding_the_window_closes_the_session() {
 /// batch out of 120 fills all 8 slots, so the turners stay hidden until the list is scrolled down.
 #[test]
 fn paging_shows_the_turners_only_at_the_end_of_the_list() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     seat_player(&mut s, 0);
@@ -712,6 +723,7 @@ fn paging_shows_the_turners_only_at_the_end_of_the_list() {
 /// API surface rather than an equivalent one.
 #[test]
 fn a_row_hover_goes_through_the_reference_tooltip_verb() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_auction(Some(state(vec![row("Copper Bar", 100, 500, 0, "Someone")])));

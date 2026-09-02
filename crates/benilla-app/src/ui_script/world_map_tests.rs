@@ -16,7 +16,8 @@ fn harness() -> UiScript {
         "Fonts.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
-        "UIPanelTemplates.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml", // the map's continent/zone pickers initialize into it at OnLoad
         "ScrollTemplates.xml",
@@ -52,6 +53,7 @@ fn landmark(name: &str, icon: u32, uv: (f32, f32)) -> WorldMapLandmarkView {
 /// `points_of_interest` row ships, so this is the guard-directions case exactly.
 #[test]
 fn a_landmark_draws_its_poi_icon_at_its_map_position() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.set_world_map_landmarks(vec![landmark("Stormwind Warrior Trainer", 6, (0.25, 0.5))]);
     s.run("WorldMapFrame_Update()").unwrap();
@@ -68,7 +70,9 @@ fn a_landmark_draws_its_poi_icon_at_its_map_position() {
     );
 
     // Cell 6 of the 8×8 grid = column 6, row 0.
-    let (l, r, t, b): (f32, f32, f32, f32) = s
+    // `GetTexCoord` answers EIGHT (UL, LL, UR, LR as x,y pairs) since 1840; the old
+    // `(l, r, t, b)` rect is `ULx, URx, ULy, LLy` — positions 1, 5, 2, 4.
+    let (l, t, _, b, r, ..): (f32, f32, f32, f32, f32, f32, f32, f32) = s
         .eval("return WorldMapFramePOI1Texture:GetTexCoord()")
         .unwrap();
     assert_eq!(
@@ -92,6 +96,7 @@ fn a_landmark_draws_its_poi_icon_at_its_map_position() {
 /// destroyed, and the same frame is re-seated when the list shrinks back.
 #[test]
 fn the_poi_pool_grows_and_parks_its_tail() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.set_world_map_landmarks(vec![
         landmark("The Bank", 6, (0.1, 0.1)),
@@ -134,6 +139,7 @@ fn the_poi_pool_grows_and_parks_its_tail() {
 /// guard's directions never do, a battleground node's "In Conflict" would.
 #[test]
 fn hovering_a_poi_names_it_and_adds_a_status_line_only_when_there_is_one() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.set_world_map_landmarks(vec![landmark("Lion's Pride Inn", 6, (0.5, 0.5))]);
     s.run("WorldMapFrame_Update()").unwrap();
@@ -169,6 +175,7 @@ fn hovering_a_poi_names_it_and_adds_a_status_line_only_when_there_is_one() {
 /// guard's marker never carries one.
 #[test]
 fn the_landmark_getter_returns_the_references_five_values() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     let mut with_status = landmark("Stables", 9, (0.25, 0.75));
     with_status.description = "In Conflict".into();
@@ -201,6 +208,7 @@ fn the_landmark_getter_returns_the_references_five_values() {
 /// is open far more often than a guard has just given directions.
 #[test]
 fn no_landmarks_draws_nothing() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = harness();
     s.run("WorldMapFrame_Update()").unwrap();
     assert_eq!(s.eval::<i64>("return GetNumMapLandmarks()").unwrap(), 0);
@@ -217,6 +225,7 @@ fn no_landmarks_draws_nothing() {
 /// getting that sign wrong mirrors every blip about the top edge without failing anything else.
 #[test]
 fn party_blips_sit_at_their_map_positions_and_hide_when_absent() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     // `IsShown`, not `IsVisible`: the map itself is closed in this harness (the POI test's own
     // idiom), so every child would read invisible through its hidden ancestor.
@@ -294,6 +303,7 @@ fn party_blips_sit_at_their_map_positions_and_hide_when_absent() {
 /// dropdown lists carry `toplevel="true"` with no parent at all.
 #[test]
 fn the_maps_own_furniture_survives_the_hide_that_showing_it_performs() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1600.0, 900.0);
     let failures = super::load_default_ui(&s);

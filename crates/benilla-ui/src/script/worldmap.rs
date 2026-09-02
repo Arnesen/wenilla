@@ -466,10 +466,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                         .unwrap_or_else(|| cont.map_file.clone()),
                 }),
             };
-            Ok(match file {
+            // THREE values, always. `0x4a7e30` has one `ret` and not a single conditional jump —
+            // there is no miss branch at all, the emptiness lives in two helpers — so the
+            // world-level answer is `nil, 0, 0` rather than one nil. (`arity_conf = exact`;
+            // decision 1845.) The two zeros are the map's texture dimensions, which no caller
+            // reads on the world level.
+            let file = match file {
                 Some(f) => Value::String(lua.create_string(&f)?),
                 None => Value::Nil,
-            })
+            };
+            Ok((file, 0i64, 0i64))
         })?,
     )?;
 

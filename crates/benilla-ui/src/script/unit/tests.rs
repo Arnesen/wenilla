@@ -400,10 +400,11 @@ fn a_dead_unit_reports_dead_and_zero_health() {
 fn power_bindings_read_the_active_type() {
     let mut s = UiScript::new().unwrap();
     s.set_unit("player", Some(player())); // rage 35/100
+                                          // ONE value. The Era `(type, "RAGE")` pair does not exist in 5875 — `0x517940` pushes a
+                                          // number at every one of its four live `ret`s and never a string (decision 1840).
     assert_eq!(
-        s.eval::<(i64, String)>(r#"return UnitPowerType("player")"#)
-            .unwrap(),
-        (1, "RAGE".into())
+        s.eval::<i64>(r#"return UnitPowerType("player")"#).unwrap(),
+        1
     );
     assert_eq!(s.eval::<i64>(r#"return UnitMana("player")"#).unwrap(), 35);
     assert_eq!(
@@ -420,11 +421,12 @@ fn power_bindings_read_the_active_type() {
             .unwrap(),
         "the Era spellings must not linger beside the 1.12 ones"
     );
-    // An absent unit: type reads as mana, values 0.
+    // An absent unit: the NUMBER 0 — the same value Mana has, and never nil. Load-bearing rather
+    // than tidy: stock `UnitFrame.lua:122` writes `ManaBarColor[UnitPowerType(unitFrame.unit)]`,
+    // and a nil there indexes nothing.
     assert_eq!(
-        s.eval::<(i64, String)>(r#"return UnitPowerType("target")"#)
-            .unwrap(),
-        (0, "MANA".into())
+        s.eval::<i64>(r#"return UnitPowerType("target")"#).unwrap(),
+        0
     );
 }
 

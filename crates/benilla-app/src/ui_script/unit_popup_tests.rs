@@ -36,7 +36,8 @@ fn load_popup_frames(s: &UiScript) {
         "Interface\\FrameXML\\TargetFrame.xml",
         "Interface\\FrameXML\\PetFrame.xml",
         "ScrollTemplates.xml",
-        "UIPanelTemplates.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "FriendsFrame.xml",
     ] {
         load_xml(s, file);

@@ -1603,7 +1603,7 @@ fn the_first_key_puts_the_keyring_on_the_bar() {
     ] {
         let (t, b) = s
             .eval::<(f64, f64)>(&format!(
-                "local _, _, top, bottom = {strip}:GetTexCoord() return top, bottom"
+                "local _, top, _, bottom = {strip}:GetTexCoord() return top, bottom"
             ))
             .unwrap();
         assert!(

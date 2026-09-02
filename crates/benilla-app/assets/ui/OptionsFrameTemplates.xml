@@ -1,145 +1,39 @@
 <Ui>
     <!--
-        The shared OPTIONS widget kit — our build of the five templates addons name, specified by
-        Interface\FrameXML\OptionsFrameTemplates.xml (line numbers below are that file's) plus the
-        one template from UIOptionsFrame.xml that addons actually name.
+        WHAT IS LEFT OF THIS FILE, AND WHY IT STILL EXISTS (decision 1841).
 
-        These are UIPanelTemplates.xml's descendants: `OptionsCheckButtonTemplate` inherits
-        `UICheckButtonTemplate` and `OptionsButtonTemplate` inherits `UIPanelButtonTemplate`, so
-        this file must load after it (the .toc seats them together).
+        The four templates this file used to build — `OptionFrameBoxTemplate`,
+        `OptionsButtonTemplate`, `OptionsCheckButtonTemplate` and `OptionsSliderTemplate` — now come
+        off the player's chain out of `Interface\FrameXML\OptionsFrameTemplates.xml`, which the
+        manifest lists directly above this entry. Our transcription of them is gone.
 
-        WHY THE UIOptionsFrame ONE LIVES HERE. `UIOptionsCheckButtonTemplate` is 8 `CreateFrame`
-        call sites in the corpus — the fourth most-wanted template we lacked — and in the reference
-        it is declared in UIOptionsFrame.xml (l.6-10) as a two-line size override on
-        `OptionsCheckButtonTemplate`. We do not build UIOptionsFrame at all (benilla's own options
-        window is OptionsFrame.xml, a different design), so the one template that file contributes
-        to the shared namespace sits with its parent rather than in a file of its own. Its
-        provenance is on the declaration.
+        **The same basename appears twice in benilla.toc on purpose.** A bare name is a file we
+        ship, a path is the reference's own (the manifest's rule since 1751), so the two entries are
+        unambiguous to the loader even though they read alike to a person. This one loads second and
+        adds exactly one name the chain's file does not have.
 
-        Every TEMPLATE name here is in `reference/1.12-globals.tsv`; none is invented. The one name
-        that is ours is the hover helper below, and it wears the `Benilla` prefix that says so —
-        the reference open-codes that hover twice, once per widget, and two copies of one behaviour
-        is how they end up disagreeing. What this supersedes but does not delete: nothing —
-        OptionsFrame.xml's own `Options*Template` family (`OptionsRedButtonTemplate`,
-        `OptionsCheckboxRowTemplate`, `OptionsSliderRowTemplate`, …) are benilla's row widgets for
-        benilla's window, distinct names and a distinct shape.
+        THAT NAME IS `UIOptionsCheckButtonTemplate`, and its home in the reference is
+        `UIOptionsFrame.xml` — a file we do not build at all, because benilla's own options window
+        is `OptionsFrame.xml`, a different design. So the template has no chain file to arrive from
+        and would simply vanish if this file did.
+
+        It is not ours and not invented: it is in `reference/1.12-globals.tsv`, and the corpus names
+        it at 8 `CreateFrame` call sites — the nameplate addons build their whole options panel out
+        of it. `panel_template_tests.rs` is the driver that says so.
+
+        WHEN THIS FILE GOES: the day `UIOptionsFrame.xml` migrates. The template comes from there,
+        this file has nothing left, and the manifest loses a line.
+
+        WHAT THE SWAP GAVE BACK. Our version factored the two widgets' hover into one
+        `BenillaOptionsWidget_ShowTooltip` helper, on the reasoning that "two copies of one
+        behaviour is how they end up disagreeing". The reference open-codes it inline in each
+        template's `<OnEnter>`, identically, and that is what runs now — the helper is gone with the
+        rest, and nothing else called it.
     -->
 
-    <Script><![CDATA[
-        -- The hover both widgets below share: an instance carries its own `tooltipText` (the
-        -- caption, wrapped) and optionally a `tooltipRequirement` (the "needs a restart / a relog"
-        -- line under it) as plain fields, set by whoever built the panel. Neither field is
-        -- required, and a widget with neither raises nothing.
-        --
-        -- BOTH LINES RENDER GOLD, and the second one's colour arguments are why that has to be
-        -- said out loud: `AddLine(text, "", 1, 1, 1)` is 1.12's archaic spelling, and the empty
-        -- string sitting in the r-slot is what makes the binding drop the whole colour tail and
-        -- fall back to the tooltip default (`script/tooltip/verbs.rs`'s AddLine carries the byte
-        -- note, and names this exact `(text, "", r, g, b)` shape as the corpus' own). The
-        -- arguments are kept because they are the reference's; the white they appear to ask for is
-        -- not what any client, ours or theirs, actually draws.
-        --
-        -- One home for it rather than one per template: the checkbox and the slider are different
-        -- widget types with no common ancestor to inherit from, so sharing the behaviour means
-        -- sharing a function. It takes the widget as an argument rather than reading `this`,
-        -- because a shared function has no handler of its own to read it from — each of the two
-        -- OnEnters below passes its own.
-        function BenillaOptionsWidget_ShowTooltip(widget)
-            local caption, requirement = widget.tooltipText, widget.tooltipRequirement
-            if caption then
-                GameTooltip:SetOwner(widget, "ANCHOR_RIGHT")
-                GameTooltip:SetText(caption, nil, nil, nil, nil, 1)
-            end
-            -- Only the requirement line asks for the tooltip to be shown, and that is the
-            -- reference's behaviour, not an oversight of ours: `SetText` already puts the plate on
-            -- screen, so the caption case needs no second verb, while `AddLine` onto a plate that
-            -- is already up has to ask for the relayout.
-            if requirement then
-                GameTooltip:AddLine(requirement, "", 1.0, 1.0, 1.0)
-                GameTooltip:Show()
-            end
-        end
-    ]]></Script>
-
-    <!-- ref l.3-34. The titled group box: a tooltip-border backdrop with its caption hung above the
-         top-left corner, greyed by its own OnLoad. -->
-    <Frame name="OptionFrameBoxTemplate" virtual="true">
-        <Layers>
-            <Layer level="BACKGROUND">
-                <FontString name="$parentTitle" inherits="GameFontHighlight">
-                    <Anchors><Anchor point="BOTTOMLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="9" y="0"/></Offset></Anchor></Anchors>
-                </FontString>
-            </Layer>
-        </Layers>
-        <Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background" edgeFile="Interface\Tooltips\UI-Tooltip-Border" tile="true">
-            <EdgeSize><AbsValue val="16"/></EdgeSize>
-            <TileSize><AbsValue val="16"/></TileSize>
-            <BackgroundInsets><AbsInset left="5" right="5" top="5" bottom="5"/></BackgroundInsets>
-        </Backdrop>
-        <Scripts>
-            <OnLoad>
-                this:SetBackdropBorderColor(0.4, 0.4, 0.4)
-                this:SetBackdropColor(0.5, 0.5, 0.5)
-            </OnLoad>
-        </Scripts>
-    </Frame>
-
-    <!-- ref l.35-39. The panel button at the options window's own 90x21. -->
-    <Button name="OptionsButtonTemplate" inherits="UIPanelButtonTemplate" virtual="true">
-        <Size><AbsDimension x="90" y="21"/></Size>
-    </Button>
-
-    <!-- ref l.40-66. The checkbox with the options window's manners: a 100px hit rect to the right
-         so the LABEL is clickable too, the on/off click sounds, and the tooltipText /
-         tooltipRequirement hover pair an instance sets as plain fields. -->
-    <CheckButton name="OptionsCheckButtonTemplate" inherits="UICheckButtonTemplate" virtual="true">
-        <HitRectInsets><AbsInset left="0" right="-100" top="0" bottom="0"/></HitRectInsets>
-        <Scripts>
-            <!-- The click kit is the state the box has just reached, not the one it left. -->
-            <OnClick>
-                PlaySound(this:GetChecked() and "igMainMenuOptionCheckBoxOn" or "igMainMenuOptionCheckBoxOff")
-            </OnClick>
-            <OnEnter>BenillaOptionsWidget_ShowTooltip(this)</OnEnter>
-            <OnLeave>GameTooltip:Hide()</OnLeave>
-        </Scripts>
-    </CheckButton>
-
-    <!-- ref UIOptionsFrame.xml l.6-10 — see the header. A 26x26 override of the above, and the
-         template the corpus's nameplate addons build their whole options panel out of. -->
+    <!-- ref UIOptionsFrame.xml l.6-10: a 26x26 override of the chain's own
+         `OptionsCheckButtonTemplate`, which it inherits from. -->
     <CheckButton name="UIOptionsCheckButtonTemplate" inherits="OptionsCheckButtonTemplate" virtual="true">
         <Size><AbsDimension x="26" y="26"/></Size>
     </CheckButton>
-
-    <!-- ref l.67-132. The horizontal options slider: a SliderBar backdrop with three labels
-         (caption above, LOW/HIGH under the ends) and the horizontal knob. `text="LOW"`/`"HIGH"` are
-         global-string keys, resolved by the loader's `resolve_text` against GlobalStrings. -->
-    <Slider name="OptionsSliderTemplate" orientation="HORIZONTAL" virtual="true" enableMouse="true">
-        <Size><AbsDimension x="128" y="17"/></Size>
-        <HitRectInsets><AbsInset left="0" right="0" top="-10" bottom="-10"/></HitRectInsets>
-        <Backdrop bgFile="Interface\Buttons\UI-SliderBar-Background" edgeFile="Interface\Buttons\UI-SliderBar-Border" tile="true">
-            <EdgeSize><AbsValue val="8"/></EdgeSize>
-            <TileSize><AbsValue val="8"/></TileSize>
-            <BackgroundInsets><AbsInset left="3" right="3" top="6" bottom="6"/></BackgroundInsets>
-        </Backdrop>
-        <Layers>
-            <Layer level="ARTWORK">
-                <FontString name="$parentText" inherits="GameFontNormalSmall">
-                    <Anchors><Anchor point="BOTTOM" relativePoint="TOP"/></Anchors>
-                </FontString>
-                <FontString name="$parentLow" inherits="GameFontHighlightSmall" text="LOW">
-                    <Anchors><Anchor point="TOPLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="2" y="3"/></Offset></Anchor></Anchors>
-                </FontString>
-                <FontString name="$parentHigh" inherits="GameFontHighlightSmall" text="HIGH">
-                    <Anchors><Anchor point="TOPRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-2" y="3"/></Offset></Anchor></Anchors>
-                </FontString>
-            </Layer>
-        </Layers>
-        <Scripts>
-            <OnEnter>BenillaOptionsWidget_ShowTooltip(this)</OnEnter>
-            <OnLeave>GameTooltip:Hide()</OnLeave>
-        </Scripts>
-        <ThumbTexture name="$parentThumb" file="Interface\Buttons\UI-SliderBar-Button-Horizontal">
-            <Size><AbsDimension x="32" y="32"/></Size>
-        </ThumbTexture>
-    </Slider>
 </Ui>

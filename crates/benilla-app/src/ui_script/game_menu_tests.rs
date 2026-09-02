@@ -43,7 +43,8 @@ fn harness_with(extra: &[&str]) -> UiScript {
         "UIParent.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
-        "UIPanelTemplates.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
     ]
     .into_iter()
     .chain(extra.iter().copied())
@@ -104,6 +105,7 @@ const LADDER: [&str; 7] = [
 /// era shape is ever "tidied".
 #[test]
 fn the_menu_has_the_era_frame_and_button_ladder() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.run("ShowUIPanel(GameMenuFrame)").unwrap();
     s.resolve();
@@ -148,6 +150,7 @@ fn the_menu_has_the_era_frame_and_button_ladder() {
 /// panel — the char-select AddOns screen is the only addon UI.)
 #[test]
 fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = harness();
     s.run("ShowUIPanel(GameMenuFrame)").unwrap();
 
@@ -335,6 +338,7 @@ fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
 /// the completed logout ends the process), which is why they look identical from here.
 #[test]
 fn the_live_buttons_queue_their_intents_and_play_their_kits() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
 
     // Return to Game — just closes, no intent.
@@ -375,6 +379,7 @@ fn the_live_buttons_queue_their_intents_and_play_their_kits() {
 /// mean CAMP fell out of that which-list.
 #[test]
 fn player_camping_opens_a_counting_dialog_whose_early_close_cancels() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("PLAYER_CAMPING", vec![]);
     assert_eq!(
@@ -424,6 +429,7 @@ fn player_camping_opens_a_counting_dialog_whose_early_close_cancels() {
 /// cancelled by its own dialog at t=0 — the character never leaves.)
 #[test]
 fn a_countdown_that_expires_does_not_cancel_the_logout() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("PLAYER_CAMPING", vec![]);
     s.run("StaticPopup_OnUpdate(StaticPopup1, 25)").unwrap();
@@ -444,6 +450,7 @@ fn a_countdown_that_expires_does_not_cancel_the_logout() {
 /// the server: "Exit now". And `LOGOUT_CANCEL` (the server's cancel ack) takes either one down.
 #[test]
 fn player_quiting_offers_exit_now_and_logout_cancel_closes_it() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("PLAYER_QUITING", vec![]);
     s.run("StaticPopup_OnUpdate(StaticPopup1, 0.5)").unwrap();
@@ -487,6 +494,7 @@ fn player_quiting_offers_exit_now_and_logout_cancel_closes_it() {
 /// the next test.
 #[test]
 fn logout_and_exit_read_disabled_while_a_countdown_runs() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("PLAYER_CAMPING", vec![]);
     s.run("ToggleGameMenu(1)").unwrap();
@@ -515,6 +523,7 @@ fn logout_and_exit_read_disabled_while_a_countdown_runs() {
 /// a logout you didn't mean is therefore the whole gesture, and it must not also open the menu.
 #[test]
 fn escape_during_a_countdown_cancels_it_and_does_not_open_the_menu() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("PLAYER_CAMPING", vec![]);
     s.run("ToggleGameMenu()").unwrap();
@@ -545,6 +554,7 @@ fn escape_during_a_countdown_cancels_it_and_does_not_open_the_menu() {
 /// afterwards.
 #[test]
 fn the_world_map_cannot_open_behind_the_menu_and_gives_its_slot_back() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = harness_with(&[
         "GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml", // the map's continent/zone pickers initialize into it at OnLoad
@@ -593,6 +603,7 @@ fn the_world_map_cannot_open_behind_the_menu_and_gives_its_slot_back() {
 /// would have opened the menu goes to the map instead (one eater per press).
 #[test]
 fn nothing_opens_behind_the_world_map_and_escape_closes_it_first() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = harness_with(&[
         "GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
@@ -770,6 +781,7 @@ fn backpack() -> ContainerState {
 /// real load order; the bare-menu harness elsewhere exercises the `or 1` guard implicitly.
 #[test]
 fn the_menu_rides_the_shared_era_window_scale() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness_with(&[
         "GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
