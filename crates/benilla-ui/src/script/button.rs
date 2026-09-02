@@ -816,8 +816,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
     c.set(
+        // GetChecked() -> the NUMBER 1 or nil, never a boolean (1830). Its neighbour
+        // `IsEnabled` two entries up was corrected for the same reason under 1719, whose comment
+        // records that a boolean here killed pfUI's widget module outright; this is that call
+        // finished. The reference proves the shape in its own source rather than only at the
+        // bytes: stock `UIOptionsFrame.xml:310` saves a checkbox as
+        // `tostring(this:GetChecked())` and stock `BuffFrame.lua:71` reads it back as `== "1"`,
+        // a round-trip that only closes on the number.
         "GetChecked",
-        lua.create_function(|lua, this: Table| with_button(lua, &this, |bs| bs.checked))?,
+        lua.create_function(|lua, this: Table| {
+            let checked = with_button(lua, &this, |bs| bs.checked)?;
+            Ok(crate::script::binding_abi::predicate(checked))
+        })?,
     )?;
     lua.set_named_registry_value(REG_CHECKBUTTON_METHODS, c)?;
 

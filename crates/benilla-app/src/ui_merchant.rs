@@ -92,6 +92,17 @@ impl MerchantOpen {
         }
     }
 
+    /// Mark every row of an item **sold out** — the `SMSG_BUY_FAILED` `ITEM_ALREADY_SOLD` arm
+    /// (`0x5dcdbf mov DWORD PTR [esi],0x0`), so a limited-stock row that just refused the click
+    /// stops showing the count that tempted it. Unconditional, as the reference's write is: only a
+    /// limited row can raise this refusal, and the reference does not break on the first match
+    /// either (`0x5dcdcd` walks all 128 cache rows).
+    pub(crate) fn sold_out(&mut self, entry: u32) {
+        for it in self.items.iter_mut().filter(|it| it.entry == entry) {
+            it.current_count = 0;
+        }
+    }
+
     /// Close the open window (a client-side close). Keeps nothing — a re-open re-lists.
     pub(crate) fn clear(&mut self) {
         self.vendor = None;
@@ -143,36 +154,53 @@ impl Plugin for UiMerchantPlugin {
     }
 }
 
-/// The client's message string for a `BuyResult` refusal (`SMSG_BUY_FAILED`); values from
-/// [`buy_result`] (vmangos `ItemDefines.h`). Unknown reasons print their code.
-fn buy_error_text(reason: u8) -> String {
-    match reason {
-        buy_result::CANT_FIND_ITEM => "That item does not exist.".into(),
-        buy_result::ITEM_ALREADY_SOLD => "That item has already been sold.".into(),
-        buy_result::NOT_ENOUGH_MONEY => "You don't have enough money.".into(),
-        buy_result::SELLER_DONT_LIKE_YOU => "The vendor doesn't like you.".into(),
-        buy_result::DISTANCE_TOO_FAR => "You are too far away.".into(),
-        buy_result::ITEM_SOLD_OUT => "The vendor is sold out of that item.".into(),
-        buy_result::CANT_CARRY_MORE => "You can't carry any more of those items.".into(),
-        buy_result::RANK_REQUIRE => "You don't have the required rank for that item.".into(),
-        buy_result::REPUTATION_REQUIRE => {
-            "You don't have the required reputation for that item.".into()
-        }
-        other => format!("Purchase failed ({other})."),
-    }
+/// The one `BuyResult` code the reference deliberately says **nothing** for. It has no vmangos
+/// name because vmangos never sends it: `0x5dcde7`'s jump table sends code 6 to the handler's own
+/// `ret`, past the `DisplayError` its neighbours land on.
+const BUY_SILENT: u8 = 6;
+
+/// The GlobalStrings key a `BuyResult` refusal (`SMSG_BUY_FAILED`) shows — the reference's switch
+/// at `0x5dcdd8`, each arm a `CGGameUI::DisplayError(msgId)` call, read off the binary for
+/// decision 1821. `None` is silence the reference chose, not a hole in the table.
+///
+/// **The `default` arm is a real message, not an invented fallback**: every code outside the
+/// table — 0, 3, 9, 10 and everything from 13 up — shows `ERR_ITEM_NOT_FOUND` (`0x5dce81`, the
+/// `ja` target of `cmp eax,0xc`).
+fn buy_error_key(reason: u8) -> Option<&'static str> {
+    Some(match reason {
+        // One arm (`0x5dcdee`) for both: vmangos calls 1 ALREADY_SOLD and 7 SOLD_OUT, and the
+        // reference tells them apart only by code 1 also zeroing the row
+        // ([`crate::net::apply::npc::vendor_buy_failed`]).
+        buy_result::ITEM_ALREADY_SOLD | buy_result::ITEM_SOLD_OUT => "ERR_VENDOR_SOLD_OUT", // 0x23
+        buy_result::NOT_ENOUGH_MONEY => "ERR_NOT_ENOUGH_MONEY", // 0x25 — speaks, line 0x28
+        buy_result::SELLER_DONT_LIKE_YOU => "ERR_VENDOR_HATES_YOU", // 0x22
+        buy_result::DISTANCE_TOO_FAR => "ERR_VENDOR_TOO_FAR",   // 0x24
+        BUY_SILENT => return None,
+        buy_result::CANT_CARRY_MORE => "ERR_ITEM_MAX_COUNT", // 0x12 — speaks, line 0x1e
+        buy_result::RANK_REQUIRE => "ERR_CANT_EQUIP_RANK",   // 0x05
+        buy_result::REPUTATION_REQUIRE => "ERR_CANT_EQUIP_REPUTATION", // 0x06
+        _ => "ERR_ITEM_NOT_FOUND",                           // 0x17 — the switch's own default
+    })
 }
 
-/// The client's message string for a `SellResult` refusal (`SMSG_SELL_ITEM`'s error path); values
-/// from [`sell_result`] (vmangos `ItemDefines.h`).
-fn sell_error_text(reason: u8) -> String {
-    match reason {
-        sell_result::CANT_FIND_ITEM => "That item does not exist.".into(),
-        sell_result::CANT_SELL_ITEM => "You can't sell that item.".into(),
-        sell_result::CANT_FIND_VENDOR => "That vendor can't be found.".into(),
-        sell_result::YOU_DONT_OWN_THAT_ITEM => "You don't own that item.".into(),
-        sell_result::ONLY_EMPTY_BAG => "You can only sell an empty bag.".into(),
-        other => format!("Sale failed ({other})."),
-    }
+/// The GlobalStrings key a `SellResult` refusal (`SMSG_SELL_ITEM`'s error path) shows — the
+/// reference's switch at `0x5dd22c` (decision 1821).
+///
+/// **Silence is the default here**, the opposite of [`buy_error_key`]: code 0 returns before the
+/// switch (`0x5dd21e`), and 5 and everything from 7 up jump past the `DisplayError` to the
+/// handler's tail. vmangos's own header agrees line for line — its comment on `SELL_ERR_UNK = 5`
+/// is *"nothing appears…"*, and its comments on 2 and 3 (*"merchant doesn't like that item"* /
+/// *"merchant doesn't like you"*) name the two strings the reference picks, which its `CANT_SELL`
+/// / `CANT_FIND_VENDOR` identifiers do not.
+fn sell_error_key(reason: u8) -> Option<&'static str> {
+    Some(match reason {
+        sell_result::CANT_FIND_ITEM => "ERR_ITEM_NOT_FOUND", // 0x17
+        sell_result::CANT_SELL_ITEM => "ERR_VENDOR_NOT_INTERESTED", // 0x21
+        sell_result::CANT_FIND_VENDOR => "ERR_VENDOR_HATES_YOU", // 0x22
+        sell_result::YOU_DONT_OWN_THAT_ITEM => "ERR_NOT_OWNER", // 0x1b
+        sell_result::ONLY_EMPTY_BAG => "ERR_DESTROY_NONEMPTY_BAG", // 0x0b
+        _ => return None,
+    })
 }
 
 /// Resolve one wire [`VendorItem`] into the Lua-facing [`MerchantItem`]: the icon comes straight from
@@ -421,6 +449,7 @@ fn feed_merchant(
     mut last_money: Local<crate::ui_script::VmMemo<Option<u64>>>,
     mut last_name: Local<crate::ui_script::VmMemo<Option<String>>>,
     mut last_vendor: Local<crate::ui_script::VmMemo<Option<u64>>>,
+    mut sink: crate::ui_action::MessageSink,
 ) {
     let Some(mut script) = script else {
         return;
@@ -429,14 +458,21 @@ fn feed_merchant(
     let last_money = last_money.get(&script);
     let last_name = last_name.get(&script);
     let last_vendor = last_vendor.get(&script);
-    // Refusals surface as the client's red error line (the equip/cast path's exact shape).
-    for refusal in errors.0.drain(..) {
-        let text = match refusal {
-            MerchantRefusal::Buy(r) => buy_error_text(r),
-            MerchantRefusal::Sell(r) => sell_error_text(r),
-        };
-        script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
-    }
+    // Refusals go to the surface — and the voice — their message record names (decision 1815):
+    // the vendor's "not enough money" carries error-speech line 0x28, "you can't carry any more"
+    // line 0x1e. A code the reference says nothing for resolves to no key and reaches nothing.
+    let refusals: Vec<_> = errors
+        .0
+        .drain(..)
+        .filter_map(|refusal| {
+            let key = match refusal {
+                MerchantRefusal::Buy(r) => buy_error_key(r)?,
+                MerchantRefusal::Sell(r) => sell_error_key(r)?,
+            };
+            crate::ui_action::keyed_line(&script, key)
+        })
+        .collect();
+    crate::ui_action::show_messages(&mut script, &mut sink, "ui_merchant", refusals);
     // The purse: push it only when it changes (u64 copper straight from PLAYER_FIELD_COINAGE),
     // and fire the real client's PLAYER_MONEY event with it — the money displays (bag + merchant
     // purses) repaint on the event rather than riding some window-content repaint that happens to
@@ -657,6 +693,98 @@ mod tests {
             max_durability: 0,
             buy_count: 1,
         }
+    }
+
+    /// **The two refusal tables, welded to the message ids they were read from** (decision 1821).
+    /// Asserting the key alone would let a plausible-looking rename through; asserting the id it
+    /// resolves to is asserting the `push <id>; call 0x496720` that was actually disassembled.
+    #[test]
+    fn the_refusal_tables_are_the_references_own() {
+        let id = |key: &str| {
+            benilla_ui::messages::by_key(key)
+                .unwrap_or_else(|| panic!("{key} is not a catalog row"))
+                .id
+        };
+        // `SMSG_BUY_FAILED` — the switch at `0x5dcdd8`. Note 1 and 7 share `0x23`, 6 is silent,
+        // and the arms outside the table fall to `0x17` rather than to nothing.
+        for (code, want) in [
+            (0u8, Some(0x17u16)),
+            (1, Some(0x23)),
+            (2, Some(0x25)),
+            (3, Some(0x17)),
+            (4, Some(0x22)),
+            (5, Some(0x24)),
+            (6, None),
+            (7, Some(0x23)),
+            (8, Some(0x12)),
+            (9, Some(0x17)),
+            (10, Some(0x17)),
+            (11, Some(0x05)),
+            (12, Some(0x06)),
+            (13, Some(0x17)),
+            (255, Some(0x17)),
+        ] {
+            assert_eq!(buy_error_key(code).map(id), want, "buy code {code}");
+        }
+        // `SMSG_SELL_ITEM` — the switch at `0x5dd22c`, where the default is silence.
+        for (code, want) in [
+            (0u8, None),
+            (1, Some(0x17u16)),
+            (2, Some(0x21)),
+            (3, Some(0x22)),
+            (4, Some(0x1b)),
+            (5, None),
+            (6, Some(0x0b)),
+            (7, None),
+            (255, None),
+        ] {
+            assert_eq!(sell_error_key(code).map(id), want, "sell code {code}");
+        }
+    }
+
+    /// The two vendor refusals that **speak** — the reason the keys had to replace the hand-written
+    /// English at all (decision 1815's join). Everything else in the two tables is a silent row.
+    #[test]
+    fn the_purse_refusals_carry_their_voice_lines() {
+        let tag = |key: &str| benilla_ui::messages::by_key(key).expect("row").type_tag;
+        assert_eq!(tag("ERR_NOT_ENOUGH_MONEY"), 0x28);
+        assert_eq!(tag("ERR_ITEM_MAX_COUNT"), 0x1e);
+        for key in [
+            "ERR_VENDOR_SOLD_OUT",
+            "ERR_VENDOR_HATES_YOU",
+            "ERR_VENDOR_TOO_FAR",
+            "ERR_ITEM_NOT_FOUND",
+            "ERR_VENDOR_NOT_INTERESTED",
+            "ERR_NOT_OWNER",
+            "ERR_DESTROY_NONEMPTY_BAG",
+            "ERR_CANT_EQUIP_RANK",
+            "ERR_CANT_EQUIP_REPUTATION",
+        ] {
+            assert_eq!(tag(key), 0x44, "{key}");
+        }
+    }
+
+    /// `ITEM_ALREADY_SOLD` zeroes the row it refused, and only that row — the reference's own
+    /// cache write (`0x5dcdbf`), keyed by entry because vmangos puts the entry in that field.
+    #[test]
+    fn a_sold_out_refusal_zeroes_only_that_rows_count() {
+        let mut open = MerchantOpen::default();
+        open.open(7, vec![row(11, 1, 3), row(22, 2, 5), row(11, 3, 2)]);
+        open.sold_out(11);
+        assert_eq!(open.items[0].current_count, 0);
+        assert_eq!(
+            open.items[1].current_count, 5,
+            "a different entry is untouched"
+        );
+        assert_eq!(
+            open.items[2].current_count, 0,
+            "the reference does not stop at the first match"
+        );
+        open.sold_out(999);
+        assert_eq!(
+            open.items[1].current_count, 5,
+            "an entry we do not stock is a no-op"
+        );
     }
 
     #[test]

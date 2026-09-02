@@ -181,23 +181,27 @@ pub(super) fn setup_cloud_layer(
 /// A WMO skybox ([`crate::skybox`]) hides the clouds too: `CSky::Render`'s one shared boolean skips
 /// **all six** sky elements together (`0x6d4a3b test edi,edi; je`), so the painted art is the whole
 /// sky rather than a backdrop the procedural clouds keep drawing over. The art carries its own cloud
-/// banks; layering ours on top lifted the painted zenith out of its near-black.
+/// banks; layering ours on top lifted the painted zenith out of its near-black. The gate is the
+/// slot's **weight** past 0.99 ([`crate::skybox::SkyboxWeight`]): through the body of the 4-second
+/// crossfade the clouds keep drawing and the painted sky alpha-blends over them.
 ///
 /// A **submerged eye** hides them the same way: the scene driver's `0x6812a4` submerged test skips
 /// the whole `CSky::Render` call (byte-VERIFIED, wow-re terrain "the liquid render state") — from
 /// under the surface there is no sky, only the murk.
 pub(super) fn apply_cloud_visibility(
     debug: Res<DebugState>,
-    skybox: Res<crate::skybox::CameraSkybox>,
+    skybox: Res<crate::skybox::SkyboxWeight>,
     underwater: Res<crate::liquid::Underwater>,
     mut dome: Query<&mut Visibility, With<CloudDome>>,
 ) {
     if let Ok(mut vis) = dome.single_mut() {
-        *vis = if debug.lighting.disable_sky_dome || skybox.0.is_some() || underwater.0.any() {
-            Visibility::Hidden
-        } else {
-            Visibility::Inherited
-        };
+        *vis =
+            if debug.lighting.disable_sky_dome || skybox.replaces_celestial() || underwater.0.any()
+            {
+                Visibility::Hidden
+            } else {
+                Visibility::Inherited
+            };
     }
 }
 

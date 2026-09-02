@@ -1,6 +1,6 @@
 //! The per-frame time-of-day RESOLVE: samples `Light.dbc` against the effective game clock (server
 //! clock, manual debug-panel scrub, or the pre-connect noon fallback) into a fresh [`super::WowLighting`]
-//! — the scene-fog stage, the camera-in-WMO interior-fog crossfade ([`WmoFogRamp`]), and the startup
+//! — the scene-fog stage, the camera-in-WMO interior-fog crossfade ([`WmoCrossfade`]), and the startup
 //! seed ([`setup_lighting`]) all live here. Split from the resource type + plugin registration in
 //! `super`.
 
@@ -31,22 +31,31 @@ fn scene_fog(fog_end_raw: f32, fog_start_frac: f32, farclip: f32) -> (f32, f32) 
 /// out (`0x6cefcb–0x6cf051`, wow-re `rf-weather-emission-timeline` ROUND 5).
 const WMO_FOG_RAMP_PER_SEC: f32 = 0.25;
 
-/// The camera-in-WMO **interior fog** blend (`[0xce9bdc]` + the staging `0x6cef43–62`): while the
-/// camera stands in a WMO interior, the scene fog — storm veil included — crossfades toward the
-/// building's own MFOG fog over 4 s, and back out over 4 s on leaving. This is why the reference's
-/// Goldshire inn keeps its warm authored haze while a storm rages outside (the storm's
-/// negative-start veil never reaches the room). The staged triple LATCHES while the camera exits so
-/// the fade-out lerps from the room's fog instead of popping. A mid-interior fog-record switch
-/// (tavern → corridor) snaps the staged target — the client's source-identity guard (`0x6cef92–b5`)
-/// re-arms a lerp there whose exact semantics are un-carved (flagged in 0338); at room scales both
-/// records' fog is ≈0 so the step is invisible.
-#[derive(Default)]
-pub(super) struct WmoFogRamp {
+/// The camera-in-WMO **interior crossfade** — the reference's `[0xce9bdc]` (+ the staging
+/// `0x6cef43–62`), ONE number with exactly two consumers: while the camera stands in a WMO
+/// interior, the scene fog — storm veil included — crossfades toward the building's own MFOG fog
+/// over 4 s and back out over 4 s on leaving, **and the same `t` is the WMO skybox's slot alpha**
+/// ("the skybox alpha and the interior fog blend are the same number" — wow-re `wmo-skybox.md` §3,
+/// VERIFIED; `crate::skybox` reads it through [`Self::t`], never a ramp of its own). This is why
+/// the reference's Goldshire inn keeps its warm authored haze while a storm rages outside (the
+/// storm's negative-start veil never reaches the room), and why Stratholme's painted sky fades in
+/// at exactly the rate its streets shed the scene fog. The staged triple LATCHES while the camera
+/// exits so the fade-out lerps from the room's fog instead of popping. A mid-interior fog-record
+/// switch (tavern → corridor) snaps the staged target — the client's source-identity guard
+/// (`0x6cef92–b5`) re-arms a lerp there whose exact semantics are un-carved (flagged in 0338); at
+/// room scales both records' fog is ≈0 so the step is invisible.
+#[derive(Resource, Default)]
+pub struct WmoCrossfade {
     t: f32,
     staged: Option<crate::wmo_portal::WmoFogTarget>,
 }
 
-impl WmoFogRamp {
+impl WmoCrossfade {
+    /// The crossfade weight this frame, `[0, 1]` — advanced only by [`update_time_lighting`]'s
+    /// blend, read by the skybox weight resolve.
+    pub fn t(&self) -> f32 {
+        self.t
+    }
     /// Advance the ramp by `dt` toward `target` and return the committed `(color, start, end)`.
     /// The staging transform is the record's own law: `end = min(end, farclip)`,
     /// `start = end × start_scalar` (`fmul 0x6cef56` — MFOG start IS a fraction of end in 1.12.1).
@@ -197,7 +206,7 @@ pub(super) fn update_time_lighting(
     view: Res<crate::view::ViewDistance>,
     time: Res<Time>,
     wmo_fog: Res<crate::wmo_portal::CameraWmoFog>,
-    mut wmo_ramp: Local<WmoFogRamp>,
+    mut wmo_ramp: ResMut<WmoCrossfade>,
     mut clock: ResMut<GameClock>,
     mut lighting: ResMut<WowLighting>,
     mut last_dump: Local<Option<u32>>,
@@ -297,7 +306,7 @@ pub(super) fn update_time_lighting(
     // commits 125/500 clear and −139/278 at full storm — the storm's −0.5 fraction yields the
     // negative start = the near veil; the short storm end whites out the middle distance.
     let (fog_start, fog_end) = scene_fog(atmo.fog_end, atmo.fog_start_frac, view.farclip);
-    // The camera-in-WMO interior-fog crossfade (see [`WmoFogRamp`]) — computed as its OWN triple;
+    // The camera-in-WMO interior-fog crossfade (see [`WmoCrossfade`]) — computed as its OWN triple;
     // the scene fog above stays untouched (the round-5 global-overwrite washed the outside view
     // golden through the door — director-caught, corrected per the round-6 Q-I lane map).
     // Submerged, the submerged Light param owns everything — the MFOG record's own underwater
@@ -482,7 +491,7 @@ mod tests {
     /// releases the latch at zero.
     #[test]
     fn wmo_fog_ramp_fades_in_and_out_over_four_seconds() {
-        let mut ramp = WmoFogRamp::default();
+        let mut ramp = WmoCrossfade::default();
         let target = WmoFogTarget {
             color: [1.0, 0.5, 0.0],
             end: 194.4,
@@ -514,7 +523,7 @@ mod tests {
     /// vs `[0xce9b94]`), and start scales off the CLAMPED end.
     #[test]
     fn wmo_fog_staging_clamps_end_to_farclip() {
-        let mut ramp = WmoFogRamp::default();
+        let mut ramp = WmoCrossfade::default();
         let target = WmoFogTarget {
             color: [1.0; 3],
             end: 444.4,

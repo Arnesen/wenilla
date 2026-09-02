@@ -1860,8 +1860,12 @@ pub(super) fn apply_net_updates(
                 new_count,
                 ..
             } => npc::vendor_buy_result(vendor, slot, new_count, &mut merchant),
-            SessionEvent::VendorBuyFailed { reason, .. } => {
-                npc::vendor_buy_failed(reason, &mut ui_actions.3)
+            SessionEvent::VendorBuyFailed {
+                vendor,
+                item_entry,
+                reason,
+            } => {
+                npc::vendor_buy_failed(vendor, item_entry, reason, &mut merchant, &mut ui_actions.3)
             }
             SessionEvent::VendorSellFailed { reason, .. } => {
                 npc::vendor_sell_failed(reason, &mut ui_actions.3)

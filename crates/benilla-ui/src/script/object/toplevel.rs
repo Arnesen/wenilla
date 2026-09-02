@@ -125,7 +125,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model.arena.is_toplevel(h))
+            Ok(crate::script::binding_abi::predicate(
+                model.arena.is_toplevel(h),
+            ))
         })?,
     )?;
     // Raise() — `0x775a50` → `0x76a5b0` → `0x7650f0(this, force = 1)`. Note it is legal on any

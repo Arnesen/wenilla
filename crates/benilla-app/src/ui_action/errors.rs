@@ -205,6 +205,17 @@ impl Shown {
     }
 }
 
+/// Resolve a message key against the VM's own `GlobalStrings.lua` into a [`Shown`] — or `None`
+/// when the key has no string there, which is the reference's own data-suppression face
+/// (`0x4967bd`/`0x4967c5`) and the reason every raise site carries a *key* rather than text.
+///
+/// Lives here rather than in each window because every keyed raise site needs exactly this and
+/// four of them had grown their own copy (decision 1821).
+pub(crate) fn keyed_line(script: &UiScript, key: &'static str) -> Option<Shown> {
+    let text = script.lua().globals().get::<String>(key).ok()?;
+    (!text.is_empty()).then(|| Shown::keyed(key, text))
+}
+
 /// **The one sink** for a resolved message line: put it on the surface its [`MsgKind`] names, and
 /// queue the sound its catalog row names.
 ///

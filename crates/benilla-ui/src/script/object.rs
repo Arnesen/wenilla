@@ -203,6 +203,24 @@ pub fn frame_kind_from_tag(s: &str) -> Option<FrameKind> {
 fn frame_kind_from_str(s: &str) -> Option<FrameKind> {
     Some(match enum_token(s).as_str() {
         "FRAME" => FrameKind::Frame,
+        // `TaxiRouteFrame` — a registered `CreateFrame` type that is a `CSimpleFrame` and NOTHING
+        // else, so it maps to `Frame` rather than earning a kind (decision 1828; wow-re
+        // `ui/scratch/taxiroute-widget-type.md`). Factory `0x495ba0` allocates `0x314`, the same
+        // size the plain-`<Frame>` factory `0x6eec10` allocates for the same base ctor `0x769090`,
+        // and the ctor `0x506950` adds no field. Its vtables are the base's length exactly (36 + 11
+        // slots), so it declares no new virtual; it overrides four slots, of which two are lifetime
+        // plumbing and the other two — `EmitLayer 0x506a60` and a scale hook `0x506ac0` — are DEAD
+        // in 5875: the paint callback `0x506a90` tail-calls `0x506aa0`, which is a bare `ret`, and
+        // every module global it would fill is written by nothing.
+        //
+        // Mapping it to `Frame` is therefore the faithful answer, not a 1203 shortcut — and it is
+        // faithful in the strong sense that `GetObjectType()` must return **"Frame"** and
+        // `IsObjectType("TaxiRouteFrame")` must be **false**: `0x484800` is not overridden, so the
+        // name lives only in the 22-entry tag→factory registry and never becomes a class identity.
+        // The flight-path lines are plain `<Texture>` children the FrameXML creates and rotates
+        // with the 8-argument `SetTexCoord` we already support; `TaxiRouteFrame.cpp` is a vestigial
+        // C++ renderer that draws nothing.
+        "TAXIROUTEFRAME" => FrameKind::Frame,
         "BUTTON" => FrameKind::Button,
         "CHECKBUTTON" => FrameKind::CheckButton,
         // A real registered type (`0x4959a6`), not an alias for Button — decision 1799. Registering

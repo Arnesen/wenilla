@@ -23,6 +23,7 @@ pub use prop_probes::{PropProbeSlot, PropProbes, MAX_PROP_PROBES};
 // — stays in the crate. Off-world producers state values through `LightBlob` and never a row index
 // (see `blob`); `global_light` builds the world's own blob on the frame path.
 pub(crate) use prop_probes::prop_probe_region_offset;
+pub use resolve::WmoCrossfade;
 use resolve::{apply_sky_backdrop, setup_lighting, update_time_lighting};
 pub(crate) use sh::prop_probe_coeffs;
 
@@ -52,7 +53,7 @@ pub struct WowLighting {
     pub(crate) fog_start: f32,
     pub(crate) fog_end: f32,
     /// The **interior** fog triple (DNState+0x80/84/88): `lerp(scene fog → the claimed WMO's MFOG
-    /// fog, t)` on the 4 s camera-in-WMO ramp ([`resolve::WmoFogRamp`]) — equal to the scene triple while
+    /// fog, t)` on the 4 s camera-in-WMO ramp ([`WmoCrossfade`]) — equal to the scene triple while
     /// the camera is outside. Consumed ONLY by the interior lanes (round-6 Q-I consumer map): the
     /// interior WMO-group surfaces and THAT group's doodads (`0x6b5190` / the group-doodad drawer
     /// `0x6b62e0`) — `wow_model.wgsl` selects it by the material interior flag. Terrain, liquid,
@@ -279,6 +280,12 @@ pub struct GameClock {
     pub source: ClockSource,
 }
 
+/// Ordering handle: [`WowLighting`] and [`WmoCrossfade`] are resolved for the frame after this
+/// set. The skybox weight resolve hangs off it — the sky reading a stale crossfade is a frame
+/// where the painted sky and the fog disagree about how far into the building you are.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LightingResolveSet;
+
 /// The lighting subsystem: registers the WoW-light resource + game-clock, a **black** background
 /// (Phase 0 — the DBC sky comes back in a later step), and the two per-frame systems that resolve the
 /// `Light.dbc` values for the time of day and push them onto the materials.
@@ -290,12 +297,14 @@ impl Plugin for LightingPlugin {
             .init_resource::<PropProbes>()
             .init_resource::<GameClock>()
             .init_resource::<WorldTime>()
+            .init_resource::<WmoCrossfade>()
             .insert_resource(ClearColor(Color::BLACK))
             .add_systems(Startup, setup_lighting.after(AssetSet::Open))
             .add_systems(
                 Update,
                 (update_time_lighting, apply_sky_backdrop)
                     .chain()
+                    .in_set(LightingResolveSet)
                     // The storm blend reads this frame's weather densities (decision 0302).
                     .after(crate::weather::WeatherTick)
                     // …and this frame's game clock, which whatever owns the session publishes in

@@ -19,8 +19,28 @@ fn taxi_script() -> UiScript {
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml"); // TaxiNodeOnButtonEnter's tooltip + SetTooltipMoney
     load_xml(&s, "Interface\\FrameXML\\UIErrorsFrame.xml"); // BenillaErrorsFrame_AddMessage — DrawOneHopLines' refusal
-    load_xml(&s, "TaxiFrame.xml");
+                                                            // Three the reference's own TaxiFrame leans on that our transcription did not:
+                                                            //   · GlobalStrings — `ERR_TAXINOPATHS` is a GlobalString, and `AddMessage(nil)` draws an
+                                                            //     empty line rather than raising, so its absence is silent.
+                                                            //   · UIPanelTemplates (.lua then .xml) — `TaxiCloseButton` inherits `UIPanelCloseButton`,
+                                                            //     which lives there and NOT in our UiPanels.xml. Without it the close button loads as a
+                                                            //     bare Button with no handler and a click does nothing at all.
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\TaxiFrame.xml");
     s
+}
+
+/// Seat the flight master as the `"npc"` unit. Stock `TaxiFrame_OnEvent` fills its label from
+/// `UnitName("npc")` (TaxiFrame.lua:27), where our deleted transcription read the `TAXIMAP_OPENED`
+/// argument — so a fixture that only fires the event leaves the reference's label blank.
+fn seat_flight_master(s: &mut UiScript, name: &str) {
+    let npc = benilla_ui::script::UnitState {
+        name: Some(name.into()),
+        ..Default::default()
+    };
+    s.set_unit("npc", Some(npc));
 }
 
 /// A two-node snapshot: Stormwind (Current) and the verified Sentinel Hill hop (Reachable, 110
@@ -59,6 +79,7 @@ fn shipped_taxi_frame_drives_end_to_end() {
     assert!(!s.eval::<bool>("return TaxiFrame:IsVisible()").unwrap());
 
     s.set_taxi(Some(menu()));
+    seat_flight_master(&mut s, "Dungar Longdrink");
     s.fire_event(
         "TAXIMAP_OPENED",
         vec![ScriptValue::Str("Dungar Longdrink".into())],
@@ -67,15 +88,22 @@ fn shipped_taxi_frame_drives_end_to_end() {
 
     assert!(s.eval::<bool>("return TaxiFrame:IsVisible()").unwrap());
     assert_eq!(
-        s.eval::<String>("return TaxiNameText:GetText()").unwrap(),
+        // The reference names the flight-master label `TaxiMerchant` and fills it from
+        // `UnitName("npc")` (TaxiFrame.lua:27) — NOT from the event's argument, which is what our
+        // transcription's `TaxiNameText` read. So the fixture seats the npc unit above.
+        s.eval::<String>("return TaxiMerchant:GetText()").unwrap(),
         "Dungar Longdrink"
     );
 
-    // The two pushed nodes show; the pool's remainder (slot 3 onward) stays hidden.
+    // The two pushed nodes show, and there is no third button AT ALL — the reference builds its
+    // node buttons on demand, one `CreateFrame("Button", "TaxiButton"..i, TaxiRouteMap,
+    // "TaxiButtonTemplate")` per node (TaxiFrame.lua:39), where our transcription pre-made a fixed
+    // pool and hid the tail. Same thing on screen, a different mechanism behind it — so the
+    // expectation moves from "hidden" to "absent".
     assert!(s.eval::<bool>("return TaxiButton1:IsVisible()").unwrap());
     assert!(s.eval::<bool>("return TaxiButton2:IsVisible()").unwrap());
-    assert!(!s.eval::<bool>("return TaxiButton3:IsVisible()").unwrap());
-    assert!(!s.eval::<bool>("return TaxiButton50:IsVisible()").unwrap());
+    assert!(s.eval::<bool>("return TaxiButton3 == nil").unwrap());
+    assert!(s.eval::<bool>("return TaxiButton50 == nil").unwrap());
 
     // A click on node 2 (Sentinel Hill) drains through TakeTaxiNode.
     s.resolve();
@@ -113,6 +141,7 @@ fn no_single_hop_destination_posts_the_error_and_closes() {
             routes: vec![],
         }],
     }));
+    seat_flight_master(&mut s, "Dungar Longdrink");
     s.fire_event(
         "TAXIMAP_OPENED",
         vec![ScriptValue::Str("Dungar Longdrink".into())],
@@ -142,13 +171,17 @@ fn no_single_hop_destination_posts_the_error_and_closes() {
 fn close_button_queues_the_intent_and_hides() {
     let mut s = taxi_script();
     s.set_taxi(Some(menu()));
+    seat_flight_master(&mut s, "Dungar Longdrink");
     s.fire_event(
         "TAXIMAP_OPENED",
         vec![ScriptValue::Str("Dungar Longdrink".into())],
     );
     assert!(s.eval::<bool>("return TaxiFrame:IsVisible()").unwrap());
 
-    s.run("BenillaTaxiCloseButton_OnClick()").unwrap();
+    // The reference's close button is a plain `UIPanelCloseButton` (TaxiFrame.xml:133) — it has no
+    // handler of its own, so the click goes through the template's, which hides the parent panel.
+    // Ours carried a named `BenillaTaxiCloseButton_OnClick`; that went with the file.
+    s.run("TaxiCloseButton:Click()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(s.take_taxi_close());
     assert!(!s.eval::<bool>("return TaxiFrame:IsVisible()").unwrap());

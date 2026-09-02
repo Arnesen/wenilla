@@ -830,7 +830,7 @@ mod loader_tests {
             return XmlBtn:GetText() == "Push Me"
                and XmlBtn:GetNormalTexture() ~= nil
                and XmlBtn:GetPushedTexture() ~= nil
-               and XmlCheck:GetChecked() == true
+               and XmlCheck:GetChecked() == 1
         "#,
             )
             .unwrap();

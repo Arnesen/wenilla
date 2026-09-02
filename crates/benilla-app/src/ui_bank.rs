@@ -103,8 +103,13 @@ impl Plugin for UiBankPlugin {
 }
 
 /// The red error line for a `SMSG_BUY_BANK_SLOT_RESULT` code — the reference GlobalStrings'
-/// `ERR_BANKSLOT_*` texts verbatim (decision 0604: the codes map 1:1 onto them). `OK` never
-/// prints (vmangos doesn't send it; tolerated silently if a server ever does).
+/// `ERR_BANKSLOT_*` texts verbatim (decision 0604: the codes map 1:1 onto them).
+///
+/// **The three ids are the reference's own table, and `None` is the reference's own silence**
+/// (decision 1821): its handler at `0x5e3f8d` reads the `u32`, refuses `>= 3` outright
+/// (`0x5e3f9c cmp eax,0x3; jae`) and otherwise indexes a 3-entry table at `0x80af14` holding
+/// exactly `{0x100, 0x101, 0x102}`. So `OK` (3) is silent by the same bound as an unknown code —
+/// there is no per-code fallback line to print, and printing one would be our invention.
 fn bank_slot_error_key(result: u32) -> Option<&'static str> {
     Some(match result {
         bank_slot_result::FAILED_TOO_MANY => "ERR_BANKSLOT_FAILED_TOO_MANY", // 0x100
@@ -139,22 +144,12 @@ fn feed_bank(
     let last = last.get(&script);
     let last_banker = last_banker.get(&script);
     // Purchase refusals go to the surface — and the voice — their message record names: the
-    // insufficient-funds row carries error-speech line `0x16` (decision 1815). A code with no key
-    // keeps its "(n)" line and stays silent, because there is no record behind it to sound.
+    // insufficient-funds row carries error-speech line `0x16` (decision 1815). A code outside the
+    // reference's three is silent, exactly as its `jae` makes it ([`bank_slot_error_key`]).
     let lines: Vec<_> = errors
         .0
         .drain(..)
-        .filter_map(|result| match bank_slot_error_key(result) {
-            Some(key) => {
-                let text = script.lua().globals().get::<String>(key).ok()?;
-                (!text.is_empty()).then(|| crate::ui_action::Shown::keyed(key, text))
-            }
-            None if result == bank_slot_result::OK => None,
-            None => Some(crate::ui_action::Shown::unkeyed(
-                benilla_ui::messages::MsgKind::Error,
-                format!("Bank slot purchase failed ({result})."),
-            )),
-        })
+        .filter_map(|result| crate::ui_action::keyed_line(&script, bank_slot_error_key(result)?))
         .collect();
     crate::ui_action::show_messages(&mut script, &mut sink, "ui_bank", lines);
     let store = self_q.iter().next();
@@ -220,7 +215,9 @@ mod tests {
     use super::*;
 
     /// The refusal-code → red-line map: the three vmangos failure codes print the reference
-    /// GlobalStrings verbatim, OK stays silent, an unknown code prints its number.
+    /// GlobalStrings verbatim, and everything else — `OK` and any unknown code alike — is silent,
+    /// which is the reference's own `cmp eax,0x3; jae` and not a policy of ours (1821). The ids
+    /// are asserted, not just the keys: those are what `0x80af14` actually holds.
     #[test]
     fn bank_slot_error_keys() {
         assert_eq!(
@@ -236,14 +233,20 @@ mod tests {
             Some("ERR_BANKSLOT_NOTBANKER")
         );
         assert_eq!(bank_slot_error_key(bank_slot_result::OK), None);
-        assert_eq!(bank_slot_error_key(99), None, "the feed's own \"(n)\" arm");
-        // Every key is a catalog row, and the insufficient-funds one is the spoken one (1815).
-        for key in [
-            "ERR_BANKSLOT_FAILED_TOO_MANY",
-            "ERR_BANKSLOT_INSUFFICIENT_FUNDS",
-            "ERR_BANKSLOT_NOTBANKER",
+        assert_eq!(
+            bank_slot_error_key(99),
+            None,
+            "past the reference's own bound"
+        );
+        // Every key is a catalog row, at the id `0x80af14` holds for its code; and the
+        // insufficient-funds one is the spoken one (1815).
+        for (key, id) in [
+            ("ERR_BANKSLOT_FAILED_TOO_MANY", 0x100u16),
+            ("ERR_BANKSLOT_INSUFFICIENT_FUNDS", 0x101),
+            ("ERR_BANKSLOT_NOTBANKER", 0x102),
         ] {
             let r = benilla_ui::messages::by_key(key).expect("catalog row");
+            assert_eq!(r.id, id, "{key}");
             assert_eq!(r.kind, benilla_ui::messages::MsgKind::Error, "{key}");
         }
         assert_eq!(

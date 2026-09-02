@@ -17,7 +17,9 @@ fn enable_mouse_gates_hit_testing() {
         local b = CreateFrame("Frame", "B")
         b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(800, 600); b:EnableMouse(false)
         b:SetScript("OnEnter", function(self) who = self:GetName() end)
-        assert(a:IsMouseEnabled() == true and b:IsMouseEnabled() == false)
+        -- 1/nil, not a boolean (1830): this is the exact comparison shape that inverts, so the
+        -- test asserts it rather than leaning on truthiness.
+        assert(a:IsMouseEnabled() == 1 and b:IsMouseEnabled() == nil)
     "#,
     )
     .unwrap();

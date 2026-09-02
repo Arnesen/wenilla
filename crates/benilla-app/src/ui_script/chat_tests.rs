@@ -603,8 +603,12 @@ fn get_chat_window_info_shown_matches_the_shipped_frames() {
     for i in 1..=7 {
         let agrees: bool = s
             .eval(&format!(
+                // Both sides are normalised to a boolean before comparing: `IsShown` answers the
+                // NUMBER 1 or nil (1830), so comparing it straight against `shown ~= nil` compares
+                // a number with a boolean and is false for every window. This test is about the two
+                // AGREEING, not about either one's shape.
                 "local _, _, _, _, _, _, shown = GetChatWindowInfo({i})\n\
-                 return (shown ~= nil) == ChatFrame{i}:IsShown()"
+                 return (shown ~= nil) == (ChatFrame{i}:IsShown() ~= nil)"
             ))
             .unwrap();
         assert!(

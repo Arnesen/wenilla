@@ -1432,20 +1432,6 @@ mod tests {
                  update; our `inventory_alerts` snapshot is recomputed on every inventory push \
                  instead, so the recompute exists and only the Lua verb that forces one does not.",
             ),
-            (
-                "QuestTimerFrame.xml",
-                "QuestLog_SetSelection",
-                "a FrameXML function, declared in stock `QuestLogFrame.lua:308` — which we do not \
-                 source, because our own `QuestLogFrame.xml` is that window. Clicking a quest \
-                 TIMER raises (`QuestTimerFrame.lua:43`). It arrives with the quest log's own \
-                 migration and not before.",
-            ),
-            (
-                "QuestTimerFrame.xml",
-                "QuestLog_Update",
-                "the twin of the line above, `QuestLogFrame.lua:107`, called on the next line \
-                 (`QuestTimerFrame.lua:44`).",
-            ),
         ];
 
         let toc = &super::super::addons::Addon::builtin().toc.files;

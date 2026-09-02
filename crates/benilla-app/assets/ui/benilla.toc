@@ -755,11 +755,19 @@ TrainerFrame.xml
 #
 # Kept in the "NPC session windows grouped" cluster beside Trainer/Taxi, and after MerchantFrame.
 Interface\FrameXML\BankFrame.xml
-# The taxi-map window (decision 0484 phase 2): the flight-master session, driven by the
-# taxi engine seam (`benilla-ui/src/script/taxi.rs`) over `crate::ui_taxi`'s feed/drain.
-# Loaded right after TrainerFrame per the same "NPC session windows grouped" posture — it
-# needs only Fonts/UiPanels/GameTooltip (SetTooltipMoney), both already loaded above.
-TaxiFrame.xml
+# ══ THE FLIGHT MAP — the reference's own, off the player's chain (1751) ══
+# The flight-master session (decision 0484 phase 2), driven by the taxi engine seam
+# (`benilla-ui/src/script/taxi.rs`) over `crate::ui_taxi`'s feed/drain — unchanged; only the window
+# in front of it is the reference's now. Our 557-line transcription carried the same five stock
+# globals plus eight helpers of its own, none of which anything outside that file named.
+#
+# The one thing it needed was the `<TaxiRouteFrame>` widget type, which is registered now (1828) —
+# a `CSimpleFrame` and nothing else, so it is `FrameKind::Frame` and the route lines stay what the
+# reference makes them: plain `<Texture>` children rotated by an 8-argument `SetTexCoord`.
+#
+# Pulls only `TaxiFrame.lua`, and still needs only Fonts/UiPanels/GameTooltip (SetTooltipMoney),
+# all loaded above — so it keeps its seat in the "NPC session windows grouped" cluster.
+Interface\FrameXML\TaxiFrame.xml
 # The stable-master window (decision 1676): the hunter's three-slot pet stable over the stable
 # API (`benilla-ui/src/script/stable.rs`) + the app's feed/drain. Kept in the "NPC session
 # windows grouped" cluster beside Trainer/Bank/Taxi. Two of its dependencies are resolved at
@@ -771,7 +779,13 @@ TaxiFrame.xml
 # longer has to, and stays here only because the NPC-session cluster is where it belongs. The rest
 # (ItemButtonTemplate's SetItemButtonTexture, GameTooltip, UiPanels' ShowUIPanel/HideUIPanel,
 # UIParent's BuildListString) are resolved when the window repaints, so their order is free.
-PetStable.xml
+#
+# ══ THE REFERENCE'S OWN, off the player's chain (1751) ══
+# A true 1:1 swap: our transcription and the stock file declare the SAME frame names and the SAME
+# four globals (`PetStable_OnLoad`/`_OnEvent`/`_Update`/`_NoPetsAllowed`), so nothing that names
+# either moves — `ui_stable.rs`, `names.rs` and `net/apply/npc.rs` all reach it by stock names
+# already, and `portrait`'s booth keys on `PetStableModel`, which both spell the same.
+Interface\FrameXML\PetStable.xml
 # The auction house (decision 1511): the three-tab doublewide window over the auction API
 # (`benilla-ui/src/script/auction.rs`) + the app's feed/drain. Kept in the "NPC session
 # windows grouped" cluster beside Trainer/Bank/Taxi, and loaded AFTER MoneyFrame (its eight

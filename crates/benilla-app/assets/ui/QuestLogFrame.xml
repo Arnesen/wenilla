@@ -1071,6 +1071,44 @@
         -- `doNotScroll` (pin §5's asymmetry, threaded through to `BenillaQuestLogDetail_Update`):
         -- absent/falsy for a manual call (a row click, the window's own OnShow); `true` from the
         -- QUEST_LOG_UPDATE event handler below.
+        -- ── The reference's own two names for what this window already does ─────────────────
+        --
+        -- `QuestTimerFrame.xml` is the reference's own file, on the chain since 1751, and its
+        -- `QuestTimerButton_OnClick` (QuestTimerFrame.lua:41-45) does exactly three things:
+        -- ShowUIPanel, `QuestLog_SetSelection(...)`, `QuestLog_Update()`. Neither of the last two
+        -- existed anywhere in this tree, so clicking a quest timer raised. Defining them here is
+        -- not a stub of an engine verb (1203) — both are FrameXML functions, and this file is our
+        -- stand-in for `QuestLogFrame.lua`, which is where the reference defines them. Every other
+        -- function in this window has the same relationship to its stock twin; these two were
+        -- simply missed because nothing of ours called them.
+        --
+        -- `QuestLog_SetSelection`'s stock body (QuestLogFrame.lua:317-345) is mostly frame work
+        -- that only the stock window has — `QuestLogTitle`..id, `QuestLogHighlightFrame`,
+        -- `QuestLogSkillHighlight`. What survives the re-expression is its LAW: a header never
+        -- becomes the selection (it folds instead), and a real quest is selected and repainted.
+        -- That is the same fork `BenillaQuestLogTitle_OnClick` above already implements, so this
+        -- is the shared body rather than a second copy of it.
+        function QuestLog_SetSelection(index)
+            if not index or index == 0 then return end
+            local _, _, _, isHeader, isCollapsed = GetQuestLogTitle(index)
+            if isHeader then
+                if isCollapsed and type(ExpandQuestHeader) == "function" then
+                    ExpandQuestHeader(index)
+                elseif type(CollapseQuestHeader) == "function" then
+                    CollapseQuestHeader(index)
+                end
+                return
+            end
+            SelectQuestLogEntry(index)
+        end
+
+        -- The reference's `QuestLog_Update` (QuestLogFrame.lua:107). Ours has carried this body
+        -- under a `Benilla` prefix; the stock name is the one the chain calls, and having it here
+        -- also shrinks the delta when this window itself migrates.
+        function QuestLog_Update(doNotScroll)
+            BenillaQuestLogFrame_Update(doNotScroll)
+        end
+
         function BenillaQuestLogFrame_Update(doNotScroll)
             QuestLog_SetFirstValidSelection()
             BenillaQuestLogList_Update()

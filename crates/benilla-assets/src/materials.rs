@@ -345,9 +345,13 @@ impl MaterialExtension for WowModelExt {
         // The nudge now lives in `wow_model.wgsl`'s vertex stage, an exact relative scale of clip z
         // driven by `sun_scale.y` (uniform DATA, no pipeline axis) — same one-ULP-per-index
         // semantics, byte-verified intent unchanged (wow-5875-re wmo-batch-blend-depth-state.md).
-        if key.bind_group_data.fade {
+        if key.bind_group_data.fade && !key.bind_group_data.sky_depth {
             // The distance-fade blend twin needs depth-write ON so near geometry occludes far within the
-            // same fading model — force it regardless of the per-flag rule above.
+            // same fading model — force it regardless of the per-flag rule above. EXCEPT on the
+            // WMO-skybox lane: its twin exists for the 4-second crossfade, where every fragment
+            // forces the one far depth — there is no within-model occlusion to preserve, and the
+            // sky's own law is depth-write off, always (the fragment leaves the z-buffer at its
+            // clear value so the world and the forced-far glare quads order by depth alone).
             if let Some(ds) = descriptor.depth_stencil.as_mut() {
                 ds.depth_write_enabled = true;
             }

@@ -42,6 +42,7 @@ pub(super) struct WorldReadout<'w, 's> {
     room: Res<'w, benilla_world::wmo_portal::CameraInteriorClaim>,
     windows: Res<'w, benilla_world::wmo_portal::ExteriorWindows>,
     skybox: Res<'w, benilla_world::skybox::CameraSkybox>,
+    skybox_weight: Res<'w, benilla_world::skybox::SkyboxWeight>,
     streamer: Res<'w, benilla_world::terrain_stream::TerrainStreamer>,
     self_guid: Res<'w, crate::net::SelfGuid>,
     names: ResMut<'w, crate::names::NameCache>,
@@ -100,11 +101,17 @@ pub(super) fn world_section(ui: &mut egui::Ui, world: &mut WorldReadout) {
         // The WMO skybox engagement, right beside the interior claim it derives from: both come off
         // the camera's down-ray seed, so when the backdrop flips between the building's painted sky
         // and the Light.dbc gradient, this is the line that says which — and whether the claim moved
-        // under it. From the chair the two are only distinguishable by colour.
+        // under it. From the chair the two are only distinguishable by colour. The weight is the
+        // 4-second crossfade (== the interior-fog blend, one number): `w 0.00` beside a name means
+        // the flood published a skybox the crossfade hasn't engaged — faithful standing outside
+        // the gate, not a resolve bug.
         match world.skybox.0.as_deref() {
             Some(path) => {
                 let leaf = path.rsplit('\\').next().unwrap_or(path);
-                line.push_str(&format!("  ·  skybox {leaf}"));
+                line.push_str(&format!(
+                    "  ·  skybox {leaf} w {:.2}",
+                    world.skybox_weight.0
+                ));
             }
             None => line.push_str("  ·  sky gradient"),
         }

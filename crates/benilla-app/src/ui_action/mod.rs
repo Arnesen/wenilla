@@ -66,8 +66,8 @@ pub(crate) struct CooldownEvents;
 pub(crate) use cast_send::{CastCommit, CastLadder};
 pub(crate) use cast_target::AutoSelfCast;
 pub(crate) use errors::{
-    attack_actor_refusal, reagent_totem_refusal, show_messages, ui_error_text, CastErrors,
-    CastFail, MessageSink, MountErrors, Shown, UiError, UiErrorKeys, UiErrorTexts,
+    attack_actor_refusal, keyed_line, reagent_totem_refusal, show_messages, ui_error_text,
+    CastErrors, CastFail, MessageSink, MountErrors, Shown, UiError, UiErrorKeys, UiErrorTexts,
 };
 // `pub(crate)`: the target chain registers the cursor pre-empt + the click commit, and the
 // spellbook/stance/craft drains thread the mode through the one cast-send path (decision 0792).

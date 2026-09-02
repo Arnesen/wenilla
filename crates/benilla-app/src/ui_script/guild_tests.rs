@@ -743,7 +743,9 @@ fn the_rank_editor_loads_its_flags_and_arms_accept_on_an_edit() {
     s.run("GuildControlPopupFrameCheckbox5:Click()").unwrap();
     assert_eq!(
         calls(&s),
-        "GuildControlSetRankFlag:5:true",
+        // The Lua hands `this:GetChecked()` straight through, and in 1.12 that is the NUMBER 1
+        // (1830) — so 1 is what the reference's own call carries too.
+        "GuildControlSetRankFlag:5:1",
         "the checkbox's own ID is what reaches the engine"
     );
     assert!(enabled(&s, "GuildControlPopupAcceptButton"));

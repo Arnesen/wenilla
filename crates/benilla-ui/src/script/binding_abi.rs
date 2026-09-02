@@ -163,6 +163,36 @@ pub(crate) fn optional_string(lua: &Lua, v: &Value) -> Option<String> {
 /// *strings* `"0"`/`"1"`, and a re-implementation wired to `lua_toboolean` inverts every
 /// string-valued option in the game. Equally, `"0.5"` and `"-1"` are decided by their first byte
 /// alone — false and `default` — never by their numeric value.
+/// A widget **predicate's return**: the NUMBER `1` for true, `nil` for false — never a Lua boolean.
+///
+/// The return-side counterpart to [`bool_or_default`], and the same class of fact: 1.12 widget
+/// bindings do not push booleans. `lua_pushboolean 0x6f39f0` has seven call sites in the whole
+/// image and not one of them is inside a widget registrar body — every predicate goes through
+/// `lua_pushnumber`/`lua_pushnil`. Decision 1830.
+///
+/// **Truthiness hides the difference and direct comparison inverts it**, which is why this survived
+/// so long. `if frame:IsVisible()` reads the same either way; `if frame:IsVisible() == nil` does
+/// not — under a boolean a hidden frame answers `false`, and `false == nil` is FALSE, so the caller
+/// concludes the frame is visible exactly when it is not. The 1.12 addon corpus has 21 such direct
+/// comparisons (`IsVisible() == nil` ×9, `GetChecked() == 1` ×6, `IsVisible() ~= nil` ×4, and one
+/// each of `~= 1` / `== 1`) across Questie, AtlasQuest, CT_BagMod, MikScrollingBattleText's options
+/// and `_dl`.
+///
+/// The reference proves its own shape without needing the bytes: stock `UIOptionsFrame.xml:310`
+/// saves a checkbox as `SHOW_BUFF_DURATIONS = tostring(this:GetChecked())` and stock
+/// `BuffFrame.lua:71` reads it back as `== "1"`. That round-trip only closes if `GetChecked`
+/// returns the number 1 — `tostring(true)` is `"true"`, and buff timers would never appear.
+///
+/// Adopting it is strictly safer than what it replaces: every `if x` and `not x` site reads
+/// identically, and only the direct comparisons change — from wrong to right.
+pub(crate) fn predicate(b: bool) -> Value {
+    if b {
+        Value::Integer(1)
+    } else {
+        Value::Nil
+    }
+}
+
 pub(crate) fn bool_or_default(v: Option<&Value>, default: bool) -> bool {
     let Some(v) = v else {
         return default; // LUA_TNONE

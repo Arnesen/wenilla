@@ -81,6 +81,65 @@ fn every_error_key_in_the_source_is_a_catalog_row() {
     );
 }
 
+/// **The claim this file's own doc has always made, finally checked** (decision 1821): a key the
+/// source names must not only be a catalog row, it must **resolve to text**.
+///
+/// The two are not the same, and the difference is the failure this file exists to catch. A row's
+/// `key` is a `GlobalStrings.lua` *lookup*, and the shipped file has no entry for a good many of
+/// them — that absence is the reference's own data-suppression face, and a raise site that picks
+/// one of those rows is silent for good. The walk above would pass it.
+///
+/// Worth closing now because 1821 moved four more windows' refusals onto keys (the vendor's two
+/// tables, the banker's, the mailbox's), where a superseded or mistyped key costs a whole window's
+/// worth of lines rather than one toast. Skips without client data.
+#[test]
+fn every_error_key_in_the_source_resolves_to_real_text() {
+    /// Keys whose row the shipped `GlobalStrings.lua` has **no string for**, so the reference
+    /// itself shows nothing when it raises them. Both are documented where they are raised —
+    /// `ui_items::equip_error` (errorId 362) and `ui_action::cast_fail` (the pet-happiness arm).
+    /// A third entry here is a defect until someone proves otherwise.
+    const SILENT_IN_5875: &[&str] = &["ERR_CANT_BE_DISENCHANTED", "ERR_NOT_HAPPY_ENOUGH"];
+
+    let data = match benilla_formats::wow_data() {
+        Some(d) => d,
+        None => return,
+    };
+    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+    let src = chain
+        .read_file("Interface\\FrameXML\\GlobalStrings.lua")
+        .expect("GlobalStrings.lua in the chain");
+    let vm = benilla_ui::script::UiScript::new().expect("VM");
+    vm.run(&String::from_utf8_lossy(&src)).expect("runs clean");
+
+    let mut sources = Vec::new();
+    walk(Path::new("src"), &mut sources);
+    walk(Path::new("../benilla-ui/src"), &mut sources);
+    let keys: BTreeSet<String> = sources.iter().flat_map(|s| err_keys(s)).collect();
+
+    let mut resolved = 0;
+    let silent: Vec<&String> = keys
+        .iter()
+        .filter(|k| !NOT_A_MESSAGE.contains(&k.as_str()))
+        .filter(|k| !SILENT_IN_5875.contains(&k.as_str()))
+        .filter(|k| {
+            let text: String = vm.lua().globals().get(k.as_str()).unwrap_or_default();
+            resolved += usize::from(!text.is_empty());
+            text.is_empty()
+        })
+        .collect();
+    assert!(
+        silent.is_empty(),
+        "these keys are catalog rows but resolve to NOTHING in the shipped GlobalStrings.lua, so \
+         every line raised through them is invisible: {silent:?}"
+    );
+    // A floor, not a ledger: the point is that the VM really loaded the file, so an empty `vm`
+    // cannot make the sweep above vacuously green.
+    assert!(
+        resolved > 150,
+        "only {resolved} keys resolved — did GlobalStrings load?"
+    );
+}
+
 /// **The other half of the same claim, on real data: a key that carries a VOICE line can actually
 /// be spoken** (decision 1815).
 ///

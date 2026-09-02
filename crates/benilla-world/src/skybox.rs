@@ -65,11 +65,26 @@
 //! in [`crate::sky_order`]), so the world paints over it and the shell is free to sit inside the
 //! room's own geometry.
 //!
+//! **The slot has a WEIGHT, and the weight is the 4-second crossfade.** The WMO slot is filled per
+//! frame as `0x6d4810(0, [0xca8080], [0xce9bdc])` — and `[0xce9bdc]` is the camera-in-WMO interior
+//! crossfade, THE same number the MFOG fog lerp rides (±0.25/s = `[0x8115b0]`, clamped [0,1];
+//! wow-re `wmo-skybox.md` §3: "the skybox alpha and the interior fog blend are the same number").
+//! A slot draws only at weight > 0 (`0x6d4afe`), with the weight multiplied into every batch's
+//! combined alpha (`0x710cb0` → `[CM2Model+0x180]`) — and a batch at `0 < A < 1` is promoted to
+//! SRC_ALPHA blending whatever its authored mode (`m2-blend-promotion-zfill.md`), so walking
+//! through Stratholme's gate alpha-blends the painted sky in over the still-standing celestial
+//! pass over 4 seconds, and back out on leaving. Here: [`crate::lighting::WmoCrossfade`] publishes
+//! the number, [`SkyboxWeight`] resolves the slot's weight from it (the DBC/ghost slot is
+//! hardcoded 1.0 — that pop is faithful), and [`apply_skybox_visibility`] applies it through the
+//! entity feather rails (`MeshTag` alpha + the promotion twin).
+//!
 //! **Scope — the skybox replaces the WHOLE celestial pass, not just the backdrop.** `CSky::Render`
 //! carries one shared boolean (`0x6d49cd` sets it, `0x6d49fb`/`0x6d4a2e` clear it once any slot's
 //! weight exceeds `[0x808aac]` = 0.99) and `0x6d4a3b test edi,edi; je` skips **all six** element
 //! draws together — stars, sun disc, both moons, gradient band and cloud dome. There is no
-//! per-element gating. Confirmed in a live GL capture of the reference standing in King's Square:
+//! per-element gating; below the 0.99 threshold — i.e. for all but the last 40 ms of the fade —
+//! the six elements still draw and the skybox blends over them ([`SkyboxWeight::replaces_celestial`]).
+//! Confirmed in a live GL capture of the reference standing in King's Square:
 //! the entire `[0.975, 0.98]` sky slice is three `count=12` draws (the cube's three texture pairs)
 //! and nothing else, identically in every frame. Only the **glare** quads survive — they render on
 //! their own later path (`0x483740 → 0x6d48c0 → 0x7e57e0`), outside this pass.
@@ -80,12 +95,13 @@
 use std::collections::HashSet;
 
 use bevy::asset::RenderAssetUsages;
-use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::mesh::{Indices, MeshTag, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::model_render::M2BatchMaterials;
 use crate::view::WorldCamera;
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
+use benilla_assets::materials::WowModelMaterial;
 use benilla_assets::WmoModel;
 use benilla_assets::{LockRecover, WorldAssets};
 
@@ -100,10 +116,50 @@ const SHOW_SKYBOX: u32 = 0x40000;
 #[derive(Resource, Default, PartialEq, Eq)]
 pub struct CameraSkybox(pub Option<String>);
 
+/// The resolved skybox's slot WEIGHT this frame — the second half of the resolve, and the number
+/// that makes the sky *crossfade* instead of pop (the report this closes). Per the byte law
+/// (module header + wow-re `wmo-skybox.md` §3–5):
+///
+/// - the **WMO slot's** weight is `[0xce9bdc]`, the camera-in-WMO interior crossfade — THE same
+///   number the MFOG fog lerp rides ([`crate::lighting::WmoCrossfade`], ±0.25/s, a 4-second fade
+///   in and out). Engagement is the fog's own (claim + MFOG count > 1 + a true-interior
+///   containing group), so at Stratholme's gate the painted sky fades in over the celestial pass
+///   exactly as the storm veil fades out of the streets;
+/// - the **DBC/ghost slot's** weight is hardcoded `1.0` whenever it is filled (`0x6d2260`) — the
+///   ghost sky pops, faithfully;
+/// - `0.0` when no skybox resolves — including a skybox *named* by the flood while the crossfade
+///   sits at 0 (standing outside the city gate: the flood reaches flagged groups through the
+///   doorway and publishes the name, but the reference draws a slot only at weight > 0, so no
+///   painted sky shows until you are actually in).
+///
+/// Consumers: [`apply_skybox_visibility`] (draw gate `weight > 0` = `0x6d4afe`, and the per-batch
+/// alpha), and the celestial stand-down gates in [`crate::sky`], [`crate::sun`] and
+/// [`crate::clouds`] via [`Self::replaces_celestial`].
+#[derive(Resource, Default, PartialEq)]
+pub struct SkyboxWeight(pub f32);
+
+impl SkyboxWeight {
+    /// Does the skybox replace the whole celestial pass this frame? `weight > 0.99`
+    /// (`[0x808aac]`, tested at `0x6d49e8`/`0x6d4a1f`): below it the six celestial elements
+    /// still draw and the skybox alpha-blends OVER them — that compositing is the visible half
+    /// of the 4-second crossfade.
+    pub fn replaces_celestial(&self) -> bool {
+        self.0 > 0.99
+    }
+}
+
 /// Marks one batch of a built skybox model, tagged with the model path it belongs to (a session can
 /// walk through more than one skybox building, and the built entities are cached, not rebuilt).
 #[derive(Component)]
-struct SkyboxPart(String);
+struct SkyboxPart {
+    /// The skybox model path this batch belongs to.
+    path: String,
+    /// The batch's authored-blend material — what it draws with at weight 1.0.
+    steady: Handle<WowModelMaterial>,
+    /// The blend-promotion twin for `0 < weight < 1` (`m2-blend-promotion-zfill.md`; equal to
+    /// `steady` for a batch whose authored mode already blends).
+    fade_blend: Handle<WowModelMaterial>,
+}
 
 /// This batch **spins**: every one of its vertices is wholly weighted to one parentless
 /// rotation-only bone, so the authored motion is a rigid transform about that bone's pivot and needs
@@ -150,6 +206,7 @@ impl Plugin for SkyboxPlugin {
         // No `MaterialPlugin` of its own any more: a skybox batch is a `WowModelMaterial` like every
         // other model batch, and that plugin is already loaded.
         app.init_resource::<CameraSkybox>()
+            .init_resource::<SkyboxWeight>()
             .init_resource::<BuiltSkyboxes>()
             .add_systems(
                 Update,
@@ -160,6 +217,10 @@ impl Plugin for SkyboxPlugin {
                     // move that changes rooms lands a frame late, or not at all on the frame it
                     // matters, and the backdrop flickers between the painted sky and the gradient.
                     .after(crate::wmo_portal::WmoPvsSet)
+                    // …and the slot weight is this frame's crossfade `t`, advanced by the lighting
+                    // resolve — a stale read here is a frame where the sky's alpha and the interior
+                    // fog disagree about how far into the building the camera is.
+                    .after(crate::lighting::LightingResolveSet)
                     .in_set(SkyboxResolve),
             )
             // Camera-anchored placement runs post-propagation off the SAME-frame camera pose — the
@@ -177,12 +238,14 @@ impl Plugin for SkyboxPlugin {
 /// carry `SHOW_SKYBOX`, and does its root name a MOSB?*
 ///
 /// That distinction is the whole bug this replaced. Reading the **containing** group instead is
-/// wrong twice over at Stratholme's King's Square: the camera stands in group 39, the root's only
-/// EXTERIOR (`0x8`) group, which does not set `SHOW_SKYBOX` — and [`CameraInteriorClaim`] is
-/// deliberately `None` over an EXTERIOR group's floor, so the old resolve could not even see the
-/// placement. The reference draws the painted sky there regardless, because 61 of the 83 groups the
-/// flood reaches from group 39 do carry the bit. (Verified on the asset: BFS over `Stratholme_B`'s
-/// MOPR reaches 82 of 83 groups from group 39, 61 of them flagged.)
+/// wrong at Stratholme's King's Square: the BSP containment there is group 39, the root's only
+/// EXTERIOR (`0x8`) group, which does not set `SHOW_SKYBOX` — yet the reference draws the painted
+/// sky, because 61 of the 83 groups the flood reaches from group 39 do carry the bit. (Verified on
+/// the asset: BFS over `Stratholme_B`'s MOPR reaches 82 of 83 groups from group 39, 61 of them
+/// flagged.) The camera's down-ray CLAIM is a different resolver and is *not* cleared there — at
+/// the reported spot it seeds the street group g08 (`0x42805`, a true interior; pin-probed
+/// 2026-09-01, decision 1827) — which is what lets the crossfade weight engage in the square while
+/// the skybox *name* comes from the flood predicate above.
 #[allow(clippy::too_many_arguments)]
 fn resolve_camera_skybox(
     instances: Query<&crate::wmo_portal::WmoPortalInstance>,
@@ -191,7 +254,9 @@ fn resolve_camera_skybox(
     viewer: Res<crate::view::Viewer>,
     current_map: Option<Res<crate::world_map::CurrentMap>>,
     cam: Query<&GlobalTransform, With<WorldCamera>>,
+    crossfade: Res<crate::lighting::WmoCrossfade>,
     mut want: ResMut<CameraSkybox>,
+    mut weight: ResMut<SkyboxWeight>,
 ) {
     // **The ghost sky first — it wins outright.** Slot B is filled at weight 1.0 and that makes the
     // reference skip loop A entirely (module header, wow-re §3–4), so a dead player under
@@ -210,6 +275,10 @@ fn resolve_camera_skybox(
             if want.0.as_deref() != Some(sky) {
                 want.0 = Some(sky.to_owned());
             }
+            // Slot B's weight is hardcoded 1.0 whenever it is filled (`0x6d26cb`/`0x6d26d0`):
+            // the ghost sky pops in whole, and — being > 0.99 — replaces the celestial pass on
+            // the same frame the death atmosphere lands.
+            weight.set_if_neq(SkyboxWeight(1.0));
             return;
         }
     }
@@ -242,6 +311,14 @@ fn resolve_camera_skybox(
     if want.0 != resolved {
         want.0 = resolved;
     }
+    // The WMO slot draws at the interior crossfade's weight — `[0xce9bdc]`, the SAME number the
+    // MFOG fog lerp rides — and at 0.0 when nothing resolved. A resolved name at weight 0 is a
+    // real state (the flood publishes through a doorway the camera hasn't walked into), and it is
+    // exactly the reference's: the slot is filled, and `0x6d4afe` declines to draw it.
+    weight.set_if_neq(SkyboxWeight(match want.0 {
+        Some(_) => crossfade.t(),
+        None => 0.0,
+    }));
 }
 
 /// Build the wanted skybox's entities the first time it is asked for. The models are small (3 batches
@@ -327,16 +404,24 @@ fn build_skybox(
         // `i + 1` is the authored-batch-order convention (`0` = unordered): the transparent half of
         // a skybox is camera-anchored, so every one of its batches shares a sort distance and the
         // order is the only thing keeping the layers from re-flipping every frame.
-        let Some(material) = mats.skybox(sub, texture, u16::try_from(i + 1).unwrap_or(0)) else {
+        let Some(pair) = mats.skybox(sub, texture, u16::try_from(i + 1).unwrap_or(0)) else {
             return; // light buffer vanished mid-build; `built` is unlatched, so we retry
         };
         let part = commands
             .spawn((
                 Mesh3d(meshes.add(mesh)),
-                MeshMaterial3d(material),
+                MeshMaterial3d(pair.steady.clone()),
                 Transform::default(),
                 Visibility::Hidden, // `apply_skybox_visibility` turns on exactly the wanted one
-                SkyboxPart(path.to_string()),
+                // The per-instance alpha the crossfade writes (bits 0..=5, the one field this
+                // population uses — no rig, no shade/probe, no flags; `apply_skybox_visibility`
+                // is its sole writer).
+                MeshTag(crate::mesh_tag::spawn_tag(0, 1.0)),
+                SkyboxPart {
+                    path: path.to_string(),
+                    steady: pair.steady,
+                    fade_blend: pair.fade_blend,
+                },
             ))
             .id();
         if let Some(spin) = sole_bone(sub).and_then(|b| spins.get(&b)) {
@@ -370,15 +455,30 @@ fn sole_bone(sub: &benilla_formats::RenderSubmesh) -> Option<u16> {
     .then_some(bone)
 }
 
-/// Show the wanted skybox's batches and hide every other built one. This is the sole `Visibility`
-/// writer for these entities (the gradient dome's own gate lives in [`crate::sky`], which reads the
-/// same resource — one authority per entity class, decision 0025).
+/// Show the wanted skybox's batches at this frame's slot weight and hide every other built one —
+/// the draw half of the 4-second crossfade. This is the sole `Visibility`, material and `MeshTag`
+/// writer for these entities (the gradient dome's own gate lives in [`crate::sky`], which reads
+/// [`SkyboxWeight`] — one authority per entity class, decision 0025).
+///
+/// Per slot the reference draws only at weight > 0 (`0x6d4afe fcomp 0.0`), with the weight
+/// multiplied into every batch's combined alpha (`0x710cb0` → `[CM2Model+0x180]`,
+/// `m2-alpha-combine-cull.md`) — and a batch at `0 < A < 1` is PROMOTED to
+/// SRC_ALPHA/INV_SRC_ALPHA blending whatever its authored mode (`m2-blend-promotion-zfill.md`),
+/// which is what lets an opaque painted cube fade. Here that is: weight ≤ 0 ⇒ hidden; weight < 1
+/// ⇒ the blend-promotion twin + the weight in the `MeshTag` alpha field (the same rails every
+/// entity feather rides); weight ≥ 1 ⇒ the steady authored material, alpha field full.
 fn apply_skybox_visibility(
     want: Res<CameraSkybox>,
-    mut parts: Query<(&SkyboxPart, &mut Visibility)>,
+    weight: Res<SkyboxWeight>,
+    mut parts: Query<(
+        &SkyboxPart,
+        &mut Visibility,
+        &mut MeshMaterial3d<WowModelMaterial>,
+        &mut MeshTag,
+    )>,
 ) {
-    for (part, mut vis) in &mut parts {
-        let show = want.0.as_deref() == Some(part.0.as_str());
+    for (part, mut vis, mut mat, mut tag) in &mut parts {
+        let show = weight.0 > 0.0 && want.0.as_deref() == Some(part.path.as_str());
         let target = if show {
             Visibility::Visible
         } else {
@@ -386,6 +486,21 @@ fn apply_skybox_visibility(
         };
         if *vis != target {
             *vis = target;
+        }
+        if !show {
+            continue;
+        }
+        let handle = if weight.0 < 1.0 {
+            &part.fade_blend
+        } else {
+            &part.steady
+        };
+        if mat.0 != *handle {
+            mat.0 = handle.clone();
+        }
+        let bits = crate::mesh_tag::with_alpha(tag.0, weight.0);
+        if tag.0 != bits {
+            tag.0 = bits;
         }
     }
 }

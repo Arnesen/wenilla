@@ -306,9 +306,33 @@ pub(super) fn vendor_buy_result(
     }
 }
 
-/// A purchase was refused (`SMSG_BUY_FAILED`) — the merchant window's error line.
-pub(super) fn vendor_buy_failed(reason: u8, errors: &mut MerchantErrors) {
-    debug!("net: buy failed (reason {reason})");
+/// A purchase was refused (`SMSG_BUY_FAILED`) — the merchant window's error line, and for the
+/// out-of-stock code the refusing row's own count.
+///
+/// **`ITEM_ALREADY_SOLD` zeroes the row** (`0x5dcda7`..`0x5dcdd6`, decision 1821): the reference
+/// walks its 128-row vendor cache, writes 0 into the matching row's count word and repaints —
+/// gated, as every other stale-answer path here is, on the packet naming the vendor still open.
+///
+/// **NAMED DIVERGENCE in the key.** The reference matches the row's `+0x00`, the vendor *slot* —
+/// the same word `SMSG_BUY_ITEM` keys its stock update by. vmangos puts the item *entry* in that
+/// field (`Player::SendBuyError`, `Player.cpp:11637`: `packet->itemEntry = item`), so matching by
+/// slot would find nothing on the server we actually talk to; matching by entry is the same row.
+/// vmangos raises this code from exactly the condition the zeroing models —
+/// `GetVendorItemCurrentCount(crItem) < totalCount` under `crItem->maxcount != 0`
+/// (`Player.cpp:18508`).
+pub(super) fn vendor_buy_failed(
+    vendor: u64,
+    item_entry: u32,
+    reason: u8,
+    merchant: &mut MerchantOpen,
+    errors: &mut MerchantErrors,
+) {
+    debug!("net: buy failed (entry {item_entry}, reason {reason})");
+    if reason == benilla_protocol::messages::buy_result::ITEM_ALREADY_SOLD
+        && merchant.vendor == Some(vendor)
+    {
+        merchant.sold_out(item_entry);
+    }
     errors.0.push(MerchantRefusal::Buy(reason));
 }
 
