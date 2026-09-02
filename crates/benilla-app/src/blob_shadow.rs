@@ -11,7 +11,11 @@
 //!   [`GroundDecalSurface`] set yet — the shadow lands on terrain + WMO faces only).
 //! - **Frame slot**: PHASE 1, among the opaque drains — `0x6812c5 call 0x683dd0`, fifth of the
 //!   row `0x6812b1`–`0x6812ca` inside `0x681070`, which the driver `0x483460` calls at
-//!   `0x48361d` (wow-re `water-frame-straddle.md` §1 + `unit-blob-shadow.md` Q1). So the shadow
+//!   `0x48361d` (wow-re `water-frame-straddle.md` §1 + `unit-blob-shadow.md` Q1). `0x683dd0` is
+//!   the **M2 node drain**, and the same loop body ticks each node's object first
+//!   (`0x48160c call [obj vt+0x38]` → the selection ring) and gates its shadow second
+//!   (`0x683ec3`) — so per unit the additive ring goes down and this modulate darkens it, never
+//!   the other way round (wow-re `decal-frame-slot.md`). So the shadow
 //!   lands after terrain and WMO and **before** everything else: the footprint decals
 //!   (`0x483654`), the M2 opaque pass (`0x4836a6`), the water surfaces (phase 3, drawn *between*
 //!   the two M2 transparent passes) and both of those passes. Every transparent in the world

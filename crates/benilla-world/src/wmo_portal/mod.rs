@@ -153,6 +153,18 @@ impl WmoGroupVis {
             .iter()
             .any(|&g| inst.visible.get(g as usize).copied().unwrap_or(true))
     }
+
+    /// The interior-fog verdict: this piece takes the building's MFOG triple iff **any** naming
+    /// group does ([`WmoPortalInstance::interior_fog`], the client's `[0xca7f00]`). ORed for the
+    /// same reason `drawn_by` ORs — a prop several rooms name is drawn from any of them, so it
+    /// wears the fog of any of them. A lookup miss reads FALSE, the opposite of `drawn_by`'s
+    /// fail-open: a missing bit here must not paint a room's fog onto the open world, and the scene
+    /// fog is what every un-gated surface already wears.
+    pub fn interior_fogged_by(&self, inst: &WmoPortalInstance) -> bool {
+        self.groups
+            .iter()
+            .any(|&g| inst.interior_fog.get(g as usize).copied().unwrap_or(false))
+    }
 }
 
 /// **Is a room-bound RIDER drawn this frame?** — [`WmoGroupVis::drawn_by`] resolved for the lanes
@@ -202,6 +214,12 @@ pub struct WmoPortalInstance {
     /// PVS. Seeded all-`true` (everything shows until the first compute, and forever for portal-less
     /// props).
     pub visible: Vec<bool>,
+    /// Per-group **interior-fog** gate for this frame (the client's `[0xca7f00]`): `true` = this
+    /// group's surfaces and its doodads draw with the building's MFOG triple, `false` = they
+    /// inherit the scene fog. Computed by the same flood as `visible` — see [`GroupPvs`] for the
+    /// rule and the byte cites. Seeded all-`false`: nothing wears a room's fog until a flood says
+    /// so, and a portal-less prop (which never floods) never does.
+    pub interior_fog: Vec<bool>,
     /// Per-group **ever-visited** latch — the client's render-record persistence (wow-re
     /// `wmo-record-persistence.md`, landed wow-re main @`00a766f6`): the visit callback `0x685d70`
     /// creates a per-(instance,group) record the first time the flood visits a group, the record
@@ -371,8 +389,18 @@ fn compute_wmo_pvs(
         // precondition) before it was born.
         if model.portal_refs.is_empty() || model.portal_infos.is_empty() {
             let held = inst.bypass_change_detection();
+            // …and never on the interior fog lane: a portal-less prop runs no flood, so there is
+            // no chain to be on (the same reading the fog resolve takes — see [`fog`]'s module doc).
+            let mut changed = false;
             if held.visible.len() != groups || held.visible.iter().any(|v| !*v) {
                 held.visible = vec![true; groups];
+                changed = true;
+            }
+            if held.interior_fog.len() != groups || held.interior_fog.iter().any(|v| *v) {
+                held.interior_fog = vec![false; groups];
+                changed = true;
+            }
+            if changed {
                 inst.set_changed();
             }
             continue;
@@ -403,8 +431,12 @@ fn compute_wmo_pvs(
             &world_from_local,
             &mut (&mut tap, &mut log),
         );
-        if inst.bypass_change_detection().visible != fresh {
-            inst.bypass_change_detection().visible = fresh;
+        if inst.bypass_change_detection().visible != fresh.visible {
+            inst.bypass_change_detection().visible = fresh.visible;
+            inst.set_changed();
+        }
+        if inst.bypass_change_detection().interior_fog != fresh.interior_fog {
+            inst.bypass_change_detection().interior_fog = fresh.interior_fog;
             inst.set_changed();
         }
         if let (Some(text), Some(log)) = (&mut dump_text, &log) {
@@ -419,8 +451,37 @@ fn compute_wmo_pvs(
         // fires only when the doorway's screen rect survives, the carved pass-1 law).
         if claim.is_none() {
             if let Some(gi) = tap.in_group {
-                if let Some(nav) = model.group_nav.get(gi).filter(|n| n.flags & EXTERIOR == 0) {
-                    fog_target = select_wmo_fog(&model.fogs, nav.fog_indices, eye_local);
+                if model
+                    .group_nav
+                    .get(gi)
+                    .is_some_and(|n| n.flags & EXTERIOR == 0)
+                {
+                    // **The MFOG engagement conjunct** (wow-re `models/scratch/wmo-interior-fog-gate.md`,
+                    // §5 VERIFIED; the byteOut loop `0x69de5f`–`0x69dea0` over the camera's containing
+                    // set `0xc7cd88`): the interior fog target exists only when one of the camera's
+                    // ≤2 CONTAINING groups — the down-ray's in-group and its across-portal partner,
+                    // which is exactly that set — is a TRUE interior, `flags & 0x48 == 0`. In an
+                    // exterior-LIT courtyard the client's `t` decays to 0 and the interior triple
+                    // equals the scene triple; no surface of the building is on the lane either
+                    // (decision 1787), so what this conjunct actually decides is the fog of an
+                    // interior-classified UNIT standing in the building, which reads the triple by
+                    // its own classification and would otherwise wear a courtyard's MFOG.
+                    //
+                    // The candidate walk reads THAT group's own MOGP fog indices (`grp+0x34`), not
+                    // the containing group's unconditionally — a courtyard's indices never engage.
+                    // The interior CLAIM below keeps the `0x8`-alone test it has always had: the
+                    // `[0xc7b748]` writer rejects on EXTERIOR only (round-6 Q-H(c)), and the weather
+                    // gate and the submersion probe both read the claim, not this.
+                    fog_target = [Some(gi), tap.across]
+                        .into_iter()
+                        .flatten()
+                        .find_map(|g| {
+                            model
+                                .group_nav
+                                .get(g)
+                                .filter(|n| n.flags & (EXTERIOR | EXTERIOR_LIT) == 0)
+                        })
+                        .and_then(|n| select_wmo_fog(&model.fogs, n.fog_indices, eye_local));
                     claim = Some(InteriorClaim {
                         room: WmoRoom {
                             instance: entity,
@@ -496,12 +557,18 @@ fn compute_wmo_pvs(
 #[derive(Default)]
 struct SeedTap {
     in_group: Option<usize>,
+    /// The down-ray's ACROSS-portal seed. With [`Self::in_group`] this is the client's
+    /// `0xc7cd88` — the camera's ≤2 *containing* groups, which the MFOG engagement conjunct
+    /// tests (and which is NOT the flood's visible set, a confusion wow-re corrected in
+    /// `models/scratch/wmo-interior-fog-gate.md`).
+    across: Option<usize>,
     /// `(destination group, rect it was entered on)` for every accepted portal step.
     entered: Vec<(usize, Rect)>,
 }
 impl FloodTrace for SeedTap {
     fn seed(&mut self, seeds: DownRaySeeds) {
         self.in_group = seeds.in_group;
+        self.across = seeds.across;
     }
     fn entered(&mut self, _from: usize, _portal: u16, to: usize, rect: Rect, _on_plane: bool) {
         self.entered.push((to, rect));
@@ -610,6 +677,30 @@ fn compute_pvs(
         world_from_local,
         &mut (),
     )
+    .visible
+}
+
+/// What one flood publishes per group: this frame's PVS bit, and whether the group draws with the
+/// building's **interior fog** triple rather than the scene fog.
+///
+/// The second is the client's per-group `[0xca7f00]` — the gate on BOTH interior-fog pushes, the
+/// group drawer `0x6b5190` and the group-doodad drawer `0x6b62e0` (wow-re
+/// `lighting/scratch/rf-weather-emission-timeline.md` round-6 Q-I, `terrain/scratch/fog-env-state.md`
+/// §block 2). Decision 0347 modelled the LANE (interior triple on shared-light rows 18-19, selected
+/// by the batch's own `flags & 0x48` interior bit) and recorded this gate as *"not modelled"*; B335
+/// is that gap seen from the Shadowfang courtyard, where the room two exterior-lit courtyards away
+/// wore the building's MFOG teal at 70 yd while the reference showed it under the scene fog.
+///
+/// The rule here: the seed's own group takes the lane (`0x6b3b4c`/`0x6b3df5` force it), and the walk
+/// carries it to a neighbour only while no group on the path has `flags & 0x48` — the interior-chain
+/// anchor breaking at an exterior/exterior-lit group (`0x6b424f` → `0x6b42c6`, QL-1). A `0x48` group
+/// is drawn by the exterior drawer `0x6b4f10`, which pushes no fog at all, so its own bit is inert;
+/// what the break decides is the rooms BEYOND it.
+pub(crate) struct GroupPvs {
+    /// Per absolute group index: in this frame's portal PVS.
+    pub(crate) visible: Vec<bool>,
+    /// Per absolute group index: draws with the interior fog triple (the `[0xca7f00]` equivalent).
+    pub(crate) interior_fog: Vec<bool>,
 }
 
 /// [`compute_pvs`] with a [`FloodTrace`] tap on every decision — the same single flood; the probe dump
@@ -621,9 +712,10 @@ fn compute_pvs_traced<T: FloodTrace>(
     clip_from_world: &Mat4,
     world_from_local: &Affine3A,
     trace: &mut T,
-) -> Vec<bool> {
+) -> GroupPvs {
     let nav = &model.group_nav;
     let mut visible = vec![false; nav.len()];
+    let mut interior_fog = vec![false; nav.len()];
 
     // Seed: the down-ray's set — the camera's current group AND, when the nearest crossing was a
     // portal, the group on its other side. Each is an independent flood ROOT with the full screen
@@ -632,21 +724,23 @@ fn compute_pvs_traced<T: FloodTrace>(
     // under-floods at exactly the near-portal moment the second root exists to cover). Over no surface
     // (open air) or an exterior one ⇒ the outside leg, seeding each EXTERIOR group full-screen (Bevy
     // then frustum-culls the genuinely off-screen ones by their Aabb). Stack item: (group, came_from,
-    // working screen rect, depth).
-    let mut stack: Vec<(usize, usize, Rect, u32)> = Vec::new();
+    // working screen rect, depth, interior-chain intact).
+    let mut stack: Vec<(usize, usize, Rect, u32, bool)> = Vec::new();
     let seeds = down_ray_seeds(model, eye_local, terrain_z);
     trace.seed(seeds);
     match seeds.in_group {
         Some(c) => {
-            stack.push((c, usize::MAX, FULL_SCREEN, 0));
+            stack.push((c, usize::MAX, FULL_SCREEN, 0, true));
             if let Some(a) = seeds.across {
-                stack.push((a, usize::MAX, FULL_SCREEN, 0));
+                stack.push((a, usize::MAX, FULL_SCREEN, 0, true));
             }
         }
         None => {
+            // The outside leg — no containing map object, so nothing takes the interior fog lane
+            // (the client's selector bails on `[0xc7b748] == 0` ahead of all of this, round 5 Q-G).
             for (gi, g) in nav.iter().enumerate() {
                 if g.flags & EXTERIOR != 0 {
-                    stack.push((gi, usize::MAX, FULL_SCREEN, 0));
+                    stack.push((gi, usize::MAX, FULL_SCREEN, 0, false));
                 }
             }
         }
@@ -656,16 +750,32 @@ fn compute_pvs_traced<T: FloodTrace>(
     // (`wow-5875-re` `wmo-insideleg-phase3.md`): only then is the exterior shell drawn (below).
     let mut deferred_exterior = false;
     let mut iters = 0u32;
-    while let Some((g, came, rect, depth)) = stack.pop() {
+    while let Some((g, came, rect, depth, chain)) = stack.pop() {
         iters += 1;
         if iters > MAX_ITERS || g >= nav.len() {
             continue;
         }
         visible[g] = true;
+        // The interior-fog gate ([`GroupPvs::interior_fog`]): this group draws with the building's
+        // own MFOG triple iff the walk that reached it kept an unbroken interior chain from the
+        // seed AND the group is itself a true interior. ORed over paths — a group two walks reach
+        // takes the lane if EITHER kept the chain.
+        //
+        // The second term is the DRAWER ROUTER folded in (`0x6b3fe8` picks interior-vs-exterior on
+        // the same `flags & 0x48`): an exterior/exterior-lit group is drawn by `0x6b4f10`, which
+        // pushes no fog at all, so `[0xca7f00]` cannot reach its surfaces however the walk got
+        // there — and that is true of the SEED's own group too when the camera stands in a
+        // courtyard. Folding it here rather than ANDing it in each of the three consuming lanes
+        // keeps one definition of "which fog does this room wear".
+        interior_fog[g] |= chain && nav[g].flags & (EXTERIOR | EXTERIOR_LIT) == 0;
         if depth >= DEPTH_CAP {
             continue;
         }
         let nav_g = &nav[g];
+        // The chain breaks BELOW an exterior/exterior-lit group, never at the seed: the seed forces
+        // the lane on for its own group (`0x6b3b4c`/`0x6b3df5`), and a `flags & 0x48` group is the
+        // anchor the walk's chain breaks at (`0x6b424f` → `0x6b42c6`).
+        let chain_on = chain && nav_g.flags & (EXTERIOR | EXTERIOR_LIT) == 0;
         let start = nav_g.ref_start as usize;
         let end = (start + nav_g.ref_count as usize).min(model.portal_refs.len());
         for r in &model.portal_refs[start..end] {
@@ -719,7 +829,7 @@ fn compute_pvs_traced<T: FloodTrace>(
             if nav.get(neighbour).is_some_and(|n| n.flags & EXTERIOR != 0) {
                 deferred_exterior = true;
             }
-            stack.push((neighbour, g, inter, depth + 1));
+            stack.push((neighbour, g, inter, depth + 1, chain_on));
         }
     }
 
@@ -738,7 +848,10 @@ fn compute_pvs_traced<T: FloodTrace>(
             }
         }
     }
-    visible
+    GroupPvs {
+        visible,
+        interior_fog,
+    }
 }
 
 /// The portal's polygon vertices (WoW model space), or `None` if the span is out of range or
@@ -890,6 +1003,7 @@ mod tests {
             world_from_local: Affine3A::IDENTITY,
             name_set: 0,
             visible: vec![false, true, false],
+            interior_fog: vec![false; 3],
             liquid_visited: vec![false; 3],
             flooded: vec![None; 3],
         };
@@ -909,6 +1023,48 @@ mod tests {
             "no referrers at all: nothing ORs"
         );
         assert!(key(&[9]).drawn_by(&inst), "index past the set fails open");
+    }
+
+    /// The interior-fog key ORs like `drawn_by` — a prop several rooms name wears the fog of any
+    /// of them — but a lookup miss reads FALSE where `drawn_by`'s reads true. The asymmetry is
+    /// deliberate: a missing PVS bit must not blank a building, and a missing fog bit must not
+    /// paint a room's MFOG onto something the flood never placed.
+    #[test]
+    fn the_interior_fog_key_ors_over_rooms_and_fails_closed() {
+        let inst = WmoPortalInstance {
+            handle: Handle::default(),
+            world_from_local: Affine3A::IDENTITY,
+            name_set: 0,
+            visible: vec![true; 3],
+            interior_fog: vec![false, true, false],
+            liquid_visited: vec![false; 3],
+            flooded: vec![None; 3],
+        };
+        let key = |groups: &[u16]| WmoGroupVis {
+            instance: Entity::PLACEHOLDER,
+            groups: Arc::from(groups),
+        };
+        assert!(key(&[1]).interior_fogged_by(&inst), "its own room is on it");
+        assert!(
+            !key(&[0]).interior_fogged_by(&inst),
+            "its own room is off it"
+        );
+        assert!(
+            key(&[0, 2, 1]).interior_fogged_by(&inst),
+            "one referrer on the lane is enough"
+        );
+        assert!(
+            !key(&[0, 2]).interior_fogged_by(&inst),
+            "no referrer is on it"
+        );
+        assert!(
+            !key(&[]).interior_fogged_by(&inst),
+            "no referrers: nothing ORs"
+        );
+        assert!(
+            !key(&[9]).interior_fogged_by(&inst),
+            "index past the set fails CLOSED — the opposite of drawn_by"
+        );
     }
 
     /// **Only `0x8` opens a window onto the open world** (`0x6b44f8`), and the flag values here are

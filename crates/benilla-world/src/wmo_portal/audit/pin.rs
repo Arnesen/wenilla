@@ -7,27 +7,58 @@
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use bevy::math::{Mat4, Vec3};
 
-use super::{load_subject, Site, EXTERIOR, UNDERCITY};
+use super::{
+    load_subject, Site, BLACKSMITH, DEADMINES, EXTERIOR, FARGODEEP, GOLDSHIRE, IRONFORGE,
+    SHADOWFANG, UNDERCITY,
+};
 
-/// The pin family's shared env targeting (`WOW_PIN_WMO`/`_MAP`/`_TILE`/`_UID`, default
-/// [`UNDERCITY`]).
+/// The named subjects `WOW_PIN_SITE` selects — every [`Site`] the harness carries, so a report at a
+/// building we have already stood in is one word rather than four env vars (whose `WOW_PIN_WMO`
+/// backslash quoting is its own trap). Unknown names list themselves.
+const NAMED_SITES: &[(&str, Site)] = &[
+    ("goldshire", GOLDSHIRE),
+    ("fargodeep", FARGODEEP),
+    ("deadmines", DEADMINES),
+    ("blacksmith", BLACKSMITH),
+    ("undercity", UNDERCITY),
+    ("ironforge", IRONFORGE),
+    ("shadowfang", SHADOWFANG),
+];
+
+/// The pin family's shared env targeting: `WOW_PIN_SITE=<name>` picks a [`NAMED_SITES`] subject
+/// (default [`UNDERCITY`]), and `WOW_PIN_WMO`/`_MAP`/`_TILE`/`_UID` each override one field of it —
+/// so an unnamed building still works, and a named one needs no quoting.
 fn site_from_env() -> Site {
+    let base = match std::env::var("WOW_PIN_SITE") {
+        Ok(name) => {
+            let key = name.trim().to_ascii_lowercase();
+            *NAMED_SITES
+                .iter()
+                .find(|(n, _)| *n == key)
+                .map(|(_, s)| s)
+                .unwrap_or_else(|| {
+                    let known: Vec<&str> = NAMED_SITES.iter().map(|(n, _)| *n).collect();
+                    panic!("WOW_PIN_SITE={name:?} is not one of {known:?}")
+                })
+        }
+        Err(_) => UNDERCITY,
+    };
     Site {
         wmo: Box::leak(
             std::env::var("WOW_PIN_WMO")
-                .unwrap_or_else(|_| UNDERCITY.wmo.to_string())
+                .unwrap_or_else(|_| base.wmo.to_string())
                 .into_boxed_str(),
         ),
         map: Box::leak(
             std::env::var("WOW_PIN_MAP")
-                .unwrap_or_else(|_| UNDERCITY.map.to_string())
+                .unwrap_or_else(|_| base.map.to_string())
                 .into_boxed_str(),
         ),
-        tile: std::env::var("WOW_PIN_TILE").map_or(UNDERCITY.tile, |s| {
+        tile: std::env::var("WOW_PIN_TILE").map_or(base.tile, |s| {
             let (a, b) = s.split_once(',').expect("WOW_PIN_TILE wants tx,ty");
             (a.trim().parse().unwrap(), b.trim().parse().unwrap())
         }),
-        uid: std::env::var("WOW_PIN_UID").map_or(UNDERCITY.uid, |s| s.trim().parse().unwrap()),
+        uid: std::env::var("WOW_PIN_UID").map_or(base.uid, |s| s.trim().parse().unwrap()),
     }
 }
 
@@ -67,6 +98,27 @@ fn wmo_group_census() {
         site.wmo,
         subject.model.group_nav.len()
     );
+    // The root's MFOG table, once. Every group line below names the ≤4 record indices it points
+    // at, and the fog a room ends up wearing is one of these — which is the whole diagnosis when a
+    // far room reads as a flat wash of one colour (B335: SFK's `0xff28444f` at end 106.9 yd). The
+    // colour is decoded exactly as [`super::super::fog`] decodes it (`0xAARRGGBB`).
+    for (i, f) in subject.model.fogs.iter().enumerate() {
+        println!(
+            "mfog f{i}: flags {:#x} pos ({:.1},{:.1},{:.1}) r[{:.2},{:.2}] end {:.1} start×{:.3} = {:.1} rgb({},{},{})",
+            f.flags,
+            f.pos[0],
+            f.pos[1],
+            f.pos[2],
+            f.radius_inner,
+            f.radius_outer,
+            f.fog_end,
+            f.fog_start_scalar,
+            f.fog_end * f.fog_start_scalar,
+            (f.color >> 16) & 0xff,
+            (f.color >> 8) & 0xff,
+            f.color & 0xff,
+        );
+    }
     // `WOW_PIN_COL=<world-x,world-y>`: every walking-collision face crossing that column, per group,
     // as world z — the down-ray's Leg A candidate list for one spot, without running the flood.
     if let Some((cx, cy)) = std::env::var("WOW_PIN_COL").ok().and_then(|v| {
@@ -211,6 +263,17 @@ fn wmo_group_census() {
                 .map(|(lo, hi)| format!("  LIQUID local z[{lo:.1},{hi:.1}]"))
                 .unwrap_or_default(),
         );
+        // Which MFOG records this group's MOGP header points at, and whether the group is on the
+        // INTERIOR fog lane at all (`flags & 0x48 == 0` — the drawer router's own test).
+        println!(
+            "     fog {:?}{}",
+            g.fog_indices,
+            if g.flags & 0x48 == 0 {
+                "  INTERIOR-LANE"
+            } else {
+                "  scene-lane (0x48 set)"
+            }
+        );
         // The group's portal edges, each placed in WoW world space. The group lines above answer
         // "which room is that"; without this the doorway between two of them is a local-space
         // vertex span nobody can point at in game, so a `.go xyz` report can't name the portal it
@@ -353,12 +416,28 @@ fn wmo_pin_probe() {
     }
 
     let vis: Vec<usize> = pvs
+        .visible
         .iter()
         .enumerate()
         .filter(|(_, &v)| v)
         .map(|(i, _)| i)
         .collect();
-    println!("visible: {} of {} groups {vis:?}", vis.len(), pvs.len());
+    println!(
+        "visible: {} of {} groups {vis:?}",
+        vis.len(),
+        pvs.visible.len()
+    );
+    // The interior-fog gate (`[0xca7f00]`, [`super::super::GroupPvs`]): which of those groups wear
+    // the building's own MFOG triple, and which inherit the scene fog. B335 is read straight off
+    // this line — the room behind the courtyard's arches must NOT be on it.
+    let fogged: Vec<usize> = pvs
+        .interior_fog
+        .iter()
+        .enumerate()
+        .filter(|(_, &v)| v)
+        .map(|(i, _)| i)
+        .collect();
+    println!("interior-fog lane: {fogged:?}");
 
     // The portal graph of every group the flood reached. A flood that stops has either run out of
     // edges or had them all rejected, and only the edge list tells the two apart.
@@ -435,8 +514,118 @@ fn wmo_pin_probe() {
                 if g.flags & EXTERIOR != 0 { " EXT" } else { "" },
                 g.ref_start,
                 g.ref_count,
-                if pvs[gi] { "VISIBLE" } else { "CULLED" }
+                match (pvs.visible[gi], pvs.interior_fog[gi]) {
+                    (true, true) => "VISIBLE · interior fog",
+                    (true, false) => "VISIBLE · scene fog",
+                    (false, _) => "CULLED",
+                }
             );
         }
     }
+}
+
+/// **B335's fixture** — the Shadowfang courtyard's far doorways, as an invariant instead of a
+/// screenshot. The reported spot (`.go xyz -224.01 2168.63 79.79 33`, third-person camera behind)
+/// stands in the open courtyard **g38**, whose MOGP flags carry `0x40` EXTERIOR_LIT; the two arches
+/// at the back of it open (through the second courtyard **g72**, also `0x40`) into room **g61**, a
+/// true interior. The report was that g61 fills with a flat blue-cyan at distance: that colour is
+/// this building's own MFOG record — `rgb(40,68,79)`, end 106.9 yd, start 10.7 — which at 70 yd is
+/// nearly saturated, while the reference shows the room under the scene fog (map 33 noon: end 333,
+/// start 83 ⇒ no fog at all at that range).
+///
+/// So the assertion is not about visibility — the flood reaches g61 from anywhere in the courtyard,
+/// and always did. It is about which fog lane it lands on: the seed's own group takes the interior
+/// lane, and the chain breaks below the exterior-lit courtyards, so **g61 must be on the scene
+/// lane**. The control is the seed itself, which must stay on the interior lane.
+#[test]
+#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
+fn shadowfang_courtyard_leaves_the_far_room_on_the_scene_fog() {
+    let site = SHADOWFANG;
+    let subject = load_subject(site.wmo, Some(&site));
+    let placed = subject
+        .placed
+        .as_ref()
+        .expect("the fixture needs a placement");
+    let to_local =
+        |wow: [f32; 3]| bevy_to_wow(placed.local_from_world.transform_point3(wow_to_bevy(wow)));
+    // The reported camera: third-person behind the player at the fountain, aimed at the p50 arches.
+    let eye_world = [-227.1_f32, 2157.0, 83.7];
+    let look_world = [-212.5_f32, 2232.3, 84.2];
+    let eye = to_local(eye_world);
+    let eye_bevy = placed.world_from_local.transform_point3(wow_to_bevy(eye));
+    let look_bevy = placed
+        .world_from_local
+        .transform_point3(wow_to_bevy(to_local(look_world)));
+    let clip = Mat4::perspective_rh(crate::view::CAM_FOVY, 16.0 / 9.0, 0.1, 1000.0)
+        * Mat4::look_at_rh(eye_bevy, look_bevy, Vec3::Y);
+    let pvs = crate::wmo_portal::compute_pvs_traced(
+        &subject.model,
+        eye,
+        subject.terrain_z(eye),
+        &clip,
+        &placed.world_from_local,
+        &mut (),
+    );
+
+    // The flags the whole verdict turns on, asserted so a data misread can't pass silently.
+    assert_eq!(
+        subject.model.group_nav[38].flags & 0x48,
+        0x40,
+        "g38 is the EXTERIOR_LIT courtyard"
+    );
+    assert_eq!(
+        subject.model.group_nav[72].flags & 0x48,
+        0x40,
+        "g72 is the second EXTERIOR_LIT courtyard"
+    );
+    assert_eq!(
+        subject.model.group_nav[61].flags & 0x48,
+        0,
+        "g61 is a true interior room"
+    );
+
+    assert!(
+        pvs.visible[61],
+        "the flood reaches the room behind the arches"
+    );
+    assert!(
+        !pvs.interior_fog[61],
+        "B335: the room two exterior-lit courtyards away must inherit the SCENE fog, not this \
+         building's MFOG teal"
+    );
+    assert!(
+        !pvs.interior_fog[72],
+        "the chain is already broken at the second courtyard"
+    );
+    assert!(
+        !pvs.interior_fog[38],
+        "the courtyard the camera stands in is exterior-LIT: the exterior drawer pushes no fog, \
+         so its own surfaces are on the scene lane too"
+    );
+    assert!(
+        pvs.interior_fog.iter().all(|f| !f),
+        "from this courtyard NOTHING wears the building's MFOG — which is what the reference \
+         screenshot shows: not one navy pixel in the frame"
+    );
+
+    // The control, from a true interior: standing in g61 itself, the room DOES take the lane —
+    // otherwise this fixture would pass on a gate that is simply always off.
+    let inside = to_local([-213.90, 2236.15, 81.5]);
+    let inside_bevy = placed
+        .world_from_local
+        .transform_point3(wow_to_bevy(inside));
+    let inside_clip = Mat4::perspective_rh(crate::view::CAM_FOVY, 16.0 / 9.0, 0.1, 1000.0)
+        * Mat4::look_at_rh(inside_bevy, eye_bevy, Vec3::Y);
+    let inside_pvs = crate::wmo_portal::compute_pvs_traced(
+        &subject.model,
+        inside,
+        subject.terrain_z(inside),
+        &inside_clip,
+        &placed.world_from_local,
+        &mut (),
+    );
+    assert!(
+        inside_pvs.interior_fog[61],
+        "control: the room seeds its own flood, so it wears the building's MFOG from inside"
+    );
 }

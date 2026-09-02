@@ -367,6 +367,21 @@ fn extract_effects(
     }));
 }
 
+/// `$WOW_EFFECT_TRACE`'s lane names: which rung of the pre-water surface-decal band a draw's sort
+/// bias is, or `None` for everything else on the stream (particles, ribbons, foam, precipitation).
+/// Keyed on the sort rung — the only field that is unique per decal lane (`sky_order::Rung`).
+fn decal_lane(bias: f32) -> Option<&'static str> {
+    use crate::sky_order::Rung;
+    match bias {
+        b if b == Rung::RING => Some("ring"),
+        b if b == Rung::SHADOW_SORT => Some("shadow"),
+        b if b == Rung::FOOTPRINT => Some("footprint"),
+        b if b == Rung::RETICLE => Some("reticle"),
+        b if b == Rung::GROUND_FX => Some("ground-fx"),
+        _ => None,
+    }
+}
+
 /// Add one [`Transparent3d`] item per draw record to the matching camera's phase.
 fn queue_effects(
     effect_pipeline: Res<EffectPipeline>,
@@ -493,11 +508,16 @@ fn prepare_effects(
     // advances past the absorbed items (`render_phase/mod.rs:1487`).
     let effect_fn = draw_functions.read().id::<DrawEffects>();
     // `$WOW_EFFECT_TRACE` — the lane's own phase probe (the WOW_PHASE shape, decision 0665,
-    // asked of effect items): during the merge walk, record each BLOB-SHADOW item (Tris
-    // topology + the shadow's own sort rung — its RASTER bias is shared with the footprint
-    // lane, which used to label prints as shadows here) with its sort distance and appended index
-    // range, then log the phase totals. Splits "never pushed / never queued / merged away /
-    // submitted but the GPU state ate it" — the gap no pixel reading can see into.
+    // asked of effect items): during the merge walk, record each **surface-decal** item — every
+    // rung of the pre-water band, named by [`decal_lane`] — with its **index in the sorted
+    // transparent phase**, its sort distance, and its appended index range, then log the phase
+    // totals. Splits "never pushed / never queued / merged away / submitted but the GPU state ate
+    // it" — the gap no pixel reading can see into — and, since 1789, reads the draw-order ladder
+    // straight off a live frame: `item 4` vs `item 81` is what B347 was, measured.
+    //
+    // The lane is keyed on the SORT rung because that is the one field unique per lane: the raster
+    // bias is shared (the footprint lane rides `SHADOW_RASTER`, and prints were being labelled
+    // shadows here for exactly that reason).
     let trace = std::env::var_os("WOW_EFFECT_TRACE").is_some();
     let mut trace_lines: Vec<String> = Vec::new();
     meta.indices.clear();
@@ -557,12 +577,9 @@ fn prepare_effects(
                 }
             }
             let index_end = meta.indices.len() as u32;
-            if trace
-                && draw.topology == EffectTopology::Tris
-                && draw.bias == crate::sky_order::Rung::SHADOW_SORT
-            {
+            if let (true, Some(lane)) = (trace, decal_lane(draw.bias)) {
                 trace_lines.push(format!(
-                    "  item {i}: shadow anchor {:.1?}, dist {:.1}, verts {}, indices \
+                    "  item {i}: {lane} anchor {:.1?}, dist {:.1}, verts {}, indices \
                      {index_start}..{index_end}, tex {:?}",
                     draw.anchor,
                     item.distance,

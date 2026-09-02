@@ -615,7 +615,7 @@ fn warm_effect_lane(
         ] {
             for raster_bias in [
                 0,
-                benilla_world::sky_order::Rung::GROUND_FX as i32,
+                benilla_world::sky_order::Rung::DECAL_RASTER,
                 benilla_world::sky_order::Rung::SHADOW_RASTER,
             ] {
                 // `lit` is a pipeline-key axis (a shader def), so BOTH arms are warmed — a hole

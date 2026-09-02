@@ -18,6 +18,7 @@ mod anim_events;
 mod cinematic;
 mod combat;
 mod creature;
+mod doodad_pool;
 mod emote;
 pub(crate) mod footsteps;
 mod gameobject;
@@ -458,6 +459,7 @@ impl Plugin for SoundPlugin {
         cinematic::plugin(app);
         gameobject::plugin(app);
         anim_events::plugin(app);
+        doodad_pool::plugin(app);
         spell::plugin(app);
         missile::plugin(app);
         creature::plugin(app);

@@ -508,7 +508,7 @@ pub(super) fn push_ring(
         .anchored(state.key.feet)
         .rung(
             benilla_world::sky_order::Rung::RING,
-            benilla_world::sky_order::Rung::RING as i32,
+            benilla_world::sky_order::Rung::DECAL_RASTER,
         );
     batch.extend(state.verts.iter().map(|v| EffectVertex {
         pos: v.pos,

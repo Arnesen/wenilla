@@ -36,6 +36,12 @@
 //! quiescence, or waiting for pixel stability cannot help. It is a renderer defect that the harness
 //! correctly *reports*; do not try to gate it away here. Read 0815 before touching this file's phases.
 //!
+//! **`creature-indoor-front` is one of them** (named 2026-09-01, while A/B-ing 1787's fog gate): two
+//! runs of ONE unchanged build land in the two states at MAE 4.518, the whole difference confined to
+//! the subject's own brightness with the room around it pixel-identical, and the settle counts differ
+//! (235 vs 211 frames). If a change you are A/B-ing shows exactly 4.518 here, re-run the baseline
+//! before believing it — the number is the flake's, not yours.
+//!
 //! ## Running one capture by hand
 //! **Run through Cargo — never the built binary directly:**
 //! ```text

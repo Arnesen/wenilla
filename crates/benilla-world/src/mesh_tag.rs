@@ -77,7 +77,13 @@
 //!    laws in a single frame the instant the ramp latched.
 //! 3. `debug_panel::apply_model_visibility` drives the small-prop distance fade (`DoodadFade`
 //!    holders) + glow-card dimming; `DoodadFade` is **never attached** to a lit interior prop
-//!    (spawn-time exclusion in `terrain_stream`), so 2 and 3 are disjoint.
+//!    (spawn-time exclusion in `terrain_stream`), so 2 and 3 are disjoint. The same system also
+//!    owns [`INTERIOR_FOG_BIT`] on **room-bound WMO content** — anything carrying a
+//!    `WmoGroupVis`: a building's group geometry, its doodad props, and the merged blobs of
+//!    either. That is the client's per-group `[0xca7f00]` gate, whose population is disjoint from
+//!    2's by construction (a WMO part is never classified — it holds no `InteriorLit`) and which
+//!    writes through [`with_interior_fog`], so the probe slot a prop was spawned with survives
+//!    the room turning its fog on and off.
 //! 4. `player::apply_self_model_fade` (the zoom-to-first-person feather) runs **after** 1–3 and wins
 //!    on the self body submeshes' alpha while feathering; on the frame it ends it restores the
 //!    alpha field itself and hands the material back to the part's law (it cannot lean on 2 to
@@ -214,6 +220,18 @@ pub fn alpha_bits(alpha: f32) -> u32 {
         1u32
     } else {
         ((alpha.min(1.0) * ALPHA_MAX).round() as u32).max(1)
+    }
+}
+
+/// Set or clear [`INTERIOR_FOG_BIT`] alone, preserving the whole payload and the highlight bit —
+/// the room-bound writer's read-modify-write. The payload is untouched on purpose: a WMO interior
+/// prop's probe slot says how it is LIT, and the client's `[0xca7f00]` decides only which fog
+/// TRIPLE its batch is pushed with. The `0` sentinel survives too, because the shader masks bits
+/// 30/31 off before testing it.
+pub(crate) fn with_interior_fog(tag: u32, on: bool) -> u32 {
+    match on {
+        true => tag | INTERIOR_FOG_BIT,
+        false => tag & !INTERIOR_FOG_BIT,
     }
 }
 

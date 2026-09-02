@@ -100,6 +100,43 @@ pub enum DoodadAnimTier<'a> {
     FirstSeq(&'a AnimClip),
 }
 
+/// The animation-event tags that make a placed doodad SOUND: `$DSL` (the looping emitter), `$DSO`
+/// (a positioned one-shot), `$DSE` (the stop token that releases a `$DSL` — `data` is 0 on all 16
+/// shipped models) and the generic `$SND`. Routed by `benilla_app::sound::anim_events`; listed here
+/// because their presence is what earns a bind-posed model a clock it would otherwise be denied
+/// (see [`arms_for_sound`]). Byte law: wow-re `sound/scratch/doodad-sound-emitters.md`.
+pub(crate) const SOUND_EVENT_TAGS: [&[u8; 4]; 4] = [b"$DSL", b"$DSO", b"$DSE", b"$SND"];
+
+/// Does this model's **arm chain** — the loader-idle seed and its variations, the only sequences a
+/// placed doodad ever plays — carry a sound-event marker?
+///
+/// This is deliberately NOT part of [`classify`]: the tier answers "what does this model *render*",
+/// and 0130's whole point is that a bind-posed sequence renders as the static mesh. That stays true.
+/// What it never meant is that the sequence does not *run* — the reference arms every placed doodad
+/// and cycles it on residency (module docs, §1/§5), and the event track rides that clock. A humming
+/// lamp is the proof: `KalidarStreetLamp01.m2` is one looping 3.333 s Stand that keys no bone at all
+/// and carries exactly one event, `$DSL` → `NightElfStreetLampLoop`. Gating its clock on the *rig*
+/// is what made every world doodad silent (bug B345), and the corpus says the class is not marginal
+/// — `benilla-extract soundeventscan`: 273 carrier models, 108 of which no rig gate would ever arm.
+///
+/// Same shape as [`ModelAnimations::idle_clip`]'s own note about emitters and material loops: arming
+/// the idle seed is what gives a consumer a running clock instead of a frozen slot-0 read. Sound is
+/// simply the third consumer.
+pub(crate) fn arms_for_sound(anims: &ModelAnimations) -> bool {
+    let Some(idle) = anims.idle_clip() else {
+        return false;
+    };
+    anims
+        .clips
+        .iter()
+        .filter(|c| c.anim_id == idle.anim_id)
+        .any(|c| {
+            c.events
+                .iter()
+                .any(|e| SOUND_EVENT_TAGS.contains(&&e.ident))
+        })
+}
+
 /// Classify a placed model for the spawn site. Boneless models are `Static` regardless of parsed
 /// tracks — their skinned twin carries joint attributes with no joints to index (the 0035 guard).
 pub fn classify<'a>(
@@ -211,10 +248,21 @@ pub fn spawn_anim_host(
         return None;
     }
     let tier = classify(&m.skeleton, m.animations.as_ref());
-    if matches!(tier, DoodadAnimTier::Static) {
+    // The SOUND arm (bug B345), orthogonal to the tier: a model whose pose is bind renders as the
+    // static mesh — 0130's gate is right about pixels — but its event track still has to run, and
+    // the reference runs it for every placed doodad. So a `Static`/`GlobalSeqOnly` model that
+    // authors `$DSL`/`$DSO`/`$SND` on its arm chain still gets a HOST here: `ModelAnimations` and
+    // the arm bookkeeping (`clip`/`anim_id`, which is what [`reroll_doodad_variation`] maintains and
+    // the event scanner reads), and deliberately **no `AnimationPlayer`** — there is no pose to
+    // evaluate, and paying for a rig to run a clock is exactly what 0130 exists to avoid.
+    let sound_arm = m.animations.as_ref().is_some_and(arms_for_sound);
+    if matches!(tier, DoodadAnimTier::Static) && !sound_arm {
         return None;
     }
-    let anims = m.animations.as_ref().expect("animated tier ⇒ animations");
+    let anims = m
+        .animations
+        .as_ref()
+        .expect("animated tier or sound arm ⇒ animations");
     // Chain-only visibility (`crate::vis_chain`): the host root renders nothing — its parts
     // draw as world roots — and ~1.4k hosts sat in the per-camera sweep at the Goldshire pin.
     let root = commands
@@ -237,6 +285,7 @@ pub fn spawn_anim_host(
     let mut armed_seq = None;
     let mut arm_id = None;
     if let DoodadAnimTier::FirstSeq(head) = tier {
+        // (the rigged arm — player + graph + variation chain)
         // The **loader's** seed only — `0x70ebd0`'s var-0 arm on the head of the chain. The real
         // pick is the holder setup's second op4 call (`0x695100`, `variationIdx = -1`), which lands
         // *after* it and is the effective arm (wow-re §4a); here that second arm is
@@ -257,6 +306,20 @@ pub fn spawn_anim_host(
         clip_info = Some((head.node, head.duration));
         armed_seq = Some(head.seq_index);
         arm_id = Some(head.anim_id);
+    } else if sound_arm {
+        // The clock-only arm: same loader seed, same self-sustaining re-roll — `ModelAnimations` is
+        // what [`reroll_doodad_variation`] needs, and without it the host would never be matched by
+        // that query and its window would never advance. No player, no graph handle: nothing here
+        // poses anything, and `gate_doodad_anim` already treats both as optional.
+        let head = anims.idle_clip().expect("sound arm ⇒ an idle clip");
+        clip_info = Some((head.node, head.duration));
+        arm_id = Some(head.anim_id);
+        commands.entity(root).insert(anims.clone());
+        // `armed_seq` stays `None` ON PURPOSE. It is the *only* input to `PlacementHost::arm`,
+        // which is what puts this placement's emitters on `EmitClock::Host` — a clock that reads
+        // the host's `AnimationPlayer`. This host has none, so claiming the arm would move a
+        // previously-`Pinned` emitter onto a player that does not exist. The sound clock is read
+        // from `clip`/`armed_at` instead, which needs no player and no slot number.
     }
     if let Some(drive) = GlobalSeqDrive::new_rig(&anims.global_bones, m.skeleton.joints.len()) {
         commands.entity(root).insert(drive);
@@ -307,6 +370,31 @@ pub struct DoodadAnimHost {
     /// 0863): under table pressure the longest-parked rigged hosts demote first. Never read
     /// while `active`.
     pub(crate) parked_at: f32,
+}
+
+impl DoodadAnimHost {
+    /// Where the **armed clip's own clock** stands right now: `(node, seek)`, the seek being
+    /// `(now − armed_at) mod duration`. `None` when nothing is armed (the gseq-only tier without a
+    /// sound arm — free-running channels have no window at all).
+    ///
+    /// The **shared clock, never the `AnimationPlayer`**, and that is the point rather than a
+    /// convenience. The player is paused by [`gate_doodad_anim`] whenever none of the placement's
+    /// submeshes is drawn; the reference's animation cycle is gated on **linkage — residency, not
+    /// the draw** (module docs §5, the same reasoning [`reroll_doodad_variation`] runs over every
+    /// host for). A campfire behind you keeps crackling in the real client, and reading the paused
+    /// player here would stop it the moment you turned around. It also gives the two arms one
+    /// answer: a clock-only host has no player to read, and a rigged one's resume seeks to exactly
+    /// this value, so the two never disagree while drawn.
+    pub fn arm_clock(&self, now: f32) -> Option<(AnimationNodeIndex, f32)> {
+        let (node, duration) = self.clip?;
+        // A zero-length clip has no phase to compute; it sits at its own t = 0.
+        let seek = if duration > 0.0 {
+            (now - self.armed_at).rem_euclid(duration)
+        } else {
+            0.0
+        };
+        Some((node, seek))
+    }
 }
 
 /// The doodad's self-sustaining re-arm (decision 0768, wow-re `doodad-anim-host.md` §5): when the
@@ -1100,5 +1188,46 @@ mod tests {
             "seek lands inside the loop: {}",
             active.seek_time()
         );
+    }
+
+    /// [`DoodadAnimHost::arm_clock`] — the sound lane's phase, which must be the SHARED clock's,
+    /// never the (draw-gated) player's. Three claims: it wraps with the clip, it is unaffected by
+    /// the host being parked, and an unarmed host has no phase at all.
+    #[test]
+    fn arm_clock_wraps_on_the_shared_clock() {
+        let mut host = DoodadAnimHost {
+            meshes: Vec::new(),
+            fade: (0.0, Vec3::ZERO),
+            clip: Some((AnimationNodeIndex::new(1), 3.333)),
+            armed_at: 10.0,
+            window_hi: f32::NEG_INFINITY,
+            anim_id: Some(0),
+            // PARKED — the whole point: a campfire behind you keeps crackling, because the
+            // reference gates the cycle on residency, not on the draw.
+            active: false,
+            parked_at: 0.0,
+        };
+
+        let (_, seek) = host.arm_clock(10.0).expect("armed");
+        assert!(seek.abs() < 1e-6, "at the arm it sits at t = 0");
+
+        let (_, seek) = host.arm_clock(12.0).expect("armed");
+        assert!((seek - 2.0).abs() < 1e-4, "2 s in, {seek}");
+
+        // Past one full cycle it wraps rather than running off the end.
+        let (_, seek) = host.arm_clock(14.0).expect("armed");
+        assert!((seek - (4.0 - 3.333)).abs() < 1e-4, "wrapped to {seek}");
+
+        // A zero-length clip has no phase to compute and must not divide by it.
+        host.clip = Some((AnimationNodeIndex::new(1), 0.0));
+        let (_, seek) = host.arm_clock(99.0).expect("armed");
+        assert!(
+            seek.abs() < 1e-6,
+            "a zero-length clip sits at its own t = 0"
+        );
+
+        // Nothing armed (the gseq-only tier without a sound arm) ⇒ no phase, so nothing fires.
+        host.clip = None;
+        assert!(host.arm_clock(12.0).is_none());
     }
 }

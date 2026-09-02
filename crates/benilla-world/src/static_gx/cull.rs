@@ -418,12 +418,26 @@ pub(super) fn cull_cells(
             let Ok(inst) = instances.get(entity) else {
                 continue;
             };
-            let mut sel = vec![false; draw.sets.len()];
+            let mut sel = crate::static_gx::render::GxSel {
+                drawn: vec![false; draw.sets.len()],
+                fog: vec![false; draw.sets.len()],
+            };
             let mut any = false;
             for (set, aabb) in &draw.groups {
                 let Some(rooms) = draw.sets.get(usize::from(*set)) else {
                     continue;
                 };
+                // The interior-fog lane is decided per SET whether or not the set draws — the
+                // record sync reads the whole vector, and a set the frustum drops this frame is
+                // back next frame with the same rooms. `set_admitted`'s fail-OPEN read is wrong
+                // here: `interior_fogged_by`'s fail-closed one is the fog rule (a missing bit
+                // must not paint a room's MFOG onto a prop).
+                sel.fog[usize::from(*set)] = rooms.iter().any(|&g| {
+                    inst.interior_fog
+                        .get(usize::from(g))
+                        .copied()
+                        .unwrap_or(false)
+                });
                 if m.portal_cull && !set_admitted(&inst.visible, rooms) {
                     continue;
                 }
@@ -445,7 +459,7 @@ pub(super) fn cull_cells(
                 {
                     continue;
                 }
-                sel[usize::from(*set)] = true;
+                sel.drawn[usize::from(*set)] = true;
                 any = true;
             }
             if any {
@@ -462,7 +476,7 @@ pub(super) fn cull_cells(
     // The WMO regions — the dev WMO toggle wholesale, then per-group admission; regions
     // likewise ordered near-first (B3).
     if m.kind_visible[crate::model_render::kind_index(crate::model_render::ModelKind::Wmo)] {
-        let mut admitted: Vec<(u32, (Entity, Vec<bool>))> = Vec::new();
+        let mut admitted: Vec<(u32, (Entity, crate::static_gx::render::GxSel))> = Vec::new();
         for (&entity, draw) in &world.wmos {
             // A region whose instance can't answer this frame (spawn-command latency) keeps
             // last frame's absence — one frame of the entity path's own arrival class.
@@ -470,9 +484,19 @@ pub(super) fn cull_cells(
                 continue;
             };
             let max_group = draw.groups.iter().map(|(g, _)| *g).max().unwrap_or(0);
-            let mut sel = vec![false; usize::from(max_group) + 1];
+            let mut sel = crate::static_gx::render::GxSel {
+                drawn: vec![false; usize::from(max_group) + 1],
+                fog: vec![false; usize::from(max_group) + 1],
+            };
             let mut any = false;
             for (group, aabb) in &draw.groups {
+                // The fog lane first, for every group of the region and not only the drawn ones —
+                // see the prop site above for why.
+                sel.fog[usize::from(*group)] = inst
+                    .interior_fog
+                    .get(usize::from(*group))
+                    .copied()
+                    .unwrap_or(false);
                 // The portal PVS bit — the SAME fail-open read `WmoGroupVis::drawn_by` takes,
                 // behind the same panel switch.
                 if m.portal_cull
@@ -502,7 +526,7 @@ pub(super) fn cull_cells(
                 {
                     continue;
                 }
-                sel[usize::from(*group)] = true;
+                sel.drawn[usize::from(*group)] = true;
                 any = true;
             }
             if any {
@@ -541,7 +565,7 @@ pub(super) fn cull_cells(
                             .iter()
                             .filter(|i| {
                                 i.group.is_some_and(|s| {
-                                    sel.get(usize::from(s)).copied().unwrap_or(false)
+                                    sel.drawn.get(usize::from(s)).copied().unwrap_or(false)
                                 })
                             })
                             .count();
@@ -556,12 +580,13 @@ pub(super) fn cull_cells(
                     .draws
                     .iter()
                     .filter(|i| {
-                        i.group
-                            .is_some_and(|g| sel.get(usize::from(g)).copied().unwrap_or(false))
+                        i.group.is_some_and(|g| {
+                            sel.drawn.get(usize::from(g)).copied().unwrap_or(false)
+                        })
                     })
                     .count();
             }
-            wmo_groups += sel.iter().filter(|b| **b).count();
+            wmo_groups += sel.drawn.iter().filter(|b| **b).count();
         }
         let (mut fs, mut fx, mut fg) = (0usize, 0usize, 0usize);
         for cell in gx.cells.values() {

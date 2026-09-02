@@ -118,8 +118,21 @@ fn mark_world_camera(
 #[derive(Clone)]
 pub(crate) enum GxDoodadVis {
     Cell((i32, i32)),
-    /// A prop region + this frame's per-referrer-SET admission bits.
-    Prop(Entity, Vec<bool>),
+    /// A prop region + this frame's per-referrer-SET verdicts.
+    Prop(Entity, GxSel),
+}
+
+/// One region's per-selection-grain verdicts for this frame — a WMO region's grain is the GROUP,
+/// a prop region's the referrer-SET index, and both index these vectors the same way.
+#[derive(Clone, Default)]
+pub(crate) struct GxSel {
+    /// Drawn this frame: PVS ∧ frustum ∧ farclip ∧ the exterior window gate.
+    pub drawn: Vec<bool>,
+    /// On the interior fog lane — the client's per-group `[0xca7f00]`, resolved by the portal
+    /// flood ([`crate::wmo_portal::GroupPvs::interior_fog`]). Rides beside `drawn` because it is
+    /// the same walk's answer at the same grain, and because the node syncs it into the record
+    /// table exactly where it already syncs the kill column.
+    pub fog: Vec<bool>,
 }
 
 /// The published half the render world clones each frame. The baked regions sit behind `Arc`
@@ -141,10 +154,15 @@ pub(crate) struct GxWorld {
     /// This frame's per-group admission per region (indexed by absolute group index): the
     /// portal flood's verdict collapsed to CPU range selection — the node draws exactly the
     /// runs whose group bit is set.
-    pub visible_wmos: Vec<(Entity, Vec<bool>)>,
+    pub visible_wmos: Vec<(Entity, GxSel)>,
 }
 
 use super::pool::GxTexturePool;
+
+/// Record column `w`, bit 14 — the per-item **interior fog** lane (decision 1787), written per
+/// frame by the fog sync and read by `static_gx.wgsl`'s fog select. Bit 0 is the exile kill bit
+/// and bits 1..=13 the interior-prop probe slot, so 14 is the first free bit.
+const RECORD_FOG_BIT: u32 = 1 << 14;
 
 /// One coalesced draw run: adjacent live bake items sharing (bind-group slot, pipeline
 /// bucket, group). Killed items are SKIPPED at build time (B3): a run never carries an exiled
@@ -180,6 +198,11 @@ struct GxCellGpu {
     records: Vec<[u32; 4]>,
     /// The `killed_rev` this table last uploaded.
     killed_applied: u32,
+    /// The per-grain interior-fog verdict this table's records were last written from
+    /// ([`GxSel::fog`]) — empty until the first sync. Compared rather than revisioned: it is
+    /// tens of bools, it changes only when the camera changes rooms, and unlike the kill bitmap
+    /// it is produced by the per-frame cull rather than owned by the region.
+    fog_applied: Vec<bool>,
 }
 
 #[derive(Resource, Default)]
@@ -504,6 +527,39 @@ fn prepare_static_gx(
         gpu.runs = build_runs(&draw.draws, &gpu.item_slot, &draw.killed);
         gpu.killed_applied = draw.killed_rev;
     }
+
+    // The interior-fog sync (decision 1787): the client's per-group `[0xca7f00]` decides which
+    // fog triple a WMO group's surfaces — and its doodad props — are pushed with, so it is a
+    // per-frame property of the SELECTION, not of the bake. It rides the record table's w column
+    // (bit `RECORD_FOG_BIT`) beside the kill bit, written per item from its own selection grain.
+    // Rewritten only when the verdict actually moves — which is when the camera changes rooms —
+    // and it never touches run membership, so no coalesce is owed.
+    let sync_fog = |gpu: &mut GxCellGpu, draw: &GxCellDraw, sel: &GxSel| {
+        if gpu.fog_applied == sel.fog {
+            return;
+        }
+        for (rec, item) in gpu.records.iter_mut().zip(&draw.draws) {
+            let on = item
+                .group
+                .is_some_and(|g| sel.fog.get(usize::from(g)).copied().unwrap_or(false));
+            rec[3] = (rec[3] & !RECORD_FOG_BIT) | (u32::from(on) * RECORD_FOG_BIT);
+        }
+        render_queue.write_buffer(&gpu.record_table, 0, bytemuck::cast_slice(&gpu.records));
+        gpu.fog_applied.clone_from(&sel.fog);
+    };
+    for (entity, sel) in &gx.visible_wmos {
+        if let (Some(gpu), Some(draw)) = (cache.wmos.get_mut(entity), gx.wmos.get(entity)) {
+            sync_fog(gpu, draw, sel);
+        }
+    }
+    for vis in &gx.visible {
+        let GxDoodadVis::Prop(entity, sel) = vis else {
+            continue; // cell items are never on the interior lane
+        };
+        if let (Some(gpu), Some(draw)) = (cache.props.get_mut(entity), gx.props.get(entity)) {
+            sync_fog(gpu, draw, sel);
+        }
+    }
 }
 
 /// Assemble one region's GPU state against the shared pool: pool slots for its textures, the
@@ -601,6 +657,8 @@ fn assemble_region(
         runs,
         records,
         killed_applied: draw.killed_rev,
+        // Empty ⇒ the first fog sync always fires (the baked records carry no lane bit).
+        fog_applied: Vec::new(),
     })
 }
 
@@ -714,7 +772,7 @@ impl ViewNode for StaticGxNode {
         // (B3/B4): the real client's own drain order (1429's byte-true anchor: terrain →
         // WMO → … → doodad), and the buildings are the frame's best early-z occluders for
         // the doodads behind them.
-        let mut resolved: Vec<(&GxCellGpu, &GxCellDraw, Option<&Vec<bool>>)> = Vec::new();
+        let mut resolved: Vec<(&GxCellGpu, &GxCellDraw, Option<&GxSel>)> = Vec::new();
         for (entity, sel) in &gx.visible_wmos {
             if let (Some(gpu), Some(draw)) = (cache.wmos.get(entity), gx.wmos.get(entity)) {
                 resolved.push((gpu, draw, Some(sel)));
@@ -783,7 +841,7 @@ impl ViewNode for StaticGxNode {
                 // The PVS range selection (1429's collapse): a WMO run draws iff its group's
                 // admission bit is set this frame; a cell run always draws.
                 if let (Some(sel), Some(group)) = (sel, run.group) {
-                    if !sel.get(usize::from(group)).copied().unwrap_or(false) {
+                    if !sel.drawn.get(usize::from(group)).copied().unwrap_or(false) {
                         continue;
                     }
                 }

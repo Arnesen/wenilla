@@ -68,7 +68,9 @@ struct GxCell {
 @group(1) @binding(0) var<uniform> cell: GxCell;
 // The per-ITEM record table, indexed by the vertex word's low bits:
 // x = texture-array layer, y = the WMO authored batch order (the clip-z nudge; 0 on cells —
-// an exact no-op), z = the MOMT SIDN colour packed r|g<<8|b<<16 (gamma bytes), w = free.
+// an exact no-op), z = the MOMT SIDN colour packed r|g<<8|b<<16 (gamma bytes), w = flags:
+// bit 0 the exile kill bit (B2), bits 1..=13 the interior-prop probe slot (B4), bit 14 the
+// per-frame INTERIOR FOG lane (1787 — the client's per-group `[0xca7f00]`).
 @group(1) @binding(1) var<storage, read> recs: array<vec4<u32>>;
 @group(1) @binding(2) var tex_array: texture_2d_array<f32>;
 // Repeat and clamp variants of the BLP model-albedo sampler (linear tri-filtered, aniso 8 —
@@ -437,9 +439,15 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // Black/White/Grey families belong to blends this lane excludes by admission). Interior
     // WMO surfaces fog with the INTERIOR triple — the room keeps its warm MFOG haze
     // (round-6 Q-I: one flag gates walls, pools and props alike).
+    // The interior fog lane is the per-frame record bit, NOT the baked `WORD_INTERIOR`: the
+    // client pushes the interior triple per GROUP under `[0xca7f00]` (`0x6b5190` for surfaces,
+    // `0x6b62e0` for the group's doodads — wow-re round-6 Q-I), and the flood decides it each
+    // frame (decision 1787, `wow_model.wgsl` carries the same law on its tag bit 30). Keyed on
+    // the batch's static interior flag instead, every true-interior group of a building wore the
+    // building's MFOG the moment the camera stood anywhere in it — B335.
     var fog_color = wow_light.fog_color;
     var fog_span = wow_light.fog_params.xy;
-    if ((in.word & WORD_INTERIOR) != 0u) {
+    if ((recs[in.word & 0xffffu].w & 16384u) != 0u) {
         fog_color = wow_light.wmo_fog_color;
         fog_span = wow_light.wmo_fog_params.xy;
     }

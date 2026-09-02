@@ -11,7 +11,8 @@
 //!   the batches whose UV/tint loop differs between sequence slots.
 //! - [`particles`] — particle and ribbon emitters, and the features the corpus authors.
 //! - [`skeleton`] — the bone tree and the attachment table that addresses it.
-//! - [`sequence`] — which sequence an arm plays, and what breaks when it is the wrong one.
+//! - [`sequence`] — which sequence an arm plays, what breaks when it is the wrong one, and
+//!   which of its event markers an arm can reach at all.
 //!
 //! Split out of a single 3.9k-line `scan.rs` once it had grown ~30 independent sweeps: the file
 //! was one *kind* of thing, but not one concern, and nothing in it was shared across families
@@ -34,7 +35,7 @@ pub use material::{alphascan, blendscan, envmapscan, texmodescan, uvslotscan, uv
 pub use particles::{
     cellscan, fxordercensus, partcensus, partscan, partslotscan, ribbonscan, shardcensus,
 };
-pub use sequence::{fxlifescan, goanimscan, idleslotscan, seqclockscan};
+pub use sequence::{fxlifescan, goanimscan, idleslotscan, seqclockscan, soundeventscan};
 pub use skeleton::{attachscan, bonescan};
 pub use world::{doodadscan, placescan, skyboxscan, wmodoodads};
 

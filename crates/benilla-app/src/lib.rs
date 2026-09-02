@@ -60,6 +60,7 @@ mod debug_panel;
 /// **The dev/player seam** (decisions 0026/1173, built in 1174) — the group, and the boundary
 /// rule, in one file. Always compiled; what it *holds* is not.
 mod dev;
+mod doodad_events;
 mod entities;
 mod fishing_line;
 mod footprints;
@@ -523,6 +524,7 @@ pub fn run(build: BuildId) -> AppExit {
     // GameObject animation (decision 0242): net-streamed GObjects (doors/chests) play an M2 sequence
     // on GAMEOBJECT_STATE change — the state-machine sibling of the doodad idle loop above.
     .add_plugins(go_anim::plugin)
+    .add_plugins(doodad_events::plugin)
     // Avatar + camera + input.
     .add_plugins(PlayerPlugin)
     // Cinematic fly-bys (`SMSG_TRIGGER_CINEMATIC`): the race intro a first login plays, and the

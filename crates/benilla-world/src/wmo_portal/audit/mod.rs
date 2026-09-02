@@ -44,6 +44,7 @@ mod pin;
 
 /// A building at its real spot on a real map: the model, plus the MODF placement to find (by its
 /// `uniqueId`) in `tile`, whose 3×3 tile block supplies the terrain the down-ray races.
+#[derive(Clone, Copy)]
 struct Site {
     wmo: &'static str,
     map: &'static str,
@@ -110,6 +111,17 @@ const IRONFORGE: Site = Site {
     map: "Azeroth",
     tile: (34, 41),
     uid: 7706,
+};
+
+/// Shadowfang Keep — B335's site: the courtyard whose far doorways read as a flat blue-cyan wash.
+/// Its two courtyard groups (g38, g72) are EXTERIOR_LIT (`0x40`) while the rooms behind their
+/// arches (g61, g60) are true interiors, which is the shape the interior-fog chain gate turns on.
+/// `.go xyz -214.30 2211.84 79.78 33` looks at the arches; `-213.90 2236.15 79.78` is inside g61.
+const SHADOWFANG: Site = Site {
+    wmo: r"world\wmo\dungeon\ld_shadowfang\ld_shadowfanginterior.wmo",
+    map: "Shadowfang",
+    tile: (27, 32),
+    uid: 218202,
 };
 
 /// Eye height above a floor point for both the standing player and the seated camera samples.
