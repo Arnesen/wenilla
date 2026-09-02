@@ -71,9 +71,15 @@ impl Loader<'_> {
                 // is in the set, `OnDragStop`/`OnReceiveDrag` are NOT. This is XML-load-time
                 // ONLY: the Lua SetScript binding (`0x7748d0`) never auto-enables, so the law
                 // lives here and not in SetScript itself (a runtime-created frame still needs an
-                // explicit `EnableMouse(true)`, like the real client). The wheel kind
-                // (`OnMouseWheel` = kind 3) has a separate index this engine doesn't model yet;
-                // the KEYBOARD kinds are modelled and armed just below.
+                // explicit `EnableMouse(true)`, like the real client). The KEYBOARD kinds are
+                // modelled and armed just below, and the WHEEL kind (`OnMouseWheel` = kind 3) is
+                // armed the same way right after — it used to say "a separate index this engine
+                // doesn't model yet", and the hit-test carve
+                // (`ui/scratch/hittest-no-fallthrough-law.md`) is what made modelling it necessary:
+                // the wheel plane is the ONE place the engine really does gate on a handler and
+                // continue past a frame that has none. Until it was its own flag, our wheel sweep
+                // had to accept any mouse-enabled frame as a stand-in, and the first such frame
+                // swallowed the wheel.
                 const MOUSE_KIND: [&str; 5] = [
                     "OnEnter",
                     "OnLeave",
@@ -83,6 +89,9 @@ impl Loader<'_> {
                 ];
                 if MOUSE_KIND.iter().any(|k| name.eq_ignore_ascii_case(k)) {
                     self.call(wrapper, "EnableMouse", true, dbg);
+                }
+                if name.eq_ignore_ascii_case("OnMouseWheel") {
+                    self.call(wrapper, "EnableMouseWheel", true, dbg);
                 }
                 // The KEYBOARD kinds, the same walker rule one index over (`OnChar` = kind 0,
                 // `OnKeyDown`/`OnKeyUp` = kind 1). Bucket membership is what the delivery walk

@@ -180,11 +180,39 @@ impl Rung {
     /// near-side default is after the water. Everything with a *known* slot moved to the
     /// pre-water band below (B347).
     pub const GROUND_FX: f32 = 8192.0;
-    /// The **rasterizer** constant the decal family shares — [`GROUND_FX`](Rung::GROUND_FX)'s
-    /// number in its second role, named so the lanes whose *sort* rung left the +8192 neighbourhood
-    /// (the ring, the reticle) still reach the coplanarity margin rather than a copy of it. The
-    /// blob shadow is the one lane that needs more: [`SHADOW_RASTER`](Rung::SHADOW_RASTER), B131.
-    pub const DECAL_RASTER: i32 = 8192;
+    /// **The one rasterizer settle every ground decal shares** — every client of the shared
+    /// surface-decal projector (`decal.rs`): the selection ring, the unit blob shadow, spell
+    /// ground-fx quads, the footprints and the ground-target reticle. It funds the `GreaterEqual`
+    /// tie against the drawn ground (`DECAL_WORLD_CLIP`, 0781).
+    ///
+    /// **It used to be two constants, and the split was wrong** (1817, superseding B131's
+    /// `SHADOW_RASTER`): the ring and reticle rode +8192 on the claim that "the blob shadow is the
+    /// one lane that needs more". The binary groups them the other way — the blob shadow reaches
+    /// the SAME EGxRs id-`0` arming site as the ring, corpse marker, click marker and sky decal
+    /// (`0x6d7920` → `0x6d8047 call 0x6d7330` → `0x6d6fa0` → `0x6d7480`), and it is the
+    /// **footprints** that are a lane of their own (`0x69a54a` in `0x69a3e0`), at 10× (wow-re
+    /// `gx/scratch/decal-depth-bias-lanes.md`, §5 five-way). And our own measurement agrees with
+    /// the grouping: the residual is 0781's bake error — the decal's CPU-baked world verts vs the
+    /// receiver's GPU-transformed verts diverge by ~1–3 ulps of the *world coordinate*, millimetres
+    /// at city magnitudes — which is a property of the bake, identical on every lane that uses it.
+    /// `ground_fx` was a third value again, and not even a raster one: it passed `GROUND_FX as
+    /// i32`, a **sort** rung borrowed for a rasterizer field because the numbers coincided — 1806's
+    /// conflation, in the one place it had survived.
+    /// So one number, and it is the measured one: **the residual is 2.59× the +4096 margin and
+    /// therefore 1.30× the +8192 one**, i.e. the ring and the reticle were riding *under* their own
+    /// conflict and had simply not been walked on a slope yet. Pinned by
+    /// `raised_bias_dominates_the_bake_residual` (particles/render.rs), which now asserts both ends.
+    ///
+    /// **What is deliberately NOT ported: the reference's magnitudes, or its 1 : 10 : 20 ratio.**
+    /// Both are properties of a 24-bit *fixed-point forward-Z* buffer at near 0.1 / far 777 /
+    /// depth-range [0, 0.94], where a constant normalized-depth bias is worth `k · d²` yards —
+    /// 0.0065 yd at 10 yd on the ring lane, 0.16 yd at 50. Ours is reversed-Z **float**, where the
+    /// bias unit is the ULP at the primitive's own depth, so the same constant is worth `z · C ·
+    /// 2⁻²³` — **linear**, not quadratic. Neither profile converts into the other, and the quantity
+    /// that sets ours is a millimetre-scale bake residual that does not grow with distance at all.
+    /// The reference's 10× footprint step has no counterpart here for the same reason: the residual
+    /// is the bake's, and the bake is one path.
+    pub const DECAL_RASTER: i32 = 32768;
     /// **The pre-water decal band, rung 1: the selection ring** (and, when they are built, the
     /// corpse marker and the click-to-move marker — the same `+0x30` slot and the same call site).
     ///
@@ -229,7 +257,7 @@ impl Rung {
     /// 1.4e4 wide, so the ladder's usual margin does not fit and pretending it does would be the
     /// lie. **The depth of the rung costs nothing at the rasterizer** — unlike [`WATER_BIAS`] and
     /// the two rungs above, the effect stream carries sort and raster as separate fields
-    /// ([`SHADOW_RASTER`](Rung::SHADOW_RASTER) is this lane's other half).
+    /// ([`DECAL_RASTER`](Rung::DECAL_RASTER) is this lane's other half).
     pub const SHADOW_SORT: f32 = -5.2e4;
     /// **The pre-water band, rung 3: footprints** — the reference draws them at
     /// `0x483654` (`0x670240` → `0x69a3e0`), one slot AFTER the shadow pass and still before the
@@ -244,48 +272,50 @@ impl Rung {
     /// on a water surface at all. When it can, that half wants a rung above [`WATER_BIAS`] — not
     /// this one.
     pub const RETICLE: f32 = -4.8e4;
-    /// The blob shadow's **rasterizer** margin, sized independently of its sort rung (B131 split
-    /// one constant into its two roles). It funds the `GreaterEqual` tie against the drawn ground
-    /// (`DECAL_WORLD_CLIP`, 0781). The reference's mechanism is the same class: `shadowBias` cvar
-    /// 0.1 → a constant-only polygon offset (−102.4 LSBs of its 24-bit buffer; no slope term
-    /// exists in the binary — wow-re unit-blob-shadow RE, corroborated across every shadow draw of
-    /// four apitraces). The *size* is ours: our residual is 0781's — the decal's CPU-baked world
-    /// verts vs the receiver's GPU-transformed verts diverge by ~1–3 ulps of the world coordinate,
-    /// millimetres at city magnitudes, landing on the depth tie where the receiver is *sloped*
-    /// (the confirmed B131 flicker walk was the Stormwind gate ramp). 4096 absorbed under half the
-    /// 3-ulp worst case at close zoom and lost the tie while moving; 32768 dominates it ≥2× at
-    /// every zoom ≥1 yd and stays centimetre-order at 30 yd. Sizing pinned by
-    /// `raised_bias_dominates_the_bake_residual` (particles/render.rs).
-    pub const SHADOW_RASTER: i32 = 32768;
-
-    /// **The wade-foam decal's rasterizer settle — the reference's own, both halves** (VERIFIED,
-    /// wow-re `terrain/scratch/foam-decal-depth-and-drain-slot.md` §3; folded back as 1809).
+    /// **The wade-foam decal's rasterizer settle.** `0x68fd0f` arms EGxRs id `0` for the foam draw
+    /// (`0x68fae0`), which is the client's third and largest ground-decal bias lane.
     ///
-    /// `0x68fd0f` arms EGxRs id `0` for the foam draw, and arming that id non-zero is what issues
-    /// the client's sole `glPolygonOffset` — `factor` a hardcoded `0xc0800000` = **−4.0**
-    /// (`0x59bf0a`, in capability arm `0x41`, whose only image-wide call site is inside the id-`0`
-    /// applicator), `units` = `footstepBias(0.125) × [0x810390]` ⇒ **−8.0001**. The `-4.0` is not
-    /// this lane's number: it is the immediate every consumer of EGxRs id `0` gets, and the foam
-    /// reaches it by borrowing the **footprint's own cvar** — which is idiom reuse ("this is a
-    /// ground decal, arm the ground-decal offset"), not a tie this decal has to win. Only the
-    /// `units` term is the foam's own.
+    /// **The shipped value is `D3DRS_DEPTHBIAS = −1.2207217514514923e−04`** =
+    /// `−f32(footstepBias(0.125) × [0x810390])` — **−2048.03 ULPs** of the reference's 24-bit
+    /// buffer, 20× the ring/shadow lane and 2× the footprints' (VERIFIED, wow-re
+    /// `gx/scratch/decal-depth-bias-lanes.md`, §5 five-way, commit `6335d165`).
     ///
-    /// **The signs invert here.** GL depth runs 0 = near, so its negative offset pulls toward the
-    /// eye; ours is reversed-Z (`CompareFunction::GreaterEqual`, near = 1), where toward the eye is
-    /// *larger* depth — so a ported term is positive. [`DECAL_RASTER`](Rung::DECAL_RASTER) being
-    /// positive for the same job corroborates the convention independently.
+    /// **1809's `−8.0001` and its `factor = −4.0` were both dead code.** `gxApi` defaults to
+    /// `"direct3d"` (`0x63a81d`) and no shipped `WTF` overrides it, so `GxDevCreate` builds
+    /// `CGxDeviceD3d` and the OpenGL arm — the only place in the image where the `−4.0` slope
+    /// factor exists — never runs. The GL arm also hard-codes a `×65536` *16-bit* ULP conversion,
+    /// which is why every number derived from it came out **256× too small**. Measured from a
+    /// fully independent state: `factor = 0` on 2485 of 2485 client-originated `glPolygonOffset`
+    /// calls across four captures, which WoW's GL arm cannot emit.
     ///
-    /// **The constant is in ULPs of a float depth buffer** (per-primitive — the quantisation 1806
-    /// is about) rather than GL's fixed `2⁻²⁴`: same order, not the same unit. Its world-space pull
-    /// is `z · C · 2⁻²³`, i.e. ~1 µm per yard of view distance at `C = 8` — invisible by
-    /// construction, which is the point. It is a guard against a driver rounding one pipeline's
-    /// coplanar arithmetic differently from another's, not a tie-breaker anything rests on.
+    /// **The signs invert here.** Reference depth runs 0 = near, so its negative offset pulls
+    /// toward the eye; ours is reversed-Z (`CompareFunction::GreaterEqual`, near = 1), where toward
+    /// the eye is *larger* depth — so a ported term is positive.
+    ///
+    /// **We spend almost none of it, on purpose.** Our constant is in ULPs of a **float** buffer
+    /// (per-primitive — the quantisation 1806 is about), so its world pull is `z · C · 2⁻²³`:
+    /// ~1 µm per yard of view distance at `C = 8`. The reference's is `1.29847e−3 · d²` — 0.13 yd
+    /// at 10 yd, 0.52 at 20, 3.2 at 50 — and wow-re **measured, from framebuffer pixels on two
+    /// Northshire wade frames, that it does paint the splash decal onto dry bank**, by ~0.3–1.0 yd
+    /// at an 11.9-yd camera. That bleed is the thing the director reported twice (B348), so the
+    /// fidelity is available and deliberately not taken; the reference's own bound on it is not
+    /// the depth test but the texgen box plus the decal texture's alpha-0 border under CLAMP.
+    /// What ours funds instead is a guard against a driver rounding one pipeline's coplanar
+    /// arithmetic differently from another's — [`FOAM_RASTER_SLOPE`](Rung::FOAM_RASTER_SLOPE) has
+    /// the reason nothing more is needed.
     pub const FOAM_RASTER: i32 = 8;
     /// **The slope half is deliberately NOT armed — the tie it settles does not exist here** (B348
     /// second round, 1811; supersedes 1809 §3's transcription).
     ///
-    /// The reference arms `factor = -4.0` and it is the right instrument *there*. It is the wrong
-    /// one here because our foam patch is not a decal *over* the liquid surface — it **is** the
+    /// **The reference has no slope term at all** — 1811 argued this from our own geometry and the
+    /// bytes then confirmed it outright: `D3DRS_SLOPESCALEDEPTHBIAS` is written nowhere in the
+    /// image (`0xaf` never pushed, census of all 24 `call [reg+0xe4]` sites), and the `-4.0` that
+    /// 1809 ported lives only in the OpenGL arm the shipped client never constructs (see
+    /// [`FOAM_RASTER`](Rung::FOAM_RASTER)). A re-implementation that ports it is transcribing dead
+    /// code, and a grazing view of a ground plane is precisely where the two arms diverge most.
+    ///
+    /// 1811's own reason stands underneath, and is the one that would hold even if the term were
+    /// live: our foam patch is not a decal *over* the liquid surface — it **is** the
     /// liquid surface's own triangles: [`water_fx::build_patch`] emits the wet cells straight out
     /// of [`WaterChunkInfo`]'s grid, in the liquid mesh's own winding, through the same
     /// `clip_from_world` (`DECAL_WORLD_CLIP`, 0781) against a mesh whose `Transform` is
@@ -338,14 +368,14 @@ const _: () = {
     assert!(Rung::GROUND_FX - CLOUDS_BIAS > 1.0e4);
     assert!(GLARE_BIAS - Rung::GROUND_FX > 1.0e4);
     assert!(Rung::NAMEPLATE - GLARE_BIAS > 1.0e4);
-    // The two raster margins are their own axis (B131) — not comparable to the sort rungs above,
-    // only to zero and to each other: the shadow's is the raised one.
-    assert!(Rung::SHADOW_RASTER > Rung::DECAL_RASTER && Rung::DECAL_RASTER > 0);
-    // The foam's settle is the reference's own and is deliberately the SMALL one: its work is done
-    // by the slope term, which the other three decal lanes do not carry (their own arming is
-    // unread — see FOAM_RASTER). Both halves pull toward the eye under reversed-Z, so both are
-    // positive; a negative here would push the decal INTO its receiver.
-    assert!(Rung::FOAM_RASTER > 0 && Rung::FOAM_RASTER < Rung::DECAL_RASTER);
+    // The raster margins are their own axis (B131) — not comparable to the sort rungs above, only
+    // to zero and to each other. One number for every ground decal (1817); the foam is not one of
+    // them, and takes far less.
+    assert!(Rung::DECAL_RASTER > 0 && Rung::FOAM_RASTER < Rung::DECAL_RASTER);
+    // The foam's settle is deliberately the SMALL one: unlike a ground decal its patch is the
+    // liquid mesh's own triangles, so it has no bake residual to dominate (1811). It pulls toward
+    // the eye under reversed-Z, so it is positive; a negative here would push it INTO its receiver.
+    assert!(Rung::FOAM_RASTER > 0);
     // The slope half stays disarmed on this lane (1811): its pull grows as z² and it spends the
     // wet-lattice skirt onto the beach, while the tie it would settle is already won by the patch
     // being the liquid mesh's own triangles. A nonzero value here is a decision, not a tune.

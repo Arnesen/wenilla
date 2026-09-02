@@ -789,7 +789,9 @@ pub(crate) fn feed_containers(
     commands: Res<NetCommands>,
     cooldowns: Res<crate::cooldowns::Cooldowns>,
     spells: Option<Res<crate::ui_action::Spells>>,
-    mut equip_errors: ResMut<EquipErrors>,
+    // The refusals and where they land, as one param (the 16-SystemParam ceiling this signature
+    // already sits at): the queue, and `show_messages`' chat + sound sinks (1815).
+    equip: (ResMut<EquipErrors>, crate::ui_action::MessageSink),
     // Reason 16's `%s` source (decision 0916); absent = every 16 keeps the generic line.
     bag_families: Option<Res<crate::ui_items::ItemBagFamilies>>,
     pending: Res<PendingItemOps>,
@@ -808,6 +810,7 @@ pub(crate) fn feed_containers(
         return;
     };
     let (clock, mut petitions) = clock_and_petitions;
+    let (mut equip_errors, mut sink) = equip;
     let (memory, vm_reset) = memory.get_reset(&script);
     // The gate (1439): the snapshot below is a function of the self descriptor's slot arrays,
     // the item stores (both epochs — `is_changed` on `Items`/`NameCache`/`Cooldowns` is
@@ -914,6 +917,7 @@ pub(crate) fn feed_containers(
     // failed to map can't reach here (the table is total), and a key we typo'd is caught by
     // `equip_error`'s resolution test against the real `GlobalStrings.lua`, not at runtime.
     let player = self_q.0.iter().next();
+    let mut refusals = Vec::new();
     for e in equip_errors.0.drain(..) {
         // Reason 16's substitution — the ONE reason whose text is chosen by the app rather than
         // by the table, because the choice needs the named bag (decision 0916). The reference's
@@ -954,8 +958,14 @@ pub(crate) fn feed_containers(
             Some(family) => text.replace("%s", &family),
             None => text,
         };
-        script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
+        refusals.push(crate::ui_action::Shown::keyed(key, text));
     }
+    // Through the one sink, so the row that named the text also names the surface and the SOUND —
+    // 18 of these keys carry an error-speech line (`ERR_INV_FULL`, `ERR_BAG_FULL`,
+    // `ERR_NOT_ENOUGH_MONEY`, …), which is the largest single source of it in the client
+    // (decision 1815). Every key this table can emit is `kind = 2`, so nothing moved off the red
+    // line when the surface stopped being hardcoded here.
+    crate::ui_action::show_messages(&mut script, &mut sink, "ui_items", refusals);
     // Both lock clears of the frame — the resolving field-update watch ([`resolve_item_locks`],
     // which runs ahead of EVERY feed) and the failure-driven clears
     // `net/apply/loot.rs::inventory_failure` queued (it has no `UiScript` to fire through). Both

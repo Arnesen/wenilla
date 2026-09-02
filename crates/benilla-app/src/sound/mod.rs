@@ -30,6 +30,7 @@ mod kit;
 mod limiter;
 mod liquid_loop;
 mod math;
+mod message;
 mod meter;
 mod missile;
 mod mix_tap;
@@ -41,12 +42,14 @@ mod reverb;
 mod sheathe;
 mod spell;
 mod ui;
+mod vocal;
 mod water;
 mod weather;
 mod zone;
 pub(crate) use emote::EmoteSounds;
 pub(crate) use glue::GlueSound;
 pub(crate) use greeting::NpcGreetingRequest;
+pub(crate) use message::MessageSounds;
 pub(crate) use mixer::Mixer;
 pub(crate) use ui::{AutoEquipSound, LootPickupSound};
 pub(crate) use zone::ExplorationSounds;
@@ -90,6 +93,12 @@ pub(crate) struct SoundConfig {
     /// the stream alive at zero, so re-enabling resumes mid-track where the reference re-picks.
     pub music_enabled: bool,
     pub ambience_enabled: bool,
+    /// **Error speech** — 1.12's `EnableErrorSpeech` CVar (`CVar::Register` at `0x457877`,
+    /// registrar default `"1"`, the stock Sound panel's fourth checkbox). Gates the race/sex
+    /// refusal lines your own character says ([`vocal`], decision 1815) and nothing else: it is
+    /// read inside `0x458250` alongside `MasterSoundEffects`, *before* any escalation state moves,
+    /// so turning it off is silence rather than a muted play.
+    pub error_speech: bool,
     /// Zone reverb — 1.12's `SoundReverb` CVar (`0x4573be` registration, callback `0x4574d0`,
     /// flag byte `[0x835a4c]`). The flag gates **both** EAX paths: the zone/environment preset
     /// (`0x45a75b`: flag zero ⇒ `FSOUND_Reverb_SetProperties` is never called) and the
@@ -188,6 +197,7 @@ impl Default for SoundConfig {
             ambience: 0.6,
             music_enabled: true,
             ambience_enabled: true,
+            error_speech: true,
             reverb: false,
             world_hold: false,
             music_suppressed: false,
@@ -471,6 +481,8 @@ impl Plugin for SoundPlugin {
         emote::plugin(app);
         greeting::plugin(app);
         ui::plugin(app);
+        vocal::plugin(app);
+        message::plugin(app);
         glue::plugin(app);
         money::plugin(app);
         reverb::plugin(app);

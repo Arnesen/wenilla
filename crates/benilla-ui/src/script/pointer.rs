@@ -187,9 +187,15 @@ impl UiScript {
         let sorted = order::traversal(&model.arena);
         let scroll_sources = scroll_clip_sources(&model);
         let fh = order::hit_test(&sorted, |fh| {
-            (model.arena.is_mouse_wheel_enabled(fh)
-                || model.arena.is_mouse_enabled(fh)
-                || link_span_hit(&model, fh, x, y))
+            // **The wheel gates on the handler and CONTINUES** — the one genuine fall-through in
+            // the engine (wow-re `ui/scratch/hittest-no-fallthrough-law.md`). Down/up deliberately
+            // do not use the idiom; the wheel does. So this asks for the WHEEL flag alone and lets
+            // the sweep walk past a frame that merely takes the mouse, which is what puts the wheel
+            // through a scroll pane's chrome and into the pane.
+            //
+            // It used to also accept `is_mouse_enabled` as a stand-in, because the loader did not
+            // arm the wheel kind and no frame ever carried the flag. The loader arms it now.
+            model.arena.is_mouse_wheel_enabled(fh)
                 && model.resolved.get(&fh).is_some_and(|r| {
                     point_in_rect(inset_rect(*r, model.arena.hit_rect_insets(fh)), x, y)
                 })

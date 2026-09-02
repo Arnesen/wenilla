@@ -863,9 +863,8 @@ fn overflowing_detail_content_clips_to_the_scrollframe_rect() {
 }
 
 /// Wheeling over the detail pane changes `GetVerticalScroll()` — the ScrollFrame is
-/// mouse-wheel-interactive by construction (decision 0112, no wheel-catcher needed), and is
-/// declared after `QuestLogWheelCatcher` in this window's `<Frames>` so it out-ranks the
-/// catcher within its own rect (this window's own XML comment on hit-test z-order).
+/// mouse-wheel-interactive by construction (decision 0112), and it is the only frame in this
+/// window's bucket covering the detail rect, so the spin lands on it outright.
 #[test]
 fn wheel_over_the_detail_pane_changes_vertical_scroll() {
     let mut s = UiScript::new().unwrap();

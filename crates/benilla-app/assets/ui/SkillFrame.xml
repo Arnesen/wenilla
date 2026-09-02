@@ -593,19 +593,6 @@
             </Layer>
         </Layers>
         <Frames>
-            <!-- The scroll-wheel catcher (TrainerFrame.xml's own note) — MUST be first so every real
-                 row below out-ranks it in hit-testing, and sized to the LIST REGION ONLY (rows span
-                 y -79..-295, x 22..309), NEVER the whole page: unlike the trainer's standalone
-                 window, this page is CharacterFrame's LAST child, so a full-page catcher
-                 out-ranks every EARLIER CharacterFrame child — it ate the tab row and the close X
-                 whenever Skills was up (the 2026-07-17 "can't switch back to Character" report;
-                 character_tests.rs's tab_round_trip_with_a_selected_skill_by_point is the repro). -->
-            <Button name="SkillWheelCatcher">
-                <Size><AbsDimension x="290" y="222"/></Size>
-                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="20" y="-76"/></Offset></Anchor></Anchors>
-                <Scripts><OnMouseWheel>BenillaSkillFrame_OnMouseWheel(arg1)</OnMouseWheel></Scripts>
-            </Button>
-
             <!-- The expand/collapse-all tab (ref SkillFrameExpandButtonFrame, l.242-317 — the SAME
                  QuestLogSortTab art TrainerFrame.xml's own BenillaTrainerExpandButtonFrame uses).
                  The tab is SIZED BY ITS LABEL, the ref's own OnLoad law (l.312-316:

@@ -351,8 +351,14 @@ pub struct Frame {
     /// tab index). Default 0. Distinct from the layout/wrapper id ([`Model`](crate::script::Model)'s
     /// bijection) — this one is data, not identity.
     pub wow_id: i64,
-    /// Monotonic creation sequence — the frame's insertion order for the draw-order key. See the
-    /// note on [`WidgetArena`] about how this relates to the client's live per-bucket insertion.
+    /// The frame's **live link position** in its `(strata, level)` bucket — the client's intrusive
+    /// list order, not a creation index. Seeded at creation and re-stamped to the bucket's tail by
+    /// [`WidgetArena::resequence_to_tail`] on every relink the reference performs: becoming
+    /// effectively visible, and a *changing* strata or level on an already-visible frame.
+    ///
+    /// It orders **two** sweeps that disagree about which end wins. Drawing takes the LATER-linked
+    /// frame on top; the HIT sweep probes the EARLIER-linked frame first and stops there
+    /// (decision 1816). See [`crate::order::hit_test`], and the note on [`WidgetArena`].
     pub insertion_seq: u32,
     /// Per-kind behavior state (StatusBar value model, …); [`KindState::None`] for plain kinds.
     pub kind_state: KindState,

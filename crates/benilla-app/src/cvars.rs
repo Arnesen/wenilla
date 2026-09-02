@@ -232,6 +232,11 @@ pub(crate) const REGISTERED: &[Registered] = &[
     same("MasterSoundEffects", "1"),
     same("EnableMusic", "1"),
     same("EnableAmbience", "1"),
+    // Error speech (1815) — the race/sex refusal lines your character says. A real 1.12 CVar
+    // (`CVar::Register` at `0x457877`, registrar default `"1"`; wow-re
+    // `re/cvar/cvar-register-sites.tsv` row 54) and a real 1.12 checkbox: SoundOptionsFrame.lua's
+    // `ENABLE_ERROR_SPEECH`, index 4, which the master enable greys along with Ambience.
+    same("EnableErrorSpeech", "1"),
     // Zone reverb (1153). The binary registers this one `"1"` (`0x4573be`) and we register it
     // `"0"` — the only row here that knowingly leaves the registrar's default, because the
     // reference's reverb is EAX-over-hardware and that hardware has not existed since Vista:
@@ -963,6 +968,7 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "mastersoundeffects" => knobs.sound.enabled = v != 0.0,
         "enablemusic" => knobs.sound.music_enabled = v != 0.0,
         "enableambience" => knobs.sound.ambience_enabled = v != 0.0,
+        "enableerrorspeech" => knobs.sound.error_speech = v != 0.0,
         // The client's own parse for this one is literally `!= 0` too (`0x4574d0`: `setne al`).
         "soundreverb" => knobs.sound.reverb = v != 0.0,
         "soundoutputlimiter" => knobs.sound.limiter = v != 0.0,
@@ -1331,7 +1337,7 @@ fn sync_cvars(
                 .collect(),
         );
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 42] = [
+        let session: [(&str, String); 43] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -1339,6 +1345,7 @@ fn sync_cvars(
             ("MasterSoundEffects", flag(sound.enabled)),
             ("EnableMusic", flag(sound.music_enabled)),
             ("EnableAmbience", flag(sound.ambience_enabled)),
+            ("EnableErrorSpeech", flag(sound.error_speech)),
             ("SoundReverb", flag(sound.reverb)),
             ("SoundOutputLimiter", flag(sound.limiter)),
             ("uiScale", scale.0.to_string()),
@@ -1675,6 +1682,7 @@ mod tests {
         assert_eq!(d["MasterSoundEffects"] != 0.0, sound.enabled);
         assert_eq!(d["EnableMusic"] != 0.0, sound.music_enabled);
         assert_eq!(d["EnableAmbience"] != 0.0, sound.ambience_enabled);
+        assert_eq!(d["EnableErrorSpeech"] != 0.0, sound.error_speech);
         // Welded like the rest — and deliberately NOT the binary's registrar "1" (1153).
         assert_eq!(d["SoundReverb"] != 0.0, sound.reverb);
         assert_eq!(d["SoundOutputLimiter"] != 0.0, sound.limiter);

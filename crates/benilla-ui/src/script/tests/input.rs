@@ -36,8 +36,13 @@ fn enable_mouse_gates_hit_testing() {
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
+/// The hit sweep's key, all three terms: strata, then level, then — at a tie — the **earlier-linked**
+/// frame, NOT the later one that draws on top (decision 1816; wow-re
+/// `ui/scratch/hittest-no-fallthrough-law.md` §4, `0x764aa0`'s strict `ja` appending equal keys and
+/// `0x7660d0` sweeping from index 0). This test used to assert the opposite at the tie and was named
+/// for it — draw order and hit order agree on strata and level and disagree on exactly this.
 #[test]
-fn topmost_by_draw_order_captures_among_overlapping_enabled_frames() {
+fn hit_order_is_strata_then_level_then_the_earlier_linked_frame() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
     s.run(
@@ -54,21 +59,25 @@ fn topmost_by_draw_order_captures_among_overlapping_enabled_frames() {
     .unwrap();
     s.resolve();
 
-    // Same strata/level: B has the later insertion ⇒ drawn on top ⇒ captures.
+    // Same strata/level: A was linked FIRST, so the sweep reaches it first and it captures —
+    // even though B, linked later, draws on top of it.
     s.mouse_move(400.0, 300.0);
-    assert_eq!(s.eval::<String>("return who").unwrap(), "B");
+    assert_eq!(s.eval::<String>("return who").unwrap(), "A");
 
     // Move off everything to clear the mouseover (fires OnLeave, resets focus) before re-testing.
     s.mouse_move(-10.0, -10.0);
 
-    // Raise A above B by strata (no rect change ⇒ no re-resolve needed): A now captures.
+    // Raise A above B by strata (no rect change ⇒ no re-resolve needed): strata outranks the tie,
+    // and A keeps the point for the stronger reason.
     s.run("A:SetFrameStrata('DIALOG')").unwrap();
     s.mouse_move(400.0, 300.0);
     assert_eq!(s.eval::<String>("return who").unwrap(), "A");
 
     s.mouse_move(-10.0, -10.0);
 
-    // Put B in the same (DIALOG) strata but a higher frame level: B captures again.
+    // Put B in the same (DIALOG) strata but a higher frame level: level outranks link order, so
+    // B takes it back — the tie rule only decides frames that are equal on both.
+
     s.run("B:SetFrameStrata('DIALOG'); B:SetFrameLevel(10)")
         .unwrap();
     s.mouse_move(400.0, 300.0);
@@ -193,6 +202,10 @@ fn mouse_wheel_passes_delta_to_the_captured_frame() {
         wheel = nil
         local a = CreateFrame("Frame", "A")
         a:SetPoint("BOTTOMLEFT", 0, 0); a:SetSize(800, 600); a:EnableMouse(true)
+        -- The wheel is its own index and its own flag: SetScript never auto-enables (that law is
+        -- XML-load-time only), so a runtime-created frame needs this explicitly, exactly as it
+        -- needs EnableMouse. Mouse-enablement alone puts nothing in the wheel index.
+        a:EnableMouseWheel(true)
         a:SetScript("OnMouseWheel", function(self, delta) wheel = delta end)
     "#,
     )
@@ -694,6 +707,9 @@ fn the_repick_re_hovers_without_a_mouse_move() {
         local over = CreateFrame("Button", "Over")
         over:SetPoint("BOTTOMLEFT", 100, 100); over:SetSize(100, 100); over:EnableMouse(true)
         over:SetScript("OnEnter", function() table.insert(entered, "over") end)
+        -- Say "on top" with the LEVEL, not with declaration order: at equal levels the sweep takes
+        -- the earlier-linked frame (`Under`), which is the tie law, not what this test is about.
+        over:SetFrameLevel(10)
     "#,
     )
     .unwrap();

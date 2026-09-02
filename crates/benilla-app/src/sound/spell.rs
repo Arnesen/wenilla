@@ -91,10 +91,10 @@ fn route_spell_kit_sounds(
                     )
                 };
                 match played {
-                    Ok(()) if looping => {
+                    Ok(_) if looping => {
                         hold_loops.insert(entity, kit_sound);
                     }
-                    Ok(()) => {}
+                    Ok(_) => {}
                     Err(e) => warn!("spell kit sound {kit_sound}: {e:#}"),
                 }
             }

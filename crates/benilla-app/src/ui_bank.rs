@@ -22,7 +22,7 @@
 use benilla_protocol::messages::bank_slot_result;
 use bevy::prelude::*;
 
-use benilla_ui::script::{BankState, ScriptValue, UiScript};
+use benilla_ui::script::{BankState, UiScript};
 
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_script::UiInput;
@@ -105,14 +105,13 @@ impl Plugin for UiBankPlugin {
 /// The red error line for a `SMSG_BUY_BANK_SLOT_RESULT` code — the reference GlobalStrings'
 /// `ERR_BANKSLOT_*` texts verbatim (decision 0604: the codes map 1:1 onto them). `OK` never
 /// prints (vmangos doesn't send it; tolerated silently if a server ever does).
-fn bank_slot_error_text(result: u32) -> Option<String> {
-    match result {
-        bank_slot_result::FAILED_TOO_MANY => Some("You've reached your limit of bag slots!".into()),
-        bank_slot_result::INSUFFICIENT_FUNDS => Some("You can't afford that.".into()),
-        bank_slot_result::NOTBANKER => Some("That unit is not a banker!".into()),
-        bank_slot_result::OK => None,
-        other => Some(format!("Bank slot purchase failed ({other}).")),
-    }
+fn bank_slot_error_key(result: u32) -> Option<&'static str> {
+    Some(match result {
+        bank_slot_result::FAILED_TOO_MANY => "ERR_BANKSLOT_FAILED_TOO_MANY", // 0x100
+        bank_slot_result::INSUFFICIENT_FUNDS => "ERR_BANKSLOT_INSUFFICIENT_FUNDS", // 0x101
+        bank_slot_result::NOTBANKER => "ERR_BANKSLOT_NOTBANKER",             // 0x102
+        _ => return None,
+    })
 }
 
 /// Push the purchase-row snapshot + the open/close/purchased-count events (module doc).
@@ -132,18 +131,32 @@ fn feed_bank(
     mut errors: ResMut<BankErrors>,
     mut last: Local<crate::ui_script::VmMemo<Option<BankState>>>,
     mut last_banker: Local<crate::ui_script::VmMemo<Option<u64>>>,
+    mut sink: crate::ui_action::MessageSink,
 ) {
     let Some(mut script) = script else {
         return;
     };
     let last = last.get(&script);
     let last_banker = last_banker.get(&script);
-    // Purchase refusals surface as the client's red error line.
-    for result in errors.0.drain(..) {
-        if let Some(text) = bank_slot_error_text(result) {
-            script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
-        }
-    }
+    // Purchase refusals go to the surface — and the voice — their message record names: the
+    // insufficient-funds row carries error-speech line `0x16` (decision 1815). A code with no key
+    // keeps its "(n)" line and stays silent, because there is no record behind it to sound.
+    let lines: Vec<_> = errors
+        .0
+        .drain(..)
+        .filter_map(|result| match bank_slot_error_key(result) {
+            Some(key) => {
+                let text = script.lua().globals().get::<String>(key).ok()?;
+                (!text.is_empty()).then(|| crate::ui_action::Shown::keyed(key, text))
+            }
+            None if result == bank_slot_result::OK => None,
+            None => Some(crate::ui_action::Shown::unkeyed(
+                benilla_ui::messages::MsgKind::Error,
+                format!("Bank slot purchase failed ({result})."),
+            )),
+        })
+        .collect();
+    crate::ui_action::show_messages(&mut script, &mut sink, "ui_bank", lines);
     let store = self_q.iter().next();
     let purchased = store
         .and_then(|s| s.0.player_bank_bag_slots_purchased())
@@ -209,20 +222,35 @@ mod tests {
     /// The refusal-code → red-line map: the three vmangos failure codes print the reference
     /// GlobalStrings verbatim, OK stays silent, an unknown code prints its number.
     #[test]
-    fn bank_slot_error_texts() {
+    fn bank_slot_error_keys() {
         assert_eq!(
-            bank_slot_error_text(bank_slot_result::FAILED_TOO_MANY).as_deref(),
-            Some("You've reached your limit of bag slots!")
+            bank_slot_error_key(bank_slot_result::FAILED_TOO_MANY),
+            Some("ERR_BANKSLOT_FAILED_TOO_MANY")
         );
         assert_eq!(
-            bank_slot_error_text(bank_slot_result::INSUFFICIENT_FUNDS).as_deref(),
-            Some("You can't afford that.")
+            bank_slot_error_key(bank_slot_result::INSUFFICIENT_FUNDS),
+            Some("ERR_BANKSLOT_INSUFFICIENT_FUNDS")
         );
         assert_eq!(
-            bank_slot_error_text(bank_slot_result::NOTBANKER).as_deref(),
-            Some("That unit is not a banker!")
+            bank_slot_error_key(bank_slot_result::NOTBANKER),
+            Some("ERR_BANKSLOT_NOTBANKER")
         );
-        assert_eq!(bank_slot_error_text(bank_slot_result::OK), None);
-        assert!(bank_slot_error_text(99).unwrap().contains("99"));
+        assert_eq!(bank_slot_error_key(bank_slot_result::OK), None);
+        assert_eq!(bank_slot_error_key(99), None, "the feed's own \"(n)\" arm");
+        // Every key is a catalog row, and the insufficient-funds one is the spoken one (1815).
+        for key in [
+            "ERR_BANKSLOT_FAILED_TOO_MANY",
+            "ERR_BANKSLOT_INSUFFICIENT_FUNDS",
+            "ERR_BANKSLOT_NOTBANKER",
+        ] {
+            let r = benilla_ui::messages::by_key(key).expect("catalog row");
+            assert_eq!(r.kind, benilla_ui::messages::MsgKind::Error, "{key}");
+        }
+        assert_eq!(
+            benilla_ui::messages::by_key("ERR_BANKSLOT_INSUFFICIENT_FUNDS")
+                .unwrap()
+                .type_tag,
+            0x16
+        );
     }
 }

@@ -660,7 +660,7 @@
             },
             Audio = {
                 "RowEnableAll", "RowMaster", "RowSound", "RowMusic", "RowAmbience",
-                "RowEnableMusic", "RowEnableAmbience",
+                "RowEnableMusic", "RowEnableAmbience", "RowEnableErrorSpeech",
             },
             Graphics = {
                 "RowUiScale", "RowFarclip", "RowWorldDetail",
@@ -1249,15 +1249,21 @@
                 return
             end
             if key ~= "Audio" then return end
+            -- 1.12's own rule, both halves: SoundOptionsFrame_UpdateDependencies greys check
+            -- button 2 (Enable Ambience) AND button 4 (Enable Error Speech) while the master
+            -- enable is unticked. Enable Music is deliberately left alive — the quirk the
+            -- reference's own file has.
             local on = GetCVar("MasterSoundEffects") ~= "0"
-            local box = OptionsFrameContainerBodyAudioRowEnableAmbienceCheck
-            local label = OptionsFrameContainerBodyAudioRowEnableAmbienceLabel
-            if on then
-                box:Enable()
-                label:SetFontObject("GameFontNormal")
-            else
-                box:Disable()
-                label:SetFontObject("GameFontDisable")
+            for _, row in {"RowEnableAmbience", "RowEnableErrorSpeech"} do
+                local box = getglobal("OptionsFrameContainerBodyAudio"..row.."Check")
+                local label = getglobal("OptionsFrameContainerBodyAudio"..row.."Label")
+                if on then
+                    box:Enable()
+                    label:SetFontObject("GameFontNormal")
+                else
+                    box:Disable()
+                    label:SetFontObject("GameFontDisable")
+                end
             end
         end
 
@@ -2318,6 +2324,22 @@
                                             <Scripts><OnLoad>
                                                 OptionsRow_OnLoad(self, "EnableAmbience", "Enable Ambience",
                                                     "OPTION_TOOLTIP_ENABLE_AMBIENCE")
+                                                self.soundQuirk = 1
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- 1.12's fourth Sound checkbox, ENABLE_ERROR_SPEECH
+                                             (SoundOptionsFrame.lua l.2) — the race/sex refusal
+                                             lines your character says aloud, decision 1815. Its
+                                             label and tooltip are the reference's own
+                                             GlobalStrings entries. -->
+                                        <Frame name="$parentRowEnableErrorSpeech" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowEnableAmbience" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowEnableAmbience" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "EnableErrorSpeech", "Enable Error Speech",
+                                                    "OPTION_TOOLTIP_ENABLE_ERROR_SPEECH")
                                                 self.soundQuirk = 1
                                             </OnLoad></Scripts>
                                         </Frame>

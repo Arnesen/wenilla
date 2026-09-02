@@ -54,11 +54,6 @@ use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_script::UiInput;
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 
-/// `ERR_NOT_ENOUGH_MONEY` (GlobalStrings.lua, verbatim) — the red line the reference's
-/// `DisplayError(0x25)` resolves when Accept is clicked without the cost in your purse. The same
-/// string [`crate::ui_merchant`] and [`crate::ui_mail`] already inline for their own refusals.
-const ERR_NOT_ENOUGH_MONEY: &str = "You don't have enough money.";
-
 /// The pending respec question. Written by the net drain's `TalentWipeConfirm` arm, read by
 /// [`feed_talent_wipe`] (which fires `CONFIRM_TALENT_WIPE` and publishes `CheckTalentMasterDist`'s
 /// answer) and by [`drain_talent_wipe`] (which turns the dialog's Accept into the answer packet).
@@ -146,6 +141,7 @@ fn drain_talent_wipe(
     mut wipe: ResMut<TalentWipeState>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     commands: Res<NetCommands>,
+    mut sink: crate::ui_action::MessageSink,
 ) {
     let Some(mut script) = script else {
         return;
@@ -170,10 +166,21 @@ fn drain_talent_wipe(
             "ui_talent_wipe: respec costs {} copper, purse holds {money} — refused client-side",
             wipe.cost
         );
-        script.fire_event(
-            "UI_ERROR_MESSAGE",
-            vec![ScriptValue::Str(ERR_NOT_ENOUGH_MONEY.to_string())],
-        );
+        // The reference's `DisplayError(0x25)` = `ERR_NOT_ENOUGH_MONEY`: the red line AND, since
+        // that row's `+0x0c` is `0x28`, the spoken one (decision 1815).
+        let text = script
+            .lua()
+            .globals()
+            .get::<String>("ERR_NOT_ENOUGH_MONEY")
+            .unwrap_or_default();
+        if !text.is_empty() {
+            crate::ui_action::show_messages(
+                &mut script,
+                &mut sink,
+                "ui_talent_wipe",
+                [crate::ui_action::Shown::keyed("ERR_NOT_ENOUGH_MONEY", text)],
+            );
+        }
         return;
     }
     for _ in 0..confirms {

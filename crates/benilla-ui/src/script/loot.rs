@@ -930,7 +930,10 @@ mod tests {
         let e = s.run("lb:SetSlot('x')").unwrap_err().to_string();
         assert!(e.contains("Usage: SetSlot(index)"), "{e}");
 
-        // Never slotted → takes nothing, rather than silently taking row 1.
+        // Never slotted → takes nothing, rather than silently taking row 1. `LB1` is still parked
+        // under the cursor from the clicks above and, being linked first, would win the tie for the
+        // point (decision 1816) and take row 2 again — get it out of the way first.
+        s.run("LB1:Hide()").unwrap();
         s.run(r#"fresh = CreateFrame("LootButton", "LB2", UIParent)"#)
             .unwrap();
         hardware_click(&mut s, "LB2", "LeftButton");

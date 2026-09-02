@@ -1042,16 +1042,6 @@
             </Layer>
         </Layers>
         <Frames>
-            <!-- The scroll-wheel catcher (TrainerFrame.xml's own note) — MUST be first so every real
-                 row below out-ranks it in hit-testing. -->
-            <Button name="BenillaTradeSkillWheelCatcher">
-                <Anchors>
-                    <Anchor point="TOPLEFT" relativePoint="TOPLEFT"/>
-                    <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"/>
-                </Anchors>
-                <Scripts><OnMouseWheel>BenillaTradeSkillFrame_OnMouseWheel(arg1)</OnMouseWheel></Scripts>
-            </Button>
-
             <!-- The top-right close X (ref a UIPanelCloseButton at TOPRIGHT -29,-8, l.838-846; the
                  minimize-button art stands in — this house dialect ships no such template,
                  TrainerFrame.xml's own precedent). -->

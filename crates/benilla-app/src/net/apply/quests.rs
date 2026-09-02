@@ -278,7 +278,10 @@ mod tests {
         quest_giver_invalid(13, &mut giver);
         let msgs = giver.take_messages();
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].kind(), crate::ui_action::MsgKind::Chat);
+        assert_eq!(
+            benilla_ui::messages::kind_of(msgs[0].key),
+            benilla_ui::messages::MsgKind::Chat
+        );
         assert_eq!(msgs[0], UiError::key("ERR_QUEST_ALREADY_ON"));
         assert!(!giver.is_open(), "the ref closes the window on a refusal");
     }
@@ -294,7 +297,10 @@ mod tests {
         quest_giver_failed(373, 4, &mut giver, &mut log, &commands);
         let msgs = giver.take_messages();
         assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0].kind(), crate::ui_action::MsgKind::Chat);
+        assert_eq!(
+            benilla_ui::messages::kind_of(msgs[0].key),
+            benilla_ui::messages::MsgKind::Chat
+        );
         assert_eq!(
             msgs[0],
             UiError {
@@ -303,7 +309,10 @@ mod tests {
                 fill_d: None,
             }
         );
-        assert_eq!(msgs[1].kind(), crate::ui_action::MsgKind::Error);
+        assert_eq!(
+            benilla_ui::messages::kind_of(msgs[1].key),
+            benilla_ui::messages::MsgKind::Error
+        );
         assert_eq!(msgs[1], UiError::key("ERR_INV_FULL"));
         assert!(!giver.is_open());
     }
@@ -316,7 +325,10 @@ mod tests {
         quest_log_full(&mut giver);
         let msgs = giver.take_messages();
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].kind(), crate::ui_action::MsgKind::Error);
+        assert_eq!(
+            benilla_ui::messages::kind_of(msgs[0].key),
+            benilla_ui::messages::MsgKind::Error
+        );
         assert_eq!(msgs[0], UiError::key("ERR_QUEST_LOG_FULL"));
         assert!(
             giver.is_open(),

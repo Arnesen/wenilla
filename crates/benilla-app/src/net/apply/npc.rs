@@ -270,7 +270,7 @@ pub(super) fn stable_result(
         // `ERR_NOT_ENOUGH_MONEY`, reached through `DisplayError` row 0x25.
         code::ERR_MONEY => {
             debug!("net: stable purchase refused — not enough money");
-            errors.0.push("You don't have enough money.".to_string());
+            errors.0.push("ERR_NOT_ENOUGH_MONEY");
         }
         code::SUCCESS_STABLE | code::SUCCESS_UNSTABLE | code::SUCCESS_BUY_SLOT => {
             let Some(npc) = stable_open.npc else {

@@ -615,13 +615,12 @@ fn warm_effect_lane(
         ] {
             // The rasterizer settle is a PAIR — constant and slope-scale — and both halves are
             // pipeline-key axes, so they are warmed as the pairs that actually ship, not as a
-            // cross product. The foam's is the reference's own (`Rung::FOAM_RASTER`, 1809) and is
-            // the only one carrying a slope term; a hole here is a live compile the first time
-            // anyone wades.
+            // cross product: every ground decal shares `Rung::DECAL_RASTER` (1817) and the foam
+            // takes its own, much smaller one. A hole here is a live compile the first time anyone
+            // wades or drops a shadow.
             for (raster_bias, raster_slope) in [
                 (0, 0.0),
                 (benilla_world::sky_order::Rung::DECAL_RASTER, 0.0),
-                (benilla_world::sky_order::Rung::SHADOW_RASTER, 0.0),
                 (
                     benilla_world::sky_order::Rung::FOAM_RASTER,
                     benilla_world::sky_order::Rung::FOAM_RASTER_SLOPE,

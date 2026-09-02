@@ -50,7 +50,7 @@ use std::collections::{HashMap, HashSet};
 use benilla_protocol::messages::{mail_error, mail_message_type, MailListEntry};
 use bevy::prelude::*;
 
-use benilla_ui::script::{MailInboxRow, MailState, ScriptValue, UiScript};
+use benilla_ui::script::{MailInboxRow, MailState, UiScript};
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
@@ -98,7 +98,7 @@ pub(crate) struct Stationery(pub(crate) benilla_formats::StationeryCatalog);
 pub(crate) struct MailSendAck {
     pub(crate) ok: bool,
     /// A pre-formatted red error line for a non-OK, non-equip send failure (else `None`).
-    pub(crate) error_text: Option<String>,
+    pub(crate) refusal: Option<MailRefusal>,
 }
 
 /// The open mailbox, filled by the net bridge ([`crate::net::apply::mail`]) and read by
@@ -124,9 +124,9 @@ pub(crate) struct MailOpen {
     last_list_query: Option<f64>,
     /// SEND-action results the net bridge queued for the feed to fire ([`MailSendAck`]).
     pub(crate) send_acks: Vec<MailSendAck>,
-    /// Pre-formatted red error lines (a take/return/delete failure) the feed fires via
-    /// `UI_ERROR_MESSAGE`.
-    pub(crate) errors: Vec<String>,
+    /// Refusals (a take/return/delete failure) the feed shows, resolved at the feed because a
+    /// keyed one reads its text out of the VM ([`MailRefusal`]).
+    pub(crate) errors: Vec<MailRefusal>,
 }
 
 impl MailOpen {
@@ -239,21 +239,54 @@ fn send_query_next_mail_time_on_enter(
     }
 }
 
-/// The client's message string for a `SMSG_SEND_MAIL_RESULT` error (vmangos `MailResponseResult`);
-/// texts quoted verbatim from the reference `GlobalStrings.lua` where one exists (decision 0544).
-/// `NOT_YOUR_TEAM` has no 1.12 GlobalString — a best-effort English literal stands in (flagged).
-pub(crate) fn mail_error_text(error: u32) -> String {
+/// One queued mail refusal, on its way to the red line.
+///
+/// Two arms because 1.12's own vocabulary has two: most `MailResponseResult` codes name a
+/// **message-catalog key**, whose row decides the text (from the player's own `GlobalStrings`),
+/// the surface, and — for `ERR_NOT_ENOUGH_MONEY`, line `0x28` — the *voice* (decision 1815). Two
+/// codes have no 1.12 string at all, and those keep the best-effort English literal they have
+/// always had: no row, so no sound, which is the honest shape rather than a borrowed one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MailRefusal {
+    Key(&'static str),
+    Text(String),
+}
+
+/// The refusal a `SMSG_SEND_MAIL_RESULT` error shows (vmangos `MailResponseResult`); keys
+/// cross-checked against the reference `GlobalStrings.lua` — every one of them resolves there to
+/// exactly the string this used to inline (decision 0544, now read at runtime instead).
+pub(crate) fn mail_refusal(error: u32) -> MailRefusal {
     match error {
-        mail_error::CANNOT_SEND_TO_SELF => "You can't send mail to yourself.".into(), // ERR_MAIL_TO_SELF
-        mail_error::NOT_ENOUGH_MONEY => "You don't have enough money.".into(), // ERR_NOT_ENOUGH_MONEY
-        mail_error::RECIPIENT_NOT_FOUND => "Cannot find mail recipient.".into(), // ERR_MAIL_TARGET_NOT_FOUND
-        mail_error::NOT_YOUR_TEAM => "That player is not part of your alliance.".into(), // no 1.12 GlobalString
-        mail_error::INTERNAL_ERROR => "Internal mail database error.".into(), // ERR_MAIL_DATABASE_ERROR
-        mail_error::TRIAL_ACCOUNT => "Trial accounts cannot perform that action.".into(),
-        mail_error::TOO_MANY_ATTACHMENTS => {
-            "You have reached the in-game cap of unique mail recipients".into() // ERR_MAIL_REACHED_CAP
+        mail_error::CANNOT_SEND_TO_SELF => MailRefusal::Key("ERR_MAIL_TO_SELF"), // 0x164
+        mail_error::NOT_ENOUGH_MONEY => MailRefusal::Key("ERR_NOT_ENOUGH_MONEY"), // 0x25
+        mail_error::RECIPIENT_NOT_FOUND => MailRefusal::Key("ERR_MAIL_TARGET_NOT_FOUND"), // 0x165
+        mail_error::INTERNAL_ERROR => MailRefusal::Key("ERR_MAIL_DATABASE_ERROR"), // 0x166
+        mail_error::TOO_MANY_ATTACHMENTS => MailRefusal::Key("ERR_MAIL_REACHED_CAP"), // 0x1c4
+        // No 1.12 GlobalString for either — flagged literals, as before.
+        mail_error::NOT_YOUR_TEAM => {
+            MailRefusal::Text("That player is not part of your alliance.".into())
         }
-        other => format!("Mail failed ({other})."),
+        mail_error::TRIAL_ACCOUNT => {
+            MailRefusal::Text("Trial accounts cannot perform that action.".into())
+        }
+        other => MailRefusal::Text(format!("Mail failed ({other}).")),
+    }
+}
+
+impl MailRefusal {
+    /// Resolve to a displayable line, reading a keyed one out of the VM's own `GlobalStrings`.
+    /// `None` for a key whose string is absent or empty — the reference's data-suppression face.
+    fn shown(self, get: &dyn Fn(&str) -> Option<String>) -> Option<crate::ui_action::Shown> {
+        match self {
+            Self::Key(key) => {
+                let text = get(key)?;
+                (!text.is_empty()).then(|| crate::ui_action::Shown::keyed(key, text))
+            }
+            Self::Text(text) => Some(crate::ui_action::Shown::unkeyed(
+                benilla_ui::messages::MsgKind::Error,
+                text,
+            )),
+        }
     }
 }
 
@@ -476,12 +509,18 @@ fn feed_mail(
     self_q: Query<(&crate::net::ObjectStore, &crate::net::Guid), With<crate::net::SelfPlayer>>,
     states: Res<crate::world_state::WorldStates>,
     // The random-suffix roll's catalogs (1547): an enclosed item's rolled name.
-    props: Option<Res<crate::items::RandomProperties>>,
-    enchants: Option<Res<crate::items::Enchants>>,
+    // The roll catalogs and the message sink, paired (the 16-SystemParam ceiling this signature
+    // sits at): the random-suffix roll (1547), and where a refusal lands (1815).
+    rolls_and_sink: (
+        Option<Res<crate::items::RandomProperties>>,
+        Option<Res<crate::items::Enchants>>,
+        crate::ui_action::MessageSink,
+    ),
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let (props, enchants, mut sink) = rolls_and_sink;
     let rolls = crate::items::RollCatalogs {
         props: props.as_deref(),
         enchants: enchants.as_deref(),
@@ -490,10 +529,12 @@ fn feed_mail(
     let last_mailbox = last_mailbox.get(&script);
     let last_has_new_mail = last_has_new_mail.get(&script);
 
-    // Take/return/delete failures surface as the client's red error line (the equip/cast path shape).
-    for text in std::mem::take(&mut mail.errors) {
-        script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
-    }
+    // Take/return/delete failures go to the surface — and the voice — their message record names.
+    let refusals: Vec<_> = std::mem::take(&mut mail.errors)
+        .into_iter()
+        .filter_map(|r| r.shown(&|key| script.lua().globals().get::<String>(key).ok()))
+        .collect();
+    crate::ui_action::show_messages(&mut script, &mut sink, "ui_mail", refusals);
     // SEND acks: MAIL_FAILED on EVERY send result (unblocks the button — wow-re §5), plus
     // MAIL_SEND_SUCCESS on OK (resets the form) or the red error line on a failure.
     for ack in std::mem::take(&mut mail.send_acks) {
@@ -501,8 +542,11 @@ fn feed_mail(
         if ack.ok {
             script.fire_event("MAIL_SEND_SUCCESS", vec![]);
             script.clear_send_mail_item();
-        } else if let Some(text) = ack.error_text {
-            script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
+        } else if let Some(line) = ack
+            .refusal
+            .and_then(|r| r.shown(&|key| script.lua().globals().get::<String>(key).ok()))
+        {
+            crate::ui_action::show_messages(&mut script, &mut sink, "ui_mail", [line]);
         }
     }
 

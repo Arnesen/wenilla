@@ -47,8 +47,7 @@ use bevy::prelude::*;
 
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
-use crate::ui_action::{show_messages, ui_error_text, MsgKind, UiError};
-use crate::ui_chat::ChatLog;
+use crate::ui_action::{show_messages, ui_error_text, MessageSink, Shown, UiError};
 use crate::ui_script::UiInput;
 
 /// How many frames a queued line waits for its `%s` before it is dropped — [`crate::ui_loot`]'s
@@ -159,14 +158,14 @@ fn feed_quest_share(
     mut share: ResMut<QuestShare>,
     mut names: ResMut<NameCache>,
     commands: Res<NetCommands>,
-    mut chat: ResMut<ChatLog>,
+    mut sink: MessageSink,
 ) {
     let Some(mut script) = script else {
         return;
     };
 
     // The verdicts: one line per resolved name, the rest kept for the next frame.
-    let mut lines: Vec<(MsgKind, String)> = Vec::new();
+    let mut lines: Vec<Shown> = Vec::new();
     let mut waiting = Vec::new();
     for mut v in std::mem::take(&mut share.verdicts) {
         let Some(key) = verdict_message(v.msg) else {
@@ -185,7 +184,7 @@ fn feed_quest_share(
                 };
                 let get = |k: &str| script.lua().globals().get::<String>(k).ok();
                 if let Some(text) = ui_error_text(&err, &get) {
-                    lines.push((err.kind(), text));
+                    lines.push(Shown::keyed(err.key, text));
                 }
             }
             None => {
@@ -202,7 +201,7 @@ fn feed_quest_share(
         }
     }
     share.verdicts = waiting;
-    show_messages(&mut script, &mut chat, "ui_quest_share", lines);
+    show_messages(&mut script, &mut sink, "ui_quest_share", lines);
 
     // The escort confirm — held until the member's name lands, then raised with the reference's own
     // two args: `QUEST_ACCEPT = "%s is starting %s\nWould you like to as well?"`, player first.

@@ -81,6 +81,13 @@ impl SoundKits {
     pub(super) fn roll(&mut self) -> u32 {
         self.rng.next()
     }
+
+    /// The kit table itself, for the one consumer that must resolve ids **ahead of** playing them:
+    /// [`super::vocal`]'s table build, which needs a kit's variation count (the reference reads
+    /// `0x45cda0(kit) + 0x94` there for exactly the same reason).
+    pub(super) fn catalog(&self) -> &SoundKitCatalog {
+        &self.catalog
+    }
 }
 
 /// One playing channel the pump owns — the client's ~0x90-byte channel struct, benilla-shaped.
@@ -251,6 +258,13 @@ impl Bus {
     /// uncapped) — only a *connecting* swing takes the capped [`Self::WEAPON_SWING`]. The armor
     /// foley off `$FSD` is here as well, uncapped beside the capped step it accompanies.
     pub(super) const DEFAULT: Bus = Bus(0);
+
+    /// Bus 1 — **cap 1**. The **error speech** line your own character says (`0x458250`,
+    /// `0x4582d4 mov ebx,1`), and the reference's only tenant of this bus. Its cap of one is
+    /// load-bearing rather than incidental: `0x458250` attempts the annoyed line *and then falls
+    /// through and attempts the ordinary one*, and it is this cap that keeps the second attempt
+    /// from being heard on top of the first (`super::vocal` records the whole cycle).
+    pub(super) const ERROR_SPEECH: Bus = Bus(1);
 
     /// Bus 5 — **cap 1**. The attacker's exertion vocal (`CreatureSoundData.Exertion` = class 0,
     /// `ExertionCritical` = class 1), routed through `0x624786` → `0x623b10`. One exertion voice
@@ -529,7 +543,8 @@ pub(crate) enum KitRef<'a> {
 /// Resolve → gate → pick → decode → play. `pos: None` is the 2D path (UI, self sounds);
 /// `category` is the caller's volume bucket (module docs — the client's per-driver flag bits).
 /// Silently succeeds without playing when the kit is out of range or duplicate-suppressed
-/// (matching the client: gates are not errors).
+/// (matching the client: gates are not errors) — `Ok(false)` is that outcome, see
+/// [`play_kit_ext`]'s return.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn play_kit(
     kits: &mut SoundKits,
@@ -540,7 +555,7 @@ pub(crate) fn play_kit(
     kit_ref: KitRef<'_>,
     pos: Option<Vec3>,
     category: SoundCategory,
-) -> Result<()> {
+) -> Result<bool> {
     play_kit_ext(
         kits,
         assets,
@@ -565,6 +580,12 @@ pub(crate) fn play_kit(
 /// handling is unpinned; decision record with the drone build), and a **voice category** — the
 /// category latched on the unit's one-shot bark slot ([`ActiveChannel::voice`]); `Some` only for
 /// the barks the reference stores in `[unit+0xb20]`.
+///
+/// **Returns whether a channel actually opened** — the reference's own answer: its play core
+/// `0x45ce60` hands back the FMOD channel, `0` when any gate refused (an unresolvable kit, the
+/// per-bus cap, the duplicate walk), and callers that care read that zero. Almost none do, and
+/// `Ok(false)` reads exactly like `Ok(())` did for them; [`super::vocal`]'s escalation counter is
+/// the one place the distinction is the mechanism.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn play_kit_ext(
     kits: &mut SoundKits,
@@ -576,7 +597,7 @@ pub(super) fn play_kit_ext(
     pos: Option<Vec3>,
     category: SoundCategory,
     extras: PlayExtras,
-) -> Result<()> {
+) -> Result<bool> {
     let PlayExtras {
         variant,
         source,
@@ -592,7 +613,7 @@ pub(super) fn play_kit_ext(
     // reveal. A dropped one-shot under an opaque cover is a sound the reference never played:
     // its world load blocks, and the events these sounds voice happen unheard.
     if config.world_hold {
-        return Ok(());
+        return Ok(false);
     }
     let kit = match kit_ref {
         KitRef::Id(id) => kits.catalog.get(id),
@@ -614,13 +635,13 @@ pub(super) fn play_kit_ext(
     let d_sq = pos.map(|p| math::dist_sq(listener, p));
     if let Some(d_sq) = d_sq {
         if cutoff > 0.0 && !math::audible(d_sq, cutoff) {
-            return Ok(());
+            return Ok(false);
         }
     }
 
     let weights: Vec<u32> = kit.files.iter().map(|(_, w)| *w).collect();
     if weights.is_empty() {
-        return Ok(()); // a kit with no files is playable-as-nothing, not an error
+        return Ok(false); // a kit with no files is playable-as-nothing, not an error
     }
 
     // The **per-bus concurrency cap** — the always-on arm of the pre-play gate `0x7a66a0`, checked
@@ -630,7 +651,7 @@ pub(super) fn play_kit_ext(
     // distance-culled one only because the cull hands the channel back — and benilla's pump reaps a
     // culled channel out of this list on the same edge.
     if bus_at_cap(out.channels.iter().map(|c| c.bus), bus) {
-        return Ok(());
+        return Ok(false);
     }
 
     // Duplicate suppression — byte-verified (wow-re uisound-tables.md, corrected §5): the FMOD
@@ -640,7 +661,7 @@ pub(super) fn play_kit_ext(
     // limit[0x87ce60], 13 categories) — stays a deferral until that limit table is read out.
     let live_same_kit = out.channels.iter().filter(|c| c.kit == id).count();
     if no_duplicates_blocks(dedupe_exempt, flags, live_same_kit) {
-        return Ok(());
+        return Ok(false);
     }
 
     // **The coherent-copy cap** (decision 1560) — the fallback for the rows the reference leaves
@@ -662,14 +683,14 @@ pub(super) fn play_kit_ext(
     // genuinely distinct mobs' impacts), while removing the coherent stack that does the damage.
     if same_kit_cap_blocks(dedupe_exempt, live_same_kit) {
         out.copies_dropped += 1;
-        return Ok(());
+        return Ok(false);
     }
 
     // The variation: an explicit index when the caller drives the cycle (the client's
     // `variant != -1`), else the weighted pick with depletion.
     let pick = match variant {
         Some(i) if i < weights.len() => i,
-        Some(_) => return Ok(()), // out-of-range explicit variant: playable-as-nothing
+        Some(_) => return Ok(false), // out-of-range explicit variant: playable-as-nothing
         None => kits.pick_variation(id, &weights),
     };
     let path = kits.catalog.get(id).expect("resolved above").files[pick]
@@ -707,7 +728,7 @@ pub(super) fn play_kit_ext(
     // that can *stop another sound*, and it must not do that for a play the cheaper gates above
     // were going to drop anyway.
     if !claim_voice(out, amp) {
-        return Ok(());
+        return Ok(false);
     }
 
     let mixer = out.mixer.as_mut().context("no audio device")?;
@@ -761,7 +782,7 @@ pub(super) fn play_kit_ext(
         bus,
         latch,
     });
-    Ok(())
+    Ok(true)
 }
 
 /// Does `unit` hold a **live one-shot voice channel** — the reference's `[unit+0xb20]` handle,

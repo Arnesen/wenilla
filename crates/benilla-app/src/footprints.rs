@@ -365,7 +365,7 @@ fn push_footprints(
             .anchored(print.anchor)
             .rung(
                 benilla_world::sky_order::Rung::FOOTPRINT,
-                benilla_world::sky_order::Rung::SHADOW_RASTER,
+                benilla_world::sky_order::Rung::DECAL_RASTER,
             )
             .owner(lane.0);
         batch.extend(print.verts.iter().map(|v| EffectVertex {

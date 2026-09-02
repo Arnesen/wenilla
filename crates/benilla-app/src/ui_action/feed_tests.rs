@@ -64,6 +64,7 @@ fn app_with_food_on_the_bar() -> (App, crossbeam_channel::Receiver<ClientCommand
         .init_resource::<UiErrorTexts>()
         // The cast-failure combat-log line (1703) rides the same drain.
         .init_resource::<crate::ui_chat::ChatLog>()
+        .init_resource::<crate::sound::MessageSounds>()
         .insert_resource(ItemDisplays::icons_for_tests(
             ItemDisplayCatalog::from_displays(displays),
         ))
@@ -314,6 +315,7 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
         .init_resource::<UiErrorTexts>()
         // The cast-failure combat-log line (1703) rides the same drain.
         .init_resource::<crate::ui_chat::ChatLog>()
+        .init_resource::<crate::sound::MessageSounds>()
         .insert_resource(NetCommands(tx));
     let mut script = UiScript::new().unwrap();
     script.set_macros(MacroState {

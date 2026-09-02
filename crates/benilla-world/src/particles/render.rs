@@ -523,7 +523,7 @@ fn prepare_effects(
     // straight off a live frame: `item 4` vs `item 81` is what B347 was, measured.
     //
     // The lane is keyed on the SORT rung because that is the one field unique per lane: the raster
-    // bias is shared (the footprint lane rides `SHADOW_RASTER`, and prints were being labelled
+    // bias is shared (every ground decal rides `DECAL_RASTER`, and prints were being labelled
     // shadows here for exactly that reason).
     let trace = std::env::var_os("WOW_EFFECT_TRACE").is_some();
     let mut trace_lines: Vec<String> = Vec::new();
@@ -901,9 +901,14 @@ mod tests {
     /// street height is micro-scale), a *sloped* receiver takes the full horizontal ulps onto
     /// its tilted normal — and the confirmed flicker walk was the Stormwind gate ramp. Model
     /// the 3-ulp worst case (0781: "~1–3 ulps") at the walk's own coordinates across zoom and
-    /// slope, and pin the resize: the residual spends over half the 0781-era 4096 margin (with
-    /// the GPU's FMA-contraction noise on top, the tie is lost — the live A/B), while
-    /// `Rung::SHADOW_RASTER` dominates the same worst case with ≥2× headroom.
+    /// slope, and pin both ends of the sizing.
+    ///
+    /// **Since 1817 it pins the raise as well as the floor.** The residual is 2.59× the 0781-era
+    /// +4096 margin, so it is also **1.30× the +8192** the selection ring and the ground-target
+    /// reticle rode until the RE showed they share the blob shadow's lane and therefore its
+    /// conflict — those two were under their own residual and had simply not been walked on a
+    /// slope. The measurement is per-lane-independent by construction: the residual is the
+    /// *bake's*, and the bake is one path, so one number serves every ground decal.
     #[test]
     fn raised_bias_dominates_the_bake_residual() {
         use crate::sky_order::Rung;
@@ -922,6 +927,7 @@ mod tests {
         };
         let cam_dir = Vec3::new(0.35, 0.55, 0.76).normalize();
         let mut worst_over_old = 0.0_f32;
+        let mut worst_over_retired_ring = 0.0_f32;
         let mut worst_over_new = 0.0_f32;
         // Receiver grades from level street to a steep ramp, tilted along 8 azimuths.
         for slope in [0.0_f32, 0.08, 0.2, 0.35] {
@@ -950,14 +956,17 @@ mod tests {
                     let conflict = delta_n as f64 * grad;
                     let unit = bias_unit(depth) as f64;
                     worst_over_old = worst_over_old.max((conflict / (4096.0 * unit)) as f32);
+                    worst_over_retired_ring =
+                        worst_over_retired_ring.max((conflict / (8192.0 * unit)) as f32);
                     worst_over_new =
-                        worst_over_new.max((conflict / (Rung::SHADOW_RASTER as f64 * unit)) as f32);
+                        worst_over_new.max((conflict / (Rung::DECAL_RASTER as f64 * unit)) as f32);
                 }
             }
         }
         eprintln!(
             "bake residual worst: {worst_over_old:.3}x the 0781-era 4096 margin, \
-             {worst_over_new:.3}x Rung::SHADOW_RASTER"
+             {worst_over_retired_ring:.3}x the 8192 the ring rode until 1817, \
+             {worst_over_new:.3}x Rung::DECAL_RASTER"
         );
         assert!(
             worst_over_old > 0.5,
@@ -965,8 +974,13 @@ mod tests {
              (worst {worst_over_old:.2}×) — the resize's premise would be unfounded"
         );
         assert!(
+            worst_over_retired_ring > 1.0,
+            "the 3-ulp residual fits inside the retired +8192 (worst {worst_over_retired_ring:.2}×) \
+             — then the ring and reticle were NOT under-biased and 1817's raise wants re-arguing"
+        );
+        assert!(
             worst_over_new < 0.5,
-            "Rung::SHADOW_RASTER leaves under 2× headroom against the 3-ulp residual \
+            "Rung::DECAL_RASTER leaves under 2× headroom against the 3-ulp residual \
              (worst {worst_over_new:.2}×) — raise it"
         );
     }

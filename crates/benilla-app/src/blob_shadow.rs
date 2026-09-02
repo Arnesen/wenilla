@@ -498,7 +498,7 @@ fn push_shadows(
             .anchored(key.feet)
             .rung(
                 benilla_world::sky_order::Rung::SHADOW_SORT,
-                benilla_world::sky_order::Rung::SHADOW_RASTER,
+                benilla_world::sky_order::Rung::DECAL_RASTER,
             )
             .owner(entity);
         batch.vertices(&verts.0);

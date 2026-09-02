@@ -277,29 +277,36 @@ pub(super) fn build_nodes(
     Some((map_id, ui, resolved))
 }
 
-/// The client's message string for an `SMSG_ACTIVATETAXIREPLY` refusal — byte-exact 1.12 enUS
-/// `GlobalStrings` (interface.MPQ `GlobalStrings.lua`). The vmangos `ActivateTaxiReplies` enum
-/// names (`Objects/Player.h`) ARE these `GlobalString` names one-for-one (`ERR_TAXIOK`,
-/// `ERR_TAXIUNSPECIFIEDSERVERERROR`, …) — cross-checked against the extracted `GlobalStrings.lua`
-/// this session, byte for byte. `OK` returns `None` (no line — the flight starts).
-pub(super) fn taxi_error_text(code: u32) -> Option<String> {
-    let text = match code {
+/// The **message id** an `SMSG_ACTIVATETAXIREPLY` refusal displays, as its GlobalStrings key.
+///
+/// The reference's parser `FUN_005ed1e0` indexes a 13-entry table at `[0x85fedc + 4*code]` and
+/// hands the result straight to `CGGameUI::DisplayError 0x496720`: `code == 0` closes the map,
+/// `1..=12` toast, `code >= 13` does nothing at all (wow-re `system/ui/scratch/taxi-system.md`
+/// §TU-1, VERIFIED byte-exact). So this returns a key rather than a string, and the catalog row
+/// behind it decides the text, the **surface** and the sound — which matters here more than
+/// anywhere: **seven of the twelve are `kind = 1`, the YELLOW info line**, not the red one they
+/// all used to take, and `ERR_TAXINOTENOUGHMONEY` carries error-speech line `0x36` (decision 1815).
+///
+/// `OK` and anything past the table return `None` — the reference's own `code >= 13` no-op, in
+/// place of the "Taxi activation failed (n)." literal that used to stand here and that the
+/// reference never shows.
+pub(super) fn taxi_error_key(code: u32) -> Option<&'static str> {
+    Some(match code {
         taxi_reply::OK => return None,
-        taxi_reply::UNSPECIFIED_SERVER_ERROR => "UNSPECIFIED TAXI SERVER ERROR",
-        taxi_reply::NO_SUCH_PATH => "There is no direct path to that destination!",
-        taxi_reply::NOT_ENOUGH_MONEY => "You don't have enough money!",
-        taxi_reply::TOO_FAR => "You are too far away from the taxi stand!",
-        taxi_reply::NO_VENDOR_NEARBY => "There is no taxi vendor nearby!",
-        taxi_reply::NOT_VISITED => "You haven't reached that taxi node on foot yet!",
-        taxi_reply::BUSY => "You are busy and can't use the taxi service now.",
-        taxi_reply::ALREADY_MOUNTED => "You are already mounted! Dismount first.",
-        taxi_reply::SHAPESHIFTED => "You can't take a taxi while shapeshifted!",
-        taxi_reply::PLAYER_MOVING => "You are moving.",
-        taxi_reply::SAME_NODE => "You are already there!",
-        taxi_reply::NOT_STANDING => "You need to be standing to go anywhere.",
-        other => return Some(format!("Taxi activation failed ({other}).")),
-    };
-    Some(text.to_string())
+        taxi_reply::UNSPECIFIED_SERVER_ERROR => "ERR_TAXIUNSPECIFIEDSERVERERROR", // 0xac
+        taxi_reply::NO_SUCH_PATH => "ERR_TAXINOSUCHPATH",                         // 0xab
+        taxi_reply::NOT_ENOUGH_MONEY => "ERR_TAXINOTENOUGHMONEY",                 // 0xad
+        taxi_reply::TOO_FAR => "ERR_TAXITOOFARAWAY",                              // 0xae
+        taxi_reply::NO_VENDOR_NEARBY => "ERR_TAXINOVENDORNEARBY",                 // 0xaf
+        taxi_reply::NOT_VISITED => "ERR_TAXINOTVISITED",                          // 0xb0
+        taxi_reply::BUSY => "ERR_TAXIPLAYERBUSY",                                 // 0xb1
+        taxi_reply::ALREADY_MOUNTED => "ERR_TAXIPLAYERALREADYMOUNTED",            // 0xb2
+        taxi_reply::SHAPESHIFTED => "ERR_TAXIPLAYERSHAPESHIFTED",                 // 0xb3
+        taxi_reply::PLAYER_MOVING => "ERR_TAXIPLAYERMOVING",                      // 0xb4
+        taxi_reply::SAME_NODE => "ERR_TAXISAMENODE",                              // 0xaa
+        taxi_reply::NOT_STANDING => "ERR_TAXINOTSTANDING",                        // 0xb6
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

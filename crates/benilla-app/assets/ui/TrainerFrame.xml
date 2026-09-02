@@ -718,17 +718,6 @@
             </Layer>
         </Layers>
         <Frames>
-            <!-- The scroll-wheel catcher (this file's header note) — MUST be first so every real row
-                 below out-ranks it in hit-testing; it gives the list's EMPTY tail a hit-target whose
-                 spin also bubbles to the window. -->
-            <Button name="BenillaTrainerWheelCatcher">
-                <Anchors>
-                    <Anchor point="TOPLEFT" relativePoint="TOPLEFT"/>
-                    <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"/>
-                </Anchors>
-                <Scripts><OnMouseWheel>BenillaTrainerFrame_OnMouseWheel(arg1)</OnMouseWheel></Scripts>
-            </Button>
-
             <!-- The top-right close X (ref a UIPanelCloseButton at TOPRIGHT (-29,-8); the minimize-button
                  art stands in). -->
             <Button name="BenillaTrainerCloseButton">
