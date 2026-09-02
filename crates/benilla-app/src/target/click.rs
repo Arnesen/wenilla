@@ -583,7 +583,6 @@ pub(super) fn act_on_right_click(
         target.is_some_and(|s| s.0.unit_flags() & cursor_mode::UNIT_FLAG_SKINNABLE != 0),
         learned.skinning.is_some(),
     );
-    let (loot, skin) = (leg == DeadUnitLeg::Loot, leg == DeadUnitLeg::Skin);
     // The unit twin of the GO/corpse legs' one-line answer (tag `use`). Every refusal on this
     // ladder is silent from the outside — the range gray, the mounted fall-through, a corpse
     // somebody else owns — and they are indistinguishable on screen. One run says which.
@@ -623,111 +622,138 @@ pub(super) fn act_on_right_click(
         me.map(|(_, g, _)| g.0),
         attack,
     );
-    if attack {
-        // The actor-eligibility block — **silent here**, and that is 1851 correcting 0481. The
-        // click still SELECTED (the commit above already ran, the ref's select-then-refuse order)
-        // and the melee auto-draw and swing still never happen; what changed is that no red
-        // `ERR_ATTACK_*` line shows any more.
-        //
-        // 0481 attached `0x612df0`'s Phase A ladder to this path. The §5 this session dispatched
-        // found that validator has exactly three callers image-wide — pet-attack `0x4bd40d`, the
-        // Attack action/keybind `0x6131aa`, and TryCast `0x6e4efb` — and the world right-click is
-        // none of them: it runs `0x60c247 call 0x5ecb70`, an extent containing no `DisplayError`
-        // at all. So all eight of those red lines belong to the bar and the pet command, never to
-        // the click, and the fix is not to delete six of them but to move where they are asked
-        // for. [`attack_actor_blocked`] is the same ladder with the message removed; the bar keeps
-        // [`attack_actor_refusal`]. (The predicate is still `0x612df0`'s and not `0x5ecb70`'s own
-        // overlapping set — a separate slice — but the SILENCE is the verified law, and the swing
-        // is suppressed either way.)
-        if crate::ui_action::attack_actor_blocked(self_store, me.map(|(_, g, _)| g.0)).is_some() {
-            // refused — selection stands, no swing, and nothing is said
-        } else {
-            debug!("right-click attack: {guid:#x}");
-            // The right-click's own StartAttack, through the one seam (auto-draw + the swing +
-            // the auto-repeat cancel — `0x5ecb70`'s whole body). The commit above may already
-            // have re-pointed the swing at this guid, in which case the ref's `0x5eccda` is the
-            // thing that suppresses a second send, so pass it the real lock state and let the
-            // seam decide: `swung` means the re-swing already went out and the lock is ours, so
-            // no stop is in flight any more.
-            let engaged = me.is_some_and(|(_, _, e)| e);
-            seam.start(guid, engaged || outcome.swung, false);
+    match unit_branch(attack, dead_fork, leg) {
+        UnitBranch::Attack => {
+            // The actor-eligibility block — **silent here**, and that is 1851 correcting 0481. The
+            // click still SELECTED (the commit above already ran, the ref's select-then-refuse order)
+            // and the melee auto-draw and swing still never happen; what changed is that no red
+            // `ERR_ATTACK_*` line shows any more.
+            //
+            // 0481 attached `0x612df0`'s Phase A ladder to this path. The §5 this session dispatched
+            // found that validator has exactly three callers image-wide — pet-attack `0x4bd40d`, the
+            // Attack action/keybind `0x6131aa`, and TryCast `0x6e4efb` — and the world right-click is
+            // none of them: it runs `0x60c247 call 0x5ecb70`, an extent containing no `DisplayError`
+            // at all. So all eight of those red lines belong to the bar and the pet command, never to
+            // the click, and the fix is not to delete six of them but to move where they are asked
+            // for. [`attack_actor_blocked`] is the same ladder with the message removed; the bar keeps
+            // [`attack_actor_refusal`]. (The predicate is still `0x612df0`'s and not `0x5ecb70`'s own
+            // overlapping set — a separate slice — but the SILENCE is the verified law, and the swing
+            // is suppressed either way.)
+            if crate::ui_action::attack_actor_blocked(self_store, me.map(|(_, g, _)| g.0)).is_some()
+            {
+                // refused — selection stands, no swing, and nothing is said
+            } else {
+                debug!("right-click attack: {guid:#x}");
+                // The right-click's own StartAttack, through the one seam (auto-draw + the swing +
+                // the auto-repeat cancel — `0x5ecb70`'s whole body). The commit above may already
+                // have re-pointed the swing at this guid, in which case the ref's `0x5eccda` is the
+                // thing that suppresses a second send, so pass it the real lock state and let the
+                // seam decide: `swung` means the re-swing already went out and the lock is ours, so
+                // no stop is in flight any more.
+                let engaged = me.is_some_and(|(_, _, e)| e);
+                seam.start(guid, engaged || outcome.swung, false);
+            }
         }
-    } else if loot {
-        // A dead unit carrying UNIT_DYNFLAG_LOOTABLE (the Pickup loot cursor, decision 0084): open
-        // its loot (`CMSG_LOOT`). Range-gated like the interact branch — the cursor grays a corpse
-        // beyond the melee interact reach (`unable`), and we don't send then (no auto-approach yet).
-        // No EmoteTalk: looting is not an NPC interaction, the corpse plays no talk.
-        //
-        // **The unit leg's own stand-state gate** (`0x60bfb7 call [playerVtbl+0xa4]`, non-zero →
-        // `0x60c007 push 0x85; call DisplayError 0x496720`) — the exact instruction pair the corpse
-        // leg carries at `0x5d6c3b`/`0x496720(0x85)`, in the same fork, one test after the lootable
-        // one. The corpse leg's comment has said since 1729 that "the unit loot branch's own copy of
-        // it is unverified here"; it is the same `push 0x85` and the same virtual, read off the same
-        // dispatcher this session's `0x60bf98` mounted gate came out of. So the caveat retires and
-        // the two legs say the same thing: sitting, kneeling or asleep, the click raises the
-        // client-local red `ERR_LOOT_NOTSTANDING` and sends nothing.
-        if self_store.is_some_and(|s| s.0.unit_stand_state() != 0) {
-            debug!("right-click loot: refused, not standing ({guid:#x})");
-            ui_error_keys
-                .0
-                .push(crate::ui_action::UiError::key("ERR_LOOT_NOTSTANDING"));
-        } else if !cursor.unable {
-            debug!("right-click loot: {guid:#x}");
-            let _ = seam.net.0.send(ClientCommand::Loot { guid });
-            // The kneel is client-predicted AT THE SEND: the real client's `CMSG_LOOT` sender
-            // (`0x5df253`) sets the loot-target latch `[player+0x1d28]` and plays Loot 50 before
-            // any server response (decision 0515). Arm the latch the anim driver's loot leg
-            // reads for the self unit; the release/refusal drops it.
-            loot_latch.0 = Some(guid);
+        UnitBranch::Dead(DeadUnitLeg::Loot) => {
+            // A dead unit carrying UNIT_DYNFLAG_LOOTABLE (the Pickup loot cursor, decision 0084): open
+            // its loot (`CMSG_LOOT`). Range-gated like the interact branch — the cursor grays a corpse
+            // beyond the melee interact reach (`unable`), and we don't send then (no auto-approach yet).
+            // No EmoteTalk: looting is not an NPC interaction, the corpse plays no talk.
+            //
+            // **The unit leg's own stand-state gate** (`0x60bfb7 call [playerVtbl+0xa4]`, non-zero →
+            // `0x60c007 push 0x85; call DisplayError 0x496720`) — the exact instruction pair the corpse
+            // leg carries at `0x5d6c3b`/`0x496720(0x85)`, in the same fork, one test after the lootable
+            // one. The corpse leg's comment has said since 1729 that "the unit loot branch's own copy of
+            // it is unverified here"; it is the same `push 0x85` and the same virtual, read off the same
+            // dispatcher this session's `0x60bf98` mounted gate came out of. So the caveat retires and
+            // the two legs say the same thing: sitting, kneeling or asleep, the click raises the
+            // client-local red `ERR_LOOT_NOTSTANDING` and sends nothing.
+            if self_store.is_some_and(|s| s.0.unit_stand_state() != 0) {
+                debug!("right-click loot: refused, not standing ({guid:#x})");
+                ui_error_keys
+                    .0
+                    .push(crate::ui_action::UiError::key("ERR_LOOT_NOTSTANDING"));
+            } else if !cursor.unable {
+                debug!("right-click loot: {guid:#x}");
+                let _ = seam.net.0.send(ClientCommand::Loot { guid });
+                // The kneel is client-predicted AT THE SEND: the real client's `CMSG_LOOT` sender
+                // (`0x5df253`) sets the loot-target latch `[player+0x1d28]` and plays Loot 50 before
+                // any server response (decision 0515). Arm the latch the anim driver's loot leg
+                // reads for the self unit; the release/refusal drops it.
+                loot_latch.0 = Some(guid);
+            }
         }
-    } else if skin {
-        // A dead SKINNABLE corpse the loot leg declined (`0x60c01f`): cast our known Skinning spell
-        // at it — the unit-side mirror of the GO lock split (0239; decision 0437's gathering
-        // finish). The spell comes from the reference's own learn-time latch
-        // ([`crate::ui_action::LearnedAbilities`] = `[0xb700e4]`, decision 0752), which is the same
-        // thing the classifier gated the Skin cursor on. Ordinarily that means an unlootable
-        // corpse; **while mounted it also means a still-lootable one**, and the cast then meets the
-        // cast family's own mounted gate (`0x6094f0`'s reason `0x39`) and says "You are mounted" —
-        // the one leg of this dispatcher where the rider is told anything at all.
-        // Range rides the cursor's melee-reach gray, like loot.
-        if !cursor.unable {
-            if let Some(spell_id) = learned.skinning {
-                let def = go_inputs
-                    .spells
-                    .as_ref()
-                    .and_then(|s| s.catalog.get(spell_id));
-                if crate::ui_action::cast_mounted_refusal(self_mounted, def) {
-                    debug!("right-click skin: refused locally — mounted (0x39)");
-                    cast_errors.push_local(spell_id, 0x39);
-                } else {
-                    debug!("right-click skin: {guid:#x} (spell {spell_id})");
-                    let _ = seam.net.0.send(ClientCommand::CastSpell {
-                        spell_id,
-                        target: Some(guid),
-                    });
+        UnitBranch::Dead(DeadUnitLeg::Skin) => {
+            // A dead SKINNABLE corpse the loot leg declined (`0x60c01f`): cast our known Skinning spell
+            // at it — the unit-side mirror of the GO lock split (0239; decision 0437's gathering
+            // finish). The spell comes from the reference's own learn-time latch
+            // ([`crate::ui_action::LearnedAbilities`] = `[0xb700e4]`, decision 0752), which is the same
+            // thing the classifier gated the Skin cursor on. Ordinarily that means an unlootable
+            // corpse; **while mounted it also means a still-lootable one**, and the cast then meets the
+            // cast family's own mounted gate (`0x6094f0`'s reason `0x39`) and says "You are mounted" —
+            // the one leg of this dispatcher where the rider is told anything at all.
+            // Range rides the cursor's melee-reach gray, like loot.
+            if !cursor.unable {
+                if let Some(spell_id) = learned.skinning {
+                    let def = go_inputs
+                        .spells
+                        .as_ref()
+                        .and_then(|s| s.catalog.get(spell_id));
+                    if crate::ui_action::cast_mounted_refusal(self_mounted, def) {
+                        debug!("right-click skin: refused locally — mounted (0x39)");
+                        cast_errors.push_local(spell_id, 0x39);
+                    } else {
+                        debug!("right-click skin: {guid:#x} (spell {spell_id})");
+                        let _ = seam.net.0.send(ClientCommand::CastSpell {
+                            spell_id,
+                            target: Some(guid),
+                        });
+                    }
                 }
             }
         }
-    } else if !cursor.unable {
-        // An in-range friendly service NPC (the cursor already gated friendly + service + range):
-        // route the interact by the classified kind (decision 0081). The Buy kind is shared by
-        // banker and auctioneer (both classify to Buy(3), low-bit-first — a gossip-flagged banker
-        // already classified to Speak and routes through the gossip menu), so the dispatch reads
-        // the NPC's own flags to split them (decision 0604).
-        let npc_flags = stores
-            .get(entity)
-            .map(|(s, _)| s.0.unit_npc_flags())
-            .unwrap_or(0);
-        if let Some(cmd) = interact_command(cursor.kind, guid, npc_flags) {
-            debug!("right-click interact: {guid:#x} ({:?})", cursor.kind);
-            let _ = seam.net.0.send(cmd);
-            // Talk at the NPC. The gesture's own anim carries WeaponFlags `0x10`, so the
-            // per-animation sheath reconcile stows a drawn weapon — a committed change that
-            // persists after the talk (decisions 0080/0081; no sheath wiring here).
-            if let Some((_, my_guid, _)) = me {
-                gestures.push(my_guid.0, crate::creature_anim::Gesture::Talk);
+        // **The silent leg — and it is TERMINAL.** That is the whole of decision 1858. A dead
+        // unit whose fork declined both legs (a rider over a lootable corpse; a corpse someone
+        // else killed; a skinnable one without the skill) is DONE: the reference reaches its
+        // NPC-service dispatch only down the ALIVE branch (`0x60c162`), never off the back of
+        // this fork.
+        //
+        // benilla wrote the fork as an `if/else if` chain whose LAST arm was the service send, so
+        // "the dead fork chose nothing" fell through into "this is a live service NPC" — and that
+        // arm dispatches on the CURSOR kind, which over a lootable corpse is `Pickup`, the mode
+        // the vendor pouch also uses ([`interact_command`]). The click therefore sent
+        // `CMSG_LIST_INVENTORY` at a dead wolf, and vmangos answers a non-vendor with
+        // `SELL_ERR_CANT_FIND_VENDOR` (`ItemHandler.cpp:701-710` → `GetNPCIfCanInteractWith` →
+        // `CanInteractWithNPC`'s npc-flag and `IsAlive` tests), which this client renders as the
+        // red **"That merchant doesn't like you."** on an animal corpse.
+        UnitBranch::Dead(DeadUnitLeg::Nothing) => {
+            debug!("right-click unit {guid:#x}: dead fork took no leg — nothing sent");
+        }
+        UnitBranch::Service if !cursor.unable => {
+            // An in-range friendly service NPC (the cursor already gated friendly + service + range):
+            // route the interact by the classified kind (decision 0081). The Buy kind is shared by
+            // banker and auctioneer (both classify to Buy(3), low-bit-first — a gossip-flagged banker
+            // already classified to Speak and routes through the gossip menu), so the dispatch reads
+            // the NPC's own flags to split them (decision 0604).
+            let npc_flags = stores
+                .get(entity)
+                .map(|(s, _)| s.0.unit_npc_flags())
+                .unwrap_or(0);
+            if let Some(cmd) = interact_command(cursor.kind, guid, npc_flags) {
+                debug!("right-click interact: {guid:#x} ({:?})", cursor.kind);
+                let _ = seam.net.0.send(cmd);
+                // Talk at the NPC. The gesture's own anim carries WeaponFlags `0x10`, so the
+                // per-animation sheath reconcile stows a drawn weapon — a committed change that
+                // persists after the talk (decisions 0080/0081; no sheath wiring here).
+                if let Some((_, my_guid, _)) = me {
+                    gestures.push(my_guid.0, crate::creature_anim::Gesture::Talk);
+                }
             }
         }
+        // The classifier's own range gray on a LIVE service NPC — outside the 5.5556 yd service
+        // reach the click sends nothing (there is no auto-approach yet), exactly as the loot and
+        // skin legs ride the same `unable`.
+        UnitBranch::Service => {}
     }
 }
 
@@ -1011,6 +1037,39 @@ fn dead_unit_leg(
         return DeadUnitLeg::Skin;
     }
     DeadUnitLeg::Nothing
+}
+/// **Which branch of `0x60bea0` a right-click on a unit takes** — the dispatcher's own top-level
+/// fork, named so it cannot be fallen out of.
+///
+/// The reference splits on the target's death *first* and never rejoins: the dead side runs
+/// [`dead_unit_leg`]'s three-way ladder and returns, and the NPC-service dispatch hangs off the
+/// ALIVE side alone (`0x60c162`'s `CanInteract` → the service send). An `if/else if` chain that
+/// ends in the service arm gets that wrong in one specific, invisible way — a dead target whose
+/// ladder chose [`DeadUnitLeg::Nothing`] slides into the service arm — which is exactly the bug
+/// decision 1858 was written for. This enum exists so the compiler, not a comment, is what keeps
+/// the two sides apart: the call site matches it exhaustively, so a new [`DeadUnitLeg`] variant
+/// cannot silently acquire a service send.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum UnitBranch {
+    /// The Attack cursor's own leg — `0x60c247 call 0x5ecb70` (select, then swing).
+    Attack,
+    /// The dead fork (`0x60bf75`), and its chosen leg. **Terminal in every variant.**
+    Dead(DeadUnitLeg),
+    /// The alive branch (`0x60c162`): `CanInteract`, then the NPC-service packet.
+    Service,
+}
+
+/// [`UnitBranch`], from the two facts that pick it. `attack` first, matching the chain the
+/// dispatcher's callers see: the Attack cursor kind is only ever classified for a LIVE hostile,
+/// so the order is a formality on real data and a defined answer on impossible data.
+fn unit_branch(attack: bool, dead_fork: bool, leg: DeadUnitLeg) -> UnitBranch {
+    if attack {
+        UnitBranch::Attack
+    } else if dead_fork {
+        UnitBranch::Dead(leg)
+    } else {
+        UnitBranch::Service
+    }
 }
 
 /// The interact packet a right-click on a friendly service NPC sends, by its classified
@@ -1404,6 +1463,55 @@ mod tests {
                 DeadUnitLeg::Nothing
             );
         }
+    }
+    /// **The dead fork is TERMINAL** — decision 1858, and the reason a mounted right-click on a
+    /// Young Wolf answered *"That merchant doesn't like you."*
+    ///
+    /// [`dead_unit_leg`] was right; where its `Nothing` WENT was not. The dispatcher's arms were
+    /// an `if/else if` chain ending in the NPC-service send, so a dead target that took no leg
+    /// slid into the arm that dispatches on the CURSOR kind — and a lootable corpse's cursor is
+    /// `Pickup`, the very mode a vendor shows. The click sent `CMSG_LIST_INVENTORY` at the
+    /// corpse, and vmangos answers a non-vendor with `SELL_ERR_CANT_FIND_VENDOR`, which is
+    /// `ERR_VENDOR_HATES_YOU`. Nothing about that was visible in [`dead_unit_leg`], which is why
+    /// 1851's two tests passed over it: they asserted the LEG, and the bug was in the ROUTING.
+    ///
+    /// So this asserts the property rather than the instance — over a dead target, no combination
+    /// of the fork's four inputs may produce [`UnitBranch::Service`].
+    #[test]
+    fn the_dead_fork_never_reaches_the_service_dispatch() {
+        for mounted in [false, true] {
+            for lootable in [false, true] {
+                for skinnable in [false, true] {
+                    for know_skinning in [false, true] {
+                        let leg = dead_unit_leg(mounted, true, lootable, skinnable, know_skinning);
+                        assert_eq!(
+                            unit_branch(false, true, leg),
+                            UnitBranch::Dead(leg),
+                            "a dead target escaped the fork (mounted={mounted} \
+                             lootable={lootable} skinnable={skinnable} know={know_skinning})"
+                        );
+                    }
+                }
+            }
+        }
+        // The exact shape the director hit: mounted, over a lootable corpse with no skinning.
+        let leg = dead_unit_leg(true, true, true, false, false);
+        assert_eq!(
+            unit_branch(false, true, leg),
+            UnitBranch::Dead(DeadUnitLeg::Nothing)
+        );
+        // ...and what that used to fall into. The pouch over a corpse and the pouch over a vendor
+        // are one cursor mode, so the old last arm read the corpse as a shop.
+        assert!(matches!(
+            interact_command(cursor_mode::CursorKind::Pickup, 0x42, 0),
+            Some(ClientCommand::ListInventory { .. })
+        ));
+        // A LIVE unit still reaches the service dispatch — the fix must not shut the door on the
+        // branch that is supposed to send.
+        assert_eq!(
+            unit_branch(false, false, DeadUnitLeg::Nothing),
+            UnitBranch::Service
+        );
     }
 
     #[test]

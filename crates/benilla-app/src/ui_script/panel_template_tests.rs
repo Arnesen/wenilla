@@ -520,3 +520,61 @@ fn tab_resize_falls_back_to_this_when_no_tab_is_passed() {
     let width = s.eval::<f64>("return ProbeTab:GetWidth()").unwrap();
     assert!(width > 0.0, "the tab got a width, got {width}");
 }
+
+/// **The window tab's structural clamp, driven the way the client drives it — from `OnUpdate`.**
+///
+/// 1002's law is that a tab may never grow past its window's drawn right edge, whatever fit the
+/// instance asked for. `BenillaTabButton_OnUpdate` enforces it by comparing the fitted width
+/// against the room, and it used to read that width from `PanelTemplates_TabResize`'s return —
+/// a benilla-only line on OUR copy of that verb.
+///
+/// 1837 put `Interface\FrameXML\UIPanelTemplates.lua` on the chain BELOW `UiPanels.xml`, so the
+/// reference's `PanelTemplates_TabResize` is the one that runs, and it returns nothing. The
+/// comparison became `nil > number`: a raise, once per tab per width change, with the clamp
+/// silently off the air and the tab already sized by the unclamped first call.
+///
+/// The existing tab test drives `OnLoad` and never ticks, which is why nothing caught it.
+#[test]
+fn a_tab_never_grows_past_its_windows_right_edge() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = harness();
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
+    // A deliberately narrow window and a long label: the natural fit does not fit.
+    let doc = benilla_ui::framexml::parse(
+        r#"<Ui>
+            <Frame name="ProbeWindow">
+                <Size><AbsDimension x="160" y="200"/></Size>
+                <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                <Frames>
+                    <Button name="ProbeTab" inherits="CharacterFrameTabButtonTemplate"
+                            text="A Very Long Tab Label Indeed">
+                        <Anchors>
+                            <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-10"/></Offset></Anchor>
+                        </Anchors>
+                    </Button>
+                </Frames>
+            </Frame>
+        </Ui>"#,
+    )
+    .unwrap();
+    let report = benilla_ui::loader::load_in(&s, &doc, "test", &|_: &str| None);
+    assert!(report.errors.is_empty(), "load: {:?}", report.errors);
+
+    // Two ticks: the first lands the measure, the second settles against it.
+    s.tick(0.1);
+    s.tick(0.1);
+    assert!(
+        s.errors().is_empty(),
+        "the settle must not raise — the clamp reads the fit back, not a return value: {:?}",
+        s.errors()
+    );
+
+    let (left, width) = s
+        .eval::<(f64, f64)>("return ProbeTab:GetLeft(), ProbeTab:GetWidth()")
+        .unwrap();
+    let right = s.eval::<f64>("return ProbeWindow:GetRight()").unwrap();
+    assert!(
+        left + width <= right + 0.5,
+        "the tab ran past its window: left {left} + width {width} > right {right}"
+    );
+}

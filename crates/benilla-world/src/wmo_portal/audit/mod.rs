@@ -124,6 +124,18 @@ const SHADOWFANG: Site = Site {
     uid: 218202,
 };
 
+/// Darnassus — the 2026-09-02 report's site: one placement, 104 groups, **50 of them exterior**, and
+/// the city's outdoor areas stitched to each other and to every shop by portals. That shape is what
+/// makes it the discriminating subject for Pass 2: standing in a shop, the doorway admits the one
+/// outdoor group beyond it, and everything else the director can see through that doorway is reached
+/// only by WALKING ON from there (decision 1853). `.go xyz 10188.36 2348.35 1328.96 1` is the pin.
+const DARNASSUS: Site = Site {
+    wmo: r"world\wmo\kalimdor\darnassis\darnassis.wmo",
+    map: "Kalimdor",
+    tile: (27, 12),
+    uid: 352798,
+};
+
 /// Eye height above a floor point for both the standing player and the seated camera samples.
 const EYE_HEIGHT: f32 = 1.7;
 

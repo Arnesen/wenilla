@@ -90,11 +90,12 @@
 //!
 //! **Lifetime.** A record holds a *snapshot* position and no reference to its source, so a shake
 //! fully outlives the creature that spawned it. The whole evaluation is skipped — offset zero,
-//! nothing expiring — while the followed unit is **swimming**.
+//! nothing expiring — while the **followed unit** (the far-sight subject when there is one, our own
+//! body otherwise) is **swimming** or riding a **fly-or-swim spline**: the reference's two suspend
+//! gates, both of which jump the same block.
 //!
 //! Not modelled, deliberately: the reference's second wholesale free on `SetTarget(nullptr)`, and
-//! its destructor's unlink-without-free (a shipped leak — our `Vec` cannot reproduce it). The
-//! flying-spline (taxi) arm of the skip is noted in [`CameraShakes::evaluate`].
+//! its destructor's unlink-without-free (a shipped leak — our `Vec` cannot reproduce it).
 
 use std::f32::consts::TAU;
 
@@ -103,10 +104,11 @@ use bevy::prelude::*;
 use benilla_formats::{CameraShake, CameraShakeCatalog, SpellShakeGroup};
 
 use crate::creature_anim::{
-    footfall_side, move_flags, AnimSoundEvent, MovementState, SpellKitShake,
+    footfall_culls, footfall_side, move_flags, AnimSoundEvent, MovementState, SpellKitShake,
 };
 use crate::entities::{BoneAttach, Creatures};
-use crate::net::{Embodied, NetEntity, ObjectStore};
+use crate::net::{Embodied, NetEntity, ObjectStore, Spline};
+use crate::player::ViewSubject;
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 use benilla_protocol::EntityKind;
 use benilla_world::schedule::WorldStage;
@@ -119,9 +121,6 @@ const FULL_DISTANCE_SQ: f32 = 81.0;
 /// The falloff's half-life base and its per-9-yd exponent divisor.
 const FALLOFF_BASE: f32 = 0.7;
 const FALLOFF_SPAN: f32 = 9.0;
-/// The footstep emitter's own radius, camera→footplant (`0x5fc00a`, `2500 yd²` = 50 yd). **The
-/// camera, not the player** — the same correction wow-re applied to `dist2-gate.md` this round.
-const EMIT_DISTANCE_SQ: f32 = 2500.0;
 /// `CameraShakes.Amplitude` is authored in inches; the client scales it at spawn (`0x511d78`).
 const INCHES_TO_YARDS: f32 = 1.0 / 36.0;
 
@@ -171,13 +170,15 @@ impl CameraShakes {
 
     /// Retire what has expired and compose this frame's offset.
     ///
-    /// `swimming` is the reference's skip (`0x50ea87`/`0x50ea8b`): while the followed unit swims,
-    /// the whole block is bypassed — the offset is zero **and nothing expires**, so a shake
-    /// resumes mid-flight on surfacing. The sibling arm of that skip, a flying (taxi) spline, is
-    /// not modelled here: we have no flying-spline predicate at the camera seat, and the case is a
-    /// heavy creature's footfall within 50 yd of a taxi path. Recorded rather than guessed.
-    fn evaluate(&mut self, eye: Vec3, facing_yaw: f32, now: f32, swimming: bool) -> Vec3 {
-        if swimming {
+    /// `suspended` is the reference's skip — **two** gates that both jump the same block
+    /// (`0x50ea87` / `0x50ea8b` → `0x50eb01`, wow-re `camera-shake-law.md` §6): the followed unit
+    /// is **swimming** (`[[unit+0x118]+0x40] & 0x200000`), or it is riding a **flying server
+    /// spline** (`MI = [[unit+0x118]+0xa4]` non-null, not done, Flying bit set) — a taxi flight.
+    /// The accumulator is zeroed *before* both gates, so a suspended frame yields the offset zero
+    /// **and expires nothing**: a shake resumes mid-flight on surfacing or landing, rather than
+    /// having quietly aged out while the camera was not reading it.
+    fn evaluate(&mut self, eye: Vec3, facing_yaw: f32, now: f32, suspended: bool) -> Vec3 {
+        if suspended {
             return Vec3::ZERO;
         }
         // Retire on the *unattenuated* clock: distance decides contribution, never lifetime.
@@ -386,7 +387,7 @@ fn fire_shakes(
         // derives it. No marker/joint = the unit origin.
         let foot = event_point(attach, pose, &joints, &ev.ident)
             .unwrap_or_else(|| transform.translation());
-        if eye.distance_squared(foot) > EMIT_DISTANCE_SQ {
+        if footfall_culls(eye, foot) {
             continue;
         }
         live.add(*row, foot, now);
@@ -461,9 +462,35 @@ fn fire_kit_shakes(
     }
 }
 
-/// The applier's read of the followed unit: its facing (the shake's body frame) and whether it is
-/// swimming (the reference's skip).
-type FollowedUnit = (&'static Transform, Option<&'static MovementState>);
+/// The applier's read of the followed unit: its facing (the shake's body frame), its move flags
+/// (the swim half of the reference's skip) and its live path (the spline half).
+type FollowedUnit = (
+    &'static Transform,
+    Option<&'static MovementState>,
+    Option<&'static Spline>,
+);
+
+/// Is the whole shake block skipped this frame? The reference's two suspend gates, OR'd — both
+/// `jmp` past the same block (`0x50ea87` / `0x50ea8b` → `0x50eb01`), on the **followed unit**.
+///
+/// **Swimming** is its move flags (`[[unit+0x118]+0x40] & 0x200000`).
+///
+/// **The spline gate** is read through to the LIVE path, exactly as the anim selector's `unify`
+/// does ([`crate::creature_anim`], RF-0057 `0x5fd19c`) — the reference re-reads
+/// `[[unit+0x118]+0xa4]` every frame rather than trusting a stamped flag, and our stored
+/// [`MovementState::flying`] is the selector's own derived value, left `false` on the controller's
+/// component. The [`Spline`]'s *presence* is the reference's "descriptor non-null **and** not done"
+/// (`sample_splines` removes the component the frame the path completes — the `& 0x4` DONE term),
+/// and `!grounded` is spline flag `0x200`.
+///
+/// **`0x200` is the shared fly-*or*-swim spline bit, not "taxi"** (wow-re `swim-transition.md`) —
+/// so this arm covers a swimming server path as well as a flight, which is the same reason it
+/// sits beside a swim gate at all. Naming it "the taxi arm" (as 1540 did, and as this was first
+/// built) over-specifies what the bit means. A **ground** spline — Charge, knockback, a fleeing
+/// walk, all of which install the same component — does not suspend anything.
+fn suspended(mv: Option<&MovementState>, spline: Option<&Spline>) -> bool {
+    mv.is_some_and(|m| m.flags & move_flags::SWIMMING != 0) || spline.is_some_and(|s| !s.grounded)
+}
 
 /// Add this frame's shake to the camera's seated eye.
 ///
@@ -476,22 +503,40 @@ type FollowedUnit = (&'static Transform, Option<&'static MovementState>);
 /// the base pose every frame, so the transform this reads is the un-shaken eye rather than last
 /// frame's shaken one. A zero offset writes nothing at all, preserving the camera's bit-equality
 /// no-op gate (decision 1362) — a still camera stays bit-stable and its propagation stays quiet.
+///
+/// **The body frame and both suspend gates come from the FOLLOWED unit** — `[cam+0x88/0x8c]` in
+/// the reference, never `0x468550` (the active player). Ordinarily they are the same object; under
+/// far sight (Mind Vision, Eye of Kilrogg, and possession, which rides the same field) they are
+/// not, and the camera orbits the subject while our body walks on somewhere else. Reading our own
+/// body there would frame the shake on the wrong facing and suspend it on the wrong unit's swim
+/// state. [`ViewSubject`] already resolves exactly this object for the rig.
+///
+/// The reference additionally requires the followed object to be **TYPEMASK_UNIT**
+/// (`0x50e90d`–`0x50e92c`) before reading its `CMovement` at all. That falls out here: the
+/// fallback is our own body, and a resolved far-sight subject with no [`MovementState`] and no
+/// [`Spline`] — a GameObject or a DynamicObject — reads as "not suspended", which is what a
+/// unit-only gate on a non-unit yields.
 pub(crate) fn apply_camera_shake(
     mut live: ResMut<CameraShakes>,
     time: Res<Time>,
     mut camera: Query<&mut Transform, With<WorldCamera>>,
-    player: Query<FollowedUnit, (With<Embodied>, Without<WorldCamera>)>,
+    subject: Res<ViewSubject>,
+    units: Query<FollowedUnit, Without<WorldCamera>>,
+    body: Query<Entity, (With<Embodied>, Without<WorldCamera>)>,
 ) {
     let Ok(mut cam) = camera.single_mut() else {
         return;
     };
-    let (yaw, swimming) = player.single().map_or((0.0, false), |(t, mv)| {
-        (
-            t.rotation.to_euler(EulerRot::YXZ).0,
-            mv.is_some_and(|m| m.flags & move_flags::SWIMMING != 0),
-        )
-    });
-    let offset = live.evaluate(cam.translation, yaw, time.elapsed_secs(), swimming);
+    let followed = subject
+        .remote
+        .map(|r| r.entity)
+        .or_else(|| body.single().ok());
+    let (yaw, suspended) = followed
+        .and_then(|e| units.get(e).ok())
+        .map_or((0.0, false), |(t, mv, spline)| {
+            (t.rotation.to_euler(EulerRot::YXZ).0, suspended(mv, spline))
+        });
+    let offset = live.evaluate(cam.translation, yaw, time.elapsed_secs(), suspended);
     if offset != Vec3::ZERO {
         cam.translation += offset;
     }
@@ -798,8 +843,8 @@ mod tests {
         );
     }
 
-    /// Swimming bypasses the whole block: zero offset, and **nothing expires** — the shake resumes
-    /// on surfacing.
+    /// A suspended frame bypasses the whole block: zero offset, and **nothing expires** — the
+    /// shake resumes on surfacing (or on landing off a taxi).
     #[test]
     fn swimming_freezes_rather_than_retires() {
         let mut s = at(FOOTSTEP_1, Vec3::ZERO);
@@ -807,5 +852,34 @@ mod tests {
         assert_eq!(s.live.len(), 1, "long past its duration, still not retired");
         assert_eq!(s.evaluate(Vec3::ZERO, 0.0, 10.0, false), Vec3::ZERO);
         assert!(s.live.is_empty(), "and it retires the moment we surface");
+    }
+
+    /// The two suspend gates are independent and either one alone suspends — and a **ground**
+    /// spline (a charge, a knockback, a fleeing walk) is not one of them: only spline flag
+    /// `0x200`, the shared fly-or-swim bit, is.
+    #[test]
+    fn either_gate_suspends_and_a_ground_spline_does_not() {
+        let swimming = MovementState {
+            flags: move_flags::SWIMMING,
+            ..default()
+        };
+        let path = |grounded: bool| Spline {
+            points: vec![[0.0; 3], [1.0, 0.0, 0.0]],
+            start: std::time::Instant::now(),
+            duration: std::time::Duration::from_secs(1),
+            id: 1,
+            grounded,
+            run_mode: true,
+        };
+
+        assert!(!suspended(None, None), "walking about: the shake plays");
+        assert!(!suspended(Some(&default()), None));
+        assert!(suspended(Some(&swimming), None), "swimming");
+        assert!(suspended(None, Some(&path(false))), "a fly-or-swim path");
+        assert!(
+            !suspended(None, Some(&path(true))),
+            "a ground spline still shakes — Charge is not a taxi"
+        );
+        assert!(suspended(Some(&swimming), Some(&path(false))), "both");
     }
 }

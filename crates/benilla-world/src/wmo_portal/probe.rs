@@ -144,10 +144,10 @@ impl FloodTrace for TraceLog {
             if on_plane { " (in-plane)" } else { "" }
         ));
     }
-    fn pass2(&mut self, group: usize, flags: u32, windows: usize, admitted: bool) {
+    fn pass2(&mut self, group: usize, flags: u32, window: usize, admitted: bool) {
         self.text.push_str(&format!(
-            "  pass2 g{group:02} EXT flags {flags:#07x} vs {windows} window(s): {}\n",
-            if admitted { "DRAWN" } else { "culled" }
+            "  pass2 g{group:02} EXT flags {flags:#07x} vs window w{window}: {}\n",
+            if admitted { "FLOOD ROOT" } else { "culled" }
         ));
     }
     fn pass3(&mut self, group: usize, flags: u32, admitted: bool) {

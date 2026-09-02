@@ -695,7 +695,8 @@ use driver::{drive_animations, drive_hand_grip};
 mod events;
 use events::fire_anim_events;
 pub(crate) use events::{
-    advance_track, footfall_side, is_footstep_sound, scan_events, AnimSoundEvent, TrackMemory,
+    advance_track, footfall_culls, footfall_side, is_footstep_sound, scan_events, AnimSoundEvent,
+    TrackMemory,
 };
 
 /// The `$BTH` breath puffs — a unit's visible cold vapour in a snow zone (B233, decision 1149).

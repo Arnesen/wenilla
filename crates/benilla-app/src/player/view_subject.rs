@@ -48,6 +48,13 @@ pub(crate) struct ViewSubject {
 /// A far-sight subject's pose, in the two forms the camera rig asks for.
 #[derive(Clone, Copy)]
 pub(crate) struct RemoteView {
+    /// The subject itself. The rig never needs it — it has the resolved pose — but the systems
+    /// that read the **followed unit's own state** do: the reference's camera driver takes the
+    /// shake's body frame and both of its suspend gates off `[cam+0x88/0x8c]`, the followed unit,
+    /// never off `0x468550` (the active player). Under Mind Vision those are different objects.
+    /// Carrying the entity does not reopen the query conflict this resolver exists to avoid —
+    /// that constraint is the *controller's*, and the controller reads the pose.
+    pub(crate) entity: Entity,
     /// The subject's feet, world space — what the rig orbits.
     pub(crate) feet: Vec3,
     /// Its framing pivot height above those feet (attachment-17 derived, scaled), the same
@@ -97,8 +104,9 @@ pub(super) fn publish_view_subject(
         .and_then(|store| store.0.player_farsight());
     subject.remote = anchor
         .and_then(|guid| index.0.get(&guid).copied())
-        .and_then(|entity| poses.get(entity).ok())
-        .map(|(t, pivot, net)| RemoteView {
+        .and_then(|entity| Some((entity, poses.get(entity).ok()?)))
+        .map(|(entity, (t, pivot, net))| RemoteView {
+            entity,
             feet: t.translation,
             pivot_height: head_height(pivot, net.map_or(1.0, |n| n.scale)),
         });

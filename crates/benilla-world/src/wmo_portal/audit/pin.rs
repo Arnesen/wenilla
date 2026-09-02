@@ -10,8 +10,8 @@ use bevy::math::{Mat4, Vec3};
 use super::super::seed::down_ray_claim;
 use super::super::EXTERIOR_LIT;
 use super::{
-    load_subject, Site, BLACKSMITH, DEADMINES, EXTERIOR, FARGODEEP, GOLDSHIRE, IRONFORGE,
-    SHADOWFANG, UNDERCITY,
+    load_subject, Site, BLACKSMITH, DARNASSUS, DEADMINES, EXTERIOR, FARGODEEP, GOLDSHIRE,
+    IRONFORGE, SHADOWFANG, UNDERCITY,
 };
 
 /// The named subjects `WOW_PIN_SITE` selects — every [`Site`] the harness carries, so a report at a
@@ -25,6 +25,7 @@ const NAMED_SITES: &[(&str, Site)] = &[
     ("undercity", UNDERCITY),
     ("ironforge", IRONFORGE),
     ("shadowfang", SHADOWFANG),
+    ("darnassus", DARNASSUS),
 ];
 
 /// The pin family's shared env targeting: `WOW_PIN_SITE=<name>` picks a [`NAMED_SITES`] subject
@@ -722,8 +723,164 @@ fn shadowfang_sees_true_interiors_that_are_off_the_fog_chain() {
 
     assert_eq!(
         off_chain,
-        vec![1, 2, 13],
-        "three true-interior rooms are in frame across the courtyards and none is on the chain: \
-         this is the population a unit's fog gate has to answer for"
+        vec![1, 2, 13, 68],
+        "four true-interior rooms are in frame across the courtyards and none is on the chain: \
+         this is the population a unit's fog gate has to answer for. It was three until 1853 — \
+         g68 sits behind an exterior group no portal joins to the seed's half of the graph, so it \
+         arrives only once Pass 2 WALKS ON from the window that admits that group instead of \
+         merely marking it. The gate's verdict on all four is identical; what changed is how many \
+         rooms the cull lets the director see at once"
+    );
+}
+
+/// **Decision 1853's fixture — Pass 2 WALKS ON from the window, it does not merely mark.**
+///
+/// The reference's Pass 2 ends its per-group predicate in `0x6b3d39 call 0x6b41c0` — the portal
+/// recursion, the same entry point Pass 1 uses — not in the callback draw `0x6b4160` (that is Pass
+/// 3's, and only Pass 3's). Decision 1826 shipped Pass 2 as a *marking* pass: a window admitted an
+/// exterior group's own MOGI box and stopped there. Everything the walk would have reached THROUGH
+/// that group — the next courtyard, the shop behind it, the terrace one portal further on — stayed
+/// culled, and from inside a Darnassus shop that is most of the city.
+///
+/// Darnassus is the discriminating subject because it is one placement with 104 groups, 50 of them
+/// exterior, and its outdoor areas are stitched to each other and to every shop by portals — so the
+/// walk-on has somewhere to go. A building whose shell is one disconnected group (the Goldshire inn)
+/// cannot tell the two implementations apart at all.
+///
+/// The measurement is the **gain**: groups the Pass-2 walk entered that no window admitted directly
+/// and Pass 1 never reached. Under the marking implementation the gain is zero by construction.
+#[test]
+#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
+fn darnassus_pass_two_walks_on_from_the_window() {
+    use std::collections::HashSet;
+
+    /// Splits the flood's `entered` steps into Pass 1's and Pass 2's, and records which groups a
+    /// window admitted directly — everything needed to name what the walk-on, and only the walk-on,
+    /// delivered.
+    #[derive(Default)]
+    struct WalkOn {
+        in_pass2: bool,
+        seen_pass1: HashSet<usize>,
+        roots: HashSet<usize>,
+        reached: HashSet<usize>,
+    }
+    impl super::super::FloodTrace for WalkOn {
+        fn seed(&mut self, seeds: super::super::DownRaySeeds) {
+            self.seen_pass1.extend(seeds.in_group);
+            self.seen_pass1.extend(seeds.across);
+        }
+        fn entered(
+            &mut self,
+            _from: usize,
+            _portal: u16,
+            to: usize,
+            _rect: super::super::Rect,
+            _on_plane: bool,
+        ) {
+            if self.in_pass2 {
+                self.reached.insert(to);
+            } else {
+                self.seen_pass1.insert(to);
+            }
+        }
+        fn pass2(&mut self, group: usize, _flags: u32, _window: usize, admitted: bool) {
+            self.in_pass2 = true;
+            if admitted {
+                self.roots.insert(group);
+            }
+        }
+    }
+
+    let site = DARNASSUS;
+    let subject = load_subject(site.wmo, Some(&site));
+    let placed = subject.placed.as_ref().expect("Darnassus has a placement");
+    let nav = &subject.model.group_nav;
+
+    // Every true interior with a doorway is a pose: stand on its floor, look out through its first
+    // portal. That is the director's own description of the report — "standing here looking out
+    // through the doorway" — swept over the whole city instead of one spot.
+    let mut poses = 0usize;
+    let mut total_gain = 0usize;
+    let mut best: Option<(usize, usize, usize)> = None; // (gain, group, exterior drawn)
+    for (gi, g) in nav.iter().enumerate() {
+        if g.flags & (EXTERIOR | EXTERIOR_LIT) != 0 || g.ref_count == 0 {
+            continue;
+        }
+        let eye = [
+            (g.bbox_min[0] + g.bbox_max[0]) * 0.5,
+            (g.bbox_min[1] + g.bbox_max[1]) * 0.5,
+            g.bbox_min[2] + super::EYE_HEIGHT,
+        ];
+        // The run is only evidence if the seed actually names the room we meant to stand in — a
+        // bbox centre can sit in a wall, over a stairwell, or above a mezzanine floor.
+        if subject.seeds(eye).in_group != Some(gi) {
+            continue;
+        }
+        let r = &subject.model.portal_refs[g.ref_start as usize];
+        let Some(verts) = super::super::portal_poly(
+            &subject.model.portal_vertices,
+            &subject.model.portal_infos[r.portal as usize],
+        ) else {
+            continue;
+        };
+        let n = verts.len() as f32;
+        let look = [
+            verts.iter().map(|v| v[0]).sum::<f32>() / n,
+            verts.iter().map(|v| v[1]).sum::<f32>() / n,
+            verts.iter().map(|v| v[2]).sum::<f32>() / n,
+        ];
+        if look == eye {
+            continue;
+        }
+        let eye_bevy = placed.world_from_local.transform_point3(wow_to_bevy(eye));
+        let look_bevy = placed.world_from_local.transform_point3(wow_to_bevy(look));
+        let clip = Mat4::perspective_rh(crate::view::CAM_FOVY, 16.0 / 9.0, 0.1, 1000.0)
+            * Mat4::look_at_rh(eye_bevy, look_bevy, Vec3::Y);
+        let mut tap = WalkOn::default();
+        let pvs = crate::wmo_portal::compute_pvs_traced(
+            &subject.model,
+            eye,
+            subject.terrain_z(eye),
+            &clip,
+            &placed.world_from_local,
+            &mut tap,
+        );
+        let gain: HashSet<usize> = tap
+            .reached
+            .difference(&tap.roots)
+            .copied()
+            .filter(|g| !tap.seen_pass1.contains(g))
+            .collect();
+        let ext_drawn = nav
+            .iter()
+            .zip(&pvs.visible)
+            .filter(|(n, v)| **v && n.flags & EXTERIOR != 0)
+            .count();
+        println!(
+            "g{gi:03} windows={} walk steps={} exterior drawn={ext_drawn}/50 walk-on gain={} {:?}",
+            pvs.windows.len(),
+            pvs.iters,
+            gain.len(),
+            {
+                let mut v: Vec<usize> = gain.iter().copied().collect();
+                v.sort_unstable();
+                v
+            }
+        );
+        poses += 1;
+        total_gain += gain.len();
+        if best.is_none_or(|(b, _, _)| gain.len() > b) {
+            best = Some((gain.len(), gi, ext_drawn));
+        }
+    }
+    println!("poses={poses} total walk-on gain={total_gain} best={best:?}");
+    assert!(
+        poses >= 20,
+        "the sweep needs the real city, got {poses} poses"
+    );
+    assert!(
+        total_gain > 0,
+        "Pass 2 must WALK ON from a window-admitted exterior group (0x6b3d39 -> 0x6b41c0); a \
+         marking pass scores exactly zero here"
     );
 }

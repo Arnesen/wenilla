@@ -2437,16 +2437,36 @@
         end
 
         function BenillaTabButton_OnUpdate(tab)
-            local text = getglobal(tab:GetName() .. "Text")
+            local name = tab:GetName()
+            local text = getglobal(name .. "Text")
             local w = (text and text:GetStringWidth()) or 0
             if w <= 0 then return end
             local pad = tab.benillaTabPadding or 0
             local room = BenillaTab_Room(tab)
             if tab.benillaFitWidth == w and tab.benillaFitRoom == room then return end
             tab.benillaFitWidth, tab.benillaFitRoom = w, room
-            local fitted = PanelTemplates_TabResize(pad, tab, nil, tab.benillaTabMaxWidth)
-            if room and fitted > room then
-                PanelTemplates_TabResize(pad, tab, room)
+            PanelTemplates_TabResize(pad, tab, nil, tab.benillaTabMaxWidth)
+            -- THE CLAMP READS THE FIT BACK OFF THE ART, not off a return value and not off the
+            -- button. `PanelTemplates_TabResize` is the REFERENCE's now (1837 put
+            -- `UIPanelTemplates.lua` on the chain below this file, so its definition wins) and it
+            -- returns nothing; our own copy's benilla-only `return tabWidth` had already stopped
+            -- running, which is what took 1002's clamp off the air silently. `tab:GetWidth()`
+            -- cannot serve either — it reads the last RESOLVED rect, this frame's stale input
+            -- inside a settle, which is the whole reason 1002 added that return.
+            --
+            -- `$parentMiddle` can. `PanelTemplates_TabResize` sets it on its way out, a Texture's
+            -- width is its AUTHORED size, and a region's GetWidth reports the authored value
+            -- without consulting a resolved rect (region::virtual_span) — so it is the number the
+            -- verb just computed, same tick. The tab is that plus its two end caps, which is the
+            -- reference's own `tabWidth = width + sideWidths`.
+            if room then
+                local middle = getglobal(name .. "Middle")
+                local left = getglobal(name .. "Left")
+                local fitted = (middle and middle:GetWidth() or 0)
+                    + 2 * (left and left:GetWidth() or 0)
+                if fitted > room then
+                    PanelTemplates_TabResize(pad, tab, room)
+                end
             end
             -- No highlight sizing here on purpose — BOTH tab templates anchor their highlight to
             -- their own two side edges, so it IS the tab by construction (decision 1004).
