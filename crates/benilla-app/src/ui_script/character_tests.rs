@@ -18,23 +18,7 @@ use benilla_ui::script::{
     UnitCombatStats, UnitState,
 };
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error (the questlog/panel
-/// tests' loader, duplicated so this file is self-contained).
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// A Night Elf Warrior, level 12 — the fixture every test below shares for the level/name line.
 fn player_unit() -> UnitState {
@@ -138,6 +122,7 @@ fn backpack_with_fitting_helm() -> benilla_ui::script::ContainerState {
 /// attack/damage/ranged rows + 5 resistance frames + the model pane + its 2 rotate buttons + chrome).
 #[test]
 fn shipped_character_frame_loads_clean() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
@@ -154,6 +139,7 @@ fn shipped_character_frame_loads_clean() {
 /// and a second toggle closes it again — each transition its own sound.
 #[test]
 fn shipped_character_frame_drives_end_to_end() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -369,6 +355,7 @@ fn shipped_character_frame_drives_end_to_end() {
 /// page's own quads. Checked on the real extracted draw order, not merely the level integer.
 #[test]
 fn close_button_draws_above_the_paper_doll_page() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -414,6 +401,7 @@ fn close_button_draws_above_the_paper_doll_page() {
 /// comment) keep `format()` from erroring outright, rather than the window failing to open at all.
 #[test]
 fn level_line_survives_no_player_snapshot_yet() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -447,6 +435,7 @@ fn level_line_survives_no_player_snapshot_yet() {
 /// the SAME slot cancels: the cursor empties and the dim clears.
 #[test]
 fn clicking_an_occupied_doll_slot_picks_it_up_and_locks_it() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -501,6 +490,7 @@ fn clicking_an_occupied_doll_slot_picks_it_up_and_locks_it() {
 /// this file's own header comment on the emulation).
 #[test]
 fn cursor_update_highlights_fitting_doll_slots_while_holding_a_bag_item() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -544,6 +534,7 @@ fn cursor_update_highlights_fitting_doll_slots_while_holding_a_bag_item() {
 /// `(bag, slot)` source, cursor cleared.
 #[test]
 fn model_pane_click_auto_equips_a_held_bag_item() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -581,6 +572,7 @@ fn model_pane_click_auto_equips_a_held_bag_item() {
 /// armor guy). Repairing it restores both to white.
 #[test]
 fn broken_equipped_item_tints_its_doll_slot_red() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -657,6 +649,7 @@ fn broken_equipped_item_tints_its_doll_slot_red() {
 /// HERE, not on the director's screen. Zero collected handler errors allowed anywhere.
 #[test]
 fn tab_round_trip_with_a_selected_skill_by_point() {
+    let _data = benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::{SkillEntry, SkillsState};
 
     let mut s = UiScript::new().unwrap();
@@ -857,6 +850,7 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
 /// click-LEFT subtracts); that quirk is quoted, so it is asserted here rather than "corrected".
 #[test]
 fn rotate_arrows_tap_twice_and_spin_while_held() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -950,6 +944,7 @@ fn rotate_arrows_tap_twice_and_spin_while_held() {
 /// to miss.
 #[test]
 fn a_keybind_page_switch_moves_the_tab_row_with_it() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -964,7 +959,7 @@ fn a_keybind_page_switch_moves_the_tab_row_with_it() {
     load_xml(&s, "PetPaperDollFrame.xml");
     load_xml(&s, "ReputationFrame.xml");
     load_xml(&s, "SkillFrame.xml");
-    load_xml(&s, "HonorFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\HonorFrame.xml");
     s.set_unit("player", Some(player_unit()));
 
     // THE INVARIANT the fix rests on: a page's `id=` is its slot in this window's own tab row, and
@@ -1060,6 +1055,7 @@ fn a_keybind_page_switch_moves_the_tab_row_with_it() {
 /// when it passes `this:GetParent()`.
 #[test]
 fn an_addons_tab_click_selects_through_the_generic_entry_point() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");

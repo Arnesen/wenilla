@@ -54,6 +54,113 @@
             (CharacterFrame.xml hit the identical wall) — click-only, so no OnUpdate is wired.
     -->
     <Script><![CDATA[
+        -- ══ THE HONOUR-PANE PAINTERS, rehomed (1751 window 15) ═══════════════════════════════
+        -- These four lived in our HonorFrame.xml, shared by the character sheet's honour page and
+        -- this window's inspect twin. That page is the reference's own `Interface\FrameXML\
+        -- HonorFrame.xml` now, which paints itself with its own `HonorFrame_Update`, so the only
+        -- remaining caller is this file — and a helper belongs with its caller.
+        --
+        -- `BenillaHonorRow_OnLoad`/`_OnEnter` come with them: they drive the row hover that the
+        -- reference's page does not have (a benilla addition, and a `frame_flag_gate` KNOWN entry
+        -- until the swap made it true only of this window). The names keep their `Benilla` prefix
+        -- because that is what they are — ours, on our window, colliding with nothing.
+
+        -- ── The row: two strings and a hover ────────────────────────────────────────────────────
+
+        -- A row remembers the pair its hover shows: its own label as the tip's title, and the
+        -- matching detailed explanation as the body. Both are the player's strings, passed in by
+        -- the instance below rather than baked into a template, so the five leaf templates differ
+        -- only in what they LOOK like.
+        function BenillaHonorRow_OnLoad(row, title, detail)
+            row.title = title
+            row.detail = detail
+        end
+
+        -- The house newbie tip (this file's header, deviation 2): label in highlight white, the
+        -- explanation wrapped under it in NORMAL_FONT_COLOR, both only when the player has detailed
+        -- tips on.
+        function BenillaHonorRow_OnEnter(row)
+            BenillaTooltip_AddNewbieTipFor(row, row.title,
+                HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b, row.detail)
+        end
+
+        -- ── The two painters both honor panes share (ref-lua l.19-77 and its inspect twin) ───────
+
+        -- Paint a set of counters. `pane` is the owning frame's name, `values` a
+        -- `{ [rowSuffix] = number }` table: each row frame is `<pane><suffix>` and its figure lives
+        -- in that frame's own `$parentValue` string, so a repaint is a table walk rather than
+        -- twelve hand-written assignments. Rows are looked up by name and skipped when absent,
+        -- which is what lets a caller paint a SUBSET (the character pane repaints its weekly
+        -- sections on a different trigger from its session ones — see HonorFrame_Update).
+        --
+        -- A nil figure is likewise not painted, and that falls out of Lua rather than being coded:
+        -- a nil value never enters the table at all, so `pairs` cannot reach it. That is the
+        -- behaviour we want on the inspect side, where the whole twelve-wide read answers with
+        -- NOTHING until the server's reply lands — better a row that has not been filled in yet
+        -- than a row confidently showing a zero nobody sent.
+        function BenillaHonorPane_SetRows(pane, values)
+            for suffix, value in pairs(values) do
+                local figure = getglobal(pane .. suffix .. "Value")
+                if figure then
+                    figure:SetText(value)
+                end
+            end
+        end
+
+        -- Paint the rank block: the badge, the rank's title, the "(Rank N)" that trails it, and the
+        -- progress bar under both. `rank` is the unit's rank as the engine reports it, `progress`
+        -- the 0..1 position within that rank, `unit` the token whose faction colours the bar.
+        --
+        -- Called with ("HonorFrame", …, "player") by the page below and with
+        -- ("BenillaInspectHonorFrame", …, the inspected token) by InspectFrame.xml.
+        function BenillaHonorPane_SetRank(pane, rank, progress, unit)
+            local rankName, rankNumber = GetPVPRankInfo(rank)
+            local title = getglobal(pane .. "CurrentPVPTitle")
+            local ordinal = getglobal(pane .. "CurrentPVPRank")
+
+            -- THE NIL IS THE MECHANISM, not an edge case. The rank names are GlobalStrings keyed
+            -- `PVP_RANK_<rank>_<team>` and there is no `PVP_RANK_0_*`: rank 0 means "no rank at
+            -- all", which is every character who has never taken an honorable kill. So the name
+            -- comes back nil there and the pane says NONE. The NUMBER is not guarded, and that is
+            -- deliberate too: it is a rank arithmetic result, never absent, and swallowing a nil
+            -- would hide a broken binding instead of reporting it.
+            title:SetText(rankName or NONE)
+            -- `RANK or ""` rather than a bare concat: a harness with no install behind it has no
+            -- GlobalStrings, and taking the pane down over a missing label helps nobody.
+            ordinal:SetText("(" .. (RANK or "") .. " " .. rankNumber .. ")")
+
+            -- The badge is built HERE, not by the engine: the file name is the rank number padded
+            -- to two digits, and it is shown only above zero. Verified against the patch chain this
+            -- session: `PvPRank01`..`PvPRank15` exist and `PvPRank00`/`16`/`17`/`18`/`19` do not,
+            -- which is exactly the range the arithmetic can produce (the fourteen player ranks plus
+            -- the PvP-leader one); zero and the four negative ranks have no badge to show.
+            local badge = getglobal(pane .. "PvPIcon")
+            if rankNumber > 0 then
+                badge:SetTexture(format("Interface\\PvPRankBadges\\PvPRank%02d", rankNumber))
+                badge:Show()
+            else
+                badge:Hide()
+            end
+
+            -- The bar wears the unit's own faction: Alliance navy, everything else Horde red. The
+            -- fork is a positive test for Alliance with an `else`, not a two-sided test, so a unit
+            -- whose faction group reads nil (a race the app has no snapshot for yet — ui_unit.rs's
+            -- own note) still gets a painted bar rather than a bare trough.
+            local bar = getglobal(pane .. "ProgressBar")
+            if UnitFactionGroup(unit) == "Alliance" then
+                bar:SetStatusBarColor(0.05, 0.15, 0.36)
+            else
+                bar:SetStatusBarColor(0.63, 0.09, 0.09)
+            end
+            bar:SetValue(progress)
+
+            -- Re-centre the PAIR, not the title. The title is centred on the pane and then shifted
+            -- left by half the width of the "(Rank N)" that trails it, so title and ordinal read as
+            -- one centred phrase. It has to be redone on every repaint because that width moves
+            -- with the number and with the locale.
+            title:SetPoint("TOP", pane, "TOP", -ordinal:GetWidth() / 2, -83)
+        end
+
         -- ── GlobalStrings values this window uses (ref-GlobalStrings.lua, cited per line — the
         -- `X = X or "..."` idiom is this codebase's convention, CharacterFrame.xml/CastingBar.xml:
         -- a real GlobalStrings.lua, if one ever loads, wins over the fallback). Declared HERE and

@@ -845,10 +845,15 @@
         <Scripts><OnClick>QuestRewardItem_OnClick()</OnClick></Scripts>
     </Button>
 
-    <!-- A greeting quest-title button (ref QuestTitleButtonTemplate, QuestFrameTemplates.xml l.174-213):
+    <!-- **The reference's own name**, since 1751's thirteenth window. It was
+         `BenillaQuestTitleButtonTemplate` while both this file and its only consumers were ours;
+         the sourced `Interface\FrameXML\GuildRegistrarFrame.xml` inherits the reference's name
+         for its two service rows, and an unknown template is a loader WARNING — the frame builds
+         and silently has no art — so the rename is what keeps that window skinned.
+         A greeting quest-title button (ref QuestTitleButtonTemplate, QuestFrameTemplates.xml l.174-213):
          a bullet + the quest title. -->
-    <Button name="BenillaQuestTitleButtonTemplate" virtual="true" hidden="true">
-        <Size><AbsDimension x="285" y="16"/></Size>
+    <Button name="QuestTitleButtonTemplate" virtual="true">
+        <Size><AbsDimension x="300" y="16"/></Size>
         <Layers>
             <Layer level="BACKGROUND">
                 <Texture file="Interface\QuestFrame\UI-Quest-BulletPoint">
@@ -1035,18 +1040,18 @@
                                     </Layer>
                                 </Layers>
                                 <Frames>
-                                    <Button name="QuestTitleButton1" inherits="BenillaQuestTitleButtonTemplate">
+                                    <Button name="QuestTitleButton1" inherits="QuestTitleButtonTemplate">
                                         <Anchors><Anchor point="TOPLEFT" relativeTo="CurrentQuestsText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-10" y="-5"/></Offset></Anchor></Anchors>
                                     </Button>
-                                    <Button name="QuestTitleButton2" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton1" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="QuestTitleButton3" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton2" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="QuestTitleButton4" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton3" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="QuestTitleButton5" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton4" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="QuestTitleButton6" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton5" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="QuestTitleButton7" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton6" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="QuestTitleButton8" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton7" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="QuestTitleButton9" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton8" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="QuestTitleButton10" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton9" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton2" inherits="QuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton1" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton3" inherits="QuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton2" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton4" inherits="QuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton3" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton5" inherits="QuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton4" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton6" inherits="QuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton5" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton7" inherits="QuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton6" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton8" inherits="QuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton7" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton9" inherits="QuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton8" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton10" inherits="QuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton9" relativePoint="BOTTOMLEFT"/></Anchors></Button>
                                 </Frames>
                             </Frame>
                         </ScrollChild>

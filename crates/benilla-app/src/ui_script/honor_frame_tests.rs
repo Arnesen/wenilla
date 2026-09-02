@@ -19,23 +19,7 @@
 
 use benilla_ui::script::{HonorState, UiScript, UnitState};
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error (the
-/// character/reputation tests' loader, duplicated so this file is self-contained).
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// The fixture snapshot — a rank-12 Alliance character with a figure in every bucket, all thirteen
 /// distinct so a swapped pair of rows cannot pass. Deliberately the same numbers as the protocol
@@ -92,7 +76,7 @@ fn load_page(s: &UiScript) {
         "UIPanelTemplates.xml",
         "OptionsFrameTemplates.xml",
         "CharacterFrame.xml",
-        "HonorFrame.xml",
+        "Interface\\FrameXML\\HonorFrame.xml",
     ] {
         load_xml(s, file);
     }
@@ -138,6 +122,7 @@ fn text(s: &mut UiScript, frame: &str) -> String {
 /// standing against a kill count — fails here and only here.
 #[test]
 fn every_figure_lands_in_its_own_row() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = shown_honor_page();
     for (frame, want) in [
         ("HonorFrameCurrentHKValue", "17"),
@@ -164,6 +149,7 @@ fn every_figure_lands_in_its_own_row() {
 /// makes it impossible to ship.
 #[test]
 fn the_title_is_the_internal_rank_and_the_badge_is_the_visual_one() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = shown_honor_page();
     assert_eq!(text(&mut s, "HonorFrameCurrentPVPTitle"), "Knight-Captain");
     // Internal 12 → visual 8. The line reads "(Rank 8)", never "(Rank 12)".
@@ -186,6 +172,7 @@ fn the_title_is_the_internal_rank_and_the_badge_is_the_visual_one() {
 /// badge. The nil is the mechanism, so this is the case that proves the pane never invents a title.
 #[test]
 fn an_unranked_character_reads_none_and_shows_no_badge() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = shown_honor_page();
     s.set_honor(Some(HonorState {
         rank: 0,
@@ -217,6 +204,7 @@ fn an_unranked_character_reads_none_and_shows_no_badge() {
 /// resolved — a bar with no colour at all would read as a broken pane.
 #[test]
 fn the_bar_takes_the_fraction_and_the_faction_colour() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = shown_honor_page();
     // Against the binding's own arithmetic, not against `191/255`. The client MULTIPLIES by the
     // f32 nearest 1/255 (`0x3B808081`, wow-re `honor-panel-law.md` `0x51aace`) rather than
@@ -255,6 +243,7 @@ fn the_bar_takes_the_fraction_and_the_faction_colour() {
 /// the flag's *derivation from the event name* is the half that can be got wrong.
 #[test]
 fn a_kill_repaints_the_session_but_not_the_week() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = shown_honor_page();
     // Everything moves in the snapshot — including a weekly figure, which is the bait.
     s.set_honor(Some(HonorState {
@@ -262,8 +251,7 @@ fn a_kill_repaints_the_session_but_not_the_week() {
         this_week_hk: 124,
         ..state()
     }));
-    s.run(r#"HonorFrame_OnEvent("PLAYER_PVP_KILLS_CHANGED")"#)
-        .unwrap();
+    s.fire_event("PLAYER_PVP_KILLS_CHANGED", vec![]);
     s.resolve();
     assert_eq!(
         text(&mut s, "HonorFrameCurrentHKValue"),
@@ -277,8 +265,7 @@ fn a_kill_repaints_the_session_but_not_the_week() {
     );
 
     // World entry is the flag that says "repaint those too".
-    s.run(r#"HonorFrame_OnEvent("PLAYER_ENTERING_WORLD")"#)
-        .unwrap();
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     s.resolve();
     assert_eq!(text(&mut s, "HonorFrameThisWeekHKValue"), "124");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -378,7 +365,7 @@ fn shown_inspect_honor_page() -> UiScript {
         "GameTooltip.xml",
         // Before InspectFrame.xml — the honor page inherits this file's row templates and calls
         // its two shared painters, and `inherits=` resolves at load (the manifest's own order).
-        "HonorFrame.xml",
+        "Interface\\FrameXML\\HonorFrame.xml",
         "InspectFrame.xml",
     ] {
         load_xml(&s, file);
@@ -406,6 +393,7 @@ fn shown_inspect_honor_page() -> UiScript {
 /// not the player. Everything the character page's row test pins, on the other feed.
 #[test]
 fn the_inspect_page_paints_the_reply_it_holds() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = shown_inspect_honor_page();
     for (frame, want) in [
         ("BenillaInspectHonorFrameCurrentHKValue", "17"),
@@ -454,6 +442,7 @@ fn the_inspect_page_paints_the_reply_it_holds() {
 /// happens to be held looks identical either way.
 #[test]
 fn the_page_asks_only_when_it_holds_nothing() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = shown_inspect_honor_page();
     // Held: the open above consumed no request.
     assert_eq!(

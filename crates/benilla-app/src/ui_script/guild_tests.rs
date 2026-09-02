@@ -22,40 +22,7 @@
 
 use benilla_ui::script::{GuildState, ScriptValue, UiScript, UnitState};
 
-/// Load one shipped `assets/ui/<file>`, panicking on any loader error — **and on any
-/// unknown-template warning**.
-///
-/// Copied from `friends_tests` on purpose, and the reason is its own: `inherits=` a template this
-/// house doesn't ship is a *warning*, not an error — the frame is still created, just with none of
-/// the template's art or size. Every social-window test stayed green while all eight action buttons
-/// and the close button were invisible, because a bare Button still clicks (decision 0672). The
-/// guild pane inherits four shared templates from `UIPanelTemplates.xml` and four local ones; this
-/// is what makes a typo in any of the eight loud.
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-    let missing: Vec<&String> = report
-        .warnings
-        .iter()
-        .filter(|w| w.contains("unknown template"))
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "{file}: inherits a template this house does not ship (the frame loads, its ART does \
-         not): {missing:?}"
-    );
-}
+use super::test_ui::load_ui_strict as load_xml;
 
 /// The guild engine API, stood in for in Lua (see the module header).
 ///

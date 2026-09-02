@@ -28,6 +28,21 @@ use benilla_ui::script::UiScript;
 /// **A chain entry needs client data**, so a test that names one has to open with
 /// `benilla_formats::wow_data_or_skip!()`; [`BAG_UI`] is a list that always does.
 pub(super) fn load_ui(s: &UiScript, entry: &str) -> usize {
+    load_entry(s, entry, false)
+}
+
+/// [`load_ui`], and **a missing template is a failure too**.
+///
+/// A frame that inherits a template nothing declares is a loader *warning*, not an error: the frame
+/// is built and simply has none of the template's art. So an under-loaded dependency list passes
+/// [`load_ui`] and then loses a window's whole skin silently — which is why four of the social
+/// windows' test modules grew this check by hand. It is one function now rather than four copies,
+/// and any test may ask for it.
+pub(super) fn load_ui_strict(s: &UiScript, entry: &str) -> usize {
+    load_entry(s, entry, true)
+}
+
+fn load_entry(s: &UiScript, entry: &str, strict_templates: bool) -> usize {
     let path = entry.replace('\\', "/");
     let bytes = read(&path).unwrap_or_else(|| panic!("{entry}: not found"));
     if path.to_ascii_lowercase().ends_with(".lua") {
@@ -44,6 +59,18 @@ pub(super) fn load_ui(s: &UiScript, entry: &str) -> usize {
         "{entry}: loader errors: {:?}",
         report.errors
     );
+    if strict_templates {
+        let missing: Vec<&String> = report
+            .warnings
+            .iter()
+            .filter(|w| w.contains("unknown template"))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{entry}: inherits a template this house does not ship (the frame loads, its ART does \
+             not): {missing:?}"
+        );
+    }
     report.frames
 }
 
@@ -112,7 +139,7 @@ pub(super) const BAG_UI: &[&str] = &[
     // `StackSplitFrame` is not optional either: the reference's own
     // `ContainerFrameItemButton_OnClick` calls `StackSplitFrame:Hide()` on EVERY plain click
     // (ContainerFrame.lua l.581) before the pickup, and opens it on the shift fork.
-    "StackSplit.xml",
+    "Interface\\FrameXML\\StackSplitFrame.xml",
     // …nor is the chat edit box. The reference's SHIFT arm opens with
     // `if ( ChatFrameEditBox:IsShown() )` (ContainerFrame.lua l.569) to decide between posting the
     // item's link and splitting the stack, so a VM without it raises before either.

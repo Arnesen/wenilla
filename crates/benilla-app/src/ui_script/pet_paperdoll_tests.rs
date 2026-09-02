@@ -11,22 +11,7 @@ use benilla_ui::script::{
     PetStats, QuadContent, ScriptValue, UiScript, UnitCombatStats, UnitState,
 };
 
-/// Load one shipped `assets/ui/<file>`, panicking on any loader error (the character tests' loader).
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// The page's production load prefix — it leans on `CharacterFrame.xml` for the shared setters,
 /// the row templates and the tab row itself, exactly as the manifest orders them.

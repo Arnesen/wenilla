@@ -767,6 +767,13 @@ impl benilla_ui::script::TextMeasure for FixedWidthFont {
 #[cfg(test)]
 mod test_ui;
 
+/// [`test_ui::load_ui`] for a test module OUTSIDE `ui_script` — `ui_action::feed_tests` drives the
+/// real `UIErrorsFrame` end to end and needs the same both-stores reader everything else uses.
+#[cfg(test)]
+pub(crate) fn load_ui_for_test(script: &benilla_ui::script::UiScript, entry: &str) -> usize {
+    test_ui::load_ui(script, entry)
+}
+
 #[cfg(test)]
 mod cinematic_tests;
 

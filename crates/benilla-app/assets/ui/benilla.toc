@@ -317,21 +317,27 @@ UIPanelTemplates.xml
 # UICheckButtonTemplate and UIPanelButtonTemplate. Not benilla's own options window
 # (OptionsFrame.xml, far below): these are the shared names addons build panels out of.
 OptionsFrameTemplates.xml
-# The shared colour dialog + its opacity slider (`ColorPickerFrame`, `OpacitySliderFrame`,
-# `ColorPickerOkayButton`, `ColorPickerCancelButton`). Last of the "shared FrameXML surface with no
-# benilla consumer yet" cluster that runs from UIPanelTemplates.xml down — the same posture as
-# MoneyFrame.xml above, and for the same reason: 86 of the 218 corpus addons reach this window (64
-# of those files are `Dewdrop-2.0.lua`, which drives THIS one rather than rolling its own), and
-# nothing we ship opens it. The seat is a REQUIREMENT, not tidiness: its Okay/Cancel buttons
-# `inherits="GameMenuButtonTemplate"`, which is resolved at LOAD, and that template lives in
+# ══ THE COLOUR DIALOG — the reference's own, off the player's chain (1751, window 11) ══
+# `ColorPickerFrame` (a `<ColorSelect>`), `OpacitySliderFrame`, `ColorPickerOkayButton`,
+# `ColorPickerCancelButton`, and the separate `OpacityFrame` beside them. The file ships no `.lua`
+# — its whole script is inline, and the one function that drives it
+# (`UIDropDownMenuButton_OpenColorPicker`) lives in UIDropDownMenu.lua.
+#
+# Last of the "shared FrameXML surface with no benilla consumer yet" cluster that runs from
+# UIPanelTemplates.xml down, and the swap is exactly why that posture was worth holding: **86 of
+# the 218 corpus addons reach this window** (64 of those files are `Dewdrop-2.0.lua`, which drives
+# THIS one rather than rolling its own), and nothing we ship opens it — so every one of them is now
+# talking to the reference's own frames rather than to our re-expression of them.
+#
+# THE SEAT IS A REQUIREMENT, not tidiness: the Okay/Cancel buttons
+# `inherits="GameMenuButtonTemplate"`, resolved at LOAD, and that template lives in
 # UIPanelTemplates.xml six lines up (it moved there from GameMenuFrame.xml — the reference's own
-# file for it — precisely because GameMenuFrame.xml is deliberately LAST). Everything else it needs
-# is far above (Fonts' GameFontNormal/…Small trio; UiPanels' ShowUIPanel/HideUIPanel, its
-# UISpecialFrames entry and the ESC rung that cancel-clicks it). UIDropDownMenu.xml, which owns the
-# colour-swatch row that OPENS this window, sits above too — but that direction is call-time only
-# (`UIDropDownMenuButton_OpenColorPicker` reaches `ColorPickerFrame` by name when the swatch is
-# clicked), so the two could sit either way round.
-ColorPickerFrame.xml
+# file for it — precisely because GameMenuFrame.xml is deliberately LAST, which is also why this
+# entry does not follow the reference's own position below it). Everything else it needs is far
+# above: Fonts' GameFontNormal trio, and UiPanels' ShowUIPanel/HideUIPanel plus its UISpecialFrames
+# entry and the ESC rung that cancel-clicks it. UIDropDownMenu.xml sits above too, but that
+# direction is call-time only, so the two could sit either way round.
+Interface\FrameXML\ColorPickerFrame.xml
 # The fullscreen world map (decision 0203 phase 2), over the worldmap host API
 # (`crate::ui_world_map` feeds it); the 'M' binding (ui_script/input.rs) calls its
 # ToggleWorldMap().
@@ -397,7 +403,28 @@ BuffFrame.xml
 # bind. It is reachable only from the dead `enchantTimer` branch above, so it is left absent rather
 # than stubbed (1203) — the honest state is "nothing calls it", not "we answer it with a lie".
 Interface\FrameXML\DurabilityFrame.xml
-ErrorsFrame.xml
+# ══ THE ERROR TOASTS AND THE RAID WARNING — the reference's own (1751, window 14) ══
+# `UIErrorsFrame` (the red/yellow toast strip) and `UIErrorsFrame_OnLoad`/`_OnEvent`, then
+# `RaidWarningFrame` and `RaidBossEmoteFrame` with `RaidWarningFrame_OnLoad`/`_OnEvent`. Two files,
+# in the reference's own split and its own order: the warning frame anchors `relativeTo=
+# "UIErrorsFrame"`, resolved at LOAD, so it cannot precede it.
+#
+# Our single `ErrorsFrame.xml` held both and is deleted. It declared `RaidWarningFrame` with **no
+# `<Scripts>` at all**, and the reason it gave was wrong: *"we already deliver that chat type
+# through `ui_chat::feed`, so wiring a second consumer would print every raid warning TWICE"*.
+# Checked rather than inherited — `ui_chat` fires `CHAT_MSG_RAID_WARNING` as an ordinary chat event
+# and nothing of ours consumes it for a display. So the reference's handler adds the big centre
+# text and its `PlaySound("RaidWarning")` **beside** the chat line, which is exactly what 1.12
+# does: the chat window and the warning frame are two consumers of one event there too.
+#
+# It also brings `RaidBossEmoteFrame`, which our copy withheld on the "no corpus caller, and a
+# shadowed name with no caller is building against a guess" rule (1222). That rule is about names
+# WE would invent; this one is the reference's own declaration, so there is nothing left to guess.
+#
+# `ChatTypeInfo["RAID_WARNING"]` comes from ChatFrame.xml far below — read at call time, so the
+# order does not bind.
+Interface\FrameXML\UIErrorsFrame.xml
+Interface\FrameXML\RaidWarning.xml
 # ══ THE BAG WINDOWS — the reference's own, off the player's chain (decision 1751, window 1) ══
 # `ContainerFrame1..12`, `ContainerFrameTemplate`, `ContainerFrameItemButtonTemplate` and the whole
 # `ToggleBag`/`ToggleBackpack`/`OpenAllBags`/`IsBagOpen`/`ToggleKeyRing` verb family — the real
@@ -453,7 +480,7 @@ Interface\FrameXML\MainMenuBarBagButtons.xml
 # click handler (the reference's `ContainerFrameItemButton_OnClick`) calls `OpenStackSplitFrame`.
 # Order between the two doesn't matter for correctness (Lua globals resolve at call time, and
 # neither file's XML `inherits=` reaches into the other's templates) — adjacent for legibility.
-StackSplit.xml
+Interface\FrameXML\StackSplitFrame.xml
 # Our ADAPTERS over the reference's own container files — one wrapper, for the keyring tooltip
 # detour benilla answers differently (0765). Must load AFTER them, since it captures at load the
 # body it wraps; its own header says what it stopped needing to do when the XML became sourceable.
@@ -505,7 +532,7 @@ SkillFrame.xml
 # declared here, and `inherits=` resolves at LOAD. The reference has the identical edge — its
 # `HonorFrameTemplates.xml` is `<Include>`d by `HonorFrame.xml` and inherited by the LoadOnDemand
 # `Blizzard_InspectUI`, which loads later still.
-HonorFrame.xml
+Interface\FrameXML\HonorFrame.xml
 # The inspect window (decision 0631): another player's paper doll. Beside the character
 # window it mirrors — it needs the same three (Fonts/UiPanels/GameTooltip) plus
 # `CharacterFrameTabButtonTemplate` from UiPanels.xml, and nothing from CharacterFrame.xml
@@ -651,15 +678,27 @@ GroupLootFrame.xml
 # art conventions); its title/panel-button labels use the auto-centred ButtonText slot.
 QuestFrame.xml
 # The two guild-charter windows (decision 1672): the guild registrar — the window the "How do I
-# form a guild?" gossip row opens — and the charter itself, the sheet nine people sign. Loaded
-# here, right after QuestFrame, because both wear the QuestGreeting parchment and its QuestFont /
+# form a guild?" gossip row opens — and the charter itself, the sheet nine people sign. **Both are
+# the reference's own files off the player's chain now** (1751, windows 12 and 13). Loaded here,
+# right after QuestFrame, because both wear the QuestGreeting parchment and its QuestFont /
 # QuestTitleFont objects and read as that family; they need UiPanels (the panel manager seats both,
-# and PetitionFrame registers its RENAME_GUILD dialog on the shared popup engine), MoneyFrame (the
-# registrar's price rides MoneyFrameTemplate, resolved at LOAD — decision 1580's ordering rule) and
-# UIPanelTemplates (the close/action buttons), all far above. The registrar must come first: no
-# load-order dependency links them, but the flow does, and the pair reads in the order it is used.
-GuildRegistrarFrame.xml
-PetitionFrame.xml
+# and the RENAME_GUILD dialog the charter raises is registered there, where 1.12 keeps every
+# dialog), MoneyFrame (the registrar's price rides MoneyFrameTemplate, resolved at LOAD — decision
+# 1580's ordering rule) and UIPanelTemplates (the close/action buttons), all far above. The
+# registrar must come first: no load-order dependency links them, but the flow does, and the pair
+# reads in the order it is used.
+Interface\FrameXML\GuildRegistrarFrame.xml
+# ══ THE GUILD CHARTER — the reference's own, off the player's chain (1751, window 12) ══
+# `PetitionFrame` and its nine signature rows, `PetitionFrame_Update`, `MAX_PETITION_SIGNATURES`,
+# and the leader/signer button pair that share one anchor. Ours was the same window under the same
+# names (decision 1672) with a different expression of the same painter; the reference's file is
+# what that expression was written from.
+#
+# The seat is unchanged and every dependency it names is above: UiPanels (the panel manager seats
+# it, and its RENAME_GUILD dialog rides the shared popup engine), MoneyFrame, UIPanelTemplates (the
+# close/action buttons `inherits=` at LOAD), and the QuestGreeting parchment family it shares with
+# GuildRegistrarFrame directly above.
+Interface\FrameXML\PetitionFrame.xml
 # The quest log window (decision 0088 arc, the quest-log slice): durable player state, not an
 # NPC session — loaded after MerchantFrame (the BenillaMoney coin helpers it reuses) and
 # alongside QuestFrame (same arc); the 'L' binding (ui_script/input.rs) calls its
@@ -669,7 +708,7 @@ QuestLogFrame.xml
 # file split. After MinimapCluster (its anchor), UIParent (the manage pass that re-seats it,
 # and SecondsToTime), GameTooltip (its row hover), and QuestLogFrame — whose window a row
 # click opens, and whose MAX_QUESTS it shares.
-QuestTimerFrame.xml
+Interface\FrameXML\QuestTimerFrame.xml
 ChatFrame.xml
 # The macro window (decision 0983): the editor + its name/icon popup, driven over the
 # engine's OWN macro table (`benilla_ui::script::macros` — 1.12 macros have no server

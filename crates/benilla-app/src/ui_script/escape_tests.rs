@@ -231,7 +231,7 @@ fn escape_closes_an_open_stack_split_frame() {
     }
     load_xml(&s, "MerchantFrame.xml"); // ContainerFrameItemButton_OnClick reads MerchantFrame
     load_xml(&s, "ChatFrame.xml"); // …and ChatFrameEditBox, the shift fork's first test
-    load_xml(&s, "StackSplit.xml");
+    load_xml(&s, "Interface\\FrameXML\\StackSplitFrame.xml");
     s.set_money(0);
 
     let mut slots = std::collections::HashMap::new();

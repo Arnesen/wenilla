@@ -11,22 +11,7 @@
 
 use benilla_ui::script::UiScript;
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error.
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// The chat dock with everything its tab menu and its grips reach under it.
 fn chat_ui() -> UiScript {
@@ -40,7 +25,7 @@ fn chat_ui() -> UiScript {
         "UIDropDownMenu.xml",
         "ScrollTemplates.xml",
         "UIPanelTemplates.xml",
-        "ColorPickerFrame.xml",
+        "Interface\\FrameXML\\ColorPickerFrame.xml",
         "ChatFrame.xml",
     ] {
         load_xml(&s, file);
@@ -102,6 +87,7 @@ fn grab_grip(s: &mut UiScript, grip: &str) -> (f32, f32) {
 /// `GetChatWindowInfo` answers, because it is the chat-cache's own `LOCKED 1`.
 #[test]
 fn both_dock_windows_ship_locked() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = chat_ui();
     for i in 1..=2 {
         assert_eq!(
@@ -133,6 +119,7 @@ fn both_dock_windows_ship_locked() {
 /// locked, `LOCK_WINDOW` when it is not, `notCheckable`.
 #[test]
 fn the_tab_menus_lock_row_toggles_the_window_and_flips_its_label() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_ui();
     right_click(&mut s, "ChatFrame1Tab");
     // Shipped locked, so the row offers the way OUT of it.
@@ -183,6 +170,7 @@ fn the_tab_menus_lock_row_toggles_the_window_and_flips_its_label() {
 /// it — see the template's note), and `FCF_Resize` must refuse even if something did reach it.
 #[test]
 fn a_locked_window_refuses_a_grip_drag() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_ui();
     let before = width(&mut s);
     assert_eq!(before, 430.0, "the authored width");
@@ -229,6 +217,7 @@ fn a_locked_window_refuses_a_grip_drag() {
 /// so a window held past its minimum stops shrinking and starts *walking*.
 #[test]
 fn an_unlocked_bottom_right_grip_resizes_and_clamps_at_the_bounds() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_ui();
     s.run("FCF_SetLocked(ChatFrame1, nil)").unwrap();
     assert!(
@@ -277,6 +266,7 @@ fn an_unlocked_bottom_right_grip_resizes_and_clamps_at_the_bounds() {
 /// the session.
 #[test]
 fn the_release_ends_the_resize_from_anywhere_on_screen() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_ui();
     s.run("FCF_SetLocked(ChatFrame1, nil)").unwrap();
     let (x, y) = grab_grip(&mut s, "ChatFrame1ResizeBottomRight");
@@ -308,6 +298,7 @@ fn the_release_ends_the_resize_from_anywhere_on_screen() {
 /// held-spell dismissal working on the same button.
 #[test]
 fn the_body_drag_moves_an_unlocked_window_and_a_locked_one_stays_put() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_ui();
     let (cx, cy) = centre(&mut s, "ChatFrame1");
     let start = left(&mut s);
@@ -348,6 +339,7 @@ fn the_body_drag_moves_an_unlocked_window_and_a_locked_one_stays_put() {
 /// back on the bottom-stack seat.
 #[test]
 fn a_moved_window_is_user_placed_and_the_managed_pass_skips_it() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_ui();
     // The managed pass owns the seat to begin with — the control for the assertion below.
     s.run("UIParent_ManageFramePositions()").unwrap();
@@ -388,6 +380,7 @@ fn a_moved_window_is_user_placed_and_the_managed_pass_skips_it() {
 /// seat it into a *fresh* VM whose windows are all on their authored anchors.
 #[test]
 fn the_geometry_round_trips_through_the_save_file() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_ui();
     s.run("FCF_SetLocked(ChatFrame1, nil)").unwrap();
 
@@ -455,6 +448,7 @@ fn the_geometry_round_trips_through_the_save_file() {
 /// so the handles appear with the box and are invisible without it.
 #[test]
 fn the_grip_art_follows_the_windows_reveal_and_tint() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_ui();
     // Off-hover, at the shipped alpha-0 base: everything in the set is invisible.
     s.run("BenillaFCF.hover = false FCF_OnUpdate(1.0)").unwrap();
@@ -497,6 +491,7 @@ fn the_grip_art_follows_the_windows_reveal_and_tint() {
 /// clause the box would fade out from under the hand holding it.
 #[test]
 fn a_drag_in_flight_holds_the_chrome_visible() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_ui();
     s.run("FCF_SetLocked(ChatFrame1, nil)").unwrap();
     grab_grip(&mut s, "ChatFrame1ResizeBottomRight");
@@ -524,6 +519,7 @@ fn a_drag_in_flight_holds_the_chrome_visible() {
 /// `FCF_Get_ChatLocked()` gate, which is the first line of both verbs.
 #[test]
 fn the_chat_locked_global_overrides_the_per_window_lock() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = chat_ui();
     s.run("FCF_SetLocked(ChatFrame1, nil)").unwrap();
     assert!(s
@@ -556,6 +552,7 @@ fn the_chat_locked_global_overrides_the_per_window_lock() {
 /// reference's third gate — `isDocked and chatFrame ~= DEFAULT_CHAT_FRAME`.
 #[test]
 fn the_docked_combat_log_cannot_be_moved_or_resized_on_its_own() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_ui();
     s.run("FCF_SetLocked(ChatFrame2, nil)").unwrap();
     assert!(

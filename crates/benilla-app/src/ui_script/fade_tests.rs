@@ -5,24 +5,7 @@
 
 use benilla_ui::script::UiScript;
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error — the same
-/// per-file loader every `ui_script` test file carries (these tests only ever need
-/// `UiPanels.xml`, where the fade kit lives).
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// **The idle fade driver parks itself** (decision 1396's class, the audit's driver-hide item):
 /// with `FADEFRAMES` empty there is nothing to walk, so the driver's OnUpdate hides its own frame

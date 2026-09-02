@@ -15,17 +15,7 @@
 
 use benilla_ui::script::UiScript;
 
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
-}
+use super::test_ui::load_ui as load_xml;
 
 /// The frame tree a cinematic actually runs against: `UIParent` (whose `ShowUIPanel` the frame's
 /// `CINEMATIC_START` arm calls) and the cinematic frame itself.

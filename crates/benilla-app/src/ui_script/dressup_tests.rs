@@ -32,7 +32,7 @@ const ROOM_UI: &[&str] = &[
     "UnitPopup.xml",
     "Interface\\FrameXML\\ItemRef.xml",
     "MerchantFrame.xml",
-    "StackSplit.xml",
+    "Interface\\FrameXML\\StackSplitFrame.xml",
     "DressUpFrame.xml",
     "ChatFrame.xml",
 ];

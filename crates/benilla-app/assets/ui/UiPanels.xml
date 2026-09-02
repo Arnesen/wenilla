@@ -1660,6 +1660,45 @@
             hideOnEscape = 1,
         }
 
+        -- The guild-charter rename box, ref StaticPopup.lua l.133-160 — **in the reference's own
+        -- home, which is this file**. It lived in our PetitionFrame.xml on the reasoning that "a
+        -- popup belongs to the window that raises it"; that is a fine rule and it is not 1.12's,
+        -- which keeps every dialog in one registry. 1751's twelfth window made the charter the
+        -- reference's own file, whose Rename button calls `StaticPopup_Show("RENAME_GUILD")` and
+        -- registers nothing, so the entry had to come here.
+        --
+        -- 24 letters is the server's MAX_CHARTER_NAME, so the box cannot compose a name that will
+        -- be refused for length. Accept and Enter run the same two lines; the reference spells
+        -- them out twice (l.139-147), and its Enter arm hides the dialog while its Accept arm does
+        -- not — the popup engine hides on a plain Accept anyway.
+        StaticPopupDialogs["RENAME_GUILD"] = {
+            text = RENAME_GUILD_LABEL,
+            button1 = ACCEPT,
+            button2 = CANCEL,
+            hasEditBox = 1,
+            maxLetters = 24,
+            OnAccept = function()
+                RenamePetition(getglobal(this:GetParent():GetName() .. "EditBox"):GetText())
+            end,
+            EditBoxOnEnterPressed = function()
+                RenamePetition(getglobal(this:GetParent():GetName() .. "EditBox"):GetText())
+                this:GetParent():Hide()
+            end,
+            OnShow = function()
+                getglobal(this:GetName() .. "EditBox"):SetFocus()
+            end,
+            OnHide = function()
+                if ChatFrameEditBox and ChatFrameEditBox:IsVisible() then
+                    ChatFrameEditBox:SetFocus()
+                end
+                getglobal(this:GetName() .. "EditBox"):SetText("")
+            end,
+            timeout = 0,
+            exclusive = 1,
+            whileDead = 1,
+            hideOnEscape = 1,
+        }
+
         -- ref UIParent.lua l.324-343 + l.356-360, the four arms on one driver. Each equip arm
         -- hides the OTHER dialog first — the two questions are mutually exclusive by construction
         -- (one item, one destination), and the hide is what cancels the record the new question

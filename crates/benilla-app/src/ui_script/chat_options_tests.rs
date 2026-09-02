@@ -13,22 +13,7 @@
 
 use benilla_ui::script::UiScript;
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error.
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// The GlobalStrings the menu labels itself with. The app runs the real
 /// `Interface\FrameXML\GlobalStrings.lua` off the player's own patch chain at boot
@@ -62,7 +47,7 @@ fn chat_with_menu() -> UiScript {
         "UIDropDownMenu.xml",
         "ScrollTemplates.xml",
         "UIPanelTemplates.xml",
-        "ColorPickerFrame.xml",
+        "Interface\\FrameXML\\ColorPickerFrame.xml",
         "ChatFrame.xml",
     ] {
         load_xml(&s, file);
@@ -125,6 +110,7 @@ fn left_click(s: &mut UiScript, frame: &str) {
 /// options at all" rather than "the menu is missing a row".
 #[test]
 fn right_clicking_a_chat_tab_opens_its_options_menu() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_with_menu();
     assert!(
         s.eval::<bool>("return not DropDownList1:IsVisible()")
@@ -173,6 +159,7 @@ fn right_clicking_a_chat_tab_opens_its_options_menu() {
 /// change. (The reference's own fork: the right-button arm returns before the select.)
 #[test]
 fn a_left_click_still_selects_the_tab_and_opens_no_menu() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_with_menu();
     left_click(&mut s, "ChatFrame2Tab");
     assert_eq!(
@@ -206,6 +193,7 @@ fn a_left_click_still_selects_the_tab_and_opens_no_menu() {
 /// `204/255`, not as 0.8.
 #[test]
 fn the_background_row_opens_the_picker_and_its_opacity_slider_drives_the_window() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_with_menu();
     right_click(&mut s, "ChatFrame1Tab");
 
@@ -274,6 +262,7 @@ fn the_background_row_opens_the_picker_and_its_opacity_slider_drives_the_window(
 /// hover ramp, which is the look the director signed off in 0288.
 #[test]
 fn the_shipped_window_still_fades_zero_to_a_quarter() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_with_menu();
     s.mouse_move(1500.0, 850.0);
     for _ in 0..4 {
@@ -301,6 +290,7 @@ fn the_shipped_window_still_fades_zero_to_a_quarter() {
 /// pick moves both the live font and the stored `SIZE`.
 #[test]
 fn the_font_size_submenu_resizes_the_window_and_stores_the_pick() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_with_menu();
     right_click(&mut s, "ChatFrame1Tab");
 
@@ -343,6 +333,7 @@ fn the_font_size_submenu_resizes_the_window_and_stores_the_pick() {
 /// parent, so a single shared capsule would have written window 1 whichever tab was clicked.
 #[test]
 fn each_tabs_menu_writes_its_own_window() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_with_menu();
     right_click(&mut s, "ChatFrame2Tab");
     assert_eq!(
@@ -370,6 +361,7 @@ fn each_tabs_menu_writes_its_own_window() {
 /// `previousValues` contract, which the reference reaches through the same `cancelFunc` field.
 #[test]
 fn cancelling_the_picker_puts_the_window_back() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_with_menu();
     // Start from a non-default look so "restored" is distinguishable from "reset".
     s.run("FCF_SetWindowAlpha(ChatFrame1, 0.4) FCF_SetWindowColor(ChatFrame1, 0.2, 0.4, 0.6)")
@@ -405,6 +397,7 @@ fn cancelling_the_picker_puts_the_window_back() {
 /// the fade latch.
 #[test]
 fn the_restore_event_repaints_the_window_from_the_store() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_with_menu();
     s.set_chat_window_looks([(
         0,

@@ -7,22 +7,7 @@
 
 use benilla_ui::script::{QuadContent, UiScript};
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error.
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// The bar on a 1024×768 screen. 1024 wide is deliberate: the 1024-wide bar then spans x 0..1024,
 /// so every ref offset below is also an absolute screen coordinate.

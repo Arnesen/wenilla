@@ -11,23 +11,7 @@
 
 use benilla_ui::script::{AuraState, UiScript, UnitState};
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error (the bag/panel
-/// tests' loader, duplicated so this file is self-contained).
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// A 1024×768 screen with the anchor law's three fixed files (fonts, the real UIParent, the
 /// real GameTooltip) plus `extra`. `CONTAINER_OFFSET_X/Y` hold their UIParent.xml load values

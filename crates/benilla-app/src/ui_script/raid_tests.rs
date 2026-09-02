@@ -16,35 +16,7 @@ use benilla_ui::script::{
     UiScript,
 };
 
-/// Load one shipped `assets/ui/<file>`, panicking on any loader error **or unknown-template
-/// warning** — `friends_tests::load_xml`'s reason verbatim: `inherits=` a template this house does
-/// not ship is a warning, the frame still loads, and every behavioural test stays green while the
-/// art is missing.
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-    let missing: Vec<&String> = report
-        .warnings
-        .iter()
-        .filter(|w| w.contains("unknown template"))
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "{file}: inherits a template this house does not ship (the frame loads, its ART does \
-         not): {missing:?}"
-    );
-}
+use super::test_ui::load_ui_strict as load_xml;
 
 /// The window's slice of the manifest, in `load_default_ui` order. `UIParent.xml` is in it for
 /// two functions the pane really calls — `MouseIsOver` (the drag's hover sweep) and

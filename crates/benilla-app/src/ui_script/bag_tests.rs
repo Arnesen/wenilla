@@ -1006,7 +1006,7 @@ fn open_backpack_with_a_five_stack(s: &mut UiScript) -> (f32, f32) {
         load_xml(s, file);
     }
     load_xml(s, "MerchantFrame.xml");
-    load_xml(s, "StackSplit.xml");
+    load_xml(s, "Interface\\FrameXML\\StackSplitFrame.xml");
     s.set_money(0);
 
     let mut slots = std::collections::HashMap::new();
@@ -1233,14 +1233,18 @@ fn typing_a_number_into_the_split_spinner_sets_the_count() {
         "and the label follows"
     );
 
-    // A second digit appends, then clamps to the 5-stack rather than being thrown away.
+    // A second digit that would overflow the stack is **IGNORED**, not clamped — the reference's
+    // `StackSplitFrame_OnChar` writes `this.split` only inside `if split <= this.maxStack`
+    // (StackSplitFrame.lua l.72-85), so 37 against a 5-stack leaves 3 standing. Our own copy
+    // clamped to 5 instead, and this assertion was written against that; the window is the
+    // reference's since 1751 window 17, so the ignore is the behaviour.
     assert!(s.char_input("7"));
     assert_eq!(
         s.eval::<i64>("return StackSplitFrame.split").unwrap(),
-        5,
-        "37 against a 5-stack clamps to 5"
+        3,
+        "37 against a 5-stack keeps the 3 — the ref ignores the digit, it does not clamp"
     );
-    // BACKSPACE drops a digit off the clamped value.
+    // BACKSPACE drops a digit off it.
     assert!(s.frame_key_input("BACKSPACE"), "the dialog took BACKSPACE");
     assert_eq!(s.eval::<i64>("return StackSplitFrame.split").unwrap(), 1);
 
@@ -1273,10 +1277,10 @@ fn split_okay_then_a_placement_queues_the_split_move() {
     assert!(s.eval::<bool>("return StackSplitFrame:IsShown()").unwrap());
 
     // Bump the spinner from 1 to 3, then Okay — the carry lands on the cursor.
-    s.run("BenillaStackSplitRight_Click()").unwrap();
-    s.run("BenillaStackSplitRight_Click()").unwrap();
+    click(&mut s, "StackSplitRightButton", "LeftButton");
+    click(&mut s, "StackSplitRightButton", "LeftButton");
     assert_eq!(s.eval::<i64>("return StackSplitFrame.split").unwrap(), 3);
-    s.run("BenillaStackSplitOkay_Click()").unwrap();
+    click(&mut s, "StackSplitOkayButton", "LeftButton");
     assert!(
         !s.eval::<bool>("return StackSplitFrame:IsShown()").unwrap(),
         "Okay hides the spinner"
@@ -1548,7 +1552,7 @@ fn keyring_surface(s: &UiScript) {
         load_xml(s, file);
     }
     load_xml(s, "MerchantFrame.xml");
-    load_xml(s, "ErrorsFrame.xml");
+    load_xml(s, "Interface\\FrameXML\\UIErrorsFrame.xml");
 }
 
 /// **The gate** (decision 0765): no key ⇒ no keyring anywhere on the bar — the button is hidden and

@@ -9,22 +9,7 @@
 
 use benilla_ui::script::{QuadContent, UiScript};
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error.
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// The manifest prefix the picker needs: fonts, the panel manager (`ShowUIPanel`/`HideUIPanel`,
 /// `UISpecialFrames`, the ESC chain), the shared widget kit (`GameMenuButtonTemplate`), then the
@@ -40,7 +25,7 @@ fn picker() -> UiScript {
         "UIDropDownMenu.xml",
         "ScrollTemplates.xml",
         "UIPanelTemplates.xml",
-        "ColorPickerFrame.xml",
+        "Interface\\FrameXML\\ColorPickerFrame.xml",
     ] {
         load_xml(&s, file);
     }
@@ -73,6 +58,7 @@ fn after_round_trip(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
 /// `ColorPickerOkayButton` is nil.
 #[test]
 fn the_named_pieces_exist_and_their_scripts_are_fetchable() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = picker();
     assert!(s
         .eval::<bool>("return ColorPickerFrame ~= nil and ColorPickerFrame.SetColorRGB ~= nil")
@@ -110,6 +96,7 @@ fn the_named_pieces_exist_and_their_scripts_are_fetchable() {
 /// this test while the swatch drew nothing. What the renderer receives is the only honest witness.
 #[test]
 fn set_color_rgb_paints_the_swatch_and_reads_back_the_widgets_colour() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = picker();
     s.run("ShowUIPanel(ColorPickerFrame)").unwrap();
     s.run("ColorPickerFrame:SetColorRGB(0.2, 0.4, 0.8)")
@@ -139,6 +126,7 @@ fn set_color_rgb_paints_the_swatch_and_reads_back_the_widgets_colour() {
 /// WIDTH with it. Both arms of the reference's `OnShow` (l.161-170).
 #[test]
 fn has_opacity_shows_the_slider_and_widens_the_window() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = picker();
 
     // Without it: no slider, the narrow window. (`GetWidth` reports the *resolved* rect, so the
@@ -179,6 +167,7 @@ fn has_opacity_shows_the_slider_and_widens_the_window() {
 /// and the reference's own `<OnValueChanged>` (l.146-152).
 #[test]
 fn the_opacity_slider_drives_opacity_func_on_every_change() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = picker();
     s.run(
         r#"
@@ -247,6 +236,7 @@ fn dewdrop_open(s: &UiScript, r: f64, g: f64, b: f64, opacity: f64) {
 /// quantized colour and the slider-derived alpha, and the window closes.
 #[test]
 fn the_dewdrop_sequence_commits_on_okay() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = picker();
     dewdrop_open(&s, 0.1, 0.5, 0.9, 0.25);
     assert!(s.errors().is_empty(), "{:?}", s.errors());
@@ -296,6 +286,7 @@ fn the_dewdrop_sequence_commits_on_okay() {
 /// in with, and it does it by *calling `cancelFunc`* — the window has no memory of its own.
 #[test]
 fn cancel_restores_the_previous_colour_through_cancel_func() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = picker();
     dewdrop_open(&s, 0.1, 0.5, 0.9, 0.25);
 
@@ -331,6 +322,7 @@ fn cancel_restores_the_previous_colour_through_cancel_func() {
 /// open behind it.
 #[test]
 fn escape_cancels_rather_than_merely_hiding() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = picker();
     dewdrop_open(&s, 0.1, 0.5, 0.9, 0.25);
     s.run("ColorPickerFrame:SetColorRGB(1, 0, 0)").unwrap();
@@ -356,6 +348,7 @@ fn escape_cancels_rather_than_merely_hiding() {
 /// this library.
 #[test]
 fn ace_console_can_chain_the_okay_buttons_onclick() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = picker();
     s.run(
         r#"
@@ -392,6 +385,7 @@ fn ace_console_can_chain_the_okay_buttons_onclick() {
 /// world's windows.
 #[test]
 fn the_picker_is_a_uispecialframe_and_close_windows_puts_it_away() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = picker();
     let listed: bool = s
         .eval(
@@ -426,6 +420,7 @@ fn the_picker_is_a_uispecialframe_and_close_windows_puts_it_away() {
 /// exact one FloatingChatFrame's colour rows use.
 #[test]
 fn a_dropdown_row_with_has_color_swatch_opens_the_picker_and_cancel_restores() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = picker();
     s.run(
         r#"
@@ -506,6 +501,7 @@ fn a_dropdown_row_with_has_color_swatch_opens_the_picker_and_cancel_restores() {
 /// menu row from sprouting a colour button.
 #[test]
 fn a_row_without_the_flag_has_no_swatch() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = picker();
     s.run(
         r#"
@@ -536,6 +532,7 @@ fn a_row_without_the_flag_has_no_swatch() {
 /// the picker addresses it by name.
 #[test]
 fn the_shipped_window_carries_the_wheel_at_the_references_geometry() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = picker();
     s.run("ShowUIPanel(ColorPickerFrame)").unwrap();
     s.resolve();
@@ -593,6 +590,7 @@ fn the_shipped_window_carries_the_wheel_at_the_references_geometry() {
 /// The click is at the wheel's right rim, which the pick law makes 180° — cyan.
 #[test]
 fn a_click_on_the_wheel_reaches_the_callers_func() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = picker();
     // Dewdrop-2.0.lua l.425-465's block, as transcribed in this file's other tests.
     s.run(
@@ -641,6 +639,7 @@ fn a_click_on_the_wheel_reaches_the_callers_func() {
 /// if the content is (decision 1592 §4).
 #[test]
 fn the_generated_art_reaches_the_renderer_carrying_only_what_moves_a_pixel() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = picker();
     s.run("ColorPickerFrame:SetColorRGB(0.15, 0.55, 0.75); ShowUIPanel(ColorPickerFrame)")
         .unwrap();

@@ -10,23 +10,7 @@
 
 use benilla_ui::script::{ExtractedQuad, QuadContent, ScriptValue, UiScript};
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error (the panel/quest
-/// tests' loader, duplicated so this file is self-contained).
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// The toast lines as drawn, **top row first**, each with its colour+alpha and its band bottom.
 fn toast_lines(s: &mut UiScript) -> Vec<(String, [f32; 4], f32)> {
@@ -55,7 +39,7 @@ fn info_and_error_messages_stack_hold_and_expire() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
-    load_xml(&s, "ErrorsFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIErrorsFrame.xml");
 
     // Empty at load. The frame itself is shown — a MessageFrame with nothing to say simply draws
     // nothing, where the hand-rolled version had to `Hide()` itself.
@@ -126,7 +110,7 @@ fn an_error_toast_draws_over_an_open_panel_window() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "ErrorsFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIErrorsFrame.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "MerchantFrame.xml"); // BenillaMoney_* — QuestLogDetail's reward money row

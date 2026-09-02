@@ -8,23 +8,7 @@ use benilla_ui::script::{
     QuestLogEntryView, QuestLogObjectiveView, QuestLogState, SoundRequest, UiScript,
 };
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error (the panel/quest
-/// tests' loader, duplicated so this file is self-contained).
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// Find a bare frame's own rect via its `QuadContent::Frame` entry (`panel_tests.rs`'s helper,
 /// duplicated) — used to locate the window so the wheel test's coordinates land inside it.
@@ -427,11 +411,11 @@ fn watch_guards_no_op_without_erroring() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
-    load_xml(&s, "ErrorsFrame.xml"); // the guards' red-line surface
-                                     // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
-                                     // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
-                                     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
-                                     // silently.
+    load_xml(&s, "Interface\\FrameXML\\UIErrorsFrame.xml"); // the guards' red-line surface
+                                                            // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
+                                                            // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
+                                                            // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
+                                                            // silently.
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");

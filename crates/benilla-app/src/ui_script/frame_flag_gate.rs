@@ -288,11 +288,6 @@ const KNOWN: &[Known] = &[
         why: "inherits BenillaMerchantItemTemplate",
     },
     Known {
-        frame: "HonorFrameProgressBar",
-        flag: Flag::Mouse,
-        why: "our honour bar carries its own hover tooltip; the reference's page has none",
-    },
-    Known {
         frame: "WorldMapFrame",
         flag: Flag::Mouse,
         why: "our map body takes the mouse so a click on it cannot reach the world behind a \

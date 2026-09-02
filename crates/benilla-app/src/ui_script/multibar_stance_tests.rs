@@ -7,22 +7,7 @@
 
 use benilla_ui::script::{ActionSlot, QuadContent, ScriptValue, SpellTooltipView, UiScript};
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error.
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "loader errors in {file}: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// Load the shipped `UIParent.xml` (UIParent_ManageFramePositions — the stance bar's
 /// OnShow/OnHide calls it, decision 0272; the runtime loads it before every bar) +

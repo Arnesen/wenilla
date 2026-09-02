@@ -35,22 +35,7 @@ fn reach(dist_sq: f64) -> UnitReach {
     }
 }
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error.
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// The inspected player: a Dwarf Paladin, level 34.
 fn target_unit() -> UnitState {
@@ -132,7 +117,7 @@ fn armed() -> UiScript {
     // Before InspectFrame.xml, and required rather than tidy: this window's honor page inherits
     // HonorFrame.xml's five row templates and `inherits=` resolves at LOAD, so without it the
     // twelve honor rows materialize bare (decision 1512; the manifest states the same order).
-    load_xml(&s, "HonorFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\HonorFrame.xml");
     load_xml(&s, "InspectFrame.xml");
     s.set_unit("target", Some(target_unit()));
     s.set_inspect(Some(inspect_view("target")));
@@ -144,6 +129,7 @@ fn armed() -> UiScript {
 /// The loader itself: the window and its 19 slots + model pane materialize with no errors.
 #[test]
 fn shipped_inspect_frame_loads_clean() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
@@ -152,7 +138,7 @@ fn shipped_inspect_frame_loads_clean() {
     // Before InspectFrame.xml, and required rather than tidy: this window's honor page inherits
     // HonorFrame.xml's five row templates and `inherits=` resolves at LOAD, so without it the
     // twelve honor rows materialize bare (decision 1512; the manifest states the same order).
-    load_xml(&s, "HonorFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\HonorFrame.xml");
     load_xml(&s, "InspectFrame.xml");
     // All 19 slots exist and carry their GetInventorySlotInfo id (1..=19, no ammo slot).
     for (name, id) in [
@@ -174,6 +160,7 @@ fn shipped_inspect_frame_loads_clean() {
 /// call in range does both. A `CanInspect` stuck truthy passes every other test in this file.
 #[test]
 fn inspect_unit_refuses_out_of_range() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = armed();
     // 11 yards (d² = 121) — past the verified 100.0 threshold.
     s.set_unit_reach(HashMap::from([("target".to_string(), reach(121.0))]));
@@ -212,6 +199,7 @@ fn inspect_unit_refuses_out_of_range() {
 /// silently normalizes — hence a test on the boundary itself.
 #[test]
 fn range_predicates_transcribe_the_verified_thresholds() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = armed();
     for (d2, can_inspect, interact1) in [
         (99.9_f64, true, true),
@@ -301,6 +289,7 @@ fn range_predicates_transcribe_the_verified_thresholds() {
 /// slot; the inspected token must read the foreign one and `"player"` must still read ours.
 #[test]
 fn inventory_bindings_route_by_unit_token() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = armed();
     s.set_inventory_slots(own_slots());
 
@@ -336,6 +325,7 @@ fn inventory_bindings_route_by_unit_token() {
 /// moving the booth yaw, and closing firing `ClearInspectPlayer`.
 #[test]
 fn shipped_inspect_frame_drives_end_to_end() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = armed();
 
     // Hidden at load, and no sound queued (never transitions on startup).
@@ -473,6 +463,7 @@ fn shipped_inspect_frame_drives_end_to_end() {
 /// second one non-obvious.
 #[test]
 fn the_active_tab_is_inert_and_toggle_inspect_closes() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = armed();
     s.run(r#"InspectUnit("target")"#).unwrap();
     let _ = s.take_sounds();

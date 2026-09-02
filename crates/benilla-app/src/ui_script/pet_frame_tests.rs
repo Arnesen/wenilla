@@ -9,23 +9,7 @@ use benilla_ui::script::{
     AuraState, QuadContent, ScriptValue, SelectionRequest, UiScript, UnitState,
 };
 
-/// Load one shipped `assets/ui/<file>`, panicking on any loader error (the unit-frame tests'
-/// loader).
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// The pet frame's production load prefix — it is parented to `PlayerFrame`, so the whole
 /// unit-frame file comes with it, and the tooltip/dropdown kit its hover and its neighbours need.
