@@ -52,6 +52,8 @@ fn load_room(s: &UiScript) {
         "Fonts.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "UIParent.xml",
         "GameTooltip.xml",
         "Cooldown.xml",

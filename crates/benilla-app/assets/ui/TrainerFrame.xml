@@ -492,8 +492,8 @@
             frame:RegisterEvent("TRAINER_UPDATE")
             frame:RegisterEvent("TRAINER_CLOSED")
             frame:RegisterEvent("PLAYER_MONEY")
-            -- The faux-scroll frame repaints the list through this window's Update.
-            getglobal("BenillaTrainerListScrollFrame").updateFunc = BenillaTrainerFrame_Update
+            -- The list repaint is wired in the scroll frame's own `<OnVerticalScroll>` below, the
+            -- reference's way; `updateFunc` was our kit's field and the reference has none (1860).
         end
 
         -- Push the three saved globals into the engine — the ref's ClassTrainerFrame <OnShow>
@@ -508,6 +508,14 @@
             SetTrainerServiceTypeFilter("used", TRAINER_FILTER_USED)
         end
 
+        -- The scroll frame's `<OnVerticalScroll>` lives in its own chunk and cannot see this
+        -- file's `local BENILLA_TRAINER_ROW_HEIGHT`, so the pitch is handed over here rather than
+        -- written as a literal in the XML (1860). The reference has the same shape with globals:
+        -- `QUESTLOG_QUEST_HEIGHT` and friends are file-scope globals in its own FrameXML.
+        function BenillaTrainerList_OnVerticalScroll()
+            FauxScrollFrame_OnVerticalScroll(BENILLA_TRAINER_ROW_HEIGHT, BenillaTrainerFrame_Update)
+        end
+
         function BenillaTrainerFrame_SetTitle(name)
             if name and name ~= "" then
                 getglobal("BenillaTrainerTitleText"):SetText(name)
@@ -518,6 +526,14 @@
 
         function BenillaTrainerFrame_OnEvent(frame)
             if event == "TRAINER_SHOW" then
+                -- SHOW FIRST, then populate — the reference's own order, and not a style choice.
+                -- `FauxScrollFrame_Update` (the chain's since 1837) gates everything that sets the
+                -- bar's range on `frame:IsVisible()`, so a list repainted before its window is up
+                -- leaves `SetMinMaxValues` unset and both arrows dead. The reference relies on this
+                -- order hard enough to test it: `MerchantFrame.lua:22-27` does `ShowUIPanel(this)`
+                -- and then treats `not this:IsVisible()` as the panel system refusing, and closes.
+                -- Decision 1860.
+                ShowUIPanel(frame)
                 -- Fresh session: top of the list, a first selection (ref ClassTrainerFrame_Show).
                 BenillaTrainerFrame_ApplyFilter()
                 BenillaTrainerFrame_SetTitle(arg1)
@@ -526,7 +542,6 @@
                     selectFirstService()
                 end
                 BenillaTrainerFrame_Update()
-                ShowUIPanel(frame)
             elseif event == "TRAINER_UPDATE" then
                 BenillaTrainerFrame_SetTitle(arg1)
                 -- Re-anchor the selection if it fell off the (possibly shorter) list.
@@ -793,13 +808,25 @@
             <Button name="BenillaTrainerService10" inherits="BenillaTrainerServiceTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTrainerService9" relativePoint="BOTTOMLEFT"/></Anchors></Button>
             <Button name="BenillaTrainerService11" inherits="BenillaTrainerServiceTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTrainerService10" relativePoint="BOTTOMLEFT"/></Anchors></Button>
 
-            <!-- The faux-scroll frame (FauxScrollFrameTemplate, ScrollTemplates.xml): invisible
-                 container over the 11 rows; only its right-hand Slider scroll bar renders. Sized to the
-                 11-row span so the bar sits in the window's right gutter. updateFunc is set in
-                 BenillaTrainerFrame_OnLoad. -->
+            <!-- The faux-scroll frame (`FauxScrollFrameTemplate`, the REFERENCE's since 1837):
+                 invisible container over the 11 rows; only its right-hand Slider scroll bar renders.
+                 Sized to the 11-row span so the bar sits in the window's right gutter.
+
+                 THE OWNER DECLARES `<OnVerticalScroll>`, which is how the reference's kit works and
+                 the one thing our transcription did differently: ours carried a `frame.updateFunc`
+                 field that `BenillaFauxScrollBar_OnValueChanged` read, and the reference has no such
+                 field. Its chain is the bar's own OnValueChanged
+                 (`this:GetParent():SetVerticalScroll(arg1)`, UIPanelTemplates.xml) -> this handler ->
+                 `FauxScrollFrame_OnVerticalScroll(itemHeight, updateFunction)`, which is the only
+                 thing that writes `frame.offset`. Without it the arrows and the thumb move the bar
+                 and the list never follows (1860). 16 is the row pitch
+                 (`BenillaTrainerServiceTemplate`). -->
             <ScrollFrame name="BenillaTrainerListScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="293" y="176"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-100"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnVerticalScroll>BenillaTrainerList_OnVerticalScroll()</OnVerticalScroll>
+                </Scripts>
             </ScrollFrame>
 
             <!-- The detail spell icon (ref ClassTrainerSkillIcon): a 37×37 button over a 64×64 UI-EmptySlot

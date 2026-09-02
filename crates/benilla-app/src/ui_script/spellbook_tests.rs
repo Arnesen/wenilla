@@ -89,6 +89,8 @@ fn shipped_spellbook_loads_clean() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "GameTooltip.xml");
     let text = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/SpellBookFrame.xml"),
@@ -120,6 +122,8 @@ fn shipped_spellbook_drives_end_to_end() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "ActionBar.xml");
@@ -213,6 +217,8 @@ fn shipped_spellbook_shows_the_cooldown_pie() {
         "Fonts.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "GameTooltip.xml",
         "Cooldown.xml",
         "SpellBookFrame.xml",
@@ -290,6 +296,8 @@ fn shipped_spellbook_empty_slot_draws_only_the_background() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "SpellBookFrame.xml");
     // An EMPTY book: every slot takes the `id > offset + numSpells` disable path.
@@ -395,6 +403,8 @@ fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "SpellBookFrame.xml");

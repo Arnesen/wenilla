@@ -147,6 +147,8 @@ pub(super) const MERCHANT_UI: &[&str] = &[
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
     "MoneyFrame.xml",
     "UiPanels.xml",
+    r"Interface\FrameXML\UIPanelTemplates.lua",
+    r"Interface\FrameXML\UIPanelTemplates.xml",
     "GameTooltip.xml", // app load order: tooltip before merchant
 ];
 
@@ -156,6 +158,8 @@ pub(super) const LOOT_UI: &[&str] = &[
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
     "MoneyFrame.xml",
     "UiPanels.xml", // StaticPopup, and the LOOT_BIND / CONFIRM_LOOT_DISTRIBUTION dialogs
+    r"Interface\FrameXML\UIPanelTemplates.lua",
+    r"Interface\FrameXML\UIPanelTemplates.xml",
     "GameTooltip.xml", // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrop
     "Interface\\FrameXML\\UIDropDownMenu.xml", // GroupLootDropDown's OnLoad calls UIDropDownMenu_Initialize
     "UnitPopup.xml",
@@ -254,6 +258,8 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     // the very first `ToggleCharacter` — load-clean, then dead on the first click. Their own
     // template dependencies come with them.
     "ScrollTemplates.xml", // SkillFrame's faux list + trough
+    r"Interface\FrameXML\UIPanelTemplates.lua",
+    r"Interface\FrameXML\UIPanelTemplates.xml",
     // The four options templates off the chain, then ours for the one it does not carry
     // (`UIOptionsCheckButtonTemplate` — decision 1841).
     "Interface\\FrameXML\\OptionsFrameTemplates.xml",

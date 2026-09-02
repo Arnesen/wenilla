@@ -267,6 +267,17 @@ pub(crate) const REGISTERED: &[Registered] = &[
          since Vista, so \"1\" would ship audio the real client has never actually produced \
          (B236)",
     ),
+    // The mix-ahead depth (1857) — 1.12's own `SoundBufferSize` (`0x4571ca`, flags 2: latched,
+    // read once at sound-system init), "sound buffer size (milliseconds)": FMOD 3's mix-ahead
+    // buffer, the distance the software mixer runs ahead of the output device. benilla's own
+    // output has the same quantity — the render thread's ring ahead of the IO callback
+    // (`sound::output`) — so the reference's dial drives it, in the reference's unit. The
+    // registrar's default is a two-way host choice: `0x457520` returns "50" or "100" from an
+    // OS-version probe (strings at `0x835e10`/`0x835e0c`, byte-read 2026-09-02). Ours is the
+    // larger of its two, because the stall the crackle was measured from was a whole IO cycle
+    // long and the depth exists to hide the next one. Applies at the next launch, like the
+    // reference's.
+    same("SoundBufferSize", "100"),
     // The output limiter (1551) — benilla's own, not a 1.12 CVar. The reference needs no such DSP
     // (its mix is FMOD 3's and its headroom lives in the SFX-bus auto-duck); benilla sums into f32
     // behind a hard clamp, and every WoW SFX is mastered to full scale, so two overlapping kits

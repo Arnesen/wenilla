@@ -75,6 +75,16 @@ impl BloodCatalog {
     /// not a bloodless marker. Reading `−1` as "bloodless" is what benilla did until 1850, and
     /// it silently dropped the spurt on every one of those 595.
     ///
+    /// **The content proves tier 3 on its own** (1859), which matters because reading a
+    /// `setle/dec/and` correctly is a thing one can be wrong about, and this is not. The tier-3
+    /// population is headed by Quilboar, Mountain Giants, Crocolisks, Gnolls and Naga Sirens —
+    /// `Crocodile.mdx` being the *only* crocolisk model, so "no blood" here means no crocolisk in
+    /// the game ever bleeds. `−1` is **unspecified**, not *none*, and it splits families that
+    /// share a directory: `QuillBoar` is `−1` beside `QuillBoarWarrior` at `1`, `GnollMelee`
+    /// beside `GnollCaster`, `Troll\TrollMelee` beside `Troll\Troll`. It even splits a single
+    /// creature — eight models ship the same art under two `CreatureModelData` rows whose blood
+    /// ids disagree with one side `−1` (a Baby Murloc is both `1` and `−1`).
+    ///
     /// `None` only for an empty table — no shipped display is bloodless by this chain. A unit
     /// still ends up with no blood at violence 0, where every row's column is `0`.
     pub fn level_key(&self, display_blood: i32, model_blood: i32) -> Option<u32> {

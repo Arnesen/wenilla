@@ -17,8 +17,16 @@ use super::spell_visual::SpellVisuals;
 use super::{SpellKitFx, SwingImpact, SwingMessage};
 
 /// The gore level: the client's `violenceLevel` cvar (0 none · 1 censored green · 2 true colors).
-/// **Hardcoded to maximum by the director's directive** (decision 0137 phase 3) — a benilla config
-/// default, not a fidelity claim; revisit when a settings surface exists.
+///
+/// **2 is the reference's own default, not merely ours** (1859; the rule is 1804). The
+/// registration at `0x6c5aa0` *formats* its default out of a per-region **maximum** table at
+/// `0x86c3f8` — `[2, 1, 2, 2, 2, 2, 2, 2]` — and the setter `0x6c5af0` clamps to that same entry,
+/// so a stock client boots at the highest gore its region permits. The locale table at `0x8558a4`
+/// is `{enUS, koKR, frFR, …}` and `[0xc0e080]` is BSS-zero, so **enUS defaults to 2**; the single
+/// capped entry is koKR, which at 1 maps red → *green* through UnitBloodLevels' middle column —
+/// the censored-locale green blood, which this chain produces without being fitted to it.
+/// Hardcoded rather than carried as a CVar row because
+/// `cvars::REGISTERED` takes one row per knob a settings page actually wires (0137 phase 3).
 const VIOLENCE_LEVEL: usize = 2;
 
 /// The victim-model M2 attachment ids the spurt hangs on (`melee-blood-spurt.md`: CEffect at
@@ -104,7 +112,8 @@ pub(super) fn blood_spurts(
             continue;
         };
         // The reference's three-tier row resolve (`0x60afb0`), including the tier-3 records-base
-        // fallback that 595 of the 10534 shipped displays land on — see `level_key`.
+        // fallback that 595 of the 10534 shipped displays land on — Quilboar, crocolisks, gnolls
+        // and Stranglethorn trolls among them, which is why it cannot mean "no blood" (1859).
         let Some(blood_id) = blood.0.level_key(disp_blood, model_blood) else {
             info!("blood: dropped — UnitBloodLevels is empty");
             continue;

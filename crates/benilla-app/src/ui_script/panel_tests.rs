@@ -716,6 +716,8 @@ fn shipped_panel_slot_pushable_promotes_to_center() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
                                      // The vendor window is the reference's own since 1751, and its `MerchantFrame_UpdateMerchantInfo`
                                      // calls `TEXT()` while building every row — see `test_ui::MERCHANT_UI` for the rest.
@@ -1134,6 +1136,8 @@ fn the_1507_registry_rows_match_the_reference_bytes() {
     let s = UiScript::new().unwrap();
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     for probe in [
         // ItemTextFrame — UIParent.lua l.20 (the B288 row).
         "UIPanelWindows['ItemTextFrame'].area == 'left'",
@@ -1171,6 +1175,8 @@ fn a_dead_player_opens_only_whiledead_windows() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     s.set_unit(
         "player",
         Some(benilla_ui::script::UnitState {
@@ -1237,6 +1243,8 @@ fn a_frame_arriving_at_center_puts_the_child_windows_away() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
 
     // The letter is open; two shipped-row stand-ins take the seats: MerchantFrame (pushable 0)
     // holds left, TradeFrame (pushable 1) then ARRIVES at center (UIParent.lua l.734-741's

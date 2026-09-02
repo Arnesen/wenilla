@@ -18,6 +18,8 @@ fn setup() -> UiScript {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "EnchantConfirm.xml");
     s
 }

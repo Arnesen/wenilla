@@ -34,6 +34,8 @@ fn harness() -> UiScript {
     // `'for' limit must be a number` on the first repaint, not a missing row.
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\QuestTimerFrame.xml");

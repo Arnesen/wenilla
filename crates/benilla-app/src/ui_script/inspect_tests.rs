@@ -119,6 +119,8 @@ fn armed() -> UiScript {
     load_xml(&s, "BasicControls.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     // `InspectUnit` lives here now — the reference's own home for that name, and no longer in the
     // window's own file (decision 1832). The manifest's order, and 49 other harnesses'.
     load_xml(&s, "UIParent.xml");
@@ -164,6 +166,8 @@ fn shipped_inspect_frame_loads_clean() {
     load_xml(&s, "BasicControls.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     // `InspectUnit` lives here now — the reference's own home for that name, and no longer in the
     // window's own file (decision 1832). The manifest's order, and 49 other harnesses'.
     load_xml(&s, "UIParent.xml");

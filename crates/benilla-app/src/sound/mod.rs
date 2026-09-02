@@ -24,7 +24,6 @@ pub(crate) mod footsteps;
 mod gameobject;
 mod glue;
 mod greeting;
-mod hal_overload;
 pub(crate) mod interior;
 mod kit;
 mod limiter;
@@ -37,6 +36,9 @@ mod mix_tap;
 mod mixer;
 mod money;
 mod mount;
+// Crate-visible for one reader: the dev-only stall watchdog asks `output::device_open` before
+// it suspends the process (decision 1857). Dev may see anything; nothing here knows dev exists.
+pub(crate) mod output;
 mod probe;
 mod reverb;
 mod sheathe;
@@ -511,7 +513,6 @@ impl Plugin for SoundPlugin {
         })
         .init_resource::<SoundConfig>()
         .init_resource::<AudioListener>()
-        .add_systems(Startup, hal_overload::setup)
         // `Material.dbc` — shared by the foley and the melee impact, so it loads here rather
         // than inside either consumer.
         .add_systems(
@@ -535,7 +536,6 @@ impl Plugin for SoundPlugin {
                 apply_master_volume.after(toggle_mute),
                 apply_focus_gate,
                 poll_mix_health,
-                hal_overload::poll,
             ),
         );
         probe::plugin(app);
@@ -671,7 +671,6 @@ fn poll_mix_health(
     time: Res<Time>,
     mut exit: MessageReader<bevy::app::AppExit>,
     mut since_report: Local<std::time::Duration>,
-    mut last_overruns: Local<u64>,
     mut last_refused: Local<u64>,
     mut peak_voices: Local<usize>,
 ) {
@@ -700,19 +699,9 @@ fn poll_mix_health(
     let peak = mixer.take_health_peak();
     let level = mixer.take_level();
     let rate = mixer.sample_rate();
+    let window = mixer.take_output_window();
     let voices = std::mem::take(&mut *peak_voices);
-    let new_overruns = health.overruns - *last_overruns;
-    *last_overruns = health.overruns;
-    if new_overruns > 0 {
-        warn!(
-            "audio: {new_overruns} missed mix deadline(s) in the last {}s (peak load {:.0}% of \
-             budget) — this is what a crackle sounds like",
-            MIX_HEALTH_REPORT.as_secs(),
-            peak * 100.0,
-        );
-    } else {
-        debug!("audio: mix load peak {:.0}% of budget", peak * 100.0);
-    }
+    report_output(window, peak);
     let new_refused = health.voices_refused - *last_refused;
     *last_refused = health.voices_refused;
     if new_refused > 0 {
@@ -730,6 +719,58 @@ fn poll_mix_health(
 /// and without the limiter kira's `clamp` would have squared it off. The line names what the game
 /// asked for, how long it was over, what the limiter had to pull, and how many voices were live —
 /// which together say *why* (thirty voices at once is a different bug from one voice at 4×).
+/// The output-side story of one report window (decision 1857): every layer between the mix
+/// and the speaker, each with its own number, so a crackle names its layer here.
+fn report_output(w: mixer::OutputWindow, peak_load: f32) {
+    if w.cycles == 0 {
+        // No stream ran this window; `Mixer::poll_health` already said why, per event.
+        return;
+    }
+    let lead = w
+        .lead_min_ms
+        .map_or_else(|| "n/a".to_string(), |v| format!("{v:.1} ms"));
+    let ring = w
+        .ring_min_ms
+        .map_or_else(|| "n/a".to_string(), |v| format!("{v:.0} ms"));
+    let shape = format!(
+        "{} cycles: lead ≥ {lead}, IO copy ≤ {:.2} ms, cycle gap ≤ {:.1} ms (nominal {:.1}), \
+         render ≤ {:.2} ms per {:.1} ms chunk (peak load {:.0}%), ring ≥ {ring}",
+        w.cycles,
+        w.io_wall_max_ms,
+        w.gap_max_ms,
+        w.cycle_ms,
+        w.render_wall_max_ms,
+        w.chunk_ms,
+        peak_load * 100.0,
+    );
+    if w.underruns > 0 {
+        warn!(
+            "audio: {} output underrun(s) — ~{:.0} ms of silence reached the device: the render \
+             thread fell the whole mix-ahead behind. This is what a crackle sounds like. {shape}",
+            w.underruns, w.underrun_ms,
+        );
+    }
+    if w.overloads > 0 {
+        let ago = w
+            .last_overload_ago_ms
+            .map_or_else(String::new, |v| format!(", last {v:.0} ms ago"));
+        warn!(
+            "audio: {} HAL processor overload(s){ago} — the OS says our IO cycle ran past its \
+             deadline. The copy's own wall time and the lead say which: a long copy is the IO \
+             thread parked inside the callback (page-in, preemption), a short lead is it woken \
+             late. {shape}",
+            w.overloads,
+        );
+    } else if w.lead_min_ms.is_some_and(|l| l < 0.0)
+        || w.io_wall_max_ms > w.cycle_ms * 0.5
+        || w.gap_max_ms > w.cycle_ms * 1.5
+    {
+        warn!("audio: IO cycle strain without an overload — {shape}");
+    } else {
+        debug!("audio: output steady — {shape}");
+    }
+}
+
 fn report_level(level: meter::LevelReading, voices: usize, rate: Option<u32>) {
     // Ahead of the level story on purpose: a non-finite sample is not a loud mix, it is a broken
     // one, and it is invisible to every other counter we have — including the limiter's own

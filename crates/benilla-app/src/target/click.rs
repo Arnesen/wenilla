@@ -135,6 +135,25 @@ pub(super) fn select_on_click(
     }
 }
 
+/// The service arms that are **not** a bare packet, as one [`SystemParam`] (the 16-param ceiling).
+///
+/// Three of the reference's fourteen arms need something other than "send this opcode": bit 1
+/// reads the target's cached questgiver status as its second conjunct, and bits 5 and 7 raise a
+/// client-side CONFIRM dialog and send nothing at all (wow-re
+/// `object-layer/scratch/interact-dead-fork-and-npc-service-ladder.md` §C).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct ServiceArms<'w> {
+    /// `[unit+0xcb8]`'s mirror — the last `SMSG_QUESTGIVER_STATUS` per guid, which the bit-1 arm's
+    /// predicate `0x5df490` reads off the TARGET.
+    pub(crate) quest: Res<'w, crate::ui_quest::QuestGiver>,
+    /// The innkeeper's bind question (bit 7): `0x5dfdc0` caches the guid and fires `CONFIRM_BINDER`
+    /// — `CMSG_BINDER_ACTIVATE` belongs to the dialog's Accept, not to the click.
+    pub(crate) binder: ResMut<'w, crate::ui_binder::BinderState>,
+    /// The spirit healer's XP-loss question (bit 5): `0x5df730` does the same, firing
+    /// `CONFIRM_XP_LOSS`.
+    pub(crate) death: ResMut<'w, crate::death::DeathNet>,
+}
+
 /// On a clean right-*click* (vanilla's context action — [`WorldRightClick`], never a turn-drag):
 /// select the hovered unit, then act by the same classification the cursor used (wow-re
 /// cursor-system.md §6). Three branches (decision 0081):
@@ -180,6 +199,8 @@ pub(super) fn act_on_right_click(
     // line (the opener cast's local totem refusal, decision 0552) + the loot-target latch
     // the loot branch arms (decision 0515), and the mailbox session the mailbox branch opens
     // (decision 0544).
+    // The three non-packet service arms (decision 1861), bundled — see [`ServiceArms`].
+    mut service: ServiceArms,
     ui_feedback: (
         ResMut<crate::ui_action::UiErrorKeys>,
         ResMut<crate::ui_action::CastErrors>,
@@ -730,24 +751,52 @@ pub(super) fn act_on_right_click(
             debug!("right-click unit {guid:#x}: dead fork took no leg — nothing sent");
         }
         UnitBranch::Service if !cursor.unable => {
-            // An in-range friendly service NPC (the cursor already gated friendly + service + range):
-            // route the interact by the classified kind (decision 0081). The Buy kind is shared by
-            // banker and auctioneer (both classify to Buy(3), low-bit-first — a gossip-flagged banker
-            // already classified to Speak and routes through the gossip menu), so the dispatch reads
-            // the NPC's own flags to split them (decision 0604).
+            // An in-range friendly service NPC (the cursor already gated friendly + service +
+            // range): run **the reference's own ladder over `UNIT_NPC_FLAGS`** ([`service_arm`]).
+            //
+            // Not the cursor's kind, which is what this dispatched on until decision 1861. The
+            // reference runs two structurally identical ladders — one for the cursor
+            // (`0x482336`), one for the send (`0x5f0289`) — and the cursor MODE is a lossy
+            // projection of the winning bit: eight arms collapse to Speak(6) and two to Buy(3),
+            // so a kind-keyed dispatch cannot tell a banker from an auctioneer, nor a trainer
+            // from an innkeeper from a spirit healer. It sent `CMSG_GOSSIP_HELLO` for all eight.
             let npc_flags = stores
                 .get(entity)
                 .map(|(s, _)| s.0.unit_npc_flags())
                 .unwrap_or(0);
-            if let Some(cmd) = interact_command(cursor.kind, guid, npc_flags) {
-                debug!("right-click interact: {guid:#x} ({:?})", cursor.kind);
-                let _ = seam.net.0.send(cmd);
-                // Talk at the NPC. The gesture's own anim carries WeaponFlags `0x10`, so the
-                // per-animation sheath reconcile stows a drawn weapon — a committed change that
-                // persists after the talk (decisions 0080/0081; no sheath wiring here).
-                if let Some((_, my_guid, _)) = me {
-                    gestures.push(my_guid.0, crate::creature_anim::Gesture::Talk);
+            let Some(arm) = service_arm(npc_flags, service.quest.status(guid)) else {
+                // `0x5f05ca` — a unit that reaches the ladder and matches no consulted bit
+                // (repair-only, or a questgiver with nothing on offer) does nothing at all, and
+                // takes no gesture with it.
+                debug!("right-click interact: {guid:#x} matches no service bit — nothing sent");
+                return;
+            };
+            match service_action(arm, guid, self_store.is_some_and(|s| s.0.player_is_ghost())) {
+                ServiceAction::Send(cmd) => {
+                    debug!("right-click interact: {guid:#x} ({arm:?})");
+                    let _ = seam.net.0.send(cmd);
                 }
+                ServiceAction::AskBinder => {
+                    debug!(
+                        "right-click interact: {guid:#x} (innkeeper — CONFIRM_BINDER, no packet)"
+                    );
+                    service.binder.ask(guid);
+                }
+                ServiceAction::AskSpiritHealer => {
+                    debug!("right-click interact: {guid:#x} (spirit healer — CONFIRM_XP_LOSS, no packet)");
+                    service.death.ask_spirit_healer(guid);
+                }
+                ServiceAction::Silent(why) => {
+                    debug!("right-click interact: {guid:#x} ({arm:?}) — silent: {why}");
+                }
+            }
+            // Talk at the NPC — on **every taken arm**, including the ones that send nothing:
+            // the reference calls the gesture after the arm's handler RETURNS, not after a send
+            // (each arm of `0x5f0130` ends `call 0x60bb30(0)` then `ret 8`). The gesture's own
+            // anim carries WeaponFlags `0x10`, so the per-animation sheath reconcile stows a drawn
+            // weapon — a committed change that persists after the talk (decisions 0080/0081).
+            if let Some((_, my_guid, _)) = me {
+                gestures.push(my_guid.0, crate::creature_anim::Gesture::Talk);
             }
         }
         // The classifier's own range gray on a LIVE service NPC — outside the 5.5556 yd service
@@ -1072,78 +1121,154 @@ fn unit_branch(attack: bool, dead_fork: bool, leg: DeadUnitLeg) -> UnitBranch {
     }
 }
 
-/// The interact packet a right-click on a friendly service NPC sends, by its classified
-/// [`cursor_mode::CursorKind`] (decision 0081). A **vendor-only** NPC (Pickup) opens the stock list
-/// directly; a **flight master** (Taxi) opens the taxi map directly (byte-verified — decision 0496
-/// `CMSG_TAXIQUERYAVAILABLENODES`; the gossip taxi option still reaches the same menu
-/// server-side, so a gossip-routed flight master isn't broken by this); every other service kind
-/// opens the universal gossip menu — `CMSG_GOSSIP_HELLO` works on any interactable creature
-/// (verified: the server passes `UNIT_NPC_FLAG_NONE`), and the gossip window shows whatever menu
-/// comes back (the banker/trainer/innkeeper *windows* are their own arcs, but the generic hello is
-/// faithful and harmless). Non-service kinds (Attack is handled above; Point/Skin aren't
-/// interacts) send nothing. A lootable corpse also shows Pickup (the loot base mode) but never
-/// reaches here — the loot branch routes it by classification first.
-fn interact_command(
-    kind: cursor_mode::CursorKind,
-    guid: u64,
-    npc_flags: u32,
-) -> Option<ClientCommand> {
-    use cursor_mode::CursorKind;
-    match kind {
-        CursorKind::Pickup => Some(ClientCommand::ListInventory { guid }),
-        CursorKind::Taxi => Some(ClientCommand::TaxiQueryNodes { guid }),
-        // Buy(3) is banker OR auctioneer (the ladder's shared leg), so it forks twice. A pure
-        // banker (bit 8 — the lowest service bit, and the only way Buy classified) opens the bank
-        // directly (`CMSG_BANKER_ACTIVATE`, decision 0604).
-        CursorKind::Buy if npc_flags & cursor_mode::npc_flags::BANKER != 0 => {
-            Some(ClientCommand::BankerActivate { guid })
+/// **The reference's own NPC-service ladder** — `0x5f0130`'s first-match-wins walk over
+/// `UNIT_NPC_FLAGS`, low bit to high (wow-re
+/// `object-layer/scratch/interact-dead-fork-and-npc-service-ladder.md` §C, every arm byte-verified
+/// from its `shr`/`test` to its `push <opcode>`). The winning bit, **not** a cursor kind.
+///
+/// The cursor classifier `0x482200` runs a second, structurally identical ladder over the same
+/// field in the same order, which is why keying the send on the classified kind looked right for
+/// so long. It is not: the projection is lossy. Speak(6) is bits 0, 1, 5, 6, 9, 10, 11 and 13 —
+/// eight arms, two of which send nothing — and Buy(3) is bits 8 and 12. A kind-keyed dispatch
+/// cannot express this ladder, and benilla's sent `CMSG_GOSSIP_HELLO` for all eight Speak arms
+/// (decision 1861).
+///
+/// **First-match-wins is load-bearing**: a GOSSIP+VENDOR NPC sends `CMSG_GOSSIP_HELLO` only, and
+/// a stable master with a menu keeps the menu — which is where 1677's hand-written
+/// `STABLEMASTER && !GOSSIP` conjunct came from. The bit order gives it for free.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ServiceArm {
+    /// bit 0 — `0x5f02a4` → `0x5df4d0`.
+    Gossip,
+    /// bit 1, **and** the target's cached questgiver status ∉ {0, 1} (`0x5f02c0` → `0x5df490`).
+    Questgiver,
+    /// bit 2 — `0x5f0317` → `0x5df5d0`.
+    Vendor,
+    /// bit 3 — `0x5f034e` → `0x5ed020`.
+    FlightMaster,
+    /// bit 4 — `0x5f0385` → `0x5df680`.
+    Trainer,
+    /// bit 5 — `0x5f03bc` → `0x5df730`. **Ghost-gated, and sends nothing.**
+    SpiritHealer,
+    /// bit 6 — `0x5f03f3` → `0x5df950`. **Ghost-gated.**
+    SpiritGuide,
+    /// bit 7 — `0x5f042a` → `0x5dfdc0`. **Sends nothing.**
+    Innkeeper,
+    /// bit 8 — `0x5f0461` → `0x5dffe0`.
+    Banker,
+    /// bit 9 — `0x5f04e3` → `0x5e0060`.
+    Petitioner,
+    /// bit 10 — `0x5f051a` → `0x5e00e0`.
+    TabardDesigner,
+    /// bit 11 — `0x5f0551` → `0x5e01a0`.
+    Battlemaster,
+    /// bit 12 — `0x5f0588` → `0x5e0220`.
+    Auctioneer,
+    /// bit 13 — `0x5f05bc` → `0x5e02a0`.
+    StableMaster,
+}
+
+/// The ladder itself. `None` = no consulted bit set (`0x5f05ca`) — the click does nothing, and
+/// takes no talk gesture with it. Bit 14 (REPAIR) has no arm in the binary and none here.
+///
+/// The reference re-reads the flags field for a redundant `bits 9 AND 10` block before the plain
+/// bit-9 test; it routes to the same handler bit 9 alone reaches, so it is dead in effect and is
+/// not transcribed (recording it would be a distinction with no outcome).
+fn service_arm(npc_flags: u32, quest_status: Option<u32>) -> Option<ServiceArm> {
+    use cursor_mode::npc_flags as f;
+    let bit = |m: u32| npc_flags & m != 0;
+    Some(if bit(f::GOSSIP) {
+        ServiceArm::Gossip
+    } else if bit(f::QUESTGIVER) && cursor_mode::questgiver_has_quest(quest_status) {
+        // The SAME predicate the cursor ladder uses at `0x482362`, shared rather than copied so
+        // the two can never disagree about which questgiver is worth talking to.
+        ServiceArm::Questgiver
+    } else if bit(f::VENDOR) {
+        ServiceArm::Vendor
+    } else if bit(f::FLIGHTMASTER) {
+        ServiceArm::FlightMaster
+    } else if bit(f::TRAINER) {
+        ServiceArm::Trainer
+    } else if bit(f::SPIRITHEALER) {
+        ServiceArm::SpiritHealer
+    } else if bit(f::SPIRITGUIDE) {
+        ServiceArm::SpiritGuide
+    } else if bit(f::INNKEEPER) {
+        ServiceArm::Innkeeper
+    } else if bit(f::BANKER) {
+        ServiceArm::Banker
+    } else if bit(f::PETITIONER) {
+        ServiceArm::Petitioner
+    } else if bit(f::TABARDDESIGNER) {
+        ServiceArm::TabardDesigner
+    } else if bit(f::BATTLEMASTER) {
+        ServiceArm::Battlemaster
+    } else if bit(f::AUCTIONEER) {
+        ServiceArm::Auctioneer
+    } else if bit(f::STABLEMASTER) {
+        ServiceArm::StableMaster
+    } else {
+        return None;
+    })
+}
+
+/// What a taken [`ServiceArm`] does. Three arms are not a packet at all.
+pub(crate) enum ServiceAction {
+    /// The arm's own opcode.
+    Send(ClientCommand),
+    /// Raise `CONFIRM_BINDER` locally and send nothing (`0x5dfdc0`).
+    AskBinder,
+    /// Raise `CONFIRM_XP_LOSS` locally and send nothing (`0x5df730`).
+    AskSpiritHealer,
+    /// Nothing goes out. The payload is why, for the debug line.
+    Silent(&'static str),
+}
+
+/// One taken arm → what benilla does about it.
+///
+/// **The two "spirit" arms are ghost-gated at entry** (`0x5df74a` / `0x5df962`, the byte-identical
+/// `PLAYER_FLAGS` bit 4 test): a LIVING player who right-clicks a spirit healer or spirit guide
+/// carrying no gossip bit gets nothing at all — no packet, no event, no error. That is not an
+/// omission here, it is the reference's own answer.
+///
+/// **Two arms deviate deliberately, and here is the whole of it**: `TabardDesigner` should send
+/// `MSG_TABARDVENDOR_ACTIVATE` and `Battlemaster` `CMSG_BATTLEMASTER_HELLO`, and benilla has
+/// neither window to open with the reply. They keep the universal gossip greeting, which against
+/// vmangos still puts a usable menu on screen; sending the faithful opcode into a reply we drop
+/// would trade a working affordance for a wire detail nobody can see. Each retires the moment its
+/// window exists — that is the condition, written down (decision 1861).
+fn service_action(arm: ServiceArm, guid: u64, ghost: bool) -> ServiceAction {
+    match arm {
+        ServiceArm::Gossip => ServiceAction::Send(ClientCommand::GossipHello { guid }),
+        ServiceArm::Questgiver => ServiceAction::Send(ClientCommand::QuestgiverHello { npc: guid }),
+        ServiceArm::Vendor => ServiceAction::Send(ClientCommand::ListInventory { guid }),
+        ServiceArm::FlightMaster => ServiceAction::Send(ClientCommand::TaxiQueryNodes { guid }),
+        ServiceArm::Trainer => ServiceAction::Send(ClientCommand::TrainerList { trainer: guid }),
+        ServiceArm::SpiritHealer if ghost => ServiceAction::AskSpiritHealer,
+        ServiceArm::SpiritHealer => ServiceAction::Silent("spirit healer, and we are alive"),
+        // Ghost-gated like its neighbour, and then a stated gap: the ghost's arm sends opcode
+        // `0x2E2` (the area spirit-healer time query) from one call deeper, and benilla has no
+        // battleground resurrect timer for the reply to fill. For a living player this IS the
+        // reference's answer; for a ghost it is the gap.
+        ServiceArm::SpiritGuide if ghost => {
+            ServiceAction::Silent("spirit guide — the 0x2E2 timer query is unbuilt")
         }
-        // An auctioneer (bit 12) greets its house (decision 1511). Note what this does NOT do:
-        // open anything. The greeting is a round trip, and the window opens when the *reply*
-        // lands — that is the real client's own law, and it is also what makes the house id
-        // (which only the reply carries) available before the sell pane needs a deposit rate.
-        // An auctioneer that also carries the gossip bit never reaches here: the service ladder
-        // is first-match-wins from the low bits, so bit 0 pre-empts bit 12 and the menu's own
-        // auctioneer option asks the server for the same greeting.
-        CursorKind::Buy if npc_flags & cursor_mode::npc_flags::AUCTIONEER != 0 => {
-            Some(ClientCommand::AuctionHello { auctioneer: guid })
+        ServiceArm::SpiritGuide => ServiceAction::Silent("spirit guide, and we are alive"),
+        ServiceArm::Innkeeper => ServiceAction::AskBinder,
+        ServiceArm::Banker => ServiceAction::Send(ClientCommand::BankerActivate { guid }),
+        ServiceArm::Petitioner => {
+            ServiceAction::Send(ClientCommand::PetitionShowList { npc: guid })
         }
-        // A stable master asks for its own pet list — the client sends `MSG_LIST_STABLED_PETS`
-        // ITSELF on the bit-13 interact leg (`0x5f05a1` → `0x5f05bc` → `0x5e02a0`, whose sole
-        // caller that is), and the window opens when the reply lands. This corrects decision
-        // 1676's "server-initiated, off the gossip option": that is how it opens against vmangos
-        // (`GOSSIP_OPTION_STABLEPET` → `SendStablePet`), but it is not what the client does.
-        //
-        // Gated on the gossip bit being absent, which is the honest bound: the cursor ladder above
-        // is first-match-wins and reaches its STABLEMASTER leg only when no lower service bit is
-        // set, but the reference's *interaction* dispatcher is a different function whose own
-        // ordering the carve did not enumerate. A stable master carrying a gossip menu therefore
-        // keeps the menu — where its own stable option asks the server for the same list — and one
-        // without a menu takes this leg, which is the case the bare bit-13 test exists for.
-        CursorKind::Speak
-            if npc_flags & cursor_mode::npc_flags::STABLEMASTER != 0
-                && npc_flags & cursor_mode::npc_flags::GOSSIP == 0 =>
-        {
-            Some(ClientCommand::ListStabledPets { npc: guid })
+        // The two documented deviations — see this function's doc.
+        ServiceArm::TabardDesigner | ServiceArm::Battlemaster => {
+            ServiceAction::Send(ClientCommand::GossipHello { guid })
         }
-        CursorKind::Speak | CursorKind::Buy | CursorKind::Trainer | CursorKind::Interact => {
-            Some(ClientCommand::GossipHello { guid })
+        ServiceArm::Auctioneer => {
+            ServiceAction::Send(ClientCommand::AuctionHello { auctioneer: guid })
         }
-        // Repair and Cast are UI-overlay modes only; Inspect and the data-named GameObject
-        // cursors (Mail/Mine/GatherHerbs/PickLock) belong to the GO branch, which routes above
-        // and never reaches this NPC-service dispatch — a unit never classifies to any of
-        // these. LootAll is loot-only (the corpse route above), never a service.
-        CursorKind::Point
-        | CursorKind::Attack
-        | CursorKind::Skin
-        | CursorKind::LootAll
-        | CursorKind::Repair
-        | CursorKind::Inspect
-        | CursorKind::Mail
-        | CursorKind::Mine
-        | CursorKind::GatherHerbs
-        | CursorKind::PickLock
-        | CursorKind::Cast => None,
+        ServiceArm::StableMaster => {
+            ServiceAction::Send(ClientCommand::ListStabledPets { npc: guid })
+        }
     }
 }
 
@@ -1500,12 +1625,10 @@ mod tests {
             unit_branch(false, true, leg),
             UnitBranch::Dead(DeadUnitLeg::Nothing)
         );
-        // ...and what that used to fall into. The pouch over a corpse and the pouch over a vendor
-        // are one cursor mode, so the old last arm read the corpse as a shop.
-        assert!(matches!(
-            interact_command(cursor_mode::CursorKind::Pickup, 0x42, 0),
-            Some(ClientCommand::ListInventory { .. })
-        ));
+        // (What that used to fall into: the pouch over a corpse and the pouch over a vendor are
+        // one cursor mode, so the old last arm read the corpse as a shop. The dispatch no longer
+        // consults a cursor kind at all — 1861 — but the fork's terminality is the guarantee that
+        // does not depend on that, so it is the one asserted here.)
         // A LIVE unit still reaches the service dispatch — the fix must not shut the door on the
         // branch that is supposed to send.
         assert_eq!(
@@ -1514,89 +1637,128 @@ mod tests {
         );
     }
 
+    /// **The ladder, bit by bit** — decision 1861. Every arm of `0x5f0130`'s first-match-wins walk
+    /// over `UNIT_NPC_FLAGS`, in the order the binary tests them.
     #[test]
-    fn interact_routes_vendor_direct_and_gossip_universal() {
-        use cursor_mode::CursorKind;
-        // A vendor-only NPC (Pickup) opens the stock list directly (decision 0081).
-        assert!(matches!(
-            interact_command(CursorKind::Pickup, 0x42, 0x4),
-            Some(ClientCommand::ListInventory { guid: 0x42 })
-        ));
-        // A flight master (Taxi) opens the taxi map directly (byte-verified — decision 0496).
-        assert!(matches!(
-            interact_command(CursorKind::Taxi, 0x77, 0x8),
-            Some(ClientCommand::TaxiQueryNodes { guid: 0x77 })
-        ));
-        // Gossip (Speak) and the out-of-scope service kinds route through the universal hello.
-        for (kind, flags) in [
-            (CursorKind::Speak, 0x1),
-            (CursorKind::Trainer, 0x10),
-            (CursorKind::Interact, 0x80),
+    fn the_service_ladder_walks_the_reference_bit_order() {
+        use cursor_mode::npc_flags as f;
+        let has = Some(benilla_protocol::messages::dialog_status::AVAILABLE);
+        for (flags, arm) in [
+            (f::GOSSIP, ServiceArm::Gossip),
+            (f::VENDOR, ServiceArm::Vendor),
+            (f::FLIGHTMASTER, ServiceArm::FlightMaster),
+            (f::TRAINER, ServiceArm::Trainer),
+            (f::SPIRITHEALER, ServiceArm::SpiritHealer),
+            (f::SPIRITGUIDE, ServiceArm::SpiritGuide),
+            (f::INNKEEPER, ServiceArm::Innkeeper),
+            (f::BANKER, ServiceArm::Banker),
+            (f::PETITIONER, ServiceArm::Petitioner),
+            (f::TABARDDESIGNER, ServiceArm::TabardDesigner),
+            (f::BATTLEMASTER, ServiceArm::Battlemaster),
+            (f::AUCTIONEER, ServiceArm::Auctioneer),
+            (f::STABLEMASTER, ServiceArm::StableMaster),
         ] {
+            assert_eq!(service_arm(flags, None), Some(arm), "flags {flags:#x}");
+        }
+        // Bit 1 is the one arm with a second conjunct: the target's cached questgiver status.
+        assert_eq!(
+            service_arm(f::QUESTGIVER, has),
+            Some(ServiceArm::Questgiver)
+        );
+        assert_eq!(service_arm(f::QUESTGIVER, None), None);
+        // No consulted bit — REPAIR (bit 14) has no arm in the binary, so a repair-only NPC does
+        // nothing at all. Neither does an empty field.
+        assert_eq!(service_arm(0x4000, None), None);
+        assert_eq!(service_arm(0, None), None);
+    }
+
+    /// **First-match-wins, which is the half a kind-keyed dispatch could not express.** The two
+    /// collisions that made the old proxy wrong are the two this pins.
+    #[test]
+    fn the_service_ladder_is_first_match_wins() {
+        use cursor_mode::npc_flags as f;
+        // A gossip-flagged anything keeps its menu — this is where 1677's hand-written
+        // `STABLEMASTER && !GOSSIP` conjunct came from, now free.
+        for other in [
+            f::VENDOR,
+            f::TRAINER,
+            f::INNKEEPER,
+            f::STABLEMASTER,
+            f::BANKER,
+        ] {
+            assert_eq!(
+                service_arm(f::GOSSIP | other, None),
+                Some(ServiceArm::Gossip)
+            );
+        }
+        // Banker (bit 8) before auctioneer (bit 12) — both were Buy(3) to the cursor.
+        assert_eq!(
+            service_arm(f::BANKER | f::AUCTIONEER, None),
+            Some(ServiceArm::Banker)
+        );
+        // Trainer (bit 4) before innkeeper (bit 7) — both were Speak/Interact to the cursor.
+        assert_eq!(
+            service_arm(f::TRAINER | f::INNKEEPER, None),
+            Some(ServiceArm::Trainer)
+        );
+    }
+
+    /// **The three arms that are not a packet**, and the packets the other eleven actually send.
+    /// The eight arms that used to collapse into `CMSG_GOSSIP_HELLO` are the point of this test.
+    #[test]
+    fn the_service_arms_send_what_the_reference_sends() {
+        let sent = |arm, ghost| match service_action(arm, 0x42, ghost) {
+            ServiceAction::Send(cmd) => format!("{cmd:?}"),
+            ServiceAction::AskBinder => "ask-binder".to_string(),
+            ServiceAction::AskSpiritHealer => "ask-spirit-healer".to_string(),
+            ServiceAction::Silent(_) => "silent".to_string(),
+        };
+        assert!(matches!(
+            service_action(ServiceArm::Questgiver, 0x42, false),
+            ServiceAction::Send(ClientCommand::QuestgiverHello { npc: 0x42 })
+        ));
+        assert!(matches!(
+            service_action(ServiceArm::Trainer, 0x42, false),
+            ServiceAction::Send(ClientCommand::TrainerList { trainer: 0x42 })
+        ));
+        assert!(matches!(
+            service_action(ServiceArm::Petitioner, 0x42, false),
+            ServiceAction::Send(ClientCommand::PetitionShowList { npc: 0x42 })
+        ));
+        assert!(matches!(
+            service_action(ServiceArm::Vendor, 0x42, false),
+            ServiceAction::Send(ClientCommand::ListInventory { guid: 0x42 })
+        ));
+        assert!(matches!(
+            service_action(ServiceArm::FlightMaster, 0x42, false),
+            ServiceAction::Send(ClientCommand::TaxiQueryNodes { guid: 0x42 })
+        ));
+        assert!(matches!(
+            service_action(ServiceArm::Banker, 0x42, false),
+            ServiceAction::Send(ClientCommand::BankerActivate { guid: 0x42 })
+        ));
+        assert!(matches!(
+            service_action(ServiceArm::Auctioneer, 0x42, false),
+            ServiceAction::Send(ClientCommand::AuctionHello { auctioneer: 0x42 })
+        ));
+        assert!(matches!(
+            service_action(ServiceArm::StableMaster, 0x42, false),
+            ServiceAction::Send(ClientCommand::ListStabledPets { npc: 0x42 })
+        ));
+        // The innkeeper asks, mounted or not, alive or not — and sends nothing.
+        assert_eq!(sent(ServiceArm::Innkeeper, false), "ask-binder");
+        // The two ghost-gated arms: nothing at all for a living player, which is the reference's
+        // own answer and not an omission.
+        assert_eq!(sent(ServiceArm::SpiritHealer, false), "silent");
+        assert_eq!(sent(ServiceArm::SpiritGuide, false), "silent");
+        assert_eq!(sent(ServiceArm::SpiritHealer, true), "ask-spirit-healer");
+        // The two documented deviations keep the greeting until their windows exist.
+        for arm in [ServiceArm::TabardDesigner, ServiceArm::Battlemaster] {
             assert!(matches!(
-                interact_command(kind, 0x99, flags),
-                Some(ClientCommand::GossipHello { guid: 0x99 })
+                service_action(arm, 0x42, false),
+                ServiceAction::Send(ClientCommand::GossipHello { guid: 0x42 })
             ));
         }
-        // Non-service cursors aren't interacts (Attack is handled by the attack branch).
-        for kind in [CursorKind::Point, CursorKind::Attack, CursorKind::Skin] {
-            assert!(interact_command(kind, 0x1, 0).is_none());
-        }
-    }
-
-    /// The auctioneer split (decision 1511): a pure auctioneer greets its house rather than
-    /// falling to the gossip universal, and the greeting is all it does — the window opens when
-    /// the *reply* lands, which is the real client's own law.
-    #[test]
-    fn interact_routes_pure_auctioneer_to_the_hello() {
-        use cursor_mode::CursorKind;
-        assert!(matches!(
-            interact_command(CursorKind::Buy, 0x51, cursor_mode::npc_flags::AUCTIONEER),
-            Some(ClientCommand::AuctionHello { auctioneer: 0x51 })
-        ));
-    }
-
-    /// The stable-master split (decision 1677): the client asks for the pet list **itself** on the
-    /// bit-13 interact leg — it is not purely server-initiated, which is what 1676 had. A stable
-    /// master carrying a gossip menu keeps the menu, whose own stable option asks the server for
-    /// the same list; one without a menu takes this leg.
-    #[test]
-    fn interact_routes_a_menuless_stable_master_to_the_pet_list() {
-        use cursor_mode::CursorKind;
-        assert!(matches!(
-            interact_command(
-                CursorKind::Speak,
-                0x64,
-                cursor_mode::npc_flags::STABLEMASTER
-            ),
-            Some(ClientCommand::ListStabledPets { npc: 0x64 })
-        ));
-        // With a gossip menu, the universal hello still wins — the menu carries the stable option.
-        assert!(matches!(
-            interact_command(
-                CursorKind::Speak,
-                0x64,
-                cursor_mode::npc_flags::STABLEMASTER | cursor_mode::npc_flags::GOSSIP
-            ),
-            Some(ClientCommand::GossipHello { guid: 0x64 })
-        ));
-    }
-
-    /// The banker split (decision 0604): Buy(3) is banker OR auctioneer — the BANKER flag routes
-    /// the direct `CMSG_BANKER_ACTIVATE`, its absence falls to the auctioneer fork above. A
-    /// gossip-flagged banker never reaches this fork (the low-bit-first ladder classified Speak).
-    #[test]
-    fn interact_routes_pure_banker_direct() {
-        use cursor_mode::CursorKind;
-        assert!(matches!(
-            interact_command(CursorKind::Buy, 0x42, cursor_mode::npc_flags::BANKER),
-            Some(ClientCommand::BankerActivate { guid: 0x42 })
-        ));
-        // Banker + auctioneer both set: the ladder's low-bit order (banker is bit 8) wins.
-        assert!(matches!(
-            interact_command(CursorKind::Buy, 0x42, 0x1100),
-            Some(ClientCommand::BankerActivate { guid: 0x42 })
-        ));
     }
 
     /// **The selection queue, end to end** — Lua in, `Selection` out — over the four ways it is

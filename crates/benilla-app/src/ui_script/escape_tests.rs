@@ -181,6 +181,8 @@ fn escape_closes_the_options_window_before_opening_the_menu() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the Keybindings page's faux-scroll kit (1008)
@@ -479,6 +481,8 @@ fn an_addon_frame_registered_in_uispecialframes_closes_on_escape() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "GameMenuFrame.xml");
 
     // The addon's three lines, verbatim in shape.

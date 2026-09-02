@@ -540,6 +540,8 @@ fn managed_positions_engage_for_the_bare_frame_name() {
     // taking every BenillaGroupLootFrame_* function down with it, not just the popup.
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     // `TOOLTIP_DEFAULT_COLOR`, which the chain's dropdown backdrops read in their OnLoad — the
     // dropdown kit rides in with the loot window now (1838), so this bespoke setup needs it too.
     load_xml(&s, "GameTooltip.xml");

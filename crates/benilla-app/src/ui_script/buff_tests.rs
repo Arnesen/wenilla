@@ -34,6 +34,8 @@ fn harness() -> UiScript {
     // `SecondsToTimeAbbrev`, which 1.12 keeps in UIParent.lua and so do we since window 18.
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "ActionBar.xml"); // BENILLA_FALLBACK_ICON (the unknown-icon fallback)

@@ -467,6 +467,8 @@ fn load_pet_menu_frames(s: &UiScript) {
         "UIParent.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "UnitPopup.xml",

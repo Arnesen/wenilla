@@ -26,6 +26,8 @@ fn ui_with_the_cinematic_frame() -> UiScript {
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "MoneyFrame.xml"); // StaticPopup's money row, or UiPanels errors at load
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\CinematicFrame.xml");
     s.resolve();
     s

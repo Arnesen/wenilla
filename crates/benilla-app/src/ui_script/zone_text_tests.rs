@@ -45,6 +45,8 @@ fn harness() -> UiScript {
     load_xml(&s, "BasicControls.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "UIParent.xml");
     // The fading kit, its own manifest entry since window 8 — as it is in the reference's TOC.
     load_xml(&s, "Interface\\FrameXML\\FadingFrame.xml");

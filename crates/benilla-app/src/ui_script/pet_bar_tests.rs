@@ -13,6 +13,8 @@ fn load_pet_bar(s: &UiScript) {
     for file in [
         "MoneyFrame.xml",
         "UiPanels.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "UIParent.xml",
         "Cooldown.xml",
         "ActionBar.xml",
@@ -351,6 +353,8 @@ fn pet_bar_row(with_multibar: bool) -> (usize, f32) {
     for file in [
         "MoneyFrame.xml",
         "UiPanels.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "UIParent.xml",
         "Cooldown.xml",
         "ActionBar.xml",
@@ -633,6 +637,8 @@ fn load_pet_bar_with_tooltip(s: &UiScript) {
         "Fonts.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "UIParent.xml",
         "GameTooltip.xml",
         "Cooldown.xml",

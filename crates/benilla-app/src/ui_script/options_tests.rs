@@ -43,6 +43,8 @@ fn harness_on(mut s: UiScript) -> UiScript {
         "UIParent.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml", // the Keybindings page's faux-scroll kit
@@ -717,6 +719,8 @@ fn interface_harness() -> UiScript {
             "Fonts.xml",
             "MoneyFrame.xml",
             "UiPanels.xml",
+            r"Interface\FrameXML\UIPanelTemplates.lua",
+            r"Interface\FrameXML\UIPanelTemplates.xml",
             "UIParent.xml",
             // The target-of-target pair's definer (1576) and the three files ahead of it, all in
             // their manifest seats. The chain is a real load-ORDER requirement rather than
@@ -770,6 +774,8 @@ fn chat_harness() -> UiScript {
             "Fonts.xml",
             "MoneyFrame.xml",
             "UiPanels.xml",
+            r"Interface\FrameXML\UIPanelTemplates.lua",
+            r"Interface\FrameXML\UIPanelTemplates.xml",
             "UIParent.xml",
             "GameTooltip.xml",
             "Interface\\FrameXML\\UIDropDownMenu.xml",

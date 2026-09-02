@@ -25,6 +25,8 @@ fn harness() -> UiScript {
     // session without it searches `1, nil` and finds no free bar at all, so this is not scenery.
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MirrorTimer.xml");
     s
 }

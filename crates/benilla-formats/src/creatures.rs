@@ -542,11 +542,6 @@ fn load_creature_display_info_extra(chain: &mut Chain) -> Result<HashMap<u32, Np
 mod tests {
     use super::*;
 
-    /// The footprint accessor on the **real** build-5875 DBCs: a display wearing the HumanMale
-    /// body resolves the Base boot print (`FootprintTextures` id 1) at the authored 12×10 inches
-    /// → 1/3 × 5/18 yards (the client's ×1/36 cache conversion, byte-verified at `0x607a00`);
-    /// a display whose model authors `FootprintTextureID = −1` resolves `None`. Guards the
-    /// schema columns (a shifted field would misread every print) and the inches→yards space.
     /// **The blood-row tier populations** over the shipped tables — the measurement behind 1850.
     /// `CreatureModelData.BloodID = −1` (122 of 430 models) is a tier-2 *miss*, not a bloodless
     /// marker, so those displays fall through to the reference's tier-3 records base and bleed
@@ -586,6 +581,142 @@ mod tests {
         assert_eq!(tiers.iter().sum::<usize>(), cat.display.len());
     }
 
+    /// **Tier 3 is ordinary fauna, not an exotic tail** — the content proof behind 1859, and the
+    /// reason the records-base fallback cannot mean "no blood".
+    ///
+    /// Read the tier-3 population by its oddest members — elementals, skeletons, mecha-striders —
+    /// and the natural conclusion is that `BloodID = −1` marks a bloodless creature and the
+    /// fallback is a misread of the disassembly. The population says otherwise: it is *headed* by
+    /// Quilboar (42 displays), Mountain Giants (30), Crocolisks (27), Gnolls (25), Nagas (24) and
+    /// Trolls (17). A fallback that resolved to "no blood" would leave Razorfen, every gnoll camp
+    /// and every Stranglethorn troll bloodless — which is not the game anyone played. That is a
+    /// proof from shipped content, independent of any instruction decode, so the creatures are
+    /// named here: a future round that "simplifies" `level_key` back to two tiers fails saying
+    /// *which creature stopped bleeding*, not merely that a count moved.
+    #[test]
+    fn the_tier_three_fallback_bleeds_red_on_ordinary_creatures() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_creature_catalog(&mut chain).expect("load creature catalog");
+        let blood = crate::load_blood_catalog(&mut chain).expect("blood tables");
+
+        // Each authors `BloodID = −1` on a single, uniquely-pathed model row, and none of their
+        // displays carries a `BloodLevel` override — so every one reaches the resolve by tier 3
+        // alone, with no other tier able to account for the result.
+        for path in [
+            r"Creature\Quillboar\QuillBoar.mdx",
+            r"Creature\Crocodile\Crocodile.mdx",
+            r"Creature\GnollMelee\GnollMelee.mdx",
+            r"Creature\MountainGiant\MountainGiant.mdx",
+            r"Creature\NagaFemale\Siren.mdx",
+            r"Creature\Troll\TrollMelee.mdx",
+        ] {
+            let mut seen = 0usize;
+            for &display_id in cat.display.keys() {
+                let Some(m) = cat.model(display_id) else {
+                    continue;
+                };
+                if !m.model_path.eq_ignore_ascii_case(path) {
+                    continue;
+                }
+                seen += 1;
+                assert_eq!(
+                    (m.blood_display, m.blood_model),
+                    (0, -1),
+                    "{path} display {display_id} is no longer a pure tier-3 case"
+                );
+                assert_eq!(
+                    blood.level_key(m.blood_display, m.blood_model),
+                    Some(1),
+                    "{path} display {display_id} must fall through to the records base (RED)"
+                );
+            }
+            assert!(seen > 0, "{path} is missing from the shipped display table");
+        }
+
+        // …and the row it lands on really draws — red, both facings, both sizes.
+        for (front, large) in [(true, false), (true, true), (false, false), (false, true)] {
+            assert!(
+                blood.effect_id(1, 2, front, large).is_some(),
+                "the records-base row draws nothing (front {front}, large {large})"
+            );
+        }
+    }
+
+    /// **`BloodID = −1` is unfilled data, not a "bloodless" marker** — the evidence that closes
+    /// the question 1850 left open (1859).
+    ///
+    /// Nine shipped models appear under **two** `CreatureModelData` rows for the same art and the
+    /// twins *disagree* about blood; in eight of the nine, one side of the disagreement is `−1`
+    /// (the ninth, FelBat, splits 1 vs 2). A Baby Murloc is a Baby
+    /// Murloc. If `−1` meant "this creature does not bleed", the same creature would bleed or not
+    /// depending on which of its two rows a display happened to name — so `−1` is an unspecified
+    /// value, and the reference's tier-3 records base is precisely the handler for one.
+    #[test]
+    fn the_minus_one_blood_id_is_unfilled_data() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_creature_catalog(&mut chain).expect("load creature catalog");
+
+        let mut by_path: HashMap<String, Vec<i32>> = HashMap::new();
+        for m in cat.models.values() {
+            by_path
+                .entry(m.path.to_ascii_lowercase())
+                .or_default()
+                .push(m.blood);
+        }
+        let mut split: Vec<&str> = by_path
+            .iter()
+            .filter(|(_, ids)| ids.contains(&-1) && ids.iter().any(|&v| v > 0))
+            .map(|(p, _)| p.as_str())
+            .collect();
+        split.sort_unstable();
+        assert_eq!(
+            split.len(),
+            8,
+            "models whose duplicate rows disagree about blood, one of them −1: {split:?}"
+        );
+        assert!(
+            split.iter().any(|p| p.ends_with(r"murloc\babymurloc.mdx")),
+            "the Baby Murloc pair is the clearest case and must be among them: {split:?}"
+        );
+
+        // The same unfilled field, one level up: within a single creature family one model says
+        // −1 and its siblings name a colour. A "bloodless" reading would put bleeding quilboar
+        // warriors next to bloodless quilboar in the same Razorfen room.
+        let blood_of = |needle: &str| {
+            cat.models
+                .values()
+                .find(|m| m.path.to_ascii_lowercase().ends_with(needle))
+                .unwrap_or_else(|| panic!("{needle} is not in CreatureModelData"))
+                .blood
+        };
+        for (unspecified, sibling) in [
+            (
+                r"quillboar\quillboar.mdx",
+                r"quillboar\quillboarwarrior.mdx",
+            ),
+            (r"gnollmelee\gnollmelee.mdx", r"gnollcaster\gnollcaster.mdx"),
+            (r"troll\trollmelee.mdx", r"troll\troll.mdx"),
+            (r"nagafemale\siren.mdx", r"nagamale\nagamale.mdx"),
+        ] {
+            assert_eq!(
+                blood_of(unspecified),
+                -1,
+                "{unspecified} should be the unfilled one"
+            );
+            assert!(
+                blood_of(sibling) > 0,
+                "{sibling} should name a real colour, splitting its own family"
+            );
+        }
+    }
+
+    /// The footprint accessor on the **real** build-5875 DBCs: a display wearing the HumanMale
+    /// body resolves the Base boot print (`FootprintTextures` id 1) at the authored 12×10 inches
+    /// → 1/3 × 5/18 yards (the client's ×1/36 cache conversion, byte-verified at `0x607a00`);
+    /// a display whose model authors `FootprintTextureID = −1` resolves `None`. Guards the
+    /// schema columns (a shifted field would misread every print) and the inches→yards space.
     #[test]
     fn footprints_resolve_on_real_data() {
         let data = crate::wow_data_or_skip!();

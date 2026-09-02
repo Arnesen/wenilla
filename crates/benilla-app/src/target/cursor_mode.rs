@@ -655,7 +655,7 @@ fn go_cursor_kind(type_id: i32, lock_cursor: Option<CursorKind>) -> CursorKind {
 ///
 /// `None` (no status ever sent) reads as no quest: the server sends the status unprompted for every
 /// questgiver in range, so its absence means the unit isn't offering us one.
-fn questgiver_has_quest(quest_status: Option<u32>) -> bool {
+pub(super) fn questgiver_has_quest(quest_status: Option<u32>) -> bool {
     use benilla_protocol::messages::dialog_status::{NONE, UNAVAILABLE};
     !matches!(quest_status, None | Some(NONE) | Some(UNAVAILABLE))
 }

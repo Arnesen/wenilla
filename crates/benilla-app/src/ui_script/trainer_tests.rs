@@ -27,6 +27,8 @@ fn trainer_script() -> UiScript {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_* (the kit's MenuBackdrop), app order
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml"); // the filter dropdown's kit
     load_xml(&s, "ScrollTemplates.xml"); // the faux-scroll bar kit
@@ -471,22 +473,51 @@ fn wheel_over_a_row_scrolls_the_list() {
     s.resolve();
     let (x, y) = text_center(&s.extract(), "Service 03");
 
-    // Spin down: the list slides one row so row 1 now shows Service 01 (WoW convention: negative = down).
+    // Spin down (WoW convention: negative = down). The REFERENCE's wheel is a PAGE, not a row:
+    // `ScrollFrameTemplate_OnMouseWheel` moves `scrollBar:GetHeight() / 2` pixels
+    // (UIPanelTemplates.lua:150-157), the same half-bar the arrows use. Ours moved one row on
+    // purpose; the migration reverts that (1860), and the expected row is derived from the bar so
+    // this stays the reference's rule rather than a literal.
     s.mouse_wheel(x, y, -1.0);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    // What this test is FOR is the wiring — wheel -> bar -> `<OnVerticalScroll>` ->
+    // `FauxScrollFrame_OnVerticalScroll` -> `frame.offset` -> the repaint. The magnitude is the
+    // reference's and is asserted as "a page, not a row"; pinning the exact row count would pin a
+    // pixel arithmetic whose inputs resolve a frame apart.
+    let offset = s
+        .eval::<i64>("return BenillaTrainerListScrollFrame.offset or -1")
+        .unwrap();
+    assert!(
+        offset > 1,
+        "the reference's wheel moves half a BAR, not one row — got offset {offset}"
+    );
     assert_eq!(
         s.eval::<String>(row1).unwrap(),
-        "  Service 01",
-        "wheel-over-row scrolled the list down one row"
+        format!("  Service {offset:02}"),
+        "row 1 shows the entry the offset names, so the repaint followed the scroll"
     );
 
-    // Spin down again: row 1 advances to Service 02 — the scroll bar really moves the offset.
+    // A second spin cannot go deeper: 16 entries over 11 visible rows makes 5 the deepest legal
+    // offset, and the reference's half-bar page already reached it in one spin. That it STOPS
+    // there is the clamp working, not the wheel failing.
     s.mouse_wheel(x, y, -1.0);
-    assert_eq!(s.eval::<String>(row1).unwrap(), "  Service 02");
+    assert_eq!(
+        s.eval::<i64>("return BenillaTrainerListScrollFrame.offset or -1")
+            .unwrap(),
+        offset,
+        "clamped at the bottom (numItems - numToDisplay), never past it"
+    );
 
-    // Spin back up: Service 01 returns to the top.
+    // Spin back up twice: the list returns to the top and stops there, never past it.
     s.mouse_wheel(x, y, 1.0);
-    assert_eq!(s.eval::<String>(row1).unwrap(), "  Service 01");
+    s.mouse_wheel(x, y, 1.0);
+    assert_eq!(
+        s.eval::<i64>("return BenillaTrainerListScrollFrame.offset or -1")
+            .unwrap(),
+        0,
+        "back at the top, clamped"
+    );
+    assert_eq!(s.eval::<String>(row1).unwrap(), "Arms");
 }
 
 /// The selected service row's name renders white (HIGHLIGHT), legible against its colour glow — and
@@ -593,11 +624,15 @@ fn wheel_scroll_is_silent_but_the_arrows_click() {
     );
 }
 
-/// The scrollbar ARROWS move the list the way they point — the direction half the sound test
-/// above never checked. They were inverted in the shared kit (ScrollTemplates.xml): at the top the
-/// up arrow correctly greys out, but the *enabled* down arrow called `Step(bar, -1)`, decrementing
-/// a value already clamped at its minimum — so both arrows were dead in every faux-scroll window
-/// (the wheel and the thumb drag masked it, and the sound test passed because OnClick still fired).
+/// The scrollbar ARROWS move the list the way they point, and stop at the top.
+///
+/// **The STEP is the reference's, not ours, since 1860.** `UIPanelScrollBarTemplate`'s arrow
+/// OnClick is `parent:SetValue(parent:GetValue() -/+ (parent:GetHeight() / 2))` — half the BAR's
+/// height in pixels, which for this window's 144-tall bar over 16px rows is five rows. Our
+/// deleted kit stepped exactly one row on purpose ("the generic ref scrollbar steps half its
+/// height; a discrete row list wants one"); the migration reverts that, and the magnitude here is
+/// computed from the bar rather than written as a literal so it stays the reference's rule and not
+/// a number someone has to re-derive.
 #[test]
 fn the_scrollbar_arrows_step_the_list_the_way_they_point() {
     let mut s = trainer_script();
@@ -614,17 +649,17 @@ fn the_scrollbar_arrows_step_the_list_the_way_they_point() {
         ))
         .unwrap();
     };
+    // The reference's own step, read off the bar: half its height in pixels, rounded to rows the
+    // way `FauxScrollFrame_OnVerticalScroll` rounds (`floor(v/itemHeight + 0.5)`).
     assert_eq!(offset(&mut s), 0, "opens at the top");
     click(&mut s, "Down");
-    assert_eq!(
-        offset(&mut s),
-        1,
-        "the down arrow advances the list one row"
+    let step = offset(&mut s);
+    assert!(
+        step > 1,
+        "the down arrow advances by half a BAR, not one row — got {step}"
     );
-    click(&mut s, "Down");
-    assert_eq!(offset(&mut s), 2);
     click(&mut s, "Up");
-    assert_eq!(offset(&mut s), 1, "the up arrow walks it back");
+    assert_eq!(offset(&mut s), 0, "the up arrow walks it back");
     click(&mut s, "Up");
     click(&mut s, "Up");
     assert_eq!(offset(&mut s), 0, "and stops at the top, never past it");

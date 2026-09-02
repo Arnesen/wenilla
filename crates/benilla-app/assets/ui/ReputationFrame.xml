@@ -329,7 +329,11 @@
             -- `offset * valueStep`, so this SetValue writes the value the Slider already holds and
             -- its change-gate (decision 0250) drops it before it could re-enter this function.
             -- Kept because it is the reference's line, not because it does anything.
-            if not FauxScrollFrame_Update(scrollFrame, numFactions, NUM_FACTIONS_DISPLAYED, REPUTATIONFRAME_FACTIONHEIGHT) then
+            local showBar = FauxScrollFrame_Update(scrollFrame, numFactions, NUM_FACTIONS_DISPLAYED, REPUTATIONFRAME_FACTIONHEIGHT)
+            -- Our trough is not the reference's business: it follows the bar the ref just decided
+            -- about (1860).
+            BenillaScrollTrough_Follow("ReputationListScrollFrame")
+            if not showBar then
                 getglobal("ReputationListScrollFrameScrollBar"):SetValue(0)
             end
             local factionOffset = FauxScrollFrame_GetOffset(scrollFrame)
@@ -435,9 +439,8 @@
         function ReputationFrame_OnLoad()
             local frame = this
             frame:RegisterEvent("UPDATE_FACTION")
-            -- The faux kit's one wiring requirement: the owner names its own repaint so a drag of
-            -- the scroll bar re-binds the rows (ScrollTemplates.xml's `frame.updateFunc` contract).
-            getglobal("ReputationListScrollFrame").updateFunc = ReputationFrame_Update
+            -- The repaint is wired in the scroll frame's own `<OnVerticalScroll>` below, which is
+            -- where the reference's kit puts it (1860).
         end
 
         function ReputationFrame_OnShow()
@@ -744,11 +747,19 @@
 
             <!-- The faux scroll frame (ref l.556-602): 296x354 at the page's TOPRIGHT(-66,-76),
                  which puts its left edge on the header column and its right edge 66 in from the
-                 page. updateFunc is set in ReputationFrame_OnLoad. -->
+                 page. Its `<OnVerticalScroll>` is what re-binds the rows (1860). -->
             <ScrollFrame name="ReputationListScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="296" y="354"/></Size>
                 <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-66" y="-76"/></Offset></Anchor></Anchors>
-            </ScrollFrame>
+                            <Scripts>
+                    <!-- The reference's kit writes `frame.offset` ONLY from here: the bar's
+                         OnValueChanged calls `SetVerticalScroll`, which lands in this handler.
+                         Our transcription used a `frame.updateFunc` field instead, which the
+                         reference does not have — without this the bar moves and the list does
+                         not follow (1860). -->
+                    <OnVerticalScroll>FauxScrollFrame_OnVerticalScroll(REPUTATIONFRAME_FACTIONHEIGHT, ReputationFrame_Update)</OnVerticalScroll>
+                </Scripts>
+</ScrollFrame>
 
             <!-- The two newbie tips over the column headings (ref l.603-630): invisible frames
                  exactly covering their FontString. `enableMouse` added, same engine rule as the bar

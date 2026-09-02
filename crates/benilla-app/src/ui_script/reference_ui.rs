@@ -1679,4 +1679,138 @@ mod tests {
         assert!(!super::is_chain_entry("BagFrame.xml"));
         assert!(!super::is_chain_entry("Fonts.xml"));
     }
+    /// Every global function and virtual template name a manifest entry declares.
+    ///
+    /// Line-based for `function NAME(`, tag-based for `name="X" … virtual="true"` — the two
+    /// shapes FrameXML actually uses. A chain `.xml` that sources its code with
+    /// `<Script file="X.lua"/>` contributes that file's functions too, because the manifest
+    /// line brings both (`every_chain_xml_brings_its_own_lua`).
+    fn declared_by(entry: &str) -> std::collections::BTreeSet<String> {
+        fn attr(tag: &str, key: &str) -> Option<String> {
+            let pat = format!("{key}=\"");
+            let mut from = 0;
+            while let Some(i) = tag[from..].find(&pat) {
+                let at = from + i;
+                let before_ok = at == 0
+                    || tag[..at]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_whitespace());
+                let rest = &tag[at + pat.len()..];
+                if before_ok {
+                    return rest.find('"').map(|j| rest[..j].to_string());
+                }
+                from = at + pat.len();
+            }
+            None
+        }
+        fn harvest(text: &str, out: &mut std::collections::BTreeSet<String>) {
+            for line in text.lines() {
+                if let Some(rest) = line.trim_start().strip_prefix("function ") {
+                    let name: String = rest
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    if !name.is_empty() && rest[name.len()..].trim_start().starts_with('(') {
+                        out.insert(name);
+                    }
+                }
+            }
+            for chunk in text.split('<').skip(1) {
+                let Some(end) = chunk.find('>') else { continue };
+                let tag = &chunk[..end];
+                if tag.contains("virtual=\"true\"") {
+                    if let Some(n) = attr(tag, "name") {
+                        out.insert(n);
+                    }
+                }
+            }
+        }
+
+        let mut out = std::collections::BTreeSet::new();
+        let text = if super::is_chain_entry(entry) {
+            let Some(bytes) = super::read(&entry.replace('\\', "/")) else {
+                return out;
+            };
+            String::from_utf8_lossy(&bytes).into_owned()
+        } else {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/ui")
+                .join(entry);
+            match std::fs::read_to_string(&path) {
+                Ok(t) => t,
+                Err(_) => return out,
+            }
+        };
+        harvest(&text, &mut out);
+
+        // A chain .xml's own `<Script file="X.lua"/>` — same folder as the .xml.
+        if super::is_chain_entry(entry) && entry.to_ascii_lowercase().ends_with(".xml") {
+            let dir = {
+                let p = entry.replace('\\', "/");
+                p.rsplit_once('/')
+                    .map(|(d, _)| d.to_string())
+                    .unwrap_or_default()
+            };
+            for chunk in text.split('<').skip(1) {
+                let Some(end) = chunk.find('>') else { continue };
+                let tag = &chunk[..end];
+                if !tag.trim_start().starts_with("Script") {
+                    continue;
+                }
+                let Some(file) = attr(tag, "file") else {
+                    continue;
+                };
+                if !file.to_ascii_lowercase().ends_with(".lua") {
+                    continue;
+                }
+                if let Some(bytes) = super::read(&format!("{dir}/{}", file.replace('\\', "/"))) {
+                    harvest(&String::from_utf8_lossy(&bytes), &mut out);
+                }
+            }
+        }
+        out
+    }
+
+    /// **A name of ours that a LATER chain entry redeclares is dead code, and nothing says so.**
+    ///
+    /// The manifest's law is "later line wins": template registration is a `HashMap::insert` and a
+    /// global function assignment is an overwrite. So the moment a window migrates and its chain
+    /// entry lands BELOW one of our files, every function and template that file shares with the
+    /// reference stops running — silently, with our copy still on disk, still commented, still
+    /// read by the next session as if it were live.
+    ///
+    /// That is not a tidiness problem. Our copies DIVERGE from the reference deliberately, and the
+    /// divergence is what dies: `UiPanels.xml`'s `PanelTemplates_TabResize` carried a benilla-only
+    /// `return tabWidth` that the tab settle reads, and the reference's returns nothing.
+    ///
+    /// The reverse direction — ours seated BELOW the chain's, so we silently override the
+    /// reference — is a real category too, and a wider audit than this gate.
+    #[test]
+    fn nothing_we_ship_is_shadowed_by_a_later_chain_entry() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        let toc = &super::super::addons::Addon::builtin().toc.files;
+        let mut ours: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut shadowed: Vec<String> = Vec::new();
+        for entry in toc.iter() {
+            let names = declared_by(entry);
+            if super::is_chain_entry(entry) {
+                for n in names {
+                    if let Some(file) = ours.remove(&n) {
+                        shadowed.push(format!("{n}  (ours in {file}, the chain's in {entry})"));
+                    }
+                }
+            } else {
+                for n in names {
+                    ours.insert(n, entry.clone());
+                }
+            }
+        }
+        shadowed.sort();
+        assert!(
+            shadowed.is_empty(),
+            "dead copies — declared by one of ours, then overwritten by a later chain entry:\n  {}",
+            shadowed.join("\n  ")
+        );
+    }
 }

@@ -129,8 +129,10 @@ pub(super) fn resurrect_request(
 /// reference fires `CONFIRM_XP_LOSS` per arrival — so the generation bump is what re-shows a
 /// cancelled confirm, exactly the `SMSG_CORPSE_RECLAIM_DELAY` re-fire pattern above.
 pub(super) fn spirit_healer_confirm(npc: u64, death_net: &mut DeathNet) {
-    death_net.spirit_healer = Some(npc);
-    death_net.confirm_generation = death_net.confirm_generation.wrapping_add(1);
+    // Through [`DeathNet::ask_spirit_healer`], which the right-click's own bit-5 arm also calls —
+    // the reference raises this dialog client-side and vmangos also pushes it, and one entry
+    // point is what keeps the two roads saying the same thing (decision 1861).
+    death_net.ask_spirit_healer(npc);
 }
 
 /// `SMSG_DURABILITY_DAMAGE_DEATH` — the 10% death durability loss.

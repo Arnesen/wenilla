@@ -12,27 +12,45 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// The mail window's load prefix — the app's own order (`ui_script/mod.rs`), members only.
 /// MerchantFrame.xml rides along because MailFrame.xml reuses its global `BenillaMoney_*` coin
 /// helpers (postage display), so a load error in either fails here.
-const FILES: [&str; 5] = [
+const FILES: [&str; 7] = [
     "Fonts.xml",
     "MoneyFrame.xml",
     "UiPanels.xml",
+    r"Interface\FrameXML\UIPanelTemplates.lua",
+    r"Interface\FrameXML\UIPanelTemplates.xml",
     "GameTooltip.xml",
     "MailFrame.xml",
 ];
 
 fn load_ui(script: &UiScript) {
     let dir = std::path::Path::new(UI_DIR);
-    let provider = |req: &str| -> Option<Vec<u8>> {
+    // A manifest entry carrying a path separator is the PLAYER's own file and comes off the patch
+    // chain; a bare name is ours, under `assets/ui`. `tests/common` already draws this line — this
+    // binary grew it when 1860 moved `PanelTemplates_*` onto the chain.
+    let chain = benilla_formats::wow_data().and_then(|d| benilla_formats::open_chain(&d).ok());
+    let read = |req: &str| -> Option<Vec<u8>> {
         let norm = req.replace('\\', "/");
+        if norm.contains('/') {
+            if let Some(b) = chain.as_ref().and_then(|c| c.read(&norm).ok()) {
+                return Some(b);
+            }
+        }
         let base = norm.rsplit('/').next().unwrap_or(&norm);
         std::fs::read(dir.join(&norm))
             .or_else(|_| std::fs::read(dir.join(base)))
             .ok()
     };
+    let provider = |req: &str| -> Option<Vec<u8>> { read(req) };
     for file in FILES {
-        let text = std::fs::read_to_string(dir.join(file)).unwrap_or_else(|e| {
-            panic!("reading {file}: {e}");
-        });
+        let bytes = read(file).unwrap_or_else(|| panic!("reading {file}"));
+        // A `.lua` entry is a CHUNK, not a document.
+        if file.to_ascii_lowercase().ends_with(".lua") {
+            script
+                .run_chunk_named(&bytes, &format!("@{file}"))
+                .unwrap_or_else(|e| panic!("{file}: {e}"));
+            continue;
+        }
+        let text = benilla_ui::source::decode(&bytes);
         let doc = benilla_ui::framexml::parse(&text).unwrap_or_else(|e| {
             panic!("parsing {file}: {e}");
         });
@@ -87,6 +105,7 @@ fn small_inbox() -> MailState {
 
 #[test]
 fn mail_frame_loads_and_key_regions_exist() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
     load_ui(&s);
     // The window, both tabs' bodies, a row, the open-letter toplevel, and the send-tab widgets.
@@ -114,6 +133,7 @@ fn mail_frame_loads_and_key_regions_exist() {
 
 #[test]
 fn mail_show_opens_and_inbox_populates() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_mail(Some(small_inbox()));
@@ -150,6 +170,7 @@ fn mail_show_opens_and_inbox_populates() {
 
 #[test]
 fn paging_math_enables_next_only_when_overflowing() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     // 9 mails → 2 pages of 7.
@@ -183,6 +204,7 @@ fn paging_math_enables_next_only_when_overflowing() {
 /// COD tag shows on a COD mail and hides on a plain one, and the plain row's money field is nil.
 #[test]
 fn cod_tag_shows_on_a_cod_mail() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_mail(Some(MailState {
@@ -209,6 +231,7 @@ fn cod_tag_shows_on_a_cod_mail() {
 
 #[test]
 fn opening_a_letter_shows_the_open_frame_and_queues_the_body() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_mail(Some(small_inbox()));
@@ -242,6 +265,7 @@ fn opening_a_letter_shows_the_open_frame_and_queues_the_body() {
 /// CharacterFrame row (the real file isn't in this harness's chain).
 #[test]
 fn a_letter_and_the_centre_occupant_evict_each_other() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_mail(Some(small_inbox()));
@@ -298,6 +322,7 @@ fn a_letter_and_the_centre_occupant_evict_each_other() {
 
 #[test]
 fn reply_switches_to_send_tab_prefilled() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_mail(Some(small_inbox()));
@@ -325,6 +350,7 @@ fn reply_switches_to_send_tab_prefilled() {
 /// reference OnHide rule (MailFrame.lua l.256-272) only purges a fully-taken husk.
 #[test]
 fn closing_a_plain_letter_does_not_delete_it() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_mail(Some(MailState {
@@ -354,6 +380,7 @@ fn closing_a_plain_letter_does_not_delete_it() {
 /// the real 1.12 client exactly as here.
 #[test]
 fn closing_a_taken_husk_deletes_it() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     let mut husk = row("One", "test", false, 0, 0);
@@ -377,6 +404,7 @@ fn closing_a_taken_husk_deletes_it() {
 /// The expiry text pluralizes like the reference (GetText("DAYS_ABBR"): "Day"/"Days").
 #[test]
 fn expiry_text_pluralizes_days() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     let mut one_day = row("Two", "b", false, 0, 0);
@@ -405,6 +433,7 @@ fn expiry_text_pluralizes_days() {
 /// buttons show and the caption reads "Take Attachments:".
 #[test]
 fn letter_button_shows_for_a_body_letter_and_click_queues_the_copy() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     let mut mail = row("One", "asd", false, 0, 0);
@@ -440,6 +469,7 @@ fn letter_button_shows_for_a_body_letter_and_click_queues_the_copy() {
 /// flag whose OnHide purge then deletes the husk on close.
 #[test]
 fn letter_button_hides_once_copied() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     let mut mail = row("One", "asd", false, 0, 0);
@@ -462,6 +492,7 @@ fn letter_button_hides_once_copied() {
 /// Hovering the coins shows the plain money tooltip (ref OpenMailMoneyButton OnEnter l.1823-1829).
 #[test]
 fn money_button_hover_shows_the_amount_tooltip() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     let mut mail = row("One", "asd", false, 0, 0);
@@ -490,6 +521,7 @@ fn money_button_hover_shows_the_amount_tooltip() {
 /// invention, now removed).
 #[test]
 fn inbox_page_label_stays_empty_like_the_reference() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_mail(Some(small_inbox()));
@@ -513,6 +545,7 @@ fn inbox_page_label_stays_empty_like_the_reference() {
 /// the claim needed a test rather than a header comment.
 #[test]
 fn a_runtime_shown_pane_renders_its_own_layers() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
     load_ui(&s);
     s.eval::<()>("MailFrame:Show() SendMailFrame:Show()")
@@ -541,6 +574,7 @@ fn a_runtime_shown_pane_renders_its_own_layers() {
 /// an explicit carve-out in the reference, so `SetText(nil)` leaves the page genuinely empty.
 #[test]
 fn an_auction_invoice_renders_as_a_receipt() {
+    let _data = benilla_formats::wow_data_or_skip!();
     /// The pane reads the player's own GlobalStrings, which a bare-XML harness has none of. Stand
     /// in synthetic ones: what is under test is that each reaches the right region, never their text.
     fn strings(s: &UiScript) {
@@ -652,6 +686,7 @@ fn an_auction_invoice_renders_as_a_receipt() {
 /// survives. The blanking above is aimed at one kind of mail and must not reach any other.
 #[test]
 fn a_plain_letter_keeps_its_body_and_shows_no_receipt() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_mail(Some(small_inbox()));
@@ -679,6 +714,7 @@ fn a_plain_letter_keeps_its_body_and_shows_no_receipt() {
 /// that one at its `file=` (ref l.258) — so a blanket "mask every ring" would be wrong too.
 #[test]
 fn the_open_letters_ring_icon_is_masked_but_the_inboxs_is_not() {
+    let _data = benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::QuadContent;
 
     let mut s = UiScript::new().unwrap();

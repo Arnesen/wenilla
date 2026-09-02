@@ -1,7 +1,12 @@
 //! The stuck-main-thread self-sampler (`WOW_STALL_SAMPLE=0` to disable; macOS only): a watchdog
 //! thread notices the main-thread heartbeat has gone stale and shells the stock profiler
 //! (`/usr/bin/sample`) at our own PID, so an intermittent stall or teardown hang **diagnoses
-//! itself the next time it happens** — on anyone's run, no reproduction needed. Two bugs that
+//! itself the next time it happens** — on anyone's run, no reproduction needed. **Except while
+//! an audio device is open** (decision 1857): `sample` suspends every thread of the task,
+//! CoreAudio's realtime IO thread included, and each suspended cycle is a crackle — the one
+//! the director heard on every desktop switch and world entry, because those are exactly the
+//! ≥600 ms main-thread stalls this watchdog fires on. In-frame sampling now waits for a run
+//! nobody is listening to; `WOW_STALL_SAMPLE=force` opts a sounding run back in, knowingly. Two bugs that
 //! each lost their reproduction motivated it (decision 0713): the ~1 s silent frame stalls at
 //! the BWL pin, and the on-close beachball the director had to force-quit — where even the probe
 //! backstop's `process::exit(0)` can wedge, because libc `exit(3)` runs the same atexit teardown
@@ -134,6 +139,8 @@ fn arm_injectors(app: &mut App) {
 
 fn watchdog(dir: Option<std::path::PathBuf>) {
     let pid = std::process::id().to_string();
+    let force = std::env::var("WOW_STALL_SAMPLE").is_ok_and(|v| v == "force");
+    let mut declined = false;
     let mut taken = 0u32;
     let mut last_sample_ms = 0u64;
     let mut exit_seen_ms = 0u64;
@@ -175,6 +182,27 @@ fn watchdog(dir: Option<std::path::PathBuf>) {
             // [`SAMPLE_GAP_MS`] of process uptime (caught by the 0713 injector runs).
             && (taken == 0 || now.saturating_sub(last_sample_ms) > SAMPLE_GAP_MS)
         {
+            // **Never while the speakers are live** (decision 1857). `sample` suspends the whole
+            // task for each of its ~1000 snapshots — the CoreAudio IO thread and our realtime
+            // render thread included — and coreaudiod times the client out: every stall this
+            // watchdog sampled in a run with a device open was also a crackle ("client timeout"
+            // × 4 per manual sample, zero overloads across 25 hitches with the sampler off).
+            // 1232 cleared the sampler on a quiet-machine measurement of the hole; under real
+            // load the hole is the sample. The instrument keeps its whole job on the runs that
+            // cannot be heard (captures, probes, `WOW_NOSOUND` — no device is open there) and
+            // at teardown, where the wedge outranks the last half-second of sound.
+            // `WOW_STALL_SAMPLE=force` overrides for a deliberate diagnostic run with sound.
+            if !exiting && crate::sound::output::device_open() && !force {
+                if !declined {
+                    eprintln!(
+                        "stall-sample: main thread stale {age} ms — NOT sampled: an audio \
+                         device is open, and `sample` suspending the process is itself a \
+                         crackle (1857). `WOW_STALL_SAMPLE=force` to sample anyway."
+                    );
+                    declined = true;
+                }
+                continue;
+            }
             taken += 1;
             last_sample_ms = now;
             let _ = std::fs::create_dir_all(dir);

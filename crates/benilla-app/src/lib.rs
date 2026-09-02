@@ -31,6 +31,14 @@
 // spent its whole diff clearing it out of. Dev builds still warn normally.
 #![cfg_attr(not(feature = "dev"), allow(dead_code))]
 
+/// The realtime-audio allocation tripwire (decision 1857). In debug builds an allocation inside
+/// the output IO callback or the render pass (`sound::output`'s `no_alloc` scopes) aborts the
+/// process, so a realtime-safety regression fails a test or a smoke instead of reaching an ear;
+/// release builds carry no wrapper at all.
+#[cfg(debug_assertions)]
+#[global_allocator]
+static ALLOC: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
+
 pub mod addon_harness;
 mod area;
 mod area_poi;

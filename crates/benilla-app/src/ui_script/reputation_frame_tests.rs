@@ -144,6 +144,16 @@ fn text_of(s: &mut UiScript, expr: &str) -> String {
         .unwrap()
 }
 
+/// **`IsVisible`, not `IsShown`, is the right question for the scroll bar since 1860.** The
+/// reference's `FauxScrollFrame_Update` hides the scroll FRAME when the list fits
+/// (`scrollBar:SetValue(0); frame:Hide()`); our deleted kit hid the BAR itself through
+/// `BenillaScrollBar_SetShown`. So the bar's own `IsShown` stays true under the reference and only
+/// its hidden ancestor takes it off screen — which `IsVisible` reports and `IsShown` cannot.
+fn visible(s: &mut UiScript, name: &str) -> bool {
+    s.eval::<bool>(&format!("return {name}:IsVisible() and true or false"))
+        .unwrap_or(false)
+}
+
 fn shown(s: &mut UiScript, name: &str) -> bool {
     s.eval::<bool>(&format!("return {name}:IsShown() and true or false"))
         .unwrap()
@@ -208,8 +218,8 @@ fn the_reputation_page_opens_on_the_windows_third_tab() {
         "slot 9 has nothing to hold"
     );
     assert!(!shown(&mut s, "ReputationHeader9"), "neither twin shows");
-    assert!(!shown(&mut s, "ReputationListScrollFrameScrollBar"));
-    assert!(!shown(&mut s, "ReputationListScrollFrameScrollBarTrough"));
+    assert!(!visible(&mut s, "ReputationListScrollFrameScrollBar"));
+    assert!(!visible(&mut s, "ReputationListScrollFrameScrollBarTrough"));
 
     // Switching away hides it again through the same one-page-at-a-time switch.
     s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
@@ -370,11 +380,11 @@ fn the_scroll_offset_rebinds_the_fixed_row_slots() {
     assert_eq!(text_of(&mut s, "ReputationBar1FactionName"), "");
     assert_eq!(text_of(&mut s, "ReputationBar15FactionName"), "Faction 14");
     assert!(
-        shown(&mut s, "ReputationListScrollFrameScrollBar"),
+        visible(&mut s, "ReputationListScrollFrameScrollBar"),
         "21 rows in 15 slots raises the scroll bar"
     );
     assert!(
-        shown(&mut s, "ReputationListScrollFrameScrollBarTrough"),
+        visible(&mut s, "ReputationListScrollFrameScrollBarTrough"),
         "and the trough it rides in comes up with it (the kit shows the pair together)"
     );
 
@@ -405,18 +415,25 @@ fn the_scroll_offset_rebinds_the_fixed_row_slots() {
     assert_eq!(text_of(&mut s, "ReputationBar1FactionName"), "Faction 03");
     assert_eq!(text_of(&mut s, "ReputationBar15FactionName"), "Faction 17");
 
-    // Past the end the kit CLAMPS rather than running off it: 21 rows in 15 slots bottom out at
-    // offset 6, so asking for 9 lands on that same last page with the final row in slot 15.
+    // Past the end the REFERENCE does not clamp the offset — it guards the BINDING.
+    // `FauxScrollFrame_SetOffset` is two lines (`frame.offset = offset`), and the reference's own
+    // `ReputationFrame_Update` walks its slots under `if ( factionIndex <= numFactions )`, hiding
+    // the ones that fall off the end (ReputationFrame.lua). Our deleted kit clamped the offset
+    // itself, which is why this used to read back 6. A player cannot reach this state — the bar's
+    // range bounds a real scroll — so it is only ever an out-of-range programmatic ask (1860).
     s.run("FauxScrollFrame_SetOffset(ReputationListScrollFrame, 9) ReputationFrame_Update()")
         .unwrap();
     assert_eq!(
         s.eval::<i64>("return FauxScrollFrame_GetOffset(ReputationListScrollFrame)")
             .unwrap(),
-        6,
-        "clamped to numItems - numToDisplay, so no slot can bind past the end"
+        9,
+        "the offset is stored as asked; the reference guards the binding, not the offset"
     );
-    assert_eq!(text_of(&mut s, "ReputationBar1FactionName"), "Faction 06");
-    assert_eq!(text_of(&mut s, "ReputationBar15FactionName"), "Faction 20");
+    assert_eq!(text_of(&mut s, "ReputationBar1FactionName"), "Faction 09");
+    assert!(
+        !shown(&mut s, "ReputationBar15"),
+        "slot 15 would want faction 24 of 21, so it stays hidden rather than binding past the end"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 

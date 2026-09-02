@@ -1201,6 +1201,12 @@ fn an_addons_tab_click_selects_through_the_generic_entry_point() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    // The reference's `PanelTemplates_SelectTab` ends with `if GameTooltip:IsOwned(tab)` —
+    // an arm our deleted copy omitted ("our tabs set no tooltip"), so selecting a tab now needs
+    // the tooltip to exist (1860).
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "UIParent.xml");
 
     // A conforming row: tabs named `<frame>Tab1..N` (what `PanelTemplates_UpdateTabs` getglobals)

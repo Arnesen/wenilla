@@ -646,6 +646,8 @@ fn shipped_target_frame_runs_the_level_law() {
     // GetDifficultyColor's own load chain (the quest log window, its ref home).
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "QuestLogFrame.xml");
     // The player at level 3, both feeds (the snapshot UnitLevel("player") reads; the req state
@@ -1199,6 +1201,8 @@ fn the_party_art_paints_over_the_bars() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "UnitPopup.xml");

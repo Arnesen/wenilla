@@ -18,6 +18,8 @@ fn an_idle_fade_driver_parks_itself_off_the_tick() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     s.resolve();
     s.run(
         "BENILLA_TEST_FADE_TICKS = 0\n\
@@ -55,6 +57,8 @@ fn a_started_fade_still_ramps_and_the_driver_reparks_after() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     s.resolve();
     s.run(r#"CreateFrame("Frame", "BenillaFadeProbe")"#)
         .unwrap();

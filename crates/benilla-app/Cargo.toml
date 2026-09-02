@@ -22,7 +22,7 @@ default = ["dev"]
 # re-exported here (1175). Their `dev` is default-on too, so without the round trip a
 # `--no-default-features` build gets the feature back through unification — and the binary
 # carries the build machine's source-tree path after all. Same trap as the shim's, one level down.
-dev = ["benilla-assets/dev", "benilla-formats/dev", "benilla-world/dev", "dep:bevy_egui", "dep:libc"]
+dev = ["benilla-assets/dev", "benilla-formats/dev", "benilla-world/dev", "dep:bevy_egui"]
 # Opt-in Tracy profiling: `cargo run --features tracy` streams per-system `info_span!` markers (on the
 # hot systems) + render-pass CPU timings to a Tracy capture (decision 0026 — the dev/player seam;
 # a `docs/howto/running.md` this once cited never landed).
@@ -61,9 +61,10 @@ include_dir = "0.7"
 # `getrusage` — whole-process CPU time (all threads), the perf probes' `cpu_ms`/`cpu_pct` metric
 # (`perf::process_cpu_secs`). Wall-clock fps is unusable as a regression instrument on a machine
 # running parallel sessions' builds; CPU-per-frame is, and it is also the number the Mac report
-# is about ("250 % CPU at 59 fps"). Already in the tree transitively; declared so the call site is
-# an honest dependency.
-libc = { version = "0.2", optional = true }
+# is about ("250 % CPU at 59 fps"). Was dev-only; since 1857 the output backend needs it in every
+# build too (`mach_absolute_time`, the host clock its meters read; `thread_policy_set`, the render
+# thread's realtime policy).
+libc = "0.2"
 # Resample varying-size layer BLPs to a uniform size for the terrain texture array; `png` so we can
 # encode the cursor image into data an NSImage can load (macOS hardware cursor).
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -97,11 +98,16 @@ cosmic-text = "0.16"
 # public-in-crate types). Pinned to the exact version `cosmic-text` 0.16 depends on so there's one
 # `fontdb` in the graph.
 fontdb = "0.23"
-# kira's own backend dependency, named directly so the mixer can hand cpal an explicit device buffer
-# size instead of accepting `BufferSize::Default` (decision 1026). `CpalBackendSettings`' fields ARE
-# cpal types, so this must stay the exact version kira resolves — one cpal in the graph.
-cpal = "0.17"
-kira = { version = "0.12", default-features = false, features = ["cpal", "mp3", "wav", "pcm", "adpcm"] }
+# kira renders the mix; the device it plays through is OURS (`sound::output`, decision 1857) —
+# kira's own cpal backend is not enabled, and cpal is out of the graph on our path with it: on
+# macOS it could neither report a lost default device nor rebuild on one, and it discarded the
+# IO-cycle timestamp the deadline meters need.
+kira = { version = "0.12", default-features = false, features = ["mp3", "wav", "pcm", "adpcm"] }
+# The realtime-audio allocation tripwire (decision 1857): `assert_no_alloc(|| …)` around the output
+# IO callback and the render pass aborts a DEBUG build on any allocation inside them, so a
+# realtime-safety regression fails a test or a smoke instead of reaching an ear. Release builds
+# compile it out (`disable_release`, the crate's default) and carry no allocator wrapper.
+assert_no_alloc = "1.1"
 # kira's own decoder, named directly for one trait: the mixer feeds streams through its own
 # `MediaSource` so kira's per-stream decode thread runs OUR code and can promote its QoS (decision
 # 1109 — a bare-spawned decode thread starves under the world-entry burst and zero-fills the mix).
@@ -141,6 +147,13 @@ smithay-clipboard = "0.7"
 # hide revert to the arrow); we bypass it with NSCursor + NSWindow::disableCursorRects. See
 # docs/knowledge/camera-control.md.
 [target.'cfg(target_os = "macos")'.dependencies]
+# The audio device layer (decision 1857, `sound::output::coreaudio`): the HAL output unit through
+# coreaudio-rs's `AudioUnit`, and the AudioObject property/listener API through the objc2 CoreAudio
+# bindings — the two crates cpal itself stood on, now used directly. The versions are the ones the
+# graph already carries; the feature sets are the ones cpal proved to compile against.
+coreaudio-rs = { version = "0.13", default-features = false, features = ["audio_unit", "core_audio"] }
+objc2-core-audio = { version = "0.3", default-features = false, features = ["std", "AudioHardware"] }
+objc2-core-audio-types = { version = "0.3", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 objc2 = "0.5"
 objc2-app-kit = { version = "0.2", features = [
     "NSApplication",

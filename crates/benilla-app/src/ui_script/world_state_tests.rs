@@ -18,6 +18,8 @@ pub(crate) fn harness() -> UiScript {
         "Fonts.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "UIParent.xml",
         "GameTooltip.xml",
         "WorldStateFrame.xml",

@@ -21,18 +21,20 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use bevy::prelude::*;
-use cpal::traits::{DeviceTrait, HostTrait};
-use kira::backend::cpal::CpalBackendSettings;
 use kira::effect::reverb::{ReverbBuilder, ReverbHandle};
 use kira::effect::volume_control::{VolumeControlBuilder, VolumeControlHandle};
 use kira::listener::ListenerHandle;
 use kira::sound::streaming::StreamingSoundData;
 use kira::sound::FromFileError;
 use kira::track::{SendTrackBuilder, SendTrackHandle, SpatialTrackBuilder};
-use kira::{AudioManager, AudioManagerSettings, Decibels, DefaultBackend, Mix, Tween};
+use kira::{AudioManager, AudioManagerSettings, Decibels, Mix, Tween};
 
 use super::limiter;
 use super::meter::{self, LevelReading, MixLevel};
+use super::output::{self, Event, OutputBackend, OutputSettings, Window};
+
+/// The output backend's per-window meters, re-exported for the report in `sound::poll_mix_health`.
+pub(super) type OutputWindow = Window;
 
 pub(crate) use benilla_formats::SoundProvider;
 
@@ -125,10 +127,12 @@ pub(crate) fn amp_to_db(amp: f32) -> Decibels {
 /// wow-re `benilla-pins.md` B6); underwater is the reverb preset + the ambience swap, both
 /// upstream of this seam.
 pub(crate) struct Mixer {
-    manager: AudioManager<DefaultBackend>,
+    manager: AudioManager<OutputBackend>,
     listener: ListenerHandle,
     /// Rolling mix-health counters — the crackle instrument ([`Mixer::poll_health`]).
     health: MixHealth,
+    /// The output meters accumulated since the last [`Mixer::take_output_window`].
+    window: Window,
     /// The zone-reverb send track (wet-only Freeverb). Every 3D world track routes into it at
     /// build; this handle's volume is the zone wet level (SILENCE = reverb off).
     reverb_send: SendTrackHandle,
@@ -156,7 +160,14 @@ impl Mixer {
     /// Open the default audio device. Fails cleanly when there is none (headless/CI) — the caller
     /// runs silent with `None` (mirrors the client's `-nosound` gate).
     pub(crate) fn new(probe_dir: Option<&Path>) -> Result<Self> {
-        let (backend_settings, sample_rate) = backend_settings();
+        // The device's rate is needed before the manager exists: the mix tap's WAV header and
+        // the limiter's delay line are sized at build time, and a kira main track is
+        // build-time-only.
+        let sample_rate = output::probe_sample_rate();
+        let backend_settings = OutputSettings {
+            mix_ahead_ms: mix_ahead_ms(),
+            device_buffer_frames: io_buffer_frames(),
+        };
         let level = Arc::new(MixLevel::default());
         let limiter_on = Arc::new(AtomicBool::new(true));
         let MainChain {
@@ -165,7 +176,7 @@ impl Mixer {
             output,
             audio_pos,
         } = main_track(&level, &limiter_on, sample_rate, probe_dir);
-        let settings = AudioManagerSettings::<DefaultBackend> {
+        let settings = AudioManagerSettings::<OutputBackend> {
             backend_settings,
             main_track_builder,
             capacities: kira::Capacities {
@@ -174,8 +185,9 @@ impl Mixer {
             },
             ..Default::default()
         };
-        let mut manager = AudioManager::<DefaultBackend>::new(settings)
-            .map_err(|e| anyhow::anyhow!("audio device init: {e}"))?;
+        let mut manager = AudioManager::<OutputBackend>::new(settings)
+            .map_err(|e| anyhow::anyhow!("audio device init: {e:#}"))?;
+        let sample_rate = Some(manager.backend_mut().sample_rate());
         // The zone-reverb send: wet-only (the dry path stays on the source tracks), silent until
         // a zone preset raises it. Effects are build-time-only; parameters retune at runtime.
         let mut send_builder = SendTrackBuilder::new().volume(Decibels::SILENCE);
@@ -209,6 +221,7 @@ impl Mixer {
             manager,
             listener,
             health: MixHealth::default(),
+            window: Window::default(),
             reverb_send,
             reverb,
             level,
@@ -495,79 +508,48 @@ struct MainChain {
     audio_pos: Option<Arc<AtomicU64>>,
 }
 
-/// kira's cpal backend takes `device.default_output_config().config()` when handed no config of
-/// its own, and that carries `BufferSize::Default` — whatever CoreAudio happens to hand us. On
-/// macOS the buffer size is a *shared, per-device* property, so another app (an OBS capture, a
-/// conferencing tool) can drag it down under us and we would never know. Naming it puts a floor
-/// under the callback's deadline instead of inheriting someone else's.
-///
-/// 2048 frames is ~43 ms at 48 kHz. Latency that size is inaudible for WoW — nothing here is
-/// rhythm-critical, the shortest UI click is an order of magnitude longer. The size is set by
-/// the *HAL's* deadline, not ours: a confirmed crackle (decision 1115) was the OS missing the
-/// device IO-cycle deadline under system pressure while our mix ran clean, and the buffer size
-/// is the cycle length — fewer, longer cycles mean twice the slack per cycle for the HAL. Our
-/// own mix cost was never the constraint at 1024 (~21 ms, decision 1026) and is even less so
-/// here.
-const TARGET_BUFFER_FRAMES: u32 = 2048;
-
-/// Build the cpal backend settings: kira's default device, our explicit buffer size. Also
-/// reports the negotiated sample rate (the mix tap's WAV header must match the renderer);
-/// `None` when the device/config could not be probed — those paths run on kira defaults.
-///
-/// `device` stays `None` on purpose — that keeps kira's own default-device selection *and* its
-/// disconnect/restart handling (`custom_device = false`). We override only the config. Every
-/// failure path falls back to kira's defaults, so a machine we can't probe still opens the device
-/// exactly as before; [`Mixer::new`]'s caller already tolerates no-device.
-fn backend_settings() -> (CpalBackendSettings, Option<u32>) {
-    let fallback = CpalBackendSettings::default();
-    let Some(device) = cpal::default_host().default_output_device() else {
-        return (fallback, None);
-    };
-    let Ok(supported) = device.default_output_config() else {
-        return (fallback, None);
-    };
-    // Clamp into what the device will actually accept; `Unknown` means cpal can't tell us the
-    // range, and asking for a size outside it fails the stream build — so leave those alone.
-    let cpal::SupportedBufferSize::Range { min, max } = supported.buffer_size() else {
-        info!("audio: device reports no buffer-size range — leaving it to the driver");
-        let rate = supported.config().sample_rate;
-        return (fallback, Some(rate));
-    };
-    let frames = TARGET_BUFFER_FRAMES.clamp(*min, *max);
-    let mut config = supported.config();
-    config.buffer_size = cpal::BufferSize::Fixed(frames);
-    info!(
-        "audio: {} Hz, {} ch, buffer {frames} frames (~{:.1} ms)",
-        config.sample_rate,
-        config.channels,
-        f64::from(frames) / f64::from(config.sample_rate) * 1000.0,
-    );
-    let rate = config.sample_rate;
-    (
-        CpalBackendSettings {
-            config: Some(config),
-            ..fallback
-        },
-        Some(rate),
-    )
+/// `SoundBufferSize` (decision 1857): the reference's latched mix-ahead dial, read once here
+/// the way the reference reads it once at sound-system init — before the `App` exists, so
+/// straight from the stored config (`boot_cvar`), the registered default when unset. Clamped
+/// to what a ring can sensibly hold; a value outside it is a typo, not a request.
+fn mix_ahead_ms() -> u32 {
+    crate::cvars::boot_cvar("SoundBufferSize")
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|ms| ms.is_finite())
+        .map_or(output::MIX_AHEAD_MS, |ms| {
+            ms.round().clamp(10.0, 1000.0) as u32
+        })
 }
 
-/// The mix-health counters — what a crackle actually *is*, in numbers (decision 1026).
+/// `$WOW_IO_BUFFER` — the device IO buffer in frames, the A/B arm 1857 leaves open: whether a
+/// busier IO thread (512, the shipping-engine norm) or a longer cycle budget (1115's 2048)
+/// rides a Space switch better is a question this machine's next crackle answers, and both
+/// arms have to be one env var apart to answer it. Unset is the default in `sound::output`.
+fn io_buffer_frames() -> u32 {
+    std::env::var("WOW_IO_BUFFER")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(output::DEVICE_BUFFER_FRAMES)
+}
+
+/// The mix-health counters — what a crackle actually *is*, in numbers (decision 1026; the
+/// meters behind them moved into the owned backend in 1857).
 ///
 /// Before this, a crackle was invisible to us: the only report was the director's ear, and we
 /// could not tell a missed callback deadline from a stepped parameter from a starved decoder.
-/// kira hands us the measurement and we were not reading it.
 #[derive(Default, Clone, Copy, Debug)]
 pub(crate) struct MixHealth {
-    /// The most recent callback load: elapsed / allotted, where allotted is `frames / sample_rate`
-    /// (kira's `pop_cpu_usage`). **`>= 1.0` means the mix missed its deadline** — that is an
-    /// underrun, and an underrun is audible as a crack.
+    /// The most recent render pass's load: wall time / the chunk's own duration. The render
+    /// thread mixes ahead of the device, so `>= 1.0` here is not yet audible — it is the thread
+    /// losing ground; the audible failure is [`Self::overruns`].
     pub(crate) load: f32,
     /// Worst load seen since the last [`Mixer::take_health_peak`].
     pub(crate) peak_load: f32,
-    /// Callbacks at/over the deadline, since launch.
+    /// Device cycles the mix-ahead ring could not fill, since launch — each one went out as
+    /// silence. This is the underrun, the one failure here that is audible by definition.
     pub(crate) overruns: u64,
-    /// cpal stream errors kira handled, since launch (device loss, `BufferUnderrun`).
+    /// Stream-side failures since launch (a lost device, a refused open).
     pub(crate) stream_errors: u64,
     /// 3D plays refused because the spatial-voice arena was full ([`SPATIAL_VOICE_CAPACITY`]),
     /// since launch. Every one of these is a sound the player should have heard and did not.
@@ -575,27 +557,49 @@ pub(crate) struct MixHealth {
 }
 
 impl Mixer {
-    /// Drain the backend's health queues. Cheap and non-blocking (two ring-buffer pops per
-    /// frame); the queues are bounded, so *not* draining them is what loses information.
+    /// Service the output backend — device notices, stream rebuilds, the meters — and fold the
+    /// window into the health counters. Cheap and non-blocking; call every frame.
     pub(crate) fn poll_health(&mut self) -> MixHealth {
         let backend = self.manager.backend_mut();
-        while let Some(load) = backend.pop_cpu_usage() {
-            self.health.load = load;
-            self.health.peak_load = self.health.peak_load.max(load);
-            if load >= 1.0 {
-                self.health.overruns += 1;
+        let (window, events) = backend.service();
+        self.sample_rate = Some(backend.sample_rate());
+        self.health.stream_errors = backend.stream_errors();
+        for event in events {
+            match event {
+                Event::Opened {
+                    device,
+                    sample_rate,
+                    buffer_frames,
+                    mix_ahead_ms,
+                    realtime_latency_frames,
+                } => info!(
+                    "audio: {device} — {sample_rate} Hz, IO buffer {buffer_frames} frames \
+                     (~{:.1} ms), mix-ahead {mix_ahead_ms} ms, device latency ~{:.1} ms",
+                    f64::from(buffer_frames) / f64::from(sample_rate) * 1000.0,
+                    f64::from(realtime_latency_frames) / f64::from(sample_rate) * 1000.0,
+                ),
+                Event::Lost(why) => warn!("audio: output stream dropped — {why}; reopening"),
+                Event::OpenFailed(what) => warn!("audio: output device refused — {what}; retrying"),
+                Event::Dead(what) => error!("audio: output is gone for good — {what}"),
             }
         }
-        while let Some(err) = backend.pop_error() {
-            self.health.stream_errors += 1;
-            warn!("audio: stream error — {err}");
+        if window.render_chunks > 0 && window.chunk_ms > 0.0 {
+            self.health.load = (window.render_wall_max_ms / window.chunk_ms) as f32;
+            self.health.peak_load = self.health.peak_load.max(self.health.load);
         }
+        self.health.overruns += window.underruns;
+        self.window.merge(window);
         self.health
     }
 
     /// Read and reset the peak — so a report covers the window since the last one, not all time.
     pub(crate) fn take_health_peak(&mut self) -> f32 {
         std::mem::take(&mut self.health.peak_load)
+    }
+
+    /// The output meters accumulated since the last take — the report's raw material.
+    pub(crate) fn take_output_window(&mut self) -> Window {
+        std::mem::take(&mut self.window)
     }
 }
 

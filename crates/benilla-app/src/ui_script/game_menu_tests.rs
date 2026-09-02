@@ -559,6 +559,8 @@ fn the_world_map_cannot_open_behind_the_menu_and_gives_its_slot_back() {
         "GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml", // the map's continent/zone pickers initialize into it at OnLoad
         "ScrollTemplates.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "WorldMapFrame.xml",
     ]);
 
@@ -608,6 +610,8 @@ fn nothing_opens_behind_the_world_map_and_escape_closes_it_first() {
         "GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "WorldMapFrame.xml",
         "Interface\\FrameXML\\MerchantFrame.xml",
         // The loot window is the reference's own since 1751 — see `test_ui::LOOT_UI` for what
@@ -786,6 +790,8 @@ fn the_menu_rides_the_shared_era_window_scale() {
         "GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "KeyBindingsPage.xml",
         "OptionsFrame.xml",
     ]);

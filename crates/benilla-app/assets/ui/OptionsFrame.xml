@@ -3471,10 +3471,34 @@
                                                 <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-32" y="28"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts>
-                                                <OnLoad>
-                                                    ScrollFrame_OnLoad()
-                                                    this.updateFunc = KeyBindingsPage_Update
-                                                </OnLoad>
+                                                <OnLoad>ScrollFrame_OnLoad()</OnLoad>
+                                                <!-- The reference's kit writes `frame.offset` ONLY
+                                                     from here (its `updateFunc` field does not
+                                                     exist); without this the bar moves and the list
+                                                     does not follow. `KEYBINDINGS_ROW_HEIGHT` is a
+                                                     file-scope global in KeyBindingsPage.xml, so it
+                                                     is visible to this handler's own chunk — a
+                                                     `local` would not be (1860). -->
+                                                <OnVerticalScroll>FauxScrollFrame_OnVerticalScroll(KEYBINDINGS_ROW_HEIGHT, KeyBindingsPage_Update)</OnVerticalScroll>
+                                                <!-- **The armed guard has to be restated HERE.**
+                                                     While a capsule is armed the wheel is a BIND,
+                                                     never a scroll (1.12's law; the body below
+                                                     guards its own arm the same way). Our retired
+                                                     `FauxScrollFrameTemplate` was a plain `<Frame>`
+                                                     with no wheel handler, so the body's guard was
+                                                     the only path. The reference's template
+                                                     inherits `UIPanelScrollFrameTemplate`, which
+                                                     carries `<OnMouseWheel>` of its own — and that
+                                                     one fires on this frame, ahead of the body,
+                                                     bypassing the guard entirely. An instance's
+                                                     handler REPLACES the inherited one, so this is
+                                                     the reference's verb with our law back in front
+                                                     of it (1860). -->
+                                                <OnMouseWheel>
+                                                    if not KeyBindingsPage.selected then
+                                                        ScrollFrameTemplate_OnMouseWheel(arg1)
+                                                    end
+                                                </OnMouseWheel>
                                             </Scripts>
                                         </ScrollFrame>
                                     </Frames>

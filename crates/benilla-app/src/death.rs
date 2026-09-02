@@ -82,6 +82,25 @@ pub(crate) struct DeathNet {
     pub(crate) water_walk: bool,
 }
 
+impl DeathNet {
+    /// **Arm the spirit healer's XP-loss question** — the one entry point, because there are two
+    /// ways to arrive at it and they must not drift.
+    ///
+    /// The reference raises this dialog **client-side, on the click**: `0x5f0130`'s bit-5 arm
+    /// (`0x5df730`) sends no packet at all — it caches the healer's guid and fires
+    /// `CONFIRM_XP_LOSS`, and `CMSG_SPIRIT_HEALER_ACTIVATE` belongs to the Lua Accept
+    /// (`AcceptXPLoss`), which calls the same function with a ZERO guid (wow-re
+    /// `interact-dead-fork-and-npc-service-ladder.md` §C). vmangos also *pushes* the question as
+    /// `SMSG_SPIRIT_HEALER_CONFIRM` off its gossip route, and benilla honours both roads in.
+    ///
+    /// The generation bump is what makes a re-ask re-show a cancelled dialog: the confirm
+    /// announces per MESSAGE, not per `Some`-edge (decision 1068).
+    pub(crate) fn ask_spirit_healer(&mut self, npc: u64) {
+        self.spirit_healer = Some(npc);
+        self.confirm_generation = self.confirm_generation.wrapping_add(1);
+    }
+}
+
 /// The feed's memory, in **two scopes** (decisions 1290/1291): the body's own state machine is
 /// world memory and survives a `/reload`; what this VM has been *told* dies with the VM.
 ///
