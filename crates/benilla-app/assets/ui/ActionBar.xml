@@ -459,6 +459,12 @@
             -- The grid count, same posture: a foreign button reaching ActionButton_HideGrid with
             -- no count would raise on the arithmetic, which is 1199's class of silent-wrong-shape.
             button.showgrid = button.showgrid or 0
+            -- The binding COMMAND, same posture again, and derived the way the REFERENCE derives
+            -- it on every read — `this.buttonType..this:GetID()` (ActionButton_UpdateHotkeys
+            -- l.126) — which is all our own OnLoad caches. Without it PaintHotkey would ask
+            -- `GetBindingKey(nil)` on somebody else's button the first time its well paints empty.
+            button.bindingCommand = button.bindingCommand
+                or ((button.buttonType or "ACTIONBUTTON") .. (button.index or button:GetID() or 1))
         end
 
         function BenillaActionButton_Action(button)
@@ -974,6 +980,16 @@
                 button.cooldown:Hide()
                 button.rangeTimer = nil
                 button.hotkey:SetVertexColor(0.6, 0.6, 0.6)
+                -- REPAINTED, never blanked (B348). The label belongs to PaintHotkey, and it is
+                -- the ref's own arrangement: `ActionButton_Update`'s empty arm touches the corner's
+                -- COLOUR only (ref l.167-172), while `ActionButton_UpdateHotkeys`' bound leg writes
+                -- the binding text whether or not the slot holds an action — so a bound-but-empty
+                -- well wears its key. Repainting here rather than leaving the text alone also
+                -- clears what the OnUpdate range timer may have left on an UNBOUND slot: the ref
+                -- keeps that "●" on a well that has just emptied (its OnUpdate then reads
+                -- IsActionInRange as nil and SHOWS the dot on an empty slot), which is a quirk of
+                -- reading the label back as state, not behaviour worth having.
+                BenillaActionButton_PaintHotkey(button)
                 button:SetChecked(0)
                 BenillaActionButton_StopFlash(button)
                 local grid = BenillaActionButton_GridShown(button)
@@ -983,7 +999,6 @@
                     -- ALWAYS_SHOW_MULTIBARS). Only the MAIN bar keeps our always-visible wells
                     -- divergence (the SCOPE note) — its art has sockets; floating rings over bare
                     -- world would not read as a bar.
-                    button.hotkey:SetText("")
                     if not grid then
                         button:Hide()
                     else

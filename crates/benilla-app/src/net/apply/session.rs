@@ -23,8 +23,8 @@ use crate::ui_trainer::TrainerOpen;
 use super::super::{
     CharActionResultMessage, CharListMessage, CinematicTriggeredMessage, DisconnectedMessage,
     DroppedOpcodes, EnteredWorldMessage, GameTime, GuidIndex, KnockBackMessage, LoggedOutMessage,
-    LoginFailedMessage, LoginStageMessage, NetStatus, PendingTransfer, PingShared, Reputations,
-    SelfGuid, ServerTime, ServerWallClock, TeleportMessage, WorldportMessage,
+    LoginFailedMessage, LoginStageMessage, NetStatus, PendingTransfer, Reputations, SelfGuid,
+    ServerTime, ServerWallClock, TeleportMessage, WorldportMessage,
 };
 
 /// The pre-logon handshake reached a new stage (decision 0539) — the login screen's dialog reads it.
@@ -187,10 +187,9 @@ pub(super) fn disconnected(
     // An announced-but-unfinished far teleport died with the socket.
     pending_transfer.0 = None;
     status.connected = false;
-    // A dead socket's last RTT is stale; the write thread resets the shared ping clock itself
-    // when the reconnect hands it a fresh writer. The averaged ring goes with it — the next
-    // connection's latency is its own, so `GetNetStats` reads unmeasured until its first pong.
-    status.clear_rtt();
+    // The RTT ring is NOT cleared here. It belongs to the connection, and the read thread wipes
+    // it as it re-enters its cycle loop (`net::io`) — same instant, one thread, no race with a
+    // reconnect that has already begun measuring.
     // Teardown (decision 0065): despawn every streamed entity except the self avatar —
     // it stays the local puppet (controller + camera keep working); the reconnect's
     // re-create refreshes it in place. Immediate despawn, not `DespawnFade`: a
@@ -475,22 +474,6 @@ pub(super) fn reputation_visible(list_id: u32, reputations: &mut Reputations) {
         reputations.0.resize(i + 1, (0, 0));
     }
     reputations.0[i].0 |= benilla_formats::faction_flags::VISIBLE;
-}
-
-/// The keepalive echo (`SMSG_PONG`): match it against the shared ping clock to measure the
-/// round trip. Stored back on the clock (the next ping's lastRtt field — what the real client
-/// reports), pushed into the RTT ring the UI's `GetNetStats` averages, and surfaced as the panel's
-/// latency readout. A stale or mismatched sequence (a pong straddling a reconnect) is dropped.
-pub(super) fn pong(sequence: u32, ping: &PingShared, status: &mut NetStatus) {
-    let mut clock = ping.0.lock().expect("ping clock");
-    if let Some(sent) = clock.sent_at.filter(|_| clock.sequence == sequence) {
-        let rtt = sent.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
-        if status.latency_ms.is_none() {
-            info!("net: pong seq={sequence} rtt={rtt}ms (keepalive live)");
-        }
-        clock.last_rtt_ms = Some(rtt);
-        status.record_rtt(rtt);
-    }
 }
 
 /// The dropped-packet tally (the wire-coverage instrument): count it, and announce each opcode's

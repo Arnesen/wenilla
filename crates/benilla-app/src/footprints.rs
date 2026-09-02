@@ -67,9 +67,6 @@ const OWN_CAP: usize = 64;
 const SHARED_CAP: usize = 512;
 /// Prints farther than this from the local player never spawn (the reference's 2500 yd² gate).
 const MAX_DISTANCE_SQ: f32 = 2500.0;
-/// The print's sort-ladder rung: below the blob shadow's 4096 — where both decals stack the
-/// shadow draws later, deterministically (the reference's frame order is the RE's open §13 item).
-const PRINT_SORT_BIAS: f32 = 2048.0;
 /// Vertical reach of the projection slab about the planted foot: enough to catch the ground
 /// through a slightly-lifted foot bone and drape a step edge, small enough not to paint a
 /// terrace below (the blob shadow's slab is the model box; a print has no box to read).
@@ -367,7 +364,7 @@ fn push_footprints(
             .batch(cam, print.texture)
             .anchored(print.anchor)
             .rung(
-                PRINT_SORT_BIAS,
+                benilla_world::sky_order::Rung::FOOTPRINT,
                 benilla_world::sky_order::Rung::SHADOW_RASTER,
             )
             .owner(lane.0);

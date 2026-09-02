@@ -494,7 +494,8 @@ fn prepare_effects(
     let effect_fn = draw_functions.read().id::<DrawEffects>();
     // `$WOW_EFFECT_TRACE` — the lane's own phase probe (the WOW_PHASE shape, decision 0665,
     // asked of effect items): during the merge walk, record each BLOB-SHADOW item (Tris
-    // topology + the shadow's own raster bias) with its sort distance and appended index
+    // topology + the shadow's own sort rung — its RASTER bias is shared with the footprint
+    // lane, which used to label prints as shadows here) with its sort distance and appended index
     // range, then log the phase totals. Splits "never pushed / never queued / merged away /
     // submitted but the GPU state ate it" — the gap no pixel reading can see into.
     let trace = std::env::var_os("WOW_EFFECT_TRACE").is_some();
@@ -558,7 +559,7 @@ fn prepare_effects(
             let index_end = meta.indices.len() as u32;
             if trace
                 && draw.topology == EffectTopology::Tris
-                && draw.raster_bias == crate::sky_order::Rung::SHADOW_RASTER
+                && draw.bias == crate::sky_order::Rung::SHADOW_SORT
             {
                 trace_lines.push(format!(
                     "  item {i}: shadow anchor {:.1?}, dist {:.1}, verts {}, indices \

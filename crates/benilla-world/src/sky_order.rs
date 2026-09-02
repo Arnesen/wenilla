@@ -129,33 +129,88 @@ pub(crate) const WATER_BIAS: f32 = -2.0e4;
 /// (the sign law above), and nothing is gained by making it bigger than the ordering needs.
 pub(crate) const GLARE_BIAS: f32 = 2.0e4;
 
+/// The floor of any world draw's view-z: the projection's ~3 km far plane, negated (the sign law
+/// above — view-z is negative in front of the eye, more negative the farther away). Two rungs
+/// order two draws *unconditionally* only when their gap exceeds this, so it is the unit the
+/// assert block measures the ladder's margins in.
+pub(crate) const WORLD_VIEW_Z_FLOOR: f32 = -3.0e3;
+
 /// **The world-side rungs** — the biases lanes *outside* this module apply to their own draw, and
 /// the reason they are here rather than each next to its lane: they are one ladder. 1163 found the
 /// four of them scattered across `blob_shadow`, `ground_fx`, `nameplates` and `target::ring`, each
 /// documenting itself by pointing at one of the others ("the same constant, for the same reason,
 /// as the ring's"), which is a ladder held together by prose. The compile-time assert below can
-/// only check an order it can see.
+/// only check an order it can see — and 1163 left two out of view: the footprint print and the
+/// ground-target reticle each kept a private constant in its own lane, copied from a neighbour's
+/// number by the same prose 1163 came to end. Both are rungs now (B347).
 ///
 /// Named as one type so a lane reaches the ladder, not a constant: `Rung::GROUND_FX`.
 pub struct Rung;
 
 impl Rung {
-    /// The **surface-decal** rung — sort bias AND rasterizer depth-bias constant, one number for
-    /// both roles. Projected decal vertices are geometrically coplanar with the drawn ground, so
-    /// without a bias the depth test dissolves into per-pixel f32 noise (stipple, view-dependent
-    /// bites); 8192 · 2⁻²³ pushes their depth ~1e-3·distance toward the camera — far above the
-    /// coplanar noise floor (an ulp of Elwynn's 10⁴-yard coords), far below anything visible.
-    /// Geometric lifts (0.1, 0.02) read as hovering at grazing angles — director-confirmed. The
-    /// reference fights the same coplanarity with polygon offset (trace-verified), the
-    /// fixed-function twin of this bias.
+    /// The **coplanarity** rung — sort bias AND rasterizer depth-bias constant, one number for
+    /// both roles, and the home of the rationale the whole decal family shares. Projected decal
+    /// vertices are geometrically coplanar with the drawn ground, so without a bias the depth
+    /// test dissolves into per-pixel f32 noise (stipple, view-dependent bites); 8192 · 2⁻²³ pushes
+    /// their depth ~1e-3·distance toward the camera — far above the coplanar noise floor (an ulp
+    /// of Elwynn's 10⁴-yard coords), far below anything visible. Geometric lifts (0.1, 0.02) read
+    /// as hovering at grazing angles — director-confirmed. The reference fights the same
+    /// coplanarity with polygon offset (trace-verified), the fixed-function twin of this bias.
+    ///
+    /// It stays a *sort* rung only for **ground-fx spell decals**, which have no reference frame
+    /// slot to take: the real client draws those quads as ordinary M2 batches with no ground
+    /// conform anywhere in the spell-visual chain (`ground_fx`'s header) — conforming them is our
+    /// own improvement, so "wherever that M2 transparent sorts" is the honest answer and the
+    /// near-side default is after the water. Everything with a *known* slot moved to the
+    /// pre-water band below (B347).
     pub const GROUND_FX: f32 = 8192.0;
-    /// The **selection ring**, the same rung and the same rationale: ties against the ground-fx
-    /// decal do not matter — all of these write no depth, so the bias only ever competes with the
-    /// opaque ground.
+    /// The **selection ring**, the same number in both roles and the same coplanarity rationale.
+    /// **Not in the pre-water band — not yet, and not by argument:** the ring's draw hangs off the
+    /// CGObject per-frame slot (`0x614ada` inside `0x614a90` = vtable +0x38), not off a call the
+    /// frame driver's own row names, so which side of the water pass it lands on is unread. An RE
+    /// is out for it (B347); until it answers the ring keeps the rung it has shipped on rather
+    /// than moving on a guess.
     pub const RING: f32 = 8192.0;
-    /// The **blob shadow**'s sort rung: half the ring's, so where both decals stack the ring draws
-    /// later deterministically.
-    pub const SHADOW_SORT: f32 = 4096.0;
+    /// **The pre-water decal band, rung 1: the unit blob shadow.**
+    ///
+    /// The reference draws its ground decals *before* the water, and B347 is what it costs not
+    /// to. The frame driver `0x483460` emits this one inside PHASE 1's opaque drain row
+    /// (`0x6812c5 call 0x683dd0` → `0x6d78f0` → `0x6d7920`; wow-re `unit-blob-shadow.md` Q1) —
+    /// before the footprints, before the M2 opaque pass (`0x4836a6`), and long before the water
+    /// surfaces, which draw in phase 3 *between* the two M2 transparent passes
+    /// (`water-frame-straddle.md` §1). Every transparent in the world paints over a shadow there.
+    ///
+    /// Here it did the exact opposite. At the old **+4096** the shadow's key (`view-z + bias`)
+    /// beat every world transparent — [`WATER_BIAS`], [`FAR_SIDE_BIAS`], and the unbiased
+    /// near-side default — making it the one thing in the scene the water did not attenuate: a
+    /// crocolisk's blob read through a Stranglethorn river that hid the crocolisk itself, and the
+    /// player's read through the Stormwind mage-tower portal (B347, both shots).
+    ///
+    /// **Where the band fits.** Its keys must clear the world-transparent band below it and the
+    /// WMO-skybox band above it, each by more than a world view-z can travel (`WORLD_VIEW_Z_FLOOR`
+    /// — two rungs are only separated if their gap exceeds it). The deepest world transparent
+    /// sorts at `FAR_SIDE_BIAS − 8 − far ≈ −4.3e4`; the shallowest skybox batch at
+    /// `WMO_SKYBOX_BIAS − 0.09 ≈ −6.0e4` — a window of `(−5.7e4, −4.3e4)`, which the three rungs
+    /// take centred, 2e3 apart, with ~5e3 of margin at each end. The assert block below is the
+    /// check, and it is arithmetic on the neighbours rather than a blanket 1e4: the window is only
+    /// 1.4e4 wide, so the ladder's usual margin does not fit and pretending it does would be the
+    /// lie. **The depth of the rung costs nothing at the rasterizer** — unlike [`WATER_BIAS`] and
+    /// the two rungs above, the effect stream carries sort and raster as separate fields
+    /// ([`SHADOW_RASTER`](Rung::SHADOW_RASTER) is this lane's other half).
+    pub const SHADOW_SORT: f32 = -5.2e4;
+    /// **The pre-water band, rung 2: footprints** — the reference draws them at
+    /// `0x483654` (`0x670240` → `0x69a3e0`), one slot AFTER the shadow pass and still before the
+    /// M2 opaque pass, so a print paints over a shadow rather than under it. That was inverted
+    /// here: the print rode +2048 *below* the shadow's +4096, on a comment calling the reference's
+    /// frame order an open RE item — `water-frame-straddle.md` §1 had already closed it.
+    pub const FOOTPRINT: f32 = -5.0e4;
+    /// **The pre-water band, rung 3: the ground-target reticle** — the reference's solid-receiver
+    /// pass (`0x4836c5`, flags `0x200122`) is the last decal before the water. Its *liquid* pass
+    /// (`0x483727`, flags `0xf0000`) is the family's one genuinely post-water draw, and it has no
+    /// counterpart here: liquid is not a `GroundDecalSurface` yet, so nothing we project can land
+    /// on a water surface at all. When it can, that half wants a rung above [`WATER_BIAS`] — not
+    /// this one.
+    pub const RETICLE: f32 = -4.8e4;
     /// The blob shadow's **rasterizer** margin, sized independently of its sort rung (B131 split
     /// one constant into its two roles). It funds the `GreaterEqual` tie against the drawn ground
     /// (`DECAL_WORLD_CLIP`, 0781). The reference's mechanism is the same class: `shadowBias` cvar
@@ -178,11 +233,13 @@ impl Rung {
 }
 
 /// The ladder IS the reference order — checked at compile time: monotonic through the sky pass,
-/// every sky rung below the world (so world transparents draw over it) and below the world-side
-/// decal rung, then rain (unbiased view-z, ≈ 0), the glare above it, and the nameplates above the
+/// then the **pre-water decal band** (the reference's own decal slots, B347), then the water-plane
+/// interleave, then rain (unbiased view-z, ≈ 0), the glare above it, and the nameplates above the
 /// glare so text stays readable through a flare. Rung gaps stay wider than any view-z that could
-/// reorder them: > 10⁴ inside the sky (camera-anchored shells spread ±far·0.85 ≈ 2.6e3), and
-/// > 10⁴ on the world side (> the far plane, a few ×10³).
+/// reorder them — over 10⁴ inside the sky (camera-anchored shells spread ±far·0.85 ≈ 2.6e3) and
+/// over 10⁴ on the world side (more than the far plane, a few ×10³) — except inside the decal
+/// band, which lives in a 1.4e4 window between two bands it must not touch and is therefore
+/// checked against its actual neighbours rather than the blanket.
 const _: () = {
     assert!(SUN_DISC_BIAS - STARS_BIAS > 1.0e4);
     assert!(WHITE_MOON_BIAS > SUN_DISC_BIAS && MOON02_BIAS > WHITE_MOON_BIAS);
@@ -197,9 +254,26 @@ const _: () = {
     assert!(Rung::GROUND_FX - CLOUDS_BIAS > 1.0e4);
     assert!(GLARE_BIAS - Rung::GROUND_FX > 1.0e4);
     assert!(Rung::NAMEPLATE - GLARE_BIAS > 1.0e4);
-    // The two decal rungs stack deterministically where both draw, and the shadow's raster margin
+    // The ring still draws after the shadow where the two stack, and the shadow's raster margin
     // is its own axis (B131) — not comparable to the sort rungs, only to zero.
     assert!(Rung::RING > Rung::SHADOW_SORT && Rung::SHADOW_RASTER > 0);
+
+    // ─── The pre-water decal band (B347) ────────────────────────────────────────────────────
+    // Internally ordered as the reference's frame emits them — shadow (PHASE 1, `0x6812c5`) →
+    // footprints (`0x483654`) → the reticle's solid pass (`0x4836c5`) — with a step far wider
+    // than the view-z two *stacked* decals can differ by (they share a patch of ground, so their
+    // anchors are yards apart, not kilometres).
+    assert!(Rung::FOOTPRINT - Rung::SHADOW_SORT > 1.0e3);
+    assert!(Rung::RETICLE - Rung::FOOTPRINT > 1.0e3);
+    // And below EVERY world transparent whatever its distance — the deepest being a far-side
+    // zfill twin (−8) out at the far plane. This is the assert B347 was missing: at the old
+    // positive rungs the band sat above the water and above every M2 transparent, and the shadow
+    // was the one thing in the scene the water did not attenuate.
+    assert!(FAR_SIDE_BIAS - 8.0 + WORLD_VIEW_Z_FLOOR - Rung::RETICLE > 1.0e3);
+    // ...and above the WMO-skybox band whatever the decal's distance, so a building's painted sky
+    // can never sort over a shadow (it is depth-forced to the far plane as well, but the ladder
+    // does not get to lean on a second mechanism to state its own order).
+    assert!(Rung::SHADOW_SORT + WORLD_VIEW_Z_FLOOR - WMO_SKYBOX_BIAS > 1.0e3);
 };
 
 /// The depth law (module doc) is a property of the **shaders**, so it is checked there: every sky

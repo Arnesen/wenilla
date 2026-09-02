@@ -378,7 +378,8 @@ pub(super) fn apply_net_updates(
     ),
     // The aura feed's duration side-table + the clock to stamp arrivals (decisions 0255/0257): the
     // self-only `SMSG_UPDATE_AURA_DURATION` lands here keyed by raw slot, timestamped for the
-    // `ui_aura` slot-join — plus the ping clock the Pong arm measures round trips against.
+    // `ui_aura` slot-join — plus the ping clock, which this drain now only CLEARS on a
+    // disconnect: the measuring moved to the read thread with B346's fix.
     // Grouped as a tuple to stay under Bevy's 16-SystemParam ceiling.
     //
     // The stamp clock is `Time<Real>`, NOT the default virtual one, and both its readers
@@ -1895,7 +1896,15 @@ pub(super) fn apply_net_updates(
             SessionEvent::ClientControl { mover, allow_move } => {
                 client_control.write(super::ClientControlMessage { mover, allow_move });
             }
-            SessionEvent::Pong { sequence } => session::pong(sequence, &aura.2, &mut status),
+            // **The pong never gets here** — the read thread measures it against the ping clock
+            // the instant it lands and stops it, the way the reference's `OnData 0x537b10` hands
+            // `SMSG_PONG` to `HandlePong 0x537d60` inline instead of queueing it (`net::io`).
+            // Reaching this arm means that bypass was undone and every latency reading is a
+            // client frame too slow again, which is B346 exactly — so it says so out loud rather
+            // than measuring here and hiding it.
+            SessionEvent::Pong { sequence } => {
+                warn!("net: pong seq={sequence} reached the drain — the read thread's RTT bypass is gone (B346)");
+            }
             SessionEvent::PacketDropped {
                 opcode,
                 unparseable,

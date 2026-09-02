@@ -1266,3 +1266,100 @@ fn the_stance_shelf_is_as_long_as_the_form_count() {
     assert_eq!(cap(&s), 12.0);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// **B348 — an extra bar's EMPTY well keeps the label of the key bound to it.**
+///
+/// The reported symptom is a flicker between two states of the same bar: the occupied slot always
+/// wore its `Q`, while the bound-but-empty slots beside it showed `E`/`R`/`C` in one screenshot
+/// and nothing in the next. The cause is a single line left behind by 0270's multibars, which
+/// carried NO binding commands at all and so had no label to lose: `BenillaActionButton_Update`'s
+/// empty arm cleared the HotKey corner outright. 1008 gave those wells real
+/// `MULTIACTIONBAR1/2BUTTONn` bindings and that clear became a wipe of a live label — repainted by
+/// the next `UPDATE_BINDINGS` and wiped again by the next thing that repaints a button (a world
+/// enter, a payload picked up over the bars, the slot next door changing), which is exactly
+/// "sometimes yes, sometimes not".
+///
+/// The reference never touches the text in `ActionButton_Update` (`ActionButton.lua:167-172` sets
+/// only the vertex colour); `ActionButton_UpdateHotkeys` is the sole writer, and its bound leg —
+/// `hotkey:SetText(GetBindingText(GetBindingKey(action), "KEY_", 1))` — runs whether or not the
+/// slot has an action.
+#[test]
+fn an_extra_bars_empty_well_keeps_its_bound_hotkey_label() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    // The real command set, so MULTIACTIONBAR1BUTTONn is bindable at all (it ships unbound —
+    // the player binds it, as the reporter had).
+    s.register_bindings(&crate::bindings::registry_commands());
+    load_action_bar(&s);
+    load_xml(&s, "MultiBars.xml");
+    show_bars(&s, &[1]);
+    s.set_action(
+        61,
+        Some(ActionSlot {
+            texture: Some("Interface\\Icons\\Spell_BL".into()),
+            kind: 0x00,
+            action: 200,
+            count: 0,
+            consumable: false,
+        }),
+    );
+    // The reporter's shape: an occupied first well and two empty ones beside it, all three bound,
+    // and the wells held open so the empty ones are on screen at all.
+    s.run(
+        r#"SetBinding("Q", "MULTIACTIONBAR1BUTTON1")
+           SetBinding("E", "MULTIACTIONBAR1BUTTON2")
+           SetBinding("R", "MULTIACTIONBAR1BUTTON3")
+           ALWAYS_SHOW_MULTIBARS = "1" MultiActionBar_UpdateGridVisibility()"#,
+    )
+    .unwrap();
+    s.fire_event("UPDATE_BINDINGS", vec![]);
+
+    let label = |s: &UiScript, button: &str| {
+        s.eval::<Option<String>>(&format!("return {button}HotKey:GetText()"))
+            .unwrap()
+            .unwrap_or_default()
+    };
+    let drawn = |s: &mut UiScript, want: &str| {
+        s.resolve();
+        s.extract()
+            .iter()
+            .any(|q| matches!(&q.content, QuadContent::Text { text: Some(t), .. } if t == want))
+    };
+    assert_eq!(label(&s, "MultiBarBottomLeftButton1"), "Q");
+    assert_eq!(label(&s, "MultiBarBottomLeftButton2"), "E");
+    assert_eq!(label(&s, "MultiBarBottomLeftButton3"), "R");
+    assert!(drawn(&mut s, "E"), "the empty well's label is on screen");
+
+    // Anything that repaints the buttons. Each of these reached the empty arm and wiped the label
+    // before the fix; the occupied well never did, which is why its Q survived every time.
+    for (event, what) in [
+        ("PLAYER_ENTERING_WORLD", "a world enter"),
+        ("ACTIONBAR_SHOWGRID", "a payload picked up over the bars"),
+        ("ACTIONBAR_HIDEGRID", "and put down again"),
+    ] {
+        s.fire_event(event, vec![]);
+        assert_eq!(label(&s, "MultiBarBottomLeftButton1"), "Q", "{what}");
+        assert_eq!(
+            label(&s, "MultiBarBottomLeftButton2"),
+            "E",
+            "the empty well keeps its bound label through {what}"
+        );
+        assert_eq!(label(&s, "MultiBarBottomLeftButton3"), "R", "{what}");
+    }
+    // The world enter above also re-seeds the four bar toggles from the server byte, which the
+    // harness does not send — so bar 1 went back down with it. Raise it again: the label is still
+    // on the well, not merely still in the FontString.
+    show_bars(&s, &[1]);
+    assert!(drawn(&mut s, "E"), "…and it is still on screen");
+
+    // The control: an UNBOUND empty well stays blank throughout — the clear this line was written
+    // for in 0270 is still done, by the repaint that knows there is no binding.
+    assert_eq!(label(&s, "MultiBarBottomLeftButton4"), "");
+    // And unbinding one takes its label away, rather than freezing the last text painted.
+    s.run(r#"SetBinding("E", nil)"#).unwrap();
+    s.fire_event("UPDATE_BINDINGS", vec![]);
+    assert_eq!(label(&s, "MultiBarBottomLeftButton2"), "");
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    assert_eq!(label(&s, "MultiBarBottomLeftButton2"), "");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
