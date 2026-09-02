@@ -190,6 +190,26 @@
     </Font>
 
     <Script><![CDATA[
+        -- ── SHOW_BUFF_DURATIONS: the buff bar's timer switch (decision 1139) ──────────────────
+        --
+        -- The reference declares this in `UIOptionsFrame.lua` (l.21/104), whose `default` is
+        -- `"0"`. We have no counterpart to that file, and the row that drives it is on THIS
+        -- window's Interface page — so this is its home, and 1751's eighteenth window is what
+        -- moved it: it lived in our BuffFrame.xml, and the buff bar is the reference's own file
+        -- now, which reads the global and declares nothing.
+        --
+        -- **`"1"` is a stated divergence, not the reference's default.** 0255 shipped the
+        -- durations-shown geometry on the director's call, and 1139 turned it into a setting
+        -- without changing what it ships as. This assignment is the ONLY statement of it: the
+        -- saved chunk executes over it at load (1128), and the Interface page's row captures it as
+        -- its Defaults value at OnLoad, which runs first — so Defaults honours the director's
+        -- choice rather than the reference's table.
+        --
+        -- Read at CALL time by `BuffButton_Update` / `BuffButtons_UpdatePositions` /
+        -- `BuffFrame_UpdateDuration`, so this file sitting far below the bar does not bind.
+        SHOW_BUFF_DURATIONS = "1"
+        RegisterForSave("SHOW_BUFF_DURATIONS")
+
         -- The static category tree (era Game tab, Classic tocs), in list order. Keys are the row
         -- name suffixes; the visible label doubles as the page title (the era does the same —
         -- Settings.RegisterCategory names both from one string).

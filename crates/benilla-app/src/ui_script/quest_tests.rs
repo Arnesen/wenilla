@@ -659,6 +659,7 @@ fn reward_rows_preview_and_post_without_selecting_the_choice() {
     load_xml(&s, "QuestFrame.xml");
     load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink lives here
     load_xml(&s, "DressUpFrame.xml"); // DressUpItemLink lives here
+    load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit its menus build from
     load_xml(&s, "ChatFrame.xml"); // ChatFrameEditBox lives here
 
     const SWORD: &str = "|cffffffff|Hitem:2299:0:0:0|h[Worn Sword]|h|r";

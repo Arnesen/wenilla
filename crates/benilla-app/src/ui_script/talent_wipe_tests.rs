@@ -4,24 +4,7 @@
 
 use benilla_ui::script::{ScriptValue, UiScript};
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error (the binder tests'
-/// loader, duplicated so this file is self-contained).
-fn load_xml(s: &UiScript, file: &str) -> usize {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-    report.frames
-}
+use super::test_ui::load_ui as load_xml;
 
 /// The app's own pre-state: a question is pending and in range, which is what
 /// `CheckTalentMasterDist()` reports while the dialog is up. MoneyFrame.xml loads FIRST because

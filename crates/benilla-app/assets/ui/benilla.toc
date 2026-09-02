@@ -55,6 +55,25 @@ Fonts.xml
 # `LocalizeFrames()` is called from `UIParent_OnEvent`'s VARIABLES_LOADED arm — the reference's own
 # caller (UIParent.lua l.230-235), added to our UIParent.xml with this window.
 Interface\FrameXML\Localization.xml
+# ══ THE LOCALE LOOKUP — the reference's own, off the player's chain (1751, window 19) ══
+# `GetText(token, gender, ordinal)` and its three helpers (`GetPluralIndex`/`GetPluralTag`/
+# `GetGenderTag`) plus `GenderTagInfo` / `MAX_GENDER_INDICES` / `MAX_PLURAL_INDICES`.
+#
+# It is a `.lua` entry because the reference has no XML for it: 1.12 pulls it in through
+# `<Script file="LocaleProperties.lua"/>` at the top of `UIParent.xml`, and until that window
+# migrates this is where it comes from.
+#
+# WORTH KNOWING, because it saved building the wrong thing: `GetText` LOOKS like an engine binding
+# — `reference/1.12-globals.tsv` has it, and the exe's `FrameScript_GetText 0x703bf0` is a real
+# function — but the exe's one CALLS this Lua global. So there is nothing to implement; the whole
+# selector is fifty lines of FrameXML, and sourcing them is the entire fix. It composes a suffix
+# from the gender (`_FEMALE` at 3, and five more tags 1.12 never uses in enGB) and the plural
+# (`_P1` for any ordinal that is not 1), then falls back suffix-by-suffix to the bare token.
+#
+# The reputation page is what needed it — `ReputationFrame.lua:65` reads its standing
+# words with `GetText("FACTION_STANDING_LABEL"..id, gender)` — and fourteen more call sites across
+# FriendsFrame, StaticPopup and the quest windows are waiting behind it.
+Interface\FrameXML\LocaleProperties.lua
 # ── A reference file sourced ABOVE ours, so OUR bodies win every collision ─────────────────────
 # This one is not a migrated window: it is here for one family of frame-agnostic globals that
 # addons call by name, while the window that file also drives is still ours. So it loads first and
@@ -93,11 +112,18 @@ BasicControls.xml
 # mechanism that re-anchors the cast bar / chat over the bottom bars) are called later, applied by
 # the loader's post-load bootstrap (ui_script/manifest.rs).
 UIParent.xml
-# The `SetItemButton*` family (ref ItemButtonTemplate.lua) — script-only, no frames and no
-# dependencies of its own, so it sits as early as it can be read. Every window that paints an item
-# slot calls these, ours and third-party alike: their absence is what left the director's Bagnon
-# window with a title, a gold line and no bag slots at all (see the file's own header).
-ItemButtonTemplate.xml
+# ══ THE ITEM-SLOT BASE — the reference's own, off the player's chain (1751, window 24) ══
+# `ItemButtonTemplate` and the eight `SetItemButton*` verbs out of `ItemButtonTemplate.lua`. It
+# sits as early as it can be read: no frames, no dependencies of its own, and every window that
+# paints an item slot inherits or calls it — ours and third-party alike. Their absence is what left
+# the director's Bagnon window with a title, a gold line and no bag slots at all.
+#
+# Our copy called the reference's file "the specification" in its own header and re-implemented the
+# eight verbs against it; the specification is now the thing that runs. The template's regions and
+# size are identical either way (`$parentIconTexture` / `$parentCount` / `$parentStock` /
+# `$parentNormalTexture`, 37x37) — which is what makes this the safest of the foundational swaps
+# rather than the widest: everything that inherits it asks for the same four names.
+Interface\FrameXML\ItemButtonTemplate.xml
 # The reference's money-frame kit: MoneyFrameTemplate/SmallMoneyFrameTemplate + MoneyTypeInfo
 # + the MoneyFrame_* API. Needs only Fonts (NumberFontNormal/NumberFontNormalLarge) — and it must
 # come BEFORE UiPanels.xml, because the shared StaticPopup's coin row is a child frame declaring
@@ -109,6 +135,21 @@ ItemButtonTemplate.xml
 # still run on MerchantFrame.xml's BenillaMoney_* slot kit, and MoneyFrame.xml's header is where
 # the two are reconciled.
 MoneyFrame.xml
+# ══ THE MONEY INPUT KIT — the reference's own, off the player's chain (1751, window 23) ══
+# `MoneyInputFrameTemplate` and the ten `MoneyInputFrame_*` verbs out of `MoneyInputFrame.lua` —
+# the three-box gold/silver/copper editor a player types an amount into. Nothing of ours ever
+# shipped it, and it declares no frames, so this is a pure addition: a template and ten globals.
+#
+# THE REFERENCE'S OWN SLOT, straight after MoneyFrame.xml (FrameXML.toc l.9-10) and for the same
+# reason ours is here — the coin art and `MONEY_ICON_WIDTH` family it lays its boxes out against.
+#
+# It is groundwork rather than a window, and the windows it is groundwork FOR are named so the
+# next session does not have to re-derive it: stock `TradeFrame.xml` and `MailFrame.xml` both build
+# their amount entry from this template and call `MoneyInputFrame_SetMode`/`_GetCopper`/
+# `_SetCopper`/`_ClearFocus`/`_SetTextColor`/`_SetOnvalueChangedFunc` — six of the names below —
+# and neither can be sourced until they exist. (Trade still needs four ENGINE verbs beyond this:
+# `AddTradeMoney`, `GetCursorMoney`, `GetTradePlayerItemLink`, `GetTradeTargetItemLink`.)
+Interface\FrameXML\MoneyInputFrame.xml
 # The UIPanel slot manager (decision 0084 §2): script-only, no frames of its own — must load
 # before any panel frame (Gossip/Merchant today) so ShowUIPanel/HideUIPanel already exist
 # when those frames' OnLoad/OnEvent reference them.
@@ -124,6 +165,20 @@ GameTooltip.xml
 # UIDropDownMenuTemplate + DropDownList1/2 + the UIDropDownMenu_* API — before its
 # first customers (the unit popups below, the world map's pickers, the trainer filter).
 UIDropDownMenu.xml
+# ══ THE UIMenu KIT — the reference's own, off the player's chain (1751, window 21) ══
+# `UIMenuTemplate` and `UIMenuButtonTemplate`, with `UIMenu.lua`'s `UIMenu_OnShow`/`_OnUpdate` and
+# the four `UIMenuButton_*` handlers arriving through the file's own `<Script file=>`.
+#
+# The kit was a block inside our ChatFrame.xml — a transcription that kept the reference's names
+# for the addon surface and said so, and whose own note recorded a divergence it had to make (the
+# row label authored LEFT-anchored, because the reference leans on 1.12's ButtonText default rect
+# and our lazy label slot did not reproduce it). Sourcing the file retires the transcription and
+# the divergence together.
+#
+# THE POSITION is the reference's own (FrameXML.toc l.12, straight after GameTooltip.xml, which it
+# needs for the tooltip backdrop its menu wears). Far above ChatFrame.xml, which is the one thing
+# that used it here — resolved at load, and now satisfied earlier rather than in the same file.
+Interface\FrameXML\UIMenu.xml
 # The unit right-click popups (0434 phase 5): UnitPopupMenus/Buttons + UnitPopup_ShowMenu
 # — after the dropdown kit it drives, before the unit/party frames whose DropDown
 # children's OnLoad initialize into it.
@@ -159,6 +214,30 @@ Interface\FrameXML\ItemRef.xml
 # health/mana numerals are the ref's other users, when that slice lands). The ref's own TOC
 # loads TextStatusBar right before its unit frames, same seat as here.
 TextStatusBar.xml
+# ══ THE UNIT-FRAME KIT — the reference's own, off the player's chain (1751, window 22) ══
+# `UnitFrame.xml` declares NO frames — it is a `<Script file="UnitFrame.lua"/>` and nothing else —
+# so this is a pure addition of thirteen globals: `UnitFrame_Initialize`, `_Update`, `_OnEvent`,
+# `_OnEnter`, `_OnLeave`, `_OnUpdate`, `_UpdateManaType`, the `UnitFrameHealthBar_*` /
+# `UnitFrameManaBar_*` pairs, and `GetUnitName`.
+#
+# ABOVE OURS ON PURPOSE, the `PaperDollFrame.lua` shape (see the top of this file): four of the
+# thirteen — `UnitFrame_Update`/`_OnEvent`/`_OnEnter`/`_OnLeave` — collide with bodies our own
+# UnitFrames.xml owns and drives, and the later line wins, so ours stay live. The other nine arrive
+# fresh, and `UnitFrame_Initialize` is the one that matters most: it is what stock
+# `PlayerFrame.xml`, `TargetFrame.xml`, `PartyFrame.xml` and `PetFrame.xml` each call in their
+# OnLoad, and its absence is the single blocker the readiness probe reports for all four.
+#
+# So this is groundwork rather than a window: those four are the most visible thing on the screen
+# and their swap is a look the director has to see. This is the part that can land without one.
+Interface\FrameXML\UnitFrame.xml
+# …and its sibling, the same shape and the same reason. `CombatFeedback.xml` declares no frames
+# either: three timing constants plus `CombatFeedback_Initialize` / `_OnCombatEvent` / `_OnUpdate`,
+# the floating hit/miss text a unit frame's portrait carries. Two of the three collide with bodies
+# our UnitFrames.xml owns, so ours win from below; `CombatFeedback_Initialize` is the one that is
+# new, and it is the second of the two blockers the probe reports for stock `PlayerFrame.xml` and
+# `PetFrame.xml` (`UnitFrame_Initialize` above being the first). With both here, all four of the
+# reference's unit windows load clean.
+Interface\FrameXML\CombatFeedback.xml
 UnitFrames.xml
 # ══ THE COMBO-POINT DOTS — the reference's own, off the player's chain (1751, window 10) ══
 # `ComboFrame`, `ComboPoint1..5`, `ComboPointTemplate` and the `ComboPointsFrame_OnEvent` /
@@ -379,7 +458,7 @@ WorldStateFrame.xml
 # The player buff/debuff bar (decisions 0255/0257 — the player aura arc): the HUD row of
 # aura icons under the minimap, driven by the UnitAura feed (`crate::ui_aura`). Needs Fonts
 # (its FontStrings) and ActionBar's `BENILLA_FALLBACK_ICON` global (both already loaded).
-BuffFrame.xml
+Interface\FrameXML\BuffFrame.xml
 # ══ THE DURABILITY ALERT — the reference's own, off the player's chain (1751, window 4) ══
 # The "armor guy" under the minimap: `DurabilityFrame`, its eleven glyph textures, and
 # `DurabilityFrame_SetAlerts` / `_OnUpdate` with `INVENTORY_ALERT_STATUS_SLOTS` and
@@ -748,7 +827,7 @@ HelpFrame.xml
 # Needs UiPanels.xml far above for ShowUIPanel/HideUIPanel and its own UIPanelWindows row; needs
 # nothing else, and nothing needs it — the engine reaches it purely by firing CINEMATIC_START.
 # Seated late because it is an outermost, screen-owning layer, like the two windows below it.
-CinematicFrame.xml
+Interface\FrameXML\CinematicFrame.xml
 # The Keybindings page MODULE (decision 1008, superseding 0997's standalone window):
 # the templates + script of the Options window's Keybindings category, over the
 # engine's binding table (benilla_ui::script::keybind + crate::bindings — the 1.12

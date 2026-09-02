@@ -47,6 +47,13 @@ pub struct GossipOptionView {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GossipQuestRow {
     pub title: String,
+    /// The quest's level — `SMSG_GOSSIP_MESSAGE`'s own third field per quest row.
+    ///
+    /// The app parsed it and dropped it until 1751's twenty-first window, because the invented
+    /// `GetGossipQuestInfo` had nowhere to put it. The reference's two verbs return the rows as
+    /// `(title, level)` PAIRS, and stock `GossipFrame.lua` strides its walk by 2 over them — so
+    /// the level is load-bearing for the stride even though 1.12's own FrameXML never reads it.
+    pub level: u32,
     pub active: bool,
 }
 
@@ -165,44 +172,89 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // → the number of quest rows the open menu carries (0 when none / no menu).
-    g.set(
-        "GetNumGossipQuests",
-        lua.create_function(|lua, ()| {
+    // ══ THE TWO QUEST LISTS, and why there are two ══════════════════════════════════════════
+    //
+    // 1.12 splits the gossip packet's quest rows by their WIRE ICON — `{3,4}` are "active", every
+    // other value "available" (decision 0758) — and publishes each list through its own vararg
+    // verb. The reference runs that same test lazily behind these two bindings
+    // (`0x4e2430`/`0x4e2580`); we run it at parse time and keep the answer on the row.
+    //
+    // **Each row is a PAIR: `(title, level)`.** Stock `GossipFrameAvailableQuestsUpdate` /
+    // `…ActiveQuestsUpdate` walk `for i = 1, arg.n, 2` and read only `arg[i]`, so the level is
+    // never displayed in 1.12 — but it is what makes the stride land, and an addon reading the
+    // second slot gets the number the server sent rather than a nil.
+    //
+    // These four REPLACE `GetNumGossipQuests` / `GetGossipQuestInfo` / `SelectGossipQuest`, which
+    // were benilla's own single-list shape and appear nowhere in `reference/1.12-globals.tsv`.
+    // 1189's rule: a superset is not free — an addon that feature-detects on a name the client
+    // does not have takes a branch we cannot honour.
+    fn quest_rows(lua: &Lua, active: bool) -> mlua::Result<MultiValue> {
+        let rows: Vec<(String, u32)> = {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(model.gossip.as_ref().map_or(0, |m| m.quests.len()) as i64)
-        })?,
+            model.gossip.as_ref().map_or_else(Vec::new, |m| {
+                m.quests
+                    .iter()
+                    .filter(|q| q.active == active)
+                    .map(|q| (q.title.clone(), q.level))
+                    .collect()
+            })
+        };
+        let mut out = Vec::with_capacity(rows.len() * 2);
+        for (title, level) in rows {
+            out.push(Value::String(lua.create_string(&title)?));
+            out.push(Value::Integer(i64::from(level)));
+        }
+        Ok(MultiValue::from_vec(out))
+    }
+
+    g.set(
+        "GetGossipAvailableQuests",
+        lua.create_function(|lua, ()| quest_rows(lua, false))?,
+    )?;
+    g.set(
+        "GetGossipActiveQuests",
+        lua.create_function(|lua, ()| quest_rows(lua, true))?,
     )?;
 
-    // GetGossipQuestInfo(i) → title, isActive (1-based; out of range → nil).
+    // The two selects. Each index is 1-based **within its own list**, which is what
+    // `GossipTitleButton_OnClick` passes: the reference re-numbers the rows per list as it lays
+    // them out (`titleIndex`), so a menu with two available and one active quest hands the active
+    // row a 1, not a 3.
+    //
+    // The queue the app drains is one list, so the index is mapped back to the WHOLE row order
+    // here — the app's own `take_gossip_quest_selects` contract is unchanged, and the two verbs
+    // stay a pure re-expression of it rather than a second drain to wire up.
+    fn select_quest(lua: &Lua, active: bool, index: usize) {
+        let whole = {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            model.gossip.as_ref().and_then(|m| {
+                m.quests
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, q)| q.active == active)
+                    .nth(index.wrapping_sub(1))
+                    .map(|(n, _)| n as u32 + 1)
+            })
+        };
+        if let Some(n) = whole {
+            lua.app_data_mut::<Model>()
+                .expect("model app_data")
+                .gossip_quest_selects
+                .push(n);
+        }
+    }
+
     g.set(
-        "GetGossipQuestInfo",
+        "SelectGossipAvailableQuest",
         lua.create_function(|lua, i: usize| {
-            let row = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model
-                    .gossip
-                    .as_ref()
-                    .and_then(|m| i.checked_sub(1).and_then(|n| m.quests.get(n)))
-                    .cloned()
-            };
-            match row {
-                Some(r) => Ok(MultiValue::from_vec(vec![
-                    Value::String(lua.create_string(&r.title)?),
-                    Value::Boolean(r.active),
-                ])),
-                None => Ok(MultiValue::from_vec(vec![Value::Nil])),
-            }
+            select_quest(lua, false, i);
+            Ok(())
         })?,
     )?;
-
-    // SelectGossipQuest(i) — queue the 1-based quest row; the app maps it to the quest id + guid and
-    // sends CMSG_QUESTGIVER_QUERY_QUEST.
     g.set(
-        "SelectGossipQuest",
-        lua.create_function(|lua, i: u32| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.gossip_quest_selects.push(i);
+        "SelectGossipActiveQuest",
+        lua.create_function(|lua, i: usize| {
+            select_quest(lua, true, i);
             Ok(())
         })?,
     )?;
@@ -281,40 +333,84 @@ mod tests {
         assert!(!s.take_gossip_close(), "drained");
     }
 
+    /// **The two quest lists the reference publishes, and the two selects that index INTO them.**
+    ///
+    /// This replaces a test of `GetNumGossipQuests`/`GetGossipQuestInfo`/`SelectGossipQuest` —
+    /// benilla's own single-list shape, and three names that appear nowhere in
+    /// `reference/1.12-globals.tsv`. 1189's rule is why they had to go rather than sit beside the
+    /// real four: an addon that feature-detects on a name this client does not have takes a branch
+    /// we cannot honour.
+    ///
+    /// The row shape is a `(title, level)` PAIR because stock `GossipFrameAvailableQuestsUpdate`
+    /// walks `for i = 1, arg.n, 2` and reads `arg[i]`. 1.12 never displays the level; it is the
+    /// stride that needs it, and an addon reading the second slot should get the server's number.
     #[test]
-    fn gossip_quest_rows_read_and_select() {
+    fn the_two_gossip_quest_lists_split_by_active_and_select_within_themselves() {
         use super::GossipQuestRow;
         let mut s = UiScript::new().unwrap();
-        // No menu → zero rows.
-        assert_eq!(s.eval::<i64>("return GetNumGossipQuests()").unwrap(), 0);
+        // No menu → both lists are empty, and that is `arg.n == 0`, not a nil.
+        assert_eq!(
+            s.eval::<i64>("return select('#', GetGossipAvailableQuests())")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            s.eval::<i64>("return select('#', GetGossipActiveQuests())")
+                .unwrap(),
+            0
+        );
+
         let mut m = menu();
         m.quests = vec![
             GossipQuestRow {
                 title: "Report to Goldshire".into(),
+                level: 5,
                 active: true,
             },
             GossipQuestRow {
                 title: "A Threat Within".into(),
+                level: 7,
+                active: false,
+            },
+            GossipQuestRow {
+                title: "Kobold Camp Cleanup".into(),
+                level: 9,
                 active: false,
             },
         ];
         s.set_gossip(Some(m));
-        assert_eq!(s.eval::<i64>("return GetNumGossipQuests()").unwrap(), 2);
-        let (title, active) = s
-            .eval::<(String, bool)>("return GetGossipQuestInfo(1)")
-            .unwrap();
-        assert_eq!((title.as_str(), active), ("Report to Goldshire", true));
-        assert!(s
-            .eval::<bool>(
-                "local t, a = GetGossipQuestInfo(2) return t == 'A Threat Within' and a == false"
-            )
-            .unwrap());
-        assert!(s
-            .eval::<bool>("return GetGossipQuestInfo(9) == nil")
-            .unwrap());
 
-        s.run("SelectGossipQuest(2)").unwrap();
-        assert_eq!(s.take_gossip_quest_selects(), vec![2]);
+        // Two available, in menu order, each a pair.
+        assert_eq!(
+            s.eval::<(String, i64, String, i64)>("return GetGossipAvailableQuests()")
+                .unwrap(),
+            (
+                "A Threat Within".to_string(),
+                7,
+                "Kobold Camp Cleanup".to_string(),
+                9
+            )
+        );
+        // One active, and the active row does NOT appear in the available list even though it
+        // comes first in the menu — the split is the wire icon, not the position.
+        assert_eq!(
+            s.eval::<(String, i64)>("return GetGossipActiveQuests()")
+                .unwrap(),
+            ("Report to Goldshire".to_string(), 5)
+        );
+
+        // **Each select is 1-based within its OWN list**, which is what
+        // `GossipTitleButton_OnClick` passes (the reference re-numbers per list as it lays the
+        // rows out). Available #2 is "Kobold Camp Cleanup", the THIRD row of the menu — and the
+        // queue the app drains is still whole-menu positions, so it must come back as 3.
+        s.run("SelectGossipAvailableQuest(2)").unwrap();
+        assert_eq!(s.take_gossip_quest_selects(), vec![3]);
+        // …and the single active row is #1 in its list, the FIRST of the menu.
+        s.run("SelectGossipActiveQuest(1)").unwrap();
+        assert_eq!(s.take_gossip_quest_selects(), vec![1]);
+        // Out of range queues nothing rather than a wrong row.
+        s.run("SelectGossipAvailableQuest(9) SelectGossipActiveQuest(0)")
+            .unwrap();
         assert!(s.take_gossip_quest_selects().is_empty(), "drained");
     }
 

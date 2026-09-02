@@ -143,6 +143,7 @@ fn escape_is_consumed_by_a_focused_editbox_and_leaves_windows_open() {
         load_xml(&s, file);
     }
     load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
     load_xml(&s, "ChatFrame.xml");
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));

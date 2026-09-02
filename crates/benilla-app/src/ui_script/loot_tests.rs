@@ -3,24 +3,7 @@ use benilla_ui::script::{
     SoundRequest, UiScript,
 };
 
-/// Load one shipped `assets/ui/<file>` into `s` (the panel tests' loader, duplicated here so this
-/// file is self-contained), panicking on any loader error and returning the frame count.
-fn load_xml(s: &UiScript, file: &str) -> usize {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-    report.frames
-}
+use super::test_ui::load_ui as load_xml;
 
 /// A bare frame's own rect via its `QuadContent::Frame` entry (every frame emits one at its resolved
 /// rect). The re-skinned loot window has no solid-colour fill (the UI-LootPanel slab is opaque), so
@@ -516,6 +499,7 @@ fn shipped_loot_pushed_to_center_by_merchant() {
             item_id: 159,
             stats: None,
             link: None,
+            max_stack: Some(1),
         }],
         ..Default::default()
     }));
@@ -630,6 +614,7 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
         "UIDropDownMenu.xml", // LootFrame owns GroupLootDropDown, initialized at its OnLoad
         "LootFrame.xml",
         "DressUpFrame.xml",
+        "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
         "ChatFrame.xml",
     ] {
         load_xml(&s, file);

@@ -384,6 +384,7 @@ fn managed_positions_track_the_bottom_bar_stack() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "CastingBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
     load_xml(&s, "ChatFrame.xml");
 
     // The loader's post-load bootstrap, replayed with no bars in existence: the bare bases.

@@ -7,24 +7,7 @@ use benilla_ui::script::{
     DressUpIntent, ExtractedQuad, LootRollEntry, LootRollsState, QuadContent, ScriptValue, UiScript,
 };
 
-/// Load one shipped `assets/ui/<file>` into `s` (the loot tests' loader, duplicated here so this
-/// file is self-contained), panicking on any loader error and returning the frame count.
-fn load_xml(s: &UiScript, file: &str) -> usize {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-    report.frames
-}
+use super::test_ui::load_ui as load_xml;
 
 /// Like [`load_xml`], but also demands zero loader WARNINGS — the bar this file's own assignment
 /// set for `GroupLootFrame.xml` itself (a stale "unknown template" warning, e.g. the kind
@@ -555,6 +538,7 @@ fn ctrl_and_shift_on_the_roll_icon_preview_and_post_its_link() {
     load_xml(&s, "GroupLootFrame.xml");
     load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink, the shared shift-insert helper
     load_xml(&s, "DressUpFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
     load_xml(&s, "ChatFrame.xml");
     s.set_loot_rolls(rolls());
 

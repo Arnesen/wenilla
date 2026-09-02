@@ -238,10 +238,12 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
         quests: vec![
             GossipQuestRow {
                 title: "Report to Goldshire".into(),
+                level: 5,
                 active: true,
             },
             GossipQuestRow {
                 title: "A Threat Within".into(),
+                level: 7,
                 active: false,
             },
         ],
@@ -273,8 +275,13 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
                         GossipTitleButton4:IsVisible()",
         )
         .unwrap();
-    assert_eq!((r1_text.as_str(), r1_vis), ("Report to Goldshire", true));
-    assert_eq!((r2_text.as_str(), r2_vis), ("A Threat Within", true));
+    // **AVAILABLE quests lead, then ACTIVE** — the reference's own order (`GossipFrameUpdate` calls
+    // `GossipFrameAvailableQuestsUpdate` before `…ActiveQuestsUpdate`, ref l.27-28), and ours since
+    // this window started reading the reference's two list verbs instead of the single ordered
+    // `GetGossipQuestInfo` benilla invented. The packet listed the active quest first; the window
+    // does not.
+    assert_eq!((r1_text.as_str(), r1_vis), ("A Threat Within", true));
+    assert_eq!((r2_text.as_str(), r2_vis), ("Report to Goldshire", true));
     assert_eq!(
         (r3_text.as_str(), r3_vis),
         ("Let me browse your goods.", true),
@@ -291,11 +298,11 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
             matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p.contains(needle))
         })
     };
-    assert!(has_icon("ActiveQuestIcon"), "row 1 (active) icon renders");
     assert!(
         has_icon("AvailableQuestIcon"),
-        "row 2 (available) icon renders"
+        "row 1 (available) icon renders"
     );
+    assert!(has_icon("ActiveQuestIcon"), "row 2 (active) icon renders");
 
     // The window's rect places row 3 (the option) strictly below row 2 (the last quest row) — the
     // static anchor chain, not a runtime SetPoint, closes the gap between the two sections. Found
@@ -311,19 +318,22 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
             .unwrap_or_else(|| panic!("no text quad for {needle:?}"))
             .top
     };
-    let row2_top = label_top("A Threat Within");
+    let row2_top = label_top("Report to Goldshire");
     let row3_top = label_top("Let me browse your goods.");
     assert!(
         row3_top < row2_top,
         "row 3 (option) sits below row 2 (last quest row): row2 top {row2_top}, row3 top {row3_top}"
     );
 
-    // Click quest row 2 (available, "A Threat Within") → SelectGossipQuest(2) queues the seam's
-    // 1-based quest-row position; the app maps it to the quest id + guid and sends
-    // CMSG_QUESTGIVER_QUERY_QUEST (decision 0088 §3).
+    // Click quest row 2 — the ACTIVE quest "Report to Goldshire", which the packet listed FIRST.
+    // The row calls `SelectGossipActiveQuest(1)`: 1 because it is the first row of the active list,
+    // which is the index the reference's own `GossipTitleButton_OnClick` passes. The binding maps
+    // that back to the whole-menu position the app's queue speaks — 1, the packet's own order. The
+    // two numbers being different for the same click is exactly what the single-list
+    // `SelectGossipQuest` we retired could not express.
     s.run("BenillaGossipRow_OnClick(GossipTitleButton2)")
         .unwrap();
-    assert_eq!(s.take_gossip_quest_selects(), vec![2]);
+    assert_eq!(s.take_gossip_quest_selects(), vec![1]);
     assert!(
         s.take_gossip_selects().is_empty(),
         "a quest-row click never queues SelectGossipOption"
@@ -541,6 +551,7 @@ fn shipped_panel_slot_replaces_gossip_with_merchant() {
             // Not this test's subject (the slot manager is) — a row with no template answer yet
             // carries no link (decision 1059).
             link: None,
+            max_stack: Some(1),
         }],
         ..Default::default()
     }));
@@ -676,6 +687,7 @@ fn shipped_panel_slot_pushable_promotes_to_center() {
             // Not this test's subject (the slot manager is) — a row with no template answer yet
             // carries no link (decision 1059).
             link: None,
+            max_stack: Some(1),
         }],
         ..Default::default()
     }));
@@ -729,7 +741,7 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
         let mut s = UiScript::new().unwrap();
         s.set_screen_size(1024.0, 768.0);
         load_xml(&s, "Fonts.xml");
-        load_xml(&s, "ItemButtonTemplate.xml"); // the reference bank's slot buttons inherit it
+        load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml"); // the reference bank's slot buttons inherit it
         load_xml(&s, "MoneyFrame.xml");
         load_xml(&s, "UiPanels.xml");
         load_xml(&s, "Cooldown.xml");

@@ -22,10 +22,34 @@ use super::test_ui::load_ui as load_xml;
 fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // The one-letter duration strings (DAY/HOUR/MINUTE/SECOND_ONELETTER_ABBR) the bar prints
+    // under a timed aura. Our copy carried them as `X = X or "%d s"` fallbacks; the reference's
+    // file formats them straight and `format(nil, …)` raises.
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Fonts.xml"); // NORMAL/HIGHLIGHT_FONT_COLOR + the FontStrings' faces
+                               // `GameTooltip`, which the reference's BuffButton_Update indexes on EVERY repaint to ask
+                               // `IsOwned(this)` (BuffFrame.lua l.104) — not just on hover. Ours guarded it; the reference
+                               // does not, so a session without the tooltip loses the whole repaint.
+    load_xml(&s, "GameTooltip.xml");
+    // `SecondsToTimeAbbrev`, which 1.12 keeps in UIParent.lua and so do we since window 18.
+    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "UIParent.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "ActionBar.xml"); // BENILLA_FALLBACK_ICON (the unknown-icon fallback)
-    load_xml(&s, "BuffFrame.xml");
+                                   // The timer switch, seeded BEFORE the bar loads. 1.12 declares it in UIOptionsFrame.lua
+                                   // (default "0"); we have no counterpart to that file, so it lives with the row that drives it
+                                   // (OptionsFrame.xml) and ships as "1" — the director's call, 0255/1139. Order matters: the
+                                   // reference's `BuffFrame_OnLoad` calls `BuffButtons_UpdatePositions`, which seats the debuff
+                                   // row 20px differently depending on this value, so setting it afterwards leaves the bar laid
+                                   // out for the wrong one.
+    s.run("SHOW_BUFF_DURATIONS = \"1\"").unwrap();
+    load_xml(&s, "Interface\\FrameXML\\BuffFrame.xml");
+    // …and APPLIED, the way the app applies it (`manifest::apply_buff_durations`).
+    // `BuffFrame_OnLoad` does not call `BuffButtons_UpdatePositions`: in 1.12 that is
+    // `UIOptionsFrame.lua`'s job and we have no counterpart to that file. A session that skips it
+    // is laid out for durations-OFF while the setting says on.
+    super::manifest::apply_buff_durations(&s).unwrap();
     s
 }
 
@@ -101,6 +125,7 @@ fn tex_quad<'a>(quads: &'a [ExtractedQuad], leaf: &str) -> Option<&'a ExtractedQ
 
 #[test]
 fn buffs_and_debuffs_fill_their_own_rows_with_counts_and_the_dispel_tint() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     push(
         &mut s,
@@ -177,6 +202,7 @@ fn buffs_and_debuffs_fill_their_own_rows_with_counts_and_the_dispel_tint() {
 
 #[test]
 fn a_timed_aura_counts_down_and_a_permanent_one_shows_no_timer() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     push(
         &mut s,
@@ -222,6 +248,7 @@ fn a_timed_aura_counts_down_and_a_permanent_one_shows_no_timer() {
 
 #[test]
 fn the_warning_flash_pulses_a_low_aura_but_leaves_a_long_one_solid() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     push(
         &mut s,
@@ -270,6 +297,7 @@ fn the_warning_flash_pulses_a_low_aura_but_leaves_a_long_one_solid() {
 
 #[test]
 fn right_clicking_a_cancelable_buff_queues_its_spell_cancel() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     push(
         &mut s,
@@ -300,6 +328,7 @@ fn right_clicking_a_cancelable_buff_queues_its_spell_cancel() {
 
 #[test]
 fn an_emptied_bar_hides_every_button() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     push(
         &mut s,
@@ -341,6 +370,7 @@ fn an_emptied_bar_hides_every_button() {
 /// `lua left -9.9s`).
 #[test]
 fn a_refreshed_duration_reaches_the_bar_with_no_aura_event() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     let mark = |expiry: f64| {
         aura(
@@ -412,6 +442,7 @@ fn a_refreshed_duration_reaches_the_bar_with_no_aura_event() {
 /// about to drop, and the reference pulses from `BuffButton_OnUpdate` regardless of the setting.
 #[test]
 fn the_duration_switch_hides_the_timers_and_closes_their_gutter() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     push(
         &mut s,
@@ -532,6 +563,7 @@ fn mixed_bar() -> Vec<AuraState> {
 /// too or the whole thing silently halves.
 #[test]
 fn the_buttons_and_the_corpus_walk_agree_on_the_cache_positions() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     push(&mut s, mixed_bar());
     frame(&mut s, 0.1);
@@ -613,6 +645,7 @@ fn the_buttons_and_the_corpus_walk_agree_on_the_cache_positions() {
 /// it is structural, because a harmful button's handle simply names a harmful record.
 #[test]
 fn right_clicking_cancels_the_aura_under_the_cursor_by_its_cache_position() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     push(&mut s, mixed_bar());
     frame(&mut s, 0.1);
@@ -651,6 +684,7 @@ fn right_clicking_cancels_the_aura_under_the_cursor_by_its_cache_position() {
 /// clear it — while rows 2 and 3, which hang off TempEnchant1 and TemporaryEnchantFrame, stay put.
 #[test]
 fn the_temporary_enchant_row_shows_a_weapon_enchant_and_moves_the_top_row_aside() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     // A LOADED bar, deliberately: the enchant slots must be driven by GetWeaponEnchantInfo and by
     // nothing else. The reference builds them from `BuffButtonTemplate` and blanks the four aura
@@ -669,18 +703,34 @@ fn the_temporary_enchant_row_shows_a_weapon_enchant_and_moves_the_top_row_aside(
         "the enchant slots are not buff buttons: no aura may reach them"
     );
     assert!(!shown(&s, "TempEnchant2"));
-    // The direct probe: none of the three aura handlers is even REGISTERED on an enchant slot.
-    // This is what the reference's empty-element idiom is supposed to achieve and what our loader
-    // does not do, so it is asserted rather than assumed.
+    // The direct probe, and its exact shape is the point. `BuffButtonTempEnchant` inherits
+    // `BuffButtonTemplate` and blanks its three aura handlers with `<OnLoad>`↵`</OnLoad>` — a
+    // WHITESPACE body, which 1.12 compiles into a valid empty function rather than storing nil
+    // (`SetScript 0x7025c0` tests `text[0]`, and nothing trims — wow-5875-re
+    // `xml-script-empty-element.md`). So each handler is still a FUNCTION here, and it is the
+    // reference's own no-op rather than `BuffButton_OnLoad`.
+    //
+    // Asserting `== nil` instead would be asserting a bug: an addon reading
+    // `TempEnchant1:GetScript("OnLoad")` gets a function on a real client.
     for handler in ["OnLoad", "OnEvent", "OnClick"] {
         assert!(
             s.eval::<bool>(&format!(
-                "return TempEnchant1:GetScript(\"{handler}\") == nil"
+                "return type(TempEnchant1:GetScript(\"{handler}\")) == \"function\""
             ))
             .unwrap(),
-            "an enchant slot must carry no {handler} — it is not a buff button"
+            "an enchant slot's {handler} is the reference's compiled no-op, not nil"
         );
     }
+    // …and it is NOT the buff-button body: an aura event reaching it would paint the first buff
+    // into the corner and arm a right-click cancel, which is what a naive "empty means absent"
+    // loader produces.
+    assert!(
+        s.eval::<bool>(
+            "return TempEnchant1:GetScript(\"OnLoad\") ~= BuffButton0:GetScript(\"OnLoad\")"
+        )
+        .unwrap(),
+        "the blank displaces the inherited handler rather than sharing it"
+    );
     s.resolve();
     let resting = s.eval::<f64>("return BuffFrame:GetRight()").unwrap();
     let row2 = s.eval::<f64>("return BuffButton16:GetRight()").unwrap();
@@ -715,6 +765,14 @@ fn the_temporary_enchant_row_shows_a_weapon_enchant_and_moves_the_top_row_aside(
     );
 
     // The top buff row slid left by one icon plus the 5px gutter; the debuff row did not move.
+    //
+    // That is true only because the harness has APPLIED the durations setting, and the
+    // qualification is worth keeping: `BuffButton16`'s XML anchor is `TOPRIGHT` to `BuffButton8`'s
+    // `BOTTOM` — inside BuffFrame, so it would travel with it — and the only thing that re-anchors
+    // it to `TemporaryEnchantFrame` is `BuffButtons_UpdatePositions`, which `BuffFrame_OnLoad`
+    // does NOT call. A bar that nobody has applied the setting to therefore moves BOTH rows. The
+    // window's own file cannot reach that state in production (our Interface page applies it), and
+    // finding it was what showed the harness had to apply it too.
     s.resolve();
     let shifted = s.eval::<f64>("return BuffFrame:GetRight()").unwrap();
     assert!(
@@ -723,7 +781,8 @@ fn the_temporary_enchant_row_shows_a_weapon_enchant_and_moves_the_top_row_aside(
     );
     assert!(
         (s.eval::<f64>("return BuffButton16:GetRight()").unwrap() - row2).abs() < 1e-3,
-        "the debuff row hangs off TemporaryEnchantFrame and stays put"
+        "the debuff row hangs off TemporaryEnchantFrame and stays put: {row2} -> {}",
+        s.eval::<f64>("return BuffButton16:GetRight()").unwrap()
     );
 
     // And back: the enchant drops, the row hides and the bar returns to its resting point.
@@ -735,19 +794,27 @@ fn the_temporary_enchant_row_shows_a_weapon_enchant_and_moves_the_top_row_aside(
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// **The idle enchant row writes nothing** (decision 1396's class, the audit's item on
-/// `TemporaryEnchantFrame:OnUpdate` — 1396 measured it at ~14 µs/frame as the post-fix lead). With
-/// neither hand enchanted, `BuffFrame_Enchant_OnUpdate` used to clear both slots and re-park the
-/// bar every frame of every session; now the no-enchant branch latches on `benillaCleared` after
-/// its first pass.
+/// **The idle enchant row rewrites the bar every frame, because the reference's does** — and this
+/// pins that rather than the write-gating it replaced.
 ///
-/// The probes are sentinels the branch would overwrite if it still ran: the bar re-anchored 41px
-/// left of its park, and slot 1 shown. Ten ticks later both survive. Then the row is DRIVEN — both
-/// hands at once — proving the latch releases, the straight-line hand packer keeps the reference's
-/// off-hand-first order, and the `filled`-gated width/anchor writes fire on the 0→2 edge; the drop
-/// back to empty re-parks the bar (the first pass after a transition always writes).
+/// Our own `BuffFrame.xml` latched the no-enchant branch on a `benillaCleared` flag after its first
+/// pass; decision 1396 measured that branch at ~14 µs/frame and took the gate as its post-fix lead.
+/// 1751's eighteenth window made the bar `Interface\FrameXML\BuffFrame.xml`, whose
+/// `BuffFrame_Enchant_OnUpdate` opens with an unconditional `TempEnchant1:Hide()` … `BuffFrame:
+/// SetPoint(…)` and returns. So the writes are back, they are the reference's, and 1751 §2 takes
+/// them: an optimisation is not a divergence we get to keep silently once the file is theirs.
+///
+/// **1396's finding is not withdrawn** — the cost is real and the same measurement would find it
+/// again. If it is ever worth paying down, the fix is an adapter over this one handler with a
+/// record beside it, not a re-transcription of the window.
+///
+/// The sentinels below are inverted from what they were: the branch overwrites both, every frame.
+/// The rest of the test is unchanged and is the part that always mattered — the row DRIVEN with
+/// both hands keeps the reference's off-hand-first packing order, and the drop back to empty
+/// re-parks the bar.
 #[test]
-fn an_idle_enchant_row_stops_rewriting_the_bar() {
+fn an_idle_enchant_row_rewrites_the_bar_as_the_reference_does() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     push(&mut s, mixed_bar());
     frame(&mut s, 0.1); // first pass: the clear + park write once and latch
@@ -766,13 +833,13 @@ fn an_idle_enchant_row_stops_rewriting_the_bar() {
     }
     assert!(s.errors().is_empty(), "{:?}", s.errors());
     assert!(
-        shown(&s, "TempEnchant1"),
-        "a latched idle row must not re-hide the slot every frame"
+        !shown(&s, "TempEnchant1"),
+        "the reference's idle branch re-hides the slot on every tick"
     );
     let displaced = s.eval::<f64>("return BuffFrame:GetRight()").unwrap();
     assert!(
-        (displaced - (resting - 41.0)).abs() < 1e-3,
-        "a latched idle row must not re-park the bar every frame — got {displaced}, resting {resting}"
+        (displaced - resting).abs() < 1e-3,
+        "…and re-parks the bar with it: got {displaced}, resting {resting}"
     );
 
     // The control: both hands enchant. Off hand packs slot 1 (the reference's order — main hand
@@ -823,16 +890,23 @@ fn an_idle_enchant_row_stops_rewriting_the_bar() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// **A settled buff button writes nothing per frame** (the same 1396 class, one row down): the
-/// poll (`GetPlayerBuffTimeLeft` every frame — load-bearing, decision 0846) stays, but the alpha
-/// and the duration-region writes are gated on what was last written. The probes are sentinels the
-/// handler can never produce: alpha 0.42 (it writes only 1.0 or the warning ramp, and at 5 min out
-/// the ramp is not running) and the text "X" (it writes only `SecondsToTimeAbbrev` strings — and
-/// the compare is against the computed STRING, never a measured extent, which is 1396's fixture
-/// trap). The controls: the minute rollover still rewrites the text, the warning band still turns
-/// the number white, and inside the last 31s the pulse still writes a fresh alpha per tick.
+/// **A settled buff button rewrites its alpha and its duration every frame, because the
+/// reference's does** — the sibling of the enchant-row test above, and the same trade.
+///
+/// Our copy gated both writes on what was last written (the 1396 class, one row down); the
+/// reference's `BuffButton_OnUpdate` polls `GetPlayerBuffTimeLeft` and then writes
+/// `SetAlpha` and `BuffFrame_UpdateDuration` unconditionally, every tick. So the sentinels below —
+/// alpha 0.42 and the text "X", neither of which the handler can produce — are overwritten within
+/// one frame, and that is what is pinned.
+///
+/// **The poll itself was never the divergence** (`GetPlayerBuffTimeLeft` every frame is
+/// load-bearing, decision 0846) and the controls below are unchanged, because they are the part
+/// that describes the WINDOW rather than our implementation of it: the minute rollover drops "5 m"
+/// to "4 m", the warning band turns the number white, and inside the last 31s the pulse ramps the
+/// alpha. Those three are the reference's behaviour and they still hold.
 #[test]
-fn a_settled_buff_button_stops_rewriting_alpha_and_duration() {
+fn a_settled_buff_button_rewrites_alpha_and_duration_as_the_reference_does() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     push(
         &mut s,
@@ -858,14 +932,14 @@ fn a_settled_buff_button_stops_rewriting_alpha_and_duration() {
     }
     assert!(s.errors().is_empty(), "{:?}", s.errors());
     assert!(
-        (alpha(&s, "BuffButton0") - 0.42).abs() < 1e-6,
-        "a settled button must not rewrite its alpha every frame — got {}",
+        (alpha(&s, "BuffButton0") - 1.0).abs() < 1e-6,
+        "the reference's OnUpdate writes a fresh alpha every tick — got {}",
         alpha(&s, "BuffButton0")
     );
     assert_eq!(
         text(&s, "BuffButton0Duration"),
-        "X",
-        "a settled button must not rewrite its unchanged duration text every frame"
+        "5 m",
+        "…and re-writes the duration with it, unchanged or not"
     );
 
     // Control 1: a REAL text change flows — the abbreviation drops to "4 m" past the boundary.

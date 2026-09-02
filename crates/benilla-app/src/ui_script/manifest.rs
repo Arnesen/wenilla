@@ -70,7 +70,31 @@ fn bootstrap_positions(script: &UiScript) -> Vec<String> {
         error!("ui_script: durability re-seat hook: {e}");
         return vec![format!("durability re-seat hook: {e}")];
     }
+    if let Err(e) = apply_buff_durations(script) {
+        error!("ui_script: buff-duration layout: {e}");
+        return vec![format!("buff-duration layout: {e}")];
+    }
     Vec::new()
+}
+
+/// **Apply `SHOW_BUFF_DURATIONS` to the buff bar once, at load** (1751 window 18).
+///
+/// The reference's `BuffFrame_OnLoad` seats the duration FontStrings and nothing else — the row
+/// pitch and the debuff row's anchor come from `BuffButtons_UpdatePositions`, which it never calls.
+/// In 1.12 that is applied by `UIOptionsFrame.lua`, the file that owns the setting; we have no
+/// counterpart to it (our row lives on `OptionsFrame.xml`, whose `applyFunc` fires on a CHANGE),
+/// so without this the bar ships laid out for durations-OFF while the setting says on — a 10px
+/// pitch error on every buff and a debuff row anchored to the wrong frame.
+///
+/// Here rather than in a FrameXML file for the same two reasons as the durability hook above:
+/// `assets/ui` does not grow (1779), and this is our stand-in for a file the reference has and we
+/// do not, which makes Rust the durable home.
+///
+/// Guarded, because the font-registry-only load has no buff bar.
+pub(super) fn apply_buff_durations(script: &UiScript) -> Result<(), String> {
+    script
+        .run("if BuffButtons_UpdatePositions then BuffButtons_UpdatePositions() end")
+        .map_err(|e| e.to_string())
 }
 
 /// **A stated divergence from the reference, installed rather than edited in** (1751 window 4).

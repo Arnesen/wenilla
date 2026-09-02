@@ -144,6 +144,11 @@ fn chain() -> Option<&'static Chain> {
 }
 
 #[cfg(test)]
+fn is_word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+#[cfg(test)]
 mod tests {
     use benilla_ui::script::UiScript;
 
@@ -231,9 +236,26 @@ mod tests {
     /// **Loading on top of the manifest, not instead of it**, because that is the position a
     /// migrated file occupies — every template it inherits is declared by an earlier entry, and
     /// asking whether `ContainerFrame.xml` loads *alone* only measures that it has predecessors.
-    /// Names it collides with are simply overwritten in the probe VM, which is thrown away; the
-    /// probe is asking about load failures, not about who wins a collision (the manifest's order is
-    /// what settles those, and it is settled per-window when the swap is made).
+    ///
+    /// ## The false positive this method has, and how to recognise it
+    ///
+    /// A candidate whose frame NAMES our own shipped file already owns produces failures that are
+    /// artefacts of the probe, not of the window. `publish_global` is deliberately non-overwriting
+    /// (RF-0023), so the second frame to claim a name gets a wrapper that `_G` never points at —
+    /// and any reference body using the `getglobal(this:GetName())` idiom then reads a DIFFERENT
+    /// table than the `this` it just wrote to.
+    ///
+    /// That is exactly what the money frames look like: stock `TradeFrame.xml` reports
+    /// `MoneyFrame_Update: attempt to index local 'info'`, because `MoneyFrame_SetType` set
+    /// `this.info` on the new frame and `MoneyFrame_Update` read it back off OUR TradeFrame's
+    /// same-named one. Delete our counterpart — which is what migrating the window does — and the
+    /// collision goes with it. The same shape covers `MailFrame` and `QuestLogFrame`.
+    ///
+    /// **So a failure inside a name our own manifest also declares is suspect and has to be
+    /// re-measured with the counterpart removed.** A failure naming something nothing of ours
+    /// declares (`CreateFrame: unknown frame type 'LootButton'`, `attempt to call global
+    /// 'UnitFrame_Initialize'`) is real. The probe does not tell the two apart for you; the
+    /// question to ask of every line is "does our tree already own this name?".
     ///
     /// Ignored because it stands up ~90 fresh VMs and each one loads the entire interface; it is an
     /// instrument you run when choosing the next window, not a gate.
@@ -328,6 +350,204 @@ mod tests {
         println!("\n=== loads clean today: {} ===", clean.len());
         for (pos, name) in &clean {
             println!("  {pos:>3}  {name}");
+        }
+    }
+
+    /// **The readiness probe's companion: not "does it load" but "what would I have to BUILD".**
+    ///
+    /// ```text
+    /// cargo test -p benilla-app --lib chain_gap_report -- --ignored --nocapture
+    /// ```
+    ///
+    /// [`chain_readiness_report`] answers one question well and is silent on the next one. A window
+    /// it calls CLEAN can still be a week of work (its verbs are only reached by a click, which
+    /// loading never makes), and a window it reports failing may be blocked on a single name. When
+    /// the migration ran out of drop-in windows, "which of these is actually cheap" became the
+    /// question, and the probe could not answer it.
+    ///
+    /// So this one reads the calls instead of running them. For every stock window not yet in the
+    /// manifest it collects the `Name(` sites across the file and its `.lua`, subtracts what the
+    /// file defines itself and what this client already has, and splits the remainder against
+    /// **the reference's own `_G`** (`reference/1.12-globals.tsv`, captured from the running
+    /// client):
+    ///
+    /// * `engine=` — the reference has it as an engine binding and we do not. **Real work**, and
+    ///   the only column worth planning from.
+    /// * `fx=` — the reference has it as a FrameXML function. Cheap by comparison: it lives in
+    ///   some stock file, and the name beside it says which, so sourcing that file may be the whole
+    ///   fix. `GetText` looked like an engine binding for an hour and turned out to be
+    ///   `LocaleProperties.lua`; this column is that lesson, mechanised.
+    /// * A name in NEITHER is dropped, and that is the load-bearing filter: 1.12's widget methods
+    ///   do not live in `_G`, so `SetText(` and `Hide(` and their two hundred siblings would
+    ///   otherwise drown the report. Anything the reference's own global table does not carry is
+    ///   not a global.
+    ///
+    /// **What "already has" means, and why it is asked of a LOADED VM.** An earlier hand-rolled
+    /// version of this compared against a bare `UiScript::new()`, which is the ENGINE surface
+    /// alone — so every FrameXML function our own interface defines (`ShowUIPanel`,
+    /// `StaticPopup_Visible`, `UpdateMicroButtons`, …) read as missing, and the `fx=` column was
+    /// mostly noise. Here the manifest is loaded first and `_G` is read after, so the answer is
+    /// what this client *actually* answers to.
+    ///
+    /// Two crudenesses, stated because they decide how to read the output. The `Name(` scan counts
+    /// a call inside an XML comment (1.12 comments out whole blocks — `GuildRegistrarFrame`'s
+    /// tabard button is one), so it can over-report; and it cannot see a name reached through
+    /// `getglobal`, so it can under-report. It is for ranking work, not for proving a window done —
+    /// [`chain_readiness_report`] and the window's own tests are that.
+    #[test]
+    #[ignore = "instrument: run by hand when choosing what to build next"]
+    fn chain_gap_report() {
+        let _data = benilla_formats::wow_data_or_skip!();
+
+        // The reference's own global table, with each name's origin.
+        let tsv = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../reference/1.12-globals.tsv"
+        );
+        let text = std::fs::read_to_string(tsv).expect("the reference surface");
+        let mut origin: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        for line in text.lines().filter(|l| !l.starts_with('#')) {
+            let mut f = line.split('\t');
+            if let (Some(name), Some(_kind), Some(from)) = (f.next(), f.next(), f.next()) {
+                origin.insert(name, from);
+            }
+        }
+
+        // What this client answers to with its whole interface up — engine bindings AND every
+        // global our own FrameXML defines.
+        let mut s = UiScript::new().expect("VM");
+        s.set_screen_size(1024.0, 768.0);
+        let failures = super::super::manifest::load_default_ui(&s);
+        assert!(failures.is_empty(), "the shipped manifest: {failures:#?}");
+        let have: std::collections::HashSet<String> = s
+            .eval::<Vec<String>>(
+                "local t = {} for k in pairs(_G) do table.insert(t, k) end return t",
+            )
+            .expect("dump _G")
+            .into_iter()
+            .collect();
+
+        let migrated: std::collections::HashSet<String> = super::super::addons::Addon::builtin()
+            .toc
+            .files
+            .iter()
+            .filter(|f| super::is_chain_entry(f))
+            .filter_map(|f| f.rsplit(['\\', '/']).next().map(str::to_string))
+            .collect();
+
+        let toc = String::from_utf8_lossy(
+            &super::read("Interface\\FrameXML\\FrameXML.toc").expect("the reference's own toc"),
+        )
+        .into_owned();
+        let stock: Vec<String> = toc
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#') && l.ends_with(".xml"))
+            .map(str::to_string)
+            .collect();
+
+        // `function Name(` across the whole corpus, so an fx gap can name the file that holds it.
+        let mut home: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for f in &stock {
+            for cand in [f.clone(), format!("{}.lua", &f[..f.len() - 4])] {
+                let Some(bytes) = super::read(&format!("Interface\\FrameXML\\{cand}")) else {
+                    continue;
+                };
+                for line in String::from_utf8_lossy(&bytes).lines() {
+                    if let Some(rest) = line.trim_start().strip_prefix("function ") {
+                        let name: String = rest
+                            .chars()
+                            .take_while(|c| c.is_alphanumeric() || *c == '_')
+                            .collect();
+                        if !name.is_empty() {
+                            home.entry(name).or_insert_with(|| cand.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        let called = |text: &str| -> std::collections::HashSet<String> {
+            let b: Vec<char> = text.chars().collect();
+            let mut out = std::collections::HashSet::new();
+            let mut i = 0;
+            while i < b.len() {
+                if b[i].is_ascii_uppercase() && (i == 0 || !super::is_word(b[i - 1])) {
+                    let mut j = i;
+                    while j < b.len() && super::is_word(b[j]) {
+                        j += 1;
+                    }
+                    let mut k = j;
+                    while k < b.len() && b[k] == ' ' {
+                        k += 1;
+                    }
+                    if k < b.len() && b[k] == '(' {
+                        out.insert(b[i..j].iter().collect::<String>());
+                    }
+                    i = j;
+                    continue;
+                }
+                i += 1;
+            }
+            out
+        };
+
+        println!("\n=== 1751 gap report — what each unmigrated window would cost ===");
+        let mut rows: Vec<(usize, String, Vec<String>, Vec<String>)> = Vec::new();
+        for f in &stock {
+            if migrated.contains(f) {
+                continue;
+            }
+            let mut text = String::new();
+            for cand in [f.clone(), format!("{}.lua", &f[..f.len() - 4])] {
+                if let Some(b) = super::read(&format!("Interface\\FrameXML\\{cand}")) {
+                    text.push_str(&String::from_utf8_lossy(&b));
+                }
+            }
+            let own: std::collections::HashSet<String> = text
+                .lines()
+                .filter_map(|l| l.trim_start().strip_prefix("function "))
+                .map(|r| {
+                    r.chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect::<String>()
+                })
+                .collect();
+            let (mut eng, mut fx) = (Vec::new(), Vec::new());
+            let mut names: Vec<String> = called(&text)
+                .into_iter()
+                .filter(|c| !own.contains(c) && !have.contains(c))
+                .collect();
+            names.sort();
+            for c in names {
+                match origin.get(c.as_str()).copied() {
+                    Some("engine") => eng.push(c),
+                    Some(_) => {
+                        let h = home.get(&c).cloned().unwrap_or_else(|| "?".into());
+                        fx.push(format!("{c}<{h}>"));
+                    }
+                    None => {} // a widget method, not a global — the reference's _G would have it
+                }
+            }
+            rows.push((eng.len(), f.clone(), eng, fx));
+        }
+        rows.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        for (n, f, eng, fx) in &rows {
+            println!("{n:>3} engine  {f}");
+            if !eng.is_empty() {
+                println!("            engine: {}", eng.join(" "));
+            }
+            if !fx.is_empty() {
+                println!("            fx:     {}", fx.join(" "));
+            }
+        }
+        let free: Vec<&String> = rows.iter().filter(|r| r.0 == 0).map(|r| &r.1).collect();
+        println!(
+            "\n=== {} windows need NO engine work at all ===",
+            free.len()
+        );
+        for f in free {
+            println!("  {f}");
         }
     }
 

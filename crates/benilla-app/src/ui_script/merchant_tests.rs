@@ -91,6 +91,7 @@ fn shipped_merchant_frame_drives_end_to_end() {
                 item_id: 159,
                 stats: None,
                 link: None,
+                max_stack: Some(1),
             },
             MerchantItem {
                 name: Some("Linen Bandage".into()),
@@ -101,6 +102,7 @@ fn shipped_merchant_frame_drives_end_to_end() {
                 item_id: 1251,
                 stats: None,
                 link: None,
+                max_stack: Some(1),
             },
         ],
         ..Default::default()
@@ -595,6 +597,7 @@ fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
                     sell_price: 0,
                 }),
                 link: None,
+                max_stack: Some(1),
             },
             MerchantItem {
                 name: Some("Chipped Buckler".into()),
@@ -618,6 +621,7 @@ fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
                     sell_price: 0,
                 }),
                 link: None,
+                max_stack: Some(1),
             },
         ],
         ..Default::default()
@@ -803,6 +807,7 @@ fn money_display_shrinks_to_content_and_stays_flush() {
                 item_id: 159,
                 stats: None,
                 link: None,
+                max_stack: Some(1),
             },
             MerchantItem {
                 name: Some("Linen Bandage".into()),
@@ -813,6 +818,7 @@ fn money_display_shrinks_to_content_and_stays_flush() {
                 item_id: 1251,
                 stats: None,
                 link: None,
+                max_stack: Some(1),
             },
         ],
         ..Default::default()
@@ -949,6 +955,7 @@ fn merchant_tabs_drive_buyback_page_and_repair_pair() {
             item_id: 159,
             stats: None,
             link: None,
+            max_stack: Some(1),
         }],
         buyback: vec![
             buyback_item("Bandit Cloak", 116),
@@ -1109,6 +1116,7 @@ fn shipped_merchant_frame_arms_the_buy_cursor_on_hover() {
                 item_id: 159,
                 stats: None,
                 link: None,
+                max_stack: Some(1),
             },
             MerchantItem {
                 name: Some("Linen Bandage".into()),
@@ -1119,6 +1127,7 @@ fn shipped_merchant_frame_arms_the_buy_cursor_on_hover() {
                 item_id: 1251,
                 stats: None,
                 link: None,
+                max_stack: Some(1),
             },
         ],
         ..Default::default()
@@ -1241,6 +1250,7 @@ fn ctrl_and_shift_on_a_vendor_row_preview_and_post_without_buying() {
         "GameTooltip.xml",
         "MerchantFrame.xml",
         "DressUpFrame.xml",
+        "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
         "ChatFrame.xml",
     ] {
         load_xml(&s, file);
@@ -1258,6 +1268,7 @@ fn ctrl_and_shift_on_a_vendor_row_preview_and_post_without_buying() {
             stats: None,
             // Fed exactly as `ui_merchant.rs` builds it off the row's template answer.
             link: Some(WATER_LINK.into()),
+            max_stack: Some(1),
         }],
         ..Default::default()
     }));

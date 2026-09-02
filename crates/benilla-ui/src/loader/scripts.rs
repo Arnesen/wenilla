@@ -20,8 +20,40 @@ impl Loader<'_> {
         for scripts in children_named(el, "Scripts") {
             for handler in &scripts.children {
                 let name = handler.tag.clone();
-                let Some(func) = self.compile_handler(handler, &name, dbg) else {
-                    continue;
+                // **AN EMPTY BODY IS A CLEAR, AND WHITESPACE IS NOT EMPTY** — the two byte
+                // tests at `SetScript 0x7025c0`, reproduced rather than approximated (wow-5875-re
+                // `system/ui/scratch/xml-script-empty-element.md`, a 3-worker cross-check):
+                //
+                //     7025ec  call 0x702670      ; unref the PREVIOUS handler, unconditionally
+                //     7025f4  test ebx,ebx
+                //     7025f6  je 0x702655        ; text == NULL -> store 0 (reads back as nil)
+                //     7025f8  cmp byte ptr [ebx],0
+                //     7025fb  je 0x702655        ; text == ""   -> same
+                //
+                // The XMLTree chardata handler (`0x6f29d0`) appends every run with `len > 0` and
+                // nothing trims, so `0x7025f8` tests the FIRST BYTE of the raw body.
+                //
+                // That distinction is the whole finding, and it is not academic. 1.12's own
+                // FrameXML has **zero** `<OnX/>` and **zero** `<OnX></OnX>`; its seven blanking
+                // sites (BuffFrame ×3, BankFrame, PaperDollFrame ×2, UIPanelTemplates) are all
+                // `<OnLoad>`↵`</OnLoad>` — a body of `"\n\t\t\t"`, whose first byte is `0x0A`.
+                // Both tests fail and it **compiles to a valid empty function**. So
+                // `TempEnchant1:GetScript("OnLoad")` answers a FUNCTION in the real client, not
+                // nil, and the inherited `BuffButton_OnLoad` is displaced rather than removed.
+                // A `.trim()` here would produce the right window and the wrong answer to an addon.
+                //
+                // The clear path is still real (an empty body, or a `function=` element with no
+                // body — 5875 never reads that attribute at all, so it takes the NULL leg), and it
+                // matters that it is a stored nil: a `0` registry ref is skipped by the dispatch
+                // guard entirely, where the compiled no-op is entered and returns.
+                let cleared = handler.body.is_empty() && handler.attr("function").is_none();
+                let func = if cleared {
+                    None
+                } else {
+                    match self.compile_handler(handler, &name, dbg) {
+                        Some(f) => Some(f),
+                        None => continue,
+                    }
                 };
                 // SetScript stores it; an unsupported name errors — surface as a gap, don't drop hard.
                 if let Err(e) = wrapper.call_method::<()>("SetScript", (name.clone(), func.clone()))
@@ -63,7 +95,10 @@ impl Loader<'_> {
                     self.call(wrapper, "EnableKeyboard", true, dbg);
                 }
                 if name.eq_ignore_ascii_case("OnLoad") {
-                    onload = Some(func);
+                    // A blanked `<OnLoad/>` leaves nothing to fire — and it must also UNSET a
+                    // handle a template's own OnLoad put here, or the caller fires the very body
+                    // this element exists to remove.
+                    onload = func;
                 }
             }
         }
@@ -109,7 +144,11 @@ impl Loader<'_> {
         name: &str,
         dbg: &str,
     ) -> Option<Function> {
-        let body = handler.body.trim();
+        // **The raw body, NOT a trimmed one** — 1.12 hands `node->text` straight to
+        // `luaL_loadbuffer` and tests only its first byte, so a whitespace-only body is a real
+        // (empty) chunk there and must be one here. See `apply_scripts` for the bytes and for the
+        // seven stock files that depend on it.
+        let body = handler.body.as_str();
         if !body.is_empty() {
             let src = format!(
                 "return function(self, ...) if self == nil then self = this end\n{body}\nend"

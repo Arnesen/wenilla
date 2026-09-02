@@ -164,8 +164,10 @@
         -- ref's titleButton.type dispatch (ref l.53-61), collapsed onto our seam's two intents
         -- (SelectGossipQuest covers both the ref's Available/Active clicks, gossip.rs's doc comment).
         function BenillaGossipRow_OnClick(button)
-            if button.kind == "quest" then
-                SelectGossipQuest(button.itemIndex)
+            if button.kind == "available" then
+                SelectGossipAvailableQuest(button.itemIndex)
+            elseif button.kind == "active" then
+                SelectGossipActiveQuest(button.itemIndex)
             else
                 SelectGossipOption(button.itemIndex)
             end
@@ -173,22 +175,30 @@
 
         function BenillaGossipFrame_Update()
             getglobal("GossipGreetingText"):SetText(GetGossipText() or "")
-            local numQuests = GetNumGossipQuests()
+            -- **The reference's own two lists, in the reference's own order** (ref l.27-28:
+            -- available, then active). Each verb returns a flat vararg of (title, level) PAIRS, and
+            -- each click indexes back INTO ITS OWN LIST — which is why the row remembers which
+            -- list it came from rather than one shared position. This replaced
+            -- `GetNumGossipQuests`/`GetGossipQuestInfo`/`SelectGossipQuest`, three names benilla
+            -- invented and 1.12 does not have (1189: a superset is not free).
+            local avail = { GetGossipAvailableQuests() }
+            local active = { GetGossipActiveQuests() }
+            local numAvail, numActive = #avail / 2, #active / 2
+            local numQuests = numAvail + numActive
             -- GetGossipOptions() returns a flat vararg of (label, type) pairs (the Era shape).
             local opts = { GetGossipOptions() }
             local numOptions = #opts / 2
             for i = 1, BENILLA_GOSSIP_MAX do
                 local button = getglobal("GossipTitleButton" .. i)
                 if i <= numQuests then
-                    -- Quest rows fill first (ref l.27-28: available then active, already ordered by
-                    -- the app before it reaches GetGossipQuestInfo) — the row's OWN 1-based position
-                    -- IS its quest-list index, so no separate local counter is needed.
-                    local title, active = GetGossipQuestInfo(i)
-                    button.kind = "quest"
-                    button.itemIndex = i
-                    button.label:SetText(title)
+                    local isActive = i > numAvail
+                    local listIndex = isActive and (i - numAvail) or i
+                    local src = isActive and active or avail
+                    button.kind = isActive and "active" or "available"
+                    button.itemIndex = listIndex
+                    button.label:SetText(src[(listIndex - 1) * 2 + 1])
                     BenillaGossipRow_Resize(button)
-                    button.icon:SetTexture(active and BENILLA_GOSSIP_QUEST_ICON_ACTIVE or BENILLA_GOSSIP_QUEST_ICON_AVAILABLE)
+                    button.icon:SetTexture(isActive and BENILLA_GOSSIP_QUEST_ICON_ACTIVE or BENILLA_GOSSIP_QUEST_ICON_AVAILABLE)
                     button:Enable()
                     button:Show()
                 elseif i <= numQuests + numOptions then

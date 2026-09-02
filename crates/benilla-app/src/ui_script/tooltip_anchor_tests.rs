@@ -310,7 +310,11 @@ fn ubertooltips_off_seats_stance_plates_beside_the_button() {
 /// BOTTOMLEFT.
 #[test]
 fn buff_hover_hangs_below_left_of_the_button() {
-    let mut s = harness(&["Cooldown.xml", "ActionBar.xml", "BuffFrame.xml"]);
+    let mut s = harness(&[
+        "Cooldown.xml",
+        "ActionBar.xml",
+        "Interface\\FrameXML\\BuffFrame.xml",
+    ]);
     s.set_auras(
         "player",
         Some(vec![AuraState {

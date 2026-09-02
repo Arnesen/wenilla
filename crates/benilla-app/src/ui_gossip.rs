@@ -56,10 +56,14 @@ pub(crate) struct GossipState {
     /// The selectable option rows (wire `GossipOption`: `index` echoed on select, `icon`, `coded`,
     /// `message`).
     pub(crate) options: Vec<GossipOption>,
-    /// The quest rows riding the same packet — `(quest_id, dialog-status icon, title)`. The gossip
+    /// The quest rows riding the same packet — `(quest_id, dialog-status icon, level, title)`.
+    /// The level joined the tuple with 1751 window 21: the reference's own
+    /// `GetGossipAvailableQuests`/`GetGossipActiveQuests` return `(title, level)` PAIRS and stock
+    /// `GossipFrame.lua` strides its walk by 2 over them, so a dropped level is a broken stride
+    /// rather than a missing number. It was on the wire all along. The gossip
     /// window lists them above the options; a click sends `CMSG_QUESTGIVER_QUERY_QUEST` /
     /// `_COMPLETE_QUEST` (decision 0088).
-    pub(crate) quests: Vec<(u32, u32, String)>,
+    pub(crate) quests: Vec<(u32, u32, u32, String)>,
     /// Ask-once NPC-text record cache keyed by `text_id` — the 8 undrawn blocks.
     records: HashMap<u32, Vec<NpcTextBlock>>,
 }
@@ -93,7 +97,7 @@ impl GossipState {
         npc: u64,
         text_id: u32,
         options: Vec<GossipOption>,
-        quests: Vec<(u32, u32, String)>,
+        quests: Vec<(u32, u32, u32, String)>,
         npc_gender: u8,
     ) -> bool {
         self.npc = Some(npc);
@@ -268,8 +272,9 @@ fn snapshot(state: &GossipState) -> Option<GossipMenu> {
         quests: state
             .quests
             .iter()
-            .map(|(_id, icon, title)| GossipQuestRow {
+            .map(|(_id, icon, level, title)| GossipQuestRow {
                 title: title.clone(),
+                level: *level,
                 active: row_is_active(*icon),
             })
             .collect(),
@@ -422,7 +427,7 @@ fn drain_gossip(
             .checked_sub(1)
             .and_then(|i| state.quests.get(i as usize))
         {
-            Some((quest_id, icon, _title)) => {
+            Some((quest_id, icon, _level, _title)) => {
                 let (quest, icon) = (*quest_id, *icon);
                 let active = row_is_active(icon);
                 // Same opcode law as the greeting panel: an active row is always a turn-in; an

@@ -23,7 +23,7 @@ fn harness() -> UiScript {
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "ActionBar.xml"); // BENILLA_FALLBACK_ICON
     load_xml(&s, "UnitFrames.xml"); // loads BEFORE BuffFrame, as in the app
-    load_xml(&s, "BuffFrame.xml"); // DebuffTypeColor
+    load_xml(&s, "Interface\\FrameXML\\BuffFrame.xml"); // DebuffTypeColor
     s
 }
 

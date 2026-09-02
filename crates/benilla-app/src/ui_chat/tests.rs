@@ -16,6 +16,7 @@ fn ev(kind: K, text: &str, sender: &str) -> ChatEvent {
 
 #[test]
 fn player_lines_link_the_name_except_emote() {
+    let _data = benilla_formats::wow_data_or_skip!();
     // The composer emits the REAL |Hplayer link now (ref ChatFrame.lua l.1451); the renderer
     // strips the markers and spans the [Name] (the P2 markup law).
     assert_eq!(
@@ -40,6 +41,7 @@ fn player_lines_link_the_name_except_emote() {
 
 #[test]
 fn group_prefixed_kinds_wear_their_brackets() {
+    let _data = benilla_formats::wow_data_or_skip!();
     assert_eq!(
         compose(&ev(K::Party, "inc 3", "Ann"), K::Party, "Common").unwrap(),
         "[Party] |Hplayer:Ann|h[Ann]|h: inc 3"
@@ -56,6 +58,7 @@ fn group_prefixed_kinds_wear_their_brackets() {
 
 #[test]
 fn flags_prefix_the_name_and_afk_uses_its_get() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut e = ev(K::Say, "brb", "Bob");
     e.flag = "GM".into();
     assert_eq!(
@@ -71,6 +74,7 @@ fn flags_prefix_the_name_and_afk_uses_its_get() {
 
 #[test]
 fn language_header_rides_non_default_tongues() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut e = ev(K::Say, "throm-ka", "Grunk");
     e.language = "Orcish".into();
     assert_eq!(
@@ -87,6 +91,7 @@ fn language_header_rides_non_default_tongues() {
 
 #[test]
 fn system_and_loot_lines_are_verbatim() {
+    let _data = benilla_formats::wow_data_or_skip!();
     assert_eq!(
         compose(
             &ChatEvent::text_only(K::System, "Additem: Wool Cloth added.".into()),
@@ -118,6 +123,7 @@ fn system_and_loot_lines_are_verbatim() {
 /// into the render.
 #[test]
 fn text_emote_lines_are_verbatim_and_never_wear_the_senders_name() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let e = ev(K::TextEmote, "Bob waves at you.", "Bob");
     assert_eq!(
         compose(&e, K::TextEmote, "Common").unwrap(),
@@ -139,6 +145,7 @@ fn text_emote_lines_are_verbatim_and_never_wear_the_senders_name() {
 /// intact) is what makes this a gate and not a mute button.
 #[test]
 fn emoting_at_your_own_selection_sends_an_untargeted_emote() {
+    let _data = benilla_formats::wow_data_or_skip!();
     use crate::target::Selection;
     use bevy::prelude::Entity;
 
@@ -225,6 +232,7 @@ fn a_received_text_emote_composes_its_sentence_and_names_the_performer() {
 
 #[test]
 fn level_up_lines_follow_the_reference_order_and_forms() {
+    let _data = benilla_formats::wow_data_or_skip!();
     use benilla_protocol::messages::LevelUpInfo;
 
     // A caster ding with talent point + three stat gains: the PLAYER_LEVEL_UP handler's exact
@@ -277,6 +285,7 @@ fn level_up_lines_follow_the_reference_order_and_forms() {
 /// without it.
 #[test]
 fn honor_gain_lines_pick_the_reference_form() {
+    let _data = benilla_formats::wow_data_or_skip!();
     assert_eq!(
         super::feed::honor_gain_line(None, None, 42),
         "You have been awarded 42 honor points."
@@ -307,6 +316,7 @@ fn honor_gain_lines_pick_the_reference_form() {
 
 #[test]
 fn xp_gain_lines_pick_the_reference_form() {
+    let _data = benilla_formats::wow_data_or_skip!();
     // COMBATLOG_XPGAIN_FIRSTPERSON / its EXHAUSTION1 rested form / _UNNAMED (GlobalStrings
     // :801/:789/:804).
     assert_eq!(
@@ -327,6 +337,7 @@ fn xp_gain_lines_pick_the_reference_form() {
 
 #[test]
 fn exploration_lines_pick_the_reference_form() {
+    let _data = benilla_formats::wow_data_or_skip!();
     // ERR_ZONE_EXPLORED (GlobalStrings :1925) — the toast, fired on EVERY exploration packet
     // (UIErrorsFrame); ERR_ZONE_EXPLORED_XP (:1926) — the chat system line that rides
     // additionally iff xp > 0 (byte-verified branch `0x5e422f`; decisions 0828/0829).
@@ -342,6 +353,7 @@ fn exploration_lines_pick_the_reference_form() {
 
 #[test]
 fn monster_lines_use_the_bare_inline_name() {
+    let _data = benilla_formats::wow_data_or_skip!();
     assert_eq!(
         compose(
             &ev(K::MonsterSay, "Intruders!", "Guard"),
@@ -365,6 +377,7 @@ fn monster_lines_use_the_bare_inline_name() {
 
 #[test]
 fn channel_line_prefixes_the_stripped_channel() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut e = ev(K::Channel, "wts boar livers", "Bob");
     e.channel = "General - Elwynn Forest".into();
     assert_eq!(
@@ -381,6 +394,7 @@ fn channel_line_prefixes_the_stripped_channel() {
 /// returned — so speech says "[General]" and the join notice says "[General - Elwynn Forest]".
 #[test]
 fn channel_notices_compose_by_the_notice_law() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut e = ChatEvent::text_only(K::ChannelNotice, String::new());
     e.channel = "General - Elwynn Forest".into();
     e.notice = "2".into(); // YOU_JOINED
@@ -427,17 +441,12 @@ fn chat_vm() -> benilla_ui::script::UiScript {
         "Fonts.xml",
         "GameTooltip.xml",
         "UIDropDownMenu.xml",
+        // The UIMenu kit is the reference's own file since 1751 window 21, so this reads both
+        // stores through the one loader that speaks them.
+        "Interface\\FrameXML\\UIMenu.xml",
         "ChatFrame.xml",
     ] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
+        crate::ui_script::load_ui_for_test(&s, file);
     }
     s.set_screen_size(1600.0, 900.0);
     s.resolve();
@@ -474,6 +483,7 @@ fn lines_in_window(s: &benilla_ui::script::UiScript) -> i64 {
 /// The spy is a control, not decoration: without it a broken fire would pass this test.
 #[test]
 fn an_addon_registering_our_own_chat_frame_does_not_double_print() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_vm();
     let mut windows = super::frames::ChatWindows::default();
     s.run(SPY).unwrap();
@@ -510,6 +520,7 @@ fn an_addon_registering_our_own_chat_frame_does_not_double_print() {
 /// in for ChatFrame1's handler, so it has to run first for the same reason.
 #[test]
 fn an_addons_handler_sees_the_line_already_in_the_window() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_vm();
     let mut windows = super::frames::ChatWindows::default();
     s.run(
@@ -537,6 +548,7 @@ fn an_addons_handler_sees_the_line_already_in_the_window() {
 /// line.
 #[test]
 fn a_say_line_fires_chat_msg_say_in_the_references_arg_positions() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_vm();
     let mut windows = super::frames::ChatWindows::default();
     s.run(SPY).unwrap();
@@ -565,6 +577,7 @@ fn a_say_line_fires_chat_msg_say_in_the_references_arg_positions() {
 /// would have caught passing nine args instead of ten.
 #[test]
 fn a_channel_notice_fires_its_token_and_the_reference_reads_arg7_and_arg10_bare() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_vm();
     let mut windows = super::frames::ChatWindows::default();
     s.run(SPY).unwrap();
@@ -618,6 +631,7 @@ fn a_channel_notice_fires_its_token_and_the_reference_reads_arg7_and_arg10_bare(
 /// now asserts.
 #[test]
 fn a_mode_change_notice_never_becomes_an_event() {
+    let _data = benilla_formats::wow_data_or_skip!();
     use benilla_protocol::messages::{channel_notice, ChannelNoticeTail};
 
     let mut log = super::feed::ChatLog::default();
@@ -651,6 +665,7 @@ fn a_mode_change_notice_never_becomes_an_event() {
 /// (`slot+0x00/+0x04/+0x94/+0x98`), so they are one record here (`chat-msg-event-args.md` §§4, 7-10).
 #[test]
 fn a_channel_we_are_not_in_fires_the_bare_name_and_zeroes() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_vm();
     let mut windows = super::frames::ChatWindows::default();
     s.run(SPY).unwrap();
@@ -676,6 +691,7 @@ fn a_channel_we_are_not_in_fires_the_bare_name_and_zeroes() {
 /// display form gets the number prefix, arg9 never does.
 #[test]
 fn stamping_a_channel_splits_the_display_form_from_the_base_name() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut channels = super::edit::ChannelState::default();
     channels.claim_slot("World");
     channels.claim_slot("General - Elwynn Forest");
@@ -709,6 +725,7 @@ fn stamping_a_channel_splits_the_display_form_from_the_base_name() {
 /// quad, because the color that matters is the one that reaches the screen.
 #[test]
 fn a_channel_notice_renders_in_the_channels_color_not_the_notice_row() {
+    let _data = benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::QuadContent;
 
     let mut s = chat_vm();
@@ -750,6 +767,7 @@ fn a_channel_notice_renders_in_the_channels_color_not_the_notice_row() {
 /// though their own rows differ (CHANNEL_JOIN/LEAVE are C08080, the notices C0C0C0).
 #[test]
 fn the_channel_color_override_covers_the_family_but_not_its_two_exemptions() {
+    let _data = benilla_formats::wow_data_or_skip!();
     use super::event::resolved_color;
 
     let chan = [255, 192, 192];
@@ -790,6 +808,7 @@ fn the_channel_color_override_covers_the_family_but_not_its_two_exemptions() {
 /// 0x49bbd0`), so the line is numbered and an addon's handler still sees the channel.
 #[test]
 fn a_leave_notice_keeps_its_number_because_the_record_dies_after_the_line() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_vm();
     let mut windows = super::frames::ChatWindows::default();
     let mut channels = super::edit::ChannelState::default();
@@ -826,6 +845,7 @@ fn a_leave_notice_keeps_its_number_because_the_record_dies_after_the_line() {
 /// free one, so a zone hop *renames* a channel and leaves its number alone.
 #[test]
 fn a_freed_slot_is_reused_and_the_others_keep_their_numbers() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut c = super::edit::ChannelState::default();
     assert_eq!(c.claim_slot("General - Teldrassil"), Some(1));
     assert_eq!(c.claim_slot("Trade - City"), Some(2));
@@ -877,6 +897,7 @@ fn a_freed_slot_is_reused_and_the_others_keep_their_numbers() {
 /// new character's. Everything the module remembers across a box open goes with the lines.
 #[test]
 fn a_session_end_empties_the_window_and_the_boxs_memory() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_vm();
     let mut windows = super::frames::ChatWindows::default();
     let mut edit = super::edit::ChatEditState::default();
@@ -917,6 +938,7 @@ fn a_session_end_empties_the_window_and_the_boxs_memory() {
 /// `CHAT_<X>_NOTICE` GlobalStrings keys).
 #[test]
 fn every_rendered_notice_has_a_token() {
+    let _data = benilla_formats::wow_data_or_skip!();
     for byte in 0x00u8..=0x1F {
         let mut e = ChatEvent::text_only(K::ChannelNotice, String::new());
         e.channel = "World".into();
@@ -934,6 +956,7 @@ fn every_rendered_notice_has_a_token() {
 /// exhaustive match at compile time; this is what makes you add it to `ALL` as well.
 #[test]
 fn every_kind_is_in_all() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut seen: Vec<&str> = K::ALL
         .iter()
         .map(|&k| super::event::event_name(k))
@@ -947,6 +970,7 @@ fn every_kind_is_in_all() {
 
 #[test]
 fn colors_match_the_shipped_table() {
+    let _data = benilla_formats::wow_data_or_skip!();
     assert_eq!(default_color(K::Say), [255, 255, 255]);
     assert_eq!(default_color(K::System), [255, 255, 0]);
     assert_eq!(default_color(K::Yell), [255, 64, 64]);
@@ -1005,6 +1029,7 @@ fn enter_switch(text: &str) -> Option<(super::edit::TypeSwitch, String)> {
 
 #[test]
 fn enter_path_type_switch_converts_and_keeps_the_remainder() {
+    let _data = benilla_formats::wow_data_or_skip!();
     use super::edit::{SendType, TypeSwitch};
     for (cmd, want) in [
         ("s", SendType::Say),
@@ -1034,6 +1059,7 @@ fn enter_path_type_switch_converts_and_keeps_the_remainder() {
 
 #[test]
 fn enter_path_whisper_takes_name_then_message() {
+    let _data = benilla_formats::wow_data_or_skip!();
     use super::edit::TypeSwitch;
     for cmd in ["w", "whisper", "t", "tell", "send"] {
         let (sw, rest) = enter_switch(&format!("/{cmd} Bob hi there")).expect(cmd);
@@ -1051,6 +1077,7 @@ fn enter_path_whisper_takes_name_then_message() {
 
 #[test]
 fn live_parse_waits_for_the_delimiting_space() {
+    let _data = benilla_formats::wow_data_or_skip!();
     use super::edit::{parse_type_switch, ChannelState, ChatEditState, TypeSwitch};
     let mut state = ChatEditState::default();
     let chans = ChannelState::default();
@@ -1076,6 +1103,7 @@ fn live_parse_waits_for_the_delimiting_space() {
 
 #[test]
 fn tell_ring_dedups_and_cycles() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut state = super::edit::ChatEditState::default();
     state.remember_tell("Ann");
     state.remember_tell("Bob");
@@ -1090,6 +1118,7 @@ fn tell_ring_dedups_and_cycles() {
 
 #[test]
 fn action_commands_parse() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let t = stub_table();
     let parse_line = |line: &str| super::input::parse_line(&t, line);
     assert_eq!(
@@ -1142,6 +1171,7 @@ fn action_commands_parse() {
 
 #[test]
 fn emote_aliases_resolve_through_the_table() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let t = stub_table();
     let parse_line = |line: &str| super::input::parse_line(&t, line);
     assert_eq!(parse_line("/wave"), ParsedChat::TextEmote(101));
@@ -1156,6 +1186,7 @@ fn emote_aliases_resolve_through_the_table() {
 
 #[test]
 fn logout_and_camp_parse() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let t = stub_table();
     let parse_line = |line: &str| super::input::parse_line(&t, line);
     for line in ["/logout", "/camp", "/LOGOUT", "/logout now"] {
@@ -1166,6 +1197,7 @@ fn logout_and_camp_parse() {
 
 #[test]
 fn one_line_reference_bodies_run_in_the_vm() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let t = stub_table();
     let parse_line = |line: &str| super::input::parse_line(&t, line);
     // `/trade` is the ref's `InitiateTrade("target")`, verbatim.
@@ -1192,6 +1224,7 @@ fn one_line_reference_bodies_run_in_the_vm() {
 /// it happens to run in. (It assumed, until 1180's `player-tests` gate ran it the other way.)
 #[test]
 fn castvis_parses_id_and_phase() {
+    let _data = benilla_formats::wow_data_or_skip!();
     use crate::creature_anim::CastEventKind;
     let t = stub_table();
     let parse_line = |line: &str| super::input::parse_line(&t, line);
@@ -1243,6 +1276,7 @@ fn castvis_parses_id_and_phase() {
 
 #[test]
 fn unknown_slash_command_is_dropped_not_said_aloud() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let t = stub_table();
     let parse_line = |line: &str| super::input::parse_line(&t, line);
     // The regression this grammar exists to fix: `/yell` used to literally SAY "/yell hello" —
@@ -1451,12 +1485,14 @@ const LAUGH: u32 = 0x0980;
 
 #[test]
 fn seated_stand_required_emotes_are_suppressed() {
+    let _data = benilla_formats::wow_data_or_skip!();
     assert!(!emote_send_eligible(BOW, 1, false)); // 0x4801 has 0x1 (requires STAND)
     assert!(!emote_send_eligible(RUDE, 1, false));
 }
 
 #[test]
 fn seated_non_stand_emotes_pass() {
+    let _data = benilla_formats::wow_data_or_skip!();
     assert!(emote_send_eligible(APPLAUD, 1, false));
     assert!(emote_send_eligible(CHEER, 1, false));
     assert!(emote_send_eligible(LAUGH, 1, false));
@@ -1465,12 +1501,14 @@ fn seated_non_stand_emotes_pass() {
 
 #[test]
 fn swimming_suppresses_only_the_0x80_emotes() {
+    let _data = benilla_formats::wow_data_or_skip!();
     assert!(!emote_send_eligible(LAUGH, 0, true)); // 0x0980 has 0x80
     assert!(emote_send_eligible(CHEER, 0, true));
 }
 
 #[test]
 fn standing_and_dry_everyone_is_eligible() {
+    let _data = benilla_formats::wow_data_or_skip!();
     for flags in [BOW, RUDE, APPLAUD, CHEER, SALUTE, LAUGH] {
         assert!(emote_send_eligible(flags, 0, false), "flags {flags:#x}");
     }
@@ -1478,6 +1516,7 @@ fn standing_and_dry_everyone_is_eligible() {
 
 #[test]
 fn unconditional_and_sleep_dead_rules() {
+    let _data = benilla_formats::wow_data_or_skip!();
     assert!(!emote_send_eligible(0x0400, 0, false)); // unconditional suppress
     assert!(!emote_send_eligible(0, 3, false)); // SLEEP without the allow bit
     assert!(!emote_send_eligible(0, 7, false)); // DEAD without the allow bit
@@ -1492,6 +1531,7 @@ fn unconditional_and_sleep_dead_rules() {
 /// opening the box lands in the same type the player's own keypress would.
 #[test]
 fn a_sticky_whose_group_is_gone_opens_as_say() {
+    let _data = benilla_formats::wow_data_or_skip!();
     use super::edit::{sticky_on_open, SendType};
     use crate::ui_party::GroupState;
 
@@ -1530,6 +1570,7 @@ fn a_sticky_whose_group_is_gone_opens_as_say() {
 /// branch on either way.
 #[test]
 fn an_inbound_addon_line_splits_on_the_first_tab_only() {
+    let _data = benilla_formats::wow_data_or_skip!();
     // **Imported, not hand-copied.** These read `0x03`/`0x04`/`0x18` for RAID/GUILD/BATTLEGROUND,
     // which are all wrong — and because the test carried the SAME wrong bytes as the code under
     // test, it agreed with the defect instead of catching it. A test that restates the value it is
@@ -1579,6 +1620,7 @@ fn an_inbound_addon_line_splits_on_the_first_tab_only() {
 /// four positionally, so a reordering fails on the values rather than on a count.
 #[test]
 fn the_addon_event_reaches_lua_with_four_arguments_in_order() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.run(
         r#"
@@ -1644,6 +1686,7 @@ fn the_addon_event_reaches_lua_with_four_arguments_in_order() {
 /// only the first, so the payload must come back with its own tabs intact.
 #[test]
 fn an_addon_message_survives_its_own_send_and_receive() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.run(r#"SendAddonMessage("oRA", "SYNC\t1\t2", "PARTY")"#)
         .unwrap();
@@ -1683,6 +1726,7 @@ fn an_addon_message_survives_its_own_send_and_receive() {
 /// so a fully-understood foreign line still carries its tag.
 #[test]
 fn the_language_header_suppresses_only_the_frames_own_default_tongue() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let orcish = ChatEvent {
         language: "Orcish".into(),
         ..ev(K::Say, "lok'tar", "Grom")
@@ -1749,6 +1793,7 @@ fn the_language_header_suppresses_only_the_frames_own_default_tongue() {
 /// text here and the laugh silently becomes a plain talk.
 #[test]
 fn the_talk_gesture_reads_the_plaintext_not_the_garbled_line() {
+    let _data = benilla_formats::wow_data_or_skip!();
     use crate::creature_anim::{select_gesture, Gesture};
     use benilla_protocol::messages::CHAT_MSG_SAY;
 
@@ -1788,6 +1833,7 @@ fn the_talk_gesture_reads_the_plaintext_not_the_garbled_line() {
 /// useless. This asserts the text.
 #[test]
 fn an_addon_sees_the_combat_log_line_it_registers_for() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_vm();
     let mut windows = super::frames::ChatWindows::default();
     s.run(SPY).unwrap();
@@ -1823,6 +1869,7 @@ fn an_addon_sees_the_combat_log_line_it_registers_for() {
 /// and would otherwise be found by a player's damage meter months later.
 #[test]
 fn every_combat_log_kind_reaches_an_addon() {
+    let _data = benilla_formats::wow_data_or_skip!();
     for kind in K::ALL.iter().copied().filter(|k| k.is_combat_log()) {
         let name = super::event::event_name(kind);
         let mut s = chat_vm();
@@ -1867,6 +1914,7 @@ fn every_combat_log_kind_reaches_an_addon() {
 /// this guards against is the player/monster branch's decorations leaking onto a combat line.
 #[test]
 fn a_combat_log_line_renders_verbatim() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let default_language = String::from("Common");
     for kind in K::ALL.iter().copied().filter(|k| k.is_combat_log()) {
         let mut e = ChatEvent::text_only(kind, "You hit Kobold Vermin for 5.".into());
@@ -1891,6 +1939,7 @@ fn a_combat_log_line_renders_verbatim() {
 /// behaviour and the reason a damage meter works without touching the windows.
 #[test]
 fn the_combat_log_lands_in_window_two_only() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let windows = super::frames::ChatWindows::default();
     for kind in [
         K::CombatSelfHits,
@@ -1926,6 +1975,7 @@ fn the_combat_log_lands_in_window_two_only() {
 /// the broken half).
 #[test]
 fn both_dock_tabs_exist_and_select_their_window() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = chat_vm();
     for id in [1, 2] {
         assert!(
@@ -1977,6 +2027,7 @@ fn the_dock_tab_labels_come_from_the_install() {
 /// pixels".
 #[test]
 fn the_combat_log_window_has_the_docks_rect() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = chat_vm();
     let edge = |frame: &str, get: &str| {
         s.eval::<Option<f64>>(&format!("return {frame}:{get}()"))
@@ -2035,6 +2086,7 @@ fn the_combat_log_window_has_the_docks_rect() {
 /// both halves of each piece: the texture the fade paints and the button that grabs it.
 #[test]
 fn both_dock_windows_carry_the_same_chrome() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = chat_vm();
     // The reference's own `CHAT_FRAME_TEXTURES`, which is also the list the file declares — read
     // out of the VM rather than restated here, so a piece that leaves the list cannot leave this
@@ -2108,6 +2160,7 @@ fn both_dock_windows_carry_the_same_chrome() {
 /// `<Layers>`, `<Frames>` or `<Scripts>` block on any instance is the defect, whatever is in it.
 #[test]
 fn the_seven_chat_windows_are_one_declaration() {
+    let _data = benilla_formats::wow_data_or_skip!();
     use benilla_ui::framexml::TopLevel;
     let xml = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/ChatFrame.xml"),
@@ -2154,6 +2207,7 @@ fn the_seven_chat_windows_are_one_declaration() {
 /// ChatFrame1, and a hidden frame gets no `OnUpdate`, so the whole dock froze on first use.
 #[test]
 fn the_dock_driver_does_not_ride_a_dock_window() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let xml = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/ChatFrame.xml"),
     )
@@ -2201,6 +2255,7 @@ fn the_dock_driver_does_not_ride_a_dock_window() {
 /// defect, whatever it contains.
 #[test]
 fn no_docked_chat_window_is_managed_by_uiparent() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let xml = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/UIParent.xml"),
     )

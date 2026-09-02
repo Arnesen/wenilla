@@ -9,12 +9,12 @@
 //! depths: the Lua-visible state (`TALENT_BRANCH_ARRAY`), the logical frame state (`IsShown`),
 //! and the extract the renderer actually draws (branch/arrow quads with their atlas coords).
 
+mod common;
+
 use benilla_ui::script::{
     QuadContent, SpellTooltipView, TalentPrereqView, TalentTabView, TalentUiState, TalentView,
     UiScript,
 };
-
-const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 
 /// The talent window's load prefix — the app's own order (`assets/ui/benilla.toc`), members only.
 /// `ItemButtonTemplate.xml` is the `SetItemButton*` family the talent buttons grey through (the
@@ -22,7 +22,7 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// other entry here bar `Fonts.xml`.
 const FILES: [&str; 7] = [
     "Fonts.xml",
-    "ItemButtonTemplate.xml",
+    "Interface\\FrameXML\\ItemButtonTemplate.xml",
     "MoneyFrame.xml",
     "UiPanels.xml",
     "GameTooltip.xml",
@@ -31,28 +31,8 @@ const FILES: [&str; 7] = [
 ];
 
 fn load_ui(script: &UiScript) {
-    let dir = std::path::Path::new(UI_DIR);
-    // The app's provider shape: backslash paths, dir-relative, basename fallback.
-    let provider = |req: &str| -> Option<Vec<u8>> {
-        let norm = req.replace('\\', "/");
-        let base = norm.rsplit('/').next().unwrap_or(&norm);
-        std::fs::read(dir.join(&norm))
-            .or_else(|_| std::fs::read(dir.join(base)))
-            .ok()
-    };
     for file in FILES {
-        let text = std::fs::read_to_string(dir.join(file)).unwrap_or_else(|e| {
-            panic!("reading {file}: {e}");
-        });
-        let doc = benilla_ui::framexml::parse(&text).unwrap_or_else(|e| {
-            panic!("parsing {file}: {e}");
-        });
-        let report = benilla_ui::loader::load(script, &doc, &provider);
-        assert!(
-            report.errors.is_empty(),
-            "{file} loaded with errors: {:#?}",
-            report.errors
-        );
+        common::load_ui(script, file);
     }
 }
 
@@ -125,6 +105,7 @@ fn open_window(points_spent: u32) -> UiScript {
 
 #[test]
 fn branch_lines_draw_for_a_same_column_prereq() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut script = open_window(10);
     // Depth 1 — the Lua machinery: Update ran, the branch array carries the vertical chain
     // (tier 1's down-edge, the empty tier-2 cell's up+down, the button's own top arrow).
@@ -182,6 +163,7 @@ fn branch_lines_draw_for_a_same_column_prereq() {
 
 #[test]
 fn tooltip_is_complete_on_the_first_hover() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut script = open_window(10);
     // The app's feed owes the store every talent spell view up front (the spellbook's own
     // arrival-driven contract) — with the views in place, the FIRST OnEnter must render the
@@ -202,6 +184,7 @@ fn tooltip_is_complete_on_the_first_hover() {
 
 #[test]
 fn tooltip_miss_still_shows_the_rank_line() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut script = open_window(10);
     // The store is EMPTY (no views pushed): the ask-once fallback must still show a box with
     // the talent head — never a blank hover — and record the ask for the app's resolver.
@@ -224,6 +207,7 @@ fn tooltip_miss_still_shows_the_rank_line() {
 
 #[test]
 fn a_locked_tier_still_draws_the_branch_gray() {
+    let _data = benilla_formats::wow_data_or_skip!();
     // The director's own day-one state: 2 points spent, tier 3 locked — the reference draws
     // the chain anyway, gray (the `-1` keys of the texcoord tables; a typo'd negative key
     // would error the draw loop and hide every line while the grid stays perfect).
@@ -258,6 +242,7 @@ fn a_locked_tier_still_draws_the_branch_gray() {
 /// greys the whole tree passes the first assertion and fails this one.
 #[test]
 fn an_unavailable_talent_reaches_the_renderer_desaturated() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut script = open_window(2);
     script.resolve();
     let icon = |quads: &[benilla_ui::script::ExtractedQuad], leaf: &str| -> (bool, [f32; 4]) {
@@ -304,6 +289,7 @@ fn an_unavailable_talent_reaches_the_renderer_desaturated() {
 
 #[test]
 fn a_wheel_spin_over_the_grid_scrolls_the_tree() {
+    let _data = benilla_formats::wow_data_or_skip!();
     // The wheel's whole chain, driven from the pointer entry point the app feeds: hit-test on
     // a talent button, bubble to the ScrollFrame's OnMouseWheel, step the Slider, whose
     // OnValueChanged pans the frame. This is the chain the 2051f4f8 rename broke silently —

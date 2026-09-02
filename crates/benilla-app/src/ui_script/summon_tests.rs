@@ -19,24 +19,7 @@ fn player(in_combat: bool) -> UnitState {
     }
 }
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error (the binder tests'
-/// loader, duplicated so this file is self-contained).
-fn load_xml(s: &UiScript, file: &str) -> usize {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-    report.frames
-}
+use super::test_ui::load_ui as load_xml;
 
 /// The app's own pre-state: a live offer from Twomage, out of Stormwind City, with the server's
 /// full two-minute window still on the clock.

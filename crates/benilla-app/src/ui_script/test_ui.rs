@@ -116,7 +116,7 @@ pub(super) const BAG_UI: &[&str] = &[
     // `OpenAllBags` opens with `if not UIParent:IsVisible() then return end`. Without it the
     // windows fall out of the cascade and the reference's own layout pass has nothing to measure.
     "UIParent.xml",
-    "ItemButtonTemplate.xml",
+    "Interface\\FrameXML\\ItemButtonTemplate.xml",
     "MoneyFrame.xml",
     "UiPanels.xml",
     "GameTooltip.xml",
@@ -143,6 +143,7 @@ pub(super) const BAG_UI: &[&str] = &[
     // …nor is the chat edit box. The reference's SHIFT arm opens with
     // `if ( ChatFrameEditBox:IsShown() )` (ContainerFrame.lua l.569) to decide between posting the
     // item's link and splitting the stack, so a VM without it raises before either.
+    "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
     "ChatFrame.xml",
     // Our adapters over the reference's container files — the keyring tooltip wrapper, the three
     // bag verbs 0561 shadows (`OpenBackpack`/`CloseBackpack`/`CloseAllBags`), and the item-push

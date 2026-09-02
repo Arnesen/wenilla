@@ -508,6 +508,12 @@ fn resolve_slot(
     let texture = icons
         .and_then(|i| i.catalog.get(item.display_id))
         .and_then(|d| d.icon.clone());
+    // The same link the merchant rows carry, built by the same helper — nil until the template
+    // answers, because the string embeds both the name and the quality colour.
+    let link = match (name.as_deref(), quality) {
+        (Some(n), Some(q)) => Some(crate::ui_items::item_link(item.entry, n, q)),
+        _ => None,
+    };
     TradeSlotItem {
         item_id: item.entry,
         name,
@@ -515,6 +521,7 @@ fn resolve_slot(
         count: item.count.max(1),
         quality,
         enchantment: None,
+        link,
     }
 }
 

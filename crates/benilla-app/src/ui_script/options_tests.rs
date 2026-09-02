@@ -73,6 +73,11 @@ fn harness_on(mut s: UiScript) -> UiScript {
             );
         }
     }
+    // The app's own post-load pass, at the app's own moment: everything is loaded, so
+    // `SHOW_BUFF_DURATIONS` (declared by OptionsFrame.xml, just above) is real by the time the
+    // buff bar's row pitch is settled from it. `BuffFrame_OnLoad` does not do this and 1.12 leaves
+    // it to UIOptionsFrame.lua, which we have no counterpart to (`manifest::apply_buff_durations`).
+    super::manifest::apply_buff_durations(&s).unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     s
 }
@@ -687,19 +692,9 @@ fn combat_harness() -> UiScript {
 /// exactly the ordering the real manifest guarantees.
 fn load_definers(s: &UiScript, files: &[&str]) {
     for file in files {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(s, &doc, &|_| None);
-        assert!(
-            report.errors.is_empty(),
-            "{file}: loader errors: {:?}",
-            report.errors
-        );
+        // Both stores: a definer can be the reference's own file now (BuffFrame.xml since 1751
+        // window 18), and `test_ui::load_ui` is the reader that speaks either.
+        super::test_ui::load_ui(s, file);
     }
 }
 
@@ -738,7 +733,7 @@ fn interface_harness() -> UiScript {
             "Cooldown.xml",
             "ActionBar.xml",
             "ScrollTemplates.xml",
-            "BuffFrame.xml",
+            "Interface\\FrameXML\\BuffFrame.xml",
             "MerchantFrame.xml",
             "QuestFrame.xml",
             "QuestLogFrame.xml",
@@ -765,6 +760,7 @@ fn chat_harness() -> UiScript {
             "UIParent.xml",
             "GameTooltip.xml",
             "UIDropDownMenu.xml",
+            "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
             "ChatFrame.xml",
         ],
     );

@@ -55,6 +55,7 @@ fn item(item_id: u32, name: &str, count: u32, quality: u32) -> TradeSlotItem {
         count,
         quality: Some(quality),
         enchantment: None,
+        link: Some(format!("|cffffffff|Hitem:{item_id}:0:0:0|h[{name}]|h|r")),
     }
 }
 

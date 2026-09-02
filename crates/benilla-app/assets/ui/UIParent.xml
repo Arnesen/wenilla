@@ -320,6 +320,35 @@
             table.insert(UIPARENT_MANAGED_POSITION_LISTENERS, fn)
         end
 
+        -- ── SecondsToTimeAbbrev (ref UIParent.lua l.1034-1049) ───────────────────────────────
+        --
+        -- "2 m", "45 s" — the one-letter duration the buff bar prints under a timed aura. It lived
+        -- in our BuffFrame.xml behind an `if not SecondsToTimeAbbrev` guard, with the four
+        -- GlobalStrings it formats defined there too, on the reasoning that "we load no
+        -- UIParent/GlobalStrings" — which stopped being true a long time ago and is why the guard
+        -- reads as a leftover rather than a decision. It belongs in this file because it belongs
+        -- in `UIParent.lua`, and 1751's eighteenth window made the buff bar the reference's own,
+        -- which reaches for it by name and defines nothing.
+        --
+        -- Verbatim, including the `>` rather than `>=` on all three boundaries: exactly 60 seconds
+        -- prints "60 s", not "1 m". That is the reference's own arithmetic.
+        function SecondsToTimeAbbrev(seconds)
+            local tempTime
+            if ( seconds > 86400 ) then
+                tempTime = ceil(seconds / 86400)
+                return format(DAY_ONELETTER_ABBR, tempTime)
+            end
+            if ( seconds > 3600 ) then
+                tempTime = ceil(seconds / 3600)
+                return format(HOUR_ONELETTER_ABBR, tempTime)
+            end
+            if ( seconds > 60 ) then
+                tempTime = ceil(seconds / 60)
+                return format(MINUTE_ONELETTER_ABBR, tempTime)
+            end
+            return format(SECOND_ONELETTER_ABBR, seconds)
+        end
+
         -- ── GetMaterialTextColors (ref UIParent.lua l.1880-1888) ─────────────────────────────
         --
         -- The page ink and the title ink for a readable's material. Transcribed here rather than

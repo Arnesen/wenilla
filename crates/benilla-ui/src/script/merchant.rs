@@ -59,6 +59,15 @@ pub struct MerchantItem {
     /// `GetBuybackItemLink` — the reference's buyback arm is an unmodified `BuybackItem(this:GetID())`
     /// with no ctrl/shift branch at all (`MerchantFrame.lua:358-361`), so nothing would read it.
     pub link: Option<String>,
+    /// `Stackable` from the item's own template — what one slot can hold, `1` for an item that
+    /// does not stack. `None` while the ask-once template query is in flight, like `name`.
+    ///
+    /// This is `GetMerchantItemMaxStack`'s answer and it exists for one caller: the reference's
+    /// `MerchantItemButton_OnClick` asks it before a shift-click, and opens the stack-split
+    /// spinner only when it is above 1 (`MerchantFrame.lua:313-326`, and again at :340 for the
+    /// buy-in-bulk arm). The wire has carried it all along — `item_template.stackable`, parsed and
+    /// then dropped, because nothing on the Lua side could ask.
+    pub max_stack: Option<u32>,
 }
 
 /// An item template's tooltip stat head (the app's `ItemInfo` view, resolved per row): what the
@@ -246,6 +255,31 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(link) => Ok(Value::String(lua.create_string(&link)?)),
                 None => Ok(Value::Nil),
             }
+        })?,
+    )?;
+
+    // GetMerchantItemMaxStack(index) → the stack size ONE slot can hold for that row's item, or
+    // nil while its template answer is in flight / the index is out of range.
+    //
+    // Its only caller in 1.12 is the reference's own `MerchantItemButton_OnClick`, which asks it
+    // twice — once on the right-click arm (`MerchantFrame.lua:313`) and once on shift-click
+    // (`:340`) — and takes the plain single-buy path whenever the answer is `<= 1`, opening the
+    // stack-split spinner otherwise. So the number decides whether a vendor click asks "how many?"
+    // at all.
+    //
+    // The value was on the wire and parsed the whole time (`item_template.stackable`); nothing on
+    // the Lua side could reach it until now, which is why the reference's merchant window listed
+    // this as one of its two missing verbs.
+    g.set(
+        "GetMerchantItemMaxStack",
+        lua.create_function(|lua, index: usize| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(model
+                .merchant
+                .as_ref()
+                .and_then(|m| index.checked_sub(1).and_then(|n| m.items.get(n)))
+                .and_then(|it| it.max_stack)
+                .map_or(Value::Nil, |n| Value::Integer(i64::from(n))))
         })?,
     )?;
 
@@ -540,6 +574,7 @@ mod tests {
                         ..Default::default()
                     }),
                     link: Some("|cffffffff|Hitem:159:0:0:0|h[Refreshing Spring Water]|h|r".into()),
+                    max_stack: Some(20),
                 },
                 // An in-flight row: the vendor list arrived, the item-template answer hasn't.
                 MerchantItem {
@@ -551,6 +586,7 @@ mod tests {
                     item_id: 4540,
                     stats: None,
                     link: None,
+                    max_stack: None, // in flight, like `name` above
                 },
             ],
             ..Default::default()
@@ -604,6 +640,25 @@ mod tests {
             .unwrap());
         assert!(s
             .eval::<bool>("return GetMerchantItemLink(9) == nil")
+            .unwrap());
+
+        // **GetMerchantItemMaxStack** — the one number that decides whether a vendor click asks
+        // "how many?". The reference's `MerchantItemButton_OnClick` reads it twice
+        // (`MerchantFrame.lua:313` on the right-click arm and `:340` on shift-click) and takes the
+        // plain single-buy path whenever it is `<= 1`, opening the stack-split spinner otherwise.
+        //
+        // Nil while the row's template answer is in flight, and nil out of range — the same two
+        // absences `GetMerchantItemLink` above has, and for the same reason: the value is the
+        // template's `stackable`, which the wire has carried all along.
+        assert_eq!(
+            s.eval::<i64>("return GetMerchantItemMaxStack(1)").unwrap(),
+            20
+        );
+        assert!(s
+            .eval::<bool>("return GetMerchantItemMaxStack(2) == nil")
+            .unwrap());
+        assert!(s
+            .eval::<bool>("return GetMerchantItemMaxStack(9) == nil")
             .unwrap());
     }
 

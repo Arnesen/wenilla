@@ -34,6 +34,7 @@ const ROOM_UI: &[&str] = &[
     "MerchantFrame.xml",
     "Interface\\FrameXML\\StackSplitFrame.xml",
     "DressUpFrame.xml",
+    "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
     "ChatFrame.xml",
 ];
 
@@ -244,6 +245,7 @@ fn the_paper_doll_slots_preview_and_post_what_you_wear() {
         "GameTooltip.xml",
         "CharacterFrame.xml",
         "DressUpFrame.xml",
+        "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
         "ChatFrame.xml",
     ] {
         load_xml(&s, file);
@@ -310,6 +312,7 @@ fn shift_clicking_an_unresolved_slot_posts_nothing_and_never_raises() {
         "GameTooltip.xml",
         "CharacterFrame.xml",
         "DressUpFrame.xml",
+        "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
         "ChatFrame.xml",
     ] {
         load_xml(&s, file);

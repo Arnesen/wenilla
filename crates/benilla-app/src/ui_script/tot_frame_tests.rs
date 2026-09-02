@@ -56,7 +56,7 @@ fn load_tot() -> UiScript {
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "ActionBar.xml");
     load_xml(&s, "UnitFrames.xml");
-    load_xml(&s, "BuffFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BuffFrame.xml");
     s.set_unit("player", Some(unit("Tri", 0x100, 100)));
     s.set_unit("target", Some(unit("Kobold Miner", 0x200, 80)));
     s.set_unit("targettarget", Some(unit("Tri", 0x100, 100)));

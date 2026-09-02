@@ -21,6 +21,7 @@ fn chat_frame() -> UiScript {
     // the dropdown kit's own dependency — its MenuBackdrop reads `TOOLTIP_DEFAULT_COLOR`.)
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
     load_xml(&s, "ChatFrame.xml");
     s.set_screen_size(1600.0, 900.0);
     s.resolve();
@@ -245,6 +246,7 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
         "UiPanels.xml",
         "GameTooltip.xml",
         "Cooldown.xml",
+        "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
         "ChatFrame.xml",
         "SpellBookFrame.xml",
     ] {

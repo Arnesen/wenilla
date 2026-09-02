@@ -222,6 +222,7 @@ fn resolve_item(
         item_id: item.entry,
         stats,
         link,
+        max_stack: template.map(|t| t.stackable.max(1)),
     }
 }
 
@@ -286,6 +287,10 @@ fn resolve_buyback(
         // click carries no ctrl/shift branch at all — it is a bare `BuybackItem(this:GetID())`
         // (`MerchantFrame.lua:358-361`). Nothing reads it, so nothing builds it (decision 1059).
         link: None,
+        // …and no max stack, for the same shape of reason: `GetMerchantItemMaxStack` indexes the
+        // MERCHANT list, and a buyback row is bought whole rather than by the stackful. Nothing
+        // asks, so nothing is answered.
+        max_stack: None,
     }
 }
 

@@ -55,6 +55,15 @@ pub struct TradeSlotItem {
     /// The enchant-slot spell name (slot 7 only) — `None` in P1 (the applied-spell path is
     /// decision 0592 P3).
     pub enchantment: Option<String>,
+    /// The slot's full escaped `|cff…|Hitem:…|h[Name]|h|r` link — `GetTradePlayerItemLink` /
+    /// `GetTradeTargetItemLink`'s answer, and `None` while the ask-once template answer is in
+    /// flight (the link embeds the name and the quality colour).
+    ///
+    /// The same shape as [`super::merchant::MerchantItem::link`] and for the same reason: 1.12's
+    /// own `TradeFrame.lua` hands it straight to `DressUpItemLink` on a ctrl-click and to
+    /// `ChatFrameEditBox:Insert` on a shift-click, so it is a string the app already knows rather
+    /// than anything the engine composes.
+    pub link: Option<String>,
 }
 
 /// One side of the trade window — the seven slots (1-based in the API) plus the gold offered on
@@ -229,6 +238,37 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // GetTradePlayerItemLink(id) / GetTradeTargetItemLink(id) → the slot's escaped item link, or
+    // nil for an empty slot / one whose template answer is still in flight.
+    //
+    // 1.12's `TradeFrame.lua` reaches for these on a modified click of a trade slot — ctrl hands
+    // the link to `DressUpItemLink`, shift inserts it into the chat box — the same pair of arms
+    // the merchant rows have, which is why this mirrors `GetMerchantItemLink` exactly rather than
+    // composing anything here.
+    for (name, side) in [
+        ("GetTradePlayerItemLink", true),
+        ("GetTradeTargetItemLink", false),
+    ] {
+        g.set(
+            name,
+            lua.create_function(move |lua, id: usize| {
+                let link = {
+                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let slot = if side {
+                        slot_at(&model, id, |t| &t.player)
+                    } else {
+                        slot_at(&model, id, |t| &t.target)
+                    };
+                    slot.and_then(|s| s.link.clone())
+                };
+                match link {
+                    Some(link) => Ok(Value::String(lua.create_string(&link)?)),
+                    None => Ok(Value::Nil),
+                }
+            })?,
+        )?;
+    }
+
     // GetTradeTargetItemInfo(id) → name, texture, numItems, quality, isUsable, enchantment (the
     // partner's offer; TradeFrame.lua l.84 — the extra `quality` is the recipient-only colour).
     g.set(
@@ -389,6 +429,9 @@ mod tests {
             count,
             quality: Some(quality),
             enchantment: None,
+            link: Some(format!(
+                "|cffffffff|Hitem:{item_id}:0:0:0|h[Linen Cloth]|h|r"
+            )),
         }
     }
 
@@ -409,6 +452,58 @@ mod tests {
             target,
             partner_name: Some("Thrall".into()),
         }
+    }
+
+    /// **The two link verbs**, and the two absences they share with every other item-link reader
+    /// here: an empty slot, and a slot whose ask-once template answer has not landed.
+    ///
+    /// 1.12's `TradeFrame.lua` reaches for these on a modified click of a trade slot — ctrl hands
+    /// the link to `DressUpItemLink`, shift inserts it into the chat box. They were two of the four
+    /// engine verbs the readiness probe reports against stock `TradeFrame.xml`.
+    #[test]
+    fn the_trade_slots_answer_their_item_links() {
+        let mut s = UiScript::new().unwrap();
+        // No trade open: both sides answer nil rather than raising.
+        assert!(s
+            .eval::<bool>("return GetTradePlayerItemLink(1) == nil")
+            .unwrap());
+        assert!(s
+            .eval::<bool>("return GetTradeTargetItemLink(1) == nil")
+            .unwrap());
+
+        let mut st = state();
+        // A slot whose template is still in flight carries no link — the string embeds the name.
+        st.target.slots[1] = Some(TradeSlotItem {
+            item_id: 4306,
+            name: None,
+            texture: None,
+            count: 1,
+            quality: None,
+            enchantment: None,
+            link: None,
+        });
+        s.set_trade(Some(st));
+
+        assert_eq!(
+            s.eval::<String>("return GetTradePlayerItemLink(1)")
+                .unwrap(),
+            "|cffffffff|Hitem:2589:0:0:0|h[Linen Cloth]|h|r"
+        );
+        assert_eq!(
+            s.eval::<String>("return GetTradeTargetItemLink(1)")
+                .unwrap(),
+            "|cffffffff|Hitem:4306:0:0:0|h[Linen Cloth]|h|r"
+        );
+        // …the in-flight slot, and an empty one, and one past the seven.
+        assert!(s
+            .eval::<bool>("return GetTradeTargetItemLink(2) == nil")
+            .unwrap());
+        assert!(s
+            .eval::<bool>("return GetTradePlayerItemLink(7) == nil")
+            .unwrap());
+        assert!(s
+            .eval::<bool>("return GetTradePlayerItemLink(9) == nil")
+            .unwrap());
     }
 
     #[test]

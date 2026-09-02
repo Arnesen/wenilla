@@ -15,16 +15,17 @@
 //! one (decision 1397: the ref Lua subtracts `posBuff`/`negBuff` itself, so a pre-subtracted first
 //! return deducts the buff twice — a defect the f32 bug was hiding).
 
-use benilla_ui::script::{UiScript, UnitCombatStats, UnitState};
+mod common;
 
-const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
+use benilla_ui::script::{UiScript, UnitCombatStats, UnitState};
 
 /// The character window's load prefix, in `assets/ui/benilla.toc` order. The .toc's own entry says
 /// it "depends only on Fonts/UiPanels/GameTooltip"; `ItemButtonTemplate.xml` joins them because the
 /// doll's equipment slots are `SetItemButton*` buttons.
 const FILES: [&str; 6] = [
     "Fonts.xml",
-    "ItemButtonTemplate.xml",
+    // The reference's own since 1751 window 24 — `common::load_ui` speaks both stores.
+    "Interface\\FrameXML\\ItemButtonTemplate.xml",
     "MoneyFrame.xml",
     "UiPanels.xml",
     "GameTooltip.xml",
@@ -32,26 +33,8 @@ const FILES: [&str; 6] = [
 ];
 
 fn load_ui(script: &UiScript) {
-    let dir = std::path::Path::new(UI_DIR);
-    // The app's provider shape: backslash paths, dir-relative, basename fallback.
-    let provider = |req: &str| -> Option<Vec<u8>> {
-        let norm = req.replace('\\', "/");
-        let base = norm.rsplit('/').next().unwrap_or(&norm);
-        std::fs::read(dir.join(&norm))
-            .or_else(|_| std::fs::read(dir.join(base)))
-            .ok()
-    };
     for file in FILES {
-        let text = std::fs::read_to_string(dir.join(file))
-            .unwrap_or_else(|e| panic!("reading {file}: {e}"));
-        let doc =
-            benilla_ui::framexml::parse(&text).unwrap_or_else(|e| panic!("parsing {file}: {e}"));
-        let report = benilla_ui::loader::load(script, &doc, &provider);
-        assert!(
-            report.errors.is_empty(),
-            "{file} loaded with errors: {:#?}",
-            report.errors
-        );
+        common::load_ui(script, file);
     }
 }
 
@@ -119,6 +102,7 @@ fn seated() -> UiScript {
 
 #[test]
 fn a_geared_stat_renders_green_and_its_tooltip_names_the_unbuffed_base() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = seated();
     painted(&mut s);
 
@@ -143,6 +127,7 @@ fn a_geared_stat_renders_green_and_its_tooltip_names_the_unbuffed_base() {
 
 #[test]
 fn a_debuffed_stat_renders_red_and_an_untouched_one_stays_plain() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = seated();
     painted(&mut s);
 
@@ -174,6 +159,7 @@ fn a_debuffed_stat_renders_red_and_an_untouched_one_stays_plain() {
 
 #[test]
 fn resistance_rows_colour_by_which_half_is_bigger() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = seated();
     painted(&mut s);
 
@@ -210,6 +196,7 @@ fn resistance_rows_colour_by_which_half_is_bigger() {
 /// shape and worth pinning as such.
 #[test]
 fn armor_with_no_buff_split_renders_plain() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = seated();
     painted(&mut s);
     assert_eq!(text_of(&mut s, "CharacterArmorFrameStatText"), "2965");

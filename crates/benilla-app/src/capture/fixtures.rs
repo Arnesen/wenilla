@@ -228,7 +228,7 @@ pub(super) fn seed_ui_fixture(
             // Quest rows ride above the options (decision 0088) — an available quest (its own
             // AvailableQuestIcon dot) so the capture covers the quest-row icon/text seating, not
             // just the option rows.
-            gossip.quests = vec![(783, 0, "Eagan Peltskinner".into())];
+            gossip.quests = vec![(783, 0, 5, "Eagan Peltskinner".into())];
             // One short option AND four that WRAP — the live shape both gossip bugs came in as
             // (the director's screenshots), and a menu deliberately TALLER than the parchment so
             // the capture covers the whole chain: the per-row auto-height

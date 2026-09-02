@@ -839,7 +839,7 @@ pub enum SessionEvent {
         npc: u64,
         text_id: u32,
         options: Vec<GossipOption>,
-        quests: Vec<(u32, u32, String)>,
+        quests: Vec<(u32, u32, u32, String)>,
     },
     /// A questgiver dialog status for one NPC (`SMSG_QUESTGIVER_STATUS`) — the `!`/`?` marker's
     /// [`crate::messages::dialog_status`] value. Stored per guid now; the world marker is a later

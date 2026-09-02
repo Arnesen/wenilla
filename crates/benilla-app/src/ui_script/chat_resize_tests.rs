@@ -26,6 +26,7 @@ fn chat_ui() -> UiScript {
         "ScrollTemplates.xml",
         "UIPanelTemplates.xml",
         "Interface\\FrameXML\\ColorPickerFrame.xml",
+        "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
         "ChatFrame.xml",
     ] {
         load_xml(&s, file);

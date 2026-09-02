@@ -318,7 +318,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             options,
             quests: quests
                 .into_iter()
-                .map(|q| (q.quest_id, q.icon, q.title))
+                .map(|q| (q.quest_id, q.icon, q.level, q.title))
                 .collect(),
         }],
         ServerPacket::QuestGiverStatus { npc, status } => {
