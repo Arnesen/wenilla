@@ -251,20 +251,25 @@ fn follow_camera(
 /// test gates `CSky::Render 0x6d4940` — stars, discs, gradient band and cloud dome together;
 /// byte-VERIFIED, wow-re terrain "the liquid render state"). With the dome hidden the `ClearColor`
 /// backdrop (the row-7 fog colour — submerged, the murk — or black via "black backdrop") shows through.
+///
+/// The skybox gate is its **weight**, not the resolve: below the 0.99 threshold the dome still
+/// draws and the painted sky alpha-blends OVER it — the visible half of the 4-second crossfade
+/// ([`crate::skybox::SkyboxWeight`]).
 fn apply_sky_visibility(
     debug: Res<DebugState>,
-    skybox: Res<crate::skybox::CameraSkybox>,
+    skybox: Res<crate::skybox::SkyboxWeight>,
     underwater: Res<crate::liquid::Underwater>,
     mut dome: Query<&mut Visibility, With<Sky>>,
 ) {
     let Ok(mut vis) = dome.single_mut() else {
         return;
     };
-    let want = if debug.lighting.disable_sky_dome || skybox.0.is_some() || underwater.0.any() {
-        Visibility::Hidden
-    } else {
-        Visibility::Visible
-    };
+    let want =
+        if debug.lighting.disable_sky_dome || skybox.replaces_celestial() || underwater.0.any() {
+            Visibility::Hidden
+        } else {
+            Visibility::Visible
+        };
     if *vis != want {
         *vis = want;
     }

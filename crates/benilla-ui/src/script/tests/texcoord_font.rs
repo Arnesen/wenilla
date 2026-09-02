@@ -32,8 +32,11 @@ fn set_tex_coord_changes_extracted_uv() {
         tex.content
     );
 
-    let (l, r, t, b): (f32, f32, f32, f32) = s.eval("return t:GetTexCoord()").unwrap();
-    assert_eq!((l, r, t, b), (0.1, 0.6, 0.2, 0.8));
+    // EIGHT values, per corner, in `SetTexCoord`'s own usage order — `ULx, ULy, LLx, LLy, URx,
+    // URy, LRx, LRy` (decision 1840). A Rect stored as `[l, r, t, b]` comes back out as its four
+    // corners, which is the only shape the reference has: there is no 4-value getter.
+    let got: (f32, f32, f32, f32, f32, f32, f32, f32) = s.eval("return t:GetTexCoord()").unwrap();
+    assert_eq!(got, (0.1, 0.2, 0.1, 0.8, 0.6, 0.2, 0.6, 0.8));
 
     // The 8-arg affine form (arg order UL, LL, UR, LR) lands as per-corner UVs in screen order
     // [TL, TR, BR, BL] — here a 90° rotation of the full texture.

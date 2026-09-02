@@ -34,6 +34,25 @@
 //!   kinds: rings every 400–450 ms, wakes one per ~0.625 yd of travel (the byte cadence laws —
 //!   the 0264 INTERIM constants are resolved, decision 0265).
 //!
+//! - **The patch sits ON the plane; its coplanar ties are settled in DEPTH, never by a lift**
+//!   (B348, 1807/1808). A decal's verts are the plane's own, so it ties with the water surface
+//!   everywhere and with the *terrain* along the shoreline, where the two cross. Lifting the patch
+//!   in world space wins that tie and also moves the geometry — and on a beach a vertical lift is a
+//!   horizontal overshoot: a decal `l` yards up keeps painting for `l / slope` yards past the
+//!   waterline, on dry sand (0.10 yd at the 29 % Stranglethorn beach the defect was reported on,
+//!   proportionally more on every flatter shore — measured with
+//!   `benilla-formats --example water_here`). **The reference agrees**: `0x68fd0f` arms a
+//!   depth-buffer bias and the foam vertices sit at the queried MCLQ height exactly, so there is no
+//!   geometric lift in the binary to be faithful to (the "−2048 GL units" this file cited for a
+//!   year is refuted; the real term is `footstepBias(0.125) × [0x810390]` = D3D `DEPTHBIAS −1/8192`).
+//!   Ours needs no settle at all, and that is worth stating rather than assuming (1811): the patch
+//!   is not a decal *over* the surface, it **is** the liquid mesh's own triangles — the same wet
+//!   cells, the same winding, through the same `clip_from_world` (`DECAL_WORLD_CLIP`, 0781) as a
+//!   mesh whose `Transform` is `IDENTITY` — so the depths agree exactly and `GreaterEqual` passes
+//!   the tie unaided. [`Rung::FOAM_RASTER`] stays as a few ULPs of insurance against a driver
+//!   rounding two pipelines differently; the **slope half is disarmed**, because its pull grows as
+//!   z² and the only thing it can reach is the skirt of wet-cell geometry lying over dry sand.
+//!
 //! The formulas + lifecycle math live in [`params`]; this half is the ECS: the emitter over the
 //! avatar + streamed units, the record pool, and one additive effect-stream draw per
 //! (chunk, category) with live records (fog OFF — the reference's verified foam render state).
@@ -94,10 +113,6 @@ const MOVE_EPSILON: f32 = 0.5;
 /// Yaw rate (rad/s) above which a non-translating streamed unit counts as turning in place
 /// (the `& 0x30` proxy).
 const TURN_EPSILON: f32 = 0.35;
-
-/// Geometric lift (yd) above the water surface — the anti-coplanarity measure standing in for the
-/// reference's polygon offset (−2048 GL units) where foam meets the *terrain* at the shoreline.
-const SURFACE_LIFT: f32 = 0.03;
 
 /// One live foam decal — a `CWater0Ripple` pool record. Geometry is static (built at emission);
 /// per-frame size/alpha are derived from `born` + the params (`params.rs`).
@@ -181,22 +196,26 @@ fn alloc_slot(cursor: &mut usize, base: usize, len: usize) -> usize {
     i
 }
 
-/// The two foam stencils (ring/wake), decoded raw at startup. The draws they feed are
-/// effect-stream records: additive, fog OFF (VERIFIED `0x68fcc1`), sort bias +1.0 over the
-/// hosting water chunk (the coplanar tie — the reference draws foam in the water group right
-/// after the liquid surface).
+/// The two foam stencils (ring/wake), decoded raw at startup. The draws they feed carry the
+/// reference's **whole** foam render state (VERIFIED at the bytes — wow-re's §5 on `0x68fae0`,
+/// folded back as 1808): additive; **fog off** (`0x68fcd0`/`0x68fcd2`/`0x68fcd7` — *not*
+/// `0x68fcc1`, which is the blend value's `mov edx,3` and was this file's citation until then);
+/// **depth-tested `LEQUAL`, depth-write off**; and a depth-buffer bias armed at `0x68fd0f`.
+/// Sorted on [`crate::sky_order::FOAM_BIAS`], a rung over the whole water band, because
+/// `0x68fae0` is `0x6816d0`'s tail-jump on both arms of the submersion branch — one call per
+/// frame, after **all** liquid has drained, with no sort key in it anywhere.
 #[derive(Resource)]
 struct FoamAssets {
     ring: Handle<Image>,
     wake: Handle<Image>,
 }
 
-/// The foam draw's sort-bias: **just over its water**, riding the water-pass rung. The reference
-/// draws foam inside the water group, right after the liquid surfaces (`0x6816d0`: ocean → river
-/// → WMO liquid → foam) — so when the water pass moved to its fixed frame slot
-/// ([`crate::sky_order::WATER_BIAS`]), the foam moved with it: still +1 over the surface for the
-/// coplanar tie, now *below* the near-side world transparents like the reference's.
-const FOAM_BIAS: f32 = crate::sky_order::WATER_BIAS + 1.0;
+/// The foam draw's sort rung — [`crate::sky_order::FOAM_BIAS`], whose doc carries the arithmetic.
+/// It is a **rung above the whole water band**, not an epsilon over one surface: the reference
+/// drains every liquid queue before it draws foam, so no water surface in the frame can come after
+/// it. (It rode `WATER_BIAS + 1.0` until B348, where the water chunk one lattice nearer the eye
+/// outsorted the foam patch by ~33 and painted over it.)
+use crate::sky_order::FOAM_BIAS;
 
 /// Load the stencils raw (CLAMP, no mips — the reference's measured sampler state).
 fn setup_water_fx(
@@ -285,7 +304,7 @@ fn build_patch(
             }
             // The liquid mesh's own winding: [tl, bl, br] then [tl, br, tr].
             for v in [tl, bl, br, tl, br, tr] {
-                verts.push(wow_to_bevy([v[0], v[1], v[2] + SURFACE_LIFT]));
+                verts.push(wow_to_bevy(v));
             }
         });
     }
@@ -575,14 +594,23 @@ fn push_water_foam(
                     assets.wake.id()
                 },
                 blend: EffectBlend::Add,
-                // The reference's foam render sets FOG off (VERIFIED `0x68fcc1`).
+                // The reference's foam render sets FOG off (VERIFIED `0x68fcd0`/`0x68fcd2`/
+                // `0x68fcd7`; the long-standing `0x68fcc1` citation was the blend setup — 1808).
                 fog: EffectFog::Off,
                 // The reference's foam render is its own additive path (`0x68fae0`), not the
                 // M2 batch state producer — no GL_LIGHTING on it.
                 lighting: crate::particles::buffer::EffectLighting::None,
                 anchor: centroid / n as f32,
                 bias: FOAM_BIAS,
-                raster_bias: 0,
+                // A few ULPs of constant and **no slope term** (`Rung::FOAM_RASTER*`, whose docs
+                // carry the bytes and the reasoning, 1811): the patch is the liquid mesh's own
+                // triangles, so `GreaterEqual` already passes the coplanar tie and the only thing
+                // a pull toward the eye can reach is the wet-lattice skirt over dry sand. The
+                // nonzero constant also selects `DECAL_WORLD_CLIP`, so these absolute verts skip
+                // the cam-relative rebase and go through the world meshes' own matrix (0781) —
+                // which is what makes the two depths agree in the first place.
+                raster_bias: crate::sky_order::Rung::FOAM_RASTER,
+                raster_slope: crate::sky_order::Rung::FOAM_RASTER_SLOPE,
                 cam_relative: false,
                 // NEVER the chunk entity: a draw's probe identity must not own a registered
                 // mesh, or bevy's sorted-phase batcher claims the item and rewrites its
@@ -735,9 +763,11 @@ mod tests {
         let (verts, _) = build_patch([2.0, 2.0], 1.5, &chunks).unwrap();
         assert_eq!(verts.len(), 6, "only the one wet cell overlaps");
         let wow = bevy_to_wow(verts[0]);
+        // ON the plane, to the bit — the coplanar tie is the rasterizer's, and a geometric lift
+        // here is a horizontal overshoot onto dry ground at every shoreline (B348).
         assert!(
-            (wow[2] - (5.0 + SURFACE_LIFT)).abs() < 1e-4,
-            "lifted to the surface"
+            (wow[2] - 5.0).abs() < 1e-4,
+            "the patch sits exactly on the liquid surface, unlifted"
         );
         assert!(
             build_patch([50.0, 50.0], 1.5, &chunks).is_none(),

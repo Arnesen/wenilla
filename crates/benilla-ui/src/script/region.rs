@@ -117,7 +117,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // the bake replaces them. A later `SetTexture`/`SetPortraitToTexture` clears the binding.
     lua.globals().set(
         "SetPortraitTexture",
-        lua.create_function(|lua, (region, unit): (Table, String)| {
+        lua.create_function(|lua, (region, unit): (Table, Value)| {
+            // `0x519ef0` gates its unit argument at `0x519fb4` with `lua_isstring` and fails into
+            // `luaL_error` with this exact string (`0x8513b8`); `luaL_error` does not return, so
+            // nil/absent/boolean/table abandon the caller's statement. Stock
+            // `Blizzard_InspectUI.lua:49` reaches it on a re-open, which is how it was found.
+            // A token that RESOLVES to nothing is a different, quiet case — it blanks the portrait
+            // and returns no values. Decision 1834.
+            let unit = crate::script::binding_abi::string_arg(
+                lua,
+                unit,
+                r#"Usage: SetPortraitTexture(texture, "unit")"#,
+            )?;
             let rh = region_handle_of(lua, &region)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let data = model.region_data.entry(rh).or_default();
@@ -168,10 +179,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // BenillaSetBoothTexture(textureRegion, slotToken) — the **square** twin of
     // SetPortraitTexture (decision 0208 §5): the same `portrait_unit` booth-image binding
-    // WITHOUT the circular mask, for the paper doll's rectangular model pane (its texture region
-    // samples the booth's body bake edge to edge — no frame ring to mask for). Benilla-named:
-    // the real client's pane is a live 3D `<PlayerModel>`; ours is the doctrine-consistent
-    // still (0105/0118), so the binding is ours, not the live API's.
+    // WITHOUT the circular mask, for a body pane whose texture region samples the booth's bake
+    // edge to edge (no frame ring to mask for). Benilla-named because it is not the live API: it
+    // is the pane→booth join written in Lua.
+    //
+    // **RETIRING.** A migrated window's file is the reference's, which declares a bare
+    // `<PlayerModel>` and no texture at all, so the join moved app-side
+    // (`portrait::MODEL_PANE_BOOTHS`) and the widget draws itself (decision 1810). Two callers are
+    // left — the dressing room and the inspect window, both still our own files — and this goes
+    // with the later of them.
     lua.globals().set(
         "BenillaSetBoothTexture",
         lua.create_function(|lua, (region, token): (Table, String)| {

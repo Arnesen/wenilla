@@ -5,23 +5,7 @@
 
 use benilla_ui::script::{QuestPanel, QuestState, ScriptValue, SoundRequest, UiScript};
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error (the panel tests'
-/// loader, duplicated so this file is self-contained).
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// The questgiver window's open/close kits — the window-sound convention (decision 0090). The real
 /// QuestFrame.lua plays igQuestListOpen in QuestFrame_OnShow (l.285) and igQuestListClose in
@@ -36,9 +20,12 @@ fn questgiver_show_hide_plays_open_and_close_kits() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     // The BenillaMoney_* purse helpers the quest reward/progress panels repaint through live in
     // MerchantFrame.xml (the same documented cross-window dep the bag tests load).
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
 
@@ -95,7 +82,10 @@ fn panel_events_show_exactly_one_child_panel_and_hide_the_others() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
 
@@ -172,7 +162,10 @@ fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
 
@@ -255,7 +248,10 @@ fn reward_panel_choice_click_selects_and_completes_with_zero_based_index() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
 
@@ -318,7 +314,10 @@ fn greeting_goodbye_button_closes_the_window() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
 
@@ -346,6 +345,12 @@ fn greeting_goodbye_button_closes_the_window() {
 /// is a virtual template declared `hidden="true"` (never itself drawn) — an instance that doesn't
 /// explicitly `:Show()` stays invisible even though it isn't declared `hidden="true"` itself. Every
 /// panel's action buttons must show, extracted at real on-window rects (never dropped/hidden).
+///
+/// It runs the **instant-text** arm, which is not the shipped one: `QUEST_FADING_DISABLE` boots at
+/// the reference's `"0"` since 1804 (it was pinned `"1"` by direction from 2026-07-17 until then),
+/// so the flag is planted below. That arm is the one this guard wants — it is the shorter path to
+/// a settled panel, and its one-frame Accept-disabled window is a state the rects have to survive.
+/// The write-on arm is `write_on_still_fades_when_instant_text_is_off`'s subject.
 #[test]
 fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
     let mut s = UiScript::new().unwrap();
@@ -353,9 +358,14 @@ fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
+    // Planted, not shipped: instant text is OFF out of the box (see the doc comment).
+    s.eval::<()>(r#"QUEST_FADING_DISABLE = "1""#).unwrap();
     s.set_quest(Some(QuestState {
         panel: QuestPanel::Detail,
         title: "A Threat Within".into(),
@@ -390,8 +400,8 @@ fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
         v
     };
 
-    // The instant-text arm (QUEST_FADING_DISABLE pinned "1"): OnShow still disables Accept and
-    // zeroes the block for the ref's one-frame window — the reveal edge just starts at 1024.
+    // The instant-text arm (QUEST_FADING_DISABLE planted "1" above): OnShow still disables Accept
+    // and zeroes the block for the ref's one-frame window — the reveal edge just starts at 1024.
     let writing = button_art(&mut s);
     assert_eq!(
         writing.len(),
@@ -451,10 +461,11 @@ fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
     );
 }
 
-/// The ref write-on survives verbatim behind the flag: with QUEST_FADING_DISABLE = "0" (the
-/// ref's own default, our pin is "1"), the description writes on at 40 chars/s scratching the
-/// quill each tick, Accept stays dead mid-write, and the objectives/rewards block FADES in over
-/// QUESTINFO_FADE_IN rather than snapping.
+/// The ref write-on runs verbatim: with QUEST_FADING_DISABLE = "0" — the ref's own default, and
+/// ours too since 1804 (it was pinned "1" from 2026-07-17 until then, which is why this file
+/// still says the value out loud rather than leaning on the shipped one) — the description writes
+/// on at 40 chars/s scratching the quill each tick, Accept stays dead mid-write, and the
+/// objectives/rewards block FADES in over QUESTINFO_FADE_IN rather than snapping.
 #[test]
 fn write_on_still_fades_when_instant_text_is_off() {
     let mut s = UiScript::new().unwrap();
@@ -462,7 +473,10 @@ fn write_on_still_fades_when_instant_text_is_off() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
     s.eval::<()>(r#"QUEST_FADING_DISABLE = "0""#).unwrap();
@@ -523,7 +537,10 @@ fn npc_name_reaches_the_title_bar_on_open_and_on_refresh() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
 
@@ -586,7 +603,10 @@ fn greeting_panel_title_rows_grow_to_their_wrapped_titles() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
 
@@ -670,11 +690,15 @@ fn reward_rows_preview_and_post_without_selecting_the_choice() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, "QuestFrame.xml");
     load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink lives here
     load_xml(&s, "DressUpFrame.xml"); // DressUpItemLink lives here
+    load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit its menus build from
     load_xml(&s, "ChatFrame.xml"); // ChatFrameEditBox lives here
 
     const SWORD: &str = "|cffffffff|Hitem:2299:0:0:0|h[Worn Sword]|h|r";

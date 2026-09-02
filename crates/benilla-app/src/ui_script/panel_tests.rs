@@ -40,23 +40,30 @@ fn frame_rect(quads: &[ExtractedQuad], w: f32, h: f32) -> benilla_ui::layout::Re
 /// gets its own dedicated test below (`shipped_gossip_frame_renders_quest_rows_above_options`).
 #[test]
 fn shipped_gossip_frame_drives_end_to_end() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // A measurer: `GossipResize` reads `GetTextHeight()` on the line after `SetText`, so a bare
+    // VM sizes every row from the previous frame's box. See
+    // `shipped_gossip_rows_grow_to_their_wrapped_labels` for why this is a harness gap and not an
+    // engine one.
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
                                          // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
                                          // optional: a missing template is a loader *warning*, not an error, so an under-loaded
                                          // list passes load_xml and then loses the scrollbar silently.
-    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     // The window + its scroll frame (bar + child) + the 32-row shared pool (quest rows and option
     // rows both draw from it, decision 0088 §3 — the reference's own NUMGOSSIPBUTTONS) + the close
     // button + the GOODBYE button. The greeting and the NPC-name banner are FontString layers (the
     // real GossipGreetingText ref l.241 / GossipFrameNpcNameText ref l.170) — not their own frames.
     assert_eq!(
-        load_xml(&s, "GossipFrame.xml"),
-        41,
-        "window + greeting panel + scroll + bar (+2 arrows) + child + 32 rows + close + goodbye"
+        load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml"),
+        43,
+        "the stock file's own shape (1751) — ours materialized 41"
     );
 
     // Hidden by default: no gossip icon on screen.
@@ -101,8 +108,18 @@ fn shipped_gossip_frame_drives_end_to_end() {
             .unwrap(),
         "Greetings, traveler. How may I help you?"
     );
-    // Row 1 shown + enabled; row 2 shown + disabled (coded); row 3+ hidden (no quest rows this menu,
-    // so the shared pool starts filling from option 1 at row 1 — decision 0088 §3).
+    // Both rows shown and BOTH ENABLED — including the coded one, and that is a divergence
+    // retiring rather than a regression.
+    //
+    // Our `GossipFrame.xml` greyed a coded option, on decision 0081's "coded options are greyed,
+    // never selected". **1.12 does no such thing**: `GossipFrameOptionsUpdate` (ref l.111-128) has
+    // no coded handling at all — it sets the text, resizes, sets the icon from the option TYPE and
+    // shows. There is no `Disable()` anywhere in the file.
+    //
+    // The consequence is worth naming: a coded option is now clickable, and our
+    // `GossipSelectOption` still sends no code (0081 v1). The server sees a select without the
+    // code it asked for. That is a named gap in the send path, not something the window should be
+    // lying about — the reference lets you click it.
     let states: (bool, bool, bool, bool) = s
         .eval(
             "return GossipTitleButton1:IsVisible(), GossipTitleButton1:IsEnabled() ~= 0,\n\
@@ -111,8 +128,8 @@ fn shipped_gossip_frame_drives_end_to_end() {
         .unwrap();
     assert_eq!(
         states,
-        (true, true, false, false),
-        "coded row disabled, extras hidden"
+        (true, true, true, false),
+        "the reference greys nothing; extras hidden"
     );
 
     s.resolve();
@@ -177,8 +194,14 @@ fn shipped_gossip_frame_drives_end_to_end() {
     let icon_rect = quads
         .iter()
         .find(|q| {
+            // Case-folded, because the reference concatenates the option TYPE verbatim into
+            // `Interface\GossipFrame\<Type>GossipIcon` and our `GetGossipOptions` answers the
+            // lowercase Era icon name. The asset VFS folds case, so the art loads either way; only
+            // the path STRING differs, and our own `GossipFrame.xml` used to capitalise it before
+            // building the path. Whether 1.12's own binding answers lowercase or capitalised is an
+            // open fidelity question, not something to settle by editing the feed to match a test.
             matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
-                    if p.contains("VendorGossipIcon"))
+                    if p.to_ascii_lowercase().contains("vendorgossipicon"))
         })
         .and_then(|q| q.rect)
         .expect("vendor option icon visible after GOSSIP_SHOW");
@@ -203,7 +226,7 @@ fn shipped_gossip_frame_drives_end_to_end() {
 
     // The close button queues a close intent (the app clears state; here we drive the hide too)
     // through HideUIPanel, which vacates the left slot.
-    s.run("BenillaGossipCloseButton_OnClick()").unwrap();
+    s.run("GossipFrameCloseButton:Click()").unwrap();
     assert!(s.take_gossip_close());
     assert!(!s.eval::<bool>("return GossipFrame:IsVisible()").unwrap());
     assert!(
@@ -222,6 +245,7 @@ fn shipped_gossip_frame_drives_end_to_end() {
 /// right 1-based position on `take_gossip_quest_selects` (`benilla-ui` `script/gossip.rs`).
 #[test]
 fn shipped_gossip_frame_renders_quest_rows_above_options() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
@@ -230,18 +254,21 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
                                          // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
                                          // optional: a missing template is a loader *warning*, not an error, so an under-loaded
                                          // list passes load_xml and then loses the scrollbar silently.
-    load_xml(&s, "UIPanelTemplates.xml");
-    load_xml(&s, "GossipFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
 
     s.set_gossip(Some(GossipMenu {
         greeting: "A word, traveler.".into(),
         quests: vec![
             GossipQuestRow {
                 title: "Report to Goldshire".into(),
+                level: 5,
                 active: true,
             },
             GossipQuestRow {
                 title: "A Threat Within".into(),
+                level: 7,
                 active: false,
             },
         ],
@@ -257,30 +284,49 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
     // Rows 1-2 carry the quest titles (active first, matching the order the menu supplied them —
     // benilla's seam already flattens available/active into one ordered list, ui_gossip.rs), row 3
     // the option, row 4+ hidden.
-    let (r1_text, r1_vis, r2_text, r2_vis, r3_text, r3_vis, r4_vis): (
+    let (r1_text, r1_vis, r2_vis, r3_text, r3_vis, r4_vis, r5_text, r5_vis, r6_vis): (
         String,
         bool,
+        bool,
         String,
+        bool,
         bool,
         String,
         bool,
         bool,
     ) = s
         .eval(
-            "return GossipTitleButton1Label:GetText(), GossipTitleButton1:IsVisible(),\n\
-                        GossipTitleButton2Label:GetText(), GossipTitleButton2:IsVisible(),\n\
-                        GossipTitleButton3Label:GetText(), GossipTitleButton3:IsVisible(),\n\
-                        GossipTitleButton4:IsVisible()",
+            "return GossipTitleButton1:GetText(), GossipTitleButton1:IsVisible(),\n\
+                        GossipTitleButton2:IsVisible(),\n\
+                        GossipTitleButton3:GetText(), GossipTitleButton3:IsVisible(),\n\
+                        GossipTitleButton4:IsVisible(),\n\
+                        GossipTitleButton5:GetText(), GossipTitleButton5:IsVisible(),\n\
+                        GossipTitleButton6:IsVisible()",
         )
         .unwrap();
-    assert_eq!((r1_text.as_str(), r1_vis), ("Report to Goldshire", true));
-    assert_eq!((r2_text.as_str(), r2_vis), ("A Threat Within", true));
+    // **AVAILABLE quests lead, then ACTIVE** — the reference's own order (`GossipFrameUpdate` calls
+    // `GossipFrameAvailableQuestsUpdate` before `…ActiveQuestsUpdate`, ref l.27-28), and ours since
+    // this window started reading the reference's two list verbs instead of the single ordered
+    // `GetGossipQuestInfo` benilla invented. The packet listed the active quest first; the window
+    // does not.
+    // **Each group is followed by a HIDDEN SPACER row, and the button index skips it** — the
+    // reference's own layout, and something our `GossipFrame.xml` did not do. Both
+    // `GossipFrameAvailableQuestsUpdate` and `…ActiveQuestsUpdate` end by hiding
+    // `GossipTitleButton<buttonIndex>` and then incrementing past it (ref l.80-84, l.104-108), so
+    // the groups are separated by a blank row's worth of space rather than butting together.
+    //
+    // With one available quest, one active and one option that lays out as:
+    //   1 available · 2 hidden spacer · 3 active · 4 hidden spacer · 5 option · 6+ hidden.
+    assert_eq!((r1_text.as_str(), r1_vis), ("A Threat Within", true));
+    assert!(!r2_vis, "the available group's trailing spacer");
+    assert_eq!((r3_text.as_str(), r3_vis), ("Report to Goldshire", true));
+    assert!(!r4_vis, "the active group's trailing spacer");
     assert_eq!(
-        (r3_text.as_str(), r3_vis),
+        (r5_text.as_str(), r5_vis),
         ("Let me browse your goods.", true),
-        "the option row sits below both quest rows"
+        "the option row sits below both quest groups"
     );
-    assert!(!r4_vis, "no fourth row: 2 quests + 1 option");
+    assert!(!r6_vis, "nothing past the option row");
 
     // The per-row icon matches active vs available (ref l.75/99), verified via the resolved quads
     // rather than the Lua-side texture string, so the assertion also proves the rows actually paint.
@@ -291,11 +337,11 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
             matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p.contains(needle))
         })
     };
-    assert!(has_icon("ActiveQuestIcon"), "row 1 (active) icon renders");
     assert!(
         has_icon("AvailableQuestIcon"),
-        "row 2 (available) icon renders"
+        "row 1 (available) icon renders"
     );
+    assert!(has_icon("ActiveQuestIcon"), "row 2 (active) icon renders");
 
     // The window's rect places row 3 (the option) strictly below row 2 (the last quest row) — the
     // static anchor chain, not a runtime SetPoint, closes the gap between the two sections. Found
@@ -311,19 +357,22 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
             .unwrap_or_else(|| panic!("no text quad for {needle:?}"))
             .top
     };
-    let row2_top = label_top("A Threat Within");
+    let row2_top = label_top("Report to Goldshire");
     let row3_top = label_top("Let me browse your goods.");
     assert!(
         row3_top < row2_top,
         "row 3 (option) sits below row 2 (last quest row): row2 top {row2_top}, row3 top {row3_top}"
     );
 
-    // Click quest row 2 (available, "A Threat Within") → SelectGossipQuest(2) queues the seam's
-    // 1-based quest-row position; the app maps it to the quest id + guid and sends
-    // CMSG_QUESTGIVER_QUERY_QUEST (decision 0088 §3).
-    s.run("BenillaGossipRow_OnClick(GossipTitleButton2)")
-        .unwrap();
-    assert_eq!(s.take_gossip_quest_selects(), vec![2]);
+    // Click quest row 2 — the ACTIVE quest "Report to Goldshire", which the packet listed FIRST.
+    // The row calls `SelectGossipActiveQuest(1)`: 1 because it is the first row of the active list,
+    // which is the index the reference's own `GossipTitleButton_OnClick` passes. The binding maps
+    // that back to the whole-menu position the app's queue speaks — 1, the packet's own order. The
+    // two numbers being different for the same click is exactly what the single-list
+    // `SelectGossipQuest` we retired could not express.
+    // Button 3, not 2: the reference's hidden spacer sits at 2 (see the layout note above).
+    s.run("GossipTitleButton3:Click()").unwrap();
+    assert_eq!(s.take_gossip_quest_selects(), vec![1]);
     assert!(
         s.take_gossip_selects().is_empty(),
         "a quest-row click never queues SelectGossipOption"
@@ -343,16 +392,29 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
 /// an edge — not any glyph metric.
 #[test]
 fn shipped_gossip_rows_grow_to_their_wrapped_labels() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // **A measurer, because the reference measures inside the tick it sets the text.**
+    // `GossipResize` reads `titleButton:GetTextHeight()` on the line after `SetText`
+    // (`GossipFrame.lua:130-137`), and without a `TextMeasure` installed a bare VM answers the
+    // PREVIOUS frame's box — the row comes out 2px tall.
+    //
+    // This is what deferred the gossip window through 1751: it was read as "our measurement is a
+    // frame late", an engine gap. It is not. `UiScript::fill_measures` closes the loop inline
+    // whenever a measurer is installed, which the app always does
+    // (`ui_script::extract`'s `AtlasMeasurer`); only a bare test VM does not. The gap was in the
+    // harness, and it hid behind a window we had written to measure a frame later.
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
                                          // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
                                          // optional: a missing template is a loader *warning*, not an error, so an under-loaded
                                          // list passes load_xml and then loses the scrollbar silently.
-    load_xml(&s, "UIPanelTemplates.xml");
-    load_xml(&s, "GossipFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
 
     // Three long options — the shape of a real judgement/roleplay menu, every one of them wrapping
     // at the row label's 275 px width.
@@ -414,7 +476,7 @@ fn shipped_gossip_rows_grow_to_their_wrapped_labels() {
     let row = |i: u32| -> (f32, f32, f32) {
         s.eval::<(f32, f32, f32)>(&format!(
             "return GossipTitleButton{i}:GetTop(), GossipTitleButton{i}:GetBottom(), \
-             GossipTitleButton{i}Label:GetHeight()"
+             GossipTitleButton{i}:GetTextHeight()"
         ))
         .unwrap()
     };
@@ -454,6 +516,7 @@ fn shipped_gossip_rows_grow_to_their_wrapped_labels() {
 /// OnHide. Nothing queues at load (the frame is authored hidden="true").
 #[test]
 fn gossip_show_hide_plays_open_and_close_kits() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
@@ -462,8 +525,9 @@ fn gossip_show_hide_plays_open_and_close_kits() {
                                          // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
                                          // optional: a missing template is a loader *warning*, not an error, so an under-loaded
                                          // list passes load_xml and then loses the scrollbar silently.
-    load_xml(&s, "UIPanelTemplates.xml");
-    load_xml(&s, "GossipFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
 
     // Hidden at load: no open sound (never transitions on startup).
     assert!(
@@ -495,6 +559,7 @@ fn gossip_show_hide_plays_open_and_close_kits() {
 
 #[test]
 fn shipped_panel_slot_replaces_gossip_with_merchant() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
@@ -503,10 +568,16 @@ fn shipped_panel_slot_replaces_gossip_with_merchant() {
                                          // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
                                          // optional: a missing template is a loader *warning*, not an error, so an under-loaded
                                          // list passes load_xml and then loses the scrollbar silently.
-    load_xml(&s, "UIPanelTemplates.xml");
-    load_xml(&s, "GossipFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
     load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
-    load_xml(&s, "MerchantFrame.xml");
+                                     // The vendor window is the reference's own since 1751, and its `MerchantFrame_UpdateMerchantInfo`
+                                     // calls `TEXT()` while building every row — see `test_ui::MERCHANT_UI` for the rest.
+    for f in super::test_ui::MERCHANT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     s.set_gossip(Some(GossipMenu {
         greeting: "Well met.".into(),
@@ -541,6 +612,7 @@ fn shipped_panel_slot_replaces_gossip_with_merchant() {
             // Not this test's subject (the slot manager is) — a row with no template answer yet
             // carries no link (decision 1059).
             link: None,
+            max_stack: Some(1),
         }],
         ..Default::default()
     }));
@@ -581,6 +653,7 @@ fn shipped_panel_slot_replaces_gossip_with_merchant() {
 /// director's gossip↔vendor lockup. This drives the exact displacement and asserts the intents.
 #[test]
 fn displacing_an_npc_window_ends_the_displaced_session() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
@@ -589,10 +662,16 @@ fn displacing_an_npc_window_ends_the_displaced_session() {
                                          // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
                                          // optional: a missing template is a loader *warning*, not an error, so an under-loaded
                                          // list passes load_xml and then loses the scrollbar silently.
-    load_xml(&s, "UIPanelTemplates.xml");
-    load_xml(&s, "GossipFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
     load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
-    load_xml(&s, "MerchantFrame.xml");
+                                     // The vendor window is the reference's own since 1751, and its `MerchantFrame_UpdateMerchantInfo`
+                                     // calls `TEXT()` while building every row — see `test_ui::MERCHANT_UI` for the rest.
+    for f in super::test_ui::MERCHANT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     // Vendor open at the left slot; clear any startup/open intents.
     s.set_merchant(Some(MerchantState::default()));
@@ -632,12 +711,20 @@ fn displacing_an_npc_window_ends_the_displaced_session() {
 /// enough to prove the slot math without a real loot window.
 #[test]
 fn shipped_panel_slot_pushable_promotes_to_center() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
-    load_xml(&s, "MerchantFrame.xml");
+                                     // The vendor window is the reference's own since 1751, and its `MerchantFrame_UpdateMerchantInfo`
+                                     // calls `TEXT()` while building every row — see `test_ui::MERCHANT_UI` for the rest.
+    for f in super::test_ui::MERCHANT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     // The synthetic pushable=7 loot stand-in opens first onto the empty left slot. `CreateFrame`
     // frames start shown by default (matching the real client) — every shipped panel frame is
@@ -676,6 +763,7 @@ fn shipped_panel_slot_pushable_promotes_to_center() {
             // Not this test's subject (the slot manager is) — a row with no template answer yet
             // carries no link (decision 1059).
             link: None,
+            max_stack: Some(1),
         }],
         ..Default::default()
     }));
@@ -719,6 +807,7 @@ fn shipped_panel_slot_pushable_promotes_to_center() {
 /// center-parked "left-area" occupant back — UIParent.lua l.777-782).
 #[test]
 fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
+    let _data = benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::BankState;
 
     // The bank window is the reference's own file off the player's chain (1751).
@@ -729,11 +818,10 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
         let mut s = UiScript::new().unwrap();
         s.set_screen_size(1024.0, 768.0);
         load_xml(&s, "Fonts.xml");
-        load_xml(&s, "ItemButtonTemplate.xml"); // the reference bank's slot buttons inherit it
+        load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml"); // the reference bank's slot buttons inherit it
         load_xml(&s, "MoneyFrame.xml");
         load_xml(&s, "UiPanels.xml");
         load_xml(&s, "Cooldown.xml");
-        load_xml(&s, "BagFrame.xml");
         load_xml(&s, "GameTooltip.xml");
         load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
                                              // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
@@ -741,9 +829,10 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
                                              // list passes load_xml and then loses the scrollbar silently.
                                              // Before BankFrame, not after: its close and purchase buttons inherit UIPanelCloseButton
                                              // and UIPanelButtonTemplate, and an `inherits=` is resolved at LOAD.
-        load_xml(&s, "UIPanelTemplates.xml");
+        load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+        load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
         load_xml(&s, "Interface\\FrameXML\\BankFrame.xml");
-        load_xml(&s, "GossipFrame.xml");
+        load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
 
         // The gossip menu is open on the banker (its bank option showing).
         s.set_gossip(Some(GossipMenu {
@@ -805,13 +894,20 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
 /// scrolling moves the content up under that clip. Same deterministic measure fake as the row test.
 #[test]
 fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // A measurer: `GossipResize` reads `GetTextHeight()` on the line after `SetText`, so a bare
+    // VM sizes every row from the previous frame's box. See
+    // `shipped_gossip_rows_grow_to_their_wrapped_labels` for why this is a harness gap and not an
+    // engine one.
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml"); // UIPanelScrollFrameTemplate — see the note above
-    load_xml(&s, "GossipFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml"); // UIPanelScrollFrameTemplate — see the note above
+    load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
 
     // Eight wrapping options: ~4 lines each, far past the 334 px scroll frame.
     let long = |n: usize| GossipOptionView {
@@ -852,7 +948,14 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
     s.resolve();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
-    // The child grew past the 334 px frame, so there is a range to scroll …
+    // There is a range to scroll — which is the property that matters and the one the window
+    // exists to have.
+    //
+    // The child's own HEIGHT is no longer part of the assertion. Ours grew it past the 334px frame
+    // in `BenillaGossipFrame_SizeScrollChild`, a helper the reference does not have: stock leaves
+    // the scroll child at the frame's size and lets the rows' own extents drive the range. So the
+    // child measures 334 and the range is non-zero, where ours had both. Asserting the range alone
+    // is asserting the behaviour rather than one implementation's way of reaching it.
     let (child_h, range): (f32, f32) = s
         .eval(
             "return GossipGreetingScrollChildFrame:GetHeight(), \
@@ -860,8 +963,8 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
         )
         .unwrap();
     assert!(
-        child_h > 334.0 && range > 0.0,
-        "content overflows the 334px frame: child {child_h}, range {range}"
+        range > 0.0,
+        "the overflowing menu has somewhere to scroll: child {child_h}, range {range}"
     );
     // … and the bar is up for it (it stays hidden when everything fits — the fit case is covered by
     // `shipped_gossip_frame_drives_end_to_end`'s two-option menu).
@@ -952,13 +1055,15 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
 /// it is where a client window would be.
 #[test]
 fn an_addons_own_frame_registered_in_uipanelwindows_takes_the_left_slot() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml"); // UIPanelScrollFrameTemplate — see the note above
-    load_xml(&s, "GossipFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml"); // UIPanelScrollFrameTemplate — see the note above
+    load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
 
     // The addon's three lines, in the order an addon writes them.
     s.run(
@@ -1027,9 +1132,12 @@ fn an_addons_own_frame_registered_in_uipanelwindows_takes_the_left_slot() {
 /// either now fails a named test instead of waiting for a player with a Verdant Note.
 #[test]
 fn the_1507_registry_rows_match_the_reference_bytes() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     for probe in [
         // ItemTextFrame — UIParent.lua l.20 (the B288 row).
         "UIPanelWindows['ItemTextFrame'].area == 'left'",
@@ -1041,7 +1149,7 @@ fn the_1507_registry_rows_match_the_reference_bytes() {
         // The whileDead flags the ref authors and 1507 carried (l.21, l.25, Blizzard_TalentUI:71).
         "UIPanelWindows['SpellBookFrame'].whileDead == 1",
         "UIPanelWindows['QuestLogFrame'].whileDead == 1",
-        "UIPanelWindows['BenillaTalentFrame'].whileDead == 1",
+        "UIPanelWindows['TalentFrame'].whileDead == 1",
         // UIChildWindows — UIParent.lua l.44-50 verbatim, all four shipped.
         "table.getn(UIChildWindows) == 4",
         "UIChildWindows[1] == 'OpenMailFrame'",
@@ -1062,10 +1170,13 @@ fn the_1507_registry_rows_match_the_reference_bytes() {
 /// not take a slot; a `whileDead = 1` row (the quest log, l.25) opens exactly as alive.
 #[test]
 fn a_dead_player_opens_only_whiledead_windows() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     s.set_unit(
         "player",
         Some(benilla_ui::script::UnitState {
@@ -1127,10 +1238,13 @@ fn a_dead_player_opens_only_whiledead_windows() {
 /// dependency chain.
 #[test]
 fn a_frame_arriving_at_center_puts_the_child_windows_away() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
 
     // The letter is open; two shipped-row stand-ins take the seats: MerchantFrame (pushable 0)
     // holds left, TradeFrame (pushable 1) then ARRIVES at center (UIParent.lua l.734-741's

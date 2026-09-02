@@ -178,7 +178,15 @@ fn play_item_gesture_sounds(
     };
 
     let mut play = |payload: &CursorPayload, gesture: CursorGesture| match payload {
-        CursorPayload::Item(item) => {
+        // Mode 5 shares the ITEM arm, not the generic one: the vendor grab `0x4950f0` is handed
+        // the row's `ItemDisplayInfo` id precisely so the cursor gets that item's own pickup and
+        // putdown sounds, the same pair a bag item gets.
+        CursorPayload::Item(_) | CursorPayload::Merchant(_) => {
+            let item_id = match payload {
+                CursorPayload::Item(i) => i.item_id,
+                CursorPayload::Merchant(m) => m.item_id,
+                _ => unreachable!("guarded by the arm's own pattern"),
+            };
             let (Some(displays), Some(sounds)) = (&displays, &sounds) else {
                 return;
             };
@@ -186,7 +194,7 @@ fn play_item_gesture_sounds(
             // lookup, not an ask; a genuinely in-flight template resolves silent, like the
             // client's null-record return.
             let Some(display_id) = items
-                .template(item.item_id, 0, &net)
+                .template(item_id, 0, &net)
                 .map(|t| t.display_info_id)
             else {
                 return;

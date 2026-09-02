@@ -423,36 +423,67 @@ pub fn traversal(arena: &WidgetArena) -> Vec<(ZTarget, ZKey)> {
 // Hit-testing — the mouse-focus capture walk
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-/// Find the frame the cursor captures, per the documented top-down-by-draw-order mouse-focus model
-/// (`propagation.md`): mouse focus walks frames **top-down in reverse draw order** (the
-/// topmost-*drawn* frame first) and the first mouse-enabled, visible frame whose rect contains the
-/// cursor captures.
+/// Find the frame the cursor captures — the reference's flat hit-test index, **byte-carved**
+/// (wow-re `system/ui/scratch/hittest-no-fallthrough-law.md`).
 ///
-/// ## Fidelity: spec-faithful, NOT byte-pinned
+/// The sweep `0x7660d0` walks the mouse plane strata high→low and, within a stratum, the index from
+/// 0 upward, ending the ENTIRE sweep on the first probe that returns non-zero. There is **no
+/// fall-through**: `0x7663f4 call [edx+0x68]` is followed by `0x7663f7 mov eax,1`, so the handler's
+/// return is destroyed before it is tested. A frame that takes the mouse and does nothing with the
+/// click eats it — a `RegisterForClicks` miss, a disabled button and an unbound script all end the
+/// event identically. (The one real fall-through in the engine is the WHEEL plane, which does gate
+/// on a handler and continue; the engine has the idiom and deliberately does not use it here.)
 ///
-/// wow-5875-re located the real mouse-hit-test leaf (InputControl / CSimpleTop) *to its translation
-/// unit* but **did not byte-pin it** — it is a flagged RE-time item, not an anchor (`anchors.md`:
-/// "the exact mouse-hit-test leaf inside InputControl/CSimpleTop … NOT byte-pinned"). So this is
-/// faithful to the *documented model*, **not** bit-exact to the binary. The one primitive that *is*
-/// verified is `point_in_rect 0x76b020` (the clip/hit rect test); the top-down capture policy above
-/// is the documented model, not a byte anchor.
+/// **The index is FLAT** — sorted `(strata, frame level, insertion order)`, with no parent/child
+/// nesting term at all, which is exactly [`traversal`]'s key. The tie is the part that matters and
+/// the part we had backwards: `0x764aa0`'s comparison is a strict `ja`, so a frame arriving at a
+/// level that already exists is **appended after** its equals, and the sweep from index 0 therefore
+/// reaches the **earlier-linked** frame first. `SetFrameLevel` relinks the parent before recursing
+/// into children, and effective-Show registers self (`0x76ae85`) before its children (`0x76aeb6`) —
+/// so at equal levels **the parent wins over its own child**.
 ///
-/// Pure over its inputs: `sorted` is a draw-order-**ascending** list (as [`traversal`] returns), and
-/// `hits(frame)` reports whether that frame is a capture candidate at the cursor — i.e. it is
-/// mouse-enabled **and** its resolved rect contains the point. Visibility is already handled
-/// upstream: [`traversal`] only emits effective-visible frames, so an (effective-)hidden frame never
-/// reaches `hits`. Regions never capture (only [`ZTarget::Frame`] entries are considered). Returns
-/// the first hit found walking from the top of the draw order downward.
+/// That is the whole reason `TargetFrame_OnLoad`'s `SetFrameLevel(textureFrame-1)` on the two bars
+/// works: the bars land at exactly `TargetFrame`'s own level, and the tie goes to the frame that
+/// registered first. Walking the draw order in reverse — which is what this did until the carve —
+/// inverts it and hands the click to the child, so right-clicking a unit frame opened nothing.
+///
+/// **The SIBLING case is the one that bites hardest, and it is why this is not a local fix**
+/// (decision 1816). All children of one parent share `parent.level + 1`, so every sibling set is one
+/// big tie, resolved purely by declaration order — and under the true law the FIRST-declared sibling
+/// wins, not the last. A full-area mouse-enabled overlay declared at the top of a `<Frames>` list
+/// therefore swallows its whole window. Five of our own windows shipped exactly that (the
+/// `*WheelCatcher` `<Button>`s), correct only under the inverted order and removed with this carve;
+/// `SkillFrame.xml` had already recorded one shipped bug from the same shape. Note that
+/// `<Button>` is mouse-enabled by its *constructor* (decision 1795), so such an overlay needs no
+/// `enableMouse` to compete — the wheel is a separate index and needs no mouse hit target at all.
+///
+/// Drawing is unaffected and stays later-on-top: this reordering is the HIT sweep's alone.
+///
+/// Pure over its inputs: `sorted` is draw-order-**ascending** (as [`traversal`] returns), and
+/// `hits(frame)` reports whether that frame is a capture candidate at the cursor. Visibility is
+/// handled upstream. Regions never capture.
 pub fn hit_test<F: Fn(FrameHandle) -> bool>(
     sorted: &[(ZTarget, ZKey)],
     hits: F,
 ) -> Option<FrameHandle> {
-    for (target, _) in sorted.iter().rev() {
-        if let ZTarget::Frame(fh) = *target {
-            if hits(fh) {
-                return Some(fh);
+    // Everything above the insertion field: one (strata, level) plane of the reference's index.
+    let plane = |k: ZKey| k.0 >> LEVEL_SHIFT;
+    let mut end = sorted.len();
+    while end > 0 {
+        let p = plane(sorted[end - 1].1);
+        let mut start = end;
+        while start > 0 && plane(sorted[start - 1].1) == p {
+            start -= 1;
+        }
+        // Planes descend; WITHIN a plane the earlier-linked frame is probed first.
+        for (target, _) in &sorted[start..end] {
+            if let ZTarget::Frame(fh) = *target {
+                if hits(fh) {
+                    return Some(fh);
+                }
             }
         }
+        end = start;
     }
     None
 }

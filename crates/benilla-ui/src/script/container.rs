@@ -392,6 +392,31 @@ fn pickup_container_item(model: &mut super::Model, bag: i64, slot: u32) -> bool 
                 }
             }
         }
+        // Mode 5 — **the buy**. A held vendor row dropped into a container slot is the whole
+        // point of the merchant cursor: `0x4f9efa` tests `[0xb4d900] == 5` right here and calls
+        // `0x5e1f30` = `CMSG_BUY_ITEM_IN_SLOT 0x1a3`, `{vendorGuid, itemEntry, bagGuid, bagSlot,
+        // count = 1}`. The cursor clears whether or not the server honours it.
+        //
+        // Deliberately NOT gated on the destination being empty. The reference does not look at
+        // the slot at all — the server decides, and answers `SMSG_BUY_FAILED` when it will not.
+        // What we DO refuse is a stale row: the reference's two container drop consumers
+        // dereference the vendor row without re-checking it against a list that may have been
+        // rewritten by a fresh `SMSG_LIST_INVENTORY`, which is a latent null deref there
+        // (`0x4f9f35`, `0x4c7ea5`). We treat a row that no longer resolves as a refusal — that is
+        // the third consumer `0x4c7300`'s own behaviour, and the one of the three that is right.
+        Some(CursorPayload::Merchant(held)) => {
+            let entry = model
+                .merchant
+                .as_ref()
+                .and_then(|m| m.items.get(held.row as usize))
+                .filter(|it| it.item_id == held.item_id)
+                .map(|it| it.item_id);
+            if let Some(entry) = entry {
+                model.merchant_slot_buys.push((bag, slot, entry));
+            }
+            cursor::queue_cursor_update(model);
+            true
+        }
         Some(
             other @ (CursorPayload::Spell(_)
             | CursorPayload::Action(_)

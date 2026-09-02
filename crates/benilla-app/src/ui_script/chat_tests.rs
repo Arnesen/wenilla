@@ -7,22 +7,7 @@
 
 use benilla_ui::script::{ExtractedQuad, QuadContent, UiScript};
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error.
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// The full ChatFrame stack (fonts first, so the FontString's `inherits="ChatFontNormal"` resolves).
 fn chat_frame() -> UiScript {
@@ -35,7 +20,8 @@ fn chat_frame() -> UiScript {
     // says so too, rather than a guard that would hide a real ordering fault. (The tooltip file is
     // the dropdown kit's own dependency — its MenuBackdrop reads `TOOLTIP_DEFAULT_COLOR`.)
     load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
     load_xml(&s, "ChatFrame.xml");
     s.set_screen_size(1600.0, 900.0);
     s.resolve();
@@ -258,8 +244,11 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
         "Fonts.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "GameTooltip.xml",
         "Cooldown.xml",
+        "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
         "ChatFrame.xml",
         "SpellBookFrame.xml",
     ] {
@@ -616,8 +605,12 @@ fn get_chat_window_info_shown_matches_the_shipped_frames() {
     for i in 1..=7 {
         let agrees: bool = s
             .eval(&format!(
+                // Both sides are normalised to a boolean before comparing: `IsShown` answers the
+                // NUMBER 1 or nil (1830), so comparing it straight against `shown ~= nil` compares
+                // a number with a boolean and is false for every window. This test is about the two
+                // AGREEING, not about either one's shape.
                 "local _, _, _, _, _, _, shown = GetChatWindowInfo({i})\n\
-                 return (shown ~= nil) == ChatFrame{i}:IsShown()"
+                 return (shown ~= nil) == (ChatFrame{i}:IsShown() ~= nil)"
             ))
             .unwrap();
         assert!(

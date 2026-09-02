@@ -1,43 +1,51 @@
-//! The target frame's aura rows (`assets/ui/UnitFrames.xml`, decision 0255's deferred slice)
-//! against the reference's `TargetDebuffButton_Update` law (ref-TargetFrame.lua l.263-387). The
-//! XML/Lua is the unit under test; the app-side feed (`crate::ui_aura`'s target half) is stubbed
-//! by pushing an [`AuraState`] list through [`UiScript::set_auras`] and firing the events the feed
-//! fires — `PLAYER_TARGET_CHANGED` on a switch, `UNIT_AURA "target"` on a list change.
+//! The target frame's aura rows — the **reference's own** `Interface\FrameXML\TargetFrame.xml`
+//! off the player's patch chain (decision 1751, which retired our `assets/ui/UnitFrames.xml`
+//! transcription) — against its `TargetDebuffButton_Update` law (ref TargetFrame.lua l.263-387).
+//! The stock XML/Lua is the unit under test; the app-side feed (`crate::ui_aura`'s target half) is
+//! stubbed by pushing an [`AuraState`] list through [`UiScript::set_auras`] and firing the events
+//! the feed fires — `PLAYER_TARGET_CHANGED` on a switch, `UNIT_AURA "target"` on a list change.
 //!
 //! Under test: the friend/hostile row swap (buffs first vs debuffs first), the 21→17 shrink when
 //! the debuff count reaches the wrap (6, no target-of-target frame), the dispel-tinted border, the
-//! stack count, and the hide-on-empty lifecycle. Files load in the app's own order (UnitFrames
-//! before BuffFrame), which also pins the `DebuffTypeColor` late-definition contract.
+//! stack count, and the hide-on-empty lifecycle. Files load in `benilla.toc`'s order, which is the
+//! reference's own (BuffFrame 40 → CombatFeedback 41 → UnitFrame 43 → PlayerFrame 44 → PartyFrame
+//! 45 → TargetFrame 46 → PetFrame 47), so `DebuffTypeColor` is defined ahead of the row that
+//! indexes it and `RefreshBuffs` ahead of the party rows that call it from their own OnLoad.
 
 use benilla_ui::script::{AuraState, QuadContent, ScriptValue, UiScript, UnitState};
 
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_* (the dropdown kit's MenuBackdrop)
-    load_xml(&s, "UIDropDownMenu.xml"); // the unit popups' kit (UnitFrames' DropDown children)
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml"); // the unit popups' kit (TargetFrameDropDown's template)
     load_xml(&s, "UnitPopup.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "ActionBar.xml"); // BENILLA_FALLBACK_ICON
-    load_xml(&s, "UnitFrames.xml"); // loads BEFORE BuffFrame, as in the app
-    load_xml(&s, "BuffFrame.xml"); // DebuffTypeColor
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\BuffFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UnitFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\CombatFeedback.xml");
+    load_xml(&s, "Interface\\FrameXML\\PlayerFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\PartyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\TargetFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\PetFrame.xml");
+
+    // **Settle the target-of-target frame before any of this measures a row.** Stock
+    // `TargetofTargetFrame` carries no `hidden=` (ref TargetFrame.xml l.515), so it loads SHOWN,
+    // and the only thing that takes it down is `TargetofTarget_Update` — which
+    // `TargetFrame_OnEvent` runs *after* `TargetDebuffButton_Update` (ref TargetFrame.lua l.63-66,
+    // the update sitting inside `TargetFrame_Update` at l.51). So the very first target a freshly
+    // loaded client acquires lays its aura rows out for the 5-wide wrap, and only the next
+    // `TargetDebuffButton_Update` corrects them. One no-target `PLAYER_TARGET_CHANGED` runs that
+    // ladder to its end — exactly what deselecting once does — and leaves the frame in the state
+    // it holds for every target after the first, which is the state these tests are about.
+    s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
     s
 }
 

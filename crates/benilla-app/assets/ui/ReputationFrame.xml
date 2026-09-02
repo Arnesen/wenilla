@@ -23,7 +23,7 @@
         identical rect and is what the page was built and approved against, not a workaround for
         something the engine cannot do.
         `CharacterFrame.xml`'s `CharacterFrame_OnHide` hide-loop over
-        `BENILLA_CHARACTERFRAME_SUBFRAMES` is what closes it with the window; joining that table as
+        `CHARACTERFRAME_SUBFRAMES` is what closes it with the window; joining that table as
         entry 3 is all this page has to do to get that.
 
         THE TAB IS THE REFERENCE'S OWN SLOT 3 AGAIN. Until this page, `SkillFrame` sat at id 3 with
@@ -65,10 +65,12 @@
              client mirror), so there is nothing new for a repaint to paint, and forcing one would
              un-tick the box the player just ticked before the round trip could answer. The
              reference calls only `ReputationWatchBar_Update()` there, and so do we.
-          4. THE SCROLL FRAME IS THE HOUSE FAUX KIT (ScrollTemplates.xml, decisions 0247/0250/0251):
-             a plain `<Frame inherits="FauxScrollFrameTemplate">` rather than the reference's
-             `<ScrollFrame>`, so the reference's `<OnVerticalScroll>` body (ref l.567-571) has
-             nothing to fire and is dropped — our offset comes straight off the Slider. The two
+          4. THE SCROLL FRAME IS A `<ScrollFrame>` ON THE CHAIN'S FAUX KIT, and this note used to
+             say otherwise. It read "a plain `<Frame inherits=\"FauxScrollFrameTemplate\">` rather
+             than the reference's `<ScrollFrame>`" — true while the kit was ours. 1846 put
+             `FauxScrollFrameTemplate` on the chain, where it IS a `<ScrollFrame>`, so every one of
+             our instances became one too: a `<Frame>` inheriting it has no `SetScrollChild` and the
+             loader throws on the template's own `<ScrollChild>`. The two
              loose trough textures the reference hangs beside the bar (ref l.572-600) are replaced
              by the kit's shared `BenillaScrollTroughTemplate`; see the site for why the fit is
              exact rather than approximate.
@@ -327,7 +329,11 @@
             -- `offset * valueStep`, so this SetValue writes the value the Slider already holds and
             -- its change-gate (decision 0250) drops it before it could re-enter this function.
             -- Kept because it is the reference's line, not because it does anything.
-            if not FauxScrollFrame_Update(scrollFrame, numFactions, NUM_FACTIONS_DISPLAYED, REPUTATIONFRAME_FACTIONHEIGHT) then
+            local showBar = FauxScrollFrame_Update(scrollFrame, numFactions, NUM_FACTIONS_DISPLAYED, REPUTATIONFRAME_FACTIONHEIGHT)
+            -- Our trough is not the reference's business: it follows the bar the ref just decided
+            -- about (1860).
+            BenillaScrollTrough_Follow("ReputationListScrollFrame")
+            if not showBar then
                 getglobal("ReputationListScrollFrameScrollBar"):SetValue(0)
             end
             local factionOffset = FauxScrollFrame_GetOffset(scrollFrame)
@@ -433,9 +439,8 @@
         function ReputationFrame_OnLoad()
             local frame = this
             frame:RegisterEvent("UPDATE_FACTION")
-            -- The faux kit's one wiring requirement: the owner names its own repaint so a drag of
-            -- the scroll bar re-binds the rows (ScrollTemplates.xml's `frame.updateFunc` contract).
-            getglobal("ReputationListScrollFrame").updateFunc = ReputationFrame_Update
+            -- The repaint is wired in the scroll frame's own `<OnVerticalScroll>` below, which is
+            -- where the reference's kit puts it (1860).
         end
 
         function ReputationFrame_OnShow()
@@ -587,7 +592,7 @@
     <!-- id=3, the reference's own (ref l.211): a page's id is the slot it occupies in the WINDOW'S
          OWN tab row, and ToggleCharacter selects the tab from it (ref CharacterFrame.lua:11).
          `character_tests.rs` pins every page's id against its slot in
-         BENILLA_CHARACTERFRAME_SUBFRAMES. -->
+         CHARACTERFRAME_SUBFRAMES. -->
     <Frame name="ReputationFrame" enableMouse="true" parent="CharacterFrame" hidden="true" id="3">
         <!-- The real 384x512 page. The explicit `<Size>` + TOPLEFT `<Anchor>` below is an exact
              equivalent of the reference's `setAllPoints="true"` here — CharacterFrame, the parent
@@ -742,11 +747,19 @@
 
             <!-- The faux scroll frame (ref l.556-602): 296x354 at the page's TOPRIGHT(-66,-76),
                  which puts its left edge on the header column and its right edge 66 in from the
-                 page. updateFunc is set in ReputationFrame_OnLoad. -->
-            <Frame name="ReputationListScrollFrame" inherits="FauxScrollFrameTemplate">
+                 page. Its `<OnVerticalScroll>` is what re-binds the rows (1860). -->
+            <ScrollFrame name="ReputationListScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="296" y="354"/></Size>
                 <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-66" y="-76"/></Offset></Anchor></Anchors>
-            </Frame>
+                            <Scripts>
+                    <!-- The reference's kit writes `frame.offset` ONLY from here: the bar's
+                         OnValueChanged calls `SetVerticalScroll`, which lands in this handler.
+                         Our transcription used a `frame.updateFunc` field instead, which the
+                         reference does not have — without this the bar moves and the list does
+                         not follow (1860). -->
+                    <OnVerticalScroll>FauxScrollFrame_OnVerticalScroll(REPUTATIONFRAME_FACTIONHEIGHT, ReputationFrame_Update)</OnVerticalScroll>
+                </Scripts>
+</ScrollFrame>
 
             <!-- The two newbie tips over the column headings (ref l.603-630): invisible frames
                  exactly covering their FontString. `enableMouse` added, same engine rule as the bar

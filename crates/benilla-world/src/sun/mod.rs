@@ -148,6 +148,10 @@ impl Plugin for SunPlugin {
 /// five. Live-confirmed: standing in King's Square the reference's whole `[0.975, 0.98]` slice is
 /// three `count=12` draws — the skybox cube — and nothing else.
 ///
+/// The gate is the slot's **weight**, never the resolve alone: through the body of the 4-second
+/// crossfade (weight ≤ 0.99) the six elements keep drawing and the skybox alpha-blends over them
+/// ([`crate::skybox::SkyboxWeight`]).
+///
 /// The **submerged eye** suppresses the same set one level up: the scene driver's `0x6812a4`
 /// submerged test skips the whole `CSky::Render` call (byte-VERIFIED, wow-re terrain "the liquid
 /// render state" — "the surface is drawn identically from below; what changes underwater is
@@ -163,13 +167,13 @@ impl Plugin for SunPlugin {
 /// own authority (decision 0025) reading these same resources.
 #[allow(clippy::type_complexity)]
 fn apply_celestial_visibility(
-    skybox: Res<crate::skybox::CameraSkybox>,
+    skybox: Res<crate::skybox::SkyboxWeight>,
     underwater: Res<crate::liquid::Underwater>,
     mut suns: Query<(&SunSprite, &mut Visibility), Without<MoonSprite>>,
     mut moons: Query<(&MoonSprite, &mut Visibility), Without<SunSprite>>,
     mut stars: Query<&mut Visibility, (With<StarDome>, Without<SunSprite>, Without<MoonSprite>)>,
 ) {
-    let suppressed = skybox.0.is_some() || underwater.0.any();
+    let suppressed = skybox.replaces_celestial() || underwater.0.any();
     // `Inherited`, not `Visible`: these sprites hang off the celestial rig and must keep deferring to
     // it when the skybox stands down, exactly as the cloud dome's gate does.
     let want = |in_sky_pass: bool| {

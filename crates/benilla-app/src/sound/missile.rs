@@ -61,7 +61,9 @@ fn route_missile_sounds(
                 }
             }
             // The missile carries only this one channel — stop everything tagged to it.
-            MissileSound::Stop { entity } => stop_source(&mut out, entity),
+            MissileSound::Stop { entity } => {
+                stop_source(&mut out, entity);
+            }
         }
     }
 }

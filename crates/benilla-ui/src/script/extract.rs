@@ -126,6 +126,14 @@ impl UiScript {
                             });
                             QuadContent::Cooldown { fraction, flash }
                         }
+                        // A `<Model>`/`<PlayerModel>` pane's content hole, carrying the pane's own
+                        // name so the app can join it to the bake that window keeps (see
+                        // [`QuadContent::ModelPane`]). Both widget kinds share `KindState::Model`
+                        // because the client's `CGCharacterModelBase` extends `CSimpleModel`, and
+                        // both draw the same way here.
+                        Some(crate::widget::KindState::Model(_)) => QuadContent::ModelPane {
+                            name: frame.and_then(|f| f.name.clone()),
+                        },
                         _ => QuadContent::Frame,
                     };
                     (

@@ -69,6 +69,14 @@ const BG_ENV_PREFIXES: &[&str] = &[
     "WOW_PROBE",
     "WOW_RIG",
     "WOW_SCHED_CENSUS",
+    // The one that names the condition directly: `WOW_UNATTENDED` *is* "the chair is empty"
+    // (1769), and method.md tells every ad-hoc probe to set it. It was missing here for as long
+    // as this list has existed, so a probe launched exactly the way the method prescribes — but
+    // under none of the named prefixes — opened focused and borderless-fullscreen over the
+    // director's work. Reported 2026-09-01 while probing B346. This is the case the list's own
+    // doc predicts ("one that doesn't shows up as the new probe window opened focused"); it is
+    // also the strongest signal available, since nothing else asserts nobody is there.
+    "WOW_UNATTENDED",
     "WOW_WORLDVIEW_",
 ];
 
@@ -108,6 +116,14 @@ fn env_names() -> impl Iterator<Item = String> {
 /// `WOW_PROBE…`-named env that captures pixels has to be excluded by name here, since the bare
 /// `WOW_PROBE` prefix would otherwise sweep it in.
 const NO_PIXEL_ENV_PREFIXES: &[&str] = &[
+    // Paired with its entry above, and it has to be BOTH or neither: `leg.sh`, `cine.sh` and
+    // `summon-live.sh` all set `WOW_UNATTENDED` beside a `WOW_PROBE*`/`WOW_RIG` that IS no-pixel,
+    // so listing it only as a background env would make it the one non-no-pixel member of every
+    // such run and the all-of rule would grow all three back to the full 1600x900 that decision
+    // 1148 shrank. A run whose ONLY background env is this one reads no pixels by construction —
+    // anything that photographs the frame names itself (`WOW_CAPTURE`, `WOW_LIVE_SHOT`,
+    // `WOW_*_SHOT`), and none of those are here, so every such pairing keeps its full size.
+    "WOW_UNATTENDED",
     "WOW_FEED_GATE_CHECK",
     "WOW_FEED_GATE_TRACE",
     "WOW_FPS_",

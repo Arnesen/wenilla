@@ -439,16 +439,26 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // nil. The binding pushes 3 on both legs (`mov eax,3`), so a caller destructuring the third
     // gets `0`. Returning nil there would be a different contract.
     //
-    // A unit token the resolver does not recognise **raises**, rather than answering nils — that
-    // is the binding's own behaviour, and swallowing it would hide a typo'd token forever.
+    // **RECOGNISED and UNRESOLVABLE are two different things**, and this binding conflated them
+    // until the stock character sheet came off the chain (decision 1751). It resolves its argument
+    // through the GENERAL unit-token resolver `0x515940`, so an *unrecognised* token raises via the
+    // L-less `luaL_error 0x7040e0` at `0x515c1a` — but "a recognised-but-unresolvable token, a
+    // non-player, a guildless player and a not-yet-arrived cache record ALL return (nil, nil, 0)"
+    // (wow-re `system/ui` ledger, `0x4c9330`, VERIFIED, `scratch/guild-api-carve.md`).
+    //
+    // Ours raised on any token the model held no unit for, which includes `"player"` before the
+    // app has pushed the first snapshot. Stock `PaperDollFrame_SetGuild` calls
+    // `GetGuildInfo("player")` UNGUARDED out of `PaperDollFrame_OnShow` (`PaperDollFrame.lua:117`,
+    // reached from `:569`), so opening the character window in the frames before that push raised
+    // where the reference prints an empty guild line. [`check_unit_token`] is the resolver's own
+    // three-way split and every other unit binding already goes through it.
     g.set(
         "GetGuildInfo",
-        lua.create_function(|lua, unit: String| {
+        lua.create_function(|lua, unit: Option<String>| {
+            crate::script::unit::check_unit_token(&unit)?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let Some(state) = model.unit(&unit) else {
-                return Err(mlua::Error::RuntimeError(format!(
-                    "GetGuildInfo: unknown unit '{unit}'"
-                )));
+            let Some(state) = unit.as_deref().and_then(|u| model.unit(u)) else {
+                return Ok((Value::Nil, Value::Nil, Value::Integer(0)));
             };
             let Some(guild) = state.guild.as_ref() else {
                 return Ok((Value::Nil, Value::Nil, Value::Integer(0)));
@@ -916,6 +926,33 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **`GetGuildInfo` splits three ways, not two** — wow-re `0x4c9330` (VERIFIED,
+    /// `scratch/guild-api-carve.md`): only an *unrecognised* token raises; a **recognised**
+    /// token that resolves to nothing answers `(nil, nil, 0)` like a guildless player does.
+    ///
+    /// The distinction is not academic. Stock `PaperDollFrame_SetGuild` calls
+    /// `GetGuildInfo("player")` unguarded from `PaperDollFrame_OnShow`, so before this split
+    /// existed, opening the character window in the frames before the app pushed its first player
+    /// snapshot raised — found by putting the reference's own `PaperDollFrame.xml` on the chain
+    /// (decision 1751). `"player"` with no unit behind it is the whole test.
+    #[test]
+    fn a_recognised_but_unresolved_unit_answers_nils_and_only_an_unknown_token_raises() {
+        let s = crate::script::UiScript::new().unwrap();
+        // Recognised, resolves to nothing — the paper doll's own case at world entry.
+        let (name, rank, idx): (Option<String>, Option<String>, i64) = s
+            .eval(r#"return GetGuildInfo("player")"#)
+            .expect("a recognised token must not raise");
+        assert_eq!((name, rank, idx), (None, None, 0));
+        // …and the third value is the NUMBER zero on that leg, not nil (`mov eax,3` on both).
+        assert!(s
+            .eval::<bool>(r#"local a,b,c = GetGuildInfo("party3") return c == 0"#)
+            .unwrap());
+        // Unrecognised: the resolver's own raise, unchanged.
+        assert!(s
+            .eval::<i64>(r#"return GetGuildInfo("nosuchunit")"#)
+            .is_err());
+    }
 
     /// The thirteen-bit table is the API contract, and its non-monotonicity is the trap: Promote
     /// and Demote sit at indices 5 and 6 with bits ABOVE Invite and Remove at 7 and 8. A

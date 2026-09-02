@@ -810,7 +810,11 @@ const SUBMERSION_EPS: f32 = 0.01;
 fn submersion_of(kind: LiquidKind) -> benilla_formats::Submersion {
     use benilla_formats::Submersion;
     match kind {
-        LiquidKind::Still | LiquidKind::Rapids | LiquidKind::Ocean => Submersion::Water,
+        LiquidKind::Still | LiquidKind::Rapids => Submersion::Water,
+        // Ocean is its own verdict — it alone runs the depth ramp (decision 1829). It can only come
+        // from ADT MCLQ (`(b & 0x0f) & 3 == 1`); a WMO cannot author it, which is why no interior
+        // pool ever reaches this arm.
+        LiquidKind::Ocean => Submersion::Ocean,
         LiquidKind::Magma => Submersion::Magma,
         LiquidKind::Slime => Submersion::Slime,
     }
@@ -852,11 +856,31 @@ fn submersion_of(kind: LiquidKind) -> benilla_formats::Submersion {
 /// the defect was never visible to [`liquid_at`] (which answers "the liquid over this XY", lowest
 /// wins, whether or not you are under it) but only to *this* rule — "every admitted surface the eye
 /// is beneath". A rule no test can call is a rule that drifts from the one being reasoned about.
+/// The verdict alone, for the tests that assert on it — a thin delegation to
+/// [`submersion_claim_at`], never a second copy of the rule. It restated the filter for about an
+/// hour of this change, and that was already one copy too many: the reason the surface height is
+/// threaded out of a *single* pass is precisely that two passes can disagree (decision 0701).
+#[cfg(test)]
 pub(super) fn submersion_at<'a>(
     liquids: impl Iterator<Item = &'a WaterChunkInfo>,
     wow: [f32; 3],
     claim: LiquidClaim,
 ) -> benilla_formats::Submersion {
+    submersion_claim_at(liquids, wow, claim).map_or_else(Default::default, |(s, _)| s)
+}
+
+/// [`submersion_at`]'s verdict **and the surface it came from** — the same rule, one value wider.
+///
+/// The surface height is what the reference's own probe keeps beside the verdict (`0x680a87` /
+/// `0x680ab0` write the pair), and two consumers need it: the glare's depth fade wants
+/// `surface − probe` and the ocean ramp wants to know it is standing on a sea. Deriving it a second
+/// time from a second pass over the surfaces would be a rule that could drift from this one — the
+/// mistake decision 0701 already paid for once.
+pub(super) fn submersion_claim_at<'a>(
+    liquids: impl Iterator<Item = &'a WaterChunkInfo>,
+    wow: [f32; 3],
+    claim: LiquidClaim,
+) -> Option<(benilla_formats::Submersion, f32)> {
     liquids
         .filter(|w| w.answers(claim, wow[2]))
         .filter_map(|w| {
@@ -868,10 +892,53 @@ pub(super) fn submersion_at<'a>(
             };
             (wow[2] < z + eps).then_some((z, submersion_of(w.kind)))
         })
-        // Lowest surface first: `total_cmp` on the surface z, so a tie is still deterministic.
         .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, s)| s)
-        .unwrap_or_default()
+        .map(|(z, s)| (s, z))
+}
+
+/// The camera-eye liquid state as ONE system parameter — the verdict and the two scalars together.
+///
+/// They are read as a unit because they are written as a unit, by one probe in one frame slot
+/// ([`super::SubmersionVerdict`]); binding them separately invites a consumer that takes the depth
+/// from this frame and the verdict from the last. It also keeps a caller under Bevy's 16-parameter
+/// ceiling, which is what forced the bundle — [`crate::lighting::resolve::update_time_lighting`]
+/// reads sixteen other things.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct EyeLiquid<'w> {
+    verdict: Option<Res<'w, Underwater>>,
+    eye: Option<Res<'w, SubmergedEye>>,
+}
+
+impl EyeLiquid<'_> {
+    /// What the eye is in — [`benilla_formats::Submersion::Dry`] before the probe has ever run.
+    pub fn submersion(&self) -> benilla_formats::Submersion {
+        self.verdict.as_ref().map_or_else(Default::default, |v| v.0)
+    }
+
+    /// The eye's absolute world Z — the ocean ramp's raw input.
+    pub fn eye_z(&self) -> f32 {
+        self.eye.as_ref().map_or(0.0, |e| e.eye_z)
+    }
+
+    /// How far the probe sits below the liquid surface, in yards; `0.0` when dry.
+    pub fn depth(&self) -> f32 {
+        self.eye.as_ref().map_or(0.0, |e| e.depth)
+    }
+}
+
+/// The submerged camera's two scalars, published beside [`Underwater`] for the consumers that need
+/// a *distance* rather than a verdict (decision 1829).
+#[derive(bevy::prelude::Resource, Default, Clone, Copy)]
+pub struct SubmergedEye {
+    /// `liquidSurfaceHeight − probeZ` in world-Z yards, **positive when submerged** and `0.0` when
+    /// dry — the quantity the reference writes at `0x680a87`/`0x680ab0`. Drives the glare's 10-yard
+    /// fade. Not a ray distance and not an occluder term.
+    pub depth: f32,
+    /// The camera eye's own absolute world Z. The ocean depth ramp clamps this raw
+    /// (`t = clamp(eye.z, −30, 0)`) rather than working from [`Self::depth`], because ocean
+    /// surfaces are pinned to z = 0 by a code branch (`0x69ba85`) rather than by data — so for the
+    /// one state that runs the ramp the two agree, and the absolute form is what the binary reads.
+    pub eye_z: f32,
 }
 
 /// How far the near rectangle's **lowest corner** sits below the eye (≤ 0, WoW-Z = Bevy-Y yards) —
@@ -896,6 +963,9 @@ pub(super) fn lowest_near_corner_drop(rotation: Quat, fov: f32, aspect: f32, nea
     drop
 }
 
+// Eight parameters: the probe reads a camera, the loaded surfaces, two scoping resources and a
+// clock, then writes the verdict and its two scalars. They are the inputs the rule has.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn detect_submersion(
     mut underwater: ResMut<Underwater>,
     camera: Query<(&Transform, &Projection), With<WorldCamera>>,
@@ -903,6 +973,7 @@ pub(super) fn detect_submersion(
     eye_claim: Res<crate::wmo_portal::CameraInteriorClaim>,
     placements: RoomPlacements,
     time: Res<Time>,
+    mut submerged_eye: ResMut<SubmergedEye>,
     mut last_dump: Local<Option<u32>>,
 ) {
     let Ok((cam, proj)) = camera.single() else {
@@ -924,7 +995,13 @@ pub(super) fn detect_submersion(
         }
         _ => eye[2],
     };
-    underwater.0 = submersion_at(water.iter(), [eye[0], eye[1], probe_z], claim);
+    let verdict = submersion_claim_at(water.iter(), [eye[0], eye[1], probe_z], claim);
+    underwater.0 = verdict.map(|(s, _)| s).unwrap_or_default();
+    // Depth is measured from the PROBE, not the eye — the probe is what decided we are submerged at
+    // all, so a fade driven off the eye would disagree with the verdict in the inches-tall band the
+    // near rectangle owns.
+    submerged_eye.depth = verdict.map_or(0.0, |(_, z)| (z - probe_z).max(0.0));
+    submerged_eye.eye_z = eye[2];
     // `WOW_FOG_DUMP` also explains *this* decision (`frame` drops the 1 Hz throttle, as there). The
     // committed fog is whichever submerged atmosphere the verdict names, so a fog line alone cannot
     // say whether an atmosphere that reads wrong is the wrong record or the right record never

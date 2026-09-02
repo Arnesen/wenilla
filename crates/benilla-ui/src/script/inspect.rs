@@ -146,12 +146,6 @@ impl super::UiScript {
     pub fn take_inspect_clear(&mut self) -> bool {
         std::mem::take(&mut self.model_mut().inspect_clear)
     }
-
-    /// The inspect model pane's bake yaw in radians — the twin of
-    /// [`Self::paperdoll_yaw`], read by the app onto the `"inspect"` booth slot each frame.
-    pub fn inspect_yaw(&self) -> f32 {
-        self.model_ref().inspect_yaw
-    }
 }
 
 /// What the app resolved for `token`, or `None` when it resolved to no live unit at all — the
@@ -267,20 +261,6 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             lua.app_data_mut::<Model>()
                 .expect("model app_data")
                 .inspect_clear = true;
-            Ok(())
-        })?,
-    )?;
-
-    // BenillaInspectModel_SetFacing(radians) — the inspect pane's own bake yaw, the exact twin of
-    // `BenillaPaperDollModel_SetFacing` (decision 0208 §5's rotate-adjusts-the-bake). Two scalars
-    // rather than one shared: the two windows can be open at different facings, and the ref's own
-    // `InspectModelFrame` carries its own `rotation` independent of the character pane's.
-    g.set(
-        "BenillaInspectModel_SetFacing",
-        lua.create_function(|lua, radians: f32| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .inspect_yaw = radians;
             Ok(())
         })?,
     )?;

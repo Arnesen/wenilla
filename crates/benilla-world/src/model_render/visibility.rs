@@ -81,6 +81,7 @@ pub(super) fn apply_model_visibility(
             &GlobalTransform,
             Option<&Aabb>,
             Has<crate::exterior_cull::ExteriorScene>,
+            Option<&mut MeshTag>,
         ),
         Without<ModelPart>,
     >,
@@ -175,6 +176,18 @@ pub(super) fn apply_model_visibility(
                         .is_none_or(|inst| gv.drawn_by(inst))
                 });
 
+            // …and, off the SAME per-frame flood, which fog triple this piece's batch is pushed
+            // with: the client's per-group `[0xca7f00]` (wow-re round-6 Q-I — the group drawer
+            // `0x6b5190` and the group-doodad drawer `0x6b62e0` push the interior triple only under
+            // it; everything else inherits `push_fog`'s scene triple). `None` for every non-WMO
+            // entity, which leaves `INTERIOR_FOG_BIT` to the entity classifier — a unit's fog is
+            // staged by the unit's OWN classification, not by the room's gate.
+            let room_fog = group_vis.map(|gv| {
+                instances
+                    .get(gv.instance)
+                    .is_ok_and(|inst| gv.interior_fogged_by(inst))
+            });
+
             // The batch's animated material-alpha factor (decision 0130 phase 2): the sampled
             // colour-alpha × transparency-weight loop, `1.0` for the untracked majority. Multiplied
             // into the tag below, and into the cull here — the real client skips a batch whose
@@ -244,18 +257,25 @@ pub(super) fn apply_model_visibility(
             // haze) blasted at full brightness (bug B30). Only the unit lane stays out:
             // `entities::apply_unit_mat_alpha` owns that compose, ordered against the interior
             // classifier and the appear-fade.
-            if fade.is_some() || mat_anim.is_some_and(|m| !m.composes_unit_tag()) {
-                // Glow cards render at AUTHORED brightness (decision 0159 — the dimmer knob died
-                // with the faithful FFXGlow pass; the square-law is what keeps halos in check).
-                let alpha = fade_alpha * mat_factor;
-                // `with_alpha` handles the `MeshTag == 0` opaque-sentinel (a *visible* glow card dimmed
-                // to exactly 0 must not flip to full bright); a distance-faded doodad (`fade_alpha == 0`)
-                // is Hidden anyway, so ≈0 bits there are equally fine. Conventions: `crate::mesh_tag`.
-                if let Some(mut tag) = tag {
-                    let bits = crate::mesh_tag::with_alpha(tag.0, alpha);
-                    if tag.0 != bits {
-                        tag.0 = bits;
-                    }
+            // The two tag fields this system owns, written in ONE read-modify-write so they
+            // compose instead of racing: the fade alpha, and the room's interior-fog bit.
+            if let Some(mut tag) = tag {
+                let mut bits = tag.0;
+                if fade.is_some() || mat_anim.is_some_and(|m| !m.composes_unit_tag()) {
+                    // Glow cards render at AUTHORED brightness (decision 0159 — the dimmer knob died
+                    // with the faithful FFXGlow pass; the square-law is what keeps halos in check).
+                    let alpha = fade_alpha * mat_factor;
+                    // `with_alpha` handles the `MeshTag == 0` opaque-sentinel (a *visible* glow card
+                    // dimmed to exactly 0 must not flip to full bright); a distance-faded doodad
+                    // (`fade_alpha == 0`) is Hidden anyway, so ≈0 bits there are equally fine.
+                    // Conventions: `crate::mesh_tag`.
+                    bits = crate::mesh_tag::with_alpha(bits, alpha);
+                }
+                if let Some(on) = room_fog {
+                    bits = crate::mesh_tag::with_interior_fog(bits, on);
+                }
+                if tag.0 != bits {
+                    tag.0 = bits;
                 }
             }
             if let Some(f) = fade {
@@ -292,7 +312,7 @@ pub(super) fn apply_model_visibility(
     // liquid every frame with no portal re-check for the rest of the world session — the Great
     // Forge's walkway-level pool stays put when its group drops out of the flood (B65). An index
     // past the latch fails OPEN (portal-less props never latch and must always draw).
-    for (gv, mut vis, xf, aabb, exterior) in &mut group_only {
+    for (gv, mut vis, xf, aabb, exterior, tag) in &mut group_only {
         let portal_ok = !m.portal_cull
             || instances.get(gv.instance).ok().is_none_or(|inst| {
                 gv.groups
@@ -320,6 +340,22 @@ pub(super) fn apply_model_visibility(
         };
         if *vis != want {
             *vis = want;
+        }
+        // …and the pool's fog lane, off the same per-frame flood as the room's walls (decision
+        // 1787). The reference's WMO liquid pass re-submits the interior fog block under the SAME
+        // `[0xca7f00]` as the geometry pass (wow-re `fog-env-state` §5's 6-site census), so a room
+        // and its water can never disagree; `liquid.wgsl` ANDs this with the surface's own static
+        // interior class. Note the term is the FLOOD's bit, not the ever-visited latch above: a
+        // pool the latch keeps drawing after its room left the PVS wears the scene fog, which is
+        // what the client's per-group toggle does with a group it is not currently walking.
+        if let Some(mut tag) = tag {
+            let on = instances
+                .get(gv.instance)
+                .is_ok_and(|inst| gv.interior_fogged_by(inst));
+            let bits = crate::mesh_tag::with_interior_fog(tag.0, on);
+            if tag.0 != bits {
+                tag.0 = bits;
+            }
         }
     }
 }

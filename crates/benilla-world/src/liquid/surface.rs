@@ -408,6 +408,11 @@ pub(crate) fn spawn_wmo_liquids<'a>(
                 MeshMaterial3d(material),
                 transform,
                 LiquidSurface,
+                // The per-frame interior-fog lane rides `MeshTag` bit 30, written by the one
+                // `Visibility` authority off this pool's own room (decision 1787; `liquid.wgsl`'s
+                // `room_fog`). Spawned clear: a pool wears the room's fog only once the flood has
+                // said the room is on the lane.
+                bevy::mesh::MeshTag(0),
                 // The ambient-loop source rides EVERY kind — the fullbright lava/slime hum too
                 // (0506). It reads its geometry off the `WaterChunkInfo` inserted below.
                 LiquidSoundSource {

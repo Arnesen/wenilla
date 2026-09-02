@@ -1,5 +1,6 @@
-//! The shipped `assets/ui/ScrollTemplates.xml` faux-scroll kit, under the **reference's own
-//! names** — `FauxScrollFrame_Update` / `_GetOffset` / `_SetOffset` / `_OnVerticalScroll` and
+//! The **reference's own** faux-scroll kit — `Interface\FrameXML\UIPanelTemplates`, off the
+//! player's chain since 1837, our transcription deleted by 1860 — under its own
+//! names — `FauxScrollFrame_Update` / `_GetOffset` / `_SetOffset` / `_OnVerticalScroll` and
 //! `ScrollFrame_OnLoad` (decision 1190: a name the shipped 1.12 UI defines is FrameXML's).
 //!
 //! These drive the kit the way an addon does — a bare instance of `FauxScrollFrameTemplate` with
@@ -11,28 +12,15 @@
 //! The last test is the one worth reading: it drives the reference's *whole* path — bar drag →
 //! `SetVerticalScroll` → the frame's `<OnVerticalScroll>` → `FauxScrollFrame_OnVerticalScroll` —
 //! on a real `<ScrollFrame>` with a scroll child, which is exactly the shape 27 corpus addons
-//! write. It has to set the scroll child by hand (`SetScrollChild`) because our XML loader has no
-//! `<ScrollChild>` element yet; that one missing element is the entire distance between this test
-//! and an addon's list scrolling in-game, which is why it is pinned here rather than described.
+//! write. `<ScrollChild>` landed with 1205, so the template's own child arrives through
+//! inheritance now (`framexml.rs merge` clones the base's children) — which is why the fixture
+//! here must be a `<ScrollFrame>`: `merge` takes the OVERRIDING node's tag, and a `<Frame>` would
+//! skip the loader's ScrollChild pass and leave `$parentScrollChildFrame` nil for the reference's
+//! `FauxScrollFrame_Update`, which touches it unguarded (decision 1860).
 
 use benilla_ui::script::UiScript;
 
-/// One shipped file into `s`, asserting it loaded clean.
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// A document written here in the test, loaded against the templates already registered — the
 /// cross-file template registry is on the `Model`, so an inline doc reaches `ScrollTemplates.xml`'s
@@ -54,6 +42,8 @@ fn harness() -> UiScript {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_inline(
         &s,
         r#"<Ui>
@@ -67,14 +57,18 @@ fn harness() -> UiScript {
                     <Button name="TestRow4"><Size><AbsDimension x="300" y="16"/></Size></Button>
                     <Button name="TestRow5"><Size><AbsDimension x="300" y="16"/></Size></Button>
                     <Frame name="TestHighlight"><Size><AbsDimension x="300" y="16"/></Size></Frame>
-                    <Frame name="TestScroll" inherits="FauxScrollFrameTemplate">
+                    <ScrollFrame name="TestScroll" inherits="FauxScrollFrameTemplate">
                         <Size><AbsDimension x="290" y="80"/></Size>
                         <Anchors><Anchor point="TOPLEFT"/></Anchors>
-                    </Frame>
+                        <Scripts>
+                            <OnVerticalScroll>FauxScrollFrame_OnVerticalScroll(16, TestUpdate)</OnVerticalScroll>
+                        </Scripts>
+                    </ScrollFrame>
                 </Frames>
             </Frame>
         </Ui>"#,
     );
+    s.run("function TestUpdate() end").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     s
 }
@@ -170,30 +164,53 @@ fn a_list_that_exactly_fits_shows_no_bar() {
         .unwrap());
 }
 
-/// **Fewer rows than fit**, arrived at by the list SHRINKING under a scrolled offset — the case
-/// that leaves a window painting rows that are not there if the clamp is missing. The reference
-/// clamps by setting the bar to 0; we clamp the offset itself, which is what the owner's repaint
-/// reads back through `FauxScrollFrame_GetOffset`.
+/// **Fewer rows than fit**, arrived at by the list SHRINKING under a scrolled offset.
+///
+/// **The clamp lives on the BAR, not on `frame.offset` — the reference's own arrangement, and ours
+/// diverged from it until 1860.** `FauxScrollFrame_SetOffset` is two lines in the reference
+/// (`frame.offset = offset`, UIPanelTemplates.lua:239-241): it does not move the thumb, so the
+/// stored offset and the bar can disagree until something scrolls. `FauxScrollFrame_Update` then
+/// re-ranges the bar (`SetMinMaxValues(0, (numItems - numToDisplay) * valueStep)`), and it is the
+/// slider's own clamp — firing OnValueChanged into the owner's `<OnVerticalScroll>` — that walks
+/// a too-deep offset back. Our deleted copy wrote `frame.offset` directly instead, which is why
+/// this test used to read a clamped offset immediately.
 #[test]
 fn a_shrinking_list_clamps_the_offset_back_into_range() {
-    let s = harness();
+    let mut s = harness();
     s.run("FauxScrollFrame_Update(TestScroll, 20, 5, 16)")
         .unwrap();
+    // The scroll range comes off the child's RESOLVED height, one solve behind the `SetHeight`
+    // the update just did (0251's lag). The app resolves every frame; a test has to say so.
+    s.resolve();
     s.run("FauxScrollFrame_SetOffset(TestScroll, 12)").unwrap();
+    s.resolve();
     assert_eq!(
         s.eval::<i64>("return FauxScrollFrame_GetOffset(TestScroll)")
             .unwrap(),
         12
     );
 
-    // The list drops to 8 rows: the deepest legal offset is now 3.
+    // The list drops to 8 rows: the deepest legal offset is now 3, and the BAR is what says so.
     s.run("FauxScrollFrame_Update(TestScroll, 8, 5, 16)")
         .unwrap();
+    s.resolve();
+    let (lo, hi) = s
+        .eval::<(f64, f64)>("return TestScrollScrollBar:GetMinMaxValues()")
+        .unwrap();
     assert_eq!(
+        (lo, hi),
+        (0.0, 48.0),
+        "the bar re-ranges to (numItems - numToDisplay) * valueStep = 3 rows"
+    );
+    // Scrolling now cannot go deeper than that range, which is how the reference walks a stale
+    // offset back — the offset itself is untouched until it does.
+    s.run("TestScrollScrollBar:SetValue(999)").unwrap();
+    s.resolve();
+    assert!(
         s.eval::<i64>("return FauxScrollFrame_GetOffset(TestScroll)")
-            .unwrap(),
-        3,
-        "clamped to numItems - numToDisplay, not left at 12"
+            .unwrap()
+            <= 3,
+        "a scroll lands inside the re-ranged bar, never past the last full page"
     );
     assert_eq!(
         s.eval::<f64>("return TestScrollScrollBar:GetValue()")
@@ -263,13 +280,12 @@ fn the_shrink_widen_tail_resizes_the_rows_and_the_highlight() {
 /// value model in one test (pixels on the bar, rows in the offset, `floor(v/step + 0.5)` between).
 #[test]
 fn dragging_the_bar_steps_the_offset_by_rows_and_repaints() {
-    let s = harness();
-    s.run(
-        "TestRepaints = 0 TestScroll.updateFunc = function() TestRepaints = TestRepaints + 1 end",
-    )
-    .unwrap();
+    let mut s = harness();
+    s.run("TestRepaints = 0 function TestUpdate() TestRepaints = TestRepaints + 1 end")
+        .unwrap();
     s.run("FauxScrollFrame_Update(TestScroll, 12, 5, 16)")
         .unwrap();
+    s.resolve(); // the range is a solve behind the update's SetHeight (0251)
     let before = s.eval::<i64>("return TestRepaints").unwrap();
 
     s.run("TestScrollScrollBar:SetValue(48)").unwrap();
@@ -278,20 +294,34 @@ fn dragging_the_bar_steps_the_offset_by_rows_and_repaints() {
             .unwrap(),
         3
     );
-    assert_eq!(
-        s.eval::<i64>("return TestRepaints").unwrap(),
-        before + 1,
-        "exactly one repaint per row the drag crossed"
+    // The drag repainted. NOT an exact count: the reference's `FauxScrollFrame_OnVerticalScroll`
+    // re-sets the bar it was called from (`scrollbar:SetValue(arg1)`, UIPanelTemplates.lua:230),
+    // so one drag can round-trip the value-changed chain more than once. Our deleted copy took the
+    // offset straight off the slider and could promise one repaint per row; the reference cannot,
+    // and pinning the number here would be pinning that re-entry rather than the contract (1860).
+    assert!(
+        s.eval::<i64>("return TestRepaints").unwrap() > before,
+        "the drag repainted the owner's list"
     );
 
-    // A sub-row nudge rounds to the nearest row and, landing on the same one, repaints nothing.
+    // A sub-row nudge rounds to the NEAREST row (`floor(v/itemHeight + 0.5)`) and lands on the
+    // same one, so the offset does not move.
+    let settled = s.eval::<i64>("return TestRepaints").unwrap();
     s.run("TestScrollScrollBar:SetValue(51)").unwrap();
     assert_eq!(
         s.eval::<i64>("return FauxScrollFrame_GetOffset(TestScroll)")
             .unwrap(),
-        3
+        3,
+        "51px is still row 3 once rounded"
     );
-    assert_eq!(s.eval::<i64>("return TestRepaints").unwrap(), before + 1);
+    // …but it STILL repaints. `FauxScrollFrame_OnVerticalScroll` ends in a bare
+    // `updateFunction();` (UIPanelTemplates.lua:228-233) — unconditional, with no compare against
+    // the previous offset. Our deleted kit repainted only when the row actually changed; the
+    // reference does not, and that difference is the migration's, not a regression to chase (1860).
+    assert!(
+        s.eval::<i64>("return TestRepaints").unwrap() > settled,
+        "the reference repaints on every scroll, changed row or not"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -371,6 +401,8 @@ fn scrolling_edit_helpers_answer_bare_calls_from_a_handler() {
     let s = UiScript::new().unwrap();
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_inline(
         &s,
         r#"<Ui>

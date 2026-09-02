@@ -163,6 +163,113 @@ pub(crate) fn optional_string(lua: &Lua, v: &Value) -> Option<String> {
 /// *strings* `"0"`/`"1"`, and a re-implementation wired to `lua_toboolean` inverts every
 /// string-valued option in the game. Equally, `"0.5"` and `"-1"` are decided by their first byte
 /// alone — false and `default` — never by their numeric value.
+/// Lua 5.0's own number→string rule as the 1.12 client compiles it: `sprintf("%.14g")`
+/// (`luaV_tostring 0x6f7c80`, format string `0x871960`). Decision 1831.
+///
+/// This is the whole of `EditBox:SetNumber`'s formatting, because **`SetNumber 0x798690` and
+/// `SetText 0x7984c0` are byte-identical functions** — 245 bytes each, zero differences after
+/// masking rel32 and absolute-VA operands, differing only in which usage string they carry. The
+/// numeric verb does no numeric work of its own; the shared `lua_tostring` marshalling does it all.
+///
+/// The rule, and the three places it is not Rust's `{}`:
+///
+/// - **14 significant digits**, then trailing zeros and a bare trailing `.` are dropped.
+/// - **Exponential iff `exp < -4 || exp >= 14`** — the C `%g` switch.
+/// - **A three-digit exponent, always.** `1e20` prints `1e+020`, not `1e+20`: the exponent is
+///   copied from the literal template `"e+000"` and digits are written onto it. This is MSVC's
+///   `%g`, not C99's, and it is the single most surprising thing here.
+///
+/// **What this deliberately does NOT reproduce**, stated so it is not mistaken for an oversight:
+/// the reference's printf is not correctly rounded. It generates 17 digits half-up and then
+/// re-rounds *that string* to 14, also half-up and with no sticky bit, so it disagrees with a
+/// correctly-rounded formatter on roughly 0.05% of doubles (`-0.11594045739607` where a correct
+/// one gives `…606`). Reproducing that needs the two-stage decimal path, not a format string, and
+/// no consumer we have is sensitive to the fourteenth digit. If one ever is, this is the note that
+/// says where to look.
+pub(crate) fn lua_number_text(v: f64) -> String {
+    if v.is_nan() {
+        // MSVC's own spellings, which are not "NaN".
+        return if v.is_sign_negative() {
+            "-1.#IND".into()
+        } else {
+            "1.#QNAN".into()
+        };
+    }
+    if v.is_infinite() {
+        return if v < 0.0 {
+            "-1.#INF".into()
+        } else {
+            "1.#INF".into()
+        };
+    }
+    if v == 0.0 {
+        // `%g` prints negative zero without the sign.
+        return "0".into();
+    }
+    const SIG: i32 = 14;
+    let exp = v.abs().log10().floor() as i32;
+    // Re-derive the exponent from the rounded form: 9.9999e2 rounds to 1e3 and changes style.
+    let exp = {
+        let probe = format!("{:.*e}", (SIG - 1) as usize, v);
+        probe
+            .rsplit('e')
+            .next()
+            .and_then(|e| e.parse::<i32>().ok())
+            .unwrap_or(exp)
+    };
+    // C's `%g` style rule verbatim: exponential when `exp < -4 || exp >= P`, else fixed.
+    if !(-4..SIG).contains(&exp) {
+        let mantissa = format!("{:.*e}", (SIG - 1) as usize, v);
+        let (m, _) = mantissa.split_once('e').unwrap_or((mantissa.as_str(), "0"));
+        let m = trim_g(m);
+        let sign = if exp < 0 { '-' } else { '+' };
+        // Three digits minimum, and MORE if the exponent needs them — the template is padded,
+        // never truncated.
+        format!("{m}e{sign}{:03}", exp.abs())
+    } else {
+        let decimals = (SIG - 1 - exp).max(0) as usize;
+        trim_g(&format!("{v:.decimals$}")).to_string()
+    }
+}
+
+/// Strip `%g`'s trailing zeros, and the decimal point if nothing follows it.
+fn trim_g(s: &str) -> &str {
+    if !s.contains('.') {
+        return s;
+    }
+    s.trim_end_matches('0').trim_end_matches('.')
+}
+
+/// A widget **predicate's return**: the NUMBER `1` for true, `nil` for false — never a Lua boolean.
+///
+/// The return-side counterpart to [`bool_or_default`], and the same class of fact: 1.12 widget
+/// bindings do not push booleans. `lua_pushboolean 0x6f39f0` has seven call sites in the whole
+/// image and not one of them is inside a widget registrar body — every predicate goes through
+/// `lua_pushnumber`/`lua_pushnil`. Decision 1830.
+///
+/// **Truthiness hides the difference and direct comparison inverts it**, which is why this survived
+/// so long. `if frame:IsVisible()` reads the same either way; `if frame:IsVisible() == nil` does
+/// not — under a boolean a hidden frame answers `false`, and `false == nil` is FALSE, so the caller
+/// concludes the frame is visible exactly when it is not. The 1.12 addon corpus has 21 such direct
+/// comparisons (`IsVisible() == nil` ×9, `GetChecked() == 1` ×6, `IsVisible() ~= nil` ×4, and one
+/// each of `~= 1` / `== 1`) across Questie, AtlasQuest, CT_BagMod, MikScrollingBattleText's options
+/// and `_dl`.
+///
+/// The reference proves its own shape without needing the bytes: stock `UIOptionsFrame.xml:310`
+/// saves a checkbox as `SHOW_BUFF_DURATIONS = tostring(this:GetChecked())` and stock
+/// `BuffFrame.lua:71` reads it back as `== "1"`. That round-trip only closes if `GetChecked`
+/// returns the number 1 — `tostring(true)` is `"true"`, and buff timers would never appear.
+///
+/// Adopting it is strictly safer than what it replaces: every `if x` and `not x` site reads
+/// identically, and only the direct comparisons change — from wrong to right.
+pub(crate) fn predicate(b: bool) -> Value {
+    if b {
+        Value::Integer(1)
+    } else {
+        Value::Nil
+    }
+}
+
 pub(crate) fn bool_or_default(v: Option<&Value>, default: bool) -> bool {
     let Some(v) = v else {
         return default; // LUA_TNONE

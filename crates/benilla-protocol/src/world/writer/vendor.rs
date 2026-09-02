@@ -36,6 +36,24 @@ impl WorldWriter {
         )
     }
 
+    /// Buy into a **named** container slot (`CMSG_BUY_ITEM_IN_SLOT`, layout in
+    /// [`messages::buy_item_in_slot`]) — the merchant cursor's drop, as against [`Self::buy_item`]'s
+    /// auto-place from a row click. `bag_guid` is the container object's guid, or the player's own
+    /// for the backpack and the equipment slots.
+    pub fn buy_item_in_slot(
+        &mut self,
+        vendor_guid: u64,
+        entry: u32,
+        bag_guid: u64,
+        bag_slot: u8,
+        count: u8,
+    ) -> Result<()> {
+        self.send(
+            opcode::CMSG_BUY_ITEM_IN_SLOT,
+            &messages::buy_item_in_slot(vendor_guid, entry, bag_guid, bag_slot, count),
+        )
+    }
+
     /// Sell an item to a vendor (`CMSG_SELL_ITEM`, layout in [`messages::sell_item`]): `count` 0 =
     /// sell the whole stack. Success is silent (the item vanishes + coinage rises via
     /// `UPDATE_OBJECT`); refusal answers `SMSG_SELL_ITEM`'s error shape (a `VendorSellFailed`

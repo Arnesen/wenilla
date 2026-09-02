@@ -20,32 +20,39 @@
 //! name (QUIT_TIMER "%d %s until exit"), which is why the reference gives QUIT an "Exit now" button
 //! and CAMP none — a force-quit needs no server round trip, a force-logout does.
 //!
-//! **Pinned vs inferred.** The wire shape is verified twice over: vmangos's packet
-//! (`WorldPackets::Misc::LogoutResponse` — `u32 reason, u8 instant`) and the real client's own
-//! handler (wow-re `system/net/ledger.tsv` 0x5b4630, `Handle(0x4c) — {u32, u8}`). The 1.12
-//! FrameXML fixes the UI half exactly: the CAMP/QUIT dialogs, their 20 s timeouts, and their
+//! **All of it is now pinned** (decision 1821 — this module's three arms were the last INFERRED
+//! join left in the leaving path). The wire shape is verified twice over: vmangos's packet
+//! (`WorldPackets::Misc::LogoutResponse` — `u32 reason, u8 instant`) and the reference's own
+//! handler (`0x5b4630`: `GetInt32` then `GetUInt8`, then a virtual `[vtable+0x54](reason,
+//! instant)`, which is `[0x80a398+0x54]` = `0x5aaef0`). That override is this decision table byte
+//! for byte:
+//!
+//! - `0x5aaef6 test eax,eax / jne 0x5aaf21` → **any** non-zero reason takes one arm:
+//!   `DisplayError(0x180)` = `ERR_LOGOUT_FAILED`, then clear the pending flag. There is no
+//!   per-reason string — combat, falling and GM-frozen all show the one line.
+//! - `0x5aaf00 test eax,eax / jne` → `instant != 0` returns having done nothing; the completion
+//!   is already on its way.
+//! - otherwise `setne cl` on `[this+0x1b1c]`, `add ecx,0x114`, `SignalEvent` → event **276
+//!   `PLAYER_CAMPING`** or **277 `PLAYER_QUITING`**, and `[this+0x1b1c]` is written from the
+//!   logout *request*'s own quit flag at `0x5ab053`. The reference remembers camp-vs-quit in one
+//!   local byte, which is exactly what [`LogoutState::quitting`] is.
+//!
+//! The 1.12 FrameXML fixes the rest: the CAMP/QUIT dialogs, their 20 s timeouts, and their
 //! `PLAYER_CAMPING` / `PLAYER_QUITING` / `LOGOUT_CANCEL` drivers (UIParent.lua l.304-315, event
-//! ids 276/277/278 in wow-re's `re/events/event-catalog.tsv`). What is **INFERRED** is the join
-//! between them — that the client fires PLAYER_CAMPING off exactly this packet's `instant == 0` —
-//! because the 0x4c handler's body isn't RE'd. It is the only wiring consistent with what the
-//! reference client observably does (no dialog when you camp in an inn, a 20 s dialog in the
-//! field, matching the server's own timer), and the falsification is cheap: a dialog that appears
-//! on an inn logout, or none in the field, means the trigger is elsewhere. The refusal string is
-//! inferred the same way (see [`ERR_LOGOUT_FAILED`]).
+//! ids 276/277/278 in wow-re's `re/events/event-catalog.tsv`).
 
-use benilla_ui::script::{ScriptValue, SessionRequest, UiScript};
+use benilla_ui::script::{SessionRequest, UiScript};
 use bevy::prelude::*;
 
 use crate::net::{ClientCommand, LoggedOutMessage, NetCommands, SelfGuid};
 use crate::ui_script::UiInput;
 
-/// The reference's own refusal line (GlobalStrings.lua `ERR_LOGOUT_FAILED`), shown when the server
-/// answers a non-zero reason. **INFERRED**: which of 1.12's several logout-failure strings the real
-/// client picks per reason code isn't RE'd, and vmangos's three reasons (combat / falling / frozen)
-/// have no distinct strings in the ERR_ table — this generic one covers all three, and is the line
-/// vanilla is remembered for. `PLAYER_LOGOUT_FAILED_ERROR` ("…because you can't sit down right
-/// now") is the other candidate and would be the correction if a capture ever shows it.
-const ERR_LOGOUT_FAILED: &str = "You can't logout now.";
+/// The reference's refusal line, as a **catalog key** rather than a literal — message id `0x180`,
+/// the sole argument of the `DisplayError` at `0x5aaf26` (decision 1821). VERIFIED, superseding
+/// this module's old inference: the reference picks this one string for every non-zero reason,
+/// and `PLAYER_LOGOUT_FAILED_ERROR` — the other candidate the guess weighed — is never reached
+/// from here. The text comes from the VM's own `GlobalStrings.lua`, so a locale rides for free.
+const LOGOUT_FAILED_KEY: &str = "ERR_LOGOUT_FAILED";
 
 /// What the wire told us to say next — drained by [`feed_logout`] into script events. A queue
 /// rather than a flag: a cancel can land in the same frame as the response it cancels, and the UI
@@ -98,7 +105,9 @@ impl LogoutState {
         });
     }
 
-    /// `SMSG_LOGOUT_CANCEL_ACK` — the countdown is off.
+    /// `SMSG_LOGOUT_CANCEL_ACK` — the countdown is off. Its handler is the vtable slot next door
+    /// (`0x5b4680 call [eax+0x58]` → `0x5aaf60`), and all it does is fire event 278
+    /// `LOGOUT_CANCEL` off the same pending byte the refusal arm clears (decision 1821).
     pub(crate) fn apply_cancelled(&mut self) {
         self.quitting = false;
         self.signals.push(LogoutSignal::Cancelled);
@@ -106,7 +115,15 @@ impl LogoutState {
 }
 
 /// Fire the camp/quit events the dialogs are driven by (GameMenuFrame.xml's `BenillaLogoutDriver`).
-fn feed_logout(script: Option<NonSendMut<UiScript>>, mut logout: ResMut<LogoutState>) {
+///
+/// The refusal is shown one at a time through the message sink rather than collected, because the
+/// signals are ordered — a cancel can land in the same frame as the response it cancels, and the
+/// dialogs must see both in the order the wire delivered them.
+fn feed_logout(
+    script: Option<NonSendMut<UiScript>>,
+    mut logout: ResMut<LogoutState>,
+    mut sink: crate::ui_action::MessageSink,
+) {
     let Some(mut script) = script else {
         return;
     };
@@ -115,10 +132,10 @@ fn feed_logout(script: Option<NonSendMut<UiScript>>, mut logout: ResMut<LogoutSt
             LogoutSignal::Camping => script.fire_event("PLAYER_CAMPING", Vec::new()),
             LogoutSignal::Quiting => script.fire_event("PLAYER_QUITING", Vec::new()),
             LogoutSignal::Cancelled => script.fire_event("LOGOUT_CANCEL", Vec::new()),
-            LogoutSignal::Refused => script.fire_event(
-                "UI_ERROR_MESSAGE",
-                vec![ScriptValue::Str(ERR_LOGOUT_FAILED.into())],
-            ),
+            LogoutSignal::Refused => {
+                let line = crate::ui_action::keyed_line(&script, LOGOUT_FAILED_KEY);
+                crate::ui_action::show_messages(&mut script, &mut sink, "ui_logout", line);
+            }
         }
     }
 }

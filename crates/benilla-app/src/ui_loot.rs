@@ -22,9 +22,7 @@
 //! → coin ? [`ClientCommand::LootMoney`] : [`ClientCommand::AutostoreLootItem`] (the clicked 1-based
 //! row mapped to the item's **wire** loot slot); `CloseLoot` → [`ClientCommand::LootRelease`].
 
-use benilla_protocol::messages::{
-    slot_type, ItemPushResult, LootItem, BAG_PLAYER_INVENTORY, SLOT_BAG_FIRST,
-};
+use benilla_protocol::messages::{slot_type, ItemPushResult, LootItem, BAG_PLAYER_INVENTORY};
 use bevy::prelude::*;
 
 use benilla_ui::script::{LootRow, LootState as LootSnapshot, ScriptValue, UiScript};
@@ -38,17 +36,27 @@ use crate::ui_party::{GroupState, GROUPTYPE_RAID, GROUP_MEMBER_SUBGROUP};
 use crate::ui_script::UiInput;
 
 /// The coin-pile row icons (direct `Interface\Icons` paths — `SetTexture` takes them as-is, no DBC),
-/// one per denomination; [`coin_icon`] picks by the highest nonzero denomination. All three VERIFIED
-/// to extract from `interface.MPQ` (`INV_Misc_Coin_01`=gold pile, `_03`=silver, `_05`=copper).
+/// **six of them, one per decade of copper**, all VERIFIED to extract from `interface.MPQ`.
 ///
-/// **Stated approximation (documented gap).** The real 1.12 client chooses the coin-pile art from the
-/// exact amount inside `GetLootSlotInfo` — a client-internal C selection that is **not** RE-recorded
-/// (no wow-re node owns it; not dispatched). Mapping the icon to the highest nonzero denomination is
-/// our faithful-shaped stand-in: a gold amount shows the gold pile, a silver-only amount the silver
-/// pile, a copper-only amount the copper pile.
-const COIN_ICON_GOLD: &str = "Interface\\Icons\\INV_Misc_Coin_01";
-const COIN_ICON_SILVER: &str = "Interface\\Icons\\INV_Misc_Coin_03";
-const COIN_ICON_COPPER: &str = "Interface\\Icons\\INV_Misc_Coin_05";
+/// This used to be three, chosen by the highest nonzero denomination, and said so in a "stated
+/// approximation" note whose stated reason was that the real selection was not RE-recorded. It is:
+/// `0x4c2460` sends the money row to `0x4c248a call 0x6c62d0`, whose ladder at
+/// `0x6c6307`–`0x6c6386` is exactly the six thresholds below (wow-re
+/// `system/ui/scratch/loot-slot-record.md` §4). The gap closed when that note landed and nothing
+/// here noticed — which is why a "documented approximation" is a thing to re-check against the
+/// sibling repo, not a thing to leave standing.
+///
+/// The icon *order* is the client's own and it is not the numeric one — `_05, _06, _03, _04, _01,
+/// _02` as the amount climbs. What each of the six pieces of art depicts is not claimed here; the
+/// ladder is byte-derived and the art is whatever the reference picks at that step.
+const COIN_ICONS: [(u32, &str); 6] = [
+    (10, "Interface\\Icons\\INV_Misc_Coin_05"),
+    (100, "Interface\\Icons\\INV_Misc_Coin_06"),
+    (1_000, "Interface\\Icons\\INV_Misc_Coin_03"),
+    (10_000, "Interface\\Icons\\INV_Misc_Coin_04"),
+    (100_000, "Interface\\Icons\\INV_Misc_Coin_01"),
+    (u32::MAX, "Interface\\Icons\\INV_Misc_Coin_02"),
+];
 /// `item_template.bonding == BIND_WHEN_PICKED_UP` — the first of the two conjuncts that defer a
 /// loot take behind the LOOT_BIND confirm (VERIFIED vmangos `ItemPrototype.h`'s `ItemBondingType`:
 /// `NO_BIND` 0, `BIND_WHEN_PICKED_UP` 1, `BIND_WHEN_EQUIPPED` 2, `BIND_WHEN_USE` 3, `QUEST_ITEM` 4;
@@ -60,8 +68,19 @@ const BIND_WHEN_PICKED_UP: u32 = 1;
 /// soulbinding something they meant to pass to a groupmate, and nobody passes a white.
 const BIND_CONFIRM_MIN_QUALITY: u32 = 2;
 
-/// The fixed quality of the synthesized coin row (common/white — the money text reads as plain).
-const COIN_QUALITY: u32 = 1;
+/// The quality `GetLootSlotInfo` answers for the synthesized coin row: **0, Poor** — so the money
+/// text renders GREY, not white.
+///
+/// Byte-derived, and it corrects a stated approximation ("common/white — the money text reads as
+/// plain"). `0x4c23a0`'s second guard IS its coin leg: `0x4c23da test ecx,ecx` / `0x4c23dc jne`, so
+/// the money row (0-based slot 0 with `[0xb71ba0] != 0`) falls through to
+/// `0x4c23de xor eax,eax; ret` and never reaches the item-cache block the item rows read
+/// `[rec+0x1c]` from. The same guard is why its `quantity` is 0 (`0x4c22fd`). wow-re
+/// `system/ui/scratch/loot-slot-record.md` §10, a §5 round of five workers.
+///
+/// Nothing downstream re-colours it: stock `LootFrame_Update` has no coin special case
+/// (`LootFrame.lua:81-85`) and `ITEM_QUALITY_COLORS[0]` is `0xff9d9d9d`.
+const COIN_QUALITY: u32 = 0;
 /// The 1.12 coin-denomination words, QUOTED from `Interface\FrameXML\GlobalStrings.lua` (verified
 /// extract): `GOLD = "Gold"` (l.2025), `SILVER = "Silver"` (l.3465), `COPPER = "Copper"` (l.865).
 const GOLD_WORD: &str = "Gold";
@@ -107,8 +126,9 @@ struct PendingReceive {
     tries: u16,
 }
 
-/// The wire push's `(bag, slot)` → the live-API **container id** the bag bar speaks (`0` backpack,
-/// `1..=4` an equipped bag, [`KEYRING_CONTAINER`] the keyring) — `ITEM_PUSH`'s `arg1`.
+/// The wire push's `(bag, slot)` → `ITEM_PUSH`'s **`arg1`**, in the reference's own vocabulary:
+/// `0` the backpack, `20..=23` an equipped bag (the INVENTORY-slot id its bag buttons carry),
+/// [`KEYRING_CONTAINER`] the keyring.
 ///
 /// **Byte-VERIFIED** at `CGGameUI::OnItemPush` `0x491bb5`-`0x491bd6`, which is the whole selector:
 ///
@@ -125,15 +145,21 @@ struct PendingReceive {
 ///   491bd4  xor eax,eax         ;  ⇒ 0 (the backpack)
 /// ```
 ///
-/// The one translation: the reference emits `bag + 1`, which is the **inventory-slot** id its bag
-/// buttons carry (`CharacterBag0Slot` = 20 … `Bag3Slot` = 23, `GetInventorySlotInfo`); benilla's bag
-/// bar is keyed by container id like every other bag surface here (`BAG_UPDATE(bagID)`,
-/// `BenillaBagBarSlot_InvSlot` = `19 + bagId`), so the same wire slots 19..22 become `1..=4`. Both
-/// vocabularies agree on `0` and `-2`, and both leave a non-equipped-bag container (a bank bag,
-/// wire 63..68) landing on an id no bag-bar button carries — no animation, exactly as there.
+/// **No translation any more, and that is the point.** This used to emit benilla's own container
+/// vocabulary (`1..=4` for the four bags), because benilla's bag BAR was ours and was keyed that
+/// way. 1751 window 3 made the bar the reference's own `MainMenuBarBagButtons.xml`, whose
+/// `ItemAnim_OnEvent` reads `this:GetParent():GetID()` — 20..23, from `GetInventorySlotInfo` — and
+/// compares it to `arg1`. Against the translated value that comparison is false for every bag, so
+/// the four bag cards would simply never have played, silently. The fix is not to adapt the
+/// reference's body: it is to stop translating, which is also what every addon reading `ITEM_PUSH`
+/// expects, so the function is now `0x491bb5`'s selector verbatim.
+///
+/// A non-equipped-bag container (a bank bag, wire 63..68) still lands on an id no bag-bar button
+/// carries — no animation, exactly as there.
 fn push_container(bag: u8, slot: u32) -> i64 {
     if bag != BAG_PLAYER_INVENTORY {
-        return i64::from(bag) - i64::from(SLOT_BAG_FIRST) + 1;
+        // `491bbb  lea eax,[edi+1]` — the wire bag byte plus one, nothing else.
+        return i64::from(bag) + 1;
     }
     if PUSH_KEYRING_SLOTS.contains(&slot) {
         return KEYRING_CONTAINER;
@@ -651,16 +677,14 @@ fn format_money(copper: u32) -> String {
     parts.join(" ")
 }
 
-/// The coin-pile icon for a copper amount: the highest nonzero denomination's pile (gold ▸ silver ▸
-/// copper). See [`COIN_ICON_GOLD`] for the stated-approximation note.
+/// The coin-pile icon for a copper amount — the reference's six-step ladder, see [`COIN_ICONS`].
+/// `u32::MAX` is the last step's bound, so the `map_or` fallback is unreachable and is there only
+/// because the table is data rather than a match.
 fn coin_icon(copper: u32) -> &'static str {
-    if copper >= 10000 {
-        COIN_ICON_GOLD
-    } else if copper >= 100 {
-        COIN_ICON_SILVER
-    } else {
-        COIN_ICON_COPPER
-    }
+    COIN_ICONS
+        .iter()
+        .find(|(below, _)| copper < *below)
+        .map_or(COIN_ICONS[5].1, |(_, icon)| icon)
 }
 
 /// Resolve one wire [`LootItem`] into the Lua-facing [`LootRow`]: the icon comes straight from the
@@ -719,6 +743,25 @@ fn resolve_item(
     }
 }
 
+/// Whether any row of this open loot is still waiting on its item-template answer — the reference's
+/// outstanding-query counter `[0xb71b44]`, in predicate form (decision 1805).
+///
+/// A row counts as waiting while its name is absent AND the server has not yet answered at all. A
+/// **negative** answer ("no such entry") releases it: the reference's counter is decremented by the
+/// arrival callback either way, and a window held open forever by an entry nobody will ever describe
+/// is strictly worse than one that opens showing the cache-miss sentinels — which is exactly what
+/// the reference paints in that case.
+///
+/// The coin row never waits; it has no template.
+fn templates_outstanding(items: &Items, snap: &LootSnapshot) -> bool {
+    snap.rows.iter().flatten().any(|r| {
+        !r.is_coin
+            && r.item_id != 0
+            && r.name.is_none()
+            && !items.template_answered_unknown(r.item_id)
+    })
+}
+
 /// Build the Lua-facing snapshot from [`LootState`] — `None` when no loot is open. One entry per
 /// slot of the **fixed** open-time layout: the coin pile first when the loot opened with gold, then
 /// the items in wire order. A slot already looted stays in the list as `None` — the gap the
@@ -738,7 +781,11 @@ fn snapshot(
         rows.push(loot.has_coin().then(|| LootRow {
             name: Some(format_money(loot.gold)),
             texture: Some(coin_icon(loot.gold).into()),
-            quantity: 1,
+            // 0, not 1, and for the same reason as [`COIN_QUALITY`]: `0x4c22e0`'s coin guard
+            // returns before the record read (`0x4c22fd`). Invisible either way — stock
+            // `LootFrame_Update` hides the count string unless `quantity > 1` — but it is the
+            // value the accessor answers.
+            quantity: 0,
             quality: Some(COIN_QUALITY),
             is_coin: true,
             item_id: 0,
@@ -971,6 +1018,22 @@ fn feed_loot(
     script.set_loot(fresh.clone());
     match (&*last, &fresh) {
         (None, Some(snap)) => {
+            // **The window does not open until every row's item template has landed** (1805). The
+            // reference's copier ends `0x4c1e9f mov eax,[0xb71b44]; test eax,eax; jne 0x4c1eeb` —
+            // if any template query is outstanding it fires NOTHING — and the item-cache arrival
+            // callback `0x4c2ac0` fires `LOOT_OPENED` (`0x10b`) itself on that counter's falling
+            // edge to zero (`0x4c2af6 dec` / `jne`). There is no repaint path to fall back on:
+            // `LootFrame_Update` is reachable only through the XML `<OnShow>`, and `ShowUIPanel`
+            // early-returns on an already-visible frame, so a second `LOOT_OPENED` would do
+            // nothing. Deferring IS the mechanism (wow-re `loot-slot-record.md` §11).
+            //
+            // Returning without advancing `last` re-evaluates next frame; the queries are already
+            // in flight from `snapshot` above, and the auto-loot sweep below waits with the window,
+            // which is the reference's shape too (the same callback runs the sweep instead of
+            // firing when the auto-loot latch is set).
+            if templates_outstanding(&items, snap) {
+                return;
+            }
             script.fire_event("LOOT_OPENED", vec![]);
             // era's engine-side auto-loot ([`LootConfig`]): the knob decides, a held SHIFT
             // inverts it, and the client "clicks" every row itself at the open edge — the
@@ -1026,10 +1089,28 @@ fn feed_loot(
             }
         }
         // A content change while open (async name landed, a row removed, coin cleared) → repaint,
-        // keeping the current page (LOOT_UPDATE, the merchant's MERCHANT_UPDATE twin — this replaces
-        // Blizzard's per-button LOOT_SLOT_CLEARED optimization with a full re-snapshot, exactly as
-        // the merchant seam replaced per-row stock updates).
+        // keeping the current page.
+        //
+        // **Both events fire, and the per-slot one is not optional any more** (1751). This used to
+        // send `LOOT_UPDATE` alone, on the reasoning that a full re-snapshot replaces Blizzard's
+        // per-button `LOOT_SLOT_CLEARED` optimization the way the merchant seam replaced per-row
+        // stock updates. That was defensible while we owned `LootFrame.xml`. The STOCK file hangs
+        // real behaviour off `LOOT_SLOT_CLEARED` and only off it: its arm hides the button in
+        // place AND, when that empties the page, calls `LootFrame_PageDown` (`LootFrame.lua:38-50`
+        // — "try to move second page of loot items to the first page"). `LOOT_UPDATE` reaches
+        // none of that. Send only the summary and looting out a page leaves the player staring at
+        // an empty window with a live Down arrow.
+        //
+        // So the reference's vocabulary is spoken as the reference speaks it: one
+        // `LOOT_SLOT_CLEARED` per row that went away, carrying its 1-based row as `arg1`, and then
+        // the summary repaint.
         (Some(before), Some(after)) => {
+            for (i, was) in before.rows.iter().enumerate() {
+                let gone = was.is_some() && after.rows.get(i).is_none_or(Option::is_none);
+                if gone {
+                    script.fire_event("LOOT_SLOT_CLEARED", vec![ScriptValue::Int(i as i64 + 1)]);
+                }
+            }
             script.fire_event("LOOT_UPDATE", vec![]);
             // The reference keeps the two apart: `LOOT_UPDATE` repaints the rows, while a changed
             // candidate list refreshes the open dropdown in place without re-toggling it
@@ -1390,6 +1471,99 @@ mod tests {
         app.insert_non_send_resource(script);
         app.world_mut().run_system_once(drain_loot).unwrap();
         (app, rx)
+    }
+
+    /// **The window waits for the item templates** (1805) — the reference's own open rule, and the
+    /// reason the cache-miss sentinels beside it are a floor rather than a plan.
+    ///
+    /// `0x4c1cb0` returns without firing while `[0xb71b44]` is non-zero, and the item-cache arrival
+    /// callback `0x4c2ac0` fires `LOOT_OPENED` on that counter's falling edge instead. There is no
+    /// repaint to fall back on: `LootFrame_Update` runs only from `<OnShow>`, and `ShowUIPanel`
+    /// early-returns on an already-visible frame.
+    ///
+    /// So: a corpse whose one row is an entry we have never seen must open NOTHING on the first
+    /// pass — and must ask the server for the template — then open exactly once when the answer
+    /// lands. A **negative** answer opens it too; a window held shut forever by an entry nobody can
+    /// describe is our one deliberate divergence from the reference's success-gated callback.
+    #[test]
+    fn the_window_waits_for_every_item_template() {
+        for answer in [
+            Some(ItemInfo {
+                quality: 1,
+                ..crate::items::test_template("Thin Cloth Gloves")
+            }),
+            // …and the negative answer, which releases the window rather than holding it shut.
+            None,
+        ] {
+            let (tx, rx) = crossbeam_channel::unbounded();
+            let mut app = App::new();
+            app.add_message::<crate::sound::LootPickupSound>()
+                .init_resource::<LootState>()
+                .init_resource::<LootErrors>()
+                .init_resource::<crate::ui_chat::ChatLog>()
+                .init_resource::<GroupState>()
+                .init_resource::<NameCache>()
+                .init_resource::<Items>()
+                .init_resource::<ButtonInput<KeyCode>>()
+                .init_resource::<LootConfig>()
+                .insert_resource(NetCommands(tx))
+                // Registered in a schedule rather than driven by `run_system_once`, because the
+                // whole question is what happens ACROSS frames and `feed_loot`'s memo of the last
+                // snapshot is a `Local`: `run_system_once` builds a new system each call and hands
+                // it a fresh memo, which reads every pass as a first open.
+                .add_systems(bevy::prelude::Update, feed_loot);
+            app.world_mut().resource_mut::<LootState>().open(
+                0x42,
+                loot_type::CORPSE,
+                0,
+                vec![item(3, TOUGH_JERKY, 1)],
+            );
+
+            let script = UiScript::new().unwrap();
+            script
+                .run(
+                    "OPENS = 0\n\
+                     local f = CreateFrame(\"Frame\")\n\
+                     f:RegisterEvent(\"LOOT_OPENED\")\n\
+                     f:SetScript(\"OnEvent\", function() OPENS = OPENS + 1 end)",
+                )
+                .unwrap();
+            app.insert_non_send_resource(script);
+
+            let opens = |app: &mut App| {
+                app.world_mut()
+                    .non_send_resource_mut::<UiScript>()
+                    .eval::<i64>("return OPENS")
+                    .unwrap()
+            };
+
+            // Pass one: the template is unknown, so the window stays shut — and the ask goes out.
+            app.update();
+            assert_eq!(
+                opens(&mut app),
+                0,
+                "no LOOT_OPENED while a template is pending"
+            );
+            assert!(
+                sent(&rx).iter().any(
+                    |c| matches!(c, ClientCommand::ItemQuery { entry, .. } if *entry == TOUGH_JERKY)
+                ),
+                "and the template was asked for"
+            );
+
+            // A second pass with nothing new changes nothing — the deferral is not a one-shot.
+            app.update();
+            assert_eq!(opens(&mut app), 0);
+
+            // The answer lands: the window opens, once.
+            app.world_mut()
+                .resource_mut::<Items>()
+                .insert_template(TOUGH_JERKY, answer.clone());
+            app.update();
+            assert_eq!(opens(&mut app), 1, "opened when the last template answered");
+            app.update();
+            assert_eq!(opens(&mut app), 1, "and only once");
+        }
     }
 
     /// The rows `LOOT_BIND_CONFIRM` has named so far, in order.
@@ -2130,10 +2304,10 @@ mod tests {
     /// value that decides which bag button the drop animation plays on.
     #[test]
     fn push_container_maps_the_wire_destination_onto_a_bag_bar_button() {
-        // `bag != 255` — an equipped bag. Wire 19..22 are the four bag inventory slots; the
-        // reference emits 20..23 (its buttons' inventory-slot ids), ours the container ids 1..=4.
-        assert_eq!(push_container(19, 0), 1);
-        assert_eq!(push_container(22, 5), 4);
+        // `bag != 255` — an equipped bag. Wire 19..22 are the four bag inventory slots, and the
+        // emitted value is the reference's own `bag + 1`: 20..23, the ids its buttons carry.
+        assert_eq!(push_container(19, 0), 20);
+        assert_eq!(push_container(22, 5), 23);
         // `bag == 255` with a keyring slot (the client's own 0x51..=0x70 window) — the keyring.
         assert_eq!(push_container(BAG_PLAYER_INVENTORY, 81), KEYRING_CONTAINER);
         assert_eq!(push_container(BAG_PLAYER_INVENTORY, 96), KEYRING_CONTAINER);
@@ -2147,7 +2321,7 @@ mod tests {
         assert_eq!(push_container(BAG_PLAYER_INVENTORY, u32::MAX), 0);
         // A bank bag (wire 63..68) lands on an id no bag-bar button carries: no animation, which is
         // exactly what the reference's `bag + 1` does with the same push.
-        assert!(!(0..=4).contains(&push_container(63, 0)));
+        assert!(!(20..=23).contains(&push_container(63, 0)));
     }
 
     #[test]
@@ -2160,17 +2334,26 @@ mod tests {
         assert_eq!(format_money(10_000), "1 Gold");
     }
 
+    /// The reference's six-step ladder at `0x6c6307`–`0x6c6386`, both sides of every boundary.
     #[test]
-    fn coin_icon_picks_the_highest_nonzero_denomination() {
-        assert_eq!(coin_icon(4), COIN_ICON_COPPER); // copper only
-        assert_eq!(coin_icon(99), COIN_ICON_COPPER);
-        assert_eq!(coin_icon(500), COIN_ICON_SILVER); // 5 silver
-        assert_eq!(coin_icon(10_025), COIN_ICON_GOLD); // gold present ⇒ gold pile
-        assert_eq!(coin_icon(20_000), COIN_ICON_GOLD);
+    fn coin_icon_walks_the_references_six_step_ladder() {
+        let icon = |n: u32| coin_icon(n).rsplit('\\').next().unwrap().to_string();
+        assert_eq!(icon(0), "INV_Misc_Coin_05");
+        assert_eq!(icon(9), "INV_Misc_Coin_05");
+        assert_eq!(icon(10), "INV_Misc_Coin_06");
+        assert_eq!(icon(99), "INV_Misc_Coin_06");
+        assert_eq!(icon(100), "INV_Misc_Coin_03");
+        assert_eq!(icon(999), "INV_Misc_Coin_03");
+        assert_eq!(icon(1_000), "INV_Misc_Coin_04");
+        assert_eq!(icon(9_999), "INV_Misc_Coin_04");
+        assert_eq!(icon(10_000), "INV_Misc_Coin_01");
+        assert_eq!(icon(99_999), "INV_Misc_Coin_01");
+        assert_eq!(icon(100_000), "INV_Misc_Coin_02");
+        assert_eq!(icon(u32::MAX), "INV_Misc_Coin_02");
     }
 
     #[test]
-    fn coin_row_uses_real_words_and_copper_pile_icon() {
+    fn coin_row_uses_real_words_and_the_ladders_icon() {
         let mut items = Items::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
@@ -2194,7 +2377,7 @@ mod tests {
         let coin = snap.rows[0].as_ref().expect("coin row present");
         assert!(coin.is_coin);
         assert_eq!(coin.name.as_deref(), Some("4 Copper"));
-        assert_eq!(coin.texture.as_deref(), Some(COIN_ICON_COPPER));
+        assert_eq!(coin.texture.as_deref(), Some(coin_icon(4)));
     }
 
     #[test]
@@ -2234,7 +2417,7 @@ mod tests {
         let coin = snap.rows[0].as_ref().expect("coin row present");
         assert!(coin.is_coin);
         assert_eq!(coin.name.as_deref(), Some("1 Gold 23 Silver 45 Copper"));
-        assert_eq!(coin.texture.as_deref(), Some(COIN_ICON_GOLD));
+        assert_eq!(coin.texture.as_deref(), Some(coin_icon(12_345)));
         // The item's name is nil while its template is in flight; its quantity is present.
         let row = snap.rows[1].as_ref().expect("item row present");
         assert!(!row.is_coin);

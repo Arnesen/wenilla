@@ -9,9 +9,9 @@
 //!   `PetPaperDollFrame_Update` calls `PaperDollFrame_SetDamage/_SetAttackPower/_SetArmor/…` with
 //!   `unit = "pet"` (ref `PetPaperDollFrame.lua:73-81`) and its own two setters read
 //!   `UnitStat("pet", i)` / `UnitResistance("pet", id)`. Nothing here is a parallel API.
-//! - **Pointing the body booth**: [`PetDollBooth`]'s `unit` gets the resolved pet entity and its
-//!   `yaw` the VM-side value the pane's rotate buttons wrote
-//!   ([`UiScript::pet_paperdoll_yaw`]) — the `crate::ui_inspect` pane's arrangement exactly.
+//! - **Pointing the body booth**: [`PetDollBooth`]'s `unit` gets the resolved pet entity, and its
+//!   `yaw` the facing the stock pane's rotate buttons wrote onto `PetModelFrame` itself
+//!   (`UiScript::model_pane_facing` — decision 1751).
 //!
 //! **Why a module of its own rather than more of [`crate::ui_pet_stats`]**, which already resolves
 //! the same pet: these are the *shared* paper-doll surface (every value passes through a binding
@@ -62,7 +62,7 @@ fn feed_pet_doll(
     // The pane's rotate buttons own the yaw; the booth mirrors it (the inspect pane's arrangement,
     // decision 0631 §4). Written every frame, pet or no pet — a stale yaw would snap the model the
     // moment one is summoned.
-    booth.yaw = script.pet_paperdoll_yaw();
+    booth.yaw = script.model_pane_facing("PetModelFrame");
 
     let pet_guid = bar.spells.pet_guid;
     let store = (pet_guid != 0).then(|| pet.store(pet_guid)).flatten();

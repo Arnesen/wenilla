@@ -41,9 +41,49 @@
 //! `OPEN_MASTER_LOOT_LIST` when a picked row's wire `slot_type` is `MASTER`, which is where the
 //! real client puts it too — its take dispatcher branches on the same byte before any Lua runs.
 
-use mlua::{Lua, MultiValue, Value};
+use mlua::{Lua, MultiValue, Table, Value};
 
 use super::Model;
+
+/// `CLootButton`'s own Lua method table (`0x847ce4`) — see [`crate::widget::FrameKind::LootButton`].
+/// Exactly one entry, and the count is read off the registrar's `mov edx,1` rather than off a run
+/// length, so it cannot drift.
+pub(super) const REG_LOOTBUTTON_METHODS: &str = "__benilla_lootbutton_methods";
+
+/// The **item-cache miss** quality `GetLootSlotInfo` answers for a row whose item template has not
+/// landed yet — the reference's own sentinel, and emphatically **not** a nil. `0x4c23a0` reads the
+/// item-cache record's `[rec+0x1c]` and hands back `-1` when the cache has no record for the id
+/// (wow-re `system/ui/scratch/loot-slot-record.md` §4, a §5 trio round).
+///
+/// It is why stock `UIParent.lua` builds `ITEM_QUALITY_COLORS` over **`for i = -1, 6`** (l.66):
+/// index `-1` exists *for this value*. `LootFrame_Update` indexes the table with the raw return and
+/// no guard — `color = ITEM_QUALITY_COLORS[quality]` (`LootFrame.lua:82`), dereferenced one line
+/// later at `color.r` (`:85`) — so a nil here is a Lua runtime error on every loot opened before
+/// its templates arrive, which is every loot on a cold item cache (decision 1805).
+const CACHE_MISS_QUALITY: i64 = -1;
+
+/// The row text on that same miss. The reference composes every loot row's name through `0x5d8b00`,
+/// which leaves its destination buffer **empty** when the item cache has no record (`0x5d8b25`
+/// stores the terminator and returns); the binding then pushes that empty string. Four values, one
+/// of them `""` — never three values, and never a nil.
+const CACHE_MISS_NAME: &str = "";
+
+/// The icon on an `ItemDisplayInfo` miss — a row that HAS an item, whose display id the catalog has
+/// no icon for. The reference appends the literal `INV_Misc_QuestionMark` (`0x847fe4`, `0x4c252b`)
+/// to the same `StringLookups.dbc` row-3 prefix (`Interface\\Icons`) a hit uses.
+///
+/// It is deliberately **not** the answer for a slot with no item: `0x4c2460` returns NULL on each of
+/// its three guards (`0x4c2470` no window, `0x4c24a6` out of range, `0x4c24b7` itemId == 0) and
+/// `lua_pushstring 0x6f3890` tail-jumps a NULL to `lua_pushnil`. The question mark needs a live
+/// itemId to be reached at all.
+const MISSING_ICON: &str = "Interface\\Icons\\INV_Misc_QuestionMark";
+
+/// The quality a slot with **no item at all** answers — a slot past the end, Lua slot 0, or any slot
+/// while no loot window is open. `0x4c23a0` returns 0 on each of its three guards, and the binding
+/// `fild`s that. Distinct from [`CACHE_MISS_QUALITY`]: a **cleared** slot still has a record, whose
+/// itemId is now 0, and `0x55ba30` short-circuits an entryId of 0 to a NULL record
+/// (`0x55ba3d`/`0x55ba42`) — a guaranteed cache miss, so it takes the `-1` arm at `0x4c2435`.
+const NO_SLOT_QUALITY: i64 = 0;
 
 /// One loot-window row, resolved by the app (decision 0084). Plain data — its 1-based order in the
 /// window is its position in [`LootState::rows`]; the coin row (when present) is always position 1.
@@ -51,15 +91,19 @@ use super::Model;
 pub struct LootRow {
     /// The row text (`GetLootSlotInfo`'s `item` return): an item's name, or the coin row's formatted
     /// money amount. `None` while the ask-once item-template query is still in flight (items only —
-    /// the coin row's text is always set); the API reports `nil` and the XML shows a placeholder.
+    /// the coin row's text is always set), and the API reports [`CACHE_MISS_NAME`] — the empty
+    /// string the reference's own name formatter leaves behind on a cache miss — never a nil.
     pub name: Option<String>,
     /// Icon texture path (`Interface\Icons\…` — from the wire `display_info_id`, or the coin
-    /// texture). `None` only if the display catalog had no icon for the id.
+    /// texture). `None` only if the display catalog had no icon for the id, which the API reports as
+    /// [`MISSING_ICON`], the reference's own `INV_Misc_QuestionMark`.
     pub texture: Option<String>,
     /// The stack size looted (`GetLootSlotInfo`'s `quantity`); the coin row is always `1`.
     pub quantity: u32,
-    /// Item quality 0..6, for the quality-coloured row text; `None` while the template is in flight
-    /// (the XML falls back to common/white). The coin row carries a fixed quality.
+    /// Item quality 0..6, for the quality-coloured row text; `None` while the template is in flight,
+    /// which the API reports as [`CACHE_MISS_QUALITY`] (`-1`, the reference's cache-miss sentinel and
+    /// a real row of `ITEM_QUALITY_COLORS`) — never a nil, which is what raised in the stock
+    /// `LootFrame_Update` (decision 1805). The coin row carries a fixed quality.
     pub quality: Option<u32>,
     /// Whether this is the synthesized coin pile (`LootSlotIsCoin` true, `LootSlotIsItem` false).
     pub is_coin: bool,
@@ -71,9 +115,9 @@ pub struct LootRow {
     /// `None` for the synthesized coin row (there is no item to link) and while the ask-once
     /// template answer is in flight — the link embeds the name, so it cannot exist before `name`
     /// does; the same `Option` shape [`super::char_stats::InvSlotView::link`] carries. Both arms of
-    /// the row click take a nil in stride: `DressUpItemLink` returns on one (its own guard,
-    /// `DressUpFrame.lua:10-16`) and the shift arm goes through `BenillaChatEdit_InsertLink`, which
-    /// drops it — our `EditBox:Insert` binding is typed `String` and would raise.
+    /// the STOCK row click take a nil in stride: `DressUpItemLink` returns on one (its own guard,
+    /// `DressUpFrame.lua:10-16`), and `ChatFrameEditBox:Insert` takes an `Option<String>`
+    /// ([`super::editbox`]) so the other drops it silently.
     pub link: Option<String>,
     /// The wire's `randomPropertyId` — the drop's **random-suffix roll**, the id the tooltip
     /// resolves against [`super::Model::random_properties`] for its enchant lines (decision 1547).
@@ -169,36 +213,60 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetLootSlotInfo(slot) → texture, item, quantity, quality (the Era flat-tuple shape,
-    // `LootFrame.lua:81`). `slot` is 1-based; out of range → nil, and so is a cleared (already
-    // looted) slot. `item`/`quality` are nil while the item-template query is in flight; `texture`
-    // rides the wire display id, so it's there at once.
+    // GetLootSlotInfo(slot) → texture, item, quantity, quality — the reference's four, in its order
+    // (`0x4c2c60`, `mov eax,4` at `0x4c2d07`; `LootFrame.lua:81`). `slot` is 1-based.
+    //
+    // **It answers four values on every leg — never three, never a bare nil** (decision 1805).
+    // A slot with no item at all (past the end, slot 0, no window) is `nil, "", 0, 0`; a CLEARED
+    // slot is `nil, "", 0, -1`, because its record survives with a zeroed itemId and that is a
+    // guaranteed item-cache miss.
+    //
+    // A LIVE row is the same story one level down: each producer has a sentinel for the case where
+    // the value it wants is not resolved yet — [`CACHE_MISS_QUALITY`] (`-1`) and [`CACHE_MISS_NAME`]
+    // (`""`) while the item template is in flight, [`MISSING_ICON`] when the display catalog has no
+    // icon for the wire display id. The quality is the load-bearing one: the reference's
+    // `ITEM_QUALITY_COLORS` has a `-1` row precisely so this value can index it.
+    //
+    // The in-flight row is nonetheless one the REFERENCE never paints, because it does not open the
+    // window until every template has landed ([`crate::script`] has no say in that; the app's
+    // `ui_loot` holds `LOOT_OPENED` back). These sentinels are the floor under that, not the plan.
     g.set(
         "GetLootSlotInfo",
         lua.create_function(|lua, slot: usize| {
-            let row = {
+            // `Some(Some(row))` is a live row; `Some(None)` is a CLEARED one (the slot survives with
+            // its record zeroed); `None` is no such slot at all.
+            let slot_state = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 model
                     .loot
                     .as_ref()
                     .and_then(|l| slot.checked_sub(1).and_then(|n| l.rows.get(n)))
-                    .and_then(|r| r.clone())
+                    .cloned()
             };
-            let Some(row) = row else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+            let Some(Some(row)) = slot_state else {
+                // No row — and the reference still pushes four (`0x4c2d07 mov eax,4` is
+                // unconditional; there is no short-return path). A cleared slot's record has a
+                // zeroed itemId, which `0x55ba30` short-circuits to a NULL cache record, so it takes
+                // the cache-miss quality where a genuinely absent slot takes the guard's zero.
+                let cleared = slot_state.is_some();
+                return Ok(MultiValue::from_vec(vec![
+                    Value::Nil,
+                    Value::String(lua.create_string(CACHE_MISS_NAME)?),
+                    Value::Integer(0),
+                    Value::Integer(if cleared {
+                        CACHE_MISS_QUALITY
+                    } else {
+                        NO_SLOT_QUALITY
+                    }),
+                    // Benilla's trailing item id: there is no item here.
+                    Value::Integer(0),
+                ]));
             };
-            let texture = match &row.texture {
-                Some(t) => Value::String(lua.create_string(t)?),
-                None => Value::Nil,
-            };
-            let item = match &row.name {
-                Some(n) => Value::String(lua.create_string(n)?),
-                None => Value::Nil,
-            };
-            let quality = match row.quality {
-                Some(q) => Value::Integer(i64::from(q)),
-                None => Value::Nil,
-            };
+            let texture =
+                Value::String(lua.create_string(row.texture.as_deref().unwrap_or(MISSING_ICON))?);
+            let item =
+                Value::String(lua.create_string(row.name.as_deref().unwrap_or(CACHE_MISS_NAME))?);
+            let quality = Value::Integer(row.quality.map_or(CACHE_MISS_QUALITY, i64::from));
             Ok(MultiValue::from_vec(vec![
                 texture,
                 item,
@@ -214,9 +282,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // like GetLootSlotInfo beside it; nil out of range, nil for the coin row, and nil while the
     // item-template query is in flight (the link embeds the name). The reference's row click reads
     // it for BOTH modifier arms — `DressUpItemLink(GetLootSlotLink(this.slot))` (`LootFrame.lua:149`)
-    // and `ChatFrameEditBox:Insert(GetLootSlotLink(this.slot))` (`:152`); ours routes the second
-    // through `BenillaChatEdit_InsertLink`, whose whole job is the nil this getter can answer.
-    // Decision 1059.
+    // and `ChatFrameEditBox:Insert(GetLootSlotLink(this.slot))` (`:152`). Since 1751 put the stock
+    // file on the chain both of those are the live call sites — our own `BenillaChatEdit_InsertLink`
+    // detour is not on this path any more — and both survive the nil on their own. Decision 1059.
     g.set(
         "GetLootSlotLink",
         lua.create_function(|lua, slot: usize| {
@@ -270,6 +338,42 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(model.loot.as_ref().is_some_and(|l| l.fishing))
         })?,
     )?;
+
+    // ── `LootButton`'s own method table — ONE entry, and this is it ─────────────────────────────
+    //
+    // `SetSlot(index)` (`0x4c1880`, table `0x847ce4`, the registrar's own `mov edx,1` says count
+    // 1). 1-based in, **0-based stored** (`ftol` then `dec eax` into `[this+0x4dc]`), and it
+    // pushes nothing. `LootFrame.lua:94`'s `button:SetSlot(slot)` is its only caller in the
+    // shipped UI — the row's `id="N"` does NOT feed it.
+    //
+    // A non-number raises the client's own usage string. That is worth transcribing exactly: it
+    // is the one place this class talks to a caller, and `LootFrame.lua` would surface a typo'd
+    // call as this text.
+    {
+        let m = lua.create_table()?;
+        m.set(
+            "SetSlot",
+            lua.create_function(|lua, (this, index): (Table, Value)| {
+                let n = match &index {
+                    Value::Integer(i) => *i as f64,
+                    Value::Number(n) => *n,
+                    // `lua_isnumber` accepts a numeric string, as everywhere else in this image.
+                    Value::String(s) => match s.to_str().ok().and_then(|s| s.parse::<f64>().ok()) {
+                        Some(n) => n,
+                        None => return Err(mlua::Error::runtime("Usage: SetSlot(index)")),
+                    },
+                    _ => return Err(mlua::Error::runtime("Usage: SetSlot(index)")),
+                };
+                // `ftol` truncates toward zero, then `dec`. A slot below 1 leaves the row taking
+                // nothing rather than wrapping — the reference stores the decrement raw, but its
+                // consumer is a bounds-checked table walk and ours is an Option.
+                let slot = (n.trunc() >= 1.0).then(|| n.trunc() as u32 - 1);
+                super::button::set_loot_slot(lua, &this, slot)?;
+                Ok(())
+            })?,
+        )?;
+        lua.set_named_registry_value(REG_LOOTBUTTON_METHODS, m)?;
+    }
 
     // BenillaTakeLootSlot(slot) — the ROW CLICK's take, queued as a 1-based display row; the app
     // maps it to the coin or the item's wire slot and applies the bind-on-pickup gate.
@@ -430,13 +534,29 @@ mod tests {
             .unwrap();
         assert_eq!((name.as_str(), qty), ("Wool Cloth", 3));
 
-        // Row 3: in flight — item name + quality nil, texture + quantity still present.
-        assert!(s
-            .eval::<bool>(
-                "local t, i, q, ql = GetLootSlotInfo(3)\n\
-                 return i == nil and ql == nil and t ~= nil and q == 1",
-            )
-            .unwrap());
+        // Row 3: in flight — the reference's cache-miss SENTINELS, not nils (decision 1805). The
+        // quality is the load-bearing one: stock `LootFrame_Update` does
+        // `ITEM_QUALITY_COLORS[quality].r` with no guard, and `-1` is a real row of that table
+        // (`UIParent.lua` builds it `for i = -1, 6`) while a nil is a runtime error.
+        let (texture, item, quantity, quality) = s
+            .eval::<(String, String, i64, i64)>("return GetLootSlotInfo(3)")
+            .unwrap();
+        assert_eq!(
+            (item.as_str(), quantity, quality),
+            ("", 1, -1),
+            "an in-flight row answers \"\" / -1, never nil"
+        );
+        assert_eq!(texture, "Interface\\Icons\\INV_Misc_QuestionMark");
+        // …and the same row with NO display-info icon either still answers a texture path.
+        let mut iconless = loot();
+        iconless.rows[2].as_mut().unwrap().texture = None;
+        s.set_loot(Some(iconless));
+        assert_eq!(
+            s.eval::<String>("return (GetLootSlotInfo(3))").unwrap(),
+            "Interface\\Icons\\INV_Misc_QuestionMark",
+            "a display-info miss answers the reference's question mark, not nil"
+        );
+        s.set_loot(Some(loot()));
 
         // GetLootSlotLink: the resolved item's link, nil for the coin row and for the in-flight one
         // (both arms of the reference's row click hand this straight on — decision 1059).
@@ -623,5 +743,206 @@ mod tests {
         s.set_loot(None);
         assert_eq!(s.eval::<i64>("return GetNumLootItems()").unwrap(), 0);
         assert!(s.eval::<bool>("return GetLootSlotInfo(1) == nil").unwrap());
+    }
+
+    /// A real HARDWARE click on a named frame — through the pointer path, so `scripted` is false
+    /// and the LootButton gate sees what it would see in play. Positions the frame first: the
+    /// input path is a hit test, and an unpositioned frame is nowhere.
+    fn hardware_click(s: &mut UiScript, name: &str, button: &str) {
+        s.set_screen_size(1024.0, 768.0);
+        s.run(&format!(
+            "{name}:ClearAllPoints() {name}:SetPoint(\"BOTTOMLEFT\", 100, 100) \
+             {name}:SetWidth(50) {name}:SetHeight(50) {name}:EnableMouse(true) {name}:Show()"
+        ))
+        .unwrap();
+        s.resolve();
+        s.mouse_button(125.0, 125.0, button, true);
+        s.mouse_button(125.0, 125.0, button, false);
+    }
+
+    /// `LootButton` is a real `CreateFrame` type with its own identity — not an alias for Button.
+    #[test]
+    fn loot_button_is_its_own_registered_type() {
+        let s = UiScript::new().unwrap();
+        s.run(r#"lb = CreateFrame("LootButton", "LB1", UIParent)"#)
+            .unwrap();
+        assert_eq!(
+            s.eval::<String>("return lb:GetObjectType()").unwrap(),
+            "LootButton",
+            "0x495b60 returns its own name, not \"Button\""
+        );
+        // `0x495af0` prepends its name to the base's three.
+        for t in ["LootButton", "Button", "Frame", "Region"] {
+            assert!(
+                s.eval::<bool>(&format!("return lb:IsObjectType({t:?}) and true or false"))
+                    .unwrap(),
+                "IsObjectType({t:?})"
+            );
+        }
+        assert!(!s
+            .eval::<bool>(r#"return lb:IsObjectType("CheckButton") and true or false"#)
+            .unwrap());
+        // Its one method of its own, plus all of Button's through the chain.
+        assert_eq!(
+            s.eval::<String>("return type(lb.SetSlot)").unwrap(),
+            "function"
+        );
+        assert_eq!(
+            s.eval::<String>("return type(lb.SetText)").unwrap(),
+            "function"
+        );
+        // …and the method is NOT on a plain Button — the chain runs derived → base only.
+        s.run(r#"b = CreateFrame("Button", "PlainB", UIParent)"#)
+            .unwrap();
+        assert_eq!(s.eval::<String>("return type(b.SetSlot)").unwrap(), "nil");
+    }
+
+    /// An unmodified hardware click takes the row's slot. The Lua `OnClick` runs first and
+    /// unconditionally, and its outcome does not gate the take.
+    #[test]
+    fn an_unmodified_click_runs_the_handler_and_then_takes() {
+        let mut s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            lb = CreateFrame("LootButton", "LB1", UIParent)
+            lb:SetSlot(3)
+            ran = 0
+            lb:SetScript("OnClick", function() ran = ran + 1 end)
+        "#,
+        )
+        .unwrap();
+        hardware_click(&mut s, "LB1", "LeftButton");
+        assert_eq!(s.eval::<i64>("return ran").unwrap(), 1, "the handler ran");
+        assert_eq!(s.take_loot_picks(), vec![3], "and then the take, 1-based");
+
+        // The handler erroring does not eat the loot — `0x4c1833`'s result is never tested.
+        s.run(r#"lb:SetScript("OnClick", function() error("boom") end)"#)
+            .unwrap();
+        hardware_click(&mut s, "LB1", "LeftButton");
+        assert_eq!(s.take_loot_picks(), vec![3], "a broken hook still loots");
+    }
+
+    /// Right-click loots exactly like left-click: `0x4c1820` reads the button code once and
+    /// forwards it, with no `cmp` against it anywhere in the body.
+    #[test]
+    fn right_click_loots_like_left_click() {
+        let mut s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            lb = CreateFrame("LootButton", "LB1", UIParent)
+            lb:SetSlot(2)
+            lb:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        "#,
+        )
+        .unwrap();
+        hardware_click(&mut s, "LB1", "RightButton");
+        assert_eq!(s.take_loot_picks(), vec![2]);
+    }
+
+    /// Any of the three modifiers suppresses the take — and only the take. The handler still runs,
+    /// which is exactly how the shipped `LootFrameItem_OnClick` gets to own the ctrl and shift
+    /// cases without the C take firing underneath it.
+    #[test]
+    fn any_modifier_suppresses_the_take_but_not_the_handler() {
+        for (i, (shift, ctrl, alt)) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut s = UiScript::new().unwrap();
+            s.run(
+                r#"
+                lb = CreateFrame("LootButton", "LB1", UIParent)
+                lb:SetSlot(1)
+                ran = 0
+                lb:SetScript("OnClick", function() ran = ran + 1 end)
+            "#,
+            )
+            .unwrap();
+            s.set_modifiers(shift, ctrl, alt);
+            hardware_click(&mut s, "LB1", "LeftButton");
+            assert_eq!(
+                s.eval::<i64>("return ran").unwrap(),
+                1,
+                "case {i}: handler ran"
+            );
+            assert!(s.take_loot_picks().is_empty(), "case {i}: no take");
+        }
+    }
+
+    /// **A scripted `:Click()` is a complete no-op** — it does not even run the row's `OnClick`.
+    /// `0x4c182b` returns before the base call. Surprising enough that it is asserted rather than
+    /// left to be rediscovered.
+    #[test]
+    fn a_scripted_click_does_nothing_at_all() {
+        let mut s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            lb = CreateFrame("LootButton", "LB1", UIParent)
+            lb:SetSlot(1)
+            ran = 0
+            lb:SetScript("OnClick", function() ran = ran + 1 end)
+            lb:Click()
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.eval::<i64>("return ran").unwrap(),
+            0,
+            "the handler never ran"
+        );
+        assert!(s.take_loot_picks().is_empty(), "and nothing was taken");
+        // A plain Button's Click() is unaffected — the gate is this type's alone.
+        s.run(
+            r#"
+            b = CreateFrame("Button", "PlainB", UIParent)
+            bran = 0
+            b:SetScript("OnClick", function() bran = bran + 1 end)
+            b:Click()
+        "#,
+        )
+        .unwrap();
+        assert_eq!(s.eval::<i64>("return bran").unwrap(), 1);
+    }
+
+    /// `SetSlot` is 1-based in and 0-based stored, takes a numeric string, and refuses `this` that
+    /// is not a LootButton (the reference's own `IsA` guard at `0x4c18ee`).
+    #[test]
+    fn set_slot_converts_and_guards() {
+        let mut s = UiScript::new().unwrap();
+        s.run(r#"lb = CreateFrame("LootButton", "LB1", UIParent)"#)
+            .unwrap();
+
+        // `ftol` truncates toward zero: 4.9 is row 4, not 5.
+        s.run("lb:SetSlot(4.9)").unwrap();
+        hardware_click(&mut s, "LB1", "LeftButton");
+        assert_eq!(s.take_loot_picks(), vec![4]);
+
+        // A numeric string is a number to `lua_isnumber`.
+        s.run(r#"lb:SetSlot("2")"#).unwrap();
+        hardware_click(&mut s, "LB1", "LeftButton");
+        assert_eq!(s.take_loot_picks(), vec![2]);
+
+        // A non-number raises the client's own usage text.
+        let e = s.run("lb:SetSlot('x')").unwrap_err().to_string();
+        assert!(e.contains("Usage: SetSlot(index)"), "{e}");
+
+        // Never slotted → takes nothing, rather than silently taking row 1. `LB1` is still parked
+        // under the cursor from the clicks above and, being linked first, would win the tie for the
+        // point (decision 1816) and take row 2 again — get it out of the way first.
+        s.run("LB1:Hide()").unwrap();
+        s.run(r#"fresh = CreateFrame("LootButton", "LB2", UIParent)"#)
+            .unwrap();
+        hardware_click(&mut s, "LB2", "LeftButton");
+        assert!(s.take_loot_picks().is_empty());
+
+        // And it is a LootButton method, not a Button one.
+        s.run(r#"b = CreateFrame("Button", "PlainB", UIParent)"#)
+            .unwrap();
+        let e = s.run("LB1.SetSlot(b, 1)").unwrap_err().to_string();
+        assert!(e.contains("not a LootButton"), "{e}");
     }
 }

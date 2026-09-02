@@ -27,21 +27,7 @@
 
 use benilla_ui::script::UiScript;
 
-fn ui_dir() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui")
-}
-
-/// One shipped `assets/ui/<file>` into `s`, asserting it loaded clean.
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(ui_dir().join(file)).unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// An **addon's** document text, loaded after the shipped files exactly as `LoadAddOn` would —
 /// the template registry is persistent, so `inherits=` reaches what `GameTooltip.xml` registered.

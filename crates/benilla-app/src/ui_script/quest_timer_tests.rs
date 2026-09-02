@@ -13,22 +13,7 @@ use benilla_ui::script::{
     QuestLogEntryView, QuestLogObjectiveView, QuestLogState, ScriptValue, UiScript,
 };
 
-/// Load one shipped `assets/ui/<file>`, panicking on any loader error.
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// Fonts + UIParent (SecondsToTime lives there) + the window itself. Deliberately NOT the whole
 /// manifest: the window must stand up on its own dependencies, and a harness that loads everything
@@ -36,9 +21,24 @@ fn load_xml(s: &UiScript, file: &str) {
 fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // The window's title is `text="QUEST_TIMERS"`, resolved against the global at load — without
+    // the player's own strings it draws the KEY, which is exactly what a `text=` attribute does
+    // with an unknown name.
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Fonts.xml");
+    // `SecondsToTime`, which the reference's `QuestTimerFrame_Update` formats every row with, and
+    // `UIParent_ManageFramePositions`, which its OnShow/OnHide call.
     load_xml(&s, "UIParent.xml");
-    load_xml(&s, "QuestTimerFrame.xml");
+    // `MAX_QUESTS`, the loop bound the reference's repaint hides its spare rows with. 1.12
+    // declares it on QuestLogFrame.lua:2 and so do we (1751 window 16) — a nil there is
+    // `'for' limit must be a number` on the first repaint, not a missing row.
+    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestTimerFrame.xml");
     s
 }
 
@@ -83,6 +83,7 @@ fn row_text(s: &UiScript, i: u32) -> String {
 /// `45 + 16·n`; and back to hidden when the last timer goes.
 #[test]
 fn the_window_follows_the_timed_quests() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
 
     // An untimed log: QUEST_LOG_UPDATE fires, the frame stays down.
@@ -132,6 +133,7 @@ fn the_window_follows_the_timed_quests() {
 /// and `mirror_timer_tests` were both written for.
 #[test]
 fn the_countdown_reaches_the_draw_list() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.set_quest_log(log(vec![quest(1, "Deliver the Message", 1_000_860)]));
     s.set_server_unix_time(1_000_000.0);
@@ -162,6 +164,7 @@ fn the_countdown_reaches_the_draw_list() {
 /// change again.
 #[test]
 fn a_world_entry_paints_a_quest_already_running() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.set_quest_log(log(vec![quest(1, "Deliver the Message", 1_000_090)]));
     s.set_server_unix_time(1_000_000.0);
@@ -181,12 +184,20 @@ fn a_world_entry_paints_a_quest_already_running() {
 /// `QuestTimer1: ours [(140.0, 16.0), (0.0, -29.0)] != ref [(140.0, 16.0), (0.0, -30.0)]`.
 #[test]
 fn the_window_geometry_matches_the_reference_framexml() {
-    let Some(reference) = super::framexml_diff::reference("QuestTimerFrame.xml") else {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let Some(reference) =
+        super::framexml_diff::reference("Interface\\FrameXML\\QuestTimerFrame.xml")
+    else {
         eprintln!("skipping: no extracted FrameXML");
         return;
     };
     // No exemptions: this window's frames keep the reference's bare names (decision 0591 §3 — the
     // manage pass and the ref's own row lookup both resolve by literal name), and every number in
     // it is the reference's. If an entry ever needs to go here, it names its reason.
-    super::framexml_diff::assert_geometry_matches("QuestTimerFrame.xml", &reference, &[], 22);
+    super::framexml_diff::assert_geometry_matches(
+        "Interface\\FrameXML\\QuestTimerFrame.xml",
+        &reference,
+        &[],
+        22,
+    );
 }

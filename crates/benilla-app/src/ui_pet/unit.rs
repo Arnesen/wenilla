@@ -107,7 +107,10 @@ pub(super) fn feed_pet_unit(
         .flatten()
         .map(|store| {
             let name = names.resolve(pet_guid, &commands).map(str::to_string);
-            let mut s = snapshot(store, name, 0);
+            // No `ChrClasses.dbc` here, and none needed: a pet is a UNIT, so the reference's
+            // own TYPEMASK_PLAYER gate refuses it before the class byte is ever read. Passing
+            // the table could not change the answer.
+            let mut s = snapshot(store, name, 0, None);
             s.guid = pet_guid;
             s
         });

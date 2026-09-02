@@ -309,23 +309,28 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     m.set(
         "SetFogColor",
-        lua.create_function(|lua, (this, r, g, b): (Table, Value, Value, Value)| {
-            let c = (num(&r), num(&g), num(&b));
-            with_model(lua, &this, |m| m.fog_color = Some(c))
-        })?,
+        lua.create_function(
+            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<Value>)| {
+                // FIVE arguments, and the fifth is the alpha — the same numeric path and the same
+                // `[0,1]` clamp as the components, not a flag. It is **guarded with a default of
+                // `1.0`** where r/g/b are read unconditionally and yield `0.0` when absent, so
+                // `SetFogColor(r, g, b)` sets alpha 1.0. Getting that backwards renders the fog
+                // invisible. Decision 1845.
+                let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+                let a = a.as_ref().map_or(1.0, num);
+                let packed = (q(a) << 24) | (q(num(&r)) << 16) | (q(num(&g)) << 8) | q(num(&b));
+                with_model(lua, &this, |m| m.fog_color = packed)
+            },
+        )?,
     )?;
     m.set(
         "GetFogColor",
         lua.create_function(|lua, this: Table| {
-            let c = with_model(lua, &this, |m| m.fog_color)?;
-            Ok(match c {
-                Some((r, g, b)) => MultiValue::from_vec(vec![
-                    Value::Number(f64::from(r)),
-                    Value::Number(f64::from(g)),
-                    Value::Number(f64::from(b)),
-                ]),
-                None => MultiValue::new(),
-            })
+            // FOUR values, always — the packed dword unpacked. Never set reads `1, 1, 1, 1`,
+            // because the `CSimpleModel` ctor's terminal write is `0xffffffff` (decision 1845).
+            let packed = with_model(lua, &this, |m| m.fog_color)?;
+            let ch = |shift: u32| f64::from((packed >> shift) & 0xff) / 255.0;
+            Ok((ch(16), ch(8), ch(0), ch(24)))
         })?,
     )?;
 
@@ -431,4 +436,43 @@ fn playermodel_install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     lua.set_named_registry_value(REG_PLAYERMODEL_METHODS, m)
+}
+
+impl crate::script::UiScript {
+    /// A named model pane's scene state, or `None` if no live frame carries that name as a
+    /// `Model`/`PlayerModel`.
+    ///
+    /// **The read side of the pane, for a host that draws it.** The app keeps one off-screen body
+    /// bake per window (this module's header: the scene is ours, the pixels are the host's), and
+    /// every frame it has to ask the pane the reference drives which way it is turned. Before
+    /// decision 1751 that came from benilla-named globals a file of ours called
+    /// (`BenillaPaperDollModel_SetFacing` and its four siblings, one scalar per window on
+    /// [`Model`]); the stock FrameXML instead calls
+    /// `Model_OnLoad`/`Model_RotateLeft`/`Model_RotateRight`/`Model_OnUpdate`, which write
+    /// `PlayerModel:SetRotation` — i.e. this state, on the pane itself. So the host reads the pane.
+    ///
+    /// By NAME rather than by handle because that is what the host knows: the character sheet's
+    /// bake belongs to `CharacterModelFrame`, and since 1751 that name is the reference's own. A
+    /// linear scan, because a name index would be a second store to keep true and a loaded
+    /// interface holds single-digit model panes.
+    pub fn model_pane(&self, name: &str) -> Option<ModelState> {
+        self.model_ref()
+            .arena
+            .iter_frames()
+            .find_map(|(_, f)| match (&f.name, &f.kind_state) {
+                (Some(n), KindState::Model(m)) if n == name => Some(m.clone()),
+                _ => None,
+            })
+    }
+
+    /// A named model pane's yaw in radians — [`Self::model_pane`]'s one hot field, and `0.0` for a
+    /// pane that does not exist yet (its window's file not loaded, or its `OnLoad` not run).
+    ///
+    /// `0.0` rather than an `Option` because every caller is a per-frame booth mirror whose only
+    /// other answer would be "keep the last one", and a pane that has not loaded has no last one.
+    /// The reference's own default, 0.61, is authored in `Model_OnLoad`, so a real pane only reads
+    /// 0.0 before it loads.
+    pub fn model_pane_facing(&self, name: &str) -> f32 {
+        self.model_pane(name).map_or(0.0, |m| m.facing)
+    }
 }

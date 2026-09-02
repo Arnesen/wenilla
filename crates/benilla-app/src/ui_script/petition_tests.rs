@@ -19,36 +19,7 @@
 
 use benilla_ui::script::UiScript;
 
-/// Load one shipped `assets/ui/<file>`, panicking on any loader error **and on any
-/// unknown-template warning** — `guild_tests`' loader, and the decision-0672 reason is the same:
-/// `inherits=` a template this house doesn't ship is a *warning*, the frame still loads, and a
-/// bare Button still clicks. Both windows here inherit from `UIPanelTemplates.xml` and
-/// `MoneyFrame.xml`, and the registrar defines one local template of its own.
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-    let missing: Vec<&String> = report
-        .warnings
-        .iter()
-        .filter(|w| w.contains("unknown template"))
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "{file}: inherits a template this house does not ship (the frame loads, its ART does \
-         not): {missing:?}"
-    );
-}
+use super::test_ui::load_ui_strict as load_xml;
 
 /// The charter engine API, stood in for in Lua.
 ///
@@ -114,13 +85,33 @@ fn setup() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     s.run(PETITION_FIXTURE).unwrap();
+    // The player's own strings: the reference's `PetitionFrame_Update` formats
+    // GUILD_CHARTER_TEMPLATE and reads GUILD_PETITION_*_INSTRUCTIONS and NOT_YET_SIGNED straight
+    // out of GlobalStrings, with no fallback of its own — `format(nil, …)` raises, and the window
+    // never paints.
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "BasicControls.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
-    load_xml(&s, "GuildRegistrarFrame.xml");
-    load_xml(&s, "PetitionFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    // `QuestTitleButtonTemplate`, which the reference's registrar inherits for its two service
+    // rows — 1.12 declares it in QuestFrameTemplates.xml, an `<Include>` of QuestFrame.xml, and
+    // ours declares it in QuestFrame.xml directly. An unknown template is a loader WARNING, so
+    // without this the rows build with no art at all and nothing goes red — which is exactly the
+    // failure `load_ui_strict` exists to turn into a red test.
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "QuestFrame.xml");
+    // `ChatFrameEditBox`, which the reference's own purchase button indexes on every click to
+    // decide where focus goes after the name box closes — a nil there raises before the charter is
+    // bought. Ours guarded it; the reference does not.
+    load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrops
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml"); // ChatFrame's seven dropdowns inherit its template
+    load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
+    load_xml(&s, "ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GuildRegistrarFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\PetitionFrame.xml");
     s
 }
 
@@ -161,6 +152,7 @@ fn show_registrar(s: &mut UiScript) {
 /// blank row 2 while every other assertion here still passed.
 #[test]
 fn a_signers_charter_shows_the_sign_face_and_nine_rows() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     show_petition(&mut s);
 
@@ -223,6 +215,7 @@ fn a_signers_charter_shows_the_sign_face_and_nine_rows() {
 /// either view alone.
 #[test]
 fn the_owners_charter_swaps_sign_for_request_and_rename() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("BenillaPetitionFixture.isOriginator = 1").unwrap();
     show_petition(&mut s);
@@ -245,6 +238,7 @@ fn the_owners_charter_swaps_sign_for_request_and_rename() {
 /// still pass.
 #[test]
 fn request_signature_disables_at_the_wires_requirement_not_at_nine() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run(
         r#"
@@ -279,6 +273,7 @@ fn request_signature_disables_at_the_wires_requirement_not_at_nine() {
 /// a signer's view and still be unsignable (already signed, already guilded, full).
 #[test]
 fn the_sign_button_follows_can_sign_petition() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     show_petition(&mut s);
     assert!(s
@@ -304,6 +299,7 @@ fn the_sign_button_follows_can_sign_petition() {
 /// window closes, and without it the engine keeps a charter session for a window nobody can see.
 #[test]
 fn the_charter_buttons_reach_their_verbs_and_the_close_clears_the_session() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     show_petition(&mut s);
     let _ = calls(&s);
@@ -326,6 +322,7 @@ fn the_charter_buttons_reach_their_verbs_and_the_close_clears_the_session() {
 /// 24-character charter-name limit.
 #[test]
 fn rename_guild_sends_the_box_text_and_caps_at_twenty_four() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("BenillaPetitionFixture.isOriginator = 1").unwrap();
     show_petition(&mut s);
@@ -358,6 +355,7 @@ fn rename_guild_sends_the_box_text_and_caps_at_twenty_four() {
 /// before the player has typed a name.
 #[test]
 fn the_registrar_opens_on_services_and_purchase_is_a_local_panel_swap() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     show_registrar(&mut s);
 
@@ -409,6 +407,7 @@ fn the_registrar_opens_on_services_and_purchase_is_a_local_panel_swap() {
 /// window will be told.
 #[test]
 fn purchase_sends_the_typed_name_and_register_turns_the_charter_in() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     show_registrar(&mut s);
     s.run("GuildRegistrarButton1:Click()").unwrap();
@@ -444,6 +443,7 @@ fn purchase_sends_the_typed_name_and_register_turns_the_charter_in() {
 /// charter list, and the greeting panel never displays one.
 #[test]
 fn the_charter_price_is_read_when_the_purchase_panel_opens() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     show_registrar(&mut s);
     s.run("GuildRegistrarButton1:Click()").unwrap();
@@ -456,6 +456,7 @@ fn the_charter_price_is_read_when_the_purchase_panel_opens() {
 /// panel left over from last time.
 #[test]
 fn reopening_the_registrar_returns_to_the_services_list() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     show_registrar(&mut s);
     s.run("GuildRegistrarButton1:Click()").unwrap();
@@ -472,6 +473,7 @@ fn reopening_the_registrar_returns_to_the_services_list() {
 /// in no slot and two left-slot windows paint over each other (B288's shape, decision 1507).
 #[test]
 fn both_charter_windows_are_registered_left_slot_panels() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     for frame in ["GuildRegistrarFrame", "PetitionFrame"] {
         assert_eq!(

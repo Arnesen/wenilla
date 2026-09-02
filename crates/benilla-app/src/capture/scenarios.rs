@@ -11,7 +11,11 @@ pub(super) struct Scenario {
     /// Felwood spot's tile (`33_24`) exists in Azeroth too, empty — so a scenario that could not
     /// name its map silently photographed the wrong world. The harness seeds
     /// [`benilla_world::world_map::CurrentMap`] from this before streaming starts (decision 0743).
-    pub(super) map: u32,
+    /// Which `Map.dbc` map this scenario photographs. `None` = **the `$WOW_MAP` knob decides** —
+    /// the arbitrary-viewpoint instruments (`vista`, `waterfx`, `fxview`) go anywhere, so they have
+    /// no map of their own and must not write one back over the knob. A named golden scenario
+    /// always says, because raw WoW coords repeat on every continent.
+    pub(super) map: Option<u32>,
     /// Camera eye, raw WoW coords `(x, y, z)`.
     pub(super) eye: [f32; 3],
     /// Camera look-at target, raw WoW coords.
@@ -112,7 +116,7 @@ pub(super) enum UiFixture {
     /// swings it through the four alternate dock states (see `fixtures.rs`).
     ChatTabHover,
     /// The social pane (`FriendsFrame`), opened through the live toggle — the instrument for B264
-    /// (decision 1298). Its `BenillaFriendsDropDown` host is declared with no anchors, exactly as
+    /// (decision 1298). Its `FriendsDropDown` host is declared with no anchors, exactly as
     /// the reference's own `FriendsDropDown` is; while an unpositioned owner stood in a zero rect
     /// for its regions, the dropdown template's texture chain drew a stray capsule at the screen
     /// origin every time the pane opened. Needs no server state to show it.
@@ -304,7 +308,7 @@ pub(super) const GLUE_SCENARIOS: &[GlueScenario] = &[
 pub(super) const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "water-noon",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: WATER_EYE,
         look: WATER_LOOK,
         minute: 720,
@@ -312,7 +316,7 @@ pub(super) const SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         name: "water-night",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: WATER_EYE,
         look: WATER_LOOK,
         minute: 0,
@@ -320,7 +324,7 @@ pub(super) const SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         name: "felwood-noon",
-        map: MAP_KALIMDOR,
+        map: Some(MAP_KALIMDOR),
         eye: FELWOOD_EYE,
         look: FELWOOD_LOOK,
         minute: 720,
@@ -328,7 +332,7 @@ pub(super) const SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         name: "felwood-night",
-        map: MAP_KALIMDOR,
+        map: Some(MAP_KALIMDOR),
         eye: FELWOOD_EYE,
         look: FELWOOD_LOOK,
         minute: 0,
@@ -444,7 +448,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // shape 0688 wired and nothing has ever photographed it.
     Scenario {
         name: "tram-undersea",
-        map: MAP_DEEPRUN_TRAM,
+        map: Some(MAP_DEEPRUN_TRAM),
         eye: TRAM_EYE,
         look: TRAM_LOOK,
         minute: 720,
@@ -458,7 +462,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // that a half-clouded zone hides. Kept as the standing reproducer for the cloud palette.
     Scenario {
         name: "tainted-scar-noon",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: SCAR_EYE,
         look: SCAR_LOOK,
         minute: 720,
@@ -473,7 +477,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // of one build) — same coplanar-batch draw-order defect as `chest-indoor-*` below (0815 Open).
     Scenario {
         name: "overlook-noon",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: OVERLOOK_EYE,
         look: OVERLOOK_LOOK,
         minute: 720,
@@ -481,7 +485,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "overlook-night",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: OVERLOOK_EYE,
         look: OVERLOOK_LOOK,
         minute: 0,
@@ -491,7 +495,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `inn-noon` — the room is lit by hearth and candles, so the clock barely reaches it).
     Scenario {
         name: "inn-noon",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: INN_EYE,
         look: INN_LOOK,
         minute: 720,
@@ -502,7 +506,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // slides off the rails and the shot degrades into an ordinary fence.
     Scenario {
         name: "fence-shadowline-day",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: FENCE_EYE,
         look: FENCE_LOOK,
         minute: 624,
@@ -516,7 +520,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // about the light curves, and a baseline is the right place to hold the answer (0749 addendum).
     Scenario {
         name: "fence-shadowline-night",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: FENCE_EYE,
         look: FENCE_LOOK,
         minute: 0,
@@ -524,7 +528,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "creature-sun-front",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: [-9496.46, 59.54, 58.28],
         look: [-9500.00, 56.00, 57.28],
         minute: 720,
@@ -535,7 +539,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "creature-sun-rear",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: [-9503.54, 52.46, 58.28],
         look: [-9500.00, 56.00, 57.28],
         minute: 720,
@@ -546,7 +550,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "creature-shade-front",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: [-9496.46, 47.54, 57.75],
         look: [-9500.00, 44.00, 56.75],
         minute: 720,
@@ -557,7 +561,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "creature-shade-rear",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: [-9503.54, 40.46, 57.75],
         look: [-9500.00, 44.00, 56.75],
         minute: 720,
@@ -568,7 +572,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "creature-indoor-front",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: [-9466.57, 34.73, 59.70],
         look: [-9469.40, 31.90, 58.70],
         minute: 720,
@@ -579,7 +583,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "creature-indoor-rear",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: [-9472.23, 29.07, 59.70],
         look: [-9469.40, 31.90, 58.70],
         minute: 720,
@@ -590,7 +594,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "chest-sun-front",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: [-9496.82, 59.18, 57.98],
         look: [-9500.00, 56.00, 56.93],
         minute: 720,
@@ -601,7 +605,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "chest-sun-rear",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: [-9503.18, 52.82, 57.98],
         look: [-9500.00, 56.00, 56.93],
         minute: 720,
@@ -612,7 +616,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "chest-shade-front",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: [-9496.82, 47.18, 57.45],
         look: [-9500.00, 44.00, 56.40],
         minute: 720,
@@ -623,7 +627,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "chest-shade-rear",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: [-9503.18, 40.82, 57.45],
         look: [-9500.00, 44.00, 56.40],
         minute: 720,
@@ -641,7 +645,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // they are deterministic.
     Scenario {
         name: "chest-indoor-front",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: [-9466.85, 34.45, 59.40],
         look: [-9469.40, 31.90, 58.35],
         minute: 720,
@@ -652,7 +656,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "chest-indoor-rear",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: [-9471.95, 29.35, 59.40],
         look: [-9469.40, 31.90, 58.35],
         minute: 720,
@@ -663,7 +667,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "house-north",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: HOUSE_EYE,
         look: [-9389.1, 71.2, 58.0],
         minute: 720,
@@ -671,7 +675,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "house-south",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: HOUSE_EYE,
         look: [-9489.1, 71.2, 58.0],
         minute: 720,
@@ -679,7 +683,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "house-west",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: HOUSE_EYE,
         look: [-9439.1, 121.2, 58.0],
         minute: 720,
@@ -687,7 +691,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "house-east",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: HOUSE_EYE,
         look: [-9439.1, 21.2, 58.0],
         minute: 720,
@@ -700,7 +704,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // every diff unseen.
     Scenario {
         name: "house-north-midnight",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: HOUSE_EYE,
         look: [-9389.1, 71.2, 58.0],
         minute: 0,
@@ -716,7 +720,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // client does the same — the audit's "faithful-cull residue"), which vanishes the room.
     Scenario {
         name: "inn-interior",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: [-9463.3, 4.4, 58.8],
         look: [-9462.1, -5.6, 58.5],
         minute: 720,
@@ -727,7 +731,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // stays as the warm-light/fog fixture.
     Scenario {
         name: "northshire-dusk",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 1170, // 19:30 — warm dusk light + fog
@@ -735,7 +739,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "northshire-sky-noon",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: SKY_EYE,
         look: SKY_LOOK,
         minute: 720, // day sky-dome gradient + fog horizon
@@ -743,7 +747,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "northshire-sky-dusk",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: SKY_EYE,
         look: SKY_LOOK,
         minute: 1170, // dusk dome warp + low sun + stars emerging
@@ -757,7 +761,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // was cut along a giant faceted circle).
     Scenario {
         name: "northshire-sun-flare",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: SKY_EYE,
         look: [-8797.0, 23.0, 264.0], // eye + 300·(elev 30°, az 45°) — the sun's spot at 17:30
         minute: 1050,
@@ -772,7 +776,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // unit tests (`flare_ray_*`) and the sun fixtures.
     Scenario {
         name: "northshire-moonrise",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: SKY_EYE,
         look: [-8775.0, 45.0, 190.0], // eye + 300·(elev 15°, az 45°) — the moon's spot at 22:44
         minute: 1364,
@@ -784,7 +788,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // the moonrise fixture above proves its absence early, this one its presence at depth of night.
     Scenario {
         name: "northshire-moon-halo",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: SKY_EYE,
         look: [-8858.0, -38.0, 358.0], // eye + 300·(elev 55°, az 45°) — the moon's spot at 00:00
         minute: 0,
@@ -796,7 +800,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // load is resident here; Northshire scenes never exercise that scale.
     Scenario {
         name: "stormwind",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: [-8833.38, 628.63, 96.0],
         look: [-8809.1, 672.3, 94.0],
         minute: 720,
@@ -808,7 +812,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // director look pass, so "looks like shit" gets caught in-loop, not on the director's screen.
     Scenario {
         name: "ui-merchant",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -816,7 +820,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "ui-gossip",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -824,7 +828,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "ui-bank",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -832,7 +836,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "ui-quest",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -840,7 +844,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "ui-questgreeting",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -848,7 +852,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "ui-questlog",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -856,7 +860,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "ui-loot",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -864,7 +868,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "ui-bag",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -874,7 +878,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-tooltip`.
     Scenario {
         name: "ui-tooltip",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -884,7 +888,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // seeded hostile wolf. Run with `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-tooltip-world`.
     Scenario {
         name: "ui-tooltip-world",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -894,7 +898,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-char`.
     Scenario {
         name: "ui-char",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -905,7 +909,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-unitframes`.
     Scenario {
         name: "ui-unitframes",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -917,7 +921,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-combopoints`.
     Scenario {
         name: "ui-combopoints",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -927,7 +931,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // Run with `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-partyinvite`.
     Scenario {
         name: "ui-partyinvite",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -940,7 +944,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-actionbar`.
     Scenario {
         name: "ui-actionbar",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -952,7 +956,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE=vplates` (main.rs sizes this window 1024×768 — the 1:1 gx window).
     Scenario {
         name: "vplates",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: [-8956.5, -137.5, 85.6],
         look: [-8949.95, -132.49, 84.8],
         minute: 720,
@@ -963,7 +967,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-worldmap`.
     Scenario {
         name: "ui-worldmap",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -972,7 +976,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // The spellbook over a seeded mage book. Run with `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-spellbook`.
     Scenario {
         name: "ui-spellbook",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -982,7 +986,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-macro`.
     Scenario {
         name: "ui-macro",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -992,7 +996,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-macro-popup`.
     Scenario {
         name: "ui-macro-popup",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -1002,7 +1006,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-chatedit`.
     Scenario {
         name: "ui-chatedit",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -1013,7 +1017,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-chat-tabhover`.
     Scenario {
         name: "ui-chat-tabhover",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -1023,7 +1027,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-social`.
     Scenario {
         name: "ui-social",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -1033,7 +1037,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options`.
     Scenario {
         name: "ui-options",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -1043,7 +1047,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options-audio`.
     Scenario {
         name: "ui-options-audio",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -1053,7 +1057,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options-graphics`.
     Scenario {
         name: "ui-options-graphics",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -1063,7 +1067,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options-chat`.
     Scenario {
         name: "ui-options-chat",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -1073,7 +1077,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-color-picker`.
     Scenario {
         name: "ui-color-picker",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -1083,7 +1087,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // with `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options-dropdown`.
     Scenario {
         name: "ui-options-dropdown",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -1093,7 +1097,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-keybindings`.
     Scenario {
         name: "ui-keybindings",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -1103,7 +1107,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options-search`.
     Scenario {
         name: "ui-options-search",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -1114,7 +1118,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // out in the water. Run with `WOW_CAPTURE=name-water`.
     Scenario {
         name: "name-water",
-        map: MAP_AZEROTH,
+        map: Some(MAP_AZEROTH),
         eye: WATER_EYE,
         look: WATER_LOOK,
         minute: 720,

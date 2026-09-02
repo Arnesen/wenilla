@@ -1916,7 +1916,7 @@
          right edge at (-2,5) / (-2,-2). Those offsets against our FauxScrollFrameTemplate's bar
          (seated 6,-16 / 6,+16) are exactly the 21/20 overhang that lands each arrow button in its
          own authored socket — ScrollTemplates.xml's own law, reached from the other side. -->
-    <Frame name="BenillaAuctionScrollTemplate" inherits="FauxScrollFrameTemplate" virtual="true">
+    <ScrollFrame name="BenillaAuctionScrollTemplate" inherits="FauxScrollFrameTemplate" virtual="true">
         <Layers>
             <Layer level="ARTWORK">
                 <Texture file="Interface\PaperDollInfoFrame\UI-Character-ScrollBar">
@@ -1931,7 +1931,7 @@
                 </Texture>
             </Layer>
         </Layers>
-    </Frame>
+    </ScrollFrame>
 
     <!-- ═══ The window (ref-xml l.5-1982) ══════════════════════════════════════════════════════
          832x447, and NO <Anchors>: it is registered `area = "doublewide"` (UiPanels.xml), so the
@@ -2053,10 +2053,10 @@
                     <Button name="AuctionFilterButton13" inherits="AuctionClassButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionFilterButton12" relativePoint="BOTTOMLEFT"/></Anchors></Button>
                     <Button name="AuctionFilterButton14" inherits="AuctionClassButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionFilterButton13" relativePoint="BOTTOMLEFT"/></Anchors></Button>
                     <Button name="AuctionFilterButton15" inherits="AuctionClassButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionFilterButton14" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                    <Frame name="BrowseFilterScrollFrame" inherits="BenillaAuctionScrollTemplate">
+                    <ScrollFrame name="BrowseFilterScrollFrame" inherits="BenillaAuctionScrollTemplate">
                         <Size><AbsDimension x="160" y="305"/></Size>
                         <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPLEFT"><Offset><AbsDimension x="158" y="-105"/></Offset></Anchor></Anchors>
-                    </Frame>
+                    </ScrollFrame>
 
                     <Button name="BrowseQualitySort" inherits="AuctionSortButtonTemplate" text="RARITY">
                         <Size><AbsDimension x="214" y="19"/></Size>
@@ -2094,10 +2094,10 @@
                     <Button name="BrowseButton6" inherits="BrowseButtonTemplate" id="6"><Anchors><Anchor point="TOPLEFT" relativeTo="BrowseButton5" relativePoint="BOTTOMLEFT"/></Anchors></Button>
                     <Button name="BrowseButton7" inherits="BrowseButtonTemplate" id="7"><Anchors><Anchor point="TOPLEFT" relativeTo="BrowseButton6" relativePoint="BOTTOMLEFT"/></Anchors></Button>
                     <Button name="BrowseButton8" inherits="BrowseButtonTemplate" id="8"><Anchors><Anchor point="TOPLEFT" relativeTo="BrowseButton7" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                    <Frame name="BrowseScrollFrame" inherits="BenillaAuctionScrollTemplate">
+                    <ScrollFrame name="BrowseScrollFrame" inherits="BenillaAuctionScrollTemplate">
                         <Size><AbsDimension x="465" y="306"/></Size>
                         <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="39" y="-105"/></Offset></Anchor></Anchors>
-                    </Frame>
+                    </ScrollFrame>
                     <Button name="BrowsePrevPageButton" inherits="BenillaAuctionPrevPageTemplate">
                         <Anchors><Anchor point="LEFT" relativeTo="BrowseButton8" relativePoint="LEFT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
                         <Scripts><OnClick>BrowsePageButton_OnClick(-1)</OnClick></Scripts>
@@ -2264,10 +2264,10 @@
                     <Button name="BidButton7" inherits="BidButtonTemplate" id="7"><Anchors><Anchor point="TOPLEFT" relativeTo="BidButton6" relativePoint="BOTTOMLEFT"/></Anchors></Button>
                     <Button name="BidButton8" inherits="BidButtonTemplate" id="8"><Anchors><Anchor point="TOPLEFT" relativeTo="BidButton7" relativePoint="BOTTOMLEFT"/></Anchors></Button>
                     <Button name="BidButton9" inherits="BidButtonTemplate" id="9"><Anchors><Anchor point="TOPLEFT" relativeTo="BidButton8" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                    <Frame name="BidScrollFrame" inherits="BenillaAuctionScrollTemplate">
+                    <ScrollFrame name="BidScrollFrame" inherits="BenillaAuctionScrollTemplate">
                         <Size><AbsDimension x="625" y="335"/></Size>
                         <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="40" y="-74"/></Offset></Anchor></Anchors>
-                    </Frame>
+                    </ScrollFrame>
                     <Button name="BidPrevPageButton" inherits="BenillaAuctionPrevPageTemplate">
                         <Anchors><Anchor point="LEFT" relativeTo="BidButton9" relativePoint="LEFT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
                         <Scripts><OnClick>BidPageButton_OnClick(-1)</OnClick></Scripts>
@@ -2381,10 +2381,10 @@
                     <Button name="AuctionsButton7" inherits="AuctionsButtonTemplate" id="7"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsButton6" relativePoint="BOTTOMLEFT"/></Anchors></Button>
                     <Button name="AuctionsButton8" inherits="AuctionsButtonTemplate" id="8"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsButton7" relativePoint="BOTTOMLEFT"/></Anchors></Button>
                     <Button name="AuctionsButton9" inherits="AuctionsButtonTemplate" id="9"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsButton8" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                    <Frame name="AuctionsScrollFrame" inherits="BenillaAuctionScrollTemplate">
+                    <ScrollFrame name="AuctionsScrollFrame" inherits="BenillaAuctionScrollTemplate">
                         <Size><AbsDimension x="435" y="339"/></Size>
                         <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="40" y="-72"/></Offset></Anchor></Anchors>
-                    </Frame>
+                    </ScrollFrame>
                     <Button name="AuctionsPrevPageButton" inherits="BenillaAuctionPrevPageTemplate">
                         <Anchors><Anchor point="LEFT" relativeTo="AuctionsButton9" relativePoint="LEFT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
                         <Scripts><OnClick>AuctionsPageButton_OnClick(-1)</OnClick></Scripts>

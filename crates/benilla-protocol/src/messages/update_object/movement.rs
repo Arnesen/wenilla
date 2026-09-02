@@ -93,12 +93,46 @@ pub struct CreateSpline {
     pub run_mode: bool,
 }
 
+/// A `LIVING` block's live mover state: the `MOVEMENTFLAGS` word and the swim pitch that rides it.
+/// See [`MovementBlock::mover`] for why both are surfaced rather than parsed and dropped.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MoverState {
+    /// The raw `MOVEMENTFLAGS` word (`CMovement+0x40`) — direction bits, swim, falling, the granted
+    /// modes.
+    pub flags: u32,
+    /// The **swim pitch** (radians, +up), present on the wire iff `MOVEFLAG_SWIMMING`; `0.0` (level)
+    /// otherwise.
+    pub pitch: f32,
+}
+
 /// The decoded fields a movement block carries: the pose (from its `LIVING`/`HAS_POSITION` flag),
 /// for a `LIVING` block the unit's 6 movement speeds, its live [`CreateSpline`] and (if
 /// `ON_TRANSPORT`) its rider pose, and (if `UPDATE_FLAG_TRANSPORT`) a transport GameObject's path
 /// progress. The rest of the block is parsed and discarded to stay aligned.
 pub struct MovementBlock {
     pub position: Option<(Vector3d, f32)>,
+    /// A `LIVING` block's **live `MOVEMENTFLAGS` word** and its **swim pitch** — the mover state this
+    /// unit is *already in* at the moment it streams into view. `None` for a `HAS_POSITION`-only
+    /// block (a GameObject has no mover).
+    ///
+    /// **The reference applies both, byte-VERIFIED** (wow-5875-re §5,
+    /// `system/collision/scratch/create-block-swim-pitch.md`). The create-block apply `0x619320`
+    /// reaches `0x618c30`, which merges the block's flags into `CMovement+0x40` under the same
+    /// `0x75a07dff` mask a relayed `MSG_MOVE_*` uses (`0x618df3`; `SWIMMING`, `FORWARD` and
+    /// `BACKWARD` are all inside it) and then calls the pose commit `0x7c6420`, whose
+    /// `fld [edx+0x34]` / `fst [ecx+0x20]` copies **this pitch** into the mover pitch field
+    /// unconditionally, alongside the position and facing. So a unit that streams in mid-swim is
+    /// pitched on its **first drawn frame** — the apply runs before `0x613e10` has even built the
+    /// model or registered its per-frame render callback.
+    ///
+    /// Dropping the pair is why a player who came into view mid-swim rendered *level* until their
+    /// next relay packet: the body-pitch render law reads exactly these two values and had neither.
+    ///
+    /// The pitch is `0.0` (level) whenever `MOVEFLAG_SWIMMING` is clear, and that is the
+    /// reference's own value, not our convenience: the block field is explicitly zeroed at
+    /// `0x47ec4a` on the non-swimming leg, so the unconditional commit stores a real 0.0 rather
+    /// than stale memory.
+    pub mover: Option<MoverState>,
     /// A `LIVING` block's 6 movement speeds (yd/s) in wire order `[walk, run, run_back, swim, swim_back,
     /// turn_rate]`; `None` for a `HAS_POSITION`-only block (GameObjects, which don't move under their
     /// own power). The animation selector keys walk-vs-run on `walk` (boundary 2× it — RF-0057); the
@@ -128,6 +162,7 @@ impl MovementBlock {
     pub(super) fn read(r: &mut impl Read) -> io::Result<Self> {
         let update_flag = read_u8(r)?;
         let mut position = None;
+        let mut mover = None;
         let mut speeds = None;
         let mut transport = None;
         let mut transport_progress = None;
@@ -150,9 +185,14 @@ impl MovementBlock {
                     orientation: read_f32_le(r)?,
                 });
             }
-            if flags & MOVEMENT_FLAG_SWIMMING != 0 {
-                let _pitch = read_f32_le(r)?;
-            }
+            // The swim-pitch tail — a lone `f32` present iff `MOVEFLAG_SWIMMING`, the same gate
+            // (and the same position in the layout) the `MSG_MOVE_*` body uses.
+            let pitch = if flags & MOVEMENT_FLAG_SWIMMING != 0 {
+                read_f32_le(r)?
+            } else {
+                0.0
+            };
+            mover = Some(MoverState { flags, pitch });
             let _fall_time = read_f32_le(r)?;
             if flags & MOVEMENT_FLAG_JUMPING != 0 {
                 for _ in 0..4 {
@@ -228,6 +268,7 @@ impl MovementBlock {
 
         Ok(Self {
             position,
+            mover,
             speeds,
             transport_progress,
             transport,

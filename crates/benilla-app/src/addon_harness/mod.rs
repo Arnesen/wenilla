@@ -1440,7 +1440,7 @@ fn seat_a_session(script: &mut UiScript) {
     // The shipped CVar table, before the realm below writes into it — the survey never registered
     // any, so `GetCVar` answered nil for every name the client actually ships. Same class as the
     // empty addon registry: a state the real client cannot be in.
-    script.register_cvars(crate::cvars::REGISTERED.iter().copied());
+    script.register_cvars(crate::cvars::registered_pairs());
     script.set_realm_name("Harness");
     // THE BIND POINT. `GetBindLocation()` answered `""` in every VM, and a logged-in character with
     // no hearth location is not a state one is in — the server sends `SMSG_BINDPOINTUPDATE` at
@@ -4497,13 +4497,14 @@ mod dependency_tests {
     /// asserted to EXIST before the silence is asserted, and the test gates on client data like
     /// every other reader of the chain.
     ///
-    /// What is deliberately NOT asserted here is `load_default_ui`'s own failure list. It is not
-    /// empty on a seated session today — `TargetFrame`'s OnLoad reaches
-    /// `BenillaTargetAuras_Update` (UnitFrames.xml:956), which indexes `TargetofTargetFrame`
-    /// ~1150 lines before that frame is declared (UnitFrames.xml:2103), so a seated TARGET raises
-    /// there at load. That is a real bug in that file and a separate one from anything this test
-    /// measures; pinning it here would make the probe's gate hostage to it. Recorded rather than
-    /// worked around.
+    /// What is deliberately NOT asserted here is `load_default_ui`'s own failure list, and the
+    /// reason is a policy rather than a symptom: it is a different measurement from this one, and
+    /// pinning it here would make the probe's gate hostage to whatever else the chain is mid-way
+    /// through. (The concrete case that prompted the note has since gone with its file: our
+    /// `UnitFrames.xml` had `TargetFrame`'s OnLoad reach a `BenillaTargetAuras_Update` that indexed
+    /// `TargetofTargetFrame` ~1150 lines before the frame was declared, so a seated TARGET raised
+    /// at load. `TargetFrame.xml` is the reference's own now, 1751, and neither the caller nor the
+    /// ordering survives.)
     #[test]
     fn the_ui_probe_is_silent_on_a_clean_vm() {
         let _data = benilla_formats::wow_data_or_skip!();

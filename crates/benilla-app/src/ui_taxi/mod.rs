@@ -40,7 +40,7 @@ use crate::ui_script::UiInput;
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 
 mod routing;
-use routing::{build_nodes, load_taxi_catalogs, taxi_error_text, TaxiCatalogs, TaxiRouteCache};
+use routing::{build_nodes, load_taxi_catalogs, taxi_error_key, TaxiCatalogs, TaxiRouteCache};
 
 /// The open taxi map (`SMSG_SHOWTAXINODES`'s payload, held exactly as the wire delivered it).
 pub(crate) struct TaxiOpen {
@@ -188,6 +188,7 @@ fn feed_taxi(
     mut last: Local<crate::ui_script::VmMemo<Option<TaxiUiState>>>,
     mut last_name: Local<crate::ui_script::VmMemo<Option<String>>>,
     mut last_riding: Local<crate::ui_script::VmMemo<Option<bool>>>,
+    mut sink: crate::ui_action::MessageSink,
 ) {
     let Some(mut script) = script else {
         return;
@@ -196,14 +197,29 @@ fn feed_taxi(
     let last_name = last_name.get(&script);
     let last_riding = last_riding.get(&script);
 
-    // The activate verdict (SMSG_ACTIVATETAXIREPLY), staged by the net bridge: a refusal surfaces
-    // on the red error line (the trainer/merchant UI_ERROR_MESSAGE pattern); OK clears the map —
-    // vmangos's own send order is mount + the flight's SMSG_MONSTER_MOVE right behind the reply,
-    // so by the time this lands the ride is already starting (0260's self-spline rails render it)
-    // and the taxi map has nothing left to show, matching the real client's own close-on-success.
+    // The activate verdict (SMSG_ACTIVATETAXIREPLY), staged by the net bridge: a refusal goes to
+    // the surface its message record names ([`taxi_error_key`] — seven of the twelve are the
+    // YELLOW info line, not the red one); OK clears the map — vmangos's own send order is mount +
+    // the flight's SMSG_MONSTER_MOVE right behind the reply, so by the time this lands the ride is
+    // already starting (0260's self-spline rails render it) and the taxi map has nothing left to
+    // show, matching the real client's own close-on-success.
     if let Some(code) = state.reply.take() {
-        match taxi_error_text(code) {
-            Some(text) => script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]),
+        match taxi_error_key(code) {
+            Some(key) => {
+                let text = script
+                    .lua()
+                    .globals()
+                    .get::<String>(key)
+                    .unwrap_or_default();
+                if !text.is_empty() {
+                    crate::ui_action::show_messages(
+                        &mut script,
+                        &mut sink,
+                        "ui_taxi",
+                        [crate::ui_action::Shown::keyed(key, text)],
+                    );
+                }
+            }
             None => state.open = None,
         }
     }
@@ -217,12 +233,24 @@ fn feed_taxi(
     // "TaxiNodeDiscovered", `igNewTaxiNodeDiscovered.wav`. There is NO FrameScript event of
     // that name — 0496 §TU-5's "named-event hashtable" was a mislabel of the sound-kit table
     // (the 0516 correction).
+    //
+    // **All three of those facts now come from the row itself** (decision 1815) — the surface from
+    // `+0x04`, the text from the key, the cue from `+0x08` — where the surface and the cue used to
+    // be hand-carried here, which is exactly the drift the catalog exists to stop.
     if std::mem::take(&mut state.discovered) {
-        script.fire_event(
-            "UI_INFO_MESSAGE",
-            vec![ScriptValue::Str("New flight path discovered!".into())],
-        );
-        script.queue_sound_kit("TaxiNodeDiscovered");
+        let text = script
+            .lua()
+            .globals()
+            .get::<String>("ERR_NEWTAXIPATH")
+            .unwrap_or_default();
+        if !text.is_empty() {
+            crate::ui_action::show_messages(
+                &mut script,
+                &mut sink,
+                "ui_taxi",
+                [crate::ui_action::Shown::keyed("ERR_NEWTAXIPATH", text)],
+            );
+        }
     }
 
     let Some(catalogs) = catalogs else {

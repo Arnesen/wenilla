@@ -42,7 +42,7 @@ mod cinematics;
 mod creatures;
 mod dbc;
 mod unit_blood;
-pub use camera_shakes::{load_camera_shakes, CameraShake, CameraShakeCatalog};
+pub use camera_shakes::{load_camera_shakes, CameraShake, CameraShakeCatalog, SpellShakeGroup};
 pub use cinematics::{
     camera_model_path, load_cinematics, CinematicCameraRow, CinematicCatalog, CinematicPath,
     CinematicSequence, CinematicView, SEQUENCE_CAMERAS,
@@ -109,8 +109,8 @@ pub use lock::{
 };
 mod lock_type;
 pub use lock_type::{load_lock_type_catalog, LockTypeCatalog};
-mod pet_name_token;
-pub use pet_name_token::{load_pet_name_tokens, PetNameTokens, PET_NAME_TOKEN_FALLBACK};
+mod chr_classes;
+pub use chr_classes::{load_chr_classes, ChrClasses, PET_NAME_TOKEN_FALLBACK};
 mod pet_stats;
 pub use pet_stats::{
     load_pet_loyalty_names, load_pet_personalities, PetHappiness, PetLoyaltyNames,
@@ -173,6 +173,10 @@ mod sound_provider;
 pub use sound_provider::{load_sound_provider_catalog, SoundProvider, SoundProviderCatalog};
 mod sound_water;
 pub use sound_water::{load_water_sound_catalog, WaterSoundCatalog};
+mod vocal_ui_sounds;
+pub use vocal_ui_sounds::{
+    load_vocal_ui_sounds, VocalUiSound, VocalUiSoundCatalog, VOCAL_UI_LINES,
+};
 mod weapon_impact;
 pub use weapon_impact::{
     impact_slot, load_weapon_impact_catalog, WeaponImpactCatalog, WeaponImpactRow,

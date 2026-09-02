@@ -612,7 +612,7 @@ impl StaticGx {
             .world
             .visible_wmos
             .iter()
-            .map(|(_, bits)| bits.iter().filter(|b| **b).count())
+            .map(|(_, bits)| bits.drawn.iter().filter(|b| **b).count())
             .sum();
         (
             self.world.visible.len(),

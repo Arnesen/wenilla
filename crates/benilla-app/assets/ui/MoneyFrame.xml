@@ -18,8 +18,9 @@
 
         ── THE OTHER COIN KIT, and why there are still two ──────────────────────────────────────────
         Eight of our windows (merchant, bank, trade, mail, quest, quest log, taxi, trainer) do NOT use
-        this file. They render coins through `BenillaMoney_Set`/`_Clear`/`_SetColor` in
-        MerchantFrame.xml: a three-SLOT chain (`<prefix>Coin1..3`) that fills only the non-zero
+        this file. They render coins through `BenillaMoney_Set`/`_Clear`/`_SetColor`, which live
+        below in this same file (they were in MerchantFrame.xml until 1751 took that window to the
+        stock chain): a three-SLOT chain (`<prefix>Coin1..3`) that fills only the non-zero
         denominations in display order and re-flows, rather than three fixed GoldButton/SilverButton/
         CopperButton frames that hide themselves. That kit takes its coin TexCoords, its collapse and
         its shrink from the same specification as this one, and its layout is the one the director has
@@ -67,6 +68,152 @@
           here as they are there. They exist because the table's shape is the contract.
     -->
     <Script><![CDATA[
+        -- ══ THE THREE-SLOT COIN KIT (`BenillaMoney_*`), rehomed from MerchantFrame.xml ═══════════
+        --
+        -- The OTHER kit — see this file's header for why there are two and what the split is. It
+        -- lives beside `MoneyFrame_*` rather than inside a window because eight windows share it:
+        -- merchant, bank, trade, mail, quest, quest log, taxi and trainer. Nothing about the kit
+        -- changed in the move; the `SmallMoneyFrameTemplate` migration the header names is still
+        -- outstanding and still the director's call.
+        -- The coin display, quoted from the real SmallMoneyFrame (ref MoneyFrame.xml/lua): a copper
+        -- amount renders as a number + a 13px coin icon per NONZERO denomination, cut from the one
+        -- shared texture Interface\MoneyFrame\UI-MoneyIcons by TexCoord (gold 0..0.25, silver
+        -- 0.25..0.5, copper 0.5..0.75 — ref l.115/74/33), the real collapse that hides zero coins
+        -- (MoneyFrame.lua l.221-267). Each money display owns three position-"slots"; the XML chains
+        -- them either left-to-right (row prices + the quest reward: Coin1 leftmost, gold first) or
+        -- right-to-left (the purses: Coin1 rightmost, copper first). BenillaMoney_Set fills the
+        -- visible denominations into slots 1.. in DISPLAY order (highestFirst=true for the
+        -- left-aligned chains) and — the real shrink, MoneyFrame.lua l.202/269 — sizes each slot to
+        -- exactly its number + its 13px coin (`SetWidth(GetTextWidth() + iconWidth)` there; the
+        -- same read here, off the number FontString the slot already owns). The static ±4px
+        -- chain-anchor offsets are the real MONEY_BUTTON_SPACING gap, so a shrunk group packs tight,
+        -- left-flush in the ltr chains and right-flush in the rtl ones. BenillaMoney_Clear hides
+        -- all three slots (the real collapse hides, see the helper).
+        --
+        -- NOTE (for the loot window's fold): the reusable helpers are
+        --   BenillaMoney_Set(prefix, copper)  and  BenillaMoney_Clear(prefix)
+        -- where `prefix` names the slot frames `<prefix>Coin1..3` (each with a `<prefix>CoinNIcon`
+        -- texture + `<prefix>CoinNNum` fontstring child). They live in this file.
+        --
+        -- They lived in MerchantFrame.xml until 1751 came for that window: the stock
+        -- `MerchantFrame.xml` off the player's chain has no room for eight other windows'
+        -- shared helpers, and this file is where the reference keeps money code anyway. A pure
+        -- move — not the `SmallMoneyFrameTemplate` migration named at the top of this file,
+        -- which is a re-layout of an approved look and is the director's to call.
+        BENILLA_COIN_TC = {
+            { 0.0,  0.25 }, -- [1] gold
+            { 0.25, 0.5  }, -- [2] silver
+            { 0.5,  0.75 }, -- [3] copper
+        }
+
+        -- Unused slots HIDE (the real collapse — MoneyFrame.lua l.230/247 goldButton:Hide()), never
+        -- SetWidth(0): a 0 width means "derive from opposing anchors" to the layout (the client's
+        -- own G+0x50 convention), not "zero px". Fills are contiguous from Coin1, so a chain never
+        -- anchors THROUGH a hidden slot.
+        function BenillaMoney_Clear(prefix)
+            for i = 1, 3 do
+                getglobal(prefix .. "Coin" .. i):Hide()
+            end
+        end
+
+        function BenillaMoney_Set(prefix, copper, highestFirst)
+            copper = copper or 0
+            local vals = {
+                math.floor(copper / 10000),         -- gold
+                math.floor((copper % 10000) / 100), -- silver
+                copper % 100,                        -- copper
+            }
+            -- Fill slots 1.. in display order (see the module comment); a zero denomination is
+            -- skipped (the real collapse), except copper always shows when the whole amount is
+            -- zero so a free item / empty purse isn't blank.
+            local first, last, step = 3, 1, -1
+            if highestFirst then first, last, step = 1, 3, 1 end
+            local slot = 0
+            for d = first, last, step do
+                if vals[d] > 0 or (d == 3 and vals[1] == 0 and vals[2] == 0) then
+                    slot = slot + 1
+                    -- The real shrink: this slot is exactly its number + its 13px coin, and the
+                    -- XML anchor chain re-flows off the new width.
+                    -- Text first, then measure it: the engine answers a width read inside the
+                    -- tick that set the text, so the number IS this number and not the last one.
+                    local num = getglobal(prefix .. "Coin" .. slot .. "Num")
+                    num:SetText(vals[d])
+                    local numW = num:GetStringWidth()
+                    local slotFrame = getglobal(prefix .. "Coin" .. slot)
+                    slotFrame:SetWidth(numW + 13)
+                    slotFrame:Show()
+                    local icon = getglobal(prefix .. "Coin" .. slot .. "Icon")
+                    icon:SetTexture("Interface\\MoneyFrame\\UI-MoneyIcons")
+                    icon:SetTexCoord(BENILLA_COIN_TC[d][1], BENILLA_COIN_TC[d][2], 0, 1)
+                    num:SetWidth(numW)
+                end
+            end
+            for i = slot + 1, 3 do
+                getglobal(prefix .. "Coin" .. i):Hide()
+            end
+        end
+
+        -- Recolor the coin *numbers* (the ref's SetMoneyFrameColor — the digits redden, the coin icons
+        -- keep their own texture). The trainer detail cost calls this white when affordable / red
+        -- (1.0, 0.1, 0.1) when not; a plain purse never calls it, so its coins stay default. Applies to
+        -- all 3 slots (hidden ones are harmless) and must be re-called after each BenillaMoney_Set,
+        -- which fills the numbers but does not reset their color.
+        function BenillaMoney_SetColor(prefix, r, g, b)
+            for i = 1, 3 do
+                getglobal(prefix .. "Coin" .. i .. "Num"):SetTextColor(r, g, b)
+            end
+        end
+
+        -- ── The editable money-input kit (ref MoneyInputFrame.lua) ────────────────────────────────
+        -- A <prefix> naming three numeric EditBoxes <prefix>Gold/Silver/Copper — the shared money entry
+        -- both the send-mail and trade windows inline (decision 0592 P2 builds it here, the money home,
+        -- so both reuse it). GetCopper folds the three digits into a copper total; SetCopper splits a
+        -- copper amount back across the boxes. SetCopper is a *programmatic* fill, so it must not re-fire
+        -- a box's OnTextChanged value-changed callback (the loop the reference's `expectChanges` counter
+        -- guards, MoneyInputFrame.lua l.44-73). Because benilla fires OnTextChanged synchronously inside
+        -- SetText, a bracket flag is exact and simpler than the counter: a window's box calls
+        -- BenillaMoneyInput_Consume(prefix) at the top of its OnTextChanged — false (swallow) while a
+        -- SetCopper is in flight, true for a genuine keystroke.
+        BENILLA_MONEYINPUT_SUPPRESS = {}
+
+        function BenillaMoneyInput_ResetMoney(prefix)
+            getglobal(prefix .. "Gold"):SetText("")
+            getglobal(prefix .. "Silver"):SetText("")
+            getglobal(prefix .. "Copper"):SetText("")
+        end
+
+        function BenillaMoneyInput_GetCopper(prefix)
+            local function n(box) return tonumber(getglobal(prefix .. box):GetText()) or 0 end
+            return n("Gold") * 10000 + n("Silver") * 100 + n("Copper")
+        end
+
+        function BenillaMoneyInput_ClearFocus(prefix)
+            getglobal(prefix .. "Gold"):ClearFocus()
+            getglobal(prefix .. "Silver"):ClearFocus()
+            getglobal(prefix .. "Copper"):ClearFocus()
+        end
+
+        function BenillaMoneyInput_SetCopper(prefix, money)
+            money = money or 0
+            local parts = {
+                Gold = math.floor(money / 10000),
+                Silver = math.floor((money % 10000) / 100),
+                Copper = money % 100,
+            }
+            BENILLA_MONEYINPUT_SUPPRESS[prefix] = true
+            for box, val in pairs(parts) do
+                local eb = getglobal(prefix .. box)
+                if (tonumber(eb:GetText()) or 0) ~= val then
+                    eb:SetText(val == 0 and "" or tostring(val))
+                end
+            end
+            BENILLA_MONEYINPUT_SUPPRESS[prefix] = false
+        end
+
+        function BenillaMoneyInput_Consume(prefix)
+            return not BENILLA_MONEYINPUT_SUPPRESS[prefix]
+        end
+
         -- ── What a coin is worth ─────────────────────────────────────────────────────────────────
         -- Published globals: an addon that formats a price does the same split we do below, and
         -- reads these rather than spelling 100 twice.

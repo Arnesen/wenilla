@@ -652,7 +652,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // ── v1 stubs (each the seam of a named later slice — see the module doc) ─────────────────────
     g.set(
         "GetQuestLogRewardSpell",
-        lua.create_function(|_, ()| Ok(Value::Nil))?,
+        // THREE values on every reachable path, and the reference's own kinds include
+        // `(nil,nil,nil)` — so the empty answer is three nils, not one (decision 1842).
+        lua.create_function(|_, ()| Ok((Value::Nil, Value::Nil, Value::Nil)))?,
     )?;
     g.set(
         "IsUnitOnQuest",

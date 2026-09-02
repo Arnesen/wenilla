@@ -62,10 +62,10 @@
         window opening/closing does.
 
         Deviations (each cited again at its own widget below):
-          - `QUEST_FADING_DISABLE` (the ref's "Instant Quest Text" option) DEFAULTS "1" where the ref
-            defaults "0" — quest text lands whole and the panel fade-ins skip; see the uvar's own
-            comment below. The write-on machinery itself (0132) is ref-verbatim and live behind the
-            flag, and since decision 1136 the player can flip the flag on the Interface page.
+          - `QUEST_FADING_DISABLE` (the ref's "Instant Quest Text" option) is no longer a deviation:
+            1804 put it back on the reference's "0", so quest text writes on and the panels fade in
+            out of the box. The write-on machinery (0132) is ref-verbatim, and since decision 1136
+            the player can flip the flag on the Interface page.
           - The material swap is BUILT but always Parchment: `QuestFramePanelTemplate` carries the
             ref's four `$parentMaterial*` quadrants and `QuestFrame_SetMaterial` is the ref's own
             body, but `GetQuestBackgroundMaterial()` is not a surface this engine has, so
@@ -94,22 +94,25 @@
         QUEST_DESCRIPTION_GRADIENT_CPS = 40
         QUESTINFO_FADE_IN = 1
 
-        -- "Instant Quest Text" (ref UIOptionsFrame.lua:20 — uvar QUEST_FADING_DISABLE, checkbox
-        -- default "0"). Pinned "1" by direction (2026-07-17): text lands whole, the greeting/
-        -- progress/reward fade-ins skip — and the quill still scratches ONCE, because that is
-        -- what the ref's instant mode actually does (see the OnShow arm below): it jams the
-        -- reveal edge past the text rather than skipping the write-on, so the first OnUpdate
-        -- tick plays one WriteQuest before the gradient runs off. Instant is one scribble, not
-        -- silence.
+        -- "Instant Quest Text" (ref UIOptionsFrame.lua l.20/110 — uvar QUEST_FADING_DISABLE,
+        -- both the checkbox table's `default` and `UIOptionsFrame_Init`'s assignment are "0").
+        -- "0" is what we ship too, since 1804: the fade-in and the write-on are the reference's
+        -- out-of-box quest text, and this was pinned "1" by direction on 2026-07-17 — a taste
+        -- call made while the window was being built, never re-weighed as a *default*.
         --
-        -- The ref home for this uvar is the options window, and that is where it lives now: the
+        -- Flipped ON ("1"), text lands whole and the greeting/progress/reward fade-ins skip — and
+        -- the quill still scratches ONCE, because that is what the ref's instant mode actually
+        -- does (see the OnShow arm below): it jams the reveal edge past the text rather than
+        -- skipping the write-on, so the first OnUpdate tick plays one WriteQuest before the
+        -- gradient runs off. Instant is one scribble, not silence.
+        --
+        -- The ref home for this uvar is the options window, and that is where the row lives: the
         -- Interface page's "Instant Quest Text" row drives it (decision 1136), and this assignment
-        -- is the only place the default is written down. Note what that buys — our default is "1"
-        -- where 1.12's table says "0", and because the row CAPTURES its default here rather than
-        -- restating one, the Defaults button walks the page back to the director's pin, not to the
-        -- reference's. Registered for save on the line below, so a player who prefers the fade-in
-        -- keeps it (1128's load order: this assignment, then the saved chunk, then consumers).
-        QUEST_FADING_DISABLE = "1"
+        -- is the only place the default is written down — the row CAPTURES it here rather than
+        -- restating one, so the Defaults button now walks the page back to the reference's value
+        -- because this line IS the reference's value. Registered for save on the line below
+        -- (1128's load order: this assignment, then the saved chunk, then consumers).
+        QUEST_FADING_DISABLE = "0"
         RegisterForSave("QUEST_FADING_DISABLE")
 
         -- One quest-item row (kind = "choice"/"reward"/"required", 1-based `index`) — unchanged from
@@ -845,10 +848,15 @@
         <Scripts><OnClick>QuestRewardItem_OnClick()</OnClick></Scripts>
     </Button>
 
-    <!-- A greeting quest-title button (ref QuestTitleButtonTemplate, QuestFrameTemplates.xml l.174-213):
+    <!-- **The reference's own name**, since 1751's thirteenth window. It was
+         `BenillaQuestTitleButtonTemplate` while both this file and its only consumers were ours;
+         the sourced `Interface\FrameXML\GuildRegistrarFrame.xml` inherits the reference's name
+         for its two service rows, and an unknown template is a loader WARNING — the frame builds
+         and silently has no art — so the rename is what keeps that window skinned.
+         A greeting quest-title button (ref QuestTitleButtonTemplate, QuestFrameTemplates.xml l.174-213):
          a bullet + the quest title. -->
-    <Button name="BenillaQuestTitleButtonTemplate" virtual="true" hidden="true">
-        <Size><AbsDimension x="285" y="16"/></Size>
+    <Button name="QuestTitleButtonTemplate" virtual="true">
+        <Size><AbsDimension x="300" y="16"/></Size>
         <Layers>
             <Layer level="BACKGROUND">
                 <Texture file="Interface\QuestFrame\UI-Quest-BulletPoint">
@@ -1035,18 +1043,18 @@
                                     </Layer>
                                 </Layers>
                                 <Frames>
-                                    <Button name="QuestTitleButton1" inherits="BenillaQuestTitleButtonTemplate">
+                                    <Button name="QuestTitleButton1" inherits="QuestTitleButtonTemplate">
                                         <Anchors><Anchor point="TOPLEFT" relativeTo="CurrentQuestsText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-10" y="-5"/></Offset></Anchor></Anchors>
                                     </Button>
-                                    <Button name="QuestTitleButton2" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton1" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="QuestTitleButton3" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton2" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="QuestTitleButton4" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton3" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="QuestTitleButton5" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton4" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="QuestTitleButton6" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton5" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="QuestTitleButton7" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton6" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="QuestTitleButton8" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton7" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="QuestTitleButton9" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton8" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="QuestTitleButton10" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton9" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton2" inherits="QuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton1" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton3" inherits="QuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton2" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton4" inherits="QuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton3" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton5" inherits="QuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton4" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton6" inherits="QuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton5" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton7" inherits="QuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton6" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton8" inherits="QuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton7" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton9" inherits="QuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton8" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton10" inherits="QuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton9" relativePoint="BOTTOMLEFT"/></Anchors></Button>
                                 </Frames>
                             </Frame>
                         </ScrollChild>

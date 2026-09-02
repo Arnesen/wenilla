@@ -7,7 +7,7 @@ use mlua::{Lua, Value};
 use super::super::Model;
 use super::{
     check_unit_token, classification_word, grey_band, level_reads_unknown, pick_unit_token,
-    power_token, with_unit, SelectionRequest,
+    with_unit, SelectionRequest,
 };
 
 /// The two class ids `GetComboPoints 0x51a190` accepts — the literals `4` and `0xb` it compares
@@ -72,8 +72,11 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // `lua_isstring` gate admits tag 3 and hands the resolver `"5"`). `check_unit_token` inside
     // `with_unit` is the second of those; the first is the `?` on the argument type below.
     // The gate is the BINDING's, not `with_unit`'s: `check_unit_token` lets a nil through by
-    // design, because that is right for `UnitExists`, `UnitIsVisible` and most of this family. It
-    // is wrong for exactly these two, so the shape-A test happens here, before the shared path.
+    // design, because that is right for `UnitExists`, `UnitIsVisible` and eleven others. **"and
+    // most of this family" is what this comment used to say, and it was the wrong way round** —
+    // wow-re has since censused all 83 entries of the table at `0x850438` and 53 of them gate and
+    // raise, with only 13 unit-token bindings quiet (decision 1834). These two were never the
+    // exception; they were an early instance of the rule.
     for (name, usage, by_player) in [
         ("UnitIsTapped", r#"Usage: UnitIsTapped("unit")"#, false),
         (
@@ -151,25 +154,52 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "UnitName",
-        lua.create_function(|lua, token: Option<String>| {
+        lua.create_function(|lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitName("unit")"#,
+            )?);
+            // TWO values on every live path (`eax = 2` at `0x5170ae` and `0x517289`): the name and
+            // the **realm**. Slot 2 is nil for a same-realm player, and *structurally* nil for a
+            // pet, creature, game object or item — `0x609210` writes the out-parameter only on its
+            // PLAYER branch. benilla is single-realm, so the second is always nil here; the day a
+            // cross-realm name arrives it is `UnitState`'s to carry, and `UnitPopup.lua:106`'s
+            // `name.."-"..server` join is what will read it. Decision 1840.
+            //
+            // Not to be confused with `showServerName`: that is the parameter of FrameXML's own
+            // `GetUnitName(unit, showServerName)` wrapper, which calls this binding with ONE
+            // argument. The engine's real second argument is a strict `LUA_TBOOLEAN` and is not
+            // modelled — no consumer passes it.
             let name = with_unit(lua, &token, None, |u| u.name.clone())?;
-            match name {
-                Some(n) => Ok(Value::String(lua.create_string(&n)?)),
-                None => Ok(Value::Nil),
-            }
+            let name = match name {
+                Some(n) => Value::String(lua.create_string(&n)?),
+                None => Value::Nil,
+            };
+            Ok((name, Value::Nil))
         })?,
     )?;
 
     g.set(
         "UnitHealth",
-        lua.create_function(|lua, token: Option<String>| {
+        lua.create_function(|lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitHealth("unit")"#,
+            )?);
             with_unit(lua, &token, 0i64, |u| i64::from(u.health))
         })?,
     )?;
 
     g.set(
         "UnitHealthMax",
-        lua.create_function(|lua, token: Option<String>| {
+        lua.create_function(|lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitHealthMax("unit")"#,
+            )?);
             with_unit(lua, &token, 0i64, |u| i64::from(u.max_health))
         })?,
     )?;
@@ -183,7 +213,12 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // `b` INFERRED and 0 in normal play — it can never drive the value ≤ 0 anyway).
     g.set(
         "UnitLevel",
-        lua.create_function(|lua, token: Option<String>| {
+        lua.create_function(|lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitLevel("unit")"#,
+            )?);
             check_unit_token(&token)?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(u) = token.as_ref().and_then(|t| model.unit(t)) else {
@@ -223,7 +258,19 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // (`UnitCanAttack("player", "target")`).
     g.set(
         "UnitCanAttack",
-        lua.create_function(|lua, (a, b): (Option<String>, Option<String>)| {
+        lua.create_function(|lua, (a, b): (Value, Value)| {
+            // BOTH positions carry an `lua_isstring` gate — two sites in the body —
+            // so either argument being nil raises (decision 1836).
+            let a = Some(crate::script::binding_abi::string_arg(
+                lua,
+                a,
+                r#"Usage: UnitCanAttack("unit", "otherUnit")"#,
+            )?);
+            let b = Some(crate::script::binding_abi::string_arg(
+                lua,
+                b,
+                r#"Usage: UnitCanAttack("unit", "otherUnit")"#,
+            )?);
             let token = pick_unit_token(&a, &b);
             Ok(if with_unit(lua, &token, false, |u| u.can_attack)? {
                 Value::Integer(1)
@@ -247,7 +294,12 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "UnitIsDead",
-        lua.create_function(|lua, token: Option<String>| {
+        lua.create_function(|lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitIsDead("unit")"#,
+            )?);
             with_unit(lua, &token, false, |u| u.dead)
         })?,
     )?;
@@ -256,13 +308,23 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // so IsDead is false for it and the popup flow branches on all three.
     g.set(
         "UnitIsGhost",
-        lua.create_function(|lua, token: Option<String>| {
+        lua.create_function(|lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitIsGhost("unit")"#,
+            )?);
             with_unit(lua, &token, false, |u| u.ghost)
         })?,
     )?;
     g.set(
         "UnitIsDeadOrGhost",
-        lua.create_function(|lua, token: Option<String>| {
+        lua.create_function(|lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitIsDeadOrGhost("unit")"#,
+            )?);
             with_unit(lua, &token, false, |u| u.dead || u.ghost)
         })?,
     )?;
@@ -274,7 +336,19 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // frame paints its name plate blue then, exactly like the reference.
     g.set(
         "UnitReaction",
-        lua.create_function(|lua, (token, _other): (Option<String>, Option<String>)| {
+        lua.create_function(|lua, (token, _other): (Value, Value)| {
+            // BOTH positions carry an `lua_isstring` gate — two sites in the body —
+            // so either argument being nil raises (decision 1836).
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitReaction("unit", "otherUnit")"#,
+            )?);
+            let _other = Some(crate::script::binding_abi::string_arg(
+                lua,
+                _other,
+                r#"Usage: UnitReaction("unit", "otherUnit")"#,
+            )?);
             let r = with_unit(lua, &token, 0u8, |u| u.reaction)?;
             Ok(if r == 0 {
                 Value::Nil
@@ -294,7 +368,19 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // reaction (0) → nil for both, the API's "can't tell". `1`/nil returns, era-style.
     g.set(
         "UnitIsEnemy",
-        lua.create_function(|lua, (a, b): (Option<String>, Option<String>)| {
+        lua.create_function(|lua, (a, b): (Value, Value)| {
+            // BOTH positions carry an `lua_isstring` gate — two sites in the body —
+            // so either argument being nil raises (decision 1836).
+            let a = Some(crate::script::binding_abi::string_arg(
+                lua,
+                a,
+                r#"Usage: UnitIsEnemy("unit", "otherUnit")"#,
+            )?);
+            let b = Some(crate::script::binding_abi::string_arg(
+                lua,
+                b,
+                r#"Usage: UnitIsEnemy("unit", "otherUnit")"#,
+            )?);
             let token = pick_unit_token(&a, &b);
             let r = with_unit(lua, &token, 0u8, |u| u.reaction)?;
             Ok(if (1..=2).contains(&r) {
@@ -306,7 +392,19 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     g.set(
         "UnitIsFriend",
-        lua.create_function(|lua, (a, b): (Option<String>, Option<String>)| {
+        lua.create_function(|lua, (a, b): (Value, Value)| {
+            // BOTH positions carry an `lua_isstring` gate — two sites in the body —
+            // so either argument being nil raises (decision 1836).
+            let a = Some(crate::script::binding_abi::string_arg(
+                lua,
+                a,
+                r#"Usage: UnitIsFriend("unit", "otherUnit")"#,
+            )?);
+            let b = Some(crate::script::binding_abi::string_arg(
+                lua,
+                b,
+                r#"Usage: UnitIsFriend("unit", "otherUnit")"#,
+            )?);
             let token = pick_unit_token(&a, &b);
             let r = with_unit(lua, &token, 0u8, |u| u.reaction)?;
             Ok(if r >= 5 {
@@ -323,6 +421,47 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // red/blue player legs, an NPC the reaction swatch. (The live gate is `UnitPlayerControlled`,
     // which also covers pets/charmed creatures; we resolve only the player half of it — the extra
     // reach needs a player-controlled flag we don't carry, and a player's own alt is the case here.)
+    // UnitIsCivilian(unit) → 1 if killing this unit would be a DISHONORABLE kill, else nil. This is
+    // `0x612550` itself handed to Lua — the same four-term predicate (`pvp` bit AND creature-query
+    // civilian flag AND hostile AND the kill would be grey) that the unit tooltip's green CIVILIAN
+    // line and `UnitPVPName`'s civilian arm already run through `is_civilian_kill`. That function's
+    // doc called itself "ONE home, two callers"; the stock target frame is the third, and it is the
+    // one that names the predicate — `TargetFrame_CheckDishonorableKill` (TargetFrame.lua:230) is
+    // its only FrameXML caller and the comment inside it reads "Is a dishonorable kill".
+    //
+    // Sharing the function is the point: a second copy would let the tooltip, the name and the
+    // target plate disagree about the same mob.
+    g.set(
+        "UnitIsCivilian",
+        lua.create_function(|lua, unit: Value| {
+            let unit = Some(crate::script::binding_abi::string_arg(
+                lua,
+                unit,
+                r#"Usage: UnitIsCivilian("unit")"#,
+            )?);
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let player_level = model.player_req.level;
+            Ok(match unit.and_then(|u| model.unit(&u)) {
+                Some(u) if super::is_civilian_kill(u, player_level) => Value::Integer(1),
+                _ => Value::Nil,
+            })
+        })?,
+    )?;
+    // UnitPlayerControlled(unit) → 1 if a PLAYER is driving this unit, else nil. `UNIT_FIELD_FLAGS`
+    // bit 3 (`UNIT_FLAG_PVP_ATTACKABLE 0x8`), which is wider than `UnitIsPlayer` below: a player's
+    // pet and a charmed creature answer 1 here and nil there. Stock `UnitFrame_OnEnter`
+    // (UnitFrame.lua:58) is the caller that made this a blocker rather than a nicety — it gates the
+    // player-options newbie tip on it, so a missing binding raised on the first unit-frame hover.
+    g.set(
+        "UnitPlayerControlled",
+        lua.create_function(|lua, unit: Option<String>| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(match unit.and_then(|u| model.unit(&u)) {
+                Some(u) if u.player_controlled => Value::Integer(1),
+                _ => Value::Nil,
+            })
+        })?,
+    )?;
     g.set(
         "UnitIsPlayer",
         lua.create_function(|lua, token: Option<String>| {
@@ -338,7 +477,19 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // is trivially the same unit; otherwise both snapshots must carry a real (nonzero) guid.
     g.set(
         "UnitIsUnit",
-        lua.create_function(|lua, (a, b): (Option<String>, Option<String>)| {
+        lua.create_function(|lua, (a, b): (Value, Value)| {
+            // BOTH positions carry an `lua_isstring` gate — two sites in the body —
+            // so either argument being nil raises (decision 1836).
+            let a = Some(crate::script::binding_abi::string_arg(
+                lua,
+                a,
+                r#"Usage: UnitIsUnit("unit", "otherUnit")"#,
+            )?);
+            let b = Some(crate::script::binding_abi::string_arg(
+                lua,
+                b,
+                r#"Usage: UnitIsUnit("unit", "otherUnit")"#,
+            )?);
             // BOTH arguments go through the resolver, so either being unrecognised raises.
             check_unit_token(&a)?;
             check_unit_token(&b)?;
@@ -458,7 +609,19 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // whisper a same-faction player), without the faction machinery the engine doesn't carry.
     g.set(
         "UnitCanCooperate",
-        lua.create_function(|lua, (a, b): (Option<String>, Option<String>)| {
+        lua.create_function(|lua, (a, b): (Value, Value)| {
+            // BOTH positions carry an `lua_isstring` gate — two sites in the body —
+            // so either argument being nil raises (decision 1836).
+            let a = Some(crate::script::binding_abi::string_arg(
+                lua,
+                a,
+                r#"Usage: UnitCanCooperate("unit", "otherUnit")"#,
+            )?);
+            let b = Some(crate::script::binding_abi::string_arg(
+                lua,
+                b,
+                r#"Usage: UnitCanCooperate("unit", "otherUnit")"#,
+            )?);
             let token = pick_unit_token(&a, &b);
             let ok = with_unit(lua, &token, false, |u| {
                 u.exists && u.is_player && u.reaction >= 5
@@ -471,7 +634,14 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // fed per token).
     g.set(
         "GetRaidTargetIndex",
-        lua.create_function(|lua, token: Option<String>| {
+        lua.create_function(|lua, token: Value| {
+            // Gated (`0x4bb4be` → `0x4bb4cd`), and the usage string names the
+            // argument unquoted — the reference's own spelling. Decision 1836.
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                "Usage: GetRaidTargetIndex(unit)",
+            )?);
             let idx = with_unit(lua, &token, 0u8, |u| u.raid_target)?;
             Ok(if idx > 0 {
                 Value::Integer(i64::from(idx))
@@ -486,7 +656,12 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // stated v1 shortcut, module doc), these are new and follow the era shape from the start.
     g.set(
         "UnitIsConnected",
-        lua.create_function(|lua, token: Option<String>| {
+        lua.create_function(|lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitIsConnected("unit")"#,
+            )?);
             Ok(if with_unit(lua, &token, false, |u| u.is_connected)? {
                 Value::Integer(1)
             } else {
@@ -518,7 +693,12 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // two callers) — see the field doc.
     g.set(
         "UnitIsPVP",
-        lua.create_function(|lua, token: Option<String>| {
+        lua.create_function(|lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitIsPVP("unit")"#,
+            )?);
             Ok(if with_unit(lua, &token, false, |u| u.pvp)? {
                 Value::Integer(1)
             } else {
@@ -528,7 +708,12 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     g.set(
         "UnitIsPVPFreeForAll",
-        lua.create_function(|lua, token: Option<String>| {
+        lua.create_function(|lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitIsPVPFreeForAll("unit")"#,
+            )?);
             Ok(if with_unit(lua, &token, false, |u| u.is_pvp_ffa)? {
                 Value::Integer(1)
             } else {
@@ -540,15 +725,40 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // the first names the `UI-PVP-<group>` texture, the second titles the player frame's hit-area
     // tooltip. nil, nil for a unit with no side (Monster/neutral templates) or no snapshot — the
     // ref's icon branches gate on exactly that (decision 0646 §1/§3).
+    //
+    // **The two are genuinely different strings and this used to push one twice.** They are
+    // FactionGroup.dbc's `InternalName` (field 2) and `Name0` (field 3), and only on enUS are they
+    // the same word — which is why the duplication survived, and why the old doc on
+    // `UnitState::faction_group` said so as if it settled the matter. Every stock consumer of the
+    // FIRST return concatenates it into a path: `"…\UI-PVP-"..factionGroup` at `PlayerFrame.lua:68`,
+    // `TargetFrame.lua:198` and `PartyMemberFrame.lua:125`, `"…\Battleground-"..` at
+    // `BattlefieldFrame.lua:195`, and `HonorFrame.lua:68` compares it to the literal "Alliance".
+    // On any localized client the old shape named a texture that does not exist. All five of those
+    // files are on our chain.
     g.set(
         "UnitFactionGroup",
-        lua.create_function(|lua, token: Option<String>| {
-            match with_unit(lua, &token, None, |u| u.faction_group.clone())? {
-                Some(group) => {
-                    let s = Value::String(lua.create_string(&group)?);
-                    Ok((s.clone(), s))
+        lua.create_function(|lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitFactionGroup("unit")"#,
+            )?);
+            let pair = with_unit(lua, &token, (None, None), |u| {
+                (u.faction_group.clone(), u.faction_group_localized.clone())
+            })?;
+            match pair {
+                (Some(english), localized) => {
+                    let a = Value::String(lua.create_string(&english)?);
+                    // The localized half falls back to the English one rather than to nil: a unit
+                    // with a side always has an `InternalName`, and `Name0` is empty for the
+                    // Player/Monster rows, so nil here would blank a tooltip the reference fills.
+                    let b = match localized {
+                        Some(l) if !l.is_empty() => Value::String(lua.create_string(&l)?),
+                        _ => a.clone(),
+                    };
+                    Ok((a, b))
                 }
-                None => Ok((Value::Nil, Value::Nil)),
+                (None, _) => Ok((Value::Nil, Value::Nil)),
             }
         })?,
     )?;
@@ -559,7 +769,12 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // reports nil, nil — the live API's shape for an absent unit.
     g.set(
         "UnitRace",
-        lua.create_function(|lua, token: Option<String>| {
+        lua.create_function(|lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitRace("unit")"#,
+            )?);
             let pair = with_unit(lua, &token, None, |u| {
                 u.race.clone().zip(u.race_file.clone())
             })?;
@@ -574,7 +789,12 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     g.set(
         "UnitClass",
-        lua.create_function(|lua, token: Option<String>| {
+        lua.create_function(|lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitClass("unit")"#,
+            )?);
             let pair = with_unit(lua, &token, None, |u| {
                 u.class.clone().zip(u.class_file.clone())
             })?;
@@ -587,11 +807,51 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             }
         })?,
     )?;
+    // UnitHasRelicSlot(unit) → **the number 1, or nil** (`0x519e50`). Whether this unit's
+    // INVSLOT 17 holds a Libram/Totem/Idol instead of a bow.
+    //
+    // The whole body is: typemask bit 4 (PLAYER) → `UNIT_FIELD_BYTES_0` byte 1 (the class) →
+    // bounds against `ds:0xc0def8` → `ds:0xc0def4`[class] → `[row+0x40]`, `ChrClasses.dbc` field
+    // 16. There is **no `cmp` against a class id anywhere in the function** — 1.12 is entirely
+    // data-driven here, and `benilla_formats::ChrClasses` is that data. The app resolves it and
+    // hands us the bit, exactly as it does for `class_file`.
+    //
+    // **This shipped absent for a long time, on a claim that was simply false** — that the relic
+    // slot post-dates 1.12 and `UnitHasRelicSlot` is a later-era verb. The base `dbc.MPQ` copy of
+    // `ChrClasses.dbc` really does have no field 16; the `patch.MPQ` copy the client actually
+    // reads has it, set for Paladin, Shaman and Druid. Decision 1796. Stock `PaperDollFrame.lua`
+    // calls this **unconditionally** at l.429 and l.580 — so while it was missing, the character
+    // sheet raised `attempt to call global 'UnitHasRelicSlot' (a nil value)` for *every* class,
+    // not just the three.
+    //
+    // No `"player"` fast path (unlike `UnitClass 0x5183b0`, which has one), so this answers for
+    // any token — `UnitHasRelicSlot("target")` on an enemy druid is 1, and the stock inspect path
+    // at `PaperDollFrame.lua:429` depends on exactly that.
+    //
+    // The truthy leg is the NUMBER 1, never a boolean; the false leg is nil, never `false`.
+    g.set(
+        "UnitHasRelicSlot",
+        lua.create_function(|lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitHasRelicSlot("unit")"#,
+            )?);
+            let has = with_unit(lua, &token, false, |u| u.has_relic_slot)?;
+            Ok(if has { Value::Integer(1) } else { Value::Nil })
+        })?,
+    )?;
+
     // UnitSex(unit) → 2 male, 3 female (1 = neuter — no 1.12 unit feed produces it); nil when the
     // unit is absent or the sex hasn't streamed (`0`), the API's "can't tell".
     g.set(
         "UnitSex",
-        lua.create_function(|lua, token: Option<String>| {
+        lua.create_function(|lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitSex("unit")"#,
+            )?);
             let sex = with_unit(lua, &token, 0u8, |u| u.sex)?;
             Ok(if sex == 0 {
                 Value::Nil
@@ -677,9 +937,21 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // alt-power color components; addons that read those handle nil).
     g.set(
         "UnitPowerType",
-        lua.create_function(|lua, token: Option<String>| {
+        lua.create_function(|lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitPowerType("unit")"#,
+            )?);
+            // ONE value, not the Era pair. `0x517940` has four live `ret`s and `eax = 1` at every
+            // one, four `lua_pushnumber` sites and zero `lua_pushstring` — the `(type, "MANA")`
+            // tuple does not exist in 5875 (decision 1840). `power_token` stays: 1819's per-resource
+            // event names are its real caller.
+            //
+            // The miss default is the NUMBER 0, the same value as Mana and never nil, which is
+            // load-bearing rather than tidy: `UnitFrame.lua:122` indexes `ManaBarColor[...]` with it.
             let ty = with_unit(lua, &token, 0u8, |u| u.power_type)?;
-            Ok((i64::from(ty), power_token(ty).to_string()))
+            Ok(i64::from(ty))
         })?,
     )?;
 
@@ -696,13 +968,23 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // have" is spelled `UnitPowerType(unit)` first, which we already provide and which IS 1.12.
     g.set(
         "UnitMana",
-        lua.create_function(|lua, token: Option<String>| {
+        lua.create_function(|lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitMana("unit")"#,
+            )?);
             with_unit(lua, &token, 0i64, |u| i64::from(u.power))
         })?,
     )?;
     g.set(
         "UnitManaMax",
-        lua.create_function(|lua, token: Option<String>| {
+        lua.create_function(|lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitManaMax("unit")"#,
+            )?);
             with_unit(lua, &token, 0i64, |u| i64::from(u.max_power))
         })?,
     )?;
@@ -714,7 +996,12 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     let is_player = |token: &Option<String>| token.as_deref() == Some("player");
     g.set(
         "UnitXP",
-        lua.create_function(move |lua, token: Option<String>| {
+        lua.create_function(move |lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitXP("unit")"#,
+            )?);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(if is_player(&token) {
                 i64::from(model.player_xp)
@@ -725,7 +1012,12 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     g.set(
         "UnitXPMax",
-        lua.create_function(move |lua, token: Option<String>| {
+        lua.create_function(move |lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitXPMax("unit")"#,
+            )?);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(if is_player(&token) {
                 i64::from(model.player_next_level_xp)
@@ -870,6 +1162,54 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             } else {
                 Value::Nil
             })
+        })?,
+    )?;
+    // PartialPlayTime() / NoPlayTime() → 1/nil: the two anti-addiction play-time regimes, read
+    // straight off `PLAYER_FLAGS` — `0x48eb70` is `shr eax,0xc; and al,1` (bit 12) and `0x48ebe0`
+    // its bit-13 neighbour (decision 1746, which carved both while establishing that bit 0x1000 is
+    // PARTIAL_PLAY_TIME on 5875 rather than the pre-1.6.1 CAN_SELF_RESURRECT). Same Lua-vanilla
+    // predicate shape as `IsResting` above: the NUMBER 1 or nil, never a boolean. Stock
+    // `PlayerFrame_UpdatePlaytime` (PlayerFrame.lua:244) is the only FrameXML caller of either.
+    g.set(
+        "PartialPlayTime",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(if model.partial_play_time {
+                Value::Integer(1)
+            } else {
+                Value::Nil
+            })
+        })?,
+    )?;
+    g.set(
+        "NoPlayTime",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(if model.no_play_time {
+                Value::Integer(1)
+            } else {
+                Value::Nil
+            })
+        })?,
+    )?;
+    // GetBillingTimeRested() → the account's rested billing MINUTES, as one number, always
+    // (decision 1820; binding `0x48ec50`, byte-VERIFIED). The body has no `jcc` at all and ends in
+    // an unconditional `mov eax,1`, and both callees are branchless and call-free — so it can never
+    // return nil and never return zero values, which is why this is not the `Value::Nil` shape its
+    // neighbours use. The engine applies NO conversion: `0x48ec5e` is a bare unsigned u32→double
+    // push, so "minutes" is the server's convention, corroborated by stock `PlayerFrame.lua:246`
+    // dividing by 60 against `REQUIRED_REST_HOURS = 5`.
+    //
+    // Against vmangos this reads 0, because the server hardcodes `uint32(0)` for the field
+    // (`World.cpp:331`). It is fed from the wire rather than pinned to a constant so a server that
+    // populates it is reported honestly. Note the reference only ever reaches this call from
+    // INSIDE `if PartialPlayTime() ... elseif NoPlayTime()`, so with those bits clear stock
+    // FrameXML never calls it — it has to exist for the file to load, and is off the live path.
+    g.set(
+        "GetBillingTimeRested",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(Value::Number(f64::from(model.billing_time_rested)))
         })?,
     )?;
     // GetTimeToWellRested() → nil, always — `0x48d4b0`, byte-VERIFIED: the whole binding is 11

@@ -45,6 +45,38 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetText",
         lua.create_function(|lua, this: Table| with_editbox(lua, &this, |eb| eb.text.clone()))?,
     )?;
+    // SetNumber(v) — **the same function as SetText**. `0x798690` and `0x7984c0` are byte-identical
+    // (245 bytes each, zero differences after masking rel32 and absolute-VA operands; only the
+    // usage string differs), so this does no numeric work of its own: it hands the argument to the
+    // shared `lua_tostring` marshalling and sets the result as text. Decision 1831.
+    //
+    // The GATE is `lua_isstring 0x6f3510`, a pure type test over {number, string} — NOT
+    // `lua_isnumber` and NOT `luaL_checknumber`. So a STRING is accepted and passed through
+    // VERBATIM, never parsed: `SetNumber("abc")` sets the text "abc" and does not raise. Anything
+    // else — nil, boolean, table, or an ABSENT argument — raises the usage string and abandons the
+    // caller's statement.
+    //
+    // The live consumer is `MoneyInputFrame.lua:47/52/57`, on the chain since 1751, whose three
+    // boxes are `numeric="true"`. Our numeric filter already models the reference's wholesale
+    // abort, which matters here: on such a box `SetNumber(-5)` or `SetNumber(0.8)` leaves the box
+    // EMPTY rather than partially filled, because the sign or the point fails the digit test after
+    // the clear-all has already run. The money path only ever passes non-negative integers
+    // (`floor`/`mod` results), so it never takes that branch.
+    m.set(
+        "SetNumber",
+        lua.create_function(|lua, (this, v): (Table, Value)| {
+            let text = match &v {
+                Value::Integer(i) => crate::script::binding_abi::lua_number_text(*i as f64),
+                Value::Number(n) => crate::script::binding_abi::lua_number_text(*n),
+                // A string is not parsed — it is the text.
+                Value::String(s) => s.to_str()?.to_string(),
+                _ => return Err(mlua::Error::runtime("Usage: EditBox:SetNumber(number)")),
+            };
+            let h = frame_handle_of(lua, &this)?;
+            set_text(lua, h, &text);
+            Ok(())
+        })?,
+    )?;
     // GetNumber: atof of the real text (0 on failure), matching `0x798790`.
     m.set(
         "GetNumber",
@@ -53,11 +85,26 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(text.trim().parse::<f64>().unwrap_or(0.0))
         })?,
     )?;
+    // Insert(text) — **a nil is a no-op, not an error.** The reference's C `Insert` reads its
+    // argument through `lua_tostring`, which answers NULL for a nil and leaves the buffer alone;
+    // stock FrameXML relies on that. `LootFrame.lua:152` is the plain case:
+    //
+    //     ChatFrameEditBox:Insert(GetLootSlotLink(this.slot));
+    //
+    // with no guard, on a coin row whose `GetLootSlotLink` is nil. Typed as `String`, this raised
+    // — which the loot window only survived while we owned the file and could add a guard the
+    // reference does not have. It bit the moment `LootFrame.xml` came off the player's chain
+    // (1751), and it would bite any addon writing the same unguarded line.
+    //
+    // A NUMBER still inserts its digits: `lua_tostring` converts one in place, and mlua's
+    // `Option<String>` coercion follows it.
     m.set(
         "Insert",
-        lua.create_function(|lua, (this, s): (Table, String)| {
+        lua.create_function(|lua, (this, s): (Table, Option<String>)| {
             let h = frame_handle_of(lua, &this)?;
-            insert(lua, h, &s, true);
+            if let Some(s) = s {
+                insert(lua, h, &s, true);
+            }
             Ok(())
         })?,
     )?;

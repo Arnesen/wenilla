@@ -400,10 +400,11 @@ fn a_dead_unit_reports_dead_and_zero_health() {
 fn power_bindings_read_the_active_type() {
     let mut s = UiScript::new().unwrap();
     s.set_unit("player", Some(player())); // rage 35/100
+                                          // ONE value. The Era `(type, "RAGE")` pair does not exist in 5875 — `0x517940` pushes a
+                                          // number at every one of its four live `ret`s and never a string (decision 1840).
     assert_eq!(
-        s.eval::<(i64, String)>(r#"return UnitPowerType("player")"#)
-            .unwrap(),
-        (1, "RAGE".into())
+        s.eval::<i64>(r#"return UnitPowerType("player")"#).unwrap(),
+        1
     );
     assert_eq!(s.eval::<i64>(r#"return UnitMana("player")"#).unwrap(), 35);
     assert_eq!(
@@ -420,11 +421,12 @@ fn power_bindings_read_the_active_type() {
             .unwrap(),
         "the Era spellings must not linger beside the 1.12 ones"
     );
-    // An absent unit: type reads as mana, values 0.
+    // An absent unit: the NUMBER 0 — the same value Mana has, and never nil. Load-bearing rather
+    // than tidy: stock `UnitFrame.lua:122` writes `ManaBarColor[UnitPowerType(unitFrame.unit)]`,
+    // and a nil there indexes nothing.
     assert_eq!(
-        s.eval::<(i64, String)>(r#"return UnitPowerType("target")"#)
-            .unwrap(),
-        (0, "MANA".into())
+        s.eval::<i64>(r#"return UnitPowerType("target")"#).unwrap(),
+        0
     );
 }
 
@@ -586,7 +588,34 @@ fn faction_group_pair_and_the_pvp_toggle() {
     let (english, localized) = s
         .eval::<(String, String)>(r#"return UnitFactionGroup("target")"#)
         .unwrap();
+    // With no localized name fed, the second return falls back to the English one rather than nil:
+    // FactionGroup.dbc leaves `Name0` empty for some rows, and nil here would blank a tooltip the
+    // reference fills.
     assert_eq!((english.as_str(), localized.as_str()), ("Horde", "Horde"));
+
+    // **The two halves are DIFFERENT fields and this is the assertion that says so.** They are
+    // FactionGroup.dbc's `InternalName` and `Name0`; only on enUS do they hold the same word, which
+    // is why returning one twice went unnoticed. The first is concatenated into a texture path by
+    // every stock consumer (`"…\UI-PVP-"..factionGroup` — PlayerFrame.lua:68, TargetFrame.lua:198,
+    // PartyMemberFrame.lua:125; `"…\Battleground-"..` — BattlefieldFrame.lua:195), so a localized
+    // string there names a file that does not exist. This fixture is a deDE-shaped client.
+    s.set_unit(
+        "target",
+        Some(UnitState {
+            exists: true,
+            faction_group: Some("Horde".into()),
+            faction_group_localized: Some("Horde-Allianz".into()),
+            ..Default::default()
+        }),
+    );
+    let (english, localized) = s
+        .eval::<(String, String)>(r#"return UnitFactionGroup("target")"#)
+        .unwrap();
+    assert_eq!(
+        (english.as_str(), localized.as_str()),
+        ("Horde", "Horde-Allianz"),
+        "the FIRST return is the English InternalName — a texture path is built from it"
+    );
 
     // No side (a Monster/neutral template, or a unit whose template hasn't streamed).
     s.set_unit(
@@ -957,11 +986,32 @@ fn an_unrecognised_unit_token_raises_and_a_recognised_empty_one_does_not() {
              implementation that raises on \"did not resolve\" gets wrong."
         );
     }
-    // QUIET NIL, leg 3: the empty string and an absent argument. The per-binding argument gates are
-    // NOT uniform in the client and only two poles are verified, so this asserts the resolver's
-    // behaviour and does not invent a gate.
+    // QUIET NIL, leg 3: the empty string — which passes the `lua_isstring` gate (it IS a string)
+    // and dies quietly in the resolver's own NULL/empty guard.
     assert!(s.run(r#"UnitName("")"#).is_ok());
-    assert!(s.run("UnitName()").is_ok());
+
+    // …but an ABSENT or nil argument is NOT leg 3, and this line used to assert that it was.
+    // `UnitName 0x517020` gates its token position at `0x517048` and raises
+    // `Usage: UnitName("unit")` (`0x850ee0`); `luaL_error` does not return. The comment this
+    // replaces said the per-binding gates were "not uniform … only two poles verified", which was
+    // true when it was written — wow-re has since censused all 83 entries of the table at
+    // `0x850438`: 53 gate and raise, and only 13 unit-token bindings are quiet. Decision 1834.
+    assert!(s.run("UnitName()").is_err(), "absent argument raises");
+    assert!(s.run("UnitName(nil)").is_err(), "nil argument raises");
+    // A NUMBER passes the gate — `lua_isstring` admits tag 3 — and is handed to the resolver as
+    // "5", which then raises the family's OTHER message rather than the `Usage:` one.
+    assert!(
+        s.run("UnitName(5)").is_err(),
+        "a number reaches the resolver"
+    );
+
+    // The thirteen that stay quiet, three of them here: no gate at all, so nil is fine.
+    for quiet in ["UnitExists", "UnitIsVisible", "UnitClassification"] {
+        assert!(
+            s.run(&format!("{quiet}()")).is_ok(),
+            "{quiet} is one of the 13 with no gate — nil must stay quiet"
+        );
+    }
 
     // A two-unit call gates BOTH arguments.
     assert!(s.run(r#"UnitIsUnit("player", "bogus")"#).is_err());
@@ -1290,4 +1340,112 @@ fn unit_is_party_leader_ors_two_legs_and_answers_one_when_solo() {
 
     // A bad token still raises through the shared resolver — shape C with a shape-A tail.
     assert!(s.run(r#"UnitIsPartyLeader("notatoken")"#).is_err());
+}
+
+/// `UnitHasRelicSlot` — the number 1 or nil, per token, never a boolean.
+///
+/// This shipped **absent** for months on the belief that the relic slot post-dates 1.12, which is
+/// false (decision 1796). Stock `PaperDollFrame.lua` calls it unconditionally at l.429 and l.580,
+/// so while it was missing the character sheet raised `attempt to call global` for every class —
+/// which is why the nil-global case is asserted here too, not just the answer.
+#[test]
+fn unit_has_relic_slot_answers_one_or_nil() {
+    let mut s = UiScript::new().unwrap();
+
+    let mut druid = player();
+    druid.class = Some("Druid".into());
+    druid.class_file = Some("DRUID".into());
+    druid.has_relic_slot = true;
+    s.set_unit("player", Some(druid));
+
+    let mut warrior = player();
+    warrior.has_relic_slot = false;
+    s.set_unit("target", Some(warrior));
+
+    // The truthy leg is the NUMBER 1 (`lua_pushnumber`, `0x519ec8`) — a caller comparing it to 1
+    // is stock idiom, and a boolean would silently fail that.
+    assert_eq!(
+        s.eval::<String>(r#"return tostring(UnitHasRelicSlot("player"))"#)
+            .unwrap(),
+        "1"
+    );
+    assert_eq!(
+        s.eval::<String>(r#"return type(UnitHasRelicSlot("player"))"#)
+            .unwrap(),
+        "number"
+    );
+    // The false leg is nil, never `false` (`lua_pushnil`, `0x519edb`).
+    assert_eq!(
+        s.eval::<String>(r#"return type(UnitHasRelicSlot("target"))"#)
+            .unwrap(),
+        "nil"
+    );
+    // No `"player"` fast path in the reference, so every token is answered the same way — the
+    // stock inspect path at `PaperDollFrame.lua:429` passes the inspected unit, not "player".
+    assert_eq!(
+        s.eval::<String>(r#"return type(UnitHasRelicSlot("party1"))"#)
+            .unwrap(),
+        "nil"
+    );
+    // And it EXISTS — the regression that actually bit. A nil global here takes the whole
+    // character sheet down for every class, not just the three that answer 1.
+    assert_eq!(
+        s.eval::<String>("return type(UnitHasRelicSlot)").unwrap(),
+        "function"
+    );
+}
+
+/// **The two-token predicates gate BOTH positions** — decision 1836, closing the half 1834 left
+/// open on purpose.
+///
+/// 1834 applied the `lua_isstring` gate only where wow-re's partial list named a single-token
+/// binding, because a census that finds "a gate somewhere in this body" cannot say *which*
+/// argument carries it. The complete 83-row table (`nil-unit-token-arg-law.md` §10) resolves it:
+/// these seven each carry **two** `lua_isstring` sites, so either argument being nil raises.
+#[test]
+fn a_two_token_predicate_raises_on_either_nil_argument() {
+    let mut s = UiScript::new().unwrap();
+    s.set_unit("player", Some(player()));
+    s.set_unit("target", Some(player()));
+
+    for verb in [
+        "UnitIsUnit",
+        "UnitIsEnemy",
+        "UnitIsFriend",
+        "UnitCanCooperate",
+        "UnitCanAttack",
+        "UnitReaction",
+    ] {
+        assert!(
+            s.run(&format!(r#"{verb}("player", "target")"#)).is_ok(),
+            "{verb} with both tokens is fine"
+        );
+        assert!(
+            s.run(&format!(r#"{verb}("player")"#)).is_err(),
+            "{verb} with the SECOND argument absent must raise"
+        );
+        assert!(
+            s.run(&format!(r#"{verb}(nil, "target")"#)).is_err(),
+            "{verb} with the FIRST argument nil must raise"
+        );
+        assert!(s.run(&format!("{verb}()")).is_err(), "{verb} with neither");
+    }
+
+    // `GetRaidTargetIndex` is the one of six previously-unclassified names that takes a token, and
+    // it is gated. Its usage string names the argument UNQUOTED — the reference's own spelling.
+    assert!(s.run(r#"GetRaidTargetIndex("player")"#).is_ok());
+    assert!(s.run("GetRaidTargetIndex()").is_err());
+
+    // …while the other five take no argument at all and have no gate. `GetTimeToWellRested` is a
+    // three-instruction stub in the reference that always pushes nil; computing a value there
+    // would be divergence, not a feature.
+    for none in [
+        "GetQuestGreenRange",
+        "GetRestState",
+        "GetXPExhaustion",
+        "GetTimeToWellRested",
+        "GetBillingTimeRested",
+    ] {
+        assert!(s.run(&format!("{none}()")).is_ok(), "{none} takes no token");
+    }
 }

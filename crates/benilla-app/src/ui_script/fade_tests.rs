@@ -5,24 +5,7 @@
 
 use benilla_ui::script::UiScript;
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error — the same
-/// per-file loader every `ui_script` test file carries (these tests only ever need
-/// `UiPanels.xml`, where the fade kit lives).
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// **The idle fade driver parks itself** (decision 1396's class, the audit's driver-hide item):
 /// with `FADEFRAMES` empty there is nothing to walk, so the driver's OnUpdate hides its own frame
@@ -35,6 +18,8 @@ fn an_idle_fade_driver_parks_itself_off_the_tick() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     s.resolve();
     s.run(
         "BENILLA_TEST_FADE_TICKS = 0\n\
@@ -72,6 +57,8 @@ fn a_started_fade_still_ramps_and_the_driver_reparks_after() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     s.resolve();
     s.run(r#"CreateFrame("Frame", "BenillaFadeProbe")"#)
         .unwrap();

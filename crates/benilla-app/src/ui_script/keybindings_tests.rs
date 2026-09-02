@@ -46,33 +46,28 @@ pub(crate) fn harness() -> UiScript {
         "Fonts.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "GameTooltip.xml",
-        "UIDropDownMenu.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
         "UIParent.xml",
         "KeyBindingsPage.xml",
         "OptionsFrame.xml",
         "GameMenuFrame.xml",
     ] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(
-            report.errors.is_empty(),
-            "{file}: loader errors: {:?}",
-            report.errors
-        );
+        // `test_ui::load_ui`, not a local read: a manifest entry carrying a path separator is the
+        // REFERENCE's own file and must come off the player's chain, which
+        // `std::fs::read_to_string` under `assets/ui` cannot do — it goes looking for
+        // `assets/ui/Interface/FrameXML/...` and fails. The shared loader resolves both shapes, and
+        // its own doc already records this consolidation happening once before. Hand-rolling it
+        // here is what made this kit break the moment a file it loads migrated (1751).
+        // `load_ui_strict` for the files whose art actually matters here: an unknown template is
+        // a loader WARNING, not an error, so a silently skinless window would otherwise pass.
         if file == "KeyBindingsPage.xml" || file == "OptionsFrame.xml" {
-            assert!(
-                report.warnings.is_empty(),
-                "{file}: loader warnings (dropped subtrees?): {:?}",
-                report.warnings
-            );
+            super::test_ui::load_ui_strict(&s, file);
+        } else {
+            super::test_ui::load_ui(&s, file);
         }
     }
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -394,6 +389,7 @@ fn search_surfaces_bindings_as_live_rows_under_the_redirect_head() {
     // with the match painted LIVE on the search pool (the era reflows its real rows the
     // same way).
     s.run(r#"OptionsFrameSearchBox:SetText("jump")"#).unwrap();
+    s.tick(0.0); // the deferred OnTextChanged drains here (decision 1831)
     assert!(s
         .eval::<bool>("return OptionsFrameContainerBodySearchHeadKeybindings:IsVisible()")
         .unwrap());
@@ -426,6 +422,7 @@ fn search_surfaces_bindings_as_live_rows_under_the_redirect_head() {
     // The head is the era redirect: clicking it ends the search on the Keybindings page.
     s.run("OptionsFrameContainerBodySearchHeadKeybindings:Click()")
         .unwrap();
+    s.tick(0.0); // the deferred OnTextChanged drains here (decision 1831)
     assert_eq!(
         s.eval::<String>("return OptionsFrame.selectedCategory")
             .unwrap(),
@@ -517,16 +514,22 @@ fn the_wheel_bubbles_from_the_rows_and_the_bar_rides_the_gutter() {
         s.tick(0.016);
         s.resolve();
     }
-    assert_eq!(
-        s.eval::<f32>("return OptionsFrameContainerScroll:GetVerticalScrollRange()")
-            .unwrap(),
-        0.0,
-        "the page scroll has nothing to scroll here — the list's own bar owns the gutter"
-    );
+    // **B217's property is the BAR, not the range, and since 1860 those differ.** The page scroll
+    // now reports a nonzero range here, and that is not a defect in either half: the chain's
+    // `FauxScrollFrameTemplate` carries a real `<ScrollChild>` which `FauxScrollFrame_Update` sizes
+    // to `numItems * valueStep` (~5275px with every section open), our old template had none, and
+    // the range is measured by unioning the scroll child's whole SUBTREE — the reference's own
+    // `0x786f80` recursion, which "re-enters itself for each shown child frame" with no clip or
+    // ScrollFrame exception (wow-re `system/ui/ui.md`, decision 1338). The reference would measure
+    // the same; it simply never nests a faux list inside a real-scroll page, which our options
+    // window is alone in doing.
+    //
+    // What B217 actually cleared — a second bar in the shared gutter — still holds, and that is
+    // what is asserted.
     assert!(
         !s.eval::<bool>("return OptionsFrameContainerScrollBar:IsVisible()")
             .unwrap(),
-        "…so only one bar is on screen"
+        "only one bar is on screen: the list's own owns the gutter"
     );
     let body_right = s
         .eval::<f64>("return OptionsFrameContainerBodyKeybindings:GetRight()")
@@ -602,10 +605,15 @@ fn the_wheel_bubbles_from_the_rows_and_the_bar_rides_the_gutter() {
         .expect("a MOVEANDSTEER description quad");
     s.mouse_wheel(wx, wy, -1.0);
     assert!(s.errors().is_empty(), "wheel over a name: {:?}", s.errors());
-    assert_eq!(
-        s.eval::<f64>(&format!("return FauxScrollFrame_GetOffset({SF})"))
-            .unwrap(),
-        1.0
+    // The spin REACHED the list, which is what this dead zone was about. The distance is the
+    // reference's half-bar page (`ScrollFrameTemplate_OnMouseWheel` moves `GetHeight()/2` pixels),
+    // not the single row our deleted kit stepped — 1860 re-pointed that everywhere it is asserted.
+    let after_name = s
+        .eval::<f64>(&format!("return FauxScrollFrame_GetOffset({SF})"))
+        .unwrap();
+    assert!(
+        after_name > 1.0,
+        "a spin over a row NAME scrolled the list by a page, got {after_name}"
     );
     // …and over a CAPSULE (a Button: the bubble path, capsule → row → body). GetLeft-family
     // reads are scale-LOCAL (the 1.12 contract; this window wears ERA_WINDOW_SCALE) — the
@@ -629,10 +637,12 @@ fn the_wheel_bubbles_from_the_rows_and_the_bar_rides_the_gutter() {
         ((((l + r) * 0.5 * k) as f32), (((t + b) * 0.5 * k) as f32))
     };
     s.mouse_wheel(cx, cy, -1.0);
-    assert_eq!(
-        s.eval::<f64>(&format!("return FauxScrollFrame_GetOffset({SF})"))
-            .unwrap(),
-        2.0
+    let after_capsule = s
+        .eval::<f64>(&format!("return FauxScrollFrame_GetOffset({SF})"))
+        .unwrap();
+    assert!(
+        after_capsule > after_name,
+        "a spin over a CAPSULE bubbles to the page too: {after_name} -> {after_capsule}"
     );
     // While a capsule is armed the wheel is a BIND, never a scroll (1.12's law) — in the app
     // the host seam swallows the spin before the UI sees one; the Lua guard is the belt for
@@ -642,7 +652,7 @@ fn the_wheel_bubbles_from_the_rows_and_the_bar_rides_the_gutter() {
     assert_eq!(
         s.eval::<f64>(&format!("return FauxScrollFrame_GetOffset({SF})"))
             .unwrap(),
-        2.0,
+        after_capsule,
         "armed: the wheel must not scroll"
     );
     s.run("KeyBindings_SetSelected(nil)").unwrap();
@@ -698,6 +708,7 @@ fn the_pet_lane_is_registered_under_the_action_bar_header() {
     // Page side: search finds it and paints a live row with the capsule filled.
     s.run(r#"OptionsFrameSearchBox:SetText("bonusactionbutton1")"#)
         .unwrap();
+    s.tick(0.0); // the deferred OnTextChanged drains here (decision 1831)
     assert!(s
         .eval::<bool>("return OptionsFrameContainerBodySearchHeadKeybindings:IsVisible()")
         .unwrap());

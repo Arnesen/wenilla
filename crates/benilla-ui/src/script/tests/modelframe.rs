@@ -410,14 +410,41 @@ fn the_light_tuple_is_opaque_and_survives_the_round_trip() {
         (1.0, 0.7_f32 as f64)
     );
 
-    // Fog is the same shape, and unset fog returns NOTHING rather than three zeros — a pane with no
-    // fog and a pane fogged to black are different states.
+    // **Fog is NOT the same shape, and this used to assert the opposite.** It read "unset fog
+    // returns NOTHING rather than three zeros — a pane with no fog and a pane fogged to black are
+    // different states", which is a good argument about a model the client does not have: there is
+    // no unset state. The fog colour is one packed `0xAARRGGBB` dword whose ctor writes
+    // `0xffffffff`, so a fresh pane reads **four** values, `1, 1, 1, 1` (decision 1845).
     assert_eq!(
         s.eval::<usize>("return table.getn({ MLight:GetFogColor() })")
             .unwrap(),
-        0
+        4
     );
+    assert_eq!(
+        s.eval::<(f64, f64, f64, f64)>("return MLight:GetFogColor()")
+            .unwrap(),
+        (1.0, 1.0, 1.0, 1.0),
+        "never set is white and opaque, not four zeros"
+    );
+
+    // Three arguments set alpha to **1.0**, not 0 — the fifth is guarded with that default where
+    // r/g/b are read unconditionally. The round trip is LOSSY by 8 bits a channel, because the
+    // store is that packed dword: 0.1 does not survive, 0.2 does.
     s.run("MLight:SetFogColor(0.1, 0.2, 0.3)").unwrap();
-    let (r, g, b): (f64, f64, f64) = s.eval("return MLight:GetFogColor()").unwrap();
-    assert_eq!((r as f32, g as f32, b as f32), (0.1, 0.2, 0.3));
+    let (r, g, b, a): (f64, f64, f64, f64) = s.eval("return MLight:GetFogColor()").unwrap();
+    assert_eq!(a, 1.0, "the omitted alpha defaults to 1.0");
+    for (got, want) in [(r, 0.1), (g, 0.2), (b, 0.3)] {
+        assert!(
+            (got - want).abs() <= 1.0 / 255.0,
+            "within one 8-bit step of {want}, got {got}"
+        );
+    }
+
+    // …and the alpha really is the fifth argument, on the same clamp as the rest.
+    s.run("MLight:SetFogColor(1, 1, 1, 0)").unwrap();
+    assert_eq!(
+        s.eval::<f64>("local _, _, _, a = MLight:GetFogColor() return a")
+            .unwrap(),
+        0.0
+    );
 }

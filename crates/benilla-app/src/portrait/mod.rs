@@ -142,6 +142,49 @@ const PETDOLL_SLOT: &str = "petdoll";
 /// [`StableBooth::unit`] at the pet entity ([`PETDOLL_SLOT`]'s case exactly), the cached one points
 /// [`StableBooth::display_id`] at the display and the mirror comes off a [`PortraitStandIn`].
 const STABLE_SLOT: &str = "stable";
+
+/// **Which booth a `<Model>`/`<PlayerModel>` pane samples** — the one join between the reference's
+/// own frame names and this module's body-bake slots.
+///
+/// The reference draws a body pane by rendering the unit into the widget live; benilla renders it
+/// into an off-screen bake this module keeps *per window* (the doc above: framing, resolution and
+/// yaw differ per pane, so they are separate booths). Which bake a pane samples is therefore a
+/// fact about the window, not about the widget — and the pane's global name is what identifies the
+/// window, because since decision 1751 that name is the reference's own.
+///
+/// This table replaces `BenillaSetBoothTexture(region, token)`, the Lua binding that used to carry
+/// the same join: a file of ours put a Texture inside the pane and named the slot. A migrated
+/// window's file is the reference's, so the join cannot live in Lua any more — and it should not,
+/// because a stock addon creating a `<PlayerModel>` never called it either. A pane that is not in
+/// this table draws nothing, exactly as it does today.
+///
+/// The names, and where each is declared: `CharacterModelFrame` (stock `PaperDollFrame.xml`),
+/// `PetModelFrame` (stock `PetPaperDollFrame.xml`), `PetStableModel` (stock `PetStable.xml`, the
+/// reference's own file since 1751), `DressUpModel` (stock `DressUpFrame.xml`'s name, still our
+/// file), and `InspectModelFrame` (stock `InspectPaperDollFrame.xml`, out of the LoadOnDemand
+/// `Blizzard_InspectUI` — the reference's own since 1832).
+///
+/// **Every name here is now the reference's.** This note used to carry a `BenillaInspectModelFrame`
+/// and an explanation: the install was thought to ship that addon packed, with no stock file to
+/// take the name from. It is not packed — the `.pub` is only what the loose
+/// `Interface\AddOns\Blizzard_InspectUI\` folder holds, while the real `.xml` and `.lua` sit
+/// inside `patch.MPQ`, which the chain mounts. 1832 migrated the window and the prefix went with it.
+const MODEL_PANE_BOOTHS: [(&str, &str); 5] = [
+    ("CharacterModelFrame", PAPERDOLL_SLOT),
+    ("PetModelFrame", PETDOLL_SLOT),
+    ("InspectModelFrame", INSPECT_SLOT),
+    ("PetStableModel", STABLE_SLOT),
+    ("DressUpModel", dressup::DRESSUP_SLOT),
+];
+
+/// The booth a named model pane samples, or `None` for a pane no window has claimed.
+pub(crate) fn model_pane_booth(name: &str) -> Option<&'static str> {
+    MODEL_PANE_BOOTHS
+        .iter()
+        .find(|(pane, _)| *pane == name)
+        .map(|(_, slot)| *slot)
+}
+
 /// World is layer 0, the UI quad pass layer 1; portraits sit on their own high layers so nothing in the
 /// world leaks into a booth and vice-versa (one layer per slot: base, base+1, …).
 const PORTRAIT_LAYER_BASE: usize = 2;

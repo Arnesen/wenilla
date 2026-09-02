@@ -200,6 +200,38 @@ pub(super) fn cancel_authorized(a: &AuraState) -> bool {
 /// nameplateShowPersonal, spellId`. The three we cannot know on this wire (`source`, `isStealable`,
 /// `nameplateShowPersonal`) return nil — an addon that reads them sees "unknown", which is honest,
 /// rather than a fabricated value.
+/// The **1.12** return tuple, which is a different shape and not a prefix of the Era one: the first
+/// value is the TEXTURE, not the name. `UnitBuff` returns `(texture, applications)` (`0x519500`) and
+/// `UnitDebuff` returns `(texture, applications, dispelType)` (`0x5198f0`) — both `verified` in
+/// wow-re's ledger, and both are what the reference's own FrameXML reads
+/// (`TargetFrame.lua:287-290` binds `debuff, debuffStack, debuffType` and then
+/// `SetTexture(debuff)`). Decision 1818, which also records why the Era shape was serving nobody.
+fn returns_1121(lua: &Lua, a: &AuraState, with_dispel_type: bool) -> mlua::Result<MultiValue> {
+    let icon = match &a.icon {
+        Some(t) => Value::String(lua.create_string(t)?),
+        None => Value::Nil,
+    };
+    let mut out = vec![icon, Value::Integer(i64::from(a.count))];
+    if with_dispel_type {
+        out.push(match &a.debuff_type {
+            Some(t) => Value::String(lua.create_string(t)?),
+            None => Value::Nil,
+        });
+    }
+    Ok(MultiValue::from_vec(out))
+}
+
+/// Which return shape a getter wants — the two are not compatible, see [`returns_1121`].
+#[derive(Clone, Copy)]
+enum Shape {
+    /// `UnitAura`'s ten values. Era-only: the name does not exist in 1.12 FrameXML at all.
+    Era,
+    /// `UnitBuff`'s two.
+    Buff,
+    /// `UnitDebuff`'s three.
+    Debuff,
+}
+
 fn returns(lua: &Lua, a: &AuraState) -> mlua::Result<MultiValue> {
     let s = |v: &Option<String>| -> mlua::Result<Value> {
         Ok(match v {
@@ -229,6 +261,7 @@ fn nth_aura(
     token: &Option<String>,
     index: i64,
     filter: &Filter,
+    shape: Shape,
 ) -> mlua::Result<MultiValue> {
     if index < 1 {
         return Ok(MultiValue::new());
@@ -246,7 +279,11 @@ fn nth_aura(
             })
     };
     match hit {
-        Some(a) => returns(lua, &a),
+        Some(a) => match shape {
+            Shape::Era => returns(lua, &a),
+            Shape::Buff => returns_1121(lua, &a, false),
+            Shape::Debuff => returns_1121(lua, &a, true),
+        },
         None => Ok(MultiValue::new()),
     }
 }
@@ -285,39 +322,62 @@ impl super::UiScript {
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
-    // UnitAura(unit, index [, filter]) — filter defaults to HELPFUL, like the live API.
+    // UnitAura(unit, index [, filter]) — filter defaults to HELPFUL, like the live API. This one
+    // keeps the Era tuple: it is not a 1.12 verb at all (zero occurrences in the reference's
+    // FrameXML) and has zero call sites in the 110-addon corpus, so it costs nothing and stays the
+    // Era-compat surface 0068 asked for.
     g.set(
         "UnitAura",
         lua.create_function(
             |lua, (token, index, filter): (Option<String>, i64, Option<String>)| {
-                nth_aura(lua, &token, index, &Filter::parse(filter.as_deref()))
+                nth_aura(
+                    lua,
+                    &token,
+                    index,
+                    &Filter::parse(filter.as_deref()),
+                    Shape::Era,
+                )
             },
         )?,
     )?;
 
-    // UnitBuff/UnitDebuff(unit, index [, filter]) — the live API pins the sign and folds any extra
-    // filter tokens (CANCELABLE, …) in alongside it.
+    // UnitBuff(unit, index [, raidFilter]) / UnitDebuff(unit, index [, raidFilter]) — the 1.12
+    // signature and the 1.12 RETURN SHAPE (decision 1818). The sign is fixed by the verb, not by a
+    // filter word: `0x519500` reads aura slots 0..31 and `0x5198f0` reads 32..47.
+    //
+    // **The third argument is a `raidFilter` flag, not Era's filter string.** Non-zero enables ONE
+    // extra per-slot predicate — castable-by-me for buffs (`0x4b3870`), dispellable-by-me for
+    // debuffs (`0x4b3920`). We accept it and DO NOT apply it, because [`AuraState`] holds neither
+    // fact and neither is derivable from the aura feed: castable-by-me needs the player's spellbook,
+    // dispellable-by-me needs a class→dispel-type table joined to `debuff_type`. Inventing an answer
+    // is the guess 1203 exists to prevent, so the flag is parked here in the open. Visible
+    // consequence, so nobody has to rediscover it: the pet frame's buff row and the
+    // dispellable-debuff rows show everything rather than only what the player can cast or dispel.
     g.set(
         "UnitBuff",
         lua.create_function(
-            |lua, (token, index, filter): (Option<String>, i64, Option<String>)| {
-                let spec = match filter {
-                    Some(f) => format!("HELPFUL|{f}"),
-                    None => "HELPFUL".to_string(),
-                };
-                nth_aura(lua, &token, index, &Filter::parse(Some(&spec)))
+            |lua, (token, index, _raid_filter): (Option<String>, i64, Option<Value>)| {
+                nth_aura(
+                    lua,
+                    &token,
+                    index,
+                    &Filter::parse(Some("HELPFUL")),
+                    Shape::Buff,
+                )
             },
         )?,
     )?;
     g.set(
         "UnitDebuff",
         lua.create_function(
-            |lua, (token, index, filter): (Option<String>, i64, Option<String>)| {
-                let spec = match filter {
-                    Some(f) => format!("HARMFUL|{f}"),
-                    None => "HARMFUL".to_string(),
-                };
-                nth_aura(lua, &token, index, &Filter::parse(Some(&spec)))
+            |lua, (token, index, _raid_filter): (Option<String>, i64, Option<Value>)| {
+                nth_aura(
+                    lua,
+                    &token,
+                    index,
+                    &Filter::parse(Some("HARMFUL")),
+                    Shape::Debuff,
+                )
             },
         )?,
     )?;
@@ -429,16 +489,18 @@ mod tests {
                 .unwrap(),
             "Battle Stance"
         );
+        // `UnitBuff`/`UnitDebuff` enumerate the same list, but their first return is the ICON, not
+        // the name (1.12's shape — decision 1818), so they are addressed by it here.
         assert_eq!(
             s.eval::<String>(r#"return (UnitBuff("player", 2))"#)
                 .unwrap(),
-            "Mark of the Wild"
+            "Interface\\Icons\\Spell_1126"
         );
         // The debuff is index 1 of its own filter, not index 3.
         assert_eq!(
             s.eval::<String>(r#"return (UnitDebuff("player", 1))"#)
                 .unwrap(),
-            "Shadow Word: Pain"
+            "Interface\\Icons\\Spell_589"
         );
         // Past the end → nil, the loop terminator.
         assert!(s
@@ -512,7 +574,7 @@ mod tests {
 
         let (name, icon, count, dtype, dur, expiry, spell) = s
             .eval::<(String, String, i64, String, f64, f64, i64)>(
-                r#"local n, i, c, d, du, e, src, st, np, sid = UnitDebuff("target", 1)
+                r#"local n, i, c, d, du, e, src, st, np, sid = UnitAura("target", 1, "HARMFUL")
                    assert(src == nil and st == nil and np == nil, "unknowable fields must be nil")
                    return n, i, c, d, du, e, sid"#,
             )
@@ -522,6 +584,62 @@ mod tests {
         assert_eq!((count, dtype.as_str()), (3, "Magic"));
         assert_eq!((dur, expiry), (18.0, 1042.5));
         assert_eq!(spell, 589);
+    }
+
+    /// The **1.12** shape, which is not a prefix of the Era one: `UnitBuff` → `(texture,
+    /// applications)`, `UnitDebuff` → `(texture, applications, dispelType)`, and the FIRST value is
+    /// the texture. Decision 1818; `0x519500`/`0x5198f0`, both `verified` in wow-re's ledger. The
+    /// reference's own FrameXML reads exactly this (`TargetFrame.lua:287-290`), and so does every
+    /// one of the 184 call sites in the addon corpus.
+    #[test]
+    fn unit_buff_and_unit_debuff_return_the_1121_tuple_not_the_era_one() {
+        let mut s = UiScript::new().unwrap();
+        let mut buff = aura(1126, "Mark of the Wild", true, true);
+        buff.count = 1;
+        let mut debuff = aura(589, "Shadow Word: Pain", false, false);
+        debuff.count = 3;
+        debuff.debuff_type = Some("Magic".into());
+        s.set_auras("target", Some(vec![buff, debuff]));
+
+        // UnitBuff returns exactly TWO values, texture first.
+        let (icon, count, third) = s
+            .eval::<(String, i64, Option<String>)>(
+                r#"local a, b, c = UnitBuff("target", 1) return a, b, c"#,
+            )
+            .unwrap();
+        assert_eq!(icon, "Interface\\Icons\\Spell_1126");
+        assert_eq!(count, 1);
+        assert_eq!(third, None, "UnitBuff returns two values, never a third");
+
+        // UnitDebuff returns THREE, the dispel type last.
+        let (icon, count, dispel, fourth) = s
+            .eval::<(String, i64, String, Option<String>)>(
+                r#"local a, b, c, d = UnitDebuff("target", 1) return a, b, c, d"#,
+            )
+            .unwrap();
+        assert_eq!(icon, "Interface\\Icons\\Spell_589");
+        assert_eq!((count, dispel.as_str()), (3, "Magic"));
+        assert_eq!(
+            fourth, None,
+            "UnitDebuff returns three values, never a fourth"
+        );
+
+        // The reference's own read, verbatim from TargetFrame.lua:287-297 — the comparison that
+        // raised `attempt to compare number with string` while we returned the Era tuple.
+        assert!(s
+            .eval::<bool>(
+                r#"local d, stack, dtype = UnitDebuff("target", 1)
+                   return stack > 1 and dtype == "Magic""#
+            )
+            .unwrap());
+
+        // The raidFilter argument is ACCEPTED and its predicate is not applied (1818): passing it
+        // must not error, and must not change the answer.
+        assert_eq!(
+            s.eval::<String>(r#"return (UnitDebuff("target", 1, 1))"#)
+                .unwrap(),
+            "Interface\\Icons\\Spell_589"
+        );
     }
 
     #[test]

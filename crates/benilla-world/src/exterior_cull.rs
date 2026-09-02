@@ -74,8 +74,13 @@
 //! [`Frustum::from_clip_from_world`] extracts the identical 6 planes. That keeps us on one
 //! plane-extraction implementation instead of a private corner-ray port.
 //!
-//! Windows narrower than [`MIN_WINDOW_NDC`] in either axis are dropped, matching the reference's
-//! `[0x8029d0]` reject.
+//! Windows narrower than [`MIN_WINDOW_NDC`] in either axis are dropped **on this walk** — the
+//! reference's reject is the first thing `0x682fa0` does, before it touches a bucket, and it is
+//! non-strict (`>= 0.01` of the 0..1 screen passes). It belongs to the walk, not to the volume:
+//! `0x682930`, the builder the containing building's own Pass 2 shares, contains no comparison at
+//! all, so a doorway too narrow to admit a hillside can still admit a wall. That asymmetry is the
+//! reference's, and reproducing it is [`scene_window_frustum`] vs [`window_frustum`] (decision
+//! 1853).
 //!
 //! ## What is gated so far, and what is knowingly not
 //!
@@ -202,19 +207,24 @@ impl Plugin for ExteriorCullPlugin {
     }
 }
 
-/// The sub-frustum for one NDC window rect.
+/// The sub-frustum for one NDC window rect — the **construction alone**, no narrowness gate.
+///
+/// **Two callers, deliberately one construction** (decision 1826): this module gates the open world
+/// through these rects, and `crate::wmo_portal`'s Pass 2 gates the containing building's own
+/// exterior groups through the same ones. The reference likewise builds one volume per window and
+/// hands it to both (`0x682930` for `0x6b3b20`'s Pass 2, and the copy at `0xc7cb7c` for
+/// `0x682fa0`). What 1826 also copied across, and should not have, was the *reject*: it belongs to
+/// the open-world walk's entry, not to the volume — see [`scene_window_frustum`]. So a doorway too
+/// narrow to admit a hillside **can** still admit a wall, which is the reference's own asymmetry.
 ///
 /// An NDC rect maps to the full screen by a scale+offset **on clip space** — `clip.x` scaled by
 /// `2/(x1-x0)` plus `clip.w` times `-(x0+x1)/(x1-x0)`, and likewise in y — so pre-multiplying
 /// `clip_from_world` by that matrix yields a projection whose 6 extracted planes bound exactly the
 /// window's sub-frustum. Depth rows are untouched: the window narrows the view laterally and inherits
 /// the camera's own near/far.
-fn window_frustum(rect: Rect, clip_from_world: &Mat4) -> Option<Frustum> {
+pub(crate) fn window_frustum(rect: Rect, clip_from_world: &Mat4) -> Frustum {
     let [x0, y0, x1, y1] = rect;
     let (w, h) = (x1 - x0, y1 - y0);
-    if w < MIN_WINDOW_NDC || h < MIN_WINDOW_NDC {
-        return None;
-    }
     // Column-major: `Mat4::from_cols` takes columns, so the `w`-column carries the offsets.
     let rect_to_ndc = Mat4::from_cols(
         Vec4::new(2.0 / w, 0.0, 0.0, 0.0),
@@ -222,9 +232,30 @@ fn window_frustum(rect: Rect, clip_from_world: &Mat4) -> Option<Frustum> {
         Vec4::new(0.0, 0.0, 1.0, 0.0),
         Vec4::new(-(x0 + x1) / w, -(y0 + y1) / h, 0.0, 1.0),
     );
-    Some(Frustum::from_clip_from_world(
-        &(rect_to_ndc * *clip_from_world),
-    ))
+    Frustum::from_clip_from_world(&(rect_to_ndc * *clip_from_world))
+}
+
+/// [`window_frustum`] behind the **open-world walk's own entry gate** — and nothing else's.
+///
+/// `0x682fa0` opens with the gate, before it touches a bucket: `fld [edi+8]; fsub [edi]; fcomp
+/// [0x8029d0]; test ah,5; jnp -> ret` on x, then the same on y. `[0x8029d0]` is `0.01` and the rects
+/// are `[0,1]` screen fraction, so the walk runs iff **both extents are `>= 0.01`** — 0.02 in our NDC,
+/// non-strict, and a window under it draws no terrain, no ADT doodads, no world WMO placement, no
+/// liquid, no far band and no outdoor unit at all.
+///
+/// **The gate is the walk's, not the volume's** (RE 2026-09-02, `wow-5875-re`
+/// `models/scratch/wmo-pass2-window-reseed.md`): a compare-class census over the whole of
+/// `0x682930` — the builder both consumers share — returns **zero** compares, and Pass 2's own body
+/// `[0x6b3c73, 0x6b3d6f)` has seven, none of them on the rect. Decision 1826 read the reject as
+/// part of the shared construction and applied it to both, which silently culled the containing
+/// building's whole exterior shell for every window between the recursion's own collapse guard
+/// (`0.001` NDC, `0x6b44b1`) and this one. Decision 1853.
+pub(crate) fn scene_window_frustum(rect: Rect, clip_from_world: &Mat4) -> Option<Frustum> {
+    let [x0, y0, x1, y1] = rect;
+    if x1 - x0 < MIN_WINDOW_NDC || y1 - y0 < MIN_WINDOW_NDC {
+        return None;
+    }
+    Some(window_frustum(rect, clip_from_world))
 }
 
 /// This frame's exterior gate — the window worklist turned into clip volumes, built once and asked
@@ -259,7 +290,7 @@ impl ExteriorGate {
         Self::Windows(
             rects
                 .iter()
-                .filter_map(|r| window_frustum(*r, &clip_from_world))
+                .filter_map(|r| scene_window_frustum(*r, &clip_from_world))
                 .collect(),
         )
     }
@@ -430,7 +461,7 @@ fn apply_exterior_cull(
     // would be arbitrary — `ExteriorGate::build`'s own law.
     let full_view = cam.iter().next().and_then(|(cam_t, proj)| {
         let clip_from_world = proj.get_clip_from_view() * cam_t.to_matrix().inverse();
-        window_frustum([-1.0, -1.0, 1.0, 1.0], &clip_from_world)
+        scene_window_frustum([-1.0, -1.0, 1.0, 1.0], &clip_from_world)
     });
     let in_view = |gt: &GlobalTransform, bound: &Aabb| {
         full_view
@@ -559,7 +590,7 @@ mod tests {
     /// clipping the world.
     #[test]
     fn the_full_screen_window_is_the_whole_frustum() {
-        let f = window_frustum([-1.0, -1.0, 1.0, 1.0], &clip_from_world()).expect("full screen");
+        let f = window_frustum([-1.0, -1.0, 1.0, 1.0], &clip_from_world());
         assert!(admits(&f, Vec3::new(0.0, 0.0, -10.0)), "straight ahead");
         // At 90° fov the frustum edge is |x| = |z|; well inside it must pass, and behind must not.
         assert!(admits(&f, Vec3::new(5.0, 0.0, -10.0)), "right of centre");
@@ -572,7 +603,7 @@ mod tests {
     /// one side of the view must not let the world in on the other.
     #[test]
     fn a_half_screen_window_rejects_the_other_half() {
-        let f = window_frustum([0.1, -1.0, 1.0, 1.0], &clip_from_world()).expect("right half");
+        let f = window_frustum([0.1, -1.0, 1.0, 1.0], &clip_from_world());
         assert!(admits(&f, Vec3::new(5.0, 0.0, -10.0)), "right: admitted");
         assert!(
             !admits(&f, Vec3::new(-5.0, 0.0, -10.0)),
@@ -590,7 +621,7 @@ mod tests {
     #[test]
     fn a_narrow_window_rejects_a_chunk_of_ground_but_never_a_whole_tile_of_it() {
         // A doorway on the RIGHT of the view; the ground of interest is 200 yd to the LEFT.
-        let f = window_frustum([0.6, -1.0, 1.0, 1.0], &clip_from_world()).expect("a right doorway");
+        let f = window_frustum([0.6, -1.0, 1.0, 1.0], &clip_from_world());
         let ground = Vec3::new(-200.0, -2.0, -200.0);
 
         const CELL: f32 = 33.333 / 2.0;
@@ -614,16 +645,42 @@ mod tests {
         );
     }
 
-    /// The reference rejects a window narrower than a hundredth of the screen (`[0x8029d0]`); a
-    /// collapsed rect must produce no frustum at all rather than a degenerate one whose planes are
-    /// NaN (which `intersects_obb` would answer arbitrarily).
+    /// The OPEN-WORLD walk rejects a window narrower than a hundredth of the screen
+    /// (`0x682fa0`'s entry compares against `[0x8029d0]`) — and it is non-strict, so a window
+    /// exactly at the threshold draws. The reject also keeps a collapsed rect from producing a
+    /// degenerate frustum whose planes are NaN (which `intersects_obb` would answer arbitrarily).
     #[test]
-    fn a_collapsed_window_is_dropped_not_degenerate() {
-        assert!(window_frustum([0.5, -1.0, 0.5, 1.0], &clip_from_world()).is_none());
-        assert!(window_frustum([-1.0, 0.2, 1.0, 0.2001], &clip_from_world()).is_none());
-        // Just over the threshold still builds.
+    fn the_scene_walk_drops_a_window_under_a_hundredth_of_the_screen() {
+        assert!(scene_window_frustum([0.5, -1.0, 0.5, 1.0], &clip_from_world()).is_none());
+        assert!(scene_window_frustum([-1.0, 0.2, 1.0, 0.2001], &clip_from_world()).is_none());
+        // `>= 0.01` of a 0..1 screen passes — the client's `jnp` is parity, not a strict `>`.
         assert!(
-            window_frustum([0.0, -1.0, MIN_WINDOW_NDC + 0.001, 1.0], &clip_from_world()).is_some()
+            scene_window_frustum([0.0, -1.0, -1.0 + MIN_WINDOW_NDC, 1.0], &clip_from_world())
+                .is_none(),
+            "a rect with a NEGATIVE extent is nonsense and must not build a frustum"
+        );
+        assert!(
+            scene_window_frustum([0.0, -1.0, MIN_WINDOW_NDC, 1.0], &clip_from_world()).is_some()
+        );
+    }
+
+    /// …and the volume builder itself has no such gate, because `0x682930` has no compares at all:
+    /// Pass 2 draws the containing building's own shell through a window the open world cannot use
+    /// (decision 1853). The band is `[0.001, 0.02)` NDC — above the recursion's collapse guard,
+    /// below the scene walk's entry.
+    #[test]
+    fn pass_twos_builder_takes_a_window_the_scene_walk_rejects() {
+        let narrow = [0.0, -1.0, 0.01, 1.0];
+        assert!(scene_window_frustum(narrow, &clip_from_world()).is_none());
+        let f = window_frustum(narrow, &clip_from_world());
+        // fov 90 / aspect 1, so NDC x = world x / -z: the sliver's axis at z = -10 is x = 0.05.
+        assert!(
+            admits(&f, Vec3::new(0.05, 0.0, -10.0)),
+            "the sliver still bounds a real volume: a point straight down its axis is inside"
+        );
+        assert!(
+            !admits(&f, Vec3::new(5.0, 0.0, -10.0)),
+            "…and it is still a sliver: NDC x = 0.5 is far outside it"
         );
     }
 
@@ -856,6 +913,7 @@ mod tests {
                 world_from_local: bevy::math::Affine3A::IDENTITY,
                 name_set: 0,
                 visible: vec![false, false],
+                interior_fog: vec![false, false],
                 liquid_visited: vec![false, false],
                 flooded: vec![None, None],
             })

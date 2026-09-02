@@ -714,13 +714,32 @@ impl EditBoxState {
         EditOutcome::changed(self.insert(&cleaned).text_changed)
     }
 
-    /// `SetText` (`0x77be00`): short-circuits when unchanged (the caller then fires nothing); else
-    /// replaces, caret to the end, caps enforced.
+    /// `SetText` (`0x77be00`) is a clear-all followed by `Insert`, not a plain assignment, and the
+    /// order of its three parts is load-bearing (decision 1831):
+    ///
+    /// 1. the selection collapses **unconditionally**, before anything is compared — an identical
+    ///    `SetText` still drops a highlight;
+    /// 2. a case-sensitive equality test then short-circuits (`SStrCmp` at `0x77be4b`), skipping the
+    ///    clear-all, the insert and both fires — so the caller fires nothing;
+    /// 3. the changing leg is `0x77c500` (delete the whole buffer) then `0x77bee0` (`Insert`), which
+    ///    means `SetText` **inherits `Insert`'s gates**. The one that shows is `numeric`: the gate
+    ///    abandons the insert wholesale on any non-digit, and the clear-all has already run, so the
+    ///    box is left **empty** rather than unchanged. `SetNumber(-5)` and `SetNumber(0.8)` both
+    ///    empty a `numeric` box, because `-` and `.` are not digits.
+    ///
+    /// The clear-all raises the `textChanged` dirty bit on every path it reaches, so the aborted
+    /// insert still reports a change and still fires — reporting `""`.
     pub fn set_text(&mut self, s: &str) -> bool {
+        self.collapse(); // (1) unconditional, ahead of the comparison
         if self.text == s {
-            return false;
+            return false; // (2)
         }
-        self.text = s.to_string();
+        // (3) the clear-all, then Insert — whose `numeric` gate refuses the whole string.
+        self.text = if self.numeric && !s.chars().all(|c| c.is_ascii_digit()) {
+            String::new()
+        } else {
+            s.to_string()
+        };
         self.cursor = self.text.len();
         self.collapse();
         self.enforce_caps();

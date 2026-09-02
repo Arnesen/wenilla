@@ -294,6 +294,10 @@ pub(super) fn drive_animations(
             // ogre at 2.2× cycles its legs 2.2× slower than a same-speed human. Read-only: nothing
             // in this system moves a unit.
             &Transform,
+            // The server-granted movement modes (decision 1780) — root, water-walk, feather-fall,
+            // hover, walk-mode, swim. `unify` folds them into the flags word the selector reads, so
+            // a creature the server has rooted or put in walk mode is animated as one.
+            Option<&crate::net::UnitMoveModes>,
         ),
     )>,
     // A mount child's movement view is its HOST's (decision 0441): the same
@@ -307,6 +311,8 @@ pub(super) fn drive_animations(
         Option<&UnitSpeeds>,
         Option<&FacingStep>,
         Has<crate::net::CreatureSwimming>,
+        // …and the host's granted modes, for the same reason `unify` reads them on the rider.
+        Option<&crate::net::UnitMoveModes>,
         // …and the rider's own `OBJECT_FIELD_SCALE_X`: a mount child's transform carries only its
         // `CreatureDisplayInfo` column, and the mount renders at the PRODUCT of the two (the
         // byte-verified mount composition, wow-re `0x613ef0`). The rate divisor wants that product
@@ -443,7 +449,16 @@ pub(super) fn drive_animations(
         wielded,
         cast_hold,
         facing_step,
-        (engaged, auto_repeat, is_self, mount_body, creature_swimming, nock_latched, transform),
+        (
+            engaged,
+            auto_repeat,
+            is_self,
+            mount_body,
+            creature_swimming,
+            nock_latched,
+            transform,
+            move_modes,
+        ),
     ) in &mut units
     {
         // A mount child drives from its HOST's movement view (decision 0441) — same inputs the
@@ -464,14 +479,15 @@ pub(super) fn drive_animations(
             speeds,
             facing_step,
             creature_swimming,
+            move_modes,
             host_scale,
             ridden_by_self,
         ) = match mount_body {
             Some(mb) => match mount_hosts.get(mb.host) {
-                Ok((s, r, m, sp, f, sw, t, host_self)) => {
-                    (s, r, m, sp, f, sw, t.scale.x, host_self)
+                Ok((s, r, m, sp, f, sw, md, t, host_self)) => {
+                    (s, r, m, sp, f, sw, md, t.scale.x, host_self)
                 }
-                Err(_) => (None, None, None, None, None, false, 1.0, false),
+                Err(_) => (None, None, None, None, None, false, None, 1.0, false),
             },
             None => (
                 spline,
@@ -480,6 +496,7 @@ pub(super) fn drive_animations(
                 speeds,
                 facing_step,
                 creature_swimming,
+                move_modes,
                 1.0,
                 false,
             ),
@@ -518,7 +535,7 @@ pub(super) fn drive_animations(
         let mount_edge = std::mem::replace(&mut drv.mount_display, mount_display) != mount_display;
         // First time we drive this unit (nothing chosen yet) — used to settle a corpse to its end pose.
         let first = drv.gait.is_none() && drv.mode == Mode::Gait;
-        let mut mv = unify(movement, remote, spline, creature_swimming);
+        let mut mv = unify(movement, remote, spline, creature_swimming, move_modes);
         // Stand state (decision 0080c): a unit without a controller-fed [`MovementState`] (remote
         // players, creatures) poses from its `UNIT_FIELD_BYTES_1` stand-state byte — a seated
         // remote player renders for free. Our own avatar's rides its `MovementState` (the

@@ -31,6 +31,14 @@
 // spent its whole diff clearing it out of. Dev builds still warn normally.
 #![cfg_attr(not(feature = "dev"), allow(dead_code))]
 
+/// The realtime-audio allocation tripwire (decision 1857). In debug builds an allocation inside
+/// the output IO callback or the render pass (`sound::output`'s `no_alloc` scopes) aborts the
+/// process, so a realtime-safety regression fails a test or a smoke instead of reaching an ear;
+/// release builds carry no wrapper at all.
+#[cfg(debug_assertions)]
+#[global_allocator]
+static ALLOC: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
+
 pub mod addon_harness;
 mod area;
 mod area_poi;
@@ -48,6 +56,7 @@ mod capture;
 mod char_create;
 mod char_select;
 mod chat_bubble;
+mod chr_classes;
 mod cinematic;
 mod combat_text;
 mod cooldowns;
@@ -60,6 +69,7 @@ mod debug_panel;
 /// **The dev/player seam** (decisions 0026/1173, built in 1174) — the group, and the boundary
 /// rule, in one file. Always compiled; what it *holds* is not.
 mod dev;
+mod doodad_events;
 mod entities;
 mod fishing_line;
 mod footprints;
@@ -183,6 +193,7 @@ use bevy::prelude::*;
 use blob_shadow::BlobShadowPlugin;
 use bowstring::BowstringPlugin;
 use camera_shake::CameraShakePlugin;
+use chr_classes::ChrClassesPlugin;
 use cinematic::CinematicPlugin;
 use creature_anim::CreatureAnimPlugin;
 use cursor::CursorPlugin;
@@ -529,6 +540,7 @@ pub fn run(build: BuildId) -> AppExit {
     // GameObject animation (decision 0242): net-streamed GObjects (doors/chests) play an M2 sequence
     // on GAMEOBJECT_STATE change — the state-machine sibling of the doodad idle loop above.
     .add_plugins(go_anim::plugin)
+    .add_plugins(doodad_events::plugin)
     // Avatar + camera + input.
     .add_plugins(PlayerPlugin)
     // Cinematic fly-bys (`SMSG_TRIGGER_CINEMATIC`): the race intro a first login plays, and the
@@ -709,6 +721,7 @@ pub fn run(build: BuildId) -> AppExit {
     // so this renders the ten packed words the last `SMSG_PET_SPELLS` delivered and sends
     // intents back. After UiActionPlugin (shares `Spells` and the cooldown triple's clock).
     .add_plugins(UiPetPlugin)
+    .add_plugins(ChrClassesPlugin)
     .add_plugins(UiPetBookPlugin)
     // The pet's paper-doll stat block (happiness/loyalty/XP/training points). Its own plugin
     // because it runs off descriptor fields and two DBC tables rather than off `SMSG_PET_SPELLS`.

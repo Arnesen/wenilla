@@ -5,24 +5,9 @@
 //! Since decision 1500 all four bars are player options that ship OFF, so most of what is here
 //! raises the bar it is about first — through the same two globals the Options rows write.
 
-use benilla_ui::script::{ActionSlot, QuadContent, SpellTooltipView, UiScript};
+use benilla_ui::script::{ActionSlot, QuadContent, ScriptValue, SpellTooltipView, UiScript};
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error.
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "loader errors in {file}: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// Load the shipped `UIParent.xml` (UIParent_ManageFramePositions — the stance bar's
 /// OnShow/OnHide calls it, decision 0272; the runtime loads it before every bar) +
@@ -802,6 +787,131 @@ fn the_grid_option_holds_the_extra_bars_empty_wells_open() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// **A held payload GHOSTS the wells it opens — the reference's `SetVertexColor(1, 1, 1, 0.5)` on
+/// a shown grid ring (`ActionButton.lua:247`), which ours skipped from 0216 to 1781.**
+///
+/// `UI-Quickslot` is not a second ring. Measured off the shipped BLPs: `UI-Quickslot2`'s interior
+/// is fully transparent (alpha 0) — a hollow border — while `UI-Quickslot`'s is solid black at
+/// alpha 0.6 across its whole middle. So the grid swap does not *outline* an empty well, it
+/// *fills* it, and at full alpha picking up a spell dropped a 60%-black square into every empty
+/// slot on every raised bar at once. That is the director's report. Half alpha takes the well to
+/// 30% black, where it reads as a drop target instead of a hole.
+///
+/// The occupied rings stay opaque, and letting go of the payload restores the wells — both
+/// DIVERGENCES, chosen in 1782. In stock 1.12.1 the dim is fanned to every button and then never
+/// cleared by anything: `SetNormalTexture(path)` reuses the region and writes only its texture
+/// handle, and a 3-argument `SetVertexColor` is `SetVertexColor(r, g, b, currentAlpha)` — so the
+/// first spell anyone picks up leaves every border at alpha 0x80 for the session (wow-re
+/// `button-state-texture-path-setter.md` §2/§7, byte-verified). That is a stuck state keyed to
+/// nothing the player can see. We take the look the dim was written for and let go of it with the
+/// payload, which is what the last two assertions here pin.
+#[test]
+fn a_held_payload_ghosts_the_empty_wells_it_opens() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    load_xml(&s, "MultiBars.xml");
+    s.set_action(
+        1,
+        Some(ActionSlot {
+            texture: Some("Interface\\Icons\\Ability_SteelMelee".into()),
+            kind: 0x00,
+            action: 100,
+            count: 0,
+            consumable: false,
+        }),
+    );
+    // The raise comes AFTER the seed: `UIParent.xml`'s PLAYER_ENTERING_WORLD arm reads the
+    // server's bar-toggle byte once and would put an early raise straight back down.
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    show_bars(&s, &[1]);
+    s.resolve();
+
+    /// The drawn alpha of every ring quad wearing `path` — `None` colour is untinted white.
+    fn ring_alphas(s: &UiScript, path: &str) -> Vec<f32> {
+        s.extract()
+            .iter()
+            .filter_map(|q| match &q.content {
+                QuadContent::Texture {
+                    path: Some(p),
+                    color,
+                    ..
+                } if p == path => Some(color.map_or(1.0, |c| c[3])),
+                _ => None,
+            })
+            .collect()
+    }
+    let quickslot = "Interface\\Buttons\\UI-Quickslot";
+    let quickslot2 = "Interface\\Buttons\\UI-Quickslot2";
+
+    // Nothing in hand: the main bar's 12 always-visible wells wear the hollow ring, all opaque.
+    assert_eq!(ring_alphas(&s, quickslot), Vec::<f32>::new());
+    let resting = ring_alphas(&s, quickslot2);
+    assert_eq!(
+        resting.len(),
+        12,
+        "the 12 main wells; the multibar's are hidden"
+    );
+    assert!(
+        resting.iter().all(|a| *a == 1.0),
+        "a resting ring is opaque: {resting:?}"
+    );
+
+    // Payload up. Every well the grid opened is the FILLED plate at HALF alpha.
+    s.fire_event("ACTIONBAR_SHOWGRID", vec![]);
+    s.resolve();
+    let ghosts = ring_alphas(&s, quickslot);
+    assert_eq!(
+        ghosts.len(),
+        23,
+        "11 empty main wells swap art + MultiBarBottomLeft's 12 appear"
+    );
+    assert!(
+        ghosts.iter().all(|a| *a == 0.5),
+        "every grid ring is the ref's half-alpha ghost, not an opaque plate: {ghosts:?}"
+    );
+
+    // …and the one OCCUPIED button is untouched by it.
+    let occupied = ring_alphas(&s, quickslot2);
+    assert_eq!(occupied, vec![1.0], "the occupied ring does not ghost");
+
+    // A well that was ghosted and is then FILLED comes back opaque. This is the assertion that
+    // outlives the engine's own `SetVertexColor` divergence (1782): the day an absent alpha stops
+    // meaning 1.0 and starts meaning "whatever is already there", a `SetRing` that let the fourth
+    // argument default would carry the 0.5 straight into the occupied ring, and only this catches
+    // it — the HIDEGRID check below would not, because that path re-derives an EMPTY well.
+    s.set_action(
+        2,
+        Some(ActionSlot {
+            texture: Some("Interface\\Icons\\Ability_Rogue_Ambush".into()),
+            kind: 0x00,
+            action: 101,
+            count: 0,
+            consumable: false,
+        }),
+    );
+    s.fire_event("ACTIONBAR_SLOT_CHANGED", vec![ScriptValue::Number(2.0)]);
+    s.resolve();
+    assert_eq!(
+        ring_alphas(&s, quickslot2),
+        vec![1.0, 1.0],
+        "a ghosted well that gets an action is opaque again, payload still held"
+    );
+
+    // Letting go restores both halves — art and tint, which is why they share one setter.
+    s.fire_event("ACTIONBAR_HIDEGRID", vec![]);
+    s.resolve();
+    assert_eq!(ring_alphas(&s, quickslot), Vec::<f32>::new());
+    let after = ring_alphas(&s, quickslot2);
+    assert_eq!(after.len(), 12);
+    // (10 empty main wells back to the hollow ring + the 2 occupied ones.)
+    assert!(
+        after.iter().all(|a| *a == 1.0),
+        "the dim does not outlive the payload (the ref's own stuck-dim bug): {after:?}"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// **The byte the row sends is the four globals, and the seed brings that byte back.**
 ///
 /// The whole round trip, over the REAL bindings (`benilla_ui::script::action_bar_toggles`): the
@@ -1154,5 +1264,102 @@ fn the_stance_shelf_is_as_long_as_the_form_count() {
     // …and back down to one form re-points it, so the shelf is not a one-way ratchet.
     set_forms(&mut s, 1);
     assert_eq!(cap(&s), 12.0);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **B348 — an extra bar's EMPTY well keeps the label of the key bound to it.**
+///
+/// The reported symptom is a flicker between two states of the same bar: the occupied slot always
+/// wore its `Q`, while the bound-but-empty slots beside it showed `E`/`R`/`C` in one screenshot
+/// and nothing in the next. The cause is a single line left behind by 0270's multibars, which
+/// carried NO binding commands at all and so had no label to lose: `BenillaActionButton_Update`'s
+/// empty arm cleared the HotKey corner outright. 1008 gave those wells real
+/// `MULTIACTIONBAR1/2BUTTONn` bindings and that clear became a wipe of a live label — repainted by
+/// the next `UPDATE_BINDINGS` and wiped again by the next thing that repaints a button (a world
+/// enter, a payload picked up over the bars, the slot next door changing), which is exactly
+/// "sometimes yes, sometimes not".
+///
+/// The reference never touches the text in `ActionButton_Update` (`ActionButton.lua:167-172` sets
+/// only the vertex colour); `ActionButton_UpdateHotkeys` is the sole writer, and its bound leg —
+/// `hotkey:SetText(GetBindingText(GetBindingKey(action), "KEY_", 1))` — runs whether or not the
+/// slot has an action.
+#[test]
+fn an_extra_bars_empty_well_keeps_its_bound_hotkey_label() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    // The real command set, so MULTIACTIONBAR1BUTTONn is bindable at all (it ships unbound —
+    // the player binds it, as the reporter had).
+    s.register_bindings(&crate::bindings::registry_commands());
+    load_action_bar(&s);
+    load_xml(&s, "MultiBars.xml");
+    show_bars(&s, &[1]);
+    s.set_action(
+        61,
+        Some(ActionSlot {
+            texture: Some("Interface\\Icons\\Spell_BL".into()),
+            kind: 0x00,
+            action: 200,
+            count: 0,
+            consumable: false,
+        }),
+    );
+    // The reporter's shape: an occupied first well and two empty ones beside it, all three bound,
+    // and the wells held open so the empty ones are on screen at all.
+    s.run(
+        r#"SetBinding("Q", "MULTIACTIONBAR1BUTTON1")
+           SetBinding("E", "MULTIACTIONBAR1BUTTON2")
+           SetBinding("R", "MULTIACTIONBAR1BUTTON3")
+           ALWAYS_SHOW_MULTIBARS = "1" MultiActionBar_UpdateGridVisibility()"#,
+    )
+    .unwrap();
+    s.fire_event("UPDATE_BINDINGS", vec![]);
+
+    let label = |s: &UiScript, button: &str| {
+        s.eval::<Option<String>>(&format!("return {button}HotKey:GetText()"))
+            .unwrap()
+            .unwrap_or_default()
+    };
+    let drawn = |s: &mut UiScript, want: &str| {
+        s.resolve();
+        s.extract()
+            .iter()
+            .any(|q| matches!(&q.content, QuadContent::Text { text: Some(t), .. } if t == want))
+    };
+    assert_eq!(label(&s, "MultiBarBottomLeftButton1"), "Q");
+    assert_eq!(label(&s, "MultiBarBottomLeftButton2"), "E");
+    assert_eq!(label(&s, "MultiBarBottomLeftButton3"), "R");
+    assert!(drawn(&mut s, "E"), "the empty well's label is on screen");
+
+    // Anything that repaints the buttons. Each of these reached the empty arm and wiped the label
+    // before the fix; the occupied well never did, which is why its Q survived every time.
+    for (event, what) in [
+        ("PLAYER_ENTERING_WORLD", "a world enter"),
+        ("ACTIONBAR_SHOWGRID", "a payload picked up over the bars"),
+        ("ACTIONBAR_HIDEGRID", "and put down again"),
+    ] {
+        s.fire_event(event, vec![]);
+        assert_eq!(label(&s, "MultiBarBottomLeftButton1"), "Q", "{what}");
+        assert_eq!(
+            label(&s, "MultiBarBottomLeftButton2"),
+            "E",
+            "the empty well keeps its bound label through {what}"
+        );
+        assert_eq!(label(&s, "MultiBarBottomLeftButton3"), "R", "{what}");
+    }
+    // The world enter above also re-seeds the four bar toggles from the server byte, which the
+    // harness does not send — so bar 1 went back down with it. Raise it again: the label is still
+    // on the well, not merely still in the FontString.
+    show_bars(&s, &[1]);
+    assert!(drawn(&mut s, "E"), "…and it is still on screen");
+
+    // The control: an UNBOUND empty well stays blank throughout — the clear this line was written
+    // for in 0270 is still done, by the repaint that knows there is no binding.
+    assert_eq!(label(&s, "MultiBarBottomLeftButton4"), "");
+    // And unbinding one takes its label away, rather than freezing the last text painted.
+    s.run(r#"SetBinding("E", nil)"#).unwrap();
+    s.fire_event("UPDATE_BINDINGS", vec![]);
+    assert_eq!(label(&s, "MultiBarBottomLeftButton2"), "");
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    assert_eq!(label(&s, "MultiBarBottomLeftButton2"), "");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

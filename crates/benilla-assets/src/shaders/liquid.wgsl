@@ -145,6 +145,12 @@ struct LiquidVsOut {
     // colour — the reference's own interior water vertex carries a colour dword for exactly this.
     // White on every other lane (and on any mesh with no colour attribute), where nothing reads it.
     @location(5) vcolor: vec4<f32>,
+    // The per-frame INTERIOR FOG lane for this surface's own room (decision 1787): the client's
+    // `[0xca7f00]`, which gates the WMO liquid pass's block-2 submit (`0x6b6323`–`0x6b6342`)
+    // exactly as it gates the geometry pass — so a pool and the walls around it can never
+    // disagree about which fog they wear. Carried on `MeshTag` bit 30, read once in the vertex
+    // stage and flat-interpolated (the whole surface is one instance).
+    @location(6) @interpolate(flat) room_fog: u32,
 }
 
 // Sun sheen (`secondary`): a Blinn highlight of the sun on the flat water surface — the glint that's
@@ -233,13 +239,14 @@ fn apply_scroll(uv: vec2<f32>) -> vec2<f32> {
 // interior haze. Only two call sites in the whole binary re-submit block 2, and they are the WMO
 // *geometry* pass (`0x6b51d9`/`0x6b51ea`) and the WMO *liquid* pass (`0x6b6323`–`0x6b6342`), both under
 // the same `[0xca7f00]` gate. So an interior room's pool takes the room's fog, in lockstep with the
-// walls around it; ADT liquid submits nothing and draws under the scene block. `w.kind.z` is that
-// gate, resolved at spawn from the group's `MOGI & 0x48` — the same interior test `wow_model.wgsl`
-// uses, which is what keeps the two in step.
-fn apply_fog(rgb: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
+// walls around it; ADT liquid submits nothing and draws under the scene block. `w.kind.z` is the STATIC
+// half of that gate, resolved at spawn from the group's `MOGI & 0x48`; the per-frame half is the
+// room's own `[0xca7f00]` bit on `MeshTag` bit 30 (decision 1787 — the flood decides it, and the
+// WMO geometry lane reads the same answer, which is what keeps the two in step).
+fn apply_fog(rgb: vec3<f32>, world_pos: vec3<f32>, room_fog: u32) -> vec3<f32> {
     var fog_color = wow_light.fog_color;
     var fog_span = wow_light.fog_params.xy;
-    if (w.kind.z > 0.5) {
+    if (w.kind.z > 0.5 && room_fog != 0u) {
         fog_color = wow_light.wmo_fog_color;
         fog_span = wow_light.wmo_fog_params.xy;
     }
@@ -270,6 +277,9 @@ fn vertex(in: Vertex) -> LiquidVsOut {
     out.depth = in.uv_b.x;
     // The faithful per-vertex sun sheen — interpolated across the coarse mesh by the fragment stage.
     out.secondary_vtx = sun_sheen(out.world_normal, out.world_position.xyz);
+    // `MeshTag` bit 30 — see `LiquidVsOut::room_fog`. ADT surfaces carry no tag (0 ⇒ scene fog,
+    // which is their only lane anyway).
+    out.room_fog = mesh_functions::get_tag(in.instance_index) & 0x40000000u;
     return out;
 }
 
@@ -309,7 +319,7 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
     // depth instead of one that recedes into the murk. (VERIFIED wow-re `liquid-render-state-sided`
     // §3/§3.1/§5, which corrects that row.)
     if (w.kind.x > 0.5) {
-        return vec4<f32>(apply_fog(detail.rgb, in.world_position.xyz), 1.0);
+        return vec4<f32>(apply_fog(detail.rgb, in.world_position.xyz, in.room_fog), 1.0);
     }
 
     // Per-vertex swatch coord V (in `in.depth`, computed CPU-side in wow-formats/liquid.rs): river/lake
@@ -362,7 +372,7 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
         // reading would have drawn.
         let body = clamp(in.vcolor.rgb + detail.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
         return vec4<f32>(
-            apply_fog(body, in.world_position.xyz),
+            apply_fog(body, in.world_position.xyz, in.room_fog),
             clamp(vtx_alpha + detail.a, 0.0, 1.0),
         );
     }
@@ -414,7 +424,7 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
         let rgb_ext = primary_ext + detail.rgb + in.secondary_vtx * detail.a;
         // `result.color.w = fragment.color.primary` — the vertex alpha ALONE. The bound program
         // bypasses the texture environment entirely, so the interior arm's `+ At` does not apply here.
-        return vec4<f32>(apply_fog(rgb_ext, in.world_position.xyz), vtx_alpha);
+        return vec4<f32>(apply_fog(rgb_ext, in.world_position.xyz, in.room_fog), vtx_alpha);
     }
 
     // Body colour: lit vertex colour × the depth-lerped water-row swatch colour (`primary·colorTex`).
@@ -447,7 +457,7 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
 
     // Distance fog (see `apply_fog`) — the water fog colour is also teal, so far water converges on the
     // haze.
-    rgb = apply_fog(rgb, in.world_position.xyz);
+    rgb = apply_fog(rgb, in.world_position.xyz, in.room_fog);
 
     // GAMMA LANE (0161): raw gamma out; alpha blends in gamma like the reference's bytes.
     return vec4<f32>(rgb, alpha);

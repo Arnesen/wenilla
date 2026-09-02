@@ -192,11 +192,42 @@ pub(super) fn draw_layer_name(l: DrawLayer) -> &'static str {
     }
 }
 
+/// A widget tag or `CreateFrame` type string → its [`FrameKind`], case- and separator-insensitive
+/// ([`enum_token`]). Public because it is the ONE mapping: `benilla-app`'s `frame_flag_gate` sweep
+/// needs it to ask the engine whether a tag is mouse-enabled by construction, and a second copy
+/// there is exactly what drifted.
+pub fn frame_kind_from_tag(s: &str) -> Option<FrameKind> {
+    frame_kind_from_str(s)
+}
+
 fn frame_kind_from_str(s: &str) -> Option<FrameKind> {
     Some(match enum_token(s).as_str() {
         "FRAME" => FrameKind::Frame,
+        // `TaxiRouteFrame` — a registered `CreateFrame` type that is a `CSimpleFrame` and NOTHING
+        // else, so it maps to `Frame` rather than earning a kind (decision 1828; wow-re
+        // `ui/scratch/taxiroute-widget-type.md`). Factory `0x495ba0` allocates `0x314`, the same
+        // size the plain-`<Frame>` factory `0x6eec10` allocates for the same base ctor `0x769090`,
+        // and the ctor `0x506950` adds no field. Its vtables are the base's length exactly (36 + 11
+        // slots), so it declares no new virtual; it overrides four slots, of which two are lifetime
+        // plumbing and the other two — `EmitLayer 0x506a60` and a scale hook `0x506ac0` — are DEAD
+        // in 5875: the paint callback `0x506a90` tail-calls `0x506aa0`, which is a bare `ret`, and
+        // every module global it would fill is written by nothing.
+        //
+        // Mapping it to `Frame` is therefore the faithful answer, not a 1203 shortcut — and it is
+        // faithful in the strong sense that `GetObjectType()` must return **"Frame"** and
+        // `IsObjectType("TaxiRouteFrame")` must be **false**: `0x484800` is not overridden, so the
+        // name lives only in the 22-entry tag→factory registry and never becomes a class identity.
+        // The flight-path lines are plain `<Texture>` children the FrameXML creates and rotates
+        // with the 8-argument `SetTexCoord` we already support; `TaxiRouteFrame.cpp` is a vestigial
+        // C++ renderer that draws nothing.
+        "TAXIROUTEFRAME" => FrameKind::Frame,
         "BUTTON" => FrameKind::Button,
         "CHECKBUTTON" => FrameKind::CheckButton,
+        // A real registered type (`0x4959a6`), not an alias for Button — decision 1799. Registering
+        // it AS a Button would load `LootFrame.xml` and leave every row dead, because 1.12 has no
+        // Lua verb for "take slot N": `LootSlot` is the bind-confirm continuation, hard-wired to
+        // `flag = 1`.
+        "LOOTBUTTON" => FrameKind::LootButton,
         "EDITBOX" => FrameKind::EditBox,
         "STATUSBAR" => FrameKind::StatusBar,
         "SLIDER" => FrameKind::Slider,
@@ -347,6 +378,12 @@ fn kind_method_registries(lua: &Lua, this: &Table) -> &'static [&'static str] {
         Some(FrameKind::Slider) => &[super::slider::REG_SLIDER_METHODS],
         Some(FrameKind::ColorSelect) => &[super::colorselect::REG_COLORSELECT_METHODS],
         Some(FrameKind::Button) => &[super::button::REG_BUTTON_METHODS],
+        // One method of its own, then all of Button's — the miss order of `0x4c1be0`, which probes
+        // its own 1-entry map `0xb71b64` and tail-calls `Button`'s `0x782c90`.
+        Some(FrameKind::LootButton) => &[
+            super::loot::REG_LOOTBUTTON_METHODS,
+            super::button::REG_BUTTON_METHODS,
+        ],
         Some(FrameKind::CheckButton) => &[
             super::button::REG_CHECKBUTTON_METHODS,
             super::button::REG_BUTTON_METHODS,

@@ -37,7 +37,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model.arena.frame(h).map(|f| f.shown).unwrap_or(false))
+            Ok(crate::script::binding_abi::predicate(
+                model.arena.frame(h).map(|f| f.shown).unwrap_or(false),
+            ))
         })?,
     )?;
     m.set(
@@ -45,11 +47,13 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model
-                .arena
-                .frame(h)
-                .map(|f| f.effective_visible)
-                .unwrap_or(false))
+            Ok(crate::script::binding_abi::predicate(
+                model
+                    .arena
+                    .frame(h)
+                    .map(|f| f.effective_visible)
+                    .unwrap_or(false),
+            ))
         })?,
     )?;
     // Identity / hierarchy
@@ -117,6 +121,10 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             FrameKind::Frame => &["Frame", "Region"],
             FrameKind::Button => &["Button", "Frame", "Region"],
             FrameKind::CheckButton => &["CheckButton", "Button", "Frame", "Region"],
+            // `CLootButton::IsObjectType 0x495af0` prepends its own name to the base's three
+            // (`"Button"` `[0x879954]`, `"Frame"` `[0x878560]`, `"Region"` `[0x878870]`) — read
+            // off the function, not assumed from the class hierarchy.
+            FrameKind::LootButton => &["LootButton", "Button", "Frame", "Region"],
             FrameKind::EditBox => &["EditBox", "Frame", "Region"],
             FrameKind::StatusBar => &["StatusBar", "Frame", "Region"],
             FrameKind::Slider => &["Slider", "Frame", "Region"],
@@ -665,7 +673,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model.arena.is_mouse_enabled(h))
+            Ok(crate::script::binding_abi::predicate(
+                model.arena.is_mouse_enabled(h),
+            ))
         })?,
     )?;
     // EnableKeyboard(flag) / IsKeyboardEnabled() — `0x776f90` / `0x776ff0`, real Frame entries in
@@ -699,7 +709,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model.arena.is_keyboard_enabled(h))
+            Ok(crate::script::binding_abi::predicate(
+                model.arena.is_keyboard_enabled(h),
+            ))
         })?,
     )?;
     // `EnableMouseWheel(flag)` / `IsMouseWheelEnabled()` — the wheel's own gate, a separate flag
@@ -765,7 +777,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model.arena.is_mouse_wheel_enabled(h))
+            Ok(crate::script::binding_abi::predicate(
+                model.arena.is_mouse_wheel_enabled(h),
+            ))
         })?,
     )?;
     // Clamp-to-screen (`0x776c00`/`0x776cb0`, geometry flags bit4 — layout.md): the layout resolve
@@ -789,7 +803,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model.arena.is_clamped_to_screen(h))
+            Ok(crate::script::binding_abi::predicate(
+                model.arena.is_clamped_to_screen(h),
+            ))
         })?,
     )?;
     // Hit-rect insets — the MOUSE rect only (widget::Frame::hit_rect_insets): the hit test shrinks

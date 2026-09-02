@@ -50,7 +50,7 @@ use crate::order;
 use crate::widget::FrameHandle;
 
 use super::clip::{effective_clip, scroll_clip_sources};
-use super::{button, cursor, editbox, event, UiScript};
+use super::{button, cursor, editbox, event, Model, UiScript};
 
 /// The double-click interval — **300 ms, VERIFIED off the bytes**, a hardcoded instruction
 /// immediate: `0x77937b  81 f9 2c 01 00 00  cmp ecx, 0x12c`, comparing `now − [this+0x334]` inside
@@ -127,6 +127,15 @@ pub(super) fn install(lua: &mlua::Lua) -> mlua::Result<()> {
     Ok(())
 }
 
+/// Whether `(x, y)` falls inside one of this frame's hyperlink spans — the engine half of the
+/// reference's per-span `CSimpleHyperlinkButton` children.
+fn link_span_hit(model: &Model, fh: FrameHandle, x: f32, y: f32) -> bool {
+    model
+        .link_spans
+        .get(&fh)
+        .is_some_and(|spans| spans.iter().any(|(r, _, _)| point_in_rect(*r, x, y)))
+}
+
 impl UiScript {
     /// Hit-test the cursor at `(x, y)` and return the **handle** of the captured frame (the
     /// topmost-drawn mouse-enabled, effective-visible frame whose rect contains the point **and**
@@ -146,13 +155,54 @@ impl UiScript {
         let sorted = order::traversal(&model.arena);
         let scroll_sources = scroll_clip_sources(&model);
         order::hit_test(&sorted, |fh| {
-            model.arena.is_mouse_enabled(fh)
+            // Mouse-enabled, **or inside one of this frame's hyperlink spans**.
+            //
+            // That second half is how the reference makes a chat link clickable on a frame that
+            // takes no mouse at all. `CSimpleMessageScrollFrame`'s ctor leaves `[+0xcc] = 0`, so
+            // `ChatFrame1` is never in the hit-test index — instead the engine synthesises one
+            // mouse-enabled `CSimpleHyperlinkButton` child PER SPAN (`0x7a3240`, born through the
+            // `CSimpleButton` ctor) and routes the three hyperlink scripts back to the parent
+            // (wow-re `mouse-enable-law.md` + the follow-up round `68987021`).
+            //
+            // We hold the spans as rects on the parent rather than as child frames, so the same
+            // law expresses as a disjunct here. What it buys is everything the reference gets from
+            // the split: the chat window is a hit candidate only over a LINK, so `GetMouseFocus()`
+            // answers what is behind it elsewhere, its `movable="true"` +
+            // `<TitleRegion setAllPoints="true"/>` stay inert so it drags by its tab and not its
+            // body, and a hover over plain text reassigns to whatever is underneath.
+            (model.arena.is_mouse_enabled(fh) || link_span_hit(&model, fh, x, y))
                 && model.resolved.get(&fh).is_some_and(|r| {
                     point_in_rect(inset_rect(*r, model.arena.hit_rect_insets(fh)), x, y)
                 })
                 && effective_clip(&model, &scroll_sources, fh)
                     .is_none_or(|c| point_in_rect(c, x, y))
         })
+    }
+
+    /// [`Self::hit_test`] over the frames that take the WHEEL — either bit, since a mouse-enabled
+    /// frame with an `<OnMouseWheel>` is a candidate for both. Same rect and clip rules; only the
+    /// enable predicate differs.
+    fn hit_test_wheel(&self, x: f32, y: f32) -> Option<u32> {
+        let model = self.model_ref();
+        let sorted = order::traversal(&model.arena);
+        let scroll_sources = scroll_clip_sources(&model);
+        let fh = order::hit_test(&sorted, |fh| {
+            // **The wheel gates on the handler and CONTINUES** — the one genuine fall-through in
+            // the engine (wow-re `ui/scratch/hittest-no-fallthrough-law.md`). Down/up deliberately
+            // do not use the idiom; the wheel does. So this asks for the WHEEL flag alone and lets
+            // the sweep walk past a frame that merely takes the mouse, which is what puts the wheel
+            // through a scroll pane's chrome and into the pane.
+            //
+            // It used to also accept `is_mouse_enabled` as a stand-in, because the loader did not
+            // arm the wheel kind and no frame ever carried the flag. The loader arms it now.
+            model.arena.is_mouse_wheel_enabled(fh)
+                && model.resolved.get(&fh).is_some_and(|r| {
+                    point_in_rect(inset_rect(*r, model.arena.hit_rect_insets(fh)), x, y)
+                })
+                && effective_clip(&model, &scroll_sources, fh)
+                    .is_none_or(|c| point_in_rect(c, x, y))
+        })?;
+        model.frame_to_id.get(&fh).copied()
     }
 
     /// Hit-test the cursor at `(x, y)` and return the **id** of the captured frame, or `None` —
@@ -702,7 +752,7 @@ impl UiScript {
         if let Some(id) = click_id {
             // One click home for the physical and programmatic (`Click()`) paths: gated on a
             // Button's enabled flag, a CheckButton toggles before OnClick fires (button.rs).
-            button::click_button(&self.lua, id, button, down);
+            button::click_button(&self.lua, id, button, down, false);
         }
         // `OnDoubleClick(self, button)` — fired where `OnClick` would have been and instead of it
         // (`0x77938d call [edx+0x98]`, the mouse-UP dispatcher's exclusive second leg). One
@@ -749,7 +799,13 @@ impl UiScript {
     /// [`UiScript::errors`].
     pub fn mouse_wheel(&mut self, x: f32, y: f32, delta: f32) {
         let target: Option<u32> = {
-            let hit = self.hit_test(x, y);
+            // **Wheel-enabled OR mouse-enabled**, not mouse-enabled alone. The reference's wheel
+            // dispatcher `0x7664f0` walks its OWN index and calls the hit probe directly, ignoring
+            // hover, capture and the mouse bit — `EnableMouse` is not a prerequisite
+            // (wow-re `mouse-enable-law.md` §6). Ours went through the mouse hit test, which
+            // coupled the two: correcting the ctor list to the reference's (ScrollFrame is inert
+            // on the mouse bit) silently stopped every scroll pane from taking the wheel.
+            let hit = self.hit_test_wheel(x, y);
             let model = self.model_ref();
             hit.and_then(|id| {
                 let mut h = *model.id_to_frame.get(&id)?;

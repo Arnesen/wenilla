@@ -13,28 +13,45 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// The trade window's load prefix — the app's own order (`ui_script/mod.rs`), members only.
 /// MerchantFrame.xml rides along because TradeFrame.xml reuses its global `BenillaMoney_*` coin
 /// helpers (the two gold displays), so a load error in either fails here.
-const FILES: [&str; 6] = [
+const FILES: [&str; 7] = [
     "Fonts.xml",
     "MoneyFrame.xml",
     "UiPanels.xml",
+    r"Interface\FrameXML\UIPanelTemplates.lua",
+    r"Interface\FrameXML\UIPanelTemplates.xml",
     "GameTooltip.xml",
-    "MerchantFrame.xml",
     "TradeFrame.xml",
 ];
 
 fn load_ui(script: &UiScript) {
     let dir = std::path::Path::new(UI_DIR);
-    let provider = |req: &str| -> Option<Vec<u8>> {
+    // A manifest entry carrying a path separator is the PLAYER's own file and comes off the patch
+    // chain; a bare name is ours, under `assets/ui`. `tests/common` already draws this line — this
+    // binary grew it when 1860 moved `PanelTemplates_*` onto the chain.
+    let chain = benilla_formats::wow_data().and_then(|d| benilla_formats::open_chain(&d).ok());
+    let read = |req: &str| -> Option<Vec<u8>> {
         let norm = req.replace('\\', "/");
+        if norm.contains('/') {
+            if let Some(b) = chain.as_ref().and_then(|c| c.read(&norm).ok()) {
+                return Some(b);
+            }
+        }
         let base = norm.rsplit('/').next().unwrap_or(&norm);
         std::fs::read(dir.join(&norm))
             .or_else(|_| std::fs::read(dir.join(base)))
             .ok()
     };
+    let provider = |req: &str| -> Option<Vec<u8>> { read(req) };
     for file in FILES {
-        let text = std::fs::read_to_string(dir.join(file)).unwrap_or_else(|e| {
-            panic!("reading {file}: {e}");
-        });
+        let bytes = read(file).unwrap_or_else(|| panic!("reading {file}"));
+        // A `.lua` entry is a CHUNK, not a document.
+        if file.to_ascii_lowercase().ends_with(".lua") {
+            script
+                .run_chunk_named(&bytes, &format!("@{file}"))
+                .unwrap_or_else(|e| panic!("{file}: {e}"));
+            continue;
+        }
+        let text = benilla_ui::source::decode(&bytes);
         let doc = benilla_ui::framexml::parse(&text).unwrap_or_else(|e| {
             panic!("parsing {file}: {e}");
         });
@@ -55,6 +72,7 @@ fn item(item_id: u32, name: &str, count: u32, quality: u32) -> TradeSlotItem {
         count,
         quality: Some(quality),
         enchantment: None,
+        link: Some(format!("|cffffffff|Hitem:{item_id}:0:0:0|h[{name}]|h|r")),
     }
 }
 
@@ -79,6 +97,7 @@ fn state() -> TradeState {
 
 #[test]
 fn trade_frame_loads_and_key_regions_exist() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
     load_ui(&s);
     for name in [
@@ -107,6 +126,7 @@ fn trade_frame_loads_and_key_regions_exist() {
 
 #[test]
 fn trade_show_opens_and_both_columns_populate() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_trade(Some(state()));
@@ -172,6 +192,7 @@ fn trade_show_opens_and_both_columns_populate() {
 
 #[test]
 fn enchant_slot_shows_the_not_traded_note() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     let mut st = state();
@@ -190,6 +211,7 @@ fn enchant_slot_shows_the_not_traded_note() {
 
 #[test]
 fn accept_update_drives_the_column_glows() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_trade(Some(state()));
@@ -230,6 +252,7 @@ fn accept_update_drives_the_column_glows() {
 
 #[test]
 fn closing_the_window_queues_the_cancel() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_trade(Some(state()));
@@ -251,6 +274,7 @@ fn closing_the_window_queues_the_cancel() {
 
 #[test]
 fn trade_button_click_queues_accept() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_trade(Some(state()));
@@ -267,6 +291,7 @@ fn trade_button_click_queues_accept() {
 /// keystroke offers the running copper total through SetTradeMoney → the app's SET_TRADE_GOLD.
 #[test]
 fn player_money_input_reflects_then_offers() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_trade(Some(state())); // state().player.gold == 12345 (1g 23s 45c)
@@ -307,6 +332,7 @@ fn player_money_input_reflects_then_offers() {
     // has no purse).
     s.run("GetMoney = function() return 100000000 end").unwrap();
     s.run("TradePlayerInputMoneyGold:SetText('2')").unwrap();
+    s.tick(0.0); // the deferred OnTextChanged drains here (decision 1831)
     assert_eq!(
         s.take_trade_money(),
         Some(2 * 10000 + 23 * 100 + 45),
@@ -321,6 +347,7 @@ fn player_money_input_reflects_then_offers() {
 /// player/recipient name-dispatch, without needing a cursor payload (the empty-cursor clear path).
 #[test]
 fn slot_click_routes_player_to_clear_and_recipient_to_inert() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_trade(Some(state())); // player slot 1 + recipient slot 1 are both filled

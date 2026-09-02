@@ -64,6 +64,7 @@ fn app_with_food_on_the_bar() -> (App, crossbeam_channel::Receiver<ClientCommand
         .init_resource::<UiErrorTexts>()
         // The cast-failure combat-log line (1703) rides the same drain.
         .init_resource::<crate::ui_chat::ChatLog>()
+        .init_resource::<crate::sound::MessageSounds>()
         .insert_resource(ItemDisplays::icons_for_tests(
             ItemDisplayCatalog::from_displays(displays),
         ))
@@ -314,6 +315,7 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
         .init_resource::<UiErrorTexts>()
         // The cast-failure combat-log line (1703) rides the same drain.
         .init_resource::<crate::ui_chat::ChatLog>()
+        .init_resource::<crate::sound::MessageSounds>()
         .insert_resource(NetCommands(tx));
     let mut script = UiScript::new().unwrap();
     script.set_macros(MacroState {
@@ -415,16 +417,10 @@ fn pre_resolved_lines_land_on_the_errors_frame_in_the_arms_colour() {
     {
         let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
         script.set_screen_size(1024.0, 768.0);
-        for file in ["Fonts.xml", "ErrorsFrame.xml"] {
-            let text = std::fs::read_to_string(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("assets/ui")
-                    .join(file),
-            )
-            .unwrap();
-            let doc = benilla_ui::framexml::parse(&text).unwrap();
-            let report = benilla_ui::loader::load(&script, &doc, &|_| None);
-            assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
+        // The errors frame is the reference's own file since 1751 window 14, so this reads both
+        // stores through the one loader that speaks them.
+        for file in ["Fonts.xml", "Interface\\FrameXML\\UIErrorsFrame.xml"] {
+            crate::ui_script::load_ui_for_test(&script, file);
         }
     }
 

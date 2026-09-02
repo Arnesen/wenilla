@@ -928,13 +928,17 @@ pub(super) const INVTYPE_AMMO: u32 = 24;
 ///   actual equip still round-trips through `SMSG_INVENTORY_CHANGE_FAILURE`
 ///   (`EQUIP_ERR_CANT_DUAL_WIELD`) if the class can't. Simpler than threading class into every
 ///   caller for a highlight-only consequence.
-/// - **`INVTYPE_RELIC` answers no slots** (the server's own table gates it per-class onto the
-///   ranged slot for Paladin/Druid/Shaman/Warlock librams/idols/totems): decision 0208 already
-///   established the relic slot is vanilla-UI-invisible (`UnitHasRelicSlot` always false, no
-///   relic slot ever shows on the 1.12 paper doll), so resolving this precisely drives no visible
-///   interaction — a named, harmless gap rather than threading class through for a slot nothing
-///   ever shows.
-pub(super) fn find_equip_slot(inventory_type: u32) -> Vec<u8> {
+/// - **`INVTYPE_RELIC` is CLOSED** (decision 1803, over the gap 1796 named). `has_relic_slot` is
+///   the player's own, read off `ChrClasses.dbc` field 16, and `IsValidForSlot 0x5da1d0`'s
+///   `slot == 0x11` leg is an EQUALITY — it takes the slot iff
+///   `(InventoryType == 28 RELIC) == hasRelicSlot`. So RELIC and the three ranged types are exact
+///   complements on that one slot rather than a union: a druid dragging a bow is offered nothing,
+///   a warrior dragging an idol likewise, and a druid dragging an idol is offered INVSLOT 17.
+///
+///   The dual-wield bullet above is NOT closed by the same threading, which is why it is still
+///   here: "knows dual wield" is a SPELL the player has learned, not a fact about their class, so
+///   it needs the known-spell set rather than the class byte.
+pub(super) fn find_equip_slot(inventory_type: u32, has_relic_slot: bool) -> Vec<u8> {
     // Live-API ids (`char_stats::SLOT_INFO`'s own numbering): wire `EQUIPMENT_SLOT_*` + 1. The
     // ammo slot is the client's own `GetInventorySlotInfo("AmmoSlot")` == 0 (not a real equip slot;
     // ammo loads by entry via `CMSG_SET_AMMO`, decision 0526) — it just names the fit-rule target.
@@ -964,31 +968,36 @@ pub(super) fn find_equip_slot(inventory_type: u32) -> Vec<u8> {
     const BAG3: u8 = 23;
 
     match inventory_type {
-        1 => vec![HEAD],                    // INVTYPE_HEAD
-        2 => vec![NECK],                    // INVTYPE_NECK
-        3 => vec![SHOULDERS],               // INVTYPE_SHOULDERS
-        4 => vec![BODY],                    // INVTYPE_BODY (the shirt)
-        5 | 20 => vec![CHEST],              // INVTYPE_CHEST / INVTYPE_ROBE (same slot)
-        6 => vec![WAIST],                   // INVTYPE_WAIST
-        7 => vec![LEGS],                    // INVTYPE_LEGS
-        8 => vec![FEET],                    // INVTYPE_FEET
-        9 => vec![WRISTS],                  // INVTYPE_WRISTS
-        10 => vec![HANDS],                  // INVTYPE_HANDS
-        11 => vec![FINGER1, FINGER2],       // INVTYPE_FINGER
-        12 => vec![TRINKET1, TRINKET2],     // INVTYPE_TRINKET
-        13 => vec![MAINHAND, OFFHAND],      // INVTYPE_WEAPON (dual-wield simplified, see doc)
-        14 => vec![OFFHAND],                // INVTYPE_SHIELD
-        15 => vec![RANGED],                 // INVTYPE_RANGED
-        16 => vec![BACK],                   // INVTYPE_CLOAK
-        17 => vec![MAINHAND],               // INVTYPE_2HWEAPON
-        18 => vec![BAG0, BAG1, BAG2, BAG3], // INVTYPE_BAG
-        19 => vec![TABARD],                 // INVTYPE_TABARD
-        21 => vec![MAINHAND],               // INVTYPE_WEAPONMAINHAND
-        22 => vec![OFFHAND],                // INVTYPE_WEAPONOFFHAND
-        23 => vec![OFFHAND],                // INVTYPE_HOLDABLE
-        24 => vec![AMMO],                   // INVTYPE_AMMO → the ammo slot (loaded via SET_AMMO)
-        25 => vec![RANGED],                 // INVTYPE_THROWN
-        26 => vec![RANGED],                 // INVTYPE_RANGEDRIGHT
+        1 => vec![HEAD],                // INVTYPE_HEAD
+        2 => vec![NECK],                // INVTYPE_NECK
+        3 => vec![SHOULDERS],           // INVTYPE_SHOULDERS
+        4 => vec![BODY],                // INVTYPE_BODY (the shirt)
+        5 | 20 => vec![CHEST],          // INVTYPE_CHEST / INVTYPE_ROBE (same slot)
+        6 => vec![WAIST],               // INVTYPE_WAIST
+        7 => vec![LEGS],                // INVTYPE_LEGS
+        8 => vec![FEET],                // INVTYPE_FEET
+        9 => vec![WRISTS],              // INVTYPE_WRISTS
+        10 => vec![HANDS],              // INVTYPE_HANDS
+        11 => vec![FINGER1, FINGER2],   // INVTYPE_FINGER
+        12 => vec![TRINKET1, TRINKET2], // INVTYPE_TRINKET
+        13 => vec![MAINHAND, OFFHAND],  // INVTYPE_WEAPON (dual-wield simplified, see doc)
+        14 => vec![OFFHAND],            // INVTYPE_SHIELD
+        // The RANGED slot is the relic slot for Paladin/Shaman/Druid, and `IsValidForSlot
+        // 0x5da1d0`'s `slot == 0x11` leg is an EQUALITY: it takes the slot iff
+        // `(InventoryType == 28 RELIC) == hasRelicSlot`. So the three ranged types and RELIC are
+        // exact complements here, not a union — a druid dragging a bow is offered nothing, and a
+        // warrior dragging an idol likewise (decisions 1796, 1803).
+        15 if !has_relic_slot => vec![RANGED], // INVTYPE_RANGED
+        16 => vec![BACK],                      // INVTYPE_CLOAK
+        17 => vec![MAINHAND],                  // INVTYPE_2HWEAPON
+        18 => vec![BAG0, BAG1, BAG2, BAG3],    // INVTYPE_BAG
+        19 => vec![TABARD],                    // INVTYPE_TABARD
+        21 => vec![MAINHAND],                  // INVTYPE_WEAPONMAINHAND
+        22 => vec![OFFHAND],                   // INVTYPE_WEAPONOFFHAND
+        23 => vec![OFFHAND],                   // INVTYPE_HOLDABLE
+        24 => vec![AMMO],                      // INVTYPE_AMMO → the ammo slot (loaded via SET_AMMO)
+        25 | 26 if !has_relic_slot => vec![RANGED], // INVTYPE_THROWN / INVTYPE_RANGEDRIGHT
+        28 if has_relic_slot => vec![RANGED],  // INVTYPE_RELIC — the same slot, the other way
         // INVTYPE_NON_EQUIP(0), INVTYPE_QUIVER(27), INVTYPE_RELIC(28, see doc), and anything past
         // MAX_INVTYPE(29): not equippable.
         _ => Vec::new(),
@@ -1318,30 +1327,75 @@ mod tests {
     /// `ItemPrototype::GetAllowedEquipSlots` (`Objects/Item.cpp:577-696`).
     #[test]
     fn find_equip_slot_matches_the_vmangos_table() {
-        assert_eq!(find_equip_slot(1), vec![1], "HEAD");
-        assert_eq!(find_equip_slot(2), vec![2], "NECK");
-        assert_eq!(find_equip_slot(4), vec![4], "BODY (shirt)");
-        assert_eq!(find_equip_slot(5), vec![5], "CHEST");
-        assert_eq!(find_equip_slot(20), vec![5], "ROBE aliases CHEST");
-        assert_eq!(find_equip_slot(11), vec![11, 12], "FINGER, two slots");
-        assert_eq!(find_equip_slot(12), vec![13, 14], "TRINKET, two slots");
+        assert_eq!(find_equip_slot(1, false), vec![1], "HEAD");
+        assert_eq!(find_equip_slot(2, false), vec![2], "NECK");
+        assert_eq!(find_equip_slot(4, false), vec![4], "BODY (shirt)");
+        assert_eq!(find_equip_slot(5, false), vec![5], "CHEST");
+        assert_eq!(find_equip_slot(20, false), vec![5], "ROBE aliases CHEST");
         assert_eq!(
-            find_equip_slot(13),
+            find_equip_slot(11, false),
+            vec![11, 12],
+            "FINGER, two slots"
+        );
+        assert_eq!(
+            find_equip_slot(12, false),
+            vec![13, 14],
+            "TRINKET, two slots"
+        );
+        assert_eq!(
+            find_equip_slot(13, false),
             vec![16, 17],
             "WEAPON offers both hands (dual-wield simplified)"
         );
-        assert_eq!(find_equip_slot(14), vec![17], "SHIELD -> off hand");
-        assert_eq!(find_equip_slot(15), vec![18], "RANGED");
-        assert_eq!(find_equip_slot(16), vec![15], "CLOAK -> back");
-        assert_eq!(find_equip_slot(17), vec![16], "2HWEAPON -> main hand only");
-        assert_eq!(find_equip_slot(19), vec![19], "TABARD");
-        assert_eq!(find_equip_slot(21), vec![16], "WEAPONMAINHAND");
-        assert_eq!(find_equip_slot(22), vec![17], "WEAPONOFFHAND");
-        assert_eq!(find_equip_slot(18), vec![20, 21, 22, 23], "BAG");
-        assert_eq!(find_equip_slot(24), vec![0], "AMMO -> the ammo slot (id 0)");
-        // Not equippable: no vanilla paper-doll slot, or a named deferral (quiver/relic).
-        for t in [0u32, 27, 28, 100] {
-            assert!(find_equip_slot(t).is_empty(), "inventory type {t}");
+        assert_eq!(find_equip_slot(14, false), vec![17], "SHIELD -> off hand");
+        assert_eq!(find_equip_slot(15, false), vec![18], "RANGED");
+        assert_eq!(find_equip_slot(16, false), vec![15], "CLOAK -> back");
+        assert_eq!(
+            find_equip_slot(17, false),
+            vec![16],
+            "2HWEAPON -> main hand only"
+        );
+        assert_eq!(find_equip_slot(19, false), vec![19], "TABARD");
+        assert_eq!(find_equip_slot(21, false), vec![16], "WEAPONMAINHAND");
+        assert_eq!(find_equip_slot(22, false), vec![17], "WEAPONOFFHAND");
+        assert_eq!(find_equip_slot(18, false), vec![20, 21, 22, 23], "BAG");
+        assert_eq!(
+            find_equip_slot(24, false),
+            vec![0],
+            "AMMO -> the ammo slot (id 0)"
+        );
+        // Not equippable for anyone: no vanilla paper-doll slot, or a named deferral (quiver).
+        for t in [0u32, 27, 100] {
+            for relic in [false, true] {
+                assert!(find_equip_slot(t, relic).is_empty(), "inventory type {t}");
+            }
+        }
+    }
+
+    /// **INVSLOT 17 is one slot with two meanings, and the flag decides it BOTH ways** —
+    /// `IsValidForSlot 0x5da1d0`'s `slot == 0x11` leg is an equality, not a union
+    /// (decisions 1796/1803). A relic class is offered the slot for a libram and refused it for a
+    /// bow; everyone else the reverse. Getting this half-right — offering relics without
+    /// withdrawing bows — would light the highlight for a druid dragging a bow, which is the one
+    /// case the reference is unambiguous about.
+    #[test]
+    fn the_ranged_slot_takes_a_relic_or_a_weapon_never_both() {
+        const RANGED: u8 = 18;
+        // Paladin / Shaman / Druid.
+        assert_eq!(find_equip_slot(28, true), vec![RANGED], "RELIC");
+        for t in [15u32, 25, 26] {
+            assert!(
+                find_equip_slot(t, true).is_empty(),
+                "a relic class is offered no ranged slot for inventory type {t}"
+            );
+        }
+        // Everyone else.
+        assert!(
+            find_equip_slot(28, false).is_empty(),
+            "RELIC, no relic slot"
+        );
+        for (t, who) in [(15u32, "RANGED"), (25, "THROWN"), (26, "RANGEDRIGHT")] {
+            assert_eq!(find_equip_slot(t, false), vec![RANGED], "{who}");
         }
     }
 

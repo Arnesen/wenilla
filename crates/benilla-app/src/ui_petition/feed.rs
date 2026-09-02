@@ -37,7 +37,6 @@ use bevy::prelude::*;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfGuid, SelfPlayer};
-use crate::ui_chat::ChatLog;
 use crate::ui_items::{find_item, ItemSearch};
 use crate::ui_session::{npc_switched, NpcSession};
 
@@ -68,7 +67,7 @@ pub(super) fn feed_petition(
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     self_guid: Res<SelfGuid>,
     commands: Res<NetCommands>,
-    mut chat_log: ResMut<ChatLog>,
+    mut sink: crate::ui_action::MessageSink,
     mut fed: Local<crate::ui_script::VmMemo<FedPetition>>,
 ) {
     let Some(mut script) = script else {
@@ -79,7 +78,14 @@ pub(super) fn feed_petition(
     // The composed lines, each onto the surface its message record names. Drained before the
     // snapshot so a refusal shows in the same frame as the state change that caused it.
     let composed = std::mem::take(&mut petition.lines);
-    crate::ui_action::show_messages(&mut script, &mut chat_log, "ui_petition", composed);
+    crate::ui_action::show_messages(
+        &mut script,
+        &mut sink,
+        "ui_petition",
+        composed
+            .into_iter()
+            .map(|(key, text)| crate::ui_action::Shown::keyed(key, text)),
+    );
 
     // **Rebuilt every frame, deliberately.** Half of what this window shows arrives from a CACHE,
     // not a packet, and reading that cache is what ISSUES its query (decision 0660's law). So a

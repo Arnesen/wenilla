@@ -259,7 +259,12 @@ pub(crate) fn update_ground_fx_decals(
                 lighting: super::particles::buffer::EffectLighting::None,
                 anchor: decal.center,
                 bias: crate::sky_order::Rung::GROUND_FX,
-                raster_bias: crate::sky_order::Rung::GROUND_FX as i32,
+                // The projector's shared coplanarity margin — NOT `GROUND_FX as i32`, which is a
+                // *sort* rung borrowed for a rasterizer field because the two numbers happened to
+                // coincide. That is the conflation 1806 is about, and it left this lane at +8192,
+                // which the projector's own bake residual exceeds by 1.30× (1817).
+                raster_bias: crate::sky_order::Rung::DECAL_RASTER,
+                raster_slope: 0.0,
                 cam_relative: false,
                 main_entity: entity,
                 light: None,

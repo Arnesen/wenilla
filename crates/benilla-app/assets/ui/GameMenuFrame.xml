@@ -109,9 +109,6 @@
         LOGOUT = LOGOUT or "Logout"
         EXIT_GAME = EXIT_GAME or "Exit Game"
         RETURN_TO_GAME = RETURN_TO_GAME or "Return to Game"
-        CAMP_TIMER = CAMP_TIMER or "%d %s until logout"
-        QUIT_TIMER = QUIT_TIMER or "%d %s until exit"
-        QUIT_NOW = QUIT_NOW or "Exit now"
         CANCEL = CANCEL or "Cancel"
 
         -- One label setter for a button with nothing behind it yet (Edit Mode and Support): set
@@ -122,74 +119,10 @@
             button:Disable()
         end
 
-        -- ── The two logout dialogs (spec: StaticPopup.lua l.564-600) ────────────────────────────
-        -- Both are countdown dialogs: their `text` is a format string the popup engine's per-tick
-        -- branch fills with the remaining time (StaticPopup_OnUpdate's which-list already names CAMP
-        -- and QUIT), so they open blank and count down. `timeout = 20` matches the server's own
-        -- logout timer (vmangos `WorldSession::LogoutRequest` → 20 s), which is what the countdown
-        -- is displaying — the client is not the authority here, it is narrating the server's clock.
-        --
-        -- The asymmetry between them is the spec's: CAMP offers only Cancel (the commented-out
-        -- CAMP_NOW/ForceLogout button is dead in 1.12 — "uncomment once forced logouts are completely
-        -- implemented"), while QUIT offers Exit now + Cancel, because a force-quit needs no server
-        -- round trip.
-        --
-        -- Both entries below are written scalars-first, handlers-last, so the dialog's SHAPE reads
-        -- before its behaviour does.
-
-        -- Dismissing a running countdown means "I didn't mean it": call the logout off. Only while
-        -- it is still RUNNING, though — the popup engine zeroes `timeleft` before hiding a dialog
-        -- that expired, so reaching zero leaves the logout alone. (Backwards, and every logout in
-        -- the field is cancelled by its own dialog at t=0 and the character never leaves.) One
-        -- function because both dialogs mean exactly this; `this` is the popup frame, which the
-        -- engine has bound around the handler.
-        local function CancelLogoutIfStillCounting()
-            if this.timeleft > 0 then
-                CancelLogout()
-            end
-        end
-
-        StaticPopupDialogs["CAMP"] = {
-            text = CAMP_TIMER,
-            button1 = CANCEL,
-            timeout = 20,
-            whileDead = 1,
-            hideOnEscape = 1,
-            OnAccept = function()
-                CancelLogout()
-            end,
-            OnHide = CancelLogoutIfStillCounting,
-        }
-
-        StaticPopupDialogs["QUIT"] = {
-            text = QUIT_TIMER,
-            button1 = QUIT_NOW,
-            button2 = CANCEL,
-            timeout = 20,
-            whileDead = 1,
-            hideOnEscape = 1,
-            -- A force-quit needs no server round trip, so the countdown it was narrating is over
-            -- the moment the button is pressed: zero `timeleft` so the OnHide below stands down.
-            OnAccept = function()
-                ForceQuit()
-                this.timeleft = 0
-            end,
-            OnHide = CancelLogoutIfStillCounting,
-        }
-
-        -- The camp/quit event driver. The ref handles these three in UIParent's own OnEvent
-        -- (UIParent.lua l.304-315); benilla has no UIParent frame, so this is a dedicated hidden
-        -- listener — the BenillaDeleteItemConfirmDriver shape.
-        function BenillaLogoutDriver_OnEvent()
-            if event == "PLAYER_CAMPING" then
-                StaticPopup_Show("CAMP")
-            elseif event == "PLAYER_QUITING" then
-                StaticPopup_Show("QUIT")
-            elseif event == "LOGOUT_CANCEL" then
-                StaticPopup_Hide("CAMP")
-                StaticPopup_Hide("QUIT")
-            end
-        end
+        -- The CAMP/QUIT dialogs and the three-event driver MOVED OUT, to UiPanels.xml — the
+        -- reference's own homes for both (StaticPopup.lua l.564/586; UIParent.lua l.304-315).
+        -- They were here only because this is where they were first needed, and 1751 moving them
+        -- is one less thing to carry when this window follows them onto the chain.
     ]]></Script>
 
     <!-- The era header text size (Classic/Dialog/DialogTemplates.xml + the OnLoad font swap):
@@ -376,20 +309,6 @@
                 if UpdateMicroButtons then UpdateMicroButtons() end
                 if Enable_BagButtons then Enable_BagButtons() end
             </OnHide>
-        </Scripts>
-    </Frame>
-
-    <!-- The camp/quit event listener (the ref's UIParent OnEvent arms — script block above). -->
-    <Frame name="BenillaLogoutDriver" hidden="true">
-        <Size><AbsDimension x="1" y="1"/></Size>
-        <Anchors><Anchor point="TOPLEFT"/></Anchors>
-        <Scripts>
-            <OnLoad>
-                self:RegisterEvent("PLAYER_CAMPING")
-                self:RegisterEvent("PLAYER_QUITING")
-                self:RegisterEvent("LOGOUT_CANCEL")
-            </OnLoad>
-            <OnEvent>BenillaLogoutDriver_OnEvent()</OnEvent>
         </Scripts>
     </Frame>
 </Ui>

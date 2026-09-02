@@ -4,8 +4,8 @@
 //!
 //! The pinned law, transcribed:
 //! - **Master toggles** (`[0xc4da34]` bit 0 enemy / bit 3 friendly; real-client boot default
-//!   **OFF** — ours boots enemy ON, friendly OFF (faithful): director calls, 0167 + 0599,
-//!   [`VPlateMode::default`]): the `ShowNameplates`/`ShowFriendNameplates` script pairs —
+//!   **OFF for both**, and since 1804 ours too — [`VPlateMode::default`]): the
+//!   `ShowNameplates`/`ShowFriendNameplates` script pairs —
 //!   bound to **V / Shift-V** by FrameXML `Bindings.xml` (asset-sourced default, like TAB).
 //! - **Gate**: never the own unit; never `NOT_SELECTABLE` (UNIT_FIELD_FLAGS bit 25); the
 //!   enemy/friendly split is **`CanAttack(localPlayer → unit)`**, NOT a reaction threshold
@@ -94,12 +94,12 @@ use benilla_world::view::WorldCamera;
 /// the plate's larger size instead of bilinear-magnified soft (0188).
 mod border;
 
-/// The master bitmask (`[0xc4da34]`): bit 0 enemy plates, bit 3 friendly. The real client boots
-/// with both OFF. Ours boots **enemy ON** (the 0167 director call — combat plates from the first
-/// frame, a deliberate deviation) and **friendly OFF** (faithful — restored by the 0599 director
-/// call, which also gives friendly speech bubbles room: the faithful plate-blocks-bubble gate
-/// would otherwise suppress them). Both stay V / Shift-V togglable. `pub(crate)` so the capture
-/// harness can force plates on for the `vplates` scenario.
+/// The master bitmask (`[0xc4da34]`): bit 0 enemy plates, bit 3 friendly. **Both boot OFF, the
+/// real client's own state** — see the derivation below. Enemy plates booted ON here from the 0167
+/// director call (combat plates from the first frame) until 1804; friendly has been OFF since the
+/// 0599 call, which also gives friendly speech bubbles room, because the faithful
+/// plate-blocks-bubble gate would otherwise suppress them. Both stay V / Shift-V togglable.
+/// `pub(crate)` so the capture harness can force plates on for the `vplates` scenario.
 ///
 /// **This resource is the truth; the CVars are its persistence** (the [`CVAR_ENEMIES`] /
 /// [`CVAR_FRIENDS`] pair, [`crate::cvars`]). That mirrors the reference's own two-store shape: the
@@ -109,7 +109,18 @@ mod border;
 /// no such string exists in the binary), so the names are the LATER-era engine's, the same posture
 /// as `autoLootDefault` — benilla's persistence lives in the CVar store (0954), and a setting with
 /// no 1.12 CVar takes the era name rather than inventing one.
-#[derive(Resource)]
+///
+/// **Both boot OFF — the reference's own state**, and verified on both of its halves, because
+/// either alone would be half an answer: the engine bitmask `[0xc4da34]` starts clear, and
+/// FrameXML's `UIOptionsFrame_Init` sets `NAMEPLATES_ON = nil` / `FRIENDNAMEPLATES_ON = nil` and
+/// only calls `ShowNameplates()` when the SAVED value is truthy (the install's own
+/// `UIOptionsFrame.lua` l.180-183, l.769-775). So a fresh 1.12 client draws no plates until you
+/// press V. Enemy plates shipped ON here from 0167 until 1804 — the same class of call as the
+/// overhead-name pair (`nameplates::NameConfig`): useful while the feature was being built, never
+/// re-weighed as a default. The `Default` is derived now that the claim is "both false", and it is
+/// still a *claim*: `cvars::tests` welds it to the registered `nameplateShowEnemies`/`Friendly`
+/// defaults and asserts the pair is off in as many words, so the derive cannot drift quietly.
+#[derive(Resource, Default)]
 pub(crate) struct VPlateMode {
     pub(crate) enemies: bool,
     pub(crate) friends: bool,
@@ -120,15 +131,6 @@ pub(crate) struct VPlateMode {
 /// never drift apart.
 pub(crate) const CVAR_ENEMIES: &str = benilla_ui::script::CVAR_NAMEPLATE_ENEMIES;
 pub(crate) const CVAR_FRIENDS: &str = benilla_ui::script::CVAR_NAMEPLATE_FRIENDS;
-
-impl Default for VPlateMode {
-    fn default() -> Self {
-        Self {
-            enemies: true,
-            friends: false,
-        }
-    }
-}
 
 /// The units carrying a live plate this frame — the ShouldShowName exclusivity verdict the
 /// overhead-name driver reads (a plated unit never also draws its floating name).
@@ -1113,27 +1115,44 @@ mod tests {
     /// what dirties `config.toml` and what the Nameplates page's checkbox reads next time it
     /// opens. Without the mirror, plates toggled by key would silently revert at every launch and
     /// the window would show the wrong state.
+    ///
+    /// The table is seeded at `"0"/"0"` because that is what the app seeds it with: both plate
+    /// CVars boot at the reference's OFF since 1804 ([`VPlateMode::default`]), so the first V of a
+    /// session turns plates ON. The mirror is direction-blind, and the second press below is here
+    /// to say so.
     #[test]
     fn the_v_key_mirrors_into_the_cvar_table() {
         use crate::bindings::{cmd, BindingsState};
         let mut app = App::new();
         let mut script = benilla_ui::script::UiScript::new().unwrap();
-        script.register_cvars([(CVAR_ENEMIES, "1"), (CVAR_FRIENDS, "0")]);
+        script.register_cvars([(CVAR_ENEMIES, "0"), (CVAR_FRIENDS, "0")]);
         app.add_systems(Update, toggle_vplates)
             .init_resource::<VPlateMode>()
             .insert_non_send_resource(script)
             .insert_resource(BindingsState::test_fired(&[cmd::NAMEPLATES]));
         app.update();
-        assert!(!app.world().resource::<VPlateMode>().enemies, "V turns off");
+        assert!(app.world().resource::<VPlateMode>().enemies, "V turns on");
         let mut script = app
             .world_mut()
             .non_send_resource_mut::<benilla_ui::script::UiScript>();
         assert_eq!(
             script.take_cvar_changes(),
-            vec![(CVAR_ENEMIES.to_string(), "0".to_string())],
+            vec![(CVAR_ENEMIES.to_string(), "1".to_string())],
             "the change queues, so the host dirties the config file"
         );
         assert_eq!(script.cvar(CVAR_FRIENDS).as_deref(), Some("0"), "untouched");
+
+        // And back: the same key mirrors the OFF as an engine write too.
+        app.world_mut()
+            .insert_resource(BindingsState::test_fired(&[cmd::NAMEPLATES]));
+        app.update();
+        assert!(!app.world().resource::<VPlateMode>().enemies, "V turns off");
+        assert_eq!(
+            app.world_mut()
+                .non_send_resource_mut::<benilla_ui::script::UiScript>()
+                .take_cvar_changes(),
+            vec![(CVAR_ENEMIES.to_string(), "0".to_string())]
+        );
 
         // Shift-V is the other bit, and only the other bit.
         app.world_mut()

@@ -1125,6 +1125,39 @@ impl Player {
         self.face_yaw += radians;
     }
 
+    /// Aim the avatar's **mover pitch** — the scripted dive's one lever (`capture::probe_pitch`),
+    /// the twin of [`Self::turn_aim`] and for the same reason.
+    ///
+    /// The only writer of this field in gameplay is the mouse-look push in
+    /// `controller`, which needs a real held mouse button (`mouselook`) and a moving OS cursor
+    /// inside the viewport. Neither is available to an unfocused probe window, so before this
+    /// there was **no way to make a benilla client swim nose-up or nose-down without a human on
+    /// the mouse** — which is why the observed-swimmer tilt (decision 0464 TU-A) could ship, and
+    /// sit for weeks, with nothing but the director's eye able to say whether it worked.
+    ///
+    /// Writes the same field `SetPitch 0x7c6f70` writes, under the same ±89°
+    /// [`MOUSELOOK_PITCH_CLAMP`], so from here on this is the identical path a real mouse-aimed
+    /// dive takes: the swim frame's travel basis, the body pose, and the wire tail all read this
+    /// one value.
+    ///
+    /// Not a *byte* copy of `SetPitch`, and deliberately: that store is epsilon-gated — it commits
+    /// iff `|new − old| >= [0x8026bc] = 2^-20`, the `==` case included (a parity test, wow-re
+    /// `system/collision/scratch/create-block-swim-pitch.md`). Reproducing a 1e-6 rad deadband in
+    /// an instrument would buy nothing and would make a slow scripted sweep stutter; the gate is
+    /// gameplay's to model on the mouse-look push if it ever matters, which at that magnitude it
+    /// cannot.
+    /// Returns what was actually stored, which is the clamped value — so an instrument reports the
+    /// aim the mover *has* rather than the one it asked for. A sweep that runs past ±89° otherwise
+    /// logs a number the body never held.
+    pub(crate) fn aim_pitch(&mut self, radians: f32) -> f32 {
+        self.mover_pitch = radians.clamp(-MOUSELOOK_PITCH_CLAMP, MOUSELOOK_PITCH_CLAMP);
+        // The mouse-look push is edge-triggered on the camera pitch it last saw; parking that at
+        // the value we just wrote keeps a *real* mouse-look from re-pushing an unchanged camera
+        // over the top of the script on the next frame.
+        self.aim_pitch_seen = self.mover_pitch;
+        self.mover_pitch
+    }
+
     /// The character's *facing* (Bevy yaw, radians) — the aim, kept in sync with the camera by
     /// right-drag/movement. This is the unit's orientation as sent to the server, distinct from the
     /// rendered body heading (`model_yaw`, which a strafe rotates). The 3D-audio listener panning

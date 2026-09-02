@@ -11,12 +11,14 @@
 //!   adds the client's emissive lift to the lighting sum when set. Orthogonal by construction:
 //!   no payload mode ever sets bit 31, and the shader masks it off before reading the payload —
 //!   so the untagged-⇒-opaque `0` sentinel still works on the masked value.
-//! - **Interior fog** ([`INTERIOR_FOG_BIT`], bit 30): this instance's model stands in a WMO
-//!   interior, so the shader fogs it with the INTERIOR triple (shared-light rows 18-19) instead of
-//!   the scene fog — the reference stages a unit's fog by the unit's OWN interior classification
-//!   (`0x71c110` → collector `+0x184..`, lane by `[node+0xc]`; wow-re `m2-unit-interior-fog.md`).
-//!   Carried by BOTH indoor laws: [`probe_bits`] bakes it in, and the entity classifier ORs it
-//!   onto the Matte (day/night) payload. Masked off with bit 31 before the payload decode.
+//! - **Interior fog** ([`INTERIOR_FOG_BIT`], bit 30): this instance draws with the INTERIOR fog
+//!   triple (shared-light rows 18-19) instead of the scene fog. **Two conjuncts, never one**: the
+//!   model must stand in a WMO interior (the reference's per-unit classification `0x71c110` →
+//!   collector `+0x184..`, lane by `[node+0xc]&2`) *and* the room it attached to must be on the
+//!   camera's `[0xca7f00]` chain this frame (`[P+0x98] != 0`, decision 1792 §4). Both writers
+//!   below decide it that way — the classifier for entity parts, `apply_model_visibility` for
+//!   room-bound WMO content — through [`with_interior_fog`]. Masked off with bit 31 before the
+//!   payload decode.
 //! - **Instance slot** (bits 19..=29, BOTH payload modes — decisions 0720, 0812, 0820): the
 //!   per-instance index into the shared buffer's slot-keyed regions. `0` is the world's shared
 //!   no-instance sentinel (terrain, WMO, doodads, clutter, and every part of a rig-less model). Two
@@ -63,11 +65,17 @@
 //!    entities out (`Without<RenderFade>`, `Without<PendingAppearFade>`). It writes through
 //!    [`with_alpha`], so the shade, probe-slot and rig fields survive a fade.
 //! 2. `interior::classify_entity_interior` is the owner of the **light law** for interior-capable
-//!    parts (`InteriorLit` holders) — the payload's non-alpha fields and [`INTERIOR_FOG_BIT`]:
-//!    probe slot + fog bit on the Bake law, fog bit alone on the Matte law, plain payload outdoors
-//!    (dropping the shade byte — the shade writer below re-asserts it the same frame, ordered
-//!    after). Its whole-payload writes go through [`with_interior_probe`] /
-//!    [`with_exterior_reset`], which carry the rig **and alpha** fields.
+//!    parts (`InteriorLit` holders) — the payload's non-alpha fields (probe slot on the Bake law,
+//!    plain payload otherwise, dropping the shade byte, which the shade writer below re-asserts
+//!    the same frame, ordered after) **and** [`INTERIOR_FOG_BIT`] on that same population. Its
+//!    whole-payload writes go through [`with_interior_probe`] / [`with_exterior_reset`], which
+//!    carry the rig **and alpha** fields, and it then sets the flag through [`with_interior_fog`].
+//!
+//!    The law and the flag are **two questions with two answers**: the law is where the part
+//!    stands (its own down-ray, re-asked only when it moves), the flag is whether that room is on
+//!    the camera's chain (re-read every frame, because the camera moves when the part does not).
+//!    An exterior-law part is never fogged; an indoor-law one is fogged only while its room's gate
+//!    is on.
 //!
 //!    It is **not** filtered by fade state (decision 0755): the light law and the fade alpha are
 //!    orthogonal, so 1 and 2 are deconflicted by *field*, not by lockout — the law follows a part
@@ -77,7 +85,13 @@
 //!    laws in a single frame the instant the ramp latched.
 //! 3. `debug_panel::apply_model_visibility` drives the small-prop distance fade (`DoodadFade`
 //!    holders) + glow-card dimming; `DoodadFade` is **never attached** to a lit interior prop
-//!    (spawn-time exclusion in `terrain_stream`), so 2 and 3 are disjoint.
+//!    (spawn-time exclusion in `terrain_stream`), so 2 and 3 are disjoint. The same system also
+//!    owns [`INTERIOR_FOG_BIT`] on **room-bound WMO content** — anything carrying a
+//!    `WmoGroupVis`: a building's group geometry, its doodad props, and the merged blobs of
+//!    either. That is the client's per-group `[0xca7f00]` gate, whose population is disjoint from
+//!    2's by construction (a WMO part is never classified — it holds no `InteriorLit`) and which
+//!    writes through [`with_interior_fog`], so the probe slot a prop was spawned with survives
+//!    the room turning its fog on and off.
 //! 4. `player::apply_self_model_fade` (the zoom-to-first-person feather) runs **after** 1–3 and wins
 //!    on the self body submeshes' alpha while feathering; on the frame it ends it restores the
 //!    alpha field itself and hands the material back to the part's law (it cannot lean on 2 to
@@ -104,12 +118,16 @@
 pub const HIGHLIGHT_BIT: u32 = 0x8000_0000;
 
 /// Bit 30 of the `MeshTag`: the **interior-fog** flag — fog this instance with the interior
-/// triple (shared-light rows 18-19, the camera-crossfaded MFOG) instead of the scene fog. The
-/// entity classifier (`crate::interior`) owns it: set on both indoor laws (Bake via
-/// [`probe_bits`], Matte by OR), cleared on the exterior law's payload reset. At camera-out the
-/// interior triple EQUALS the scene triple (the reference's t=0 lerp), so the bit only ever
-/// diverges the fog while the camera is inside a fogged WMO — exactly the byte semantics
-/// (wow-re `m2-unit-interior-fog.md`).
+/// triple (shared-light rows 18-19, the camera-crossfaded MFOG) instead of the scene fog. Two
+/// owners over disjoint populations, both applying the same two-conjunct law (see the module doc):
+/// `crate::interior` for entity parts, `apply_model_visibility` for room-bound WMO content.
+///
+/// At camera-out the interior triple EQUALS the scene triple (the reference's t=0 lerp), so the
+/// bit cannot diverge the fog unless the camera is inside a fogged WMO. That is why it took until
+/// B335 to matter — and why the chain conjunct is the rest of the story: with the camera inside a
+/// building, "inside the same building" is *not* the same room-complex, and a unit two courtyards
+/// away wore 95 %-saturated MFOG while the walls behind it wore none (wow-re
+/// `m2-unit-interior-fog.md`; decisions 1787, 1792).
 pub(crate) const INTERIOR_FOG_BIT: u32 = 0x4000_0000;
 
 /// Bits 0..=5 of BOTH payload modes: the fade alpha as a 6-bit fraction (`63` = opaque).
@@ -129,9 +147,16 @@ const RIG_SHIFT: u32 = 19;
 pub const MAX_RIG_SLOTS: usize = 1 << 11;
 
 /// An interior-probe payload constructor for RIG-LESS spawns (the static-prop spawner): the slot
-/// in bits 6..=18 + an opaque alpha field + the [`INTERIOR_FOG_BIT`] (a probe payload always
-/// means the model stands indoors). Rig-carrying writers (the entity classifier) go through
-/// [`with_interior_probe`] instead, which preserves the rig and alpha fields.
+/// in bits 6..=18 + an opaque alpha field + the [`INTERIOR_FOG_BIT`]. Rig-carrying writers (the
+/// entity classifier) go through [`with_interior_probe`] instead, which preserves the rig and
+/// alpha fields.
+///
+/// It sets the fog bit where `with_interior_probe` leaves it alone, and the difference is which
+/// population each serves. This is a **spawn** value for room-bound WMO content, whose bit
+/// `apply_model_visibility` then owns and rewrites every frame from the room's gate — except for
+/// an unnamed prop that no group's MODR references, which carries no `WmoGroupVis`, is never
+/// visited by that writer, and therefore keeps this value for its whole life (1787 §5). Set is
+/// what that population has always had.
 pub(crate) fn probe_bits(slot: u16) -> u32 {
     INTERIOR_FOG_BIT | (u32::from(slot) << PROBE_SHIFT) | alpha_bits(1.0)
 }
@@ -156,8 +181,13 @@ fn carried_alpha(tag: u32) -> u32 {
 /// else — the classifier owns the rest of the payload when it fires): the entity classifier's
 /// Bake-law write for skinned unit parts, whose rig slot must ride through the indoor/outdoor
 /// transitions and whose fade alpha must ride through a mid-ramp re-lane.
+///
+/// **Payload only — it does not touch [`INTERIOR_FOG_BIT`]**, unlike its spawn-side sibling
+/// [`probe_bits`]. Standing indoors is necessary for a part's fog but not sufficient: the room must
+/// also be on the camera's `[0xca7f00]` chain this frame (decision 1792 §4), so the classifier
+/// composes this with [`with_interior_fog`] and the bit has exactly one decision point.
 pub(crate) fn with_interior_probe(tag: u32, slot: u16) -> u32 {
-    INTERIOR_FOG_BIT | (tag & RIG_MASK) | (u32::from(slot) << PROBE_SHIFT) | carried_alpha(tag)
+    (tag & RIG_MASK) | (u32::from(slot) << PROBE_SHIFT) | carried_alpha(tag)
 }
 
 /// Rewrite a tag as a fresh exterior payload, preserving the rig and alpha fields: the
@@ -214,6 +244,18 @@ pub fn alpha_bits(alpha: f32) -> u32 {
         1u32
     } else {
         ((alpha.min(1.0) * ALPHA_MAX).round() as u32).max(1)
+    }
+}
+
+/// Set or clear [`INTERIOR_FOG_BIT`] alone, preserving the whole payload and the highlight bit —
+/// the room-bound writer's read-modify-write. The payload is untouched on purpose: a WMO interior
+/// prop's probe slot says how it is LIT, and the client's `[0xca7f00]` decides only which fog
+/// TRIPLE its batch is pushed with. The `0` sentinel survives too, because the shader masks bits
+/// 30/31 off before testing it.
+pub(crate) fn with_interior_fog(tag: u32, on: bool) -> u32 {
+    match on {
+        true => tag | INTERIOR_FOG_BIT,
+        false => tag & !INTERIOR_FOG_BIT,
     }
 }
 
@@ -383,7 +425,11 @@ mod tests {
         let indoor = with_interior_probe(spawn, 4321); // the classifier's Bake law (writer 2)
         assert_eq!(rig_of(indoor), 1000);
         assert_eq!((indoor & PROBE_MASK) >> PROBE_SHIFT, 4321);
-        assert_eq!(indoor & INTERIOR_FOG_BIT, INTERIOR_FOG_BIT);
+        assert_eq!(
+            indoor & INTERIOR_FOG_BIT,
+            0,
+            "payload only — the flag is decided apart"
+        );
         let outdoor = with_exterior_reset(indoor); // …and its outdoor reclaim
         assert_eq!(rig_of(outdoor), 1000);
         assert_eq!(outdoor & (PROBE_MASK | INTERIOR_FOG_BIT), 0);
@@ -396,7 +442,7 @@ mod tests {
 
     #[test]
     fn interior_fog_bit_survives_the_field_writers() {
-        // The bit is owned by the classifier's whole-payload writes; the alpha/shade
+        // The bit is set by its owners through `with_interior_fog`; the alpha/shade
         // read-modify-writes must carry it (a feathering or MCSH-ramping indoor unit keeps
         // its room fog).
         let t = INTERIOR_FOG_BIT | alpha_bits(1.0);
@@ -425,14 +471,14 @@ mod tests {
         );
         assert_eq!((indoor & PROBE_MASK) >> PROBE_SHIFT, 1234);
         assert_eq!(rig_of(indoor), 7);
-        assert_eq!(indoor & INTERIOR_FOG_BIT, INTERIOR_FOG_BIT);
         let outdoor = with_exterior_reset(indoor);
         assert_eq!(outdoor & ALPHA_MASK, mid_ramp, "and the reclaim too");
         assert_eq!(rig_of(outdoor), 7);
         assert_eq!(outdoor & (PROBE_MASK | INTERIOR_FOG_BIT), 0);
-        // A settled (opaque) part is unaffected — the steady state still reads exactly as before.
+        // A settled (opaque) part is unaffected — the steady state still reads exactly as before,
+        // barring the flag the two constructors deliberately differ on (see `probe_bits`).
         assert_eq!(
-            with_interior_probe(alpha_bits(1.0), 1234),
+            with_interior_fog(with_interior_probe(alpha_bits(1.0), 1234), true),
             probe_bits(1234),
             "an opaque part's Bake payload is unchanged"
         );

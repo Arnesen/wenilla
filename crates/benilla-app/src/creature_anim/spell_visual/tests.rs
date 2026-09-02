@@ -14,7 +14,10 @@ use benilla_formats::{SpellCatalog, SpellDisplay, SpellVisualCatalog, VisualKit,
 use super::super::{
     CastEvent, CastEventKind, CastHold, EmoteAnim, RangedHold, SheathRequest, WoundAnim,
 };
-use super::{route_cast_visuals, KitPush, MissileSpawn, SpellKitFx, SpellKitSound, SpellVisuals};
+use super::{
+    route_cast_visuals, KitPush, MissileSpawn, SpellKitFx, SpellKitShake, SpellKitSound,
+    SpellVisuals,
+};
 use crate::creature_anim::SpellGoTargets;
 
 /// Demon Armor's real chain shape (5875 `spellvis 706`): visual 130 → precast kit 217, anim 52 —
@@ -40,6 +43,7 @@ fn app() -> App {
         .add_message::<EmoteAnim>()
         .add_message::<WoundAnim>()
         .add_message::<SpellKitSound>()
+        .add_message::<SpellKitShake>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
@@ -200,6 +204,7 @@ fn precast_kit_sound_rings_once_at_start() {
         .add_message::<EmoteAnim>()
         .add_message::<WoundAnim>()
         .add_message::<SpellKitSound>()
+        .add_message::<SpellKitShake>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
@@ -484,7 +489,8 @@ fn aura_state_kit_arms_persistent_and_reaps_on_aura_end() {
     // sound leg (0852). Food's kit 409 carries neither, so nothing is asserted here — the
     // messages just have to exist for the writers.
     app.add_message::<crate::aura_visual::AuraProc>();
-    app.add_message::<SpellKitSound>();
+    app.add_message::<SpellKitSound>()
+        .add_message::<SpellKitShake>();
     app.init_resource::<FxLog>();
     app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables_with_paths(
         HashMap::from([(
@@ -614,6 +620,7 @@ fn missile_spawn_defers_iff_the_cast_kit_animates() {
         .add_message::<EmoteAnim>()
         .add_message::<WoundAnim>()
         .add_message::<SpellKitSound>()
+        .add_message::<SpellKitShake>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
@@ -725,6 +732,7 @@ fn a_targetless_dest_go_spawns_a_ground_missile_whose_arrival_sounds_at_the_poin
         .add_message::<EmoteAnim>()
         .add_message::<WoundAnim>()
         .add_message::<SpellKitSound>()
+        .add_message::<SpellKitShake>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
@@ -1197,6 +1205,7 @@ fn real_shooter(weapon: &RealRanged) -> Option<(App, Entity)> {
         .add_message::<EmoteAnim>()
         .add_message::<WoundAnim>()
         .add_message::<SpellKitSound>()
+        .add_message::<SpellKitShake>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()

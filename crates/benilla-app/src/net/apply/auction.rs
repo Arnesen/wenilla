@@ -208,7 +208,7 @@ pub(super) fn auction_removed_notification(item_entry: u32, auction: &mut Auctio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui_action::MsgKind;
+    use benilla_ui::messages::MsgKind;
 
     fn keys(auction: &AuctionOpen) -> Vec<(&'static str, MsgKind, Option<u32>)> {
         auction

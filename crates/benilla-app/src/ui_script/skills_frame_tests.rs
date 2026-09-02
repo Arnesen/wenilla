@@ -11,26 +11,13 @@
 //! descriptor is (`benilla-ui`'s `SkillEntry::mono`; wow-re `0x4d3610`'s `4d38b1` branch). A
 //! hunter's `Beast Mastery` on vmangos arrives as `300/300` and must still read gray and
 //! numberless, exactly as it does in the real client.
+//!
+//! **The window around the page is the reference's own since 1751** — `CharacterFrame.xml` and
+//! `PaperDollFrame.xml` off the player's chain — so every test that opens the page loads
+//! [`super::test_ui::CHARACTER_UI`] and opens with `wow_data_or_skip!()`. The page itself
+//! (`assets/ui/SkillFrame.xml`) is still ours.
 
-use benilla_ui::script::{QuadContent, SkillEntry, SkillsState, UiScript};
-
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error (the
-/// character/spellbook tests' loader, duplicated so this file is self-contained).
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use benilla_ui::script::{QuadContent, SkillEntry, SkillsState, UiScript, UnitState};
 
 fn skill(
     skill_id: u32,
@@ -61,25 +48,37 @@ fn skill(
 /// The Skills page, shown, with one line of each shape — a hunter's real vmangos numbers:
 /// `Beast Mastery 300/300` (single-rank, `SkillRaceClassInfo` 0x410), `Defense 12/60` (a normal
 /// weapon line), `Cloth 1/1` (an armor proficiency the server itself caps).
+///
+/// The window around the page is the reference's own since 1751, so the file list is
+/// [`super::test_ui::CHARACTER_UI`] — which already carries `SkillFrame.xml` (stock
+/// `CharacterFrame_ShowSubFrame` hides all five pages by name, unguarded) and the
+/// `UIPanelTemplates.xml` this list learned by hand a year ago: a MISSING template is a loader
+/// *warning*, not an error, so an under-loaded list passes and then fails later on geometry that
+/// silently never got built (`SkillDetailScrollFrame` inherits `UIPanelScrollFrameTemplate`).
+/// [`super::test_ui::load_ui_strict`] is that lesson made into a check.
 fn shown_skills_page() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    // UIPanelTemplates.xml is NOT optional even though this list ran without it for a year: a
-    // MISSING template is a loader *warning*, not an error, so an under-loaded list passes the
-    // assert in load_xml and then fails later on geometry that silently never got built.
-    // SkillDetailScrollFrame inherits UIPanelScrollFrameTemplate from that file.
-    for f in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        "GameTooltip.xml",
-        "ScrollTemplates.xml",
-        "UIPanelTemplates.xml",
-        "CharacterFrame.xml",
-        "SkillFrame.xml",
-    ] {
-        load_xml(&s, f);
+    for f in super::test_ui::CHARACTER_UI {
+        super::test_ui::load_ui_strict(&s, f);
     }
+    // A player behind the window, carrying BOTH halves of the race and class pairs:
+    // `UnitRace`/`UnitClass` answer `(localized, file)` or `nil, nil` — the binding `zip`s them —
+    // and stock `PaperDollFrame_SetLevel` formats level, race and class into `CharacterLevelText`
+    // unguarded (`PaperDollFrame.lua:100-104`) every time this window is shown. Ours never did,
+    // which is why this page could be opened with no player at all.
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            exists: true,
+            level: 60,
+            race: Some("Tauren".into()),
+            race_file: Some("Tauren".into()),
+            class: Some("Hunter".into()),
+            class_file: Some("HUNTER".into()),
+            ..UnitState::default()
+        }),
+    );
     s.set_skills(SkillsState {
         entries: vec![
             skill(50, "Beast Mastery", 300, 300, true, (7, "Class Skills", 2)),
@@ -105,6 +104,24 @@ fn row(s: &mut UiScript, i: u32) -> (String, [f32; 4]) {
     (text, [c.0, c.1, c.2, c.3])
 }
 
+/// The quads **this page** draws — `s.extract()` narrowed to targets whose nearest named owner is
+/// one of the page's own frames.
+///
+/// Not a convenience: since 1751 the window around the page is the reference's own, so a test VM
+/// carries the whole [`super::test_ui::CHARACTER_UI`] — the action bar, the micro menu and the unit
+/// frames are loaded and *visible*, and their quads land in the same extract. An unfiltered
+/// "nothing draws at alpha 0.5" over that list asserts something about the action bar, not about
+/// this page's troughs.
+fn page_quads(s: &UiScript) -> Vec<benilla_ui::script::ExtractedQuad> {
+    s.extract()
+        .into_iter()
+        .filter(|q| {
+            s.target_owner_name(q.target)
+                .is_some_and(|n| n.starts_with("Skill"))
+        })
+        .collect()
+}
+
 /// Row slot `i`'s **trough** colour — the `$parentBackground` texture behind the fill, which the
 /// ref recolours per branch alongside the fill (`SkillFrame.lua:158` normal / `:167` proficiency).
 fn row_bg(s: &mut UiScript, i: u32) -> [f32; 4] {
@@ -118,6 +135,7 @@ fn row_bg(s: &mut UiScript, i: u32) -> [f32; 4] {
 
 #[test]
 fn a_single_rank_line_paints_gray_with_no_rank_text() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = shown_skills_page();
     assert!(
         s.eval::<bool>("return SkillFrame:IsVisible()").unwrap(),
@@ -158,8 +176,7 @@ fn a_single_rank_line_paints_gray_with_no_rank_text() {
     // — a real texel — and the vertex colour MULTIPLIES it, alpha included (the composition law,
     // `benilla-ui` `script::tests::regions`): the proficiency's white reaches the screen at
     // `0.2 x 0.5 = 0.1`, not 0.5. Every solid-colour quad this page emits is one of these troughs.
-    let solids: Vec<[f32; 4]> = s
-        .extract()
+    let solids: Vec<[f32; 4]> = page_quads(&s)
         .iter()
         .filter_map(|q| match &q.content {
             QuadContent::Texture {
@@ -311,6 +328,7 @@ fn a_real_hunters_block_lists_exactly_what_the_reference_client_lists() {
 /// (80x22 centred on the page's TOPLEFT + (305,-422)), and that it closes the window.
 #[test]
 fn the_pages_close_button_sits_where_the_reference_seats_it_and_closes_the_window() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = shown_skills_page();
 
     assert!(
@@ -346,18 +364,24 @@ fn the_pages_close_button_sits_where_the_reference_seats_it_and_closes_the_windo
     );
 
     // Its label is the CLOSE global string's seat, in the panel-button gold.
-    let label = s
-        .extract()
+    // **"Close", not "CLOSE".** An XML `text=` attribute is a GlobalStrings LOOKUP, not a literal
+    // (`loader::Loader::resolve_text`, wow-re `rf28-typed-widget-loadxml.md` l.36 —
+    // `FrameScript_GetText 0x703bf0`), and `CLOSE = "Close"` (`GlobalStrings.lua:760`). This test
+    // read "CLOSE" while the page's list carried no `GlobalStrings.lua`: it was asserting our
+    // loader's miss-fallback (the LITERAL, a deliberate divergence for benilla-authored files),
+    // not the label the reference client draws. [`super::test_ui::CHARACTER_UI`] loads the
+    // player's own strings first, as the app does, so this is the real label now.
+    let label = page_quads(&s)
         .iter()
         .find_map(|q| match &q.content {
             QuadContent::Text {
                 text: Some(t),
                 color,
                 ..
-            } if t == "CLOSE" => Some(*color),
+            } if t == "Close" => Some(*color),
             _ => None,
         })
-        .expect("the CLOSE label draws");
+        .expect("the Close label draws");
     assert_eq!(
         label,
         Some([1.0, 0.82, 0.0, 1.0]),
@@ -384,10 +408,12 @@ fn the_pages_close_button_sits_where_the_reference_seats_it_and_closes_the_windo
 /// cap), not 3px above it, which is where the offset copied from `TrainerFrame.xml` put it.
 #[test]
 fn the_collapse_all_fold_wears_the_row_font_and_the_references_seat() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = shown_skills_page();
 
-    let label = s
-        .extract()
+    // "All", not "ALL" — the same GlobalStrings lookup as the CLOSE button above
+    // (`ALL = "All"`, `GlobalStrings.lua:45`). The face is what this test is about, not the word.
+    let label = page_quads(&s)
         .iter()
         .find_map(|q| match &q.content {
             QuadContent::Text {
@@ -395,10 +421,10 @@ fn the_collapse_all_fold_wears_the_row_font_and_the_references_seat() {
                 color,
                 font_height,
                 ..
-            } if t == "ALL" => Some((*color, *font_height)),
+            } if t == "All" => Some((*color, *font_height)),
             _ => None,
         })
-        .expect("the ALL label draws");
+        .expect("the All label draws");
     assert_eq!(
         label,
         (Some([1.0, 1.0, 1.0, 1.0]), Some(12.0)),
@@ -439,6 +465,7 @@ fn the_collapse_all_fold_wears_the_row_font_and_the_references_seat() {
 /// reference's, and only the first is what a cold load sees.
 #[test]
 fn the_expand_tab_fits_its_label_once_a_measure_answers() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = shown_skills_page();
     assert_eq!(
         s.eval::<f64>("return SkillFrameExpandButtonFrame:GetWidth()")

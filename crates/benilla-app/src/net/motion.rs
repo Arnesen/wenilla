@@ -23,6 +23,7 @@ use benilla_assets::coords::{wow_rotation_to_bevy, wow_to_bevy};
 use bevy::prelude::*;
 
 mod facing;
+mod modes;
 mod relay;
 mod remote;
 mod spline;
@@ -33,6 +34,8 @@ pub(crate) use facing::drive_display_facing;
 pub(in crate::net) use facing::resolve_facing;
 pub(in crate::net) use facing::DisplayFacing;
 pub(crate) use facing::FacingStep;
+pub(crate) use modes::UnitMoveModes;
+pub(in crate::net) use modes::ROOT_APPLY_WIPE;
 pub(crate) use relay::{PendingMove, RelayMove};
 pub(crate) use remote::jump_seed;
 pub(crate) use remote::RemoteMotion;

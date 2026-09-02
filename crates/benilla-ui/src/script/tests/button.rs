@@ -220,7 +220,8 @@ fn disabled_button_swallows_clicks_checkbutton_toggles_before_onclick() {
     s.mouse_button(50.0, 50.0, "LeftButton", true);
     s.mouse_button(50.0, 50.0, "LeftButton", false);
     assert_eq!(s.eval::<i64>("return clicks").unwrap(), 1);
-    assert!(s.eval::<bool>("return seen_checked == true").unwrap());
+    // `seen_checked` is whatever `GetChecked()` handed the handler — the NUMBER 1 (1830).
+    assert!(s.eval::<bool>("return seen_checked == 1").unwrap());
     assert!(s.eval::<bool>("return Toggler:GetChecked()").unwrap());
 
     // Programmatic Click() rides the same path: toggles back off.

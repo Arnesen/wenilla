@@ -47,8 +47,12 @@ pub enum TexCoords {
 }
 
 impl TexCoords {
-    /// The tightest axis-aligned `[left, right, top, bottom]` containing the mapping — what the
-    /// 4-value `GetTexCoord()` reports (exact for `Rect`, the bounding box for `Corners`).
+    /// The tightest axis-aligned `[left, right, top, bottom]` containing the mapping (exact for
+    /// `Rect`, the bounding box for `Corners`).
+    ///
+    /// **Not what `GetTexCoord()` reports** — that answers eight per-corner values, and the 4-value
+    /// rect it used to return is a shape the reference has nowhere (decision 1840). This is the
+    /// renderer's and the app's convenience view, and it keeps its callers.
     pub fn edges(&self) -> [f32; 4] {
         match *self {
             TexCoords::Rect(e) => e,
@@ -93,6 +97,24 @@ pub enum QuadContent {
         /// track — byte-read off `UI-Cooldown-Indicator.m2` (linear 0→1 over the first third,
         /// hold to the half, 1→0 over the back half) — applied app-side.
         flash: Option<f32>,
+    },
+    /// A `Model` / `PlayerModel` widget's own draw slot: the 3D pane's content hole. The engine
+    /// core carries the resolved rect and the pane's identity; the app renderer puts pixels in it
+    /// — the same division of labour [`QuadContent::Minimap`] and [`QuadContent::Cooldown`] use,
+    /// and for the same reason (the scene state is [`crate::widget::ModelState`]; the render is
+    /// not this crate's).
+    ///
+    /// **Why the NAME travels rather than the scene.** benilla draws a body pane by sampling an
+    /// off-screen bake the app already keeps per *window* (the paper doll's, the inspect window's,
+    /// the pet page's), and which bake a pane samples is a fact about that window, not about the
+    /// widget. So the seam carries what the app needs to make the join — the pane's global frame
+    /// name, which since decision 1751 is the reference's own — and nothing it would have to
+    /// invent a meaning for. A pane with no name, or one no window has claimed, draws nothing;
+    /// that is also what a `SetModel` pane does today, and it is honest rather than a white slab.
+    ModelPane {
+        /// The pane's global frame name (`$parent`-expanded), or `None` for an anonymous
+        /// `CreateFrame("Model")` — pfUI's autocast shine is the corpus example of the latter.
+        name: Option<String>,
     },
     /// A `Texture` region: a BLP path *or* a solid/vertex color (or both — a tinted texture).
     Texture {

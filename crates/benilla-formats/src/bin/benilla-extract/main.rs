@@ -486,6 +486,17 @@ enum Command {
         /// Internal-path prefix filter (e.g. `world`), case-insensitive; all models if omitted.
         prefix: Option<String>,
     },
+    /// Sweep every `.m2` and census the **animation-driven sound emitters**: the models whose
+    /// sequences carry a `$DSL` (doodad sound loop) / `$DSO` (doodad sound one-shot) / `$SND`
+    /// (generic one-shot) marker, the `SoundEntries` kit each names with its 3D parameters, and —
+    /// the column this exists for — whether the carrying sequence is REST-posed, i.e. one the
+    /// render content gate (decision 0130) never builds a rig for. A placed lamp's hum is a single
+    /// `$DSL` on a sequence that keys no bone at all, so the whole class is unreachable through an
+    /// `AnimationPlayer`: the population instrument for "every world doodad is silent" (B345).
+    Soundeventscan {
+        /// Internal-path prefix to limit the sweep (e.g. `world`); all models if omitted.
+        prefix: Option<String>,
+    },
     /// Sweep every `.m2` (optionally under a path prefix) and list the models whose PARTICLE
     /// emitters carry any of the given file-flag bits (`M2ParticleEmitter+0x04`) — the
     /// population instrument for particle-flag mechanisms (which content actually authors
@@ -852,6 +863,7 @@ fn main() -> Result<()> {
         Command::Fxordercensus { prefix } => scan::fxordercensus(&mut chain, prefix.as_deref())?,
         Command::Shardcensus { prefix } => scan::shardcensus(&mut chain, prefix.as_deref())?,
         Command::Idleslotscan { prefix } => scan::idleslotscan(&mut chain, prefix.as_deref())?,
+        Command::Soundeventscan { prefix } => scan::soundeventscan(&mut chain, prefix.as_deref())?,
         Command::Partscan { mask, prefix } => {
             let mask = parse_u32_maybe_hex(&mask)
                 .with_context(|| format!("parsing flag mask '{mask}'"))?;

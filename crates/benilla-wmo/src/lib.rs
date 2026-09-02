@@ -164,7 +164,9 @@ pub struct WmoLiquid {
     /// and white noise on the other is not being read at the wrong offset.
     pub opacity: Vec<u8>,
     /// Per-tile flag bytes, row-major `j·xtiles + i`, `xtiles·ytiles` long. Low nibble = liquid type;
-    /// `0xf` = hole (skip the tile). High bits are fishable (`0x40`) / shared (`0x80`).
+    /// `0xf` = hole (skip the tile); `0x80` shared (the strip-builder gate). `0x40` ("fishable") is
+    /// carried but deliberately unread: the reference's WMO-side reader `0x6b9e50` is only reached
+    /// from the zero-caller `0x69b5d0` island — fishability is the server's verdict. Decision 1825.
     pub tile_flags: Vec<u8>,
 }
 

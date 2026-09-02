@@ -62,7 +62,7 @@
 //! Its arm reads nothing off the wire — `0x5e4a09` is `push 0x1c3; call 0x496720`, three
 //! instructions — so the whole packet is "show message 451". benilla already models
 //! `CGGameUI::DisplayError 0x496720` and its message registry
-//! ([`crate::ui_action::MsgKind`]); what this packet needed was the two facts that registry
+//! ([`benilla_ui::messages::MsgKind`]); what this packet needed was the two facts that registry
 //! entry carries, and both are VERIFIED here:
 //!
 //! - **451 is `ERR_CHAT_RESTRICTED`.** The string `"ERR_CHAT_RESTRICTED"` (`0x83f6d4`) has exactly

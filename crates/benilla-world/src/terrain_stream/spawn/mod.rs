@@ -338,6 +338,9 @@ pub(super) fn spawn_loaded_placements(
                                 world_from_local: p.transform.compute_affine(),
                                 name_set: p.name_set,
                                 visible: vec![true; m.group_nav.len()],
+                                // Nothing wears the building's own fog until a flood says
+                                // it is on the chain (`WmoPortalInstance::interior_fog`).
+                                interior_fog: vec![false; m.group_nav.len()],
                                 liquid_visited: vec![false; m.group_nav.len()],
                                 // The MOGP `groupLiquid` override, resolved once at spawn: 13
                                 // groups in the whole archive declare "this room is wholly

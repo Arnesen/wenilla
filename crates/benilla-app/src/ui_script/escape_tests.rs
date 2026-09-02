@@ -65,17 +65,20 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    // LootFrame.xml owns GroupLootDropDown, whose OnLoad calls UIDropDownMenu_Initialize — the
-    // shipped manifest loads the dropdown kit far ahead of it (benilla.toc l.110 vs 478), and the
-    // kit's backdrop reads TOOLTIP_DEFAULT_COLOR out of GameTooltip.xml (already in BAG_UI).
-    load_xml(&s, "UIDropDownMenu.xml");
-    load_xml(&s, "LootFrame.xml");
-    load_xml(&s, "MerchantFrame.xml"); // BenillaMoney_Set, BankFrame's purse helper
+    // The loot window is the reference's own since 1751, and its dependency list grew with the
+    // swap — `LOOT_UI` carries the why for each entry. Loaded whole rather than cherry-picked:
+    // `PartyFrame.xml` is needed at LOAD (MAX_PARTY_MEMBERS) and skipping it fails loudly, but
+    // `ItemButtonTemplate` is only a warning and skipping it fails silently.
+    for file in super::test_ui::LOOT_UI {
+        load_xml(&s, file);
+    }
+    load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // BenillaMoney_Set, BankFrame's purse helper
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
 
     // Open the bag and the loot window; drain the open kits (not under test here).
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     s.set_loot(Some(LootState {
         fishing: false,
         master_candidates: Vec::new(),
@@ -142,12 +145,13 @@ fn escape_is_consumed_by_a_focused_editbox_and_leaves_windows_open() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
     load_xml(&s, "ChatFrame.xml");
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
 
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     assert!(
         s.focus_editbox("ChatFrameEditBox"),
         "the chat edit box focuses"
@@ -177,8 +181,10 @@ fn escape_closes_the_options_window_before_opening_the_menu() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the Keybindings page's faux-scroll kit (1008)
     load_xml(&s, "KeyBindingsPage.xml");
     load_xml(&s, "OptionsFrame.xml");
@@ -229,9 +235,9 @@ fn escape_closes_an_open_stack_split_frame() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml"); // ContainerFrameItemButton_OnClick reads MerchantFrame
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // ContainerFrameItemButton_OnClick reads MerchantFrame
     load_xml(&s, "ChatFrame.xml"); // …and ChatFrameEditBox, the shift fork's first test
-    load_xml(&s, "StackSplit.xml");
+    load_xml(&s, "Interface\\FrameXML\\StackSplitFrame.xml");
     s.set_money(0);
 
     let mut slots = std::collections::HashMap::new();
@@ -264,7 +270,7 @@ fn escape_closes_an_open_stack_split_frame() {
             slots,
         }),
     );
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     assert!(bag_open(&s, 0), "the backpack window is up");
 
     // Open the spinner with a real SHIFT + left-click on the button holding slot 1 — asked of the
@@ -307,11 +313,11 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
     }
     // GameTooltip.xml (BAG_UI's, for the bag slots' tooltips) also carries TOOLTIP_DEFAULT_COLOR,
     // which the dropdown backdrop's OnLoad reads — so the kit can load straight after it.
-    load_xml(&s, "UIDropDownMenu.xml");
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     let _ = s.take_sounds();
     assert!(bag_open(&s, 0));
     s.set_unit(
@@ -325,7 +331,14 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
     // Press 0 — mid-cast with a dropdown open (the ref's CloseMenus rung, l.1488): the menu
     // closes and eats the press — the cast, the windows, and the target all survive.
     s.set_casting(true);
-    s.run("DropDownList1:Show()").unwrap();
+    // `maxWidth` before the Show: stock `DropDownList`'s own `<OnShow>` sizes every button from it
+    // (ref UIDropDownMenuTemplates.xml:237-245), and `UIDropDownMenu_Initialize` is what normally
+    // sets it — so showing the list bare raises `SetWidth(nil)` in the real client too. Our deleted
+    // transcription had no such OnShow, which is why a bare Show worked here before. The subject of
+    // this test is the ESC ladder, not the menu's construction, so it sets the one field the show
+    // path reads rather than standing up a whole anchored dropdown.
+    s.run("DropDownList1.maxWidth = 100 DropDownList1:Show()")
+        .unwrap();
     s.run("ToggleGameMenu()").unwrap();
     assert!(
         !s.eval::<bool>("return DropDownList1:IsShown()").unwrap(),
@@ -402,10 +415,10 @@ fn escape_ladder_targeting_rung_after_cast_before_windows() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     let _ = s.take_sounds();
     assert!(bag_open(&s, 0));
 
@@ -468,6 +481,8 @@ fn an_addon_frame_registered_in_uispecialframes_closes_on_escape() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "GameMenuFrame.xml");
 
     // The addon's three lines, verbatim in shape.

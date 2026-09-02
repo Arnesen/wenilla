@@ -89,6 +89,10 @@ pub struct WorldSession {
     /// vmangos drops any chat whose language the character doesn't know (dot-commands included) —
     /// hardcoded Common silently ate every Horde character's chat and commands once.
     chat_language: u32,
+    /// The rested billing minutes the admitting `SMSG_AUTH_RESPONSE` carried, or `0` when its body
+    /// was too short for the billing group. Read by [`Self::billing_time_rested`]; see decision
+    /// 1820 for why `0` rather than the client's own uninitialised-global behaviour.
+    billing_time_rested: u32,
 }
 
 impl WorldSession {
@@ -205,6 +209,7 @@ impl WorldSession {
             crypto,
             roster_races: Default::default(),
             chat_language: messages::LANGUAGE_COMMON,
+            billing_time_rested: 0,
         };
 
         // 4. Wait for SMSG_AUTH_RESPONSE. Usually the first encrypted packet, but not always first
@@ -218,7 +223,17 @@ impl WorldSession {
         // honest message at the login screen.
         loop {
             match session.recv_async().await? {
-                ServerPacket::AuthResponse { result, .. } if result == messages::AUTH_OK => break,
+                ServerPacket::AuthResponse {
+                    result,
+                    billing_time_rested,
+                    ..
+                } if result == messages::AUTH_OK => {
+                    // The admitting packet is the only one that counts: a queue packet carries the
+                    // group too, but the client re-reads it on every AUTH_RESPONSE and the last one
+                    // wins, which is this one.
+                    session.billing_time_rested = billing_time_rested.unwrap_or(0);
+                    break;
+                }
                 // **Queued, not refused** — the realm is full and we keep our place in line. Report
                 // the position and go back to reading; the server re-sends as we move up and ends
                 // the wait with an `AUTH_OK`. Treating this as an ending (which it was until now)
@@ -226,6 +241,7 @@ impl WorldSession {
                 ServerPacket::AuthResponse {
                     result,
                     queue_position,
+                    ..
                 } if result == messages::AUTH_WAIT_QUEUE => {
                     if !queued {
                         queued = true;
@@ -255,6 +271,17 @@ impl WorldSession {
         }
 
         Ok(session)
+    }
+
+    /// The account's accumulated **rested billing minutes**, from the `SMSG_AUTH_RESPONSE` that
+    /// admitted this session — what `GetBillingTimeRested()` reports (decision 1820).
+    ///
+    /// Against vmangos this is always `0`: the server hardcodes `uint32(0)` for the field
+    /// (`World.cpp:331`, and `:380` for the queue packet), guarded on a build newer than 1.7.1,
+    /// which 1.12 is. It is read from the wire rather than assumed so that a server which does
+    /// populate it is reported honestly.
+    pub fn billing_time_rested(&self) -> u32 {
+        self.billing_time_rested
     }
 
     /// Set a read timeout on the underlying socket (e.g. so a debug read-loop can stop when the
@@ -558,6 +585,21 @@ impl WorldSession {
         self.send(
             opcode::CMSG_BUY_ITEM,
             &messages::buy_item(vendor_guid, entry, count),
+        )
+    }
+
+    /// `CMSG_BUY_ITEM_IN_SLOT` — buy into a named container slot, the merchant cursor's drop.
+    pub fn buy_item_in_slot(
+        &mut self,
+        vendor_guid: u64,
+        entry: u32,
+        bag_guid: u64,
+        bag_slot: u8,
+        count: u8,
+    ) -> Result<()> {
+        self.send(
+            opcode::CMSG_BUY_ITEM_IN_SLOT,
+            &messages::buy_item_in_slot(vendor_guid, entry, bag_guid, bag_slot, count),
         )
     }
 

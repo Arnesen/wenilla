@@ -48,6 +48,19 @@ fn every_shipped_ui_xml_parses() {
 fn the_whole_shipped_manifest_loads_without_errors() {
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // The in-game UI materializes on world entry (1051), so a player always exists by the time the
+    // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
+    // into its label inside its own OnLoad. A manifest load with no player is a state the client
+    // never reaches (decision 1848).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
     let failures = super::load_default_ui(&s);
     assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
     s.resolve();
@@ -74,6 +87,19 @@ fn the_whole_shipped_manifest_loads_without_errors() {
 fn loading_the_shipped_ui_queues_no_sounds() {
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // The in-game UI materializes on world entry (1051), so a player always exists by the time the
+    // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
+    // into its label inside its own OnLoad. A manifest load with no player is a state the client
+    // never reaches (decision 1848).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
     let failures = super::load_default_ui(&s);
     assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
     s.resolve();
@@ -736,9 +762,10 @@ fn no_shipped_script_sets_a_global_string_key_as_display_text() {
 /// otherwise lift an ARTWORK bar fill straight over BACKGROUND art.
 ///
 /// Decision 0884 pinned the layer as bucket-wide and above the frame. Two files had been getting
-/// this right for the wrong reason — `UnitFrames.xml` and `PartyFrame.xml` both *declared* the
+/// this right for the wrong reason — our `UnitFrames.xml` and `PartyFrame.xml` both *declared* the
 /// TextureFrame after the bars and leaned on the retired key's insertion-order tie-break — so both
-/// inverted the instant the key was corrected, and both reached the director's screen. The
+/// inverted the instant the key was corrected, and both reached the director's screen. (Both files
+/// are retired now, 1751; the lesson is kept because it is about the KEY, not about them.) The
 /// reference spends a real frame level on this in both of its own spellings (`TargetFrame.lua`
 /// l.32-34's explicit `SetFrameLevel(textureFrame-1)`, `PlayerFrame.xml` l.50-52's two anonymous
 /// nesting frames); benilla now uses the first, everywhere.
@@ -756,11 +783,32 @@ fn every_texture_frame_outranks_its_status_bars() {
 
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // The in-game UI materializes on world entry (1051), so a player always exists by the time the
+    // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
+    // into its label inside its own OnLoad. A manifest load with no player is a state the client
+    // never reaches (decision 1848).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
     let failures = super::load_default_ui(&s);
     assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
     // Every unit-frame family painting at once: the frames hide themselves without a unit, and a
     // hidden frame emits no quads to read a level from.
-    for unit in ["player", "target", "party1", "party2", "party3", "party4"] {
+    for unit in [
+        "player",
+        "target",
+        "targettarget",
+        "party1",
+        "party2",
+        "party3",
+        "party4",
+    ] {
         s.set_unit(
             unit,
             Some(benilla_ui::script::UnitState {
@@ -778,6 +826,13 @@ fn every_texture_frame_outranks_its_status_bars() {
     }
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     s.fire_event("PARTY_MEMBERS_CHANGED", vec![]);
+    // The target-of-target frame ships OFF (`SHOW_TARGET_OF_TARGET = "0"`, the reference's own
+    // default, declared in OptionsFrame.xml which the manifest above has just loaded). Turn it on
+    // here: it is the SECOND of the two named TextureFrames the reference spells this way, and a
+    // gate that only ever sees the first covers half of what it claims to.
+    s.run(r#"SHOW_TARGET_OF_TARGET = "1""#).unwrap();
+    s.run("this = TargetofTargetFrame TargetofTarget_Update() this = nil")
+        .unwrap();
     s.resolve();
 
     // owner frame name → its (strata, level), read off the packed draw key the renderer sorts by.
@@ -812,10 +867,22 @@ fn every_texture_frame_outranks_its_status_bars() {
             checked += 1;
         }
     }
-    // Player + target (health/power) and four party members (health/mana) — never let this pass by
-    // matching nothing, which is exactly how a renamed frame would silently retire the check.
+    // **The predicted reduction, arrived.** This asserted 12 while the unit frames were ours,
+    // because our transcription spelled the idiom with a named `$parentTextureFrame` on EVERY
+    // family. The reference does not: it has exactly TWO named ones, `TargetFrameTextureFrame` and
+    // `TargetofTargetTextureFrame`, both in TargetFrame.xml. `PlayerFrame`, `PetFrame` and the
+    // party rows reach the same order the other way — the art inside ANONYMOUS nested
+    // `<Frame setAllPoints="true">` wrappers, outranking the bars by nesting depth rather than by
+    // a level on a name. There is nothing for a name sweep to look up, so those families move from
+    // this assertion's cover to the loader's nesting rule.
+    //
+    // The note above this line predicted the drop when PartyFrame went to the chain and called it
+    // "a real reduction rather than a rename". That was right, and it under-counted: the whole kit
+    // went at once, so player and pet left by the same door. Two families × (HealthBar, ManaBar,
+    // ManaBar) = 6 is the reference's own coverage, and it is the floor now. Still never zero —
+    // matching nothing is exactly how a renamed frame would silently retire the check.
     assert!(
-        checked >= 12,
+        checked >= 6,
         "only {checked} texture-frame/bar pairs checked — the name sweep found nothing"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -862,6 +929,19 @@ fn the_font_registry_alone_covers_the_whole_bake_plan() {
         let mut s = benilla_ui::script::UiScript::new().unwrap();
         s.set_screen_size(1024.0, 768.0);
         if whole {
+            // The in-game UI materializes on world entry (1051), so a player always exists by the time the
+            // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
+            // into its label inside its own OnLoad. A manifest load with no player is a state the client
+            // never reaches (decision 1848).
+            s.set_unit(
+                "player",
+                Some(benilla_ui::script::UnitState {
+                    exists: true,
+                    name: Some("Probefour".into()),
+                    level: 60,
+                    ..Default::default()
+                }),
+            );
             let _ = super::load_default_ui(&s);
         } else {
             let _ = super::load_font_registry(&s);
@@ -903,6 +983,19 @@ fn the_font_registry_alone_covers_the_whole_bake_plan() {
 fn the_shipped_ui_takes_variables_loaded_without_a_script_error() {
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // The in-game UI materializes on world entry (1051), so a player always exists by the time the
+    // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
+    // into its label inside its own OnLoad. A manifest load with no player is a state the client
+    // never reaches (decision 1848).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
     let failures = super::load_default_ui(&s);
     assert!(failures.is_empty(), "loader errors: {failures:?}");
     let _ = s.errors(); // drain anything the load itself logged; this test is about the event
@@ -930,6 +1023,19 @@ fn the_shipped_ui_takes_variables_loaded_without_a_script_error() {
 fn every_shipped_font_object_is_published_as_a_lua_global() {
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // The in-game UI materializes on world entry (1051), so a player always exists by the time the
+    // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
+    // into its label inside its own OnLoad. A manifest load with no player is a state the client
+    // never reaches (decision 1848).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
     let failures = super::load_default_ui(&s);
     assert!(failures.is_empty(), "loader errors: {failures:?}");
 
@@ -1001,6 +1107,19 @@ fn every_shipped_font_object_is_published_as_a_lua_global() {
 fn the_inheritable_reference_templates_confer_their_shape() {
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // The in-game UI materializes on world entry (1051), so a player always exists by the time the
+    // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
+    // into its label inside its own OnLoad. A manifest load with no player is a state the client
+    // never reaches (decision 1848).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
     assert!(super::load_default_ui(&s).is_empty());
 
     // `CT_UnitFrames/CT_TargetFrame.xml:4` builds its own virtual template on top of this one, so
@@ -1052,6 +1171,19 @@ fn the_inheritable_reference_templates_confer_their_shape() {
 fn the_inspect_cursor_pair_takes_both_arms() {
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // The in-game UI materializes on world entry (1051), so a player always exists by the time the
+    // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
+    // into its label inside its own OnLoad. A manifest load with no player is a state the client
+    // never reaches (decision 1848).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
     assert!(super::load_default_ui(&s).is_empty());
 
     // Both exist as functions — the shape a caller checks before hooking.
@@ -1115,6 +1247,19 @@ fn the_inspect_cursor_pair_takes_both_arms() {
 fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // The in-game UI materializes on world entry (1051), so a player always exists by the time the
+    // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
+    // into its label inside its own OnLoad. A manifest load with no player is a state the client
+    // never reaches (decision 1848).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
     let failures = super::load_default_ui(&s);
     assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
     s.resolve();
@@ -1184,6 +1329,19 @@ fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
 fn every_declared_parent_really_attaches() {
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // The in-game UI materializes on world entry (1051), so a player always exists by the time the
+    // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
+    // into its label inside its own OnLoad. A manifest load with no player is a state the client
+    // never reaches (decision 1848).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
     let failures = super::load_default_ui(&s);
     assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
     s.resolve();

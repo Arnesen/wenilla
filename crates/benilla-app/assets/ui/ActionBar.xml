@@ -56,8 +56,14 @@
           1218/1219 fixed for MultiBarLeft.
           Unlike the ref (which HIDES an empty, non-grid slot entirely), our MAIN bar always shows
           all 12 wells; the grid only swaps an EMPTY slot's ring art between the occupied and empty
-          Quickslot textures. The ref's extra SetVertexColor(1,1,1,0.5) dim on a grid ring is NOT
-          ours — that look is unchanged since 0216 and is the director's to move.
+          Quickslot textures. The ref's SetVertexColor(1,1,1,0.5) dim on a grid ring IS ours as of
+          1781 — this note said for three hundred decisions that the dim was "the director's to
+          move", and they moved it: an empty well under a held spell read as a black hole, because
+          UI-Quickslot is a FILLED plate (see BenillaActionButton_SetRing) and we were painting it
+          opaque. The dim now rides the ring's own setter, so art and tint cannot drift apart.
+          What we do NOT take is where the ref's dim ENDS: nothing in the real client ever clears
+          it, so one pickup fades every border for the session (byte-pinned; the setter's comment
+          has the addresses). Ours lets go with the payload — divergence, chosen, decision 1782.
         - Exhaustion tick + rest fill, XP text (hover/cvar-gated), MaxLevelBar: OUT. The bar's
           right-hand cluster is otherwise complete — the backpack toggle + four bag slots live in
           BagFrame.xml and the eight micro buttons in MicroMenu.xml (both anchored into
@@ -94,9 +100,11 @@
         BOTTOMRIGHT_ACTIONBAR_PAGE = 5
         BOTTOMLEFT_ACTIONBAR_PAGE = 6
 
-        -- Ref ActionButton.lua:4 / UIParent.lua: the flash blink period and the range-check cadence.
+        -- Ref ActionButton.lua:4: the flash blink period. Its neighbour `TOOLTIP_UPDATE_TIME`
+        -- (the range-check cadence this file's `rangeTimer` reads) moved to UIParent.xml, which is
+        -- the reference's own home for it — `UIParent.lua:1`, and the stock `BuffFrame.lua` reads
+        -- it as well.
         ATTACK_BUTTON_FLASH_TIME = 0.4
-        TOOLTIP_UPDATE_TIME = 0.2
 
         -- "Lock ActionBars" (ref UIOptionsFrame.lua:102-103 — uvar LOCK_ACTIONBAR, default "0").
         -- The reference declares it in its options window; ours lives with the bar it locks, which
@@ -291,8 +299,12 @@
             end
             -- Losing the last key with the keyring open would strand an orphan window; the ref
             -- can't reach this state (its latch is one-way), so this is ours to decide. The window
-            -- is an ordinary ContainerFrame since 1751, so this is the reference's own CloseBag.
-            if not show then CloseBag(KEYRING_CONTAINER) end
+            -- is an ordinary ContainerFrame since 1751, so this is the reference's own CloseBag —
+            -- nil-guarded like every other reach out of this function, because the trigger above
+            -- lives on THIS file's art frame now (1751 window 3) and a dozen harnesses load the
+            -- bar with no bag stack behind it. With no ContainerFrame.lua there is no keyring
+            -- window to strand either, so skipping is the whole correct answer.
+            if not show and CloseBag then CloseBag(KEYRING_CONTAINER) end
         end
 
         -- ── The bonus-bar slide (decision 1524; ref BonusActionBarFrame.lua:1-98) ──────────────
@@ -449,6 +461,12 @@
             -- The grid count, same posture: a foreign button reaching ActionButton_HideGrid with
             -- no count would raise on the arithmetic, which is 1199's class of silent-wrong-shape.
             button.showgrid = button.showgrid or 0
+            -- The binding COMMAND, same posture again, and derived the way the REFERENCE derives
+            -- it on every read — `this.buttonType..this:GetID()` (ActionButton_UpdateHotkeys
+            -- l.126) — which is all our own OnLoad caches. Without it PaintHotkey would ask
+            -- `GetBindingKey(nil)` on somebody else's button the first time its well paints empty.
+            button.bindingCommand = button.bindingCommand
+                or ((button.buttonType or "ACTIONBUTTON") .. (button.index or button:GetID() or 1))
         end
 
         function BenillaActionButton_Action(button)
@@ -888,12 +906,64 @@
             BenillaActionButton_Update(button)
         end
 
+        -- ── The ring: art and tint set TOGETHER ────────────────────────────────────────────────
+        -- One well, one answer to "what does it look like". Setting the two apart is precisely how
+        -- the reference's own pair got out of step: ActionButton_ShowGrid (ActionButton.lua:247)
+        -- dims the ring and ActionButton_Update, the only thing that ever repaints it, never
+        -- restores the dim.
+        --
+        -- `ghost` is that dim, the ref's own SetVertexColor(1.0, 1.0, 1.0, 0.5), and it is not
+        -- cosmetic trim. UI-Quickslot and UI-Quickslot2 are not two rings: Quickslot2 is a hollow
+        -- border (interior alpha 0), Quickslot is a FILLED plate — solid black at alpha 0.6 across
+        -- its whole middle (measured off the shipped BLPs). So the grid swap does not outline an
+        -- empty well, it fills it, and painting that plate opaque drops a 60%-black square into
+        -- every empty slot on every bar the moment a payload is picked up. The ref's half-alpha
+        -- takes it to 30%, where it reads as a drop-target hint rather than a hole. Ours skipped
+        -- the dim from 0216 to 1781 and the bars went dark under a held spell.
+        --
+        -- **Only the EMPTY well ghosts, and that is a DIVERGENCE — a chosen one (1782).** The
+        -- reference fans SHOWGRID to every button and dims each one, occupied included, and then
+        -- nothing ever clears it: `SetNormalTexture(path)` REUSES the region and touches only the
+        -- texture handle, and `UpdateUsable`'s three-argument SetVertexColor is
+        -- `SetVertexColor(r, g, b, currentAlpha)` — the binding asks a second time whether the
+        -- alpha argument is present and, when it is not, copies the alpha it just read back over
+        -- the 1.0 default. Both byte-verified: wow-re `system/ui/scratch/
+        -- button-state-texture-path-setter.md` §2/§7 (`0x778f10`, `0x770200`, `0x79adfe`).
+        --
+        -- So in stock 1.12.1 the FIRST spell anyone picks up leaves every action button's border at
+        -- vertex alpha 0x80 for the rest of the session, occupied slots included. That is a stuck
+        -- state, not a look: it is keyed to nothing the player can see, it never comes back, and
+        -- reproducing it would fade the whole bar permanently on the first drag. We take the look
+        -- the dim was written for — the wells the grid opens read as drop targets — and let go of
+        -- it with the payload. 1782 is why, and what we would need to see to revisit it.
+        function BenillaActionButton_SetRing(button, texture, ghost)
+            button:SetNormalTexture(texture)
+            -- The derived name, exactly as UpdateUsable reaches the same region (and as the ref
+            -- reaches it); nil only for an anonymous foreign button, which has no wells of ours.
+            local name = button:GetName()
+            local normal = name and getglobal(name .. "NormalTexture")
+            if not normal then return end
+            if ghost then
+                normal:SetVertexColor(1.0, 1.0, 1.0, 0.5)
+            else
+                -- The fourth argument is written OUT, never left to the default. Our binding
+                -- currently reads an absent alpha as 1.0 and the reference reads it as the alpha
+                -- already there (above); the day that divergence is closed, a 3-argument call here
+                -- would preserve the 0.5 it is supposed to be clearing and the ghost would become
+                -- exactly the stuck state this function exists to avoid — silently, with no test
+                -- touching this file able to see it. Saying 1.0 out loud is correct under either.
+                normal:SetVertexColor(1.0, 1.0, 1.0, 1.0)
+            end
+        end
+
         function BenillaActionButton_Update(button)
             local action = BenillaActionButton_Action(button)
             if HasAction(action) then
                 button.icon:SetTexture(GetActionTexture(action) or BENILLA_FALLBACK_ICON)
                 button.icon:Show()
-                button:SetNormalTexture("Interface\\Buttons\\UI-Quickslot2")
+                -- Full alpha here only to clear whatever the ring last wore; the real occupied
+                -- tint is UpdateUsable's, below.
+                BenillaActionButton_SetRing(button, "Interface\\Buttons\\UI-Quickslot2", false)
                 button:Show()
                 button.rangeTimer = -1
                 BenillaActionButton_UpdateCount(button)
@@ -912,6 +982,16 @@
                 button.cooldown:Hide()
                 button.rangeTimer = nil
                 button.hotkey:SetVertexColor(0.6, 0.6, 0.6)
+                -- REPAINTED, never blanked (B348). The label belongs to PaintHotkey, and it is
+                -- the ref's own arrangement: `ActionButton_Update`'s empty arm touches the corner's
+                -- COLOUR only (ref l.167-172), while `ActionButton_UpdateHotkeys`' bound leg writes
+                -- the binding text whether or not the slot holds an action — so a bound-but-empty
+                -- well wears its key. Repainting here rather than leaving the text alone also
+                -- clears what the OnUpdate range timer may have left on an UNBOUND slot: the ref
+                -- keeps that "●" on a well that has just emptied (its OnUpdate then reads
+                -- IsActionInRange as nil and SHOWS the dot on an empty slot), which is a quirk of
+                -- reading the label back as state, not behaviour worth having.
+                BenillaActionButton_PaintHotkey(button)
                 button:SetChecked(0)
                 BenillaActionButton_StopFlash(button)
                 local grid = BenillaActionButton_GridShown(button)
@@ -921,21 +1001,26 @@
                     -- ALWAYS_SHOW_MULTIBARS). Only the MAIN bar keeps our always-visible wells
                     -- divergence (the SCOPE note) — its art has sockets; floating rings over bare
                     -- world would not read as a bar.
-                    button.hotkey:SetText("")
                     if not grid then
                         button:Hide()
                     else
-                        button:SetNormalTexture("Interface\\Buttons\\UI-Quickslot")
+                        BenillaActionButton_SetRing(button, "Interface\\Buttons\\UI-Quickslot", true)
                         button:Show()
                     end
                 else
                     -- While the grid is up, an empty slot shows the ref's own "no action" ring
                     -- (Interface\Buttons\UI-Quickslot) so it reads as a drop target; otherwise the
                     -- plain occupied-style ring, unchanged from before this slice (SCOPE note).
+                    --
+                    -- Either way the tint is WRITTEN, not left: this arm used to touch the ring's
+                    -- art and never its colour, so a slot emptied while out of power kept
+                    -- UpdateUsable's blue-grey 0.5/0.5/1.0 on a well with nothing in it — 1108's
+                    -- "a tint outlives the art" one region over. A ring that is only ever painted
+                    -- as a function of the button's state cannot carry the last one's history.
                     if grid then
-                        button:SetNormalTexture("Interface\\Buttons\\UI-Quickslot")
+                        BenillaActionButton_SetRing(button, "Interface\\Buttons\\UI-Quickslot", true)
                     else
-                        button:SetNormalTexture("Interface\\Buttons\\UI-Quickslot2")
+                        BenillaActionButton_SetRing(button, "Interface\\Buttons\\UI-Quickslot2", false)
                     end
                 end
             end
@@ -2036,6 +2121,35 @@
                         <Scripts><OnClick>ActionBar_PageDown() PlaySound("UChatScrollButton")</OnClick></Scripts>
                     </Button>
                 </Frames>
+                <!-- ── The keyring's SHOW trigger (ref MainMenuBar.xml l.322-341) ──────────────
+                     The art frame watches the bags and re-derives the keyring half of the bar; the
+                     reference puts these three registrations and this exact call on THIS frame, and
+                     that is why they are here rather than on KeyRingButton.
+
+                     They used to live on KeyRingButton's own OnEvent, in our BagFrame.xml, because
+                     that file was ours to write scripts into. 1751 window 3 made the bag bar the
+                     reference's own MainMenuBarBagButtons.xml, whose KeyRingButton has no OnEvent —
+                     so the trigger had to come back to where the reference keeps it, which is here.
+
+                     The ref's body latches SHOW_KEYRING on forever the first time HasKey() is true
+                     (a saved variable) and pulses the button for 60s. Ours does neither, and 0765
+                     is the record: the latch is re-derived from HasKey() every BAG_UPDATE in BOTH
+                     directions, and the pulse is out for 0304's reason. So there is no
+                     SHOW_KEYRING and no SetButtonPulse here — MainMenuBar_UpdateKeyRing (top of
+                     this file) carries the whole decision, and this is only its trigger.
+
+                     NOT called from OnLoad, and the reference does not call it there either: this
+                     file is manifest entry 25 and the body reaches `CloseBag` (the sourced
+                     ContainerFrame.lua, entry 46) and `KeyRingButton` (entry 48), neither of which
+                     exists yet. PLAYER_ENTERING_WORLD is what paints the first state, there and
+                     here. -->
+                <Scripts>
+                    <OnLoad>
+                        this:RegisterEvent("PLAYER_ENTERING_WORLD")
+                        this:RegisterEvent("BAG_UPDATE")
+                    </OnLoad>
+                    <OnEvent>MainMenuBar_UpdateKeyRing()</OnEvent>
+                </Scripts>
             </Frame>
 
             <!-- The performance ("ping") meter (ref-MainMenuBar.xml l.344-407). 16x64 pinned to the

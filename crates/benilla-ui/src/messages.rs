@@ -68,11 +68,11 @@ pub struct MessageRecord {
     pub key: &'static str,
     /// Where it is shown.
     pub kind: MsgKind,
-    /// The sound cue played with it, or `None` for the 435 silent rows. Carried as data;
-    /// benilla does not wire message cues yet.
+    /// The sound cue played with it, or `None` for the 435 silent rows. Read at the display, by
+    /// `benilla_app::sound::message` (decision 1815).
     pub sound: Option<&'static str>,
-    /// `+0x0c`. `0x44` means "play [`Self::sound`]"; the other 56 rows carry an error-speech id
-    /// instead. Unmodelled, recorded.
+    /// `+0x0c`. `0x44` means "play [`Self::sound`]"; the other 56 rows carry an error-speech line
+    /// id instead, spoken in the player's own race and gender voice (decision 1815).
     pub type_tag: u8,
     /// The chat type handed to the composer, meaningful for [`MsgKind::Chat`] rows only. `10`
     /// (`CHAT_MSG_SYSTEM`) for all but three — the skill-up trio `ERR_PROFICIENCY_GAINED_S`,

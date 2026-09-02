@@ -288,6 +288,18 @@ pub(crate) struct Model {
     /// resolve at a 3,988-frame roster, which made it the biggest phase left in the preamble
     /// (decision 1634's `[layout-pre] watched=`).
     pub(crate) on_size_changed_frames: Vec<FrameHandle>,
+    /// Edit boxes whose text changed and whose `OnTextChanged` has **not fired yet** — the
+    /// reference's `textChanged` dirty bit (`[E+0x31c]` bit 0), which `SetText`/`Insert` raise and
+    /// only the dirty-word drain `0x77d3e0` clears (decision 1831).
+    ///
+    /// The fire is deferred, not immediate: `SetText` returns to Lua before any handler runs, and N
+    /// changes to one box between two drains produce exactly ONE fire carrying the final text. The
+    /// reference's own FrameXML depends on both halves — `MoneyInputFrame_SetCopper` sets three
+    /// boxes while counting the fires it expects back, and errors if one arrives mid-loop.
+    ///
+    /// A hidden box stays on this list: `Hide` splices it out of the chain the update walk follows,
+    /// so its pending fire waits until it is shown again (or a key/mouse-down reaches it).
+    pub(crate) dirty_editboxes: Vec<FrameHandle>,
     /// `event name → frames registered for it` (RegisterEvent), in **registration order** — an
     /// ordered Vec, never a set: the client's `SignalEvent 0x703e50` walks a per-event listener
     /// LIST, so cross-frame dispatch order is a law, not an accident (the abbey territory-line
@@ -591,6 +603,26 @@ pub(crate) struct Model {
     /// Sounds queued by the Lua `PlaySound`/`PlaySoundFile` bindings since the app's last
     /// [`UiScript::take_sounds`] drain — the outbound Lua→app intent seam ([`sound`]).
     pub(crate) sound_queue: Vec<SoundRequest>,
+
+    /// **The UI-load sound-suppression depth** — `[0xb05fa0]` in the reference, a counted scope
+    /// with exactly three references image-wide: `0x458f50` (`inc`), `0x458f60` (`dec`), and one
+    /// reader at `0x458046`, inside `PlaySoundByName 0x458030`. The whole-UI load `0x48fbf0`
+    /// brackets ITSELF in it — `0x48fbfa` on entry, `0x49016d` on exit, spanning the TOC walk,
+    /// `Bindings.xml` and the AddOns — and both of its callers, login (`0x48f681`) and `/reloadui`
+    /// (`0x495669`), therefore load silently.
+    ///
+    /// The reader bails at `0x45804d` **before** the `MasterSoundEffects` CVar and the kit-hash
+    /// lookup, so a suppressed call is **dropped**: not muted, not queued, no Lua error, and the
+    /// binding still answers its usual `(willPlay, handle)`. Scoped to the NAME-keyed entry only —
+    /// id-keyed `PlaySound(kitId)` (`0x457fb0`/`0x457ff0`), `PlaySoundFile`, `PlayMusic` and
+    /// `StopMusic` all run normally inside the scope.
+    ///
+    /// This is what makes stock `TargetFrame_OnHide`'s `PlaySound("INTERFACESOUND_LOSTTARGETUNIT")`
+    /// inaudible at every login: the frame really is shown when its `OnLoad` hides it, the OnHide
+    /// really does fire, the call really is made — and the engine throws it away. Decision 1033's
+    /// "no sound during the load" is the client's own law, enforced here rather than by hoping no
+    /// handler rings.
+    pub(crate) sound_suppression: u32,
 
     /// The CVar table (decision 0954, [`super::cvars`]): lowercase name → slot. Host-registered
     /// only; Lua reads/writes through `GetCVar`/`SetCVar`/`GetCVarDefault`.
@@ -901,6 +933,12 @@ pub(crate) struct Model {
     /// seam ([`merchant`]).
     pub(crate) merchant: Option<merchant::MerchantState>,
     pub(crate) merchant_buys: Vec<(u32, u32)>,
+    /// `PickupMerchantItem`'s SELL arm — the `(bag, slot)` the cursor was holding when it was
+    /// called over the vendor window. The app resolves the guid and sends `CMSG_SELL_ITEM`.
+    pub(crate) merchant_cursor_sells: Vec<(i64, u32)>,
+    /// A held vendor row dropped into a bag — `(bag, slot, item entry)`, the app's
+    /// `CMSG_BUY_ITEM_IN_SLOT`.
+    pub(crate) merchant_slot_buys: Vec<(i64, u32, u32)>,
     pub(crate) merchant_close: bool,
     /// `BuybackItem` intents (1-based buyback slots), the `RepairAllItems` flag, and the
     /// client-side repair-mode latch (`ShowRepairCursor`/`InRepairMode`) — the rest of the
@@ -1229,6 +1267,23 @@ pub(crate) struct Model {
     pub(crate) rest_state: u8,
     pub(crate) rest_pool: u32,
     pub(crate) resting: bool,
+
+    /// `PLAYER_FLAGS` bit 12 — **PARTIAL_PLAY_TIME**, what `PartialPlayTime()` answers
+    /// (`0x48eb70`, `shr eax,0xc` / `and al,1`; decision 1746 §"`PLAYER_FLAGS` bit `0x1000` is
+    /// read after all"). The play-time regime a realm with an anti-addiction policy puts an
+    /// account into; on a western realm it never sets.
+    pub(crate) partial_play_time: bool,
+
+    /// `PLAYER_FLAGS` bit 13 — what `NoPlayTime()` answers (`0x48ebe0`, the neighbour of the
+    /// above and the harsher half of the same regime).
+    pub(crate) no_play_time: bool,
+
+    /// The account's accumulated **rested billing minutes**, from `SMSG_AUTH_RESPONSE` — what
+    /// `GetBillingTimeRested()` returns (decision 1820, binding `0x48ec50`). Minutes is the
+    /// server's convention and the engine converts nothing; stock `PlayerFrame.lua:246` divides by
+    /// 60 for hours. Reached only from inside the two play-time bits above, so with those clear
+    /// nothing in stock FrameXML ever reads it.
+    pub(crate) billing_time_rested: u32,
     /// Is a cinematic playing? What `InCinematic()` reports, pushed by the cinematic plugin.
     ///
     /// Read by more than the letterbox: `StaticPopup_Show` refuses any dialog whose entry lacks
@@ -1266,7 +1321,6 @@ pub(crate) struct Model {
     /// 12th) — recomputed on every inventory push, which fires `UPDATE_INVENTORY_ALERTS`
     /// unconditionally, the client's own shape (see [`char_stats`]).
     pub(crate) inventory_alerts: [u8; 12],
-    pub(crate) paperdoll_yaw: f32,
     /// Inventory-slot ids queued by `UseInventoryItem` (decision 0208 phase 1b, `cursor`'s `doll`
     /// submodule) — drained by the app into `CMSG_USE_ITEM` against the equipped position.
     pub(crate) inventory_uses: Vec<u32>,
@@ -1285,12 +1339,9 @@ pub(crate) struct Model {
     pub(crate) inspect_notifies: Vec<String>,
     /// `ClearInspectPlayer` was called — drained by the app, which drops its inspect target.
     pub(crate) inspect_clear: bool,
-    /// The inspect model pane's bake yaw, the twin of [`Self::paperdoll_yaw`].
-    pub(crate) inspect_yaw: f32,
-    /// The **pet** paper doll's model-pane bake yaw (decision 1057) — a third scalar for the same
-    /// reason the inspect pane got a second: character tab 1 and tab 2 are two panes that can sit
-    /// at two different facings, and the ref carries a `rotation` per `<PlayerModel>`.
-    pub(crate) pet_paperdoll_yaw: f32,
+    /// The inspect model pane's bake yaw — the last of the benilla-named pane scalars beside
+    /// [`Self::dressup_yaw`]. A migrated window's pane carries its own facing in `ModelState`
+    /// (`UiScript::model_pane_facing`, decision 1751); these two remain because their windows are
     /// The dressing room's queued intents (decision 1060) — `BenillaDressUpModel_Dress/TryOn/Close`,
     /// drained by the app in order (see [`super::dressup`] on why order matters).
     pub(crate) dressup_intents: Vec<super::dressup::DressUpIntent>,
@@ -1533,6 +1584,7 @@ impl Model {
             scripts: HashMap::new(),
             on_update_frames: Vec::new(),
             on_size_changed_frames: Vec::new(),
+            dirty_editboxes: Vec::new(),
             event_to_frames: HashMap::new(),
             frame_events: HashMap::new(),
             focused_editbox: None,
@@ -1596,6 +1648,7 @@ impl Model {
             action_bar_toggles: None,
             action_bar_toggle_sends: Vec::new(),
             sound_queue: Vec::new(),
+            sound_suppression: 0,
             cvars: HashMap::new(),
             cvars_saved_base: HashMap::new(),
             cvar_changes: Vec::new(),
@@ -1667,6 +1720,8 @@ impl Model {
             gossip_quest_selects: Vec::new(),
             merchant: None,
             merchant_buys: Vec::new(),
+            merchant_cursor_sells: Vec::new(),
+            merchant_slot_buys: Vec::new(),
             merchant_close: false,
             merchant_buybacks: Vec::new(),
             repair_all: false,
@@ -1798,6 +1853,9 @@ impl Model {
             rest_state: 2,
             rest_pool: 0,
             resting: false,
+            partial_play_time: false,
+            no_play_time: false,
+            billing_time_rested: 0,
             in_cinematic: false,
             exhaustion: [
                 (1, ("Rested".to_string(), 2.0)),
@@ -1813,14 +1871,11 @@ impl Model {
             inventory_slots: Default::default(),
             bank_bag_slots: Default::default(),
             inventory_alerts: [0; 12],
-            paperdoll_yaw: 0.0,
             inventory_uses: Vec::new(),
             weapon_enchants: [None; 2],
             inspect: None,
             inspect_notifies: Vec::new(),
             inspect_clear: false,
-            inspect_yaw: 0.0,
-            pet_paperdoll_yaw: 0.0,
             dressup_intents: Vec::new(),
             dressup_yaw: 0.0,
             unit_reach: HashMap::new(),

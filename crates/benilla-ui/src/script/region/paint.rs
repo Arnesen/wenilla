@@ -38,6 +38,22 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
+    // **KNOWN DIVERGENCE, byte-pinned and deliberately not closed here (decision 1782).** An
+    // ABSENT alpha argument is 1.0 below; in the reference it is *the alpha already on the region*.
+    // `0x79abd0` reads the current colour back (`0x79ac81` -> `0x77f8c0`), packs the caller's rgb
+    // against an `a` default of 1.0 (`0x79ad43`), and then asks a SECOND time whether argument 5
+    // was present — when it was not, it copies byte 3 of the read-back colour over the packed
+    // alpha (`0x79adfe`/`0x79ae0a`) before the store. So `SetVertexColor(r, g, b)` on 1.12.1 is
+    // `SetVertexColor(r, g, b, currentAlpha)`, and a three-argument call CANNOT restore opacity.
+    // wow-re `system/ui/scratch/button-state-texture-path-setter.md` §7.
+    //
+    // Why it still says 1.0: the fix is one line, but its blast radius is every three-argument
+    // call in FrameXML and in the addon corpus, and it only bites where a region already carries
+    // alpha < 1 — where it would surface as art going permanently translucent, which is a LOOK and
+    // therefore the director's call, not a quiet correction to fold into an unrelated slice. The
+    // known live case is the action bar's grid ring, and `ActionBar.xml`'s
+    // BenillaActionButton_SetRing is already written to be correct under BOTH readings (it passes
+    // the fourth argument explicitly), so closing this cannot silently change that file.
     m.set(
         "SetVertexColor",
         lua.create_function(
@@ -487,13 +503,39 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let rh = region_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            let [l, r, t, b] = model
+            // EIGHT values — a 4-iteration loop of 2 pushes, `mov eax,8`. There is no 4-value
+            // getter in this API at all: the 4-argument `(minX, maxX, minY, maxY)` min/max rect is
+            // **setter-only**, and returning it here was a shape that exists nowhere in the client.
+            // Order is `SetTexCoord`'s own usage string (`0x87c538`):
+            // `ULx, ULy, LLx, LLy, URx, URy, LRx, LRy`. Decision 1840.
+            //
+            // `GetTexCoord` has zero call sites in 1.12 FrameXML, so nothing on the chain could
+            // ever have caught this — only the binary could.
+            let corners = model
                 .region_data
                 .get(&rh)
                 .and_then(|d| d.tex_coords)
-                .map(|tc| tc.edges())
-                .unwrap_or([0.0, 1.0, 0.0, 1.0]);
-            Ok((l, r, t, b))
+                .map_or([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]], |tc| {
+                    match tc {
+                        // Stored per corner in SCREEN order `[TL, TR, BR, BL]`; Lua wants
+                        // UL, LL, UR, LR.
+                        crate::script::types::TexCoords::Corners(c) => [c[0], c[3], c[1], c[2]],
+                        crate::script::types::TexCoords::Rect(_) => {
+                            let [l, r, t, b] = tc.edges();
+                            [[l, t], [l, b], [r, t], [r, b]]
+                        }
+                    }
+                });
+            Ok((
+                corners[0][0],
+                corners[0][1],
+                corners[1][0],
+                corners[1][1],
+                corners[2][0],
+                corners[2][1],
+                corners[3][0],
+                corners[3][1],
+            ))
         })?,
     )?;
     Ok(())

@@ -29,7 +29,7 @@
 //! | `GetSpellCooldown(id, "pet")` | **bank 1** — [`PetBar::cooldowns`], the pet's own store. The reference reaches it with the same `0x6e2ea0(edx = isPet)` `GetPetActionCooldown` uses (`0x4b40dd`), so a spell on the bar and the same spell in the book read one timer, and they do here too. |
 //! | `GetSpellAutocast` | the raw word's bits 31/30 |
 //! | `IsCurrentCast` | the pet's own auras — `0x4b36f0`'s pet arm scans `[pet.fields + 0xa4]`, which is exactly the predicate the bar's [`crate::ui_pet`] already applies per slot |
-//! | `HasPetSpells`'s token | `ChrClasses.dbc` field 4 (`benilla_formats::PetNameTokens`) |
+//! | `HasPetSpells`'s token | `ChrClasses.dbc` field 4, via [`crate::chr_classes`] |
 //!
 //! ## The two verbs
 //!
@@ -51,7 +51,7 @@ use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 
-use benilla_formats::{PetNameTokens, SpellDisplay};
+use benilla_formats::SpellDisplay;
 use benilla_protocol::messages::PetActionEntry;
 use benilla_ui::script::{PetBookState, SpellSlotView, UiScript};
 
@@ -61,47 +61,25 @@ use crate::ui_action::Spells;
 use crate::ui_pet::PetBar;
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
-
-/// `ChrClasses.dbc`'s pet-name-token column — absent when the client data failed to load, in which
-/// case [`benilla_ui`]'s own `"PET"` fallback stands (the reference's `0x4b44a6` arm).
-#[derive(Resource)]
-pub(crate) struct PetNameTokenTable(pub(crate) PetNameTokens);
 
 pub(crate) struct UiPetBookPlugin;
 
 impl Plugin for UiPetBookPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, load_pet_name_tokens.after(AssetSet::Open))
-            .add_systems(
-                Update,
-                (
-                    // Rides the unit feed beside the player book's, and before the input pass so a
-                    // tab flipped this frame already reads a populated book.
-                    feed_pet_book
-                        .in_set(UnitFeed)
-                        .before(crate::ui_action::CooldownEvents)
-                        .before(UiInput),
-                    // After the input pass, and — like `ui_pet`'s own drain — writing back into
-                    // `PetBar`, whose next feed carries the mirrored autocast bit.
-                    drain_pet_book.after(UiInput),
-                ),
-            );
-    }
-}
-
-fn load_pet_name_tokens(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
-    let Some(assets) = assets else { return };
-    let loaded = {
-        let mut chain = assets.chain.lock_recover();
-        benilla_formats::load_pet_name_tokens(&mut chain)
-    };
-    match loaded {
-        Ok(tokens) => commands.insert_resource(PetNameTokenTable(tokens)),
-        Err(e) => warn!(
-            "ui_pet_book: ChrClasses.dbc failed to load — every pet book tab reads the client's \
-             own \"PET\" fallback, so a warlock's says Pet rather than Demon: {e:#}"
-        ),
+        app.add_systems(
+            Update,
+            (
+                // Rides the unit feed beside the player book's, and before the input pass so a
+                // tab flipped this frame already reads a populated book.
+                feed_pet_book
+                    .in_set(UnitFeed)
+                    .before(crate::ui_action::CooldownEvents)
+                    .before(UiInput),
+                // After the input pass, and — like `ui_pet`'s own drain — writing back into
+                // `PetBar`, whose next feed carries the mirrored autocast bit.
+                drain_pet_book.after(UiInput),
+            ),
+        );
     }
 }
 
@@ -117,7 +95,7 @@ fn feed_pet_book(
     script: Option<NonSendMut<UiScript>>,
     bar: Res<PetBar>,
     spells: Option<Res<Spells>>,
-    tokens: Option<Res<PetNameTokenTable>>,
+    classes: Option<Res<crate::chr_classes::ChrClassTable>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     index: Res<GuidIndex>,
     stores: Query<&ObjectStore>,
@@ -145,7 +123,9 @@ fn feed_pet_book(
         // A warlock reading "Demon" while a hunter reads "Pet" is the whole of it.
         token: self_q.single().ok().and_then(|s| {
             let class = u32::from(s.0.unit_class()?);
-            tokens.as_deref().map(|t| t.0.token(class).to_string())
+            classes
+                .as_deref()
+                .map(|t| t.0.pet_name_token(class).to_string())
         }),
         slots: Vec::new(),
     };

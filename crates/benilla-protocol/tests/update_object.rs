@@ -447,6 +447,111 @@ fn unit_living_block_surfaces_on_transport_rider_pose() {
     }
 }
 
+/// A player who streams in **already swimming**: the `LIVING` block's `MOVEFLAG_SWIMMING` word and
+/// the swim-pitch float that rides it both reach [`SessionEvent::ObjectCreate::mover`], and the six
+/// speeds after the tail still parse from the right offset.
+///
+/// This is the byte the client threw away for as long as observed swimming has existed
+/// (`let _pitch = read_f32_le(r)?;`). Its cost was the whole body-pitch render law being
+/// unreachable at create: the app's only source of a mover's flags + pitch was a relayed
+/// `MSG_MOVE_*`, so a player who swam into view rendered LEVEL until their next packet — and an
+/// idle floater, who sends none while unmoving, stayed level for as long as they floated. The
+/// reference re-authors `CMovement`'s live flags word from this same block (wow-5875-re
+/// `system/collision/collision.md`, the create-block apply's `0x75a07dff` merge).
+#[test]
+fn unit_living_block_surfaces_the_swim_it_is_already_in() {
+    let mut body = 1u32.to_le_bytes().to_vec();
+    body.push(0); // has_transport
+    body.push(2); // update_type: CREATE_OBJECT
+    write_packed_guid(0xAA, &mut body).unwrap();
+    body.push(4); // TypeId::Player
+
+    body.push(0x20); // movement block: LIVING only
+    let flags: u32 = 0x20_0000 | 0x1; // MOVEFLAG_SWIMMING | MOVEFLAG_FORWARD
+    body.extend_from_slice(&flags.to_le_bytes());
+    body.extend_from_slice(&0u32.to_le_bytes()); // timestamp
+    body.extend_from_slice(&(-812.5f32).to_le_bytes()); // living pos.x
+    body.extend_from_slice(&(-566.0f32).to_le_bytes()); // living pos.y
+    body.extend_from_slice(&(-3.25f32).to_le_bytes()); // living pos.z (under the surface)
+    body.extend_from_slice(&2.0f32.to_le_bytes()); // living orientation
+                                                   // The SWIMMING tail: one f32, no ON_TRANSPORT pose before it, `fall_time` right after.
+    body.extend_from_slice(&(-0.4f32).to_le_bytes()); // swim pitch — nose DOWN
+    body.extend_from_slice(&0.0f32.to_le_bytes()); // fall_time
+    for v in [2.5f32, 7.0, 4.5, 4.722_222_3, 2.5, std::f32::consts::PI] {
+        body.extend_from_slice(&v.to_le_bytes()); // the 6 speeds — must land right after the tail
+    }
+
+    body.push(0); // mask: 0 blocks
+
+    let packet = messages::parse_server(messages::opcode::SMSG_UPDATE_OBJECT, &body).unwrap();
+    match decode(packet).as_slice() {
+        [SessionEvent::ObjectCreate {
+            guid: 0xAA,
+            kind: EntityKind::Player,
+            orientation,
+            mover,
+            speeds,
+            ..
+        }] => {
+            assert_eq!(*orientation, 2.0);
+            assert_eq!(
+                mover,
+                &Some(benilla_protocol::MoverState { flags, pitch: -0.4 }),
+                "the live flags word and its swim-pitch tail both reach the app"
+            );
+            assert_eq!(
+                speeds.map(|s| s.walk),
+                Some(2.5),
+                "the 6 speeds still parse right after the swim-pitch tail"
+            );
+        }
+        other => panic!("expected one ObjectCreate, got {other:?}"),
+    }
+}
+
+/// A **dry** create carries no pitch tail at all — the four bytes are absent, so a parse that read
+/// one unconditionally would swallow `fall_time` and misalign every speed after it. The mover state
+/// still surfaces (the flags word is not conditional); its pitch is a level `0.0`, which is what the
+/// render law's own SWIMMING gate then reads.
+#[test]
+fn a_dry_living_block_has_no_pitch_tail_and_reads_level() {
+    let mut body = 1u32.to_le_bytes().to_vec();
+    body.push(0);
+    body.push(2);
+    write_packed_guid(0xAB, &mut body).unwrap();
+    body.push(3); // TypeId::Unit
+
+    body.push(0x20); // LIVING
+    let flags: u32 = 0x1; // FORWARD, walking on dry land
+    body.extend_from_slice(&flags.to_le_bytes());
+    body.extend_from_slice(&0u32.to_le_bytes()); // timestamp
+    for v in [10.0f32, 20.0, 30.0, 0.5] {
+        body.extend_from_slice(&v.to_le_bytes()); // pos + orientation
+    }
+    body.extend_from_slice(&0.0f32.to_le_bytes()); // fall_time — NO pitch tail before it
+    for v in [2.5f32, 7.0, 4.5, 4.722_222_3, 2.5, std::f32::consts::PI] {
+        body.extend_from_slice(&v.to_le_bytes());
+    }
+    body.push(0);
+
+    let packet = messages::parse_server(messages::opcode::SMSG_UPDATE_OBJECT, &body).unwrap();
+    match decode(packet).as_slice() {
+        [SessionEvent::ObjectCreate { mover, speeds, .. }] => {
+            assert_eq!(
+                mover,
+                &Some(benilla_protocol::MoverState { flags, pitch: 0.0 }),
+                "no tail on the wire reads as a level pitch, not a misparse"
+            );
+            assert_eq!(
+                speeds.map(|s| s.walk),
+                Some(2.5),
+                "the speeds land right after fall_time — the tail really was absent"
+            );
+        }
+        other => panic!("expected one ObjectCreate, got {other:?}"),
+    }
+}
+
 /// A unit that is **already walking** when it streams in: the `LIVING` block's
 /// `MOVEFLAG_SPLINE_ENABLED` (0x0040_0000) tail, byte-shaped exactly as vmangos writes it
 /// (`PacketBuilder::WriteCreate`, `packet_builder.cpp:152`). Two things are verified, and both are

@@ -190,6 +190,39 @@
     </Font>
 
     <Script><![CDATA[
+        -- ── SHOW_BUFF_DURATIONS: the buff bar's timer switch (decision 1139) ──────────────────
+        --
+        -- The reference declares this in `UIOptionsFrame.lua` (l.21/104), whose `default` is
+        -- `"0"`. We have no counterpart to that file, and the row that drives it is on THIS
+        -- window's Interface page — so this is its home, and 1751's eighteenth window is what
+        -- moved it: it lived in our BuffFrame.xml, and the buff bar is the reference's own file
+        -- now, which reads the global and declares nothing.
+        --
+        -- **`"0"` — the reference's own, since 1804.** It shipped `"1"` from 0255, which put the
+        -- durations-shown geometry in on the director's call, through 1139, which turned it into a
+        -- setting without re-weighing what it ships as. This assignment is the ONLY statement of
+        -- the default: the saved chunk executes over it at load (1128), and the Interface page's
+        -- row captures it as its Defaults value at OnLoad, which runs first — so Defaults now
+        -- walks back to the reference's table because this line IS the reference's table.
+        --
+        -- Read at CALL time by `BuffButton_Update` / `BuffButtons_UpdatePositions` /
+        -- `BuffFrame_UpdateDuration`, so this file sitting far below the bar does not bind.
+        SHOW_BUFF_DURATIONS = "0"
+        RegisterForSave("SHOW_BUFF_DURATIONS")
+
+        -- The target-of-target pair, at the reference's own values and in the reference's own home
+        -- (`UIOptionsFrame.lua` l.116-119, where both sit in the uvar defaults block and both are
+        -- RegisterForSave'd). The switch ships OFF and the state ships "5".
+        --
+        -- These lived in our `UnitFrames.xml` file scope until the unit-frame kit went to the
+        -- chain — a squatter, and its own note said so. The reference declares them beside the
+        -- other party/unit uvars here, and `TargetFrame.lua:504` reads the switch at CALL time
+        -- (`TargetofTarget_Update`), so this file sitting far below the frames does not bind.
+        SHOW_TARGET_OF_TARGET = "0"
+        SHOW_TARGET_OF_TARGET_STATE = "5"
+        RegisterForSave("SHOW_TARGET_OF_TARGET")
+        RegisterForSave("SHOW_TARGET_OF_TARGET_STATE")
+
         -- The static category tree (era Game tab, Classic tocs), in list order. Keys are the row
         -- name suffixes; the visible label doubles as the page title (the era does the same —
         -- Settings.RegisterCategory names both from one string).
@@ -622,6 +655,17 @@
             .. "Below 100% trades sharpness for frame rate; above 100% is supersampling, which "
             .. "smooths edges at the cost of frame rate. Applies when you click Apply."
 
+        -- Enable Sound in Background (1847). An era row: 1.12 hardcodes the behaviour and has no
+        -- checkbox, so there is no OPTION_TOOLTIP_* to resolve and the BENILLA_ prefix applies
+        -- for the same reason Render Scale's does -- the reference's namespace stays the
+        -- reference's. The last line is not padding: mute is not pause on either client, and a
+        -- player who expects a paused fight to resume where it stopped is owed the difference.
+        BENILLA_TOOLTIP_BACKGROUND_SOUND =
+            "Keeps the game's sound playing while you are working in another window.\n\n"
+            .. "With this off, switching away silences the game and switching back restores it. "
+            .. "Sounds keep running while they are silenced, so a long one may have finished by "
+            .. "the time you return."
+
         -- Display Mode (1650). 1.12's own OPTION_TOOLTIP_WINDOWED_MODE cannot ride this row: it
         -- is written for the checkbox it belonged to ("Check to play in a non-fullscreen
         -- window..."), and its second half describes a desktop-gamma consequence of an exclusive
@@ -640,7 +684,8 @@
             },
             Audio = {
                 "RowEnableAll", "RowMaster", "RowSound", "RowMusic", "RowAmbience",
-                "RowEnableMusic", "RowEnableAmbience",
+                "RowEnableMusic", "RowEnableAmbience", "RowEnableErrorSpeech",
+                "RowBackgroundSound",
             },
             Graphics = {
                 "RowUiScale", "RowFarclip", "RowWorldDetail",
@@ -1229,15 +1274,21 @@
                 return
             end
             if key ~= "Audio" then return end
+            -- 1.12's own rule, both halves: SoundOptionsFrame_UpdateDependencies greys check
+            -- button 2 (Enable Ambience) AND button 4 (Enable Error Speech) while the master
+            -- enable is unticked. Enable Music is deliberately left alive — the quirk the
+            -- reference's own file has.
             local on = GetCVar("MasterSoundEffects") ~= "0"
-            local box = OptionsFrameContainerBodyAudioRowEnableAmbienceCheck
-            local label = OptionsFrameContainerBodyAudioRowEnableAmbienceLabel
-            if on then
-                box:Enable()
-                label:SetFontObject("GameFontNormal")
-            else
-                box:Disable()
-                label:SetFontObject("GameFontDisable")
+            for _, row in {"RowEnableAmbience", "RowEnableErrorSpeech"} do
+                local box = getglobal("OptionsFrameContainerBodyAudio"..row.."Check")
+                local label = getglobal("OptionsFrameContainerBodyAudio"..row.."Label")
+                if on then
+                    box:Enable()
+                    label:SetFontObject("GameFontNormal")
+                else
+                    box:Disable()
+                    label:SetFontObject("GameFontDisable")
+                end
             end
         end
 
@@ -2163,8 +2214,9 @@
                                              base — the reference's own arrangement, and the reason
                                              the readout is raw yards here rather than a percent:
                                              "22" means the wheel stops at 22 yards, which is the
-                                             thing being chosen. Our default is the factor fully
-                                             raised (30 yd), where 1.12 ships 1.0. -->
+                                             thing being chosen. The slider rests at 1.0 (15 yd),
+                                             1.12's own registered default — it sat at the top of
+                                             the range (30 yd) from 1140 until 1804. -->
                                         <!-- Camera Following Style (1493, values re-pinned by
                                              1502): 1.12's own dropdown
                                              (UIOptionsFrameCameraDropDown) in its own order —
@@ -2297,6 +2349,42 @@
                                             <Scripts><OnLoad>
                                                 OptionsRow_OnLoad(self, "EnableAmbience", "Enable Ambience",
                                                     "OPTION_TOOLTIP_ENABLE_AMBIENCE")
+                                                self.soundQuirk = 1
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- 1.12's fourth Sound checkbox, ENABLE_ERROR_SPEECH
+                                             (SoundOptionsFrame.lua l.2) — the race/sex refusal
+                                             lines your character says aloud, decision 1815. Its
+                                             label and tooltip are the reference's own
+                                             GlobalStrings entries. -->
+                                        <Frame name="$parentRowEnableErrorSpeech" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowEnableAmbience" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowEnableAmbience" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "EnableErrorSpeech", "Enable Error Speech",
+                                                    "OPTION_TOOLTIP_ENABLE_ERROR_SPEECH")
+                                                self.soundQuirk = 1
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- Sound in the background (decision 1847). The one
+                                             Audio row 1.12 has no checkbox for: it mutes on its
+                                             window-activation event unconditionally, so this row
+                                             offers the way out the reference never did, shipped
+                                             OFF at the reference's own behaviour. Era's label and
+                                             era's CVar spelling, the autoLootDefault posture.
+                                             soundQuirk like every box on this page - the mapping
+                                             belongs to the panel, not to the row's provenance. -->
+                                        <Frame name="$parentRowBackgroundSound" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowEnableErrorSpeech" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowEnableErrorSpeech" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "Sound_EnableSoundWhenGameIsInBG",
+                                                    "Enable Sound in Background",
+                                                    "BENILLA_TOOLTIP_BACKGROUND_SOUND")
                                                 self.soundQuirk = 1
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -3377,18 +3465,42 @@
                                              seating). The wheel handler is NOT here: a spin over a row
                                              bubbles up the PARENT chain (pointer.rs), and this frame is
                                              the rows' sibling — it lives on the body below. -->
-                                        <Frame name="$parentScrollFrame" inherits="FauxScrollFrameTemplate">
+                                        <ScrollFrame name="$parentScrollFrame" inherits="FauxScrollFrameTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-47"/></Offset></Anchor>
                                                 <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-32" y="28"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts>
-                                                <OnLoad>
-                                                    ScrollFrame_OnLoad()
-                                                    this.updateFunc = KeyBindingsPage_Update
-                                                </OnLoad>
+                                                <OnLoad>ScrollFrame_OnLoad()</OnLoad>
+                                                <!-- The reference's kit writes `frame.offset` ONLY
+                                                     from here (its `updateFunc` field does not
+                                                     exist); without this the bar moves and the list
+                                                     does not follow. `KEYBINDINGS_ROW_HEIGHT` is a
+                                                     file-scope global in KeyBindingsPage.xml, so it
+                                                     is visible to this handler's own chunk — a
+                                                     `local` would not be (1860). -->
+                                                <OnVerticalScroll>FauxScrollFrame_OnVerticalScroll(KEYBINDINGS_ROW_HEIGHT, KeyBindingsPage_Update)</OnVerticalScroll>
+                                                <!-- **The armed guard has to be restated HERE.**
+                                                     While a capsule is armed the wheel is a BIND,
+                                                     never a scroll (1.12's law; the body below
+                                                     guards its own arm the same way). Our retired
+                                                     `FauxScrollFrameTemplate` was a plain `<Frame>`
+                                                     with no wheel handler, so the body's guard was
+                                                     the only path. The reference's template
+                                                     inherits `UIPanelScrollFrameTemplate`, which
+                                                     carries `<OnMouseWheel>` of its own — and that
+                                                     one fires on this frame, ahead of the body,
+                                                     bypassing the guard entirely. An instance's
+                                                     handler REPLACES the inherited one, so this is
+                                                     the reference's verb with our law back in front
+                                                     of it (1860). -->
+                                                <OnMouseWheel>
+                                                    if not KeyBindingsPage.selected then
+                                                        ScrollFrameTemplate_OnMouseWheel(arg1)
+                                                    end
+                                                </OnMouseWheel>
                                             </Scripts>
-                                        </Frame>
+                                        </ScrollFrame>
                                     </Frames>
                                     <!-- The page's wheel: rows and the bar all bubble here (the
                                          QuestLog/Trainer lesson — a handler on the sibling catcher

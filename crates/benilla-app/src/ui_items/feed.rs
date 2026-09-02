@@ -556,6 +556,10 @@ fn resolve_slot(
     // (that field's own doc has the full reason).
     now: bevy::platform::time::Instant,
     ui_now: f64,
+    // The player's own `ChrClasses.dbc` relic flag — `find_equip_slot`'s second half. It decides
+    // ONE slot (INVSLOT 17) and it decides it both ways, so it has to reach every fit-rule read
+    // rather than being applied at one of them (1803).
+    has_relic_slot: bool,
 ) -> Option<ContainerSlot> {
     if guid == 0 {
         return None;
@@ -677,7 +681,7 @@ fn resolve_slot(
         flags,
         already_bound,
         enchants: enchant_lines,
-        equip_slots: find_equip_slot(t.inventory_type),
+        equip_slots: find_equip_slot(t.inventory_type, has_relic_slot),
         bar_placeable: t.placeable_on_action_bar(),
         cooldown: t.use_spell.and_then(|u| {
             let sd = spells.and_then(|s| s.get(u.spell_id));
@@ -768,6 +772,8 @@ pub(crate) fn resolve_item_locks(
 #[allow(clippy::too_many_arguments, clippy::type_complexity)] // the param list IS the input set
 pub(crate) fn feed_containers(
     script: Option<NonSendMut<UiScript>>,
+    // `ChrClasses.dbc` field 16, for the fit rule's relic half — see `find_equip_slot` (1803).
+    classes: Option<Res<crate::chr_classes::ChrClassTable>>,
     mut items: ResMut<Items>,
     icons: Option<Res<ItemDisplays>>,
     // The two item-DBC catalogs, as one param (the 16-SystemParam ceiling): `SpellItemEnchantment`'s
@@ -786,7 +792,9 @@ pub(crate) fn feed_containers(
     commands: Res<NetCommands>,
     cooldowns: Res<crate::cooldowns::Cooldowns>,
     spells: Option<Res<crate::ui_action::Spells>>,
-    mut equip_errors: ResMut<EquipErrors>,
+    // The refusals and where they land, as one param (the 16-SystemParam ceiling this signature
+    // already sits at): the queue, and `show_messages`' chat + sound sinks (1815).
+    equip: (ResMut<EquipErrors>, crate::ui_action::MessageSink),
     // Reason 16's `%s` source (decision 0916); absent = every 16 keeps the generic line.
     bag_families: Option<Res<crate::ui_items::ItemBagFamilies>>,
     pending: Res<PendingItemOps>,
@@ -805,6 +813,7 @@ pub(crate) fn feed_containers(
         return;
     };
     let (clock, mut petitions) = clock_and_petitions;
+    let (mut equip_errors, mut sink) = equip;
     let (memory, vm_reset) = memory.get_reset(&script);
     // The gate (1439): the snapshot below is a function of the self descriptor's slot arrays,
     // the item stores (both epochs — `is_changed` on `Items`/`NameCache`/`Cooldowns` is
@@ -911,6 +920,7 @@ pub(crate) fn feed_containers(
     // failed to map can't reach here (the table is total), and a key we typo'd is caught by
     // `equip_error`'s resolution test against the real `GlobalStrings.lua`, not at runtime.
     let player = self_q.0.iter().next();
+    let mut refusals = Vec::new();
     for e in equip_errors.0.drain(..) {
         // Reason 16's substitution — the ONE reason whose text is chosen by the app rather than
         // by the table, because the choice needs the named bag (decision 0916). The reference's
@@ -951,8 +961,14 @@ pub(crate) fn feed_containers(
             Some(family) => text.replace("%s", &family),
             None => text,
         };
-        script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
+        refusals.push(crate::ui_action::Shown::keyed(key, text));
     }
+    // Through the one sink, so the row that named the text also names the surface and the SOUND —
+    // 18 of these keys carry an error-speech line (`ERR_INV_FULL`, `ERR_BAG_FULL`,
+    // `ERR_NOT_ENOUGH_MONEY`, …), which is the largest single source of it in the client
+    // (decision 1815). Every key this table can emit is `kind = 2`, so nothing moved off the red
+    // line when the surface stopped being hardcoded here.
+    crate::ui_action::show_messages(&mut script, &mut sink, "ui_items", refusals);
     // Both lock clears of the frame — the resolving field-update watch ([`resolve_item_locks`],
     // which runs ahead of EVERY feed) and the failure-driven clears
     // `net/apply/loot.rs::inventory_failure` queued (it has no `UiScript` to fire through). Both
@@ -964,6 +980,16 @@ pub(crate) fn feed_containers(
     let transitioned: Vec<(i64, u32)> = std::mem::take(&mut lock_cleared.0);
 
     let mut fresh: HashMap<i64, ContainerState> = HashMap::new();
+    // The player's own relic flag, resolved once. `find_equip_slot` reads it for INVSLOT 17 and
+    // reads it BOTH ways, so an absent table (no client data) answers false — every class then
+    // reads as an ordinary ranged wielder, which is the safe degradation.
+    let has_relic_slot = player.is_some_and(|p| {
+        p.0.unit_class().is_some_and(|c| {
+            classes
+                .as_deref()
+                .is_some_and(|t| t.0.has_relic_slot(u32::from(c)))
+        })
+    });
     if let Some(store) = player {
         // Bag 0: the backpack — its slots live directly in the player descriptor.
         let mut slots = HashMap::new();
@@ -981,6 +1007,7 @@ pub(crate) fn feed_containers(
                 &mut petitions,
                 now,
                 ui_now,
+                has_relic_slot,
             ) {
                 slot.locked = pending.contains(0, u32::from(i) + 1);
                 slots.insert(u32::from(i) + 1, slot);
@@ -1035,6 +1062,7 @@ pub(crate) fn feed_containers(
                     &mut petitions,
                     now,
                     ui_now,
+                    has_relic_slot,
                 ) {
                     slot.locked = pending.contains(i64::from(bag), j as u32 + 1);
                     slots.insert(j as u32 + 1, slot);
@@ -1069,6 +1097,7 @@ pub(crate) fn feed_containers(
                 &mut petitions,
                 now,
                 ui_now,
+                has_relic_slot,
             ) {
                 slot.locked = pending.contains(BANK_CONTAINER, u32::from(i) + 1);
                 slots.insert(u32::from(i) + 1, slot);
@@ -1119,6 +1148,7 @@ pub(crate) fn feed_containers(
                     &mut petitions,
                     now,
                     ui_now,
+                    has_relic_slot,
                 ) {
                     slot.locked = pending.contains(bag_id, j as u32 + 1);
                     slots.insert(j as u32 + 1, slot);
@@ -1157,6 +1187,7 @@ pub(crate) fn feed_containers(
                 &mut petitions,
                 now,
                 ui_now,
+                has_relic_slot,
             ) {
                 slot.locked = pending.contains(KEYRING_CONTAINER, u32::from(i) + 1);
                 slots.insert(u32::from(i) + 1, slot);

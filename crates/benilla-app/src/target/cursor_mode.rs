@@ -169,7 +169,7 @@ pub(crate) mod npc_flags {
 }
 
 /// `UNIT_FLAG_SKINNABLE` in `UNIT_FIELD_FLAGS` (vanilla).
-const UNIT_FLAG_SKINNABLE: u32 = 0x0400_0000;
+pub(super) const UNIT_FLAG_SKINNABLE: u32 = 0x0400_0000;
 
 /// NPC-service range gate: gray beyond 5.5556 yd (squared 30.864 — the client's `0xb4b32c` cell,
 /// `[0x804328]²`; checked at `0x482320`, boundary-inclusive). Shared with the merchant window's
@@ -655,7 +655,7 @@ fn go_cursor_kind(type_id: i32, lock_cursor: Option<CursorKind>) -> CursorKind {
 ///
 /// `None` (no status ever sent) reads as no quest: the server sends the status unprompted for every
 /// questgiver in range, so its absence means the unit isn't offering us one.
-fn questgiver_has_quest(quest_status: Option<u32>) -> bool {
+pub(super) fn questgiver_has_quest(quest_status: Option<u32>) -> bool {
     use benilla_protocol::messages::dialog_status::{NONE, UNAVAILABLE};
     !matches!(quest_status, None | Some(NONE) | Some(UNAVAILABLE))
 }

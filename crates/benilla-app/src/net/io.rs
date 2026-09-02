@@ -100,18 +100,106 @@ pub(crate) struct LoginRequest {
 /// must never shrink below that.
 pub(super) const PING_INTERVAL: Duration = Duration::from_secs(30);
 
-/// The ping clock — shared between the write thread (which stamps each `CMSG_PING`) and the app's
-/// event drain (which matches the `SMSG_PONG` echo against it to measure the round trip). One
-/// mutex, touched every 30 s by the writer and once per pong by the drain.
+/// How many round trips [`PingClock`] keeps — **fifteen**, which is the reference's *usable*
+/// depth even though its array holds sixteen (VERIFIED, wow-re `system/net`, 4-agent §5).
+///
+/// `conn+0x1a6c` is 16 u32 slots, and W1's shorthand "head/tail wrap 16" is about that array. But
+/// the averager treats `read == write` as its **empty** sentinel (`0x537fa8`), so `HandlePong`'s
+/// conditional read-index advance (`0x537de8`) makes the full state unreachable: the 16th sample
+/// pushes the oldest out of view as it lands, and every reading from then on is over 15. Our
+/// `VecDeque` holds what can actually be seen, so the bound is the reachable number rather than
+/// the allocation — and the mean is over the same samples the reference's is.
+const RTT_RING: usize = 15;
+
+/// **The connection's ping/RTT stats** — the reference's own per-connection stats block
+/// (`conn+0x1a6c` ring, `+0x1aac/+0x1ab0` head/tail, `+0x1a64` send stamp, `+0x1a68` expected
+/// sequence; wow-re net W1), behind the same one lock it guards them with (`conn+0x1ac0`'s
+/// critical section, taken by both `HandlePong 0x537d60` and the `GetNetStats` math at
+/// `0x537f20`).
+///
+/// **Shared by all three threads, and the sharing is the point.** The write thread stamps each
+/// `CMSG_PING` here; the **read thread** measures the `SMSG_PONG` echo against it the instant the
+/// packet comes off the socket; the app reads [`Self::avg_latency_ms`] for `GetNetStats`.
+///
+/// That middle one is the whole reason this type owns the ring (bug B346). The measurement used
+/// to happen in the ECS drain — `Instant::elapsed` called one frame or more after the pong had
+/// already arrived — so the "round trip" it reported was the network round trip **plus a client
+/// frame**. The meter therefore read high exactly when the client was slow, and the worst frames
+/// of any session are the ones right after entering the world (`pipe_warm` alone grinds ~1051 ms
+/// main-thread hitches warming the game's pipeline set; the collider builder costs hundreds of ms
+/// more). A pong drained on one of those frames is recorded as a ~600 ms round trip, and at a
+/// 30 s cadence the ring then carries that sample for minutes — which is exactly what B346
+/// reported: a meter that opens at ~600 ms and sinks towards the truth over two or three minutes.
+///
+/// Measured on a localhost run (where the true RTT is 0-1 ms), the drain added **58 ms** to the
+/// pong that landed 2.5 s after world enter against 8-11 ms once the session settled — and the
+/// pong was the *first* event of that drain with 0 ms spent inside it, so every bit of the
+/// difference was waiting for the frame to come round, not queue backlog.
+///
+/// The reference never had this problem, because it never measures on the game thread: `OnData`
+/// (`0x537b10`) peeks the opcode and sends `SMSG_PONG` **straight** to `HandlePong` inline on the
+/// network thread, bypassing the message queue every other opcode is copied onto. [`record_pong`]
+/// is that function, and the read loop calls it from the same position.
+///
+/// [`record_pong`]: Self::record_pong
 #[derive(Default)]
 pub(crate) struct PingClock {
     /// Sequence of the most recent ping sent (the real client's ++counter; reset per connection).
     pub(crate) sequence: u32,
     /// When that ping went out — `None` until the first ping of a connection.
     pub(crate) sent_at: Option<Instant>,
-    /// The last measured round trip (ms): echoed in the next ping's lastRtt field (what the real
-    /// client reports) and surfaced as the debug panel's latency readout.
+    /// The last measured round trip (ms) — echoed in the next ping's lastRtt field, which is what
+    /// the real client puts on the wire, and shown as the debug panel's readout. Kept apart from
+    /// the ring because it is the *last* sample, not the average.
     pub(crate) last_rtt_ms: Option<u32>,
+    /// The most recent [`RTT_RING`] round trips (ms), oldest first — the reference's own RTT
+    /// history, which [`Self::avg_latency_ms`] averages for `GetNetStats`.
+    rtt_ring: std::collections::VecDeque<u32>,
+}
+
+impl PingClock {
+    /// **`HandlePong`** — one `SMSG_PONG` off the socket, measured and filed, on the read thread.
+    /// A stale or mismatched sequence (a pong straddling a reconnect) is dropped, as the
+    /// reference drops it. Returns the measured round trip when one was recorded.
+    pub(crate) fn record_pong(&mut self, sequence: u32) -> Option<u32> {
+        let sent = self.sent_at.filter(|_| self.sequence == sequence)?;
+        let rtt = sent.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
+        self.file_rtt(rtt);
+        Some(rtt)
+    }
+
+    /// The filing half of [`Self::record_pong`], split out so a test can hand it exact
+    /// milliseconds — the measuring half reads a real clock, and a ring test wants known numbers.
+    /// The newest sample in, the oldest out at depth.
+    fn file_rtt(&mut self, rtt: u32) {
+        self.last_rtt_ms = Some(rtt);
+        if self.rtt_ring.len() == RTT_RING {
+            self.rtt_ring.pop_front();
+        }
+        self.rtt_ring.push_back(rtt);
+    }
+
+    /// The latency `GetNetStats` reports: the mean of the ring, truncated — `None` while it is
+    /// empty (no pong since the connection came up), which the UI feed renders as the reference's
+    /// own literal 0 (`0x537fd2`).
+    ///
+    /// Byte-for-byte the reference's own arithmetic, not an approximation of it: `0x537f20` walks
+    /// read→write summing into `eax` and counting into `edi`, then does one `xor edx,edx; div edi`
+    /// (`0x537fce`) — **unsigned, truncating, remainder discarded**, with no rounding term
+    /// anywhere in the function. So the mean is over the samples actually present rather than a
+    /// fixed sixteen, and integer `sum / len` in milliseconds *is* the reference's answer.
+    pub(crate) fn avg_latency_ms(&self) -> Option<u32> {
+        if self.rtt_ring.is_empty() {
+            return None;
+        }
+        let sum: u64 = self.rtt_ring.iter().map(|&ms| u64::from(ms)).sum();
+        Some((sum / self.rtt_ring.len() as u64) as u32)
+    }
+
+    /// Forget this connection's measurements — the next connection's latency is its own.
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
 }
 
 /// Cap on consecutive "command dropped/failed" warns per connection epoch, so a movement stream
@@ -191,6 +279,9 @@ pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let clock = Arc::clone(&ping_clock);
+            // The sequencer's own handle: `SMSG_PONG` is measured where it lands, not where it is
+            // drained (B346 — see [`PingClock`]).
+            let read_clock = Arc::clone(&ping_clock);
             let abandon = Arc::clone(&login_abandon);
             thread::Builder::new()
                 .name("wow-net-write".into())
@@ -212,7 +303,7 @@ pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
                     // every await inside it is a blocking socket read, so this is the old loop with
                     // an `.await` written where the call used to be.
                     futures_lite::future::block_on(sequencer(
-                        cfg, events_tx, writer_tx, pick_rx, login_rx, abandon,
+                        cfg, events_tx, writer_tx, pick_rx, login_rx, abandon, read_clock,
                     ));
                 })
                 .expect("spawn wow-net thread");
@@ -222,8 +313,9 @@ pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
             // No threads in a page: the sequencer is one task on the browser's own event loop, and
             // the writer is drained by a Bevy system instead of a sibling thread (`crate::net`).
             let abandon = Arc::clone(&login_abandon);
+            let read_clock = Arc::clone(&ping_clock);
             wasm_bindgen_futures::spawn_local(sequencer(
-                cfg, events_tx, writer_tx, pick_rx, login_rx, abandon,
+                cfg, events_tx, writer_tx, pick_rx, login_rx, abandon, read_clock,
             ));
         }
     }
@@ -253,9 +345,27 @@ async fn sequencer(
     pick_rx: async_channel::Receiver<CharRequest>,
     login_rx: async_channel::Receiver<LoginRequest>,
     abandon: Arc<AtomicU64>,
+    ping_clock: Arc<Mutex<PingClock>>,
 ) {
     loop {
-        match run(&cfg, &events_tx, &writer_tx, &pick_rx, &login_rx, &abandon).await {
+        // **A cycle starts with no measurements.** Every way the last one ended — a stream
+        // failure, a logout, a re-park — lands here, so one clear covers them all, and it runs on
+        // the task that owns the connection instead of racing in from the app's drain a frame
+        // later. (`writer_loop` clears again when the fresh writer arrives, and still has to:
+        // between the old socket dying and that handover the keepalive tick can still fire on the
+        // stale writer.)
+        ping_clock.lock().expect("ping clock").clear();
+        match run(
+            &cfg,
+            &events_tx,
+            &writer_tx,
+            &pick_rx,
+            &login_rx,
+            &abandon,
+            &ping_clock,
+        )
+        .await
+        {
             Ok(Cycle::Exit) => return,
             Ok(Cycle::Repark) => {}
             Ok(Cycle::LoggedOut) => {
@@ -303,6 +413,7 @@ async fn run(
     pick_rx: &async_channel::Receiver<CharRequest>,
     login_rx: &async_channel::Receiver<LoginRequest>,
     abandon: &AtomicU64,
+    ping_clock: &Mutex<PingClock>,
 ) -> Result<Cycle> {
     // ── The pre-logon park (decision 0539): wait for credentials. ───────────────────────────────
     let Ok(req) = login_rx.recv().await else {
@@ -542,11 +653,13 @@ async fn run(
     session.player_login_async(guid).await?;
     session.set_active_mover_async(guid).await?;
 
+    let billing_time_rested = session.billing_time_rested();
     let (mut reader, writer) = session.into_split()?;
     if events_tx
         .send(SessionEvent::Connected {
             self_guid: guid,
             name,
+            billing_time_rested,
         })
         .is_err()
     {
@@ -584,6 +697,21 @@ async fn run(
                     );
                 }
                 for ev in events {
+                    // **The pong bypass** (B346), the reference's own shape: `OnData 0x537b10`
+                    // peeks the opcode and hands `SMSG_PONG` straight to `HandlePong 0x537d60`
+                    // inline, instead of copying it onto the queue the game thread drains. So do
+                    // we — the round trip is measured here, against the clock the write thread
+                    // stamped, and the event stops here. Measuring it after a drain instead added
+                    // a whole client frame to every reading, which is a frame's worth of the
+                    // client's own slowness reported as the server's distance.
+                    if let SessionEvent::Pong { sequence } = ev {
+                        if let Some(rtt) =
+                            ping_clock.lock().expect("ping clock").record_pong(sequence)
+                        {
+                            bevy::log::debug!("net: pong seq={sequence} rtt={rtt}ms");
+                        }
+                        continue;
+                    }
                     // A confirmed logout ends the cycle *after* the app hears about it.
                     let logged_out = matches!(ev, SessionEvent::LoggedOut);
                     // Receiver dropped → the app exited; end the thread cleanly.
@@ -646,7 +774,14 @@ fn writer_loop(
 ) {
     let mut writer: Option<WorldWriter> = None;
     let mut warned = 0u32;
-    let ping_tick = crossbeam_channel::tick(PING_INTERVAL);
+    // **Armed by the connection, re-armed by each send — never free-running** (wow-re net,
+    // `0x537ff0`: `now - lastSent - 30000 >= 0`, evaluated at the connection's own drain tail,
+    // and `0x537bcf` stamps `lastSent` with the current tick at connect). It was a process-
+    // lifetime `tick`, which is a different clock in two ways that both showed: the first ping of
+    // a session landed anywhere in the 30 s after entering the world rather than at the end of it
+    // — sometimes squarely inside the world-load storm, which is where B346's inflated sample
+    // came from — and the cadence never re-phased on a reconnect.
+    let mut ping_tick = crossbeam_channel::never();
     loop {
         crossbeam_channel::select! {
             recv(writer_rx) -> w => match w {
@@ -656,7 +791,11 @@ fn writer_loop(
                     // A fresh connection restarts the keepalive from scratch, like the real
                     // client: sequence 1 is the new socket's first ping, and a stale in-flight
                     // pong from the old socket can no longer match.
-                    *ping_clock.lock().expect("ping clock") = PingClock::default();
+                    ping_clock.lock().expect("ping clock").clear();
+                    // The connect stamp: the first keepalive of a connection is a full interval
+                    // out, not on the next drain (`0x537bcf` — verified; the alternative reading,
+                    // that a zeroed stamp fires one immediately, is what the bytes ruled out).
+                    ping_tick = crossbeam_channel::after(PING_INTERVAL);
                 }
                 // The read thread ended (app exit). Stop selecting the dead channel (a
                 // disconnected receiver is always-ready — it would busy-spin the select);
@@ -667,11 +806,28 @@ fn writer_loop(
                 // The keepalive (30 s, the verified real-client cadence). Sent only while a live
                 // writer exists — the parked char-select socket goes without (decision 0193's
                 // self-healing covers it), and vmangos would kick a faster cadence as overspeed.
+                // Disarmed unless a send is attempted, so a dead connection stops pinging and the
+                // next writer re-arms from its own connect.
+                ping_tick = crossbeam_channel::never();
                 if let Some(w) = writer.as_mut() {
+                    // Re-armed from the SEND, so the interval is measured the way the reference
+                    // measures it — and a failed write still counts, since what the cadence is
+                    // spacing is our attempts on the socket, not the server's answers.
+                    ping_tick = crossbeam_channel::after(PING_INTERVAL);
                     let (sequence, last_rtt) = {
                         let mut c = ping_clock.lock().expect("ping clock");
                         c.sequence += 1;
                         c.sent_at = Some(Instant::now());
+                        // `lastRtt`: the most recent single sample, never the mean (VERIFIED —
+                        // the reference reads `ring[write-1]`, folded into
+                        // `[esi + 4*w + 0x1a68]` at `0x537e87`). **One deliberate divergence.**
+                        // Its `jbe` guard at `0x537e85` substitutes a literal 0 whenever the write
+                        // index is 0 — true before the first pong, and again on every sixteenth
+                        // ping thereafter, so a healthy real client reports a 0 ms latency to the
+                        // server once in sixteen. That is an artefact of its index arithmetic, not
+                        // a behaviour: nothing renders it, only the server stores it. We send 0
+                        // for the first case (no sample yet, which is the honest value) and the
+                        // real sample for the rest.
                         (c.sequence, c.last_rtt_ms.unwrap_or(0))
                     };
                     if let Err(e) = w.ping(sequence, last_rtt) {
@@ -895,6 +1051,13 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             entry,
             count,
         } => w.buy_item(vendor, entry, count),
+        ClientCommand::BuyItemInSlot {
+            vendor,
+            entry,
+            bag_guid,
+            bag_slot,
+            count,
+        } => w.buy_item_in_slot(vendor, entry, bag_guid, bag_slot, count),
         ClientCommand::SellItem {
             vendor,
             item_guid,
@@ -1190,5 +1353,81 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             total_cost,
             nodes,
         } => w.activate_taxi_express(guid, total_cost, &nodes),
+    }
+}
+
+#[cfg(test)]
+mod rtt_tests {
+    use super::{PingClock, RTT_RING};
+    use std::time::Instant;
+
+    /// Arm the clock as the write thread does — a ping sent "now" under `sequence`.
+    fn sent(clock: &mut PingClock, sequence: u32) {
+        clock.sequence = sequence;
+        clock.sent_at = Some(Instant::now());
+    }
+
+    /// The reported latency is the ring's mean, and the ring is bounded at the reference depth —
+    /// so a single spike moves the meter by a fifteenth, not the whole way (which is the point of
+    /// averaging at all: the ping cadence is 30 s, and one bad sample must not sit on a red bar
+    /// for seven minutes).
+    #[test]
+    fn the_reported_latency_is_the_mean_of_a_bounded_ring() {
+        let mut clock = PingClock::default();
+        assert_eq!(clock.avg_latency_ms(), None, "no pong yet");
+
+        clock.file_rtt(40);
+        assert_eq!(clock.avg_latency_ms(), Some(40));
+        clock.file_rtt(60);
+        assert_eq!(clock.avg_latency_ms(), Some(50), "the mean, not the last");
+        assert_eq!(
+            clock.last_rtt_ms,
+            Some(60),
+            "the last sample stays separate"
+        );
+
+        // Fill past the ring: only the newest RTT_RING samples count, so the two above age out.
+        for _ in 0..RTT_RING {
+            clock.file_rtt(100);
+        }
+        assert_eq!(clock.rtt_ring.len(), RTT_RING);
+        assert_eq!(clock.avg_latency_ms(), Some(100));
+
+        clock.clear();
+        assert_eq!(clock.avg_latency_ms(), None, "a disconnect forgets it all");
+        assert_eq!(clock.last_rtt_ms, None);
+    }
+
+    /// **B346's regression.** A pong is only a measurement if it answers the ping we are timing:
+    /// the sequence has to match, and there has to be a live send to measure against. The echo of
+    /// a ping from a dead socket (a pong straddling a reconnect, where `clear` has already run)
+    /// must not enter the ring — it would be timed against nothing, or worse against the *new*
+    /// connection's send, and one bogus sample sits on the meter for minutes at a 30 s cadence.
+    #[test]
+    fn only_the_pong_we_are_waiting_for_is_recorded() {
+        let mut clock = PingClock::default();
+        assert_eq!(clock.record_pong(1), None, "no ping is in flight");
+
+        sent(&mut clock, 7);
+        assert_eq!(
+            clock.record_pong(6),
+            None,
+            "a stale sequence is not our ping"
+        );
+        assert_eq!(clock.record_pong(8), None, "nor is one we never sent");
+        assert!(clock.rtt_ring.is_empty(), "neither entered the ring");
+
+        assert!(clock.record_pong(7).is_some(), "the one we are timing");
+        assert_eq!(clock.rtt_ring.len(), 1);
+        assert!(clock.avg_latency_ms().is_some());
+
+        // The reconnect edge: cleared, so the old socket's echo has nothing to match.
+        clock.clear();
+        assert_eq!(
+            clock.record_pong(7),
+            None,
+            "the dead socket's echo is dropped"
+        );
+        assert_eq!(clock.avg_latency_ms(), None);
     }
 }

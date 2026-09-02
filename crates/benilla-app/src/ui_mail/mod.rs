@@ -50,7 +50,7 @@ use std::collections::{HashMap, HashSet};
 use benilla_protocol::messages::{mail_error, mail_message_type, MailListEntry};
 use bevy::prelude::*;
 
-use benilla_ui::script::{MailInboxRow, MailState, ScriptValue, UiScript};
+use benilla_ui::script::{MailInboxRow, MailState, UiScript};
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
@@ -97,8 +97,8 @@ pub(crate) struct Stationery(pub(crate) benilla_formats::StationeryCatalog);
 /// button). `MAIL_SEND_SUCCESS` fires additionally when `error == OK`.
 pub(crate) struct MailSendAck {
     pub(crate) ok: bool,
-    /// A pre-formatted red error line for a non-OK, non-equip send failure (else `None`).
-    pub(crate) error_text: Option<String>,
+    /// The message key for a non-OK, non-equip send failure (else `None`).
+    pub(crate) refusal: Option<&'static str>,
 }
 
 /// The open mailbox, filled by the net bridge ([`crate::net::apply::mail`]) and read by
@@ -124,9 +124,10 @@ pub(crate) struct MailOpen {
     last_list_query: Option<f64>,
     /// SEND-action results the net bridge queued for the feed to fire ([`MailSendAck`]).
     pub(crate) send_acks: Vec<MailSendAck>,
-    /// Pre-formatted red error lines (a take/return/delete failure) the feed fires via
-    /// `UI_ERROR_MESSAGE`.
-    pub(crate) errors: Vec<String>,
+    /// Refusals (a take/return/delete failure) the feed shows, as message keys — resolved at the
+    /// feed, which is where the VM's `GlobalStrings` can be read
+    /// ([`crate::ui_action::keyed_line`]).
+    pub(crate) errors: Vec<&'static str>,
 }
 
 impl MailOpen {
@@ -239,23 +240,36 @@ fn send_query_next_mail_time_on_enter(
     }
 }
 
-/// The client's message string for a `SMSG_SEND_MAIL_RESULT` error (vmangos `MailResponseResult`);
-/// texts quoted verbatim from the reference `GlobalStrings.lua` where one exists (decision 0544).
-/// `NOT_YOUR_TEAM` has no 1.12 GlobalString — a best-effort English literal stands in (flagged).
-pub(crate) fn mail_error_text(error: u32) -> String {
+/// The message a `SMSG_SEND_MAIL_RESULT` code shows — **always** a catalog key, which is the whole
+/// correction decision 1821 brought here (superseding 0544's hand-written pair).
+///
+/// The reference's handler `0x4ad050` indexes `[0x4ad1a0 + error]` into a nine-entry jump table at
+/// `0x4ad17c`, every arm a `push <id>; call CGGameUI::DisplayError`. This module used to claim
+/// *"No 1.12 GlobalString for either"* about codes 5 and 14 and inline near-miss English for them;
+/// both are real rows, and their real strings differ from what we were showing. And the arm this
+/// module used to spell `"Mail failed (n)."` is the reference's own `ja 0x4ad147` — every code
+/// from 6 to 13 and everything past 15 lands on `ERR_MAIL_DATABASE_ERROR` with them.
+///
+/// `OK` and `EQUIP_ERROR` never reach here: the first is not a refusal (it has
+/// [`MAIL_SENT_KEY`] instead) and the second resolves through the equip-error table
+/// (`0x4ad12e` → `0x622630`), which is [`crate::ui_items`]' job.
+pub(crate) fn mail_refusal(error: u32) -> &'static str {
     match error {
-        mail_error::CANNOT_SEND_TO_SELF => "You can't send mail to yourself.".into(), // ERR_MAIL_TO_SELF
-        mail_error::NOT_ENOUGH_MONEY => "You don't have enough money.".into(), // ERR_NOT_ENOUGH_MONEY
-        mail_error::RECIPIENT_NOT_FOUND => "Cannot find mail recipient.".into(), // ERR_MAIL_TARGET_NOT_FOUND
-        mail_error::NOT_YOUR_TEAM => "That player is not part of your alliance.".into(), // no 1.12 GlobalString
-        mail_error::INTERNAL_ERROR => "Internal mail database error.".into(), // ERR_MAIL_DATABASE_ERROR
-        mail_error::TRIAL_ACCOUNT => "Trial accounts cannot perform that action.".into(),
-        mail_error::TOO_MANY_ATTACHMENTS => {
-            "You have reached the in-game cap of unique mail recipients".into() // ERR_MAIL_REACHED_CAP
-        }
-        other => format!("Mail failed ({other})."),
+        mail_error::CANNOT_SEND_TO_SELF => "ERR_MAIL_TO_SELF", // 0x164
+        mail_error::NOT_ENOUGH_MONEY => "ERR_NOT_ENOUGH_MONEY", // 0x25 — speaks, line 0x28
+        mail_error::RECIPIENT_NOT_FOUND => "ERR_MAIL_TARGET_NOT_FOUND", // 0x165
+        mail_error::NOT_YOUR_TEAM => "ERR_PLAYER_WRONG_FACTION", // 0xff
+        mail_error::TRIAL_ACCOUNT => "ERR_RESTRICTED_ACCOUNT", // 0x1be
+        mail_error::TOO_MANY_ATTACHMENTS => "ERR_MAIL_REACHED_CAP", // 0x1c4
+        // INTERNAL_ERROR (6) and every other code, by the same `0x4ad147`.
+        _ => "ERR_MAIL_DATABASE_ERROR", // 0x166
     }
 }
+
+/// The line a **successful** `SEND` shows: `ERR_MAIL_SENT` — id `0x167`, and a `kind 1` row, so it
+/// is the yellow info line and not the red one. `0x4ad0b1` reaches it before the form reset
+/// (`0x4acdc0`), gated on the action being `SEND`; a successful take/return/delete says nothing.
+pub(crate) const MAIL_SENT_KEY: &str = "ERR_MAIL_SENT";
 
 mod invoice;
 
@@ -476,12 +490,18 @@ fn feed_mail(
     self_q: Query<(&crate::net::ObjectStore, &crate::net::Guid), With<crate::net::SelfPlayer>>,
     states: Res<crate::world_state::WorldStates>,
     // The random-suffix roll's catalogs (1547): an enclosed item's rolled name.
-    props: Option<Res<crate::items::RandomProperties>>,
-    enchants: Option<Res<crate::items::Enchants>>,
+    // The roll catalogs and the message sink, paired (the 16-SystemParam ceiling this signature
+    // sits at): the random-suffix roll (1547), and where a refusal lands (1815).
+    rolls_and_sink: (
+        Option<Res<crate::items::RandomProperties>>,
+        Option<Res<crate::items::Enchants>>,
+        crate::ui_action::MessageSink,
+    ),
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let (props, enchants, mut sink) = rolls_and_sink;
     let rolls = crate::items::RollCatalogs {
         props: props.as_deref(),
         enchants: enchants.as_deref(),
@@ -490,19 +510,28 @@ fn feed_mail(
     let last_mailbox = last_mailbox.get(&script);
     let last_has_new_mail = last_has_new_mail.get(&script);
 
-    // Take/return/delete failures surface as the client's red error line (the equip/cast path shape).
-    for text in std::mem::take(&mut mail.errors) {
-        script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
-    }
+    // Take/return/delete failures go to the surface — and the voice — their message record names.
+    let refusals: Vec<_> = std::mem::take(&mut mail.errors)
+        .into_iter()
+        .filter_map(|key| crate::ui_action::keyed_line(&script, key))
+        .collect();
+    crate::ui_action::show_messages(&mut script, &mut sink, "ui_mail", refusals);
     // SEND acks: MAIL_FAILED on EVERY send result (unblocks the button — wow-re §5), plus
-    // MAIL_SEND_SUCCESS on OK (resets the form) or the red error line on a failure.
+    // MAIL_SEND_SUCCESS on OK (resets the form) or the refusal's own line on a failure. The
+    // success also SAYS so — `ERR_MAIL_SENT`, the yellow info line `0x4ad0b1` shows before it
+    // resets the form (decision 1821).
     for ack in std::mem::take(&mut mail.send_acks) {
         script.fire_event("MAIL_FAILED", vec![]);
+        let key = if ack.ok {
+            Some(MAIL_SENT_KEY)
+        } else {
+            ack.refusal
+        };
+        let line = key.and_then(|k| crate::ui_action::keyed_line(&script, k));
+        crate::ui_action::show_messages(&mut script, &mut sink, "ui_mail", line);
         if ack.ok {
             script.fire_event("MAIL_SEND_SUCCESS", vec![]);
             script.clear_send_mail_item();
-        } else if let Some(text) = ack.error_text {
-            script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
         }
     }
 
@@ -727,6 +756,43 @@ fn drain_mail(
 mod tests {
     use super::*;
     use benilla_protocol::messages::MailAttachment;
+
+    /// **The mail-result table, welded to the message ids it was read from** (decision 1821) —
+    /// the reference's jump table at `0x4ad17c`, reached through the byte index at `0x4ad1a0`.
+    /// The id, not the key, is what was disassembled, so the id is what this asserts.
+    #[test]
+    fn the_mail_result_table_is_the_references_own() {
+        let id = |key: &str| {
+            benilla_ui::messages::by_key(key)
+                .unwrap_or_else(|| panic!("{key} is not a catalog row"))
+                .id
+        };
+        for (code, want) in [
+            (mail_error::CANNOT_SEND_TO_SELF, 0x164u16),
+            (mail_error::NOT_ENOUGH_MONEY, 0x25),
+            (mail_error::RECIPIENT_NOT_FOUND, 0x165),
+            (mail_error::NOT_YOUR_TEAM, 0xff),
+            (mail_error::INTERNAL_ERROR, 0x166),
+            (mail_error::TRIAL_ACCOUNT, 0x1be),
+            (mail_error::TOO_MANY_ATTACHMENTS, 0x1c4),
+        ] {
+            assert_eq!(id(mail_refusal(code)), want, "mail error {code}");
+        }
+        // `ja 0x4ad147` and the index table's `08` run: 7..13 and everything past 15 share the
+        // database-error line, and there is no "(n)" arm for them to take.
+        for code in [7, 8, 13, 16, 99, u32::MAX] {
+            assert_eq!(id(mail_refusal(code)), 0x166, "mail error {code}");
+        }
+        // A success SAYS so — and on the YELLOW line, which is the half a red-only path would
+        // have got wrong.
+        assert_eq!(id(MAIL_SENT_KEY), 0x167);
+        assert_eq!(
+            benilla_ui::messages::by_key(MAIL_SENT_KEY)
+                .expect("row")
+                .kind,
+            benilla_ui::messages::MsgKind::Info
+        );
+    }
 
     /// The no-subject macro context these row tests run under: none of them exercises a `$` token,
     /// and a subject-less context leaves plain text untouched (the expander only rewrites at a `$`).

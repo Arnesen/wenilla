@@ -98,9 +98,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             };
 
             let Some(slot) = slot else {
-                // Not joined: the number 0, and nothing else. `channelName` is unread by every
-                // caller on this branch (all four sites bail on the number first).
-                return Ok(MultiValue::from_vec(vec![Value::Integer(0)]));
+                // **`0, nil, 0` — three values, not one.** This used to push the number alone,
+                // reasoning that `channelName` is unread by every caller on this branch. True of
+                // the callers; not true of the client. `0x4a05e0` pushes three on every path, and
+                // slot 2 is neither the empty string nor the argument echoed back:
+                // `0x4a0659 xor edx,edx` then `lua_pushstring(NULL)`, which tail-jumps to
+                // `lua_pushnil`. Decision 1845.
+                //
+                // "Not joined" is also wider than a bad index: the lookup answers NULL while the
+                // join-pending word is non-zero, so a channel already in the list but not yet
+                // CONFIRMED reads `0, nil, 0` identically — which is what `joined` models here.
+                return Ok(MultiValue::from_vec(vec![
+                    Value::Integer(0),
+                    Value::Nil,
+                    Value::Integer(0),
+                ]));
             };
             let name = name_at(&model, slot).unwrap_or_default().to_string();
             Ok(MultiValue::from_vec(vec![

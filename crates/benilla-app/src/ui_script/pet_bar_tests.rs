@@ -4,22 +4,7 @@
 
 use benilla_ui::script::{PetActionView, QuadContent, UiScript};
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error.
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "loader errors in {file}: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// The pet bar's own load prerequisites, in manifest order: UiPanels (`SetDesaturation`, the
 /// disabled-bar grey), UIParent (the managed bottom stack its OnShow/OnHide re-fires), Cooldown
@@ -28,6 +13,8 @@ fn load_pet_bar(s: &UiScript) {
     for file in [
         "MoneyFrame.xml",
         "UiPanels.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "UIParent.xml",
         "Cooldown.xml",
         "ActionBar.xml",
@@ -366,6 +353,8 @@ fn pet_bar_row(with_multibar: bool) -> (usize, f32) {
     for file in [
         "MoneyFrame.xml",
         "UiPanels.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "UIParent.xml",
         "Cooldown.xml",
         "ActionBar.xml",
@@ -648,6 +637,8 @@ fn load_pet_bar_with_tooltip(s: &UiScript) {
         "Fonts.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "UIParent.xml",
         "GameTooltip.xml",
         "Cooldown.xml",
@@ -675,7 +666,7 @@ fn hovered_pet_bar() -> UiScript {
     // them — so `GetBindingKey("BONUSACTIONBUTTON1")` answers CTRL-1 (its byte-real default) and
     // `GetCVar("UberTooltips")` answers "1" (its byte-read registrar value) rather than nil.
     s.register_bindings(&crate::bindings::registry_commands());
-    s.register_cvars(crate::cvars::REGISTERED.iter().copied());
+    s.register_cvars(crate::cvars::registered_pairs());
     load_pet_bar_with_tooltip(&s);
     declare_token_strings(&s);
     s.set_pet_actions(true, true, true, hunter_slots());

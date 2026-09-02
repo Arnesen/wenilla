@@ -114,6 +114,10 @@ impl Plugin for DevProbesPlugin {
                 "WOW_PROBE_HOVER",
                 "WOW_PROBE_KEY",
                 "WOW_PROBE_LUA",
+                // The swim-pitch aim is a wall-clock timeline like every other probe schedule, and
+                // it is the one script that can be a run's *only* actuator (a drifting swimmer
+                // needs no keys) — so it arms the occlusion defence on its own.
+                "WOW_PROBE_PITCH",
                 "WOW_PROBE_CHEST",
                 "WOW_PROBE_CLAM",
                 "WOW_RIG",
@@ -374,11 +378,13 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_LIVE_FPS").is_ok() {
                 app.add_plugins(crate::capture::LiveFpsPlugin);
             }
-            // The two scripted probe drivers that lived in `player/` until decision 1174 — the mouse-turn
-            // (`WOW_PROBE_LOOK`, decision 0621) and the camera park (`WOW_PROBE_CAM`, decision 0653). Added
+            // The scripted probe drivers that live beside `capture` rather than in `player/`
+            // (decision 1174) — the mouse-turn (`WOW_PROBE_LOOK`, decision 0621), the swim-pitch aim
+            // (`WOW_PROBE_PITCH`) and the camera park (`WOW_PROBE_CAM`, decision 0653). Added
             // unconditionally because each plugin's own `from_env` is its gate, so the variable's name is
-            // spelled in exactly one place; both order themselves before `player::PlayerControlSet`.
+            // spelled in exactly one place; all three order themselves before `player::PlayerControlSet`.
             app.add_plugins(crate::capture::ProbeLookPlugin);
+            app.add_plugins(crate::capture::ProbePitchPlugin);
             app.add_plugins(crate::capture::ProbeCamPlugin);
             // The FPS journal: `WOW_FPS_JOURNAL=<csv>` appends per-second position + frame-time rows on a
             // director-driven run — "where does it dip" as coordinates (see `perf::FpsJournalPlugin`).

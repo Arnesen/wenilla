@@ -48,6 +48,54 @@ pub(crate) fn is_footstep_sound(ident: &[u8; 4]) -> bool {
     ident == b"$FSD"
 }
 
+/// **The footfall handler's own radius**, `2500 yd²` (50 yd) — `[0x80c5b4]`, read at `0x5fc00a`
+/// inside `0x5fbf70`. This gate stands *above* everything that handler goes on to spawn: the
+/// footprint decal ([`crate::footprints`]), the footstep camera shake
+/// ([`crate::camera_shake`]) and the 25 yd spray branch below it all live under it, so it is one
+/// constant and not one per consumer — they held a copy each until they disagreed about its
+/// origin (decision 1856).
+///
+/// **Measured from the CAMERA EYE, not the local player.** `FUN_004818f0()` returns
+/// `[[0xb4b2bc]+0x65b8]` — the *active camera* — and its `+0x8/+0xc/+0x10` is the eye; wow-re
+/// corrected that mislabel in `dist2-gate.md` (2026-08-22, with the camera-dtor proof).
+///
+/// **Unconditional** — the local player's own feet are gated like anyone else's. The reference's
+/// `GUID == local player` compare (`0x5fc042`–`0x5fc06b`) is the decal call's fifth argument, the
+/// **ring-pool select**, not an early bypass.
+const FOOTFALL_RADIUS_SQ: f32 = 2500.0;
+
+/// **Is this footfall out of range?** The handler's distance gate, whole: the kernel, the
+/// threshold and the compare, because all three are load-bearing and splitting them is what
+/// let two consumers disagree.
+///
+/// The kernel rounds **once, at the end**. The reference is x87: it loads the two `C3Vector`s as f32, and keeps every difference, square
+/// and sum in 80-bit extended, then `fstp`s the sum to a **single f32** (`0x5fbffe` store,
+/// `0x5fc007` reload) before the compare. A plain `Vec3::distance_squared` rounds six times
+/// instead of once and can land on the other side of the branch for a footfall sitting on the
+/// 50 yd edge.
+///
+/// f64 reproduces it exactly and needs no x87: an `f32 − f32` widened first is exact, a 24×24→48
+/// bit product is exact, and the sum of three ≤50-bit values is exact — which also makes the
+/// reference's `(dz² + dy²) + dx²` summation order unobservable here, so this does not pretend to
+/// map its axis names onto ours. Round once on the way out and the f32 handed to the compare is
+/// bit-identical (wow-re `dist2-gate.md`, the shared kernel + its `fstp`-round-trip exception
+/// list; `footfall-camera-distance-gate.md` for this call site).
+///
+/// The compare is **strict** — bail iff `> FOOTFALL_RADIUS_SQ`, so exactly 50 yd passes, and so
+/// does a NaN: `test ah,0x41; je` reads ZF and takes the unordered result as "keep", which Rust's
+/// `>` reproduces for free. It lives here rather than at the call sites so the strictness and the
+/// NaN edge are stated once instead of re-spelled per consumer.
+pub(crate) fn footfall_culls(a: Vec3, b: Vec3) -> bool {
+    footfall_dist2(a, b) > FOOTFALL_RADIUS_SQ
+}
+
+/// The gate's `dist²`, split out so the tests can see the number the compare is handed.
+fn footfall_dist2(a: Vec3, b: Vec3) -> f32 {
+    let d = |p: f32, q: f32| p as f64 - q as f64;
+    let (dx, dy, dz) = (d(a.x, b.x), d(a.y, b.y), d(a.z, b.z));
+    (dx * dx + dy * dy + dz * dz) as f32
+}
+
 /// The **visual** channel: the foot side a per-foot plant tag names (`$FL0` → `L`), or `None` for
 /// every other tag — the trigger for footfall-driven *visuals* ([`crate::footprints`]). The ten
 /// families the dispatcher tables, each with its `0/1/2/3` variants: `$FL/$FR` (front),
@@ -276,6 +324,59 @@ pub(crate) fn scan_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gate's edge behaviour, which is the whole reason the kernel is not
+    /// `Vec3::distance_squared`: exactly 50 yd **passes** (the compare is strict), a NaN passes
+    /// with it, and the sum is rounded to f32 exactly once.
+    #[test]
+    fn the_footfall_gate_edge_and_nan_both_pass() {
+        let at = |d: f32| Vec3::new(d, 0.0, 0.0);
+        assert_eq!(
+            footfall_dist2(Vec3::ZERO, at(50.0)),
+            FOOTFALL_RADIUS_SQ,
+            "50 yd is exactly the threshold"
+        );
+        assert!(
+            !footfall_culls(Vec3::ZERO, at(50.0)),
+            "and the edge is kept"
+        );
+        assert!(footfall_culls(Vec3::ZERO, at(50.001)));
+        assert!(
+            !footfall_culls(Vec3::ZERO, Vec3::splat(f32::NAN)),
+            "an unordered compare keeps, exactly as `test ah,0x41; je` does"
+        );
+    }
+
+    /// **Rounding once is not cosmetic** — this pair flips the branch.
+    ///
+    /// Two points 50 yd apart out at the map's edge, where the coordinates are large enough that
+    /// f32 differences and squares stop being exact. Rounding six times (each difference, each
+    /// square, each partial sum — what a plain f32 `distance_squared` does) lands on **exactly**
+    /// `2500.0`, which the strict compare *keeps*; the reference's single rounding lands one ulp
+    /// above, which it *culls*. Same two points, opposite answers, and ours has to be the second.
+    ///
+    /// The literals are the shortest decimals that round-trip to the intended f32s.
+    #[test]
+    fn a_six_rounding_kernel_lands_on_the_wrong_side_of_the_branch() {
+        let a = Vec3::new(-6157.2476, 16978.16, -14441.062);
+        let b = Vec3::new(-6180.6636, 16935.822, -14453.679);
+
+        let naive = {
+            let d = a - b;
+            d.x * d.x + d.y * d.y + d.z * d.z
+        };
+        assert_eq!(
+            naive, FOOTFALL_RADIUS_SQ,
+            "six roundings land exactly on the threshold, which the strict compare would keep"
+        );
+
+        let ours = footfall_dist2(a, b);
+        assert!(ours > naive, "one rounding lands an ulp above");
+        assert!(
+            footfall_culls(a, b),
+            "so the reference culls this footfall, and so do we"
+        );
+    }
 
     /// The two channels are disjoint (decision 1080): `$FSD` is the whole sound channel, the
     /// per-foot side tags the whole visual one. HumanMale's Walk keys one of each family per

@@ -451,12 +451,13 @@ pub fn indoors_at<'a>(
     matches!(
         indoor_verdict_at(
             wmos,
-            instances,
+            instances.into_iter().map(|inst| ((), inst)),
             streamer,
             adt_tiles,
             feet_world,
             LightAttach::DownRay,
-        ),
+        )
+        .0,
         IndoorVerdict::DayNight | IndoorVerdict::Baked { .. }
     )
 }
@@ -527,29 +528,35 @@ pub enum IndoorVerdict {
 /// a ray from there leaves the building entirely; the reference never casts from there (0776).
 /// `Containment` also takes the reference's UPWARD retry on the footprint leg (`6a908d`), so an
 /// object resting a hair below its floor still bakes from it.
-pub fn indoor_verdict_at<'a>(
+///
+/// Returns the winning **room** alongside the verdict — the caller's own key for the placement that
+/// won, paired with the claim's group index — `None` on both outdoor arms. That pair is the
+/// reference's per-(instance, group) render record `P`: the light node's attach is what creates it
+/// (`0x685f85` → `[P+0x98]`), and it is the key the interior-FOG gate is asked at, separately from
+/// the light law (decision 1792 §4). Callers that only want the bool pass `()` as the key.
+pub fn indoor_verdict_at<'a, K: Copy>(
     wmos: &Assets<WmoModel>,
-    instances: impl IntoIterator<Item = &'a WmoPortalInstance>,
+    instances: impl IntoIterator<Item = (K, &'a WmoPortalInstance)>,
     streamer: &TerrainStreamer,
     adt_tiles: &Assets<AdtTile>,
     anchor_world: Vec3,
     attach: LightAttach,
-) -> IndoorVerdict {
+) -> (IndoorVerdict, Option<(K, usize)>) {
     let probe_world = anchor_world + Vec3::Y * POSITION_PROBE_LIFT;
     let terrain = terrain_height_under(streamer, adt_tiles, probe_world);
-    let mut best: Option<(DownRayClaim, &WmoModel, &WmoPortalInstance, [f32; 3])> = None;
+    let mut best: Option<(DownRayClaim, &WmoModel, &WmoPortalInstance, [f32; 3], K)> = None;
     // The containment lane's UPWARD retry (`0x6a8ed0`'s `6a9093 fadd ds:0x8022cc`): a GameObject's
     // light node anchors at its authored-box centre, which for a particle-heavy model sits well
     // BELOW the floor it stands on — 104 of Onyxia's lava traps anchor ~40 yd under the chamber
     // (their authored box reaches 98 yd past their own geometry). The reference recovers by casting
     // up; run it only when the whole downward pass came back empty, so a claim is never arbitrated
     // against one made in the other direction. See [`up_ray_claim`].
-    let instances: Vec<&WmoPortalInstance> = instances.into_iter().collect();
+    let instances: Vec<(K, &WmoPortalInstance)> = instances.into_iter().collect();
     for retry_up in [false, true] {
         if retry_up && (best.is_some() || !matches!(attach, LightAttach::Containment)) {
             break;
         }
-        for inst in instances.iter().copied() {
+        for (key, inst) in instances.iter().copied() {
             let Some(model) = wmos.get(&inst.handle) else {
                 continue;
             };
@@ -583,16 +590,21 @@ pub fn indoor_verdict_at<'a>(
                 continue;
             };
             if best.as_ref().is_none_or(|(b, ..)| claim.depth < b.depth) {
-                best = Some((claim, model, inst, probe_local));
+                best = Some((claim, model, inst, probe_local, key));
             }
         }
     }
-    let Some((claim, model, inst, probe_local)) = best else {
-        return IndoorVerdict::Outdoors;
+    let Some((claim, model, inst, probe_local, key)) = best else {
+        return (IndoorVerdict::Outdoors, None);
     };
     if claim.outdoor {
-        return IndoorVerdict::OutdoorsOnWmo;
+        return (IndoorVerdict::OutdoorsOnWmo, None);
     }
+    // The ROOM the light node attached to, for every indoor verdict below. It is the ATTACH ray's
+    // group (`0x6a8a20`'s claim), not the footprint sample's: the reference's per-(instance,group)
+    // render record hangs off the node's attach, and the footprint leg is a later, separate ray
+    // that only picks the bake colours. The two agree on every floor where one face owns both.
+    let room = Some((key, claim.group));
     // Indoors — run the footprint sample on the winning placement's render mesh. The containment
     // lane retries UPWARD on a miss (`6a908d..6a90c7`); the down-ray lane has no such leg here (its
     // own retry is a second DOWNWARD cast from 1000 above, `6a8ab0`, which cannot reach a face
@@ -604,10 +616,10 @@ pub fn indoor_verdict_at<'a>(
             .flatten()
     });
     let Some((gi, mocv, mopy_daynight)) = sample else {
-        return IndoorVerdict::DayNight;
+        return (IndoorVerdict::DayNight, room);
     };
     if mopy_daynight {
-        return IndoorVerdict::DayNight;
+        return (IndoorVerdict::DayNight, room);
     }
     let lobes = model
         .group_light_refs
@@ -625,7 +637,7 @@ pub fn indoor_verdict_at<'a>(
             atten_end: l.attenuation_end,
         })
         .collect();
-    IndoorVerdict::Baked { mocv, lobes }
+    (IndoorVerdict::Baked { mocv, lobes }, room)
 }
 
 /// The footprint down-ray: the nearest render-mesh face below `probe_local` across the model's

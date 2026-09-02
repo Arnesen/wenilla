@@ -58,6 +58,8 @@ fn setup() -> UiScript {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     s.set_money(0);
     s
 }
@@ -73,7 +75,7 @@ fn bag_setup() -> UiScript {
     }
     // `ContainerFrame_Update` reads `MerchantFrame:IsShown()` on any slot the tooltip owns, and
     // `BankFrame` (BAG_UI's last entry) fills its purse through `BenillaMoney_Set`.
-    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s
 }
@@ -323,7 +325,12 @@ fn typing_the_confirm_word_enables_okay_and_untyping_it_disables_again() {
     let mut s = setup();
     drop_in_world(&mut s, 871, "Flurry Axe", 4);
 
+    // OKAY is enabled by the box's `OnTextChanged`, and that fire is deferred to the drain
+    // (decision 1831) — so what this answers is the button state the LAST DRAINED text produced,
+    // which is the state a player ever sees. Ticking here rather than after each write keeps the
+    // test reading as the sequence of edits it is about.
     let enabled = |s: &mut UiScript| {
+        s.tick(0.0);
         s.eval::<i64>("return StaticPopup1Button1:IsEnabled()")
             .unwrap()
             == 1
@@ -382,6 +389,7 @@ fn enter_in_the_box_destroys_only_once_okay_is_enabled() {
     assert!(s.take_container_destroys().is_empty());
 
     s.run(r#"StaticPopup1EditBox:SetText("DELETE")"#).unwrap();
+    s.tick(0.0); // the write only marks the box — the drain is what enables OKAY (1831)
     assert!(s.key_input("ENTER"));
     assert!(
         !s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),

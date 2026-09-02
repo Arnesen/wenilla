@@ -361,6 +361,7 @@ fn debug_panel_ui(
     mut sound_cfg: ResMut<crate::sound::SoundConfig>,
     mut cull_probe: ResMut<benilla_world::wmo_portal::WmoCullProbe>,
     net_status: Res<crate::net::NetStatus>,
+    ping: Res<crate::net::PingShared>,
     dropped: Res<crate::net::DroppedOpcodes>,
     mut weather_state: Option<ResMut<benilla_world::weather::WeatherState>>,
     mut world: WorldReadout,
@@ -634,8 +635,12 @@ fn debug_panel_ui(
                     egui::CollapsingHeader::new("Net")
                         .default_open(false)
                         .show(ui, |ui| {
+                            // The LAST sample, not the ring average the meter shows: the panel
+                            // is the instrument, and "what did the most recent pong measure" is
+                            // the question a stuck or spiking meter needs answered.
+                            let last_rtt = ping.0.lock().expect("ping clock").last_rtt_ms;
                             ui.label(if net_status.connected {
-                                match net_status.latency_ms {
+                                match last_rtt {
                                     Some(ms) => format!("connected · {ms} ms ping"),
                                     None => "connected".to_string(),
                                 }

@@ -168,7 +168,7 @@ pub use mirror_timer::{
     read_pause_mirror_timer, read_start_mirror_timer, read_stop_mirror_timer, MirrorTimerKind,
     MirrorTimerStart,
 };
-pub use movement::{JumpInfo, MoveMode, MovementInfo, SpeedKind, TransportPose};
+pub use movement::{JumpInfo, MoveMode, MovementInfo, SpeedKind, SplineMode, TransportPose};
 pub use opcode_names::opcode_name;
 pub use packet::{CreatureQueryInfo, MonsterMoveFacing, ServerPacket};
 pub use page_text::page_text_query;
@@ -240,14 +240,14 @@ pub use trade::{
 };
 pub use trainer::{train_fail, trainer_buy_spell, trainer_list, trainer_spell_state, TrainerSpell};
 pub use update_object::{
-    quest_slot_state, CorpseLook, CreateSpline, MovementBlock, Object, ObjectFields, ObjectType,
-    OwnerFallback, PlayerSkillSlot, QuestLogSlot, UnitAuraSlot, AURA_FLAG_CANCELABLE,
+    quest_slot_state, CorpseLook, CreateSpline, MovementBlock, MoverState, Object, ObjectFields,
+    ObjectType, OwnerFallback, PlayerSkillSlot, QuestLogSlot, UnitAuraSlot, AURA_FLAG_CANCELABLE,
     AURA_FLAG_EFF_INDEX_MASK, FIELD_PLAYER_SKILL_INFO_1_1, PLAYER_EXPLORED_ZONES_SLOTS,
     PLAYER_QUEST_LOG_SLOTS, PLAYER_SKILL_SLOTS, UNIT_AURA_POSITIVE_SLOTS, UNIT_AURA_SLOTS,
 };
 pub use vendor::{
-    buy_item, buy_result, buyback_item, list_inventory, repair_item, sell_item, sell_result,
-    VendorItem,
+    buy_item, buy_item_in_slot, buy_result, buyback_item, list_inventory, repair_item, sell_item,
+    sell_result, VendorItem,
 };
 pub use world_state::InitWorldStates;
 

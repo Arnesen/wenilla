@@ -7,27 +7,61 @@
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use bevy::math::{Mat4, Vec3};
 
-use super::{load_subject, Site, EXTERIOR, UNDERCITY};
+use super::super::seed::down_ray_claim;
+use super::super::EXTERIOR_LIT;
+use super::{
+    load_subject, Site, BLACKSMITH, DARNASSUS, DEADMINES, EXTERIOR, FARGODEEP, GOLDSHIRE,
+    IRONFORGE, SHADOWFANG, UNDERCITY,
+};
 
-/// The pin family's shared env targeting (`WOW_PIN_WMO`/`_MAP`/`_TILE`/`_UID`, default
-/// [`UNDERCITY`]).
+/// The named subjects `WOW_PIN_SITE` selects — every [`Site`] the harness carries, so a report at a
+/// building we have already stood in is one word rather than four env vars (whose `WOW_PIN_WMO`
+/// backslash quoting is its own trap). Unknown names list themselves.
+const NAMED_SITES: &[(&str, Site)] = &[
+    ("goldshire", GOLDSHIRE),
+    ("fargodeep", FARGODEEP),
+    ("deadmines", DEADMINES),
+    ("blacksmith", BLACKSMITH),
+    ("undercity", UNDERCITY),
+    ("ironforge", IRONFORGE),
+    ("shadowfang", SHADOWFANG),
+    ("darnassus", DARNASSUS),
+];
+
+/// The pin family's shared env targeting: `WOW_PIN_SITE=<name>` picks a [`NAMED_SITES`] subject
+/// (default [`UNDERCITY`]), and `WOW_PIN_WMO`/`_MAP`/`_TILE`/`_UID` each override one field of it —
+/// so an unnamed building still works, and a named one needs no quoting.
 fn site_from_env() -> Site {
+    let base = match std::env::var("WOW_PIN_SITE") {
+        Ok(name) => {
+            let key = name.trim().to_ascii_lowercase();
+            *NAMED_SITES
+                .iter()
+                .find(|(n, _)| *n == key)
+                .map(|(_, s)| s)
+                .unwrap_or_else(|| {
+                    let known: Vec<&str> = NAMED_SITES.iter().map(|(n, _)| *n).collect();
+                    panic!("WOW_PIN_SITE={name:?} is not one of {known:?}")
+                })
+        }
+        Err(_) => UNDERCITY,
+    };
     Site {
         wmo: Box::leak(
             std::env::var("WOW_PIN_WMO")
-                .unwrap_or_else(|_| UNDERCITY.wmo.to_string())
+                .unwrap_or_else(|_| base.wmo.to_string())
                 .into_boxed_str(),
         ),
         map: Box::leak(
             std::env::var("WOW_PIN_MAP")
-                .unwrap_or_else(|_| UNDERCITY.map.to_string())
+                .unwrap_or_else(|_| base.map.to_string())
                 .into_boxed_str(),
         ),
-        tile: std::env::var("WOW_PIN_TILE").map_or(UNDERCITY.tile, |s| {
+        tile: std::env::var("WOW_PIN_TILE").map_or(base.tile, |s| {
             let (a, b) = s.split_once(',').expect("WOW_PIN_TILE wants tx,ty");
             (a.trim().parse().unwrap(), b.trim().parse().unwrap())
         }),
-        uid: std::env::var("WOW_PIN_UID").map_or(UNDERCITY.uid, |s| s.trim().parse().unwrap()),
+        uid: std::env::var("WOW_PIN_UID").map_or(base.uid, |s| s.trim().parse().unwrap()),
     }
 }
 
@@ -67,6 +101,27 @@ fn wmo_group_census() {
         site.wmo,
         subject.model.group_nav.len()
     );
+    // The root's MFOG table, once. Every group line below names the ≤4 record indices it points
+    // at, and the fog a room ends up wearing is one of these — which is the whole diagnosis when a
+    // far room reads as a flat wash of one colour (B335: SFK's `0xff28444f` at end 106.9 yd). The
+    // colour is decoded exactly as [`super::super::fog`] decodes it (`0xAARRGGBB`).
+    for (i, f) in subject.model.fogs.iter().enumerate() {
+        println!(
+            "mfog f{i}: flags {:#x} pos ({:.1},{:.1},{:.1}) r[{:.2},{:.2}] end {:.1} start×{:.3} = {:.1} rgb({},{},{})",
+            f.flags,
+            f.pos[0],
+            f.pos[1],
+            f.pos[2],
+            f.radius_inner,
+            f.radius_outer,
+            f.fog_end,
+            f.fog_start_scalar,
+            f.fog_end * f.fog_start_scalar,
+            (f.color >> 16) & 0xff,
+            (f.color >> 8) & 0xff,
+            f.color & 0xff,
+        );
+    }
     // `WOW_PIN_COL=<world-x,world-y>`: every walking-collision face crossing that column, per group,
     // as world z — the down-ray's Leg A candidate list for one spot, without running the flood.
     if let Some((cx, cy)) = std::env::var("WOW_PIN_COL").ok().and_then(|v| {
@@ -211,6 +266,17 @@ fn wmo_group_census() {
                 .map(|(lo, hi)| format!("  LIQUID local z[{lo:.1},{hi:.1}]"))
                 .unwrap_or_default(),
         );
+        // Which MFOG records this group's MOGP header points at, and whether the group is on the
+        // INTERIOR fog lane at all (`flags & 0x48 == 0` — the drawer router's own test).
+        println!(
+            "     fog {:?}{}",
+            g.fog_indices,
+            if g.flags & 0x48 == 0 {
+                "  INTERIOR-LANE"
+            } else {
+                "  scene-lane (0x48 set)"
+            }
+        );
         // The group's portal edges, each placed in WoW world space. The group lines above answer
         // "which room is that"; without this the doorway between two of them is a local-space
         // vertex span nobody can point at in game, so a `.go xyz` report can't name the portal it
@@ -353,12 +419,28 @@ fn wmo_pin_probe() {
     }
 
     let vis: Vec<usize> = pvs
+        .visible
         .iter()
         .enumerate()
         .filter(|(_, &v)| v)
         .map(|(i, _)| i)
         .collect();
-    println!("visible: {} of {} groups {vis:?}", vis.len(), pvs.len());
+    println!(
+        "visible: {} of {} groups {vis:?}",
+        vis.len(),
+        pvs.visible.len()
+    );
+    // The interior-fog gate (`[0xca7f00]`, [`super::super::GroupPvs`]): which of those groups wear
+    // the building's own MFOG triple, and which inherit the scene fog. B335 is read straight off
+    // this line — the room behind the courtyard's arches must NOT be on it.
+    let fogged: Vec<usize> = pvs
+        .interior_fog
+        .iter()
+        .enumerate()
+        .filter(|(_, &v)| v)
+        .map(|(i, _)| i)
+        .collect();
+    println!("interior-fog lane: {fogged:?}");
 
     // The portal graph of every group the flood reached. A flood that stops has either run out of
     // edges or had them all rejected, and only the edge list tells the two apart.
@@ -435,8 +517,370 @@ fn wmo_pin_probe() {
                 if g.flags & EXTERIOR != 0 { " EXT" } else { "" },
                 g.ref_start,
                 g.ref_count,
-                if pvs[gi] { "VISIBLE" } else { "CULLED" }
+                match (pvs.visible[gi], pvs.interior_fog[gi]) {
+                    (true, true) => "VISIBLE · interior fog",
+                    (true, false) => "VISIBLE · scene fog",
+                    (false, _) => "CULLED",
+                }
             );
         }
     }
+}
+
+/// **B335's fixture** — the Shadowfang courtyard's far doorways, as an invariant instead of a
+/// screenshot. The reported spot (`.go xyz -224.01 2168.63 79.79 33`, third-person camera behind)
+/// stands in the open courtyard **g38**, whose MOGP flags carry `0x40` EXTERIOR_LIT; the two arches
+/// at the back of it open (through the second courtyard **g72**, also `0x40`) into room **g61**, a
+/// true interior. The report was that g61 fills with a flat blue-cyan at distance: that colour is
+/// this building's own MFOG record — `rgb(40,68,79)`, end 106.9 yd, start 10.7 — which at 70 yd is
+/// nearly saturated, while the reference shows the room under the scene fog (map 33 noon: end 333,
+/// start 83 ⇒ no fog at all at that range).
+///
+/// So the assertion is not about visibility — the flood reaches g61 from anywhere in the courtyard,
+/// and always did. It is about which fog lane it lands on: the seed's own group takes the interior
+/// lane, and the chain breaks below the exterior-lit courtyards, so **g61 must be on the scene
+/// lane**. The control is the seed itself, which must stay on the interior lane.
+#[test]
+#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
+fn shadowfang_courtyard_leaves_the_far_room_on_the_scene_fog() {
+    let site = SHADOWFANG;
+    let subject = load_subject(site.wmo, Some(&site));
+    let placed = subject
+        .placed
+        .as_ref()
+        .expect("the fixture needs a placement");
+    let to_local =
+        |wow: [f32; 3]| bevy_to_wow(placed.local_from_world.transform_point3(wow_to_bevy(wow)));
+    // The reported camera: third-person behind the player at the fountain, aimed at the p50 arches.
+    let eye_world = [-227.1_f32, 2157.0, 83.7];
+    let look_world = [-212.5_f32, 2232.3, 84.2];
+    let eye = to_local(eye_world);
+    let eye_bevy = placed.world_from_local.transform_point3(wow_to_bevy(eye));
+    let look_bevy = placed
+        .world_from_local
+        .transform_point3(wow_to_bevy(to_local(look_world)));
+    let clip = Mat4::perspective_rh(crate::view::CAM_FOVY, 16.0 / 9.0, 0.1, 1000.0)
+        * Mat4::look_at_rh(eye_bevy, look_bevy, Vec3::Y);
+    let pvs = crate::wmo_portal::compute_pvs_traced(
+        &subject.model,
+        eye,
+        subject.terrain_z(eye),
+        &clip,
+        &placed.world_from_local,
+        &mut (),
+    );
+
+    // The flags the whole verdict turns on, asserted so a data misread can't pass silently.
+    assert_eq!(
+        subject.model.group_nav[38].flags & 0x48,
+        0x40,
+        "g38 is the EXTERIOR_LIT courtyard"
+    );
+    assert_eq!(
+        subject.model.group_nav[72].flags & 0x48,
+        0x40,
+        "g72 is the second EXTERIOR_LIT courtyard"
+    );
+    assert_eq!(
+        subject.model.group_nav[61].flags & 0x48,
+        0,
+        "g61 is a true interior room"
+    );
+
+    assert!(
+        pvs.visible[61],
+        "the flood reaches the room behind the arches"
+    );
+    assert!(
+        !pvs.interior_fog[61],
+        "B335: the room two exterior-lit courtyards away must inherit the SCENE fog, not this \
+         building's MFOG teal"
+    );
+    assert!(
+        !pvs.interior_fog[72],
+        "the chain is already broken at the second courtyard"
+    );
+    assert!(
+        !pvs.interior_fog[38],
+        "the courtyard the camera stands in is exterior-LIT: the exterior drawer pushes no fog, \
+         so its own surfaces are on the scene lane too"
+    );
+    assert!(
+        pvs.interior_fog.iter().all(|f| !f),
+        "from this courtyard NOTHING wears the building's MFOG — which is what the reference \
+         screenshot shows: not one navy pixel in the frame"
+    );
+
+    // The control, from a true interior: standing in g61 itself, the room DOES take the lane —
+    // otherwise this fixture would pass on a gate that is simply always off.
+    let inside = to_local([-213.90, 2236.15, 81.5]);
+    let inside_bevy = placed
+        .world_from_local
+        .transform_point3(wow_to_bevy(inside));
+    let inside_clip = Mat4::perspective_rh(crate::view::CAM_FOVY, 16.0 / 9.0, 0.1, 1000.0)
+        * Mat4::look_at_rh(inside_bevy, eye_bevy, Vec3::Y);
+    let inside_pvs = crate::wmo_portal::compute_pvs_traced(
+        &subject.model,
+        inside,
+        subject.terrain_z(inside),
+        &inside_clip,
+        &placed.world_from_local,
+        &mut (),
+    );
+    assert!(
+        inside_pvs.interior_fog[61],
+        "control: the room seeds its own flood, so it wears the building's MFOG from inside"
+    );
+}
+
+/// **1792 §5's fixture** — the sibling case to [`shadowfang_courtyard_leaves_the_far_room_on_the_scene_fog`],
+/// one room further in. Stand *inside* g61 (the director's own "standing inside it" pin) and look
+/// back the way they came: the flood reaches three more true-interior rooms across the courtyards,
+/// and every one of them is off the interior-fog chain. Their walls take the scene fog, which is
+/// 1787 working — but a unit standing in one classifies indoors by its OWN down-ray, so before the
+/// `[P+0x98]` conjunct it wore this building's MFOG regardless. g13 is a 14x18x13 room whose centre
+/// is 91 yd from the eye, where that MFOG (start 10.7, end 106.9) is ~84 % saturated toward
+/// rgb(40,68,79) while the scene fog at map 33 noon (start 83, end 333) is ~3 %: the mob reads as a
+/// flat teal cut-out in an unfogged room.
+///
+/// The invariant this pins is that the case is REACHABLE — a visible true interior off the chain —
+/// because it is what makes the conjunct load-bearing rather than theoretical. The conjunct itself
+/// is `crate::interior`'s `a_settled_anchor_follows_its_rooms_fog_gate_without_moving`.
+#[test]
+#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
+fn shadowfang_sees_true_interiors_that_are_off_the_fog_chain() {
+    let site = SHADOWFANG;
+    let subject = load_subject(site.wmo, Some(&site));
+    let placed = subject
+        .placed
+        .as_ref()
+        .expect("the fixture needs a placement");
+    let to_local =
+        |wow: [f32; 3]| bevy_to_wow(placed.local_from_world.transform_point3(wow_to_bevy(wow)));
+    let inside = to_local([-213.90, 2236.15, 81.5]);
+    let look = to_local([-227.1, 2157.0, 83.7]);
+    let inside_bevy = placed
+        .world_from_local
+        .transform_point3(wow_to_bevy(inside));
+    let look_bevy = placed.world_from_local.transform_point3(wow_to_bevy(look));
+    let clip = Mat4::perspective_rh(crate::view::CAM_FOVY, 16.0 / 9.0, 0.1, 1000.0)
+        * Mat4::look_at_rh(inside_bevy, look_bevy, Vec3::Y);
+    let pvs = crate::wmo_portal::compute_pvs_traced(
+        &subject.model,
+        inside,
+        subject.terrain_z(inside),
+        &clip,
+        &placed.world_from_local,
+        &mut (),
+    );
+
+    assert!(
+        pvs.interior_fog[61],
+        "the camera's own room is on the chain — otherwise nothing here is being tested"
+    );
+    let off_chain: Vec<usize> = (0..subject.model.group_nav.len())
+        .filter(|&g| {
+            pvs.visible[g] && !pvs.interior_fog[g] && subject.model.group_nav[g].flags & 0x48 == 0
+        })
+        .collect();
+    // And the other half of the verdict, end to end on the real data: a unit standing in one of
+    // those rooms attaches to it. Same ray and same `0x48` mask the light classifier's attach uses
+    // (`crate::interior` → `indoor_verdict_at`), cast from a point the body occupies — so the room
+    // it claims is the key the fog gate is asked at. g13 claims g13 (indoor, off the chain ⇒ the
+    // scene fog), and the control g61 claims g61 (indoor, ON the chain ⇒ the building's MFOG).
+    let attach_room = |gi: usize| {
+        let g = &subject.model.group_nav[gi];
+        let centre = [
+            (g.bbox_min[0] + g.bbox_max[0]) * 0.5,
+            (g.bbox_min[1] + g.bbox_max[1]) * 0.5,
+            (g.bbox_min[2] + g.bbox_max[2]) * 0.5,
+        ];
+        down_ray_claim(
+            &subject.model.group_collision_tris,
+            &subject.model.group_collision_bounds,
+            &subject.model.group_collision_grids,
+            &subject.model.group_nav,
+            centre,
+            None,
+            EXTERIOR | EXTERIOR_LIT,
+        )
+        .map(|c| (c.group, c.outdoor))
+    };
+    assert_eq!(
+        attach_room(13),
+        Some((13, false)),
+        "a body standing in g13 attaches to g13 and classifies INDOORS — the light law says fog it"
+    );
+    assert!(
+        !pvs.interior_fog[13],
+        "…and its room is off the chain, so the fog it takes is the SCENE's (1792 §5's fix)"
+    );
+    assert_eq!(
+        attach_room(61),
+        Some((61, false)),
+        "the control: a body in the camera's own room attaches to it"
+    );
+
+    assert_eq!(
+        off_chain,
+        vec![1, 2, 13, 68],
+        "four true-interior rooms are in frame across the courtyards and none is on the chain: \
+         this is the population a unit's fog gate has to answer for. It was three until 1853 — \
+         g68 sits behind an exterior group no portal joins to the seed's half of the graph, so it \
+         arrives only once Pass 2 WALKS ON from the window that admits that group instead of \
+         merely marking it. The gate's verdict on all four is identical; what changed is how many \
+         rooms the cull lets the director see at once"
+    );
+}
+
+/// **Decision 1853's fixture — Pass 2 WALKS ON from the window, it does not merely mark.**
+///
+/// The reference's Pass 2 ends its per-group predicate in `0x6b3d39 call 0x6b41c0` — the portal
+/// recursion, the same entry point Pass 1 uses — not in the callback draw `0x6b4160` (that is Pass
+/// 3's, and only Pass 3's). Decision 1826 shipped Pass 2 as a *marking* pass: a window admitted an
+/// exterior group's own MOGI box and stopped there. Everything the walk would have reached THROUGH
+/// that group — the next courtyard, the shop behind it, the terrace one portal further on — stayed
+/// culled, and from inside a Darnassus shop that is most of the city.
+///
+/// Darnassus is the discriminating subject because it is one placement with 104 groups, 50 of them
+/// exterior, and its outdoor areas are stitched to each other and to every shop by portals — so the
+/// walk-on has somewhere to go. A building whose shell is one disconnected group (the Goldshire inn)
+/// cannot tell the two implementations apart at all.
+///
+/// The measurement is the **gain**: groups the Pass-2 walk entered that no window admitted directly
+/// and Pass 1 never reached. Under the marking implementation the gain is zero by construction.
+#[test]
+#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
+fn darnassus_pass_two_walks_on_from_the_window() {
+    use std::collections::HashSet;
+
+    /// Splits the flood's `entered` steps into Pass 1's and Pass 2's, and records which groups a
+    /// window admitted directly — everything needed to name what the walk-on, and only the walk-on,
+    /// delivered.
+    #[derive(Default)]
+    struct WalkOn {
+        in_pass2: bool,
+        seen_pass1: HashSet<usize>,
+        roots: HashSet<usize>,
+        reached: HashSet<usize>,
+    }
+    impl super::super::FloodTrace for WalkOn {
+        fn seed(&mut self, seeds: super::super::DownRaySeeds) {
+            self.seen_pass1.extend(seeds.in_group);
+            self.seen_pass1.extend(seeds.across);
+        }
+        fn entered(
+            &mut self,
+            _from: usize,
+            _portal: u16,
+            to: usize,
+            _rect: super::super::Rect,
+            _on_plane: bool,
+        ) {
+            if self.in_pass2 {
+                self.reached.insert(to);
+            } else {
+                self.seen_pass1.insert(to);
+            }
+        }
+        fn pass2(&mut self, group: usize, _flags: u32, _window: usize, admitted: bool) {
+            self.in_pass2 = true;
+            if admitted {
+                self.roots.insert(group);
+            }
+        }
+    }
+
+    let site = DARNASSUS;
+    let subject = load_subject(site.wmo, Some(&site));
+    let placed = subject.placed.as_ref().expect("Darnassus has a placement");
+    let nav = &subject.model.group_nav;
+
+    // Every true interior with a doorway is a pose: stand on its floor, look out through its first
+    // portal. That is the director's own description of the report — "standing here looking out
+    // through the doorway" — swept over the whole city instead of one spot.
+    let mut poses = 0usize;
+    let mut total_gain = 0usize;
+    let mut best: Option<(usize, usize, usize)> = None; // (gain, group, exterior drawn)
+    for (gi, g) in nav.iter().enumerate() {
+        if g.flags & (EXTERIOR | EXTERIOR_LIT) != 0 || g.ref_count == 0 {
+            continue;
+        }
+        let eye = [
+            (g.bbox_min[0] + g.bbox_max[0]) * 0.5,
+            (g.bbox_min[1] + g.bbox_max[1]) * 0.5,
+            g.bbox_min[2] + super::EYE_HEIGHT,
+        ];
+        // The run is only evidence if the seed actually names the room we meant to stand in — a
+        // bbox centre can sit in a wall, over a stairwell, or above a mezzanine floor.
+        if subject.seeds(eye).in_group != Some(gi) {
+            continue;
+        }
+        let r = &subject.model.portal_refs[g.ref_start as usize];
+        let Some(verts) = super::super::portal_poly(
+            &subject.model.portal_vertices,
+            &subject.model.portal_infos[r.portal as usize],
+        ) else {
+            continue;
+        };
+        let n = verts.len() as f32;
+        let look = [
+            verts.iter().map(|v| v[0]).sum::<f32>() / n,
+            verts.iter().map(|v| v[1]).sum::<f32>() / n,
+            verts.iter().map(|v| v[2]).sum::<f32>() / n,
+        ];
+        if look == eye {
+            continue;
+        }
+        let eye_bevy = placed.world_from_local.transform_point3(wow_to_bevy(eye));
+        let look_bevy = placed.world_from_local.transform_point3(wow_to_bevy(look));
+        let clip = Mat4::perspective_rh(crate::view::CAM_FOVY, 16.0 / 9.0, 0.1, 1000.0)
+            * Mat4::look_at_rh(eye_bevy, look_bevy, Vec3::Y);
+        let mut tap = WalkOn::default();
+        let pvs = crate::wmo_portal::compute_pvs_traced(
+            &subject.model,
+            eye,
+            subject.terrain_z(eye),
+            &clip,
+            &placed.world_from_local,
+            &mut tap,
+        );
+        let gain: HashSet<usize> = tap
+            .reached
+            .difference(&tap.roots)
+            .copied()
+            .filter(|g| !tap.seen_pass1.contains(g))
+            .collect();
+        let ext_drawn = nav
+            .iter()
+            .zip(&pvs.visible)
+            .filter(|(n, v)| **v && n.flags & EXTERIOR != 0)
+            .count();
+        println!(
+            "g{gi:03} windows={} walk steps={} exterior drawn={ext_drawn}/50 walk-on gain={} {:?}",
+            pvs.windows.len(),
+            pvs.iters,
+            gain.len(),
+            {
+                let mut v: Vec<usize> = gain.iter().copied().collect();
+                v.sort_unstable();
+                v
+            }
+        );
+        poses += 1;
+        total_gain += gain.len();
+        if best.is_none_or(|(b, _, _)| gain.len() > b) {
+            best = Some((gain.len(), gi, ext_drawn));
+        }
+    }
+    println!("poses={poses} total walk-on gain={total_gain} best={best:?}");
+    assert!(
+        poses >= 20,
+        "the sweep needs the real city, got {poses} poses"
+    );
+    assert!(
+        total_gain > 0,
+        "Pass 2 must WALK ON from a window-admitted exterior group (0x6b3d39 -> 0x6b41c0); a \
+         marking pass scores exactly zero here"
+    );
 }

@@ -1,39 +1,44 @@
 //! The unit right-click popups reached the two ways a solo player invites someone (director
 //! report, 2026-07-17): right-clicking a **target** unit frame, and right-clicking a **chat
 //! name**. Both drive the shared UnitPopup engine (`UnitPopup.xml`); the chat path adds the
-//! `SetItemRef` player branch + its minimal `FriendsFrame` stand-in (`ItemRef.xml`). Proven
-//! serverless through the real hit/route paths.
+//! `SetItemRef` player branch — the reference's own since 1751 window 6 — and the FRIEND dropdown
+//! it opens, which lives in `FriendsFrame.xml` where 1.12 keeps it. Proven serverless through the
+//! real hit/route paths.
 
 use benilla_ui::script::{FollowRequest, PartyRequest, UiScript, UnitState};
 
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
-/// The production prefix the popups need (ui_script/mod.rs order): the dropdown kit, the unit
-/// popups, the chat-link router (`ItemRef.xml`, after UnitPopup — its `FriendsDropDown` inherits
-/// `UIDropDownMenuTemplate` and opens a UnitPopup FRIEND menu), then the unit frames.
+/// The production prefix the popups need, in `benilla.toc`'s own order: the dropdown kit, the
+/// unit popups, the reference's chat-link router, the unit frames — and `FriendsFrame.xml`, which
+/// is where `FriendsFrame_ShowDropdown` and the `FriendsDropDown` host live in 1.12 and where they
+/// live here since window 6 (our ItemRef.xml used to carry a private second copy of both).
 fn load_popup_frames(s: &UiScript) {
     for file in [
         "Fonts.xml",
         "UIParent.xml",
+        // `SmallMoneyFrame_OnLoad`, which UiPanels' own StaticPopup money rows call at load.
+        "MoneyFrame.xml",
+        // `StaticPopupDialogs` and the `PanelTemplates_*` family, both of which FriendsFrame.xml
+        // reaches at LOAD (its tab row and its confirm dialogs).
+        "UiPanels.xml",
         "GameTooltip.xml",
-        "UIDropDownMenu.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
         "UnitPopup.xml",
-        "ItemRef.xml",
-        "UnitFrames.xml",
+        "Interface\\FrameXML\\ItemRef.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\BuffFrame.xml",
+        "Interface\\FrameXML\\UnitFrame.xml",
+        "Interface\\FrameXML\\CombatFeedback.xml",
+        "Interface\\FrameXML\\PlayerFrame.xml",
+        "Interface\\FrameXML\\PartyFrame.xml",
+        "Interface\\FrameXML\\TargetFrame.xml",
+        "Interface\\FrameXML\\PetFrame.xml",
+        "ScrollTemplates.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        "FriendsFrame.xml",
     ] {
         load_xml(s, file);
     }
@@ -58,6 +63,17 @@ fn bake_strings(s: &UiScript) {
         FOLLOW = "Follow"
         CANCEL = "Cancel"
         RAID_TARGET_ICON = "Raid Target Icon"
+        -- The newbie tooltip the stock unit frame raises on a HOVER, which every test in this file
+        -- takes on its way to a right-click. `UnitFrame_OnEnter` (ref `UnitFrame.lua:58-65`) runs
+        -- the detailed-tip branch whenever `SHOW_NEWBIE_TIPS == "1"` — 1.12's own default
+        -- (`UIOptionsFrame.lua:100`), which our `GameTooltip.xml:46` sets at load — and for a
+        -- player-controlled target that is not us it calls
+        -- `GameTooltip_AddNewbieTip(PLAYER_OPTIONS_LABEL, 1, 1, 1, NEWBIE_TOOLTIP_PLAYEROPTIONS)`.
+        -- Both are nil in a bare harness, and `GameTooltip:SetText(nil)` raises. Verbatim from the
+        -- real `Interface\FrameXML\GlobalStrings.lua` off the 1.12.1 chain (l.3081 and l.2755).
+        -- Our deleted `UnitFrames.xml` never reached this arm; the stock file does.
+        PLAYER_OPTIONS_LABEL = "Player Options"
+        NEWBIE_TOOLTIP_PLAYEROPTIONS = "Right-click to bring up special commands for interacting with another player. You can inspect their equipment, issue a party invite, initiate a trade, or challenge a player to a duel. A group leader can promote or remove that player from the group."
     "#,
     )
     .unwrap();
@@ -69,6 +85,7 @@ fn bake_strings(s: &UiScript) {
 /// hit — the player branch of `SetItemRef` used to be a no-op stub.
 #[test]
 fn chat_name_right_click_opens_the_invite_menu() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     bake_strings(&s);
@@ -137,6 +154,7 @@ fn chat_name_right_click_opens_the_invite_menu() {
 /// off for players — only NPC/self targets, whose every row needs a party, open nothing.
 #[test]
 fn solo_target_right_click_invites_a_player() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     bake_strings(&s);
@@ -148,6 +166,7 @@ fn solo_target_right_click_invites_a_player() {
             exists: true,
             name: Some("Me".into()),
             is_player: true,
+            player_controlled: true,
             ..UnitState::default()
         }),
     );
@@ -160,6 +179,7 @@ fn solo_target_right_click_invites_a_player() {
             health: 40,
             max_health: 40,
             is_player: true,
+            player_controlled: true,
             reaction: 5,
             ..UnitState::default()
         }),
@@ -236,6 +256,7 @@ fn solo_target_right_click_invites_a_player() {
 /// so a break between `this.value == "TRADE"` and the queued initiate token shows up here.
 #[test]
 fn solo_target_trade_click_queues_an_initiate() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     bake_strings(&s);
@@ -247,6 +268,7 @@ fn solo_target_trade_click_queues_an_initiate() {
             exists: true,
             name: Some("Me".into()),
             is_player: true,
+            player_controlled: true,
             ..UnitState::default()
         }),
     );
@@ -258,6 +280,7 @@ fn solo_target_trade_click_queues_an_initiate() {
             health: 40,
             max_health: 40,
             is_player: true,
+            player_controlled: true,
             reaction: 5,
             ..UnitState::default()
         }),
@@ -303,6 +326,7 @@ fn solo_target_trade_click_queues_an_initiate() {
 /// exactly the kind of break a row-label assertion cannot see.
 #[test]
 fn solo_target_follow_click_queues_an_exact_by_name_follow() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     bake_strings(&s);
@@ -314,6 +338,7 @@ fn solo_target_follow_click_queues_an_exact_by_name_follow() {
             exists: true,
             name: Some("Me".into()),
             is_player: true,
+            player_controlled: true,
             ..UnitState::default()
         }),
     );
@@ -325,6 +350,7 @@ fn solo_target_follow_click_queues_an_exact_by_name_follow() {
             health: 40,
             max_health: 40,
             is_player: true,
+            player_controlled: true,
             reaction: 5,
             ..UnitState::default()
         }),
@@ -369,6 +395,7 @@ fn solo_target_follow_click_queues_an_exact_by_name_follow() {
 /// popup's dispatch, and `inspect_tests.rs` owns what the window then does.
 #[test]
 fn solo_target_inspect_click_reaches_inspect_unit() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     bake_strings(&s);
@@ -382,6 +409,7 @@ fn solo_target_inspect_click_reaches_inspect_unit() {
             exists: true,
             name: Some("Me".into()),
             is_player: true,
+            player_controlled: true,
             ..UnitState::default()
         }),
     );
@@ -393,6 +421,7 @@ fn solo_target_inspect_click_reaches_inspect_unit() {
             health: 40,
             max_health: 40,
             is_player: true,
+            player_controlled: true,
             reaction: 5,
             ..UnitState::default()
         }),
@@ -438,10 +467,20 @@ fn load_pet_menu_frames(s: &UiScript) {
         "UIParent.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
         "GameTooltip.xml",
-        "UIDropDownMenu.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
         "UnitPopup.xml",
-        "UnitFrames.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\BuffFrame.xml",
+        "Interface\\FrameXML\\UnitFrame.xml",
+        "Interface\\FrameXML\\CombatFeedback.xml",
+        "Interface\\FrameXML\\PlayerFrame.xml",
+        "Interface\\FrameXML\\PartyFrame.xml",
+        "Interface\\FrameXML\\TargetFrame.xml",
+        "Interface\\FrameXML\\PetFrame.xml",
         "Cooldown.xml",
         "ActionBar.xml",
         "PetActionBar.xml",
@@ -494,6 +533,7 @@ fn a_pet(s: &mut UiScript, name: &str) {
             max_health: 100,
             level: 60,
             is_player: true,
+            player_controlled: true,
             ..UnitState::default()
         }),
     );
@@ -520,9 +560,28 @@ fn a_pet(s: &mut UiScript, name: &str) {
 
 /// Open the pet menu through the real hit path, and return nothing — the assertions read
 /// `DropDownList1` afterwards.
+///
+/// **The click lands in the frame's own HIT RECT, not at its centre** — and on the reference's
+/// file those are two different places. Stock `PetFrame.xml:15-17` ships
+/// `<HitRectInsets><AbsInset left="7" right="66" top="6" bottom="7"/></HitRectInsets>` on a
+/// 128×53 button (`PetFrame.xml:4-7`), so the clickable
+/// band is the PORTRAIT half (x = left+7 … left+62) and the geometric centre (x = left+64) is two
+/// pixels outside it. Worse, the centre sits *inside* `PetFrameHealthBar` (`PetFrame.xml:125-135`:
+/// TOPLEFT 47,-22, 70×8), which is mouse-enabled by the `TextStatusBar` template's OnEnter
+/// (ref `TextStatusBar.xml:11-27`) and sits at `PetFrame.level + 1` — so under the hit law it
+/// takes the point and the click is consumed there. Unlike stock `PlayerFrame`, stock `PetFrame`
+/// ships **no** `<OnMouseUp>` forwarder on its bars, so that click is genuinely eaten in the real
+/// client too; a right-click on a pet's health bar opens nothing. Our deleted transcription had no
+/// hit-rect insets on the pet frame, which is the only reason `GetCenter()` ever worked here.
 fn right_click_the_pet_frame(s: &mut UiScript) {
     s.resolve();
-    let (cx, cy) = s.eval::<(f64, f64)>("return PetFrame:GetCenter()").unwrap();
+    let (cx, cy) = s
+        .eval::<(f64, f64)>(
+            "local il, ir, it, ib = PetFrame:GetHitRectInsets() \
+             return (PetFrame:GetLeft() + il + PetFrame:GetRight() - ir) / 2, \
+                    (PetFrame:GetBottom() + ib + PetFrame:GetTop() - it) / 2",
+        )
+        .unwrap();
     s.mouse_button(cx as f32, cy as f32, "RightButton", true);
     s.mouse_button(cx as f32, cy as f32, "RightButton", false);
     s.resolve();
@@ -536,6 +595,7 @@ fn right_click_the_pet_frame(s: &mut UiScript) {
 /// offered a row the reference never shows.
 #[test]
 fn the_pet_menu_forks_between_abandon_and_dismiss() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     bake_pet_strings(&s);
@@ -605,6 +665,7 @@ fn the_pet_menu_forks_between_abandon_and_dismiss() {
 /// giving up a tamed pet is a server-side delete.
 #[test]
 fn dismiss_sends_immediately_and_abandon_waits_for_the_confirm() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     bake_pet_strings(&s);
@@ -661,6 +722,7 @@ fn dismiss_sends_immediately_and_abandon_waits_for_the_confirm() {
 /// opens while the name dialog is still up, so the second one lands in instance 2.
 #[test]
 fn renaming_a_pet_reads_the_name_back_before_sending_it() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     bake_pet_strings(&s);
@@ -712,6 +774,7 @@ fn renaming_a_pet_reads_the_name_back_before_sending_it() {
 /// was blocked on, and the only row here that opens a window rather than a wire verb.
 #[test]
 fn the_pet_details_row_opens_the_pet_paper_doll() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     bake_pet_strings(&s);
@@ -742,6 +805,7 @@ fn the_pet_details_row_opens_the_pet_paper_doll() {
 /// unit reconnects mid-open — and closing the menu re-parks the driver.
 #[test]
 fn an_idle_unit_popup_driver_parks_itself_off_the_tick() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     bake_strings(&s);
@@ -753,6 +817,7 @@ fn an_idle_unit_popup_driver_parks_itself_off_the_tick() {
             exists: true,
             name: Some("Me".into()),
             is_player: true,
+            player_controlled: true,
             ..UnitState::default()
         }),
     );
@@ -766,6 +831,7 @@ fn an_idle_unit_popup_driver_parks_itself_off_the_tick() {
             health: 40,
             max_health: 40,
             is_player: true,
+            player_controlled: true,
             reaction: 5,
             ..UnitState::default()
         }),
@@ -843,6 +909,7 @@ fn an_idle_unit_popup_driver_parks_itself_off_the_tick() {
             health: 40,
             max_health: 40,
             is_player: true,
+            player_controlled: true,
             reaction: 5,
             is_connected: true,
             ..UnitState::default()

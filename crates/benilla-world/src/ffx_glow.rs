@@ -277,6 +277,122 @@ fn sync_haze(
     }
 }
 
+/// **The GlowWave lane** — the underwater screen warp's two inputs (wow-re
+/// `ffxeffects/scratch/glow-wave-underwater.md`, §5 cross-checked; decision 1824).
+///
+/// Underwater the reference swaps its whole post-process pass list: `CFFXGlow::Render 0x6cc630`
+/// walks a second list whose third pass is **FFXGlowWave** (`0x6cb1f0`, render `0x6cb310`) rather
+/// than FFXGlow, and that pass displaces the combine's two samples through a sine bump map. wow-re's
+/// note had carried the swap as an undecided "GlowWave, *or* a duplicate Glow" for months; the round
+/// that answered it found the arms mutually exclusive and the plain-Glow arm unreachable on both
+/// backends, so a submerged frame is ALWAYS the wave.
+///
+/// **No liquid-type discrimination.** `[0xc7f288] ∈ {0xf dry, 0 water, 1 ocean, 2 magma, 3 slime}`
+/// and `0x6cc644` compares against `0xf` alone — the warp runs in lava and slime exactly as in
+/// water. (That is not the drift cloud's rule, which *does* fork per kind and gives slime no motes
+/// at all; two neighbouring underwater systems reading the same byte with different questions.)
+#[derive(Resource, Clone, Copy, Default, ExtractResource)]
+pub struct FfxWave {
+    /// `(t mod 3174)/3174` — the u-axis phase, 3.174 s.
+    phase1: f32,
+    /// `(t mod 2805)/2805` — the v-axis phase, 2.805 s. Independent of [`Self::phase1`]: the two
+    /// rejoin only every ~49 minutes, which is what keeps the warp from reading as a loop.
+    phase2: f32,
+    /// Whether the pass-list swap itself is tripped: in-world (`0x467d00`) **and** the camera-eye
+    /// liquid probe non-dry (`0x672470 != 0xf`). Not a strength — the swap is a hard fork, and the
+    /// warp has no ramp in or out.
+    active: bool,
+}
+
+/// The two GlowWave phase periods in milliseconds — `[0xce89c4]` and `[0xce89c8]`, divided into an
+/// integer millisecond clock exactly as the reference's `fild`/`fidiv` pair does.
+const WAVE_PERIOD_MS: [u64; 2] = [3174, 2805];
+
+/// The wave LUT's edge — 128×128 texels (`[0xce89a0]`'s 7-field descriptor: 128/128/128/128 and
+/// the two 1/128 reciprocals).
+const WAVE_LUT_EDGE: u32 = 128;
+
+/// The reference's glow-wave LUT (`ffx_glow_wave_lut` `0x6cbea0`, a diffed PRIMITIVE), as the
+/// texels our combine samples.
+///
+/// Two channels, one sine each and each depending on ONE axis — `du = sin(2πx/128)` across,
+/// `dv = sin(2πy/128)` down — which is what makes the sampled value a *displacement* rather than an
+/// intensity: the shipped format is the signed two-channel bump format on both backends
+/// (`D3DFMT_V8U8` / `GL_DSDT8_NV`), and the pass is a dependent texture read.
+///
+/// We store the reference's **unsigned** pack (`(s·0.5 + 0.5)·255`, its path B) and bias it back in
+/// the shader, because that is the permutation the live client actually runs: `gxApi` defaults to
+/// direct3d, the shipped `WTF/` overrides nothing, and the caps tier that selects picks the biased
+/// `ps_2_0` blob against an unsigned texture. `as u8` truncates toward zero, which is `__ftol`.
+fn wave_lut_texels() -> Vec<u8> {
+    let pack = |s: f32| ((s * 0.5 + 0.5) * 255.0).clamp(0.0, 255.0) as u8;
+    let sine = |i: u32| (std::f32::consts::TAU * i as f32 / WAVE_LUT_EDGE as f32).sin();
+    let mut texels = Vec::with_capacity((WAVE_LUT_EDGE * WAVE_LUT_EDGE * 2) as usize);
+    for y in 0..WAVE_LUT_EDGE {
+        let dv = pack(sine(y));
+        for x in 0..WAVE_LUT_EDGE {
+            texels.push(pack(sine(x)));
+            texels.push(dv);
+        }
+    }
+    texels
+}
+
+/// Sync [`FfxWave`] from the same two inputs the reference's swap guard reads, plus the clock its
+/// render method phases on (`OsGetAsyncTimeMs`, `0x6cb43a`).
+///
+/// The phases advance whether or not the wave is armed — they are a free-running wall clock in the
+/// reference too, not a timer the swap starts — so surfacing and diving again does not restart the
+/// pattern, and nothing has to be reset on the transition.
+fn sync_wave(
+    time: Res<Time>,
+    live: Res<crate::schedule::WorldLive>,
+    underwater: Option<Res<crate::liquid::Underwater>>,
+    mut wave: ResMut<FfxWave>,
+    mut last_dump: Local<Option<u32>>,
+) {
+    let ms = (time.elapsed_secs_f64() * 1000.0) as u64;
+    wave.phase1 = (ms % WAVE_PERIOD_MS[0]) as f32 / WAVE_PERIOD_MS[0] as f32;
+    wave.phase2 = (ms % WAVE_PERIOD_MS[1]) as f32 / WAVE_PERIOD_MS[1] as f32;
+    let verdict = underwater.map(|u| u.0);
+    wave.active = live.0 && verdict.is_some_and(|v| v.any());
+
+    // `WOW_WAVE_DUMP` — 1 Hz, and it reports on EVERY frame including the ones that do not warp,
+    // naming why. An instrument that only speaks while the effect is running cannot tell "not
+    // armed" from "armed and broken", which is exactly the hour the drift cloud's first probe cost
+    // (decision 1814 §6b): the effect was off, the screen was silent, and the silence was
+    // indistinguishable from a compile failure.
+    if std::env::var_os("WOW_WAVE_DUMP").is_some() {
+        let sec = time.elapsed_secs() as u32;
+        if last_dump.replace(sec) != Some(sec) {
+            let why = match (live.0, verdict) {
+                (false, _) => "off — not in world (the reference's 0x467d00 half of the guard)",
+                (_, None) => "off — no submersion verdict resolved yet",
+                (_, Some(benilla_formats::Submersion::Dry)) => "off — the eye is dry",
+                (_, Some(_)) => "WARPING",
+            };
+            info!(
+                "glow-wave: {why} — verdict {verdict:?} phase {:.3}/{:.3} (periods {} / {} ms)",
+                wave.phase1, wave.phase2, WAVE_PERIOD_MS[0], WAVE_PERIOD_MS[1]
+            );
+        }
+    }
+}
+
+/// Whether a view draws the warped combine — the pass-list swap, as a pure function.
+///
+/// Three conditions, each a fact about the reference rather than a taste call:
+/// - the view runs the **WorldFrame** pass pair. The swap lives in `CFFXGlow::Render`, which the
+///   glue screens' own pair also reaches — but its guard's first half is `0x467d00`, the in-world
+///   objmgr gate, so a glue screen can never trip it. A bake runs no pair at all.
+/// - the camera eye is in liquid and we are in-world ([`FfxWave::active`]).
+/// - the player is **not a ghost**. `CFFXDeath` REPLACES `CFFXGlow` outright in the single active
+///   pass slot `[0xce8bb4]`, and `CFFXDeath::Render 0x6cdf20` owns one list and no guard — so a
+///   ghost underwater gets no warp, the same way it already gets no haze.
+fn wave_armed(state: FfxState, wave: FfxWave, death: f32) -> bool {
+    matches!(state, FfxState::Player) && wave.active && death == 0.0
+}
+
 /// Sync the gain from the live zone lighting (the same source `sync_bloom` used). Off-world there
 /// is no `Light.dbc` zone — the reference runs its `LightParams` **default 0.5** (wow-re
 /// death-pass.md: "the zone/time-of-day ambient glow scalar, default 0.5"): the glue screens'
@@ -333,15 +449,32 @@ struct FfxGlowPipelines {
     layout_filter: BindGroupLayoutDescriptor,
     layout_combine: BindGroupLayoutDescriptor,
     sampler: Sampler,
+    /// The 128×128 sine bump map and its own REPEAT sampler — built once here, not per view: the
+    /// LUT is 32 KB of resolution-independent constant, and the reference generates it once too
+    /// (the registration callback `0x6cbcf0`).
+    ///
+    /// REPEAT is load-bearing, not a default. The wave texcoord's scale runs to `W/128` — ten full
+    /// cycles across a 1280-wide screen — so under CLAMP every cycle but the first would pin to the
+    /// edge texel and the warp would vanish over ~90% of the frame. It is byte-closed to
+    /// `D3DTADDRESS_WRAP` (`0x5a2646`/`0x5a266a` through the table `0x80a254 = {CLAMP, WRAP}`), and
+    /// misreading it was the costliest near-miss of the round that derived this.
+    wave_view: TextureView,
+    wave_sampler: Sampler,
     downsample: CachedRenderPipelineId,
     gauss_h: CachedRenderPipelineId,
     gauss_v: CachedRenderPipelineId,
     combine: CachedRenderPipelineId,
+    /// The underwater combine. A SEPARATE pipeline rather than a branch inside `fs_combine`,
+    /// compiled once at startup beside it: a dry frame then binds byte-for-byte the pipeline it
+    /// bound before this feature existed and pays nothing at all for the warp — no extra pass, no
+    /// extra target, not even a uniform branch.
+    combine_wave: CachedRenderPipelineId,
 }
 
 fn init_pipelines(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
     fullscreen_shader: Res<FullscreenShader>,
     asset_server: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
@@ -367,7 +500,12 @@ fn init_pipelines(
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
                 texture_2d(TextureSampleType::Float { filterable: true }),
-                uniform_buffer_sized(false, Some(std::num::NonZero::new(16).unwrap())),
+                uniform_buffer_sized(false, Some(std::num::NonZero::new(32).unwrap())),
+                // The wave LUT + its REPEAT sampler ride EVERY combine's layout, dry included, so
+                // the two entry points stay interchangeable behind one bind group. Binding a
+                // texture the dry shader never samples costs the frame nothing.
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                sampler(SamplerBindingType::Filtering),
             ),
         ),
     );
@@ -378,6 +516,39 @@ fn init_pipelines(
         address_mode_v: AddressMode::ClampToEdge,
         ..Default::default()
     });
+    // LINEAR + REPEAT, both byte-closed: the reference's 128-texel sine is *sampled*, so linear
+    // filtering is what makes it a smooth wave rather than 128 steps, and the wrap is what lets the
+    // texcoord run past 1.0 into its tenth cycle.
+    let wave_sampler = render_device.create_sampler(&SamplerDescriptor {
+        min_filter: FilterMode::Linear,
+        mag_filter: FilterMode::Linear,
+        address_mode_u: AddressMode::Repeat,
+        address_mode_v: AddressMode::Repeat,
+        ..Default::default()
+    });
+    let wave_view = render_device
+        .create_texture_with_data(
+            &render_queue,
+            &TextureDescriptor {
+                label: Some("ffx_glow_wave_lut"),
+                size: Extent3d {
+                    width: WAVE_LUT_EDGE,
+                    height: WAVE_LUT_EDGE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                // Two unsigned channels, biased back to signed in the shader — the shipped
+                // permutation's own encoding (see [`wave_lut_texels`]).
+                format: TextureFormat::Rg8Unorm,
+                usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            TextureDataOrder::LayerMajor,
+            &wave_lut_texels(),
+        )
+        .create_view(&TextureViewDescriptor::default());
     let pipeline = |label: &'static str,
                     layout: &BindGroupLayoutDescriptor,
                     entry: &'static str|
@@ -413,14 +584,22 @@ fn init_pipelines(
         &layout_combine,
         "fs_combine",
     ));
+    let combine_wave = pipeline_cache.queue_render_pipeline(pipeline(
+        "ffx_glow_combine_wave",
+        &layout_combine,
+        "fs_combine_wave",
+    ));
     commands.insert_resource(FfxGlowPipelines {
         layout_filter,
         layout_combine,
         sampler,
+        wave_view,
+        wave_sampler,
         downsample,
         gauss_h,
         gauss_v,
         combine,
+        combine_wave,
     });
 }
 
@@ -431,8 +610,9 @@ fn init_pipelines(
 struct FfxGlowTextures {
     quarter_a: CachedTexture,
     quarter_b: CachedTexture,
-    /// The combine's 16-byte `(gain, death, haze, pad)` uniform — persistent, rewritten each
-    /// frame with a queue write (queue writes land before the graph's submit executes).
+    /// The combine's 32-byte uniform — `(gain, death, haze, dither)` then the GlowWave phases.
+    /// Persistent, rewritten each frame with a queue write (queue writes land before the graph's
+    /// submit executes).
     gain_buf: Buffer,
     /// The two Gauss bind groups bind only the ¼-res ping-pong views + sampler — all stable
     /// while the textures hold. The downsample and combine bind groups bind the view target's
@@ -498,7 +678,7 @@ fn prepare_textures(
         );
         let gain_buf = render_device.create_buffer(&BufferDescriptor {
             label: Some("ffx_glow_gain"),
-            size: 16,
+            size: 32,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -544,12 +724,17 @@ fn dither_armed() -> f32 {
 ///   pair this view runs decides what drives them, and a bake runs neither pair (decision 1481,
 ///   report B49 — now structural rather than arithmetic, decision 1731).
 /// - **w** — the deband-dither arm ([`dither_armed`]), 0 or 1.
+///
+/// The second row is the GlowWave lane: the two phases, written on every frame and read only by
+/// the warped entry point. They are unconditional because they are a free-running clock — gating
+/// the *write* on the arm would make the pattern restart on every dive.
 fn combine_uniform(
     zone_gain: f32,
     world: FfxPassState,
     glue: FfxPassState,
     glow: &FfxGlow,
-) -> [f32; 4] {
+    wave: FfxWave,
+) -> [f32; 8] {
     let feed = match glow.state {
         FfxState::Player => world,
         FfxState::Glue => glue,
@@ -560,6 +745,10 @@ fn combine_uniform(
         feed.death,
         feed.haze,
         dither_armed(),
+        wave.phase1,
+        wave.phase2,
+        0.0,
+        0.0,
     ]
 }
 
@@ -614,20 +803,27 @@ impl ViewNode for FfxGlowNode {
     ) -> Result<(), NodeRunError> {
         let pipelines = world.resource::<FfxGlowPipelines>();
         let pipeline_cache = world.resource::<PipelineCache>();
+        let death = world.resource::<FfxDeathFade>().0;
+        let wave = *world.resource::<FfxWave>();
         let uniform = combine_uniform(
             world.resource::<FfxGlowGain>().0,
-            FfxPassState::world(
-                world.resource::<FfxDeathFade>().0,
-                world.resource::<FfxHazeMix>().0,
-            ),
+            FfxPassState::world(death, world.resource::<FfxHazeMix>().0),
             FfxPassState::glue(world.resource::<GlueFfx>().death()),
             glow,
+            wave,
         );
+        // THE PASS-LIST SWAP (`0x6cc630`). The reference forks the whole list here; we fork one
+        // pipeline, which is the same fork — the first two passes are identical in both lists.
+        let combine_id = if wave_armed(glow.state, wave, death) {
+            pipelines.combine_wave
+        } else {
+            pipelines.combine
+        };
         let (Some(downsample), Some(gauss_h), Some(gauss_v), Some(combine)) = (
             pipeline_cache.get_render_pipeline(pipelines.downsample),
             pipeline_cache.get_render_pipeline(pipelines.gauss_h),
             pipeline_cache.get_render_pipeline(pipelines.gauss_v),
-            pipeline_cache.get_render_pipeline(pipelines.combine),
+            pipeline_cache.get_render_pipeline(combine_id),
         ) else {
             return Ok(()); // pipelines still compiling — draw the frame un-glowed
         };
@@ -702,6 +898,8 @@ impl ViewNode for FfxGlowNode {
                 &pipelines.sampler,
                 &textures.quarter_a.default_view,
                 textures.gain_buf.as_entire_binding(),
+                &pipelines.wave_view,
+                &pipelines.wave_sampler,
             )),
         );
         let mut pass = render_context
@@ -733,14 +931,16 @@ impl Plugin for FfxGlowPlugin {
             .init_resource::<FfxDeathFade>()
             .init_resource::<GlueFfx>()
             .init_resource::<FfxHazeMix>()
+            .init_resource::<FfxWave>()
             .add_plugins((
                 ExtractComponentPlugin::<FfxGlow>::default(),
                 ExtractResourcePlugin::<FfxGlowGain>::default(),
                 ExtractResourcePlugin::<FfxDeathFade>::default(),
                 ExtractResourcePlugin::<GlueFfx>::default(),
                 ExtractResourcePlugin::<FfxHazeMix>::default(),
+                ExtractResourcePlugin::<FfxWave>::default(),
             ))
-            .add_systems(Update, (sync_gain, sync_haze, ensure_ffx_glow));
+            .add_systems(Update, (sync_gain, sync_haze, sync_wave, ensure_ffx_glow));
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -802,17 +1002,35 @@ mod tests {
     fn a_ghosts_bake_is_not_death_combined() {
         let zone = 0.5;
         assert_eq!(
-            combine_uniform(zone, ghost_world(), living_glue(), &FfxGlow::WORLD),
-            [0.5, 1.0, 0.0, 0.0]
+            combine_uniform(
+                zone,
+                ghost_world(),
+                living_glue(),
+                &FfxGlow::WORLD,
+                FfxWave::default()
+            ),
+            [0.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         );
         assert_eq!(
-            combine_uniform(zone, ghost_world(), living_glue(), &FfxGlow::BOOTH),
-            [0.5, 0.0, 0.0, 0.0],
+            combine_uniform(
+                zone,
+                ghost_world(),
+                living_glue(),
+                &FfxGlow::BOOTH,
+                FfxWave::default()
+            ),
+            [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             "the booth keeps the zone glow and drops the death gate"
         );
         assert_eq!(
-            combine_uniform(zone, ghost_world(), living_glue(), &FfxGlow::UI_PANE),
-            [0.0, 0.0, 0.0, 0.0]
+            combine_uniform(
+                zone,
+                ghost_world(),
+                living_glue(),
+                &FfxGlow::UI_PANE,
+                FfxWave::default()
+            ),
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         );
     }
 
@@ -822,12 +1040,24 @@ mod tests {
     fn a_drunk_players_bake_stays_sharp() {
         let (zone, drunk) = (0.5, FfxPassState::world(0.0, 1.0));
         assert_eq!(
-            combine_uniform(zone, drunk, living_glue(), &FfxGlow::WORLD),
-            [0.5, 0.0, 1.0, 0.0]
+            combine_uniform(
+                zone,
+                drunk,
+                living_glue(),
+                &FfxGlow::WORLD,
+                FfxWave::default()
+            ),
+            [0.5, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         );
         assert_eq!(
-            combine_uniform(zone, drunk, living_glue(), &FfxGlow::BOOTH),
-            [0.5, 0.0, 0.0, 0.0]
+            combine_uniform(
+                zone,
+                drunk,
+                living_glue(),
+                &FfxGlow::BOOTH,
+                FfxWave::default()
+            ),
+            [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         );
     }
 
@@ -841,18 +1071,36 @@ mod tests {
         let ghost_glue = FfxPassState::glue(1.0);
         let alive_world = FfxPassState::world(0.0, 0.0);
         assert_eq!(
-            combine_uniform(zone, alive_world, ghost_glue, &FfxGlow::GLUE_SCENE),
-            [0.5, 1.0, 0.0, 0.0],
+            combine_uniform(
+                zone,
+                alive_world,
+                ghost_glue,
+                &FfxGlow::GLUE_SCENE,
+                FfxWave::default()
+            ),
+            [0.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             "a ghost roster row death-combines the glue scene"
         );
         assert_eq!(
-            combine_uniform(zone, alive_world, ghost_glue, &FfxGlow::WORLD),
-            [0.5, 0.0, 0.0, 0.0],
+            combine_uniform(
+                zone,
+                alive_world,
+                ghost_glue,
+                &FfxGlow::WORLD,
+                FfxWave::default()
+            ),
+            [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             "…and never the world view, whose own player is alive"
         );
         assert_eq!(
-            combine_uniform(zone, ghost_world(), living_glue(), &FfxGlow::GLUE_SCENE),
-            [0.5, 0.0, 0.0, 0.0],
+            combine_uniform(
+                zone,
+                ghost_world(),
+                living_glue(),
+                &FfxGlow::GLUE_SCENE,
+                FfxWave::default()
+            ),
+            [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             "and a world ghost never reaches the glue view"
         );
     }
@@ -870,11 +1118,151 @@ mod tests {
                 0.5,
                 drunk_world,
                 FfxPassState::glue(1.0),
-                &FfxGlow::GLUE_SCENE
+                &FfxGlow::GLUE_SCENE,
+                FfxWave::default()
             ),
-            [0.5, 1.0, 0.0, 0.0],
+            [0.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             "the glue view death-combines on its own gate and never hazes"
         );
+    }
+
+    /// **The pass-list swap** (`0x6cc630`) — the three conditions, each independently load-bearing.
+    ///
+    /// The guard is `0x467d00() != 0 && 0x672470() != 0xf`, and the death pass REPLACES the glow
+    /// pass outright rather than composing with it, so a ghost has no wave for the same structural
+    /// reason it has no haze.
+    #[test]
+    fn the_warp_arms_only_for_a_living_submerged_world_view() {
+        let wet = FfxWave {
+            phase1: 0.0,
+            phase2: 0.0,
+            active: true,
+        };
+        let dry = FfxWave::default();
+        assert!(
+            wave_armed(FfxState::Player, wet, 0.0),
+            "in-world, submerged, alive — the reference walks its second list"
+        );
+        assert!(
+            !wave_armed(FfxState::Player, dry, 0.0),
+            "a dry camera keeps the first list"
+        );
+        assert!(
+            !wave_armed(FfxState::Player, wet, 1.0),
+            "a ghost runs CFFXDeath, which owns one list and no guard"
+        );
+        assert!(
+            !wave_armed(FfxState::Glue, wet, 0.0),
+            "the glue pair reaches the same Render, but 0x467d00 gates it out of the swap"
+        );
+        assert!(
+            !wave_armed(FfxState::None, wet, 0.0),
+            "a bake runs neither pair"
+        );
+    }
+
+    /// **A dry frame is untouched by this feature** — the perf claim, made structurally rather than
+    /// with a frame counter (the machine that would measure it is busy, and a stopwatch could not
+    /// prove this anyway).
+    ///
+    /// Dry, the uniform's first row is bit-identical to what it was before the warp existed and the
+    /// phase row is inert; the node then selects `combine` — the same pipeline object, compiled at
+    /// the same startup, bound through the same layout. The warp costs a dry frame nothing because
+    /// there is nothing of it in a dry frame, not because its cost is small.
+    #[test]
+    fn a_dry_frame_pays_nothing_for_the_warp() {
+        let live = FfxWave {
+            phase1: 0.4,
+            phase2: 0.7,
+            active: false,
+        };
+        let u = combine_uniform(
+            0.5,
+            FfxPassState::world(0.0, 0.0),
+            living_glue(),
+            &FfxGlow::WORLD,
+            live,
+        );
+        assert_eq!(
+            u[..4],
+            [0.5, 0.0, 0.0, 0.0],
+            "the combine lane is exactly what it was before the wave lane existed"
+        );
+        assert!(
+            !wave_armed(FfxState::Player, live, 0.0),
+            "and the node binds the unwarped pipeline"
+        );
+    }
+
+    /// The phases are a FREE-RUNNING clock, not a timer the dive starts: they advance whether or not
+    /// the wave is armed, so surfacing and diving again does not restart the pattern. Their periods
+    /// are the reference's own two integer millisecond moduli, and being coprime-ish is what stops
+    /// the warp reading as a loop — they rejoin only every ~49 minutes.
+    #[test]
+    fn the_two_phases_run_independently_off_one_clock() {
+        let phase = |ms: u64, i: usize| (ms % WAVE_PERIOD_MS[i]) as f32 / WAVE_PERIOD_MS[i] as f32;
+        assert_eq!(WAVE_PERIOD_MS, [3174, 2805]);
+        // Each wraps on its own period and nowhere else.
+        assert!(phase(3173, 0) > 0.999 && phase(3174, 0) == 0.0);
+        assert!(phase(2804, 1) > 0.999 && phase(2805, 1) == 0.0);
+        // At its own wrap the OTHER phase is mid-stride — the whole point of two moduli.
+        assert!(phase(3174, 1) > 0.13 && phase(3174, 1) < 0.14);
+        // The joint period: lcm(3174, 2805) ms ≈ 49 min 28 s.
+        let gcd = |mut a: u64, mut b: u64| {
+            while b != 0 {
+                (a, b) = (b, a % b);
+            }
+            a
+        };
+        let joint =
+            WAVE_PERIOD_MS[0] / gcd(WAVE_PERIOD_MS[0], WAVE_PERIOD_MS[1]) * WAVE_PERIOD_MS[1];
+        assert_eq!(joint, 2_967_690);
+    }
+
+    /// **The LUT is a displacement map, and each channel bends ONE axis.** That is the fact that
+    /// makes the effect a geometric warp rather than a brightness shimmer, and it is visible in the
+    /// texels: `du` depends only on x, `dv` only on y (the shipped format is the signed two-channel
+    /// bump format on both backends — `D3DFMT_V8U8` / `GL_DSDT8_NV`).
+    #[test]
+    fn the_wave_lut_is_one_sine_per_axis() {
+        let lut = wave_lut_texels();
+        let edge = WAVE_LUT_EDGE as usize;
+        assert_eq!(lut.len(), edge * edge * 2);
+        let at = |x: usize, y: usize| {
+            let i = (y * edge + x) * 2;
+            (lut[i], lut[i + 1])
+        };
+        for x in 0..edge {
+            for y in [0usize, 37, 91, 127] {
+                assert_eq!(at(x, y).0, at(x, 0).0, "du must not vary down the texture");
+                assert_eq!(at(x, y).1, at(0, y).1, "dv must not vary across it");
+            }
+        }
+        // Biased back the way the shipped ps_2_0 permutation does, every texel is its axis's sine
+        // to within one 8-bit step — the quantization the reference itself ships.
+        for i in 0..edge {
+            let want = (std::f32::consts::TAU * i as f32 / edge as f32).sin();
+            let got = (at(i, i).0 as f32 / 255.0 - 0.5) * 2.0;
+            assert!(
+                (got - want).abs() <= 2.0 / 255.0,
+                "texel {i}: {got} vs sin {want}"
+            );
+        }
+    }
+
+    /// GOLDEN — the reference's own pack, down to the truncation. `ffx_glow_wave_lut`'s path B is
+    /// `(s·0.5 + 0.5)·255` → clamp → `__ftol`, and `__ftol` truncates toward zero rather than
+    /// rounding: `sin = 0` packs to **127**, not 128, so the map carries a half-step DC bias the
+    /// reference carries too. Rounding here would be a "cleaner" number and the wrong one.
+    #[test]
+    fn the_wave_pack_truncates_like_ftol() {
+        let lut = wave_lut_texels();
+        // x = 0 and x = 64 are the sine's two zeros; both truncate down.
+        assert_eq!(lut[0], 127, "sin(0) = 0 → trunc(127.5) = 127");
+        assert_eq!(lut[64 * 2], 127, "sin(π) ≈ 0 → 127");
+        // The quarter points saturate the ends of the range.
+        assert_eq!(lut[32 * 2], 255, "sin(π/2) = 1 → 255");
+        assert_eq!(lut[96 * 2], 0, "sin(3π/2) = −1 → 0");
     }
 
     /// GOLDEN — the three writers of the glue screens' `LightParams.glow`, and the alpha byte the

@@ -36,6 +36,12 @@
 //! quiescence, or waiting for pixel stability cannot help. It is a renderer defect that the harness
 //! correctly *reports*; do not try to gate it away here. Read 0815 before touching this file's phases.
 //!
+//! **`creature-indoor-front` is one of them** (named 2026-09-01, while A/B-ing 1787's fog gate): two
+//! runs of ONE unchanged build land in the two states at MAE 4.518, the whole difference confined to
+//! the subject's own brightness with the room around it pixel-identical, and the settle counts differ
+//! (235 vs 211 frames). If a change you are A/B-ing shows exactly 4.518 here, re-run the baseline
+//! before believing it — the number is the flake's, not yours.
+//!
 //! ## Running one capture by hand
 //! **Run through Cargo — never the built binary directly:**
 //! ```text
@@ -135,15 +141,18 @@ use scenarios::GlueScreen;
 use scenarios::{Scenario, SubjectKind, UiFixture, GLUE_SCENARIOS, GROUND_EYE, SCENARIOS};
 
 pub(crate) mod fxview;
-// The two scripted probe drivers, which lived in `player/` until decision 1174: they turn the
-// avatar's aim and park the camera rig, and both order themselves BEFORE `player::control`. An
-// instrument may name the gameplay system it runs against; gameplay may not name the instrument.
+// The three scripted probe drivers, which lived in `player/` until decision 1174: they turn the
+// avatar's aim, aim its swim pitch, and park the camera rig, and all three order themselves BEFORE
+// `player::control`. An instrument may name the gameplay system it runs against; gameplay may not
+// name the instrument.
 mod probe_cam;
 mod probe_look;
+mod probe_pitch;
 pub(crate) mod waterfx;
 
 pub(crate) use probe_cam::ProbeCamPlugin;
 pub(crate) use probe_look::ProbeLookPlugin;
+pub(crate) use probe_pitch::ProbePitchPlugin;
 
 /// Which screen a capture starts the client on — the dev arm of [`crate::run_mode::start_state`],
 /// which is what `main` actually calls. A glue capture boots onto the screen it photographs; any
@@ -222,6 +231,9 @@ fn glue_screen() -> Option<GlueScreen> {
 /// surface decals, `crate::ground_fx`; default 0 = the mid-air point), `WOW_FX_HOLD` (=1 keeps
 /// the fixture alive past one sequence pass — previewing a persistent HOLD kit's steady state;
 /// default 0 = the game's discrete-instance reap at one pass, then the pool drains),
+/// `WOW_FX_AT` (`x,y,z` — plant the fixture at a real world point instead of the Northshire
+/// hillside, with `WOW_MAP` picking the map and `WOW_FX_MINUTE` the clock; the ground-decal lanes
+/// need real terrain under the subject),
 /// `WOW_FX_UP` (yards to raise the fixture above its resolved seat — for models authored below
 /// their anchor, whose opening frames the terrain otherwise swallows; default 0).
 #[derive(Resource)]
@@ -259,6 +271,14 @@ pub(crate) struct FxViewRequest {
     pub(crate) ground: bool,
     /// See `WOW_FX_HOLD` above.
     pub(crate) hold: bool,
+    /// `WOW_FX_AT=x,y,z` — plant the fixture at this raw WoW point instead of [`FXVIEW_POS`]
+    /// (with `WOW_MAP` picking the map, like `vista` and `waterfx`). The ground-decal lanes —
+    /// blob shadow, footprints, the selection ring — only exist *on* terrain, and which terrain
+    /// decides whether they exist at all (footprints gate on the surface's `TerrainType.Flags & 1`,
+    /// i.e. snow and sand) and how hard the coplanar tie is (a steep slope seen at a grazing
+    /// angle is the whole difficulty). A fixture nailed to one Northshire hillside can photograph
+    /// none of that.
+    pub(crate) at: Option<[f32; 3]>,
     /// `WOW_FX_UP` — raise the fixture this many yards above its resolved seat (default 0).
     /// The escape hatch for models authored BELOW their anchor (Arcane Intellect's star cluster
     /// starts 1.6 yd under its attach point): at the default seat the terrain swallows the
@@ -581,6 +601,10 @@ impl Plugin for CapturePlugin {
             None
         } else {
             Some(if name == "fxview" {
+                let at = std::env::var("WOW_FX_AT").ok().and_then(|v| {
+                    let c: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+                    (c.len() == 3).then(|| [c[0], c[1], c[2]])
+                });
                 let display: Option<u32> = std::env::var("WOW_FX_DISPLAY")
                     .ok()
                     .and_then(|v| v.trim().parse().ok());
@@ -622,21 +646,29 @@ impl Plugin for CapturePlugin {
                     ground: knob("WOW_FX_GROUND", 0.0) > 0.5,
                     hold: knob("WOW_FX_HOLD", 0.0) > 0.5,
                     up: knob("WOW_FX_UP", 0.0),
+                    // `WOW_FX_AT=x,y,z` plants the fixture anywhere in the real world, with
+                    // `WOW_MAP` picking the map — the same pair `vista` and `waterfx` take. The
+                    // default hillside can photograph an effect but not a ground decal: which
+                    // surface is under the subject decides whether footprints exist at all, and
+                    // how steeply it falls away decides how hard the coplanar tie is.
+                    at,
                 })
                 .init_resource::<FxViewState>();
                 Scenario {
                     name: "fxview",
-                    map: scenarios::MAP_AZEROTH, // the fixture spawns over the Northshire slope
-                    eye: GROUND_EYE,             // overridden per frame by the orbit in `pin_scene`
-                    look: FXVIEW_POS,
-                    minute: 720,
+                    map: None,
+                    eye: GROUND_EYE, // overridden per frame by the orbit in `pin_scene`
+                    look: at.unwrap_or(FXVIEW_POS),
+                    minute: knob("WOW_FX_MINUTE", 720.0) as u32,
                     ui: None,
                 }
             } else if name == "waterfx" {
-                // The water-foam viewer (see `water_fx::view`): a synthetic wading unit over a
-                // synthetic wet lattice, framed by a fixed orbit around the rig centre. Knobs:
-                // WOW_WFX_MODE (ring|wake|turn), WOW_WFX_SPEED (yd/s), WOW_WFX_AGE (s),
-                // WOW_WFX_DEPTH (yd), camera WOW_WFX_AZ/EL/DIST. Not a golden scenario.
+                // The water-foam viewer (see `capture::waterfx`): a wading unit over a synthetic
+                // wet lattice — or, with WOW_WFX_AT=x,y,z, in the real streamed liquid at that pin
+                // — framed by a fixed orbit around the rig centre. Knobs: WOW_WFX_MODE
+                // (ring|wake|turn), WOW_WFX_SPEED (yd/s), WOW_WFX_HEAD (deg), WOW_WFX_AGE (s),
+                // WOW_WFX_DEPTH (yd),
+                // camera WOW_WFX_AZ/EL/DIST. Not a golden scenario.
                 let knob = |k: &str, d: f32| {
                     std::env::var(k)
                         .ok()
@@ -648,9 +680,17 @@ impl Plugin for CapturePlugin {
                     Ok("turn") => waterfx::WfxMode::Turn,
                     _ => waterfx::WfxMode::Ring,
                 };
-                // Rig centre in raw WoW coords: over the Northshire ground scene, the synthetic
-                // surface a few yards above the terrain so the backdrop plane reads clean.
-                let center = [-8961.0_f32, -145.0, 95.0];
+                // Rig centre in raw WoW coords. Default: over the Northshire ground scene, the
+                // synthetic surface a few yards above the terrain so the backdrop plane reads
+                // clean. `WOW_WFX_AT=x,y,z` moves it anywhere and switches the rig to the REAL
+                // streamed liquid there (`z` = that water's surface height) — a synthetic square
+                // of water has no bank to clip against and no neighbour to be sorted against.
+                let at = std::env::var("WOW_WFX_AT").ok().and_then(|v| {
+                    let c: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+                    (c.len() == 3).then(|| [c[0], c[1], c[2]])
+                });
+                let live = at.is_some();
+                let center = at.unwrap_or([-8961.0_f32, -145.0, 95.0]);
                 let az = knob("WOW_WFX_AZ", 180.0).to_radians();
                 let el = knob("WOW_WFX_EL", 35.0).to_radians();
                 let dist = knob("WOW_WFX_DIST", 14.0);
@@ -662,14 +702,18 @@ impl Plugin for CapturePlugin {
                 app.insert_resource(waterfx::WaterFxView {
                     mode,
                     speed: knob("WOW_WFX_SPEED", 4.0),
+                    heading: knob("WOW_WFX_HEAD", 0.0).to_radians(),
                     age: knob("WOW_WFX_AGE", 1.5),
                     center,
                     depth: knob("WOW_WFX_DEPTH", 0.5),
+                    live,
                 })
                 .init_resource::<FxViewState>();
                 Scenario {
                     name: "waterfx",
-                    map: scenarios::MAP_AZEROTH, // the synthetic lattice sits over the Northshire slope
+                    // The synthetic lattice sits over the Northshire slope; a live rig
+                    // (`WOW_WFX_AT`) goes wherever its pin is, so its map is a knob like `vista`'s.
+                    map: None,
                     eye,
                     look: center,
                     minute: 720,
@@ -713,10 +757,7 @@ impl Plugin for CapturePlugin {
                     name: "vista",
                     // The arbitrary-viewpoint instrument goes anywhere, so its map is a knob: a
                     // horizon report from Kalimdor is `WOW_MAP=1` (a `Map.dbc` id).
-                    map: std::env::var("WOW_MAP")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(scenarios::MAP_AZEROTH),
+                    map: None,
                     eye,
                     look: [
                         eye[0] + d * pitch.cos() * face.cos(),
@@ -752,10 +793,12 @@ impl Plugin for CapturePlugin {
         // terrain/WDL streamers and per-map lighting all key off it. Raw WoW coords repeat on every
         // continent, so a scenario that could not say which map it meant would stream the wrong
         // world's tiles and photograph a void (Felwood's tile `33_24` exists in Azeroth, empty).
-        // Written back for `vista` too, which is where the value came from — a harmless no-op that
-        // keeps one path for "which map is this run on" (decision 0743). A glue screen has no map.
-        if let Some(s) = &scenario {
-            std::env::set_var("WOW_MAP", s.map.to_string());
+        // The arbitrary-viewpoint instruments (`vista`, `waterfx`, `fxview`) carry `map: None`
+        // instead: their map IS the knob, so writing it back would be a round trip through a second
+        // parser — and a second parser is how `WOW_MAP=Kalimdor` came to photograph Azeroth in
+        // silence. `world_map` is the one reader (decision 0743). A glue screen has no map.
+        if let Some(m) = scenario.as_ref().and_then(|s| s.map) {
+            std::env::set_var("WOW_MAP", m.to_string());
         }
         let shot_name = scenario.map(|s| s.name).or(glue.map(|g| g.name)).unwrap();
         let out = std::env::var("WOW_CAPTURE_OUT")

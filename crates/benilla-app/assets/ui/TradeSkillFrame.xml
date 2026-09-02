@@ -1042,16 +1042,6 @@
             </Layer>
         </Layers>
         <Frames>
-            <!-- The scroll-wheel catcher (TrainerFrame.xml's own note) — MUST be first so every real
-                 row below out-ranks it in hit-testing. -->
-            <Button name="BenillaTradeSkillWheelCatcher">
-                <Anchors>
-                    <Anchor point="TOPLEFT" relativePoint="TOPLEFT"/>
-                    <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"/>
-                </Anchors>
-                <Scripts><OnMouseWheel>BenillaTradeSkillFrame_OnMouseWheel(arg1)</OnMouseWheel></Scripts>
-            </Button>
-
             <!-- The top-right close X (ref a UIPanelCloseButton at TOPRIGHT -29,-8, l.838-846; the
                  minimize-button art stands in — this house dialect ships no such template,
                  TrainerFrame.xml's own precedent). -->
@@ -1178,10 +1168,10 @@
                  container over the 8 rows; only its right-hand Slider scroll bar renders. Sized to the
                  8-row span (TRADE_SKILLS_DISPLAYED × TRADE_SKILL_HEIGHT), TrainerFrame.xml's own
                  same-TOPLEFT-as-row1 convention. updateFunc set in BenillaTradeSkillFrame_OnLoad. -->
-            <Frame name="BenillaTradeSkillListScrollFrame" inherits="FauxScrollFrameTemplate">
+            <ScrollFrame name="BenillaTradeSkillListScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="293" y="128"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-96"/></Offset></Anchor></Anchors>
-            </Frame>
+            </ScrollFrame>
 
             <!-- The detail product icon (ref TradeSkillSkillIcon, l.539-591): a 37×37 button over a
                  64×64 UI-EmptySlot ring (TrainerFrame.xml's own BenillaTrainerSkillIcon shape) at the
