@@ -30,7 +30,7 @@ const JERKY_LINK: &str = "|cffffffff|Hitem:117|h[Tough Jerky]|h|r";
 const ROOM_UI: &[&str] = &[
     "UIDropDownMenu.xml",
     "UnitPopup.xml",
-    "ItemRef.xml",
+    "Interface\\FrameXML\\ItemRef.xml",
     "MerchantFrame.xml",
     "StackSplit.xml",
     "DressUpFrame.xml",

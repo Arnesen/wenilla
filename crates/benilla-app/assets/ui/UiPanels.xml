@@ -972,9 +972,15 @@
         -- the StaticPopupDialogs registry + StaticPopup_Show(which, arg1, arg2) + the OnUpdate
         -- countdown/StartDelay machinery — the death arc's dialogs exercise nearly all of it, and
         -- StaticPopup_Show/StaticPopupDialogs are 1.14 addon-API surface (0068). v1 scope:
-        --   · TWO dialog instances (STATICPOPUP_NUMDIALOGS = 2; the ref runs 4) — the deepest
-        --     nesting exercised so far is decline-res re-showing DEATH (Show precedes the click's
-        --     hide, so a free second instance is required). Grow toward 4 when a third coexists.
+        --   · FOUR dialog instances, the reference's own count. It was 2 for a long time, on the
+        --     reasoning that the deepest nesting exercised was decline-res re-showing DEATH (Show
+        --     precedes the click's hide, so a free second instance is required) and that it should
+        --     "grow toward 4 when a third coexists". 1751 window 7 supplied that third caller from
+        --     an unexpected direction: the reference's own `MirrorTimer_Show` bounds its free-bar
+        --     search by this constant rather than by `MIRRORTIMER_NUMTIMERS` (MirrorTimer.lua
+        --     l.32, a copy-paste from StaticPopup.lua), so at 2 the third mirror bar was
+        --     unreachable for a new timer. The coupling is the reference's bug and this is not the
+        --     file to fix it in; matching its count is.
         --   · info fields honored: text, button1, button2, DisplayButton2, OnShow(data),
         --     OnHide(data), OnAccept(data, data2) (truthy return = keep open — RECOVER_CORPSE
         --     waits for the server, XP_LOSS's first Accept re-asks), OnCancel(data, reason)
@@ -1007,7 +1013,7 @@
         --   · Resize runs per tick while shown, not only on text swaps: GetHeight's measure has a
         --     frame of latency (the measured-width convention below), so the height self-corrects
         --     the frame after any text change.
-        STATICPOPUP_NUMDIALOGS = 2
+        STATICPOPUP_NUMDIALOGS = 4
         StaticPopupDialogs = {}
 
         local function StaticPopupTimeUnit(n, minutes)
@@ -2447,6 +2453,19 @@
     </Frame>
     <Frame name="StaticPopup2" inherits="StaticPopupTemplate" parent="UIParent">
         <Anchors><Anchor point="TOP" relativeTo="StaticPopup1" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-8"/></Offset></Anchor></Anchors>
+    </Frame>
+    <!-- The ref's four (StaticPopup.xml l.245-254), each stacked under the last. Instances 3 and 4
+         joined with 1751's seventh window and the reason is a cross-file coupling worth naming:
+         `STATICPOPUP_NUMDIALOGS` is not only this engine's pool size — the reference's own
+         `MirrorTimer_Show` bounds its free-bar search by it (MirrorTimer.lua l.32, a copy-paste
+         from StaticPopup.lua). At 2 against MIRRORTIMER_NUMTIMERS = 3 the third mirror bar could
+         never be claimed by a new timer, silently. The v1 note above said "grow toward 4 when a
+         third coexists"; the reference's own body is that third caller. -->
+    <Frame name="StaticPopup3" inherits="StaticPopupTemplate" parent="UIParent">
+        <Anchors><Anchor point="TOP" relativeTo="StaticPopup2" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-8"/></Offset></Anchor></Anchors>
+    </Frame>
+    <Frame name="StaticPopup4" inherits="StaticPopupTemplate" parent="UIParent">
+        <Anchors><Anchor point="TOP" relativeTo="StaticPopup3" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-8"/></Offset></Anchor></Anchors>
     </Frame>
 
     <!-- The delete-item confirm driver (decision 0216 §3): DELETE_ITEM_CONFIRM names no frame of

@@ -1,5 +1,5 @@
-//! The combo-point dots (decisions 0869, 0875) — our `ComboFrame` implementation driven
-//! through the real loader: the show/hide edges, the per-point highlight/shine fade chain, the
+//! The combo-point dots (decisions 0869, 0875) — the reference's own `ComboFrame.xml`/`.lua`,
+//! executed off the player's chain since 1751's tenth window, driven through the real loader: the show/hide edges, the per-point highlight/shine fade chain, the
 //! "only newly-earned points flare" rule that `COMBO_FRAME_LAST_NUM_POINTS` exists to enforce, and
 //! the two gates that live in `GetComboPoints` rather than in this Lua — rogue-or-druid only, and
 //! the points must be banked on the CURRENT target.
@@ -10,22 +10,7 @@ use benilla_ui::script::{PlayerReqState, UiScript, UnitState};
 const MOB_A: u64 = 0xF130_0000_0000_0001;
 const MOB_B: u64 = 0xF130_0000_0000_0002;
 
-/// Load one shipped `assets/ui/<file>` (the panel tests' loader), panicking on any loader error.
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 /// The manifest order this file actually ships in: `UiPanels.xml` for `UIFrameFade`,
 /// `UnitFrames.xml` for the `TargetFrame` the dots anchor to.
@@ -40,7 +25,7 @@ fn load_combo_frame() -> UiScript {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "UnitFrames.xml");
-    load_xml(&s, "ComboFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\ComboFrame.xml");
     s.resolve();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     s
@@ -83,6 +68,7 @@ fn highlight_alpha(s: &mut UiScript, i: u32) -> f64 {
 /// completion first, since the highlight arrives via `UIFrameFade`, not a straight `SetAlpha`.
 #[test]
 fn combo_frame_follows_the_point_count() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = load_combo_frame();
     play_as(&mut s, 4, MOB_A); // rogue, mob A selected
 
@@ -135,6 +121,7 @@ fn combo_frame_follows_the_point_count() {
 /// combo event, so re-targeting mid-window fires exactly this repaint.
 #[test]
 fn a_repaint_at_the_same_count_does_not_re_flare() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = load_combo_frame();
     play_as(&mut s, 4, MOB_A);
     s.set_combo_points(2, MOB_A);
@@ -164,6 +151,7 @@ fn a_repaint_at_the_same_count_does_not_re_flare() {
 /// the rogue ladder's first rung, so only the class differs.
 #[test]
 fn a_warriors_overpower_point_lights_no_dot() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = load_combo_frame();
     play_as(&mut s, 1, MOB_A); // warrior
     s.set_combo_points(1, MOB_A);
@@ -184,6 +172,7 @@ fn a_warriors_overpower_point_lights_no_dot() {
 /// target entirely (guid 0) empties them too.
 #[test]
 fn re_targeting_empties_the_dots_without_the_count_moving() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = load_combo_frame();
     play_as(&mut s, 4, MOB_A);
     s.set_combo_points(3, MOB_A);

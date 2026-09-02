@@ -70,9 +70,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // AddMessage(text [, r, g, b [, a]]) — binding 0x795590.
     //
+    // The TEXT is `super::message_text` — an `lua_isstring` gate whose failure is a silent jump to
+    // this function's own epilogue, not a raise, and the same for a NULL coercion and for the
+    // empty string. Its doc carries the bytes and the reason it matters; the short version is that
+    // stock `ContainerFrame.lua` really does reach `AddMessage(nil, …)` on a full keyring, and
+    // taking a `String` here (which this did until 1751's fourth window) put a script-error dialog
+    // on a gesture the reference answers with a dead click.
+    //
     // r/g/b are required **as a trio** (three presence checks ANDed at 0x7956xx); absent ⇒ hard
     // 0xFFFFFFFF white. The fourth numeric is a real alpha, `lua_isnumber`-gated with a default of
-    // 1.0 (`795752: mov [ebp-0x18],0x3f800000`).
+    // 1.0 (`795752: mov [ebp-0x18],0x3f800000`). **Deliberately NOT the same shape as the text:** a
+    // bad colour jumps to `0x79581c`, which still enqueues the line in opaque white. Only a bad
+    // text shows nothing.
     //
     // **The signature stops there, and the closure's arity is the enforcement.** The corpus's three
     // blocked callers all pass a sixth argument they believe is a hold time; mlua hands us the
@@ -82,7 +91,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "AddMessage",
         lua.create_function(
-            |lua, (this, text, r, g, b, a): (Table, String, Value, Value, Value, Value)| {
+            |lua, (this, text, r, g, b, a): (Table, Value, Value, Value, Value, Value)| {
+                let Some(text) = super::message_text(lua, &text) else {
+                    return Ok(());
+                };
                 let has_rgb = !matches!(
                     (&r, &g, &b),
                     (Value::Nil, _, _) | (_, Value::Nil, _) | (_, _, Value::Nil)
@@ -242,6 +254,61 @@ mod tests {
             num_messages(&s, "MF"),
             0,
             "the 6th arg must not extend a message's life"
+        );
+    }
+
+    /// **A text `AddMessage` cannot use is swallowed whole — silently, with nothing added and
+    /// nothing raised** (`0x795590`'s three jumps to its own epilogue; see [`super::super`]'s
+    /// `message_text`).
+    ///
+    /// The defect this pins is not hypothetical and not ours to have guessed at: our binding took
+    /// its text as an mlua `String`, which raises on nil, and 1.12's own `ContainerFrame.lua:753`
+    /// reports a full keyring through `UIErrorsFrame:AddMessage(NO_EMPTY_KEYRING_SLOTS, …)` — a
+    /// GlobalString the shipped `GlobalStrings.lua` never defines. So dropping a key onto a full
+    /// keyring put a script-error dialog on screen where the reference gives a dead click. It
+    /// surfaced the moment 1751's third window made the bag bar the reference's own file.
+    ///
+    /// The three silent cases and the two that are NOT silent are pinned together, because the
+    /// pair is the finding: a bad **colour** still adds the line (opaque white), and the receiver
+    /// guards still raise. Reading the text gate as a general argument law is exactly 1717's error.
+    #[test]
+    fn addmessage_swallows_a_text_it_cannot_use_and_only_the_text() {
+        let s = UiScript::new().unwrap();
+        s.run("CreateFrame('MessageFrame', 'MF')").unwrap();
+
+        // `lua_isstring 0x6f3510` accepts tags 4 and 3 only — everything else jumps to 0x79582b.
+        for bad in ["nil", "", "true", "{}", "print"] {
+            s.run(&format!("MF:AddMessage({bad})"))
+                .unwrap_or_else(|e| panic!("AddMessage({bad}) must not raise: {e}"));
+        }
+        // …and so does the empty string, on its own `cmp byte ptr [ebx],0` at 0x79564b.
+        s.run("MF:AddMessage('')").unwrap();
+        assert_eq!(
+            num_messages(&s, "MF"),
+            0,
+            "nil, absent, boolean, table, function and \"\" each add NOTHING"
+        );
+
+        // A number IS a usable text — tag 3 passes the gate and `0x6f7c80` retags the slot in
+        // place, so it renders as its decimal form.
+        s.run("MF:AddMessage(42)").unwrap();
+        assert_eq!(num_messages(&s, "MF"), 1, "a number is a text");
+
+        // The colour arguments are the OPPOSITE shape and that is the load-bearing negative: a bad
+        // r/g/b jumps to 0x79581c, which still enqueues with the 0xffffffff white staged at
+        // 0x795658. Suppressing the line here would be the same over-generalisation in reverse.
+        s.run("MF:AddMessage('kept', {}, nil, 'x')").unwrap();
+        assert_eq!(
+            num_messages(&s, "MF"),
+            2,
+            "a bad colour still adds the line"
+        );
+
+        // The receiver guards are upstream of all of it and DO raise (0x847ef8 — "used '.' instead
+        // of ':'").
+        assert!(
+            s.run("MF.AddMessage('dot')").is_err(),
+            "a '.'-instead-of-':' call still raises"
         );
     }
 

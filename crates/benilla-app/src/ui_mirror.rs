@@ -148,6 +148,13 @@ fn feed_mirror_timers(
                     ScriptValue::Str(caption(kind, spell_name(start.spell_id).as_deref())),
                 ],
             ),
+            // **This edge reaches a reference body that raises**, and it is left that way on
+            // purpose (1751 window 7). `MirrorTimerFrame_OnEvent` reads `arg1` as the timer name
+            // and then as a number (`arg1 > 0`), comparing a string to a number — 1.12's own bug.
+            // vmangos never sends the packet: it substitutes a full START and says so in
+            // `Player::SendMirrorTimers`, which is presumably how the bug survived. If a server
+            // ever does send one, the raise is the correct loud failure (1203) and the repair
+            // belongs in an adapter over the reference's body, not in a second vocabulary here.
             MirrorTimerEdge::Pause { paused, .. } => (
                 "MIRROR_TIMER_PAUSE",
                 vec![name, ScriptValue::Int(i64::from(paused))],

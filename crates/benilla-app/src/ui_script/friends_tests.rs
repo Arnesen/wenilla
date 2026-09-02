@@ -658,8 +658,7 @@ fn right_clicking_a_who_row_opens_the_friend_menu() {
         "the menu opens"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaFriendsDropDown.name")
-            .unwrap(),
+        s.eval::<String>("return FriendsDropDown.name").unwrap(),
         "Tigole",
         "addressed by name, not by a unit token"
     );

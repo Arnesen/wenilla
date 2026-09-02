@@ -130,6 +130,15 @@
     </Button>
 
     <Script><![CDATA[
+        -- **`MAX_COMBO_POINTS` belongs to the TARGET frame in 1.12** — `TargetFrame.lua:1`, the
+        -- very first line of the file this one is our counterpart to — and this is where it lives
+        -- now (1751 window 10). It was declared in our ComboFrame.xml, whose own note said "it
+        -- lives in the ref's TargetFrame.lua; we have no such file", and that was the honest place
+        -- for it while both files were ours. The combo window is the reference's own file now and
+        -- reads this global without defining it, so it had to come home; `CombatText.xml`'s
+        -- five-point flash reads it too, and this file loads above both.
+        MAX_COMBO_POINTS = 5
+
         -- The right-click-menu explanations the detailed-tooltip fork shows in place of the unit
         -- lines (BenillaUnitFrame_OnEnter below) — ref GlobalStrings.lua l.2993/3081/2754/2755
         -- (enUS), fallback form: the real localized GlobalStrings.lua runs before this file at

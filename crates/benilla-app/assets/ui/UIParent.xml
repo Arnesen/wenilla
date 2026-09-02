@@ -32,6 +32,8 @@
     <Frame name="UIParent" setAllPoints="true" frameStrata="MEDIUM">
         <Scripts>
             <OnLoad>
+                this:RegisterEvent("VARIABLES_LOADED")
+                this:RegisterEvent("MIRROR_TIMER_START")
                 this:RegisterEvent("PLAYER_ENTERING_WORLD")
                 this:RegisterEvent("READY_CHECK")
             </OnLoad>
@@ -205,6 +207,32 @@
         -- ~25 per-window harnesses that load this file load no bars; the binding itself is engine
         -- level and always installed. Decision 1500.
         function UIParent_OnEvent(event)
+            -- The reference's own first arm (UIParent.lua l.230-235). `LocalizeFrames` comes from
+            -- the sourced `Interface\FrameXML\Localization.xml` (1751 window 5) and is the file
+            -- that sets `TwentyFourHourTime` and the locale's frame adjustments; nothing called it
+            -- here before, which is why GameTime.xml used to set that global itself and why
+            -- HelpFrame.xml's header records a family of strings that never arrived. Guarded like
+            -- every other cross-file reach in this function: the per-window harnesses load
+            -- UIParent.xml with no chain behind it. `UpdateNameplates` is the ref's other call in
+            -- this arm and is not bound here — left absent rather than stubbed (1203).
+            if ( event == "VARIABLES_LOADED" ) then
+                if ( LocalizeFrames ) then
+                    LocalizeFrames()
+                end
+                return
+            end
+            -- The mirror bars' START driver (ref UIParent.lua l.97 + l.374-377). It lived on a
+            -- hidden `MirrorTimerDriver` frame in our own MirrorTimer.xml until 1751 window 7,
+            -- on the reasoning that "our UIParent.xml is script-only — it has no frame of its own
+            -- to register events on". That stopped being true when this file grew a real UIParent
+            -- frame with a Scripts block, so the driver came home and the extra frame is gone.
+            -- `MirrorTimer_Show` is the sourced `Interface\FrameXML\MirrorTimer.lua`'s.
+            if ( event == "MIRROR_TIMER_START" ) then
+                if ( MirrorTimer_Show ) then
+                    MirrorTimer_Show(arg1, arg2, arg3, arg4, arg5, arg6)
+                end
+                return
+            end
             if ( event == "PLAYER_ENTERING_WORLD" ) then
                 SHOW_MULTI_ACTIONBAR_1, SHOW_MULTI_ACTIONBAR_2, SHOW_MULTI_ACTIONBAR_3,
                     SHOW_MULTI_ACTIONBAR_4 = GetActionBarToggles()
@@ -290,6 +318,88 @@
 
         function UIParent_RegisterManagedPositionListener(fn)
             table.insert(UIPARENT_MANAGED_POSITION_LISTENERS, fn)
+        end
+
+        -- ── GetMaterialTextColors (ref UIParent.lua l.1880-1888) ─────────────────────────────
+        --
+        -- The page ink and the title ink for a readable's material. Transcribed here rather than
+        -- left absent because the sourced `Interface\FrameXML\ItemTextFrame.xml` (1751 window 9)
+        -- calls it, and it belongs in this file because it belongs in `UIParent.lua`. The two
+        -- tables it reads are the reference's own, in the reference's own home — our Fonts.xml,
+        -- which grew them with the same window.
+        --
+        -- The fallback is BOTH-or-neither on purpose (the reference's own `not(a and b)`), so an
+        -- unrecognised material never gets one table's colour and the other's default.
+        function GetMaterialTextColors(material)
+            local textColor = MATERIAL_TEXT_COLOR_TABLE[material]
+            local titleColor = MATERIAL_TITLETEXT_COLOR_TABLE[material]
+            if ( not (textColor and titleColor) ) then
+                textColor = MATERIAL_TEXT_COLOR_TABLE["Default"]
+                titleColor = MATERIAL_TITLETEXT_COLOR_TABLE["Default"]
+            end
+            return textColor, titleColor
+        end
+
+        -- ── ValidateFramePosition (ref UIParent.lua l.1513-1557) ─────────────────────────────
+        --
+        -- Shove a frame the player has dragged mostly off the screen back on. Transcribed here
+        -- rather than left absent because its one caller in 1.12 is the sourced
+        -- `Interface\FrameXML\ItemRef.xml`'s OnDragStop (l.48) — so with that window migrated
+        -- (1751, window 6) a player dragging a chat-link tooltip would otherwise hit a nil global,
+        -- which is a raise on an ordinary gesture rather than a loud missing feature. It belongs
+        -- in this file because it belongs in `UIParent.lua`, which this file is our copy of.
+        --
+        -- Verbatim, quirks included. Two are worth naming so nobody "fixes" them later:
+        --   · the two axes are exclusive, not additive — a frame off BOTH corners takes the
+        --     `not newAnchorX` branch and re-derives x from `left`, so only one axis moves per
+        --     drop. That is the reference's own control flow (l.1544-1548), not a transcription
+        --     slip.
+        --   · the bottom test is against `MainMenuBar:GetHeight()`, so this raises with no action
+        --     bar loaded. The reference has the same dependency; the harnesses that drive
+        --     ItemRefTooltip load ActionBar.xml for it.
+        function ValidateFramePosition(frame, offscreenPadding, returnOffscreen)
+            if ( not frame ) then
+                return
+            end
+            local left = frame:GetLeft()
+            local right = frame:GetRight()
+            local top = frame:GetTop()
+            local bottom = frame:GetBottom()
+            local newAnchorX, newAnchorY
+            if ( not offscreenPadding ) then
+                offscreenPadding = 15
+            end
+            if ( top < (0 + MainMenuBar:GetHeight() + offscreenPadding) ) then
+                -- Off the bottom of the screen
+                newAnchorY = MainMenuBar:GetHeight() + frame:GetHeight() - GetScreenHeight()
+            elseif ( bottom > GetScreenHeight() ) then
+                -- Off the top of the screen
+                newAnchorY = 0
+            end
+            if ( right < 0 ) then
+                -- Off the left of the screen
+                newAnchorX = 0
+            elseif ( left > GetScreenWidth() ) then
+                -- Off the right of the screen
+                newAnchorX = GetScreenWidth() - frame:GetWidth()
+            end
+            if ( newAnchorX or newAnchorY ) then
+                if ( returnOffscreen ) then
+                    return 1
+                else
+                    if ( not newAnchorX ) then
+                        newAnchorX = left
+                    elseif ( not newAnchorY ) then
+                        newAnchorY = top - GetScreenHeight()
+                    end
+                    frame:ClearAllPoints()
+                    frame:SetPoint("TOPLEFT", nil, "TOPLEFT", newAnchorX, newAnchorY)
+                end
+            else
+                if ( returnOffscreen ) then
+                    return nil
+                end
+            end
         end
 
         function UIParent_ManageFramePositions()

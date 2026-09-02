@@ -112,7 +112,7 @@ pub(super) enum UiFixture {
     /// swings it through the four alternate dock states (see `fixtures.rs`).
     ChatTabHover,
     /// The social pane (`FriendsFrame`), opened through the live toggle — the instrument for B264
-    /// (decision 1298). Its `BenillaFriendsDropDown` host is declared with no anchors, exactly as
+    /// (decision 1298). Its `FriendsDropDown` host is declared with no anchors, exactly as
     /// the reference's own `FriendsDropDown` is; while an unpositioned owner stood in a zero rect
     /// for its regions, the dropdown template's texture chain drew a stray capsule at the screen
     /// origin every time the pane opened. Needs no server state to show it.

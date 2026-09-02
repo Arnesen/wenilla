@@ -92,13 +92,20 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // method-table bytes that put all four on BOTH tables.
     super::install_justify(lua, &m, "ScrollingMessageFrame")?;
 
-    // AddMessage(text [, r, g, b [, id]]) — the id (5th arg) is accepted and ignored (v1 has no
-    // per-line UpdateColorByID). rgb absent ⇒ white; the state quantizes round-half-up and forces
-    // the line opaque, then the fade drives its alpha.
+    // AddMessage(text [, r, g, b [, id]]) — binding 0x792900, the id (5th arg) accepted and
+    // ignored (v1 has no per-line UpdateColorByID). rgb absent ⇒ white; the state quantizes
+    // round-half-up and forces the line opaque, then the fade drives its alpha.
+    //
+    // The TEXT gate is the sibling class's, verbatim — gate `0x79299c`, `je 0x792b81` = this
+    // function's own epilogue — so `DEFAULT_CHAT_FRAME:AddMessage(nil)` is silent too. See
+    // `super::message_text`.
     m.set(
         "AddMessage",
         lua.create_function(
-            |lua, (this, text, r, g, b): (Table, String, Value, Value, Value)| {
+            |lua, (this, text, r, g, b): (Table, Value, Value, Value, Value)| {
+                let Some(text) = super::message_text(lua, &text) else {
+                    return Ok(());
+                };
                 let has_rgb = !matches!(
                     (&r, &g, &b),
                     (Value::Nil, _, _) | (_, Value::Nil, _) | (_, _, Value::Nil)

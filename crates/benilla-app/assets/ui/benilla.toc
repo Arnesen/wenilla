@@ -39,6 +39,22 @@
 # The named virtual Font objects (decision 0084) — must load first so any FontString's
 # `inherits="GameFontNormal"` resolves against a registered object.
 Fonts.xml
+# ══ THE LOCALE ADJUSTMENTS — the reference's own, off the player's chain (1751, window 5) ══
+# `Localize()` (which this file also CALLS at load, exactly as the reference's own two-part
+# `<Script>` does) and `LocalizeFrames()`. Nothing of ours ever shipped either, and the gap was
+# recorded in two places: `GameTime.xml` set `TwentyFourHourTime = 1` itself with a note saying the
+# reference sets it in `LocalizeFrames`, and `HelpFrame.xml` names a whole family of strings that
+# "`LocalizeFrames()`, which benilla does not ship, so it never fired here either" would have set.
+#
+# It is the reference's own slot (FrameXML.toc l.3, straight after Fonts.xml) and the order is the
+# point: `Localize` overwrites `GlobalStrings.lua` keys, and GlobalStrings is loaded ahead of this
+# whole manifest at VM setup (`ui_script/mod.rs`) — which is FrameXML.toc l.1, so the two land in
+# the reference's own order. The file it patches is the PLAYER'S, so the locale is theirs by
+# construction rather than ours to guess.
+#
+# `LocalizeFrames()` is called from `UIParent_OnEvent`'s VARIABLES_LOADED arm — the reference's own
+# caller (UIParent.lua l.230-235), added to our UIParent.xml with this window.
+Interface\FrameXML\Localization.xml
 # ── A reference file sourced ABOVE ours, so OUR bodies win every collision ─────────────────────
 # This one is not a migrated window: it is here for one family of frame-agnostic globals that
 # addons call by name, while the window that file also drives is still ours. So it loads first and
@@ -112,22 +128,52 @@ UIDropDownMenu.xml
 # — after the dropdown kit it drives, before the unit/party frames whose DropDown
 # children's OnLoad initialize into it.
 UnitPopup.xml
-# The chat-link click router (SetItemRef): item links → ItemRefTooltip:SetHyperlink; a
-# player name → left-click whisper / right-click FRIEND dropdown. After GameTooltip.xml —
-# ItemRefTooltip inherits=GameTooltipTemplate, so this order is now REQUIRED, not just legible
-# (GameTooltip_OnLoad was the old, runtime-only reason) — AND after the dropdown kit +
-# UnitPopup, since its FriendsDropDown inherits UIDropDownMenuTemplate and opens a UnitPopup
-# FRIEND menu.
-ItemRef.xml
+# ══ THE CHAT-LINK TOOLTIP — the reference's own, off the player's chain (1751, window 6) ══
+# `SetItemRef` (the chat-link click router) and `ItemRefTooltip` / `ItemRefCloseButton`.
+#
+# THE POSITION IS THE REQUIREMENT: `inherits="GameTooltipTemplate"` is resolved at LOAD, so this
+# sits below GameTooltip.xml. The dropdown kit and UnitPopup above it are a call-time need only,
+# but the reference's own TOC has the same shape and the order costs nothing.
+#
+# THREE THINGS OUR COPY CARRIED THAT THE REFERENCE'S DOES NOT, each moved to the reference's own
+# home rather than deleted:
+# · `FriendsFrame_ShowDropdown` + its initializer, and the `FriendsDropDown` frame they toggle.
+#   1.12 keeps all three in `FriendsFrame.lua`/`.xml`; ours had a second private copy here because
+#   nothing else called them. FriendsFrame.xml (far below) owns the one body now and publishes the
+#   reference's name over it — resolved at call time, so the order does not bind.
+# · `ValidateFramePosition`, which the sourced `ItemRef.xml`'s OnDragStop calls (l.48). It lives in
+#   `UIParent.lua` in 1.12, so it is transcribed into our UIParent.xml with this window.
+# · Two divergences in `SetItemRef` itself, both now the reference's own body: the shift-click arm
+#   fills a visible ADD_IGNORE/ADD_FRIEND/ADD_GUILDMEMBER/ADD_RAIDMEMBER popup's editbox before it
+#   considers the chat box, and falls through to `SendWho("n-"..name)`. Ours guarded both away as
+#   "the friends/who arc, deferred"; `StaticPopup_Visible` and `SendWho` both exist, so the guards
+#   were outliving their reason.
+#
+# AND ONE THING IT GAINS: the reference's tooltip is `movable` and drag-armed, so a chat-link
+# tooltip can be dragged off the middle of the screen. Ours declared "benilla has no
+# user-moved-frame affordance yet" — `StartMoving`/`StopMovingOrSizing` are bindings
+# (`script/object/movable.rs`), so that note was stale too.
+Interface\FrameXML\ItemRef.xml
 # The shared status-bar numerals machinery (decision 1082): TextStatusBar_* + the opt-in
 # template — before its customers (the XP bar in ActionBar.xml today; the unit-frame
 # health/mana numerals are the ref's other users, when that slice lands). The ref's own TOC
 # loads TextStatusBar right before its unit frames, same seat as here.
 TextStatusBar.xml
 UnitFrames.xml
-# The combo-point dots (decision 0869) — anchored to TargetFrame, so after
-# UnitFrames.xml; its fade chain needs UiPanels.xml's UIFrameFade above.
-ComboFrame.xml
+# ══ THE COMBO-POINT DOTS — the reference's own, off the player's chain (1751, window 10) ══
+# `ComboFrame`, `ComboPoint1..5`, `ComboPointTemplate` and the `ComboPointsFrame_OnEvent` /
+# `ComboPointShineFade*` chain with its five duration constants, out of `ComboFrame.lua`.
+#
+# THE POSITION IS THE REQUIREMENT: `relativeTo="TargetFrame"` is resolved at LOAD, so this sits
+# below UnitFrames.xml. Its fade chain needs UiPanels.xml's `UIFrameFade` family, far above, at
+# call time.
+#
+# Our copy's frames were `BenillaComboPointTemplate` and kin; the reference's are
+# `ComboPointTemplate` / `ComboPoint<N>Highlight` / `ComboPoint<N>Shine`, which is what an addon
+# skinning the dots reaches for. `MAX_COMBO_POINTS` moved to UnitFrames.xml with this window —
+# 1.12 declares it on `TargetFrame.lua:1`, and our copy's own note said so while explaining that
+# it had nowhere else to go.
+Interface\FrameXML\ComboFrame.xml
 # The center-screen scrolling combat text (decision 0578) — the Blizzard_CombatText
 # transcription; consumes COMBAT_TEXT_UPDATE + the regen/health/power events, needs
 # only Fonts.xml (CombatTextFont) + UIParent before it.
@@ -206,20 +252,51 @@ MicroMenu.xml
 # <Minimap> widget hole (`crate::minimap` fills it). After GameTooltip (its zone-text
 # hover uses the shared tooltip).
 MinimapCluster.xml
-# The minimap's time-of-day indicator (GameTimeFrame): the reference's own file split — its
-# TOC loads GameTime.xml right after Minimap.xml. After MinimapCluster (its parent) and
-# GameTooltip (the hover tooltip); driven by the app's game clock (`minimap::feed_game_time`).
-GameTime.xml
+# ══ THE TIME-OF-DAY INDICATOR — the reference's own, off the player's chain (1751, window 5) ══
+# `GameTimeFrame`, `GameTimeTexture`, and `GameTime_GetTime` / `GameTimeFrame_Update` /
+# `_UpdateTooltip` / `GAMETIME_DAWN`/`_DUSK` out of `GameTime.lua`. Ours was a re-implementation of
+# the same behaviour under the same published names, and it is deleted.
+#
+# THE POSITION IS THE REQUIREMENT: `parent="MinimapCluster"` is resolved at LOAD, so this sits
+# below MinimapCluster.xml — which is also the reference's own order (its TOC loads GameTime.xml
+# right after Minimap.xml). GameTooltip above it for the hover; the clock itself is the app's
+# `GetGameTime` (`minimap::feed_game_time`), resolved at call time.
+#
+# BOTH of our recorded divergences went away rather than being carried (1751 §2). The `TEXT()`
+# wrapper the ref puts round its format strings is real here now — `BasicControls.xml` defines it.
+# And `TwentyFourHourTime = 1`, which our file set itself with a note saying the reference sets it
+# in `LocalizeFrames`, now comes from exactly there: `Interface\FrameXML\Localization.xml` is
+# sourced at the top of this manifest and `UIParent_OnEvent`'s VARIABLES_LOADED arm calls it. The
+# value is the PLAYER's locale rather than our assumption about it.
+Interface\FrameXML\GameTime.xml
 # Print screen's UI half (decision 1487): the centred "Screen Captured"/"Screen Capture Failed"
 # line, and the `TakeScreenshot()` the SCREENSHOT binding runs. Needs Fonts.xml (SystemFont) and
 # UIParent.xml (its seat) — both far above — and nothing else; seated beside ZoneText.xml, whose
 # AutoFollowStatus is the same full-screen-frame-with-a-centred-line shape.
 ScreenshotStatus.xml
-# The zone-entry splash (decision 0287): ZoneTextFrame/SubZoneTextFrame + the inlined
-# FadingFrame kit, driven by the ZONE_CHANGED family `crate::area` fires. Needs only
-# Fonts (ZoneTextFont/SubZoneTextFont) + UIParent; kept by the minimap cluster — the
-# other consumer of the zone-text host globals.
-ZoneText.xml
+# ══ THE ZONE SPLASH — the reference's own, off the player's chain (1751, window 8) ══
+# Two files, in the reference's own order and for its own reason.
+#
+# `FadingFrame.lua`'s kit first (`FadingFrame_OnLoad`/`_Show`/`_OnUpdate` and the three
+# `_Set*Time` setters). Our copy inlined it into ZoneText.xml on the argument that
+# ZoneTextFrame/SubZoneTextFrame are its only consumers in the whole 1.12 FrameXML — true, and
+# still the wrong shape once the file could simply be sourced: an addon that wants a fading frame
+# reaches for the kit's published names, not for the splash. The reference gives it its own TOC
+# line (l.25) and so do we. It declares no frames at all — it is a `<Script file=>` and nothing
+# else — so it needs nothing above it.
+Interface\FrameXML\FadingFrame.xml
+# …then the splash itself: `ZoneTextFrame` / `SubZoneTextFrame` / `AutoFollowStatus`, `SetZoneText`
+# and the three `Zone*Duration` constants, driven by the ZONE_CHANGED family `crate::area` fires
+# and by AUTOFOLLOW_BEGIN/END. Needs Fonts (ZoneTextFont/SubZoneTextFont) + UIParent, both far
+# above; kept by the minimap cluster, the other consumer of the zone-text host globals.
+#
+# Our copy's own header called its Lua "OURS: our own implementation of the behaviour
+# ref-ZoneText.xml specifies", with the published names and the measurements quoted. The
+# reference's file is that specification, so it replaces it whole — including the
+# `CONTESTED_TERRITORY`/`FACTION_CONTROLLED_TERRITORY`/`FREE_FOR_ALL_TERRITORY`/`AUTOFOLLOW*`
+# strings, which came from ours as `X = X or "…"` fallbacks and now come from the player's own
+# GlobalStrings.lua like every other string in this interface.
+Interface\FrameXML\ZoneText.xml
 # The faux-scroll kit (decisions 0247/0250/0251): BenillaScrollBarTemplate (the draggable
 # Slider scroll bar) + FauxScrollFrameTemplate + the reference's own FauxScrollFrame_*
 # API (Update/GetOffset/SetOffset/OnVerticalScroll + ScrollFrame_OnLoad) —
@@ -265,10 +342,29 @@ WorldMapFrame.xml
 # The cast bar (decision 0137 phase 1) — the extracted 1.12 CastingBarFrame, driven by
 # the SPELLCAST_* events `crate::ui_cast` fires. Only needs Fonts before it.
 CastingBar.xml
-# The mirror timers (decision 0874): the breath/fatigue bars at top-center, driven by the
-# MIRROR_TIMER_* events `crate::ui_mirror` fires. Needs only Fonts (GameFontHighlight)
-# before it; kept beside the cast bar, whose border art it shares.
-MirrorTimer.xml
+# ══ THE MIRROR TIMERS — the reference's own, off the player's chain (1751, window 7) ══
+# `MirrorTimer1..3`, `MIRRORTIMER_NUMTIMERS`, `MirrorTimerColors` and the `MirrorTimer_Show` /
+# `MirrorTimerFrame_*` family out of `MirrorTimer.lua`. The breath/fatigue bars at top-centre,
+# driven by the `MIRROR_TIMER_*` events `crate::ui_mirror` fires off the wire. Needs only Fonts
+# (GameFontHighlight) before it; kept beside the cast bar, whose border art it shares.
+#
+# ALL THREE of our copy's recorded divergences resolved at the swap (1751 §2), and two of them had
+# already stopped being true:
+# · THE START DRIVER. Ours hosted `MIRROR_TIMER_START` on a hidden `MirrorTimerDriver` frame
+#   because "our UIParent.xml is script-only — it has no frame of its own to register events on".
+#   It has one now, so the registration and the `MirrorTimer_Show` call moved into
+#   `UIParent_OnEvent` where the reference keeps them (UIParent.lua l.97 + l.374-377), and the
+#   extra frame is gone.
+# · THE POOL WALK. The reference asks its two questions in two loops and bounds the SECOND by
+#   `STATICPOPUP_NUMDIALOGS` — a copy-paste from StaticPopup.lua, and its own bug. Ours folded
+#   them into one walk to avoid it. Now faithful, which forced the real fix in the right place:
+#   our `STATICPOPUP_NUMDIALOGS` was 2 against the reference's 4, so the third mirror bar could
+#   never be claimed by a new timer. UiPanels.xml grew instances 3 and 4 with this window.
+# · THE PAUSE ARG is now the reference's own bug, reproduced: `MirrorTimerFrame_OnEvent` reads
+#   `arg1` as a timer NAME and then as a number (`arg1 > 0`), so a real MIRROR_TIMER_PAUSE raises.
+#   1.12 never reaches it — vmangos refuses to send that packet and substitutes a full START,
+#   saying so in `Player::SendMirrorTimers` — and `ui_mirror.rs`'s Pause edge carries the note.
+Interface\FrameXML\MirrorTimer.xml
 # The always-up world-state readout (decision 1586, report B190): the tower/flag/base counters an
 # outdoor-PvP zone or a battleground shows at top-centre, driven by the UPDATE_WORLD_STATES event
 # `crate::world_state_ui` fires. Needs Fonts (GameFontNormalSmall) and GameTooltip; sits beside the
@@ -278,10 +374,29 @@ WorldStateFrame.xml
 # aura icons under the minimap, driven by the UnitAura feed (`crate::ui_aura`). Needs Fonts
 # (its FontStrings) and ActionBar's `BENILLA_FALLBACK_ICON` global (both already loaded).
 BuffFrame.xml
-# The durability alert (the "armor guy"): under the minimap beside BuffFrame, driven by
-# UPDATE_INVENTORY_ALERTS off the same inventory push the character window reads. Needs
-# MinimapCluster (its anchor) — loaded above.
-DurabilityFrame.xml
+# ══ THE DURABILITY ALERT — the reference's own, off the player's chain (1751, window 4) ══
+# The "armor guy" under the minimap: `DurabilityFrame`, its eleven glyph textures, and
+# `DurabilityFrame_SetAlerts` / `_OnUpdate` with `INVENTORY_ALERT_STATUS_SLOTS` and
+# `INVENTORY_ALERT_COLORS`, all from `DurabilityFrame.lua` through its own `<Script file=>`.
+#
+# Ours was a measurement-faithful transcription and it is deleted. The swap re-examined its one
+# recorded divergence (1751 §2) and made it faithful: our copy OMITTED the ref's `OnUpdate`,
+# because the whole body is an `enchantTimer` countdown and that timer is provably dead in 1.12
+# (`SetAlerts` nils it; the only line that sets it is commented out, and so are the two colours it
+# would have painted). The reference runs the handler anyway, so we do too — the cost is one call
+# per frame on one frame, and it is the reference's own behaviour rather than our judgment of it.
+#
+# THE POSITION: `parent="UIParent"` and `relativeTo="MinimapCluster"` are both resolved at LOAD, so
+# this sits below UIParent.xml and MinimapCluster.xml. It is far above the reference's own slot
+# (FrameXML.toc l.86) and that is fine — nothing else reaches it at load, and its seat is decided
+# at runtime regardless: like every managed HUD frame the authored anchor is dead on arrival, with
+# `UIParent_ManageFramePositions` re-seating it on the loader's post-load pass and on every
+# OnShow/OnHide (ref UIParent.lua l.1758-1768).
+#
+# `UpdateInventoryAlertStatus` is the one global the sourced file names that this client does not
+# bind. It is reachable only from the dead `enchantTimer` branch above, so it is left absent rather
+# than stubbed (1203) — the honest state is "nothing calls it", not "we answer it with a lie".
+Interface\FrameXML\DurabilityFrame.xml
 ErrorsFrame.xml
 # ══ THE BAG WINDOWS — the reference's own, off the player's chain (decision 1751, window 1) ══
 # `ContainerFrame1..12`, `ContainerFrameTemplate`, `ContainerFrameItemButtonTemplate` and the whole
@@ -440,11 +555,19 @@ MailFrame.xml
 # MerchantFrame because it REUSES that file's global BenillaMoney_Set coin helpers (the two
 # gold displays) — they must be defined first.
 TradeFrame.xml
-# The item-text reader: letters (mail-made permanent copies) and, later, books/plaques —
-# the ItemTextGet* seam (`benilla-ui/src/script/item_text.rs`) over `crate::ui_item_text`'s
-# feed/drain. Loaded right after MailFrame (the same arc; needs only Fonts/UiPanels, both
-# loaded above).
-ItemTextFrame.xml
+# ══ THE ITEM-TEXT READER — the reference's own, off the player's chain (1751, window 9) ══
+# `ItemTextFrame` and its page chrome, over the `ItemTextGet*` seam
+# (`benilla-ui/src/script/item_text.rs`) and `crate::ui_item_text`'s feed/drain. Letters (mail-made
+# permanent copies) and, later, books and plaques. Right after MailFrame, the same arc; needs
+# Fonts/UiPanels/ScrollTemplates, all above.
+#
+# ONE THING OUR COPY CARRIED THAT THE REFERENCE'S DOES NOT, moved to the reference's own home:
+# `GetMaterialTextColors` and the two colour tables it reads. 1.12 keeps the function in
+# `UIParent.lua` and the tables in `Fonts.xml`, and both of ours now do the same — under the
+# reference's published names (`MATERIAL_TEXT_COLOR_TABLE` / `MATERIAL_TITLETEXT_COLOR_TABLE`)
+# rather than the `BENILLA_`-prefixed pair this file kept privately. Fonts.xml's own note said
+# those two tables would arrive "the day something does" read them; the sourced file is that day.
+Interface\FrameXML\ItemTextFrame.xml
 # The trainer window (decision 0237 phase 3): the read-only class/profession trainer list.
 # Loaded right after MerchantFrame per the director's brief (kept adjacent even though this
 # v1 uses plain-text costs, not MerchantFrame's coin helpers) and before the other NPC

@@ -1792,19 +1792,15 @@ fn a_key_dropped_on_the_button_files_itself() {
         "the reference's own dangling string name prints nothing — un-quirking it is a decision, \
          not a default"
     );
-    // The nil ALSO raises, out of `MessageFrame:AddMessage`. That is deliberately not asserted as
-    // correct: our binding takes its text as an mlua `String`, which raises on nil by default —
-    // not from a carved gate (`messageframe/plain.rs` reads `0x795590`'s rgb/alpha parse off the
-    // bytes and says nothing about the text argument). Whether 1.12 raises here, no-ops, or prints
-    // a blank line is out with wow-re. So this pins the keyring's own behaviour — the refusal, and
-    // the silence — and lets exactly that one error through by name, which still fails the test on
-    // any OTHER error the click produces.
-    let errs = s.errors();
-    assert!(
-        errs.iter()
-            .all(|e| e.contains("AddMessage") && e.contains("PutKeyInKeyRing")),
-        "the only error may be the reference's own nil message: {errs:?}"
-    );
+    // And it does not RAISE either, which is the half this test could not assert until the bytes
+    // came back. `AddMessage`'s text is fetched through `lua_isstring 0x6f3510` whose failure edge
+    // is a silent jump to the function's own epilogue — no line, no error (wow-5875-re
+    // `addmessage-text-gate-silent-skip.md`, 4-worker cross-check). Ours took an mlua `String` and
+    // raised, which put a script-error dialog on an ordinary player gesture; the fix is in
+    // `messageframe/mod.rs::message_text` and its own test carries the full law.
+    //
+    // So a full keyring is a DEAD CLICK on a real 1.12 client, and now here.
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
 /// The item-push drop animation (decision 0887): `ITEM_PUSH(container, icon)` runs the pushed item's

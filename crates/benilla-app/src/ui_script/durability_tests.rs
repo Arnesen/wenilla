@@ -1,29 +1,15 @@
-//! The durability alert ("armor guy", `assets/ui/DurabilityFrame.xml`) against the shipped XML:
+//! The durability alert ("armor guy") against the reference's own `DurabilityFrame.xml`/`.lua`,
+//! executed off the player's chain since 1751's fourth window:
 //! the engine's `GetInventoryAlertStatus` statuses (recomputed on every inventory push, a change
 //! firing `UPDATE_INVENTORY_ALERTS`) drive the ref's own SetAlerts law — body pieces show
 //! together when any body region alerts, showSeparate pieces (Weapon/Shield/Ranged) each show
 //! only themselves, the shield glyph swaps for the off-weapon glyph when the off hand holds a
 //! WEAPON, and the whole frame hides at zero alerts.
 
+use super::test_ui::load_ui as load_xml;
 use benilla_ui::script::{
     InvSlotView, InventorySlots, ItemTemplateView, QuadContent, ScriptValue, UiScript,
 };
-
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
 
 fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
@@ -35,10 +21,17 @@ fn harness() -> UiScript {
         "UIParent.xml",
         "GameTooltip.xml",
         "MinimapCluster.xml",
-        "DurabilityFrame.xml",
+        // The reference's own file. This module carried a private disk-only `load_xml` until the
+        // swap, which structurally could not name a chain entry — [`super::test_ui::load_ui`] is
+        // the one reader that speaks both stores, and it is why that helper exists.
+        "Interface\\FrameXML\\DurabilityFrame.xml",
     ] {
         load_xml(&s, f);
     }
+    // The app installs this at the end of every real load; a test VM has to say so itself. It is
+    // benilla's stated repair of a reference bug — the seat going stale when a side glyph appears
+    // while the frame is already shown — and its whole reasoning is at the constant.
+    super::manifest::install_durability_reseat(&s).unwrap();
     s
 }
 
@@ -88,6 +81,7 @@ const YELLOW: [f32; 4] = [1.0, 0.82, 0.18, 1.0];
 /// white), then repaired (hidden again).
 #[test]
 fn armor_guy_shows_red_broken_yellow_damaged_and_hides_clean() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     // The ref's initial settle: the frame is authored shown; PLAYER_ENTERING_WORLD's SetAlerts
     // hides it while everything is clean.
@@ -166,6 +160,7 @@ fn armor_guy_shows_red_broken_yellow_damaged_and_hides_clean() {
 /// 1.12 FrameXML never reads it.
 #[test]
 fn flag_bits_and_the_low_ammo_region() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("PLAYER_ENTERING_WORLD", vec![ScriptValue::Str("".into())]);
 
@@ -216,6 +211,7 @@ fn flag_bits_and_the_low_ammo_region() {
 /// broken off-hand WEAPON (template class 2) swaps it for the off-weapon glyph.
 #[test]
 fn off_hand_glyph_follows_what_the_hand_holds() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.set_item_template(
         2362,
@@ -269,6 +265,7 @@ fn off_hand_glyph_follows_what_the_hand_holds() {
 /// the pass on every alert transition.
 #[test]
 fn manage_pass_seats_the_frame_inside_the_cluster_edge() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("PLAYER_ENTERING_WORLD", vec![ScriptValue::Str("".into())]);
 
@@ -313,6 +310,7 @@ fn manage_pass_seats_the_frame_inside_the_cluster_edge() {
 /// (director-caught). The OnEvent re-manage keeps it fresh on every alert recompute.
 #[test]
 fn a_late_side_glyph_refreshes_the_seat_while_the_frame_stays_shown() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.set_item_template(
         25,
@@ -383,6 +381,7 @@ fn a_late_side_glyph_refreshes_the_seat_while_the_frame_stays_shown() {
 /// colliding there (director-caught, over "The Captain's Chest").
 #[test]
 fn the_quest_tracker_stacks_below_the_durability_guy() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in [
@@ -393,11 +392,12 @@ fn the_quest_tracker_stacks_below_the_durability_guy() {
         "GameTooltip.xml",
         "MinimapCluster.xml",
         "ScrollTemplates.xml",
-        "DurabilityFrame.xml",
+        "Interface\\FrameXML\\DurabilityFrame.xml",
         "QuestLogFrame.xml",
     ] {
         load_xml(&s, f);
     }
+    super::manifest::install_durability_reseat(&s).unwrap();
 
     // A right-side glyph shows the 65-tall durability frame under the minimap.
     let mut inv: InventorySlots = Default::default();

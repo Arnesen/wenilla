@@ -1,8 +1,12 @@
-//! Drives the REAL `assets/ui/ItemTextFrame.xml` through the engine — the reader window for bag
-//! letters (mail-made permanent copies) and, later, books. Loads the same file chain the app does
-//! (cut to the reader's dependency prefix), pushes an `ItemTextState`, fires the reference event
-//! flow `ITEM_TEXT_BEGIN` → `ITEM_TEXT_READY` → `ITEM_TEXT_CLOSED`, and asserts the transcribed
-//! Lua actually paints (title, the "From," creator tail, page-button visibility, the close intent).
+//! Drives the REAL reader window through the engine — bag letters (mail-made permanent copies)
+//! and, later, books. Loads the same file chain the app does (cut to the reader's dependency
+//! prefix), pushes an `ItemTextState`, fires the reference event flow `ITEM_TEXT_BEGIN` →
+//! `ITEM_TEXT_READY` → `ITEM_TEXT_CLOSED`, and asserts the Lua actually paints (title, the "From,"
+//! creator tail, page-button visibility, the close intent).
+//!
+//! The window itself is `Interface\FrameXML\ItemTextFrame.xml`, off the player's own patch chain
+//! since 1751's ninth window — so every test here gates on the install, as every chain-backed
+//! test does.
 
 use benilla_ui::script::{ItemTextState, UiScript};
 
@@ -11,32 +15,56 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// The reader's dependency prefix, in the manifest's own order. `ScrollTemplates.xml` and
 /// `UIPanelTemplates.xml` joined it with decisions 1337/1338: the page sits in a real ScrollFrame
 /// now, whose template is in the second and whose `ScrollFrame_OnLoad` is in the first.
-const FILES: [&str; 6] = [
+const FILES: [&str; 8] = [
+    // `ITEM_TEXT_FROM`, which the reference's READY arm concatenates into the creator tail — and
+    // `attempt to concatenate a nil value` kills the handler before it reaches its `ShowUIPanel`,
+    // so the window simply never opens. Our deleted copy carried the string as a local fallback.
+    "Interface\\FrameXML\\GlobalStrings.lua",
     "Fonts.xml",
     "MoneyFrame.xml",
     "UiPanels.xml",
+    // `GetMaterialTextColors`, which the reference's own `ItemTextFrame_OnEvent` calls to pick the
+    // page and title ink. 1.12 keeps it in UIParent.lua and ours does the same (1751 window 9).
+    "UIParent.xml",
     "ScrollTemplates.xml",
     "UIPanelTemplates.xml",
-    "ItemTextFrame.xml",
+    "Interface\\FrameXML\\ItemTextFrame.xml",
 ];
 
+/// **Both stores, told apart the manifest's own way** — a bare filename is a file we ship, a path
+/// is the reference's own off the player's install (`ui_script::reference_ui::is_chain_entry`,
+/// re-expressed here because that module is crate-private and this is an integration test).
+///
+/// The provider half matters as much as the loop: the reference's `ItemTextFrame.xml` pulls its
+/// Lua through `<Script file="ItemTextFrame.lua"/>`, which the loader resolves against the
+/// document's own directory — `Interface\FrameXML\ItemTextFrame.lua`, a chain path — so a
+/// disk-only provider would leave every one of its globals nil and every test below red for a
+/// reason that looks nothing like the cause.
 fn load_ui(script: &UiScript) {
     let dir = std::path::Path::new(UI_DIR);
-    let provider = |req: &str| -> Option<Vec<u8>> {
-        let norm = req.replace('\\', "/");
-        let base = norm.rsplit('/').next().unwrap_or(&norm);
-        std::fs::read(dir.join(&norm))
-            .or_else(|_| std::fs::read(dir.join(base)))
-            .ok()
+    let chain = benilla_formats::wow_data()
+        .and_then(|data| benilla_formats::open_chain(&data).ok())
+        .expect("client data — every test here gates on it");
+    let read = |req: &str| -> Option<Vec<u8>> {
+        if req.contains('\\') || req.contains('/') {
+            return chain.read(req).ok();
+        }
+        std::fs::read(dir.join(req)).ok()
     };
     for file in FILES {
-        let text = std::fs::read_to_string(dir.join(file)).unwrap_or_else(|e| {
-            panic!("reading {file}: {e}");
-        });
-        let doc = benilla_ui::framexml::parse(&text).unwrap_or_else(|e| {
-            panic!("parsing {file}: {e}");
-        });
-        let report = benilla_ui::loader::load(script, &doc, &provider);
+        let bytes = read(file).unwrap_or_else(|| panic!("reading {file}"));
+        // A `.lua` entry is a chunk, not a document — `GlobalStrings.lua` is one, exactly as it is
+        // in the reference's own TOC. Bytes, not text: a chunk goes to Lua as it sits in the
+        // archive and only an XML parse decodes (1193).
+        if file.to_ascii_lowercase().ends_with(".lua") {
+            script
+                .run_chunk_named(&bytes, &format!("@{file}"))
+                .unwrap_or_else(|e| panic!("running {file}: {e}"));
+            continue;
+        }
+        let doc = benilla_ui::framexml::parse(&benilla_ui::source::decode(&bytes))
+            .unwrap_or_else(|e| panic!("parsing {file}: {e}"));
+        let report = benilla_ui::loader::load_in(script, &doc, &file.replace('\\', "/"), &read);
         assert!(
             report.errors.is_empty(),
             "{file} loaded with errors: {:#?}",
@@ -78,6 +106,7 @@ fn letter() -> ItemTextState {
 /// and shows the window; a single page shows no page number and no page-turn buttons.
 #[test]
 fn a_letter_reads_with_the_creator_tail() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     assert!(!s.eval::<bool>("return ItemTextFrame:IsShown()").unwrap());
@@ -118,6 +147,7 @@ fn a_letter_reads_with_the_creator_tail() {
 /// check pins the tripwire that now catches any such unresolved named anchor at load.
 #[test]
 fn the_scrollbar_track_sits_right_of_the_page() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     let unresolved: Vec<String> = s
@@ -149,6 +179,7 @@ fn the_scrollbar_track_sits_right_of_the_page() {
 /// buttons show per the reference visibility rules (page 1 with a next → Next only).
 #[test]
 fn a_book_page_shows_the_paging_chrome() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_item_text(Some(ItemTextState {
@@ -186,6 +217,7 @@ fn a_book_page_shows_the_paging_chrome() {
 /// clears the session and fires `ITEM_TEXT_CLOSED` — which hides again, harmlessly).
 #[test]
 fn closing_queues_the_close_intent() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_item_text(Some(letter()));
@@ -216,6 +248,7 @@ fn closing_queues_the_close_intent() {
 /// one block that still has angle brackets in it, which is exactly what was reported.
 #[test]
 fn the_reported_html_page_draws_as_blocks_not_as_its_own_markup() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_item_text(Some(ItemTextState {
@@ -404,6 +437,7 @@ fn the_reported_book_crest_draws_at_the_blps_own_size() {
 /// OnHide ending its own session exactly as the merchant/gossip pair already does.
 #[test]
 fn a_quest_givers_gossip_displaces_the_open_reader() {
+    let _data = benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::GossipMenu;
 
     let mut s = UiScript::new().unwrap();

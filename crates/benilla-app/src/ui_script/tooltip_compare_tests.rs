@@ -31,7 +31,7 @@ fn harness() -> UiScript {
         "UiPanels.xml",
         "UIParent.xml",
         "GameTooltip.xml",
-        "ItemRef.xml",
+        "Interface\\FrameXML\\ItemRef.xml",
         "MerchantFrame.xml",
         "Cooldown.xml",
         "CharacterFrame.xml",
@@ -56,7 +56,11 @@ fn harness_with_bags() -> UiScript {
     for f in BAG_UI {
         load_xml(&s, f);
     }
-    for f in ["ItemRef.xml", "MerchantFrame.xml", "CharacterFrame.xml"] {
+    for f in [
+        "Interface\\FrameXML\\ItemRef.xml",
+        "MerchantFrame.xml",
+        "CharacterFrame.xml",
+    ] {
         load_xml(&s, f);
     }
     s.set_money(0);

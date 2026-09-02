@@ -66,8 +66,48 @@ fn bootstrap_positions(script: &UiScript) -> Vec<String> {
         error!("ui_script: managed-positions bootstrap: {e}");
         return vec![format!("managed-positions bootstrap: {e}")];
     }
+    if let Err(e) = install_durability_reseat(script) {
+        error!("ui_script: durability re-seat hook: {e}");
+        return vec![format!("durability re-seat hook: {e}")];
+    }
     Vec::new()
 }
+
+/// **A stated divergence from the reference, installed rather than edited in** (1751 window 4).
+///
+/// The reference seats `DurabilityFrame` 20 further in when one of its three side glyphs is up
+/// (`UIParent.lua` l.1759-1768), and recomputes that only when something calls
+/// `UIParent_ManageFramePositions`. Stock `DurabilityFrame.xml` calls it from `OnShow`/`OnHide`
+/// only — so the case where the frame is **already shown** and a side glyph *then* appears leaves
+/// the seat stale, and the shield glyph's ~17-unit overhang hangs off the screen edge until some
+/// unrelated frame happens to trigger the next pass. That is the reference's own bug and the
+/// director caught it on their screen; it is not ours to reproduce faithfully.
+///
+/// So the fix rides on the frame's `OnEvent` — which is exactly the recompute the glyphs change on
+/// — and it is installed **here** rather than written into anything of Blizzard's. Two reasons for
+/// that home rather than a FrameXML one: `assets/ui` does not grow (1779), and this is the wrong
+/// side of the line for a `ContainerFrameAdapters`-class shim anyway — that clause is for a genuine
+/// engine difference (1751 §2), and this is a deliberate repair of a reference defect. Rust is also
+/// the durable home: our `UIParent.xml` is itself a transcription awaiting its own window, and a
+/// hook parked there would be homeless again the day it migrates.
+///
+/// Idempotent by its own latch, so a `ReloadUI` cannot stack wrappers. The reference's handler
+/// still runs first and unchanged: `this`, `event` and `arg1` are globals the engine has already
+/// set for the dispatch, so calling it through the captured reference is the same call.
+pub(super) fn install_durability_reseat(script: &UiScript) -> Result<(), String> {
+    script.run(DURABILITY_RESEAT).map_err(|e| e.to_string())
+}
+
+const DURABILITY_RESEAT: &str = r#"
+if DurabilityFrame and not DurabilityFrame.benillaReseat then
+    DurabilityFrame.benillaReseat = 1
+    local refOnEvent = DurabilityFrame:GetScript("OnEvent")
+    DurabilityFrame:SetScript("OnEvent", function()
+        if refOnEvent then refOnEvent() end
+        UIParent_ManageFramePositions()
+    end)
+end
+"#;
 
 /// Load benilla's own default UI — every file [`MANIFEST`] names — through the engine-free loader.
 /// This is our content (MIT/Apache), committed and **compiled into the binary**

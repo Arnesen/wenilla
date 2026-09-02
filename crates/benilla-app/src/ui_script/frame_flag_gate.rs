@@ -365,16 +365,6 @@ const KNOWN: &[Known] = &[
     // between UIParent's tree and the top level is a defect, because `SetFullScreenFrame` hides
     // `UIParent` and everything below it; a frame seated one rung along inside that tree is not.
     Known {
-        frame: "FriendsDropDown",
-        flag: Flag::Parent,
-        why: "the reference nests this menu HOST in FriendsFrame; ours sits on UIParent in \
-              ItemRef.xml, beside the SetItemRef branch that is its only caller — and it has to, \
-              because FriendsFrame.xml loads 262 lines further down the manifest and a forward \
-              parent reference resolves to nothing. Both seats are inside UIParent's tree, and a \
-              host frame is never shown: ToggleDropDownMenu seats the visible DropDownList1, \
-              which is top-level on both sides.",
-    },
-    Known {
         frame: "SendMailBodyEditBox",
         flag: Flag::Parent,
         why: "the reference interposes SendMailScrollChildFrame between the pane and its content; \

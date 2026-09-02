@@ -847,7 +847,7 @@
         --     declared width as `noResize` + a fixed list width (UIDropDownMenu.xml l.672-679),
         --     so transcribing it would pin the menu at 50 px and cut "Background" in half. In the
         --     reference, MENU mode never draws the capsule at all, so its width is inert there.
-        -- `BenillaFriendsDropDown` (FriendsFrame.xml) is already this same shape.
+        -- `FriendsDropDown` (FriendsFrame.xml) is already this same shape.
         function FCFOptionsDropDown_OnLoad()
             this.initialize = FCFOptionsDropDown_Initialize
             this.displayMode = "MENU"

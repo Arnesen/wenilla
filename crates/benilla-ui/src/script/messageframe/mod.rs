@@ -36,6 +36,48 @@ pub(super) use plain::REG_MESSAGEFRAME_METHODS;
 pub(super) use scrolling::REG_SCROLLINGMESSAGEFRAME_METHODS;
 
 /// Install both classes' method tables (and the chat input globals the scrolling one carries).
+/// **`AddMessage`'s text argument, and the three ways it silently swallows the whole call**
+/// (wow-5875-re `system/ui/scratch/addmessage-text-gate-silent-skip.md`, 4-worker cross-check
+/// 2026-08-31). `None` means *do nothing at all* — no line, no record, no error.
+///
+/// `CSimpleMessageFrame::AddMessage 0x795590` fetches Lua index 2 through `lua_isstring 0x6f3510`
+/// and then `lua_tostring 0x6f3690`, and **three** results jump to the function's own epilogue at
+/// `0x79582b` (`pop edi / pop esi / xor eax,eax / pop ebx / leave / ret` — zero Lua values, no
+/// push, and the virtual enqueue at `0x795825 call [eax+0x90]` never reached):
+///
+/// ```text
+///   79561b  mov edx,2
+///   795625  call 0x6f3510      ; lua_isstring — tags 4 (string) and 3 (number) only
+///   79562c  je   0x79582b      ; nil / boolean / table / function  -> silent
+///   795642  je   0x79582b      ; lua_tostring returned NULL        -> silent
+///   79564b  je   0x79582b      ; cmp byte ptr [ebx],0 — EMPTY string -> silent
+/// ```
+///
+/// `ScrollingMessageFrame:AddMessage 0x792900` is the same shape (gate `0x79299c`, `je 0x792b81` =
+/// its own epilogue), so `DEFAULT_CHAT_FRAME:AddMessage(nil)` is silent too.
+///
+/// **This is not a general argument law and must not be read as one** (1717's rule: the shape is
+/// settled per binding). The *colour* arguments beside it behave the opposite way — a bad `r`/`g`/
+/// `b`/`a` jumps to `0x79581c`, which still calls the enqueue with the `0xffffffff` opaque white
+/// staged at `0x795658`. Only a bad **text** shows nothing. The three *receiver* guards
+/// (`0x847ef8` "used '.' instead of ':'", `0x847ec0`, `0x847e98`) do still raise, and they are
+/// upstream of this.
+///
+/// **Why it is load-bearing rather than pedantry.** Stock FrameXML takes this path: 1.12's
+/// `ContainerFrame.lua:753` reports a full keyring with
+/// `UIErrorsFrame:AddMessage(NO_EMPTY_KEYRING_SLOTS, 1.0, 0.1, 0.1, 1.0)` and **no such
+/// GlobalString exists** — the shipped `GlobalStrings.lua` defines only
+/// `NO_EMPTY_KEYRING_SLOTS_ERROR`, a rename that updated the definition and not the use. So a
+/// player dropping a key onto a full keyring gets a dead click on a real client. Taking a `String`
+/// here (which is what this did until 1751's fourth window swapped the bag bar in) raised instead,
+/// putting a script-error dialog on an ordinary player gesture that the reference never shows.
+///
+/// A **number** is accepted and rendered as its decimal text — `0x6f7c80` retags the slot in
+/// place — which is exactly [`super::binding_abi::optional_string`]'s coercion.
+pub(super) fn message_text(lua: &mlua::Lua, v: &mlua::Value) -> Option<String> {
+    super::binding_abi::optional_string(lua, v).filter(|s| !s.is_empty())
+}
+
 /// Install `SetJustifyH`/`GetJustifyH`/`SetJustifyV`/`GetJustifyV` on a message-frame method
 /// table. Both classes carry all four (see [`crate::widget::ScrollingMessageState::justify`] for
 /// the method-table bytes that settled it), and the law they obey is

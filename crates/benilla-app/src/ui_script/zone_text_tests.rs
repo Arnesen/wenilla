@@ -1,4 +1,5 @@
-//! The shipped `ZoneText.xml` driven engine-only (decision 0287): the zone splash shows on the
+//! The reference's own `ZoneText.xml` — executed off the player's chain since 1751's eighth
+//! window — driven engine-only (decision 0287): the zone splash shows on the
 //! right events with the right strings/colors, fades on the reference 0.5/1.0/2.0 timeline, and
 //! honors the subtle law — a plain `ZONE_CHANGED` re-caches the zone name *silently*, so a later
 //! `ZONE_CHANGED_NEW_AREA` that lands on the already-cached name never re-splashes.
@@ -8,23 +9,7 @@
 
 use benilla_ui::script::UiScript;
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error (the sibling
-/// tests' loader, duplicated so this file is self-contained).
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+use super::test_ui::load_ui as load_xml;
 
 fn visible(s: &UiScript, frame: &str) -> bool {
     s.eval::<bool>(&format!("return {frame}:IsVisible() and true or false"))
@@ -50,16 +35,26 @@ fn set_area(s: &UiScript, zone: &str, sub: &str, pvp: &str, faction: &str) {
 fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // The player's own strings: the splash formats CONTESTED_TERRITORY,
+    // FACTION_CONTROLLED_TERRITORY, FREE_FOR_ALL_TERRITORY and the AUTOFOLLOW pair straight out of
+    // GlobalStrings. Our deleted copy carried `X = X or "…"` fallbacks for a harness with no
+    // chain; the reference's file has none, and it should not.
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Fonts.xml");
+    // `TEXT()`, which AutoFollowStatus_OnEvent puts its message through.
+    load_xml(&s, "BasicControls.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "UIParent.xml");
-    load_xml(&s, "ZoneText.xml");
+    // The fading kit, its own manifest entry since window 8 — as it is in the reference's TOC.
+    load_xml(&s, "Interface\\FrameXML\\FadingFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\ZoneText.xml");
     s
 }
 
 #[test]
 fn new_area_splashes_zone_pvp_and_subzone_then_fades_out() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
 
     // OnLoad hides both fading frames.
@@ -89,6 +84,7 @@ fn new_area_splashes_zone_pvp_and_subzone_then_fades_out() {
 
 #[test]
 fn subzone_hop_shows_only_the_small_line() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     set_area(&s, "Elwynn Forest", "", "friendly", "Alliance");
     s.fire_event("ZONE_CHANGED_NEW_AREA", vec![]);
@@ -108,6 +104,7 @@ fn subzone_hop_shows_only_the_small_line() {
 
 #[test]
 fn plain_zone_changed_recaches_silently_so_new_area_wont_resplash() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     set_area(&s, "Elwynn Forest", "", "friendly", "Alliance");
     s.fire_event("ZONE_CHANGED_NEW_AREA", vec![]);
@@ -143,6 +140,7 @@ fn plain_zone_changed_recaches_silently_so_new_area_wont_resplash() {
 /// SubZoneTextFrame's handler calls SetZoneText(1), which SETS the (hidden) PVP string.
 #[test]
 fn abbey_grounds_subzone_hop_shows_no_territory_line() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     set_area(
         &s,
@@ -178,6 +176,7 @@ fn abbey_grounds_subzone_hop_shows_no_territory_line() {
 /// truth, produced by the engine feed rather than by handler-order luck.
 #[test]
 fn abbey_interior_shows_the_room_in_the_small_line_alone() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     set_area(
         &s,
@@ -210,6 +209,7 @@ fn abbey_interior_shows_the_room_in_the_small_line_alone() {
 /// shows under it, exactly as on a NEW_AREA splash.
 #[test]
 fn inn_entry_splashes_the_inn_name_with_territory_line() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     set_area(&s, "Elwynn Forest", "Goldshire", "friendly", "Alliance");
     s.fire_event("ZONE_CHANGED_NEW_AREA", vec![]);
@@ -231,6 +231,7 @@ fn inn_entry_splashes_the_inn_name_with_territory_line() {
 /// exactly like the entry hop.
 #[test]
 fn indoor_exit_returns_the_subzone_line_alone() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     set_area(
         &s,
@@ -265,6 +266,7 @@ fn indoor_exit_returns_the_subzone_line_alone() {
 /// the big frame never shows, so no territory line.
 #[test]
 fn room_to_room_hop_splashes_the_room_name_alone() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     set_area(&s, "Elwynn Forest", "Main Hall", "friendly", "Alliance");
     s.fire_event("ZONE_CHANGED_INDOORS", vec![]);
@@ -284,6 +286,7 @@ fn room_to_room_hop_splashes_the_room_name_alone() {
 /// the "PvP Area" arena string under it, red per the quote's PVPArenaTextString color.
 #[test]
 fn arena_pit_shows_the_ffa_line() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     set_area(&s, "Stranglethorn Vale", "", "contested", "");
     s.fire_event("ZONE_CHANGED_NEW_AREA", vec![]);
@@ -304,6 +307,7 @@ fn arena_pit_shows_the_ffa_line() {
 /// anchors to PVPInfoTextString's BOTTOM — the three-line stack the director's screenshot shows.
 #[test]
 fn subzone_seat_hangs_under_the_territory_line_on_new_area() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     set_area(
         &s,
@@ -336,6 +340,7 @@ fn subzone_seat_hangs_under_the_territory_line_on_new_area() {
 /// name at start rather than re-reading it — by the time a follow ends, the followee is often gone.
 #[test]
 fn the_autofollow_status_line_names_the_followee_and_fades_on_end() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     assert!(
         !visible(&s, "AutoFollowStatus"),
@@ -382,6 +387,7 @@ fn the_autofollow_status_line_names_the_followee_and_fades_on_end() {
 /// than inheriting the dying one's alpha.
 #[test]
 fn a_begin_during_the_end_fade_resets_the_line() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event(
         "AUTOFOLLOW_BEGIN",

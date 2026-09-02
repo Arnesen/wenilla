@@ -1108,8 +1108,7 @@ fn right_clicking_a_roster_row_offers_the_guild_rows() {
         "the menu opens"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaFriendsDropDown.name")
-            .unwrap(),
+        s.eval::<String>("return FriendsDropDown.name").unwrap(),
         "Furor",
         "addressed by name — a roster row has no unit token behind it"
     );
@@ -1166,8 +1165,7 @@ fn the_guild_rows_stay_off_a_who_row_menu() {
     // NOT our own name: the WHISPER row hides on yourself, and with INVITE gated the same way the
     // menu would have nothing to show and never open — which would make the assertion below pass
     // for the wrong reason.
-    s.run("BenillaFriendsFrame_ShowDropdown(\"Thrall\", 1)")
-        .unwrap();
+    s.run("FriendsFrame_ShowDropdown(\"Thrall\", 1)").unwrap();
     assert!(s.eval::<bool>("return DropDownList1:IsVisible()").unwrap());
     let present = r#"
         for i = 1, UIDROPDOWNMENU_MAXBUTTONS do
