@@ -19,6 +19,10 @@
 //!   the only thing the renderer draws, so wherever the lattice runs out before the ground climbs
 //!   through the plane, the water ends on a 4.167-yd straight edge in open water: a shape no
 //!   shoreline has;
+//! - its **mirror** — wet cells the ground climbs out of, which is the skirt of liquid-lattice
+//!   geometry that lies over dry sand. Nothing renders there only because the terrain drew first
+//!   and won the depth test, so this is the exact budget a depth bias spends: a decal pulled `b`
+//!   yards toward the eye paints `b / slope` yards of that skirt;
 //! - the **shoreline slope** at the pin, and what a coplanarity *lift* costs there. A decal held `l`
 //!   yards above the water plane keeps painting for `l / slope` yards past the waterline, on dry
 //!   ground — the arithmetic behind B348's foam-on-the-sand, and the reason that settle is a depth
@@ -251,6 +255,64 @@ fn main() -> anyhow::Result<()> {
     for (d, k) in short_cells.iter().take(10) {
         println!(
             "    cell {k:?} at ({:.1}, {:.1}) — up to {d:.3} yd of water missing",
+            (k.0 as f32 + 0.5) * CELL,
+            (k.1 as f32 + 0.5) * CELL
+        );
+    }
+
+    // ── The mirror: WET cells the ground climbs out of ───────────────────────────────────────
+    // The scan above finds water that is missing; this one finds water geometry that is *over dry
+    // land*. Whole wet cells are the unit the renderer draws, so wherever the ground climbs through
+    // the plane inside a cell, the liquid mesh — and every decal built on the same lattice — carries
+    // a skirt of geometry up the beach. Nothing renders there only because the terrain drew first
+    // and won the depth test, which makes this number the exact **budget a depth bias spends**: a
+    // decal pulled `b` yards toward the eye paints `b / slope` yards of that skirt onto the sand.
+    let mut skirts: Vec<(f32, f32, (i32, i32))> = Vec::new(); // (height above plane, run inland, cell)
+    for (k, idxs) in by_key.iter() {
+        let c = &cells[idxs[0]];
+        if (c.x - x).hypot(c.y - y) > radius {
+            continue;
+        }
+        let mut highest = 0.0_f32;
+        for si in 0..=16 {
+            for sj in 0..=16 {
+                let px = c.x - CELL / 2.0 + CELL * si as f32 / 16.0;
+                let py = c.y - CELL / 2.0 + CELL * sj as f32 / 16.0;
+                if let Some(g) = terrain_height_at(&chunks, [px, py, 0.0]) {
+                    highest = highest.max(g - c.surface);
+                }
+            }
+        }
+        if highest > 0.02 {
+            let h = 1.0_f32;
+            let sample = |dx: f32, dy: f32| terrain_height_at(&chunks, [c.x + dx, c.y + dy, 0.0]);
+            let slope = match (
+                sample(h, 0.0),
+                sample(-h, 0.0),
+                sample(0.0, h),
+                sample(0.0, -h),
+            ) {
+                (Some(px), Some(mx), Some(py), Some(my)) => {
+                    (((px - mx) / (2.0 * h)).powi(2) + ((py - my) / (2.0 * h)).powi(2)).sqrt()
+                }
+                _ => 0.0,
+            };
+            let run = if slope > 0.0 {
+                highest / slope
+            } else {
+                f32::INFINITY
+            };
+            skirts.push((highest, run, *k));
+        }
+    }
+    skirts.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("finite"));
+    println!(
+        "\n  WET cells with dry ground inside them (the skirt the depth test has to eat): {}",
+        skirts.len()
+    );
+    for (hi, run, k) in skirts.iter().take(6) {
+        println!(
+            "    cell {k:?} at ({:.1}, {:.1}) — ground up to {hi:.3} yd above the plane, {run:.2} yd inland",
             (k.0 as f32 + 0.5) * CELL,
             (k.1 as f32 + 0.5) * CELL
         );

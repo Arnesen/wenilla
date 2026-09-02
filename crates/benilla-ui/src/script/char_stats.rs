@@ -150,24 +150,35 @@ pub struct UnitCombatStats {
     /// Ranged damage range (`UNIT_FIELD_MINRANGEDDAMAGE`/`MAXRANGEDDAMAGE`).
     pub ranged_min_damage: f32,
     pub ranged_max_damage: f32,
-    /// The equipped main-hand weapon's skill line as `(value, temp+perm bonus)` — the app resolves
-    /// WHICH skill via [`weapon_subclass_skill`] (unarmed = [`SKILL_UNARMED`]) and reads the pair
-    /// from `PLAYER_SKILL_INFO`; `UnitAttackBothHands` serves it verbatim.
-    pub main_weapon_skill: (u32, i32),
+    /// The equipped main-hand weapon's skill line as **`(value + PERM bonus, TEMP bonus)`** — the
+    /// app resolves WHICH skill via [`weapon_subclass_skill`] (unarmed = [`SKILL_UNARMED`]) and
+    /// reads the pair from `PLAYER_SKILL_INFO`; `UnitAttackBothHands` serves it verbatim.
+    ///
+    /// **The permanent half belongs to the BASE, not to the modifier** (`0x5ea460`, VERIFIED —
+    /// wow-re `ui/scratch/unitrangedattack-skill-pair.md` §3; corrected here by decision 1812).
+    /// Every one of these four pairs comes out of that one reader, so all four carry the split.
+    pub main_weapon_skill: (i32, i32),
     /// The OFF hand's, read the same way. `UnitAttackBothHands` pushes both hands (§4 of wow-re's
     /// `pet-paperdoll-stat-api.md`: `0x518810` calls `[vtbl+0xb0]` twice, hand 0 then hand 1), and
     /// an empty or non-weapon off hand is Unarmed exactly as the main hand is.
-    pub offhand_weapon_skill: (u32, i32),
-    /// The ranged weapon's skill pair (`UnitRangedAttack`).
-    pub ranged_weapon_skill: (u32, i32),
-    /// The [`SKILL_DEFENSE`] line's `(value, temp+perm bonus)` pair, read out of `PLAYER_SKILL_INFO`
-    /// like the two weapon pairs above; `UnitDefense` serves it verbatim.
+    pub offhand_weapon_skill: (i32, i32),
+    /// The ranged weapon's skill pair (`UnitRangedAttack`), same split.
+    ///
+    /// **Player-only, and by a different gate than its two neighbours.** `UnitRangedAttack`
+    /// `0x518b90` is a DIRECT call gated on the PLAYER typemask alone — no vtable slot and **no
+    /// `CGUnit_C` fallback body** (wow-re `unitrangedattack-skill-pair.md` §4). So where
+    /// `UnitDefense` and `UnitAttackBothHands` pass a pet through SELF-OR-MINE and answer
+    /// `level * 5`, this one answers `(0, 0)` for a pet and for every other player too. Mirroring
+    /// [`cgunit_skill`] here would be wrong.
+    pub ranged_weapon_skill: (i32, i32),
+    /// The [`SKILL_DEFENSE`] line's pair, in the same `(value + perm, temp)` split as the three
+    /// above and out of the same reader; `UnitDefense` serves it verbatim.
     ///
     /// **The player's only.** A creature has no skill block, and the client does not read one for
     /// it: `UnitDefense` forks on the resolved unit's vtable and gives a non-player
     /// `UNIT_FIELD_LEVEL * 5` instead ([`cgunit_skill`]), so the pet feed never fills this and the
     /// binding never reads it for a pet.
-    pub defense_skill: (u32, i32),
+    pub defense_skill: (i32, i32),
     /// Whether a wand is equipped (`HasWandEquipped` — the ref swaps the ranged-attack action for
     /// wand Shoot on it).
     pub has_wand: bool,
@@ -496,7 +507,7 @@ fn with_unit_stats<T>(
 /// — so the pair can never sum below zero (`0x519298` for `UnitDefense`, `0x5188a7` per hand for
 /// `UnitAttackBothHands`; wow-re `ui/scratch/pet-paperdoll-stat-api.md` §4). A debuff deeper than
 /// the skill itself reads as "reduced to 0", never as a negative total.
-fn skill_clamped((base, modifier): (u32, i32)) -> (i64, i64) {
+fn skill_clamped((base, modifier): (i32, i32)) -> (i64, i64) {
     let base = i64::from(base);
     let modifier = i64::from(modifier);
     (base, if modifier + base < 0 { -base } else { modifier })
@@ -1500,6 +1511,52 @@ mod tests {
             s.eval::<(i64, i64, i64, i64)>(r#"return UnitAttackBothHands("target")"#)
                 .unwrap(),
             (0, 0, 0, 0)
+        );
+    }
+
+    /// **`UnitRangedAttack` does NOT take the pet fork its two neighbours take** (decision 1812).
+    ///
+    /// `UnitDefense` `0x519200` and `UnitAttackBothHands` `0x518810` gate on SELF-OR-MINE and then
+    /// dispatch through the resolved unit's vtable, so a pet passes and lands on `CGUnit_C`'s
+    /// `level * 5`. `UnitRangedAttack` `0x518b90` is a **direct call** gated on the PLAYER typemask
+    /// alone, with no vtable slot and **no `CGUnit_C` fallback body at all** (VERIFIED, wow-re
+    /// `ui/scratch/unitrangedattack-skill-pair.md` §4 — `0x612b40`/`0x5edae0`/`0x5ea460` appear as
+    /// a dword zero times image-wide, against a positive control of one hit each for the four
+    /// addresses that ARE in a vtable).
+    ///
+    /// So a pet's ranged attack is `(0, 0)`, not `level * 5`. The whole reason this is a test and
+    /// not a comment is that the three verbs look interchangeable from the FrameXML side, and
+    /// mirroring the defense handling here would be a plausible, silent, wrong number.
+    #[test]
+    fn ranged_attack_gives_a_pet_zeros_where_defense_gives_it_level_times_five() {
+        let mut s = UiScript::new().unwrap();
+        s.set_player_combat_stats(Some(stats()));
+        s.set_pet_combat_stats(Some(pet_stats()));
+        s.set_unit(
+            "pet",
+            Some(super::super::UnitState {
+                exists: true,
+                level: 60,
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            s.eval::<(i64, i64)>(r#"return UnitDefense("pet")"#)
+                .unwrap(),
+            (300, 0),
+            "the vtable fork: level * 5"
+        );
+        assert_eq!(
+            s.eval::<(i64, i64)>(r#"return UnitRangedAttack("pet")"#)
+                .unwrap(),
+            (0, 0),
+            "no fork, no fallback body — a pet fails the PLAYER typemask and gets zeros"
+        );
+        // …and so does another PLAYER, which is the same gate seen from the other side.
+        assert_eq!(
+            s.eval::<(i64, i64)>(r#"return UnitRangedAttack("target")"#)
+                .unwrap(),
+            (0, 0)
         );
     }
 

@@ -45,9 +45,13 @@
 //!   depth-buffer bias and the foam vertices sit at the queried MCLQ height exactly, so there is no
 //!   geometric lift in the binary to be faithful to (the "−2048 GL units" this file cited for a
 //!   year is refuted; the real term is `footstepBias(0.125) × [0x810390]` = D3D `DEPTHBIAS −1/8192`).
-//!   Ours is the decal family's rasterizer bias plus `DECAL_WORLD_CLIP` — absolute verts through the
-//!   same `clip_from_world` the world meshes run (0781), so the tie is settled in depth ULPs with
-//!   zero horizontal cost.
+//!   Ours needs no settle at all, and that is worth stating rather than assuming (1811): the patch
+//!   is not a decal *over* the surface, it **is** the liquid mesh's own triangles — the same wet
+//!   cells, the same winding, through the same `clip_from_world` (`DECAL_WORLD_CLIP`, 0781) as a
+//!   mesh whose `Transform` is `IDENTITY` — so the depths agree exactly and `GreaterEqual` passes
+//!   the tie unaided. [`Rung::FOAM_RASTER`] stays as a few ULPs of insurance against a driver
+//!   rounding two pipelines differently; the **slope half is disarmed**, because its pull grows as
+//!   z² and the only thing it can reach is the skirt of wet-cell geometry lying over dry sand.
 //!
 //! The formulas + lifecycle math live in [`params`]; this half is the ECS: the emitter over the
 //! avatar + streamed units, the record pool, and one additive effect-stream draw per
@@ -598,12 +602,13 @@ fn push_water_foam(
                 lighting: crate::particles::buffer::EffectLighting::None,
                 anchor: centroid / n as f32,
                 bias: FOAM_BIAS,
-                // **The reference's own settle, both halves** (`Rung::FOAM_RASTER`, whose doc
-                // carries the bytes): a near-zero constant plus a slope-scaled term, which is what
-                // a near-horizontal decal at a grazing angle needs — the shoreline view. A nonzero
-                // constant also selects `DECAL_WORLD_CLIP`, so these absolute verts skip the
-                // cam-relative rebase and tie against the ground through the world meshes' own
-                // matrix (0781).
+                // A few ULPs of constant and **no slope term** (`Rung::FOAM_RASTER*`, whose docs
+                // carry the bytes and the reasoning, 1811): the patch is the liquid mesh's own
+                // triangles, so `GreaterEqual` already passes the coplanar tie and the only thing
+                // a pull toward the eye can reach is the wet-lattice skirt over dry sand. The
+                // nonzero constant also selects `DECAL_WORLD_CLIP`, so these absolute verts skip
+                // the cam-relative rebase and go through the world meshes' own matrix (0781) —
+                // which is what makes the two depths agree in the first place.
                 raster_bias: crate::sky_order::Rung::FOAM_RASTER,
                 raster_slope: crate::sky_order::Rung::FOAM_RASTER_SLOPE,
                 cam_relative: false,

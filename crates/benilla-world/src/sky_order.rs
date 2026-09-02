@@ -264,30 +264,46 @@ impl Rung {
     /// `0x68fd0f` arms EGxRs id `0` for the foam draw, and arming that id non-zero is what issues
     /// the client's sole `glPolygonOffset` — `factor` a hardcoded `0xc0800000` = **−4.0**
     /// (`0x59bf0a`, in capability arm `0x41`, whose only image-wide call site is inside the id-`0`
-    /// applicator), `units` = `footstepBias(0.125) × [0x810390]` ⇒ **−8.0001**. So the reference
-    /// settles this decal with a **slope-scaled** term plus a near-zero constant, which is the
-    /// right instrument and not an accident: a near-horizontal decal seen at a grazing angle has a
-    /// depth gradient a constant cannot follow, and the shoreline is exactly that view.
+    /// applicator), `units` = `footstepBias(0.125) × [0x810390]` ⇒ **−8.0001**. The `-4.0` is not
+    /// this lane's number: it is the immediate every consumer of EGxRs id `0` gets, and the foam
+    /// reaches it by borrowing the **footprint's own cvar** — which is idiom reuse ("this is a
+    /// ground decal, arm the ground-decal offset"), not a tie this decal has to win. Only the
+    /// `units` term is the foam's own.
     ///
     /// **The signs invert here.** GL depth runs 0 = near, so its negative offset pulls toward the
     /// eye; ours is reversed-Z (`CompareFunction::GreaterEqual`, near = 1), where toward the eye is
-    /// *larger* depth — so both terms are positive. [`DECAL_RASTER`](Rung::DECAL_RASTER) being
+    /// *larger* depth — so a ported term is positive. [`DECAL_RASTER`](Rung::DECAL_RASTER) being
     /// positive for the same job corroborates the convention independently.
     ///
-    /// **Two things here are ours, not transcribed.** `factor` multiplies the primitive's *window*
-    /// depth slope, and reversed-Z gives a plane a different gradient than GL's mapping does, so
-    /// 4.0 is the reference's number in a frame where it means something slightly different.
-    /// And the constant is in ULPs of a **float** depth buffer (per-primitive, the quantisation
-    /// 1806 is about) rather than GL's fixed `2⁻²⁴` — same order, not the same unit. The client's
-    /// *D3D* backend arms no slope term at all and compensates with a flat bias ~256× the GL
-    /// constant; which of the two encodings is canonical turns on the `gxApi` device-identity
-    /// question, which is open on wow-re's `gx` board. The GL shape is ported because it is the
-    /// one that is *correct* in any depth format, and because a flat constant is described at the
-    /// bytes as standing in for the missing slope term.
+    /// **The constant is in ULPs of a float depth buffer** (per-primitive — the quantisation 1806
+    /// is about) rather than GL's fixed `2⁻²⁴`: same order, not the same unit. Its world-space pull
+    /// is `z · C · 2⁻²³`, i.e. ~1 µm per yard of view distance at `C = 8` — invisible by
+    /// construction, which is the point. It is a guard against a driver rounding one pipeline's
+    /// coplanar arithmetic differently from another's, not a tie-breaker anything rests on.
     pub const FOAM_RASTER: i32 = 8;
-    /// The slope-scale half of [`FOAM_RASTER`](Rung::FOAM_RASTER) — see its doc for the bytes,
-    /// the sign inversion, and what is ported vs transcribed.
-    pub const FOAM_RASTER_SLOPE: f32 = 4.0;
+    /// **The slope half is deliberately NOT armed — the tie it settles does not exist here** (B348
+    /// second round, 1811; supersedes 1809 §3's transcription).
+    ///
+    /// The reference arms `factor = -4.0` and it is the right instrument *there*. It is the wrong
+    /// one here because our foam patch is not a decal *over* the liquid surface — it **is** the
+    /// liquid surface's own triangles: [`water_fx::build_patch`] emits the wet cells straight out
+    /// of [`WaterChunkInfo`]'s grid, in the liquid mesh's own winding, through the same
+    /// `clip_from_world` (`DECAL_WORLD_CLIP`, 0781) against a mesh whose `Transform` is
+    /// `IDENTITY`. Same vertices, same matrix, same arithmetic — so the depths agree exactly and
+    /// `GreaterEqual` passes the tie on its own. That holds for the fullbright kinds too, which
+    /// are the only liquids that write depth at all (magma/slime are `AlphaMode::Opaque`; water is
+    /// `Blend`, depth-write off, so it never competes at all).
+    ///
+    /// What a slope term *does* buy, measured: a near-horizontal decal at a grazing angle has a
+    /// window-depth gradient of `n / (h · f)` per pixel (eye height `h` above the plane, focal
+    /// length `f` in pixels), so `factor · m` is a world-space pull of `factor · z² / (h · f)` —
+    /// **growing as the square of view distance, and the near plane cancels out**. Whole wet cells
+    /// are the unit of liquid geometry, so a shoreline carries a skirt of liquid-lattice triangles
+    /// over dry sand (up to 7 yd of it at the reported beach — `benilla-formats --example
+    /// water_here`), held back by nothing but the terrain having drawn first. Any pull toward the
+    /// eye spends that budget: at `4.0` the wake visibly washed onto the beach, which is what the
+    /// director reported twice.
+    pub const FOAM_RASTER_SLOPE: f32 = 0.0;
     /// **World text** — above the celestial glare, so a flare never washes a nameplate, and above
     /// every sky rung. The reference draws its world text late in the frame (decision 0519).
     /// Small on purpose: 6× the far plane is all the ordering needs, and this same field doubles
@@ -330,7 +346,10 @@ const _: () = {
     // unread — see FOAM_RASTER). Both halves pull toward the eye under reversed-Z, so both are
     // positive; a negative here would push the decal INTO its receiver.
     assert!(Rung::FOAM_RASTER > 0 && Rung::FOAM_RASTER < Rung::DECAL_RASTER);
-    assert!(Rung::FOAM_RASTER_SLOPE > 0.0);
+    // The slope half stays disarmed on this lane (1811): its pull grows as z² and it spends the
+    // wet-lattice skirt onto the beach, while the tie it would settle is already won by the patch
+    // being the liquid mesh's own triangles. A nonzero value here is a decision, not a tune.
+    assert!(Rung::FOAM_RASTER_SLOPE == 0.0);
 
     // ─── The pre-water decal band (B347, 1785/1789) ─────────────────────────────────────────
     // Internally ordered as the reference's frame emits them — ring then shadow, both from

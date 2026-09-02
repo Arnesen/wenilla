@@ -409,16 +409,38 @@ fn weapon_skill_id(
     weapon_subclass_skill(t.subclass).unwrap_or(SKILL_UNARMED)
 }
 
-/// Read a skill line's `(value, temp+perm bonus)` pair from the `PLAYER_SKILL_INFO` triplets;
-/// `(0, 0)` when the line isn't known (a ranged pair with nothing equipped).
-fn skill_pair(store: &ObjectStore, skill_id: u32) -> (u32, i32) {
+/// Read a skill line's `(value + PERM bonus, TEMP bonus)` pair from the `PLAYER_SKILL_INFO`
+/// triplets; `(0, 0)` when the line isn't known (a ranged pair with nothing equipped).
+///
+/// **The split is not `(value, temp + perm)`, which is what this returned until decision 1812.**
+/// The reader every skill-shaped binding goes through is `0x5ea460`, and it writes
+/// `*out1 = value + permBonus` / `*out2 = tempBonus` — the permanent half folds into the BASE and
+/// only the temporary half is the modifier (VERIFIED, wow-re
+/// `ui/scratch/unitrangedattack-skill-pair.md` §3; the field reads are `+0x84C` `movzx` value,
+/// `+0x850` `movsx` temp — the block's only sign-extended read — and `+0x852` `movzx` perm).
+///
+/// The old shape had the right TOTAL and the wrong halves, which is why nothing caught it: the
+/// paper doll's Attack row prints `base` and colours `base + mod`, so a 300-value line with a +5
+/// talent and a +10 aura read "300" with a green +15 where the reference reads "305" with a green
+/// +10. wow-re's own `object-layer/scratch/w2b2.md` had the two inverted as well, and that is
+/// where ours came from; the same round corrected it there.
+///
+/// **The perm add is skipped when the value is 0** (`0x5ea4b4 jle`), so an unknown line stays a
+/// flat 0 rather than reading back a bare talent bonus.
+///
+/// Signed, because the sum is: `fild dword` on both pushes, and a perm malus deeper than the skill
+/// is representable on the wire even if no live server sends one.
+fn skill_pair(store: &ObjectStore, skill_id: u32) -> (i32, i32) {
     for i in 0..PLAYER_SKILL_SLOTS {
         if let Some(s) = store.0.player_skill(i) {
             if u32::from(s.skill_id) == skill_id {
-                return (
-                    u32::from(s.value),
-                    i32::from(s.temp_bonus) + i32::from(s.perm_bonus),
-                );
+                let value = i32::from(s.value);
+                let base = if value == 0 {
+                    0
+                } else {
+                    value + i32::from(s.perm_bonus)
+                };
+                return (base, i32::from(s.temp_bonus));
             }
         }
     }
@@ -1222,6 +1244,57 @@ mod tests {
     use super::*;
     use benilla_protocol::messages::ObjectFields;
     use bevy::ecs::system::RunSystemOnce;
+
+    /// **The skill pair splits `(value + PERM, TEMP)`, not `(value, temp + perm)`** — the reader
+    /// every skill-shaped binding goes through (`0x5ea460`, VERIFIED: wow-re
+    /// `ui/scratch/unitrangedattack-skill-pair.md` §3).
+    ///
+    /// It reported the right TOTAL and the wrong halves until decision 1812, which is exactly why
+    /// nothing caught it: `UnitAttackBothHands`'s caller prints the base and colours `base + mod`,
+    /// so both shapes agree on the number a player adds up and disagree on the two they read. The
+    /// fixture below is the one the record quotes — 300 / +5 talent / +10 aura — where the
+    /// reference shows **305** with a green **+10** and ours showed 300 with a green +15.
+    ///
+    /// The zero-value leg is the other half of the law (`0x5ea4b4 jle`): an unknown line must stay
+    /// a flat 0 rather than reading back a bare talent bonus.
+    #[test]
+    fn a_skill_pair_folds_the_permanent_bonus_into_the_base() {
+        /// `PLAYER_SKILL_INFO_1_1` — id|step, then value|max, then temp|perm, per slot.
+        const F_SKILL: u16 = 718;
+        let pair = |lo: u16, hi: u16| u32::from(lo) | (u32::from(hi) << 16);
+        // Slot 0: Defense (95) at 300, +10 temporary, +5 permanent.
+        // Slot 1: Swords (43) at 0 — known id, no value, a +7 permanent that must NOT surface.
+        let store = ObjectStore(ObjectFields::from_pairs(&[
+            (F_SKILL, pair(95, 0)),
+            (F_SKILL + 1, pair(300, 300)),
+            (F_SKILL + 2, pair(10, 5)),
+            (F_SKILL + 3, pair(43, 0)),
+            (F_SKILL + 4, pair(0, 300)),
+            (F_SKILL + 5, pair(0, 7)),
+        ]));
+        assert_eq!(
+            skill_pair(&store, 95),
+            (305, 10),
+            "the permanent bonus belongs to the base and the temporary one is the modifier"
+        );
+        assert_eq!(
+            skill_pair(&store, 43),
+            (0, 0),
+            "a line at value 0 skips the perm add — a bare talent bonus is not a skill"
+        );
+        assert_eq!(
+            skill_pair(&store, 162),
+            (0, 0),
+            "a line the player does not have at all"
+        );
+        // A malus deeper than the skill is representable, which is why the pair is signed.
+        let cursed = ObjectStore(ObjectFields::from_pairs(&[
+            (F_SKILL, pair(95, 0)),
+            (F_SKILL + 1, pair(5, 300)),
+            (F_SKILL + 2, pair(0, u16::MAX - 9)), // perm = -10
+        ]));
+        assert_eq!(skill_pair(&cursed, 95), (-5, 0));
+    }
 
     /// `PLAYER_FIELD_BANK_BAG_SLOT_1` — bank bag slot 0's guid pair (protocol test `bank.rs`).
     const F_BANK_BAG_1: u16 = 612;
