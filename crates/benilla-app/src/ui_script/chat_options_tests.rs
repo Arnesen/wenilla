@@ -44,7 +44,7 @@ fn chat_with_menu() -> UiScript {
         "UiPanels.xml",
         "UIParent.xml",
         "GameTooltip.xml",
-        "UIDropDownMenu.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
         "UIPanelTemplates.xml",
         "Interface\\FrameXML\\ColorPickerFrame.xml",

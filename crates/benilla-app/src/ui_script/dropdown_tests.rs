@@ -23,7 +23,7 @@ fn load_dropdown_kit(s: &UiScript) {
         "Fonts.xml",
         "UIParent.xml",
         "GameTooltip.xml",
-        "UIDropDownMenu.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
     ] {
         load_xml(s, file);
     }

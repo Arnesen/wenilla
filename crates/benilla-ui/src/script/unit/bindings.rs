@@ -576,15 +576,35 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // the first names the `UI-PVP-<group>` texture, the second titles the player frame's hit-area
     // tooltip. nil, nil for a unit with no side (Monster/neutral templates) or no snapshot — the
     // ref's icon branches gate on exactly that (decision 0646 §1/§3).
+    //
+    // **The two are genuinely different strings and this used to push one twice.** They are
+    // FactionGroup.dbc's `InternalName` (field 2) and `Name0` (field 3), and only on enUS are they
+    // the same word — which is why the duplication survived, and why the old doc on
+    // `UnitState::faction_group` said so as if it settled the matter. Every stock consumer of the
+    // FIRST return concatenates it into a path: `"…\UI-PVP-"..factionGroup` at `PlayerFrame.lua:68`,
+    // `TargetFrame.lua:198` and `PartyMemberFrame.lua:125`, `"…\Battleground-"..` at
+    // `BattlefieldFrame.lua:195`, and `HonorFrame.lua:68` compares it to the literal "Alliance".
+    // On any localized client the old shape named a texture that does not exist. All five of those
+    // files are on our chain.
     g.set(
         "UnitFactionGroup",
         lua.create_function(|lua, token: Option<String>| {
-            match with_unit(lua, &token, None, |u| u.faction_group.clone())? {
-                Some(group) => {
-                    let s = Value::String(lua.create_string(&group)?);
-                    Ok((s.clone(), s))
+            let pair = with_unit(lua, &token, (None, None), |u| {
+                (u.faction_group.clone(), u.faction_group_localized.clone())
+            })?;
+            match pair {
+                (Some(english), localized) => {
+                    let a = Value::String(lua.create_string(&english)?);
+                    // The localized half falls back to the English one rather than to nil: a unit
+                    // with a side always has an `InternalName`, and `Name0` is empty for the
+                    // Player/Monster rows, so nil here would blank a tooltip the reference fills.
+                    let b = match localized {
+                        Some(l) if !l.is_empty() => Value::String(lua.create_string(&l)?),
+                        _ => a.clone(),
+                    };
+                    Ok((a, b))
                 }
-                None => Ok((Value::Nil, Value::Nil)),
+                (None, _) => Ok((Value::Nil, Value::Nil)),
             }
         })?,
     )?;

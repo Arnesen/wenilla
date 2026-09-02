@@ -19,7 +19,7 @@ fn setup() -> UiScript {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     // The row right-click menu is the shared UnitPopup "FRIEND" menu, so the window's slice of
     // the manifest includes it (it loads well before FriendsFrame.xml in the real order).
     load_xml(&s, "UnitPopup.xml");

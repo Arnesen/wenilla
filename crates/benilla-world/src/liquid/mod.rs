@@ -98,8 +98,8 @@ mod surface; // the against-real-client-files tests — they span both halves
 // terrain cells is a leg that could reach nothing at all and never show it.
 pub use query::{
     camera_claim, describe_at, liquid_at, player_claim, surfaces_at, unit_claim, water_surface_at,
-    FoamPatch, LiquidClaim, LiquidHit, LiquidSource, RoomPlacements, Underwater, WaterChunkInfo,
-    WmoPool,
+    EyeLiquid, FoamPatch, LiquidClaim, LiquidHit, LiquidSource, RoomPlacements, SubmergedEye,
+    Underwater, WaterChunkInfo, WmoPool,
 };
 pub(crate) use spatial::{maintain_water_index, WaterIndex};
 pub(crate) use surface::{
@@ -124,6 +124,7 @@ impl Plugin for LiquidPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<LiquidMaterial>::default())
             .init_resource::<Underwater>()
+            .init_resource::<SubmergedEye>()
             .init_resource::<WaterIndex>()
             // PreUpdate: surfaces stream in/out via Update-side commands, so the edge is visible
             // here the frame after — before any of that frame's consumers ask. A despawn's stale

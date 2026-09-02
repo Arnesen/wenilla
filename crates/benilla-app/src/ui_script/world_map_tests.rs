@@ -18,7 +18,7 @@ fn harness() -> UiScript {
         "UiPanels.xml",
         "UIPanelTemplates.xml",
         "GameTooltip.xml",
-        "UIDropDownMenu.xml", // the map's continent/zone pickers initialize into it at OnLoad
+        "Interface\\FrameXML\\UIDropDownMenu.xml", // the map's continent/zone pickers initialize into it at OnLoad
         "ScrollTemplates.xml",
         // The blip templates, which WorldMapFrame.xml instantiates with inherits=. Not
         // optional: an unknown template is a loader WARNING, not an error, so leaving this
@@ -26,19 +26,13 @@ fn harness() -> UiScript {
         "WorldMapFrameTemplates.xml",
         "WorldMapFrame.xml",
     ] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(
-            report.errors.is_empty(),
-            "{file}: loader errors: {:?}",
-            report.errors
-        );
+        // `test_ui::load_ui`, not a local read: a manifest entry carrying a path separator is the
+        // REFERENCE's own file and must come off the player's chain, which
+        // `std::fs::read_to_string` under `assets/ui` cannot do — it goes looking for
+        // `assets/ui/Interface/FrameXML/...` and fails. The shared loader resolves both shapes, and
+        // its own doc already records this consolidation happening once before. Hand-rolling it
+        // here is what made this kit break the moment a file it loads migrated (1751).
+        super::test_ui::load_ui(&s, file);
     }
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     s

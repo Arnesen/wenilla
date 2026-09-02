@@ -21,7 +21,7 @@ fn harness() -> UiScript {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_* (the dropdown kit's MenuBackdrop)
-    load_xml(&s, "UIDropDownMenu.xml"); // the unit popups' kit (TargetFrameDropDown's template)
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml"); // the unit popups' kit (TargetFrameDropDown's template)
     load_xml(&s, "UnitPopup.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "ActionBar.xml"); // BENILLA_FALLBACK_ICON

@@ -106,7 +106,7 @@ fn setup() -> UiScript {
     // decide where focus goes after the name box closes — a nil there raises before the charter is
     // bought. Ours guarded it; the reference does not.
     load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrops
-    load_xml(&s, "UIDropDownMenu.xml"); // ChatFrame's seven dropdowns inherit its template
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml"); // ChatFrame's seven dropdowns inherit its template
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
     load_xml(&s, "ChatFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\GuildRegistrarFrame.xml");

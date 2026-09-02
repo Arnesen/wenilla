@@ -26,7 +26,7 @@ fn load_unit_frames(s: &UiScript) {
     load_xml(s, "Interface\\FrameXML\\TextStatusBar.lua");
     load_xml(s, "Interface\\FrameXML\\TextStatusBar.xml");
     load_xml(s, "GameTooltip.xml");
-    load_xml(s, "UIDropDownMenu.xml");
+    load_xml(s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(s, "UnitPopup.xml");
     load_xml(s, "Interface\\FrameXML\\BuffFrame.xml");
     load_xml(s, "Interface\\FrameXML\\UnitFrame.xml");
@@ -1200,7 +1200,7 @@ fn the_party_art_paints_over_the_bars() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "UnitPopup.xml");
     // The reference's own kit, in the manifest's order. `UIParent.xml` is not decoration here:
     // `RaiseFrameLevel`/`LowerFrameLevel` live in it (ref UIParent.lua l.1890-1896) and stock

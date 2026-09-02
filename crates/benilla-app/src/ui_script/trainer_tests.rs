@@ -28,7 +28,7 @@ fn trainer_script() -> UiScript {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_* (the kit's MenuBackdrop), app order
-    load_xml(&s, "UIDropDownMenu.xml"); // the filter dropdown's kit
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml"); // the filter dropdown's kit
     load_xml(&s, "ScrollTemplates.xml"); // the faux-scroll bar kit
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // BenillaMoney_Set/_Clear/_SetColor live here
     load_xml(&s, "TrainerFrame.xml");

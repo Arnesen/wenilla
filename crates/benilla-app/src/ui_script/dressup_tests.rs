@@ -33,7 +33,7 @@ const JERKY_LINK: &str = "|cffffffff|Hitem:117|h[Tough Jerky]|h|r";
 /// The room's own files, past whatever bag interface the caller wants — both loaders below end
 /// with these, in manifest order.
 const ROOM_UI: &[&str] = &[
-    "UIDropDownMenu.xml",
+    "Interface\\FrameXML\\UIDropDownMenu.xml",
     "UnitPopup.xml",
     "Interface\\FrameXML\\ItemRef.xml",
     "Interface\\FrameXML\\MerchantFrame.xml",

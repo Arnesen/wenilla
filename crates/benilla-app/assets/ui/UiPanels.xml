@@ -399,6 +399,35 @@
         -- surface (a focused test VM, and the reference's own `ADDON_LOADED` ordering), and this
         -- runs on the first line of every `ToggleBag`/`ToggleBackpack`/`ToggleKeyRing`, so it is
         -- the last place that should be the thing to raise.
+        -- ── Moved here when UIDropDownMenu.xml went to the chain (1751) ──────────────────────
+        -- The reference keeps `CloseMenus` in `UIParent.lua:984`, not in its dropdown file, and
+        -- this file is already where our slice of UIParent.lua lives (`IsOptionFrameOpen` below,
+        -- `CloseAllWindows`, `ToggleGameMenu`). It sits at manifest line 144, ahead of all five
+        -- consumers — the stock dropdown at 155, MicroMenu, GameMenuFrame and two test kits.
+        --
+        -- The BOUND is inlined rather than read from `UIDROPDOWNMENU_MAXLEVELS`, which lives in the
+        -- dropdown file: a kit that loads this file and not that one would otherwise fail on
+        -- `'for' limit must be a number`. Two is the reference's own list count (DropDownList1/2 are
+        -- what `UIDropDownMenu.xml` declares; the third exists only in later builds).
+        --
+        -- The BODY stays ours and is deliberately not the reference's: stock iterates a `UIMenus`
+        -- table nothing here declares, ours asks the dropdown lists directly. Same answer, and it
+        -- retires with this file rather than pretending to be stock.
+        function CloseMenus()
+            local closed
+            for i=1, 2, 1 do
+                local list = getglobal("DropDownList"..i)
+                if list and list:IsVisible() then
+                    closed = 1
+                end
+            end
+            if closed then
+                CloseDropDownMenus()
+            end
+            return closed
+        end
+
+
         function IsOptionFrameOpen()
             if (GameMenuFrame and GameMenuFrame:IsVisible())
                 or (OptionsFrame and OptionsFrame:IsVisible())

@@ -193,6 +193,24 @@ pub(super) fn setup_lighting(
 /// sun sets (that's how the real client does it). **Phase 0:** this only writes the resolved values
 /// into [`WowLighting`] (consumed by `apply_wow_lighting` → the materials). No PBR sun / ambient /
 /// fog / sky are touched — those are rebuilt in-shader step by step.
+/// The reference's `0x6d1620` — an HSV **VALUE-only** scale of a colour, as used by the ocean depth
+/// ramp: unpack to RGB floats, `RGB → HSV` (`0x7bbc80`), multiply the third member (V) alone,
+/// `HSV → RGB` (`0x7bbd60`), repack.
+///
+/// **It is a uniform RGB multiply, and that is a fact rather than an approximation.** HSV keeps
+/// `V = max(r,g,b)` and `S = (max − min)/max`; scaling V while H and S are untouched scales the max
+/// by `f`, and the min by `new_V·(1 − S) = f·min`, and the middle channel by the same ratio — so
+/// every channel comes back multiplied by `f`. The detour is an identity for a V-only scale, so we
+/// transcribe the identity. `the_hsv_detour_is_a_plain_multiply` checks that against an actual
+/// round trip rather than leaving it as an argument in a comment.
+///
+/// The one thing we do NOT carry over is the reference's byte repack (`×255 + 512 >> 14`): its
+/// light lane is 8-bit and ours is float end to end, and re-quantizing here would be inventing a
+/// step this pipeline does not otherwise have.
+fn hsv_value_scale(c: [f32; 3], f: f32) -> [f32; 3] {
+    [c[0] * f, c[1] * f, c[2] * f]
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn update_time_lighting(
     world_time: Res<super::WorldTime>,
@@ -200,7 +218,7 @@ pub(super) fn update_time_lighting(
     debug: Res<DebugState>,
     cam: Query<&GlobalTransform, With<WorldCamera>>,
     current_map: Option<Res<CurrentMap>>,
-    underwater: Option<Res<crate::liquid::Underwater>>,
+    eye_liquid: crate::liquid::EyeLiquid,
     viewer: Res<crate::view::Viewer>,
     weather: Option<Res<crate::weather::WeatherState>>,
     view: Res<crate::view::ViewDistance>,
@@ -262,10 +280,7 @@ pub(super) fn update_time_lighting(
     // fog + cool light. Feeding it through the normal atmosphere → `WowLighting` path means every
     // existing consumer (terrain/model/water/WDL fog + the clear colour) becomes underwater for free
     // (VERIFIED apitrace WoW.18: the reference just switches the active param; no overlay quad).
-    let submerged = underwater
-        .as_ref()
-        .map(|u| u.0)
-        .unwrap_or(benilla_formats::Submersion::Dry);
+    let submerged = eye_liquid.submersion();
     // The ghost-world atmosphere (decision 0308 §7, byte-VERIFIED death-light.md): while
     // PLAYER_FLAGS_GHOST is up the active LightParams slot is 4 — the death profile — applied
     // instantly (the client rebuilds its color tables per frame off the single active slot).
@@ -328,9 +343,17 @@ pub(super) fn update_time_lighting(
         )
     };
     let moon02 = daynight::moon02_state(day_f);
+    // **The ocean depth ramp** (decision 1829, wow-re `submerged-atmosphere.md` §3). Ocean alone
+    // runs it, and it darkens the two committed light triples — the first (`DNState+0x178`) by
+    // `fac1` down to 0.5, the second (`+0x174`) by `fac2` down to 0.75, over the first 30 yards.
+    // Every other submersion state, ocean's own fog colour included, is untouched: the fog-colour
+    // commit in the same block is dead code, overwritten from the bands immediately after.
+    let (fac1, fac2) = submerged
+        .ocean_depth_factors(eye_liquid.eye_z())
+        .unwrap_or((1.0, 1.0));
     let resolved = WowLighting {
-        ambient: atmo.ambient,
-        diffuse: atmo.sun_diffuse,
+        ambient: hsv_value_scale(atmo.ambient, fac1),
+        diffuse: hsv_value_scale(atmo.sun_diffuse, fac2),
         spec: atmo.sun_color, // row 9 (warm-white) — WoW's specular color
         sun_dir,
         celestial_dir,
@@ -433,11 +456,26 @@ pub(super) fn update_time_lighting(
     // recomputes the same call offline — so a line from a live run can be replayed against the DBC
     // instead of argued about. Without the map printed, "is this the atmosphere the zone actually
     // authored, or the one next door?" costs a session (Stratholme, 2026-07-29).
-    if *last_dump != Some(minute) && std::env::var_os("WOW_LIGHT_DUMP").is_some() {
-        *last_dump = Some(minute);
+    // `WOW_LIGHT_DUMP=frame` drops the minute throttle, exactly as `WOW_FOG_DUMP=frame` does. The
+    // minute gate is right for comparing colours against a DBC replay, and useless for anything
+    // POSITIONAL: game minutes advance slowly enough that a whole probe logs two lines, and both of
+    // them land in the first moments after world entry — before the submersion verdict has settled,
+    // so the line reports `Dry` at a position that is plainly underwater (1829, chasing exactly
+    // that contradiction).
+    if let Some(mode) = std::env::var_os("WOW_LIGHT_DUMP") {
+        let key = (mode != *"frame").then_some(minute);
+        if key.is_some() && *last_dump == key {
+            return;
+        }
+        *last_dump = key;
         let b = |c: [f32; 3]| [c[0] * 255.0, c[1] * 255.0, c[2] * 255.0].map(|v| v.round() as i32);
         eprintln!(
-            "[light] map {map} at ({:.1}, {:.1}, {:.1}) minute {minute} ({source:?}) ambient {:?} diffuse {:?} spec {:?} sun_dir {:.3} fog {:?} start/end {:.0}/{:.0}",
+            // The submersion tail (1829) reports the RAMP ITSELF, not just its result. Comparing
+            // two dives at different depths cannot prove the ramp fired — the light row moves with
+            // the clock between runs, and the dump only fires on a game-minute change, so the two
+            // samples are never the same row. Printing the factors and their input settles it in
+            // one line instead.
+            "[light] map {map} at ({:.1}, {:.1}, {:.1}) minute {minute} ({source:?}) ambient {:?} diffuse {:?} spec {:?} sun_dir {:.3} fog {:?} start/end {:.0}/{:.0} submersion {submerged:?} eye_z {:.1} ocean_fac {:.4}/{:.4}",
             wow_pos[0],
             wow_pos[1],
             wow_pos[2],
@@ -448,6 +486,9 @@ pub(super) fn update_time_lighting(
             b(resolved.fog_color),
             resolved.fog_start,
             resolved.fog_end,
+            eye_liquid.eye_z(),
+            fac1,
+            fac2,
         );
     }
 }
@@ -479,6 +520,73 @@ pub(super) fn apply_sky_backdrop(
     // GAMMA LANE (0161): the buffer holds gamma bytes — the clear writes the authored DBC
     // value RAW (`linear_rgb` = no conversion); the frame's one decode is the FFXGlow combine.
     clear.0 = Color::linear_rgb(l.fog_color[0], l.fog_color[1], l.fog_color[2]);
+}
+
+#[cfg(test)]
+mod ocean_ramp_tests {
+    use super::hsv_value_scale;
+
+    /// A textbook `RGB → HSV → RGB` round trip, written out here so the identity claim in
+    /// [`hsv_value_scale`]'s doc is *checked* rather than argued. If it were ever false, our one
+    /// multiply would be silently wrong in colour rather than obviously wrong in code.
+    fn round_trip_v_scale(c: [f32; 3], f: f32) -> [f32; 3] {
+        let (r, g, b) = (c[0], c[1], c[2]);
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        let v = max;
+        let sat = if max == 0.0 { 0.0 } else { (max - min) / max };
+        let hue = if max == min {
+            0.0
+        } else if max == r {
+            60.0 * (((g - b) / (max - min)) % 6.0)
+        } else if max == g {
+            60.0 * ((b - r) / (max - min) + 2.0)
+        } else {
+            60.0 * ((r - g) / (max - min) + 4.0)
+        };
+        // V *= f, H and S untouched — the reference's `0x6d1620`.
+        let v = v * f;
+        // HSV -> RGB
+        let cc = v * sat;
+        let x = cc * (1.0 - (((hue / 60.0) % 2.0) - 1.0).abs());
+        let m = v - cc;
+        let (r1, g1, b1) = match (hue / 60.0).floor() as i32 {
+            0 => (cc, x, 0.0),
+            1 => (x, cc, 0.0),
+            2 => (0.0, cc, x),
+            3 => (0.0, x, cc),
+            4 => (x, 0.0, cc),
+            _ => (cc, 0.0, x),
+        };
+        [r1 + m, g1 + m, b1 + m]
+    }
+
+    /// The reference scales HSV **V** alone; we transcribe that as a plain RGB multiply. This is an
+    /// identity, not an approximation — and the round trip above says so for real colours,
+    /// including the degenerate greys and blacks where the hue is undefined.
+    #[test]
+    fn the_hsv_detour_is_a_plain_multiply() {
+        let colours = [
+            [0.8, 0.4, 0.1],
+            [0.1, 0.1, 0.1],
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [0.2, 0.9, 0.55],
+            [0.0, 0.3, 0.7],
+        ];
+        for c in colours {
+            for f in [1.0f32, 0.875, 0.75, 0.5] {
+                let want = round_trip_v_scale(c, f);
+                let got = hsv_value_scale(c, f);
+                for i in 0..3 {
+                    assert!(
+                        (want[i] - got[i]).abs() < 1e-6,
+                        "{c:?} × {f}: HSV round trip {want:?} vs multiply {got:?}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

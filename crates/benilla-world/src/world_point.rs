@@ -94,6 +94,7 @@ pub struct WorldPoint<'w, 's> {
 /// else answers.
 pub fn init_world_point_resources(world: &mut bevy::prelude::World) {
     world.init_resource::<Underwater>();
+    world.init_resource::<crate::liquid::SubmergedEye>();
     world.init_resource::<PlayerWmoRoom>();
     world.init_resource::<CameraInteriorClaim>();
     world.init_resource::<bevy::prelude::Assets<benilla_assets::WmoModel>>();

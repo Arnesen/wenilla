@@ -279,9 +279,21 @@ pub struct UnitState {
     /// only one that can name a shipped `UI-PVP-<group>` texture. `None` for Monster/neutral
     /// templates is a state the icon callers explicitly handle (`if ( factionGroup and … )`).
     ///
-    /// The Era binding returns it twice — English token first, localized name second; enUS ships
-    /// the same word for both (FactionGroup.dbc's `InternalName` and `Name0`).
+    /// This is the **English** half — FactionGroup.dbc's `InternalName` — because that is what
+    /// `UnitFactionGroup`'s first return must carry: every stock consumer concatenates it into a
+    /// texture path (`"…\UI-PVP-"..factionGroup` at `PlayerFrame.lua:68`, `TargetFrame.lua:198`,
+    /// `PartyMemberFrame.lua:125`; `"…\Battleground-"..` at `BattlefieldFrame.lua:195`), and
+    /// `HonorFrame.lua:68` compares it against the literal `"Alliance"`.
+    ///
+    /// This field's doc used to say the binding "returns it twice … enUS ships the same word for
+    /// both". That is true of enUS and of nothing else: `Name0` is localized, so on any other
+    /// client the texture path would name a file that does not exist. The localized half lives in
+    /// [`Self::faction_group_localized`] now.
     pub faction_group: Option<String>,
+    /// The **localized** group name — FactionGroup.dbc's `Name0`, and `UnitFactionGroup`'s SECOND
+    /// return, which stock uses as display text (`PlayerFrame.lua`'s PvP hit-area tooltip title).
+    /// Never interchangeable with the English half above.
+    pub faction_group_localized: Option<String>,
     /// The unit's GUID (`OBJECT_FIELD_GUID`) — the identity the cross-token predicates compare
     /// (`UnitIsUnit`, `UnitInParty`; decision 0434 §5's popup gating). `0` = the app's feed didn't
     /// resolve one; two zero guids never compare equal.

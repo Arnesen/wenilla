@@ -266,7 +266,7 @@ fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
             "Interface\\FrameXML\\MerchantFrame.xml",
             // The loot window is the reference's own since 1751 — `test_ui::LOOT_UI` carries
             // what it needs and why, and PartyFrame's `MAX_PARTY_MEMBERS` is needed at LOAD.
-            "UIDropDownMenu.xml",
+            "Interface\\FrameXML\\UIDropDownMenu.xml",
             "UnitPopup.xml",
             "Interface\\FrameXML\\TextStatusBar.lua",
             "Interface\\FrameXML\\TextStatusBar.xml",
@@ -547,7 +547,7 @@ fn escape_during_a_countdown_cancels_it_and_does_not_open_the_menu() {
 fn the_world_map_cannot_open_behind_the_menu_and_gives_its_slot_back() {
     let s = harness_with(&[
         "GameTooltip.xml",
-        "UIDropDownMenu.xml", // the map's continent/zone pickers initialize into it at OnLoad
+        "Interface\\FrameXML\\UIDropDownMenu.xml", // the map's continent/zone pickers initialize into it at OnLoad
         "ScrollTemplates.xml",
         "WorldMapFrame.xml",
     ]);
@@ -595,7 +595,7 @@ fn the_world_map_cannot_open_behind_the_menu_and_gives_its_slot_back() {
 fn nothing_opens_behind_the_world_map_and_escape_closes_it_first() {
     let s = harness_with(&[
         "GameTooltip.xml",
-        "UIDropDownMenu.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
         "WorldMapFrame.xml",
         "Interface\\FrameXML\\MerchantFrame.xml",
@@ -772,7 +772,7 @@ fn backpack() -> ContainerState {
 fn the_menu_rides_the_shared_era_window_scale() {
     let mut s = harness_with(&[
         "GameTooltip.xml",
-        "UIDropDownMenu.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
         "KeyBindingsPage.xml",
         "OptionsFrame.xml",

@@ -23,7 +23,7 @@ fn load_popup_frames(s: &UiScript) {
         // reaches at LOAD (its tab row and its confirm dialogs).
         "UiPanels.xml",
         "GameTooltip.xml",
-        "UIDropDownMenu.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
         "UnitPopup.xml",
         "Interface\\FrameXML\\ItemRef.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
@@ -467,7 +467,7 @@ fn load_pet_menu_frames(s: &UiScript) {
         "MoneyFrame.xml",
         "UiPanels.xml",
         "GameTooltip.xml",
-        "UIDropDownMenu.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
         "UnitPopup.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",

@@ -47,32 +47,25 @@ pub(crate) fn harness() -> UiScript {
         "MoneyFrame.xml",
         "UiPanels.xml",
         "GameTooltip.xml",
-        "UIDropDownMenu.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
         "UIParent.xml",
         "KeyBindingsPage.xml",
         "OptionsFrame.xml",
         "GameMenuFrame.xml",
     ] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(
-            report.errors.is_empty(),
-            "{file}: loader errors: {:?}",
-            report.errors
-        );
+        // `test_ui::load_ui`, not a local read: a manifest entry carrying a path separator is the
+        // REFERENCE's own file and must come off the player's chain, which
+        // `std::fs::read_to_string` under `assets/ui` cannot do — it goes looking for
+        // `assets/ui/Interface/FrameXML/...` and fails. The shared loader resolves both shapes, and
+        // its own doc already records this consolidation happening once before. Hand-rolling it
+        // here is what made this kit break the moment a file it loads migrated (1751).
+        // `load_ui_strict` for the files whose art actually matters here: an unknown template is
+        // a loader WARNING, not an error, so a silently skinless window would otherwise pass.
         if file == "KeyBindingsPage.xml" || file == "OptionsFrame.xml" {
-            assert!(
-                report.warnings.is_empty(),
-                "{file}: loader warnings (dropped subtrees?): {:?}",
-                report.warnings
-            );
+            super::test_ui::load_ui_strict(&s, file);
+        } else {
+            super::test_ui::load_ui(&s, file);
         }
     }
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());

@@ -208,7 +208,7 @@ fn setup() -> UiScript {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "UnitPopup.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, "UIPanelTemplates.xml");

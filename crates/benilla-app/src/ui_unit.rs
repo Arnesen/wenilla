@@ -1005,6 +1005,21 @@ fn rest_state_message(prev: u8, new: u8) -> Option<&'static str> {
 pub(crate) fn faction_group(store: &ObjectStore, factions: Option<&Factions>) -> Option<String> {
     let catalog = factions?.catalog();
     let template = catalog.template(store.0.unit_faction_template()?)?;
+    // The ENGLISH name (`InternalName`), because `UnitFactionGroup`'s first return is concatenated
+    // into a texture path by every stock consumer. The localized twin is below.
+    catalog
+        .faction_group_internal_name(template.group_mask & 6)
+        .map(str::to_string)
+}
+
+/// The localized group name for the same unit — `UnitFactionGroup`'s SECOND return, which stock
+/// shows as text rather than building a path from.
+pub(crate) fn faction_group_localized(
+    store: &ObjectStore,
+    factions: Option<&Factions>,
+) -> Option<String> {
+    let catalog = factions?.catalog();
+    let template = catalog.template(store.0.unit_faction_template()?)?;
     catalog
         .faction_group_name(template.group_mask & 6)
         .map(str::to_string)
@@ -1239,6 +1254,7 @@ fn feed_units(
         s.guid = guid.0;
         s.raid_target = group.raid_target_index(guid.0);
         s.faction_group = faction_group(store, factions.as_deref());
+        s.faction_group_localized = faction_group_localized(store, factions.as_deref());
         // `GetGuildInfo("player")` — the unit's own PUBLIC descriptor fields (191/192) joined
         // against the app's guild-identity cache, which the miss also asks for (decision 1257).
         // Filled here rather than in `snapshot` for the reason `faction_group` and `can_attack`
@@ -1292,6 +1308,7 @@ fn feed_units(
         s.is_connected = true; // see the player leg
         s.raid_target = group.raid_target_index(guid);
         s.faction_group = faction_group(store, factions.as_deref());
+        s.faction_group_localized = faction_group_localized(store, factions.as_deref());
         // The byte-confirmed CanAttack 0x606980 (decision 0172) — the same predicate TAB and the
         // combat flash run; `UnitCanAttack("player","target")` gates the target frame's
         // difficulty-colored level (ref TargetFrame_CheckLevel).
@@ -1345,6 +1362,7 @@ fn feed_units(
             s.is_connected = true; // see the player leg
             s.raid_target = group.raid_target_index(guid);
             s.faction_group = faction_group(store, factions.as_deref());
+            s.faction_group_localized = faction_group_localized(store, factions.as_deref());
             s.can_attack = crate::target::can_attack(
                 Some(store),
                 factions.as_deref(),
@@ -1432,6 +1450,7 @@ fn feed_units(
             s.is_connected = true;
             s.raid_target = group.raid_target_index(guid);
             s.faction_group = faction_group(store, factions.as_deref());
+            s.faction_group_localized = faction_group_localized(store, factions.as_deref());
             s.can_attack = crate::target::can_attack(
                 Some(store),
                 factions.as_deref(),

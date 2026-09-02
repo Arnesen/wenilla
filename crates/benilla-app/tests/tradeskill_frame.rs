@@ -15,7 +15,7 @@ use benilla_ui::script::{
     TradeSkillRecipe, TradeSkillState, UiScript,
 };
 
-const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
+mod common;
 
 /// The tradeskill window's load prefix — the app's own order (`ui_script/mod.rs`), members only.
 /// CraftFrame.xml rides along (it loads right after TradeSkillFrame.xml in the app and shares
@@ -25,34 +25,18 @@ const FILES: [&str; 8] = [
     "MoneyFrame.xml",
     "UiPanels.xml",
     "GameTooltip.xml",
-    "UIDropDownMenu.xml",
+    "Interface\\FrameXML\\UIDropDownMenu.xml",
     "ScrollTemplates.xml",
     "TradeSkillFrame.xml",
     "CraftFrame.xml",
 ];
 
 fn load_ui(script: &UiScript) {
-    let dir = std::path::Path::new(UI_DIR);
-    let provider = |req: &str| -> Option<Vec<u8>> {
-        let norm = req.replace('\\', "/");
-        let base = norm.rsplit('/').next().unwrap_or(&norm);
-        std::fs::read(dir.join(&norm))
-            .or_else(|_| std::fs::read(dir.join(base)))
-            .ok()
-    };
+    // `common::load_ui`, not a local read: a manifest entry carrying a path separator is the
+    // REFERENCE's own file and has to come off the player's chain, which `std::fs::read` under
+    // `assets/ui` cannot do. This kit gained such an entry when the dropdown migrated (1751).
     for file in FILES {
-        let text = std::fs::read_to_string(dir.join(file)).unwrap_or_else(|e| {
-            panic!("reading {file}: {e}");
-        });
-        let doc = benilla_ui::framexml::parse(&text).unwrap_or_else(|e| {
-            panic!("parsing {file}: {e}");
-        });
-        let report = benilla_ui::loader::load(script, &doc, &provider);
-        assert!(
-            report.errors.is_empty(),
-            "{file} loaded with errors: {:#?}",
-            report.errors
-        );
+        common::load_ui(script, file);
     }
 }
 

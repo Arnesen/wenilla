@@ -304,6 +304,15 @@ pub struct FactionCatalog {
     /// `GetZonePVPInfo`'s territory line formats (`0x48d540` reads FactionGroup.dbc Name of the
     /// row whose bit ∈ the zone's FactionGroupMask; wow-re ui `zonetext-pvpinfo.md`).
     group_names: HashMap<u32, String>,
+    /// The same key → FactionGroup.dbc's **`InternalName`** (field 2), which is English on every
+    /// locale where `Name0` is not. Kept beside the localized map rather than derived from it
+    /// because `UnitFactionGroup` returns BOTH and they are not interchangeable: its first return
+    /// names a TEXTURE — stock builds `"Interface\TargetingFrame\UI-PVP-"..factionGroup`
+    /// (`PlayerFrame.lua:68`, `TargetFrame.lua:198`, `PartyMemberFrame.lua:125`) and
+    /// `"…\Battleground-"..UnitFactionGroup("player")` (`BattlefieldFrame.lua:195`) — so a
+    /// localized string there is a path that does not exist. `HonorFrame.lua:68` compares it to
+    /// the literal `"Alliance"` for the same reason.
+    group_internal_names: HashMap<u32, String>,
     /// Faction id → the localized Name — what the item tooltip's "Requires <Faction> -
     /// <Standing>" line prints.
     names: HashMap<u32, String>,
@@ -348,6 +357,17 @@ impl FactionCatalog {
 
     /// The localized FactionGroup name of the (first) group bit set in `mask` — "Alliance" for 2,
     /// "Horde" for 4; `None` for an unowned mask. The `GetZonePVPInfo` territory-line lookup.
+    /// The **English** group name for a mask — FactionGroup.dbc's `InternalName`. This is the one
+    /// `UnitFactionGroup`'s FIRST return must carry, because callers concatenate it into a texture
+    /// path; [`Self::faction_group_name`] is the localized twin for the second return.
+    pub fn faction_group_internal_name(&self, mask: u32) -> Option<&str> {
+        (0..32)
+            .map(|b| 1u32 << b)
+            .filter(|bit| mask & bit != 0)
+            .find_map(|bit| self.group_internal_names.get(&bit))
+            .map(String::as_str)
+    }
+
     pub fn faction_group_name(&self, mask: u32) -> Option<&str> {
         (0..32)
             .map(|b| 1u32 << b)
@@ -499,10 +519,16 @@ pub fn load_faction_catalog(chain: &mut Chain) -> Result<FactionCatalog> {
         .with_context(|| format!("reading {FACTION_GROUP}"))?;
     let rs = parse(&bytes, faction_group_schema(), "FactionGroup")?;
     let mut group_names = HashMap::with_capacity(rs.records().len());
+    let mut group_internal_names = HashMap::with_capacity(rs.records().len());
     for r in rs.records() {
         let (Some(mask_id), Some(name)) = (u32_at(r, 1), crate::dbc::str_at(&rs, r, 3)) else {
             continue;
         };
+        // Field 2 is `InternalName`, field 3 is `Name0` — see the schema above. Both are read
+        // because `UnitFactionGroup` returns the pair and only the localized half was kept before.
+        if let Some(internal) = crate::dbc::str_at(&rs, r, 2) {
+            group_internal_names.insert(1u32 << mask_id, internal);
+        }
         group_names.insert(1u32 << mask_id, name);
     }
 
@@ -510,6 +536,7 @@ pub fn load_faction_catalog(chain: &mut Chain) -> Result<FactionCatalog> {
         templates,
         factions,
         group_names,
+        group_internal_names,
         names,
         descriptions,
     })

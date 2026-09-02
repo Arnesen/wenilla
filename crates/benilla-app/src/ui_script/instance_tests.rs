@@ -87,7 +87,7 @@ fn the_self_menu_row_gates_on_the_binding_and_confirms_before_sending() {
         "MoneyFrame.xml",
         "UiPanels.xml",
         "GameTooltip.xml",
-        "UIDropDownMenu.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
         "UnitPopup.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",

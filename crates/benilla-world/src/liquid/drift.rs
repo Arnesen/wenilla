@@ -418,7 +418,9 @@ fn simulate_drift(
             Submersion::Dry => {}
             // Slime disables outright, with no re-scatter (`0x680b6f`).
             Submersion::Slime => cloud.mode = None,
-            Submersion::Water => {
+            // Water and ocean share the drift cloud's whole configuration — the mote cell set is
+            // keyed on liquid types 0 AND 1 (`[0x86a0a0]`), so the sea drifts exactly like a lake.
+            Submersion::Water | Submersion::Ocean => {
                 cloud.scatter(DriftMode::Water);
                 cloud.last_cam = eye;
             }

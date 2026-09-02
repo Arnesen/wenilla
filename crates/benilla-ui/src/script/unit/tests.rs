@@ -586,7 +586,34 @@ fn faction_group_pair_and_the_pvp_toggle() {
     let (english, localized) = s
         .eval::<(String, String)>(r#"return UnitFactionGroup("target")"#)
         .unwrap();
+    // With no localized name fed, the second return falls back to the English one rather than nil:
+    // FactionGroup.dbc leaves `Name0` empty for some rows, and nil here would blank a tooltip the
+    // reference fills.
     assert_eq!((english.as_str(), localized.as_str()), ("Horde", "Horde"));
+
+    // **The two halves are DIFFERENT fields and this is the assertion that says so.** They are
+    // FactionGroup.dbc's `InternalName` and `Name0`; only on enUS do they hold the same word, which
+    // is why returning one twice went unnoticed. The first is concatenated into a texture path by
+    // every stock consumer (`"…\UI-PVP-"..factionGroup` — PlayerFrame.lua:68, TargetFrame.lua:198,
+    // PartyMemberFrame.lua:125; `"…\Battleground-"..` — BattlefieldFrame.lua:195), so a localized
+    // string there names a file that does not exist. This fixture is a deDE-shaped client.
+    s.set_unit(
+        "target",
+        Some(UnitState {
+            exists: true,
+            faction_group: Some("Horde".into()),
+            faction_group_localized: Some("Horde-Allianz".into()),
+            ..Default::default()
+        }),
+    );
+    let (english, localized) = s
+        .eval::<(String, String)>(r#"return UnitFactionGroup("target")"#)
+        .unwrap();
+    assert_eq!(
+        (english.as_str(), localized.as_str()),
+        ("Horde", "Horde-Allianz"),
+        "the FIRST return is the English InternalName — a texture path is built from it"
+    );
 
     // No side (a Monster/neutral template, or a unit whose template hasn't streamed).
     s.set_unit(

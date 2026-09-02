@@ -182,7 +182,7 @@ fn escape_closes_the_options_window_before_opening_the_menu() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the Keybindings page's faux-scroll kit (1008)
     load_xml(&s, "KeyBindingsPage.xml");
     load_xml(&s, "OptionsFrame.xml");
@@ -311,7 +311,7 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
     }
     // GameTooltip.xml (BAG_UI's, for the bag slots' tooltips) also carries TOOLTIP_DEFAULT_COLOR,
     // which the dropdown backdrop's OnLoad reads — so the kit can load straight after it.
-    load_xml(&s, "UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
@@ -329,7 +329,14 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
     // Press 0 — mid-cast with a dropdown open (the ref's CloseMenus rung, l.1488): the menu
     // closes and eats the press — the cast, the windows, and the target all survive.
     s.set_casting(true);
-    s.run("DropDownList1:Show()").unwrap();
+    // `maxWidth` before the Show: stock `DropDownList`'s own `<OnShow>` sizes every button from it
+    // (ref UIDropDownMenuTemplates.xml:237-245), and `UIDropDownMenu_Initialize` is what normally
+    // sets it — so showing the list bare raises `SetWidth(nil)` in the real client too. Our deleted
+    // transcription had no such OnShow, which is why a bare Show worked here before. The subject of
+    // this test is the ESC ladder, not the menu's construction, so it sets the one field the show
+    // path reads rather than standing up a whole anchored dropdown.
+    s.run("DropDownList1.maxWidth = 100 DropDownList1:Show()")
+        .unwrap();
     s.run("ToggleGameMenu()").unwrap();
     assert!(
         !s.eval::<bool>("return DropDownList1:IsShown()").unwrap(),

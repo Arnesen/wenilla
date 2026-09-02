@@ -139,7 +139,7 @@ pub(super) const LOOT_UI: &[&str] = &[
     "MoneyFrame.xml",
     "UiPanels.xml", // StaticPopup, and the LOOT_BIND / CONFIRM_LOOT_DISTRIBUTION dialogs
     "GameTooltip.xml", // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrop
-    "UIDropDownMenu.xml", // GroupLootDropDown's OnLoad calls UIDropDownMenu_Initialize
+    "Interface\\FrameXML\\UIDropDownMenu.xml", // GroupLootDropDown's OnLoad calls UIDropDownMenu_Initialize
     "UnitPopup.xml",
     // …and what its rows' OnLoad calls: every `PartyMemberFrame<N>` and its pet frame runs
     // `UnitFrame_Initialize`, which lives in UnitFrame.lua and itself calls
@@ -209,7 +209,7 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     // The unit frames' four right-click dropdowns call `UIDropDownMenu_Initialize` at LOAD, so the
     // kit and the menu table it initialises from both precede them — the manifest's own order
     // (175 → 189 → 193 → 263).
-    "UIDropDownMenu.xml",
+    "Interface\\FrameXML\\UIDropDownMenu.xml",
     "Interface\\FrameXML\\UIMenu.xml",
     "UnitPopup.xml",
     "Interface\\FrameXML\\TextStatusBar.lua",

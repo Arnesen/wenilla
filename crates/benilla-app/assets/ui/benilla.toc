@@ -149,10 +149,17 @@ UiPanels.xml
 # requirement: ItemRef.xml below expands one, and so do the 27 corpus addons that name
 # GameTooltipTemplate in an XML inherits=.
 GameTooltip.xml
-# The dropdown kit (0203 phase 2's closing sub-slice, widened for 0434 phase 5):
-# UIDropDownMenuTemplate + DropDownList1/2 + the UIDropDownMenu_* API — before its
-# first customers (the unit popups below, the world map's pickers, the trainer filter).
-UIDropDownMenu.xml
+# ══ THE DROPDOWN KIT — the reference's own, off the player's chain (1751) ══
+# UIDropDownMenuTemplate + the DropDownList frames + the whole `UIDropDownMenu_*` API — before its
+# first customers (the unit popups below, the world map's pickers, the trainer filter). The stock
+# file pulls its own `UIDropDownMenu.lua` and `<Include>`s UIDropDownMenuTemplates.xml, so this one
+# line carries all three. We also gain `DropDownList3`, which our transcription stopped short of.
+#
+# Ours (0203 phase 2, widened for 0434 phase 5) defined every stock global plus six helpers of its
+# own. Five were named nowhere outside the file. The sixth, `CloseMenus`, moved to UiPanels.xml —
+# the reference keeps it in `UIParent.lua`, not its dropdown file, and UiPanels is both where our
+# slice of UIParent.lua lives and ahead of all five of its consumers.
+Interface\FrameXML\UIDropDownMenu.xml
 # ══ THE UIMenu KIT — the reference's own, off the player's chain (1751, window 21) ══
 # `UIMenuTemplate` and `UIMenuButtonTemplate`, with `UIMenu.lua`'s `UIMenu_OnShow`/`_OnUpdate` and
 # the four `UIMenuButton_*` handlers arriving through the file's own `<Script file=>`.

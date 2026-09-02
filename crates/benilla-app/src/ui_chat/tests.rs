@@ -440,7 +440,7 @@ fn chat_vm() -> benilla_ui::script::UiScript {
     for file in [
         "Fonts.xml",
         "GameTooltip.xml",
-        "UIDropDownMenu.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
         // The UIMenu kit is the reference's own file since 1751 window 21, so this reads both
         // stores through the one loader that speaks them.
         "Interface\\FrameXML\\UIMenu.xml",

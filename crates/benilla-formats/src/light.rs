@@ -78,16 +78,43 @@ const SLOT_DEATH: usize = 4;
 const PARAM_SLIME: u32 = 6;
 const PARAM_MAGMA: u32 = 7;
 
+/// The ocean depth ramp's floor — `0x81162c` = −30.0f. Below this the factors hold flat.
+const OCEAN_RAMP_FLOOR: f32 = -30.0;
+/// The ramp's reciprocal, **as the binary stores it** — the f32 at `0x811628`, bit pattern
+/// `0xbd088889`.
+///
+/// Written from the bits rather than as a decimal on purpose. The decimal wow-re quotes
+/// (`−0.0333333351`) carries more digits than an f32 holds, so spelling it out is both a clippy
+/// `excessive_precision` error and a small lie about what is in the file; and rounding it to
+/// `−0.033_333_335` would read as a value someone chose. `from_bits` says the true thing: this
+/// constant is a bit pattern lifted out of the image. (It happens to equal `-1.0f32 / 30.0` — see
+/// [`Submersion::ocean_depth_factors`] for why that is not the point.)
+const OCEAN_RAMP_RECIP: f32 = f32::from_bits(0xbd08_8889);
+
 /// What the camera eye is submerged in, if anything — the atmosphere selector. Water and ocean pick
 /// the zone's *underwater slot*; magma and slime replace the whole area blend with a fixed global row
 /// (see [`PARAM_MAGMA`]/[`PARAM_SLIME`]).
+///
+/// **Five states, because the reference has five.** `[0xc7f288] ∈ {0xf dry, 0 water, 1 ocean,
+/// 2 magma, 3 slime}` — and ocean is not a synonym for water. It is the only kind that runs the
+/// depth ramp ([`Submersion::ocean_depth_factors`]), which is gated on the **full unmasked dword
+/// `== 1`** at `0x6d2821` (not the nibble — `0x11` would pass a nibble test and must not). Every
+/// other consumer image-wide treats the two alike, so this enum forks in exactly one place, which
+/// is the shape of the finding.
+///
+/// Collapsing them, as we did until decision 1829, was not a small approximation: ocean is
+/// **96.8% of every wet sub-tile** in the shipped corpus (14 069 166 of 14 528 712). The state we
+/// were not modelling was essentially all open water.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Submersion {
     /// Dry — the ordinary clear/storm slot.
     #[default]
     Dry,
-    /// Under water, ocean or rapids: the zone's own underwater `LightParams`, area-blended as usual.
+    /// Under still water or rapids: the zone's own underwater `LightParams`, area-blended as usual.
     Water,
+    /// Under **ocean**: the same underwater slot as [`Self::Water`], plus the depth ramp. Comes
+    /// only from the ADT MCLQ per-subtile flags (`(b & 0x0f) & 3 == 1`); a WMO cannot author it.
+    Ocean,
     /// Under magma: the fixed global row, verbatim.
     Magma,
     /// Under slime: the fixed global row, verbatim.
@@ -107,25 +134,63 @@ impl Submersion {
     /// Deliberately NOT [`Self::any`]: whether the reference swaps the submerged ambience bed and the
     /// reverb preset for **lava and slime** as well is unverified, and widening it silently on the way
     /// past would be inventing a behaviour. The atmosphere is verified per kind; the audio is not.
+    ///
+    /// [`Submersion::Ocean`] belongs here with [`Submersion::Water`]: the split exists for the depth
+    /// ramp alone, and every other consumer — the underwater slot, the ambience bed, the reverb
+    /// column, the drift cloud's cell set — treats a sea exactly like a lake.
     pub fn is_water(self) -> bool {
-        self == Submersion::Water
+        matches!(self, Submersion::Water | Submersion::Ocean)
+    }
+
+    /// The **ocean depth ramp** — the one thing ocean does that water does not (wow-re
+    /// `lighting/scratch/submerged-atmosphere.md` §3, VERIFIED; decision 1829).
+    ///
+    /// Returns `(fac1, fac2)`, the multipliers on the committed light record's first and second
+    /// colour triples — `DNState+0x178 × fac1` and `DNState+0x174 × fac2`. `fac1` runs `1.0 → 0.5`
+    /// and `fac2` runs `1.0 → 0.75` over the first 30 yards of depth, so the fill darkens twice as
+    /// fast as the direct term and a deep sea goes flat as well as dim.
+    ///
+    /// **A multiply by the stored constant, not a divide by 30.** wow-re's note says
+    /// "`−0.0333333351f` is not exactly −1/30 — a bit-exact reimplementation must use the stored
+    /// f32, not `t/30.0`". The conclusion is right and the reason as stated is not, which matters
+    /// because it changes what you have to be careful about: `0xbd088889` **is** the nearest f32 to
+    /// −1/30, bit for bit. What differs is the *operation* — `t · recip` and `t / 30.0` round
+    /// differently, and they disagree inside the ramp's own range (at `t = −29` by 6e−8 in `k`).
+    /// So the thing to transcribe is the multiply, and the constant is incidental.
+    ///
+    /// The boundaries are exact, not near-misses: `k` reaches exactly `0.0` at −30 yd, so `fac1`
+    /// bottoms at exactly 0.5 and `fac2` at exactly 0.75.
+    ///
+    /// **Not the fog colour.** The binary commits this ramp to three slots, but the fog-colour one
+    /// (`0x6d28b0` → `DNState+0x70`) is dead: `0x66ff60` calls the tint and *then* calls `0x6cee30`,
+    /// whose `0x6cee76` unconditionally overwrites that slot from the band-derived colour. The
+    /// underwater murk colour reaches the screen through the LightParams slot switch we already
+    /// have; this ramp darkens two light bands and nothing else.
+    pub fn ocean_depth_factors(self, eye_z: f32) -> Option<(f32, f32)> {
+        if self != Submersion::Ocean {
+            return None;
+        }
+        let t = eye_z.clamp(OCEAN_RAMP_FLOOR, 0.0);
+        let k = 1.0 - t * OCEAN_RAMP_RECIP;
+        Some(((k + 1.0) * 0.5, k * 0.25 + 0.75))
     }
 
     /// The fixed global `LightParams` row this submersion replaces the whole blend with, if any.
-    /// `None` for [`Submersion::Dry`] and [`Submersion::Water`], which go through the slot selection.
+    /// `None` for the dry and water-kind states, which go through the slot selection.
     fn fixed_param(self) -> Option<u32> {
         match self {
             Submersion::Magma => Some(PARAM_MAGMA),
             Submersion::Slime => Some(PARAM_SLIME),
-            Submersion::Dry | Submersion::Water => None,
+            Submersion::Dry | Submersion::Water | Submersion::Ocean => None,
         }
     }
 }
 
 /// Pick the `LightParams` slot for the current ghost/weather/submersion state (see `SLOT_*`).
 /// Ghost wins outright — the client keeps ONE active slot, and the ghost watcher owns it while
-/// the flag is up. Only [`Submersion::Water`] reaches the underwater slots; the fullbright liquids
-/// never get here (their fixed row short-circuits the blend).
+/// the flag is up. Only a **water kind** reaches the underwater slots (water or ocean alike — the
+/// slot switch does not distinguish them); the fullbright liquids never get here (their fixed row
+/// short-circuits the blend).
 fn weather_slot(ghost: bool, stormy: bool, underwater: bool) -> usize {
     if ghost {
         return SLOT_DEATH;
@@ -539,7 +604,7 @@ impl LightCatalog {
                 return self.sample_param(p, time);
             }
         }
-        let slot = weather_slot(ghost, stormy, submersion == Submersion::Water);
+        let slot = weather_slot(ghost, stormy, submersion.is_water());
         let atmo_of = |l: &Light| -> Option<Atmosphere> {
             // Fall back to the clear slot if the requested slot is unset for this light (e.g. a zone
             // with no dedicated underwater param degrades to the above-water atmosphere).
@@ -904,6 +969,98 @@ impl LightCatalog {
                 .copied()
                 .unwrap_or(d.highlight_sky),
         }
+    }
+}
+
+#[cfg(test)]
+mod ocean_tests {
+    use super::*;
+
+    /// The ramp's shape: both factors are 1.0 at the surface, bottom out at 30 yards, and hold flat
+    /// below. `fac1` (the first light triple) halves; `fac2` (the second) only drops to 0.75 — the
+    /// fill darkens twice as fast as the direct term, which is what makes a deep sea read flat as
+    /// well as dim.
+    #[test]
+    fn the_ocean_ramp_runs_over_thirty_yards_and_then_holds() {
+        let f = |z: f32| Submersion::Ocean.ocean_depth_factors(z).unwrap();
+        let (a, b) = f(0.0);
+        assert_eq!(
+            (a, b),
+            (1.0, 1.0),
+            "at the surface the ramp is the identity"
+        );
+        // Above the surface clamps to the identity too — the ramp never brightens.
+        assert_eq!(f(12.0), (1.0, 1.0));
+        let (a30, b30) = f(-30.0);
+        assert!((a30 - 0.5).abs() < 1e-6 && (b30 - 0.75).abs() < 1e-6);
+        assert_eq!(f(-100.0), (a30, b30), "below 30 yd it holds flat");
+        // Linear, and fac1 falls exactly twice as fast as fac2.
+        let (a15, b15) = f(-15.0);
+        assert!((a15 - 0.75).abs() < 1e-6 && (b15 - 0.875).abs() < 1e-6);
+        assert!(((1.0 - a15) - 2.0 * (1.0 - b15)).abs() < 1e-6);
+    }
+
+    /// GOLDEN — the binary's own constant, and the reason it has to be a MULTIPLY.
+    ///
+    /// wow-re's note warns that `−0.0333333351f` "is not exactly −1/30" and that a bit-exact port
+    /// must use the stored f32 rather than `t/30.0`. The warning is worth heeding and its stated
+    /// reason is not the real one: that bit pattern IS the nearest f32 to −1/30. The hazard is the
+    /// operation, not the operand — `t · recip` and `t / 30.0` round differently, and they disagree
+    /// *inside* the ramp's range, so a port that "simplifies" the multiply into a divide drifts.
+    /// This test pins both halves so neither can be tidied away.
+    #[test]
+    fn the_ramp_multiplies_by_the_binarys_own_reciprocal() {
+        assert_eq!(OCEAN_RAMP_RECIP.to_bits(), 0xbd088889);
+        assert_eq!(
+            OCEAN_RAMP_RECIP,
+            -1.0f32 / 30.0,
+            "the constant itself is just the nearest f32 to -1/30"
+        );
+        // …and yet the two forms are not interchangeable. -29 yd is a witness inside the range.
+        let t = -29.0f32;
+        assert_ne!(
+            1.0 - t * OCEAN_RAMP_RECIP,
+            1.0 + t / 30.0,
+            "multiply and divide must be observably different, or the warning is empty"
+        );
+        // The boundaries land exactly, with no f32 residue to explain away.
+        assert_eq!(
+            Submersion::Ocean.ocean_depth_factors(-30.0).unwrap(),
+            (0.5, 0.75)
+        );
+    }
+
+    /// The ramp is OCEAN'S ALONE — the gate is the full unmasked dword `== 1` (`0x6d2821`), and
+    /// every other state, still water included, is untouched at any depth.
+    #[test]
+    fn only_ocean_ramps() {
+        for s in [
+            Submersion::Dry,
+            Submersion::Water,
+            Submersion::Magma,
+            Submersion::Slime,
+        ] {
+            assert!(
+                s.ocean_depth_factors(-30.0).is_none(),
+                "{s:?} must not ramp"
+            );
+        }
+    }
+
+    /// The split exists for the ramp and nothing else: everywhere a *water kind* is the question,
+    /// ocean answers with water — the underwater LightParams slot, the ambience bed, the reverb
+    /// column. And neither takes a fixed global row, which is what magma and slime do.
+    #[test]
+    fn ocean_is_a_water_kind_everywhere_but_the_ramp() {
+        assert!(Submersion::Ocean.is_water() && Submersion::Water.is_water());
+        assert!(!Submersion::Magma.is_water() && !Submersion::Slime.is_water());
+        assert!(Submersion::Ocean.any());
+        assert_eq!(Submersion::Ocean.fixed_param(), None);
+        assert_eq!(
+            weather_slot(false, false, Submersion::Ocean.is_water()),
+            SLOT_CLEAR_UNDERWATER,
+            "ocean reaches the underwater slot exactly as water does"
+        );
     }
 }
 

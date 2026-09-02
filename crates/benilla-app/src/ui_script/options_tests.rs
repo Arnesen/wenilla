@@ -44,33 +44,24 @@ fn harness_on(mut s: UiScript) -> UiScript {
         "MoneyFrame.xml",
         "UiPanels.xml",
         "GameTooltip.xml",
-        "UIDropDownMenu.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml", // the Keybindings page's faux-scroll kit
         "KeyBindingsPage.xml", // the Keybindings body's templates + script (1008)
         "OptionsFrame.xml",
         "GameMenuFrame.xml",
     ] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(
-            report.errors.is_empty(),
-            "{file}: loader errors: {:?}",
-            report.errors
-        );
+        // `test_ui::load_ui`, not a local read: a manifest entry carrying a path separator is the
+        // REFERENCE's own file and must come off the player's chain, which
+        // `std::fs::read_to_string` under `assets/ui` cannot do — it goes looking for
+        // `assets/ui/Interface/FrameXML/...` and fails. The shared loader resolves both shapes, and
+        // its own doc already records this consolidation happening once before. Hand-rolling it
+        // here is what made this kit break the moment a file it loads migrated (1751).
         // The dialect announces DROPPED subtrees as warnings, not errors — for the new file,
-        // a warning is a silently-missing piece of chrome, so it fails here.
+        // a warning is a silently-missing piece of chrome, so it fails there.
         if file == "OptionsFrame.xml" {
-            assert!(
-                report.warnings.is_empty(),
-                "{file}: loader warnings (dropped subtrees?): {:?}",
-                report.warnings
-            );
+            super::test_ui::load_ui_strict(&s, file);
+        } else {
+            super::test_ui::load_ui(&s, file);
         }
     }
     // The app's own post-load pass, at the app's own moment: everything is loaded, so
@@ -726,7 +717,7 @@ fn interface_harness() -> UiScript {
             // these again after these — re-running a UI file is what `/reload` does, and the
             // loader takes it.
             "GameTooltip.xml",
-            "UIDropDownMenu.xml",
+            "Interface\\FrameXML\\UIDropDownMenu.xml",
             "UnitPopup.xml",
             "Interface\\FrameXML\\TextStatusBar.lua",
             "Interface\\FrameXML\\TextStatusBar.xml",
@@ -772,7 +763,7 @@ fn chat_harness() -> UiScript {
             "UiPanels.xml",
             "UIParent.xml",
             "GameTooltip.xml",
-            "UIDropDownMenu.xml",
+            "Interface\\FrameXML\\UIDropDownMenu.xml",
             "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
             "ChatFrame.xml",
         ],
