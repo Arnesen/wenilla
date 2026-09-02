@@ -17,7 +17,8 @@ fn load_unit_frames(s: &UiScript) {
     load_xml(s, "UIParent.xml");
     // The bars' numerals machinery (decision 1082), which the manifest loads immediately ahead of
     // UnitFrames.xml and which every bar's OnLoad wires into since 1143.
-    load_xml(s, "TextStatusBar.xml");
+    load_xml(s, "Interface\\FrameXML\\TextStatusBar.lua");
+    load_xml(s, "Interface\\FrameXML\\TextStatusBar.xml");
     load_xml(s, "GameTooltip.xml");
     load_xml(s, "UIDropDownMenu.xml");
     load_xml(s, "UnitPopup.xml");
@@ -1516,8 +1517,13 @@ fn status_bar_text_paints_the_player_numerals_but_not_the_targets() {
         .unwrap();
     assert!(shown(&s, "TargetFrameHealthBarText"));
     assert_eq!(text(&s, "TargetFrameHealthBarText"), "50 / 100");
-    s.run("BenillaUnitFrameBar_OnLeave(TargetFrameHealthBar)")
-        .unwrap();
+    // `this` bound, as the engine binds it for a bar's own `<OnLeave>`: the stock
+    // `HideTextStatusBarText` reads `this.isZero` on one line where every other reads `bar`
+    // (TextStatusBar.lua:95 — the reference's own slip; a nil index only from bare Lua).
+    s.run(
+        "this = TargetFrameHealthBar BenillaUnitFrameBar_OnLeave(TargetFrameHealthBar) this = nil",
+    )
+    .unwrap();
     assert!(
         !shown(&s, "TargetFrameHealthBarText"),
         "and go away again — the lockShow refcount balances"
@@ -1535,8 +1541,10 @@ fn status_bar_text_paints_the_player_numerals_but_not_the_targets() {
         shown(&s, "PlayerFrameHealthBarText"),
         "hover shows them even with the option off"
     );
-    s.run("BenillaUnitFrameBar_OnLeave(PlayerFrameHealthBar)")
-        .unwrap();
+    s.run(
+        "this = PlayerFrameHealthBar BenillaUnitFrameBar_OnLeave(PlayerFrameHealthBar) this = nil",
+    )
+    .unwrap();
     assert!(!shown(&s, "PlayerFrameHealthBarText"));
     s.run("SetCVar(\"statusBarText\", \"1\", \"STATUS_BAR_TEXT\")")
         .unwrap();

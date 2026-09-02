@@ -115,28 +115,19 @@ const MOUSE_HANDLERS: &[&str] = &[
     "OnDragStart",
 ];
 
-/// Widget kinds whose **constructor** enables the mouse, so an element of that tag needs no
+/// Whether an element's TAG is a widget kind the constructor mouse-enables — so it needs no
 /// `enableMouse` and no handler to be clickable.
 ///
-/// This is deliberately the SAME list [`benilla_ui::widget::WidgetArena::create`] uses, and it has
-/// to be: both are one claim about the client's ctors (`CSimpleButton`/`CSimpleEditBox` enable
-/// input in theirs; a `Slider` thumb must be draggable; a scroll frame takes the wheel — each
-/// carries its own citation there). Reading the engine's list here means a wrong entry is wrong in
-/// one place rather than two, and the sweep never reports a divergence that is only the two models
-/// disagreeing with each other.
-///
-/// It is also what answers the chat window: `ChatFrame1` is a `ScrollingMessageFrame`, so the
-/// reference's takes the mouse from its ctor even though `FloatingChatFrameTemplate` writes
-/// `enableMouse="false"` — which is a no-op, the XML path only ever ENABLES
-/// (`scripts-auto-enable.md` §1.3). That is how a 1.12 chat link is clickable at all.
-const MOUSE_BY_CTOR: &[&str] = &[
-    "Button",
-    "CheckButton",
-    "EditBox",
-    "ScrollingMessageFrame",
-    "ScrollFrame",
-    "Slider",
-];
+/// **Answered by the engine, not by a copy of its list.** This used to be a `MOUSE_BY_CTOR` array
+/// here whose own comment said it was "deliberately the SAME list `WidgetArena::create` uses… so a
+/// wrong entry is wrong in one place rather than two". It was a second list, and it drifted
+/// silently the first time the engine's was edited — this sweep then reported six scroll frames as
+/// divergences that were only the two models disagreeing with each other, which is precisely what
+/// the comment claimed could not happen.
+fn tag_mouse_enabled_by_ctor(tag: &str) -> bool {
+    benilla_ui::script::frame_kind_from_tag(tag)
+        .is_some_and(benilla_ui::widget::mouse_enabled_by_ctor)
+}
 
 /// One accepted difference between benilla and the reference, with the reason it is accepted.
 ///
@@ -184,6 +175,102 @@ const KNOWN: &[Known] = &[
         why:
             "the reference bar inherits TextStatusBar, whose OnEnter/OnLeave show the value text; \
               ours is a plain StatusBar. Wants the status-text arc, not the flag.",
+    },
+    // Seven `*ScrollFrame` mouse entries RETIRED here (1795). They read "our faux scroll pane is a
+    // Frame with an explicit `<OnMouseWheel>`, not a ScrollFrame" — a divergence that existed only
+    // because OUR `ScrollFrame` ctor took the mouse and the reference's does not. Correcting the
+    // ctor list to the client's made both sides agree, and an accepted divergence that has been
+    // fixed is documentation claiming a defect we do not have.
+    Known {
+        frame: "ChatFrame1",
+        flag: Flag::Mouse,
+        why: "our chat window takes the mouse and the reference's does not. It was believed a \
+              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
+              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
+              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
+              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
+              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
+              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
+              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
+              that is the chat window's own piece of work, not this flag's.",
+    },
+    Known {
+        frame: "ChatFrame2",
+        flag: Flag::Mouse,
+        why: "our chat window takes the mouse and the reference's does not. It was believed a \
+              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
+              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
+              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
+              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
+              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
+              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
+              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
+              that is the chat window's own piece of work, not this flag's.",
+    },
+    Known {
+        frame: "ChatFrame3",
+        flag: Flag::Mouse,
+        why: "our chat window takes the mouse and the reference's does not. It was believed a \
+              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
+              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
+              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
+              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
+              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
+              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
+              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
+              that is the chat window's own piece of work, not this flag's.",
+    },
+    Known {
+        frame: "ChatFrame4",
+        flag: Flag::Mouse,
+        why: "our chat window takes the mouse and the reference's does not. It was believed a \
+              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
+              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
+              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
+              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
+              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
+              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
+              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
+              that is the chat window's own piece of work, not this flag's.",
+    },
+    Known {
+        frame: "ChatFrame5",
+        flag: Flag::Mouse,
+        why: "our chat window takes the mouse and the reference's does not. It was believed a \
+              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
+              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
+              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
+              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
+              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
+              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
+              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
+              that is the chat window's own piece of work, not this flag's.",
+    },
+    Known {
+        frame: "ChatFrame6",
+        flag: Flag::Mouse,
+        why: "our chat window takes the mouse and the reference's does not. It was believed a \
+              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
+              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
+              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
+              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
+              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
+              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
+              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
+              that is the chat window's own piece of work, not this flag's.",
+    },
+    Known {
+        frame: "ChatFrame7",
+        flag: Flag::Mouse,
+        why: "our chat window takes the mouse and the reference's does not. It was believed a \
+              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
+              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
+              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
+              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
+              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
+              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
+              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
+              that is the chat window's own piece of work, not this flag's.",
     },
     Known {
         frame: "TargetofTargetHealthBar",
@@ -242,41 +329,6 @@ const KNOWN: &[Known] = &[
     //
     // The two mail panes are a further step out: ours are flat art with a FontString body, a
     // render approximation MailFrame.xml names at the site, so neither side scrolls them.
-    Known {
-        frame: "FriendsFrameFriendsScrollFrame",
-        flag: Flag::Mouse,
-        why: "our faux scroll pane is a Frame with an explicit <OnMouseWheel>, not a ScrollFrame",
-    },
-    Known {
-        frame: "FriendsFrameIgnoreScrollFrame",
-        flag: Flag::Mouse,
-        why: "as FriendsFrameFriendsScrollFrame",
-    },
-    Known {
-        frame: "GuildListScrollFrame",
-        flag: Flag::Mouse,
-        why: "as FriendsFrameFriendsScrollFrame",
-    },
-    Known {
-        frame: "WhoListScrollFrame",
-        flag: Flag::Mouse,
-        why: "as FriendsFrameFriendsScrollFrame",
-    },
-    Known {
-        frame: "SkillListScrollFrame",
-        flag: Flag::Mouse,
-        why: "as FriendsFrameFriendsScrollFrame",
-    },
-    Known {
-        frame: "ReputationListScrollFrame",
-        flag: Flag::Mouse,
-        why: "as FriendsFrameFriendsScrollFrame",
-    },
-    Known {
-        frame: "QuestLogListScrollFrame",
-        flag: Flag::Mouse,
-        why: "as FriendsFrameFriendsScrollFrame",
-    },
     // ── id ─────────────────────────────────────────────────────────────────────────────────────
     //
     // Empty, and it is worth saying why rather than leaving a bare header. The reference side of
@@ -482,10 +534,7 @@ fn reference_takes_mouse(name: &str, frames: &HashMap<String, Element>) -> bool 
     let Some(el) = frames.get(name) else {
         return false;
     };
-    if MOUSE_BY_CTOR
-        .iter()
-        .any(|t| t.eq_ignore_ascii_case(&el.tag))
-    {
+    if tag_mouse_enabled_by_ctor(&el.tag) {
         return true;
     }
     if resolved_attr(name, frames, "enableMouse", 0).is_some_and(|v| v.eq_ignore_ascii_case("true"))

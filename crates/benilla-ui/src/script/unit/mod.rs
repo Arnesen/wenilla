@@ -173,7 +173,7 @@ pub struct UnitState {
     /// which is the nil leg.
     ///
     /// True for exactly Paladin, Shaman and Druid in 1.12 (Libram, Totem, Idol). It was believed
-    /// here for a long time that no 1.12 class had one; see decision 1785 for how that survived.
+    /// here for a long time that no 1.12 class had one; see decision 1796 for how that survived.
     pub has_relic_slot: bool,
     /// The unit's sex on the `UnitSex` scale: `2` male, `3` female (`1` = neuter/unknown). `0`
     /// (the unfilled default) reports as nil — the API's "can't tell", like [`Self::reaction`].

@@ -565,6 +565,9 @@ fn slot_view(
     // `ItemSubClass.dbc` — the count gate below reads its `DisplayFlags` bit 2. `None` (the DBC
     // failed to load) leaves every bag at 0, which is the plain-bag answer and the safe one.
     sub_classes: Option<&crate::ui_items::ItemSubClasses>,
+    // The player's own `ChrClasses.dbc` relic flag — `find_equip_slot`'s second half (1803). It
+    // decides INVSLOT 17 both ways, so it reaches every fit-rule read rather than one of them.
+    has_relic_slot: bool,
     guid: u64,
     live_id: u32,
 ) -> Option<InvSlotView> {
@@ -630,7 +633,7 @@ fn slot_view(
                 Some(crate::ui_items::item_link_full(
                     entry, 0, roll, 0, &name, t.quality,
                 )),
-                find_equip_slot(t.inventory_type),
+                find_equip_slot(t.inventory_type, has_relic_slot),
                 (t.class, t.subclass),
                 t.placeable_on_action_bar(),
             )
@@ -725,7 +728,14 @@ fn inventory_slots(
     pending: &PendingItemOps,
     names: &mut crate::names::NameCache,
     sub_classes: Option<&crate::ui_items::ItemSubClasses>,
+    classes: Option<&benilla_formats::ChrClasses>,
 ) -> InventorySlots {
+    // Resolved once from the player's own class byte, right here — the store is already in scope,
+    // so nothing new is threaded through the callers for the class half.
+    let has_relic_slot = store
+        .0
+        .unit_class()
+        .is_some_and(|c| classes.is_some_and(|t| t.has_relic_slot(u32::from(c))));
     let mut inv: InventorySlots = Default::default();
     let ammo_id = store.0.player_ammo_id().unwrap_or(0);
     if ammo_id != 0 {
@@ -786,6 +796,7 @@ fn inventory_slots(
             pending,
             names,
             sub_classes,
+            has_relic_slot,
             guid,
             live,
         );
@@ -825,6 +836,10 @@ fn bank_bag_slots(
             pending,
             names,
             sub_classes,
+            // A bank bag slot holds a BAG, and `find_equip_slot(INVTYPE_BAG)` answers the four
+            // bag slots whatever this says — the flag decides INVSLOT 17 alone, which no item in
+            // this band can reach. `false` here is provable, not a default.
+            false,
             guid,
             BANK_BAG_LIVE_FIRST + i as u32,
         );
@@ -941,6 +956,9 @@ pub(crate) fn fire_stat_transitions(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn feed_char(
+    // `ChrClasses.dbc` field 16, for the fit rule's relic half — `ui_items::find_equip_slot`
+    // (1803). Absent client data reads every class as an ordinary ranged wielder.
+    classes: Option<Res<crate::chr_classes::ChrClassTable>>,
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     changed_self: Query<(), (With<SelfPlayer>, Changed<ObjectStore>)>,
@@ -1075,6 +1093,7 @@ pub(crate) fn feed_char(
         &pending,
         &mut names,
         sub_classes.as_deref(),
+        classes.as_deref().map(|t| &t.0),
     );
     let bank_bags = bank_bag_slots(
         store,

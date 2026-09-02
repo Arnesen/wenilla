@@ -191,3 +191,68 @@ fn the_death_countdown_text_rerenders_each_tick() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// **`StaticPopup_Hide`'s and `StaticPopup_FindVisible`'s second argument** (decisions 1793).
+///
+/// Both took `which` alone until the arity scan found the drift. The reference takes `(which,
+/// data)`, and the difference is invisible without a test: Lua discards a surplus argument without
+/// complaint, so a stock caller's `StaticPopup_Hide("CONFIRM_BATTLEFIELD_ENTRY", i)` — the shape
+/// `BattlefieldFrame.lua:120` uses — would have hidden every instance of that dialog instead of
+/// the one it named, and said nothing.
+///
+/// The `multiple` gate is the reference's own and is why `data` is not a plain equality: a kind
+/// declared `multiple` can have several instances up at once and is matched by data; every other
+/// kind has at most one, so its data is never consulted.
+#[test]
+fn hide_and_find_address_one_instance_by_data_only_for_a_multiple_dialog() {
+    let s = setup();
+    s.run(
+        r#"
+        StaticPopupDialogs["T_MULTI"] = { text = "multi", button1 = "Ok", multiple = 1, timeout = 0 }
+        StaticPopupDialogs["T_ONE"]   = { text = "one",   button1 = "Ok", timeout = 0 }
+        a = StaticPopup_Show("T_MULTI") a.data = "alpha"
+        b = StaticPopup_Show("T_MULTI") b.data = "beta"
+        c = StaticPopup_Show("T_ONE")   c.data = "gamma"
+    "#,
+    )
+    .unwrap();
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+
+    // A `multiple` kind is addressed by data — both ways round, so this cannot pass by finding
+    // whichever instance happens to be first.
+    for (data, want) in [("alpha", "a"), ("beta", "b")] {
+        assert!(
+            s.eval::<bool>(&format!(
+                "return StaticPopup_FindVisible(\"T_MULTI\", {data:?}) == {want}"
+            ))
+            .unwrap(),
+            "FindVisible picks the instance carrying {data:?}"
+        );
+    }
+    // …and a data nothing carries finds nothing, rather than the first instance.
+    assert!(s
+        .eval::<bool>(r#"return StaticPopup_FindVisible("T_MULTI", "nobody") == nil"#)
+        .unwrap());
+
+    // Hiding by data takes ONE instance and leaves its sibling up.
+    s.run(r#"StaticPopup_Hide("T_MULTI", "alpha")"#).unwrap();
+    assert!(s
+        .eval::<bool>("return not a:IsShown() and b:IsShown()")
+        .unwrap());
+
+    // No data hides every instance of the kind — which is what every one-argument caller means.
+    s.run(r#"StaticPopup_Hide("T_MULTI")"#).unwrap();
+    assert!(s.eval::<bool>("return not b:IsShown()").unwrap());
+
+    // A NON-multiple kind ignores data entirely: the reference gates the comparison on
+    // `info.multiple`, so a wrong data still finds it.
+    assert!(s
+        .eval::<bool>(r#"return StaticPopup_FindVisible("T_ONE", "wrong") == c"#)
+        .unwrap());
+
+    // An unknown kind answers nil rather than scanning — the reference's own early out.
+    assert!(s
+        .eval::<bool>(r#"return StaticPopup_FindVisible("T_NOPE") == nil"#)
+        .unwrap());
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}

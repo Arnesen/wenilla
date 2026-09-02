@@ -1115,7 +1115,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // a property of the SLOT, not of the player. It pairs with `UnitHasRelicSlot("player")`,
     // which is the class half, and stock reads the two as a conjunction
     // (`PaperDollFrame.lua:680`/`:744`). This comment used to say `UnitHasRelicSlot` is a
-    // later-era concept, always false in vanilla; it is not — decision 1785.
+    // later-era concept, always false in vanilla; it is not — decision 1796.
     g.set(
         "GetInventorySlotInfo",
         lua.create_function(|lua, name: String| {

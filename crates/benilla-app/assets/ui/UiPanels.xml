@@ -1025,10 +1025,24 @@
             return "seconds"
         end
 
-        function StaticPopup_FindVisible(which)
+        -- ref StaticPopup.lua l.1414-1426, `data` included. Ours took `which` alone until 1793
+        -- found the arity drift; the reference's second argument is what makes a `multiple` dialog
+        -- addressable, and dropping it is silent in both directions (Lua discards a surplus
+        -- argument without complaint).
+        --
+        -- The `info.multiple` gate is the reference's own and is why `data` is not simply an
+        -- equality: a dialog kind declared `multiple` can have several instances up at once, so it
+        -- is matched by data; every other kind has at most one, so its data is not consulted at
+        -- all. An unknown `which` answers nil rather than scanning — the reference's own early out.
+        function StaticPopup_FindVisible(which, data)
+            local info = StaticPopupDialogs[which]
+            if not info then
+                return nil
+            end
             for index = 1, STATICPOPUP_NUMDIALOGS do
                 local frame = getglobal("StaticPopup" .. index)
-                if frame:IsShown() and frame.which == which then
+                if frame:IsShown() and frame.which == which
+                    and (not info.multiple or frame.data == data) then
                     return frame
                 end
             end
@@ -1044,11 +1058,19 @@
             return nil
         end
 
-        function StaticPopup_Hide(which)
+        -- ref StaticPopup.lua l.1703-1710, `data` included (1793). With a `data` the reference
+        -- hides only the instance carrying it; without one it hides every instance of the kind,
+        -- which is what every one-argument caller means and gets.
+        --
+        -- Note the reference does NOT test `IsShown()` here, where `FindVisible` does — hiding an
+        -- already-hidden dialog is a no-op, and the missing test is not an oversight to correct:
+        -- `Hide()` on a hidden frame still runs nothing, and adding the guard would change which
+        -- frames the loop touches for no visible difference. Transcribed as it is.
+        function StaticPopup_Hide(which, data)
             for index = 1, STATICPOPUP_NUMDIALOGS do
-                local frame = getglobal("StaticPopup" .. index)
-                if frame:IsShown() and frame.which == which then
-                    frame:Hide()
+                local dialog = getglobal("StaticPopup" .. index)
+                if dialog.which == which and (not data or data == dialog.data) then
+                    dialog:Hide()
                 end
             end
         end

@@ -49,7 +49,7 @@
 //! (`0x54240e`/`0x542446`), so the patch copy is the only one the client can read. Read the base
 //! archive alone — or an early-vanilla 16-column struct — and the flag simply is not there, which
 //! is how "the relic slot post-dates 1.12" became a settled belief in this codebase and stayed one
-//! across two decision records. It is false; see decision 1785. [`CHR_CLASSES_FIELDS`] is what
+//! across two decision records. It is false; see decision 1796. [`CHR_CLASSES_FIELDS`] is what
 //! keeps us on the patch copy, and it is load-bearing, not defensive.
 //!
 //! The flag is engine-enforced, not a UI conceit: `IsValidForSlot 0x5da1d0`'s `slot == 0x11` leg

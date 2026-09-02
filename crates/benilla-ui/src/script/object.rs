@@ -192,12 +192,20 @@ pub(super) fn draw_layer_name(l: DrawLayer) -> &'static str {
     }
 }
 
+/// A widget tag or `CreateFrame` type string → its [`FrameKind`], case- and separator-insensitive
+/// ([`enum_token`]). Public because it is the ONE mapping: `benilla-app`'s `frame_flag_gate` sweep
+/// needs it to ask the engine whether a tag is mouse-enabled by construction, and a second copy
+/// there is exactly what drifted.
+pub fn frame_kind_from_tag(s: &str) -> Option<FrameKind> {
+    frame_kind_from_str(s)
+}
+
 fn frame_kind_from_str(s: &str) -> Option<FrameKind> {
     Some(match enum_token(s).as_str() {
         "FRAME" => FrameKind::Frame,
         "BUTTON" => FrameKind::Button,
         "CHECKBUTTON" => FrameKind::CheckButton,
-        // A real registered type (`0x4959a6`), not an alias for Button — decision 1788. Registering
+        // A real registered type (`0x4959a6`), not an alias for Button — decision 1799. Registering
         // it AS a Button would load `LootFrame.xml` and leave every row dead, because 1.12 has no
         // Lua verb for "take slot N": `LootSlot` is the bind-confirm continuation, hard-wired to
         // `flag = 1`.

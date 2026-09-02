@@ -101,6 +101,7 @@ mod model;
 mod modelframe;
 mod net_stats;
 mod object;
+pub use object::frame_kind_from_tag;
 mod party;
 mod pet;
 mod petition;

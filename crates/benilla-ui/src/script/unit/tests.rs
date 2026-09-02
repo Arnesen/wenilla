@@ -1295,7 +1295,7 @@ fn unit_is_party_leader_ors_two_legs_and_answers_one_when_solo() {
 /// `UnitHasRelicSlot` — the number 1 or nil, per token, never a boolean.
 ///
 /// This shipped **absent** for months on the belief that the relic slot post-dates 1.12, which is
-/// false (decision 1785). Stock `PaperDollFrame.lua` calls it unconditionally at l.429 and l.580,
+/// false (decision 1796). Stock `PaperDollFrame.lua` calls it unconditionally at l.429 and l.580,
 /// so while it was missing the character sheet raised `attempt to call global` for every class —
 /// which is why the nil-global case is asserted here too, not just the answer.
 #[test]

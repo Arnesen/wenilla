@@ -447,6 +447,47 @@ impl Default for WidgetArena {
     }
 }
 
+/// Whether a widget of this kind is **mouse-enabled by its constructor**, needing neither an
+/// `enableMouse` attribute nor an auto-enabling `<Scripts>` handler to be clickable.
+///
+/// One list, because there are two readers: this arena, and `benilla-app`'s `frame_flag_gate`
+/// sweep, which compares our frames against a model of the reference's XML. That sweep used to
+/// carry its own copy with a comment claiming it was "deliberately the SAME list" — it was not,
+/// and it drifted silently the first time this one was edited. A wrong entry should be wrong in
+/// one place.
+///
+/// **Read off the client's ctors** (wow-re `ui/scratch/mouse-enable-law.md` `774f7eb6`, and the
+/// follow-up `68987021`). `[frame+0xcc]` is a four-bit input mask — char, keyboard, MOUSE, wheel —
+/// zeroed by the base `CSimpleFrame` ctor `0x769090` and set by exactly five subclass ctors:
+/// Button `0x778771`, CheckButton (through Button), Slider `0x789467`, ColorSelect `0x78b2b5`,
+/// and EditBox `0x779ced`, which takes char+keyboard+mouse together because it must take a click
+/// to focus. `Minimap` is an engine frame born `0x4` (`0x4edc38`), and ours is a `FrameKind`.
+///
+/// **`ScrollFrame` and `ScrollingMessageFrame` are NOT here, and that was the hard one.** They
+/// were, on the reasoning that a scroll frame "takes the wheel in its ctor" — the wheel is a
+/// different bit, and no ctor writes it at all. Against that stood a recorded observation:
+/// `ChatFrame1` is a `ScrollingMessageFrame`, and something has to make a 1.12 chat link
+/// clickable. The follow-up round settled it: nothing about the frame does. The engine synthesises
+/// one mouse-enabled `CSimpleHyperlinkButton` child PER LINK SPAN (`0x7a3240`, born through the
+/// `CSimpleButton` ctor) and routes the hyperlink scripts back to the parent. We hold spans as
+/// rects rather than child frames, so `script::pointer`'s hit test carries the same law as a
+/// disjunct: the chat window is a candidate over a link and inert everywhere else.
+pub fn mouse_enabled_by_ctor(kind: FrameKind) -> bool {
+    matches!(
+        kind,
+        FrameKind::Button
+            | FrameKind::CheckButton
+            | FrameKind::EditBox
+            // A Slider's thumb must be draggable: every scrollbar is a UIPanelScrollBarTemplate
+            // Slider that declares no `enableMouse` yet is draggable in-game (decision 0250).
+            | FrameKind::Slider
+            | FrameKind::ColorSelect
+            | FrameKind::Minimap
+            // `LootButton` extends `CSimpleButton` and inherits its ctor's bit (decision 1799).
+            | FrameKind::LootButton
+    )
+}
+
 impl WidgetArena {
     /// A new, empty arena in **1.12 mode** (alpha does not propagate).
     pub fn new() -> WidgetArena {
@@ -602,27 +643,7 @@ impl WidgetArena {
             effective_alpha,
             shown,
             effective_visible: shown && parent_visible,
-            // A button/editbox is mouse-enabled by construction (the client's CSimpleButton and
-            // CSimpleEditBox enable input in their ctors — an XML button needs no enableMouse attr
-            // to be clickable, and an editbox must take clicks to focus, RF-0082 §1).
-            mouse_enabled: matches!(
-                kind,
-                FrameKind::Button
-                    | FrameKind::CheckButton
-                    | FrameKind::EditBox
-                    // The scroll frame takes the wheel in its ctor (msgframe-runtime.md) — an XML
-                    // ScrollingMessageFrame is wheel-interactive with no enableMouse attr, exactly
-                    // like a Button is clickable without one.
-                    | FrameKind::ScrollingMessageFrame
-                    // A plain ScrollFrame likewise takes the wheel/drag by construction (decision
-                    // 0112) — an XML ScrollFrame is scroll-interactive with no enableMouse attr,
-                    // the same rationale as the ScrollingMessageFrame above.
-                    | FrameKind::ScrollFrame
-                    // A Slider takes the mouse in its ctor too (the thumb must be draggable): every
-                    // scrollbar is a UIPanelScrollBarTemplate Slider that declares no enableMouse yet
-                    // is draggable in-game (decision 0250), so the enablement is by construction.
-                    | FrameKind::Slider
-            ),
+            mouse_enabled: mouse_enabled_by_ctor(kind),
             // The two kinds whose ctor takes the WHEEL rather than the mouse generally — the same
             // by-construction argument as above, narrowed to the flag it is actually about
             // (decision 1198): a ScrollingMessageFrame and a ScrollFrame are wheel-interactive

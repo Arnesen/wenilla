@@ -599,7 +599,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // **This shipped absent for a long time, on a claim that was simply false** — that the relic
     // slot post-dates 1.12 and `UnitHasRelicSlot` is a later-era verb. The base `dbc.MPQ` copy of
     // `ChrClasses.dbc` really does have no field 16; the `patch.MPQ` copy the client actually
-    // reads has it, set for Paladin, Shaman and Druid. Decision 1785. Stock `PaperDollFrame.lua`
+    // reads has it, set for Paladin, Shaman and Druid. Decision 1796. Stock `PaperDollFrame.lua`
     // calls this **unconditionally** at l.429 and l.580 — so while it was missing, the character
     // sheet raised `attempt to call global 'UnitHasRelicSlot' (a nil value)` for *every* class,
     // not just the three.

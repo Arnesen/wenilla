@@ -395,13 +395,13 @@ mod tests {
     /// manifest in a fresh VM — the same pass [`chain_readiness_report`] makes, run here so the
     /// answer is in one table.
     ///
-    /// That last one is 1790, and it is the same mistake as the third column one step later.
+    /// That last one is 1801, and it is the same mistake as the third column one step later.
     /// `<LootButton>` and `<TaxiRouteFrame>` are element TAGS: no census of `Name(` or `:Name(`
     /// can reach them, so `LootFrame.xml` sat in this report's "needs NO engine work" list while
     /// the readiness probe was printing `4 issue(s)` for it in a different table. Both tables were
     /// right. Joining them was left to whoever read them, and I read it wrong.
     ///
-    /// Until 1787 the method sites were **silently dropped**: a name in neither the engine nor the
+    /// Until 1798 the method sites were **silently dropped**: a name in neither the engine nor the
     /// FrameXML half of `1.12-globals.tsv` was assumed to be a widget method and skipped, on the
     /// reasoning that widget methods are not in `_G`. True, and it meant the report could not see
     /// a widget method we had *not built*. `MerchantFrame.xml` read `0 engine` and
@@ -410,10 +410,16 @@ mod tests {
     /// file loaded, every check passed, and hovering a vendor row would have raised in play. Both
     /// instruments were right about what they measure. Neither measured the window.
     ///
+    /// **A remaining `<?>` in the `fx=` column is usually a LoadOnDemand addon**, not something to
+    /// build. `ClassTrainerFrame_Show`, `CraftFrame_Show`, `MacroFrame_SaveMacro`,
+    /// `InspectFrame_Show`, `TalentFrame_Toggle` and their siblings live in `Blizzard_*` addons the
+    /// install ships **packed as `.pub`**, so no amount of scanning the extracted FrameXML finds
+    /// them. They arrive when that addon does, exactly like an `fx=` name with a home.
+    ///
     /// One crudeness remains, stated because it decides how to read the output: neither scan can
     /// see a name reached through `getglobal`, so both can under-report.
     ///
-    /// They no longer over-report on comments. Both counted commented-out calls until 1789 — 1.12
+    /// They no longer over-report on comments. Both counted commented-out calls until 1800 — 1.12
     /// comments out whole blocks, and `PaperDollFrame.lua:754-756`'s `ShowInventorySellCursor` is
     /// three commented lines that this report named as that window's last engine gap. A real
     /// binding, never called, blocking a window that was not blocked. [`strip_comments`] takes
@@ -457,7 +463,7 @@ mod tests {
             .collect();
 
         // Strip what is not code before either scan. Both `Name(` and `:Name(` counted calls
-        // inside comments until 1789: the round that built `PickupMerchantItem` also asked wow-re
+        // inside comments until 1800: the round that built `PickupMerchantItem` also asked wow-re
         // for `ShowInventorySellCursor`, which this report had named as `PaperDollFrame.xml`'s
         // last engine gap — and the answer was that stock `PaperDollFrame.lua:754-756` has the
         // call **commented out**, all three lines. A real binding, never called, blocking a window
@@ -604,7 +610,7 @@ mod tests {
             .collect()
         };
         // The instrument's own tripwire: if the probe stops working, the `method=` column goes
-        // silently empty — which is precisely the failure mode 1787 exists to end.
+        // silently empty — which is precisely the failure mode 1798 exists to end.
         let control: Vec<String> = ["SetPoint", "SetMerchantItem", "BenillaNotAMethod"]
             .iter()
             .map(|s| (*s).to_string())
@@ -636,10 +642,48 @@ mod tests {
             .map(str::to_string)
             .collect();
 
+        // The `.lua` files a stock `.xml` SOURCES through `<Script file=>`. A window's own sourced
+        // code is part of the window: its functions are not gaps, and they are where most of its
+        // `fx=` names would otherwise be looked for.
+        let sourced_luas = |xml_leaf: &str| -> Vec<String> {
+            let Some(b) = super::read(&format!("Interface\\FrameXML\\{xml_leaf}")) else {
+                return Vec::new();
+            };
+            let text = String::from_utf8_lossy(&b).into_owned();
+            let mut out = Vec::new();
+            for (i, _) in text.match_indices("<Script") {
+                let rest = &text[i..];
+                let Some(end) = rest.find("/>").or_else(|| rest.find('>')) else {
+                    continue;
+                };
+                let tag = &rest[..end];
+                if let Some(fi) = tag.find("file=\"") {
+                    let after = &tag[fi + 6..];
+                    if let Some(q) = after.find('"') {
+                        let leaf = after[..q].rsplit(['\\', '/']).next().unwrap_or("");
+                        if leaf.ends_with(".lua") {
+                            out.push(leaf.to_string());
+                        }
+                    }
+                }
+            }
+            out
+        };
+
         // `function Name(` across the whole corpus, so an fx gap can name the file that holds it.
+        //
+        // Each toc `.xml` is scanned together with **every `.lua` it SOURCES**, not just the
+        // `X.lua` its own name suggests. Guessing missed the common case: `ActionBarFrame.xml`
+        // sources `ActionButton.lua`, there is no `ActionBarFrame.lua`, and `ActionButton.lua` is
+        // not a toc line of its own — so the whole `ActionButton_*` family read `<?>`, which says
+        // "nothing defines this" about five functions a stock file defines and brings with it.
+        // The difference matters for how the column is read: a name with a home ARRIVES when that
+        // file does; a `<?>` is something to build.
         let mut home: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         for f in &stock {
-            for cand in [f.clone(), format!("{}.lua", &f[..f.len() - 4])] {
+            let mut cands = vec![f.clone(), format!("{}.lua", &f[..f.len() - 4])];
+            cands.extend(sourced_luas(f));
+            for cand in cands {
                 let Some(bytes) = super::read(&format!("Interface\\FrameXML\\{cand}")) else {
                     continue;
                 };
@@ -662,7 +706,16 @@ mod tests {
             let mut out = std::collections::HashSet::new();
             let mut i = 0;
             while i < b.len() {
-                if b[i].is_ascii_uppercase() && (i == 0 || !super::is_word(b[i - 1])) {
+                // A GLOBAL call: uppercase, not inside a word, and **not preceded by `.` or
+                // `:`**. Without that last test `info.UpdateFunc(` and `dialog.OnAccept(` read as
+                // globals — `.` is not a word character — and a dozen `StaticPopupDialogs` /
+                // `MoneyTypeInfo` FIELD names showed up as `<?>` gaps. `:` belongs to the method
+                // scan below; `.` belongs to nobody, since a field call arrives with its table.
+                let after_field = i > 0 && (b[i - 1] == '.' || b[i - 1] == ':');
+                if b[i].is_ascii_uppercase()
+                    && !after_field
+                    && (i == 0 || !super::is_word(b[i - 1]))
+                {
                     let mut j = i;
                     while j < b.len() && super::is_word(b[j]) {
                         j += 1;
@@ -696,13 +749,39 @@ mod tests {
             if migrated.contains(f) {
                 continue;
             }
+            // The window IS its xml plus every `.lua` it sources — `ActionBarFrame.xml` sources
+            // `ActionButton.lua`, and the whole `ActionButton_*` family is that window's own code,
+            // not a dependency on somebody else's. Gathering only `X.xml` + `X.lua` reported five
+            // of its own functions as gaps.
             let mut text = String::new();
-            for cand in [f.clone(), format!("{}.lua", &f[..f.len() - 4])] {
+            let mut parts = vec![f.clone(), format!("{}.lua", &f[..f.len() - 4])];
+            parts.extend(sourced_luas(f));
+            for cand in parts {
                 if let Some(b) = super::read(&format!("Interface\\FrameXML\\{cand}")) {
                     text.push_str(&String::from_utf8_lossy(&b));
                 }
             }
             let text = strip_comments(&text);
+            // …and the names the file declares as LOCALS, which a bare call resolves to. The
+            // idiom that needs it is the reference's own dispatch shape:
+            //
+            //     local OnAccept = StaticPopupDialogs[dialog.which].OnAccept
+            //     if ( OnAccept ) then dontHide = OnAccept(dialog.data, dialog.data2) end
+            //
+            // The call is bare, so the global scan sees `OnAccept(` and reports a gap for a name
+            // that is a table field one line up. `OnAccept`, `OnCancel`, `OnShow`, `OnHide` and
+            // the three `EditBoxOn*` all arrived that way. A `local` declaration in the same file
+            // is proof enough: nothing else could be meant.
+            let locals: std::collections::HashSet<String> = text
+                .lines()
+                .filter_map(|l| l.trim_start().strip_prefix("local "))
+                .map(|r| {
+                    r.chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect::<String>()
+                })
+                .filter(|n| !n.is_empty())
+                .collect();
             let own: std::collections::HashSet<String> = text
                 .lines()
                 .filter_map(|l| l.trim_start().strip_prefix("function "))
@@ -715,7 +794,7 @@ mod tests {
             let (mut eng, mut fx) = (Vec::new(), Vec::new());
             let mut names: Vec<String> = called(&text)
                 .into_iter()
-                .filter(|c| !own.contains(c) && !have.contains(c))
+                .filter(|c| !own.contains(c) && !locals.contains(c) && !have.contains(c))
                 .collect();
             names.sort();
             for c in names {
@@ -737,8 +816,30 @@ mod tests {
             // while `chain_readiness_report` was printing `4 issue(s)` for it in another table.
             //
             // Both tables were right. Joining them was left to whoever read them, and I got it
-            // wrong (1790). So this one runs the load itself — the same fresh-VM-plus-manifest
+            // wrong (1801). So this one runs the load itself — the same fresh-VM-plus-manifest
             // pass the readiness probe does — and reports it in the same row.
+            // **A `LOAD:` line for a window we ALSO ship is suspect**, and the reason is the same
+            // one `chain_readiness_report` carries: `publish_global` is non-overwriting (RF-0023),
+            // so loading the stock file on top of our identically-named one leaves every colliding
+            // frame's global pointing at OUR frame while the stock file's handlers run against
+            // THEIRS. A field set on `this` in an OnLoad is then invisible to `getglobal(name)`,
+            // and the failure looks like a bug in whatever read it back.
+            //
+            // Worked example, because it cost an hour: stock `TradeFrame.xml` reported
+            // `MoneyFrame.xml:525: attempt to index local 'info'`. Nothing was wrong with our
+            // MoneyFrame — `MoneyFrame_SetType` had set `this.info` correctly, and
+            // `getglobal(this:GetName())` answered a DIFFERENT table, because our own
+            // `TradeFrame.xml` already owned `TradeRecipientMoneyFrame`.
+            //
+            // So the column is marked, not trusted. A row whose file we do not ship is a real
+            // load failure; a row whose file we do ship needs the swap attempted to know.
+            let ours_too = !migrated.contains(f)
+                && std::fs::metadata(
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("assets/ui")
+                        .join(f),
+                )
+                .is_ok();
             let loads = {
                 let mut probe = UiScript::new().expect("VM");
                 probe.set_screen_size(1024.0, 768.0);
@@ -759,8 +860,22 @@ mod tests {
             let known = answers(&s, &asked);
             let mut meth: Vec<String> = asked.into_iter().filter(|m| !known.contains(m)).collect();
             meth.sort();
+            // A suspect LOAD line does not count as a blocker — it is a question, not an answer.
+            let load_blockers = if ours_too { 0 } else { loads.len() };
+            let loads: Vec<String> = loads
+                .into_iter()
+                .map(|e| {
+                    let one = e.replace('\n', " ");
+                    let mark = if ours_too {
+                        " (ours too — suspect)"
+                    } else {
+                        ""
+                    };
+                    format!("{mark}   {}", &one[..one.len().min(150)])
+                })
+                .collect();
             rows.push((
-                eng.len() + meth.len() + loads.len(),
+                eng.len() + meth.len() + load_blockers,
                 f.clone(),
                 eng,
                 fx,
@@ -778,8 +893,7 @@ mod tests {
                 println!("            method: {}", meth.join(" "));
             }
             for e in loads {
-                let one = e.replace('\n', " ");
-                println!("            LOAD:   {}", &one[..one.len().min(150)]);
+                println!("            LOAD:{e}");
             }
             if !fx.is_empty() {
                 println!("            fx:     {}", fx.join(" "));
@@ -816,11 +930,102 @@ mod tests {
     /// load, which is what this reports: a name ours defines that a chain entry in our own
     /// manifest also defines.
     ///
+    /// **Two halves, both exact, because both sides DECLARE rather than mention.** The function
+    /// half is above. The frame half asks the other question a swap has to answer: *can this stock
+    /// window be added at all* — which is different from "does it load", because a stock window we
+    /// do not ship under its own name usually has a counterpart of ours under a different one, and
+    /// both would declare the same frames.
+    ///
+    /// That half doubles as the map nothing else holds: `ActionBarFrame.xml` is our
+    /// `ActionBar.xml`, `FloatingChatFrame.xml` is our `ChatFrame.xml`, `PlayerFrame.xml` and
+    /// `TargetFrame.xml` and `PetFrame.xml` are all our one `UnitFrames.xml`,
+    /// `MainMenuBarMicroButtons.xml` is our `MicroMenu.xml`, `StaticPopup.xml` is our
+    /// `UiPanels.xml`. `chain_gap_report` calls several of those unblocked, and they are —
+    /// individually. They just cannot load beside the file of ours already holding their names.
+    ///
     /// Run it before attempting a swap. It predicts which ones will fail without attempting them.
     #[test]
     #[ignore = "instrument: run by hand before attempting a window swap"]
     fn shadowed_reference_functions() {
         let _data = benilla_formats::wow_data_or_skip!();
+
+        // The FRAME NAMES a document declares — `name="X"` on a widget element, minus the
+        // `$parent`-relative and `virtual` template forms, which name nothing globally.
+        //
+        // The sibling of the function check below and exactly as exact, because both sides
+        // DECLARE rather than mention. This is the version of the "frame names" idea that works:
+        // an earlier attempt scanned names a file *referenced* and was pure noise (it found `UI`
+        // and missed the case it was built for), because a reference can live in any file. A
+        // declaration cannot.
+        //
+        // What it catches: our `UnitFrames.xml` declares `PetFrame`, and so does the stock
+        // `PetFrame.xml`. Adding that stock file alongside ours would declare the name twice.
+        // Several stock windows we do not ship under their own name have an equivalent of ours
+        // under a different one, and `chain_gap_report` calls every one of them unblocked —
+        // truthfully, because the stock file WOULD load; it just cannot load *beside* ours.
+        let declares = |text: &str| -> Vec<String> {
+            let mut out = Vec::new();
+            for (i, _) in text.match_indices("name=\"") {
+                let rest = &text[i + 6..];
+                let Some(end) = rest.find('"') else { continue };
+                let name = &rest[..end];
+                if name.starts_with('$') || name.is_empty() {
+                    continue;
+                }
+                // A `virtual="true"` element is a template: its name is a registry key, not a
+                // frame, and two files may legitimately hold the same template name only if one
+                // replaces the other — which is the same question, so they are reported too.
+                out.push(name.to_string());
+            }
+            out
+        };
+
+        // `function Name(a, b, c)` → the name and its PARAMETER LIST. Arity is the third way our
+        // files and the reference's can disagree about a name, and the one that fails most
+        // quietly: `TextStatusBar_Initialize()` takes no argument in 1.12 and acts on `this`, ours
+        // took an optional bar, and `UnitFrames.xml` calls it with one. Swapping that file stopped
+        // initialising the unit-frame bars with no error and no missing global — the numerals
+        // simply never appeared (decision 1793).
+        //
+        // **Both directions are silent, and that is the point.** Lua drops extra arguments without
+        // complaint, so neither an over- nor an under-supplied call raises; they differ only in
+        // WHO loses information:
+        //
+        //   * ours WIDER  — our callers pass the extra argument and the reference's version drops
+        //     it. Breaks when OUR file is swapped out (the `TextStatusBar` case).
+        //   * ours NARROWER — the reference's callers pass more than ours takes and ours drops it.
+        //     Breaks when a STOCK file is added beside ours and calls our version.
+        //
+        // The report names the direction because it says which swap the difference is waiting for,
+        // not because one of them is safe.
+        let params_in = |text: &str| -> Vec<(String, usize)> {
+            let mut out = Vec::new();
+            for line in text.lines() {
+                let Some(rest) = line.trim_start().strip_prefix("function ") else {
+                    continue;
+                };
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if name.is_empty() {
+                    continue;
+                }
+                let Some(open) = rest.find('(') else { continue };
+                let Some(close) = rest[open..].find(')') else {
+                    continue;
+                };
+                let args = rest[open + 1..open + close].trim();
+                // `...` is a vararg, which has no fixed arity to compare.
+                let n = if args.is_empty() || args == "..." {
+                    0
+                } else {
+                    args.split(',').count()
+                };
+                out.push((name, n));
+            }
+            out
+        };
 
         let defined_in = |text: &str| -> Vec<String> {
             text.lines()
@@ -840,6 +1045,8 @@ mod tests {
         let pos: std::collections::HashMap<&String, usize> =
             toc.iter().enumerate().map(|(i, f)| (f, i)).collect();
         let mut chain_home: std::collections::HashMap<String, (String, usize)> =
+            std::collections::HashMap::new();
+        let mut chain_frames: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         for entry in toc.iter().filter(|f| super::is_chain_entry(f)) {
             let leaf = entry.rsplit(['\\', '/']).next().unwrap_or(entry);
@@ -878,6 +1085,67 @@ mod tests {
         }
         hits.sort();
         hits.dedup();
+        // The frame names every STOCK window declares — read off the reference's own toc, not off
+        // our manifest's chain entries. Scanning only what we already load was the first attempt
+        // and it answered 0 by construction: a stock file we do not load is exactly the one whose
+        // names could collide, and it was never opened.
+        let ref_toc = String::from_utf8_lossy(
+            &super::read("Interface\\FrameXML\\FrameXML.toc").expect("the reference's own toc"),
+        )
+        .into_owned();
+        let mut ref_arity: std::collections::HashMap<String, (usize, String)> =
+            std::collections::HashMap::new();
+        for line in ref_toc.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') || !line.ends_with(".xml") {
+                continue;
+            }
+            for cand in [line.to_string(), format!("{}.lua", &line[..line.len() - 4])] {
+                let Some(b) = super::read(&format!("Interface/FrameXML/{cand}")) else {
+                    continue;
+                };
+                let text = String::from_utf8_lossy(&b).into_owned();
+                if cand.ends_with(".xml") {
+                    for name in declares(&text) {
+                        chain_frames.entry(name).or_insert_with(|| line.to_string());
+                    }
+                }
+                for (name, n) in params_in(&text) {
+                    ref_arity.entry(name).or_insert((n, cand.clone()));
+                }
+            }
+        }
+        assert!(
+            chain_frames.contains_key("GameTooltip") && chain_frames.contains_key("PetFrame"),
+            "the stock frame-name scan found nothing recognisable ({} names) — an empty answer \
+             here reads as \"no collisions\", which is what the first version of this reported \
+             for the wrong reason",
+            chain_frames.len()
+        );
+
+        // …and the frame-name half, over the stock files the manifest does NOT already take off
+        // the chain. A file of ours whose stock counterpart we already load is a swap that has
+        // happened; this is about the ones that have not.
+        let mut frame_hits: Vec<(String, String, String)> = Vec::new();
+        for entry in toc.iter().filter(|f| !super::is_chain_entry(f)) {
+            let Ok(text) = std::fs::read_to_string(dir.join(entry)) else {
+                continue;
+            };
+            for name in declares(&text) {
+                if let Some(home) = chain_frames.get(&name) {
+                    let already = toc
+                        .iter()
+                        .filter(|f| super::is_chain_entry(f))
+                        .any(|f| f.ends_with(home.as_str()));
+                    // A template's name is a registry key rather than a frame, but two files
+                    // holding one is the same question, so it is reported the same way.
+                    if !already {
+                        frame_hits.push((name, entry.clone(), home.clone()));
+                    }
+                }
+            }
+        }
+        frame_hits.sort();
+        frame_hits.dedup();
 
         println!("\n=== names ours redefines that a CHAIN entry already defines ===");
         println!("{:<36} {:<28} {:<34} winner", "name", "ours", "chain");
@@ -901,6 +1169,114 @@ mod tests {
         for (f, n) in &by_file {
             println!("  {n:>3}  {f}");
         }
+
+        // The ARITY half: a name we define that the reference also defines, with a different
+        // parameter count. Not a collision — the two need never both load for this to bite — so it
+        // is its own section rather than a column.
+        let mut arity: Vec<(String, String, usize, usize, String)> = Vec::new();
+        for entry in toc.iter().filter(|f| !super::is_chain_entry(f)) {
+            let Ok(text) = std::fs::read_to_string(dir.join(entry)) else {
+                continue;
+            };
+            for (name, ours_n) in params_in(&text) {
+                if let Some((ref_n, home)) = ref_arity.get(&name) {
+                    if *ref_n != ours_n {
+                        arity.push((name, entry.clone(), ours_n, *ref_n, home.clone()));
+                    }
+                }
+            }
+        }
+        arity.sort();
+        arity.dedup();
+        println!(
+            "\n=== {} signatures of ours differ in ARITY from the reference's ===",
+            arity.len()
+        );
+        println!("{:<34} {:<26} ours ref  direction", "name", "ours");
+        for (name, ours, a, b, home) in &arity {
+            // Which swap this one is waiting for — see the note above; both are silent.
+            let dir = if a > b {
+                "ours WIDER  — bites when OUR file goes"
+            } else {
+                "ours NARROWER — bites when THEIRS arrives"
+            };
+            println!("{name:<34} {ours:<26} {a:>4} {b:>3}  {dir} — ref in {home}");
+        }
+
+        // The frame half, grouped the other way — by the STOCK file, because that is the unit of
+        // the question it answers: "can this stock window be added?"
+        let mut by_stock: std::collections::BTreeMap<&String, std::collections::BTreeSet<&String>> =
+            std::collections::BTreeMap::new();
+        for (_, ours, home) in &frame_hits {
+            by_stock.entry(home).or_default().insert(ours);
+        }
+        println!(
+            "\n=== {} FRAME-NAME collisions: {} stock windows we do not load already have their \
+             names declared by a file of ours ===",
+            frame_hits.len(),
+            by_stock.len()
+        );
+        for (stock, ours) in &by_stock {
+            let n = frame_hits.iter().filter(|(_, _, h)| h == *stock).count();
+            let mine: Vec<&str> = ours.iter().map(|s| s.as_str()).collect();
+            println!("  {n:>3}  {stock:<34} vs {}", mine.join(", "));
+        }
+    }
+
+    /// **A chain `.xml` that does not source its own `.lua` needs TWO manifest lines**, and
+    /// getting it wrong is silent.
+    ///
+    /// Most stock windows pull their code in with `<Script file="X.lua"/>`, so naming the `.xml`
+    /// brings both. A few do not — `TextStatusBar.xml` and `MoneyInputFrame.xml` declare only a
+    /// template, and the reference's own toc lists their `.lua` on the preceding line (l.32-33,
+    /// l.11-12). Name the `.xml` alone and the template loads against nothing: every global that
+    /// file was supposed to define reads nil, every guarded call becomes a no-op, and there is no
+    /// error anywhere.
+    ///
+    /// Both were live. `TextStatusBar` was caught by three tests that happened to assert on the
+    /// numerals; `MoneyInputFrame` was caught only by sweeping for the shape afterwards, and its
+    /// manifest header had claimed for months to bring "the ten `MoneyInputFrame_*` verbs" while a
+    /// full-manifest probe answered nil for all of them.
+    ///
+    /// A gate rather than an instrument, because the answer should always be zero and the failure
+    /// mode is invisible.
+    #[test]
+    fn every_chain_xml_brings_its_own_lua() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        let toc = &super::super::addons::Addon::builtin().toc.files;
+        let listed: std::collections::HashSet<&str> = toc
+            .iter()
+            .map(|f| f.rsplit(['\\', '/']).next().unwrap_or(f))
+            .collect();
+
+        let mut orphans = Vec::new();
+        for entry in toc.iter().filter(|f| super::is_chain_entry(f)) {
+            let leaf = entry.rsplit(['\\', '/']).next().unwrap_or(entry);
+            let Some(stem) = leaf.strip_suffix(".xml") else {
+                continue;
+            };
+            let lua = format!("{stem}.lua");
+            // No sibling in the archive means there is nothing to miss.
+            if super::read(&format!("Interface/FrameXML/{lua}")).is_none() {
+                continue;
+            }
+            let xml = super::read(&entry.replace('\\', "/"))
+                .unwrap_or_else(|| panic!("{entry}: not in the chain"));
+            let text = String::from_utf8_lossy(&xml);
+            let sourced = text
+                .to_ascii_lowercase()
+                .contains(&format!("file=\"{}\"", lua.to_ascii_lowercase()));
+            if !sourced && !listed.contains(lua.as_str()) {
+                orphans.push(format!(
+                    "{leaf} does not source {lua}, and {lua} is not a manifest entry"
+                ));
+            }
+        }
+        assert!(
+            orphans.is_empty(),
+            "a chain window whose code never loads — silent, every global it defines reads nil:\n  {}",
+            orphans.join("\n  ")
+        );
     }
 
     /// A path is a chain entry; a bare name is ours. The one-line rule the manifest rests on.

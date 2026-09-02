@@ -48,7 +48,7 @@ pub enum FrameKind {
     ///
     /// Its whole Lua surface of its own is **one method, `SetSlot(index)`** (table `0x847ce4`,
     /// count 1 read off the registrar's own `mov edx,1`) — 1-based in, 0-based stored, no returns.
-    /// `LootFrame.lua:94` is its only caller. Decision 1788; wow-re `e5338caf`.
+    /// `LootFrame.lua:94` is its only caller. Decision 1799; wow-re `e5338caf`.
     LootButton,
     CheckButton,
     EditBox,

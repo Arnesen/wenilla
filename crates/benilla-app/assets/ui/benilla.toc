@@ -149,6 +149,14 @@ MoneyFrame.xml
 # `_SetCopper`/`_ClearFocus`/`_SetTextColor`/`_SetOnvalueChangedFunc` — six of the names below —
 # and neither can be sourced until they exist. (Trade still needs four ENGINE verbs beyond this:
 # `AddTradeMoney`, `GetCursorMoney`, `GetTradePlayerItemLink`, `GetTradeTargetItemLink`.)
+#
+# **TWO entries, and the `.lua` was missing.** This `.xml` declares only the template and does not
+# source its `.lua`; the reference's toc lists both (l.11-12). Listing the `.xml` alone brought the
+# template and none of the ten verbs — the header above has claimed otherwise since the day it was
+# written, and a probe of a full manifest load answered `nil` for every one of them. Same shape as
+# `TextStatusBar`, found by sweeping every chain entry for it once that one bit;
+# `every_chain_xml_brings_its_own_lua` is now a gate so neither can recur.
+Interface\FrameXML\MoneyInputFrame.lua
 Interface\FrameXML\MoneyInputFrame.xml
 # The UIPanel slot manager (decision 0084 §2): script-only, no frames of its own — must load
 # before any panel frame (Gossip/Merchant today) so ShowUIPanel/HideUIPanel already exist
@@ -210,10 +218,24 @@ UnitPopup.xml
 # (`script/object/movable.rs`), so that note was stale too.
 Interface\FrameXML\ItemRef.xml
 # The shared status-bar numerals machinery (decision 1082): TextStatusBar_* + the opt-in
-# template — before its customers (the XP bar in ActionBar.xml today; the unit-frame
-# health/mana numerals are the ref's other users, when that slice lands). The ref's own TOC
-# loads TextStatusBar right before its unit frames, same seat as here.
-TextStatusBar.xml
+# template. The ref's own TOC loads TextStatusBar right before its unit frames, same seat.
+#
+# ══ THE STATUS-BAR NUMERALS — the reference's own, off the player's chain (1751) ═══════════
+# `TextStatusBar_*` + the `TextStatusBar` template. The reference's own toc loads it right
+# before its unit frames; this is the same seat.
+#
+# Nothing of ours inherits the template — it exists for the reference's windows, whose rows
+# carry `inherits="TextStatusBar"` and would have found ours. What blocked the swap was a
+# signature WE widened (`TextStatusBar_Initialize`), fixed by giving our own bars the OnLoad
+# the reference's have.
+#
+# **TWO entries, because the reference has two** (its toc l.32-33). This `.xml` declares only the
+# template and does NOT source its `.lua` — unlike most stock windows, whose `<Script file=>`
+# brings their code in. Listing the `.xml` alone loads a template whose OnLoad calls a function
+# nothing defined: every `TextStatusBar_*` name reads nil, every guarded call is a silent no-op,
+# and the numerals simply never appear. The `.lua` comes first, as it does there.
+Interface\FrameXML\TextStatusBar.lua
+Interface\FrameXML\TextStatusBar.xml
 # ══ THE UNIT-FRAME KIT — the reference's own, off the player's chain (1751, window 22) ══
 # `UnitFrame.xml` declares NO frames — it is a `<Script file="UnitFrame.lua"/>` and nothing else —
 # so this is a pure addition of thirteen globals: `UnitFrame_Initialize`, `_Update`, `_OnEvent`,
@@ -674,10 +696,10 @@ RaidFrame.xml
 # label, our measurement being a frame late; that is what the swap tests.
 Interface\FrameXML\GossipFrame.xml
 # ══ THE VENDOR WINDOW — the reference's own, off the player's chain (1751) ══════════════════
-# It took three things, in this order: `PickupMerchantItem` (the vendor cursor, 1786), the
+# It took three things, in this order: `PickupMerchantItem` (the vendor cursor, 1797), the
 # `BenillaMoney_*` coin kit moving out to MoneyFrame.xml where eight other windows can reach it
-# without loading this one, and `SetMerchantCompareItem` (1791) — which the gap report could not
-# see at all until 1787 taught it to read `:Method(` sites, and which would have raised on the
+# without loading this one, and `SetMerchantCompareItem` (1802) — which the gap report could not
+# see at all until 1798 taught it to read `:Method(` sites, and which would have raised on the
 # first vendor-row hover with every check green.
 #
 # That is why the notes below say "grouping" rather than "reuses that file's helpers": the
@@ -779,11 +801,11 @@ TradeSkillFrame.xml
 CraftFrame.xml
 # ══ THE LOOT WINDOW — the reference's own, off the player's chain (1751) ════════════════════
 # It never needed an engine VERB. It needed a widget TYPE: `<LootButton>` is a real registered
-# `CreateFrame` type (decision 1788), and registering it as a plain Button would have loaded the
+# `CreateFrame` type (decision 1799), and registering it as a plain Button would have loaded the
 # file and left every row dead — 1.12 has no Lua verb for "take slot N".
 #
 # Its ONE method, `SetSlot`, is also what the gap report's new `method=` column found from the
-# call site while wow-re was deriving it from the vtable (1787). Both columns read 0 now, and
+# call site while wow-re was deriving it from the vtable (1798). Both columns read 0 now, and
 # every verb the stock file calls at runtime — not just at load — was checked by hand against
 # the bindings before this line changed.
 Interface\FrameXML\LootFrame.xml

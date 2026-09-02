@@ -48,7 +48,7 @@
             1059/1060): ctrl previews the inspected item on your own body, shift posts its link.
             Nothing else happens on a click, which is still the reference's own shape.
           - `UnitHasRelicSlot` (ref l.123, l.22) — this note used to say "vanilla-always-false, so
-            the relic branch can never fire". **That is wrong** (decision 1785): the flag is set
+            the relic branch can never fire". **That is wrong** (decision 1796): the flag is set
             for Paladin, Shaman and Druid, and the binding now exists and answers for any token,
             with no `"player"` fast path — inspecting an enemy druid answers 1. The branch is
             still not transcribed here, but for a different and honest reason: 1.12's inspect pane

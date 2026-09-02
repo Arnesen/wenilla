@@ -76,7 +76,7 @@
             forced-show path). A real forced-highlight affordance is a `benilla-ui` follow-up, not
             blocking this slice — `BenillaPaperDollSlot_LockHighlight`/`_UnlockHighlight` below
             tint the slot's Quickslot2 ring instead, flagged at their own definition.
-          - The relic slot: **restored, and this note used to be wrong** (decision 1785). It read
+          - The relic slot: **restored, and this note used to be wrong** (decision 1796). It read
             "`UnitHasRelicSlot` is vanilla-always-false (there is no relic slot in 1.12), so the
             ref's branches are DEAD CODE" — they are not. `ChrClasses.dbc` field 16 is set for
             Paladin, Shaman and Druid, and INVSLOT 17 doubles as their relic slot. All four of the
@@ -527,7 +527,7 @@
         -- ref PaperDollFrame_OnShow (l.568-585): SetGuild OMITTED (named deferral, this file's
         -- header). The relic branch (l.580-584) is transcribed verbatim — a relic class has no
         -- ranged weapon and therefore no ammo, so its ammo slot hides. This used to be dropped on
-        -- the belief that UnitHasRelicSlot is always false; decision 1785.
+        -- the belief that UnitHasRelicSlot is always false; decision 1796.
         function PaperDollFrame_OnShow()
             paintRows(paperDollRows)
             if UnitHasRelicSlot("player") then
@@ -823,7 +823,7 @@
         end
 
         -- ref PaperDollFrame_SetRangedAttack (l.419-466). `hasRelic` is transcribed (it used to
-        -- be dropped — decision 1785). It is the whole reason a paladin's ranged block reads
+        -- be dropped — decision 1796). It is the whole reason a paladin's ranged block reads
         -- "n/a" rather than the stats of the libram sitting in that slot: `noRanged` is set when
         -- there is no ranged texture OR the class has a relic slot, and `SetRangedDamage` /
         -- `SetRangedAttackPower` both read it (ref l.482 / l.552), so one flag blanks all three
@@ -1020,7 +1020,7 @@
             button.emptyTexture = texture
             -- `checkRelic` is the number 1 for the ranged slot alone (a property of the SLOT); the
             -- class half is `UnitHasRelicSlot`, and the ref reads the two as a conjunction. Both
-            -- halves are live — decision 1785.
+            -- halves are live — decision 1796.
             button.checkRelic = checkRelic
             button.icon = getglobal(button:GetName() .. "IconTexture")
             button.count = getglobal(button:GetName() .. "Count")
@@ -1105,7 +1105,7 @@
             else
                 -- ref l.678-681: the empty ranged slot of a relic class shows the relic plate,
                 -- not the bow plate. The art ships (`UI-PaperDoll-Slot-Relic.blp`, 3916 bytes,
-                -- patch.MPQ). Restored — decision 1785.
+                -- patch.MPQ). Restored — decision 1796.
                 local emptyTexture = button.emptyTexture
                 if button.checkRelic and UnitHasRelicSlot("player") then
                     emptyTexture = "Interface\\Paperdoll\\UI-PaperDoll-Slot-Relic.blp"
@@ -1145,7 +1145,7 @@
         -- the doll popped a "Currently Equipped" 0/XX beside a template-full main tooltip).
         -- The ref's repair-mode branch (l.757-762) is INTERIM-omitted with the binding's
         -- repairCost. checkRelic (l.744-746) is transcribed — it was called TBC-flagged dead
-        -- weight here, which was wrong (decision 1785): a paladin hovering their empty ranged
+        -- weight here, which was wrong (decision 1796): a paladin hovering their empty ranged
         -- slot reads "Relic", not "Ranged".
         function BenillaPaperDollSlot_OnEnter(button)
             GameTooltip:SetOwner(button, "ANCHOR_RIGHT")

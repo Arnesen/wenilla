@@ -277,9 +277,9 @@
             -- and the only conditional here: 1.12 sets it on the player's two bars, the pet's two
             -- and the XP bar, and on nothing else, which is exactly why Status Bar Text pins your
             -- own numbers and your pet's but never the target's (decision 1143).
-            if TextStatusBar_Initialize then -- engine tests load file subsets
-                TextStatusBar_Initialize(frame.healthbar)
-                TextStatusBar_Initialize(frame.manabar)
+            -- `TextStatusBar_Initialize` is NOT called here any more — each bar calls it from its
+            -- own OnLoad, the reference's way (see the bar declarations below).
+            if SetTextStatusBarText then -- engine tests load file subsets
                 SetTextStatusBarText(frame.healthbar, getglobal(name .. "HealthBarText"))
                 SetTextStatusBarText(frame.manabar, getglobal(name .. "ManaBarText"))
                 if unit == "player" then
@@ -1265,6 +1265,13 @@
                 <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
                 <BarColor r="0.0" g="1.0" b="0.0"/>
                 <Scripts>
+                    <!-- The reference initialises a numerals bar from the BAR'S OWN OnLoad
+                         (PlayerFrame.xml l.300-303, PetFrame.xml l.138/163), never from the parent
+                         with the bar as an argument — `TextStatusBar_Initialize()` takes no
+                         argument in 1.12 and acts on `this`. Ours called it from the parent's
+                         OnLoad, which needed a widened signature and would have broken silently
+                         the day TextStatusBar.xml came off the player's chain (decisions 1793). -->
+                    <OnLoad>if TextStatusBar_Initialize then TextStatusBar_Initialize() end</OnLoad>
                     <OnEvent>if TextStatusBar_OnEvent then TextStatusBar_OnEvent(arg1, arg2) end</OnEvent>
                     <OnValueChanged>if TextStatusBar_OnValueChanged then TextStatusBar_OnValueChanged() end</OnValueChanged>
                     <OnEnter>BenillaUnitFrameBar_OnEnter(self)</OnEnter>
@@ -1281,6 +1288,13 @@
                 <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
                 <BarColor r="0.0" g="0.0" b="1.0"/>
                 <Scripts>
+                    <!-- The reference initialises a numerals bar from the BAR'S OWN OnLoad
+                         (PlayerFrame.xml l.300-303, PetFrame.xml l.138/163), never from the parent
+                         with the bar as an argument — `TextStatusBar_Initialize()` takes no
+                         argument in 1.12 and acts on `this`. Ours called it from the parent's
+                         OnLoad, which needed a widened signature and would have broken silently
+                         the day TextStatusBar.xml came off the player's chain (decisions 1793). -->
+                    <OnLoad>if TextStatusBar_Initialize then TextStatusBar_Initialize() end</OnLoad>
                     <OnEvent>if TextStatusBar_OnEvent then TextStatusBar_OnEvent(arg1, arg2) end</OnEvent>
                     <OnValueChanged>if TextStatusBar_OnValueChanged then TextStatusBar_OnValueChanged() end</OnValueChanged>
                     <OnEnter>BenillaUnitFrameBar_OnEnter(self)</OnEnter>
@@ -1609,6 +1623,13 @@
                 <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
                 <BarColor r="0.0" g="1.0" b="0.0"/>
                 <Scripts>
+                    <!-- The reference initialises a numerals bar from the BAR'S OWN OnLoad
+                         (PlayerFrame.xml l.300-303, PetFrame.xml l.138/163), never from the parent
+                         with the bar as an argument — `TextStatusBar_Initialize()` takes no
+                         argument in 1.12 and acts on `this`. Ours called it from the parent's
+                         OnLoad, which needed a widened signature and would have broken silently
+                         the day TextStatusBar.xml came off the player's chain (decisions 1793). -->
+                    <OnLoad>if TextStatusBar_Initialize then TextStatusBar_Initialize() end</OnLoad>
                     <OnEvent>if TextStatusBar_OnEvent then TextStatusBar_OnEvent(arg1, arg2) end</OnEvent>
                     <OnValueChanged>if TextStatusBar_OnValueChanged then TextStatusBar_OnValueChanged() end</OnValueChanged>
                     <OnEnter>BenillaUnitFrameBar_OnEnter(self)</OnEnter>
@@ -1625,6 +1646,13 @@
                 <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
                 <BarColor r="0.0" g="0.0" b="1.0"/>
                 <Scripts>
+                    <!-- The reference initialises a numerals bar from the BAR'S OWN OnLoad
+                         (PlayerFrame.xml l.300-303, PetFrame.xml l.138/163), never from the parent
+                         with the bar as an argument — `TextStatusBar_Initialize()` takes no
+                         argument in 1.12 and acts on `this`. Ours called it from the parent's
+                         OnLoad, which needed a widened signature and would have broken silently
+                         the day TextStatusBar.xml came off the player's chain (decisions 1793). -->
+                    <OnLoad>if TextStatusBar_Initialize then TextStatusBar_Initialize() end</OnLoad>
                     <OnEvent>if TextStatusBar_OnEvent then TextStatusBar_OnEvent(arg1, arg2) end</OnEvent>
                     <OnValueChanged>if TextStatusBar_OnValueChanged then TextStatusBar_OnValueChanged() end</OnValueChanged>
                     <OnEnter>BenillaUnitFrameBar_OnEnter(self)</OnEnter>
@@ -2265,9 +2293,9 @@
             frame.healthbar:SetFrameLevel(level - 1)
             frame.manabar:SetFrameLevel(level - 1)
             -- The pet's numerals, textLockable like the ref's (PetFrame.xml l.139/164; 1143).
-            if TextStatusBar_Initialize then -- engine tests load file subsets
-                TextStatusBar_Initialize(frame.healthbar)
-                TextStatusBar_Initialize(frame.manabar)
+            -- `TextStatusBar_Initialize` is NOT called here any more — each bar calls it from its
+            -- own OnLoad, the reference's way (PetFrame.xml l.138/163).
+            if SetTextStatusBarText then -- engine tests load file subsets
                 SetTextStatusBarText(frame.healthbar, PetFrameHealthBarText)
                 SetTextStatusBarText(frame.manabar, PetFrameManaBarText)
                 frame.healthbar.textLockable = 1
@@ -2574,6 +2602,13 @@
                 <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
                 <BarColor r="0" g="1.0" b="0"/>
                 <Scripts>
+                    <!-- The reference initialises a numerals bar from the BAR'S OWN OnLoad
+                         (PlayerFrame.xml l.300-303, PetFrame.xml l.138/163), never from the parent
+                         with the bar as an argument — `TextStatusBar_Initialize()` takes no
+                         argument in 1.12 and acts on `this`. Ours called it from the parent's
+                         OnLoad, which needed a widened signature and would have broken silently
+                         the day TextStatusBar.xml came off the player's chain (decisions 1793). -->
+                    <OnLoad>if TextStatusBar_Initialize then TextStatusBar_Initialize() end</OnLoad>
                     <OnEvent>if TextStatusBar_OnEvent then TextStatusBar_OnEvent(arg1, arg2) end</OnEvent>
                     <OnValueChanged>if TextStatusBar_OnValueChanged then TextStatusBar_OnValueChanged() end</OnValueChanged>
                     <OnEnter>BenillaUnitFrameBar_OnEnter(self)</OnEnter>
@@ -2587,6 +2622,13 @@
                 <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
                 <BarColor r="0" g="0" b="1.0"/>
                 <Scripts>
+                    <!-- The reference initialises a numerals bar from the BAR'S OWN OnLoad
+                         (PlayerFrame.xml l.300-303, PetFrame.xml l.138/163), never from the parent
+                         with the bar as an argument — `TextStatusBar_Initialize()` takes no
+                         argument in 1.12 and acts on `this`. Ours called it from the parent's
+                         OnLoad, which needed a widened signature and would have broken silently
+                         the day TextStatusBar.xml came off the player's chain (decisions 1793). -->
+                    <OnLoad>if TextStatusBar_Initialize then TextStatusBar_Initialize() end</OnLoad>
                     <OnEvent>if TextStatusBar_OnEvent then TextStatusBar_OnEvent(arg1, arg2) end</OnEvent>
                     <OnValueChanged>if TextStatusBar_OnValueChanged then TextStatusBar_OnValueChanged() end</OnValueChanged>
                     <OnEnter>BenillaUnitFrameBar_OnEnter(self)</OnEnter>
