@@ -1,5 +1,10 @@
-//! The shipped **pet paper doll** driven end-to-end, engine-only (decision 1057): the real
-//! `assets/ui/PetPaperDollFrame.xml` behind `CharacterFrame.xml`, fed synthetic pet snapshots.
+//! The shipped **pet paper doll** driven end-to-end, engine-only (decision 1057) — and since
+//! decision 1751's character swap, "shipped" is the reference's own
+//! `Interface\FrameXML\PetPaperDollFrame.xml`, read off the player's patch chain behind the
+//! reference's `CharacterFrame.xml` and `PaperDollFrame.xml`. Our
+//! `assets/ui/PetPaperDollFrame.xml` is deleted; [`super::test_ui::CHARACTER_UI`] is the load
+//! list, and every test here opens with `wow_data_or_skip!()` because a chain entry needs the
+//! install.
 //!
 //! The page's rows are the character page's own code with a different unit token, and
 //! `character_tests.rs` already pins those. What is genuinely new — and what these test — is the
@@ -11,23 +16,20 @@ use benilla_ui::script::{
     PetStats, QuadContent, ScriptValue, UiScript, UnitCombatStats, UnitState,
 };
 
-use super::test_ui::load_ui as load_xml;
-
-/// The page's production load prefix — it leans on `CharacterFrame.xml` for the shared setters,
-/// the row templates and the tab row itself, exactly as the manifest orders them.
+/// The page's production load prefix. [`super::test_ui::CHARACTER_UI`] is the whole character
+/// block in `benilla.toc`'s order — the pet page cannot stand on its own file, because
+/// `PetPaperDollFrame_Update` calls seven `PaperDollFrame_Set*` setters with a `"pet"` unit
+/// token (stock `PetPaperDollFrame.lua:75-81`) and `PetTab_Update` moves a tab that
+/// `CharacterFrame.xml` declares.
+///
+/// **Callers must open with `benilla_formats::wow_data_or_skip!()` themselves** — the macro
+/// `return`s from the function it is written in, so a helper cannot hold the guard for its caller.
 fn load_pet_page() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    // `UIParent.xml` is the manifest's third file and this page needs one thing out of it:
-    // `BuildListString`, the reference's own `UIParent.lua:1051` joiner behind the diet tooltip
-    // (decision 1062). Loaded in manifest order rather than bolted on at the end.
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "CharacterFrame.xml");
-    load_xml(&s, "PetPaperDollFrame.xml");
+    for f in super::test_ui::CHARACTER_UI {
+        super::test_ui::load_ui_strict(&s, f);
+    }
     s.set_unit("player", Some(player_unit()));
     s
 }
@@ -130,23 +132,48 @@ fn take_pet(s: &mut UiScript) {
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
 }
 
+/// The loader itself, plus the page's own frame count.
+///
+/// **A count is a fingerprint of a file, not a target** (decision 1800's closing note): this one
+/// is the reference's `PetPaperDollFrame.xml` — the page, the five stat rows and five resistance
+/// frames, the XP bar, the model pane with its two rotate buttons, the diet icon and the close
+/// button — and it moves only when the player's own file does. It is new with decision 1751's
+/// character swap: this test asserted no count while the file it loaded was ours, because a count
+/// of our own transcription fingerprints nothing but the transcription.
 #[test]
 fn shipped_pet_page_loads_clean() {
-    let s = load_pet_page();
+    let _data = benilla_formats::wow_data_or_skip!();
+    let s = UiScript::new().unwrap();
+    let mut pet_frames = 0;
+    for f in super::test_ui::CHARACTER_UI {
+        let n = super::test_ui::load_ui_strict(&s, f);
+        if *f == "Interface\\FrameXML\\PetPaperDollFrame.xml" {
+            pet_frames = n;
+        }
+    }
     assert!(s.errors().is_empty(), "load errors: {:?}", s.errors());
+    assert_eq!(pet_frames, 34, "the reference's own PetPaperDollFrame.xml");
     // The page itself exists and starts down, like every other subframe.
     assert!(!s
         .eval::<bool>("return PetPaperDollFrame:IsVisible()")
         .unwrap());
 }
 
-/// **The conditional tab, both ways.** With no pet the Pet tab is down and Skills slides onto its
-/// spot; with a pet the Pet tab comes up *at that very spot* and Skills moves out past it. Pinning
-/// "Skills-when-closed sits exactly where Pet-when-open does" is what proves the re-anchor really
-/// ran — a tab merely hidden, with the row left as-authored, would leave a gap and pass a weaker
-/// check.
+/// **The conditional tab, both ways.** With no pet the Pet tab is down and the tab beside it slides
+/// onto its spot; with a pet the Pet tab comes up *at that very spot* and its neighbour moves out
+/// past it. Pinning "tab-3-when-closed sits exactly where tab 2 stands when open" is what proves
+/// the re-anchor really ran — a tab merely hidden, with the row left as-authored, would leave a gap
+/// and pass a weaker check. `PetTab_Update` is the whole mechanism, and it is four lines
+/// (stock `PetPaperDollFrame.lua:189-198`).
+///
+/// **The name was stale, not the test.** It said "Skills closes the gap" from when Skills WAS tab
+/// 3; the Reputation page moved it to 4 long before this file went to the chain, and the tab
+/// `PetTab_Update` re-anchors is and always was `CharacterFrameTab3` — REPUTATION in the
+/// reference's row (`CharacterFrame.xml:115`) and in our deleted copy alike. Renamed so it says
+/// what it checks; the assertions are untouched.
 #[test]
-fn the_pet_tab_rises_and_falls_with_the_pet_and_skills_closes_the_gap() {
+fn the_pet_tab_rises_and_falls_with_the_pet_and_the_next_tab_closes_the_gap() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = load_pet_page();
     // The rects only exist while something lays the window out.
     s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
@@ -168,11 +195,11 @@ fn the_pet_tab_rises_and_falls_with_the_pet_and_skills_closes_the_gap() {
     let open3 = tab_left(&mut s, 3);
     assert_eq!(
         open2, closed3,
-        "with no pet, Skills stood exactly where the Pet tab stands with one"
+        "with no pet, tab 3 stood exactly where the Pet tab stands with one"
     );
     assert!(
         open3 > open2,
-        "…and a pet pushes Skills out past it ({open3} vs {open2})"
+        "…and a pet pushes tab 3 out past it ({open3} vs {open2})"
     );
 
     take_pet(&mut s);
@@ -185,11 +212,12 @@ fn the_pet_tab_rises_and_falls_with_the_pet_and_skills_closes_the_gap() {
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
 }
 
-/// The reference's `ToggleCharacter` guard (ref `CharacterFrame.lua:4-6`): asking for the pet page
+/// The reference's `ToggleCharacter` guard (stock `CharacterFrame.lua:4-6`): asking for the pet page
 /// with no pet does **nothing at all** — it does not open the window on some other tab, and it does
 /// not close an already-open one.
 #[test]
 fn asking_for_the_pet_page_without_a_pet_does_nothing() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = load_pet_page();
     s.run(r#"ToggleCharacter("PetPaperDollFrame")"#).unwrap();
     assert!(
@@ -208,10 +236,11 @@ fn asking_for_the_pet_page_without_a_pet_does_nothing() {
 }
 
 /// The page paints the **pet's** numbers, not the player's — the whole point of un-gating the stat
-/// bindings. The player's own snapshot is deliberately absent here: anything that leaked through
-/// the `"player"` path would read zeros and this would fail.
+/// bindings. No player COMBAT-STATS snapshot is pushed here (only the unit one the window needs to
+/// open), so anything that leaked through the `"player"` path would read zeros and this would fail.
 #[test]
 fn the_page_reads_the_pets_own_snapshot() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = load_pet_page();
     give_pet(&mut s);
     s.run(r#"ToggleCharacter("PetPaperDollFrame")"#).unwrap();
@@ -226,7 +255,8 @@ fn the_page_reads_the_pets_own_snapshot() {
             "expected {want:?} on the page; drew {drawn:?}"
         );
     }
-    // Unspent training points = total - spent (ref l.85-86), not either number by itself.
+    // Unspent training points = total - spent (stock `PetPaperDollFrame.lua:85-86`), not either
+    // number by itself.
     assert!(
         drawn.iter().any(|t| t == "40"),
         "unspent training points (170-130); drew {drawn:?}"
@@ -234,11 +264,13 @@ fn the_page_reads_the_pets_own_snapshot() {
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
 }
 
-/// The window has ONE name line and the two pages take turns holding it (ref l.50-60) — the pet's
+/// The window has ONE name line and the two pages take turns holding it (stock
+/// `PetPaperDollFrame.lua:50-60`) — the pet's
 /// name replaces the player's on show and hands it back on hide. A page that forgot the hand-back
 /// would leave the character sheet nameless.
 #[test]
 fn the_page_borrows_the_windows_name_line_and_gives_it_back() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = load_pet_page();
     give_pet(&mut s);
 
@@ -258,11 +290,13 @@ fn the_page_borrows_the_windows_name_line_and_gives_it_back() {
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
 }
 
-/// A pet dismissed or killed while its own page is open **closes the window** (ref l.32-37). This
+/// A pet dismissed or killed while its own page is open **closes the window** (stock
+/// `PetPaperDollFrame.lua:32-37`). This
 /// is the one arm that must run while the page is visible and the pet is already gone, so it is
 /// also the arm that would blow up on a page that repainted before checking.
 #[test]
 fn the_pet_leaving_closes_the_page_under_it() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = load_pet_page();
     give_pet(&mut s);
     s.run(r#"ToggleCharacter("PetPaperDollFrame")"#).unwrap();
@@ -277,9 +311,11 @@ fn the_pet_leaving_closes_the_page_under_it() {
 }
 
 /// A warlock's minion: `HasPetUI` says yes, its second return says no. The page opens in full and
-/// the three hunter-only pieces stay down (1005's class gate, seen from the page's side).
+/// the three hunter-only pieces stay down (stock `PetPaperDollFrame.lua:83-93`; 1005's class gate,
+/// seen from the page's side).
 #[test]
 fn a_minion_gets_the_page_without_the_hunter_furniture() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = load_pet_page();
     s.set_unit("pet", Some(pet_unit()));
     s.set_pet_stats(true, PetStats::default()); // has_ui, but hunter_pet == false
@@ -310,16 +346,16 @@ fn a_minion_gets_the_page_without_the_hunter_furniture() {
 }
 
 /// **The level line, both ways** (decision 1062). The reference guards its whole `SetText` on
-/// `UnitCreatureFamily("pet")` (ref `PetPaperDollFrame.lua:68-70`), so the family is not decoration
-/// on an existing line — it is the *condition* for the line existing at all. With a family the row
-/// reads "Level 58 Imp"; without one the page shows no level at all, which is the state 1057
-/// shipped in and the hole this closes.
+/// `UnitCreatureFamily("pet")` (stock `PetPaperDollFrame.lua:68-70`), so the family is not
+/// decoration on an existing line — it is the *condition* for the line existing at all. With a
+/// family the row reads "Level 58 Imp"; without one nothing about the pet reaches the line, which
+/// is the state 1057 shipped in and the hole this closes.
 ///
 /// The minion is deliberate: a warlock's Imp fails `HasPetUI`'s second return, so this also pins
 /// that the family word rides OUTSIDE 1005's hunter gate. Gating it would blank this line for every
 /// warlock in the game.
 ///
-/// **The two halves are two separate page loads on purpose.** The ref's guard skips the `SetText`;
+/// **The two halves are two separate page loads on purpose.** The guard skips the `SetText`;
 /// it does not clear the FontString — so pushing a family and then taking it away leaves the old
 /// word on screen (this test found that by asserting the opposite first). That is the reference's
 /// own shape and it is unreachable in play: a family is a property of the pet's *template*, it
@@ -327,7 +363,8 @@ fn a_minion_gets_the_page_without_the_hunter_furniture() {
 /// reachable is "the page painted before the creature query answered", which is a page that never
 /// had a family — the second half here.
 #[test]
-fn the_level_line_names_the_family_and_is_blank_without_one() {
+fn the_level_line_names_the_family_and_is_untouched_without_one() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let with_family = |family: Option<String>| {
         let mut s = load_pet_page();
         s.set_unit("pet", Some(pet_unit()));
@@ -352,25 +389,38 @@ fn the_level_line_names_the_family_and_is_blank_without_one() {
         "UNIT_LEVEL_TEMPLATE + the family word; drew {drawn:?}"
     );
 
-    // No family — the creature query has not answered, or the template has none. The line is
-    // absent, not "Level 58" and not "Level 58 " with a trailing space: the ref's guard skips the
-    // whole SetText, which is why nil (never "") is the binding's contract.
+    // No family — the creature query has not answered, or the template has none. The guard skips
+    // the whole `SetText`, so the FontString keeps whatever it already held: nothing derived from
+    // the pet is written, which is why nil (never "") is the binding's contract.
+    //
+    // **Retired divergence (decision 1751's character swap).** This used to read "no family ⇒ no
+    // level line at all", because our deleted `assets/ui/PetPaperDollFrame.xml` declared
+    // `PetLevelText` with no `text=` and it started empty. The reference declares it
+    // `text="Level level race class"` (stock `PetPaperDollFrame.xml:70`) — a design-time
+    // placeholder, and not a GlobalStrings key, so the loader's `text=` lookup falls through to the
+    // literal and that literal is what a player sees in this state, un-replaced. Both spellings say
+    // the same thing about the guard; this one says it about the file that ships.
     let drawn = with_family(None);
     assert!(
-        !drawn.iter().any(|t| t.starts_with("Level")),
-        "no family ⇒ no level line at all; drew {drawn:?}"
+        drawn.iter().any(|t| t == "Level level race class"),
+        "no family ⇒ the XML's own design-time placeholder is left standing; drew {drawn:?}"
+    );
+    assert!(
+        !drawn.iter().any(|t| t.starts_with("Level 58")),
+        "…and nothing derived from the pet reaches the line; drew {drawn:?}"
     );
 }
 
 /// **The diet tooltip** (decision 1062): the happiness-art icon under the rotate buttons is the
 /// pet's DIET affordance, and its hover runs the reference's own
-/// `format(PET_DIET_TEMPLATE, BuildListString(GetPetFoodTypes()))` (ref
-/// `PetPaperDollFrame.xml:269`) — the vararg binding feeding the `UIParent.lua` joiner.
+/// `format(PET_DIET_TEMPLATE, BuildListString(GetPetFoodTypes()))` (stock
+/// `PetPaperDollFrame.xml:267-270`) — the vararg binding feeding the `UIParent.lua` joiner.
 ///
-/// Driven through the frame's real `OnEnter`, not by re-typing the expression, so a guard left in
-/// the XML or a mis-anchored `GetScript` slot fails here.
+/// Driven through the pointer, not by re-typing the expression, so a guard left in the XML or a
+/// frame that has stopped taking the mouse fails here.
 #[test]
 fn hovering_the_diet_icon_lists_what_the_pet_eats() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = load_pet_page();
     give_pet(&mut s);
     s.run(r#"ToggleCharacter("PetPaperDollFrame")"#).unwrap();
@@ -396,28 +446,38 @@ fn hovering_the_diet_icon_lists_what_the_pet_eats() {
     let rect = icon.rect.expect("…with a resolved rect");
     assert!(
         (rect.right - rect.left - 24.0).abs() < 0.5 && (rect.top - rect.bottom - 23.0).abs() < 0.5,
-        "24x23 (ref PetPaperDollPetInfo), got {}x{}",
+        "24x23 (stock `PetPaperDollFrame.xml:245-248`), got {}x{}",
         rect.right - rect.left,
         rect.top - rect.bottom
     );
-    // …and it draws ON TOP of the model pane it sits inside — the actual regression. The pane's
-    // booth quad is OPAQUE and the icon's rect is wholly within it, so being in the render list is
-    // not the same as being seen. The pane rides BACKGROUND for exactly this reason (decision
-    // 1070): at ARTWORK the draw layer, which is bucket-wide and outranks the frame (0884), buried
-    // the icon no matter which frame was declared later.
+    // …and it draws ON TOP of the model pane it sits inside — the actual regression. The pane is
+    // opaque and the icon's rect is wholly within it, so being in the render list is not the same
+    // as being seen. The pane rides BACKGROUND for exactly this reason (decision 1070): at ARTWORK
+    // the draw layer, which is bucket-wide and outranks the frame (0884), buried the icon no
+    // matter which frame was declared later.
+    //
+    // The pane is found by NAME rather than by "a texture quad with an empty path", which is what
+    // this used to look for. Our deleted `assets/ui/PetPaperDollFrame.xml` declared `PetModelFrame`
+    // as a plain `<Frame>` carrying one opaque BACKGROUND booth texture standing in for a widget
+    // this engine did not draw; the reference declares it `<PlayerModel>` (stock
+    // `PetPaperDollFrame.xml:177`), which is a real widget here now and extracts as
+    // `QuadContent::ModelPane`. The old needle matches nothing against it — this asserts the
+    // containment itself rather than folding it into a `find`, so a pane that stopped covering the
+    // icon fails loudly instead of dropping out of the search.
     let pane = quads
         .iter()
         .find(|q| {
-            matches!(&q.content, QuadContent::Texture { path, .. }
-                if path.as_deref().unwrap_or_default().is_empty())
-                && q.rect.is_some_and(|r| {
-                    r.left <= rect.left
-                        && r.right >= rect.right
-                        && r.bottom <= rect.bottom
-                        && r.top >= rect.top
-                })
+            matches!(&q.content, QuadContent::ModelPane { name: Some(n) } if n == "PetModelFrame")
         })
-        .expect("the pet model pane's booth quad covers the icon's rect");
+        .expect("the pet model pane is in the render list");
+    let pane_rect = pane.rect.expect("…with a resolved rect");
+    assert!(
+        pane_rect.left <= rect.left
+            && pane_rect.right >= rect.right
+            && pane_rect.bottom <= rect.bottom
+            && pane_rect.top >= rect.top,
+        "the icon sits wholly inside the pane, which is what makes the z-order matter"
+    );
     assert!(
         icon.z > pane.z,
         "the diet icon must paint over the pane it sits in (icon z={:#x}, pane z={:#x})",
@@ -425,11 +485,18 @@ fn hovering_the_diet_icon_lists_what_the_pet_eats() {
         pane.z
     );
 
-    s.run(
-        "local f = PetPaperDollPetInfo \
-         f:GetScript(\"OnEnter\")(f)",
-    )
-    .unwrap();
+    let centre = super::test_ui::centre_of(&mut s, "PetPaperDollPetInfo");
+    // Through the MOUSE, not `GetScript("OnEnter")(f)`: the reference's handler is inline XML that
+    // opens `GameTooltip:SetOwner(this, "ANCHOR_RIGHT")` (stock `PetPaperDollFrame.xml:268`), and
+    // only the engine sets `this` — calling the script by hand passes nil and raises. Driving the
+    // pointer also puts the frame's `enableMouse` and the hit test under test, which is the half
+    // that was never covered.
+    super::test_ui::hover(&mut s, "PetPaperDollPetInfo");
+    assert_eq!(
+        s.hit_test_name(centre.0, centre.1).as_deref(),
+        Some("PetPaperDollPetInfo"),
+        "the diet icon owns its own point inside the model pane"
+    );
     assert_eq!(
         s.eval::<String>("return GameTooltipTextLeft1:GetText()")
             .unwrap(),
@@ -445,6 +512,7 @@ fn hovering_the_diet_icon_lists_what_the_pet_eats() {
 /// is hunter-gated. Quietly returning `""` here would hide that coupling.
 #[test]
 fn build_list_string_is_a_plain_comma_join_that_nils_on_nothing() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = load_pet_page();
     assert_eq!(
         s.eval::<String>("return BuildListString('Meat', 'Fish', 'Cheese')")

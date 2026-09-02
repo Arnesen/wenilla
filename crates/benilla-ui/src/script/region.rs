@@ -168,10 +168,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // BenillaSetBoothTexture(textureRegion, slotToken) — the **square** twin of
     // SetPortraitTexture (decision 0208 §5): the same `portrait_unit` booth-image binding
-    // WITHOUT the circular mask, for the paper doll's rectangular model pane (its texture region
-    // samples the booth's body bake edge to edge — no frame ring to mask for). Benilla-named:
-    // the real client's pane is a live 3D `<PlayerModel>`; ours is the doctrine-consistent
-    // still (0105/0118), so the binding is ours, not the live API's.
+    // WITHOUT the circular mask, for a body pane whose texture region samples the booth's bake
+    // edge to edge (no frame ring to mask for). Benilla-named because it is not the live API: it
+    // is the pane→booth join written in Lua.
+    //
+    // **RETIRING.** A migrated window's file is the reference's, which declares a bare
+    // `<PlayerModel>` and no texture at all, so the join moved app-side
+    // (`portrait::MODEL_PANE_BOOTHS`) and the widget draws itself (decision 1810). Two callers are
+    // left — the dressing room and the inspect window, both still our own files — and this goes
+    // with the later of them.
     lua.globals().set(
         "BenillaSetBoothTexture",
         lua.create_function(|lua, (region, token): (Table, String)| {

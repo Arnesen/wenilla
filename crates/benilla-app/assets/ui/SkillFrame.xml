@@ -25,7 +25,7 @@
         paints ON TOP of it (later file = higher z, the established house convention every top-level
         window already relies on implicitly). Because a true engine Hide-cascade doesn't reach a
         non-child, `CharacterFrame.xml`'s own `CharacterFrame_OnHide` was extended (its own
-        header comment) to loop-hide every `BENILLA_CHARACTERFRAME_SUBFRAMES` entry — the fix this
+        header comment) to loop-hide every `CHARACTERFRAME_SUBFRAMES` entry — the fix this
         page's non-nested shape requires, done once so later non-nested tabs (Pet/Reputation/Honor)
         inherit it for free.
 
@@ -542,7 +542,7 @@
          ToggleCharacter selects the tab from it (ref CharacterFrame.lua:11). This was 3 while
          Reputation (the ref's 3) was not built; ReputationFrame.xml landed and took that slot, so
          Skills is back on the reference's number. `character_tests.rs` pins every page's id against
-         its slot in BENILLA_CHARACTERFRAME_SUBFRAMES, which is what made the renumber loud rather
+         its slot in CHARACTERFRAME_SUBFRAMES, which is what made the renumber loud rather
          than silent — exactly as this comment predicted. -->
     <Frame name="SkillFrame" enableMouse="true" parent="CharacterFrame" hidden="true" id="4">
         <!-- The real 384×512 page. No <Anchors relativeTo> substitute for true parenting exists

@@ -459,11 +459,18 @@
             PlaySound("igInventoryRotateCharacter")
         end
 
-        -- The character window's twin (CharacterFrame.xml's BenillaPaperDollModel_OnUpdate — the
-        -- same ref Model_OnUpdate, UIParent.lua:1444-1462, that EVERY 1.12 model pane wires:
-        -- PaperDollFrame l.222-224, DressUpFrame.xml:202-204, TabardFrame.xml:406-408). Held button
+        -- The ref's own Model_OnUpdate (UIParent.lua:1444-1462), which EVERY 1.12 model pane wires:
+        -- PaperDollFrame l.222-224, DressUpFrame.xml:202-204, TabardFrame.xml:406-408. Held button
         -- = half a turn per second; the 0.03 click above is the tap. The ref's held-vs-click sign
         -- flip is quoted, not corrected.
+        --
+        -- **This quartet retires with this window.** The character sheet's twin of it is gone: the
+        -- migrated paper doll is a real `<PlayerModel>` driven by the reference's own
+        -- `Model_OnLoad`/`Model_Rotate*`/`Model_OnUpdate` (UIParent.xml), because `<Model>` panes
+        -- draw their booth now and carry their own facing (decision 1810). This pane is still a
+        -- booth-texture Frame, so it still needs the `frame.facing` + `*_SetFacing` shape — until
+        -- the inspect window is the reference's own, which it cannot be while 1.12 ships it as a
+        -- LoadOnDemand addon packed as `.pub`.
         function BenillaInspectModel_OnUpdate(frame, elapsed)
             local step = elapsed * 2 * PI * ROTATIONS_PER_SECOND
             if getglobal(frame:GetName() .. "RotateLeftButton"):GetButtonState() == "PUSHED" then

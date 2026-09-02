@@ -169,13 +169,12 @@ const KNOWN: &[Known] = &[
     // we have not built, and the interaction the player would notice is the TOOLTIP those handlers
     // show — not the click-blocking the flag gives. Declaring `enableMouse="true"` here would make
     // the frame swallow the click and hand back nothing, which is worse than the gap.
-    Known {
-        frame: "PetPaperDollFrameExpBar",
-        flag: Flag::Mouse,
-        why:
-            "the reference bar inherits TextStatusBar, whose OnEnter/OnLeave show the value text; \
-              ours is a plain StatusBar. Wants the status-text arc, not the flag.",
-    },
+    // `PetPaperDollFrameExpBar` RETIRED here (decision 1751's character-sheet window). It read
+    // "the reference bar inherits TextStatusBar, whose OnEnter/OnLeave show the value text; ours is
+    // a plain StatusBar" — true of OUR `PetPaperDollFrame.xml`, which is deleted. The pet page is
+    // the reference's own file now, so its XP bar inherits `TextStatusBar` because it IS the
+    // reference's declaration, and the divergence has nothing left to describe.
+    //
     // Seven `*ScrollFrame` mouse entries RETIRED here (1795). They read "our faux scroll pane is a
     // Frame with an explicit `<OnMouseWheel>`, not a ScrollFrame" — a divergence that existed only
     // because OUR `ScrollFrame` ctor took the mouse and the reference's does not. Correcting the
@@ -275,14 +274,16 @@ const KNOWN: &[Known] = &[
     Known {
         frame: "TargetofTargetHealthBar",
         flag: Flag::Mouse,
-        why: "same as PetPaperDollFrameExpBar — a plain StatusBar where the reference inherits \
-              TextStatusBar.",
+        why: "a plain StatusBar where the reference inherits TextStatusBar, whose OnEnter/OnLeave \
+              show the value text. Wants the status-text arc, not the flag. (The pet page's XP bar \
+              was this entry's twin until its window became the reference's own.)",
     },
     Known {
         frame: "TargetofTargetManaBar",
         flag: Flag::Mouse,
-        why: "same as PetPaperDollFrameExpBar — a plain StatusBar where the reference inherits \
-              TextStatusBar.",
+        why: "a plain StatusBar where the reference inherits TextStatusBar, whose OnEnter/OnLeave \
+              show the value text. Wants the status-text arc, not the flag. (The pet page's XP bar \
+              was this entry's twin until its window became the reference's own.)",
     },
     Known {
         frame: "TradePlayerItem7",

@@ -12,10 +12,13 @@
 //! The fixture deliberately mirrors the engine module's own (Alliance over Ironforge + Stormwind,
 //! Steamwheedle over Booty Bay, the parentless bucket last) so a failure here reads against a shape
 //! that is already pinned one layer down, and the two can be compared line for line.
+//!
+//! **The window around the page is the reference's own since 1751** — `CharacterFrame.xml` and
+//! `PaperDollFrame.xml` off the player's chain — so every test here opens with
+//! `wow_data_or_skip!()` and loads [`super::test_ui::CHARACTER_UI`]. The page itself
+//! (`ReputationFrame.xml`) and the watch bar (`ActionBar.xml`) are still ours.
 
 use benilla_ui::script::{FactionEntry, ReputationState, UiScript, UnitState};
-
-use super::test_ui::load_ui as load_xml;
 
 /// An ordinary bar row: visible, not a header, `standing_id` 5 ("Friendly") sitting 1000 into a
 /// 6000-wide rank window. The same numbers `benilla-ui`'s own fixture uses.
@@ -76,28 +79,36 @@ fn state() -> ReputationState {
     }
 }
 
-/// The manifest prefix this page really needs, in manifest order: the fonts, the panel manager, the
-/// managed-position pass, the tooltip, the numerals machinery + Cooldown + ActionBar (the watch bar
-/// and every frame it drives live there), the two scroll/shared-widget kits the page's list and
-/// popup inherit from, then the window and the page.
+/// The character window, whose third tab this page is — [`super::test_ui::CHARACTER_UI`], which
+/// already carries `ReputationFrame.xml` (stock `CharacterFrame_ShowSubFrame` hides all five pages
+/// by name, unguarded) and `ActionBar.xml` (the watch bar, and the show/hide pair's
+/// `ShowWatchedReputationBarText`). This page adds nothing of its own.
+///
+/// It was a hand-copied manifest prefix until the window became the reference's (decision 1751):
+/// stock `CharacterFrame_OnLoad` reaches into four other files before it does anything else, so the
+/// list stopped being short enough for a per-module copy to stay honest.
 fn load_page(s: &UiScript) {
-    for file in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        "UIParent.xml",
-        "GameTooltip.xml",
-        "Interface\\FrameXML\\TextStatusBar.lua",
-        "Interface\\FrameXML\\TextStatusBar.xml",
-        "Cooldown.xml",
-        "ActionBar.xml",
-        "ScrollTemplates.xml",
-        "UIPanelTemplates.xml",
-        "OptionsFrameTemplates.xml",
-        "CharacterFrame.xml",
-        "ReputationFrame.xml",
-    ] {
-        load_xml(s, file);
+    for file in super::test_ui::CHARACTER_UI {
+        super::test_ui::load_ui_strict(s, file);
+    }
+}
+
+/// A level-`level` player behind the window — enough of one that opening it is quiet.
+///
+/// **Race and class carry both halves of their pairs**, which is not decoration since 1751:
+/// `UnitRace`/`UnitClass` answer `(localized, file)` or `nil, nil` — the binding `zip`s the two —
+/// and stock `PaperDollFrame_SetLevel` formats level, race and class into `CharacterLevelText`
+/// unguarded (`PaperDollFrame.lua:100-104`), on every show of the window this page is a tab of.
+/// A `UnitState::default()` player therefore raises the moment `ToggleCharacter` runs.
+fn player(level: u32) -> UnitState {
+    UnitState {
+        exists: true,
+        level,
+        race: Some("Human".into()),
+        race_file: Some("Human".into()),
+        class: Some("Warrior".into()),
+        class_file: Some("WARRIOR".into()),
+        ..UnitState::default()
     }
 }
 
@@ -106,14 +117,7 @@ fn shown_reputation_page() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_page(&s);
-    s.set_unit(
-        "player",
-        Some(UnitState {
-            exists: true,
-            level: 40,
-            ..UnitState::default()
-        }),
-    );
+    s.set_unit("player", Some(player(40)));
     s.set_reputation(state());
     s.run(r#"ToggleCharacter("ReputationFrame")"#).unwrap();
     s.resolve();
@@ -151,6 +155,7 @@ fn shown(s: &mut UiScript, name: &str) -> bool {
 /// wrong tab. Skills moved to 4 in the same breath and is asserted here for the same reason.
 #[test]
 fn the_reputation_page_opens_on_the_windows_third_tab() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = shown_reputation_page();
     assert!(
         s.eval::<bool>("return ReputationFrame:IsVisible()")
@@ -163,21 +168,36 @@ fn the_reputation_page_opens_on_the_windows_third_tab() {
         3,
         "and the tab row selects 3 — the reference's own slot for Reputation"
     );
+    // **The id IS the tab slot**, and that is the whole coupling: `ToggleCharacter` selects the tab
+    // with `PanelTemplates_SetTab(CharacterFrame, subFrame:GetID())`
+    // (`CharacterFrame.lua:10`), while `CharacterFrameTab_OnClick` hardcodes which page each tab
+    // opens (`:41-43` — tab 3 → Reputation, tab 4 → Skills). A page whose `id=` disagreed would
+    // open on click and light the wrong tab.
     assert_eq!(
         s.eval::<i64>("return ReputationFrame:GetID()").unwrap(),
         3,
-        "the id IS the tab slot; BENILLA_CHARACTERFRAME_SUBFRAMES[3] must name this page"
+        "the id IS the tab slot the reference's tab 3 opens"
     );
     assert_eq!(
-        s.eval::<String>("return BENILLA_CHARACTERFRAME_SUBFRAMES[3]")
-            .unwrap(),
-        "ReputationFrame"
+        s.eval::<i64>("return SkillFrame:GetID()").unwrap(),
+        4,
+        "and Skills is the reference's 4 beside it"
     );
-    assert_eq!(
-        s.eval::<String>("return BENILLA_CHARACTERFRAME_SUBFRAMES[4]")
-            .unwrap(),
-        "SkillFrame",
-        "and Skills moved to the reference's 4 with it"
+    // **`CHARACTERFRAME_SUBFRAMES` is the hide-all list, not the tab map** — re-pointed here at
+    // 1751, because our deleted `CharacterFrame.xml` wrote the two as one thing and the
+    // reference's does not. Stock line 1 is
+    // `{ "PaperDollFrame", "PetPaperDollFrame", "SkillFrame", "ReputationFrame", "HonorFrame" }` —
+    // Skills THIRD and Reputation FOURTH, the opposite of their tab slots — and it is only ever
+    // walked by `CharacterFrame_ShowSubFrame`, which shows the one it was named and hides the rest
+    // (`CharacterFrame.lua:25-33`). So what this page needs from the list is membership: a page
+    // missing from it is a page nothing ever hides, which is the "one page at a time" assertion at
+    // the end of this test.
+    assert!(
+        s.eval::<bool>(
+            "for _, v in CHARACTERFRAME_SUBFRAMES do if v == \"ReputationFrame\" then return true end end return false"
+        )
+        .unwrap(),
+        "the hide-all list names this page"
     );
 
     // Eight rows in fifteen slots: the tail goes dark on BOTH twins, and a list that fits raises
@@ -205,6 +225,7 @@ fn the_reputation_page_opens_on_the_windows_third_tab() {
 /// global leaves the folded rows on screen (ReputationFrame.xml's deviation 3).
 #[test]
 fn a_header_row_paints_its_fold_icon_and_folds_on_click() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = shown_reputation_page();
 
     assert_eq!(text_of(&mut s, "ReputationHeader1"), "Alliance");
@@ -259,6 +280,7 @@ fn a_header_row_paints_its_fold_icon_and_folds_on_click() {
 /// absolute.
 #[test]
 fn a_bar_row_paints_name_standing_and_the_faction_bar_colour() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = shown_reputation_page();
 
     assert_eq!(text_of(&mut s, "ReputationBar2FactionName"), "Ironforge");
@@ -325,10 +347,11 @@ fn a_bar_row_paints_name_standing_and_the_faction_bar_colour() {
 /// 0251), so this is the assertion that the slots really are re-bound and not just clipped.
 #[test]
 fn the_scroll_offset_rebinds_the_fixed_row_slots() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_page(&s);
-    s.set_unit("player", Some(UnitState::default()));
+    s.set_unit("player", Some(player(40)));
 
     // One header over twenty children: 21 visible rows against 15 slots.
     let mut entries = vec![header(469, 11, "Alliance")];
@@ -403,10 +426,11 @@ fn the_scroll_offset_rebinds_the_fixed_row_slots() {
 /// bar again closes it, which is the reference's own toggle (l.152-153).
 #[test]
 fn clicking_a_bar_opens_the_detail_popup_on_that_faction() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_page(&s);
-    s.set_unit("player", Some(UnitState::default()));
+    s.set_unit("player", Some(player(40)));
     // Ironforge at war and peace-forced — the two flags the popup reads back off the row.
     let mut st = state();
     for e in &mut st.entries {
@@ -512,17 +536,11 @@ fn clicking_a_bar_opens_the_detail_popup_on_that_faction() {
 /// `ExhaustionTick_Update` as unreachable while this bar could never show.
 #[test]
 fn the_watch_bar_shows_the_watched_factions_progress_and_swaps_at_max_level() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_page(&s);
-    s.set_unit(
-        "player",
-        Some(UnitState {
-            exists: true,
-            level: 40,
-            ..UnitState::default()
-        }),
-    );
+    s.set_unit("player", Some(player(40)));
     assert!(
         !shown(&mut s, "ReputationWatchBar"),
         "nothing watched: the bar stays down, as it has since it was a stub"
@@ -587,14 +605,7 @@ fn the_watch_bar_shows_the_watched_factions_progress_and_swaps_at_max_level() {
         .unwrap();
 
     // Ding to 60: the reputation strip takes the XP bar's place, art and all.
-    s.set_unit(
-        "player",
-        Some(UnitState {
-            exists: true,
-            level: 60,
-            ..UnitState::default()
-        }),
-    );
+    s.set_unit("player", Some(player(60)));
     s.fire_event(
         "PLAYER_LEVEL_UP",
         vec![benilla_ui::script::ScriptValue::Int(60)],

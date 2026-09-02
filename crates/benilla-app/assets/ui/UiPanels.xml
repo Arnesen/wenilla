@@ -2418,10 +2418,36 @@
         pre-fit state). Its OnShow *also* sets the highlight width, which is dead code in the
         reference and dropped here: this highlight is anchored LEFT/RIGHT, and two opposing anchors
         resolve the size from the span without consulting the width at all (wow-re layout.md,
-        VERIFIED). The small tab now says the same thing the same way (1004). One deviation: the ref's OnLoad
-        SetFrameLevel(+4) raise (our loader has no cross-frame level raise wired into templates
-        yet; the tabs sit below the window art's hit-rect so nothing overlaps them). OnClick is
-        the instance's to define (the ref merchant overrides it too).
+        VERIFIED). The small tab now says the same thing the same way (1004).
+
+        **The OnLoad raise and the OnClick are the reference's own, and both were dropped here
+        until decision 1810.** The note that stood in their place said the raise was unnecessary —
+        "the tabs sit below the window art's hit-rect so nothing overlaps them" — and that "OnClick
+        is the instance's to define". Both were true of our own CharacterFrame.xml, and both are
+        false of the reference's, which is the file that runs now:
+
+          - the reference's `PaperDollFrame` is `setAllPoints enableMouse="true"` with a
+            `bottom=45` hit inset, and the reference's tabs are anchored INSIDE the window (CENTER
+            to BOTTOMLEFT +60,+62), so the page's hit rect covers the whole row. Frame levels come
+            out CharacterFrame 1 / PaperDollFrame 2 / tabs 2, later-created winning — the page eats
+            every tab click. `SetFrameLevel(+4)` is what lifts the row out, and is why the
+            reference has it.
+          - stock `CharacterFrame.xml` gives its five tabs only `<OnEnter>`/`<OnLeave>`; the
+            dispatch lives HERE. Without it `CharacterFrameTab4:GetScript("OnClick")` is nil and
+            the character window's tabs do nothing at all.
+
+        The body hardcodes `CharacterFrame`, which reads odd on a shared template until you check
+        the other consumers: the reference's `MerchantFrameTab1/2` and every one of ours
+        (Auction/Friends/Inspect/Mail/Talent) declares its own `<OnClick>`, and an instance's
+        handler REPLACES the inherited one rather than adding to it. So this reaches exactly the
+        window it names, which is the reference's own arrangement.
+
+        Still ours, and still why this template is not simply sourced off the chain:
+        `Interface\FrameXML\CharacterFrameTemplates.xml` fits its text in `<OnShow>` through
+        `PanelTemplates_TabResize(0)`, which needs the reference's SYNCHRONOUS string measure. Ours
+        lands a frame late, so the fit runs from `BenillaTabButton_OnUpdate` instead and an
+        OnShow-only fit would leave every tab at its pre-fit 115px. That divergence is 1004's, it
+        spans six windows, and it is what this template's own migration waits on.
     -->
     <Button name="CharacterFrameTabButtonTemplate" virtual="true">
         <Size><AbsDimension x="115" y="32"/></Size>
@@ -2472,6 +2498,12 @@
             </Anchors>
         </HighlightTexture>
         <Scripts>
+            <!-- ref CharacterFrameTemplates.xml:69-81, verbatim. -->
+            <OnLoad>this:SetFrameLevel(this:GetFrameLevel() + 4)</OnLoad>
+            <OnClick>
+                PanelTemplates_Tab_OnClick(CharacterFrame)
+                CharacterFrameTab_OnClick()
+            </OnClick>
             <OnUpdate>BenillaTabButton_OnUpdate(self)</OnUpdate>
         </Scripts>
     </Button>

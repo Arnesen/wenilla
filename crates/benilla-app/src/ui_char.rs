@@ -27,9 +27,10 @@
 //!   `locked` (decision 0208 phase 1b — the doll twin of `ui_items::feed_containers`'s bag-slot
 //!   `.locked`), and its resolved `equip_slots` (`ui_items::find_equip_slot` over the item
 //!   template's `inventoryType` — the cursor arc's "fit rule", decision 0216/0218).
-//! - **The paper-doll booth yaw**: the pane's `Model:SetRotation` transcription writes the VM-side
-//!   value ([`UiScript::paperdoll_yaw`]); the feed mirrors it onto [`PaperDollBooth`] so the booth
-//!   re-bakes at the new facing (decision 0208 §5).
+//! - **The paper-doll booth yaw**: the stock pane's rotate buttons call the reference's own
+//!   `Model_RotateLeft`/`_RotateRight`, which write `CharacterModelFrame:SetRotation`; the feed
+//!   mirrors that pane's facing onto [`PaperDollBooth`] so the booth re-bakes at the new angle
+//!   (decision 0208 §5, off the pane itself since 1751).
 //!
 //! Events, fired on snapshot transitions (grouped by the ref's own registration set,
 //! `PaperDollFrame.lua:14-28` — arg1 `"player"`): `UNIT_STATS`, `UNIT_RESISTANCES`, `UNIT_DAMAGE`,
@@ -505,6 +506,7 @@ pub(crate) fn unit_combat_stats(store: &ObjectStore) -> UnitCombatStats {
         has_offhand: false,
         has_wand: false,
         main_weapon_skill: (0, 0),
+        offhand_weapon_skill: (0, 0),
         ranged_weapon_skill: (0, 0),
         defense_skill: (0, 0),
     }
@@ -524,6 +526,7 @@ fn combat_stats(store: &ObjectStore, items: &mut Items, commands: &NetCommands) 
         .is_some_and(|t| t.class == ITEM_CLASS_WEAPON && t.subclass == SUBCLASS_WAND);
 
     let main_skill = weapon_skill_id(store, items, commands, SLOT_MAIN_HAND);
+    let offhand_skill = weapon_skill_id(store, items, commands, SLOT_OFF_HAND);
     let ranged_skill_id = slot_entry(store, items, SLOT_RANGED)
         .and_then(|e| items.template(e, 0, commands))
         .filter(|t| t.class == ITEM_CLASS_WEAPON)
@@ -533,6 +536,10 @@ fn combat_stats(store: &ObjectStore, items: &mut Items, commands: &NetCommands) 
         has_offhand,
         has_wand,
         main_weapon_skill: skill_pair(store, main_skill),
+        // `UnitAttackBothHands`'s SECOND pair (decision 1810) — the binding pushes one per hand,
+        // and `weapon_skill_id` already answers Unarmed for an empty or non-weapon off hand, which
+        // is what a shield or an empty hand reads as.
+        offhand_weapon_skill: skill_pair(store, offhand_skill),
         ranged_weapon_skill: ranged_skill_id.map_or((0, 0), |id| skill_pair(store, id)),
         // `UnitDefense`'s pair. Its repaint wire is `SKILL_LINES_CHANGED` (which the ref's
         // `PaperDollFrame` registers, l.28, and `watch_skill_ups` already fires), NOT a
@@ -979,9 +986,13 @@ pub(crate) fn feed_char(
     let Some(mut script) = script else {
         return;
     };
-    // The pane's Model:SetRotation transcription owns the yaw; the booth mirrors it (0208 §5).
+    // The pane owns the yaw and the booth mirrors it (0208 §5). Read off the widget's own
+    // `SetRotation` state since decision 1751 put the reference's `PaperDollFrame.xml` on the
+    // chain: the stock file declares a real `<PlayerModel name="CharacterModelFrame">` and drives
+    // it with `Model_OnLoad`/`Model_Rotate*`/`Model_OnUpdate`, where ours used to call a
+    // benilla-named `BenillaPaperDollModel_SetFacing` into a scalar on the VM.
     // Write-if-different: an unconditional write would mark the booth changed every frame.
-    let yaw = script.paperdoll_yaw();
+    let yaw = script.model_pane_facing("CharacterModelFrame");
     if booth.yaw != yaw {
         booth.yaw = yaw;
     }

@@ -12,15 +12,20 @@
 //! ignoreModifiers)` — which takes the MOUSE button as its first argument and reads the frame from
 //! `this`, so a test cannot call it directly any more. These drive the mouse instead
 //! ([`super::test_ui::click`]), which is the stronger test regardless: it puts the template's own
-//! `RegisterForClicks("LeftButtonUp", "RightButtonUp")` and script wiring under test too. The doll
-//! slots below are still ours (`BenillaPaperDollSlot_OnClick`) and are still called directly.
+//! `RegisterForClicks("LeftButtonUp", "RightButtonUp")` and script wiring under test too.
+//!
+//! **The doll slots went the same way.** `CharacterFrame.xml` and `PaperDollFrame.xml` are the
+//! reference's own too now, so `BenillaPaperDollSlot_OnClick` is gone and the fork is stock
+//! `PaperDollItemSlotButton_OnClick(button, ignoreModifiers)` (`PaperDollFrame.lua:647-662`) —
+//! which reads `this` exactly as the bag handler does. Those tests drive the mouse as well, over a
+//! window that is genuinely OPEN, which is the only state a player can click a doll slot from.
 
 use benilla_ui::script::{
     ContainerSlot, ContainerState, DressUpIntent, InvSlotView, InventorySlots, SoundRequest,
-    UiScript,
+    UiScript, UnitState,
 };
 
-use super::test_ui::{bag_slot_button, click, load_ui as load_xml, BAG_UI};
+use super::test_ui::{bag_slot_button, click, load_ui as load_xml, BAG_UI, CHARACTER_UI};
 
 /// The jerky stack every bag fixture here uses — a real 1.12 link, quality white.
 const JERKY_LINK: &str = "|cffffffff|Hitem:117|h[Tough Jerky]|h|r";
@@ -73,6 +78,41 @@ fn load_room_with_bags(s: &UiScript) {
     for file in ROOM_UI {
         load_xml(s, file);
     }
+}
+
+/// The character window **open on its paper doll**, with the room and a chat edit box beside it —
+/// the two files [`CHARACTER_UI`] does not already carry. (`UIDropDownMenu.xml`,
+/// `Interface\FrameXML\UIMenu.xml` and `UnitPopup.xml` are in both lists; loading either twice
+/// would redeclare its frames.)
+///
+/// The player behind it carries **both** halves of the race and class pairs: `UnitRace`/`UnitClass`
+/// answer `(localized, file)` or `nil, nil` — the binding `zip`s them — and stock
+/// `PaperDollFrame_SetLevel` formats all three into `CharacterLevelText` unguarded
+/// (`PaperDollFrame.lua:100-104`) on every show.
+///
+/// **Needs client data**, like [`load_room_with_bags`].
+fn shown_paper_doll() -> UiScript {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for file in CHARACTER_UI {
+        super::test_ui::load_ui_strict(&s, file);
+    }
+    for file in ["DressUpFrame.xml", "ChatFrame.xml"] {
+        super::test_ui::load_ui_strict(&s, file);
+    }
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            exists: true,
+            level: 60,
+            race: Some("Human".into()),
+            race_file: Some("Human".into()),
+            class: Some("Warrior".into()),
+            class_file: Some("WARRIOR".into()),
+            ..UnitState::default()
+        }),
+    );
+    s
 }
 
 /// A backpack holding a 5-stack of Tough Jerky in slot 1, opened; returns the NAME of the button
@@ -230,26 +270,17 @@ fn ctrl_clicking_a_chat_link_previews_it() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The paper doll's own slots (ref PaperDollFrame.lua:647-655): ctrl previews what you are
-/// wearing, shift posts its link. Both read the unit-keyed `GetInventoryItemLink`, the binding this
-/// arc added — so this also pins that the getter answers for `"player"`.
+/// The paper doll's own slots (`PaperDollFrame.lua:647-662`): ctrl previews what you are wearing,
+/// shift posts its link. Both read the unit-keyed `GetInventoryItemLink`, the binding this arc
+/// added — so this also pins that the getter answers for `"player"`.
+///
+/// Since 1751 that handler is the reference's own `PaperDollItemSlotButton_OnClick(button,
+/// ignoreModifiers)`, which reads the frame from `this` — so this drives the mouse over a window
+/// that is really open, exactly as the bag tests above do.
 #[test]
 fn the_paper_doll_slots_preview_and_post_what_you_wear() {
-    let mut s = UiScript::new().unwrap();
-    s.set_screen_size(1024.0, 768.0);
-    for file in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        "UIParent.xml",
-        "GameTooltip.xml",
-        "CharacterFrame.xml",
-        "DressUpFrame.xml",
-        "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
-        "ChatFrame.xml",
-    ] {
-        load_xml(&s, file);
-    }
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = shown_paper_doll();
     let mut slots = InventorySlots::default();
     slots[1] = Some(InvSlotView {
         item_id: 1234,
@@ -267,11 +298,13 @@ fn the_paper_doll_slots_preview_and_post_what_you_wear() {
             .unwrap(),
         "|cff1eff00|Hitem:1234:0:0:0|h[Test Helm]|h|r"
     );
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
+    let _ = s.take_dressup_intents();
+    s.resolve();
 
     // CTRL on the head slot → the room, wearing the helm.
     s.set_modifiers(false, true, false);
-    s.run("BenillaPaperDollSlot_OnClick(CharacterHeadSlot, \"LeftButton\")")
-        .unwrap();
+    click(&mut s, "CharacterHeadSlot", "LeftButton");
     s.set_modifiers(false, false, false);
     assert_eq!(
         s.take_dressup_intents(),
@@ -281,8 +314,7 @@ fn the_paper_doll_slots_preview_and_post_what_you_wear() {
     // SHIFT with chat open → the link; the item is never picked up either way.
     assert!(s.focus_editbox("ChatFrameEditBox"));
     s.set_modifiers(true, false, false);
-    s.run("BenillaPaperDollSlot_OnClick(CharacterHeadSlot, \"LeftButton\")")
-        .unwrap();
+    click(&mut s, "CharacterHeadSlot", "LeftButton");
     s.set_modifiers(false, false, false);
     assert_eq!(
         s.eval::<String>("return ChatFrameEditBox:GetText()")
@@ -297,26 +329,17 @@ fn the_paper_doll_slots_preview_and_post_what_you_wear() {
 }
 
 /// A slot whose item template has not answered yet has **no link** — a state the real client never
-/// has (its item cache is synchronous), so the reference carries no guard and `EditBox:Insert`
-/// takes a string. Shift-clicking such a slot must post nothing and raise nothing; the click after
-/// the answer lands works normally.
+/// has (its item cache is synchronous), so the reference carries no guard: stock
+/// `PaperDollItemSlotButton_OnClick` shift-inserts `GetInventoryItemLink(...)` straight
+/// (`PaperDollFrame.lua:653`). Shift-clicking such a slot must post nothing and raise nothing.
+///
+/// That is now the ENGINE's promise rather than a transcription's guard: `EditBox:Insert(nil)` is a
+/// no-op because the reference reads the argument through `lua_tostring` (decision 1800), and this
+/// test is what holds the stock line above harmless over an in-flight item.
 #[test]
 fn shift_clicking_an_unresolved_slot_posts_nothing_and_never_raises() {
-    let mut s = UiScript::new().unwrap();
-    s.set_screen_size(1024.0, 768.0);
-    for file in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        "UIParent.xml",
-        "GameTooltip.xml",
-        "CharacterFrame.xml",
-        "DressUpFrame.xml",
-        "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
-        "ChatFrame.xml",
-    ] {
-        load_xml(&s, file);
-    }
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = shown_paper_doll();
     // The slot is occupied but unresolved: an item id with no name/quality yet, so no link.
     let mut slots = InventorySlots::default();
     slots[1] = Some(InvSlotView {
@@ -325,11 +348,13 @@ fn shift_clicking_an_unresolved_slot_posts_nothing_and_never_raises() {
         ..Default::default()
     });
     s.set_inventory_slots(slots);
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
+    let _ = s.take_dressup_intents();
+    s.resolve();
     assert!(s.focus_editbox("ChatFrameEditBox"));
 
     s.set_modifiers(true, false, false);
-    s.run("BenillaPaperDollSlot_OnClick(CharacterHeadSlot, \"LeftButton\")")
-        .unwrap();
+    click(&mut s, "CharacterHeadSlot", "LeftButton");
     s.set_modifiers(false, false, false);
     assert_eq!(
         s.eval::<String>("return ChatFrameEditBox:GetText()")
@@ -341,8 +366,7 @@ fn shift_clicking_an_unresolved_slot_posts_nothing_and_never_raises() {
 
     // And ctrl on the same unresolved slot is inert too (DressUpItemLink's own nil guard).
     s.set_modifiers(false, true, false);
-    s.run("BenillaPaperDollSlot_OnClick(CharacterHeadSlot, \"LeftButton\")")
-        .unwrap();
+    click(&mut s, "CharacterHeadSlot", "LeftButton");
     s.set_modifiers(false, false, false);
     assert!(
         s.take_dressup_intents().is_empty(),

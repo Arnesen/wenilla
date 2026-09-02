@@ -136,6 +136,33 @@
             button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
         end
 
+        -- ref MicroButtonTooltipText (MainMenuBarMicroButtons.lua l.11-18), VERBATIM — the
+        -- reference's own two-argument form: a label and a binding ACTION name, returning the
+        -- label with the bound key in NORMAL_FONT_COLOR parentheses, or the bare label when the
+        -- action is unbound.
+        --
+        -- It lives here because this file is our `MainMenuBarMicroButtons.xml`, which is where the
+        -- reference declares it. It is not the micro bar's own helper: the stock `CharacterFrame`
+        -- tab row calls it at all five `<OnEnter>` sites
+        -- (`MicroButtonTooltipText(TEXT(CHARACTER_INFO), "TOGGLECHARACTER0")` and its four
+        -- siblings), so migrating that window onto the chain (decision 1751) needs this name to
+        -- answer or every character-tab hover raises. `SpellBookFrame.xml` already guards on it
+        -- with `if MicroButtonTooltipText then`; that guard is now always true.
+        --
+        -- Ours below is the BUTTON-shaped variant, kept because our own micro buttons carry the
+        -- action in `button.binding` and the label in `button.label`, and because it renders the
+        -- key through the Key Bindings window's display law. The reference's version prints
+        -- `GetBindingKey`'s raw token, which is what the real client shows, so the two are not
+        -- folded together: this one is the reference's text, the other is ours.
+        function MicroButtonTooltipText(text, action)
+            if GetBindingKey(action) then
+                return text .. " " .. NORMAL_FONT_COLOR_CODE .. "(" .. GetBindingKey(action) .. ")"
+                    .. FONT_COLOR_CODE_CLOSE
+            else
+                return text
+            end
+        end
+
         -- ref MicroButtonTooltipText (l.11-18), the LIVE contract since 0997: `button.binding`
         -- is the binding ACTION name and the key resolves through GetBindingKey at hover time
         -- (rendered through the Key Bindings window's display law when it is loaded — the

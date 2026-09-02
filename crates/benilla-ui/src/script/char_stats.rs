@@ -154,6 +154,10 @@ pub struct UnitCombatStats {
     /// WHICH skill via [`weapon_subclass_skill`] (unarmed = [`SKILL_UNARMED`]) and reads the pair
     /// from `PLAYER_SKILL_INFO`; `UnitAttackBothHands` serves it verbatim.
     pub main_weapon_skill: (u32, i32),
+    /// The OFF hand's, read the same way. `UnitAttackBothHands` pushes both hands (§4 of wow-re's
+    /// `pet-paperdoll-stat-api.md`: `0x518810` calls `[vtbl+0xb0]` twice, hand 0 then hand 1), and
+    /// an empty or non-weapon off hand is Unarmed exactly as the main hand is.
+    pub offhand_weapon_skill: (u32, i32),
     /// The ranged weapon's skill pair (`UnitRangedAttack`).
     pub ranged_weapon_skill: (u32, i32),
     /// The [`SKILL_DEFENSE`] line's `(value, temp+perm bonus)` pair, read out of `PLAYER_SKILL_INFO`
@@ -200,6 +204,7 @@ impl Default for UnitCombatStats {
             ranged_min_damage: 0.0,
             ranged_max_damage: 0.0,
             main_weapon_skill: (0, 0),
+            offhand_weapon_skill: (0, 0),
             ranged_weapon_skill: (0, 0),
             defense_skill: (0, 0),
             has_wand: false,
@@ -466,21 +471,6 @@ impl super::UiScript {
     pub fn take_inventory_uses(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.model_mut().inventory_uses)
     }
-
-    /// The paper-doll model pane's yaw in radians (`BenillaPaperDollModel_SetFacing` wrote it) —
-    /// a persistent value the app samples each frame to pose the booth's body bake (decision 0208
-    /// §5), not a drain. `0.0` until Lua sets it (the ref's own default, 0.61, is authored in the
-    /// window's OnLoad).
-    pub fn paperdoll_yaw(&self) -> f32 {
-        self.model_ref().paperdoll_yaw
-    }
-
-    /// The **pet** paper doll pane's yaw (`BenillaPetPaperDollModel_SetFacing` wrote it) — the
-    /// exact twin of [`Self::paperdoll_yaw`] and of `UiScript::inspect_yaw`, sampled each frame by
-    /// `crate::ui_pet_doll` onto its booth (decision 1057).
-    pub fn pet_paperdoll_yaw(&self) -> f32 {
-        self.model_ref().pet_paperdoll_yaw
-    }
 }
 
 /// Read a unit's combat-stats snapshot under a short model borrow, routed by token: `"player"` and
@@ -500,6 +490,16 @@ fn with_unit_stats<T>(
         _ => None,
     };
     f(pushed.unwrap_or(&absent))
+}
+
+/// The post-processing both skill-shaped bindings share: **`if (mod + base) < 0 then mod = -base`**
+/// — so the pair can never sum below zero (`0x519298` for `UnitDefense`, `0x5188a7` per hand for
+/// `UnitAttackBothHands`; wow-re `ui/scratch/pet-paperdoll-stat-api.md` §4). A debuff deeper than
+/// the skill itself reads as "reduced to 0", never as a negative total.
+fn skill_clamped((base, modifier): (u32, i32)) -> (i64, i64) {
+    let base = i64::from(base);
+    let modifier = i64::from(modifier);
+    (base, if modifier + base < 0 { -base } else { modifier })
 }
 
 /// A **non-player** unit's answer to both skill-shaped questions — `UnitDefense` and
@@ -839,27 +839,39 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // UnitAttackBothHands("player") → (base, modifier) — the main-hand weapon-skill line: skill
-    // value + its temp+perm bonus, resolved app-side via the weapon_subclass_skill table (unarmed
-    // = SKILL_UNARMED when nothing's equipped).
+    // UnitAttackBothHands("player") → (mainBase, mainMod, offBase, offMod) — **FOUR** returns, one
+    // pair per hand: each hand's weapon-skill line, value + its temp+perm bonus, resolved app-side
+    // via the weapon_subclass_skill table (unarmed = SKILL_UNARMED for an empty or non-weapon
+    // hand).
     //
-    // A non-player unit takes the same virtual fork `UnitDefense` does (`0x6136b0`, wow-re
-    // `ui/scratch/pet-paperdoll-stat-api.md`) and lands on the identical `level * 5` — and that
-    // one **ignores its hand index outright**, so both hands answer the same pair. The pet sheet's
-    // Attack row therefore reads 300 at level 60, exactly like its Defense row.
+    // **It answered two until decision 1810**, which is 1793's shape at its quietest: `0x518810`
+    // calls `[vtbl+0xb0]` TWICE, hand 0 then hand 1, and pushes `(base0, mod0, base1, mod1)`
+    // (VERIFIED, wow-re `ui/scratch/pet-paperdoll-stat-api.md` §4). The reference's own
+    // `PaperDollFrame_SetAttackBothHands` destructures only the first two — its next line is
+    // `-- FIXME: The offhand stats aren't displayed yet.` — so putting the stock character sheet on
+    // the chain could never have exposed this. An addon reading four gets two nils.
+    //
+    // A non-player unit takes the same virtual fork `UnitDefense` does (`0x6136b0`) and lands on
+    // the identical `level * 5` — and that one **ignores its hand index outright**, so both hands
+    // answer the same pair. The pet sheet's Attack row reads 300 at level 60, like its Defense row.
     g.set(
         "UnitAttackBothHands",
         lua.create_function(|lua, token: Option<String>| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(match token.as_deref() {
-                Some("player") => model.player_combat_stats.as_ref().map_or((0, 0), |s| {
-                    (
-                        i64::from(s.main_weapon_skill.0),
-                        i64::from(s.main_weapon_skill.1),
-                    )
-                }),
-                Some("pet") => (cgunit_skill(&model, "pet"), 0),
-                _ => (0, 0),
+                Some("player") => model
+                    .player_combat_stats
+                    .as_ref()
+                    .map_or((0, 0, 0, 0), |s| {
+                        let (mb, mm) = skill_clamped(s.main_weapon_skill);
+                        let (ob, om) = skill_clamped(s.offhand_weapon_skill);
+                        (mb, mm, ob, om)
+                    }),
+                Some("pet") => {
+                    let base = cgunit_skill(&model, "pet");
+                    (base, 0, base, 0)
+                }
+                _ => (0, 0, 0, 0),
             })
         })?,
     )?;
@@ -895,9 +907,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, token: Option<String>| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(match token.as_deref() {
-                Some("player") => model.player_combat_stats.as_ref().map_or((0, 0), |s| {
-                    (i64::from(s.defense_skill.0), i64::from(s.defense_skill.1))
-                }),
+                Some("player") => model
+                    .player_combat_stats
+                    .as_ref()
+                    .map_or((0, 0), |s| skill_clamped(s.defense_skill)),
                 Some("pet") => (cgunit_skill(&model, "pet"), 0),
                 _ => (0, 0),
             })
@@ -1174,33 +1187,6 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // BenillaPaperDollModel_SetFacing(radians) — the model pane's rotate buttons write the bake
-    // yaw here (persistent; the app samples UiScript::paperdoll_yaw each frame — decision 0208
-    // §5's rotate-adjusts-the-bake). Benilla-named: the real client's Model:SetFacing is a widget
-    // method on a live 3D pane; our doctrine-consistent still carries one scalar.
-    g.set(
-        "BenillaPaperDollModel_SetFacing",
-        lua.create_function(|lua, radians: f32| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .paperdoll_yaw = radians;
-            Ok(())
-        })?,
-    )?;
-
-    // BenillaPetPaperDollModel_SetFacing(radians) — the PET pane's own bake yaw (decision 1057),
-    // the exact twin of `BenillaInspectModel_SetFacing`: a third scalar, because tab 1 and tab 2
-    // are two panes that can sit at two different facings.
-    g.set(
-        "BenillaPetPaperDollModel_SetFacing",
-        lua.create_function(|lua, radians: f32| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .pet_paperdoll_yaw = radians;
-            Ok(())
-        })?,
-    )?;
-
     Ok(())
 }
 
@@ -1240,6 +1226,7 @@ mod tests {
             ranged_min_damage: 31.0,
             ranged_max_damage: 47.0,
             main_weapon_skill: (25, 2),
+            offhand_weapon_skill: (20, 0),
             ranged_weapon_skill: (18, 0),
             defense_skill: (55, 4),
             has_wand: false,
@@ -1488,9 +1475,10 @@ mod tests {
             (52, 0, -3)
         );
         assert_eq!(
-            s.eval::<(i64, i64)>(r#"return UnitAttackBothHands("player")"#)
+            s.eval::<(i64, i64, i64, i64)>(r#"return UnitAttackBothHands("player")"#)
                 .unwrap(),
-            (25, 2)
+            (25, 2, 20, 0),
+            "FOUR values, one pair per hand"
         );
         assert_eq!(
             s.eval::<(i64, i64)>(r#"return UnitRangedAttack("player")"#)
@@ -1509,9 +1497,57 @@ mod tests {
             (0, 0, 0)
         );
         assert_eq!(
-            s.eval::<(i64, i64)>(r#"return UnitAttackBothHands("target")"#)
+            s.eval::<(i64, i64, i64, i64)>(r#"return UnitAttackBothHands("target")"#)
                 .unwrap(),
-            (0, 0)
+            (0, 0, 0, 0)
+        );
+    }
+
+    /// **`UnitAttackBothHands` pushes FOUR values, one pair per hand — and it pushed two until
+    /// decision 1810.**
+    ///
+    /// The quietest shape decision 1793 describes: `0x518810` calls `[vtbl+0xb0]` twice, hand 0
+    /// then hand 1, and pushes `(base0, mod0, base1, mod1)` (VERIFIED, wow-re
+    /// `ui/scratch/pet-paperdoll-stat-api.md` §4). The reference's own
+    /// `PaperDollFrame_SetAttackBothHands` destructures only the first two — its very next line is
+    /// `-- FIXME: The offhand stats aren't displayed yet.` — so no amount of running the stock
+    /// character sheet could have exposed it. An addon reading four got two nils.
+    ///
+    /// The pet leg is here too because it is the same call: `CGUnit_C 0x6136b0` takes a hand index
+    /// and **never reads it**, so both hands answer the identical `level * 5`.
+    #[test]
+    fn attack_both_hands_answers_a_pair_per_hand() {
+        let mut s = UiScript::new().unwrap();
+        s.set_player_combat_stats(Some(UnitCombatStats {
+            main_weapon_skill: (300, 5),
+            offhand_weapon_skill: (275, -12),
+            ..stats()
+        }));
+        assert_eq!(
+            s.eval::<(i64, i64, i64, i64)>(r#"return UnitAttackBothHands("player")"#)
+                .unwrap(),
+            (300, 5, 275, -12),
+            "each hand's own skill line, in hand order"
+        );
+        // …and the per-hand clamp the binding applies after each virtual call
+        // (`0x5188a7`: `if (out2 + out1 < 0) out2 = -out1`), which `UnitDefense` shares.
+        s.set_player_combat_stats(Some(UnitCombatStats {
+            main_weapon_skill: (40, -100),
+            offhand_weapon_skill: (40, -40),
+            defense_skill: (30, -90),
+            ..stats()
+        }));
+        assert_eq!(
+            s.eval::<(i64, i64, i64, i64)>(r#"return UnitAttackBothHands("player")"#)
+                .unwrap(),
+            (40, -40, 40, -40),
+            "a debuff deeper than the skill reads as reduced-to-0, never a negative total"
+        );
+        assert_eq!(
+            s.eval::<(i64, i64)>(r#"return UnitDefense("player")"#)
+                .unwrap(),
+            (30, -30),
+            "the same clamp, the same law"
         );
     }
 
@@ -1650,10 +1686,10 @@ mod tests {
             "a level-60 pet: level * 5, modifier flat 0"
         );
         assert_eq!(
-            s.eval::<(i64, i64)>(r#"return UnitAttackBothHands("pet")"#)
+            s.eval::<(i64, i64, i64, i64)>(r#"return UnitAttackBothHands("pet")"#)
                 .unwrap(),
-            (300, 0),
-            "the Attack row takes the same fork — and ignores its hand index"
+            (300, 0, 300, 0),
+            "the Attack row takes the same fork — and ignores its hand index, so both pairs match"
         );
         // The pet's snapshot carries neither pair, which is the whole point: the numbers above
         // cannot have come from it.
@@ -1949,29 +1985,57 @@ mod tests {
             .is_err());
     }
 
+    /// The character and pet paper dolls' facings are **the panes' own `SetRotation` state**, read
+    /// back by name — not the two benilla-named scalars they were until decision 1751.
+    ///
+    /// The two tabs are two `<PlayerModel>`s that can sit at different facings, which is the whole
+    /// reason this is per-pane at all: turning one must leave the other alone. It used to be
+    /// guaranteed by there being two fields on `Model`; now it is guaranteed by there being two
+    /// frames, which is also what the reference relies on (`Model_RotateLeft(model)` takes the
+    /// pane).
     #[test]
-    fn paperdoll_facing_persists_for_the_app_to_sample() {
+    fn each_model_pane_carries_its_own_facing_for_the_app_to_sample() {
         let s = UiScript::new().unwrap();
-        assert_eq!(s.paperdoll_yaw(), 0.0, "unset default");
-        s.run("BenillaPaperDollModel_SetFacing(0.61)").unwrap();
-        assert_eq!(s.paperdoll_yaw(), 0.61);
-        // Persistent, not a drain — two reads see the same value; a later write replaces it.
-        assert_eq!(s.paperdoll_yaw(), 0.61);
-        s.run("BenillaPaperDollModel_SetFacing(-0.5)").unwrap();
-        assert_eq!(s.paperdoll_yaw(), -0.5);
-    }
+        assert_eq!(
+            s.model_pane_facing("CharacterModelFrame"),
+            0.0,
+            "a pane whose file has not loaded"
+        );
+        s.run(
+            r#"
+            CreateFrame("PlayerModel", "CharacterModelFrame")
+            CreateFrame("PlayerModel", "PetModelFrame")
+        "#,
+        )
+        .unwrap();
+        // The reference's own default, as `Model_OnLoad` writes it.
+        s.run("CharacterModelFrame:SetRotation(0.61)").unwrap();
+        assert_eq!(s.model_pane_facing("CharacterModelFrame"), 0.61);
+        // Persistent, not a drain — two reads see the same value.
+        assert_eq!(s.model_pane_facing("CharacterModelFrame"), 0.61);
+        assert_eq!(
+            s.model_pane_facing("PetModelFrame"),
+            0.0,
+            "the pet pane did not move"
+        );
 
-    /// The pet pane's yaw is a THIRD scalar, not a share of the character pane's: the two tabs can
-    /// sit at different facings, so a write to either must leave the other alone.
-    #[test]
-    fn pet_paperdoll_facing_is_independent_of_the_character_panes() {
-        let s = UiScript::new().unwrap();
-        assert_eq!(s.pet_paperdoll_yaw(), 0.0, "unset default");
-        s.run("BenillaPetPaperDollModel_SetFacing(1.2)").unwrap();
-        assert_eq!(s.pet_paperdoll_yaw(), 1.2);
-        assert_eq!(s.paperdoll_yaw(), 0.0, "the character pane did not move");
-        s.run("BenillaPaperDollModel_SetFacing(0.61)").unwrap();
-        assert_eq!(s.pet_paperdoll_yaw(), 1.2, "…and neither did the pet pane");
-        assert_eq!(s.paperdoll_yaw(), 0.61);
+        s.run("PetModelFrame:SetRotation(1.2)").unwrap();
+        assert_eq!(s.model_pane_facing("PetModelFrame"), 1.2);
+        assert_eq!(
+            s.model_pane_facing("CharacterModelFrame"),
+            0.61,
+            "…and neither did the character pane"
+        );
+
+        s.run("CharacterModelFrame:SetRotation(-0.5)").unwrap();
+        assert_eq!(s.model_pane_facing("CharacterModelFrame"), -0.5);
+
+        // A name nothing declares reads 0.0 rather than raising — the app samples this every
+        // frame, including before the window's file has loaded.
+        assert_eq!(s.model_pane_facing("NoSuchModelFrame"), 0.0);
+        // …and so does a name that IS declared but is not a model pane, which is the shape a
+        // renamed window would take.
+        s.run(r#"CreateFrame("Frame", "NotAPane")"#).unwrap();
+        assert!(s.model_pane("NotAPane").is_none());
     }
 }

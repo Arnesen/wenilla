@@ -1,17 +1,18 @@
-//! The shipped **character window** driven end-to-end, engine-only (no Bevy): the real
-//! `assets/ui/CharacterFrame.xml` loaded behind `Fonts.xml`/`UiPanels.xml`/`GameTooltip.xml` and fed
-//! a synthetic player snapshot + combat-stats + one equipped item — mirroring `questlog_tests.rs`'s
-//! harness for the paper-doll slice (decision 0208 phase 1a).
+//! The shipped **character window** driven end-to-end, engine-only (no Bevy) — and since decision
+//! 1751's character swap, "shipped" means the **reference's own**
+//! `Interface\FrameXML\CharacterFrame.xml`, `PaperDollFrame.xml` and `PetPaperDollFrame.xml`, read
+//! off the player's patch chain. Our `assets/ui/CharacterFrame.xml` and `PetPaperDollFrame.xml` are
+//! deleted; [`super::test_ui::CHARACTER_UI`] is the load list, in `benilla.toc`'s own order, and
+//! every test here opens with `wow_data_or_skip!()` because a chain entry needs the install.
 //!
-//! NOTE (session state, not a property of this file): at the time this test was written, the
-//! `benilla` crate's non-test code (`ui_unit.rs`, `ui_script/mod.rs`'s `demo_unit_feed`) had not yet
-//! been updated for `UnitState`'s new `race`/`class`/`class_file`/`race_file`/`sex` fields (a
-//! concurrent, unrelated change landing in `benilla-ui/src/script/unit.rs` this same session) — so
-//! `cargo test -p benilla` could not compile AT ALL, for reasons entirely outside this file. Every
-//! assertion below was independently cross-verified against the real `benilla-ui` engine through a
-//! throwaway external harness (a scratch Cargo project depending on `benilla-ui` by path) before
-//! landing here, so its correctness doesn't rest on `cargo test -p benilla` having run — but that
-//! command itself is still owed once the unrelated breakage clears, per this crate's own gates.
+//! The fixtures are unchanged (a synthetic player snapshot + combat stats + one equipped item), but
+//! the behaviour under them is the stock file's, not ours. Where the two differed the divergence is
+//! named at the test that used to pin it, with the stock file and line that replaces it — the
+//! per-window re-examination 1751 asks for, done in the open rather than silently.
+//!
+//! **Handlers are driven through the mouse, never called by name.** The reference's slot handlers
+//! read `this` (`PaperDollItemSlotButton_OnClick(button, ignoreModifiers)` takes the MOUSE button
+//! and gets the frame from `this`, `PaperDollFrame.lua:647`), and only the engine sets `this`.
 
 use benilla_ui::script::{
     ExtractedQuad, InvSlotView, InventorySlots, QuadContent, ScriptValue, SoundRequest, UiScript,
@@ -117,18 +118,32 @@ fn backpack_with_fitting_helm() -> benilla_ui::script::ContainerState {
     }
 }
 
-/// The loader itself: every file the window depends on parses and materializes with no errors —
-/// 59 frames (the container + tab + paper-doll page: 19 slots + ammo + 5 attribute rows + armor/
-/// attack/damage/ranged rows + 5 resistance frames + the model pane + its 2 rotate buttons + chrome).
+/// The loader itself: every file the window depends on parses and materializes with no errors, and
+/// the two chain files this module owns each land their own frame count.
+///
+/// **A count is a fingerprint of a file, not a target** (decision 1800's closing note). These two
+/// are the reference's — `CharacterFrame.xml`'s container + close button + name frame + five tabs,
+/// and `PaperDollFrame.xml`'s 19 slots + ammo + their cooldown children + the stat/resistance rows
+/// + the model pane and its two rotate buttons. They change only when the player's own file does.
 #[test]
 fn shipped_character_frame_loads_clean() {
     let _data = benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "CharacterFrame.xml");
+    let mut counts = std::collections::HashMap::new();
+    for f in super::test_ui::CHARACTER_UI {
+        counts.insert(*f, super::test_ui::load_ui_strict(&s, f));
+    }
+    assert!(s.errors().is_empty(), "load errors: {:?}", s.errors());
+    assert_eq!(
+        counts.get("Interface\\FrameXML\\CharacterFrame.xml"),
+        Some(&8),
+        "the reference's own CharacterFrame.xml"
+    );
+    assert_eq!(
+        counts.get("Interface\\FrameXML\\PaperDollFrame.xml"),
+        Some(&75),
+        "the reference's own PaperDollFrame.xml"
+    );
 }
 
 /// The whole contract in one end-to-end drive: `ToggleCharacter` (the 'C' binding's entry point)
@@ -142,11 +157,9 @@ fn shipped_character_frame_drives_end_to_end() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "CharacterFrame.xml");
+    for f in super::test_ui::CHARACTER_UI {
+        super::test_ui::load_ui_strict(&s, f);
+    }
 
     s.set_unit("player", Some(player_unit()));
     s.set_player_combat_stats(Some(combat_stats()));
@@ -322,13 +335,15 @@ fn shipped_character_frame_drives_end_to_end() {
     );
 
     // Rotating the model pane advances the booth yaw from the ref's default 0.61 by +0.03/click and
-    // plays the rotate kit (ref UIParent.lua:1421-1442).
-    s.run("BenillaPaperDollModel_RotateRight(CharacterModelFrame)")
-        .unwrap();
+    // plays the rotate kit. The pane's own rotate button calls `Model_RotateRight(this:GetParent())`
+    // (stock `PaperDollFrame.xml:265`), the reference's shared turntable out of `UIParent.lua:1421`,
+    // declared in our `UIParent.xml` — our `BenillaPaperDollModel_*` pair is gone with the file
+    // that used it (decision 1751).
+    s.run("Model_RotateRight(CharacterModelFrame)").unwrap();
     assert!(
-        (s.paperdoll_yaw() - 0.64).abs() < 0.001,
+        (s.model_pane_facing("CharacterModelFrame") - 0.64).abs() < 0.001,
         "yaw = {}",
-        s.paperdoll_yaw()
+        s.model_pane_facing("CharacterModelFrame")
     );
     assert_eq!(
         s.take_sounds(),
@@ -358,11 +373,9 @@ fn close_button_draws_above_the_paper_doll_page() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "CharacterFrame.xml");
+    for f in super::test_ui::CHARACTER_UI {
+        super::test_ui::load_ui_strict(&s, f);
+    }
     s.set_unit("player", Some(player_unit()));
     // The window must be SHOWN for extract() to emit quads (hidden="true" by default).
     s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
@@ -395,54 +408,100 @@ fn close_button_draws_above_the_paper_doll_page() {
     );
 }
 
-/// Before the app's first player snapshot lands, `UnitRace`/`UnitClass` answer nil,nil (this
-/// engine's own timing — unlike the real client's synchronous local data, this codebase's race/
-/// class stream in). The level line's "?" placeholders (CharacterFrame.xml's own `SetLevel`
-/// comment) keep `format()` from erroring outright, rather than the window failing to open at all.
+/// **The level/race/class line, and the one event that repaints it.** `PaperDollFrame_SetLevel`
+/// formats `PLAYER_LEVEL` ("Level %d %s %s", `GlobalStrings.lua:3075`) from `UnitLevel`/`UnitRace`/
+/// `UnitClass` and writes it to BOTH `CharacterLevelText` and the honor page's `HonorLevelText`
+/// "while we at it" (stock `PaperDollFrame.lua:100-103`); `UNIT_LEVEL` for `"player"` is the only
+/// event that calls it again (`PaperDollFrame.lua:48-49`), and only while the page is visible
+/// (`:42-44`).
+///
+/// **Retired divergence (decision 1751's character swap).** This test used to be
+/// `level_line_survives_no_player_snapshot_yet`: it opened the window with NO player snapshot and
+/// pinned `"Level 0 ? ?"`, because our deleted `assets/ui/CharacterFrame.xml` carried `or "?"`
+/// placeholders around the two nils. The reference has no such guard — `PaperDollFrame.lua:101`
+/// passes `UnitRace("player")` straight into `format`, which raises `bad argument #3 to 'format'`
+/// on a nil — so on the stock file that state is not "survived", it is a hard error, and pinning
+/// our softening would have been pinning the thing the swap deleted.
+///
+/// It is also **unreachable in the app**, which is why nothing replaces the guard rather than the
+/// expectation moving to "it raises": `ui_unit::feed_units` pushes `set_unit("player", …)` earlier
+/// in the same system than it fires `PLAYER_ENTERING_WORLD`, and that fire is gated on our avatar's
+/// descriptor existing (decisions 1087/1094) — while the window can only be opened in-world at all.
+/// So the state under test is the one below: a snapshot is always there first.
 #[test]
-fn level_line_survives_no_player_snapshot_yet() {
+fn level_line_reads_the_snapshot_and_repaints_on_unit_level() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "CharacterFrame.xml");
+    for f in super::test_ui::CHARACTER_UI {
+        super::test_ui::load_ui_strict(&s, f);
+    }
+    s.set_unit("player", Some(player_unit()));
+    s.set_player_combat_stats(Some(combat_stats()));
 
-    // No set_unit("player", ...) call at all — UnitLevel/UnitRace/UnitClass answer their absent
-    // shapes (0 / nil,nil / nil,nil, `unit.rs`'s own contract).
     s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
     assert!(s.errors().is_empty(), "open errors: {:?}", s.errors());
     assert_eq!(
         s.eval::<String>("return CharacterLevelText:GetText()")
             .unwrap(),
-        "Level 0 ? ?"
+        "Level 12 Night Elf Warrior"
+    );
+    // The honor page's twin, written by the same call — the reason `HonorFrame.xml` is in
+    // CHARACTER_UI at all (its absence loads clean and raises on the first SHOW).
+    assert_eq!(
+        s.eval::<String>("return HonorLevelText:GetText()").unwrap(),
+        "Level 12 Night Elf Warrior"
     );
 
-    // A stray extractor's frame-count sanity check: some frame renders (the window itself), no
-    // panics anywhere in the drive.
-    let quads: Vec<ExtractedQuad> = {
-        s.resolve();
-        s.extract()
-    };
-    assert!(!quads.is_empty());
+    // Ding: a new snapshot plus `UNIT_LEVEL` for the player, the app's own sequencing.
+    let mut leveled = player_unit();
+    leveled.level = 13;
+    s.set_unit("player", Some(leveled));
+    s.fire_event("UNIT_LEVEL", vec![ScriptValue::Str("player".into())]);
+    assert!(s.errors().is_empty(), "level-up errors: {:?}", s.errors());
+    assert_eq!(
+        s.eval::<String>("return CharacterLevelText:GetText()")
+            .unwrap(),
+        "Level 13 Night Elf Warrior",
+        "UNIT_LEVEL repaints the line (PaperDollFrame.lua:48-49)"
+    );
+
+    // …and it is really on screen, not merely in the FontString.
+    s.resolve();
+    let quads: Vec<ExtractedQuad> = s.extract();
+    assert!(
+        quads.iter().any(|q| matches!(&q.content,
+            QuadContent::Text { text: Some(t), .. } if t == "Level 13 Night Elf Warrior")),
+        "the level line renders"
+    );
 }
 
 /// Decision 0208 phase 1b, end to end: clicking an OCCUPIED doll slot picks the item up onto the
 /// cursor (the SAME payload `GetCursorInfo`/`CursorHasItem` read) and dims the slot's icon
 /// (`IsInventoryItemLocked` — the held-here derivation, no server round-trip). A second click on
 /// the SAME slot cancels: the cursor empties and the dim clears.
+///
+/// **Driven through the mouse since decision 1751's character swap**, not `s.run("Handler(frame)")`:
+/// the stock handler is `PaperDollItemSlotButton_OnClick(button, ignoreModifiers)`
+/// (`PaperDollFrame.lua:647`), which takes the MOUSE button as its first argument and reads the
+/// frame off `this` — and only the engine sets `this`. That also puts the template's own
+/// `RegisterForClicks("LeftButtonUp", "RightButtonUp")` (`PaperDollFrame.lua:86`) and its
+/// `<OnClick>PaperDollItemSlotButton_OnClick(arg1)</OnClick>` (`PaperDollFrame.xml:15-17`) under
+/// test, which the old by-name call skipped.
+///
+/// **Retired divergence:** the dim used to be asserted as "darker than 0.5". The reference's exact
+/// value is 0.5 — `PaperDollItemSlotButton_UpdateLock` calls
+/// `SetItemButtonDesaturated(this, 1, 0.5, 0.5, 0.5)` (`PaperDollFrame.lua:729-737`), and
+/// `ItemButtonTemplate.lua:61-82` both desaturates the icon and vertex-colours it with exactly
+/// those numbers. So the assertion is the pair, `desaturated` included.
 #[test]
 fn clicking_an_occupied_doll_slot_picks_it_up_and_locks_it() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "CharacterFrame.xml");
+    for f in super::test_ui::CHARACTER_UI {
+        super::test_ui::load_ui_strict(&s, f);
+    }
     s.set_unit("player", Some(player_unit()));
     s.set_player_combat_stats(Some(combat_stats()));
     s.set_inventory_slots(inventory_with_head_item());
@@ -455,8 +514,13 @@ fn clicking_an_occupied_doll_slot_picks_it_up_and_locks_it() {
     assert!(!s.eval::<bool>("return IsInventoryItemLocked(1)").unwrap());
     assert!(!s.eval::<bool>("return CursorHasItem()").unwrap());
 
-    s.run(r#"BenillaPaperDollSlot_OnClick(CharacterHeadSlot, "LeftButton")"#)
-        .unwrap();
+    super::test_ui::click(&mut s, "CharacterHeadSlot", "LeftButton");
+    // The repaint is one frame behind the pickup, and that is the reference's shape, not a
+    // convenience: `PickupInventoryItem` locks the slot and QUEUES `ITEM_LOCK_CHANGED(-1, id)`
+    // (`benilla-ui/src/script/cursor/doll.rs:78`, the one transition seam of decision 0216), and
+    // that event is what runs `PaperDollItemSlotButton_UpdateLock` (stock
+    // `PaperDollFrame.lua:601-604`). The app ticks every frame; a test has to say so.
+    s.tick(0.0);
     assert!(s.errors().is_empty(), "click errors: {:?}", s.errors());
 
     assert!(s.eval::<bool>("return CursorHasItem()").unwrap());
@@ -468,63 +532,91 @@ fn clicking_an_occupied_doll_slot_picks_it_up_and_locks_it() {
         s.eval::<bool>("return IsInventoryItemLocked(1)").unwrap(),
         "the picked slot locks"
     );
-    // The icon vertex-dims (the bag slots' own convention, this file's own Update comment).
+    // The icon desaturates and vertex-dims to the reference's own 0.5 triple.
     s.resolve();
     let head_icon_dim = s.extract().iter().any(|q| {
-        matches!(&q.content, QuadContent::Texture { path: Some(p), color: Some(c), .. }
-            if p.contains("INV_Helmet_01") && c[0] < 0.5)
+        matches!(&q.content, QuadContent::Texture { path: Some(p), color: Some(c), desaturated, .. }
+            if p.contains("INV_Helmet_01") && *desaturated && c[0] == 0.5 && c[1] == 0.5 && c[2] == 0.5)
     });
     assert!(head_icon_dim, "the picked slot's icon dims");
 
     // Clicking the SAME slot again cancels — mirrors the bag's own same-slot-cancel contract.
-    s.run(r#"BenillaPaperDollSlot_OnClick(CharacterHeadSlot, "LeftButton")"#)
-        .unwrap();
+    super::test_ui::click(&mut s, "CharacterHeadSlot", "LeftButton");
+    s.tick(0.0);
     assert!(!s.eval::<bool>("return CursorHasItem()").unwrap());
     assert!(!s.eval::<bool>("return IsInventoryItemLocked(1)").unwrap());
+    s.resolve();
+    let head_icon_lit = s.extract().iter().any(|q| {
+        matches!(&q.content, QuadContent::Texture { path: Some(p), color: Some(c), desaturated, .. }
+            if p.contains("INV_Helmet_01") && !*desaturated && c[0] == 1.0)
+    });
+    assert!(head_icon_lit, "cancelling clears the dim");
 }
 
 /// Decision 0208 phase 1b's `CURSOR_UPDATE` highlight: holding a BAG item that fits ONLY the
-/// head slot locks the head slot's highlight and leaves every other slot unlocked (the neck slot
-/// checked here) — the wiring test for `BenillaPaperDollSlot_LockHighlight`/`_UnlockHighlight`
-/// (a Lua-level spy, since no `GetVertexColor` getter exists to read the emulated tint back —
-/// this file's own header comment on the emulation).
+/// head slot lights the head slot's highlight ring and leaves every other slot dark (the neck slot
+/// checked here). Stock `PaperDollItemSlotButton_OnEvent`'s `CURSOR_UPDATE` arm is
+/// `if ( CursorCanGoInSlot(this:GetID()) ) then this:LockHighlight() else this:UnlockHighlight()`
+/// (`PaperDollFrame.lua:609-616`).
+///
+/// **Retired divergence (decision 1751's character swap).** This used to spy on a pair of our own
+/// `BenillaPaperDollSlot_LockHighlight`/`_UnlockHighlight` wrappers, which vertex-tinted the
+/// Quickslot2 ring because the engine had no `LockHighlight`. It has both verbs now
+/// (`benilla-ui/src/script/button.rs`), the stock file calls them, and the emulation is gone with
+/// the file that held it — so the assertion is the real locked-highlight state, read where a player
+/// reads it: `ItemButtonTemplate`'s own `HighlightTexture`
+/// (`Interface\Buttons\ButtonHilight-Square`, `ItemButtonTemplate.xml:44`) is emitted for a locked
+/// button and not for an unlocked, unhovered one (`ButtonState::region_visible`). The mouse is
+/// parked clear of the doll first so nothing is hovered and the lock is the only thing that can
+/// light a ring.
 #[test]
 fn cursor_update_highlights_fitting_doll_slots_while_holding_a_bag_item() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "CharacterFrame.xml");
+    for f in super::test_ui::CHARACTER_UI {
+        super::test_ui::load_ui_strict(&s, f);
+    }
     s.set_unit("player", Some(player_unit()));
     s.set_player_combat_stats(Some(combat_stats()));
+    // The window must be SHOWN for extract() to emit the slots' quads at all.
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
+    super::test_ui::unhover(&mut s);
     s.resolve();
 
-    s.run(
-        r#"
-        lockHighlighted, unlockHighlighted = {}, {}
-        local origLock, origUnlock = BenillaPaperDollSlot_LockHighlight, BenillaPaperDollSlot_UnlockHighlight
-        BenillaPaperDollSlot_LockHighlight = function(b) lockHighlighted[b:GetName()] = true; origLock(b) end
-        BenillaPaperDollSlot_UnlockHighlight = function(b) unlockHighlighted[b:GetName()] = true; origUnlock(b) end
-        "#,
-    )
-    .unwrap();
+    /// Is `slot`'s highlight ring in the render list? (`None` for "no such owner drew anything".)
+    fn ring_lit(s: &mut UiScript, slot: &str) -> bool {
+        s.resolve();
+        let quads = s.extract();
+        quads.iter().any(|q| {
+            s.quad_owner_name(q.target).as_deref() == Some(slot)
+                && matches!(&q.content,
+                    QuadContent::Texture { path: Some(p), .. } if p.contains("ButtonHilight-Square"))
+        })
+    }
+
+    assert!(
+        !ring_lit(&mut s, "CharacterHeadSlot"),
+        "nothing is held yet, so no ring is lit"
+    );
 
     s.set_container(0, Some(backpack_with_fitting_helm()));
     s.run("PickupContainerItem(0, 1)").unwrap();
     s.tick(0.0); // dispatches the queued CURSOR_UPDATE to every registered doll slot
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 
+    // The engine's own predicate agrees with the fixture's `equip_slots: vec![1]` — the input the
+    // reference's arm branches on, pinned beside the effect so a wrong answer here can't read as a
+    // wiring failure there.
+    assert!(s.eval::<bool>("return CursorCanGoInSlot(1)").unwrap());
+    assert!(!s.eval::<bool>("return CursorCanGoInSlot(2)").unwrap());
+
     assert!(
-        s.eval::<bool>("return lockHighlighted['CharacterHeadSlot'] == true")
-            .unwrap(),
+        ring_lit(&mut s, "CharacterHeadSlot"),
         "the fitting slot locks its highlight"
     );
     assert!(
-        s.eval::<bool>("return unlockHighlighted['CharacterNeckSlot'] == true")
-            .unwrap(),
+        !ring_lit(&mut s, "CharacterNeckSlot"),
         "a non-fitting slot stays unhighlighted"
     );
 }
@@ -537,11 +629,9 @@ fn model_pane_click_auto_equips_a_held_bag_item() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "CharacterFrame.xml");
+    for f in super::test_ui::CHARACTER_UI {
+        super::test_ui::load_ui_strict(&s, f);
+    }
     s.set_unit("player", Some(player_unit()));
     s.set_player_combat_stats(Some(combat_stats()));
     s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
@@ -567,19 +657,33 @@ fn model_pane_click_auto_equips_a_held_bag_item() {
     assert_eq!(s.take_container_autoequips(), vec![(0, 1)]);
 }
 
-/// A BROKEN equipped item (durability 0) paints its doll slot red — the icon AND the slot ring,
-/// both the ref's 0.9,0,0 (PaperDollItemSlotButton_Update l.670-676; director-directed with the
-/// armor guy). Repairing it restores both to white.
+/// A BROKEN equipped item (durability 0) paints its doll slot's **ring** red — the reference's own
+/// 0.9,0,0 on that slot's `NormalTexture` (`Interface\Buttons\UI-Quickslot2`,
+/// `ItemButtonTemplate.xml:31`). Repairing it restores the ring to white, and no neighbouring slot
+/// is ever tinted. Director-directed with the armor guy.
+///
+/// **Retired divergence (decision 1751's character swap): the ICON does not go red, and in the
+/// reference it never did.** Stock `PaperDollItemSlotButton_Update` really does call BOTH setters
+/// on a broken item — `SetItemButtonTextureVertexColor(this, 0.9, 0, 0)` and
+/// `SetItemButtonNormalTextureVertexColor(this, 0.9, 0, 0)` (`PaperDollFrame.lua:670-672`) — and
+/// `ItemButtonTemplate.lua` paints `$parentIconTexture` from the first and `$parentNormalTexture`
+/// from the second (`:53-59` / `:84-90`). But the same `Update` ends with
+/// `PaperDollItemSlotButton_UpdateLock()` (`:714`), whose unlocked arm is
+/// `SetItemButtonDesaturated(this, nil)` (`:735`), and that function's `if ( not desaturated )`
+/// branch overwrites `r,g,b` with 1,1,1 and re-`SetVertexColor`s **the icon**
+/// (`ItemButtonTemplate.lua:71-81`). Forty-four lines later in the same call, the icon's red is
+/// gone; only the ring survives. Our deleted `assets/ui/CharacterFrame.xml` painted both and made
+/// them stick, which is why this test asserted the icon — that half is the transcription's, not the
+/// reference's, and it goes with the file. Verified on a real run: the head slot's `INV_Helmet_01`
+/// quad extracts white while its `UI-Quickslot2` quad extracts [0.9, 0, 0, 1].
 #[test]
 fn broken_equipped_item_tints_its_doll_slot_red() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "CharacterFrame.xml");
+    for f in super::test_ui::CHARACTER_UI {
+        super::test_ui::load_ui_strict(&s, f);
+    }
     s.set_unit("player", Some(player_unit()));
     s.set_player_combat_stats(Some(combat_stats()));
 
@@ -593,32 +697,42 @@ fn broken_equipped_item_tints_its_doll_slot_red() {
     );
     assert!(s.errors().is_empty(), "update errors: {:?}", s.errors());
     s.resolve();
-    let color_of = |s: &mut UiScript, needle: &str| {
-        s.extract().iter().find_map(|q| match &q.content {
+    /// The colour of `slot`'s own quad whose texture path contains `needle` — asked per OWNER, so
+    /// the nineteen slots that share the ring art can be told apart.
+    fn slot_color(s: &mut UiScript, slot: &str, needle: &str) -> Option<[f32; 4]> {
+        s.resolve();
+        let quads = s.extract();
+        quads.iter().find_map(|q| match &q.content {
             QuadContent::Texture {
                 path: Some(p),
                 color,
                 ..
-            } if p.contains(needle) => Some(color.unwrap_or([1.0, 1.0, 1.0, 1.0])),
+            } if p.contains(needle) && s.quad_owner_name(q.target).as_deref() == Some(slot) => {
+                Some(color.unwrap_or([1.0, 1.0, 1.0, 1.0]))
+            }
             _ => None,
         })
-    };
+    }
     let red = [0.9, 0.0, 0.0, 1.0];
+    let white = [1.0, 1.0, 1.0, 1.0];
     assert_eq!(
-        color_of(&mut s, "INV_Helmet_01"),
+        slot_color(&mut s, "CharacterHeadSlot", "Quickslot2"),
         Some(red),
-        "the broken helm's icon paints red"
+        "the broken slot's ring paints red"
     );
-    // The head slot's ring (its NormalTexture Quickslot2 art) paints red too. Other doll slots
-    // share the art but rest white — assert the red one exists among them.
-    let ring_red = s.extract().iter().any(|q| {
-        matches!(&q.content,
-        QuadContent::Texture { path: Some(p), color: Some(c), .. }
-            if p.contains("Quickslot2") && (c[0] - 0.9).abs() < 1e-5 && c[1] == 0.0)
-    });
-    assert!(ring_red, "the broken slot's ring paints red");
+    assert_eq!(
+        slot_color(&mut s, "CharacterNeckSlot", "Quickslot2"),
+        Some(white),
+        "…and only that slot's — its neighbours share the art and rest white"
+    );
+    // The icon stays white: see the retired divergence in this test's doc comment.
+    assert_eq!(
+        slot_color(&mut s, "CharacterHeadSlot", "INV_Helmet_01"),
+        Some(white),
+        "the icon's red is overwritten by UpdateLock's SetItemButtonDesaturated(this, nil)"
+    );
 
-    // Repaired: both restore to white.
+    // Repaired: the ring restores to white.
     let mut inv = inventory_with_head_item();
     inv[1].as_mut().unwrap().durability = Some((40, 40));
     s.set_inventory_slots(inv);
@@ -628,16 +742,10 @@ fn broken_equipped_item_tints_its_doll_slot_red() {
     );
     s.resolve();
     assert_eq!(
-        color_of(&mut s, "INV_Helmet_01"),
-        Some([1.0, 1.0, 1.0, 1.0]),
-        "repair restores the icon"
+        slot_color(&mut s, "CharacterHeadSlot", "Quickslot2"),
+        Some(white),
+        "repair restores the ring"
     );
-    let ring_red = s.extract().iter().any(|q| {
-        matches!(&q.content,
-        QuadContent::Texture { path: Some(p), color: Some(c), .. }
-            if p.contains("Quickslot2") && (c[0] - 0.9).abs() < 1e-5 && c[1] == 0.0)
-    });
-    assert!(!ring_red, "repair restores the ring");
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
 }
 
@@ -654,17 +762,16 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
 
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "ScrollTemplates.xml");
-    // Not optional, though this list ran without it: a MISSING template is a loader *warning*, not
-    // an error, so an under-loaded list passes load_xml's assert and then fails later on geometry
-    // that silently never got built. SkillDetailScrollFrame inherits UIPanelScrollFrameTemplate.
-    load_xml(&s, "UIPanelTemplates.xml");
-    load_xml(&s, "CharacterFrame.xml");
-    load_xml(&s, "SkillFrame.xml");
+    for f in super::test_ui::CHARACTER_UI {
+        super::test_ui::load_ui_strict(&s, f);
+    }
+    // `ScrollTemplates.xml` and `SkillFrame.xml` used to be loaded again here, because the old
+    // per-file preamble did not carry them and a MISSING template is a loader *warning*, not an
+    // error (`SkillDetailScrollFrame` inherits `UIPanelScrollFrameTemplate`, so it would have
+    // loaded clean with no trough and failed later on geometry that silently never got built).
+    // `CHARACTER_UI` carries both now — `CharacterFrame_ShowSubFrame` hides all five pages by name
+    // on the first `ToggleCharacter` — and `load_ui_strict` fails on the warning, so a second load
+    // would only re-declare frames the list already built.
     s.set_unit("player", Some(player_unit()));
     s.set_skills(SkillsState {
         entries: vec![
@@ -744,8 +851,8 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
     assert!(shown(&mut s, "PaperDollFrame"), "opens on the doll page");
 
     // Tab to Skills — by point, the director's gesture.
-    let tab2 = text_center(&mut s, "Skills");
-    click(&mut s, tab2);
+    let skills_tab = text_center(&mut s, "Skills");
+    click(&mut s, skills_tab);
     assert!(shown(&mut s, "SkillFrame"), "Skills tab shows the page");
     assert!(!shown(&mut s, "PaperDollFrame"), "doll page yields");
 
@@ -808,13 +915,13 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
     click(&mut s, row);
 
     // Tab BACK to Character — the reported failure.
-    let tab1 = text_center(&mut s, "Character");
+    let character_tab = text_center(&mut s, "Character");
     assert_eq!(
-        s.hit_test_name(tab1.0, tab1.1).as_deref(),
+        s.hit_test_name(character_tab.0, character_tab.1).as_deref(),
         Some("CharacterFrameTab1"),
         "the Character tab OWNS its point while Skills is up (the wheel catcher must not)"
     );
-    click(&mut s, tab1);
+    click(&mut s, character_tab);
     assert!(
         shown(&mut s, "PaperDollFrame"),
         "the Character tab switches back (the 2026-07-17 report)"
@@ -822,11 +929,11 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
     assert!(!shown(&mut s, "SkillFrame"), "Skills page yields");
 
     // Once more around — "flaky" only shows up on repetition.
-    let tab2 = text_center(&mut s, "Skills");
-    click(&mut s, tab2);
+    let skills_tab = text_center(&mut s, "Skills");
+    click(&mut s, skills_tab);
     assert!(shown(&mut s, "SkillFrame"), "second trip to Skills");
-    let tab1 = text_center(&mut s, "Character");
-    click(&mut s, tab1);
+    let character_tab = text_center(&mut s, "Character");
+    click(&mut s, character_tab);
     assert!(shown(&mut s, "PaperDollFrame"), "second trip back");
 
     assert!(
@@ -853,13 +960,9 @@ fn rotate_arrows_tap_twice_and_spin_while_held() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    // ROTATIONS_PER_SECOND lives here (the ref's UIParent.lua:2), like it does in the real client.
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "CharacterFrame.xml");
+    for f in super::test_ui::CHARACTER_UI {
+        super::test_ui::load_ui_strict(&s, f);
+    }
     s.set_unit("player", Some(player_unit()));
     s.set_player_combat_stats(Some(combat_stats()));
     s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
@@ -878,7 +981,7 @@ fn rotate_arrows_tap_twice_and_spin_while_held() {
     // Press and HOLD. The press edge is itself a click (−0.03 off the 0.61 default).
     s.mouse_move(bx, by);
     s.mouse_button(bx, by, "LeftButton", true);
-    let pressed = s.paperdoll_yaw();
+    let pressed = s.model_pane_facing("CharacterModelFrame");
     assert!(
         (pressed - 0.58).abs() < 1e-4,
         "the press edge nudges once: {pressed}"
@@ -887,7 +990,7 @@ fn rotate_arrows_tap_twice_and_spin_while_held() {
     // Held for half a second: half of half a turn = +π/2 (the held-LEFT branch ADDS).
     s.tick(0.5);
     assert!(s.errors().is_empty(), "OnUpdate errors: {:?}", s.errors());
-    let spun = s.paperdoll_yaw();
+    let spun = s.model_pane_facing("CharacterModelFrame");
     assert!(
         (spun - (pressed + std::f32::consts::FRAC_PI_2)).abs() < 1e-3,
         "half a second held spins half of half a turn: {pressed} → {spun}"
@@ -895,14 +998,14 @@ fn rotate_arrows_tap_twice_and_spin_while_held() {
 
     // Release: the second click edge (another −0.03), and the spin stops dead.
     s.mouse_button(bx, by, "LeftButton", false);
-    let released = s.paperdoll_yaw();
+    let released = s.model_pane_facing("CharacterModelFrame");
     assert!(
         (released - (spun - 0.03)).abs() < 1e-4,
         "the release edge nudges again: {spun} → {released}"
     );
     s.tick(0.5);
     assert!(
-        (s.paperdoll_yaw() - released).abs() < 1e-6,
+        (s.model_pane_facing("CharacterModelFrame") - released).abs() < 1e-6,
         "a released button does not keep spinning"
     );
 
@@ -917,9 +1020,9 @@ fn rotate_arrows_tap_twice_and_spin_while_held() {
     };
     s.mouse_move(rx, ry);
     s.mouse_button(rx, ry, "LeftButton", true);
-    let before = s.paperdoll_yaw();
+    let before = s.model_pane_facing("CharacterModelFrame");
     s.tick(0.25);
-    let after = s.paperdoll_yaw();
+    let after = s.model_pane_facing("CharacterModelFrame");
     assert!(
         (after - (before - std::f32::consts::FRAC_PI_4)).abs() < 1e-3,
         "the right arrow spins the other way: {before} → {after}"
@@ -947,39 +1050,60 @@ fn a_keybind_page_switch_moves_the_tab_row_with_it() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIPanelTemplates.xml");
-    load_xml(&s, "OptionsFrameTemplates.xml");
-    load_xml(&s, "CharacterFrame.xml");
-    load_xml(&s, "PetPaperDollFrame.xml");
-    load_xml(&s, "ReputationFrame.xml");
-    load_xml(&s, "SkillFrame.xml");
-    load_xml(&s, "Interface\\FrameXML\\HonorFrame.xml");
+    for f in super::test_ui::CHARACTER_UI {
+        super::test_ui::load_ui_strict(&s, f);
+    }
     s.set_unit("player", Some(player_unit()));
 
-    // THE INVARIANT the fix rests on: a page's `id=` is its slot in this window's own tab row, and
-    // `BENILLA_CHARACTERFRAME_SUBFRAMES` is the same 1:1 mapping written the other way round. It
-    // did its job: this loop is what made the Reputation page's arrival LOUD, since Skills had to
-    // move from 3 to 4 in the same breath. All five slots are the reference's own now
-    // (Character/Pet/Reputation/Skills/Honor, ref `CharacterFrame.xml:79-168`), so the loop covers
-    // the whole row rather than a prefix of it — there is nothing left past the end for a page to
-    // arrive into unnoticed.
-    for i in 1..=5 {
-        let id: i64 = s
-            .eval(&format!(
-                "return getglobal(BENILLA_CHARACTERFRAME_SUBFRAMES[{i}]):GetID()"
-            ))
-            .unwrap();
+    // THE INVARIANT the fix rests on: a page's `id=` is the slot in this window's tab row that the
+    // tab row's own dispatch sends to that page. `ToggleCharacter` selects the row with
+    // `PanelTemplates_SetTab(CharacterFrame, subFrame:GetID())` (stock `CharacterFrame.lua:10`), so
+    // if a page's id and its tab's id ever disagree, a keybind lights the wrong tab.
+    //
+    // **Retired divergence (decision 1751's character swap).** This used to loop over
+    // `BENILLA_CHARACTERFRAME_SUBFRAMES` asserting `page i must carry id=i`, because our deleted
+    // `assets/ui/CharacterFrame.xml` listed the pages in tab order. The reference does not:
+    // `CHARACTERFRAME_SUBFRAMES` is `{PaperDoll, PetPaperDoll, Skill, Reputation, Honor}`
+    // (`CharacterFrame.lua:1`) while the tab row is Character/Pet/**Reputation**/**Skills**/Honor
+    // (`CharacterFrame.xml:79-168`) — index 3 is SkillFrame with id 4, index 4 is ReputationFrame
+    // with id 3. That list is a set to iterate for show/hide, not an ordering, so the ordering
+    // assertion moves to where the reference really states it: `CharacterFrameTab_OnClick`'s five
+    // name branches (`CharacterFrame.lua:35-48`).
+    let row: [(i64, &str); 5] = [
+        (1, "PaperDollFrame"),
+        (2, "PetPaperDollFrame"),
+        (3, "ReputationFrame"),
+        (4, "SkillFrame"),
+        (5, "HonorFrame"),
+    ];
+    for (id, page) in row {
         assert_eq!(
-            id, i,
-            "page {i} of BENILLA_CHARACTERFRAME_SUBFRAMES must carry id={i}"
+            s.eval::<i64>(&format!("return {page}:GetID()")).unwrap(),
+            id,
+            "{page} is the page CharacterFrameTab{id} toggles, so it must carry id={id}"
+        );
+        assert_eq!(
+            s.eval::<i64>(&format!("return CharacterFrameTab{id}:GetID()"))
+                .unwrap(),
+            id,
+        );
+        // …and it is one of the five the show/hide sweep knows about, so a page cannot arrive with
+        // a tab and stay invisible to `CharacterFrame_ShowSubFrame` (`CharacterFrame.lua:25-33`).
+        assert!(
+            s.eval::<bool>(&format!(
+                "for _, v in CHARACTERFRAME_SUBFRAMES do if v == \"{page}\" then return true end \
+                 end return false"
+            ))
+            .unwrap(),
+            "{page} must be in CHARACTERFRAME_SUBFRAMES"
         );
     }
+    assert_eq!(
+        s.eval::<i64>("return getn(CHARACTERFRAME_SUBFRAMES)")
+            .unwrap(),
+        5,
+        "…and there is nothing past the end for a sixth page to arrive into unnoticed"
+    );
 
     let selected = |s: &mut UiScript| {
         s.eval::<i64>("return PanelTemplates_GetSelectedTab(CharacterFrame)")
@@ -1025,6 +1149,22 @@ fn a_keybind_page_switch_moves_the_tab_row_with_it() {
     // Character tab is inert while the Character page is up. The window only closed because the row
     // still said Skills: tab 1 was left enabled, the click reached `ToggleCharacter`, and the page
     // it named was already visible — the HideUIPanel arm.
+    //
+    // The MECHANISM is asserted first and the click second, deliberately: a tab whose OnClick never
+    // ran would sail through the click assertions below for the wrong reason, and this is the one
+    // fact that cannot.
+    assert_eq!(
+        s.eval::<i64>("return CharacterFrameTab1:IsEnabled()")
+            .unwrap(),
+        0,
+        "the selected tab is DISABLED — that is what makes the click below inert"
+    );
+    assert_eq!(
+        s.eval::<i64>("return CharacterFrameTab4:IsEnabled()")
+            .unwrap(),
+        1,
+        "…while an unselected one stays clickable"
+    );
     s.run("CharacterFrameTab1:Click()").unwrap();
     assert!(
         shown(&mut s, "CharacterFrame"),
@@ -1041,14 +1181,13 @@ fn a_keybind_page_switch_moves_the_tab_row_with_it() {
 /// rest; this client had every other member of the kit and not that one, because our own windows
 /// wire their tabs to their own handlers and never reached for the generic entry point.
 ///
-/// **It is built on a row of this test's own, and that is the finding, not a convenience.** The
-/// reference's tab buttons carry `id="1".."4"` (ref `CharacterFrame.xml:79-133`) and ours carry
-/// none: our row is id-based through `BenillaCharacterFrameTab_OnClick(id)`, which closes over the
-/// number instead of reading it off the widget. So `CharacterFrameTab2:GetID()` is **0** here, and
-/// driving OUR row through the generic entry point would select tab 0 — correct code meeting a
-/// window that does not obey the contract it reads. An addon's own tabs do carry ids, which is why
-/// the four callers above work; this builds a row that obeys the reference's contract and drives
-/// that.
+/// **It is built on a row of this test's own, and that is deliberate.** When it was written our
+/// character row carried no `id=` at all (it was id-based through a `BenillaCharacterFrameTab_OnClick(id)`
+/// closure), so driving it through the generic entry point would have selected tab 0. Decision
+/// 1751's swap fixed that from the other end — the row is the reference's own now and every tab
+/// carries its id (`CharacterFrame.xml:79-168`) — but the standalone row stays: this test is about
+/// the KIT, and an addon's window is exactly what it builds, so it must not need a shipped window
+/// loaded to run.
 ///
 /// The `this`/frame split is the whole reason the function exists: `this` is the clicked TAB and
 /// the owning FRAME is a separate argument, which is the shape `SimpleActionSets.xml:342` relies on

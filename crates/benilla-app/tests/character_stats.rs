@@ -1,5 +1,6 @@
-//! Drives the REAL `assets/ui/CharacterFrame.xml` stat rows through the engine — the first test
-//! that executes the paper doll's own `PaperDollFrame_Set*` Lua at all.
+//! Drives the REAL `Interface\FrameXML\PaperDollFrame.xml` stat rows through the engine — the
+//! first test that executes the paper doll's own `PaperDollFrame_Set*` Lua at all, and since
+//! decision 1751 that Lua is the reference's own rather than a transcription of it.
 //!
 //! That gap is why this file exists. The character sheet's whole buff-decomposition surface — the
 //! green number, the red number, the `(base +x -y)` tooltip — sat broken from the day it shipped
@@ -19,17 +20,38 @@ mod common;
 
 use benilla_ui::script::{UiScript, UnitCombatStats, UnitState};
 
-/// The character window's load prefix, in `assets/ui/benilla.toc` order. The .toc's own entry says
-/// it "depends only on Fonts/UiPanels/GameTooltip"; `ItemButtonTemplate.xml` joins them because the
-/// doll's equipment slots are `SetItemButton*` buttons.
-const FILES: [&str; 6] = [
+/// The paper doll's load prefix, in `assets/ui/benilla.toc` order.
+///
+/// **`CharacterFrame.xml` is deliberately not here.** These tests repaint the stat rows directly;
+/// they never open the window, and `PaperDollFrame`'s only tie to its container is a `parent=`
+/// name, which the loader warns about and falls back from. Pulling the container in would drag
+/// `CharacterFrame_OnLoad`'s four external dependencies (the unit frames, the XP bar,
+/// `TextStatusBar.lua`, the panel-tab kit — see `ui_script::test_ui::CHARACTER_UI`) into a test
+/// about arithmetic.
+///
+/// `GlobalStrings.lua` and `BasicControls.xml` are not scenery either: the stock file has no
+/// `X = X or "…"` fallbacks, and every row here formats a real string — `SPELL_STAT0_NAME`..`4`
+/// through `TEXT()` (`PaperDollFrame.lua:143`), `RESISTANCE<n>_NAME` and
+/// `RESISTANCE_TOOLTIP_SUBTEXT` (`:184`/`:224`), `ARMOR` and `ARMOR_TOOLTIP` (`:236`/`:249`).
+const FILES: [&str; 10] = [
+    "Interface\\FrameXML\\GlobalStrings.lua",
     "Fonts.xml",
+    "BasicControls.xml",
     // The reference's own since 1751 window 24 — `common::load_ui` speaks both stores.
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
     "MoneyFrame.xml",
+    // `Model_OnLoad` — the model pane's `<OnLoad>` calls it, so this is a LOAD-time dependency of
+    // the paper doll, not of the window. The reference declares it in `UIParent.lua`; ours lives
+    // in our counterpart of that file.
+    "UIParent.xml",
     "UiPanels.xml",
     "GameTooltip.xml",
-    "CharacterFrame.xml",
+    // `CooldownFrameTemplate` and `CooldownFrame_SetTimer`. Not scenery: every one of the 20 slot
+    // buttons runs `PaperDollItemSlotButton_Update` from its own OnLoad, which calls
+    // `CooldownFrame_SetTimer` on `$parentCooldown` unconditionally (`PaperDollFrame.lua:692`) —
+    // so leaving this out is 20 loader errors before the first assertion.
+    "Cooldown.xml",
+    "Interface\\FrameXML\\PaperDollFrame.xml",
 ];
 
 fn load_ui(script: &UiScript) {
@@ -84,6 +106,12 @@ fn text_of(script: &mut UiScript, region: &str) -> String {
     script
         .eval::<String>(&format!(r#"return getglobal("{region}"):GetText()"#))
         .unwrap_or_else(|e| panic!("reading {region}: {e}"))
+}
+
+fn tooltip_of_field(script: &mut UiScript, frame: &str, field: &str) -> String {
+    script
+        .eval::<String>(&format!(r#"return getglobal("{frame}").{field}"#))
+        .unwrap_or_else(|e| panic!("reading {frame}.{field}: {e}"))
 }
 
 fn tooltip_of(script: &mut UiScript, frame: &str) -> String {
@@ -163,13 +191,16 @@ fn resistance_rows_colour_by_which_half_is_bigger() {
     let mut s = seated();
     painted(&mut s);
 
-    // The five magic rows are the sheet's own school order (BENILLA_MAGICRES_IDS); resolve each
-    // row's school from the frame rather than assuming, so a row-order change cannot silently
-    // re-point these assertions.
+    // Resolve each row's school from the FRAME's own `id=`, never from a table: that is exactly
+    // what the reference's `PaperDollFrame_SetResistances` does (`UnitResistance("player",
+    // frame:GetID())`), and it means a row-order change cannot silently re-point these assertions.
+    // It used to read our deleted file's `BENILLA_MAGICRES_IDS`; the stock XML carries the same
+    // mapping on the frames themselves (`MagicResFrame1 id="6"` arcane, then 2..5 fire/nature/
+    // frost/shadow — `PaperDollFrame.xml:654-758`).
     let row_of = |s: &mut UiScript, school: i64| -> usize {
         s.eval::<i64>(&format!(
             "for i = 1, NUM_RESISTANCE_TYPES do \
-               if BENILLA_MAGICRES_IDS[i] == {school} then return i end \
+               if getglobal(\"MagicResFrame\"..i):GetID() == {school} then return i end \
              end return 0"
         ))
         .expect("the school→row map") as usize
@@ -189,6 +220,124 @@ fn resistance_rows_colour_by_which_half_is_bigger() {
         nature_text.starts_with(RED),
         "a nature school whose debuff outweighs its buff renders red, got {nature_text:?}"
     );
+}
+
+/// **The melee block: the seven-value `UnitDamage` unpacked positionally by the reference's own
+/// Lua**, and the arithmetic it does with the last three.
+///
+/// The stat rows above pin `UnitStat`/`UnitResistance`/`UnitArmor`. This one pins the family
+/// decision 1793 warns about hardest, because its consumer is arithmetic rather than a lookup:
+/// `PaperDollFrame_SetDamage` destructures **seven** values and immediately divides by the
+/// seventh. One value short and `percent` is nil — `(minDamage / nil)` raises; one value long and
+/// every term after it is off by a slot and the numbers come out plausible and wrong. Asserting
+/// the rendered strings is what tells those two apart from correct.
+///
+/// The numbers below are the reference's own formula, not ours: `displayMin`/`displayMax` are the
+/// raw range floored/ceiled, while the TOOLTIP range is the same numbers with the multiplier
+/// divided out and the flat bonuses subtracted (`PaperDollFrame.lua:279-283`) — which is why
+/// "40 - 62" and "27 - 47" are both right and different.
+#[test]
+fn the_melee_block_unpacks_seven_values_and_does_the_references_arithmetic() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = seated();
+    // 40.5-61.5 at 2.6 s, +12/-3 flat and a x1.1 multiplier: every one of the seven slots is
+    // distinct and non-zero, so a slot read from the wrong position cannot coincide with the
+    // right answer.
+    s.set_player_combat_stats(Some(UnitCombatStats {
+        main_attack_time_ms: 2600,
+        min_damage: 40.5,
+        max_damage: 61.5,
+        physical_bonus_pos: 12,
+        physical_bonus_neg: -3,
+        damage_percent: 1.1,
+        attack_power: 780,
+        attack_power_pos: 30,
+        attack_power_neg: -10,
+        ..stats()
+    }));
+    s.run("PaperDollFrame_SetDamage() PaperDollFrame_SetAttackPower()")
+        .expect("the melee rows repaint");
+
+    // The ROW: the raw range, green because the bonuses are net positive.
+    assert_eq!(
+        text_of(&mut s, "CharacterDamageFrameStatText"),
+        format!("{GREEN}40 - 62|r")
+    );
+    // The TOOLTIP: the same range with the multiplier divided out and the flat bonuses removed,
+    // then each modifier appended in the reference's own order and colours.
+    assert_eq!(
+        tooltip_of_field(&mut s, "CharacterDamageFrame", "damage"),
+        format!("27 - 47{GREEN} +12|r{RED} -3|r{GREEN} x110%|r")
+    );
+    let speed: f64 = s
+        .eval("return CharacterDamageFrame.attackSpeed")
+        .expect("the hover's attack speed");
+    assert!((speed - 2.6).abs() < 1e-6, "got {speed}");
+    // dps = fullDamage / speed, fullDamage = (base + pos + neg) * percent = 51.0.
+    let dps: f64 = s.eval("return CharacterDamageFrame.dps").expect("the dps");
+    assert!((dps - 51.0 / 2.6).abs() < 0.01, "got {dps}");
+    // No offhand weapon: the reference NILS the offhand speed, which is what its hover branches on.
+    assert!(s
+        .eval::<Option<f64>>("return CharacterDamageFrame.offhandAttackSpeed")
+        .unwrap()
+        .is_none());
+
+    // Attack power goes through `PaperDollFormatStat`, whose colour law is "red if anything is
+    // negative, green otherwise" — so a mixed pair is RED even though the net is positive.
+    assert_eq!(
+        text_of(&mut s, "CharacterAttackPowerFrameStatText"),
+        format!("{RED}800|r")
+    );
+    let ap_tip = tooltip_of(&mut s, "CharacterAttackPowerFrame");
+    assert!(
+        ap_tip.contains("800") && ap_tip.contains("(780") && ap_tip.contains("+30"),
+        "the AP tooltip names the effective, the base and the buff, got {ap_tip:?}"
+    );
+
+    // The plain leg: no bonuses and no multiplier, so `totalBonus == 0` and the row carries no
+    // colour escape at all — the branch a wrong `percent` would silently take.
+    s.set_player_combat_stats(Some(UnitCombatStats {
+        main_attack_time_ms: 2600,
+        min_damage: 40.5,
+        max_damage: 61.5,
+        damage_percent: 1.0,
+        ..stats()
+    }));
+    s.run("PaperDollFrame_SetDamage()").unwrap();
+    assert_eq!(text_of(&mut s, "CharacterDamageFrameStatText"), "40 - 62");
+}
+
+/// **The ranged block with nothing in the ranged slot** — the `NOT_APPLICABLE` fallback all three
+/// ranged rows share, and the `PaperDollFrame.noRanged` latch that carries it between them.
+///
+/// It is the reachable state for eight of nine classes at level 1, and it is the branch that
+/// decides whether `PaperDollFrame_SetRangedDamage` unpacks `UnitRangedDamage`'s six values at
+/// all — so it has to be pinned before the numbers are worth anything.
+#[test]
+fn the_ranged_rows_fall_back_to_not_applicable_with_an_empty_ranged_slot() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = seated();
+    s.run(
+        "PaperDollFrame_SetRangedAttack() PaperDollFrame_SetRangedDamage()          PaperDollFrame_SetRangedAttackPower()",
+    )
+    .expect("the ranged rows repaint");
+
+    let na: String = s
+        .eval("return NOT_APPLICABLE")
+        .expect("the ref's own string");
+    for row in [
+        "CharacterRangedAttackFrameStatText",
+        "CharacterRangedDamageFrameStatText",
+        "CharacterRangedAttackPowerFrameStatText",
+    ] {
+        assert_eq!(text_of(&mut s, row), na, "{row}");
+    }
+    // …and the hover has nothing to show, which is the guard
+    // `CharacterRangedDamageFrame_OnEnter` opens with.
+    assert!(s
+        .eval::<Option<String>>("return CharacterRangedDamageFrame.damage")
+        .unwrap()
+        .is_none());
 }
 
 /// Armor is the one row of this family the local server never decomposes — item armor lands in

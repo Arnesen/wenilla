@@ -36,10 +36,14 @@
 //!
 //! **Order decides, and the manifest is the order.** A name defined by both goes to whichever line
 //! is later. That is the whole rule; there is no precedence machinery. A file sourced *before* our
-//! own (`PaperDollFrame.lua`, which is there for one frame-agnostic button family and collides on
-//! eighteen names we drive ourselves) has its collisions overwritten by ours; a file sourced at the
-//! position of the window it replaces owns its names outright, which is what migrating a window
-//! means.
+//! own has its collisions overwritten by ours; a file sourced at the position of the window it
+//! replaces owns its names outright, which is what migrating a window means.
+//!
+//! The load-bearing example was `PaperDollFrame.lua`, sourced far above everything for one
+//! frame-agnostic button family while our own `CharacterFrame.xml` won the eighteen names it
+//! collided on. Decision 1751 migrated that window, so the file arrives at its own position now
+//! and there is nothing left for it to collide with — which is what a finished migration looks
+//! like.
 //!
 //! **Nothing is stubbed silently.** A reference body that reaches for something this client does
 //! not have raises, naming it — which is loud, correct, and strictly better than a no-op that
@@ -251,6 +255,80 @@ mod tests {
         );
     }
 
+    /// Strip what is not code, before any call census over a FrameXML file.
+    ///
+    /// Both `Name(` and `:Name(` counted calls inside comments until decision 1800: the round that
+    /// built `PickupMerchantItem` also asked wow-re for `ShowInventorySellCursor`, which
+    /// [`chain_gap_report`] had named as `PaperDollFrame.xml`'s last engine gap — and the answer
+    /// was that stock `PaperDollFrame.lua:754-756` has the call **commented out**, all three
+    /// lines. A real binding, never called, blocking a window that was not blocked.
+    ///
+    /// Line-based and deliberately simple: Lua `--` to end of line (but not `--[[`, which opens a
+    /// block), Lua `--[[ … ]]` blocks, and XML `<!-- … -->` blocks. It does not track string
+    /// literals, so a `"--"` inside a string truncates that line — which can only ever cause an
+    /// UNDER-report, the safe direction for every reader of it.
+    fn strip_comments(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut in_xml = false;
+        let mut in_lua_block = false;
+        for line in text.lines() {
+            let mut rest = line;
+            let mut kept = String::new();
+            loop {
+                if in_xml {
+                    match rest.find("-->") {
+                        Some(i) => {
+                            in_xml = false;
+                            rest = &rest[i + 3..];
+                        }
+                        None => break,
+                    }
+                } else if in_lua_block {
+                    match rest.find("]]") {
+                        Some(i) => {
+                            in_lua_block = false;
+                            rest = &rest[i + 2..];
+                        }
+                        None => break,
+                    }
+                } else {
+                    let xml = rest.find("<!--");
+                    let lua = rest.find("--");
+                    match (xml, lua) {
+                        (Some(x), Some(l)) if x <= l => {
+                            kept.push_str(&rest[..x]);
+                            in_xml = true;
+                            rest = &rest[x + 4..];
+                        }
+                        (_, Some(l)) => {
+                            kept.push_str(&rest[..l]);
+                            if rest[l..].starts_with("--[[") {
+                                in_lua_block = true;
+                                rest = &rest[l + 4..];
+                            } else {
+                                // A plain `--` comment runs to end of line.
+                                rest = "";
+                                break;
+                            }
+                        }
+                        (Some(x), None) => {
+                            kept.push_str(&rest[..x]);
+                            in_xml = true;
+                            rest = &rest[x + 4..];
+                        }
+                        (None, None) => break,
+                    }
+                }
+            }
+            if !in_xml && !in_lua_block {
+                kept.push_str(rest);
+            }
+            out.push_str(&kept);
+            out.push('\n');
+        }
+        out
+    }
+
     /// **A chain entry really loads off the player's install, and order really decides.**
     ///
     /// The two halves of this module's rule, asserted rather than described, because nothing else
@@ -286,20 +364,41 @@ mod tests {
         // …and its constants, which the corpus reads directly.
         assert_eq!(s.eval::<i64>("return NUM_BAG_FRAMES").unwrap(), 4);
         assert_eq!(s.eval::<i64>("return NUM_CONTAINER_FRAMES").unwrap(), 12);
-        // The `PaperDollFrame.lua` line's own reason to exist.
+        // `PaperDollFrame.lua` used to be a manifest line of its own, sourced far above everything
+        // for exactly this family. It arrives through stock `PaperDollFrame.xml`'s own
+        // `<Script file=>` now, at the character window's position (decision 1751) — so this
+        // assertion also proves a chain `.xml` really brings its `.lua`.
         assert!(s
             .eval::<bool>("return type(PaperDollItemSlotButton_OnLoad) == \"function\"")
             .unwrap());
 
-        // Order decides: `PaperDollFrame.lua` is sourced ABOVE CharacterFrame.xml, so OUR body of
-        // a colliding name is the live one. `PaperDollFrame_SetLevel` is in the 18-name overlap.
+        // **The 18-name overlap this test used to assert the winner of is GONE.** Our
+        // `CharacterFrame.xml` redefined 18 of `PaperDollFrame.lua`'s 29 functions and won them all
+        // by loading later; that file is deleted and the reference's own bodies are the only ones.
+        // The check that replaces it is the swap's, not the collision's: the live bodies are the
+        // reference's, and ours are not merely shadowed but absent.
         assert!(
             s.eval::<bool>(
                 "return type(PaperDollFrame_SetLevel) == \"function\" \
-                 and BenillaPaperDollSlot_OnLoad ~= nil"
+                 and type(CHARACTERFRAME_SUBFRAMES) == \"table\" \
+                 and table.getn(CHARACTERFRAME_SUBFRAMES) == 5 \
+                 and BenillaPaperDollSlot_OnLoad == nil"
             )
             .unwrap(),
-            "our character sheet's own bodies must still be the live ones"
+            "the character sheet's bodies must be the reference's own now"
+        );
+
+        // Order still decides, and it is still the whole rule — so it is asserted directly rather
+        // than through whichever window happens to collide this month. Two chunks, the same name,
+        // and the later one stands; `publish_global`'s non-overwriting rule (RF-0023) applies to
+        // FRAMES, never to a plain Lua global, and confusing the two has produced confident wrong
+        // diagnoses before.
+        s.run("function _order_probe() return 1 end").unwrap();
+        s.run("function _order_probe() return 2 end").unwrap();
+        assert_eq!(
+            s.eval::<i64>("return _order_probe()").unwrap(),
+            2,
+            "the later definition of a colliding name is the live one"
         );
         assert!(s.errors().is_empty(), "{:#?}", s.errors());
     }
@@ -560,79 +659,6 @@ mod tests {
             .expect("dump _G")
             .into_iter()
             .collect();
-
-        // Strip what is not code before either scan. Both `Name(` and `:Name(` counted calls
-        // inside comments until 1800: the round that built `PickupMerchantItem` also asked wow-re
-        // for `ShowInventorySellCursor`, which this report had named as `PaperDollFrame.xml`'s
-        // last engine gap — and the answer was that stock `PaperDollFrame.lua:754-756` has the
-        // call **commented out**, all three lines. A real binding, never called, blocking a window
-        // that was not blocked.
-        //
-        // Line-based and deliberately simple: Lua `--` to end of line (but not `--[[`, which opens
-        // a block), Lua `--[[ … ]]` blocks, and XML `<!-- … -->` blocks. It does not track string
-        // literals, so a `"--"` inside a string truncates that line — which can only ever cause an
-        // UNDER-report, the safe direction for an instrument that ranks work.
-        let strip_comments = |text: &str| -> String {
-            let mut out = String::with_capacity(text.len());
-            let mut in_xml = false;
-            let mut in_lua_block = false;
-            for line in text.lines() {
-                let mut rest = line;
-                let mut kept = String::new();
-                loop {
-                    if in_xml {
-                        match rest.find("-->") {
-                            Some(i) => {
-                                in_xml = false;
-                                rest = &rest[i + 3..];
-                            }
-                            None => break,
-                        }
-                    } else if in_lua_block {
-                        match rest.find("]]") {
-                            Some(i) => {
-                                in_lua_block = false;
-                                rest = &rest[i + 2..];
-                            }
-                            None => break,
-                        }
-                    } else {
-                        let xml = rest.find("<!--");
-                        let lua = rest.find("--");
-                        match (xml, lua) {
-                            (Some(x), Some(l)) if x <= l => {
-                                kept.push_str(&rest[..x]);
-                                in_xml = true;
-                                rest = &rest[x + 4..];
-                            }
-                            (_, Some(l)) => {
-                                kept.push_str(&rest[..l]);
-                                if rest[l..].starts_with("--[[") {
-                                    in_lua_block = true;
-                                    rest = &rest[l + 4..];
-                                } else {
-                                    // A plain `--` comment runs to end of line.
-                                    rest = "";
-                                    break;
-                                }
-                            }
-                            (Some(x), None) => {
-                                kept.push_str(&rest[..x]);
-                                in_xml = true;
-                                rest = &rest[x + 4..];
-                            }
-                            (None, None) => break,
-                        }
-                    }
-                }
-                if !in_xml && !in_lua_block {
-                    kept.push_str(rest);
-                }
-                out.push_str(&kept);
-                out.push('\n');
-            }
-            out
-        };
 
         // `:Name(` — a method call, receiver unknown.
         let called_methods = |text: &str| -> std::collections::HashSet<String> {
@@ -1320,6 +1346,208 @@ mod tests {
             let mine: Vec<&str> = ours.iter().map(|s| s.as_str()).collect();
             println!("  {n:>3}  {stock:<34} vs {}", mine.join(", "));
         }
+    }
+
+    /// **Every global a MIGRATED window calls is answered by the loaded interface.**
+    ///
+    /// The gate the loot window and the character sheet both wanted and neither had.
+    /// [`chain_readiness_report`] asks "does the stock file LOAD"; [`chain_gap_report`] asks "what
+    /// would I have to BUILD before migrating it". Neither asks the question that actually bites
+    /// after a swap: *the file is on the chain now — does everything it calls exist?* A missing
+    /// FrameXML function is invisible to both, because loading a file never runs the body that
+    /// calls it: `LootFrame.xml` shipped load-clean and raised at `LootFrame.lua:85` the first
+    /// time it met real data, and stock `CharacterFrame.xml` would have raised on the first tab
+    /// HOVER, because `MicroButtonTooltipText` did not exist here (it does now — `MicroMenu.xml`,
+    /// our `MainMenuBarMicroButtons.xml` counterpart, is where the reference declares it).
+    ///
+    /// So: for every chain `.xml` in the manifest, census the bare `Name(` call sites across it
+    /// and its `.lua`, subtract what those two define themselves, keep the names the reference's
+    /// own `_G` carries (`reference/1.12-globals.tsv` — anything else is a local, a widget method,
+    /// or a table field, and 1.12's widget methods are not globals), and require every survivor to
+    /// be non-nil in a VM with the whole shipped manifest up.
+    ///
+    /// **A gate rather than an instrument** (the `assert` is the point): for a window we have
+    /// already migrated, the answer must be zero, and a missing name is a raise waiting for a
+    /// player's first click on it.
+    ///
+    /// Three limits, stated because they decide what a green run is worth. It cannot see a name
+    /// reached through `getglobal` (both censuses share that blind spot). It cannot see a WIDGET
+    /// method — those are not in `_G`, which is exactly why `chain_gap_report` grew a separate
+    /// `method=` column (1798). And "the name exists" is not "the body is right": arity and
+    /// semantics are decision 1793's problem and the window's own tests', not this one's.
+    #[test]
+    fn every_global_a_migrated_window_calls_is_answered() {
+        let _data = benilla_formats::wow_data_or_skip!();
+
+        // The reference's own global table — the filter that keeps this from drowning in locals.
+        let tsv = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../reference/1.12-globals.tsv"
+        );
+        let text = std::fs::read_to_string(tsv).expect("the reference surface");
+        let reference: std::collections::HashSet<&str> = text
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .filter_map(|l| l.split('\t').next())
+            .collect();
+
+        let mut s = UiScript::new().expect("VM");
+        s.set_screen_size(1024.0, 768.0);
+        let failures = super::super::manifest::load_default_ui(&s);
+        assert!(failures.is_empty(), "the shipped manifest: {failures:#?}");
+        let have: std::collections::HashSet<String> = s
+            .eval::<Vec<String>>(
+                "local t = {} for k in pairs(_G) do table.insert(t, k) end return t",
+            )
+            .expect("dump _G")
+            .into_iter()
+            .collect();
+
+        // **The gaps this gate found on the day it was written, each still open, each named with
+        // the window that reaches it and the click that would.** They are listed rather than
+        // silenced: a KNOWN entry here is a defect we have and have not fixed, not a tolerance —
+        // and the assertion below refuses an entry that no longer describes one, so fixing a gap
+        // forces its line out (`frame_flag_gate`'s rule, applied to a second gate).
+        //
+        // None of them belongs to the character sheet, which is the window that prompted this and
+        // reads clean. Each belongs to whichever window's migration left it, and each is one
+        // binding or one sourced file away.
+        const KNOWN: &[(&str, &str, &str)] = &[
+            (
+                "ContainerFrame.xml",
+                "KeyRingButtonIDToInvSlotID",
+                "an engine binding (`1.12-globals.tsv`). `ContainerFrame.lua:617` hovers a KEYRING \
+                 slot with it, so the raise needs the keyring open and a key hovered. Ours drives \
+                 keyring tooltips through `ContainerFrameAdapters.xml`'s wrapper (0765), which is \
+                 why nothing has hit it — the wrapper answers first for our own rows.",
+            ),
+            (
+                "DurabilityFrame.xml",
+                "UpdateInventoryAlertStatus",
+                "an engine binding. `DurabilityFrame.lua:81` calls it from the armor guy's own \
+                 update; our `inventory_alerts` snapshot is recomputed on every inventory push \
+                 instead, so the recompute exists and only the Lua verb that forces one does not.",
+            ),
+            (
+                "QuestTimerFrame.xml",
+                "QuestLog_SetSelection",
+                "a FrameXML function, declared in stock `QuestLogFrame.lua:308` — which we do not \
+                 source, because our own `QuestLogFrame.xml` is that window. Clicking a quest \
+                 TIMER raises (`QuestTimerFrame.lua:43`). It arrives with the quest log's own \
+                 migration and not before.",
+            ),
+            (
+                "QuestTimerFrame.xml",
+                "QuestLog_Update",
+                "the twin of the line above, `QuestLogFrame.lua:107`, called on the next line \
+                 (`QuestTimerFrame.lua:44`).",
+            ),
+            (
+                "UnitFrame.xml",
+                "UnitPlayerControlled",
+                "an engine binding, and the most reachable gap here: `UnitFrame_OnEnter` \
+                 (`UnitFrame.lua:62`) calls it while HOVERING any unit frame, behind \
+                 `SHOW_NEWBIE_TIPS == \"1\"` — which is the shipped default. wow-re has it carved \
+                 (`0x516410`, VERIFIED, `scratch/unit-verbs-controlled-charmed-creaturetype.md`): \
+                 one return, `UNIT_FIELD_FLAGS` bit 3, the DOUBLE 1.0 when set and nil when clear, \
+                 raising on an unrecognised token. `UnitState` carries no such flag yet, so it is \
+                 a field + a push + a binding — the unit frames' own slice.",
+            ),
+        ];
+
+        let toc = &super::super::addons::Addon::builtin().toc.files;
+        let mut missing: Vec<(String, String)> = Vec::new();
+        for entry in toc.iter().filter(|f| super::is_chain_entry(f)) {
+            let leaf = entry.rsplit(['\\', '/']).next().unwrap_or(entry);
+            let mut text = String::new();
+            let mut cands = vec![entry.replace('\\', "/")];
+            if let Some(stem) = entry.strip_suffix(".xml") {
+                cands.push(format!("{stem}.lua").replace('\\', "/"));
+            }
+            for cand in &cands {
+                if let Some(b) = super::read(cand) {
+                    text.push_str(&String::from_utf8_lossy(&b));
+                    text.push('\n');
+                }
+            }
+            let text = strip_comments(&text);
+            let defines: std::collections::HashSet<String> = text
+                .lines()
+                .filter_map(|l| l.trim_start().strip_prefix("function "))
+                .map(|r| r.chars().take_while(|c| super::is_word(*c)).collect())
+                .collect();
+
+            // `name(` at a call position: any identifier not preceded by `.` or `:` (a field or a
+            // method) and followed by `(`.
+            //
+            // **Not capitalised-only.** An earlier cut of this filtered on a leading capital, on
+            // the reasoning that 1.12's globals are named that way — most are, and the ones that
+            // are not are the ones a stat tooltip is built out of: `strupper`, `strsub`, `abs`,
+            // `max`, `floor`, `format`, `getglobal`. `reference/1.12-globals.tsv` is the filter
+            // that actually belongs here, and it does not care about case.
+            let b: Vec<char> = text.chars().collect();
+            let mut called: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut i = 0;
+            while i < b.len() {
+                if (b[i].is_ascii_alphabetic() || b[i] == '_')
+                    && (i == 0 || !super::is_word(b[i - 1]))
+                    && (i == 0 || (b[i - 1] != '.' && b[i - 1] != ':'))
+                {
+                    let mut j = i;
+                    while j < b.len() && super::is_word(b[j]) {
+                        j += 1;
+                    }
+                    let mut k = j;
+                    while k < b.len() && b[k].is_whitespace() {
+                        k += 1;
+                    }
+                    if k < b.len() && b[k] == '(' {
+                        called.insert(b[i..j].iter().collect());
+                    }
+                    i = j;
+                    continue;
+                }
+                i += 1;
+            }
+
+            let mut gaps: Vec<&String> = called
+                .iter()
+                .filter(|n| !defines.contains(*n))
+                .filter(|n| reference.contains(n.as_str()))
+                .filter(|n| !have.contains(*n))
+                .collect();
+            gaps.sort();
+            for n in gaps {
+                missing.push((leaf.to_string(), n.clone()));
+            }
+        }
+        missing.sort();
+
+        let news: Vec<String> = missing
+            .iter()
+            .filter(|(f, n)| !KNOWN.iter().any(|(kf, kn, _)| kf == f && kn == n))
+            .map(|(f, n)| format!("{f} calls {n}, which nothing answers to"))
+            .collect();
+        assert!(
+            news.is_empty(),
+            "a MIGRATED window calls a global this client does not have — load-clean and dead on \
+             the first click that reaches it:\n  {}",
+            news.join("\n  ")
+        );
+
+        // …and the other direction: a KNOWN entry whose gap has been closed is documentation
+        // claiming a defect we do not have, so it must go with the fix.
+        let stale: Vec<String> = KNOWN
+            .iter()
+            .filter(|(kf, kn, _)| !missing.iter().any(|(f, n)| f == kf && n == kn))
+            .map(|(kf, kn, why)| format!("{kf} / {kn} — claimed: {why}"))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "{} KNOWN entr(y/ies) name a gap that is closed — delete them:\n  {}",
+            stale.len(),
+            stale.join("\n  ")
+        );
     }
 
     /// **A chain `.xml` that does not source its own `.lua` needs TWO manifest lines**, and

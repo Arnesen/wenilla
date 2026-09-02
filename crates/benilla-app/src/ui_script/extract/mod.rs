@@ -119,6 +119,7 @@ fn content_kind(c: &QuadContent) -> &'static str {
         QuadContent::Frame => "frame",
         QuadContent::Minimap { .. } => "minimap",
         QuadContent::Cooldown { .. } => "cooldown",
+        QuadContent::ModelPane { .. } => "modelpane",
         QuadContent::Texture { .. } => "texture",
         QuadContent::ColorWheel => "colorwheel",
         QuadContent::ColorValue { .. } => "colorvalue",
@@ -1312,6 +1313,56 @@ fn convert_entry(
                 rect, eq.z, eq.alpha, fraction, flash, clip, assets, images, out,
             );
         }
+        // A `<Model>`/`<PlayerModel>` pane's content: the off-screen body bake its window keeps,
+        // sampled square edge to edge. The pane→booth join is
+        // [`crate::portrait::model_pane_booth`], whose doc says why it is a table of frame names.
+        //
+        // This is the same draw the `portrait_unit` arm below makes for a Texture region, and it
+        // used to BE that draw: until decision 1751 a file of ours put a Texture inside each pane
+        // and named the slot with `BenillaSetBoothTexture`. A migrated window runs the reference's
+        // own file, which declares a bare `<PlayerModel>` and no Texture at all — so the widget
+        // itself has to draw, or the character sheet's paper doll is an empty rectangle.
+        //
+        // A pane with no name, or one no window claims, draws nothing (`SetModel` panes included:
+        // this engine holds their scene and renders no M2 into it). Nothing is stubbed white.
+        QuadContent::ModelPane { name } => {
+            use crate::portrait::PortraitSource;
+            let Some(slot) = name.as_deref().and_then(crate::portrait::model_pane_booth) else {
+                return;
+            };
+            // The aspect the bake must render at, and the fact that it is on screen at all
+            // (decision 1069) — published before the readiness check below for the same reason the
+            // `portrait_unit` arm does it there: a pane whose bake has not landed yet is still a
+            // pane being drawn, and gating the publish on the image would be a standoff.
+            if rect.height() > 0.0 {
+                booths
+                    .panes
+                    .0
+                    .insert(slot.to_string(), rect.width() / rect.height());
+            }
+            // The bake is a render target and carries PREMULTIPLIED colour; the 2D stand-in the
+            // slot shows while a model streams is an ordinary straight-alpha BLP.
+            let (handle, premultiplied) = match booths.images.0.get(slot) {
+                Some(PortraitSource::Live(h)) => (Some(h.clone()), true),
+                Some(PortraitSource::File(p)) => (
+                    assets.as_mut().and_then(|a| a.sprite_texture(p, images)),
+                    false,
+                ),
+                None => (None, false),
+            };
+            let Some(handle) = handle else {
+                return;
+            };
+            out.push(UiQuad {
+                rect,
+                z_key: eq.z,
+                texture: Some(handle),
+                color: [1.0, 1.0, 1.0, eq.alpha],
+                premultiplied,
+                clip,
+                ..default()
+            });
+        }
         QuadContent::Texture {
             path,
             color,
@@ -2196,6 +2247,72 @@ mod extract_gate_tests {
         assert!(
             app.world().resource::<UiQuads>().dirty,
             "a moved frame must re-extract"
+        );
+    }
+
+    /// **A `<PlayerModel>` pane draws its window's booth, and an unclaimed one draws nothing**
+    /// (decision 1810).
+    ///
+    /// The engine verb the stock character sheet needed. `PaperDollFrame.xml` declares a bare
+    /// `<PlayerModel name="CharacterModelFrame">` with no texture in it at all — our own deleted
+    /// file put a `<Texture>` there and named the booth with `BenillaSetBoothTexture` — so without
+    /// this the migrated window's paper doll is an empty rectangle, which no loader error and no
+    /// missing global would have said a word about.
+    ///
+    /// Both halves are asserted because the second is what keeps the first honest: the join is a
+    /// table of frame names ([`crate::portrait::model_pane_booth`]), and a pane no window claims —
+    /// pfUI's anonymous `CreateFrame("Model")` autocast shine is the corpus case — must draw
+    /// nothing rather than borrow somebody's bake.
+    #[test]
+    fn a_named_model_pane_samples_its_booth_and_an_unclaimed_one_draws_nothing() {
+        let mut app = app_from_script(
+            r#"
+            local doll = CreateFrame("PlayerModel", "CharacterModelFrame")
+            doll:SetPoint("TOPLEFT", 0, 0)
+            doll:SetSize(233, 224)
+            doll:SetUnit("player")
+            local stray = CreateFrame("PlayerModel", "SomeAddonsModelPane")
+            stray:SetPoint("TOPLEFT", 300, 0)
+            stray:SetSize(233, 224)
+            stray:SetUnit("player")
+        "#,
+        );
+        let bake = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(Image::default());
+        app.world_mut().resource_mut::<PortraitImages>().0.insert(
+            "paperdoll".to_string(),
+            crate::portrait::PortraitSource::Live(bake.clone()),
+        );
+        app.update();
+
+        let quads = &app.world().resource::<UiQuads>().quads;
+        let panes: Vec<_> = quads
+            .iter()
+            .filter(|q| q.texture.as_ref() == Some(&bake))
+            .collect();
+        assert_eq!(
+            panes.len(),
+            1,
+            "exactly the claimed pane draws the paper doll's bake"
+        );
+        assert!(
+            panes[0].premultiplied,
+            "a render-target bake carries premultiplied colour"
+        );
+        // …and the pane published its aspect, which is what lets the booth render at the shape it
+        // will be stretched into (decision 1069) and what tells it it is on screen at all.
+        let aspect = app
+            .world()
+            .resource::<crate::portrait::BoothPanes>()
+            .0
+            .get("paperdoll")
+            .copied()
+            .expect("the pane publishes its aspect");
+        assert!(
+            (aspect - 233.0 / 224.0).abs() < 0.01,
+            "the pane's own rect is the aspect, got {aspect}"
         );
     }
 

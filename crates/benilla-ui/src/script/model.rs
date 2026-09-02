@@ -1272,7 +1272,6 @@ pub(crate) struct Model {
     /// 12th) — recomputed on every inventory push, which fires `UPDATE_INVENTORY_ALERTS`
     /// unconditionally, the client's own shape (see [`char_stats`]).
     pub(crate) inventory_alerts: [u8; 12],
-    pub(crate) paperdoll_yaw: f32,
     /// Inventory-slot ids queued by `UseInventoryItem` (decision 0208 phase 1b, `cursor`'s `doll`
     /// submodule) — drained by the app into `CMSG_USE_ITEM` against the equipped position.
     pub(crate) inventory_uses: Vec<u32>,
@@ -1291,12 +1290,11 @@ pub(crate) struct Model {
     pub(crate) inspect_notifies: Vec<String>,
     /// `ClearInspectPlayer` was called — drained by the app, which drops its inspect target.
     pub(crate) inspect_clear: bool,
-    /// The inspect model pane's bake yaw, the twin of [`Self::paperdoll_yaw`].
+    /// The inspect model pane's bake yaw — the last of the benilla-named pane scalars beside
+    /// [`Self::dressup_yaw`]. A migrated window's pane carries its own facing in `ModelState`
+    /// (`UiScript::model_pane_facing`, decision 1751); these two remain because their windows are
+    /// still ours, and each retires with its file.
     pub(crate) inspect_yaw: f32,
-    /// The **pet** paper doll's model-pane bake yaw (decision 1057) — a third scalar for the same
-    /// reason the inspect pane got a second: character tab 1 and tab 2 are two panes that can sit
-    /// at two different facings, and the ref carries a `rotation` per `<PlayerModel>`.
-    pub(crate) pet_paperdoll_yaw: f32,
     /// The dressing room's queued intents (decision 1060) — `BenillaDressUpModel_Dress/TryOn/Close`,
     /// drained by the app in order (see [`super::dressup`] on why order matters).
     pub(crate) dressup_intents: Vec<super::dressup::DressUpIntent>,
@@ -1821,14 +1819,12 @@ impl Model {
             inventory_slots: Default::default(),
             bank_bag_slots: Default::default(),
             inventory_alerts: [0; 12],
-            paperdoll_yaw: 0.0,
             inventory_uses: Vec::new(),
             weapon_enchants: [None; 2],
             inspect: None,
             inspect_notifies: Vec::new(),
             inspect_clear: false,
             inspect_yaw: 0.0,
-            pet_paperdoll_yaw: 0.0,
             dressup_intents: Vec::new(),
             dressup_yaw: 0.0,
             unit_reach: HashMap::new(),

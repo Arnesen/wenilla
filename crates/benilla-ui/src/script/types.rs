@@ -94,6 +94,24 @@ pub enum QuadContent {
         /// hold to the half, 1→0 over the back half) — applied app-side.
         flash: Option<f32>,
     },
+    /// A `Model` / `PlayerModel` widget's own draw slot: the 3D pane's content hole. The engine
+    /// core carries the resolved rect and the pane's identity; the app renderer puts pixels in it
+    /// — the same division of labour [`QuadContent::Minimap`] and [`QuadContent::Cooldown`] use,
+    /// and for the same reason (the scene state is [`crate::widget::ModelState`]; the render is
+    /// not this crate's).
+    ///
+    /// **Why the NAME travels rather than the scene.** benilla draws a body pane by sampling an
+    /// off-screen bake the app already keeps per *window* (the paper doll's, the inspect window's,
+    /// the pet page's), and which bake a pane samples is a fact about that window, not about the
+    /// widget. So the seam carries what the app needs to make the join — the pane's global frame
+    /// name, which since decision 1751 is the reference's own — and nothing it would have to
+    /// invent a meaning for. A pane with no name, or one no window has claimed, draws nothing;
+    /// that is also what a `SetModel` pane does today, and it is honest rather than a white slab.
+    ModelPane {
+        /// The pane's global frame name (`$parent`-expanded), or `None` for an anonymous
+        /// `CreateFrame("Model")` — pfUI's autocast shine is the corpus example of the latter.
+        name: Option<String>,
+    },
     /// A `Texture` region: a BLP path *or* a solid/vertex color (or both — a tinted texture).
     Texture {
         path: Option<String>,

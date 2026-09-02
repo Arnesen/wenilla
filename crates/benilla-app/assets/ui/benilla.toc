@@ -74,26 +74,6 @@ Interface\FrameXML\Localization.xml
 # words with `GetText("FACTION_STANDING_LABEL"..id, gender)` — and fourteen more call sites across
 # FriendsFrame, StaticPopup and the quest windows are waiting behind it.
 Interface\FrameXML\LocaleProperties.lua
-# ── A reference file sourced ABOVE ours, so OUR bodies win every collision ─────────────────────
-# This one is not a migrated window: it is here for one family of frame-agnostic globals that
-# addons call by name, while the window that file also drives is still ours. So it loads first and
-# our later files overwrite the names we own. (A migrated window is the other case, and sits at its
-# window's own position — `Interface\FrameXML\ContainerFrame.xml` below is the first of them.)
-#
-# PaperDollFrame.lua earns its place for ONE family: `PaperDollItemSlotButton_OnLoad`/`_OnEvent`/
-# `_OnClick`/`_Update`/`_UpdateLock`/`_OnEnter`/`_OnUpdate` — frame-agnostic in the same sense,
-# acting on `this`/`this:GetID()` through live APIs and never on a named reference window.
-# `PaperDollItemSlotButtonTemplate` and `BagSlotButtonTemplate` are declared over them
-# (ItemSlotButtonTemplates.xml), and pfUI builds its bag bar from the latter.
-#
-# Its top level is four constants (NUM_RESISTANCE_TYPES, NUM_STATS, NUM_SHOPPING_TOOLTIPS,
-# ATTACK_POWER_MAGIC_NUMBER) — nothing touches a frame at load, so sourcing it cannot raise. 18 of
-# its 29 functions collide with ours (the PaperDollFrame_Set* stat family, the two damage-frame
-# hovers, PaperDollFormatStat, PaperDollStatTooltip) and this position settles all of them the
-# documented way: CharacterFrame.xml loads far below and its bodies win. Not one of the seven
-# names we are here for is in that overlap, and our own doll slots keep calling
-# `BenillaPaperDollSlot_*`, untouched.
-Interface\FrameXML\PaperDollFrame.lua
 # The reference's own second file, in its own position: TEXT/message/_ERRORMESSAGE, the
 # ScriptErrors dialog, and the DialogBoxFrame + DialogButton*Texture kit it is built from.
 # Straight after Fonts.xml because those are the only things it needs (GameFontRedLarge,
@@ -559,18 +539,52 @@ Interface\FrameXML\RaidWarning.xml
 # (Cooldown.xml), `UIPanelCloseButton` (UIPanelTemplates.xml) — plus `parent="UIParent"`. It
 # cannot load "first" the way a Lua-only sourcing had to.
 Interface\FrameXML\ContainerFrame.xml
-# The reference's item-SLOT button base, `PaperDollItemSlotButtonTemplate` — published for addons
-# (pfUI builds its bag bar from what inherits it) and, since window 3, a LOAD-TIME dependency of the
-# entry directly below: stock `MainMenuBarBagButtons.xml` inherits it on all five bag buttons, and
-# an `inherits=` is resolved at load. That requirement is what moved this file up from below
-# CharacterFrame.xml, where it sat only because the chain crossed the old BagFrame -> CharacterFrame
-# the wrong way. It needs ItemButtonTemplate.xml above it for the base and Cooldown.xml for the
-# $parentCooldown the doll template carries — both far above.
+# ══ THE CHARACTER WINDOW — the reference's own, off the player's chain (decision 1751) ══
+# `CharacterFrame` + its five-tab row and portrait/name header (CharacterFrame.xml), the paper doll
+# itself — model pane, 19 equipment slots, the ammo slot, the five attributes, the melee and ranged
+# stat blocks, the five resistances (PaperDollFrame.xml) — and the pet page over the same templates
+# (PetPaperDollFrame.xml). Our `CharacterFrame.xml` (2027 lines) and `PetPaperDollFrame.xml` (773)
+# stood here and are deleted.
 #
-# `BagSlotButtonTemplate` used to be declared here too, transcribed from MainMenuBarBagButtons.xml
-# because that file could not be sourced. It is sourced now, one entry down, so the reference's own
-# declaration is the live one and the copy is deleted — the whole point of the migration.
-ItemSlotButtonTemplates.xml
+# THREE FILES IN THE REFERENCE'S OWN ORDER, and every edge between them is resolved at LOAD:
+#   - CharacterFrame.xml declares `CharacterFrame`, which the other two name in `parent=` (1734).
+#   - PaperDollFrame.xml declares `StatFrameTemplate`, `AttributeFrameTemplate` and
+#     `MagicResistanceFrameTemplate`, which PetPaperDollFrame.xml inherits on 11 frames.
+#   - PaperDollFrame.xml also declares `PaperDollItemSlotButtonTemplate`, which stock
+#     `MainMenuBarBagButtons.xml` below inherits on all five bag buttons.
+#
+# THAT LAST EDGE IS WHY THE BLOCK SITS HERE rather than below the bag bar where ours did.
+# `ItemSlotButtonTemplates.xml` held a transcribed copy of that template for exactly one reason:
+# our CharacterFrame.xml loaded after the bag bar and could not declare it in time. The reference's
+# own toc has no such problem (CharacterFrame 53, PaperDollFrame 54, MainMenuBarBagButtons 59), so
+# the copy is deleted and the reference's declaration is the live one — the same retirement
+# `BagSlotButtonTemplate` took one window earlier.
+#
+# `PaperDollFrame.lua` used to be a manifest line of its own, sourced far above everything so that
+# our bodies would win its 18 collisions. It arrives through PaperDollFrame.xml's own
+# `<Script file=>` now, at this position, and the collisions went with the file that had them.
+#
+# What the block needs from above, all far up: Fonts.xml (every `inherits=` font object),
+# ItemButtonTemplate.xml (the slot template's base, and the `SetItemButton*` family),
+# Cooldown.xml (`CooldownFrameTemplate` + `CooldownFrame_SetTimer`), GameTooltip.xml, UiPanels.xml
+# (`CharacterFrameTabButtonTemplate`, `UIPanelWindows`), UIPanelTemplates.xml (`UIPanelCloseButton`,
+# `UIPanelButtonTemplate`, and `PanelTemplates_SetNumTabs`, which `CharacterFrame_OnLoad` calls at
+# LOAD), TextStatusBar.xml (`SetTextStatusBarTextPrefix`, called at load too, plus the
+# `TextStatusBar` the pet page's XP bar inherits), UnitFrames.xml (`PlayerFrameHealthBar` /
+# `PlayerFrameManaBar`, named in that same OnLoad), ActionBar.xml (`MainMenuExpBar`, likewise),
+# MicroMenu.xml (`MicroButtonTooltipText`, the five tab hovers) and UIParent.xml
+# (`Model_OnLoad`/`_RotateLeft`/`_RotateRight`/`_OnUpdate` — the model pane's turntable, the
+# reference's own code living in our UIParent.lua counterpart).
+#
+# Two names it writes live BELOW it, and that is fine because both are runtime rather than load:
+# `HonorLevelText` and `HonorGuildText` (HonorFrame.xml), which `PaperDollFrame_SetLevel` and
+# `_SetGuild` fill "while we're at it" — reached only from OnShow and the UNIT_* events, long after
+# that file has loaded.
+Interface\FrameXML\CharacterFrame.xml
+Interface\FrameXML\PaperDollFrame.xml
+# Tab 2, the reference's file as well. `PetTab_Update` shows or hides `CharacterFrameTab2` off
+# `HasPetUI()` and re-anchors tab 3 over the gap, so a classless character's row has no hole.
+Interface\FrameXML\PetPaperDollFrame.xml
 # ══ THE BAG BAR — the reference's own, off the player's chain (decision 1751, window 3) ══
 # `MainMenuBarBackpackButton`, `CharacterBag0Slot`..`CharacterBag3Slot`, `KeyRingButton`,
 # `BagSlotButtonTemplate` and the `BagSlotButton_*`/`BackpackButton_*`/`Disable_BagButtons` family
@@ -584,8 +598,10 @@ ItemSlotButtonTemplates.xml
 #
 # THE POSITION IS THE REQUIREMENT: `inherits="PaperDollItemSlotButtonTemplate"` on the four bag
 # slots and `inherits="ItemButtonTemplate"` on the backpack are resolved at LOAD, and so is
-# `parent="MainMenuBarArtFrame"` — so this sits below ItemSlotButtonTemplates.xml (above) and
-# ActionBar.xml (which declares the art frame). Being BELOW the sourced ContainerFrame.xml is
+# `parent="MainMenuBarArtFrame"` — so this sits below the character-window block (above, which is
+# where stock `PaperDollFrame.xml` declares that template) and below ActionBar.xml (which declares
+# the art frame). It sat below a transcribed copy of the template in `ItemSlotButtonTemplates.xml`
+# until the character window migrated and made that copy redundant (decision 1810). Being BELOW the sourced ContainerFrame.xml is
 # legibility, not necessity, in either direction: every verb each file calls of the other resolves
 # at call time, `KEYRING_CONTAINER` included (no top-level read of it exists in ContainerFrame.lua).
 #
@@ -605,17 +621,6 @@ Interface\FrameXML\StackSplitFrame.xml
 # detour benilla answers differently (0765). Must load AFTER them, since it captures at load the
 # body it wraps; its own header says what it stopped needing to do when the XML became sourceable.
 ContainerFrameAdapters.xml
-# The character window (decision 0208 phase 1a): the C-key paper doll. Loaded after BagFrame
-# (needs nothing from it, but keeps player-state windows grouped) and before the NPC session
-# windows (Gossip/Merchant/Quest*) — it depends only on Fonts/UiPanels/GameTooltip, all
-# already loaded above.
-CharacterFrame.xml
-# The Pet tab (decision 1057): the same separate-top-level-file shape as SkillFrame below,
-# and ahead of it because it is the earlier tab. It leans on CharacterFrame.xml for real —
-# the `(unit, prefix)` stat setters, the `BenillaStatRow`/`BenillaMagicResistanceFrame`
-# templates and the tab row it raises tab 2 of — all of which only exist once that file has
-# loaded, so this order is a requirement here, not just tidiness.
-PetPaperDollFrame.xml
 # The Reputation tab: the same separate-top-level-file shape as the two pages around it, seated
 # BETWEEN them because that is the real client's tab order (Character 1, Pet 2, Reputation 3,
 # Skills 4 — ref CharacterFrame.xml:79-168), and the page's `id=` is that slot. Its hard
@@ -770,9 +775,10 @@ TaxiFrame.xml
 # windows grouped" cluster beside Trainer/Bank/Taxi. Two of its dependencies are resolved at
 # LOAD and so must sit above it: MoneyFrame (its purse and cost displays inherit
 # SmallMoneyFrameTemplate) and UIPanelTemplates (UIPanelButtonTemplate / UIPanelCloseButton).
-# A third is resolved at load too, and is the reason this cannot sit up with the other NPC
-# windows' dependencies: the model pane's own <OnLoad> calls CharacterFrame.xml's shared
-# `BenillaPaperDollModel_OnLoad`, so that file must already have run. The rest
+# A third is resolved at load too: the model pane is a `<PlayerModel>` whose own <OnLoad> calls
+# the reference's `Model_OnLoad` (UIParent.xml, far above). That used to be CharacterFrame.xml's
+# `BenillaPaperDollModel_OnLoad`, which is why this entry sat below the character window; it no
+# longer has to, and stays here only because the NPC-session cluster is where it belongs. The rest
 # (ItemButtonTemplate's SetItemButtonTexture, GameTooltip, UiPanels' ShowUIPanel/HideUIPanel,
 # UIParent's BuildListString) are resolved when the window repaints, so their order is free.
 PetStable.xml

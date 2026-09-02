@@ -366,7 +366,7 @@ fn feed_stable_booth(
     };
     // Written every frame, selection or none — a stale yaw would snap the model the moment one is
     // picked (the pet paper doll's arrangement).
-    booth.yaw = script.stable_yaw();
+    booth.yaw = script.model_pane_facing("PetStableModel");
 
     // `GetSelectedStablePet()`'s own answer: `0` = the summoned pet, `1..=2` a bought stable slot,
     // `-1` nothing. Reading the binding's translation rather than the raw petNumber is deliberate —

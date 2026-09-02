@@ -144,6 +144,80 @@ pub(super) const LOOT_UI: &[&str] = &[
     "PartyFrame.xml",
 ];
 
+/// What the **character window** needs before `Interface\FrameXML\CharacterFrame.xml`,
+/// `PaperDollFrame.xml` and `PetPaperDollFrame.xml` will load and behave — the same shape as
+/// [`BAG_UI`] / [`LOOT_UI`] / [`MERCHANT_UI`], and grown the same way (decision 1751).
+///
+/// This one is the longest of the four, and the reason is `CharacterFrame_OnLoad`: it is the only
+/// migrated window whose LOAD-time body reaches outside its own file, and it reaches into four
+/// others at once —
+///
+/// * **`Interface\FrameXML\TextStatusBar.lua`** for `SetTextStatusBarTextPrefix`, which it calls
+///   three times before doing anything else. Its `.xml` twin comes too, because the pet page's XP
+///   bar inherits the `TextStatusBar` template it declares and a missing template is a loader
+///   *warning* — the bar would load with no art and no text region and read as a pass.
+/// * **`UnitFrames.xml`** for `PlayerFrameHealthBar` / `PlayerFrameManaBar`, the frames those three
+///   calls name, plus `PetFrameHealthBar` / `PetFrameManaBar` which `CharacterFrame_OnShow` shows
+///   the text on. (Ours: the unit frames are not migrated. When they are, this entry becomes the
+///   stock `PlayerFrame.xml` / `PetFrame.xml` pair.)
+/// * **`ActionBar.xml`** for `MainMenuExpBar` — the third bar of that prefix call — and for
+///   `ShowWatchedReputationBarText` / `HideWatchedReputationBarText`, which the window's
+///   show/hide pair calls.
+/// * **`UIPanelTemplates.xml`** for `PanelTemplates_SetNumTabs`/`_SetTab`, the last two lines of
+///   that same OnLoad.
+///
+/// And two more that only bite later, which is exactly why they are written down:
+///
+/// * **`Interface\FrameXML\HonorFrame.xml`** — `PaperDollFrame_SetLevel` and `_SetGuild` write
+///   `HonorLevelText` and `HonorGuildText` "while we're at it" (`PaperDollFrame.lua:100`/`:120`).
+///   Nothing touches them at load, so leaving this out loads clean and then raises the first time
+///   the window is SHOWN. It sits below the character block in the manifest for the same reason.
+/// * **`MicroMenu.xml`** — `UpdateMicroButtons` (called by both `CharacterFrame_OnShow` and
+///   `_OnHide`) and `MicroButtonTooltipText` (all five tab hovers). A tab hover is the only thing
+///   that reaches the second one, so its absence is invisible until a test hovers a tab.
+///
+/// Needs client data, like its three siblings: open with `benilla_formats::wow_data_or_skip!()`.
+pub(super) const CHARACTER_UI: &[&str] = &[
+    // The reference's own localized strings. The stock file has no `X = X or "…"` fallbacks —
+    // `PaperDollFrame_OnLoad` sets seven labels from them at LOAD, and `PaperDollFrame_SetStats`
+    // concatenates `SPELL_STAT0_NAME`..`4` on every repaint.
+    "Interface\\FrameXML\\GlobalStrings.lua",
+    "Fonts.xml",
+    "BasicControls.xml", // TEXT(), which every one of those label sets goes through
+    "Interface\\FrameXML\\ItemButtonTemplate.xml", // PaperDollItemSlotButtonTemplate's base
+    "MoneyFrame.xml",
+    "UIParent.xml", // Model_OnLoad/_Rotate*/_OnUpdate — the model panes' turntable
+    "UiPanels.xml", // CharacterFrameTabButtonTemplate, UIPanelWindows, Show/HideUIPanel
+    "GameTooltip.xml",
+    "Cooldown.xml", // CooldownFrameTemplate + CooldownFrame_SetTimer, per equipment slot
+    "UIPanelTemplates.xml",
+    // The unit frames' four right-click dropdowns call `UIDropDownMenu_Initialize` at LOAD, so the
+    // kit and the menu table it initialises from both precede them — the manifest's own order
+    // (175 → 189 → 193 → 263).
+    "UIDropDownMenu.xml",
+    "Interface\\FrameXML\\UIMenu.xml",
+    "UnitPopup.xml",
+    "Interface\\FrameXML\\TextStatusBar.lua",
+    "Interface\\FrameXML\\TextStatusBar.xml",
+    "UnitFrames.xml",
+    "ActionBar.xml",
+    "MicroMenu.xml",
+    // The two page files these three need before the window can be OPENED, which is not the same
+    // as before it can load: `CHARACTERFRAME_SUBFRAMES` lists all five pages by name and
+    // `CharacterFrame_ShowSubFrame` calls `getglobal(value):Hide()` on each one it is not showing
+    // (`CharacterFrame.lua:25-32`), unguarded. A missing page is `attempt to index a nil value` on
+    // the very first `ToggleCharacter` — load-clean, then dead on the first click. Their own
+    // template dependencies come with them.
+    "ScrollTemplates.xml",       // SkillFrame's faux list + trough
+    "OptionsFrameTemplates.xml", // ReputationFrame's detail check boxes
+    "Interface\\FrameXML\\CharacterFrame.xml",
+    "Interface\\FrameXML\\PaperDollFrame.xml",
+    "Interface\\FrameXML\\PetPaperDollFrame.xml",
+    "ReputationFrame.xml",
+    "SkillFrame.xml",
+    "Interface\\FrameXML\\HonorFrame.xml",
+];
+
 pub(super) const BAG_UI: &[&str] = &[
     // The reference's own localized strings — `BACKPACK_TOOLTIP`, `EQUIP_CONTAINER`, `KEYRING`,
     // the `*_FONT_COLOR_CODE` pair. The app loads this at VM setup, ahead of the manifest
@@ -154,11 +228,6 @@ pub(super) const BAG_UI: &[&str] = &[
     // is the better answer, and these tests already gate on the install.
     "Interface\\FrameXML\\GlobalStrings.lua",
     "Fonts.xml",
-    // The reference's own `PaperDollItemSlotButton_*` family, sourced at manifest entry 2. Not
-    // optional since 1751's third window: stock `BagSlotButtonTemplate`'s OnLoad *is*
-    // `PaperDollItemSlotButton_OnLoad()`, which is what gives each bag button its inventory-slot
-    // id (20..23 via `GetInventorySlotInfo`), its six event registrations and its first paint.
-    "Interface\\FrameXML\\PaperDollFrame.lua",
     // `TEXT()` — the reference's own identity-function wrapper, which stock
     // `MainMenuBarBackpackButton`'s OnEnter calls (`GameTooltip:SetText(TEXT(BACKPACK_TOOLTIP)…)`)
     // and `BagSlotButton_OnEnter` calls for `EQUIP_CONTAINER`. Manifest entry 3, and not optional
@@ -183,9 +252,20 @@ pub(super) const BAG_UI: &[&str] = &[
     "MicroMenu.xml",
     "UIPanelTemplates.xml",
     "Interface\\FrameXML\\ContainerFrame.xml",
-    // `PaperDollItemSlotButtonTemplate`, which every bag button inherits — resolved at load, so it
-    // has to precede the bar exactly as it does in the manifest.
-    "ItemSlotButtonTemplates.xml",
+    // `PaperDollItemSlotButtonTemplate` and the `PaperDollItemSlotButton_*` family behind it,
+    // which every bag button inherits and runs — resolved at load, so this has to precede the bar
+    // exactly as it does in the manifest. Stock `BagSlotButtonTemplate`'s OnLoad *is*
+    // `PaperDollItemSlotButton_OnLoad()`, which gives each bag button its inventory-slot id
+    // (20..23 via `GetInventorySlotInfo`), its six event registrations and its first paint.
+    //
+    // The whole paper-doll file, because that is where the reference declares both — our
+    // `ItemSlotButtonTemplates.xml` held a transcribed copy of the template only because our own
+    // character window loaded too late to declare it, and it is deleted (decision 1751). Its
+    // companion `Interface\\FrameXML\\CharacterFrame.xml` is deliberately NOT here: this list is
+    // the bags, `PaperDollFrame` only names `CharacterFrame` in `parent=` (a missing parent is a
+    // loader warning, not an error), and `CharacterFrame_OnLoad` would drag in the unit frames,
+    // the XP bar and the text-status-bar file for a window no bag test opens.
+    "Interface\\FrameXML\\PaperDollFrame.xml",
     // The bag BAR itself, the reference's own since 1751's third window: MainMenuBarBackpackButton,
     // CharacterBag0..3Slot, KeyRingButton, `BagSlotButtonTemplate`, and `KEYRING_CONTAINER`.
     "Interface\\FrameXML\\MainMenuBarBagButtons.xml",

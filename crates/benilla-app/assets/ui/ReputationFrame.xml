@@ -23,7 +23,7 @@
         identical rect and is what the page was built and approved against, not a workaround for
         something the engine cannot do.
         `CharacterFrame.xml`'s `CharacterFrame_OnHide` hide-loop over
-        `BENILLA_CHARACTERFRAME_SUBFRAMES` is what closes it with the window; joining that table as
+        `CHARACTERFRAME_SUBFRAMES` is what closes it with the window; joining that table as
         entry 3 is all this page has to do to get that.
 
         THE TAB IS THE REFERENCE'S OWN SLOT 3 AGAIN. Until this page, `SkillFrame` sat at id 3 with
@@ -587,7 +587,7 @@
     <!-- id=3, the reference's own (ref l.211): a page's id is the slot it occupies in the WINDOW'S
          OWN tab row, and ToggleCharacter selects the tab from it (ref CharacterFrame.lua:11).
          `character_tests.rs` pins every page's id against its slot in
-         BENILLA_CHARACTERFRAME_SUBFRAMES. -->
+         CHARACTERFRAME_SUBFRAMES. -->
     <Frame name="ReputationFrame" enableMouse="true" parent="CharacterFrame" hidden="true" id="3">
         <!-- The real 384x512 page. The explicit `<Size>` + TOPLEFT `<Anchor>` below is an exact
              equivalent of the reference's `setAllPoints="true"` here — CharacterFrame, the parent

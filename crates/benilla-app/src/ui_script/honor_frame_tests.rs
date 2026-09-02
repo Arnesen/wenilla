@@ -1,5 +1,6 @@
-//! The shipped **Honor tab** (`assets/ui/HonorFrame.xml`) driven end-to-end, engine-only (no
-//! Bevy) — the per-window test module the skills/reputation files establish (decision 1512).
+//! The shipped **Honor tab** (`Interface\\FrameXML\\HonorFrame.xml`, the reference's own) driven
+//! end-to-end, engine-only (no Bevy) — the per-window test module the skills/reputation files
+//! establish (decision 1512).
 //!
 //! What it pins is the PAINT law, the half `benilla-ui`'s own `script::pvp::tests` structurally
 //! cannot reach: that module drives the thirteen globals and asserts their tuples, and stops at the
@@ -51,9 +52,13 @@ fn state() -> HonorState {
 }
 
 /// The eight rank titles this fixture can ask for, defined as the install's `GlobalStrings.lua`
-/// defines them. Set by hand rather than read off the chain so the pane's law is pinned on a
-/// machine with no client data; [`the_real_global_strings_name_the_rank`] is the same assertion
-/// against the player's actual file.
+/// defines them — verbatim (`GlobalStrings.lua:2795`, `:3075`, `:3150-3161`, `:3297`).
+///
+/// **The inspect page's, since 1751.** The character page loads the player's own file as its first
+/// [`super::test_ui::CHARACTER_UI`] entry, because stock `PaperDollFrame_OnLoad` sets seven labels
+/// from it; [`shown_inspect_honor_page`] loads no such thing, so these are what its titles read.
+/// [`the_real_global_strings_name_the_rank`] is the same assertion against the player's actual
+/// file, on both sides.
 const RANK_GLOBALS: &str = r#"
     NONE = "None"
     RANK = "Rank"
@@ -64,27 +69,27 @@ const RANK_GLOBALS: &str = r#"
     PVP_RANK_14_0 = "Champion"
 "#;
 
+/// The character window, whose fifth tab this page is. Every file it needs — including
+/// `Interface\\FrameXML\\HonorFrame.xml` itself, which the shared list carries because
+/// `PaperDollFrame_SetLevel` writes `HonorLevelText` on every show
+/// (`PaperDollFrame.lua:103`, and `_SetGuild` writes `HonorGuildText` at `:123`) — is
+/// [`super::test_ui::CHARACTER_UI`]; this page adds nothing of its own. It was a hand-copied list until the window became the reference's (decision 1751), which
+/// is when the list stopped being short enough for a copy to stay honest.
 fn load_page(s: &UiScript) {
-    for file in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        "UIParent.xml",
-        "GameTooltip.xml",
-        "Interface\\FrameXML\\TextStatusBar.lua",
-        "Interface\\FrameXML\\TextStatusBar.xml",
-        "ScrollTemplates.xml",
-        "UIPanelTemplates.xml",
-        "OptionsFrameTemplates.xml",
-        "CharacterFrame.xml",
-        "Interface\\FrameXML\\HonorFrame.xml",
-    ] {
-        load_xml(s, file);
+    for file in super::test_ui::CHARACTER_UI {
+        super::test_ui::load_ui_strict(s, file);
     }
 }
 
 /// An Alliance, male, level-60 player — the two facts the rank title's GlobalString key is built
 /// from (side → the team digit, sex → the `_FEMALE` twin), plus the level line's input.
+///
+/// **Both halves of the race and class pairs, since 1751.** `UnitRace`/`UnitClass` answer
+/// `(localized, file)` or `nil, nil` — the binding `zip`s the two, so a snapshot carrying only the
+/// localized name reports the unit as raceless. Stock `PaperDollFrame_SetLevel` writes
+/// `HonorLevelText` off `format(TEXT(PLAYER_LEVEL), UnitLevel, UnitRace, UnitClass)` — unguarded,
+/// on every show of this page (`PaperDollFrame.lua:100-104`) — so a half-filled snapshot raises
+/// there. Ours never called it from the honor tab, which is why the gap sat unseen.
 fn alliance_player() -> UnitState {
     UnitState {
         exists: true,
@@ -92,7 +97,9 @@ fn alliance_player() -> UnitState {
         sex: 2,
         faction_group: Some("Alliance".into()),
         race: Some("Human".into()),
+        race_file: Some("Human".into()),
         class: Some("Warrior".into()),
+        class_file: Some("WARRIOR".into()),
         pvp_rank: 12,
         ..UnitState::default()
     }
@@ -103,7 +110,6 @@ fn alliance_player() -> UnitState {
 fn shown_honor_page() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    s.run(RANK_GLOBALS).unwrap();
     load_page(&s);
     s.set_unit("player", Some(alliance_player()));
     s.set_honor(Some(state()));
