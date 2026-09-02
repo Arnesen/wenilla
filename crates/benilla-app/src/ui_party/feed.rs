@@ -56,6 +56,9 @@ pub(super) struct FedParty {
     saved_answers: u32,
     /// The ready-check ticket last seen ([`GroupState::ready_check`]).
     ready_check: u32,
+    /// The raid-target icon board last pushed — what `RAID_TARGET_UPDATE` fires on. Eight guids,
+    /// so a plain copy rather than the `Vec` diffs above.
+    raid_targets: [u64; 8],
 }
 
 pub(crate) const PARTY_TOKENS: [&str; 4] = ["party1", "party2", "party3", "party4"];
@@ -431,6 +434,22 @@ pub(super) fn feed_party(
         gate.audit("feed_party", "the raid-roster edge");
         fed.raid_key = raid_key;
         script.fire_event("RAID_ROSTER_UPDATE", vec![]);
+    }
+
+    // ── RAID_TARGET_UPDATE ──────────────────────────────────────────────────────────────────
+    //
+    // The board moving is an EVENT, and we were not firing it at all. Stock `TargetFrame.lua:30`
+    // registers `RAID_TARGET_UPDATE` and its `:99` arm calls `TargetFrame_UpdateRaidTargetIcon`,
+    // so without this the skull/star on your CURRENT target never appears or clears — it only
+    // corrects itself on the next `PLAYER_TARGET_CHANGED`, i.e. when you re-target. That file is
+    // on our chain, so this was live.
+    //
+    // Fired on the whole board rather than per unit because that is the shape the reference's
+    // handler has: it takes no argument and re-reads the unit it is showing.
+    if group.raid_targets != fed.raid_targets {
+        gate.audit("feed_party", "the raid-target board edge");
+        fed.raid_targets = group.raid_targets;
+        script.fire_event("RAID_TARGET_UPDATE", vec![]);
     }
 
     // ── READY_CHECK (decision 1549) ─────────────────────────────────────────────────────────

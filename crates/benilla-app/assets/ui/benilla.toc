@@ -655,14 +655,36 @@ SkillFrame.xml
 # `HonorFrameTemplates.xml` is `<Include>`d by `HonorFrame.xml` and inherited by the LoadOnDemand
 # `Blizzard_InspectUI`, which loads later still.
 Interface\FrameXML\HonorFrame.xml
-# The inspect window (decision 0631): another player's paper doll. Beside the character
-# window it mirrors — it needs the same three (Fonts/UiPanels/GameTooltip) plus
-# `CharacterFrameTabButtonTemplate` from UiPanels.xml, and nothing from CharacterFrame.xml
-# itself (its slot template, handlers, and booth slot are all its own — the two windows
-# share only the reference's art). ONE cross-window dependency does bind, and it is on the
-# entry directly above: this window's honor page inherits HonorFrame.xml's five row templates
-# and calls its two shared painters, the same sharing the reference does.
-InspectFrame.xml
+# ══ THE INSPECT WINDOW — the reference's own, off the player's chain (1751, window 24) ══
+# Another player's paper doll (decision 0631), and the FIRST LoadOnDemand ADDON we take off the
+# chain rather than a FrameXML file. Everything below it in this manifest that names a
+# `Blizzard_*` addon follows the shape set here.
+#
+# **The addon is inside patch.MPQ, not the loose folder.** `Interface\AddOns\Blizzard_InspectUI\`
+# on disk holds one `Blizzard_InspectUI.pub` decoy and nothing else; the real four files sit in
+# the archive, which the chain mounts. Believing the decoy is what kept this window (and Macro,
+# Talent, Raid, Trainer) on a transcription for months.
+#
+# No LoadOnDemand: we list the addon's files here and they load with everything else. The
+# reference reaches them through `InspectUnit` → `InspectFrame_LoadUI`; ours keeps `InspectUnit`
+# (in UIParent.xml, the reference's own home for that name) and drops the LoadUI call.
+#
+# The addon's own toc order, which is load order — the `.xml` files pull their `.lua` siblings
+# through `<Script file=.../>` relative to the addon directory, exactly as a FrameXML file does.
+# Its toc lists a fourth entry, `Localization.lua`, which is omitted here because it holds no code
+# at all: the whole file is the comment `-- This file is executed at the end of addon load`.
+#
+# Dependencies are unchanged from the file this replaces: Fonts/UiPanels/GameTooltip, plus
+# `CharacterFrameTabButtonTemplate` from UiPanels.xml, plus ItemButtonTemplate.xml far above
+# (`InspectPaperDollItemSlotButtonTemplate` inherits it, resolved at LOAD). And the one that
+# binds hardest is the entry directly above: the honor page inherits HonorFrame.xml's five row
+# templates — the reference has the identical edge, which is why its own toc has the same order.
+#
+# What we GAIN by swapping: `InspectGuildText` and `InspectTitleText`, two FontStrings our
+# transcription never had.
+Interface\AddOns\Blizzard_InspectUI\Blizzard_InspectUI.xml
+Interface\AddOns\Blizzard_InspectUI\InspectPaperDollFrame.xml
+Interface\AddOns\Blizzard_InspectUI\InspectHonorFrame.xml
 # The dressing room (decision 1060): the ctrl-click item preview. Loaded right after the
 # windows whose slots feed it (the character window above, the bags before that) and before
 # everything else that ctrl-clicks into it — order is legibility only, since `DressUpItemLink`
@@ -674,13 +696,23 @@ DressUpFrame.xml
 # windows grouped" posture, same Fonts/UiPanels/GameTooltip-only dependency set); the
 # 'P' binding (ui_script/input.rs) calls its bare ToggleSpellBook(BOOKTYPE_SPELL).
 SpellBookFrame.xml
-# The talent window (decision 0304 §4): the N-key window, the class talent grid over the
-# `benilla-ui::script::talent` engine seam. Loaded right after SpellBookFrame (the same
-# "player-state windows grouped" posture; needs Fonts/UiPanels/GameTooltip plus
-# ScrollTemplates.xml — its real ScrollFrame's scrollbar reuses BenillaScrollBarTemplate —
-# all already loaded above). The 'N' binding (ui_script/input.rs) calls its bare
-# ToggleTalentFrame().
-TalentFrame.xml
+# ══ THE TALENT WINDOW — the reference's own, off the player's chain (1751, window 25) ══
+# The second LoadOnDemand addon (1832 was the first, and its header carries the mechanics).
+# `Blizzard_TalentUI` is FIVE files behind one manifest line: the `.xml` sources its own `.lua`
+# and `<Include>`s `Blizzard_TalentUITemplates.xml`, which is where the four templates every
+# talent button, branch, arrow and tab inherits actually live. Its toc's only other entry is the
+# empty `Localization.lua`.
+#
+# It needs NOTHING built — every engine verb the five files call was already registered, checked
+# name by name against our bindings. What it needs LOADED is UIPanelTemplates (its scroll frame
+# is `UIPanelScrollFrameTemplate`, its close and cancel buttons `UIPanelCloseButton` /
+# `UIPanelButtonTemplate`) and Fonts, both far above.
+#
+# `ToggleTalentFrame` moved to UIParent.xml, the reference's own home for it — see 1833.
+#
+# What we GAIN: `TalentFrameTab4` and `TalentFrameTab5`. The reference lays out five tab slots
+# where our transcription stopped at the three a 1.12 class actually has.
+Interface\AddOns\Blizzard_TalentUI\Blizzard_TalentUI.xml
 # The social window (decision 0668): the O-key friends/ignore/who window over the social
 # API (`benilla-ui/src/script/social.rs`) + `crate::ui_social`'s feed/drain. Needs
 # UiPanels (the panel manager, `CharacterFrameTabButtonTemplate`, and the StaticPopup
@@ -826,12 +858,6 @@ CraftFrame.xml
 # every verb the stock file calls at runtime — not just at load — was checked by hand against
 # the bindings before this line changed.
 Interface\FrameXML\LootFrame.xml
-# The group-loot roll popups (decision 0591): the Need/Greed/Pass dialogs, a sibling of
-# LootFrame.xml (loaded right after it) over the `benilla-ui::script::loot_roll` seam
-# (`crate::ui_loot_roll`'s feed/drain). NOT a UIPanel — four `frameStrata="DIALOG"` toplevel
-# popups with their own hardcoded anchors — so it needs only Fonts (GameFontNormalSmall) +
-# GameTooltip (the item/PASS/NEED/GREED hovers), both already loaded above.
-GroupLootFrame.xml
 # The questgiver window (decision 0088): four sub-panels over the Era quest API. Loaded after
 # MerchantFrame (grouping; the BenillaMoney coin helpers now live in MoneyFrame.xml) and GossipFrame (shared parchment
 # art conventions); its title/panel-button labels use the auto-centred ButtonText slot.

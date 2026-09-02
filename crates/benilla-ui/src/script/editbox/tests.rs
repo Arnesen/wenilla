@@ -220,14 +220,19 @@ fn click_focuses_regardless_of_autofocus_and_transition_order_is_lost_then_gaine
 
 // ── §3 text buffer + editing + OnTextChanged/OnTextSet ───────────────────────────────────────
 
+/// **`OnTextChanged` is deferred and coalesced** (decision 1831). An edit only raises the
+/// `textChanged` dirty bit; the fire belongs to the drain (`0x77d3e0`) that the box's own OnUpdate
+/// runs. So three typed characters are three marks on ONE box and produce exactly ONE fire — this
+/// test asserted three before the law was checked.
 #[test]
-fn typing_builds_text_and_fires_ontextchanged_per_mutation() {
+fn typing_coalesces_into_one_deferred_ontextchanged() {
     let mut s = script();
     s.run(
         r#"
         changed = 0
         E = CreateFrame("EditBox", "E")
-        E:SetScript("OnTextChanged", function() changed = changed + 1 end)
+        seen = ""
+        E:SetScript("OnTextChanged", function() changed = changed + 1 seen = E:GetText() end)
         E:SetFocus()
     "#,
     )
@@ -236,26 +241,50 @@ fn typing_builds_text_and_fires_ontextchanged_per_mutation() {
     assert!(s.char_input("b"));
     assert!(s.char_input("c"));
     assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "abc");
-    assert_eq!(s.eval::<i64>("return changed").unwrap(), 3);
+    assert_eq!(
+        s.eval::<i64>("return changed").unwrap(),
+        0,
+        "the text is already there, but nothing has drained yet"
+    );
+
+    s.tick(0.0);
+    assert_eq!(
+        s.eval::<i64>("return changed").unwrap(),
+        1,
+        "three edits, one fire, carrying the final text"
+    );
+    assert_eq!(s.eval::<String>("return seen").unwrap(), "abc");
+
+    // Nothing is pending now, so a second drain fires nothing.
+    s.tick(0.0);
+    assert_eq!(s.eval::<i64>("return changed").unwrap(), 1);
 }
 
+/// The two fires part company (decision 1831): **`OnTextSet` is synchronous, inside `SetText`
+/// itself** (`0x77be6b`), while `OnTextChanged` waits for the drain. The equality short-circuit
+/// still suppresses both. So writing "hi", "hi", "bye" before any drain logs two `set`s and then a
+/// SINGLE `changed` carrying only the last value — `A → B` coalesces.
 #[test]
-fn set_text_short_circuits_on_same_value_else_fires_textset_then_textchanged() {
-    let s = script();
+fn set_text_fires_ontextset_at_once_and_ontextchanged_at_the_drain() {
+    let mut s = script();
     s.run(
         r#"
         log = {}
         E = CreateFrame("EditBox", "E")
         E:SetScript("OnTextSet", function() table.insert(log, "set") end)
         E:SetScript("OnTextChanged", function() table.insert(log, "changed") end)
-        E:SetText("hi")     -- fires set then changed
-        E:SetText("hi")     -- unchanged → short-circuit, no events
-        E:SetText("bye")    -- fires set then changed
+        E:SetText("hi")     -- fires set NOW, marks changed for the drain
+        E:SetText("hi")     -- unchanged → short-circuit, no events at all
+        E:SetText("bye")    -- fires set NOW; the pending change simply becomes "bye"
     "#,
     )
     .unwrap();
     let log: Vec<String> = s.eval("return log").unwrap();
-    assert_eq!(log, vec!["set", "changed", "set", "changed"]);
+    assert_eq!(log, vec!["set", "set"], "no drain has run yet");
+
+    s.tick(0.0);
+    let log: Vec<String> = s.eval("return log").unwrap();
+    assert_eq!(log, vec!["set", "set", "changed"]);
     assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "bye");
 }
 
@@ -328,8 +357,10 @@ fn paste_inserts_at_the_cursor_and_replaces_the_selection() {
     s.run("E:HighlightText(0, -1)").unwrap();
     assert!(s.paste("xyz"));
     assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "xyz");
-    // Each paste that changed the text fired OnTextChanged once.
-    assert_eq!(s.eval::<i64>("return changed").unwrap(), 2);
+    // Both pastes marked the same box, so the drain owes exactly one fire — not one per paste.
+    assert_eq!(s.eval::<i64>("return changed").unwrap(), 0);
+    s.tick(0.0);
+    assert_eq!(s.eval::<i64>("return changed").unwrap(), 1);
 }
 
 #[test]
@@ -1448,5 +1479,75 @@ fn an_editbox_is_born_with_the_ctors_five_regions_ahead_of_its_authored_ones() {
         )
         .unwrap(),
         "the selection trio and the caret are blank quads"
+    );
+}
+
+/// `SetNumber` is `SetText` with Lua's own `%.14g` in front of it — the two bindings are
+/// byte-identical in the reference (`0x798690` / `0x7984c0`), so the numeric verb does no numeric
+/// work of its own. Decision 1831; the expected strings are the reference's executed output.
+#[test]
+fn set_number_formats_like_the_references_printf() {
+    let s = UiScript::new().unwrap();
+    s.run(r#"box = CreateFrame("EditBox", "NumBox", UIParent)"#)
+        .unwrap();
+
+    for (input, want) in [
+        ("3", "3"),
+        ("0.8", "0.8"),
+        ("-0.5", "-0.5"),
+        ("0.1 + 0.2", "0.3"),
+        ("1/3", "0.33333333333333"),
+        ("1e13", "10000000000000"),
+        // The three-digit exponent, which is MSVC's `%g` and not C99's. `1e+020`, never `1e+20`.
+        ("1e14", "1e+014"),
+        ("1e20", "1e+020"),
+        ("1e-5", "1e-005"),
+        // Just inside the fixed-notation window.
+        ("1e-4", "0.0001"),
+        // `%g` drops the sign on negative zero.
+        ("-0.0", "0"),
+    ] {
+        s.run(&format!("box:SetNumber({input})")).unwrap();
+        assert_eq!(
+            s.eval::<String>("return box:GetText()").unwrap(),
+            want,
+            "SetNumber({input})"
+        );
+    }
+
+    // A STRING is accepted and passed through verbatim — the gate is `lua_isstring`, so the
+    // argument is never parsed as a number.
+    s.run(r#"box:SetNumber("abc")"#).unwrap();
+    assert_eq!(s.eval::<String>("return box:GetText()").unwrap(), "abc");
+
+    // Everything else raises, including an ABSENT argument. `luaL_error` does not return.
+    for bad in [
+        "box:SetNumber()",
+        "box:SetNumber(nil)",
+        "box:SetNumber(true)",
+    ] {
+        assert!(s.run(bad).is_err(), "{bad} must raise");
+    }
+}
+
+/// A `numeric` box takes the reference's wholesale abort: the clear-all has already run when the
+/// insert fails the digit test, so the box is left EMPTY rather than partly filled. The money
+/// boxes (`MoneyInputFrame.xml`) are numeric, which is why this matters — though the money path
+/// itself only ever passes non-negative integers.
+#[test]
+fn set_number_on_a_numeric_box_empties_it_when_the_text_is_not_all_digits() {
+    let s = UiScript::new().unwrap();
+    s.run(r#"box = CreateFrame("EditBox", "NumOnly", UIParent) box:SetNumeric(true)"#)
+        .unwrap();
+
+    s.run("box:SetNumber(1234)").unwrap();
+    assert_eq!(s.eval::<String>("return box:GetText()").unwrap(), "1234");
+
+    // The minus sign fails the digit test, and the abort is wholesale.
+    s.run("box:SetNumber(-5)").unwrap();
+    assert_eq!(
+        s.eval::<String>("return box:GetText()").unwrap(),
+        "",
+        "a sign empties a numeric box rather than partly filling it"
     );
 }

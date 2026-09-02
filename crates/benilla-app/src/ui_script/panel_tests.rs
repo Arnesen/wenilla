@@ -1125,7 +1125,7 @@ fn the_1507_registry_rows_match_the_reference_bytes() {
         // The whileDead flags the ref authors and 1507 carried (l.21, l.25, Blizzard_TalentUI:71).
         "UIPanelWindows['SpellBookFrame'].whileDead == 1",
         "UIPanelWindows['QuestLogFrame'].whileDead == 1",
-        "UIPanelWindows['BenillaTalentFrame'].whileDead == 1",
+        "UIPanelWindows['TalentFrame'].whileDead == 1",
         // UIChildWindows — UIParent.lua l.44-50 verbatim, all four shipped.
         "table.getn(UIChildWindows) == 4",
         "UIChildWindows[1] == 'OpenMailFrame'",

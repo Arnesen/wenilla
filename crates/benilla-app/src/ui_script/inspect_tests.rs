@@ -111,15 +111,39 @@ fn drawn(s: &mut UiScript, needle: &str) -> bool {
 fn armed() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // `PLAYER_LEVEL`, the template the stock level line formats through — the reference keeps its
+    // strings here, and our retired file had the sentence written into it (1832).
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Fonts.xml");
+    // `TEXT`, which the stock `InspectPaperDollFrame_SetLevel` formats its level line through.
+    load_xml(&s, "BasicControls.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    // `InspectUnit` lives here now — the reference's own home for that name, and no longer in the
+    // window's own file (decision 1832). The manifest's order, and 49 other harnesses'.
+    load_xml(&s, "UIParent.xml");
     load_xml(&s, "GameTooltip.xml");
     // Before InspectFrame.xml, and required rather than tidy: this window's honor page inherits
     // HonorFrame.xml's five row templates and `inherits=` resolves at LOAD, so without it the
     // twelve honor rows materialize bare (decision 1512; the manifest states the same order).
+    // The stock slot buttons inherit `ItemButtonTemplate` — where their `$parentIconTexture`
+    // comes from, which `InspectPaperDollItemSlotButton_OnLoad` indexes unconditionally. Our own
+    // slot template declared its icon inline and needed no such file; the manifest has carried
+    // this entry far above the inspect window all along (decision 1832).
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\HonorFrame.xml");
-    load_xml(&s, "InspectFrame.xml");
+    load_xml(
+        &s,
+        "Interface\\AddOns\\Blizzard_InspectUI\\Blizzard_InspectUI.xml",
+    );
+    load_xml(
+        &s,
+        "Interface\\AddOns\\Blizzard_InspectUI\\InspectPaperDollFrame.xml",
+    );
+    load_xml(
+        &s,
+        "Interface\\AddOns\\Blizzard_InspectUI\\InspectHonorFrame.xml",
+    );
     s.set_unit("target", Some(target_unit()));
     s.set_inspect(Some(inspect_view("target")));
     // 4 yards away (d² = 16) — comfortably inside the verified 100.0.
@@ -132,25 +156,51 @@ fn armed() -> UiScript {
 fn shipped_inspect_frame_loads_clean() {
     let _data = benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
+    // `PLAYER_LEVEL`, the template the stock level line formats through — the reference keeps its
+    // strings here, and our retired file had the sentence written into it (1832).
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Fonts.xml");
+    // `TEXT`, which the stock `InspectPaperDollFrame_SetLevel` formats its level line through.
+    load_xml(&s, "BasicControls.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    // `InspectUnit` lives here now — the reference's own home for that name, and no longer in the
+    // window's own file (decision 1832). The manifest's order, and 49 other harnesses'.
+    load_xml(&s, "UIParent.xml");
     load_xml(&s, "GameTooltip.xml");
     // Before InspectFrame.xml, and required rather than tidy: this window's honor page inherits
     // HonorFrame.xml's five row templates and `inherits=` resolves at LOAD, so without it the
     // twelve honor rows materialize bare (decision 1512; the manifest states the same order).
+    // The stock slot buttons inherit `ItemButtonTemplate` — where their `$parentIconTexture`
+    // comes from, which `InspectPaperDollItemSlotButton_OnLoad` indexes unconditionally. Our own
+    // slot template declared its icon inline and needed no such file; the manifest has carried
+    // this entry far above the inspect window all along (decision 1832).
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\HonorFrame.xml");
-    load_xml(&s, "InspectFrame.xml");
+    load_xml(
+        &s,
+        "Interface\\AddOns\\Blizzard_InspectUI\\Blizzard_InspectUI.xml",
+    );
+    load_xml(
+        &s,
+        "Interface\\AddOns\\Blizzard_InspectUI\\InspectPaperDollFrame.xml",
+    );
+    load_xml(
+        &s,
+        "Interface\\AddOns\\Blizzard_InspectUI\\InspectHonorFrame.xml",
+    );
     // All 19 slots exist and carry their GetInventorySlotInfo id (1..=19, no ammo slot).
+    // The stock `InspectPaperDollItemSlotButton_OnLoad` puts it on the frame's own ID
+    // (`this:SetID(id)`); our retired file kept it in an `invSlotId` field of its own (1832).
     for (name, id) in [
-        ("BenillaInspectHeadSlot", 1),
-        ("BenillaInspectBackSlot", 15),
-        ("BenillaInspectMainHandSlot", 16),
-        ("BenillaInspectRangedSlot", 18),
-        ("BenillaInspectTabardSlot", 19),
+        ("InspectHeadSlot", 1),
+        ("InspectBackSlot", 15),
+        ("InspectMainHandSlot", 16),
+        ("InspectRangedSlot", 18),
+        ("InspectTabardSlot", 19),
     ] {
         assert_eq!(
-            s.eval::<i64>(&format!("return {name}.invSlotId")).unwrap(),
+            s.eval::<i64>(&format!("return {name}:GetID()")).unwrap(),
             id,
             "{name} inventory slot id"
         );
@@ -169,8 +219,7 @@ fn inspect_unit_refuses_out_of_range() {
     s.run(r#"InspectUnit("target")"#).unwrap();
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
     assert!(
-        !s.eval::<bool>("return BenillaInspectFrame:IsVisible()")
-            .unwrap(),
+        !s.eval::<bool>("return InspectFrame:IsVisible()").unwrap(),
         "out of range: the window must not open"
     );
     assert!(
@@ -182,8 +231,7 @@ fn inspect_unit_refuses_out_of_range() {
     s.set_unit_reach(HashMap::from([("target".to_string(), reach(99.9))]));
     s.run(r#"InspectUnit("target")"#).unwrap();
     assert!(
-        s.eval::<bool>("return BenillaInspectFrame:IsVisible()")
-            .unwrap(),
+        s.eval::<bool>("return InspectFrame:IsVisible()").unwrap(),
         "in range: the window opens"
     );
     assert_eq!(
@@ -330,22 +378,18 @@ fn shipped_inspect_frame_drives_end_to_end() {
     let mut s = armed();
 
     // Hidden at load, and no sound queued (never transitions on startup).
-    assert!(!s
-        .eval::<bool>("return BenillaInspectFrame:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return InspectFrame:IsVisible()").unwrap());
     assert!(s.take_sounds().is_empty());
     // The pane's OnLoad set the ref's own default facing (InspectModelFrame_OnLoad, 0.61).
     assert!(
-        (s.inspect_yaw() - 0.61).abs() < 0.0001,
+        (s.model_pane_facing("InspectModelFrame") - 0.61).abs() < 0.0001,
         "default facing 0.61, got {}",
-        s.inspect_yaw()
+        s.model_pane_facing("InspectModelFrame")
     );
 
     s.run(r#"InspectUnit("target")"#).unwrap();
     assert!(s.errors().is_empty(), "open errors: {:?}", s.errors());
-    assert!(s
-        .eval::<bool>("return BenillaInspectFrame:IsVisible()")
-        .unwrap());
+    assert!(s.eval::<bool>("return InspectFrame:IsVisible()").unwrap());
     assert_eq!(
         s.take_sounds(),
         vec![SoundRequest::KitName("igCharacterInfoOpen".into())],
@@ -353,13 +397,13 @@ fn shipped_inspect_frame_drives_end_to_end() {
     );
 
     assert_eq!(
-        s.eval::<String>("return BenillaInspectNameText:GetText()")
+        s.eval::<String>("return InspectNameText:GetText()")
             .unwrap(),
         "Thargrim",
         "the name line reads UnitName of the inspected token"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaInspectLevelText:GetText()")
+        s.eval::<String>("return InspectLevelText:GetText()")
             .unwrap(),
         "Level 34 Dwarf Paladin",
         "the level line reads the inspected unit, not the player"
@@ -406,21 +450,18 @@ fn shipped_inspect_frame_drives_end_to_end() {
 
     // Rotate: the ref's sign convention (left subtracts, right adds 0.03) onto the booth yaw, with
     // the kit each click.
-    s.run("BenillaInspectModelFrameRotateLeftButton:Click()")
-        .unwrap();
+    s.run("InspectModelRotateLeftButton:Click()").unwrap();
     assert!(
-        (s.inspect_yaw() - 0.58).abs() < 0.0001,
+        (s.model_pane_facing("InspectModelFrame") - 0.58).abs() < 0.0001,
         "rotate-left subtracts 0.03, got {}",
-        s.inspect_yaw()
+        s.model_pane_facing("InspectModelFrame")
     );
-    s.run("BenillaInspectModelFrameRotateRightButton:Click()")
-        .unwrap();
-    s.run("BenillaInspectModelFrameRotateRightButton:Click()")
-        .unwrap();
+    s.run("InspectModelRotateRightButton:Click()").unwrap();
+    s.run("InspectModelRotateRightButton:Click()").unwrap();
     assert!(
-        (s.inspect_yaw() - 0.64).abs() < 0.0001,
+        (s.model_pane_facing("InspectModelFrame") - 0.64).abs() < 0.0001,
         "rotate-right adds 0.03, got {}",
-        s.inspect_yaw()
+        s.model_pane_facing("InspectModelFrame")
     );
     assert_eq!(
         s.take_sounds(),
@@ -438,10 +479,8 @@ fn shipped_inspect_frame_drives_end_to_end() {
         !s.take_inspect_clear(),
         "ClearInspectPlayer not called while open"
     );
-    s.run(r#"HideUIPanel(BenillaInspectFrame)"#).unwrap();
-    assert!(!s
-        .eval::<bool>("return BenillaInspectFrame:IsVisible()")
-        .unwrap());
+    s.run(r#"HideUIPanel(InspectFrame)"#).unwrap();
+    assert!(!s.eval::<bool>("return InspectFrame:IsVisible()").unwrap());
     assert_eq!(
         s.take_sounds(),
         vec![SoundRequest::KitName("igCharacterInfoClose".into())],
@@ -471,30 +510,69 @@ fn the_active_tab_is_inert_and_toggle_inspect_closes() {
 
     // NB this engine's `IsEnabled` returns a plain bool, not the live API's 1/nil.
     assert!(
-        !s.eval::<bool>("return BenillaInspectFrameTab1:IsEnabled() ~= 0")
+        !s.eval::<bool>("return InspectFrameTab1:IsEnabled() ~= 0")
             .unwrap(),
         "the selected tab is disabled (PanelTemplates_SelectTab), so its click is inert"
     );
-    s.run("BenillaInspectFrameTab1:Click()").unwrap();
+    s.run("InspectFrameTab1:Click()").unwrap();
     assert!(
-        s.eval::<bool>("return BenillaInspectFrame:IsVisible()")
-            .unwrap(),
+        s.eval::<bool>("return InspectFrame:IsVisible()").unwrap(),
         "clicking the disabled active tab changes nothing"
     );
 
     // The reachable path: ToggleInspect on the page already showing closes the window.
-    s.run(r#"ToggleInspect("BenillaInspectPaperDollFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleInspect("InspectPaperDollFrame")"#).unwrap();
     assert!(
-        !s.eval::<bool>("return BenillaInspectFrame:IsVisible()")
-            .unwrap(),
+        !s.eval::<bool>("return InspectFrame:IsVisible()").unwrap(),
         "ToggleInspect on the showing page closes the window (ref ToggleInspect)"
     );
-    // And again re-opens it, the other branch of the same function.
-    s.run(r#"ToggleInspect("BenillaInspectPaperDollFrame")"#)
-        .unwrap();
-    assert!(s
-        .eval::<bool>("return BenillaInspectFrame:IsVisible()")
-        .unwrap());
     assert!(s.errors().is_empty(), "tab errors: {:?}", s.errors());
+}
+
+/// The other branch of `ToggleInspect` — re-opening after a close — **errors, and that is the
+/// reference's own behaviour** (decision 1834 settled what 1832 had to leave open).
+///
+/// `InspectFrame_OnHide` sets `this.unit = nil`, so a re-open runs `InspectFrame_OnShow` with no
+/// token. wow-re censused the whole binding table: `SetPortraitTexture 0x519ef0` gates its unit
+/// argument at `0x519fb4` with `lua_isstring` and raises `Usage: SetPortraitTexture(texture,
+/// "unit")`, and `luaL_error` does not return — so the reference raises here too, on its own
+/// shipped code. The widget clear sits six instructions PAST the gate, so the portrait is not even
+/// blanked; it is left exactly as it was.
+///
+/// In the reference the raise unwinds to the handler's `lua_pcall`, abandons the rest of `OnShow`,
+/// and pops the ScriptErrors dialog through `_ERRORMESSAGE`. Ours collects it into `errors` and
+/// abandons the handler the same way. So: the window shows, the portrait and name do not update,
+/// and there is exactly one error — which is what this now asserts.
+///
+/// One correction from that census worth keeping: stock 1.12 ships **no** inspect keybind (0 of 234
+/// `Binding name=` entries) and no caller of `ToggleInspect` outside the addon's own tab buttons,
+/// which are children of the hidden `InspectFrame`. So on the stock UI's own paths this is
+/// unreachable — only an addon or a macro gets here. It is still ours to reproduce.
+#[test]
+fn toggle_inspect_reopens_after_a_close_and_raises_like_the_reference() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let s = armed();
+    s.run(r#"InspectUnit("target")"#).unwrap();
+    s.run(r#"ToggleInspect("InspectPaperDollFrame")"#).unwrap();
+    assert!(!s.eval::<bool>("return InspectFrame:IsVisible()").unwrap());
+    let _ = s.errors();
+
+    s.run(r#"ToggleInspect("InspectPaperDollFrame")"#).unwrap();
+    assert!(
+        s.eval::<bool>("return InspectFrame:IsVisible()").unwrap(),
+        "the window still shows — Show() runs before OnShow raises"
+    );
+    // TWO raises, not one: `InspectFrame` and `InspectPaperDollFrame` each have their own OnShow,
+    // each fired under its own pcall, so each abandons independently — the first at the portrait's
+    // gate, the second at `UnitLevel`'s. Both carry the reference's own `Usage:` text.
+    let errors = s.errors();
+    assert_eq!(errors.len(), 2, "one raise per OnShow handler: {errors:?}");
+    assert!(
+        errors[0].contains(r#"Usage: SetPortraitTexture(texture, "unit")"#),
+        "the portrait's gate, before the name line is ever reached: {errors:?}"
+    );
+    assert!(
+        errors[1].contains(r#"Usage: UnitLevel("unit")"#),
+        "and the paper doll's own handler, dying at its first getter: {errors:?}"
+    );
 }

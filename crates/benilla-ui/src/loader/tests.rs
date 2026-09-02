@@ -939,13 +939,15 @@ mod loader_tests {
             "12345"
         );
 
-        // A click focuses the box (mouse-enabled by construction); a typed char fires OnTextChanged.
+        // A click focuses the box (mouse-enabled by construction); a typed char marks it changed,
+        // and the drain on the next tick is what actually fires OnTextChanged (decision 1831).
         s.resolve();
         s.mouse_button(50.0, 10.0, "LeftButton", true);
         s.mouse_button(50.0, 10.0, "LeftButton", false);
         assert!(s.eval::<bool>("return XmlEdit:HasFocus()").unwrap());
         s.run("typed = false").unwrap();
         assert!(s.char_input("7"));
+        s.tick(0.0);
         assert!(s.eval::<bool>("return typed == true").unwrap());
         assert!(s.errors().is_empty(), "{:?}", s.errors());
     }

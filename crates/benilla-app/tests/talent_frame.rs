@@ -13,21 +13,39 @@ mod common;
 
 use benilla_ui::script::{
     QuadContent, SpellTooltipView, TalentPrereqView, TalentTabView, TalentUiState, TalentView,
-    UiScript,
+    UiScript, UnitState,
 };
 
 /// The talent window's load prefix — the app's own order (`assets/ui/benilla.toc`), members only.
 /// `ItemButtonTemplate.xml` is the `SetItemButton*` family the talent buttons grey through (the
 /// reference's own verb; see TalentFrame.xml's header) — it sits at .toc line 32, above every
 /// other entry here bar `Fonts.xml`.
-const FILES: [&str; 7] = [
+const FILES: [&str; 12] = [
+    // `PLAYER_LEVEL` and the rest of the strings the stock file formats through.
+    "Interface\\FrameXML\\GlobalStrings.lua",
     "Fonts.xml",
+    // `TEXT`.
+    "BasicControls.xml",
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
     "MoneyFrame.xml",
     "UiPanels.xml",
+    // `ToggleTalentFrame` lives here now, not in the window's own file (decision 1833).
+    "UIParent.xml",
     "GameTooltip.xml",
+    // `UIPanelScrollFrameTemplate` — the stock scroll frame's whole substance: its `$parentScrollBar`
+    // Slider AND its `<OnMouseWheel>`. Nothing else in the tree declares it, and a missing template
+    // is a loader WARNING, not an error, so without this the window still built — just with no
+    // scrollbar and no wheel (decision 1833). `load_ui_strict` below is what makes that loud.
+    "UIPanelTemplates.xml",
     "ScrollTemplates.xml",
-    "TalentFrame.xml",
+    // Stock `TalentFrame_OnShow` opens with `SetButtonPulse(TalentMicroButton, 0, 1)` and then
+    // `UpdateMicroButtons()` — both live here, and a nil `TalentMicroButton` throws out of OnShow
+    // BEFORE `TalentFrame_Update()`, so the whole window comes up empty (decision 1833). Our
+    // retired file's OnShow called neither, which is why this was never a dependency before.
+    "MicroMenu.xml",
+    // Five files behind one line: the `.xml` sources its own `.lua` and `<Include>`s the
+    // templates file that declares TalentButton/Branch/Arrow/TabTemplate.
+    "Interface\\AddOns\\Blizzard_TalentUI\\Blizzard_TalentUI.xml",
 ];
 
 fn load_ui(script: &UiScript) {
@@ -86,6 +104,26 @@ fn fixture(points_spent: u32) -> TalentUiState {
     }
 }
 
+/// [`fixture`] plus a talent on the LAST tier, so the tree is taller than the scroll frame.
+///
+/// The stock `TalentFrameScrollChildFrame` is 50px in XML and is never resized by Lua — the
+/// reference derives its extent from the buttons anchored into it via `UpdateScrollChildRect`
+/// (`Blizzard_TalentUI.lua:311`). So a two-talent tree genuinely does not scroll, and asking it to
+/// would be asserting our retired file's behaviour rather than the reference's: ours pinned the
+/// child to a fixed full-height rect, which made every tree scrollable regardless of content
+/// (decision 1833).
+fn tall_fixture() -> TalentUiState {
+    let mut state = fixture(10);
+    let mut deep = state.talents[0][1].clone();
+    deep.name = "Mortal Strike".into();
+    deep.tier = 7;
+    deep.rank = 0;
+    deep.prereqs = Vec::new();
+    deep.display_spell = 401;
+    state.talents[0].push(deep);
+    state
+}
+
 fn view(name: &str, desc: &str) -> SpellTooltipView {
     SpellTooltipView {
         name: name.into(),
@@ -94,10 +132,43 @@ fn view(name: &str, desc: &str) -> SpellTooltipView {
     }
 }
 
+/// Hover a talent button the way a player does — the pointer, not a handler call.
+///
+/// The stock `Blizzard_TalentUITemplates.xml` writes the tooltip code INLINE in the button's
+/// `<OnEnter>` (`GameTooltip:SetOwner` + `GameTooltip:SetTalent`), so there is no named function to
+/// invoke the way our retired file's `BenillaTalentButton_OnEnter` could be (decision 1833). Moving
+/// the mouse is closer to the thing under test anyway: it drives the hit test as well as the
+/// handler.
+fn hover(script: &mut UiScript, frame: &str) {
+    script.resolve();
+    let (x, y): (f32, f32) = script
+        .eval(&format!("return {frame}:GetCenter()"))
+        .unwrap_or_else(|e| panic!("{frame}:GetCenter() — {e}"));
+    script.mouse_move(x, y);
+}
+
+/// A level-60 player. The reference's `ToggleTalentFrame` opens nothing below level 10 (decision
+/// 1833) — real behaviour, not a guard — so every opener here needs one. Our retired file had no
+/// such gate, which is why this fixture did not exist before.
+fn probe_player() -> UnitState {
+    UnitState {
+        exists: true,
+        name: Some("Probefour".into()),
+        level: 60,
+        race: Some("Human".into()),
+        class: Some("Warrior".into()),
+        ..Default::default()
+    }
+}
+
 fn open_window(points_spent: u32) -> UiScript {
     let mut script = UiScript::new().expect("engine");
     script.set_screen_size(1024.0, 768.0);
     load_ui(&script);
+    // The reference's `ToggleTalentFrame` opens nothing below level 10 (decision 1833) — that is
+    // real behaviour, not a guard, so the window needs a player who has talents at all. Our
+    // retired file had no such gate, which is why this fixture was never needed before.
+    script.set_unit("player", Some(probe_player()));
     script.set_talents(fixture(points_spent));
     script.run("ToggleTalentFrame()").expect("toggle");
     script
@@ -112,7 +183,7 @@ fn branch_lines_draw_for_a_same_column_prereq() {
     script
         .run(
             r#"
-            assert(BenillaTalentFrame:IsVisible(), "window visible")
+            assert(TalentFrame:IsVisible(), "window visible")
             local a = TALENT_BRANCH_ARRAY
             assert(a[1][3].down == 1, "tier1 down, got " .. tostring(a[1][3].down))
             assert(a[2][3].up == 1, "tier2 up, got " .. tostring(a[2][3].up))
@@ -125,8 +196,8 @@ fn branch_lines_draw_for_a_same_column_prereq() {
     script
         .run(
             r#"
-            assert(BenillaTalentFrameBranch1:IsShown(), "branch 1 shown")
-            assert(BenillaTalentFrameArrow1:IsShown(), "arrow 1 shown")
+            assert(TalentFrameBranch1:IsShown(), "branch 1 shown")
+            assert(TalentFrameArrow1:IsShown(), "arrow 1 shown")
             "#,
         )
         .expect("pool state");
@@ -170,10 +241,10 @@ fn tooltip_is_complete_on_the_first_hover() {
     // full tooltip: name line, description, the green hint.
     script.set_spell_tooltip(201, view("Improved Rend", "Bleed harder."));
     script.set_spell_tooltip(301, view("Deep Wounds", "Bleed on crit."));
+    hover(&mut script, "TalentFrameTalent2");
     script
         .run(
             r#"
-            BenillaTalentButton_OnEnter(BenillaTalentFrameTalent2)
             assert(GameTooltip:IsShown(), "tooltip shown on first hover")
             assert(GameTooltipTextLeft1:GetText() == "Deep Wounds",
                 "name line, got " .. tostring(GameTooltipTextLeft1:GetText()))
@@ -188,10 +259,10 @@ fn tooltip_miss_still_shows_the_rank_line() {
     let mut script = open_window(10);
     // The store is EMPTY (no views pushed): the ask-once fallback must still show a box with
     // the talent head — never a blank hover — and record the ask for the app's resolver.
+    hover(&mut script, "TalentFrameTalent2");
     script
         .run(
             r#"
-            BenillaTalentButton_OnEnter(BenillaTalentFrameTalent2)
             assert(GameTooltip:IsShown(), "tooltip shown on a store miss")
             assert(GameTooltipTextLeft1:GetText() == "Rank 0/3",
                 "rank fallback, got " .. tostring(GameTooltipTextLeft1:GetText()))
@@ -218,8 +289,8 @@ fn a_locked_tier_still_draws_the_branch_gray() {
             local a = TALENT_BRANCH_ARRAY
             assert(a[1][3].down == -1, "tier1 down gray, got " .. tostring(a[1][3].down))
             assert(a[3][3].topArrow == -1, "tier3 topArrow gray, got " .. tostring(a[3][3].topArrow))
-            assert(BenillaTalentFrameBranch1:IsShown(), "gray branch shown")
-            assert(BenillaTalentFrameArrow1:IsShown(), "gray arrow shown")
+            assert(TalentFrameBranch1:IsShown(), "gray branch shown")
+            assert(TalentFrameArrow1:IsShown(), "gray arrow shown")
             "#,
         )
         .expect("gray branch");
@@ -295,22 +366,27 @@ fn a_wheel_spin_over_the_grid_scrolls_the_tree() {
     // OnValueChanged pans the frame. This is the chain the 2051f4f8 rename broke silently —
     // the handler called a helper by a name that no longer existed, and only a real spin (not
     // a load) executes it.
-    let mut script = open_window(10);
+    let mut script = UiScript::new().expect("engine");
+    script.set_screen_size(1024.0, 768.0);
+    load_ui(&script);
+    script.set_unit("player", Some(probe_player()));
+    script.set_talents(tall_fixture());
+    script.run("ToggleTalentFrame()").expect("toggle");
     // Rects must be resolved before the wheel's hit-test can land on the grid.
     script.resolve();
     let (x, y): (f32, f32) = script
-        .eval("return BenillaTalentFrameTalent1:GetCenter()")
+        .eval("return TalentFrameTalent1:GetCenter()")
         .expect("talent 1 center");
     // One notch DOWN (WoW convention: -1) — the handler steps the bar one valueStep forward.
     script.mouse_wheel(x, y, -1.0);
     script
         .run(
             r#"
-            local scroll = BenillaTalentFrameScroll:GetVerticalScroll()
-            assert(scroll == BENILLA_TALENT_SCROLL_STEP,
-                "one notch down pans one step, got " .. tostring(scroll))
-            assert(BenillaTalentFrameScrollBar:GetValue() == scroll,
-                "the bar follows the frame, got " .. tostring(BenillaTalentFrameScrollBar:GetValue()))
+            local scroll = TalentFrameScrollFrame:GetVerticalScroll()
+            assert(scroll > 0,
+                "one notch down pans the frame, got " .. tostring(scroll))
+            assert(TalentFrameScrollFrameScrollBar:GetValue() == scroll,
+                "the bar follows the frame, got " .. tostring(TalentFrameScrollFrameScrollBar:GetValue()))
             "#,
         )
         .expect("wheel down");
@@ -319,8 +395,8 @@ fn a_wheel_spin_over_the_grid_scrolls_the_tree() {
     script
         .run(
             r#"
-            assert(BenillaTalentFrameScroll:GetVerticalScroll() == 0,
-                "a notch up rewinds to the top, got " .. tostring(BenillaTalentFrameScroll:GetVerticalScroll()))
+            assert(TalentFrameScrollFrame:GetVerticalScroll() == 0,
+                "a notch up rewinds to the top, got " .. tostring(TalentFrameScrollFrame:GetVerticalScroll()))
             "#,
         )
         .expect("wheel up");

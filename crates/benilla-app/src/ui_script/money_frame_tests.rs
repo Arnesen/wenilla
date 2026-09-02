@@ -361,3 +361,70 @@ fn the_money_type_table_carries_all_seven_reference_types() {
         );
     }
 }
+
+/// **`MoneyInputFrame.lua` is `EditBox:SetNumber`'s only caller on the whole chain**, and the verb
+/// did not exist until decision 1831 — so the three-box amount editor could not put a number in a
+/// box at all. This drives the reference's own file: split an amount, read it back, round-trip.
+///
+/// The boxes are `numeric="true"`, which is why the value→text law matters here specifically: a
+/// non-digit abandons the insert wholesale and leaves the box EMPTY. Every value this path passes
+/// is a non-negative integer, so `%.14g` yields plain digits and the gate never trips — but the
+/// zero case below is the one that would show if it ever did.
+#[test]
+fn the_chains_money_input_frame_splits_an_amount_across_its_three_boxes() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let s = UiScript::new().unwrap();
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml"); // COPPER_PER_GOLD / COPPER_PER_SILVER live here
+                                    // The manifest's own order: the `.lua` brings the ten verbs, the `.xml` the template.
+    load_xml(&s, r"Interface\FrameXML\MoneyInputFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyInputFrame.xml");
+
+    let doc = benilla_ui::framexml::parse(
+        r#"<Ui>
+            <Frame name="TestAmount" inherits="MoneyInputFrameTemplate">
+                <Anchors><Anchor point="TOPLEFT"/></Anchors>
+            </Frame>
+        </Ui>"#,
+    )
+    .unwrap();
+    let report = benilla_ui::loader::load_in(&s, &doc, "test", &|_: &str| None);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+
+    // 1234g 56s 78c.
+    s.run("MoneyInputFrame_SetCopper(TestAmount, 12345678)")
+        .unwrap();
+    for (box_name, want) in [("Gold", "1234"), ("Silver", "56"), ("Copper", "78")] {
+        assert_eq!(
+            s.eval::<String>(&format!("return TestAmount{box_name}:GetText()"))
+                .unwrap(),
+            want,
+            "TestAmount{box_name}"
+        );
+    }
+    assert_eq!(
+        s.eval::<f64>("return MoneyInputFrame_GetCopper(TestAmount)")
+            .unwrap(),
+        12345678.0,
+        "the amount round-trips back out of the three boxes"
+    );
+
+    // Zero is the reference's quiet case: `GetNumber()` on an empty box is already 0, so the
+    // equality test short-circuits and `SetNumber` is never reached — the boxes stay EMPTY rather
+    // than reading "0", and the total still comes back 0.
+    s.run("MoneyInputFrame_ResetMoney(TestAmount)").unwrap();
+    s.run("MoneyInputFrame_SetCopper(TestAmount, 0)").unwrap();
+    for box_name in ["Gold", "Silver", "Copper"] {
+        assert_eq!(
+            s.eval::<String>(&format!("return TestAmount{box_name}:GetText()"))
+                .unwrap(),
+            "",
+            "TestAmount{box_name} stays empty at zero"
+        );
+    }
+    assert_eq!(
+        s.eval::<f64>("return MoneyInputFrame_GetCopper(TestAmount)")
+            .unwrap(),
+        0.0
+    );
+}

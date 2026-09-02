@@ -159,15 +159,20 @@ const STABLE_SLOT: &str = "stable";
 /// this table draws nothing, exactly as it does today.
 ///
 /// The names, and where each is declared: `CharacterModelFrame` (stock `PaperDollFrame.xml`),
-/// `PetModelFrame` (stock `PetPaperDollFrame.xml`), `DressUpModel` (stock `DressUpFrame.xml`'s
-/// name, our file), `PetStableModel` (stock `PetStable.xml`'s name, our file), and
-/// `BenillaInspectModelFrame` — the one that is NOT the reference's, because 1.12's inspect window
-/// is a LoadOnDemand `Blizzard_InspectUI` the install ships packed, so we have no stock file to
-/// take the name from.
+/// `PetModelFrame` (stock `PetPaperDollFrame.xml`), `PetStableModel` (stock `PetStable.xml`, the
+/// reference's own file since 1751), `DressUpModel` (stock `DressUpFrame.xml`'s name, still our
+/// file), and `InspectModelFrame` (stock `InspectPaperDollFrame.xml`, out of the LoadOnDemand
+/// `Blizzard_InspectUI` — the reference's own since 1832).
+///
+/// **Every name here is now the reference's.** This note used to carry a `BenillaInspectModelFrame`
+/// and an explanation: the install was thought to ship that addon packed, with no stock file to
+/// take the name from. It is not packed — the `.pub` is only what the loose
+/// `Interface\AddOns\Blizzard_InspectUI\` folder holds, while the real `.xml` and `.lua` sit
+/// inside `patch.MPQ`, which the chain mounts. 1832 migrated the window and the prefix went with it.
 const MODEL_PANE_BOOTHS: [(&str, &str); 5] = [
     ("CharacterModelFrame", PAPERDOLL_SLOT),
     ("PetModelFrame", PETDOLL_SLOT),
-    ("BenillaInspectModelFrame", INSPECT_SLOT),
+    ("InspectModelFrame", INSPECT_SLOT),
     ("PetStableModel", STABLE_SLOT),
     ("DressUpModel", dressup::DRESSUP_SLOT),
 ];

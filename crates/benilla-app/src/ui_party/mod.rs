@@ -182,6 +182,19 @@ impl GroupState {
         if group_type == 1 && self.group_type != 1 {
             lines.push(RAID_YOU_JOINED.to_string());
         }
+        // The OTHER direction clears the raid-target board. `0x4ba550` — sole caller `0x5e6ebb`,
+        // inside `SMSG_GROUP_LIST 0x7d`'s raid-flag-CLEAR leg — `rep stosd`-zeroes all eight slots
+        // and refreshes every formerly-marked unit (decision 1820, wow-re
+        // `object-layer/scratch/party-group-wire.md`). Without it a raid→party conversion leaves
+        // stale marks on screen: the icons are drawn from this board, and nothing else clears it
+        // short of a `0x321` for each slot, which the server does not send.
+        //
+        // A full disband needs no arm here — `leaving` above replaces the whole state, and
+        // `[u64; 8]::default()` is already the empty board. 1820 recorded this as "stale icons
+        // after a disband", which was wider than the truth; the conversion is the real gap.
+        if group_type != 1 && self.group_type == 1 {
+            self.raid_targets = [0; 8];
+        }
 
         // Drop stats snapshots for members no longer on the roster.
         self.stats
@@ -650,5 +663,37 @@ mod tests {
         assert_eq!(g.raid_targets[0], 0x22);
         assert_eq!(g.raid_targets[5], 0x33);
         assert_eq!(g.raid_targets[3], 0, "the list form resets absent icons");
+    }
+
+    /// A raid→party conversion CLEARS the board; a disband does too (by replacing the state), and
+    /// an ordinary roster change inside a raid does not. The reference zeroes all eight slots on
+    /// `SMSG_GROUP_LIST`'s raid-flag-clear leg (`0x4ba550`, decision 1820) — without it the marks
+    /// are drawn from a board nothing else empties, so they linger on screen.
+    #[test]
+    fn a_raid_to_party_conversion_clears_the_raid_target_board() {
+        let mut g = GroupState::default();
+        g.apply_list(1, 0, vec![member("Ally", 0x22)], 0x22, None);
+        g.apply_raid_target(7, 0x22);
+        assert_eq!(g.raid_targets[7], 0x22, "marked while a raid");
+
+        // Still a raid, roster moved: the board survives.
+        g.apply_list(
+            1,
+            0,
+            vec![member("Ally", 0x22), member("Bee", 0x33)],
+            0x22,
+            None,
+        );
+        assert_eq!(
+            g.raid_targets[7], 0x22,
+            "a roster change inside a raid keeps the marks"
+        );
+
+        // Raid flag clears while the group lives on — the leg the reference zeroes on.
+        g.apply_list(0, 0, vec![member("Ally", 0x22)], 0x22, None);
+        assert_eq!(
+            g.raid_targets, [0; 8],
+            "the raid flag clearing empties the board"
+        );
     }
 }

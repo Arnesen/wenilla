@@ -722,6 +722,9 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
         s.cursor_payload().is_none(),
         "with the editor open a shift-click writes instead of picking up"
     );
+    // The dirty flag is set by the box's own `OnTextChanged`, which is deferred to the drain — the
+    // write landed in the buffer synchronously, the notification did not (decision 1831).
+    s.tick(0.0);
     assert!(
         s.eval::<bool>("return BenillaMacroFrame.textChanged == 1")
             .unwrap(),

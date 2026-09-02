@@ -387,6 +387,7 @@ fn search_surfaces_bindings_as_live_rows_under_the_redirect_head() {
     // with the match painted LIVE on the search pool (the era reflows its real rows the
     // same way).
     s.run(r#"OptionsFrameSearchBox:SetText("jump")"#).unwrap();
+    s.tick(0.0); // the deferred OnTextChanged drains here (decision 1831)
     assert!(s
         .eval::<bool>("return OptionsFrameContainerBodySearchHeadKeybindings:IsVisible()")
         .unwrap());
@@ -419,6 +420,7 @@ fn search_surfaces_bindings_as_live_rows_under_the_redirect_head() {
     // The head is the era redirect: clicking it ends the search on the Keybindings page.
     s.run("OptionsFrameContainerBodySearchHeadKeybindings:Click()")
         .unwrap();
+    s.tick(0.0); // the deferred OnTextChanged drains here (decision 1831)
     assert_eq!(
         s.eval::<String>("return OptionsFrame.selectedCategory")
             .unwrap(),
@@ -691,6 +693,7 @@ fn the_pet_lane_is_registered_under_the_action_bar_header() {
     // Page side: search finds it and paints a live row with the capsule filled.
     s.run(r#"OptionsFrameSearchBox:SetText("bonusactionbutton1")"#)
         .unwrap();
+    s.tick(0.0); // the deferred OnTextChanged drains here (decision 1831)
     assert!(s
         .eval::<bool>("return OptionsFrameContainerBodySearchHeadKeybindings:IsVisible()")
         .unwrap());

@@ -117,7 +117,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // the bake replaces them. A later `SetTexture`/`SetPortraitToTexture` clears the binding.
     lua.globals().set(
         "SetPortraitTexture",
-        lua.create_function(|lua, (region, unit): (Table, String)| {
+        lua.create_function(|lua, (region, unit): (Table, Value)| {
+            // `0x519ef0` gates its unit argument at `0x519fb4` with `lua_isstring` and fails into
+            // `luaL_error` with this exact string (`0x8513b8`); `luaL_error` does not return, so
+            // nil/absent/boolean/table abandon the caller's statement. Stock
+            // `Blizzard_InspectUI.lua:49` reaches it on a re-open, which is how it was found.
+            // A token that RESOLVES to nothing is a different, quiet case — it blanks the portrait
+            // and returns no values. Decision 1834.
+            let unit = crate::script::binding_abi::string_arg(
+                lua,
+                unit,
+                r#"Usage: SetPortraitTexture(texture, "unit")"#,
+            )?;
             let rh = region_handle_of(lua, &region)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let data = model.region_data.entry(rh).or_default();

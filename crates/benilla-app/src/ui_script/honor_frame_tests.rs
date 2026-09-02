@@ -367,13 +367,21 @@ fn shown_inspect_honor_page() -> UiScript {
     s.run(RANK_GLOBALS).unwrap();
     for file in [
         "Fonts.xml",
+        // `TEXT`, the stock level line's formatter.
+        "BasicControls.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
+        // `InspectUnit`'s home since 1832.
+        "UIParent.xml",
         "GameTooltip.xml",
-        // Before InspectFrame.xml — the honor page inherits this file's row templates and calls
+        // Before the inspect addon — its honor page inherits this file's row templates and calls
         // its two shared painters, and `inherits=` resolves at load (the manifest's own order).
+        // The stock inspect slot buttons inherit this (1832).
+        "Interface\\FrameXML\\ItemButtonTemplate.xml",
         "Interface\\FrameXML\\HonorFrame.xml",
-        "InspectFrame.xml",
+        "Interface\\AddOns\\Blizzard_InspectUI\\Blizzard_InspectUI.xml",
+        "Interface\\AddOns\\Blizzard_InspectUI\\InspectPaperDollFrame.xml",
+        "Interface\\AddOns\\Blizzard_InspectUI\\InspectHonorFrame.xml",
     ] {
         load_xml(&s, file);
     }
@@ -390,8 +398,7 @@ fn shown_inspect_honor_page() -> UiScript {
     s.set_unit_reach(HashMap::from([("target".to_string(), reach(16.0))]));
     s.set_inspect_honor(Some(inspect_reply()));
     s.run(r#"InspectUnit("target")"#).unwrap();
-    s.run(r#"ToggleInspect("BenillaInspectHonorFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleInspect("InspectHonorFrame")"#).unwrap();
     s.resolve();
     s
 }
@@ -403,36 +410,30 @@ fn the_inspect_page_paints_the_reply_it_holds() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = shown_inspect_honor_page();
     for (frame, want) in [
-        ("BenillaInspectHonorFrameCurrentHKValue", "17"),
-        ("BenillaInspectHonorFrameCurrentDKValue", "2"),
-        ("BenillaInspectHonorFrameYesterdayHKValue", "41"),
-        ("BenillaInspectHonorFrameYesterdayContributionValue", "640"),
-        ("BenillaInspectHonorFrameThisWeekHKValue", "123"),
-        ("BenillaInspectHonorFrameThisWeekContributionValue", "1250"),
-        ("BenillaInspectHonorFrameLastWeekHKValue", "420"),
-        ("BenillaInspectHonorFrameLastWeekContributionValue", "8431"),
-        ("BenillaInspectHonorFrameLastWeekStandingValue", "57"),
-        ("BenillaInspectHonorFrameLifeTimeHKValue", "3907"),
-        ("BenillaInspectHonorFrameLifeTimeDKValue", "12"),
-        (
-            "BenillaInspectHonorFrameLifeTimeRankValue",
-            "Lieutenant Commander",
-        ),
+        ("InspectHonorFrameCurrentHKValue", "17"),
+        ("InspectHonorFrameCurrentDKValue", "2"),
+        ("InspectHonorFrameYesterdayHKValue", "41"),
+        ("InspectHonorFrameYesterdayContributionValue", "640"),
+        ("InspectHonorFrameThisWeekHKValue", "123"),
+        ("InspectHonorFrameThisWeekContributionValue", "1250"),
+        ("InspectHonorFrameLastWeekHKValue", "420"),
+        ("InspectHonorFrameLastWeekContributionValue", "8431"),
+        ("InspectHonorFrameLastWeekStandingValue", "57"),
+        ("InspectHonorFrameLifeTimeHKValue", "3907"),
+        ("InspectHonorFrameLifeTimeDKValue", "12"),
+        ("InspectHonorFrameLifeTimeRankValue", "Lieutenant Commander"),
     ] {
         assert_eq!(text(&mut s, frame), want, "{frame}");
     }
     // The rank block: the target's CURRENT rank (12 → "Knight-Captain", badge 08), and the bar off
     // the reply's own byte rather than the player's.
     assert_eq!(
-        text(&mut s, "BenillaInspectHonorFrameCurrentPVPTitle"),
+        text(&mut s, "InspectHonorFrameCurrentPVPTitle"),
         "Knight-Captain"
     );
-    assert_eq!(
-        text(&mut s, "BenillaInspectHonorFrameCurrentPVPRank"),
-        "(Rank 8)"
-    );
+    assert_eq!(text(&mut s, "InspectHonorFrameCurrentPVPRank"), "(Rank 8)");
     let bar = s
-        .eval::<f64>("return BenillaInspectHonorFrameProgressBar:GetValue()")
+        .eval::<f64>("return InspectHonorFrameProgressBar:GetValue()")
         .unwrap();
     assert!(
         (bar - 191.0 / 255.0).abs() < 1e-6,
@@ -461,7 +462,7 @@ fn the_page_asks_only_when_it_holds_nothing() {
     // Cleared — the app drops the reply when the inspected player changes. Re-showing the page
     // asks, and paints nothing until an answer lands.
     s.set_inspect_honor(None);
-    s.run(r#"BenillaInspectHonorFrame_OnShow()"#).unwrap();
+    s.run(r#"InspectHonorFrame_OnShow()"#).unwrap();
     s.resolve();
     assert_eq!(
         s.take_inspect_honor_requests(),

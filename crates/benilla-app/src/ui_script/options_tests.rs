@@ -383,6 +383,8 @@ fn search_reflows_live_rows_and_restores_the_page() {
         .unwrap();
 
     s.run("OptionsFrameSearchBox:SetText(\"music\")").unwrap();
+    // The search reflows off the box's `OnTextChanged`, which is deferred to the drain (1831).
+    s.tick(0.0);
     assert_eq!(
         s.eval::<String>("return OptionsFrameContainerTitle:GetText()")
             .unwrap(),
@@ -440,6 +442,7 @@ fn search_reflows_live_rows_and_restores_the_page() {
 
     // Clearing restores the page view and the authored chain EXACTLY.
     s.run("OptionsFrameSearchBox:SetText(\"\")").unwrap();
+    s.tick(0.0); // the clear reflows on the drain, like the search itself (1831)
     assert_eq!(
         s.eval::<String>("return OptionsFrameContainerTitle:GetText()")
             .unwrap(),
@@ -489,12 +492,16 @@ fn the_phrase_match_outranks_its_words() {
 /// the box) and a no-match query (the section-header "no results" line, nothing chained).
 #[test]
 fn a_head_click_ends_the_search_and_a_miss_shows_no_results() {
-    let s = harness();
+    let mut s = harness();
     s.run("ShowUIPanel(OptionsFrame)").unwrap();
 
     s.run("OptionsFrameSearchBox:SetText(\"volume\")").unwrap();
+    s.tick(0.0); // the head being clicked below is built by the search reflow, so drain first (1831)
     s.run("OptionsFrameContainerBodySearchHeadAudio:Click()")
         .unwrap();
+    // The click clears the box synchronously; restoring the page rides that clear's
+    // `OnTextChanged`, which the drain owes (1831).
+    s.tick(0.0);
     assert_eq!(
         s.eval::<String>("return OptionsFrameSearchBox:GetText()")
             .unwrap(),
@@ -517,6 +524,7 @@ fn a_head_click_ends_the_search_and_a_miss_shows_no_results() {
 
     s.run("OptionsFrameSearchBox:SetText(\"flibbertigibbet\")")
         .unwrap();
+    s.tick(0.0); // the miss renders on the drain too (1831)
     assert!(s
         .eval::<bool>("return OptionsFrameContainerBodyNoResults:IsVisible()")
         .unwrap());
@@ -530,6 +538,7 @@ fn a_head_click_ends_the_search_and_a_miss_shows_no_results() {
         );
     }
     s.run("OptionsFrameSearchBox:SetText(\"\")").unwrap();
+    s.tick(0.0); // and so does clearing it (1831)
     assert!(!s
         .eval::<bool>("return OptionsFrameContainerBodyNoResults:IsVisible()")
         .unwrap());

@@ -466,3 +466,40 @@ fn every_template_these_files_declare_is_a_real_1_12_name() {
         "only {checked} templates swept — the sweep, not the files, is what broke"
     );
 }
+
+/// **`PanelTemplates_TabResize`'s `tab` argument is OPTIONAL, and omitting it means `this`.**
+///
+/// The reference opens with `if ( tab ) then tabName = tab:GetName(); else tabName =
+/// this:GetName(); tab = this; end`. Ours had only the first half, so `tab:GetName()` on a nil
+/// threw — and nothing in our tree noticed, because every caller we wrote passed a tab explicitly.
+/// The stock files do not: `Blizzard_MacroUI.xml`'s two tabs each call
+/// `PanelTemplates_TabResize(0)` from their own `OnLoad` and nothing else, so both threw at load
+/// and the window came up with unsized tabs. Decision 1835.
+///
+/// Driven through a real `OnLoad` rather than a direct call, because `this` is exactly what is
+/// under test: a plain function call would not set it.
+#[test]
+fn tab_resize_falls_back_to_this_when_no_tab_is_passed() {
+    let mut s = harness();
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
+    let doc = benilla_ui::framexml::parse(
+        r#"<Ui>
+            <Button name="ProbeTab" inherits="CharacterFrameTabButtonTemplate" text="Macros">
+                <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                <Scripts><OnLoad>PanelTemplates_TabResize(0)</OnLoad></Scripts>
+            </Button>
+        </Ui>"#,
+    )
+    .unwrap();
+    let report = benilla_ui::loader::load_in(&s, &doc, "test", &|_: &str| None);
+    assert!(
+        report.errors.is_empty(),
+        "the OnLoad must not throw: {:?}",
+        report.errors
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    // It sized the tab it was never handed: wider than the bare label, because the end slices are
+    // added on top.
+    let width = s.eval::<f64>("return ProbeTab:GetWidth()").unwrap();
+    assert!(width > 0.0, "the tab got a width, got {width}");
+}

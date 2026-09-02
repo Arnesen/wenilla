@@ -18,7 +18,7 @@
 
 use mlua::Lua;
 
-use super::{fire_script, frame_id_of, set_focus_handle, sync_text_region, with_eb};
+use super::{set_focus_handle, sync_text_region, with_eb};
 use crate::script::Model;
 use crate::widget::{FrameHandle, FrameKind, KindState};
 
@@ -108,7 +108,7 @@ pub(in crate::script) fn cut_selection(lua: &Lua) -> Option<String> {
     let h = focused(lua)?;
     let copied = with_eb(lua, h, |eb| eb.cut_selection()).flatten()?;
     sync_text_region(lua, h);
-    fire_script(lua, frame_id_of(lua, h), "OnTextChanged");
+    super::mark_text_changed(lua, h);
     Some(copied)
 }
 

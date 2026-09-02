@@ -644,9 +644,14 @@ pub(crate) fn token_recognised(token: &str) -> bool {
 /// 1203's shape pointed the other way: a failure the client reports, silently swallowed.
 ///
 /// The split is THREE-way, not two, and the two quiet legs are as carved:
-///   * **absent argument** — quiet nil (the per-binding argument gates are NOT uniform; `UnitName`
-///     has its own `lua_isstring` gate and `UnitExists` has none at all, and only those two poles
-///     are verified, so this does not invent a gate for the other ~102);
+///   * **absent argument** — quiet nil *here*, because this helper is only the resolver's half.
+///     Whether a nil ever reaches it is the BINDING's question, and it is settled per binding:
+///     wow-re's census of all 83 entries at `0x850438` found 53 that gate the token position with
+///     `lua_isstring` and raise `Usage:`, against 13 unit-token bindings with no gate at all
+///     (decision 1834). The gated ones call `binding_abi::string_arg` before they get here, so a
+///     nil never arrives; the quiet 13 pass it straight through. This comment used to say the
+///     gates were "NOT uniform … only those two poles are verified" and decline to guess, which
+///     was the right call at the time — the table now exists, so it is applied rather than feared;
 ///   * **`""`** — quiet nil;
 ///   * a **recognised** token naming nothing (`"party5"` solo, `"playerfoo"`) — quiet nil.
 pub(crate) fn check_unit_token(token: &Option<String>) -> mlua::Result<()> {

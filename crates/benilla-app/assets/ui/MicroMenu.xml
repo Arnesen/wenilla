@@ -213,7 +213,7 @@
         function UpdateMicroButtons()
             BenillaMicroButton_SetPushed(CharacterMicroButton, BenillaMicro_PanelShown("CharacterFrame"))
             BenillaMicroButton_SetPushed(SpellbookMicroButton, BenillaMicro_PanelShown("SpellBookFrame"))
-            BenillaMicroButton_SetPushed(TalentMicroButton, BenillaMicro_PanelShown("BenillaTalentFrame"))
+            BenillaMicroButton_SetPushed(TalentMicroButton, BenillaMicro_PanelShown("TalentFrame"))
             BenillaMicroButton_SetPushed(QuestLogMicroButton, BenillaMicro_PanelShown("QuestLogFrame"))
             -- ref l.60-64. Missing since the Socials button went live with decision 0668: the
             -- window opened but its button never read pushed. Spotted while wiring Help, which is

@@ -36,6 +36,8 @@
                 this:RegisterEvent("MIRROR_TIMER_START")
                 this:RegisterEvent("PLAYER_ENTERING_WORLD")
                 this:RegisterEvent("READY_CHECK")
+                this:RegisterEvent("START_LOOT_ROLL")
+                this:RegisterEvent("CONFIRM_LOOT_ROLL")
             </OnLoad>
             <OnEvent>UIParent_OnEvent(event)</OnEvent>
         </Scripts>
@@ -213,6 +215,41 @@
         -- statements on the same event). `MultiActionBar_Update` is existence-guarded because the
         -- ~25 per-window harnesses that load this file load no bars; the binding itself is engine
         -- level and always installed. Decision 1500.
+        -- ref UIParent.lua:223, whose slot this is — immediately above `UIParent_OnEvent`, the
+        -- same neighbour it has there. It moved here from our own InspectFrame.xml when 1832
+        -- retired that file: the name belongs to UIParent in the reference, and the window it
+        -- opens is now the stock LoadOnDemand `Blizzard_InspectUI` off the player's chain.
+        --
+        -- The reference's body is `InspectFrame_LoadUI()` and then a guarded `InspectFrame_Show`.
+        -- We have no load-on-demand — benilla.toc loads that addon with everything else — so the
+        -- LoadUI call has nothing to do and is left out rather than stubbed (1203). The guard is
+        -- kept exactly as the reference writes it, and it is not decoration: it is what makes this
+        -- safe in the ~25 per-window harnesses that load UIParent.xml without the inspect window.
+        function InspectUnit(unit)
+            if ( InspectFrame_Show ) then
+                InspectFrame_Show(unit);
+            end
+        end
+
+        -- ref UIParent.lua's own `ToggleTalentFrame`, moved here from our TalentFrame.xml when
+        -- 1833 retired that file — the same move `InspectUnit` made just above, for the same
+        -- reason: the reference keeps the opener in UIParent and the window in a LoadOnDemand
+        -- addon, so deleting our window file would have taken the name with it.
+        --
+        -- The LEVEL GATE is the reference's, and it is real behaviour rather than a guard: below
+        -- level 10 the key and the micro button do nothing at all. `TalentFrame_LoadUI` is left
+        -- out (we load the addon eagerly, 1203 — build it or leave it out, never stub it); the
+        -- `TalentFrame_Toggle` guard is kept verbatim, and it is what lets the ~25 harnesses that
+        -- load UIParent.xml without the talent window do so safely.
+        function ToggleTalentFrame()
+            if ( UnitLevel("player") < 10 ) then
+                return;
+            end
+            if ( TalentFrame_Toggle ) then
+                TalentFrame_Toggle();
+            end
+        end
+
         function UIParent_OnEvent(event)
             -- The reference's own first arm (UIParent.lua l.230-235). `LocalizeFrames` comes from
             -- the sourced `Interface\FrameXML\Localization.xml` (1751 window 5) and is the file
@@ -246,6 +283,36 @@
                 if ( MultiActionBar_Update ) then
                     MultiActionBar_Update()
                 end
+            end
+            -- The group-roll opener, ref UIParent.lua l.513-515 verbatim. This arm is why our
+            -- own GroupLootFrame.xml existed at all: that file's header explained it was carrying
+            -- a dedicated hidden driver frame *because* "this engine doesn't ship" UIParent's
+            -- monolithic OnEvent. It does now, so the router comes home to the reference's own
+            -- slot and the driver goes with the file (decision 1838).
+            --
+            -- `GroupLootFrame_OpenNewFrame` and the four frames it walks are the CHAIN's, out of
+            -- `Interface\FrameXML\LootFrame.xml` and its `.lua` — already on the manifest, and
+            -- already declaring every name our copy re-declared. Existence-guarded for
+            -- `MultiActionBar_Update`'s reason, not the reference's: the per-window harnesses load
+            -- this file with no loot window behind it.
+            if ( event == "START_LOOT_ROLL" ) then
+                if ( GroupLootFrame_OpenNewFrame ) then
+                    GroupLootFrame_OpenNewFrame(arg1, arg2)
+                end
+                return
+            end
+            -- ref UIParent.lua l.517-524, the arm directly below the one above and the second
+            -- router our GroupLootFrame.xml was carrying. The dialog it raises now lives in
+            -- UiPanels.xml beside DELETE_ITEM; `arg1`/`arg2` are the roll id and roll type, and
+            -- `StaticPopup_Show` answering nil (the popup pool being full) is the reference's own
+            -- guarded case, not ours.
+            if ( event == "CONFIRM_LOOT_ROLL" ) then
+                local dialog = StaticPopup_Show("CONFIRM_LOOT_ROLL")
+                if ( dialog ) then
+                    dialog.data = arg1
+                    dialog.data2 = arg2
+                end
+                return
             end
             -- The ready-check popup's opener (decision 1549), ref UIParent.lua l.570-572. The
             -- event is the engine's own `0x218`, fired by the `MSG_RAID_READY_CHECK` open

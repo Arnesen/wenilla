@@ -984,11 +984,32 @@ fn an_unrecognised_unit_token_raises_and_a_recognised_empty_one_does_not() {
              implementation that raises on \"did not resolve\" gets wrong."
         );
     }
-    // QUIET NIL, leg 3: the empty string and an absent argument. The per-binding argument gates are
-    // NOT uniform in the client and only two poles are verified, so this asserts the resolver's
-    // behaviour and does not invent a gate.
+    // QUIET NIL, leg 3: the empty string — which passes the `lua_isstring` gate (it IS a string)
+    // and dies quietly in the resolver's own NULL/empty guard.
     assert!(s.run(r#"UnitName("")"#).is_ok());
-    assert!(s.run("UnitName()").is_ok());
+
+    // …but an ABSENT or nil argument is NOT leg 3, and this line used to assert that it was.
+    // `UnitName 0x517020` gates its token position at `0x517048` and raises
+    // `Usage: UnitName("unit")` (`0x850ee0`); `luaL_error` does not return. The comment this
+    // replaces said the per-binding gates were "not uniform … only two poles verified", which was
+    // true when it was written — wow-re has since censused all 83 entries of the table at
+    // `0x850438`: 53 gate and raise, and only 13 unit-token bindings are quiet. Decision 1834.
+    assert!(s.run("UnitName()").is_err(), "absent argument raises");
+    assert!(s.run("UnitName(nil)").is_err(), "nil argument raises");
+    // A NUMBER passes the gate — `lua_isstring` admits tag 3 — and is handed to the resolver as
+    // "5", which then raises the family's OTHER message rather than the `Usage:` one.
+    assert!(
+        s.run("UnitName(5)").is_err(),
+        "a number reaches the resolver"
+    );
+
+    // The thirteen that stay quiet, three of them here: no gate at all, so nil is fine.
+    for quiet in ["UnitExists", "UnitIsVisible", "UnitClassification"] {
+        assert!(
+            s.run(&format!("{quiet}()")).is_ok(),
+            "{quiet} is one of the 13 with no gate — nil must stay quiet"
+        );
+    }
 
     // A two-unit call gates BOTH arguments.
     assert!(s.run(r#"UnitIsUnit("player", "bogus")"#).is_err());
@@ -1370,4 +1391,59 @@ fn unit_has_relic_slot_answers_one_or_nil() {
         s.eval::<String>("return type(UnitHasRelicSlot)").unwrap(),
         "function"
     );
+}
+
+/// **The two-token predicates gate BOTH positions** — decision 1836, closing the half 1834 left
+/// open on purpose.
+///
+/// 1834 applied the `lua_isstring` gate only where wow-re's partial list named a single-token
+/// binding, because a census that finds "a gate somewhere in this body" cannot say *which*
+/// argument carries it. The complete 83-row table (`nil-unit-token-arg-law.md` §10) resolves it:
+/// these seven each carry **two** `lua_isstring` sites, so either argument being nil raises.
+#[test]
+fn a_two_token_predicate_raises_on_either_nil_argument() {
+    let mut s = UiScript::new().unwrap();
+    s.set_unit("player", Some(player()));
+    s.set_unit("target", Some(player()));
+
+    for verb in [
+        "UnitIsUnit",
+        "UnitIsEnemy",
+        "UnitIsFriend",
+        "UnitCanCooperate",
+        "UnitCanAttack",
+        "UnitReaction",
+    ] {
+        assert!(
+            s.run(&format!(r#"{verb}("player", "target")"#)).is_ok(),
+            "{verb} with both tokens is fine"
+        );
+        assert!(
+            s.run(&format!(r#"{verb}("player")"#)).is_err(),
+            "{verb} with the SECOND argument absent must raise"
+        );
+        assert!(
+            s.run(&format!(r#"{verb}(nil, "target")"#)).is_err(),
+            "{verb} with the FIRST argument nil must raise"
+        );
+        assert!(s.run(&format!("{verb}()")).is_err(), "{verb} with neither");
+    }
+
+    // `GetRaidTargetIndex` is the one of six previously-unclassified names that takes a token, and
+    // it is gated. Its usage string names the argument UNQUOTED — the reference's own spelling.
+    assert!(s.run(r#"GetRaidTargetIndex("player")"#).is_ok());
+    assert!(s.run("GetRaidTargetIndex()").is_err());
+
+    // …while the other five take no argument at all and have no gate. `GetTimeToWellRested` is a
+    // three-instruction stub in the reference that always pushes nil; computing a value there
+    // would be divergence, not a feature.
+    for none in [
+        "GetQuestGreenRange",
+        "GetRestState",
+        "GetXPExhaustion",
+        "GetTimeToWellRested",
+        "GetBillingTimeRested",
+    ] {
+        assert!(s.run(&format!("{none}()")).is_ok(), "{none} takes no token");
+    }
 }

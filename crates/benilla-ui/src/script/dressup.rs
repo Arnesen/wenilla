@@ -98,7 +98,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // BenillaDressUpModel_SetFacing(radians) — the pane's bake yaw, the exact twin of
-    // `BenillaPaperDollModel_SetFacing` / `BenillaInspectModel_SetFacing`.
+    // `BenillaPaperDollModel_SetFacing` (the inspect pane's twin went with 1832's migration).
     g.set(
         "BenillaDressUpModel_SetFacing",
         lua.create_function(|lua, radians: f32| {

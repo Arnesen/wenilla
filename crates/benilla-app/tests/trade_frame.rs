@@ -307,6 +307,7 @@ fn player_money_input_reflects_then_offers() {
     // has no purse).
     s.run("GetMoney = function() return 100000000 end").unwrap();
     s.run("TradePlayerInputMoneyGold:SetText('2')").unwrap();
+    s.tick(0.0); // the deferred OnTextChanged drains here (decision 1831)
     assert_eq!(
         s.take_trade_money(),
         Some(2 * 10000 + 23 * 100 + 45),

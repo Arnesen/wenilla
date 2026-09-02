@@ -28,7 +28,7 @@ use benilla_ui::script::UiScript;
 /// **A chain entry needs client data**, so a test that names one has to open with
 /// `benilla_formats::wow_data_or_skip!()`; [`BAG_UI`] is a list that always does.
 pub(super) fn load_ui(s: &UiScript, entry: &str) -> usize {
-    load_entry(s, entry, false)
+    load_entry(s, entry, false, false)
 }
 
 /// [`load_ui`], and **a missing template is a failure too**.
@@ -39,10 +39,21 @@ pub(super) fn load_ui(s: &UiScript, entry: &str) -> usize {
 /// windows' test modules grew this check by hand. It is one function now rather than four copies,
 /// and any test may ask for it.
 pub(super) fn load_ui_strict(s: &UiScript, entry: &str) -> usize {
-    load_entry(s, entry, true)
+    load_entry(s, entry, true, false)
 }
 
-fn load_entry(s: &UiScript, entry: &str, strict_templates: bool) -> usize {
+/// [`load_ui`], and **no loader warning of any kind is tolerated**.
+///
+/// Stricter than [`load_ui_strict`], which only fails a missing template. A file whose own
+/// assignment is "this loads perfectly clean" wants the whole warnings channel asserted empty — a
+/// stale unknown-attribute or dropped-script warning is exactly the drift that check exists to
+/// catch. It was a fourth private disk-only reader in `group_loot_tests.rs` until 1838; a
+/// disk-only reader cannot name a chain file, which is what that test now loads.
+pub(super) fn load_ui_no_warnings(s: &UiScript, entry: &str) -> usize {
+    load_entry(s, entry, false, true)
+}
+
+fn load_entry(s: &UiScript, entry: &str, strict_templates: bool, no_warnings: bool) -> usize {
     let path = entry.replace('\\', "/");
     let bytes = read(&path).unwrap_or_else(|| panic!("{entry}: not found"));
     if path.to_ascii_lowercase().ends_with(".lua") {
@@ -59,6 +70,13 @@ fn load_entry(s: &UiScript, entry: &str, strict_templates: bool) -> usize {
         "{entry}: loader errors: {:?}",
         report.errors
     );
+    if no_warnings {
+        assert!(
+            report.warnings.is_empty(),
+            "{entry}: loader warnings: {:?}",
+            report.warnings
+        );
+    }
     if strict_templates {
         let missing: Vec<&String> = report
             .warnings

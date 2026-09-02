@@ -140,11 +140,14 @@ fn new_then_pick_an_icon_then_okay_creates_the_macro() {
 /// A regression here silently discards everything the player typed.
 #[test]
 fn typing_a_body_and_closing_the_window_commits_it() {
-    let s = harness();
+    let mut s = harness();
     s.run(r#"CreateMacro("Ambush", 1, "")"#).unwrap();
     s.run("ShowMacroFrame()").unwrap();
     s.run(r#"BenillaMacroFrameText:SetText("/cast Ambush\n/say pew")"#)
         .unwrap();
+    // The window's dirty flag comes from the box's `OnTextChanged`, which the drain owes until the
+    // next frame (decision 1831).
+    s.tick(0.0);
     no_errors(&s, "type");
     assert!(
         s.eval::<bool>("return BenillaMacroFrame.textChanged == 1")
@@ -172,13 +175,14 @@ fn typing_a_body_and_closing_the_window_commits_it() {
 /// point: `MacroFrame.macroBase` is 0 or MAX_MACROS, and every binding takes `macroBase + i`.
 #[test]
 fn the_character_tab_creates_in_the_second_index_range_and_switching_saves() {
-    let s = harness();
+    let mut s = harness();
     s.run(r#"CreateMacro("Acct", 1, "")"#).unwrap();
     s.run("ShowMacroFrame()").unwrap();
 
     // Type into the account macro, then switch tabs WITHOUT any explicit save.
     s.run(r#"BenillaMacroFrameText:SetText("/say account")"#)
         .unwrap();
+    s.tick(0.0); // as above — the edit marks, the drain notifies (1831)
     s.run("BenillaMacroFrameTab2:Click()").unwrap();
     no_errors(&s, "tab 2");
     assert_eq!(

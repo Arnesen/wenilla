@@ -97,7 +97,7 @@ pub(super) fn paste(lua: &Lua, text: &str) -> bool {
     // this layer's.
     if with_eb(lua, h, |eb| eb.paste(text)).is_some_and(|o| o.text_changed) {
         sync_text_region(lua, h);
-        fire_script(lua, frame_id_of(lua, h), "OnTextChanged");
+        mark_text_changed(lua, h);
     }
     true
 }
@@ -339,7 +339,7 @@ fn insert(lua: &Lua, h: FrameHandle, ins: &str, fire_space: bool) {
             .errors
             .push(e.to_string());
     }
-    fire_script(lua, id, "OnTextChanged");
+    mark_text_changed(lua, h);
     if fire_space {
         for _ in 0..out.spaces {
             fire_script(lua, id, "OnSpacePressed");
@@ -355,7 +355,7 @@ fn set_text(lua: &Lua, h: FrameHandle, s: &str) {
         sync_text_region(lua, h);
         let id = frame_id_of(lua, h);
         fire_script(lua, id, "OnTextSet");
-        fire_script(lua, id, "OnTextChanged");
+        mark_text_changed(lua, h);
     }
 }
 
@@ -369,7 +369,7 @@ fn delete_span(lua: &Lua, h: FrameHandle, target_of: impl FnOnce(&EditBoxState) 
     });
     if changed == Some(true) {
         sync_text_region(lua, h);
-        fire_script(lua, frame_id_of(lua, h), "OnTextChanged");
+        mark_text_changed(lua, h);
     }
 }
 
@@ -379,7 +379,7 @@ fn delete_dir(lua: &Lua, h: FrameHandle, forward: bool) {
     let changed = with_eb(lua, h, |eb| eb.delete_dir(forward));
     if changed == Some(true) {
         sync_text_region(lua, h);
-        fire_script(lua, frame_id_of(lua, h), "OnTextChanged");
+        mark_text_changed(lua, h);
     }
 }
 
@@ -618,3 +618,55 @@ pub(super) use methods::install;
 
 #[cfg(test)]
 mod tests;
+
+/// Raise the `textChanged` dirty bit (`[E+0x31c]` bit 0) rather than firing — **`OnTextChanged` is
+/// deferred**, and this is the whole of decision 1831's second half.
+///
+/// The reference never fires it from an edit. `SetText 0x77be00`, `Insert 0x77bee0` and the deletes
+/// all only OR the bit; the single fire site is `0x77d498`, inside the dirty-word drain `0x77d3e0`,
+/// whose three callers are the box's own `OnUpdate` (`0x77a790`), its `OnKeyDown` (`0x77b160`) and
+/// its `OnMouseDown` (`0x77b800`). So a Lua caller gets control back with the handler still
+/// unrun, and repeated changes **coalesce**: the box appears once on the pending list however many
+/// times it is written, and the one fire carries the final text.
+pub(super) fn mark_text_changed(lua: &Lua, h: FrameHandle) {
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    if !model.dirty_editboxes.contains(&h) {
+        model.dirty_editboxes.push(h);
+    }
+}
+
+/// The dirty-word drain (`0x77d3e0`): fire the pending `OnTextChanged`s.
+///
+/// Called from the frame tick — the first of the reference's three callers (`0x77a7a1`, inside the
+/// box's own `OnUpdate` `0x77a790`, which is also where our caret blink lives). Its other two, the
+/// box's `OnKeyDown` and `OnMouseDown`, are **not** wired: they only make a pending fire arrive
+/// sooner within a frame, and our key and mouse paths reach the tick anyway. Decision 1831 says so
+/// out loud rather than leaving it to be discovered.
+///
+/// A box that is **not effectively visible stays pending**: `Hide`
+/// splices it out of the chain the update walk follows, so its fire waits for a `Show` (verified
+/// chain mechanics; the "hidden ⇒ no OnUpdate" step is the RE's own stated inference).
+///
+/// A handler may itself write to a box — including this one — so the list is taken before any Lua
+/// runs and anything re-marked during the sweep lands on the NEXT drain rather than extending this
+/// one. That is the reference's shape too: its bit is cleared before its fire.
+pub(in crate::script) fn drain_text_changed(lua: &Lua) {
+    let pending = {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        if model.dirty_editboxes.is_empty() {
+            return;
+        }
+        let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut model.dirty_editboxes)
+            .into_iter()
+            .partition(|&h| model.arena.frame(h).is_some_and(|f| f.effective_visible));
+        // A frame that has been destroyed drops out of both halves.
+        model.dirty_editboxes = waiting
+            .into_iter()
+            .filter(|&h| model.arena.frame(h).is_some())
+            .collect();
+        ready
+    };
+    for h in pending {
+        fire_script(lua, frame_id_of(lua, h), "OnTextChanged");
+    }
+}

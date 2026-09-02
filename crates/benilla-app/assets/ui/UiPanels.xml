@@ -110,7 +110,7 @@
         -- The inspect window (decision 0631, InspectFrame.xml): the ref's own InspectFrame row
         -- (`Blizzard_InspectUI.lua:4` — area "left", pushable 0), so inspecting swaps out whichever
         -- left-slot window was open, exactly as the character window does.
-        UIPanelWindows["BenillaInspectFrame"] = { area = "left", pushable = 0 }
+        UIPanelWindows["InspectFrame"] = { area = "left", pushable = 0 }
         -- The spellbook (decision 0216 §8, SpellBookFrame.xml): the ref's own SpellBookFrame row
         -- verbatim (`{ area = "left", pushable = 0, whileDead = 1 }`, UIParent.lua l.21; whileDead
         -- carried since 1507) — same left-slot competition as every window above.
@@ -120,7 +120,7 @@
         -- pushable 6 one tier above the plain NPC-session/player-state windows' 0. whileDead was
         -- omitted here while `UnitIsDead` didn't exist; it is a live unit binding now, so 1507
         -- carries the ref's flag on every row that has one.
-        UIPanelWindows["BenillaTalentFrame"] = { area = "left", pushable = 6, whileDead = 1 }
+        UIPanelWindows["TalentFrame"] = { area = "left", pushable = 6, whileDead = 1 }
         -- The social window (decision 0668) — the ref's own registration line verbatim
         -- (`UIPanelWindows["FriendsFrame"] = { area = "left", pushable = 0, whileDead = 1 }`,
         -- UIParent.lua l.29). whileDead: a corpse run is exactly when you want to whisper someone.
@@ -1705,6 +1705,36 @@
         -- other path → hide) replaces the old bespoke `deleteItemFlow` CURSOR_UPDATE driver.
         -- exclusive is v1-inert (engine header note); showAlert is live since 1068 — the ref's
         -- own "display the error image" case is this very dialog.
+        -- CONFIRM_LOOT_ROLL — the BoP roll's "this will bind to you" gate, keyed BARE like every
+        -- other entry (the key is `StaticPopup_Show`'s argument, not a frame name).
+        --
+        -- It moved here from our own GroupLootFrame.xml when 1838 retired that file. The reference
+        -- keeps it in `StaticPopup.lua`; we have no counterpart to that file, and our own
+        -- convention is that a dialog whose window has migrated comes to sit beside DELETE_ITEM
+        -- below — the same move `CloseMenus` made when the dropdown kit went to the chain.
+        --
+        -- The C `RollOnLoot` is what diverts a BoP Need/Greed here rather than rolling: the gate
+        -- lives in the binding, not in Lua (decision 0594, verified in the 5875 binary), and only
+        -- `OnAccept`'s `ConfirmLootRoll` re-enters past it. `id`/`rollType` arrive as data/data2,
+        -- set by the `CONFIRM_LOOT_ROLL` arm in UIParent.xml's own OnEvent.
+        --
+        -- The three strings are quoted verbatim rather than read from GlobalStrings, which is this
+        -- file's existing idiom for exactly one reason: a bare global is nil in a harness that has
+        -- not loaded the chain's GlobalStrings, and a `format()` over nil aborts the whole inline
+        -- chunk — taking every function defined after it down with it.
+        StaticPopupDialogs["CONFIRM_LOOT_ROLL"] = {
+            text = "Looting this item will bind it to you.", -- LOOT_NO_DROP
+            button1 = "Okay",                                -- OKAY
+            button2 = "Cancel",                              -- CANCEL
+            OnAccept = function(id, rollType)
+                ConfirmLootRoll(id, rollType)
+            end,
+            timeout = 0,
+            whileDead = 1,
+            exclusive = 1,
+            hideOnEscape = 1
+        }
+
         StaticPopupDialogs["DELETE_ITEM"] = {
             text = DELETE_ITEM,
             button1 = YES,
@@ -2322,6 +2352,16 @@
         -- ours reads GetStringWidth — the same number once the measure round-trip lands, which is
         -- why the caller below re-checks from OnUpdate instead of OnShow.
         function PanelTemplates_TabResize(padding, tab, absoluteSize, maxWidth)
+            -- The ref's own opening arm, and it is not defensive: `tab` is OPTIONAL, and a caller
+            -- that omits it is relying on `this`. Ours had only the explicit-`tab` half, so every
+            -- caller in our own files passed one and the gap stayed invisible — until a stock file
+            -- called `PanelTemplates_TabResize(0)` from a tab's OnLoad and threw
+            -- "attempt to index local 'tab' (a nil value)". `Blizzard_MacroUI.xml`'s two tabs do
+            -- exactly that; so do the readiness instrument's two `UiPanels.xml` failures.
+            -- Decision 1835.
+            if ( not tab ) then
+                tab = this
+            end
             local name = tab:GetName()
             local text = getglobal(name .. "Text")
             local sideWidths = 2 * getglobal(name .. "Left"):GetWidth()

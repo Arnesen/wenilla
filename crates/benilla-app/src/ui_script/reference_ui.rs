@@ -610,9 +610,17 @@ mod tests {
     ///
     /// **A remaining `<?>` in the `fx=` column is usually a LoadOnDemand addon**, not something to
     /// build. `ClassTrainerFrame_Show`, `CraftFrame_Show`, `MacroFrame_SaveMacro`,
-    /// `InspectFrame_Show`, `TalentFrame_Toggle` and their siblings live in `Blizzard_*` addons the
-    /// install ships **packed as `.pub`**, so no amount of scanning the extracted FrameXML finds
-    /// them. They arrive when that addon does, exactly like an `fx=` name with a home.
+    /// `InspectFrame_Show`, `TalentFrame_Toggle` and their siblings live in `Blizzard_*` addons, so
+    /// no amount of scanning the extracted **FrameXML** finds them. They arrive when that addon does,
+    /// exactly like an `fx=` name with a home.
+    ///
+    /// **They are NOT unreachable, and this doc used to say they were.** It claimed the install
+    /// ships them "packed as `.pub`", which is a misreading of the loose
+    /// `Interface\AddOns\<name>\` folder — that really does hold only a `.pub` signature file.
+    /// The addon's real `.xml`/`.lua`/`.toc` are inside **`patch.MPQ`**, and `Chain` mounts MPQs, so
+    /// `reference_ui::read` reaches them and `is_chain_entry` accepts the path. Verified by reading
+    /// `Interface\AddOns\Blizzard_MacroUI\Blizzard_MacroUI.xml` and `Blizzard_InspectUI`'s twin
+    /// straight out of the archive. Every one of those windows is buildable today.
     ///
     /// One crudeness remains, stated because it decides how to read the output: neither scan can
     /// see a name reached through `getglobal`, so both can under-report.

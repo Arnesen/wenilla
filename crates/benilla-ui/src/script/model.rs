@@ -288,6 +288,18 @@ pub(crate) struct Model {
     /// resolve at a 3,988-frame roster, which made it the biggest phase left in the preamble
     /// (decision 1634's `[layout-pre] watched=`).
     pub(crate) on_size_changed_frames: Vec<FrameHandle>,
+    /// Edit boxes whose text changed and whose `OnTextChanged` has **not fired yet** — the
+    /// reference's `textChanged` dirty bit (`[E+0x31c]` bit 0), which `SetText`/`Insert` raise and
+    /// only the dirty-word drain `0x77d3e0` clears (decision 1831).
+    ///
+    /// The fire is deferred, not immediate: `SetText` returns to Lua before any handler runs, and N
+    /// changes to one box between two drains produce exactly ONE fire carrying the final text. The
+    /// reference's own FrameXML depends on both halves — `MoneyInputFrame_SetCopper` sets three
+    /// boxes while counting the fires it expects back, and errors if one arrives mid-loop.
+    ///
+    /// A hidden box stays on this list: `Hide` splices it out of the chain the update walk follows,
+    /// so its pending fire waits until it is shown again (or a key/mouse-down reaches it).
+    pub(crate) dirty_editboxes: Vec<FrameHandle>,
     /// `event name → frames registered for it` (RegisterEvent), in **registration order** — an
     /// ordered Vec, never a set: the client's `SignalEvent 0x703e50` walks a per-event listener
     /// LIST, so cross-frame dispatch order is a law, not an accident (the abbey territory-line
@@ -1330,8 +1342,6 @@ pub(crate) struct Model {
     /// The inspect model pane's bake yaw — the last of the benilla-named pane scalars beside
     /// [`Self::dressup_yaw`]. A migrated window's pane carries its own facing in `ModelState`
     /// (`UiScript::model_pane_facing`, decision 1751); these two remain because their windows are
-    /// still ours, and each retires with its file.
-    pub(crate) inspect_yaw: f32,
     /// The dressing room's queued intents (decision 1060) — `BenillaDressUpModel_Dress/TryOn/Close`,
     /// drained by the app in order (see [`super::dressup`] on why order matters).
     pub(crate) dressup_intents: Vec<super::dressup::DressUpIntent>,
@@ -1574,6 +1584,7 @@ impl Model {
             scripts: HashMap::new(),
             on_update_frames: Vec::new(),
             on_size_changed_frames: Vec::new(),
+            dirty_editboxes: Vec::new(),
             event_to_frames: HashMap::new(),
             frame_events: HashMap::new(),
             focused_editbox: None,
@@ -1865,7 +1876,6 @@ impl Model {
             inspect: None,
             inspect_notifies: Vec::new(),
             inspect_clear: false,
-            inspect_yaw: 0.0,
             dressup_intents: Vec::new(),
             dressup_yaw: 0.0,
             unit_reach: HashMap::new(),
