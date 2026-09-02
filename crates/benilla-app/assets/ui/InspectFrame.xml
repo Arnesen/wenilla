@@ -47,8 +47,17 @@
             `InspectPaperDollFrame.lua:104-112`) — 0208's named deferrals, both LANDED (decisions
             1059/1060): ctrl previews the inspected item on your own body, shift posts its link.
             Nothing else happens on a click, which is still the reference's own shape.
-          - `UnitHasRelicSlot` (ref l.123, l.22) — vanilla-always-false, so the relic branch can
-            never fire. Dropped outright, as CharacterFrame.xml drops it.
+          - `UnitHasRelicSlot` (ref l.123, l.22) — this note used to say "vanilla-always-false, so
+            the relic branch can never fire". **That is wrong** (decision 1785): the flag is set
+            for Paladin, Shaman and Druid, and the binding now exists and answers for any token,
+            with no `"player"` fast path — inspecting an enemy druid answers 1. The branch is
+            still not transcribed here, but for a different and honest reason: 1.12's inspect pane
+            ships inside `Blizzard_InspectUI`, which is a packed `.pub` on this install, so there
+            is no reference source to transcribe from. Restoring it is part of migrating this
+            window, not something to reconstruct from memory. The shared
+            `PaperDollFrame_SetRangedAttack(unit, prefix)` in CharacterFrame.xml — which the ref's
+            inspect pane drives with the inspected unit and the "Inspect" prefix — does honour
+            `hasRelic` now.
           - The held-button continuous spin (ref `InspectModelFrame_OnUpdate`, l.7-22) needs
             `GetButtonState() == "PUSHED"`, which this engine's Button has no method for
             (CharacterFrame.xml hit the identical wall) — click-only, so no OnUpdate is wired.

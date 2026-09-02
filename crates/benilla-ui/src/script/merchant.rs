@@ -28,6 +28,7 @@
 use mlua::{Lua, MultiValue, Value};
 
 use super::container::UiCursorMode;
+use super::cursor::CursorPayload;
 use super::Model;
 
 /// One vendor row, resolved by the app from the wire `VendorItem` (decision 0081). Plain data —
@@ -130,6 +131,20 @@ impl super::UiScript {
     /// `index` is the 1-based row position; the app maps it to the item entry the wire needs.
     pub fn take_merchant_buys(&mut self) -> Vec<(u32, u32)> {
         std::mem::take(&mut self.model_mut().merchant_buys)
+    }
+
+    /// Drain the `(bag, slot)` sells `PickupMerchantItem`'s cursor arm queued — the item the
+    /// cursor was holding when it was dropped on the vendor window. The app resolves the concrete
+    /// item guid from the pair and sends `CMSG_SELL_ITEM`, the same resolution the bag-click sell
+    /// route already does.
+    pub fn take_merchant_cursor_sells(&mut self) -> Vec<(i64, u32)> {
+        std::mem::take(&mut self.model_mut().merchant_cursor_sells)
+    }
+
+    /// Drain the `(bag, slot, item entry)` buys a held vendor row queued by being dropped into a
+    /// container slot — `CMSG_BUY_ITEM_IN_SLOT 0x1a3`.
+    pub fn take_merchant_slot_buys(&mut self) -> Vec<(i64, u32, u32)> {
+        std::mem::take(&mut self.model_mut().merchant_slot_buys)
     }
 
     /// Whether `CloseMerchant` was called since the last drain (and clear the flag). vanilla's
@@ -323,6 +338,86 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (index, quantity): (u32, Option<u32>)| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             model.merchant_buys.push((index, quantity.unwrap_or(1)));
+            Ok(())
+        })?,
+    )?;
+
+    // PickupMerchantItem(index) — **two verbs behind one name** (`0x4fb760`, wow-re
+    // `system/ui/scratch/merchant-cursor-law.md`). `0x4fb787` calls `GetCursorItem 0x494c60`,
+    // which answers for **mode 1 only**, and the result forks the whole function:
+    //
+    //   * cursor holds a real bag item  → **SELL it** (`CMSG_SELL_ITEM 0x1a0`), then clear the
+    //     cursor. The index is IGNORED on this arm and there is no merchant-open gate on it. This
+    //     is what stock `MerchantFrame.xml:743`'s `<OnMouseUp>PickupMerchantItem(0)</OnMouseUp>`
+    //     is for: dropping a bag item anywhere on the vendor window sells it.
+    //   * otherwise                     → **grab** vendor row `index - 1` as cursor mode 5.
+    //
+    // Stock FrameXML never guards this call with `CursorHasItem()` — `MerchantFrame.lua:329`'s
+    // `else` is the else of the ctrl/shift modifier chain. An unmodified left-click calls it
+    // whatever the cursor holds, and the binding decides.
+    //
+    // **Every refusal is silent, and every refusal CLEARS THE CURSOR** — there is no `luaL_error`
+    // anywhere in the range, unlike its neighbour `BuyMerchantItem`. The ladder, in order:
+    // non-number argument (`0x4fb7cb`; a numeric *string* is accepted), `index < 1` (`0x4fb7e1`),
+    // `index > count` (`0x4fb7e9`), no merchant open (`0x4fb7f7`), a dead row (`0x4fb80b`), and a
+    // re-click on the row already held (`0x4fb818`, a toggle-off). Conversion is `_ftol` —
+    // **truncate toward zero**, then `-1`, bounded signed.
+    //
+    // It does **not** test stock and does **not** test the item cache: a sold-out row grabs fine
+    // and the buy still goes out, and the server refuses it. `numAvailable` is read exactly once
+    // image-wide, by `GetMerchantItemInfo`, for display.
+    g.set(
+        "PickupMerchantItem",
+        lua.create_function(|lua, index: Option<f64>| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+
+            // The sell fork, and it comes FIRST — before the argument is even looked at.
+            if let Some(CursorPayload::Item(item)) = &model.cursor {
+                let pair = (item.bag, item.slot);
+                model.cursor = None;
+                model.merchant_cursor_sells.push(pair);
+                return Ok(());
+            }
+
+            // From here every leg clears the cursor and answers nothing. Holding a mode-5 payload
+            // and calling this again is the toggle-off, which is the same clear.
+            let held = match &model.cursor {
+                Some(CursorPayload::Merchant(m)) => Some(m.row),
+                _ => None,
+            };
+            model.cursor = None;
+
+            let Some(index) = index else { return Ok(()) };
+            // `_ftol` truncates toward zero; the bound is then applied signed, so a negative or
+            // a zero index falls out here rather than wrapping into a row. NaN is written as its
+            // own test rather than as a negated `>=` — same answer, and the intent is on the page.
+            //
+            // The upper bound is ours and it is load-bearing, not defensive: without it a Lua
+            // index of `2^32 + 1` truncates on the cast to row 0 and would grab the FIRST row.
+            // The reference cannot have that bug — its bound is against the vendor count, which
+            // it applies before any narrowing.
+            let row = index.trunc();
+            if row.is_nan() || row < 1.0 || row > f64::from(u32::MAX) {
+                return Ok(());
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let row0 = row as u32 - 1;
+            let Some(merchant) = model.merchant.as_ref() else {
+                return Ok(());
+            };
+            let Some(item) = merchant.items.get(row0 as usize) else {
+                return Ok(());
+            };
+            // The toggle-off: naming the row already on the cursor puts nothing back.
+            if held == Some(row0) {
+                return Ok(());
+            }
+            let payload = CursorPayload::Merchant(super::cursor::CursorMerchantItem {
+                item_id: item.item_id,
+                row: row0,
+                texture: item.texture.clone(),
+            });
+            model.cursor = Some(payload);
             Ok(())
         })?,
     )?;
@@ -907,5 +1002,153 @@ mod tests {
         // fail path) — the Buy from the buyback hover above survives.
         s.run("ShowMerchantSellCursor(99)").unwrap();
         assert_eq!(s.ui_cursor(), Some(UiCursorMode::Buy));
+    }
+    /// `PickupMerchantItem` is TWO verbs, and which one runs is decided by the cursor, never by
+    /// the caller — stock FrameXML never guards it (wow-re `merchant-cursor-law.md`).
+    #[test]
+    fn pickup_merchant_item_grabs_a_row_as_mode_5() {
+        let mut s = UiScript::new().unwrap();
+        s.set_merchant(Some(stock()));
+
+        s.run("PickupMerchantItem(1)").unwrap();
+        // Mode 5 is INVISIBLE to Lua. This is the load-bearing assertion in the whole file: all
+        // thirteen stock `CursorHasItem()` gates stay closed while a vendor cursor is held.
+        assert!(
+            s.eval::<bool>("return not CursorHasItem()").unwrap(),
+            "CursorHasItem is nil for mode 5"
+        );
+        assert!(s.eval::<bool>("return not CursorHasSpell()").unwrap());
+        assert!(
+            s.eval::<bool>("return GetCursorInfo() == nil").unwrap(),
+            "GetCursorInfo reports nothing — no binding exposes mode 5"
+        );
+
+        // …but it IS held: a second call naming the same row is the toggle-off (`0x4fb818`), and
+        // a third call re-grabs it. Nothing else can observe the difference from Lua, so the
+        // toggle is what the test reads it through.
+        s.run("PickupMerchantItem(1)").unwrap();
+        s.run("PickupMerchantItem(1)").unwrap();
+        assert!(s.take_merchant_slot_buys().is_empty(), "no drop yet");
+    }
+
+    /// Every refusal is silent AND clears the cursor — there is no `luaL_error` in the range.
+    #[test]
+    fn pickup_merchant_item_refuses_silently_and_clears() {
+        let mut s = UiScript::new().unwrap();
+        s.set_merchant(Some(stock()));
+
+        for bad in [
+            "PickupMerchantItem(0)",
+            "PickupMerchantItem(-1)",
+            "PickupMerchantItem(99)",
+        ] {
+            s.run("PickupMerchantItem(1)").unwrap(); // hold something first
+            s.run(bad)
+                .unwrap_or_else(|e| panic!("{bad} must not raise: {e}"));
+            assert!(
+                s.eval::<bool>("return GetCursorInfo() == nil").unwrap(),
+                "{bad} cleared the cursor"
+            );
+        }
+        // A missing argument is the same silent clear, not an error.
+        s.run("PickupMerchantItem(1)").unwrap();
+        s.run("PickupMerchantItem()").unwrap();
+        // A wrapping index must not become a valid row: `2^32 + 1` narrows to 0 on a naive cast
+        // and would grab row 1. It refuses, and the cursor stays empty.
+        s.run("PickupMerchantItem(4294967297)").unwrap();
+        assert!(s.eval::<bool>("return GetCursorInfo() == nil").unwrap());
+        s.run("PickupContainerItem(0, 3)").unwrap();
+        assert!(
+            s.take_merchant_slot_buys().is_empty(),
+            "the wrapping index grabbed nothing"
+        );
+        // A numeric STRING is accepted (`_ftol` over a converted argument), and `1.9` truncates
+        // toward zero to row 1 — not rounds to 2.
+        s.run(r#"PickupMerchantItem("1")"#).unwrap();
+        s.run("PickupMerchantItem(1.9)").unwrap();
+        // …which the toggle proves: 1.9 named the row 1 already held, so it toggled off.
+        assert!(s.eval::<bool>("return GetCursorInfo() == nil").unwrap());
+    }
+
+    /// The sell arm: a bag item on the cursor makes this a sell, the index is ignored, and the
+    /// cursor empties. This is what stock `MerchantFrame.xml:743`'s `PickupMerchantItem(0)` is —
+    /// an index the grab arm would refuse outright.
+    #[test]
+    fn pickup_merchant_item_sells_what_the_cursor_holds() {
+        use crate::script::cursor::{CursorItem, CursorPayload};
+        let mut s = UiScript::new().unwrap();
+        s.set_merchant(Some(stock()));
+        s.model_mut().cursor = Some(CursorPayload::Item(CursorItem {
+            bag: 0,
+            slot: 7,
+            item_id: 4540,
+            texture: None,
+            link: None,
+            count: None,
+            quality: None,
+            equip_slots: Vec::new(),
+            bar_placeable: false,
+        }));
+
+        s.run("PickupMerchantItem(0)").unwrap();
+        assert_eq!(
+            s.take_merchant_cursor_sells(),
+            vec![(0, 7)],
+            "index 0 is ignored — the cursor decides"
+        );
+        assert!(s.eval::<bool>("return not CursorHasItem()").unwrap());
+        assert!(s.take_merchant_cursor_sells().is_empty(), "drained");
+    }
+
+    /// The drop is the buy. A held row placed into a bag slot queues `CMSG_BUY_ITEM_IN_SLOT`.
+    #[test]
+    fn a_held_vendor_row_dropped_in_a_bag_is_a_buy() {
+        let mut s = UiScript::new().unwrap();
+        s.set_merchant(Some(stock()));
+        s.run("PickupMerchantItem(1)").unwrap();
+        s.run("PickupContainerItem(0, 3)").unwrap();
+        assert_eq!(
+            s.take_merchant_slot_buys(),
+            vec![(0, 3, 159)],
+            "the row's item entry, aimed at the dropped-on slot"
+        );
+        assert!(
+            s.eval::<bool>("return GetCursorInfo() == nil").unwrap(),
+            "the cursor clears on the drop"
+        );
+    }
+
+    /// A stale row is a refusal, not a wrong buy. The reference has a latent null deref on two of
+    /// its three drop paths for exactly this case (a fresh `SMSG_LIST_INVENTORY` rewrites the
+    /// count without clearing the cursor); we take the third path's behaviour on all of them.
+    #[test]
+    fn a_stale_vendor_row_drops_without_buying() {
+        let mut s = UiScript::new().unwrap();
+        s.set_merchant(Some(stock()));
+        s.run("PickupMerchantItem(2)").unwrap();
+        // The vendor list is replaced while the cursor still holds row 2 of the old one.
+        let mut shorter = stock();
+        shorter.items.truncate(1);
+        s.set_merchant(Some(shorter));
+        s.run("PickupContainerItem(0, 3)").unwrap();
+        assert!(
+            s.take_merchant_slot_buys().is_empty(),
+            "no buy goes out for a row that no longer resolves"
+        );
+        assert!(s.eval::<bool>("return GetCursorInfo() == nil").unwrap());
+    }
+
+    /// A vendor cursor is not a bar action and not an equip: `PlaceAction` refuses it and hands it
+    /// back, exactly as it does the pet-action and stable-pet payloads.
+    #[test]
+    fn the_action_bar_refuses_a_vendor_row_and_keeps_it_held() {
+        let mut s = UiScript::new().unwrap();
+        s.set_merchant(Some(stock()));
+        s.run("PickupMerchantItem(1)").unwrap();
+        s.run("PlaceAction(1)").unwrap();
+        // Still held, proven positively: dropping it in a bag afterwards still buys. An asserted
+        // *absence* here would pass just as well if the bar had eaten the payload.
+        s.run("PickupContainerItem(0, 5)").unwrap();
+        assert_eq!(s.take_merchant_slot_buys(), vec![(0, 5, 159)]);
     }
 }

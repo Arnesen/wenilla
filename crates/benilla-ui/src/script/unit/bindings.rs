@@ -587,6 +587,36 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             }
         })?,
     )?;
+    // UnitHasRelicSlot(unit) → **the number 1, or nil** (`0x519e50`). Whether this unit's
+    // INVSLOT 17 holds a Libram/Totem/Idol instead of a bow.
+    //
+    // The whole body is: typemask bit 4 (PLAYER) → `UNIT_FIELD_BYTES_0` byte 1 (the class) →
+    // bounds against `ds:0xc0def8` → `ds:0xc0def4`[class] → `[row+0x40]`, `ChrClasses.dbc` field
+    // 16. There is **no `cmp` against a class id anywhere in the function** — 1.12 is entirely
+    // data-driven here, and `benilla_formats::ChrClasses` is that data. The app resolves it and
+    // hands us the bit, exactly as it does for `class_file`.
+    //
+    // **This shipped absent for a long time, on a claim that was simply false** — that the relic
+    // slot post-dates 1.12 and `UnitHasRelicSlot` is a later-era verb. The base `dbc.MPQ` copy of
+    // `ChrClasses.dbc` really does have no field 16; the `patch.MPQ` copy the client actually
+    // reads has it, set for Paladin, Shaman and Druid. Decision 1785. Stock `PaperDollFrame.lua`
+    // calls this **unconditionally** at l.429 and l.580 — so while it was missing, the character
+    // sheet raised `attempt to call global 'UnitHasRelicSlot' (a nil value)` for *every* class,
+    // not just the three.
+    //
+    // No `"player"` fast path (unlike `UnitClass 0x5183b0`, which has one), so this answers for
+    // any token — `UnitHasRelicSlot("target")` on an enemy druid is 1, and the stock inspect path
+    // at `PaperDollFrame.lua:429` depends on exactly that.
+    //
+    // The truthy leg is the NUMBER 1, never a boolean; the false leg is nil, never `false`.
+    g.set(
+        "UnitHasRelicSlot",
+        lua.create_function(|lua, token: Option<String>| {
+            let has = with_unit(lua, &token, false, |u| u.has_relic_slot)?;
+            Ok(if has { Value::Integer(1) } else { Value::Nil })
+        })?,
+    )?;
+
     // UnitSex(unit) → 2 male, 3 female (1 = neuter — no 1.12 unit feed produces it); nil when the
     // unit is absent or the sex hasn't streamed (`0`), the API's "can't tell".
     g.set(

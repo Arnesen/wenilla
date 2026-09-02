@@ -660,7 +660,9 @@ impl WidgetArena {
             insertion_seq,
             kind_state: match kind {
                 FrameKind::StatusBar => KindState::StatusBar(StatusBarState::default()),
-                FrameKind::Button | FrameKind::CheckButton => {
+                // `CLootButton` and `CSimpleCheckbox` both extend `CSimpleButton` and both add
+                // exactly one field, which `ButtonState` carries for them (`loot_slot`/`checked`).
+                FrameKind::Button | FrameKind::CheckButton | FrameKind::LootButton => {
                     KindState::Button(ButtonState::default())
                 }
                 FrameKind::EditBox => KindState::EditBox(EditBoxState::default()),

@@ -901,6 +901,12 @@ pub(crate) struct Model {
     /// seam ([`merchant`]).
     pub(crate) merchant: Option<merchant::MerchantState>,
     pub(crate) merchant_buys: Vec<(u32, u32)>,
+    /// `PickupMerchantItem`'s SELL arm — the `(bag, slot)` the cursor was holding when it was
+    /// called over the vendor window. The app resolves the guid and sends `CMSG_SELL_ITEM`.
+    pub(crate) merchant_cursor_sells: Vec<(i64, u32)>,
+    /// A held vendor row dropped into a bag — `(bag, slot, item entry)`, the app's
+    /// `CMSG_BUY_ITEM_IN_SLOT`.
+    pub(crate) merchant_slot_buys: Vec<(i64, u32, u32)>,
     pub(crate) merchant_close: bool,
     /// `BuybackItem` intents (1-based buyback slots), the `RepairAllItems` flag, and the
     /// client-side repair-mode latch (`ShowRepairCursor`/`InRepairMode`) — the rest of the
@@ -1667,6 +1673,8 @@ impl Model {
             gossip_quest_selects: Vec::new(),
             merchant: None,
             merchant_buys: Vec::new(),
+            merchant_cursor_sells: Vec::new(),
+            merchant_slot_buys: Vec::new(),
             merchant_close: false,
             merchant_buybacks: Vec::new(),
             repair_all: false,

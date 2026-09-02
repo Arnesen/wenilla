@@ -502,6 +502,21 @@ impl WorldSession {
         )
     }
 
+    /// `CMSG_BUY_ITEM_IN_SLOT` — buy into a named container slot, the merchant cursor's drop.
+    pub fn buy_item_in_slot(
+        &mut self,
+        vendor_guid: u64,
+        entry: u32,
+        bag_guid: u64,
+        bag_slot: u8,
+        count: u8,
+    ) -> Result<()> {
+        self.send(
+            opcode::CMSG_BUY_ITEM_IN_SLOT,
+            &messages::buy_item_in_slot(vendor_guid, entry, bag_guid, bag_slot, count),
+        )
+    }
+
     /// Sell an item to a vendor (`CMSG_SELL_ITEM`) — the unsplit twin of [`WorldWriter::sell_item`];
     /// `count` 0 = the whole stack.
     pub fn sell_item(&mut self, vendor_guid: u64, item_guid: u64, count: u8) -> Result<()> {

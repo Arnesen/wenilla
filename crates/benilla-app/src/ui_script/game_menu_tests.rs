@@ -264,10 +264,13 @@ fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
         &[],
         &[
             "MerchantFrame.xml",
-            // LootFrame.xml owns GroupLootDropDown, whose OnLoad needs the dropdown kit — which
-            // in turn reads TOOLTIP_DEFAULT_COLOR from GameTooltip.xml (BAG_UI's, ahead of this).
+            // The loot window is the reference's own since 1751 — `test_ui::LOOT_UI` carries
+            // what it needs and why, and PartyFrame's `MAX_PARTY_MEMBERS` is needed at LOAD.
             "UIDropDownMenu.xml",
-            "LootFrame.xml",
+            "UnitPopup.xml",
+            "PartyFrame.xml",
+            "Interface\\FrameXML\\ItemButtonTemplate.xml",
+            "Interface\\FrameXML\\LootFrame.xml",
         ],
     );
     s.set_money(0);
@@ -592,7 +595,12 @@ fn nothing_opens_behind_the_world_map_and_escape_closes_it_first() {
         "ScrollTemplates.xml",
         "WorldMapFrame.xml",
         "MerchantFrame.xml",
-        "LootFrame.xml",
+        // The loot window is the reference's own since 1751 — see `test_ui::LOOT_UI` for what
+        // each of these buys; `PartyFrame`'s MAX_PARTY_MEMBERS is needed at LOAD time.
+        "UnitPopup.xml",
+        "PartyFrame.xml",
+        "Interface\\FrameXML\\ItemButtonTemplate.xml",
+        "Interface\\FrameXML\\LootFrame.xml",
     ]);
     s.run("ToggleWorldMap()").unwrap();
 

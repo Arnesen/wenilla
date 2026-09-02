@@ -389,11 +389,28 @@ mod tests {
     /// mostly noise. Here the manifest is loaded first and `_G` is read after, so the answer is
     /// what this client *actually* answers to.
     ///
-    /// Two crudenesses, stated because they decide how to read the output. The `Name(` scan counts
+    /// **Three columns, and the third one exists because its absence cost a swap.** `engine=` and
+    /// `fx=` read bare `Name(` globals. `method=` reads `:Name(` calls against the method surface
+    /// this engine actually exposes — built by walking `getmetatable(w).__index` over one widget
+    /// of every type, plus the tooltip.
+    ///
+    /// Until 1787 the method sites were **silently dropped**: a name in neither the engine nor the
+    /// FrameXML half of `1.12-globals.tsv` was assumed to be a widget method and skipped, on the
+    /// reasoning that widget methods are not in `_G`. True, and it meant the report could not see
+    /// a widget method we had *not built*. `MerchantFrame.xml` read `0 engine` and
+    /// [`chain_readiness_report`] read CLEAN while the stock row's `<OnEnter>` called
+    /// `ShoppingTooltip1:SetMerchantCompareItem(...)`, which this engine does not have — so the
+    /// file loaded, every check passed, and hovering a vendor row would have raised in play. Both
+    /// instruments were right about what they measure. Neither measured the window.
+    ///
+    /// Two crudenesses remain, stated because they decide how to read the output. Both scans count
     /// a call inside an XML comment (1.12 comments out whole blocks — `GuildRegistrarFrame`'s
-    /// tabard button is one), so it can over-report; and it cannot see a name reached through
-    /// `getglobal`, so it can under-report. It is for ranking work, not for proving a window done —
-    /// [`chain_readiness_report`] and the window's own tests are that.
+    /// tabard button is one), so they can over-report; and neither can see a name reached through
+    /// `getglobal`, so they can under-report. The `method=` column is also receiver-blind: it asks
+    /// "does ANY widget type answer to this name", not "does *this* receiver", so a method that
+    /// exists on the wrong type still reads as present. It is for ranking work, not for proving a
+    /// window done — [`chain_readiness_report`] and the window's own tests are that, and the
+    /// paragraph above is what those two are worth on their own.
     #[test]
     #[ignore = "instrument: run by hand when choosing what to build next"]
     fn chain_gap_report() {
@@ -426,6 +443,94 @@ mod tests {
             .expect("dump _G")
             .into_iter()
             .collect();
+
+        // `:Name(` — a method call, receiver unknown.
+        let called_methods = |text: &str| -> std::collections::HashSet<String> {
+            let b: Vec<char> = text.chars().collect();
+            let mut out = std::collections::HashSet::new();
+            let mut i = 1;
+            while i < b.len() {
+                // `::` is not a method call, and neither is a `:` inside a word.
+                if b[i - 1] == ':' && (i < 2 || b[i - 2] != ':') && b[i].is_ascii_alphabetic() {
+                    let mut j = i;
+                    while j < b.len() && super::is_word(b[j]) {
+                        j += 1;
+                    }
+                    let mut k = j;
+                    while k < b.len() && b[k] == ' ' {
+                        k += 1;
+                    }
+                    if k < b.len() && b[k] == '(' {
+                        out.insert(b[i..j].iter().collect::<String>());
+                    }
+                    i = j;
+                    continue;
+                }
+                i += 1;
+            }
+            out
+        };
+
+        // Whether this engine's widgets answer to a method name — **asked**, not enumerated. A
+        // widget's methods come through an `__index` FUNCTION, so there is no table to walk; the
+        // only way to know is to look the name up on a real widget. Receiver-blind by design (a
+        // `:Name(` site does not say what it is called on), so this answers "does ANY widget type
+        // answer to this name", which is the question that catches a method we never built.
+        let answers = |s: &UiScript, names: &[String]| -> std::collections::HashSet<String> {
+            let list = names
+                .iter()
+                .map(|n| format!("{n:?}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            s.eval::<Vec<String>>(&format!(
+                r#"
+                local want = {{{list}}}
+                local probes = {{ GameTooltip }}
+                local types = {{
+                    "Frame", "Button", "CheckButton", "LootButton", "StatusBar", "EditBox",
+                    "ScrollFrame",
+                    "Slider", "ColorSelect", "MessageFrame", "ScrollingMessageFrame",
+                    "SimpleHTML", "Model", "PlayerModel", "DressUpModel", "TabardModel",
+                    "Minimap", "MovieFrame", "Cooldown",
+                }}
+                for i = 1, table.getn(types) do
+                    local ok, w = pcall(function()
+                        return CreateFrame(types[i], "BenillaGapProbe" .. i, UIParent)
+                    end)
+                    if ok and w then table.insert(probes, w) end
+                end
+                local host = CreateFrame("Frame", "BenillaGapProbeHost", UIParent)
+                table.insert(probes, host:CreateTexture())
+                table.insert(probes, host:CreateFontString())
+                local out = {{}}
+                for i = 1, table.getn(want) do
+                    local name, found = want[i], false
+                    for j = 1, table.getn(probes) do
+                        local ok, v = pcall(function() return probes[j][name] end)
+                        if ok and type(v) == "function" then found = true break end
+                    end
+                    if found then table.insert(out, name) end
+                end
+                return out
+            "#
+            ))
+            .expect("probe the widget method surface")
+            .into_iter()
+            .collect()
+        };
+        // The instrument's own tripwire: if the probe stops working, the `method=` column goes
+        // silently empty — which is precisely the failure mode 1787 exists to end.
+        let control: Vec<String> = ["SetPoint", "SetMerchantItem", "BenillaNotAMethod"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let got = answers(&s, &control);
+        assert!(
+            got.contains("SetPoint")
+                && got.contains("SetMerchantItem")
+                && !got.contains("BenillaNotAMethod"),
+            "the method probe is not working — it answered {got:?} for {control:?}"
+        );
 
         let migrated: std::collections::HashSet<String> = super::super::addons::Addon::builtin()
             .toc
@@ -493,7 +598,8 @@ mod tests {
         };
 
         println!("\n=== 1751 gap report — what each unmigrated window would cost ===");
-        let mut rows: Vec<(usize, String, Vec<String>, Vec<String>)> = Vec::new();
+        #[allow(clippy::type_complexity)] // (engine count, file, engine, fx, method)
+        let mut rows: Vec<(usize, String, Vec<String>, Vec<String>, Vec<String>)> = Vec::new();
         for f in &stock {
             if migrated.contains(f) {
                 continue;
@@ -526,24 +632,38 @@ mod tests {
                         let h = home.get(&c).cloned().unwrap_or_else(|| "?".into());
                         fx.push(format!("{c}<{h}>"));
                     }
-                    None => {} // a widget method, not a global — the reference's _G would have it
+                    None => {} // not a global at all — the `:Name(` scan below is what sees it
                 }
             }
-            rows.push((eng.len(), f.clone(), eng, fx));
+            // The method half. `own`/`have` do not apply: a method is never a global, so the only
+            // question is whether this engine's widgets answer to the name.
+            let mut asked: Vec<String> = called_methods(&text).into_iter().collect();
+            asked.sort();
+            let known = answers(&s, &asked);
+            let mut meth: Vec<String> = asked.into_iter().filter(|m| !known.contains(m)).collect();
+            meth.sort();
+            rows.push((eng.len() + meth.len(), f.clone(), eng, fx, meth));
         }
         rows.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-        for (n, f, eng, fx) in &rows {
+        for (n, f, eng, fx, meth) in &rows {
             println!("{n:>3} engine  {f}");
             if !eng.is_empty() {
                 println!("            engine: {}", eng.join(" "));
+            }
+            if !meth.is_empty() {
+                println!("            method: {}", meth.join(" "));
             }
             if !fx.is_empty() {
                 println!("            fx:     {}", fx.join(" "));
             }
         }
+        // "Free" now means free of BOTH — the count above is engine names plus missing methods,
+        // because a window blocked on a widget method is exactly as blocked as one missing a
+        // global, and reading it as free is the mistake 1787 is about.
         let free: Vec<&String> = rows.iter().filter(|r| r.0 == 0).map(|r| &r.1).collect();
         println!(
-            "\n=== {} windows need NO engine work at all ===",
+            "\n=== {} windows need NO engine work at all (no missing global AND no missing \
+             method) ===",
             free.len()
         );
         for f in free {

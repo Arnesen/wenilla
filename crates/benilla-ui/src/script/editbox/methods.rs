@@ -53,11 +53,26 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(text.trim().parse::<f64>().unwrap_or(0.0))
         })?,
     )?;
+    // Insert(text) — **a nil is a no-op, not an error.** The reference's C `Insert` reads its
+    // argument through `lua_tostring`, which answers NULL for a nil and leaves the buffer alone;
+    // stock FrameXML relies on that. `LootFrame.lua:152` is the plain case:
+    //
+    //     ChatFrameEditBox:Insert(GetLootSlotLink(this.slot));
+    //
+    // with no guard, on a coin row whose `GetLootSlotLink` is nil. Typed as `String`, this raised
+    // — which the loot window only survived while we owned the file and could add a guard the
+    // reference does not have. It bit the moment `LootFrame.xml` came off the player's chain
+    // (1751), and it would bite any addon writing the same unguarded line.
+    //
+    // A NUMBER still inserts its digits: `lua_tostring` converts one in place, and mlua's
+    // `Option<String>` coercion follows it.
     m.set(
         "Insert",
-        lua.create_function(|lua, (this, s): (Table, String)| {
+        lua.create_function(|lua, (this, s): (Table, Option<String>)| {
             let h = frame_handle_of(lua, &this)?;
-            insert(lua, h, &s, true);
+            if let Some(s) = s {
+                insert(lua, h, &s, true);
+            }
             Ok(())
         })?,
     )?;

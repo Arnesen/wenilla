@@ -320,6 +320,73 @@
             table.insert(UIPARENT_MANAGED_POSITION_LISTENERS, fn)
         end
 
+        -- ── The model-pane rotation handlers (ref UIParent.lua l.1421-1462) ──────────────────
+        --
+        -- `Model_OnLoad` / `Model_RotateLeft` / `Model_RotateRight` / `Model_OnUpdate` — the four
+        -- the reference's dress-up room, pet paper doll, stable and character sheet all drive their
+        -- turntable with. Verbatim, in this file because this file is our `UIParent.lua`.
+        --
+        -- Everything they reach for is already here: `ROTATIONS_PER_SECOND` at the top of this
+        -- file (the reference puts it on its own line 2), `PI` as an engine global, and
+        -- `SetRotation` on the model panes that chain through `PlayerModel`
+        -- (`script/modelframe.rs` — a plain `<Model>` does NOT acquire it, and neither does the
+        -- reference's).
+        --
+        -- **What this does and does not buy, said plainly.** It removes these four names from the
+        -- gap list of `DressUpFrame.xml`, `PetPaperDollFrame.xml`, `PetStable.xml` and
+        -- `PaperDollFrame.xml`, and it makes the rotation STATE correct — the angle the API reads
+        -- back is the angle the reference would have. It does not make a model appear: this engine
+        -- holds the model pane's scene and draws no pixels into it, which is the one gap those four
+        -- windows still stand behind. Correct state under an unrendered pane is worth having on its
+        -- own — it is what an addon reading `model.rotation` gets — and it is not a stub, because
+        -- nothing here pretends the pane is drawn.
+        --
+        -- The two button-driven arms read `<name>RotateLeftButton`/`RotateRightButton` by
+        -- concatenation, so they work for any pane that follows the reference's naming and raise
+        -- loudly for one that does not. That is the reference's own coupling, not ours.
+        function Model_OnLoad()
+            this.rotation = 0.61
+            this:SetRotation(this.rotation)
+        end
+
+        function Model_RotateLeft(model, rotationIncrement)
+            if ( not rotationIncrement ) then
+                rotationIncrement = 0.03
+            end
+            model.rotation = model.rotation - rotationIncrement
+            model:SetRotation(model.rotation)
+            PlaySound("igInventoryRotateCharacter")
+        end
+
+        function Model_RotateRight(model, rotationIncrement)
+            if ( not rotationIncrement ) then
+                rotationIncrement = 0.03
+            end
+            model.rotation = model.rotation + rotationIncrement
+            model:SetRotation(model.rotation)
+            PlaySound("igInventoryRotateCharacter")
+        end
+
+        function Model_OnUpdate(elapsedTime, model, rotationsPerSecond)
+            if ( not rotationsPerSecond ) then
+                rotationsPerSecond = ROTATIONS_PER_SECOND
+            end
+            if ( getglobal(model:GetName() .. "RotateLeftButton"):GetButtonState() == "PUSHED" ) then
+                model.rotation = model.rotation + (elapsedTime * 2 * PI * rotationsPerSecond)
+                if ( model.rotation < 0 ) then
+                    model.rotation = model.rotation + (2 * PI)
+                end
+                model:SetRotation(model.rotation)
+            end
+            if ( getglobal(model:GetName() .. "RotateRightButton"):GetButtonState() == "PUSHED" ) then
+                model.rotation = model.rotation - (elapsedTime * 2 * PI * rotationsPerSecond)
+                if ( model.rotation > (2 * PI) ) then
+                    model.rotation = model.rotation - (2 * PI)
+                end
+                model:SetRotation(model.rotation)
+            end
+        end
+
         -- ── SecondsToTimeAbbrev (ref UIParent.lua l.1034-1049) ───────────────────────────────
         --
         -- "2 m", "45 s" — the one-letter duration the buff bar prints under a timed aura. It lived

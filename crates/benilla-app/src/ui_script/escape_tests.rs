@@ -65,11 +65,14 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    // LootFrame.xml owns GroupLootDropDown, whose OnLoad calls UIDropDownMenu_Initialize — the
-    // shipped manifest loads the dropdown kit far ahead of it (benilla.toc l.110 vs 478), and the
-    // kit's backdrop reads TOOLTIP_DEFAULT_COLOR out of GameTooltip.xml (already in BAG_UI).
-    load_xml(&s, "UIDropDownMenu.xml");
-    load_xml(&s, "LootFrame.xml");
+    // The loot window is the reference's own since 1751, and its dependency list grew with the
+    // swap — `LOOT_UI` carries the why for each entry. Loaded whole rather than cherry-picked:
+    // `PartyFrame.xml` is needed at LOAD (MAX_PARTY_MEMBERS) and skipping it fails loudly, but
+    // `ItemButtonTemplate` is only a warning and skipping it fails silently.
+    for file in super::test_ui::LOOT_UI {
+        load_xml(&s, file);
+    }
+    load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
     load_xml(&s, "MerchantFrame.xml"); // BenillaMoney_Set, BankFrame's purse helper
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));

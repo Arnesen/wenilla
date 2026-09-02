@@ -126,6 +126,10 @@ pub(crate) fn place_action(model: &mut Model, id: u32) -> bool {
         // Mode 10 (decision 1677) — a stabled pet has no `CMSG_SET_ACTION_BUTTON` encoding either,
         // so the action bar refuses it and it goes back on the cursor.
         CursorPayload::StablePet(_) => None,
+        // Mode 5 — a vendor row is not a bar action. `PlaceAction`'s payload table takes modes
+        // 1, 2 and 8 only, and the merchant grab is none of them, so it goes back on the cursor
+        // where the vendor window can still take it.
+        CursorPayload::Merchant(_) => None,
     };
     let Some((kind, action, texture)) = placeable else {
         model.cursor = Some(held);

@@ -973,6 +973,13 @@ fn writer_loop(
                         entry,
                         count,
                     } => w.buy_item(vendor, entry, count),
+                    ClientCommand::BuyItemInSlot {
+                        vendor,
+                        entry,
+                        bag_guid,
+                        bag_slot,
+                        count,
+                    } => w.buy_item_in_slot(vendor, entry, bag_guid, bag_slot, count),
                     ClientCommand::SellItem {
                         vendor,
                         item_guid,

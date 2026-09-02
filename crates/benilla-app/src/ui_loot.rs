@@ -1031,10 +1031,28 @@ fn feed_loot(
             }
         }
         // A content change while open (async name landed, a row removed, coin cleared) → repaint,
-        // keeping the current page (LOOT_UPDATE, the merchant's MERCHANT_UPDATE twin — this replaces
-        // Blizzard's per-button LOOT_SLOT_CLEARED optimization with a full re-snapshot, exactly as
-        // the merchant seam replaced per-row stock updates).
+        // keeping the current page.
+        //
+        // **Both events fire, and the per-slot one is not optional any more** (1751). This used to
+        // send `LOOT_UPDATE` alone, on the reasoning that a full re-snapshot replaces Blizzard's
+        // per-button `LOOT_SLOT_CLEARED` optimization the way the merchant seam replaced per-row
+        // stock updates. That was defensible while we owned `LootFrame.xml`. The STOCK file hangs
+        // real behaviour off `LOOT_SLOT_CLEARED` and only off it: its arm hides the button in
+        // place AND, when that empties the page, calls `LootFrame_PageDown` (`LootFrame.lua:38-50`
+        // — "try to move second page of loot items to the first page"). `LOOT_UPDATE` reaches
+        // none of that. Send only the summary and looting out a page leaves the player staring at
+        // an empty window with a live Down arrow.
+        //
+        // So the reference's vocabulary is spoken as the reference speaks it: one
+        // `LOOT_SLOT_CLEARED` per row that went away, carrying its 1-based row as `arg1`, and then
+        // the summary repaint.
         (Some(before), Some(after)) => {
+            for (i, was) in before.rows.iter().enumerate() {
+                let gone = was.is_some() && after.rows.get(i).is_none_or(Option::is_none);
+                if gone {
+                    script.fire_event("LOOT_SLOT_CLEARED", vec![ScriptValue::Int(i as i64 + 1)]);
+                }
+            }
             script.fire_event("LOOT_UPDATE", vec![]);
             // The reference keeps the two apart: `LOOT_UPDATE` repaints the rows, while a changed
             // candidate list refreshes the open dropdown in place without re-toggling it

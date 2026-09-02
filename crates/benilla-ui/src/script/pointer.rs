@@ -702,7 +702,7 @@ impl UiScript {
         if let Some(id) = click_id {
             // One click home for the physical and programmatic (`Click()`) paths: gated on a
             // Button's enabled flag, a CheckButton toggles before OnClick fires (button.rs).
-            button::click_button(&self.lua, id, button, down);
+            button::click_button(&self.lua, id, button, down, false);
         }
         // `OnDoubleClick(self, button)` — fired where `OnClick` would have been and instead of it
         // (`0x77938d call [edx+0x98]`, the mouse-UP dispatcher's exclusive second leg). One

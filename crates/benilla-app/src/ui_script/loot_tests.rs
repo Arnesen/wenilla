@@ -92,17 +92,17 @@ fn coin_and_two_items() -> LootState {
 fn shipped_loot_frame_drives_end_to_end() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml"); // ITEM_QUALITY_COLORS (LootFrame's palette), app load order
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    // LootFrame.xml owns GroupLootDropDown, whose OnLoad calls UIDropDownMenu_Initialize —
-    // the shipped manifest loads the dropdown kit far ahead of it (benilla.toc l.64 vs 383).
-    load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, which the dropdown backdrop reads
-    load_xml(&s, "UIDropDownMenu.xml");
+    for f in super::test_ui::LOOT_UI {
+        load_xml(&s, f);
+    }
     assert_eq!(
-        load_xml(&s, "LootFrame.xml"),
-        10,
-        "window + 4 rows + up + down + close + GroupLootDropDown and its template's own $parentButton"
+        load_xml(&s, "Interface\\FrameXML\\LootFrame.xml"),
+        34,
+        "the STOCK file's own shape (1751): the window, its portrait overlay and Next/Prev art, \
+         four LootButton rows each carrying ItemButtonTemplate's sub-frames, the two pagers, the \
+         close button, and GroupLootDropDown with the dropdown template's own children. Our \
+         transcription materialized 10 — a count is a fingerprint of a file, not a property of a \
+         loot window, and this one is now the reference's"
     );
 
     // Hidden by default: no coin icon on screen, left slot empty.
@@ -133,7 +133,9 @@ fn shipped_loot_frame_drives_end_to_end() {
         .unwrap();
     assert_eq!(vis, (true, true, true, false), "coin + 2 items, 4th hidden");
     // Only 3 items ⇒ no pager.
-    assert!(!s.eval::<bool>("return LootDownButton:IsVisible()").unwrap());
+    assert!(!s
+        .eval::<bool>("return LootFrameDownButton:IsVisible()")
+        .unwrap());
 
     s.resolve();
     let quads = s.extract();
@@ -240,6 +242,14 @@ fn shipped_loot_frame_drives_end_to_end() {
     let mut coin_looted = coin_and_two_items();
     coin_looted.rows[0] = None;
     s.set_loot(Some(coin_looted));
+    // The app's own pair, in the app's own order (`ui_loot`): the per-slot event first — the
+    // stock file hangs "hide the button in place" off it and only off it — then the summary
+    // repaint. Firing LOOT_UPDATE alone leaves the looted row drawn, which is what a client that
+    // sent only the summary would actually show.
+    s.fire_event(
+        "LOOT_SLOT_CLEARED",
+        vec![benilla_ui::script::ScriptValue::Int(1)],
+    );
     s.fire_event("LOOT_UPDATE", vec![]);
     let vis2: (bool, bool, bool) = s
         .eval(
@@ -254,7 +264,7 @@ fn shipped_loot_frame_drives_end_to_end() {
     );
 
     // The close button hides the window → OnHide → CloseLoot() queues the release intent.
-    s.run("BenillaLootCloseButton_OnClick()").unwrap();
+    s.run("LootCloseButton:Click()").unwrap();
     assert!(
         s.take_loot_close(),
         "closing the window releases the loot (OnHide → CloseLoot)"
@@ -275,14 +285,10 @@ fn shipped_loot_frame_drives_end_to_end() {
 fn loot_empty_roll_plays_the_empty_open_kit() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml"); // ITEM_QUALITY_COLORS (LootFrame's palette), app load order
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    // LootFrame.xml owns GroupLootDropDown, whose OnLoad calls UIDropDownMenu_Initialize —
-    // the shipped manifest loads the dropdown kit far ahead of it (benilla.toc l.64 vs 383).
-    load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, which the dropdown backdrop reads
-    load_xml(&s, "UIDropDownMenu.xml");
-    load_xml(&s, "LootFrame.xml");
+    for f in super::test_ui::LOOT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
 
     // A normal, non-empty loot open queues no sound (the normal open kit is C-side).
     s.set_loot(Some(coin_and_two_items()));
@@ -320,14 +326,10 @@ fn loot_empty_roll_plays_the_empty_open_kit() {
 fn fishing_loot_open_plays_the_reel_and_swaps_the_portrait() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml"); // ITEM_QUALITY_COLORS (LootFrame's palette), app load order
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    // LootFrame.xml owns GroupLootDropDown, whose OnLoad calls UIDropDownMenu_Initialize —
-    // the shipped manifest loads the dropdown kit far ahead of it (benilla.toc l.64 vs 383).
-    load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, which the dropdown backdrop reads
-    load_xml(&s, "UIDropDownMenu.xml");
-    load_xml(&s, "LootFrame.xml");
+    for f in super::test_ui::LOOT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
     let has_icon = |quads: &[ExtractedQuad], needle: &str| {
         quads.iter().any(|q| {
             matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p.contains(needle))
@@ -375,14 +377,10 @@ fn fishing_loot_open_plays_the_reel_and_swaps_the_portrait() {
 fn shipped_loot_frame_pages_five_items() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml"); // ITEM_QUALITY_COLORS (LootFrame's palette), app load order
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    // LootFrame.xml owns GroupLootDropDown, whose OnLoad calls UIDropDownMenu_Initialize —
-    // the shipped manifest loads the dropdown kit far ahead of it (benilla.toc l.64 vs 383).
-    load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, which the dropdown backdrop reads
-    load_xml(&s, "UIDropDownMenu.xml");
-    load_xml(&s, "LootFrame.xml");
+    for f in super::test_ui::LOOT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
 
     let rows: Vec<Option<LootRow>> = (0..5)
         .map(|i| {
@@ -415,7 +413,7 @@ fn shipped_loot_frame_pages_five_items() {
         .unwrap();
     assert_eq!(page1, (true, true, true, false), "page 1 shows 3 rows");
     let pager1: (bool, bool) = s
-        .eval("return LootUpButton:IsVisible(), LootDownButton:IsVisible()")
+        .eval("return LootFrameUpButton:IsVisible(), LootFrameDownButton:IsVisible()")
         .unwrap();
     assert_eq!(pager1, (false, true), "page 1: Up hidden, Down shown");
 
@@ -429,13 +427,17 @@ fn shipped_loot_frame_pages_five_items() {
         .unwrap();
     assert_eq!(page2, (true, true, false), "page 2 shows the last 2 rows");
     let pager2: (bool, bool) = s
-        .eval("return LootUpButton:IsVisible(), LootDownButton:IsVisible()")
+        .eval("return LootFrameUpButton:IsVisible(), LootFrameDownButton:IsVisible()")
         .unwrap();
     assert_eq!(pager2, (true, false), "page 2: Up shown, Down hidden");
 
     // Back on page 1, loot all three of its rows: their buttons hide in place, and the emptied
     // page advances to page 2 on its own — the ref's LOOT_SLOT_CLEARED tail (LootFrame.lua
     // l.38-50: every button hidden + Down visible → PageDown).
+    //
+    // The events are the app's own, in the app's own order: one LOOT_SLOT_CLEARED per row that
+    // went away (`ui_loot`'s emitter), then the summary LOOT_UPDATE. The auto-advance hangs off
+    // the per-slot event and ONLY off it, which is why the app fires both.
     s.run("LootFrame_PageUp()").unwrap();
     let mut cleared = rows;
     cleared[0] = None;
@@ -446,6 +448,12 @@ fn shipped_loot_frame_pages_five_items() {
         master_candidates: Vec::new(),
         rows: cleared,
     }));
+    for row in 1..=3 {
+        s.fire_event(
+            "LOOT_SLOT_CLEARED",
+            vec![benilla_ui::script::ScriptValue::Int(row)],
+        );
+    }
     s.fire_event("LOOT_UPDATE", vec![]);
     assert_eq!(
         s.eval::<i64>("return LootFrame.page").unwrap(),
@@ -466,14 +474,10 @@ fn shipped_loot_frame_pages_five_items() {
 fn shipped_loot_pushed_to_center_by_merchant() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml"); // ITEM_QUALITY_COLORS (LootFrame's palette), app load order
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    // LootFrame.xml owns GroupLootDropDown, whose OnLoad calls UIDropDownMenu_Initialize —
-    // the shipped manifest loads the dropdown kit far ahead of it (benilla.toc l.64 vs 383).
-    load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, which the dropdown backdrop reads
-    load_xml(&s, "UIDropDownMenu.xml");
-    load_xml(&s, "LootFrame.xml");
+    for f in super::test_ui::LOOT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
     load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
     load_xml(&s, "MerchantFrame.xml");
 
@@ -546,15 +550,10 @@ fn shipped_loot_pushed_to_center_by_merchant() {
 fn the_loot_window_draws_over_the_party_frames() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    // PartyFrame's per-member dropdown OnLoad walks the whole popup kit (app manifest order).
-    load_xml(&s, "UIDropDownMenu.xml");
-    load_xml(&s, "UnitPopup.xml");
-    load_xml(&s, "PartyFrame.xml");
-    load_xml(&s, "LootFrame.xml");
+    for f in super::test_ui::LOOT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
 
     // The party frame up FIRST, the window second — the order that cannot be what saves it.
     s.eval::<()>("PartyMemberFrame1:Show()").unwrap();
@@ -605,14 +604,12 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
     const WOOL_LINK: &str = "|cffffffff|Hitem:2589:0:0:0|h[Wool Cloth]|h|r";
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    for f in super::test_ui::LOOT_UI {
+        load_xml(&s, f);
+    }
     for file in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
         "UIParent.xml", // BenillaChatEdit_InsertLink, the shared shift-insert helper
-        "GameTooltip.xml", // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrop
-        "UIDropDownMenu.xml", // LootFrame owns GroupLootDropDown, initialized at its OnLoad
-        "LootFrame.xml",
+        "Interface\\FrameXML\\LootFrame.xml",
         "DressUpFrame.xml",
         "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
         "ChatFrame.xml",
@@ -747,12 +744,10 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
 fn shipped_loot_frame_hands_a_master_row_to_a_candidate() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "UIDropDownMenu.xml");
-    load_xml(&s, "LootFrame.xml");
+    for f in super::test_ui::LOOT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
 
     let row = |name: &str, quality: u32| {
         Some(LootRow {
@@ -891,12 +886,10 @@ fn the_master_loot_menu_groups_raid_candidates_by_subgroup() {
 
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "UIDropDownMenu.xml");
-    load_xml(&s, "LootFrame.xml");
+    for f in super::test_ui::LOOT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
 
     // A raid, so the dropdown takes its nested arm (GetNumRaidMembers() > 0 is the whole gate).
     s.set_party(PartyState {
@@ -974,12 +967,10 @@ fn the_master_loot_menu_groups_raid_candidates_by_subgroup() {
 fn the_loot_bind_confirm_raises_the_dialog_and_okay_calls_loot_slot() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "UIDropDownMenu.xml");
-    load_xml(&s, "LootFrame.xml");
+    for f in super::test_ui::LOOT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
     s.set_loot(Some(coin_and_two_items()));
     s.fire_event("LOOT_OPENED", vec![]);
     let _ = s.take_loot_picks();
@@ -1063,12 +1054,10 @@ fn the_loot_bind_confirm_raises_the_dialog_and_okay_calls_loot_slot() {
 fn a_row_click_takes_rather_than_continues() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "UIDropDownMenu.xml");
-    load_xml(&s, "LootFrame.xml");
+    for f in super::test_ui::LOOT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
     s.set_loot(Some(coin_and_two_items()));
     s.fire_event("LOOT_OPENED", vec![]);
     let quads = s.extract();

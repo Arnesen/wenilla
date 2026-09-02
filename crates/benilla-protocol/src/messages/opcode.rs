@@ -780,8 +780,9 @@ pub const SMSG_LIST_INVENTORY: u16 = 0x019F; // 415
 pub const CMSG_SELL_ITEM: u16 = 0x01A0; // 416
 pub const SMSG_SELL_ITEM: u16 = 0x01A1; // 417
 pub const CMSG_BUY_ITEM: u16 = 0x01A2; // 418
-/// Buy into a specific bag slot — value pinned for completeness; unused (out of scope, plain
-/// `CMSG_BUY_ITEM` auto-place is sufficient for v1, decision 0081).
+/// Buy into a **specific** bag slot. This is what a vendor row dropped out of the merchant
+/// cursor sends (`PickupMerchantItem` mode 5 → the container/doll drop), as against
+/// `CMSG_BUY_ITEM`'s auto-place, which is what clicking the row sends. Both ship (decision 1786).
 pub const CMSG_BUY_ITEM_IN_SLOT: u16 = 0x01A3; // 419
 pub const SMSG_BUY_ITEM: u16 = 0x01A4; // 420
 pub const SMSG_BUY_FAILED: u16 = 0x01A5; // 421

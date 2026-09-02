@@ -91,6 +91,37 @@ fn read(req: &str) -> Option<Vec<u8>> {
 /// Named as a list rather than folded into a `setup()` because the callers all want to add their
 /// own files around it (a merchant, the bank, the action bar art), and the ORDER is the thing
 /// being reused — it is `benilla.toc`'s, trimmed to what the bags actually reach for.
+/// What the **loot window** needs before `Interface\FrameXML\LootFrame.xml` will load and behave —
+/// the same shape as [`BAG_UI`], for the same reason, and it grew for 1751 exactly as that one did.
+///
+/// Three of these are load-bearing in a way that is invisible if you leave them out:
+///
+/// * **`GlobalStrings.lua`** — the stock file concatenates `GROUP` and `GIVE_LOOT` while building
+///   the master-loot menu. The app loads the player's own copy ahead of the whole manifest at VM
+///   setup; a bare `UiScript::new()` does not. Our deleted `LootFrame.xml` carried
+///   `X = X or "…"` fallbacks for precisely these; the stock file carries none.
+/// * **`ItemButtonTemplate.xml`** — stock `LootButtonTemplate` inherits it, and a missing template
+///   is a loader *warning*, not an error. Leave it out and every row loads clean with no art and
+///   no `$parentIconTexture`, which reads as a pass until an assertion looks for an icon.
+/// * **`PartyFrame.xml`** — for `MAX_PARTY_MEMBERS`, which stock `LootFrame.lua:217` does
+///   arithmetic on at LOAD time, not at click time. Its home is the reference's own
+///   (`PartyMemberFrame.lua:1`), and it wants the dropdown kit and `UnitPopup` ahead of it — the
+///   manifest's order (167 → 185 → 262), reproduced rather than short-circuited. Setting the
+///   constant by hand would pass and teach nothing about the real load.
+///
+/// Needs client data, like [`BAG_UI`]: open with `benilla_formats::wow_data_or_skip!()`.
+pub(super) const LOOT_UI: &[&str] = &[
+    "Interface\\FrameXML\\GlobalStrings.lua",
+    "Fonts.xml", // ITEM_QUALITY_COLORS — the row-name palette
+    "Interface\\FrameXML\\ItemButtonTemplate.xml",
+    "MoneyFrame.xml",
+    "UiPanels.xml", // StaticPopup, and the LOOT_BIND / CONFIRM_LOOT_DISTRIBUTION dialogs
+    "GameTooltip.xml", // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrop
+    "UIDropDownMenu.xml", // GroupLootDropDown's OnLoad calls UIDropDownMenu_Initialize
+    "UnitPopup.xml",
+    "PartyFrame.xml",
+];
+
 pub(super) const BAG_UI: &[&str] = &[
     // The reference's own localized strings — `BACKPACK_TOOLTIP`, `EQUIP_CONTAINER`, `KEYRING`,
     // the `*_FONT_COLOR_CODE` pair. The app loads this at VM setup, ahead of the manifest

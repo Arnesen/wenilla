@@ -1149,6 +1149,18 @@ pub(crate) enum ClientCommand {
         entry: u32,
         count: u8,
     },
+    /// Buy into a **named** container slot (`CMSG_BUY_ITEM_IN_SLOT`, decision 1786) — what a
+    /// vendor row dragged off the merchant window and dropped into a bag or an equipment slot
+    /// sends, as against [`ClientCommand::BuyItem`]'s auto-place from a plain row click.
+    /// `bag_guid` is the container object's guid, or the player's own for the backpack and the
+    /// equipment slots. Same refusal shape as `BuyItem` — `SMSG_BUY_FAILED`.
+    BuyItemInSlot {
+        vendor: u64,
+        entry: u32,
+        bag_guid: u64,
+        bag_slot: u8,
+        count: u8,
+    },
     /// Sell an item to a vendor (`CMSG_SELL_ITEM`, decision 0081 phase 4's sell affordance):
     /// `item_guid` is the concrete bag item, `count` 0 = the whole stack. Success is silent (the item
     /// vanishes + coinage rises via `UPDATE_OBJECT`); refusal answers `SMSG_SELL_ITEM`'s error shape

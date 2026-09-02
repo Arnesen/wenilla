@@ -171,8 +171,8 @@ pub use container::{
 };
 pub use craft::{CraftReagent, CraftRecipe, CraftState, CraftTooltip};
 pub use cursor::{
-    CursorAction, CursorItem, CursorMacro, CursorPayload, CursorPetAction, CursorSpell,
-    CursorStablePet, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
+    CursorAction, CursorItem, CursorMacro, CursorMerchantItem, CursorPayload, CursorPetAction,
+    CursorSpell, CursorStablePet, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
 };
 pub use cvars::{MultisampleFormat, CVAR_NAMEPLATE_ENEMIES, CVAR_NAMEPLATE_FRIENDS};
 pub use death::{DeathAction, DeathUiState};
@@ -1379,6 +1379,9 @@ impl UiScript {
                 crate::widget::FrameKind::Frame => "Frame",
                 crate::widget::FrameKind::Button => "Button",
                 crate::widget::FrameKind::CheckButton => "CheckButton",
+                // `GetObjectType 0x495b60` is two instructions and returns `"LootButton"`
+                // (`[0x847ce0]` → `0x843414`). It does NOT answer "Button".
+                crate::widget::FrameKind::LootButton => "LootButton",
                 crate::widget::FrameKind::EditBox => "EditBox",
                 crate::widget::FrameKind::StatusBar => "StatusBar",
                 crate::widget::FrameKind::Slider => "Slider",

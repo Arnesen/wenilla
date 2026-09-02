@@ -21,6 +21,35 @@ pub enum FrameKind {
     /// Plain `CSimpleFrame` — the base container.
     Frame,
     Button,
+    /// `CLootButton` (`Ui\\LootFrame.h:21`, factory `0x495a30`, size `0x4e0`) — a
+    /// **registered `CreateFrame` type**, one of the eight the client registers through
+    /// `0x495940` (pair `("LootButton" @0x843414, 0x495a30)` at site `0x4959a6`), and the reason
+    /// the stock `LootFrame.xml` cannot load against a plain `<Button>`.
+    ///
+    /// It is a `CSimpleButton` **plus one dword and one overridden virtual**, and that is the
+    /// whole class. The dword at `+0x4dc` is the 0-based loot slot; the virtual is primary slot 37
+    /// `OnClick 0x4c1820`. Everything else it overrides (slots 0, 2, 4, 6, 7 and the secondary
+    /// adjustor thunk) is compiler-mandated identity and lifetime plumbing. A binary-wide census
+    /// of `+0x4dc` finds exactly three sites in its code: the ctor's zero, `SetSlot`'s write, and
+    /// `OnClick`'s read.
+    ///
+    /// **What it does NOT have**, each proven by the vtable dwords being *identical* to
+    /// `CSimpleButton`'s: no C-side `OnEnter`/`OnLeave` (slots 19/20), so the hover tooltip is
+    /// purely the FrameXML `<OnEnter>`; no drag (29/30/31); no `OnLoad`/`OnShow`/`OnHide`/
+    /// `OnUpdate` (9/12/13/14). And no button-code test anywhere in its 79-byte click body — it
+    /// reads `[ebp+8]` once and immediately forwards it — so **right-click loots exactly like
+    /// left-click**, and with no `<OnDoubleClick>` a fast double-click takes two slots.
+    ///
+    /// The click, in order (`0x4c1820`): a scripted click returns immediately and does **nothing,
+    /// not even run the Lua `<OnClick>`** (`0x4c182b`); otherwise the base fires the Lua handler
+    /// unconditionally, and then — only with **no shift, ctrl or alt** held — the take runs. That
+    /// gate is what keeps the C take and `LootFrameItem_OnClick`'s ctrl/shift arms from firing
+    /// together, and it is why the shipped Lua handler deliberately never calls a take itself.
+    ///
+    /// Its whole Lua surface of its own is **one method, `SetSlot(index)`** (table `0x847ce4`,
+    /// count 1 read off the registrar's own `mov edx,1`) — 1-based in, 0-based stored, no returns.
+    /// `LootFrame.lua:94` is its only caller. Decision 1788; wow-re `e5338caf`.
+    LootButton,
     CheckButton,
     EditBox,
     StatusBar,
@@ -590,6 +619,13 @@ pub struct ButtonState {
     /// answers "NORMAL" here where the real engine's one state variable would say "PUSHED".
     /// Nothing in the transcribed FrameXML reads the state mid-mouse-press.
     pub pushed_state: bool,
+    /// [`FrameKind::LootButton`]'s own field — `CLootButton +0x4dc`, the **0-based** loot slot
+    /// this row takes when clicked. `None` until `SetSlot` writes it (the ctor's zero is a slot
+    /// id in the reference; ours is `None`, so a row that was never given one takes nothing
+    /// rather than silently taking slot 0). Unused on every other button kind, the same way
+    /// [`Self::checked`] below is unused on a plain Button — the client's subclasses add their one
+    /// field the same way, and our flat state mirrors that rather than growing a variant.
+    pub loot_slot: Option<u32>,
     /// CheckButton's checked flag (`+0x4dc`; XML `checked`). Unused on a plain Button.
     pub checked: bool,
     /// `<NormalTexture>`/`SetNormalTexture` (`+0x4bc`).
@@ -659,6 +695,7 @@ pub struct ButtonState {
 impl Default for ButtonState {
     fn default() -> Self {
         ButtonState {
+            loot_slot: None,
             enabled: true,
             pushed_state: false,
             checked: false,

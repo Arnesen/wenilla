@@ -28,10 +28,11 @@ use benilla_ui::script::{ItemStatsHead, MerchantItem, MerchantState, ScriptValue
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
-use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_items::item_link;
+use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
+use crate::ui_items::{item_link, slot_guid, wire_pos};
 use crate::ui_script::UiInput;
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
+use benilla_protocol::messages::BAG_PLAYER_INVENTORY;
 
 /// The wire's "unlimited stock" sentinel for a vendor row's `current_count` (vmangos
 /// `ItemHandler.cpp`); the Lua side sees it as `numAvailable == -1`.
@@ -528,14 +529,17 @@ fn drain_merchant(
     script: Option<NonSendMut<UiScript>>,
     mut open: ResMut<MerchantOpen>,
     commands: Res<NetCommands>,
-    self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
+    items: Res<Items>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let self_pair = self_q.iter().next();
+    let self_store = self_pair.map(|(store, _)| store);
     for index in script.take_merchant_buybacks() {
         let Some(vendor) = open.vendor else { continue };
-        let Some(store) = self_q.iter().next() else {
+        let Some(store) = self_store else {
             continue;
         };
         let order = buyback_order(&store.0);
@@ -575,6 +579,62 @@ fn drain_merchant(
                 });
             }
             None => debug!("ui_merchant: BuyMerchantItem({index}) out of range — ignored"),
+        }
+    }
+    // `PickupMerchantItem`'s SELL arm — a bag item dropped on the vendor window. Resolved the
+    // same way the bag-click sell route resolves it: the wire addresses the item by its concrete
+    // guid, not by a slot, so a slot that emptied under us is a no-op rather than a wrong sell.
+    //
+    // **No merchant-open gate**, deliberately: `0x4fb760`'s sell arm runs before the vendor check
+    // (`0x4fb7f7` gates only the grab). The vendor guid is still needed to address the packet, so
+    // in practice a closed window drops it — but the ORDER matters, because it is why dropping an
+    // item on a vendor window that is closing still sells.
+    for (bag, slot) in script.take_merchant_cursor_sells() {
+        let Some(vendor) = open.vendor else { continue };
+        let slot0 = u8::try_from(slot.saturating_sub(1)).unwrap_or(0);
+        match self_store.and_then(|s| slot_guid(&s.0, bag, slot0, &items)) {
+            Some(item_guid) => {
+                debug!("ui_merchant: cursor sell bag {bag} slot {slot} (item {item_guid:#x})");
+                let _ = commands.0.send(ClientCommand::SellItem {
+                    vendor,
+                    item_guid,
+                    count: 0,
+                });
+            }
+            None => debug!("ui_merchant: cursor sell on an empty slot ({bag}, {slot}) — ignored"),
+        }
+    }
+    // A held vendor row dropped into a slot — `CMSG_BUY_ITEM_IN_SLOT`, count 1 (the reference's
+    // own hardcoded stack count on all three drop paths).
+    for (bag, slot, entry) in script.take_merchant_slot_buys() {
+        let Some(vendor) = open.vendor else { continue };
+        let (Some(store), Some((bag_index, bag_slot))) = (self_store, wire_pos(bag, slot)) else {
+            debug!("ui_merchant: slot buy to an unaddressable slot ({bag}, {slot}) — ignored");
+            continue;
+        };
+        // The wire wants the destination CONTAINER'S GUID, not its slot index: the player's own
+        // for the backpack, the keyring, the bank and the equipment slots (all of which live in
+        // the player's array, `BAG_PLAYER_INVENTORY`), and the bag object's for a real bag.
+        let bag_guid = if bag_index == BAG_PLAYER_INVENTORY {
+            self_pair.map(|(_, g)| g.0)
+        } else {
+            store.0.player_inv_slot(bag_index).filter(|g| *g != 0)
+        };
+        match bag_guid {
+            Some(bag_guid) => {
+                debug!(
+                    "ui_merchant: slot buy entry {entry} → bag {bag_guid:#x} slot {bag_slot} \
+                     (lua {bag}, {slot})"
+                );
+                let _ = commands.0.send(ClientCommand::BuyItemInSlot {
+                    vendor,
+                    entry,
+                    bag_guid,
+                    bag_slot,
+                    count: 1,
+                });
+            }
+            None => debug!("ui_merchant: slot buy into an absent bag {bag} — ignored"),
         }
     }
     if script.take_merchant_close() {

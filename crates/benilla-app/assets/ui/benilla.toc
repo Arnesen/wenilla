@@ -132,7 +132,7 @@ Interface\FrameXML\ItemButtonTemplate.xml
 # used to sit 140 lines lower, beside the other shared widget kits, which was only ever tenable
 # while nothing above it showed coins. AuctionFrame far below is laid out on it as well (its price
 # columns need a money TYPE, which the other kit has no notion of); our other eight coin displays
-# still run on MerchantFrame.xml's BenillaMoney_* slot kit, and MoneyFrame.xml's header is where
+# still run on the BenillaMoney_* slot kit (which now lives HERE), and this file's header is where
 # the two are reconciled.
 MoneyFrame.xml
 # ══ THE MONEY INPUT KIT — the reference's own, off the player's chain (1751, window 23) ══
@@ -650,16 +650,26 @@ FriendsFrame.xml
 # same reason (its FrameXML.toc has RaidFrame.xml on the very next line). Decision 1549.
 RaidFrame.xml
 GossipFrame.xml
+# NOT YET on the chain, and the reason is worth keeping. `PickupMerchantItem` (1786) was the
+# last name the *gap report* wanted, the readiness probe then called the stock file CLEAN, and
+# both were right about what they measure and wrong about the window: the stock row's `<OnEnter>`
+# calls `ShoppingTooltip1:SetMerchantCompareItem(...)`, which we do not have. That is a METHOD,
+# and the gap report only reads bare `Name(` globals — see 1787, which fixes the instrument.
+# A hover would have raised in play with every check green. The swap waits on that one method.
+#
+# Its shared `BenillaMoney_*` coin kit HAS moved out, to MoneyFrame.xml where the reference keeps
+# money code and where eight windows can reach it without loading this one. That is why the notes
+# below now say "grouping" rather than "reuses that file's helpers".
 MerchantFrame.xml
 # The mail window (decision 0544 P1/P2): the mailbox inbox, open-letter, and send tab over
-# the Era mail API (`benilla-ui/src/script/mail.rs`) + `crate::ui_mail`'s feed/drain. Loaded
-# right after MerchantFrame because it REUSES that file's global BenillaMoney_Set/_Clear
-# coin helpers (postage/enclosed/COD displays) — they must be defined first.
+# the Era mail API (`benilla-ui/src/script/mail.rs`) + `crate::ui_mail`'s feed/drain. Kept
+# beside MerchantFrame in the NPC-window cluster; its postage/enclosed/COD coin displays use
+# the BenillaMoney_* kit, which is defined in MoneyFrame.xml far above.
 MailFrame.xml
 # The player-to-player trade window (decision 0592 P1): the two-sided offer over the trade
-# API (`benilla-ui/src/script/trade.rs`) + `crate::ui_trade`'s feed/drain. Loaded after
-# MerchantFrame because it REUSES that file's global BenillaMoney_Set coin helpers (the two
-# gold displays) — they must be defined first.
+# API (`benilla-ui/src/script/trade.rs`) + `crate::ui_trade`'s feed/drain. Kept beside
+# MerchantFrame in the NPC-window cluster; its two gold displays use the BenillaMoney_* kit,
+# defined in MoneyFrame.xml far above.
 TradeFrame.xml
 # ══ THE ITEM-TEXT READER — the reference's own, off the player's chain (1751, window 9) ══
 # `ItemTextFrame` and its page chrome, over the `ItemTextGet*` seam
@@ -726,7 +736,7 @@ PetStable.xml
 # (`benilla-ui/src/script/auction.rs`) + the app's feed/drain. Kept in the "NPC session
 # windows grouped" cluster beside Trainer/Bank/Taxi, and loaded AFTER MoneyFrame (its eight
 # money displays are SmallMoneyFrameTemplate, and it registers the AUCTION_DEPOSIT money type
-# into that file's MoneyTypeInfo), after MerchantFrame (it reuses that file's global
+# into that file's MoneyTypeInfo), after MerchantFrame (grouping only now — that file's global
 # BenillaMoneyInput_* helpers for its four money inputs), after ScrollTemplates (four faux lists), after
 # UIPanelTemplates (UIPanelButtonTemplate / UIPanelCloseButton / InputBoxTemplate /
 # UICheckButtonTemplate), after UIDropDownMenu (the rarity capsule) and after UiPanels (the
@@ -745,7 +755,16 @@ TradeSkillFrame.xml
 # TradeSkillFrame.xml defines) already exists when CraftFrame.xml reuses it without
 # redefining (CraftFrame.xml's own header comment, deviation 2).
 CraftFrame.xml
-LootFrame.xml
+# ══ THE LOOT WINDOW — the reference's own, off the player's chain (1751) ════════════════════
+# It never needed an engine VERB. It needed a widget TYPE: `<LootButton>` is a real registered
+# `CreateFrame` type (decision 1788), and registering it as a plain Button would have loaded the
+# file and left every row dead — 1.12 has no Lua verb for "take slot N".
+#
+# Its ONE method, `SetSlot`, is also what the gap report's new `method=` column found from the
+# call site while wow-re was deriving it from the vtable (1787). Both columns read 0 now, and
+# every verb the stock file calls at runtime — not just at load — was checked by hand against
+# the bindings before this line changed.
+Interface\FrameXML\LootFrame.xml
 # The group-loot roll popups (decision 0591): the Need/Greed/Pass dialogs, a sibling of
 # LootFrame.xml (loaded right after it) over the `benilla-ui::script::loot_roll` seam
 # (`crate::ui_loot_roll`'s feed/drain). NOT a UIPanel — four `frameStrata="DIALOG"` toplevel
@@ -753,7 +772,7 @@ LootFrame.xml
 # GameTooltip (the item/PASS/NEED/GREED hovers), both already loaded above.
 GroupLootFrame.xml
 # The questgiver window (decision 0088): four sub-panels over the Era quest API. Loaded after
-# MerchantFrame (the BenillaMoney coin helpers live there) and GossipFrame (shared parchment
+# MerchantFrame (grouping; the BenillaMoney coin helpers now live in MoneyFrame.xml) and GossipFrame (shared parchment
 # art conventions); its title/panel-button labels use the auto-centred ButtonText slot.
 QuestFrame.xml
 # The two guild-charter windows (decision 1672): the guild registrar — the window the "How do I
@@ -779,7 +798,7 @@ Interface\FrameXML\GuildRegistrarFrame.xml
 # GuildRegistrarFrame directly above.
 Interface\FrameXML\PetitionFrame.xml
 # The quest log window (decision 0088 arc, the quest-log slice): durable player state, not an
-# NPC session — loaded after MerchantFrame (the BenillaMoney coin helpers it reuses) and
+# NPC session — loaded after MerchantFrame (grouping; the coin helpers are in MoneyFrame.xml now) and
 # alongside QuestFrame (same arc); the 'L' binding (ui_script/input.rs) calls its
 # ToggleQuestLog().
 QuestLogFrame.xml

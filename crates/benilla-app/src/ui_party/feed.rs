@@ -98,6 +98,9 @@ pub(crate) const GROUP_MEMBER_SUBGROUP: u8 = 0x07;
 /// roster status byte overlays both (the descriptor never carries connected/AFK/DND).
 #[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 pub(super) fn feed_party(
+    // `ChrClasses.dbc` field 16 — `UnitHasRelicSlot`'s only input. Absent when the client data
+    // failed to load, in which case no class reads as having a relic slot.
+    classes: Option<Res<crate::chr_classes::ChrClassTable>>,
     script: Option<NonSendMut<UiScript>>,
     group: Res<GroupState>,
     index: Res<GuidIndex>,
@@ -123,6 +126,7 @@ pub(super) fn feed_party(
         return;
     };
     let (fed, vm_reset) = fed.get_reset(&script);
+    let chr = classes.as_deref().map(|t| &t.0);
     // The gate (1439): the group state, any member/self descriptor change or DESPAWN (a removed
     // store is invisible to `Changed`), the streamed-guid index the merged view resolves
     // through, the two catalogs, the name cache by its landed counter, and our own leaf area
@@ -292,6 +296,7 @@ pub(super) fn feed_party(
                 index.0.get(&m.guid).and_then(|e| stores.get(*e).ok()),
                 &group,
                 own_group.clone(),
+                chr,
             )
         });
         if fed.units[i] != snap {
@@ -351,7 +356,7 @@ pub(super) fn feed_party(
             if Some(*guid) == self_guid {
                 let (_, store) = self_pair?;
                 let name = names.peek(*guid).map(str::to_string);
-                let mut s = crate::ui_unit::snapshot(store, name, 0);
+                let mut s = crate::ui_unit::snapshot(store, name, 0, chr);
                 s.is_player = true;
                 s.guid = *guid;
                 s.raid_target = group.raid_target_index(*guid);
@@ -369,6 +374,7 @@ pub(super) fn feed_party(
                     index.0.get(guid).and_then(|e| stores.get(*e).ok()),
                     &group,
                     own_group.clone(),
+                    chr,
                 ))
             }
         });
@@ -720,10 +726,14 @@ fn member_unit_state(
     store: Option<&ObjectStore>,
     group: &GroupState,
     own_group: Option<String>,
+    // `ChrClasses.dbc`, for the relic column alone — see [`crate::ui_unit::snapshot`]. Only the
+    // in-range leg can use it; the out-of-range roster record carries no class byte to key on,
+    // so an out-of-range paladin reads no relic slot until their object streams back.
+    classes: Option<&benilla_formats::ChrClasses>,
 ) -> UnitState {
     let mut s = match store {
         // In visibility range: the live descriptor is the truth (the server keeps it current).
-        Some(store) => crate::ui_unit::snapshot(store, Some(m.name.clone()), 0),
+        Some(store) => crate::ui_unit::snapshot(store, Some(m.name.clone()), 0, classes),
         // Out of range: **the roster record** — which is not only the `PARTY_MEMBER_STATS` wire
         // any more (decision 1640). It is seeded from the member's own live descriptor at the
         // instant their object leaves the manager (`0x5f0880`, `net::apply::group::
@@ -1489,7 +1499,7 @@ mod tests {
             max_power: Some(1000),
             ..PartyMemberStatsInfo::default()
         };
-        let s = member_unit_state(&m, Some(&record), None, &GroupState::default(), None);
+        let s = member_unit_state(&m, Some(&record), None, &GroupState::default(), None, None);
         assert_eq!(
             (s.health, s.max_health),
             (2400, 3000),
@@ -1506,7 +1516,7 @@ mod tests {
         // And a member with no record at all still reads as an existing, connected player — the
         // seat law means this cannot happen for a real roster, but the mapping must not invent
         // numbers when it does.
-        let bare = member_unit_state(&m, None, None, &GroupState::default(), None);
+        let bare = member_unit_state(&m, None, None, &GroupState::default(), None, None);
         assert_eq!((bare.health, bare.max_health, bare.power), (0, 0, 0));
         assert!(bare.exists);
     }
@@ -1533,7 +1543,7 @@ mod tests {
             status: Some(member_status::ONLINE | member_status::DEAD),
             ..PartyMemberStatsInfo::default()
         };
-        let s = member_unit_state(&m, Some(&dead), None, &GroupState::default(), None);
+        let s = member_unit_state(&m, Some(&dead), None, &GroupState::default(), None, None);
         assert!(
             s.dead,
             "the record says dead even though the roster echo does not"
@@ -1544,7 +1554,7 @@ mod tests {
             status: Some(member_status::ONLINE | member_status::GHOST),
             ..PartyMemberStatsInfo::default()
         };
-        let s = member_unit_state(&m, Some(&ghost), None, &GroupState::default(), None);
+        let s = member_unit_state(&m, Some(&ghost), None, &GroupState::default(), None, None);
         assert!(s.ghost);
         assert!(!s.dead, "a released ghost is not `dead` — the 0308 §1 trio");
 
@@ -1559,6 +1569,7 @@ mod tests {
             Some(&PartyMemberStatsInfo::placeholder(true)),
             None,
             &GroupState::default(),
+            None,
             None,
         );
         assert!(s.dead);

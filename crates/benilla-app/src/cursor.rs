@@ -45,6 +45,10 @@ fn payload_icon(script: &benilla_ui::script::UiScript) -> Option<String> {
         // Mode 10 — the stabled pet's family icon (decision 1677). Always present: a non-empty
         // icon path is the grab's own gate.
         CursorPayload::StablePet(p) => Some(p.texture),
+        // Mode 5 — the vendor row's icon. The reference stores the row's `ItemDisplayInfo` id
+        // (`0xb4d8ec`) and resolves the art from it; we carry the resolved path, so this is the
+        // same picture one hop later.
+        CursorPayload::Merchant(m) => m.texture,
     }
 }
 

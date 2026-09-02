@@ -246,8 +246,8 @@ pub use update_object::{
     PLAYER_QUEST_LOG_SLOTS, PLAYER_SKILL_SLOTS, UNIT_AURA_POSITIVE_SLOTS, UNIT_AURA_SLOTS,
 };
 pub use vendor::{
-    buy_item, buy_result, buyback_item, list_inventory, repair_item, sell_item, sell_result,
-    VendorItem,
+    buy_item, buy_item_in_slot, buy_result, buyback_item, list_inventory, repair_item, sell_item,
+    sell_result, VendorItem,
 };
 pub use world_state::InitWorldStates;
 

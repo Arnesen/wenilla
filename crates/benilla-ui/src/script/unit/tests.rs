@@ -1291,3 +1291,56 @@ fn unit_is_party_leader_ors_two_legs_and_answers_one_when_solo() {
     // A bad token still raises through the shared resolver — shape C with a shape-A tail.
     assert!(s.run(r#"UnitIsPartyLeader("notatoken")"#).is_err());
 }
+
+/// `UnitHasRelicSlot` — the number 1 or nil, per token, never a boolean.
+///
+/// This shipped **absent** for months on the belief that the relic slot post-dates 1.12, which is
+/// false (decision 1785). Stock `PaperDollFrame.lua` calls it unconditionally at l.429 and l.580,
+/// so while it was missing the character sheet raised `attempt to call global` for every class —
+/// which is why the nil-global case is asserted here too, not just the answer.
+#[test]
+fn unit_has_relic_slot_answers_one_or_nil() {
+    let mut s = UiScript::new().unwrap();
+
+    let mut druid = player();
+    druid.class = Some("Druid".into());
+    druid.class_file = Some("DRUID".into());
+    druid.has_relic_slot = true;
+    s.set_unit("player", Some(druid));
+
+    let mut warrior = player();
+    warrior.has_relic_slot = false;
+    s.set_unit("target", Some(warrior));
+
+    // The truthy leg is the NUMBER 1 (`lua_pushnumber`, `0x519ec8`) — a caller comparing it to 1
+    // is stock idiom, and a boolean would silently fail that.
+    assert_eq!(
+        s.eval::<String>(r#"return tostring(UnitHasRelicSlot("player"))"#)
+            .unwrap(),
+        "1"
+    );
+    assert_eq!(
+        s.eval::<String>(r#"return type(UnitHasRelicSlot("player"))"#)
+            .unwrap(),
+        "number"
+    );
+    // The false leg is nil, never `false` (`lua_pushnil`, `0x519edb`).
+    assert_eq!(
+        s.eval::<String>(r#"return type(UnitHasRelicSlot("target"))"#)
+            .unwrap(),
+        "nil"
+    );
+    // No `"player"` fast path in the reference, so every token is answered the same way — the
+    // stock inspect path at `PaperDollFrame.lua:429` passes the inspected unit, not "player".
+    assert_eq!(
+        s.eval::<String>(r#"return type(UnitHasRelicSlot("party1"))"#)
+            .unwrap(),
+        "nil"
+    );
+    // And it EXISTS — the regression that actually bit. A nil global here takes the whole
+    // character sheet down for every class, not just the three that answer 1.
+    assert_eq!(
+        s.eval::<String>("return type(UnitHasRelicSlot)").unwrap(),
+        "function"
+    );
+}

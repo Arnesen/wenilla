@@ -41,9 +41,14 @@
 //! `OPEN_MASTER_LOOT_LIST` when a picked row's wire `slot_type` is `MASTER`, which is where the
 //! real client puts it too — its take dispatcher branches on the same byte before any Lua runs.
 
-use mlua::{Lua, MultiValue, Value};
+use mlua::{Lua, MultiValue, Table, Value};
 
 use super::Model;
+
+/// `CLootButton`'s own Lua method table (`0x847ce4`) — see [`crate::widget::FrameKind::LootButton`].
+/// Exactly one entry, and the count is read off the registrar's `mov edx,1` rather than off a run
+/// length, so it cannot drift.
+pub(super) const REG_LOOTBUTTON_METHODS: &str = "__benilla_lootbutton_methods";
 
 /// One loot-window row, resolved by the app (decision 0084). Plain data — its 1-based order in the
 /// window is its position in [`LootState::rows`]; the coin row (when present) is always position 1.
@@ -270,6 +275,42 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(model.loot.as_ref().is_some_and(|l| l.fishing))
         })?,
     )?;
+
+    // ── `LootButton`'s own method table — ONE entry, and this is it ─────────────────────────────
+    //
+    // `SetSlot(index)` (`0x4c1880`, table `0x847ce4`, the registrar's own `mov edx,1` says count
+    // 1). 1-based in, **0-based stored** (`ftol` then `dec eax` into `[this+0x4dc]`), and it
+    // pushes nothing. `LootFrame.lua:94`'s `button:SetSlot(slot)` is its only caller in the
+    // shipped UI — the row's `id="N"` does NOT feed it.
+    //
+    // A non-number raises the client's own usage string. That is worth transcribing exactly: it
+    // is the one place this class talks to a caller, and `LootFrame.lua` would surface a typo'd
+    // call as this text.
+    {
+        let m = lua.create_table()?;
+        m.set(
+            "SetSlot",
+            lua.create_function(|lua, (this, index): (Table, Value)| {
+                let n = match &index {
+                    Value::Integer(i) => *i as f64,
+                    Value::Number(n) => *n,
+                    // `lua_isnumber` accepts a numeric string, as everywhere else in this image.
+                    Value::String(s) => match s.to_str().ok().and_then(|s| s.parse::<f64>().ok()) {
+                        Some(n) => n,
+                        None => return Err(mlua::Error::runtime("Usage: SetSlot(index)")),
+                    },
+                    _ => return Err(mlua::Error::runtime("Usage: SetSlot(index)")),
+                };
+                // `ftol` truncates toward zero, then `dec`. A slot below 1 leaves the row taking
+                // nothing rather than wrapping — the reference stores the decrement raw, but its
+                // consumer is a bounds-checked table walk and ours is an Option.
+                let slot = (n.trunc() >= 1.0).then(|| n.trunc() as u32 - 1);
+                super::button::set_loot_slot(lua, &this, slot)?;
+                Ok(())
+            })?,
+        )?;
+        lua.set_named_registry_value(REG_LOOTBUTTON_METHODS, m)?;
+    }
 
     // BenillaTakeLootSlot(slot) — the ROW CLICK's take, queued as a 1-based display row; the app
     // maps it to the coin or the item's wire slot and applies the bind-on-pickup gate.
@@ -623,5 +664,203 @@ mod tests {
         s.set_loot(None);
         assert_eq!(s.eval::<i64>("return GetNumLootItems()").unwrap(), 0);
         assert!(s.eval::<bool>("return GetLootSlotInfo(1) == nil").unwrap());
+    }
+
+    /// A real HARDWARE click on a named frame — through the pointer path, so `scripted` is false
+    /// and the LootButton gate sees what it would see in play. Positions the frame first: the
+    /// input path is a hit test, and an unpositioned frame is nowhere.
+    fn hardware_click(s: &mut UiScript, name: &str, button: &str) {
+        s.set_screen_size(1024.0, 768.0);
+        s.run(&format!(
+            "{name}:ClearAllPoints() {name}:SetPoint(\"BOTTOMLEFT\", 100, 100) \
+             {name}:SetWidth(50) {name}:SetHeight(50) {name}:EnableMouse(true) {name}:Show()"
+        ))
+        .unwrap();
+        s.resolve();
+        s.mouse_button(125.0, 125.0, button, true);
+        s.mouse_button(125.0, 125.0, button, false);
+    }
+
+    /// `LootButton` is a real `CreateFrame` type with its own identity — not an alias for Button.
+    #[test]
+    fn loot_button_is_its_own_registered_type() {
+        let s = UiScript::new().unwrap();
+        s.run(r#"lb = CreateFrame("LootButton", "LB1", UIParent)"#)
+            .unwrap();
+        assert_eq!(
+            s.eval::<String>("return lb:GetObjectType()").unwrap(),
+            "LootButton",
+            "0x495b60 returns its own name, not \"Button\""
+        );
+        // `0x495af0` prepends its name to the base's three.
+        for t in ["LootButton", "Button", "Frame", "Region"] {
+            assert!(
+                s.eval::<bool>(&format!("return lb:IsObjectType({t:?}) and true or false"))
+                    .unwrap(),
+                "IsObjectType({t:?})"
+            );
+        }
+        assert!(!s
+            .eval::<bool>(r#"return lb:IsObjectType("CheckButton") and true or false"#)
+            .unwrap());
+        // Its one method of its own, plus all of Button's through the chain.
+        assert_eq!(
+            s.eval::<String>("return type(lb.SetSlot)").unwrap(),
+            "function"
+        );
+        assert_eq!(
+            s.eval::<String>("return type(lb.SetText)").unwrap(),
+            "function"
+        );
+        // …and the method is NOT on a plain Button — the chain runs derived → base only.
+        s.run(r#"b = CreateFrame("Button", "PlainB", UIParent)"#)
+            .unwrap();
+        assert_eq!(s.eval::<String>("return type(b.SetSlot)").unwrap(), "nil");
+    }
+
+    /// An unmodified hardware click takes the row's slot. The Lua `OnClick` runs first and
+    /// unconditionally, and its outcome does not gate the take.
+    #[test]
+    fn an_unmodified_click_runs_the_handler_and_then_takes() {
+        let mut s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            lb = CreateFrame("LootButton", "LB1", UIParent)
+            lb:SetSlot(3)
+            ran = 0
+            lb:SetScript("OnClick", function() ran = ran + 1 end)
+        "#,
+        )
+        .unwrap();
+        hardware_click(&mut s, "LB1", "LeftButton");
+        assert_eq!(s.eval::<i64>("return ran").unwrap(), 1, "the handler ran");
+        assert_eq!(s.take_loot_picks(), vec![3], "and then the take, 1-based");
+
+        // The handler erroring does not eat the loot — `0x4c1833`'s result is never tested.
+        s.run(r#"lb:SetScript("OnClick", function() error("boom") end)"#)
+            .unwrap();
+        hardware_click(&mut s, "LB1", "LeftButton");
+        assert_eq!(s.take_loot_picks(), vec![3], "a broken hook still loots");
+    }
+
+    /// Right-click loots exactly like left-click: `0x4c1820` reads the button code once and
+    /// forwards it, with no `cmp` against it anywhere in the body.
+    #[test]
+    fn right_click_loots_like_left_click() {
+        let mut s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            lb = CreateFrame("LootButton", "LB1", UIParent)
+            lb:SetSlot(2)
+            lb:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        "#,
+        )
+        .unwrap();
+        hardware_click(&mut s, "LB1", "RightButton");
+        assert_eq!(s.take_loot_picks(), vec![2]);
+    }
+
+    /// Any of the three modifiers suppresses the take — and only the take. The handler still runs,
+    /// which is exactly how the shipped `LootFrameItem_OnClick` gets to own the ctrl and shift
+    /// cases without the C take firing underneath it.
+    #[test]
+    fn any_modifier_suppresses_the_take_but_not_the_handler() {
+        for (i, (shift, ctrl, alt)) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut s = UiScript::new().unwrap();
+            s.run(
+                r#"
+                lb = CreateFrame("LootButton", "LB1", UIParent)
+                lb:SetSlot(1)
+                ran = 0
+                lb:SetScript("OnClick", function() ran = ran + 1 end)
+            "#,
+            )
+            .unwrap();
+            s.set_modifiers(shift, ctrl, alt);
+            hardware_click(&mut s, "LB1", "LeftButton");
+            assert_eq!(
+                s.eval::<i64>("return ran").unwrap(),
+                1,
+                "case {i}: handler ran"
+            );
+            assert!(s.take_loot_picks().is_empty(), "case {i}: no take");
+        }
+    }
+
+    /// **A scripted `:Click()` is a complete no-op** — it does not even run the row's `OnClick`.
+    /// `0x4c182b` returns before the base call. Surprising enough that it is asserted rather than
+    /// left to be rediscovered.
+    #[test]
+    fn a_scripted_click_does_nothing_at_all() {
+        let mut s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            lb = CreateFrame("LootButton", "LB1", UIParent)
+            lb:SetSlot(1)
+            ran = 0
+            lb:SetScript("OnClick", function() ran = ran + 1 end)
+            lb:Click()
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.eval::<i64>("return ran").unwrap(),
+            0,
+            "the handler never ran"
+        );
+        assert!(s.take_loot_picks().is_empty(), "and nothing was taken");
+        // A plain Button's Click() is unaffected — the gate is this type's alone.
+        s.run(
+            r#"
+            b = CreateFrame("Button", "PlainB", UIParent)
+            bran = 0
+            b:SetScript("OnClick", function() bran = bran + 1 end)
+            b:Click()
+        "#,
+        )
+        .unwrap();
+        assert_eq!(s.eval::<i64>("return bran").unwrap(), 1);
+    }
+
+    /// `SetSlot` is 1-based in and 0-based stored, takes a numeric string, and refuses `this` that
+    /// is not a LootButton (the reference's own `IsA` guard at `0x4c18ee`).
+    #[test]
+    fn set_slot_converts_and_guards() {
+        let mut s = UiScript::new().unwrap();
+        s.run(r#"lb = CreateFrame("LootButton", "LB1", UIParent)"#)
+            .unwrap();
+
+        // `ftol` truncates toward zero: 4.9 is row 4, not 5.
+        s.run("lb:SetSlot(4.9)").unwrap();
+        hardware_click(&mut s, "LB1", "LeftButton");
+        assert_eq!(s.take_loot_picks(), vec![4]);
+
+        // A numeric string is a number to `lua_isnumber`.
+        s.run(r#"lb:SetSlot("2")"#).unwrap();
+        hardware_click(&mut s, "LB1", "LeftButton");
+        assert_eq!(s.take_loot_picks(), vec![2]);
+
+        // A non-number raises the client's own usage text.
+        let e = s.run("lb:SetSlot('x')").unwrap_err().to_string();
+        assert!(e.contains("Usage: SetSlot(index)"), "{e}");
+
+        // Never slotted → takes nothing, rather than silently taking row 1.
+        s.run(r#"fresh = CreateFrame("LootButton", "LB2", UIParent)"#)
+            .unwrap();
+        hardware_click(&mut s, "LB2", "LeftButton");
+        assert!(s.take_loot_picks().is_empty());
+
+        // And it is a LootButton method, not a Button one.
+        s.run(r#"b = CreateFrame("Button", "PlainB", UIParent)"#)
+            .unwrap();
+        let e = s.run("LB1.SetSlot(b, 1)").unwrap_err().to_string();
+        assert!(e.contains("not a LootButton"), "{e}");
     }
 }

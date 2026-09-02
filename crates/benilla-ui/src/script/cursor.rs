@@ -55,6 +55,13 @@ pub enum CursorPayload {
     Action(CursorAction),
     Macro(CursorMacro),
     PetAction(CursorPetAction),
+    /// A vendor row grabbed off the merchant window — **mode 5** (see [`CursorMerchantItem`]).
+    ///
+    /// Deliberately NOT `Item`: the reference's `CursorHasItem 0x4895d0` answers truthy for modes
+    /// **1 and 9 only**, so all thirteen stock `CursorHasItem()` gates (TradeFrame, MailFrame,
+    /// PlayerFrame, TargetFrame, PetFrame, StaticPopup, the keyring…) exclude a vendor cursor.
+    /// Making this an `Item` variant would silently open every one of them.
+    Merchant(CursorMerchantItem),
     /// A pet picked up from the stable window — **mode 10** (see [`CursorStablePet`]).
     ///
     /// Mode 10 was recorded as "class/talent ability (DBC)" until wow-re's stable-master carve
@@ -64,6 +71,31 @@ pub enum CursorPayload {
     /// this variant is what puts it back on the shared cursor, so a stable pet dropped on the world
     /// or another window clears through the same path as every other payload.
     StablePet(CursorStablePet),
+}
+
+/// A vendor row held on the cursor — payload **mode 5**, set by `PickupMerchantItem 0x4fb760`.
+///
+/// **A buy-on-drop cursor, not an item cursor.** The reference writes three globals and this
+/// mirrors all three: the item entry (`0xb4b41c`), the display id that drives the icon
+/// (`0xb4d8ec` — we carry the resolved texture path, which is the same thing one hop later), and
+/// the **0-based** vendor row (`0xb4b420`). Dropping it on a bag slot sends
+/// `CMSG_BUY_ITEM_IN_SLOT 0x1a3`; dropping it on the world, pressing ESC, or the vendor window
+/// closing is a plain clear with **no packet**.
+///
+/// No Lua predicate reports it. `CursorHasItem`, `CursorHasSpell`, `CursorHasMoney` and
+/// `CursorCanGoInSlot` are all nil for mode 5 — no registered binding exposes it at all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CursorMerchantItem {
+    /// The row's item template entry — `0xb4b41c`, and what the buy addresses.
+    pub item_id: u32,
+    /// The vendor row this came from, **0-based** (`0xb4b420` = `trunc(arg) - 1`). Kept because
+    /// the reference keeps it: a second `PickupMerchantItem` naming the same row is a toggle-off,
+    /// which is the only thing that reads it back.
+    pub row: u32,
+    /// The icon drawn at the mouse. The reference stores `ItemDisplayInfo`'s id (`0xb4d8ec`) and
+    /// resolves the art from it; we hold the already-resolved path, which is the same value one
+    /// hop later and the shape every other payload here uses.
+    pub texture: Option<String>,
 }
 
 /// A pet held on the cursor from the stable window — payload **mode 10** (`0x495020`, the grab
@@ -299,7 +331,11 @@ pub(crate) fn clear_cursor(model: &mut Model) {
             | CursorPayload::Action(_)
             | CursorPayload::Macro(_)
             | CursorPayload::PetAction(_)
-            | CursorPayload::StablePet(_),
+            | CursorPayload::StablePet(_)
+            // Mode 5 clears like every other non-item payload, and clearing it sends NO packet —
+            // a vendor cursor abandoned on the world, on ESC, or by the window closing costs
+            // nothing. `ClearCursor`'s own mode-5 arm is `0x49525f`.
+            | CursorPayload::Merchant(_),
         ) => {
             queue_cursor_update(model);
         }
@@ -593,6 +629,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 // reference's `GetCursorInfo` arms are not carved for it, the stable window never
                 // asks, and inventing a type string would put a guess where an addon could read it.
                 Some(CursorPayload::StablePet(_)) => {
+                    Ok((Value::Nil, Value::Nil, Value::Nil, Value::Nil))
+                }
+                // Mode 5 — the vendor grab. Reported as nothing, for the same reason and with a
+                // stronger warrant: **no registered binding in the 5875 image exposes mode 5 to
+                // Lua at all.** `CursorHasItem`, `CursorHasSpell`, `CursorHasMoney` and
+                // `CursorCanGoInSlot` are each nil for it, by census. A vendor cursor is invisible
+                // from Lua and that invisibility is load-bearing — it is what keeps all thirteen
+                // stock `CursorHasItem()` gates closed while one is held.
+                Some(CursorPayload::Merchant(_)) => {
                     Ok((Value::Nil, Value::Nil, Value::Nil, Value::Nil))
                 }
                 None => Ok((Value::Nil, Value::Nil, Value::Nil, Value::Nil)),

@@ -163,6 +163,18 @@ pub struct UnitState {
     /// the ref's stat-tooltip lookups key on (`getglobal(strupper(class).."_STAT_TOOLTIP")` —
     /// the ref uppercases it again defensively; we store it already uppercase).
     pub class_file: Option<String>,
+    /// This unit's INVSLOT 17 is a **relic** slot rather than a ranged-weapon slot —
+    /// `UnitHasRelicSlot`'s whole answer (`0x519e50`).
+    ///
+    /// Resolved app-side off `ChrClasses.dbc` field 16, for the same reason [`Self::class_file`]
+    /// is resolved app-side: it is a static per-class column of a table this crate cannot read.
+    /// The reference gates on TYPEMASK_PLAYER before it looks at the class byte, so the feed sets
+    /// this only for a player — a creature, a pet and an unstreamed unit all leave it `false`,
+    /// which is the nil leg.
+    ///
+    /// True for exactly Paladin, Shaman and Druid in 1.12 (Libram, Totem, Idol). It was believed
+    /// here for a long time that no 1.12 class had one; see decision 1785 for how that survived.
+    pub has_relic_slot: bool,
     /// The unit's sex on the `UnitSex` scale: `2` male, `3` female (`1` = neuter/unknown). `0`
     /// (the unfilled default) reports as nil — the API's "can't tell", like [`Self::reaction`].
     /// The app maps `UNIT_FIELD_BYTES_0` byte 2 (0 male / 1 female) onto this shape.

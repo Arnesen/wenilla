@@ -928,12 +928,20 @@ pub(super) const INVTYPE_AMMO: u32 = 24;
 ///   actual equip still round-trips through `SMSG_INVENTORY_CHANGE_FAILURE`
 ///   (`EQUIP_ERR_CANT_DUAL_WIELD`) if the class can't. Simpler than threading class into every
 ///   caller for a highlight-only consequence.
-/// - **`INVTYPE_RELIC` answers no slots** (the server's own table gates it per-class onto the
-///   ranged slot for Paladin/Druid/Shaman/Warlock librams/idols/totems): decision 0208 already
-///   established the relic slot is vanilla-UI-invisible (`UnitHasRelicSlot` always false, no
-///   relic slot ever shows on the 1.12 paper doll), so resolving this precisely drives no visible
-///   interaction — a named, harmless gap rather than threading class through for a slot nothing
-///   ever shows.
+/// - **`INVTYPE_RELIC` answers no slots, and this one is a real gap** (decision 1785). It used to
+///   be excused on the grounds that the relic slot is vanilla-UI-invisible — that
+///   `UnitHasRelicSlot` is always false and no relic slot ever shows on the 1.12 paper doll.
+///   **That is false.** `ChrClasses.dbc` field 16 is set for Paladin, Shaman and Druid, and
+///   `IsValidForSlot 0x5da1d0`'s `slot == 0x11` leg requires `(InventoryType == 28) ==
+///   hasRelicSlot` — so for those three classes INVSLOT 17 takes a relic and refuses a ranged
+///   weapon, and for the other six the reverse.
+///
+///   What remains true is the *consequence*: this function drives the `CURSOR_UPDATE` highlight
+///   only, and the equip still round-trips through `SMSG_INVENTORY_CHANGE_FAILURE`. So the gap
+///   costs a relic-class player the highlight on their ranged slot when dragging a libram, and
+///   over-offers it when dragging a bow. Closing it needs the class threaded through
+///   [`crate::ui_char::slot_view`], which is the same threading the dual-wield bullet above
+///   declines — one change would close both.
 pub(super) fn find_equip_slot(inventory_type: u32) -> Vec<u8> {
     // Live-API ids (`char_stats::SLOT_INFO`'s own numbering): wire `EQUIPMENT_SLOT_*` + 1. The
     // ammo slot is the client's own `GetInventorySlotInfo("AmmoSlot")` == 0 (not a real equip slot;

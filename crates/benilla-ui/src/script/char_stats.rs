@@ -1108,9 +1108,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // GetInventorySlotInfo(slotName) → (slotId, textureName, checkRelic) — the client's own
-    // PaperDollItemFrame.dbc rows (SLOT_INFO above). checkRelic is always false in vanilla
-    // (UnitHasRelicSlot is a later-era concept; the 0208 deferral). An unknown name is a Lua
-    // error, the client's own behavior.
+    // PaperDollItemFrame.dbc rows (SLOT_INFO above). An unknown name is a Lua error, the client's
+    // own behavior.
+    //
+    // `checkRelic` is the number 1 for the ranged slot and nil elsewhere, unconditionally — it is
+    // a property of the SLOT, not of the player. It pairs with `UnitHasRelicSlot("player")`,
+    // which is the class half, and stock reads the two as a conjunction
+    // (`PaperDollFrame.lua:680`/`:744`). This comment used to say `UnitHasRelicSlot` is a
+    // later-era concept, always false in vanilla; it is not — decision 1785.
     g.set(
         "GetInventorySlotInfo",
         lua.create_function(|lua, name: String| {

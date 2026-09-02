@@ -76,10 +76,15 @@
             forced-show path). A real forced-highlight affordance is a `benilla-ui` follow-up, not
             blocking this slice — `BenillaPaperDollSlot_LockHighlight`/`_UnlockHighlight` below
             tint the slot's Quickslot2 ring instead, flagged at their own definition.
-          - The relic slot: `UnitHasRelicSlot` is vanilla-always-false (there is no relic slot in
-            1.12), so the ref's `CharacterAmmoSlot:Hide()`/relic-texture branches are DEAD CODE even
-            in the real client — omitted outright rather than transcribing unreachable branches; the
-            ammo slot always shows.
+          - The relic slot: **restored, and this note used to be wrong** (decision 1785). It read
+            "`UnitHasRelicSlot` is vanilla-always-false (there is no relic slot in 1.12), so the
+            ref's branches are DEAD CODE" — they are not. `ChrClasses.dbc` field 16 is set for
+            Paladin, Shaman and Druid, and INVSLOT 17 doubles as their relic slot. All four of the
+            ref's relic branches are live for three of nine classes and are transcribed here: the
+            ammo slot hides (ref l.580), ranged Attack/Damage/Attack Power force `NOT_APPLICABLE`
+            through `PaperDollFrame.noRanged` (l.437/449/482/552), the empty ranged-slot art
+            becomes `UI-PaperDoll-Slot-Relic.blp` (l.680), and its empty-slot tooltip reads
+            "Relic" (l.744).
           - Class-specific stat-tooltip flavor text (`WARRIOR_STRENGTH_TOOLTIP` and its ~20 siblings):
             only the 5 `DEFAULT_*_TOOLTIP` fallbacks ship. `PaperDollStatTooltip` still looks
             the class-specific global up FIRST exactly like the ref, so dropping in the per-class
@@ -232,6 +237,7 @@
         SECONDARYHANDSLOT = SECONDARYHANDSLOT or "Off Hand"            -- :3400
         RANGEDSLOT = RANGEDSLOT or "Ranged"                            -- :3291
         AMMOSLOT = AMMOSLOT or "Ammo"                                  -- :53
+        RELICSLOT = RELICSLOT or "Relic"                               -- :3312
 
         -- The font color codes/tables live in our Fonts.xml (the ref's own home for them, l.8-19 —
         -- verified this session), loaded before every window.
@@ -519,11 +525,16 @@
         end
 
         -- ref PaperDollFrame_OnShow (l.568-585): SetGuild OMITTED (named deferral, this file's
-        -- header). The relic Hide/Show branch is DROPPED outright — UnitHasRelicSlot is
-        -- vanilla-always-false, so CharacterAmmoSlot simply never has a reason to hide; it ships
-        -- with no hidden="true" at all (see its own Button below).
+        -- header). The relic branch (l.580-584) is transcribed verbatim — a relic class has no
+        -- ranged weapon and therefore no ammo, so its ammo slot hides. This used to be dropped on
+        -- the belief that UnitHasRelicSlot is always false; decision 1785.
         function PaperDollFrame_OnShow()
             paintRows(paperDollRows)
+            if UnitHasRelicSlot("player") then
+                CharacterAmmoSlot:Hide()
+            else
+                CharacterAmmoSlot:Show()
+            end
         end
         -- ref PaperDollFrame_OnHide (l.587-592) is entirely commented-out in the ref itself (the
         -- ShoppingTooltip/compare-tooltip lines, OMIT) — nothing to transcribe, no OnHide wired.
@@ -811,8 +822,12 @@
                 getglobal(prefix .. "AttackFrameStatText"), mainHandAttackBase, mainHandAttackMod)
         end
 
-        -- ref PaperDollFrame_SetRangedAttack (l.419-466). `hasRelic`/UnitHasRelicSlot DROPPED
-        -- outright (this file's header comment: vanilla-always-false, dead code in the ref itself).
+        -- ref PaperDollFrame_SetRangedAttack (l.419-466). `hasRelic` is transcribed (it used to
+        -- be dropped — decision 1785). It is the whole reason a paladin's ranged block reads
+        -- "n/a" rather than the stats of the libram sitting in that slot: `noRanged` is set when
+        -- there is no ranged texture OR the class has a relic slot, and `SetRangedDamage` /
+        -- `SetRangedAttackPower` both read it (ref l.482 / l.552), so one flag blanks all three
+        -- rows.
         -- The literal slot id 18 is the ref's OWN hardcoded value (l.435) — quoted verbatim; what
         -- GetInventoryItemTexture resolves id 18 to is the parallel binding's call, not re-derived
         -- here.
@@ -823,10 +838,11 @@
             local frame = getglobal(prefix .. "RangedAttackFrame")
             local text = getglobal(prefix .. "RangedAttackFrameStatText")
             local paperDoll = getglobal("PaperDollFrame")
+            local hasRelic = UnitHasRelicSlot(unit)
             local rangedAttackBase, rangedAttackMod = UnitRangedAttack(unit)
             local rangedTexture = GetInventoryItemTexture("player", 18)
             local oldValue = paperDoll.noRanged
-            if rangedTexture then
+            if rangedTexture and not hasRelic then
                 paperDoll.noRanged = nil
             else
                 text:SetText(NOT_APPLICABLE)
@@ -837,7 +853,7 @@
                 PaperDollFrame_SetRangedAttackPower()
                 PaperDollFrame_SetRangedDamage()
             end
-            if not rangedTexture then return end
+            if not rangedTexture or hasRelic then return end
             setAttackRating(frame, text, rangedAttackBase, rangedAttackMod)
         end
 
@@ -1002,7 +1018,10 @@
             button.invSlotId = id
             button.slotName = slotName
             button.emptyTexture = texture
-            button.checkRelic = checkRelic -- UnitHasRelicSlot is vanilla-always-false (header OMIT): never read
+            -- `checkRelic` is the number 1 for the ranged slot alone (a property of the SLOT); the
+            -- class half is `UnitHasRelicSlot`, and the ref reads the two as a conjunction. Both
+            -- halves are live — decision 1785.
+            button.checkRelic = checkRelic
             button.icon = getglobal(button:GetName() .. "IconTexture")
             button.count = getglobal(button:GetName() .. "Count")
             -- Equip interactions on the 19 named slots use the equip-swap wire (PickupInventoryItem
@@ -1084,7 +1103,14 @@
                     button.count:SetText("")
                 end
             else
-                button.icon:SetTexture(button.emptyTexture)
+                -- ref l.678-681: the empty ranged slot of a relic class shows the relic plate,
+                -- not the bow plate. The art ships (`UI-PaperDoll-Slot-Relic.blp`, 3916 bytes,
+                -- patch.MPQ). Restored — decision 1785.
+                local emptyTexture = button.emptyTexture
+                if button.checkRelic and UnitHasRelicSlot("player") then
+                    emptyTexture = "Interface\\Paperdoll\\UI-PaperDoll-Slot-Relic.blp"
+                end
+                button.icon:SetTexture(emptyTexture)
                 button.count:SetText("")
             end
             -- A BROKEN item (durability 0) tints icon + slot ring red — ref
@@ -1118,14 +1144,20 @@
         -- arm (a worn item compared with itself is no comparison; director-caught: shift over
         -- the doll popped a "Currently Equipped" 0/XX beside a template-full main tooltip).
         -- The ref's repair-mode branch (l.757-762) is INTERIM-omitted with the binding's
-        -- repairCost. checkRelic (l.744-746) is TBC-flagged dead weight in 1.12 — omitted.
+        -- repairCost. checkRelic (l.744-746) is transcribed — it was called TBC-flagged dead
+        -- weight here, which was wrong (decision 1785): a paladin hovering their empty ranged
+        -- slot reads "Relic", not "Ranged".
         function BenillaPaperDollSlot_OnEnter(button)
             GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
             local hasItem = GameTooltip:SetInventoryItem("player", button.invSlotId)
             if not hasItem then
                 -- Empty slot: the slot-name tooltip (ref strupper(strsub(name,10)) -> the matching
                 -- GlobalStrings key, e.g. "HeadSlot" -> HEADSLOT -> "Head").
-                GameTooltip:SetText(getglobal(strupper(button.slotName)) or button.slotName)
+                local text = getglobal(strupper(button.slotName)) or button.slotName
+                if button.checkRelic and UnitHasRelicSlot("player") then
+                    text = RELICSLOT
+                end
+                GameTooltip:SetText(text)
             end
             GameTooltip:Show()
         end

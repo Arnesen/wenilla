@@ -977,10 +977,11 @@ fn reward_row_hover_serves_the_shared_item_tooltip() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
-    // LootFrame.xml is here for BENILLA_LOOT_QUALITY_COLORS (the quality→colour table); it
+    // This used to load LootFrame.xml for `BENILLA_LOOT_QUALITY_COLORS`, an alias our own copy of
+    // that window set to `ITEM_QUALITY_COLORS`. 1751 retired the window and the alias with it, so
+    // Fonts.xml alone is the source now. Formerly: it
     // needs the dropdown kit its GroupLootDropDown initializes against (benilla.toc l.64 vs 383).
     load_xml(&s, "UIDropDownMenu.xml");
-    load_xml(&s, "LootFrame.xml");
     load_xml(&s, "MerchantFrame.xml");
     // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
     // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —

@@ -142,6 +142,29 @@ fn with_button<T>(
     }
 }
 
+/// Write [`ButtonState::loot_slot`] — `LootButton:SetSlot`'s whole body, kept here beside the
+/// other `ButtonState` writers rather than reaching into the arena from `script::loot`.
+pub(super) fn set_loot_slot(lua: &Lua, this: &Table, slot: Option<u32>) -> mlua::Result<()> {
+    let h = frame_handle_of(lua, this)?;
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let frame = model
+        .arena
+        .frame_mut(h)
+        .ok_or_else(|| mlua::Error::runtime("stale frame handle"))?;
+    match (&frame.kind, &mut frame.kind_state) {
+        (crate::widget::FrameKind::LootButton, KindState::Button(bs)) => {
+            bs.loot_slot = slot;
+            Ok(())
+        }
+        // The reference's own guard: `SetSlot` type-checks `this` against the LootButton tag via
+        // vtable slot 4 (`0x4c18ee`), so calling it on a plain Button raises rather than writing a
+        // field nothing would ever read.
+        _ => Err(mlua::Error::runtime(
+            "SetSlot: 'this' is not a LootButton widget",
+        )),
+    }
+}
+
 /// Get-or-create the region behind `slot`; returns its id.
 fn ensure_slot(lua: &Lua, this: &Table, slot: Slot) -> mlua::Result<u32> {
     let h = frame_handle_of(lua, this)?;
@@ -754,7 +777,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             };
             let btn = button.unwrap_or_else(|| "LeftButton".to_string());
             // A programmatic Click() always emulates a completed (released) click.
-            click_button(lua, id, &btn, false);
+            // A programmatic Click() — `scripted = true`, which only a LootButton reads.
+            click_button(lua, id, &btn, false, true);
             Ok(())
         })?,
     )?;
@@ -866,12 +890,42 @@ pub(super) fn press_held(model: &Model, h: FrameHandle) -> bool {
 /// `self:GetChecked()` sees the new state); then `OnClick(self, button, down)` — `down` is `true`
 /// only for a press that fired via a `"<Button>ButtonDown"` registration, `false` for every
 /// release-fired or programmatic click (the Era signature: `down` mirrors which transition fired).
-pub(super) fn click_button(lua: &Lua, id: u32, button: &str, down: bool) {
+///
+/// `scripted` says the click came from Lua `:Click()` rather than from hardware — the reference's
+/// second `OnClick` argument (`0` from `0x779280`/`0x7793a4`, `1` from the `Button:Click` binding
+/// `0x7826c0`). Only [`crate::widget::FrameKind::LootButton`] reads it, and it reads it as a hard
+/// gate: `0x4c182b` returns before the base call, so **a scripted click on a loot row does
+/// nothing at all — not even run the row's own Lua `OnClick`**. Every other kind ignores it, which
+/// is the reference's shape too (the base `0x779540` never looks at the flag).
+pub(super) fn click_button(lua: &Lua, id: u32, button: &str, down: bool, scripted: bool) {
+    let mut take_loot = None;
     let fire = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
         let Some(&h) = model.id_to_frame.get(&id) else {
             return;
         };
+        let is_loot = model
+            .arena
+            .frame(h)
+            .is_some_and(|f| f.kind == crate::widget::FrameKind::LootButton);
+        if is_loot {
+            if scripted {
+                return;
+            }
+            // Read the take BEFORE the handler runs, but queue it after: the reference reads
+            // `[esi+0x4dc]` after the base call, and a handler that re-slots its own row mid-click
+            // is not a case the shipped UI produces — reading first keeps the borrow simple and
+            // the two cannot disagree. The modifier gate is `0x4c183a`/`0x4c1848`/`0x4c1856`:
+            // shift, ctrl OR alt suppresses, and it is the whole reason the shipped
+            // `LootFrameItem_OnClick` never calls a take itself.
+            let (shift, ctrl, alt) = model.modifiers;
+            if !shift && !ctrl && !alt {
+                take_loot = model.arena.frame(h).and_then(|f| match &f.kind_state {
+                    KindState::Button(bs) => bs.loot_slot,
+                    _ => None,
+                });
+            }
+        }
         let Some(frame) = model.arena.frame_mut(h) else {
             return;
         };
@@ -905,5 +959,16 @@ pub(super) fn click_button(lua: &Lua, id: u32, button: &str, down: bool) {
             .expect("model app_data")
             .errors
             .push(e.to_string());
+    }
+    // …and then the take, unconditionally on the handler's outcome. `0x4c1867` is not guarded by
+    // anything the Lua side did: the base call at `0x4c1833` returns void and its result is never
+    // tested. A row whose `OnClick` errored still loots, which is the reference's behaviour and
+    // the reason a broken addon hook cannot silently eat your loot.
+    if let Some(slot) = take_loot {
+        // The 0-based store, back to the 1-based display row the take queue speaks.
+        lua.app_data_mut::<Model>()
+            .expect("model app_data")
+            .loot_picks
+            .push(slot + 1);
     }
 }

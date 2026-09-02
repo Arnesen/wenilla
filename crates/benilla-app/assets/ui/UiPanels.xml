@@ -1486,6 +1486,59 @@
         YES = YES or "Yes"
         NO = NO or "No"
 
+        -- ref GlobalStrings.lua l.2612 / l.2818 / l.465, fallback form (the player's own localized
+        -- file runs off the patch chain first).
+        LOOT_NO_DROP = LOOT_NO_DROP or "Looting this item will bind it to you."
+        OKAY = OKAY or "Okay"
+        CANCEL = CANCEL or "Cancel"
+
+        -- ref StaticPopup.lua l.601-611, verbatim. `OnAccept`'s argument is `dialog.data`, the
+        -- event's row — and `LootSlot` is the CONTINUATION verb, so this line is the only thing in
+        -- the client that ever completes a bind-deferred take (decision 1744).
+        --
+        -- It lives here rather than in the loot window because this file is our `StaticPopup.lua`
+        -- and that is the reference's own home for it. Our transcription of `LootFrame.xml`
+        -- declared it; the stock file does not, so 1751 moved it where it always belonged.
+        --
+        -- No OnCancel (declining leaves the row in the window, and the app drops the pending stash
+        -- when the window turns over) and no OnUpdate poll: the loot window's own LOOT_CLOSED
+        -- hides it (`LootFrame.lua:53-54`).
+        StaticPopupDialogs["LOOT_BIND"] = {
+            text = LOOT_NO_DROP,
+            button1 = OKAY,
+            button2 = CANCEL,
+            OnAccept = function(slot)
+                LootSlot(slot)
+            end,
+            timeout = 0,
+            exclusive = 1,
+            hideOnEscape = 1,
+        }
+
+        CONFIRM_LOOT_DISTRIBUTION = CONFIRM_LOOT_DISTRIBUTION
+            or "You wish to assign %s to %s.  Is this correct?" -- GlobalStrings.lua l.848
+
+        -- The master-loot confirmation the group-loot dropdown raises for an at-or-above-threshold
+        -- item (ref StaticPopup.lua l.85-94, verbatim). It lives HERE because that is the
+        -- reference's own home for it — this file is our `StaticPopup.lua` — and because 1751 took
+        -- `LootFrame.xml` to the player's chain: our transcription used to declare this dialog
+        -- itself, and the stock file does not.
+        --
+        -- `data` is the candidate index the dropdown stashed; the SLOT is re-read live from
+        -- `LootFrame.selectedSlot` at accept time, exactly as the reference does. That is not a
+        -- shortcut — it is why the row click hides this popup first (`LootFrame.lua:156`), so an
+        -- accept can never land on a row the player has since clicked away from.
+        StaticPopupDialogs["CONFIRM_LOOT_DISTRIBUTION"] = {
+            text = CONFIRM_LOOT_DISTRIBUTION,
+            button1 = YES,
+            button2 = NO,
+            OnAccept = function(data)
+                GiveMasterLoot(LootFrame.selectedSlot, data)
+            end,
+            timeout = 0,
+            hideOnEscape = 1,
+        }
+
         -- Ref StaticPopup.lua l.659-679, verbatim — its own OnUpdate poll (cursor emptied by any
         -- other path → hide) replaces the old bespoke `deleteItemFlow` CURSOR_UPDATE driver.
         -- exclusive is v1-inert (engine header note); showAlert is live since 1068 — the ref's
@@ -1713,6 +1766,20 @@
             elseif event == "AUTOEQUIP_BIND_CONFIRM" then
                 StaticPopup_Hide("EQUIP_BIND")
                 local dialog = StaticPopup_Show("AUTOEQUIP_BIND")
+                if dialog then
+                    dialog.data = arg1
+                end
+            elseif event == "LOOT_BIND_CONFIRM" then
+                -- ref UIParent.lua l.317-323. The row rides on `dialog.data` rather than as a
+                -- text arg — LOOT_NO_DROP has no format specifier, so the sentence is the same
+                -- whatever binds; the number is only there to hand back to `LootSlot`.
+                --
+                -- This arm used to live in our own `LootFrame.xml`, on the window's event
+                -- listener, on the reasoning that LOOT_CLOSED already had to hide the dialog and
+                -- the arc stayed in one file. 1751 took that window to the chain, and the
+                -- reference's placement — UIParent, beside every other bind confirm — turned out
+                -- to be the one that survives the window being someone else's.
+                local dialog = StaticPopup_Show("LOOT_BIND")
                 if dialog then
                     dialog.data = arg1
                 end
@@ -2533,6 +2600,7 @@
                 self:RegisterEvent("EQUIP_BIND_CONFIRM")
                 self:RegisterEvent("AUTOEQUIP_BIND_CONFIRM")
                 self:RegisterEvent("USE_BIND_CONFIRM")
+                self:RegisterEvent("LOOT_BIND_CONFIRM")
                 self:RegisterEvent("CURSOR_UPDATE")
             </OnLoad>
             <OnEvent>BenillaBindConfirmDriver_OnEvent(self)</OnEvent>

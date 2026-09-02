@@ -48,6 +48,7 @@ mod capture;
 mod char_create;
 mod char_select;
 mod chat_bubble;
+mod chr_classes;
 mod cinematic;
 mod combat_text;
 mod cooldowns;
@@ -178,6 +179,7 @@ use bevy::prelude::*;
 use blob_shadow::BlobShadowPlugin;
 use bowstring::BowstringPlugin;
 use camera_shake::CameraShakePlugin;
+use chr_classes::ChrClassesPlugin;
 use cinematic::CinematicPlugin;
 use creature_anim::CreatureAnimPlugin;
 use cursor::CursorPlugin;
@@ -705,6 +707,7 @@ pub fn run(build: BuildId) -> AppExit {
     // so this renders the ten packed words the last `SMSG_PET_SPELLS` delivered and sends
     // intents back. After UiActionPlugin (shares `Spells` and the cooldown triple's clock).
     .add_plugins(UiPetPlugin)
+    .add_plugins(ChrClassesPlugin)
     .add_plugins(UiPetBookPlugin)
     // The pet's paper-doll stat block (happiness/loyalty/XP/training points). Its own plugin
     // because it runs off descriptor fields and two DBC tables rather than off `SMSG_PET_SPELLS`.
