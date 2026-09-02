@@ -384,6 +384,7 @@ fn decal_lane(bias: f32) -> Option<&'static str> {
         b if b == Rung::FOOTPRINT => Some("footprint"),
         b if b == Rung::RETICLE => Some("reticle"),
         b if b == Rung::GROUND_FX => Some("ground-fx"),
+        b if b == Rung::DRIFT_CLOUD => Some("drift-cloud"),
         _ => None,
     }
 }

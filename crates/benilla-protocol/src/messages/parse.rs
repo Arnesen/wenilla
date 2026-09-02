@@ -191,14 +191,21 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             // position as current is a bug we decline to reproduce.
             let result = read_u8(&mut r)?;
             let queued = result == super::AUTH_WAIT_QUEUE;
+            let mut billing_time_rested = None;
             if (result == super::AUTH_OK || queued) && r.len() >= 5 {
                 let _billing_time_remaining = read_u32_le(&mut r)?;
                 let _billing_plan_flags = read_u8(&mut r)?;
-                let _billing_time_rested = read_u32_le(&mut r)?;
+                // Kept rather than dropped since 1820: this is the only place the value ever
+                // arrives, and `GetBillingTimeRested()` is a plain read of it. The client parks it
+                // in a process-lifetime global (`[ClientServices+0x1af8]`, sole writer `0x5b421a`);
+                // ours rides the session, which has the same lifetime and cannot go stale across a
+                // reconnect the way that global does.
+                billing_time_rested = Some(read_u32_le(&mut r)?);
             }
             ServerPacket::AuthResponse {
                 result,
                 queue_position: queued.then(|| read_u32_le(&mut r).ok()).flatten(),
+                billing_time_rested,
             }
         }
         opcode::SMSG_CHAR_ENUM => {

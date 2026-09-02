@@ -154,8 +154,20 @@ end
 /// the addon harness ([`crate::addon_harness`]), which needs our entire interface under each
 /// surveyed addon.
 pub(crate) fn load_default_ui(script: &UiScript) -> Vec<String> {
+    // **Silent, the way the client's own load is.** `0x48fbf0` brackets ITSELF in the counted
+    // sound-suppression scope — `0x48fbfa call 0x458f50` on entry, `0x49016d call 0x458f60` on
+    // exit — across the TOC walk, Bindings.xml and the AddOns, so both of its callers (login
+    // `0x48f681` and `/reloadui` `0x495669`) load without a sound. The only reader of that depth
+    // is `PlaySoundByName 0x458030`, which drops the call outright.
+    //
+    // This is the mechanism, not a workaround for one noisy handler: stock `TargetFrame_OnHide`
+    // really does fire at load (the frame ships shown and its OnLoad hides it) and really does
+    // call `PlaySound("INTERFACESOUND_LOSTTARGETUNIT")`. The engine throws it away. Decision 1033
+    // reached the right rule from the director's ear; this is the binary agreeing.
+    script.push_sound_suppression();
     let mut failures = load_manifest(script, &Addon::builtin().toc.files);
     failures.extend(bootstrap_positions(script));
+    script.pop_sound_suppression();
     failures
 }
 

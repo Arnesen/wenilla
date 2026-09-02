@@ -334,6 +334,21 @@ impl Rung {
     /// eye spends that budget: at `4.0` the wake visibly washed onto the beach, which is what the
     /// director reported twice.
     pub const FOAM_RASTER_SLOPE: f32 = 0.0;
+    /// **The underwater drift cloud** — the mote field, at the reference's own frame slot
+    /// `0x483731`: after the water surface AND both M2 transparent passes, immediately before the
+    /// glare dispatch `0x483740`. The last world content in the frame (decision 1814).
+    ///
+    /// The window is narrow and this rung is checked against its actual NEIGHBOURS rather than the
+    /// blanket 1e4, exactly as the decal band is: it has to clear
+    /// [`GROUND_FX`](Rung::GROUND_FX) below and [`GLARE_BIAS`] above, and those are only 1.18e4
+    /// apart. Centred, that leaves ~5.8e3 each side — comfortably more than the
+    /// [`WORLD_VIEW_Z_FLOOR`] spread that is the most two anchors here can differ by, since the
+    /// cloud's anchor is the eye itself and a ground-fx decal's is at most a far plane away.
+    ///
+    /// One batch for the whole field, so there is no intra-cloud sort — which is right rather than
+    /// merely cheap: the reference submits all its survivors as **one indexed triangle list**
+    /// (`0x68f3c9`) in slot order, with depth WRITE off and no per-mote ordering anywhere.
+    pub const DRIFT_CLOUD: f32 = 1.4e4;
     /// **World text** — above the celestial glare, so a flare never washes a nameplate, and above
     /// every sky rung. The reference draws its world text late in the frame (decision 0519).
     /// Small on purpose: 6× the far plane is all the ordering needs, and this same field doubles
@@ -368,6 +383,12 @@ const _: () = {
     assert!(Rung::GROUND_FX - CLOUDS_BIAS > 1.0e4);
     assert!(GLARE_BIAS - Rung::GROUND_FX > 1.0e4);
     assert!(Rung::NAMEPLATE - GLARE_BIAS > 1.0e4);
+    // The drift cloud sits between the ground-fx decals and the glare — the reference's `0x483731`,
+    // the frame's last world draw. Its window is 1.18e4 wide, so like the decal band it is measured
+    // against its neighbours rather than the blanket: the margin only has to beat the view-z spread
+    // two anchors here can differ by, and the cloud's anchor IS the eye.
+    assert!(Rung::DRIFT_CLOUD - Rung::GROUND_FX > -WORLD_VIEW_Z_FLOOR);
+    assert!(GLARE_BIAS - Rung::DRIFT_CLOUD > -WORLD_VIEW_Z_FLOOR);
     // The raster margins are their own axis (B131) — not comparable to the sort rungs above, only
     // to zero and to each other. One number for every ground decal (1817); the foam is not one of
     // them, and takes far less.

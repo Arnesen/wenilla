@@ -730,11 +730,23 @@ fn interface_harness() -> UiScript {
             "UnitPopup.xml",
             "Interface\\FrameXML\\TextStatusBar.lua",
             "Interface\\FrameXML\\TextStatusBar.xml",
-            "UnitFrames.xml",
+            "Interface\\FrameXML\\BuffFrame.xml",
+            "Interface\\FrameXML\\UnitFrame.xml",
+            "Interface\\FrameXML\\CombatFeedback.xml",
+            "Interface\\FrameXML\\PlayerFrame.xml",
+            "Interface\\FrameXML\\PartyFrame.xml",
+            "Interface\\FrameXML\\TargetFrame.xml",
+            "Interface\\FrameXML\\PetFrame.xml",
+            // `PartyMemberBackground`'s OnEvent sets `OpacityFrameSlider` on VARIABLES_LOADED,
+            // and that slider is declared in ColorPickerFrame.xml. The reference loads them in
+            // this same order (its toc: PartyFrame 45, ColorPickerFrame 84) — it works there
+            // because the reader is an EVENT handler, not a load-time one, so by the time
+            // VARIABLES_LOADED fires the slider exists. A test that fires the event has to have
+            // loaded it too.
+            "Interface\\FrameXML\\ColorPickerFrame.xml",
             "Cooldown.xml",
             "ActionBar.xml",
             "ScrollTemplates.xml",
-            "Interface\\FrameXML\\BuffFrame.xml",
             "Interface\\FrameXML\\MerchantFrame.xml",
             "QuestFrame.xml",
             "QuestLogFrame.xml",

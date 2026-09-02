@@ -381,6 +381,7 @@ pub(crate) fn seat_from_roster(
             _ => 0,
         },
         is_player: true,
+        player_controlled: true,
         // Nil here is not "no faction", it is a state a player character cannot be in, and
         // AceDB-2.0 concatenates it at file scope — see [`crate::ui_unit::race_faction_group`].
         faction_group: crate::ui_unit::race_faction_group(row.race).map(str::to_string),

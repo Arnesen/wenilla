@@ -1044,10 +1044,11 @@ mod tests {
     /// A window that reads unblocked in [`chain_gap_report`] can still fail to swap, and the third
     /// reason found (after a missing widget type and a missing widget method) is this one: our
     /// `assets/ui` file defines a global the reference defines too, our manifest loads a CHAIN file
-    /// that also defines it, and whichever lands second wins. `PartyFrame.xml` is the worked
-    /// example — `UnitFrames.xml` redefines `UnitFrame_OnEvent`/`UnitFrame_Update` nine manifest
-    /// lines after stock `UnitFrame.lua` defines them, so a stock party row built by the
-    /// reference's own `UnitFrame_Initialize` calls OUR update and indexes a field its rows do not
+    /// that also defines it, and whichever lands second wins. `PartyFrame.xml` was the worked
+    /// example, and it is worth keeping in the past tense because it is what this check was built
+    /// to catch: our `UnitFrames.xml` redefined `UnitFrame_OnEvent`/`UnitFrame_Update` nine
+    /// manifest lines after stock `UnitFrame.lua` defined them, so a stock party row built by the
+    /// reference's own `UnitFrame_Initialize` called OUR update and indexed a field its rows do not
     /// carry. It loads clean and raises on the first event.
     ///
     /// Shadowing is not automatically wrong — where we ship a file the reference would have
@@ -1062,10 +1063,11 @@ mod tests {
     /// both would declare the same frames.
     ///
     /// That half doubles as the map nothing else holds: `ActionBarFrame.xml` is our
-    /// `ActionBar.xml`, `FloatingChatFrame.xml` is our `ChatFrame.xml`, `PlayerFrame.xml` and
-    /// `TargetFrame.xml` and `PetFrame.xml` are all our one `UnitFrames.xml`,
+    /// `ActionBar.xml`, `FloatingChatFrame.xml` is our `ChatFrame.xml`,
     /// `MainMenuBarMicroButtons.xml` is our `MicroMenu.xml`, `StaticPopup.xml` is our
-    /// `UiPanels.xml`. `chain_gap_report` calls several of those unblocked, and they are —
+    /// `UiPanels.xml`. (The row this map used to lead with — `PlayerFrame.xml`/`TargetFrame.xml`/
+    /// `PetFrame.xml` all being our one `UnitFrames.xml` — is retired: those four are the
+    /// reference's own files now, 1751.) `chain_gap_report` calls several of those unblocked, and they are —
     /// individually. They just cannot load beside the file of ours already holding their names.
     ///
     /// Run it before attempting a swap. It predicts which ones will fail without attempting them.
@@ -1083,8 +1085,10 @@ mod tests {
         // and missed the case it was built for), because a reference can live in any file. A
         // declaration cannot.
         //
-        // What it catches: our `UnitFrames.xml` declares `PetFrame`, and so does the stock
-        // `PetFrame.xml`. Adding that stock file alongside ours would declare the name twice.
+        // What it catches, in the case it was built for: our `UnitFrames.xml` declared `PetFrame`,
+        // and so does the stock `PetFrame.xml`, so adding that stock file alongside ours would have
+        // declared the name twice. (That pair is resolved — ours is deleted — but the check is not
+        // about those two files; every window still ahead of 1751 has the same collision waiting.)
         // Several stock windows we do not ship under their own name have an equivalent of ours
         // under a different one, and `chain_gap_report` calls every one of them unblocked —
         // truthfully, because the stock file WOULD load; it just cannot load *beside* ours.
@@ -1441,17 +1445,6 @@ mod tests {
                 "QuestLog_Update",
                 "the twin of the line above, `QuestLogFrame.lua:107`, called on the next line \
                  (`QuestTimerFrame.lua:44`).",
-            ),
-            (
-                "UnitFrame.xml",
-                "UnitPlayerControlled",
-                "an engine binding, and the most reachable gap here: `UnitFrame_OnEnter` \
-                 (`UnitFrame.lua:62`) calls it while HOVERING any unit frame, behind \
-                 `SHOW_NEWBIE_TIPS == \"1\"` — which is the shipped default. wow-re has it carved \
-                 (`0x516410`, VERIFIED, `scratch/unit-verbs-controlled-charmed-creaturetype.md`): \
-                 one return, `UNIT_FIELD_FLAGS` bit 3, the DOUBLE 1.0 when set and nil when clear, \
-                 raising on an unrecognised token. `UnitState` carries no such flag yet, so it is \
-                 a field + a push + a binding — the unit frames' own slice.",
             ),
         ];
 

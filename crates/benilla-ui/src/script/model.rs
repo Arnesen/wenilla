@@ -592,6 +592,26 @@ pub(crate) struct Model {
     /// [`UiScript::take_sounds`] drain — the outbound Lua→app intent seam ([`sound`]).
     pub(crate) sound_queue: Vec<SoundRequest>,
 
+    /// **The UI-load sound-suppression depth** — `[0xb05fa0]` in the reference, a counted scope
+    /// with exactly three references image-wide: `0x458f50` (`inc`), `0x458f60` (`dec`), and one
+    /// reader at `0x458046`, inside `PlaySoundByName 0x458030`. The whole-UI load `0x48fbf0`
+    /// brackets ITSELF in it — `0x48fbfa` on entry, `0x49016d` on exit, spanning the TOC walk,
+    /// `Bindings.xml` and the AddOns — and both of its callers, login (`0x48f681`) and `/reloadui`
+    /// (`0x495669`), therefore load silently.
+    ///
+    /// The reader bails at `0x45804d` **before** the `MasterSoundEffects` CVar and the kit-hash
+    /// lookup, so a suppressed call is **dropped**: not muted, not queued, no Lua error, and the
+    /// binding still answers its usual `(willPlay, handle)`. Scoped to the NAME-keyed entry only —
+    /// id-keyed `PlaySound(kitId)` (`0x457fb0`/`0x457ff0`), `PlaySoundFile`, `PlayMusic` and
+    /// `StopMusic` all run normally inside the scope.
+    ///
+    /// This is what makes stock `TargetFrame_OnHide`'s `PlaySound("INTERFACESOUND_LOSTTARGETUNIT")`
+    /// inaudible at every login: the frame really is shown when its `OnLoad` hides it, the OnHide
+    /// really does fire, the call really is made — and the engine throws it away. Decision 1033's
+    /// "no sound during the load" is the client's own law, enforced here rather than by hoping no
+    /// handler rings.
+    pub(crate) sound_suppression: u32,
+
     /// The CVar table (decision 0954, [`super::cvars`]): lowercase name → slot. Host-registered
     /// only; Lua reads/writes through `GetCVar`/`SetCVar`/`GetCVarDefault`.
     pub(crate) cvars: HashMap<String, super::cvars::CvarSlot>,
@@ -1235,6 +1255,23 @@ pub(crate) struct Model {
     pub(crate) rest_state: u8,
     pub(crate) rest_pool: u32,
     pub(crate) resting: bool,
+
+    /// `PLAYER_FLAGS` bit 12 — **PARTIAL_PLAY_TIME**, what `PartialPlayTime()` answers
+    /// (`0x48eb70`, `shr eax,0xc` / `and al,1`; decision 1746 §"`PLAYER_FLAGS` bit `0x1000` is
+    /// read after all"). The play-time regime a realm with an anti-addiction policy puts an
+    /// account into; on a western realm it never sets.
+    pub(crate) partial_play_time: bool,
+
+    /// `PLAYER_FLAGS` bit 13 — what `NoPlayTime()` answers (`0x48ebe0`, the neighbour of the
+    /// above and the harsher half of the same regime).
+    pub(crate) no_play_time: bool,
+
+    /// The account's accumulated **rested billing minutes**, from `SMSG_AUTH_RESPONSE` — what
+    /// `GetBillingTimeRested()` returns (decision 1820, binding `0x48ec50`). Minutes is the
+    /// server's convention and the engine converts nothing; stock `PlayerFrame.lua:246` divides by
+    /// 60 for hours. Reached only from inside the two play-time bits above, so with those clear
+    /// nothing in stock FrameXML ever reads it.
+    pub(crate) billing_time_rested: u32,
     /// Is a cinematic playing? What `InCinematic()` reports, pushed by the cinematic plugin.
     ///
     /// Read by more than the letterbox: `StaticPopup_Show` refuses any dialog whose entry lacks
@@ -1600,6 +1637,7 @@ impl Model {
             action_bar_toggles: None,
             action_bar_toggle_sends: Vec::new(),
             sound_queue: Vec::new(),
+            sound_suppression: 0,
             cvars: HashMap::new(),
             cvars_saved_base: HashMap::new(),
             cvar_changes: Vec::new(),
@@ -1804,6 +1842,9 @@ impl Model {
             rest_state: 2,
             rest_pool: 0,
             resting: false,
+            partial_play_time: false,
+            no_play_time: false,
+            billing_time_rested: 0,
             in_cinematic: false,
             exhaustion: [
                 (1, ("Rested".to_string(), 2.0)),

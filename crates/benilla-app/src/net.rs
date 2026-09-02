@@ -2173,7 +2173,12 @@ pub(crate) struct CharActionResultMessage {
 /// We entered the world (the IO thread's `Connected`, bridged from the Net drain): flips
 /// [`crate::char_select::ClientState`] to `InWorld`.
 #[derive(Message)]
-pub(crate) struct EnteredWorldMessage;
+pub(crate) struct EnteredWorldMessage {
+    /// The account's accumulated **rested billing minutes**, from the `SMSG_AUTH_RESPONSE` that
+    /// admitted the session — pushed into the script here because this is the only moment it ever
+    /// arrives (decision 1820).
+    pub(crate) billing_time_rested: u32,
+}
 
 /// The server asked us to play a cinematic (`SMSG_TRIGGER_CINEMATIC`) — a `CinematicSequences.dbc`
 /// id. Read by [`crate::cinematic`], which owns the playback *and* the ack (decision 0196: the ack

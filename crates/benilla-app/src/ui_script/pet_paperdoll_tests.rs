@@ -47,6 +47,7 @@ fn player_unit() -> UnitState {
         class_file: Some("HUNTER".into()),
         sex: 2,
         is_player: true,
+        player_controlled: true,
         ..UnitState::default()
     }
 }

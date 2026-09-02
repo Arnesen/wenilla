@@ -67,6 +67,10 @@
 //!   through. The once-a-frame askers keep the plain walk.
 //! * [`surface`] — **the Bevy render glue.** The per-kind animated materials, the two spawn paths
 //!   (MCLQ and WMO MLIQ), the flat mesh build, and the 24 fps frame cycler.
+//! * [`drift`] — **the underwater drift cloud**: the 4000-mote field the reference draws while the
+//!   camera eye is inside a liquid (decision 1814). It is here rather than under `weather` because
+//!   the reference keeps it that way too — the pool is CWorld's, not the weather manager's, and
+//!   the two share no state and no code — and because [`Underwater`] is its whole trigger.
 //!
 //! The one cross-feed runs query → lighting: `detect_submersion` publishes WHICH liquid the eye is
 //! in, and `lighting::update_time_lighting` selects the whole submerged atmosphere from it.
@@ -77,6 +81,7 @@ use bevy::prelude::*;
 use benilla_assets::materials::LiquidMaterial;
 use benilla_assets::AssetSet;
 
+mod drift;
 mod query;
 #[cfg(test)]
 mod real_data;
@@ -155,5 +160,8 @@ impl Plugin for LiquidPlugin {
                     .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate)
                     .run_if(|| std::env::var_os("WOW_NO_LIQUID").is_some()),
             );
+        // The underwater drift cloud — the one thing in this subsystem that RENDERS because the
+        // eye is submerged, rather than answering where the liquid is (see the layout note above).
+        drift::register(app);
     }
 }

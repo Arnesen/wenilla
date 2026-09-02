@@ -412,15 +412,17 @@ pub const SCREEN: crate::layout::Handle = 0;
 ///
 /// **This list is FLAT; the reference's set is per widget type** (RF-0028's script-name→slot
 /// resolvers: base map `0x76a0d0` + the type's own additions — a `<Frame>` has no `OnClick`). That
-/// divergence is deliberate and measured: our own transcribed FrameXML relies on it in 9 places
-/// (`PlayerFrame`/`TargetFrame`/`PetFrame`/`PartyMemberFrame1-4` are mouse-enabled `<Frame>`s
-/// carrying `OnClick` — see the note at `assets/ui/UnitFrames.xml`'s `PlayerFrame_OnClick` — plus
-/// `ChatFrame1`/`ChatFrame2`), and the corpus in 21 more (20 `EditBox` + 1 `<Frame>`
+/// divergence is deliberate and measured, and the 1751 migration has been shrinking the debt it
+/// covers. Our own FrameXML used to rely on it in 9 places; seven of them were
+/// `PlayerFrame`/`TargetFrame`/`PetFrame`/`PartyMemberFrame1-4` declared as mouse-enabled
+/// `<Frame>`s carrying `OnClick` in our transcribed `UnitFrames.xml`, and that file is gone — the
+/// reference declares all seven as `<Button>`, which carries `OnClick` by type. What is left of
+/// ours is `ChatFrame1`/`ChatFrame2`, plus the corpus's 21 (20 `EditBox` + 1 `<Frame>`
 /// `OnEscapePressed`), all of which fire today ([`button::click_button`]'s "plain frames can carry
 /// one too" arm). Going per-type is the faithful shape and is what would give us `HasScript` (948
-/// corpus call sites across 91 addons), but it removes working behaviour from those 30 sites, so it
-/// is a change to make deliberately with FrameXML fixed first — not a side effect of widening this
-/// list.
+/// corpus call sites across 91 addons); it removes working behaviour from the 23 sites that remain,
+/// so it is still a change to make deliberately rather than as a side effect of widening this list
+/// — but the FrameXML half of "with FrameXML fixed first" is most of the way there now.
 const SCRIPT_KINDS: [&str; 35] = [
     "OnLoad",
     "OnEvent",

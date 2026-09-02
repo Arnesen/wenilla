@@ -588,11 +588,13 @@ fn run(
     session.player_login(guid)?;
     session.set_active_mover(guid)?;
 
+    let billing_time_rested = session.billing_time_rested();
     let (mut reader, writer) = session.into_split()?;
     if events_tx
         .send(SessionEvent::Connected {
             self_guid: guid,
             name,
+            billing_time_rested,
         })
         .is_err()
     {

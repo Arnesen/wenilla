@@ -2,17 +2,23 @@ use benilla_ui::script::{
     QuadContent, ScriptValue, SelectionRequest, SoundRequest, UiScript, UnitState,
 };
 
-use super::test_ui::load_ui as load_xml;
+use super::test_ui::{hover, load_ui as load_xml, unhover};
 
 /// The unit frames' production load prefix (ui_script/mod.rs order): fonts + UIParent +
 /// tooltip, then the dropdown kit + unit popups the frames' DropDown children initialize into.
 fn load_unit_frames(s: &UiScript) {
-    // The app runs the real `Interface\FrameXML\GlobalStrings.lua` off the player's chain
-    // BEFORE any XML (`load_global_strings`); this stands in for it, with the one key these
-    // frames resolve at load time — `DEAD` l.898, which both dead-text FontStrings name in
-    // their `text=` attribute. Without it the loader's literal fallback would leave the KEY on
-    // screen, which is the bug this file guards below.
-    s.run(r#"DEAD = "Dead""#).unwrap();
+    // The app runs the real `Interface\FrameXML\GlobalStrings.lua` off the player's chain BEFORE
+    // any XML (`load_global_strings`), so the fixture names it too. This used to be a single
+    // hand-set `DEAD = "Dead"`, which was enough while the frames were OUR transcription: ours
+    // carried `X = X or "…"` fallbacks and hard literals for everything else. The reference's own
+    // files carry none, and they resolve GlobalStrings at LOAD in three separate places —
+    // `CombatFeedback.lua` l.7-17 builds the whole `CombatFeedbackText` table out of them
+    // (`TEXT(ABSORB)`, `TEXT(MISS)`, …), `UnitFrame.lua` l.1-6 builds `ManaBarColor`'s prefixes
+    // the same way, and `UnitFrame_OnEnter` l.60/63 passes `PARTY_OPTIONS_LABEL` /
+    // `PLAYER_OPTIONS_LABEL` straight into `GameTooltip:SetText`, which raises on nil rather than
+    // drawing an empty plate. Hand-setting the union of those is a second copy of the reference's
+    // own file; naming the file is the only version that cannot drift. (`DEAD` is l.898 of it.)
+    load_xml(s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(s, "Fonts.xml");
     load_xml(s, "UIParent.xml");
     // The bars' numerals machinery (decision 1082), which the manifest loads immediately ahead of
@@ -22,7 +28,13 @@ fn load_unit_frames(s: &UiScript) {
     load_xml(s, "GameTooltip.xml");
     load_xml(s, "UIDropDownMenu.xml");
     load_xml(s, "UnitPopup.xml");
-    load_xml(s, "UnitFrames.xml");
+    load_xml(s, "Interface\\FrameXML\\BuffFrame.xml");
+    load_xml(s, "Interface\\FrameXML\\UnitFrame.xml");
+    load_xml(s, "Interface\\FrameXML\\CombatFeedback.xml");
+    load_xml(s, "Interface\\FrameXML\\PlayerFrame.xml");
+    load_xml(s, "Interface\\FrameXML\\PartyFrame.xml");
+    load_xml(s, "Interface\\FrameXML\\TargetFrame.xml");
+    load_xml(s, "Interface\\FrameXML\\PetFrame.xml");
 }
 
 /// Load the real `assets/ui/UnitFrames.xml` (the shipped default UI) into a bare engine and
@@ -36,13 +48,31 @@ fn shipped_unit_frames_drive_end_to_end() {
     load_unit_frames(&s);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
-    // No units yet: both frames hid themselves on their OnLoad's first update.
-    let hidden: bool = s
-        .eval("return not PlayerFrame:IsVisible() and not TargetFrame:IsVisible()")
+    // **Only the TARGET frame hides.** Our deleted transcription hid both; the reference hides
+    // exactly one. `PlayerFrame` is a plain top-level `<Button>` with no `hidden=` attribute
+    // (ref PlayerFrame.xml l.4) and `PlayerFrame_Update` (ref PlayerFrame.lua l.29-37) wraps its
+    // whole body in `if UnitExists("player")` without an else — nothing in the file ever calls
+    // `PlayerFrame:Hide()`. That is the real client's behaviour: the player plate is up from the
+    // moment the UI loads, empty until the player object arrives. `TargetFrame_Update`
+    // (ref TargetFrame.lua l.38-55) is the one with the `else this:Hide()`.
+    let shape: bool = s
+        .eval("return PlayerFrame:IsVisible() and not TargetFrame:IsVisible()")
         .unwrap();
-    assert!(hidden, "frames hide while their units don't exist");
+    assert!(
+        shape,
+        "the player plate is always up; only the target frame hides while its unit is absent"
+    );
 
     // The player appears (name still unresolved), at 72/100 health, 45/80 mana.
+    //
+    // `PLAYER_ENTERING_WORLD` is the event, not `UNIT_HEALTH`, and the reference is why: the
+    // stock bars each register their OWN events and repaint only themselves
+    // (`UnitFrameHealthBar_Initialize` takes UNIT_HEALTH/UNIT_MAXHEALTH, ref UnitFrame.lua
+    // l.150-151; `UnitFrameManaBar_Initialize` takes the ten UNIT_MANA/RAGE/… ones, l.189-199),
+    // so UNIT_HEALTH alone would leave the mana bar at its load-time 0/0. The one handler that
+    // repaints name + portrait + both bars together is `PlayerFrame_OnEvent`'s
+    // PLAYER_ENTERING_WORLD arm → `UnitFrame_Update()` (ref PlayerFrame.lua l.96-100), which is
+    // also what really fires when the player object arrives.
     s.set_unit(
         "player",
         Some(UnitState {
@@ -56,10 +86,14 @@ fn shipped_unit_frames_drive_end_to_end() {
             max_power: 80,
             dead: false,
             reaction: 0,
+            // Not decoration: `UnitFrameManaBar_Update`'s disconnect leg (ref UnitFrame.lua
+            // l.209-212) pins a disconnected unit's power bar to MAX and greys it, and
+            // `UnitState::default()` leaves this `false`.
+            is_connected: true,
             ..UnitState::default()
         }),
     );
-    s.fire_event("UNIT_HEALTH", vec![ScriptValue::Str("player".into())]);
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     assert!(s.eval::<bool>("return PlayerFrame:IsVisible()").unwrap());
     let ok: bool = s
         .eval(
@@ -71,11 +105,23 @@ fn shipped_unit_frames_drive_end_to_end() {
             return hb:GetValue() == 72 and hmax == 100
                and pb:GetValue() == 45 and pmax == 80 and pb:IsVisible()
                and b == 1 and r == 0 -- mana blue
-               and PlayerName:GetText() == "Unknown"
         "#,
         )
         .unwrap();
     assert!(ok, "player frame painted from the snapshot");
+
+    // …and the name plate is BLANK while the name is unresolved, not the word "Unknown". That
+    // word was our transcription's, twice over — a `text="Unknown"` literal on the FontString
+    // (deleted UnitFrames.xml l.1364) and a `UnitName(unit) or "Unknown"` fallback (l.803). The
+    // reference's `PlayerName` carries no `text=` at all (ref PlayerFrame.xml l.58) and
+    // `GetUnitName` returns `UnitName`'s result unchanged (ref UnitFrame.lua l.226-236), so what
+    // shows is whatever the engine's `UnitName` returns for a nameless unit — nil here.
+    assert_eq!(
+        s.eval::<Option<String>>("return PlayerName:GetText()")
+            .unwrap(),
+        None,
+        "no name yet: the stock file has no \"Unknown\" literal to fall back on"
+    );
 
     // The name-query answer lands: UNIT_NAME_UPDATE repaints the name.
     s.set_unit(
@@ -91,6 +137,7 @@ fn shipped_unit_frames_drive_end_to_end() {
             max_power: 80,
             dead: false,
             reaction: 0,
+            is_connected: true,
             ..UnitState::default()
         }),
     );
@@ -100,7 +147,21 @@ fn shipped_unit_frames_drive_end_to_end() {
         "Benilla"
     );
 
-    // A powerless wolf gets targeted: frame shows, power bar hides, health fills 30/50.
+    // A powerless wolf gets targeted: frame shows, power bar runs EMPTY, health fills 30/50.
+    //
+    // "Empty", not hidden — and the reason is a reference quirk worth knowing. The only thing in
+    // 1.12 that hides a StatusBar for having no track is `TextStatusBar_UpdateTextString`'s
+    // `else textStatusBar:Hide()` (ref TextStatusBar.lua l.55-57), and that whole body sits
+    // inside `if(string)` — `string` being `bar.TextString`. The reference **never declares**
+    // `TargetFrameHealthBarText` / `TargetFrameManaBarText`: TargetFrame.xml l.486-487 passes
+    // both names into `UnitFrame_Initialize` and neither exists anywhere in FrameXML (only the
+    // player's and the pet's do — PlayerFrame.xml l.79/88, PetFrame.xml l.87/96). So
+    // `SetTextStatusBarText` early-returns on the nil (ref TextStatusBar.lua l.7-10), the
+    // target's bars carry no `TextString`, and the hide can never fire. It doesn't show: these
+    // bars have a `<BarTexture>` and no background, so a 0/0 bar draws nothing either way.
+    //
+    // Our transcription hid it, because 1146 §3 *declared* the two text regions the reference
+    // leaves dangling. Those are gone with the file.
     s.set_unit(
         "target",
         Some(UnitState {
@@ -114,6 +175,7 @@ fn shipped_unit_frames_drive_end_to_end() {
             max_power: 0,
             dead: false,
             reaction: 4, // neutral
+            is_connected: true,
             ..UnitState::default()
         }),
     );
@@ -122,8 +184,10 @@ fn shipped_unit_frames_drive_end_to_end() {
     let ok: bool = s
         .eval(
             r#"
+            local _, pmax = TargetFrameManaBar:GetMinMaxValues()
             return TargetFrame:IsVisible()
-               and not TargetFrameManaBar:IsVisible()
+               and TargetFrameManaBar:GetValue() == 0 and pmax == 0
+               and TargetFrameManaBar.TextString == nil -- the reference declares no text region
                and TargetName:GetText() == "Young Wolf"
                and TargetLevelText:GetText() == "3"
                and not TargetDeadText:IsShown() -- living target: no dead word
@@ -132,7 +196,7 @@ fn shipped_unit_frames_drive_end_to_end() {
         .unwrap();
     assert!(
         ok,
-        "target frame painted; powerless unit hides its power bar"
+        "target frame painted; a powerless unit's power bar runs empty over an empty track"
     );
     // The select sound rides the frame's OnShow (ref TargetFrame_OnShow): a neutral (4) wolf is
     // neither UnitIsEnemy (≤2) nor UnitIsFriend (≥5) → the neutral kit.
@@ -341,20 +405,9 @@ fn unit_combat_drives_the_player_hit_indicator() {
 fn left_clicking_the_player_frame_targets_self() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    // The SELF-menu strings the popup rows bake at UnitPopup.xml load (no GlobalStrings in a
-    // bare engine — production reads the real file).
-    s.run(
-        r#"
-        LOOT_METHOD = "Loot Method"
-        LOOT_THRESHOLD = "Loot Threshold"
-        LOOT_GROUP_LOOT = "Group Loot"
-        PARTY_LEAVE = "Leave Party"
-        RAID_TARGET_ICON = "Raid Target Icon"
-        CANCEL = "Cancel"
-        ITEM_QUALITY2_DESC = "Uncommon"
-    "#,
-    )
-    .unwrap();
+    // The SELF-menu strings the popup rows bake at UnitPopup.xml load arrive with
+    // `load_unit_frames`' `GlobalStrings.lua`; they used to be hand-set here, and one of the
+    // hand-set values was wrong (see the row assertion below).
     load_unit_frames(&s);
 
     // The player must exist for the frame to be shown and mouse-hittable.
@@ -427,10 +480,14 @@ fn left_clicking_the_player_frame_targets_self() {
         6,
         "title + Loot Method + Loot Threshold + Leave Party + Raid Target Icon + Cancel"
     );
+    // `PARTY_LEAVE`, verbatim. The reference's own GlobalStrings.lua l.2991 is
+    // `PARTY_LEAVE = "Leave party"` — lower-case "party". The hand-set fixture this test used to
+    // open with title-cased it, so the row read back the fixture's own typo rather than the
+    // client's string; naming the real file is what exposed it.
     assert_eq!(
         s.eval::<String>("return DropDownList1Button4:GetText()")
             .unwrap(),
-        "Leave Party"
+        "Leave party"
     );
     // The nested rows carry the expand arrow (the level-2 gate for a leader).
     assert!(
@@ -467,21 +524,9 @@ fn left_clicking_the_player_frame_targets_self() {
 fn raid_mark_clicks_through_the_nested_level() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    s.run(
-        r#"
-        LOOT_METHOD = "Loot Method"
-        LOOT_THRESHOLD = "Loot Threshold"
-        LOOT_GROUP_LOOT = "Group Loot"
-        PARTY_LEAVE = "Leave Party"
-        RAID_TARGET_ICON = "Raid Target Icon"
-        CANCEL = "Cancel"
-        ITEM_QUALITY2_DESC = "Uncommon"
-        RAID_TARGET_1 = "Star"; RAID_TARGET_2 = "Circle"; RAID_TARGET_3 = "Diamond";
-        RAID_TARGET_4 = "Triangle"; RAID_TARGET_5 = "Moon"; RAID_TARGET_6 = "Square";
-        RAID_TARGET_7 = "Cross"; RAID_TARGET_8 = "Skull"; NONE = "None"
-    "#,
-    )
-    .unwrap();
+    // The menu strings arrive with `load_unit_frames`' own `GlobalStrings.lua`
+    // (`RAID_TARGET_ICON` l.3288, `RAID_TARGET_1..8` l.3280-3287, `NONE` l.2795), which is where
+    // production reads them; they used to be hand-set here.
     load_unit_frames(&s);
 
     s.set_unit(
@@ -551,6 +596,13 @@ fn raid_mark_clicks_through_the_nested_level() {
         .unwrap();
     s.mouse_button(sx as f32, sy as f32, "LeftButton", true);
     s.mouse_button(sx as f32, sy as f32, "LeftButton", false);
+    // RED while the `SetRaidTarget` engine binding is absent, and deliberately left that way.
+    // `UnitPopup.xml`'s row calls `SetRaidTargetIcon(menu.unit, mark)`; the definition of that
+    // used to be ours, and since the migration it is the reference's own — `TargetFrame.lua`
+    // l.486-492 — whose whole body is `SetRaidTarget(unit, 0 or index)`. `SetRaidTarget` is an
+    // engine verb this house does not have yet, so the click raises
+    // "attempt to call global 'SetRaidTarget' (a nil value)" and no intent is queued. 1203: it
+    // gets built, never stubbed.
     assert_eq!(
         s.take_party_requests(),
         vec![benilla_ui::script::PartyRequest::SetRaidTarget {
@@ -608,6 +660,7 @@ fn shipped_target_frame_runs_the_level_law() {
             exists: true,
             level: 3,
             is_player: true,
+            player_controlled: true,
             health: 50,
             max_health: 50,
             ..UnitState::default()
@@ -738,6 +791,7 @@ fn shipped_target_frame_runs_the_level_law() {
             exists: true,
             level: 30,
             is_player: true,
+            player_controlled: true,
             health: 50,
             max_health: 50,
             ..UnitState::default()
@@ -789,6 +843,7 @@ fn pvp_icon_follows_the_three_branch_law() {
         max_health: 50,
         level: 10,
         is_player: true,
+        player_controlled: true,
         faction_group: Some("Alliance".into()),
         pvp,
         is_pvp_ffa: ffa,
@@ -896,6 +951,7 @@ fn flagged_friendly_player_plate_is_green() {
         max_health: 50,
         level: 20,
         is_player: true,
+        player_controlled: true,
         reaction: 5,
         can_attack: false,
         faction_group: Some("Alliance".into()),
@@ -1075,10 +1131,16 @@ fn the_ring_art_paints_over_the_bars() {
             power_type: 0,
             power: 60,
             max_power: 100,
+            is_connected: true, // else the power bar takes the disconnect leg's grey max fill
             ..UnitState::default()
         }),
     );
-    s.fire_event("UNIT_HEALTH", vec![ScriptValue::Str("player".into())]);
+    // PLAYER_ENTERING_WORLD, not UNIT_HEALTH: the reference repaints the NAME only from
+    // `UnitFrame_Update` (ref UnitFrame.lua l.23-28) and on UNIT_NAME_UPDATE (l.31-34) — the
+    // health bar's own event touches its bar and nothing else. `PlayerFrame_OnEvent`'s
+    // PLAYER_ENTERING_WORLD arm (ref PlayerFrame.lua l.96-100) is the one that runs the full
+    // repaint, and the name quad is half of what this test measures.
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     s.resolve();
     let quads = s.extract();
 
@@ -1131,16 +1193,28 @@ fn the_party_art_paints_over_the_bars() {
     // The loot test's prefix (`loot_tests.rs`): PartyFrame's inline <Script> reads
     // StaticPopupDialogs, which UiPanels.xml defines, and its per-member dropdown OnLoad walks the
     // whole popup kit.
+    // GlobalStrings first, for the same reason `load_unit_frames` names it — the stock unit-frame
+    // files resolve it at LOAD (`CombatFeedback.lua` l.7-17, `UnitFrame.lua` l.1-6).
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "UIDropDownMenu.xml");
     load_xml(&s, "UnitPopup.xml");
-    // BENILLA_POWER_COLORS (the shared power-colour table) lives in UnitFrames.xml; the party
-    // frames' Update reads it. The player/target frames it also defines stay hidden here — no unit.
-    load_xml(&s, "UnitFrames.xml");
-    load_xml(&s, "PartyFrame.xml");
+    // The reference's own kit, in the manifest's order. `UIParent.xml` is not decoration here:
+    // `RaiseFrameLevel`/`LowerFrameLevel` live in it (ref UIParent.lua l.1890-1896) and stock
+    // `TargetofTargetTextureFrame`'s OnLoad calls one of them.
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\BuffFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UnitFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\CombatFeedback.xml");
+    load_xml(&s, "Interface\\FrameXML\\PlayerFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\PartyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\TargetFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\PetFrame.xml");
 
     s.set_unit(
         "party1",
@@ -1153,9 +1227,27 @@ fn the_party_art_paints_over_the_bars() {
             power_type: 0,
             power: 60,
             max_power: 100,
+            is_connected: true,
             ..UnitState::default()
         }),
     );
+    // **The ROSTER, not the unit snapshot, is what shows a party row.** Stock
+    // `PartyMemberFrame_UpdateMember` gates on `GetPartyMember(id)` (ref PartyMemberFrame.lua
+    // l.41-57) — `UnitExists("party1")` is never consulted — and its else arm is `this:Hide()`.
+    // Our deleted `PartyFrame.xml` keyed the row off the unit token, so setting `party1` alone
+    // used to be enough; against the reference's file it paints nothing at all.
+    s.set_party(benilla_ui::script::PartyState {
+        members: vec![benilla_ui::script::PartyMemberInfo {
+            name: "Onepriest".into(),
+            guid: 0x0_0B12,
+        }],
+        leader_index: 0,
+        leader_guid: 0,
+        raid: Vec::new(),
+        loot_method: "group".into(),
+        master_looter: None,
+        loot_threshold: 2,
+    });
     s.fire_event("PARTY_MEMBERS_CHANGED", vec![]);
     s.resolve();
     let quads = s.extract();
@@ -1166,14 +1258,39 @@ fn the_party_art_paints_over_the_bars() {
         s.quad_owner_name(q.target)
             .is_some_and(|n| n.starts_with("PartyMemberFrame1"))
     };
-    let art = quads
+    // The ART cannot be scoped that way, and the reason is the reference's own declaration:
+    // `PartyMemberFrameTemplate` hangs `$parentTexture` two levels down inside a pair of
+    // **anonymous** `<Frame setAllPoints="true">` wrappers (ref PartyFrameTemplates.xml
+    // l.230-240). The region itself still resolves to `PartyMemberFrame1Texture` — `$parent`
+    // walks to the nearest named ancestor — but the frame that OWNS the quad has no name at all,
+    // so an owner-name filter can never see it. (Our deleted PartyFrame.xml gave that wrapper a
+    // name, `$parentTextureFrame`, which is why this used to work.) Scoped by geometry instead:
+    // rows 2-4 are hidden with no member, so exactly one UI-PartyFrame quad is drawn, and it is
+    // asserted to sit on member 1's rect.
+    let art_quads: Vec<_> = quads
         .iter()
-        .find(|q| {
-            mine(q)
-                && matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
+        .filter(|q| {
+            matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
                     if p.ends_with("UI-PartyFrame"))
         })
-        .expect("the party member frame art");
+        .collect();
+    assert_eq!(
+        art_quads.len(),
+        1,
+        "one member in the party, one row of art drawn"
+    );
+    let art = art_quads[0];
+    let row: Vec<f32> = s
+        .eval(
+            "return { PartyMemberFrame1:GetLeft(), PartyMemberFrame1:GetBottom(), \
+                      PartyMemberFrame1:GetRight(), PartyMemberFrame1:GetTop() }",
+        )
+        .unwrap();
+    let r = art.rect.expect("the art quad has a resolved rect");
+    assert!(
+        r.left >= row[0] - 1.0 && r.right <= row[2] + 1.0 && r.top <= row[3] + 3.0,
+        "the art quad sits on PartyMemberFrame1 (art {r:?}, row {row:?})"
+    );
     let fill = quads
         .iter()
         .filter(|q| {
@@ -1234,8 +1351,16 @@ fn a_feigning_target_paints_empty_bars_and_the_dead_text() {
     assert!(alive, "the control: a live hunter reads live");
 
     // He feigns. Only the flag moved on the wire — the snapshot turns it into these three.
+    //
+    // BOTH events, because the reference's bars are independent listeners: the health bar takes
+    // UNIT_HEALTH/UNIT_MAXHEALTH (ref UnitFrame.lua l.150-151) and the mana bar takes the ten
+    // UNIT_MANA/RAGE/FOCUS/… ones (l.189-199) — there is no shared "repaint the frame" event, so
+    // UNIT_HEALTH alone leaves the power bar showing the pre-feign number. Our deleted
+    // transcription drove both bars off one update, which is why this test used to fire one event.
+    // The server sends both when the dynflag lands.
     s.set_unit("target", hunter(0, 0, true));
     s.fire_event("UNIT_HEALTH", vec![ScriptValue::Str("target".into())]);
+    s.fire_event("UNIT_MANA", vec![ScriptValue::Str("target".into())]);
     let (hp, hmax, mana, mmax): (f64, f64, f64, f64) = (
         s.eval("return TargetFrameHealthBar:GetValue()").unwrap(),
         s.eval("local _, m = TargetFrameHealthBar:GetMinMaxValues() return m")
@@ -1270,6 +1395,7 @@ fn a_feigning_target_paints_empty_bars_and_the_dead_text() {
     // He stands back up: the flag clears, and nothing about the body needed restoring.
     s.set_unit("target", hunter(1200, 300, false));
     s.fire_event("UNIT_HEALTH", vec![ScriptValue::Str("target".into())]);
+    s.fire_event("UNIT_MANA", vec![ScriptValue::Str("target".into())]);
     let up: bool = s
         .eval(
             r#"
@@ -1444,10 +1570,21 @@ fn the_rest_badge_covers_the_level_number() {
 /// frames people actually watch (director report). Now the player's health and power bars carry
 /// "value / max", and the switch pins them.
 ///
-/// Which bars it pins is the REFERENCE's own split, transcribed rather than chosen: 1.12 sets
-/// `textLockable` on the player's two bars, the pet's two and the XP bar, and on nothing else — so
-/// the target frame's numerals are hover-only there and stay blank here. The power bar is whatever
-/// the unit runs on; a rage unit reads "45 / 80" the same as a mana one.
+/// Which bars it reaches is the REFERENCE's own split, and running the reference's own files made
+/// it narrower than 1146 believed. `textLockable` is set on the player's two bars, the pet's two
+/// and the XP bar and nothing else — but the TARGET frame goes further than "not lockable": it has
+/// **no text regions at all**. `TargetFrame.xml` l.486-487 hands `TargetFrameHealthBarText` /
+/// `TargetFrameManaBarText` to `UnitFrame_Initialize` and neither name is declared anywhere in
+/// FrameXML (only `PlayerFrame.xml` l.79/88 and `PetFrame.xml` l.87/96 declare theirs), so
+/// `SetTextStatusBarText` early-returns on the nil (ref TextStatusBar.lua l.7-10) and those bars
+/// never get a `TextString`. 1146 §3 *added* the two regions to our transcription so a hover could
+/// reveal them; they went with the file. What 1.12 actually gives you when you hover a target bar
+/// is the unit TOOLTIP (ref TextStatusBar.xml l.16-26), asserted below.
+///
+/// The power bar's numerals also carry the resource's LABEL again — "Rage 45 / 80" — because
+/// `UnitFrame_UpdateManaType` sets the prefix on every update (ref UnitFrame.lua l.129) and that
+/// call is inside the stock file. 1147 §1 cut ours on the director's look call; the stock file has
+/// no such cut.
 #[test]
 fn status_bar_text_paints_the_player_numerals_but_not_the_targets() {
     let mut s = UiScript::new().unwrap();
@@ -1465,6 +1602,10 @@ fn status_bar_text_paints_the_player_numerals_but_not_the_targets() {
         max_power: 80,
         dead: false,
         reaction: 4,
+        // Without this `UnitFrameManaBar_Update` takes its disconnect leg (ref UnitFrame.lua
+        // l.209-212) — the power bar pins to MAX and never reaches `UnitFrame_UpdateManaType`,
+        // so it would read "80 / 80" with no prefix.
+        is_connected: true,
         ..UnitState::default()
     };
     s.set_unit("player", Some(alive(72, 45, 1))); // power_type 1 = RAGE
@@ -1493,59 +1634,95 @@ fn status_bar_text_paints_the_player_numerals_but_not_the_targets() {
         shown(&s, "PlayerFrameHealthBarText"),
         "your own health numerals pin on"
     );
+    // Bare here, and only because this fixture stops short of the character window: the
+    // reference's "Health" prefix is set by `CharacterFrame_OnLoad` (ref CharacterFrame.lua l.55),
+    // not by the unit frames, and the manifest loads `Interface\FrameXML\CharacterFrame.xml` far
+    // below these. In a full run the player's health bar reads "Health 72 / 100".
     assert_eq!(
         text(&s, "PlayerFrameHealthBarText"),
         "72 / 100",
-        "bare numbers: the reference's \"Health\"/\"Rage\" labels were cut on the \
-         director's call (1147)"
+        "no prefix without the character window, which is what sets HEALTH"
     );
+    // The power bar's LABEL is back, and it is the unit frames' own:
+    // `UnitFrame_UpdateManaType` re-sets the prefix from `ManaBarColor[UnitPowerType(unit)].prefix`
+    // on every mana-bar update (ref UnitFrame.lua l.122-129), and
+    // `TextStatusBar_UpdateTextString` renders `prefix .. " " .. value .. " / " .. max`
+    // (ref TextStatusBar.lua l.42-46). 1147 §1 cut the three prefix calls out of OUR files on the
+    // director's look call; this one lives inside the stock file, so it came back with it.
+    assert_eq!(
+        s.eval::<String>("return PlayerFrameManaBar.prefix")
+            .unwrap(),
+        "Rage",
+        "the prefix follows the resource — this player runs on rage"
+    );
+    // The STRING, though, is still the one rendered before the switch existed. That is the
+    // reference's own ordering, not a gap: `TextStatusBar_OnEvent`'s CVAR_UPDATE arm only calls
+    // `TextString:Show()` (ref TextStatusBar.lua l.14-24) — it never re-renders — and the last
+    // render ran from `SetValue`'s OnValueChanged during PLAYER_ENTERING_WORLD, before
+    // `UnitFrame_UpdateManaType` had set the prefix (ref UnitFrame.lua l.208-215 sets the value
+    // first). Its own re-render is gated on `GetCVar("statusBarText") == "1"` (l.130-132), which
+    // was not yet true. So the label lands on the next repaint — asserted at the end of this test.
     assert_eq!(
         text(&s, "PlayerFrameManaBarText"),
         "45 / 80",
-        "the power bar shows the number alone, whatever resource it is"
+        "flipping the switch shows the string, it does not re-render it"
     );
 
-    // The target's stay dark with the switch ON: 1.12 never makes its bars textLockable, so the
-    // option does not reach them.
+    // The target's bars carry NO text region, so there is nothing for the switch to pin and
+    // nothing for a hover to reveal. Asserted on the globals themselves: the reference leaves both
+    // names undeclared (ref TargetFrame.xml l.486-487 passes them anyway).
     assert!(
-        !shown(&s, "TargetFrameHealthBarText"),
-        "the switch pins your own numbers, never the target's"
+        s.eval::<bool>(
+            "return TargetFrameHealthBarText == nil and TargetFrameManaBarText == nil \
+             and TargetFrameHealthBar.TextString == nil and TargetFrameManaBar.TextString == nil"
+        )
+        .unwrap(),
+        "the reference declares no numerals on the target frame, at any switch setting"
     );
 
-    // ...but the HOVER reveals them, which is how you read a target's health in 1.12 (1146).
-    s.run("BenillaUnitFrameBar_OnEnter(TargetFrameHealthBar)")
-        .unwrap();
-    assert!(shown(&s, "TargetFrameHealthBarText"));
-    assert_eq!(text(&s, "TargetFrameHealthBarText"), "50 / 100");
-    // `this` bound, as the engine binds it for a bar's own `<OnLeave>`: the stock
-    // `HideTextStatusBarText` reads `this.isZero` on one line where every other reads `bar`
-    // (TextStatusBar.lua:95 — the reference's own slip; a nil index only from bare Lua).
-    s.run(
-        "this = TargetFrameHealthBar BenillaUnitFrameBar_OnLeave(TargetFrameHealthBar) this = nil",
-    )
-    .unwrap();
+    // Hovering a target bar pops the unit TOOLTIP instead — the `elseif this:GetParent() ==
+    // TargetFrame` arm of the template's own OnEnter (ref TextStatusBar.xml l.16-26). Driven
+    // through the real pointer path, because that arm reads `this`.
+    hover(&mut s, "TargetFrameHealthBar");
     assert!(
-        !shown(&s, "TargetFrameHealthBarText"),
-        "and go away again — the lockShow refcount balances"
+        s.eval::<bool>(
+            "return GameTooltip:IsShown() and GameTooltip:IsOwned(TargetFrameHealthBar)"
+        )
+        .unwrap(),
+        "the target's bar hover is a tooltip, not numerals ({:?})",
+        s.errors()
+    );
+    assert!(
+        s.eval::<String>("return tostring(GameTooltipTextLeft1:GetText())")
+            .unwrap()
+            .contains("Somebody"),
+        "and it is the unit's own plate"
+    );
+    unhover(&mut s);
+    assert!(
+        s.eval::<bool>("return not GameTooltip:IsShown()").unwrap(),
+        "the template's OnLeave hides it (ref TextStatusBar.xml l.28-31)"
     );
 
-    // The same hover works with the switch OFF, which is the point of it on YOUR frame too: the
-    // numbers are there when you go looking, without living on the bar.
+    // The hover on YOUR bar with the switch OFF is the reveal that still exists: the numbers are
+    // there when you go looking, without living on the bar. `ShowTextStatusBarText` /
+    // `HideTextStatusBarText` and their `lockShow` refcount (ref TextStatusBar.lua l.77-102) are
+    // the mechanism, reached through the template's OnEnter/OnLeave.
     s.run("SetCVar(\"statusBarText\", \"0\", \"STATUS_BAR_TEXT\")")
         .unwrap();
     s.tick(0.0);
     assert!(!shown(&s, "PlayerFrameHealthBarText"));
-    s.run("BenillaUnitFrameBar_OnEnter(PlayerFrameHealthBar)")
-        .unwrap();
+    hover(&mut s, "PlayerFrameHealthBar");
     assert!(
         shown(&s, "PlayerFrameHealthBarText"),
-        "hover shows them even with the option off"
+        "hover shows them even with the option off ({:?})",
+        s.errors()
     );
-    s.run(
-        "this = PlayerFrameHealthBar BenillaUnitFrameBar_OnLeave(PlayerFrameHealthBar) this = nil",
-    )
-    .unwrap();
-    assert!(!shown(&s, "PlayerFrameHealthBarText"));
+    unhover(&mut s);
+    assert!(
+        !shown(&s, "PlayerFrameHealthBarText"),
+        "and go away again — the lockShow refcount balances"
+    );
     s.run("SetCVar(\"statusBarText\", \"1\", \"STATUS_BAR_TEXT\")")
         .unwrap();
     s.tick(0.0);
@@ -1555,10 +1732,11 @@ fn status_bar_text_paints_the_player_numerals_but_not_the_targets() {
     s.fire_event("UNIT_HEALTH", vec![ScriptValue::Str("player".into())]);
     assert_eq!(text(&s, "PlayerFrameHealthBarText"), "31 / 100");
 
-    // A power-type change repaints the same way (it used to re-LABEL the bar too — 1147 cut that).
+    // A power-type change repaints AND re-labels — `UnitFrame_UpdateManaType` runs off
+    // UNIT_DISPLAYPOWER (ref UnitFrame.lua l.36-40) and the prefix follows the new resource.
     s.set_unit("player", Some(alive(31, 60, 3)));
     s.fire_event("UNIT_DISPLAYPOWER", vec![ScriptValue::Str("player".into())]);
-    assert_eq!(text(&s, "PlayerFrameManaBarText"), "60 / 80");
+    assert_eq!(text(&s, "PlayerFrameManaBarText"), "Energy 60 / 80");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 

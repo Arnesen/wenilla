@@ -100,9 +100,11 @@
         BOTTOMRIGHT_ACTIONBAR_PAGE = 5
         BOTTOMLEFT_ACTIONBAR_PAGE = 6
 
-        -- Ref ActionButton.lua:4 / UIParent.lua: the flash blink period and the range-check cadence.
+        -- Ref ActionButton.lua:4: the flash blink period. Its neighbour `TOOLTIP_UPDATE_TIME`
+        -- (the range-check cadence this file's `rangeTimer` reads) moved to UIParent.xml, which is
+        -- the reference's own home for it — `UIParent.lua:1`, and the stock `BuffFrame.lua` reads
+        -- it as well.
         ATTACK_BUTTON_FLASH_TIME = 0.4
-        TOOLTIP_UPDATE_TIME = 0.2
 
         -- "Lock ActionBars" (ref UIOptionsFrame.lua:102-103 — uvar LOCK_ACTIONBAR, default "0").
         -- The reference declares it in its options window; ours lives with the bar it locks, which

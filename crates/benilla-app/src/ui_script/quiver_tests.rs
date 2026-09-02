@@ -142,6 +142,7 @@ fn seat_a_hunter(root: &Path) -> UiScript {
             class_file: Some("HUNTER".into()),
             sex: 2,
             is_player: true,
+            player_controlled: true,
             faction_group: Some("Alliance".into()),
             ..Default::default()
         }),

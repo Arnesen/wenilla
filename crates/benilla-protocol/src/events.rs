@@ -195,7 +195,15 @@ pub enum SessionEvent {
     CharActionResult { action: CharAction, code: u8 },
     /// We are in the world: `self_guid` is our player, `name` its character name. The IO thread emits
     /// this first, before any object updates.
-    Connected { self_guid: u64, name: String },
+    Connected {
+        self_guid: u64,
+        name: String,
+        /// The account's accumulated **rested billing minutes**, from the `SMSG_AUTH_RESPONSE`
+        /// that admitted this session — what `GetBillingTimeRested()` reports (decision 1820).
+        /// Rides the connect event because that is the only moment it ever arrives: the reference
+        /// keeps it in a process-lifetime global written once by the auth parser.
+        billing_time_rested: u32,
+    },
     /// The server confirmed our logout (`SMSG_LOGOUT_COMPLETE`) — we are back at character select.
     /// The IO thread cycles the connection immediately; a fresh [`Self::CharacterList`] follows.
     LoggedOut,

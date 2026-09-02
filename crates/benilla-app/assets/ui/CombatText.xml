@@ -19,8 +19,10 @@
           strings; region templates are outside the v1 loader's object model (BuffFrame.xml has
           the precedent note), so the 20 instances inherit the CombatTextFont Font object and
           carry the template's anchor directly.
-        - UNIT_MANA → UNIT_POWER_UPDATE + the Era Unit* API (our event surface, decision 0068);
-          same low-mana law. PLAYER_COMBO_POINTS rides the combo wire (0869); its arm reads
+        - UNIT_MANA, the spec's own event. This used to read UNIT_POWER_UPDATE + the Era Unit* API
+          (0068's surface); 1819 retired that pair — 1.12 names the resource in the event, and the
+          Era spelling was a deviation this file's own header already flagged. Same low-mana law,
+          and now the handler is not woken by rage or energy at all. PLAYER_COMBO_POINTS rides the combo wire (0869); its arm reads
           `GetComboPoints()`, so it is rogue/druid-only and per-target for free — the binding
           gates, not this file (0875).
         - Lua 5.0 `for k,v in t` iteration becomes explicit index loops (5.1 VM), backwards
@@ -284,10 +286,11 @@
                 if not messageType then
                     return
                 end
-            elseif event == "UNIT_POWER_UPDATE" then
-                -- Spec: UNIT_MANA + UnitMana/UnitManaMax (header deviation — the Era surface).
-                -- Power type 0 is mana; the same event also carries rage, focus and energy, none
-                -- of which has a low warning.
+            elseif event == "UNIT_MANA" then
+                -- The powerType == 0 guard still earns its place: `power_token` reports an UNKNOWN
+                -- power type as MANA (its descriptor default), so this event can arrive for a unit
+                -- whose track is not really mana. Rage, focus and energy now have their own event
+                -- names and never reach here at all (1819).
                 local mana = UnitMana("player")
                 local powerType = UnitPowerType("player")
                 if arg1 == "player" then
@@ -567,7 +570,7 @@
             if SHOW_COMBAT_TEXT == "0" then
                 CombatText:UnregisterEvent("COMBAT_TEXT_UPDATE")
                 CombatText:UnregisterEvent("UNIT_HEALTH")
-                CombatText:UnregisterEvent("UNIT_POWER_UPDATE")
+                CombatText:UnregisterEvent("UNIT_MANA")
                 CombatText:UnregisterEvent("PLAYER_COMBO_POINTS")
                 CombatText:UnregisterEvent("PLAYER_REGEN_DISABLED")
                 CombatText:UnregisterEvent("PLAYER_REGEN_ENABLED")
@@ -575,7 +578,7 @@
             else
                 CombatText:RegisterEvent("COMBAT_TEXT_UPDATE")
                 CombatText:RegisterEvent("UNIT_HEALTH")
-                CombatText:RegisterEvent("UNIT_POWER_UPDATE")
+                CombatText:RegisterEvent("UNIT_MANA")
                 CombatText:RegisterEvent("PLAYER_COMBO_POINTS")
                 CombatText:RegisterEvent("PLAYER_REGEN_DISABLED")
                 CombatText:RegisterEvent("PLAYER_REGEN_ENABLED")

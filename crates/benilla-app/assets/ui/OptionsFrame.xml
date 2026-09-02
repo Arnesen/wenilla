@@ -210,6 +210,19 @@
         SHOW_BUFF_DURATIONS = "0"
         RegisterForSave("SHOW_BUFF_DURATIONS")
 
+        -- The target-of-target pair, at the reference's own values and in the reference's own home
+        -- (`UIOptionsFrame.lua` l.116-119, where both sit in the uvar defaults block and both are
+        -- RegisterForSave'd). The switch ships OFF and the state ships "5".
+        --
+        -- These lived in our `UnitFrames.xml` file scope until the unit-frame kit went to the
+        -- chain — a squatter, and its own note said so. The reference declares them beside the
+        -- other party/unit uvars here, and `TargetFrame.lua:504` reads the switch at CALL time
+        -- (`TargetofTarget_Update`), so this file sitting far below the frames does not bind.
+        SHOW_TARGET_OF_TARGET = "0"
+        SHOW_TARGET_OF_TARGET_STATE = "5"
+        RegisterForSave("SHOW_TARGET_OF_TARGET")
+        RegisterForSave("SHOW_TARGET_OF_TARGET_STATE")
+
         -- The static category tree (era Game tab, Classic tocs), in list order. Keys are the row
         -- name suffixes; the visible label doubles as the page title (the era does the same —
         -- Settings.RegisterCategory names both from one string).

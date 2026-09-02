@@ -40,6 +40,7 @@ fn player_unit() -> UnitState {
         class_file: Some("WARRIOR".into()),
         sex: 2,
         is_player: true,
+        player_controlled: true,
         ..Default::default()
     }
 }

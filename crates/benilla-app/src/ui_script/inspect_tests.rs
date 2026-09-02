@@ -51,6 +51,7 @@ fn target_unit() -> UnitState {
         class_file: Some("PALADIN".into()),
         sex: 2,
         is_player: true,
+        player_controlled: true,
         ..Default::default()
     }
 }

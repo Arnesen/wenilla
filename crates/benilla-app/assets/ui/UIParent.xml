@@ -126,6 +126,13 @@
         -- the custom block at the end of the pass recomputes it, for the reason recorded there.
         PETACTIONBAR_XPOS = 36
 
+        -- ref UIParent.lua:1 — the tooltip/range re-check cadence. It lived in our ActionBar.xml,
+        -- beside the range timer that reads it; the reference's own `BuffFrame.lua:32` reads it too
+        -- and, now that BuffFrame is the reference's own file (1751), a kit can want the buff row
+        -- without wanting the action bars. So it moves to the reference's home, one line above the
+        -- constant below it.
+        TOOLTIP_UPDATE_TIME = 0.2
+
         -- ref UIParent.lua:2 — the model panes' held-button spin rate (half a turn per second),
         -- read by every `Model_OnUpdate` transcription (the character window's + inspect's).
         ROTATIONS_PER_SECOND = .5

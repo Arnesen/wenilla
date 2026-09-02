@@ -89,7 +89,15 @@ fn the_self_menu_row_gates_on_the_binding_and_confirms_before_sending() {
         "GameTooltip.xml",
         "UIDropDownMenu.xml",
         "UnitPopup.xml",
-        "UnitFrames.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\BuffFrame.xml",
+        "Interface\\FrameXML\\UnitFrame.xml",
+        "Interface\\FrameXML\\CombatFeedback.xml",
+        "Interface\\FrameXML\\PlayerFrame.xml",
+        "Interface\\FrameXML\\PartyFrame.xml",
+        "Interface\\FrameXML\\TargetFrame.xml",
+        "Interface\\FrameXML\\PetFrame.xml",
         "RaidFrame.xml",
     ] {
         load_xml(&s, file);

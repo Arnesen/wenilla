@@ -9,8 +9,9 @@
 //! units tall every frame, and [`seam_scale`] carries quads ×s out / mouse ÷s in. The quad pass
 //! wants y-down window px, so extraction also flips through the window height.
 //!
-//! Benilla's own **unit frames** (`assets/ui/UnitFrames.xml` — a template + the player and target
-//! instances) load at startup by default through [`benilla_ui::loader`] — the decision 0068 slice-1
+//! The **unit frames** (the reference's own `Interface\FrameXML\{PlayerFrame,PartyFrame,
+//! TargetFrame,PetFrame}.xml`, off the player's chain since 1751 — our `UnitFrames.xml`
+//! transcription is retired) load at startup through [`benilla_ui::loader`] — the decision 0068 slice-1
 //! game-shell: real FrameXML+Lua rendering unit health/power/level/name through the whole chain
 //! (snapshot → `Unit*` bindings → Lua → event → StatusBars+text → quad pass). Since captures run
 //! server-less (no real game state), `WOW_CAPTURE_UI=1` also feeds synthetic `"player"`/`"target"`
@@ -550,6 +551,7 @@ fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<VmMemo<
             class_file: Some("WARRIOR".into()),
             sex: 2,
             is_player: true,
+            player_controlled: true,
             ..Default::default()
         }),
     );

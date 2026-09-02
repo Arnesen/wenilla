@@ -104,6 +104,7 @@ pub(super) fn cinematic_triggered(
 pub(super) fn connected(
     guid: u64,
     name: String,
+    billing_time_rested: u32,
     self_guid: &mut SelfGuid,
     status: &mut NetStatus,
     names: &mut NameCache,
@@ -115,7 +116,9 @@ pub(super) fn connected(
     info!("net: in world as {name} (guid {guid})");
     // Our own name came with the login — seed the cache so "player" never queries.
     names.insert_player(guid, name, None);
-    entered_world.write(EnteredWorldMessage);
+    entered_world.write(EnteredWorldMessage {
+        billing_time_rested,
+    });
 }
 
 /// The server confirmed our logout (`SMSG_LOGOUT_COMPLETE`) — back to character select.

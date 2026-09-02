@@ -216,75 +216,65 @@ Interface\FrameXML\ItemRef.xml
 # and the numerals simply never appear. The `.lua` comes first, as it does there.
 Interface\FrameXML\TextStatusBar.lua
 Interface\FrameXML\TextStatusBar.xml
+# ══ THE PLAYER AURA BAR — the reference's own, off the player's chain (1751) ══
+# The HUD row of buff/debuff icons under the minimap, driven by the UnitAura feed
+# (`crate::ui_aura`; decisions 0255/0257).
+#
+# FIRST OF THE KIT, which is the reference's own order (its toc: BuffFrame 40, CombatFeedback 41,
+# UnitFrame 43, PlayerFrame 44, PartyFrame 45, TargetFrame 46, PetFrame 47). It has to precede
+# PartyFrame because stock `PartyMemberFrame.lua:60` calls `RefreshBuffs` from each row's OnLoad
+# and `BuffFrame.lua` is where that lives. Ours had BuffFrame below the unit frames; that
+# inversion is gone.
+Interface\FrameXML\BuffFrame.xml
 # ══ THE UNIT-FRAME KIT — the reference's own, off the player's chain (1751, window 22) ══
 # `UnitFrame.xml` declares NO frames — it is a `<Script file="UnitFrame.lua"/>` and nothing else —
-# so this is a pure addition of thirteen globals: `UnitFrame_Initialize`, `_Update`, `_OnEvent`,
+# so it is a pure addition of thirteen globals: `UnitFrame_Initialize`, `_Update`, `_OnEvent`,
 # `_OnEnter`, `_OnLeave`, `_OnUpdate`, `_UpdateManaType`, the `UnitFrameHealthBar_*` /
-# `UnitFrameManaBar_*` pairs, and `GetUnitName`.
-#
-# ABOVE OURS ON PURPOSE, the `PaperDollFrame.lua` shape (see the top of this file): four of the
-# thirteen — `UnitFrame_Update`/`_OnEvent`/`_OnEnter`/`_OnLeave` — collide with bodies our own
-# UnitFrames.xml owns and drives, and the later line wins, so ours stay live. The other nine arrive
-# fresh, and `UnitFrame_Initialize` is the one that matters most: it is what stock
+# `UnitFrameManaBar_*` pairs, and `GetUnitName`. `UnitFrame_Initialize` is what stock
 # `PlayerFrame.xml`, `TargetFrame.xml`, `PartyFrame.xml` and `PetFrame.xml` each call in their
-# OnLoad, and its absence is the single blocker the readiness probe reports for all four.
+# OnLoad.
 #
-# So this is groundwork rather than a window: those four are the most visible thing on the screen
-# and their swap is a look the director has to see. This is the part that can land without one.
+# Until the four windows below arrived, our own UnitFrames.xml loaded underneath this and
+# redefined four of the thirteen — `_Update`, `_OnEvent`, `_OnEnter`, `_OnLeave` — so the
+# reference's bodies were dead the whole time and stock party rows would have called OUR update,
+# which indexed a `nameText` the reference's rows do not carry. That file is gone; these are live.
 Interface\FrameXML\UnitFrame.xml
-# …and its sibling, the same shape and the same reason. `CombatFeedback.xml` declares no frames
-# either: three timing constants plus `CombatFeedback_Initialize` / `_OnCombatEvent` / `_OnUpdate`,
-# the floating hit/miss text a unit frame's portrait carries. Two of the three collide with bodies
-# our UnitFrames.xml owns, so ours win from below; `CombatFeedback_Initialize` is the one that is
-# new, and it is the second of the two blockers the probe reports for stock `PlayerFrame.xml` and
-# `PetFrame.xml` (`UnitFrame_Initialize` above being the first). With both here, all four of the
-# reference's unit windows load clean.
+# The same shape and the same reason. `CombatFeedback.xml` declares no frames either: three timing
+# constants plus `CombatFeedback_Initialize` / `_OnCombatEvent` / `_OnUpdate`, the floating
+# hit/miss text a unit frame's portrait carries. Two of the three used to collide with bodies our
+# UnitFrames.xml owned; with that file gone the reference's three are what run.
 Interface\FrameXML\CombatFeedback.xml
-UnitFrames.xml
+# ── The four unit windows themselves (1751, window 22) ─────────────────────────────────────────
+# `PlayerFrame` + `PlayerStatusGlow` + `PlayerPlayTime` + `PlayerPVPIconHitArea` +
+# `PlayerFrameGroupIndicator` + the dropdown, out of `PlayerFrame.lua`.
+Interface\FrameXML\PlayerFrame.xml
+# `PartyMemberFrame1..4`, `PartyMemberBuffTooltip` and `PartyMemberBackground`, out of
+# `PartyMemberFrame.lua` (decision 0434 phase 2). Its `<Script>` list names `TextStatusBar.lua`
+# a second time, which is the reference's own doing and harmless — the file is idempotent.
+#
+# What moved out of our copy before it went: the PARTY_INVITE dialog and its driver, to
+# UiPanels.xml (StaticPopup.lua l.526, UIParent.lua), and the three raid constants, which
+# RaidFrame.xml already declared — that is the reference's home for them (RaidFrame.lua l.2-4).
+Interface\FrameXML\PartyFrame.xml
+# `TargetFrame`, its texture frame and dropdown, the sixteen debuff and five buff buttons with
+# their three templates, and the whole `TargetofTarget*` family — out of `TargetFrame.lua`, which
+# is also where `MAX_COMBO_POINTS` (l.1) and `SetRaidTargetIconTexture` live. `TargetofTarget_Update`
+# is what OptionsFrame.xml's two ToT settings drive.
+Interface\FrameXML\TargetFrame.xml
+# `PetFrame`, its health/mana bars, `PetFrameHappiness` and the dropdown, out of `PetFrame.lua`.
+Interface\FrameXML\PetFrame.xml
 # ══ THE COMBO-POINT DOTS — the reference's own, off the player's chain (1751, window 10) ══
 # `ComboFrame`, `ComboPoint1..5`, `ComboPointTemplate` and the `ComboPointsFrame_OnEvent` /
 # `ComboPointShineFade*` chain with its five duration constants, out of `ComboFrame.lua`.
 #
 # THE POSITION IS THE REQUIREMENT: `relativeTo="TargetFrame"` is resolved at LOAD, so this sits
-# below UnitFrames.xml. Its fade chain needs UiPanels.xml's `UIFrameFade` family, far above, at
-# call time.
-#
-# Our copy's frames were `BenillaComboPointTemplate` and kin; the reference's are
-# `ComboPointTemplate` / `ComboPoint<N>Highlight` / `ComboPoint<N>Shine`, which is what an addon
-# skinning the dots reaches for. `MAX_COMBO_POINTS` moved to UnitFrames.xml with this window —
-# 1.12 declares it on `TargetFrame.lua:1`, and our copy's own note said so while explaining that
-# it had nowhere else to go.
+# below TargetFrame.xml. Its fade chain needs UiPanels.xml's `UIFrameFade` family, far above, at
+# call time. `MAX_COMBO_POINTS` comes from TargetFrame.lua now, which is where 1.12 declares it.
 Interface\FrameXML\ComboFrame.xml
 # The center-screen scrolling combat text (decision 0578) — the Blizzard_CombatText
 # transcription; consumes COMBAT_TEXT_UPDATE + the regen/health/power events, needs
 # only Fonts.xml (CombatTextFont) + UIParent before it.
 CombatText.xml
-# The player buff/debuff bar (decisions 0255/0257 — the player aura arc): the HUD row of aura
-# icons under the minimap, driven by the UnitAura feed (`crate::ui_aura`).
-#
-# MOVED UP HERE from below the world-state frame when PartyFrame went to the chain (1751). It
-# has to precede PartyFrame, because stock `PartyMemberFrame.lua:60` calls `RefreshBuffs` from
-# each row's OnLoad and `BuffFrame.lua` is where that lives — which is exactly the reference's
-# own order (its toc: BuffFrame 40, UnitFrame 43, PartyFrame 45; ours had them inverted).
-#
-# The note this entry used to carry — "needs ActionBar's `BENILLA_FALLBACK_ICON`" — was stale:
-# that was true of OUR BuffFrame.xml, and the chain file does not mention the name. The only
-# readers left are MerchantFrame, StanceBar and TradeSkillFrame, all at runtime.
-Interface\FrameXML\BuffFrame.xml
-# The party member frames (decision 0434 phase 2).
-#
-# NOT yet on the chain, and the blocker is ours, not a missing verb: **`UnitFrames.xml` below
-# redefines `UnitFrame_OnEvent` and `UnitFrame_Update`**, two names stock `UnitFrame.lua` (l.232
-# above) has already defined. Ours win, so stock party rows — built by stock
-# `PartyMemberFrame.lua` and initialized by the reference's own `UnitFrame_Initialize` — end up
-# calling OUR update, which indexes a `nameText` the reference's rows do not carry. The swap
-# loads and then raises on the first PARTY_MEMBERS_CHANGED. So PartyFrame waits on the
-# player/target/pet frames, not on anything of its own.
-#
-# What HAS moved out: the PARTY_INVITE dialog and its driver, to UiPanels.xml (StaticPopup.lua
-# l.526, UIParent.lua), and the three raid constants, which RaidFrame.xml already declared —
-# that is the reference's home for them (RaidFrame.lua l.2-4).
-PartyFrame.xml
 # The death arc's dialogs + event driver (decision 0308): registry entries on the shared
 # StaticPopup engine, so after UiPanels.xml.
 DeathFrame.xml

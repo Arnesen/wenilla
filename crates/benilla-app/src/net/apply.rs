@@ -540,9 +540,11 @@ pub(super) fn apply_net_updates(
             SessionEvent::Connected {
                 self_guid: guid,
                 name,
+                billing_time_rested,
             } => session::connected(
                 guid,
                 name,
+                billing_time_rested,
                 &mut self_guid,
                 &mut status,
                 &mut names,

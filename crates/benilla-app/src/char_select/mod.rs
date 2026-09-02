@@ -1066,7 +1066,9 @@ mod tests {
         app.world_mut().resource_mut::<Roster>().pending_pick = Some(7);
 
         // One frame carrying both halves of the race, in the order the drain produces them.
-        app.world_mut().write_message(EnteredWorldMessage);
+        app.world_mut().write_message(EnteredWorldMessage {
+            billing_time_rested: 0,
+        });
         app.world_mut()
             .write_message(crate::net::DisconnectedMessage {
                 reason: "disconnected: world stream closed: failed to fill whole buffer".into(),
@@ -1105,7 +1107,9 @@ mod tests {
             .add_message::<crate::net::DisconnectedMessage>()
             .add_systems(Update, (enter_on_connected, back_on_disconnect).chain());
 
-        app.world_mut().write_message(EnteredWorldMessage);
+        app.world_mut().write_message(EnteredWorldMessage {
+            billing_time_rested: 0,
+        });
         app.world_mut()
             .write_message(crate::net::DisconnectedMessage {
                 reason: "logged out".into(),

@@ -85,6 +85,15 @@ pub enum ServerPacket {
         /// Our place in the login queue, when `result` is [`super::AUTH_WAIT_QUEUE`] — `None` for
         /// every other result, and also for a queue packet whose body was too short to carry one.
         queue_position: Option<u32>,
+        /// The account's accumulated **rested billing minutes**, the third field of the billing
+        /// group — what `GetBillingTimeRested()` reports (decision 1820). `None` when the body was
+        /// too short to carry the group, which is the same length branch `queue_position` takes.
+        ///
+        /// The unit is the server's convention, not the engine's: the client applies no conversion
+        /// at any point (the binding `0x48ec50` does a bare unsigned u32→double, and the parser
+        /// `0x418eb0` a bare `mov`). Minutes is what the reference's own FrameXML assumes —
+        /// `PlayerFrame.lua:246` divides by 60 to get hours against `REQUIRED_REST_HOURS = 5`.
+        billing_time_rested: Option<u32>,
     },
     CharEnum {
         characters: Vec<Character>,

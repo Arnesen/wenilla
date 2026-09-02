@@ -89,9 +89,31 @@ fn world_hover_seats_the_default_corner() {
 #[test]
 fn unit_frame_hover_takes_the_default_corner_and_drops_on_leave() {
     // The kit + popups precede the unit frames (their DropDown children's OnLoad), app order.
-    let mut s = harness(&["UIDropDownMenu.xml", "UnitPopup.xml", "UnitFrames.xml"]);
+    let mut s = harness(&[
+        // The stock unit frames resolve GlobalStrings at LOAD (`CombatFeedback.lua` l.7-17,
+        // `UnitFrame.lua` l.1-6) and `UnitFrame_OnEnter` passes `PARTY_OPTIONS_LABEL` /
+        // `PLAYER_OPTIONS_LABEL` (l.60/63) straight into `GameTooltip:SetText`, which raises on
+        // nil. The app loads this file ahead of the whole manifest; so does the fixture.
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "UIDropDownMenu.xml",
+        "UnitPopup.xml",
+        "Interface\\FrameXML\\BuffFrame.xml",
+        "Interface\\FrameXML\\UnitFrame.xml",
+        "Interface\\FrameXML\\CombatFeedback.xml",
+        "Interface\\FrameXML\\PlayerFrame.xml",
+        "Interface\\FrameXML\\PartyFrame.xml",
+        "Interface\\FrameXML\\TargetFrame.xml",
+        "Interface\\FrameXML\\PetFrame.xml",
+    ]);
     s.set_unit("target", Some(wolf()));
-    s.run("BenillaUnitFrame_OnEnter(TargetFrame)").unwrap();
+    // The reference's handler takes no arguments and reads `this` (ref UnitFrame.lua l.45), which
+    // is exactly how the stock frames wire it: `<OnEnter>UnitFrame_OnEnter();</OnEnter>`
+    // (ref TargetFrame.xml l.505, PlayerFrame.xml l.435). Our deleted transcription's
+    // `BenillaUnitFrame_OnEnter(frame)` adapter went with the file.
+    s.run("this = TargetFrame UnitFrame_OnEnter() this = nil")
+        .unwrap();
     assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
     s.resolve();
     let ok: bool = s
@@ -113,7 +135,8 @@ fn unit_frame_hover_takes_the_default_corner_and_drops_on_leave() {
         "a non-player target still gets the unit lines"
     );
     // Leave: gone on the spot, no ramp to wait out.
-    s.run("BenillaUnitFrame_OnLeave(TargetFrame)").unwrap();
+    s.run("this = TargetFrame UnitFrame_OnLeave() this = nil")
+        .unwrap();
     let hidden: bool = s.eval("return not GameTooltip:IsShown()").unwrap();
     assert!(
         hidden,
@@ -132,10 +155,28 @@ fn unit_frame_hover_takes_the_default_corner_and_drops_on_leave() {
 /// (the sibling test above).
 #[test]
 fn your_own_portrait_explains_the_menu_instead_of_showing_your_health() {
-    let mut s = harness(&["UIDropDownMenu.xml", "UnitPopup.xml", "UnitFrames.xml"]);
+    let mut s = harness(&[
+        // The stock unit frames resolve GlobalStrings at LOAD (`CombatFeedback.lua` l.7-17,
+        // `UnitFrame.lua` l.1-6) and `UnitFrame_OnEnter` passes `PARTY_OPTIONS_LABEL` /
+        // `PLAYER_OPTIONS_LABEL` (l.60/63) straight into `GameTooltip:SetText`, which raises on
+        // nil. The app loads this file ahead of the whole manifest; so does the fixture.
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "UIDropDownMenu.xml",
+        "UnitPopup.xml",
+        "Interface\\FrameXML\\BuffFrame.xml",
+        "Interface\\FrameXML\\UnitFrame.xml",
+        "Interface\\FrameXML\\CombatFeedback.xml",
+        "Interface\\FrameXML\\PlayerFrame.xml",
+        "Interface\\FrameXML\\PartyFrame.xml",
+        "Interface\\FrameXML\\TargetFrame.xml",
+        "Interface\\FrameXML\\PetFrame.xml",
+    ]);
     s.set_unit("player", Some(wolf()));
 
-    s.run("BenillaUnitFrame_OnEnter(PlayerFrame)").unwrap();
+    s.run("this = PlayerFrame UnitFrame_OnEnter() this = nil")
+        .unwrap();
     assert_eq!(
         s.eval::<String>("return GameTooltipTextLeft1:GetText()")
             .unwrap(),
@@ -160,11 +201,13 @@ fn your_own_portrait_explains_the_menu_instead_of_showing_your_health() {
         "target",
         Some(UnitState {
             is_player: true,
+            player_controlled: true,
             name: Some("Someone".into()),
             ..wolf()
         }),
     );
-    s.run("BenillaUnitFrame_OnEnter(TargetFrame)").unwrap();
+    s.run("this = TargetFrame UnitFrame_OnEnter() this = nil")
+        .unwrap();
     assert_eq!(
         s.eval::<String>("return GameTooltipTextLeft1:GetText()")
             .unwrap(),
@@ -313,6 +356,8 @@ fn buff_hover_hangs_below_left_of_the_button() {
     let mut s = harness(&[
         "Cooldown.xml",
         "ActionBar.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
         "Interface\\FrameXML\\BuffFrame.xml",
     ]);
     s.set_auras(

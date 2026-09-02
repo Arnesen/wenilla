@@ -85,7 +85,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 ));
             };
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.sound_queue.push(req);
+            // `PlaySoundByName 0x458030`'s first act: read the UI-load suppression depth
+            // (`0x458046`) and bail at `0x45804d` if it is non-zero — BEFORE the
+            // `MasterSoundEffects` CVar and before the kit-hash lookup. So the call is dropped
+            // rather than muted or queued, and the binding still answers as if it had played.
+            // NAME-keyed only: the id-keyed entry (`0x457fb0`) has no such gate, which is why the
+            // arm above pushes unconditionally.
+            let suppressed = matches!(req, SoundRequest::KitName(_)) && model.sound_suppression > 0;
+            if !suppressed {
+                model.sound_queue.push(req);
+            }
             drop(model);
             // willPlay (queued), soundHandle (nil — module docs).
             Ok((true, Value::Nil))

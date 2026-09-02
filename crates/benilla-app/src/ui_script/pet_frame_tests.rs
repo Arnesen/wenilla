@@ -31,7 +31,15 @@ fn load_pet_frame() -> UiScript {
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "UIDropDownMenu.xml");
     load_xml(&s, "UnitPopup.xml");
-    load_xml(&s, "UnitFrames.xml");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\BuffFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UnitFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\CombatFeedback.xml");
+    load_xml(&s, "Interface\\FrameXML\\PlayerFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\PartyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\TargetFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\PetFrame.xml");
     s.set_unit(
         "player",
         Some(UnitState {
@@ -61,6 +69,12 @@ fn pet(name: &str, health: u32, power: u32, max_power: u32, power_type: u8) -> U
         power_type,
         power,
         max_power,
+        // Every token the app's feed pushes is connected (`ui_unit.rs`, "the stated
+        // `is_connected` gap, closed"). It matters to the reference's own bar: stock
+        // `UnitFrameManaBar_Update` (UnitFrame.lua:213) greys a DISCONNECTED unit's bar to
+        // (0.5,0.5,0.5) and only reaches `UnitFrame_UpdateManaType`'s power colour otherwise, so a
+        // fixture that leaves this false paints every bar grey and tests nothing about power type.
+        is_connected: true,
         ..UnitState::default()
     }
 }
@@ -92,7 +106,9 @@ fn draws(s: &mut UiScript, path: &str) -> bool {
     drawn(s).iter().any(|(p, _)| p == path)
 }
 
-fn debuff(spell_id: u32, name: &str, count: u8) -> AuraState {
+/// One aura on the pet's row. **Helpful**, because the row the pet frame fills is a BUFF row —
+/// see [`the_debuff_row_fills_from_the_pets_own_auras`] for the reference's own `showBuffs = 1`.
+fn pet_buff(spell_id: u32, name: &str, count: u8) -> AuraState {
     AuraState {
         spell_id,
         name: Some(name.into()),
@@ -102,7 +118,7 @@ fn debuff(spell_id: u32, name: &str, count: u8) -> AuraState {
         // No unit but yourself carries a duration on the 1.12 wire (decision 0257 B6).
         duration: 0.0,
         expiration_time: 0.0,
-        helpful: false,
+        helpful: true,
         cancelable: false,
         until_cancelled: false,
         channeled: false,
@@ -183,10 +199,28 @@ fn the_frame_answers_only_the_events_that_name_its_own_unit() {
     assert!(!s.eval::<bool>("return PetFrame:IsVisible()").unwrap());
 }
 
-/// The reference's art swap (`PetFrame.lua`'s Update): a pet with no power wears the `-NoMana`
+/// The reference's art swap (`PetFrame.lua:29-33`): a pet with no power wears the `-NoMana`
 /// plate, which has no mana rail to leave empty — and the bar hides with it. A hunter's FOCUS pet
 /// takes the plain plate and the focus colour, which is the case the mana-coloured default would
 /// get wrong.
+///
+/// **Two things about the reference's wiring that our transcription did not have.**
+///
+/// *The plate's only wire is `UNIT_PET`.* `PetFrame_Update` — the sole caller of the
+/// `UnitManaMax("pet") == 0` fork — runs from `PetFrame_OnEvent`'s `UNIT_PET`/`arg1 == "player"`
+/// arm and from the frame's `OnShow` (`PetFrame.lua:46-49`, `PetFrame.xml:284-287`), and from
+/// nothing else. This fixture used to poke `UNIT_MAXPOWER`, which the stock frame does not
+/// register at all — nor could it, since the bar's own registrations are 1.12's
+/// `UNIT_MANA`/`UNIT_MAXMANA`/… (`UnitFrame.lua:190-200`) rather than our Era pair. Swapping one
+/// pet for a differently-powered one is a `UNIT_PET` on the wire, which is the honest edge here.
+///
+/// *Nothing in `PetFrame.lua` hides the bar.* The hide comes out of `TextStatusBar`: the bar
+/// inherits that template's `<OnValueChanged>` (`TextStatusBar.xml:32-34` — `PetFrame.xml:161-169`
+/// overrides only OnLoad/OnEvent), so `UnitFrameManaBar_Update`'s `SetMinMaxValues(0, 0)`
+/// (`UnitFrame.lua:211-212`) reaches `TextStatusBar_UpdateTextString`, whose `valueMax > 0` else
+/// branch is `textStatusBar:Hide()` (`TextStatusBar.lua:34/55-57`). Same visible answer as our
+/// transcription's explicit `Hide()`, by a different and much longer road — which is worth knowing,
+/// because it means the bar comes back only through a value change, never through `PetFrame.lua`.
 #[test]
 fn a_powerless_pet_wears_the_no_mana_plate() {
     let mut s = load_pet_frame();
@@ -208,9 +242,10 @@ fn a_powerless_pet_wears_the_no_mana_plate() {
     assert!(draws(&mut s, PLAIN), "the plate with a mana rail");
     assert!(!draws(&mut s, NO_MANA));
 
-    // A skeleton: no power at all.
+    // A skeleton: no power at all. `UNIT_PET` names the OWNER — see the doc above for why it, and
+    // not a power event, is what re-cuts the plate.
     s.set_unit("pet", Some(pet("Skeleton", 100, 0, 0, 0)));
-    s.fire_event("UNIT_MAXPOWER", vec![ScriptValue::Str("pet".into())]);
+    s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
     assert!(
         !s.eval::<bool>("return PetFrameManaBar:IsVisible()")
             .unwrap(),
@@ -259,8 +294,25 @@ fn the_attack_overlay_follows_its_own_two_events() {
         .unwrap());
 }
 
-/// The four debuff buttons fill from `UnitDebuff("pet", i)` in order, show a stack count only above
-/// 1, and the unused ones hide. `UNIT_AURA("pet")` is the wire.
+/// The four `$parentDebuff` buttons fill from the pet's own auras in order and the unused ones
+/// hide. `UNIT_AURA("pet")` is the wire (`PetFrame.lua:54-57`).
+///
+/// **Two things the reference does that our deleted transcription did not**, both worth stating
+/// because the frames' NAMES argue for the opposite on both counts:
+///
+/// 1. **The row shows BUFFS, not debuffs**, despite every frame in it being called
+///    `PetFrameDebuffN`. `PetFrame.lua:37`/`:56` are the only two `RefreshBuffs` calls in the whole
+///    of 1.12's FrameXML that pass `showBuffs = 1`, and that argument selects
+///    `UnitBuff(unit, i, SHOW_CASTABLE_BUFFS)` at `BuffFrame.lua:277`. (Every other caller —
+///    `PartyMemberFrame.lua:60`/`:176`/`:259`, `TargetFrame.lua:538` — passes `0`, which is the
+///    `UnitDebuff` arm at `:280`.) Our `BenillaPetFrame_UpdateDebuffs` read `UnitDebuff("pet", i)`,
+///    so a hunter whose pet was buffed saw an empty row and a poisoned pet saw icons the reference
+///    would not show.
+/// 2. **There is no stack count.** `RefreshBuffs` sets an icon and a border and nothing else
+///    (`BuffFrame.lua:287-301`), and `PartyBuffButtonTemplate` — the template all four inherit
+///    (`PetFrame.xml:173`/`:188`/`:203`/`:218`) — declares only `$parentIcon` and `$parentBorder`
+///    (`PartyFrameTemplates.xml:3-36`). `PetFrameDebuff2Count` is not a frame in the reference's
+///    house at all; the old assertion was reading a FontString our transcription invented.
 #[test]
 fn the_debuff_row_fills_from_the_pets_own_auras() {
     let mut s = load_pet_frame();
@@ -269,7 +321,7 @@ fn the_debuff_row_fills_from_the_pets_own_auras() {
 
     s.set_auras(
         "pet",
-        Some(vec![debuff(1000, "Rend", 1), debuff(1001, "Sunder", 3)]),
+        Some(vec![pet_buff(1000, "Rend", 1), pet_buff(1001, "Sunder", 3)]),
     );
     s.fire_event("UNIT_AURA", vec![ScriptValue::Str("pet".into())]);
 
@@ -280,15 +332,23 @@ fn the_debuff_row_fills_from_the_pets_own_auras() {
                and PetFrameDebuff2:IsVisible()
                and not PetFrameDebuff3:IsVisible()
                and not PetFrameDebuff4:IsVisible()
-               and not PetFrameDebuff1Count:IsVisible()
-               and PetFrameDebuff2Count:IsVisible()
-               and PetFrameDebuff2Count:GetText() == "3"
+               -- The reference has no count region on this template at all — not a hidden one.
+               and getglobal("PetFrameDebuff1Count") == nil
+               and getglobal("PetFrameDebuff2Count") == nil
             "#,
         )
         .unwrap();
-    assert!(ok, "two debuffs draw, a stack count shows only above 1");
-    // …and the icons are the pet's own auras, in the pet's own order.
-    assert!(draws(&mut s, "Interface\\Icons\\Spell_1000"));
+    assert!(ok, "two auras draw, the other two rows stay down");
+    // …and the icons are the pet's own auras, in the pet's own order. `RefreshBuffs` paints them
+    // with `debuffIcon:SetTexture(debuff)` where `debuff` is `UnitBuff`'s FIRST return
+    // (`BuffFrame.lua:277`/`:288`) — which on the 1.12 wire is the texture path
+    // (`TargetFrame.lua:269-272` uses it the same way, and `:287-303` reads the debuff triple as
+    // `texture, applications, dispelType`).
+    assert!(
+        draws(&mut s, "Interface\\Icons\\Spell_1000"),
+        "the first buff's ICON draws — if this fails with the aura's NAME on the row instead, \
+         `UnitBuff`'s first return is the Era signature's `name`, not 1.12's texture"
+    );
     assert!(draws(&mut s, "Interface\\Icons\\Spell_1001"));
 
     // They clear when the auras do.
@@ -523,12 +583,24 @@ fn unit_happiness_repaints_only_the_icon() {
 /// The layering law (decision 0884), the pet frame's copy of the player/target/party tests: the
 /// frame art must draw OVER the bar fills, which only the frame LEVEL can hold — the draw layer is
 /// bucket-wide. A "simplification" back to declaration order puts the bars on top as pasted slabs.
+///
+/// **The art frame has no name in the reference, so it is reached through its texture.** Our
+/// deleted transcription gave it one (`PetFrameTextureFrame`); stock `PetFrame.xml:52-124` builds
+/// it as two ANONYMOUS `<Frame setAllPoints="true">` wrappers, one inside the other, with
+/// `PetFrameTexture` in the inner one's BACKGROUND layer. That nesting is how the reference buys
+/// the level: `PetFrame` is 2, its direct children (both bars, `PetFrame.xml:125`/`:150`) are 3,
+/// and the doubly-nested art frame is 4. The law is unchanged — the art is one level above the
+/// bars — only the way to name the frame is, so this asks the texture for its parent.
+///
+/// It is also *why* the reference needs no `PetFrameManaBar:Hide()` of its own for the
+/// [`a_powerless_pet_wears_the_no_mana_plate`] case: the `-NoMana` plate is painted a level ABOVE
+/// the mana bar and simply covers the rail.
 #[test]
 fn the_pet_art_paints_over_the_bars() {
     let s = load_pet_frame();
     let level: (i64, i64, i64) = s
         .eval(
-            "return PetFrameTextureFrame:GetFrameLevel(), \
+            "return PetFrameTexture:GetParent():GetFrameLevel(), \
                     PetFrameHealthBar:GetFrameLevel(), \
                     PetFrameManaBar:GetFrameLevel()",
         )

@@ -271,20 +271,11 @@ const KNOWN: &[Known] = &[
               under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
               that is the chat window's own piece of work, not this flag's.",
     },
-    Known {
-        frame: "TargetofTargetHealthBar",
-        flag: Flag::Mouse,
-        why: "a plain StatusBar where the reference inherits TextStatusBar, whose OnEnter/OnLeave \
-              show the value text. Wants the status-text arc, not the flag. (The pet page's XP bar \
-              was this entry's twin until its window became the reference's own.)",
-    },
-    Known {
-        frame: "TargetofTargetManaBar",
-        flag: Flag::Mouse,
-        why: "a plain StatusBar where the reference inherits TextStatusBar, whose OnEnter/OnLeave \
-              show the value text. Wants the status-text arc, not the flag. (The pet page's XP bar \
-              was this entry's twin until its window became the reference's own.)",
-    },
+    // The two `TargetofTarget*Bar` entries RETIRED here (the unit-frame migration), for the same
+    // reason their twin the pet page's XP bar went: they said our bars were plain StatusBars where
+    // the reference inherits `TextStatusBar` — true of our transcription, and no longer true of
+    // anything. `TargetFrame.xml` is the reference's own now and its ToT bars inherit
+    // `TextStatusBar` like every other unit bar. The gate found them itself, which is its job.
     Known {
         frame: "TradePlayerItem7",
         flag: Flag::Mouse,

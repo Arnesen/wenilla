@@ -323,6 +323,42 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // red/blue player legs, an NPC the reaction swatch. (The live gate is `UnitPlayerControlled`,
     // which also covers pets/charmed creatures; we resolve only the player half of it — the extra
     // reach needs a player-controlled flag we don't carry, and a player's own alt is the case here.)
+    // UnitIsCivilian(unit) → 1 if killing this unit would be a DISHONORABLE kill, else nil. This is
+    // `0x612550` itself handed to Lua — the same four-term predicate (`pvp` bit AND creature-query
+    // civilian flag AND hostile AND the kill would be grey) that the unit tooltip's green CIVILIAN
+    // line and `UnitPVPName`'s civilian arm already run through `is_civilian_kill`. That function's
+    // doc called itself "ONE home, two callers"; the stock target frame is the third, and it is the
+    // one that names the predicate — `TargetFrame_CheckDishonorableKill` (TargetFrame.lua:230) is
+    // its only FrameXML caller and the comment inside it reads "Is a dishonorable kill".
+    //
+    // Sharing the function is the point: a second copy would let the tooltip, the name and the
+    // target plate disagree about the same mob.
+    g.set(
+        "UnitIsCivilian",
+        lua.create_function(|lua, unit: Option<String>| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let player_level = model.player_req.level;
+            Ok(match unit.and_then(|u| model.unit(&u)) {
+                Some(u) if super::is_civilian_kill(u, player_level) => Value::Integer(1),
+                _ => Value::Nil,
+            })
+        })?,
+    )?;
+    // UnitPlayerControlled(unit) → 1 if a PLAYER is driving this unit, else nil. `UNIT_FIELD_FLAGS`
+    // bit 3 (`UNIT_FLAG_PVP_ATTACKABLE 0x8`), which is wider than `UnitIsPlayer` below: a player's
+    // pet and a charmed creature answer 1 here and nil there. Stock `UnitFrame_OnEnter`
+    // (UnitFrame.lua:58) is the caller that made this a blocker rather than a nicety — it gates the
+    // player-options newbie tip on it, so a missing binding raised on the first unit-frame hover.
+    g.set(
+        "UnitPlayerControlled",
+        lua.create_function(|lua, unit: Option<String>| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(match unit.and_then(|u| model.unit(&u)) {
+                Some(u) if u.player_controlled => Value::Integer(1),
+                _ => Value::Nil,
+            })
+        })?,
+    )?;
     g.set(
         "UnitIsPlayer",
         lua.create_function(|lua, token: Option<String>| {
@@ -900,6 +936,54 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             } else {
                 Value::Nil
             })
+        })?,
+    )?;
+    // PartialPlayTime() / NoPlayTime() → 1/nil: the two anti-addiction play-time regimes, read
+    // straight off `PLAYER_FLAGS` — `0x48eb70` is `shr eax,0xc; and al,1` (bit 12) and `0x48ebe0`
+    // its bit-13 neighbour (decision 1746, which carved both while establishing that bit 0x1000 is
+    // PARTIAL_PLAY_TIME on 5875 rather than the pre-1.6.1 CAN_SELF_RESURRECT). Same Lua-vanilla
+    // predicate shape as `IsResting` above: the NUMBER 1 or nil, never a boolean. Stock
+    // `PlayerFrame_UpdatePlaytime` (PlayerFrame.lua:244) is the only FrameXML caller of either.
+    g.set(
+        "PartialPlayTime",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(if model.partial_play_time {
+                Value::Integer(1)
+            } else {
+                Value::Nil
+            })
+        })?,
+    )?;
+    g.set(
+        "NoPlayTime",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(if model.no_play_time {
+                Value::Integer(1)
+            } else {
+                Value::Nil
+            })
+        })?,
+    )?;
+    // GetBillingTimeRested() → the account's rested billing MINUTES, as one number, always
+    // (decision 1820; binding `0x48ec50`, byte-VERIFIED). The body has no `jcc` at all and ends in
+    // an unconditional `mov eax,1`, and both callees are branchless and call-free — so it can never
+    // return nil and never return zero values, which is why this is not the `Value::Nil` shape its
+    // neighbours use. The engine applies NO conversion: `0x48ec5e` is a bare unsigned u32→double
+    // push, so "minutes" is the server's convention, corroborated by stock `PlayerFrame.lua:246`
+    // dividing by 60 against `REQUIRED_REST_HOURS = 5`.
+    //
+    // Against vmangos this reads 0, because the server hardcodes `uint32(0)` for the field
+    // (`World.cpp:331`). It is fed from the wire rather than pinned to a constant so a server that
+    // populates it is reported honestly. Note the reference only ever reaches this call from
+    // INSIDE `if PartialPlayTime() ... elseif NoPlayTime()`, so with those bits clear stock
+    // FrameXML never calls it — it has to exist for the file to load, and is off the live path.
+    g.set(
+        "GetBillingTimeRested",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(Value::Number(f64::from(model.billing_time_rested)))
         })?,
     )?;
     // GetTimeToWellRested() → nil, always — `0x48d4b0`, byte-VERIFIED: the whole binding is 11

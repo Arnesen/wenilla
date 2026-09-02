@@ -12,8 +12,9 @@ const MOB_B: u64 = 0xF130_0000_0000_0002;
 
 use super::test_ui::load_ui as load_xml;
 
-/// The manifest order this file actually ships in: `UiPanels.xml` for `UIFrameFade`,
-/// `UnitFrames.xml` for the `TargetFrame` the dots anchor to.
+/// The manifest order this file actually ships in: `UiPanels.xml` for `UIFrameFade`, and the
+/// reference's own `TargetFrame.xml` for the `TargetFrame` the dots anchor to — `relativeTo` is
+/// resolved at LOAD, so that file has to precede this one (1751).
 fn load_combo_frame() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
@@ -24,7 +25,15 @@ fn load_combo_frame() -> UiScript {
     load_xml(&s, "UnitPopup.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "UnitFrames.xml");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\BuffFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UnitFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\CombatFeedback.xml");
+    load_xml(&s, "Interface\\FrameXML\\PlayerFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\PartyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\TargetFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\PetFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\ComboFrame.xml");
     s.resolve();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());

@@ -141,7 +141,19 @@ pub(super) const LOOT_UI: &[&str] = &[
     "GameTooltip.xml", // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrop
     "UIDropDownMenu.xml", // GroupLootDropDown's OnLoad calls UIDropDownMenu_Initialize
     "UnitPopup.xml",
-    "PartyFrame.xml",
+    // …and what its rows' OnLoad calls: every `PartyMemberFrame<N>` and its pet frame runs
+    // `UnitFrame_Initialize`, which lives in UnitFrame.lua and itself calls
+    // `SetTextStatusBarText` out of TextStatusBar.lua. Naming PartyFrame without these loads
+    // four rows that each raise on their own OnLoad — the loader reports it, but only because
+    // `load_ui_strict` looks; a plain load would have gone quiet.
+    "Interface\\FrameXML\\TextStatusBar.lua",
+    "Interface\\FrameXML\\TextStatusBar.xml",
+    "Interface\\FrameXML\\UnitFrame.xml",
+    // …and `RefreshBuffs`, which `PartyMemberFrame.lua:60` calls from each row's OnLoad. Its home
+    // is BuffFrame.lua, which the chain's BuffFrame.xml sources — the reference's own toc has
+    // BuffFrame at 40 and PartyFrame at 45 for exactly this reason.
+    "Interface\\FrameXML\\BuffFrame.xml",
+    "Interface\\FrameXML\\PartyFrame.xml",
 ];
 
 /// What the **character window** needs before `Interface\FrameXML\CharacterFrame.xml`,
@@ -156,10 +168,13 @@ pub(super) const LOOT_UI: &[&str] = &[
 ///   three times before doing anything else. Its `.xml` twin comes too, because the pet page's XP
 ///   bar inherits the `TextStatusBar` template it declares and a missing template is a loader
 ///   *warning* — the bar would load with no art and no text region and read as a pass.
-/// * **`UnitFrames.xml`** for `PlayerFrameHealthBar` / `PlayerFrameManaBar`, the frames those three
-///   calls name, plus `PetFrameHealthBar` / `PetFrameManaBar` which `CharacterFrame_OnShow` shows
-///   the text on. (Ours: the unit frames are not migrated. When they are, this entry becomes the
-///   stock `PlayerFrame.xml` / `PetFrame.xml` pair.)
+/// * **`Interface\FrameXML\PlayerFrame.xml`** for `PlayerFrameHealthBar` / `PlayerFrameManaBar`,
+///   the frames those three calls name, and **`PetFrame.xml`** for `PetFrameHealthBar` /
+///   `PetFrameManaBar`, which `CharacterFrame_OnShow` shows the text on. Both call
+///   `UnitFrame_Initialize` in their OnLoad and `PlayerFrame` also calls `CombatFeedback_Initialize`,
+///   so `UnitFrame.xml` and `CombatFeedback.xml` come first — the reference's own toc order.
+///   (This entry used to be our one `UnitFrames.xml`, and this note used to say "when they are
+///   migrated, this becomes the stock pair". They are; it did.)
 /// * **`ActionBar.xml`** for `MainMenuExpBar` — the third bar of that prefix call — and for
 ///   `ShowWatchedReputationBarText` / `HideWatchedReputationBarText`, which the window's
 ///   show/hide pair calls.
@@ -199,7 +214,18 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     "UnitPopup.xml",
     "Interface\\FrameXML\\TextStatusBar.lua",
     "Interface\\FrameXML\\TextStatusBar.xml",
-    "UnitFrames.xml",
+    // `UnitFrame_Initialize` and `CombatFeedback_Initialize`, which the two windows below call in
+    // their OnLoad. Neither file declares a frame; both are pure script.
+    "Interface\\FrameXML\\UnitFrame.xml",
+    "Interface\\FrameXML\\CombatFeedback.xml",
+    "Interface\\FrameXML\\PlayerFrame.xml",
+    // `PetFrame.xml`'s four `PetFrameBuff*` inherit `PartyBuffButtonTemplate`, which lives here.
+    // The manifest never names this file: it arrives through `PartyFrame.xml`'s
+    // `<Include file="PartyFrameTemplates.xml"/>`, and the reference's own toc puts PartyFrame (45)
+    // ahead of TargetFrame (46) and PetFrame (47) for exactly that reason. This kit wants the
+    // template and not four party member frames, so it takes the included file directly.
+    "Interface\\FrameXML\\PartyFrameTemplates.xml",
+    "Interface\\FrameXML\\PetFrame.xml",
     "ActionBar.xml",
     "MicroMenu.xml",
     // The two page files these three need before the window can be OPENED, which is not the same

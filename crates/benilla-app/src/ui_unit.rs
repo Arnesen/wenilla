@@ -15,9 +15,12 @@
 //! query-cache seam): the feed resolves each token's guid, which asks the server once on a miss and
 //! fills in a later frame; the transition fires `UNIT_NAME_UPDATE` so frames repaint.
 //!
-//! The event surface is the Era set, fired per field on transitions: `UNIT_HEALTH`/`UNIT_MAXHEALTH`/
-//! `UNIT_LEVEL` (arg1 = token), `UNIT_POWER_UPDATE`/`UNIT_MAXPOWER` (token, power token e.g.
-//! `"MANA"`), `UNIT_DISPLAYPOWER` (power *type* changed), `UNIT_NAME_UPDATE`, plus
+//! The event surface is fired per field on transitions: `UNIT_HEALTH`/`UNIT_MAXHEALTH`/
+//! `UNIT_LEVEL` (arg1 = token), the **1.12** per-resource power pair `UNIT_MANA`/`UNIT_RAGE`/
+//! `UNIT_FOCUS`/`UNIT_ENERGY`/`UNIT_HAPPINESS` and their five `UNIT_MAX*` twins (arg1 = token; the
+//! resource is in the NAME, not an argument — decision 1819, which retired the Era
+//! `UNIT_POWER_UPDATE`/`UNIT_MAXPOWER` pair that no 1.12 frame listens for),
+//! `UNIT_DISPLAYPOWER` (power *type* changed), `UNIT_NAME_UPDATE`, plus
 //! `PLAYER_ENTERING_WORLD` once and `PLAYER_TARGET_CHANGED` on selection change. A token appearing
 //! counts as a transition of every present field (frames also pull on target change, so either path
 //! populates).
@@ -788,6 +791,11 @@ pub(crate) fn snapshot(
         // UNIT_FIELD_FLAGS (vmangos UnitDefines.h: 0x1000 / 0x04000000, VERIFIED).
         pvp: store.0.unit_flags() & 0x1000 != 0,
         skinnable: store.0.unit_flags() & 0x0400_0000 != 0,
+        // `UnitPlayerControlled` — the same word, bit 3 (`UNIT_FLAG_PVP_ATTACKABLE 0x8`, which is
+        // behaviourally "player-controlled"; `target::relations` already carved it for the duel
+        // leg of the selection ring). Wider than `is_player` above: a pet or a charmed creature
+        // sets it without being a player.
+        player_controlled: store.0.unit_flags() & 0x8 != 0,
         // `UnitAffectingCombat 0x517e10` — the SAME `UNIT_FIELD_FLAGS` word, bit 19
         // (`shr ecx,0x13; test cl,1`). One flag for every token: wow-re's whole-image census of
         // that idiom found the local-player readers reading this identical bit, so there is no
@@ -930,6 +938,14 @@ const PLAYER_FLAGS_PVP_DESIRED: u32 = 0x200;
 /// `IsResting 0x516ea0` tests (`shr 5; test 1` — wow-re rested-xp-bindings.md §3).
 const PLAYER_FLAGS_RESTING: u32 = 0x20;
 
+/// `PLAYER_FLAGS` bit 12 / bit 13 — the two **play-time** regimes an anti-addiction realm puts an
+/// account into, read by `PartialPlayTime` (`0x48eb70`) and `NoPlayTime` (`0x48ebe0`). Decision
+/// 1746 carved both, and settled that `0x1000` is PARTIAL_PLAY_TIME on 5875 rather than the
+/// pre-1.6.1 `CAN_SELF_RESURRECT` it had been read as. Stock `PlayerFrame_UpdatePlaytime` tests
+/// them at LOAD, so their absence is a raise on the first frame, not a cosmetic gap.
+const PLAYER_FLAGS_PARTIAL_PLAY_TIME: u32 = 0x1000;
+const PLAYER_FLAGS_NO_PLAY_TIME: u32 = 0x2000;
+
 /// The PvP-preference announcement rule (decision 0652): `(toast, verbose)` on a real change of the
 /// bit, `None` otherwise.
 ///
@@ -1027,7 +1043,6 @@ pub(crate) fn fire_transitions(
     cur: &UnitState,
 ) {
     let tok = || ScriptValue::Str(token.to_string());
-    let ptok = || ScriptValue::Str(power_token(cur.power_type).to_string());
     let changed = |f: fn(&UnitState) -> u64| prev.is_none_or(|p| f(p) != f(cur));
 
     if changed(|u| u64::from(u.health)) {
@@ -1042,11 +1057,28 @@ pub(crate) fn fire_transitions(
     if changed(|u| u64::from(u.power_type)) {
         script.fire_event("UNIT_DISPLAYPOWER", vec![tok()]);
     }
+    // The POWER pair is named per resource in 1.12, not once with the token as arg2: the reference's
+    // `UnitFrameManaBar_Initialize` registers `UNIT_MANA`/`UNIT_RAGE`/`UNIT_FOCUS`/`UNIT_ENERGY`/
+    // `UNIT_HAPPINESS` and the five `UNIT_MAX*` twins (`UnitFrame.lua:190-199`), and nothing in
+    // 1.12 FrameXML has ever heard of `UNIT_POWER_UPDATE`. `power_token` already yields exactly the
+    // suffix, so the name is the token. Health is unaffected — `UNIT_HEALTH`/`UNIT_MAXHEALTH` are
+    // spelled the same in both eras — and so is `UNIT_DISPLAYPOWER` above.
+    //
+    // This was live breakage, not tidiness: while we fired only the Era names, the stock unit frames
+    // registered only the 1.12 ones, so a mana/rage/energy bar never moved except when something
+    // else happened to call `UnitFrame_Update` (a target change, a pet summon, a frame show).
+    // Decision 1819.
     if changed(|u| u64::from(u.power)) {
-        script.fire_event("UNIT_POWER_UPDATE", vec![tok(), ptok()]);
+        script.fire_event(
+            &format!("UNIT_{}", power_token(cur.power_type)),
+            vec![tok()],
+        );
     }
     if changed(|u| u64::from(u.max_power)) {
-        script.fire_event("UNIT_MAXPOWER", vec![tok(), ptok()]);
+        script.fire_event(
+            &format!("UNIT_MAX{}", power_token(cur.power_type)),
+            vec![tok()],
+        );
     }
     if prev.is_none_or(|p| p.name != cur.name) {
         script.fire_event("UNIT_NAME_UPDATE", vec![tok()]);
@@ -1119,10 +1151,26 @@ fn feed_units(
     // The NPC the player is interacting with, for the `"npc"` token below. `Option` for the same
     // reason `index` and `factions` are: a UI-only harness runs this feed with no session plugin.
     interact: Option<Res<crate::ui_session::InteractNpc>>,
+    // The account's rested billing minutes ride the world-enter message, which is the only moment
+    // they ever arrive (decision 1820): the value comes off `SMSG_AUTH_RESPONSE` and the reference
+    // parks it in a process-lifetime global. `MessageReader` rather than a resource because it is
+    // an EDGE, and it is read here rather than in a system of its own because this feed already
+    // holds the script.
+    // `Option` for the same reason `index`, `factions` and `interact` above are: the message is
+    // registered by `NetPlugin`, and a UI-only harness runs this feed with no net stack at all —
+    // a bare reader turns that into a system-validation panic.
+    entered_world: Option<MessageReader<crate::net::EnteredWorldMessage>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    // Ahead of the gate below, which is about descriptor deltas: this is a login edge and has no
+    // snapshot to diff.
+    if let Some(entered) =
+        entered_world.and_then(|mut r| r.read().last().map(|m| m.billing_time_rested))
+    {
+        script.set_billing_time_rested(entered);
+    }
     let chr = classes.as_deref().map(|t| &t.0);
     // One reborrow so the memo (`feed.vm`) and `feed.warned_sideless` can be borrowed as the
     // disjoint fields they are — through the `ResMut` deref they would alias.
@@ -1449,6 +1497,13 @@ fn feed_units(
             let prev = memo.last_rest;
             memo.last_rest = Some(rest);
             script.set_rest_state(rest.0, rest.1, rest.2 & PLAYER_FLAGS_RESTING != 0);
+            // The same descriptor word carries the two play-time bits, and they ride the same
+            // memo: `0x5ee990` fires PLAYER_FLAGS_CHANGED on ANY PLAYER_FLAGS delta without
+            // testing which bit moved, so one snapshot is the faithful granularity for all three.
+            script.set_play_time(
+                rest.2 & PLAYER_FLAGS_PARTIAL_PLAY_TIME != 0,
+                rest.2 & PLAYER_FLAGS_NO_PLAY_TIME != 0,
+            );
             if prev.map(|p| (p.0, p.1)) != Some((rest.0, rest.1)) {
                 script.fire_event("UPDATE_EXHAUSTION", vec![]);
             }

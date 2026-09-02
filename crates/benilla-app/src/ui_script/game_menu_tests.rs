@@ -268,7 +268,11 @@ fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
             // what it needs and why, and PartyFrame's `MAX_PARTY_MEMBERS` is needed at LOAD.
             "UIDropDownMenu.xml",
             "UnitPopup.xml",
-            "PartyFrame.xml",
+            "Interface\\FrameXML\\TextStatusBar.lua",
+            "Interface\\FrameXML\\TextStatusBar.xml",
+            "Interface\\FrameXML\\UnitFrame.xml",
+            "Interface\\FrameXML\\BuffFrame.xml",
+            "Interface\\FrameXML\\PartyFrame.xml",
             "Interface\\FrameXML\\ItemButtonTemplate.xml",
             "Interface\\FrameXML\\LootFrame.xml",
         ],
@@ -598,7 +602,11 @@ fn nothing_opens_behind_the_world_map_and_escape_closes_it_first() {
         // The loot window is the reference's own since 1751 — see `test_ui::LOOT_UI` for what
         // each of these buys; `PartyFrame`'s MAX_PARTY_MEMBERS is needed at LOAD time.
         "UnitPopup.xml",
-        "PartyFrame.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\UnitFrame.xml",
+        "Interface\\FrameXML\\BuffFrame.xml",
+        "Interface\\FrameXML\\PartyFrame.xml",
         "Interface\\FrameXML\\ItemButtonTemplate.xml",
         "Interface\\FrameXML\\LootFrame.xml",
     ]);
