@@ -204,7 +204,7 @@ fn escape_opens_the_menu_only_when_nothing_else_wants_the_press_and_then_closes_
     s.set_container(0, Some(backpack()));
 
     // A press with a window open is eaten by CloseAllWindows — the menu stays down.
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     let _ = s.take_sounds();
     s.run("ToggleGameMenu()").unwrap();
     assert!(!bag_open(&s, 0), "the press closed the bag");
@@ -239,7 +239,7 @@ fn the_clicked_form_closes_everything_and_opens_the_menu_in_one_go() {
     let mut s = bag_harness_with(&[], &["MerchantFrame.xml"]);
     s.set_money(0);
     s.set_container(0, Some(backpack()));
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     assert!(bag_open(&s, 0));
 
     s.run("ToggleGameMenu(1)").unwrap();
@@ -272,7 +272,7 @@ fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
     );
     s.set_money(0);
     s.set_container(0, Some(backpack()));
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     s.set_loot(Some(LootState {
         fishing: false,
         master_candidates: Vec::new(),

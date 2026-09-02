@@ -168,7 +168,7 @@ pub use mirror_timer::{
     read_pause_mirror_timer, read_start_mirror_timer, read_stop_mirror_timer, MirrorTimerKind,
     MirrorTimerStart,
 };
-pub use movement::{JumpInfo, MoveMode, MovementInfo, SpeedKind, TransportPose};
+pub use movement::{JumpInfo, MoveMode, MovementInfo, SpeedKind, SplineMode, TransportPose};
 pub use opcode_names::opcode_name;
 pub use packet::{CreatureQueryInfo, MonsterMoveFacing, ServerPacket};
 pub use page_text::page_text_query;

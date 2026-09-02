@@ -7,7 +7,9 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 use benilla_assets::coords::bevy_to_wow;
-use benilla_protocol::{guid, EntityKind, MonsterMoveFacing, MoveSpeeds, ObjectFields, SpeedKind};
+use benilla_protocol::{
+    guid, EntityKind, MonsterMoveFacing, MoveSpeeds, ObjectFields, SpeedKind, SplineMode,
+};
 use bevy::prelude::*;
 
 use crate::go_templates::GameObjectTemplates;
@@ -18,11 +20,11 @@ use benilla_world::vis_chain::VisChainOnly;
 
 use super::super::motion::{
     create_spline, gameobject_rotation, monster_move_spline, pose_transform, resolve_facing,
-    trace_create_spline, trace_move_snap, wire_yaw, write_pose, SplineStopped,
+    trace_create_spline, trace_move_snap, wire_yaw, write_pose, SplineStopped, ROOT_APPLY_WIPE,
 };
 use super::super::{
     Guid, GuidIndex, NetCommands, NetEntity, ObjectStore, RemoteMotion, SelfGuid,
-    SpeedChangeMessage, Spline, UnitSpeeds,
+    SpeedChangeMessage, Spline, UnitMoveModes, UnitSpeeds,
 };
 
 /// A GameObject plays its one-shot **Custom** animation (`SMSG_GAMEOBJECT_CUSTOM_ANIM`, decision
@@ -482,6 +484,7 @@ pub(super) fn monster_move(
     duration_ms: u32,
     flying: bool,
     run_mode: bool,
+    rooted: bool,
     commands: &mut Commands,
     index: &GuidIndex,
     transforms: &mut Query<&mut Transform>,
@@ -526,12 +529,7 @@ pub(super) fn monster_move(
                 }
             }
         }
-        // The spline is authoritative now, not the relay stream — the mirror of `unit_move`'s
-        // "drop a stale spline". A splined PLAYER (charge, taxi) otherwise keeps a stale
-        // `RemoteMotion` whose old flags outrank the spline in the anim selector's `unify`
-        // precedence (Stand frozen mid-flight); the relay re-seeds it on its next packet.
-        //
-        // A spline move also **un-nocks and drops the weapon-visual hold**, unconditionally:
+        // A spline move **un-nocks and drops the weapon-visual hold**, unconditionally:
         // `0x6018f0` (this packet's handler, via `0x603f00` registered on opcodes 0xDD/0x2AE) has
         // exactly one `ret`, and its shared tail runs `0x6020e8 call 0x60d040` (clear `0x400`) →
         // `0x6020ef call 0x60f530` (un-nock) → `RecomputeBaseAnim(-1)` on every path through it
@@ -539,10 +537,37 @@ pub(super) fn monster_move(
         // archer NPC yanked along a path, or a player charged/knocked back, loses the arrow —
         // the ranged sheath is untouched, exactly like the locomotion un-nock.
         commands.entity(e).remove::<(
-            RemoteMotion,
             crate::creature_anim::NockLatch,
             crate::creature_anim::RangedHold,
         )>();
+        // **A rooted unit cannot be splined** (decision 1780). `0x6187a0` — the *server
+        // position/spline apply*, and the sole path from this packet's parse chain into
+        // `CMovement`'s spline installer `0x7c6a50` — opens with `0x6187c2 test ah,0x10` and
+        // returns on ROOT (wow-re `moveflag-family.md` §5.3, and §5.4's verdict in as many words:
+        // *"cannot translate, cannot jump, cannot be splined"*).
+        //
+        // **Scoped to the path deliberately.** What is byte-verified is that the *position/spline*
+        // apply is refused; whether the rest of `0x6018f0` still runs for a rooted unit is not
+        // recorded, and the one part of it we do know — the un-nock tail — is verified to run on
+        // **every** path through the handler (`shooter-stop-law.md` §J1.2/§J1.3), so it stays above
+        // this gate. The facing snap is left running for the same reason: refusing more than the
+        // note establishes would be inventing a behaviour, and refusing the path is what keeps the
+        // body still.
+        //
+        // On vmangos this is a race rather than the common case — `Unit::SetRooted(true)` calls
+        // `StopMoving()` before the root goes out, so an already-walking creature is normally
+        // stopped by its own stop-spline. The gate is what keeps a path the server had already
+        // queued from moving a body it has since pinned.
+        if rooted {
+            return;
+        }
+        // The spline is authoritative now, not the relay stream — the mirror of `unit_move`'s
+        // "drop a stale spline". A splined PLAYER (charge, taxi) otherwise keeps a stale
+        // `RemoteMotion` whose old flags outrank the spline in the anim selector's `unify`
+        // precedence (Stand frozen mid-flight); the relay re-seeds it on its next packet. Below the
+        // root gate because it is the *install's* own consequence: with no path taken there is no
+        // new authority to hand the pose to.
+        commands.entity(e).remove::<RemoteMotion>();
         match monster_move_spline(path, spline_id, stop, duration_ms, flying, run_mode) {
             // A moving path: sample_splines drives the transform along every waypoint.
             Some(spline) => {
@@ -556,6 +581,86 @@ pub(super) fn monster_move(
                     .remove::<Spline>()
                     .insert(SplineStopped(spline_id));
             }
+        }
+    }
+}
+
+/// **Per-drain staging for [`UnitMoveModes`]** — the same shape (and the same reason) as
+/// [`merge_fields`]' `pending`: a component this drain inserted through `Commands` is not queryable
+/// until the sync point, so a grant and the packet it changes the meaning of can arrive in one drain
+/// and the second must see the first. Seeded lazily from the live component; never read after the
+/// drain.
+pub(super) type StagedModes = HashMap<u64, UnitMoveModes>;
+
+/// This unit's granted modes as of *now within the drain* — the staged word if it was granted this
+/// drain, else the live component, else none. The reference's word lives as long as the `CGUnit`, so
+/// "no component" and "all bits clear" are the same answer and both are [`UnitMoveModes::default`].
+pub(super) fn modes_of(
+    guid: u64,
+    index: &GuidIndex,
+    modes: &Query<&mut UnitMoveModes>,
+    staged: &StagedModes,
+) -> UnitMoveModes {
+    staged
+        .get(&guid)
+        .copied()
+        .or_else(|| index.0.get(&guid).and_then(|&e| modes.get(e).ok().copied()))
+        .unwrap_or_default()
+}
+
+/// **A movement mode granted on a unit we do not control** — the `SMSG_SPLINE_MOVE_*` family
+/// (decision 1780). No ack, and `guid` is whatever unit the server named: normally a creature, which
+/// is exactly the body the ack'd `SMSG_FORCE_*` family structurally cannot address.
+///
+/// An unresolvable guid is **dropped**, faithfully: the reference's handler `0x603c80` resolves with
+/// `ClntObjMgrObjectPtr(TYPEMASK_UNIT)` and returns without applying anything when it misses.
+///
+/// Our own guid is not special-cased. vmangos cannot send it for our mover (`Unit::SetRooted` and
+/// its three siblings take the broadcast leg only when the unit is **not** moved by a player), and
+/// the reference applies to whatever it finds — so we do too. It is inert on the avatar either way:
+/// the animation selector's `unify` gives the controller's own `MovementState` precedence, and our
+/// mover's modes are the handshake family's ([`crate::player::state::MoveModes`]).
+#[allow(clippy::too_many_arguments)] // the wire fields + the apply context, one per concern
+pub(super) fn spline_move_mode(
+    guid: u64,
+    mode: SplineMode,
+    apply: bool,
+    commands: &mut Commands,
+    index: &GuidIndex,
+    modes: &mut Query<&mut UnitMoveModes>,
+    remote: &mut Query<&mut RemoteMotion>,
+    staged: &mut StagedModes,
+) {
+    let Some(&e) = index.0.get(&guid) else {
+        return; // no such unit — the reference drops it too
+    };
+    let mut word = modes_of(guid, index, modes, staged);
+    word.set(mode, apply);
+    staged.insert(guid, word);
+    if let Ok(mut live) = modes.get_mut(e) {
+        *live = word;
+    } else {
+        commands.entity(e).insert(word);
+    }
+
+    // **`SetRoot 0x7c7340`'s one-shot wipe**, on the one benilla body that has direction bits to
+    // wipe — a relayed player's. The reference clears `0xffe07f00`'s complement from the flags word
+    // at apply and calls `0x7c6290` StopFalling with it; with the direction bits gone the unit fails
+    // the integration gate (`move_flags::INTEGRATED`) and is not stepped at all, which is *how* a
+    // root stops a body rather than leaving it coasting on its last reported heading until the next
+    // packet. Without this the dead-reckon keeps walking a rooted player forward for the ~500 ms to
+    // its next heartbeat.
+    //
+    // A creature needs none of it: it has no direction bits (its motion is its [`Spline`]), and what
+    // stops *it* is `monster_move`'s refusal above.
+    if mode == SplineMode::Root && apply {
+        if let Ok(mut rm) = remote.get_mut(e) {
+            use crate::creature_anim::move_flags;
+            rm.flags &= ROOT_APPLY_WIPE & !(move_flags::FALLING | move_flags::FALLING_FAR);
+            rm.speed = 0.0;
+            rm.vertical_velocity = 0.0;
+            rm.jump_xy_vel = [0.0; 2];
+            rm.fall_start_z = None;
         }
     }
 }
@@ -739,6 +844,246 @@ mod tests {
     use super::*;
 
     const ME: u64 = 0x0000_0000_0000_002A;
+
+    /// The observer movement-mode family's own harness (decision 1780): one indexed unit, and a
+    /// `World` small enough that the only thing that can move it is the code under test.
+    mod spline_modes {
+        use super::*;
+        use benilla_protocol::SplineMode;
+        use bevy::ecs::system::RunSystemOnce;
+
+        const MOB: u64 = 0x0000_0000_0000_00F0;
+
+        /// A world holding one indexed unit, optionally already dead-reckoning as a relayed player.
+        fn world_with_unit(remote: Option<RemoteMotion>) -> (World, Entity) {
+            let mut w = World::new();
+            let mut e = w.spawn_empty();
+            if let Some(rm) = remote {
+                e.insert(rm);
+            }
+            let entity = e.id();
+            let mut index = GuidIndex::default();
+            index.0.insert(MOB, entity);
+            w.insert_resource(index);
+            (w, entity)
+        }
+
+        fn remote_walking_forward() -> RemoteMotion {
+            RemoteMotion {
+                wow_pos: [0.0; 3],
+                pending: std::collections::VecDeque::new(),
+                orientation: 0.0,
+                flags: crate::creature_anim::move_flags::FORWARD,
+                pitch: 0.0,
+                speed: 7.0,
+                vertical_velocity: 0.0,
+                jump_xy_vel: [0.0; 2],
+                fall_start_z: None,
+                relay: Default::default(),
+                last_apply_ms: 0.0,
+                last_apply_pos: [0.0; 3],
+            }
+        }
+
+        /// Run one grant through the real arm body, then flush the `Commands` it queued.
+        fn grant(w: &mut World, mode: SplineMode, apply: bool) {
+            w.run_system_once(
+                move |mut commands: Commands,
+                      index: Res<GuidIndex>,
+                      mut modes: Query<&mut UnitMoveModes>,
+                      mut remote: Query<&mut RemoteMotion>| {
+                    let mut staged = StagedModes::new();
+                    spline_move_mode(
+                        MOB,
+                        mode,
+                        apply,
+                        &mut commands,
+                        &index,
+                        &mut modes,
+                        &mut remote,
+                        &mut staged,
+                    );
+                },
+            )
+            .unwrap();
+        }
+
+        /// **The grant lands, and the revoke takes it back off** — the whole family in one shape,
+        /// because every one of the twelve opcodes is this same set-or-clear of one bit.
+        #[test]
+        fn a_grant_sets_the_bit_and_its_pair_clears_it() {
+            use crate::creature_anim::move_flags;
+            let (mut w, e) = world_with_unit(None);
+
+            grant(&mut w, SplineMode::Hover, true);
+            grant(&mut w, SplineMode::WaterWalk, true);
+            let m = *w
+                .entity(e)
+                .get::<UnitMoveModes>()
+                .expect("first grant inserts");
+            assert_eq!(
+                m.0,
+                move_flags::HOVER | move_flags::WATER_WALKING,
+                "two grants accumulate in one word — the reference has one CMovement+0x40"
+            );
+
+            grant(&mut w, SplineMode::Hover, false);
+            let m = *w.entity(e).get::<UnitMoveModes>().unwrap();
+            assert_eq!(
+                m.0,
+                move_flags::WATER_WALKING,
+                "UNSET_HOVER takes back hover and nothing else"
+            );
+        }
+
+        /// **`SET_RUN_MODE` clears the walk bit.** The pair is inverted against its opcode names
+        /// (`0x617e80` → `SetRunMode 0x7c71c0`, whose argument is *run*), folded at the parse — so
+        /// by the time it reaches here `apply` is the bit's direction and this is a plain round
+        /// trip. Pinned anyway: the inversion is the family's one trap, and a regression that
+        /// flipped it would put every running creature into a walk with nothing else visibly wrong.
+        #[test]
+        fn the_walk_bit_round_trips_with_the_run_opcodes_sense() {
+            use crate::creature_anim::move_flags;
+            let (mut w, e) = world_with_unit(None);
+            grant(&mut w, SplineMode::WalkMode, true); // SMSG_SPLINE_MOVE_SET_WALK_MODE
+            assert_eq!(
+                w.entity(e).get::<UnitMoveModes>().unwrap().0,
+                move_flags::WALK_MODE
+            );
+            grant(&mut w, SplineMode::WalkMode, false); // SMSG_SPLINE_MOVE_SET_RUN_MODE
+            assert_eq!(w.entity(e).get::<UnitMoveModes>().unwrap().0, 0);
+        }
+
+        /// **A root stops a watched body dead, and that is the direction bits' doing.** `SetRoot
+        /// 0x7c7340` sets the bit and then wipes `0xffe07f00`'s complement — the four direction
+        /// bits among it — in one shot; with those gone the unit fails the client's integration
+        /// gate (`0x616e20 test dword [esi+0x40],0x20ff`) and is not stepped at all. Without the
+        /// wipe our dead-reckon walks a rooted player forward for the ~500 ms to its next
+        /// heartbeat, which is the reported "rooted and still sliding".
+        #[test]
+        fn a_root_wipes_the_direction_bits_the_dead_reckon_runs_on() {
+            use crate::creature_anim::move_flags;
+            let (mut w, e) = world_with_unit(Some(remote_walking_forward()));
+
+            grant(&mut w, SplineMode::Root, true);
+
+            let rm = w.entity(e).get::<RemoteMotion>().unwrap();
+            assert_eq!(
+                rm.flags & move_flags::INTEGRATED,
+                0,
+                "nothing the integration gate tests may survive the root — this is what stops it"
+            );
+            assert_eq!(rm.speed, 0.0, "and it is not still travelling at run speed");
+            assert!(w.entity(e).get::<UnitMoveModes>().unwrap().rooted());
+        }
+
+        /// The unroot is **not** the wipe run backwards: `ClearRoot 0x7c7370` only clears the bit.
+        /// A unit is put back in motion by the server's next pose or path, never by us inventing
+        /// direction bits for it.
+        #[test]
+        fn an_unroot_clears_the_bit_and_invents_no_movement() {
+            let (mut w, e) = world_with_unit(Some(remote_walking_forward()));
+            grant(&mut w, SplineMode::Root, true);
+            grant(&mut w, SplineMode::Root, false);
+            assert!(!w.entity(e).get::<UnitMoveModes>().unwrap().rooted());
+            assert_eq!(
+                w.entity(e).get::<RemoteMotion>().unwrap().flags,
+                0,
+                "still no direction bits — the wipe is one-shot and the unroot does not undo it"
+            );
+        }
+
+        /// **An unknown guid is dropped, not defaulted.** The reference's handler `0x603c80`
+        /// resolves with `ClntObjMgrObjectPtr(TYPEMASK_UNIT)` and returns having applied nothing
+        /// when it misses. Ours must not spawn or index anything to hold the grant: a mode
+        /// broadcast can outrun its unit's create block, and the create carries the modes itself.
+        #[test]
+        fn a_grant_for_a_unit_we_do_not_have_is_dropped() {
+            let (mut w, e) = world_with_unit(None);
+            w.run_system_once(
+                |mut commands: Commands,
+                 index: Res<GuidIndex>,
+                 mut modes: Query<&mut UnitMoveModes>,
+                 mut remote: Query<&mut RemoteMotion>| {
+                    let mut staged = StagedModes::new();
+                    spline_move_mode(
+                        0xDEAD_BEEF,
+                        SplineMode::Root,
+                        true,
+                        &mut commands,
+                        &index,
+                        &mut modes,
+                        &mut remote,
+                        &mut staged,
+                    );
+                    assert!(
+                        staged.is_empty(),
+                        "nothing staged for a unit we do not have"
+                    );
+                },
+            )
+            .unwrap();
+            assert!(w.entity(e).get::<UnitMoveModes>().is_none());
+        }
+
+        /// **A rooted unit cannot be splined** — `0x6187a0`, the server position/spline apply,
+        /// opens `0x6187c2 test ah,0x10` and returns. So a path the server queued before it pinned
+        /// the body does not move it.
+        ///
+        /// The gate is scoped to the *path*, not to the packet: what wow-re establishes is that
+        /// the position/spline apply is refused, and the one other thing the handler is known to do
+        /// (the un-nock tail) is verified to run on every path through it. The assertion below is
+        /// therefore about the `Spline` and nothing else.
+        #[test]
+        fn a_rooted_unit_refuses_the_path_the_server_queued() {
+            let mut w = World::new();
+            let e = w
+                .spawn((
+                    Transform::default(),
+                    NetEntity {
+                        kind: EntityKind::Unit,
+                        display_id: None,
+                        scale: 1.0,
+                    },
+                ))
+                .id();
+            let mut index = GuidIndex::default();
+            index.0.insert(MOB, e);
+            w.insert_resource(index);
+
+            let path = vec![[0.0, 0.0, 0.0], [30.0, 0.0, 0.0]];
+            for (rooted, expect_spline) in [(true, false), (false, true)] {
+                let path = path.clone();
+                w.run_system_once(
+                    move |mut commands: Commands,
+                          index: Res<GuidIndex>,
+                          mut transforms: Query<&mut Transform>| {
+                        monster_move(
+                            MOB,
+                            [0.0, 0.0, 0.0],
+                            7,
+                            path.clone(),
+                            MonsterMoveFacing::None,
+                            false,
+                            3000,
+                            false,
+                            true,
+                            rooted,
+                            &mut commands,
+                            &index,
+                            &mut transforms,
+                        );
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    w.entity(e).get::<Spline>().is_some(),
+                    expect_spline,
+                    "rooted={rooted}: a pinned body takes no path, an unpinned one does"
+                );
+            }
+        }
+    }
 
     /// A dismounted human's set — 1.12.1's base run 7.0 (the `--speed` probe's own golden).
     fn on_foot() -> MoveSpeeds {

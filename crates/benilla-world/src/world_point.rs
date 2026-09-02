@@ -79,6 +79,31 @@ pub struct WorldPoint<'w, 's> {
     wmo_areas: Option<Res<'w, crate::wmo_portal::WmoAreas>>,
 }
 
+/// **Seed a headless `World` with everything [`WorldPoint`] needs to be constructible.**
+///
+/// [`WorldPoint`] is a facade over ten resources that the world plugins insert during startup, and a
+/// `RunSystemOnce` harness runs none of them — so a test that touches it fails not with an assertion
+/// but with `SystemParamValidationError { message: "Resource does not exist" }`, naming whichever
+/// field happens to be first. That error is the same whatever the test was about, which makes it a
+/// tax on every harness that ever reaches the world facade rather than a signal about any of them.
+///
+/// One call here is the whole of it, and it stays correct by construction: a resource added to
+/// [`WorldPoint`] is added here in the same edit, instead of being discovered by three unrelated
+/// test modules failing at once. The defaults are the empty world — no rooms claimed, no liquid, no
+/// area — which is what a geometry harness wants: it supplies the geometry it is about and nothing
+/// else answers.
+pub fn init_world_point_resources(world: &mut bevy::prelude::World) {
+    world.init_resource::<Underwater>();
+    world.init_resource::<PlayerWmoRoom>();
+    world.init_resource::<CameraInteriorClaim>();
+    world.init_resource::<bevy::prelude::Assets<benilla_assets::WmoModel>>();
+    world.init_resource::<bevy::prelude::Assets<benilla_assets::AdtTile>>();
+    world.init_resource::<crate::terrain_stream::TerrainStreamer>();
+    world.init_resource::<CurrentArea>();
+    world.init_resource::<CurrentWmoInterior>();
+    world.init_resource::<CurrentAreaInterior>();
+}
+
 /// The nearest wet point of one liquid sound class — see [`WorldPoint::nearest_liquid_per_class`].
 pub struct NearestLiquid {
     /// Squared distance from the query point, in WoW yards.
@@ -291,15 +316,7 @@ mod tests {
     #[test]
     fn a_unit_subject_resolves_to_that_units_own_room() {
         let mut world = World::new();
-        world.init_resource::<Underwater>();
-        world.init_resource::<PlayerWmoRoom>();
-        world.init_resource::<CameraInteriorClaim>();
-        world.init_resource::<Assets<benilla_assets::WmoModel>>();
-        world.init_resource::<Assets<benilla_assets::AdtTile>>();
-        world.init_resource::<crate::terrain_stream::TerrainStreamer>();
-        world.init_resource::<CurrentArea>();
-        world.init_resource::<CurrentWmoInterior>();
-        world.init_resource::<CurrentAreaInterior>();
+        super::init_world_point_resources(&mut world);
 
         let placement = world.spawn_empty().id();
         let indoors = world

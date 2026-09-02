@@ -595,3 +595,127 @@ fn a_misframed_batch_errors_rather_than_dropping_moves() {
     let undersized = hx("030000007801637cc7000001e200f0");
     assert!(messages::parse_server(messages::opcode::SMSG_COMPRESSED_MOVES, &undersized).is_err());
 }
+
+/// **The observer movement-mode family, byte-exact** (decision 1780) — the `SMSG_SPLINE_MOVE_*`
+/// twelve. Three things are asserted because all three are how this family differs from the ack'd
+/// `SMSG_FORCE_*` one it is otherwise a twin of:
+///
+/// 1. **The body is a bare packed guid** — parsing a *four-byte-shorter* body than the FORCE family's
+///    must succeed, so a trailing counter is not being read. Reading one would desync every
+///    subsequent packet in the same TCP read.
+/// 2. **All twelve opcodes are handled**, including `SMSG_SPLINE_MOVE_ROOT`'s out-of-band `0x31A`
+///    (the reference's dispatcher range is `0x304..=0x31A`, root deliberately at the top).
+/// 3. **The run/walk pair is inverted** — `SET_RUN_MODE` *clears* `MOVEFLAG_WALK_MODE`, because the
+///    reference's `0x617e80` hands the opcode's bool to `SetRunMode 0x7c71c0`, whose argument is
+///    *run*. Getting this backwards would walk every running creature in view.
+#[test]
+fn spline_move_mode_family_parses_golden() {
+    use benilla_protocol::messages::SplineMode;
+
+    // Packed guid 0xAA (mask 0x01, one byte) and NOTHING else — four bytes shorter than the
+    // FORCE family's `[packed guid][u32 counter]`.
+    let body = hx("01aa");
+    assert_eq!(body.len(), 2, "the whole body is one packed guid");
+
+    let expected = [
+        (
+            messages::opcode::SMSG_SPLINE_MOVE_ROOT,
+            SplineMode::Root,
+            true,
+        ),
+        (
+            messages::opcode::SMSG_SPLINE_MOVE_UNROOT,
+            SplineMode::Root,
+            false,
+        ),
+        (
+            messages::opcode::SMSG_SPLINE_MOVE_WATER_WALK,
+            SplineMode::WaterWalk,
+            true,
+        ),
+        (
+            messages::opcode::SMSG_SPLINE_MOVE_LAND_WALK,
+            SplineMode::WaterWalk,
+            false,
+        ),
+        (
+            messages::opcode::SMSG_SPLINE_MOVE_FEATHER_FALL,
+            SplineMode::FeatherFall,
+            true,
+        ),
+        (
+            messages::opcode::SMSG_SPLINE_MOVE_NORMAL_FALL,
+            SplineMode::FeatherFall,
+            false,
+        ),
+        (
+            messages::opcode::SMSG_SPLINE_MOVE_SET_HOVER,
+            SplineMode::Hover,
+            true,
+        ),
+        (
+            messages::opcode::SMSG_SPLINE_MOVE_UNSET_HOVER,
+            SplineMode::Hover,
+            false,
+        ),
+        (
+            messages::opcode::SMSG_SPLINE_MOVE_START_SWIM,
+            SplineMode::Swimming,
+            true,
+        ),
+        (
+            messages::opcode::SMSG_SPLINE_MOVE_STOP_SWIM,
+            SplineMode::Swimming,
+            false,
+        ),
+        // The inversion: the WALK opcode sets the bit, the RUN opcode clears it.
+        (
+            messages::opcode::SMSG_SPLINE_MOVE_SET_WALK_MODE,
+            SplineMode::WalkMode,
+            true,
+        ),
+        (
+            messages::opcode::SMSG_SPLINE_MOVE_SET_RUN_MODE,
+            SplineMode::WalkMode,
+            false,
+        ),
+    ];
+
+    for (op, mode, apply) in expected {
+        let packet = messages::parse_server(op, &body)
+            .unwrap_or_else(|e| panic!("{op:#06x} must parse from a bare packed guid: {e}"));
+        match &packet {
+            ServerPacket::SplineMoveMode {
+                guid: 0xAA,
+                mode: m,
+                apply: a,
+            } => assert_eq!(
+                (*m, *a),
+                (mode, apply),
+                "{} decoded to the wrong mode/direction",
+                packet.name()
+            ),
+            p => panic!("expected SplineMoveMode for {op:#06x}, got {}", p.name()),
+        }
+        match decode(packet).as_slice() {
+            [SessionEvent::SplineMoveMode {
+                guid: 0xAA,
+                mode: m,
+                apply: a,
+            }] => assert_eq!((*m, *a), (mode, apply)),
+            other => panic!("expected one SplineMoveMode event for {op:#06x}, got {other:?}"),
+        }
+    }
+
+    // The flag bits are the same word the ack'd family writes — the two families are one state.
+    assert_eq!(SplineMode::Root.flag(), messages::MoveMode::Root.flag());
+    assert_eq!(
+        SplineMode::WaterWalk.flag(),
+        messages::MoveMode::WaterWalk.flag()
+    );
+    assert_eq!(
+        SplineMode::FeatherFall.flag(),
+        messages::MoveMode::FeatherFall.flag()
+    );
+    assert_eq!(SplineMode::Hover.flag(), messages::MoveMode::Hover.flag());
+}

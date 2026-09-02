@@ -44,7 +44,7 @@ use motion::{
 // `creature_anim`, and the cross-seam test that pins the pair runs both systems in one app.
 pub(crate) use motion::drive_display_facing;
 pub(crate) use motion::{
-    jump_seed, CreatureSwimming, FacingStep, RemoteMotion, Spline, SplineStopped,
+    jump_seed, CreatureSwimming, FacingStep, RemoteMotion, Spline, SplineStopped, UnitMoveModes,
 };
 // `GroundClamped`'s only consumer outside `net::motion::spline` is the ground-census probe, and a
 // probe is an instrument — a build with the instruments compiled out contains nothing that names

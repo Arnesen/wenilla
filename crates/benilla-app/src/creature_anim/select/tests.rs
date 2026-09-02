@@ -927,12 +927,76 @@ fn unify_stamps_flying_from_the_live_spline_on_every_leg() {
     // Self leg: the controller's stored component says nothing about the ride — the live
     // Spline does (the client reads the active CMovement's spline flags at select time).
     let m = moving_forward(32.0);
-    assert!(unify(Some(&m), None, Some(&spline(false)), false).flying);
-    assert!(!unify(Some(&m), None, Some(&spline(true)), false).flying);
-    assert!(!unify(Some(&m), None, None, false).flying);
+    assert!(unify(Some(&m), None, Some(&spline(false)), false, None).flying);
+    assert!(!unify(Some(&m), None, Some(&spline(true)), false, None).flying);
+    assert!(!unify(Some(&m), None, None, false, None).flying);
     // Spline leg (a remote taxi after the stale-RemoteMotion drop): flying + FORWARD + speed.
-    let v = unify(None, None, Some(&spline(false)), false);
+    let v = unify(None, None, Some(&spline(false)), false, None);
     assert!(v.flying && v.flags & move_flags::FORWARD != 0 && v.speed > 0.0);
+}
+
+/// **The server-granted modes reach the selector's flags word** (decision 1780). They are bits of
+/// the same `CMovement+0x40` word the selector already tests, so a creature the server has put in
+/// walk mode or rooted must read as one — the reference re-runs this very selector on the spot when
+/// the grant lands (`0x6014ec push edi; call 0x60e480`, then `push -1; call 0x5fd9e0`), which is
+/// what makes this opcode family a *visual* one rather than bookkeeping.
+///
+/// The self leg is deliberately exempt: our own mover's modes are the ack'd family's, already
+/// folded into the `MovementState` the controller writes. Reading them from a second place would be
+/// a second source of truth for one bit.
+#[test]
+fn the_granted_modes_fold_into_the_flags_word_on_every_leg_but_our_own() {
+    use crate::net::UnitMoveModes;
+    use std::time::{Duration, Instant};
+
+    let rooted = UnitMoveModes(move_flags::ROOT);
+    let walking = UnitMoveModes(move_flags::WALK_MODE);
+
+    // Creature leg — a standing NPC the server has rooted.
+    let v = unify(None, None, None, false, Some(&rooted));
+    assert_eq!(v.flags & move_flags::ROOT, move_flags::ROOT);
+
+    // Creature leg on a path: the granted bit rides alongside the spline's own FORWARD.
+    let spline = crate::net::Spline {
+        points: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
+        start: Instant::now(),
+        duration: Duration::from_secs(10),
+        id: 1,
+        grounded: true,
+        run_mode: true,
+    };
+    let v = unify(None, None, Some(&spline), false, Some(&walking));
+    assert_eq!(
+        v.flags,
+        move_flags::WALK_MODE | move_flags::FORWARD,
+        "the walk grant does not displace the spline's own travel bit"
+    );
+
+    // Remote leg — OR'd onto the pose's flags, never replacing them.
+    let rm = crate::net::RemoteMotion {
+        wow_pos: [0.0; 3],
+        pending: std::collections::VecDeque::new(),
+        orientation: 0.0,
+        flags: move_flags::FORWARD,
+        pitch: 0.0,
+        speed: 7.0,
+        vertical_velocity: 0.0,
+        jump_xy_vel: [0.0; 2],
+        fall_start_z: None,
+        relay: Default::default(),
+        last_apply_ms: 0.0,
+        last_apply_pos: [0.0; 3],
+    };
+    let v = unify(None, Some(&rm), None, false, Some(&walking));
+    assert_eq!(v.flags, move_flags::FORWARD | move_flags::WALK_MODE);
+
+    // Self leg — untouched.
+    let m = moving_forward(32.0);
+    assert_eq!(
+        unify(Some(&m), None, None, false, Some(&rooted)).flags,
+        m.flags,
+        "our own mover's modes are the ack'd family's; this word is the controller's"
+    );
 }
 
 /// The prowl creep outranks the WHOLE speed tail (RF-0057 `0x5fd1d3` precedes `0x5fd202`): a

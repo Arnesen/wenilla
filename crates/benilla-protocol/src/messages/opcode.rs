@@ -616,6 +616,57 @@ pub const SMSG_SPLINE_SET_SWIM_SPEED: u16 = 0x0300; // 768
 pub const SMSG_SPLINE_SET_WALK_SPEED: u16 = 0x0301; // 769
 pub const SMSG_SPLINE_SET_SWIM_BACK_SPEED: u16 = 0x0302; // 770
 pub const SMSG_SPLINE_SET_TURN_RATE: u16 = 0x0303; // 771
+
+// **The OBSERVER movement-mode family** (decision 1780) — the spline-move twelve. Where the
+// `SMSG_FORCE_*`/`SMSG_MOVE_*` family above hands the *controlling client* a mode to ack, this one
+// tells everyone else that some unit's mode changed, and it is a different wire in three ways:
+// the body is a **bare packed guid** (no counter, no `MovementInfo`), there is **no ack**, and the
+// target is **any unit**, not our mover.
+//
+// VERIFIED both ends. Server: vmangos `MovementPacketSender::SendMovementFlagChangeToAll` /
+// `SendToggleRunWalkToAll` (`MovementPacketSender.cpp:399-462`) write `data << unit->GetPackGUID()`
+// and stop — the `+ 4` / `9` in the `WorldPacket` ctor is a capacity hint, not content. Client:
+// all twelve register the single handler `0x603c80`, which reads one packed guid (`0x642ed0`),
+// resolves it with `ClntObjMgrObjectPtr(TYPEMASK_UNIT)` and calls the dispatcher `0x601420`
+// (`lea eax,[edi-0x304]; cmp eax,0x16; ja` — so `0x304..=0x31A`, and `SMSG_SPLINE_MOVE_ROOT`'s
+// out-of-band `0x31A` is deliberately the range's top). An unresolvable guid is dropped silently.
+//
+// The dispatcher's twelve arms, in registration order (`0x603775`-`0x603830`), are a 1:1 map onto
+// the twelve opcodes; six of the arms are independently VERIFIED in wow-re's collision ledger:
+//
+// | opcode | arm | effect on `CMovement+0x40` |
+// |---|---|---|
+// | `0x31A` ROOT | `0x619a10` | `SetRoot 0x7c7340` — sets `0x1000`, and **wipes `0xffe07f00`'s complement once at apply** |
+// | `0x304` UNROOT | `0x619a40` | `ClearRoot 0x7c7370(1)` — clears `0x1000` |
+// | `0x305`/`0x306` | `0x61a4e0` | `SetFeatherFall 0x7c72e0` — `0x20000000` |
+// | `0x307`/`0x308` | `0x61a620` | `SetHover 0x7c7310` — `0x40000000` |
+// | `0x309`/`0x30A` | `0x61a3d0` | `SetWaterWalk 0x7c7280` — `0x10000000` |
+// | `0x30B`/`0x30C` | `0x61a130`/`0x61a160` | `SetSwim 0x7c6e50`/`0x7c6e80` — `0x200000` |
+// | `0x30D`/`0x30E` | `0x617e80` | `SetRunMode 0x7c71c0` — `0x100`, **inverted** (see below) |
+//
+// After any arm the dispatcher re-runs the unit's animation selector (`0x6014ec push edi; call
+// 0x60e480` then `push -1; call 0x5fd9e0`), which is why this family is *visual*: the mode change
+// re-picks the gait on the spot rather than waiting for the next pose.
+//
+// (wow-re `collision/scratch/moveflag-family.md` §§2-5, `collision/scratch/walk-mode-law.md` §5,
+// `collision/scratch/remote-swim-decision.md` §1.4, `collision/ledger.tsv` rows for each arm.)
+pub const SMSG_SPLINE_MOVE_UNROOT: u16 = 0x0304; // 772
+pub const SMSG_SPLINE_MOVE_FEATHER_FALL: u16 = 0x0305; // 773
+pub const SMSG_SPLINE_MOVE_NORMAL_FALL: u16 = 0x0306; // 774
+pub const SMSG_SPLINE_MOVE_SET_HOVER: u16 = 0x0307; // 775
+pub const SMSG_SPLINE_MOVE_UNSET_HOVER: u16 = 0x0308; // 776
+pub const SMSG_SPLINE_MOVE_WATER_WALK: u16 = 0x0309; // 777
+pub const SMSG_SPLINE_MOVE_LAND_WALK: u16 = 0x030A; // 778
+pub const SMSG_SPLINE_MOVE_START_SWIM: u16 = 0x030B; // 779
+pub const SMSG_SPLINE_MOVE_STOP_SWIM: u16 = 0x030C; // 780
+                                                    // **The run/walk pair is inverted against the flag bit, and that is the reference's own sign.**
+                                                    // `0x617e80` passes the opcode's bool straight to `CMovement::SetRunMode 0x7c71c0`, whose argument
+                                                    // is *run* — so `SET_RUN_MODE` CLEARS `MOVEFLAG_WALK_MODE` (`0x100`) and `SET_WALK_MODE` sets it.
+                                                    // Modelled as one [`super::movement::SplineMode::WalkMode`] whose `apply` is the flag's direction,
+                                                    // so every arm of the family means the same thing by "apply": set this bit.
+pub const SMSG_SPLINE_MOVE_SET_RUN_MODE: u16 = 0x030D; // 781
+pub const SMSG_SPLINE_MOVE_SET_WALK_MODE: u16 = 0x030E; // 782
+pub const SMSG_SPLINE_MOVE_ROOT: u16 = 0x031A; // 794
 pub const MSG_MOVE_SET_RUN_SPEED: u16 = 0x00CD; // 205
 pub const MSG_MOVE_SET_RUN_BACK_SPEED: u16 = 0x00CF; // 207
 pub const MSG_MOVE_SET_WALK_SPEED: u16 = 0x00D1; // 209

@@ -347,37 +347,17 @@ const KNOWN: &[Known] = &[
     },
     // ── id ─────────────────────────────────────────────────────────────────────────────────────
     //
-    // The reference side of this comparison is XML only: the sweep cannot see a `SetID` the
-    // reference makes from Lua at `OnLoad`, so a frame the reference numbers *there* reads as 0
-    // here. Every entry below is that case, and each ends at the same runtime number ours declares
-    // — which is why they are accepted rather than fixed. (The blind spot only ever under-reports:
-    // it can hide a divergence, never invent one, so nothing it misses is a false failure.)
-    Known {
-        frame: "CharacterBag0Slot",
-        flag: Flag::Id,
-        why: "the bag slots are numbered from Lua in the reference (ContainerFrame.lua's bag-slot \
-              OnLoad); ours declares the same inventory slot in XML",
-    },
-    Known {
-        frame: "CharacterBag1Slot",
-        flag: Flag::Id,
-        why: "as CharacterBag0Slot",
-    },
-    Known {
-        frame: "CharacterBag2Slot",
-        flag: Flag::Id,
-        why: "as CharacterBag0Slot",
-    },
-    Known {
-        frame: "CharacterBag3Slot",
-        flag: Flag::Id,
-        why: "as CharacterBag0Slot",
-    },
-    Known {
-        frame: "KeyRingButton",
-        flag: Flag::Id,
-        why: "-2 is KEYRING_CONTAINER, which the reference also arrives at — from Lua, not XML",
-    },
+    // Empty, and it is worth saying why rather than leaving a bare header. The reference side of
+    // this comparison is XML only: the sweep cannot see a `SetID` the reference makes from Lua at
+    // `OnLoad`, so a frame the reference numbers *there* used to read as 0 here while ours
+    // declared the number in XML. The five entries that lived here were all one case — the bag
+    // bar's `CharacterBag0..3Slot` and `KeyRingButton`.
+    //
+    // 1751's third window deleted them by making the difference not exist: the bar IS
+    // `Interface\FrameXML\MainMenuBarBagButtons.xml` now, so those ids come from
+    // `PaperDollItemSlotButton_OnLoad`'s `GetInventorySlotInfo` and from `this:SetID(
+    // KEYRING_CONTAINER)` — the reference's own Lua, on both sides. This gate reported them the
+    // frame it was built to report (1751 §5: the drift instruments retire with the copies).
     // ── parent ─────────────────────────────────────────────────────────────────────────────────
     //
     // Three, and each is a seat inside the SAME tree the reference seats it in — which is the

@@ -765,7 +765,7 @@ fn shipped_bag_frame_drives_end_to_end() {
     // [`BAG_UI`] is `benilla.toc`'s own order for everything a bag window needs. Three files join
     // it at the positions the manifest gives them:
     //   * ActionBar.xml straight after Cooldown.xml — the bag bar is anchored INTO
-    //     MainMenuBarArtFrame, so the bar must exist before BagFrame.xml loads or the toggle's
+    //     MainMenuBarArtFrame, so the bar must exist before the bag bar loads or the toggle's
     //     cross-file `relativeTo` silently falls back to the screen root (which would land in the
     //     right place here anyway, by the 1024-wide coincidence: screen BOTTOMRIGHT == the
     //     full-width bar's art-frame BOTTOMRIGHT — so the failure would be invisible);
@@ -780,7 +780,7 @@ fn shipped_bag_frame_drives_end_to_end() {
         if *file == "Cooldown.xml" {
             load_ui(&s, "ActionBar.xml");
         }
-        if *file == "BagFrame.xml" {
+        if *file == "Interface\\FrameXML\\MainMenuBarBagButtons.xml" {
             bar_frames = frames;
         }
     }
@@ -788,12 +788,13 @@ fn shipped_bag_frame_drives_end_to_end() {
     load_ui(&s, "MerchantFrame.xml");
 
     assert_eq!(
-        bar_frames, 12,
+        bar_frames, 16,
         "the bag bar is six CheckButtons — MainMenuBarBackpackButton, CharacterBag0..3Slot, \
-         KeyRingButton — each carrying one $parentItemAnim push card (decision 0887): 6 + 6. \
-         Every window this file used to declare (the backpack, four equipped bags, the keyring) \
-         is the reference's ContainerFrame now, and its slot buttons, close buttons and money \
-         rows went with it (decision 1751)"
+         KeyRingButton — each carrying one $parentItemAnim Model (6 + 6), plus a $parentCooldown \
+         Model on each of the four slots that inherit PaperDollItemSlotButtonTemplate (+4). The \
+         deleted BagFrame.xml built 12: it mirrored the six buttons and their push cards but had \
+         no cooldown on a bag-bar slot at all, which is the reference's own and is what the swap \
+         to Interface\\FrameXML\\MainMenuBarBagButtons.xml brought with it (1751 window 3)"
     );
 
     // The app's feed: a backpack with Tough Jerky ×5 in slot 1.

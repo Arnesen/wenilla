@@ -95,7 +95,7 @@ fn backpack_toggle_plays_open_and_close_kits() {
     assert!(!open(&s, 0));
 
     // Toggle open → OnShow → igBackPackOpen.
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     assert!(open(&s, 0));
     assert_eq!(
         s.take_sounds(),
@@ -104,7 +104,7 @@ fn backpack_toggle_plays_open_and_close_kits() {
     );
 
     // Toggle closed → OnHide → igBackPackClose.
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     assert!(!open(&s, 0));
     assert_eq!(
         s.take_sounds(),
@@ -155,7 +155,7 @@ fn b_opens_the_backpack_alone_and_closes_every_bag() {
     );
 
     // Toggle open: the BACKPACK, and only the backpack — bag 2 is equipped and stays shut.
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     let _ = s.take_sounds();
     assert!(open(&s, 0), "backpack opens");
     assert!(
@@ -171,7 +171,7 @@ fn b_opens_the_backpack_alone_and_closes_every_bag() {
     // takes the lot down.
     s.run("ToggleBag(2)").unwrap();
     assert!(open(&s, 2));
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     let _ = s.take_sounds();
     assert!(
         !open(&s, 0) && !open(&s, 2),
@@ -181,7 +181,7 @@ fn b_opens_the_backpack_alone_and_closes_every_bag() {
     // Bag 0 shut, bag 2 open: the ref's condition reads bag 0, so this is the OPEN arm — the
     // backpack joins the bag already up instead of closing it.
     s.run("ToggleBag(2)").unwrap();
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     let _ = s.take_sounds();
     assert!(
         open(&s, 0) && open(&s, 2),
@@ -441,7 +441,7 @@ fn bag_tooltip_hangs_left_when_the_slot_sits_in_the_right_half() {
             slots,
         }),
     );
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     s.take_sounds();
     s.resolve();
 
@@ -517,7 +517,7 @@ fn hovered_bag_tooltip_fills_itself_when_the_stats_land() {
             slots,
         }),
     );
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     s.resolve();
     let btn = bag_slot_button(&s, 0, 1);
 
@@ -756,7 +756,7 @@ fn readable_letter_hover_shows_the_inspect_magnifier() {
             slots,
         }),
     );
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     s.take_sounds();
     s.resolve();
     let b1 = bag_slot_button(&s, 0, 1);
@@ -824,7 +824,7 @@ fn drag_across_two_slots_queues_the_same_move_a_click_pickup_would() {
             slots,
         }),
     );
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     s.take_sounds();
     s.resolve();
 
@@ -910,8 +910,7 @@ fn a_second_bag_window_feeds_and_paints_via_the_bag_bar() {
 
     assert!(!open(&s, 1), "hidden by default");
     // CharacterBag0Slot == bag id 1 (BenillaBagBarSlot_OnLoad(self, 1) in BagFrame.xml).
-    s.run("BenillaBagBarSlot_OnClick(CharacterBag0Slot)")
-        .unwrap();
+    s.run("CharacterBag0Slot:Click()").unwrap();
     let _ = s.take_sounds();
     assert!(open(&s, 1), "the bag-bar click opened bag 1's window");
     let w = window(&s, 1);
@@ -1040,7 +1039,7 @@ fn open_backpack_with_a_five_stack(s: &mut UiScript) -> (f32, f32) {
             slots,
         }),
     );
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     let _ = s.take_sounds();
     s.resolve();
 
@@ -1391,10 +1390,19 @@ fn bag_slot_cooldown_sweeps_through_the_xml() {
 }
 
 /// The bar's five bag buttons had NO hover at all — the director's "the bags are missing their
-/// simple tooltips". These are the ref's plain `SetText` plates (ref-MainMenuBarBagButtons.xml
-/// l.91-99 for the backpack, ref-MainMenuBarBagButtons.lua l.86-96 for the four slots), NOT the
-/// two-line newbie kind the micro buttons next to them use — so what's pinned here is the label,
-/// the empty-slot fallback, and that they seat BESIDE the button rather than at the screen corner.
+/// simple tooltips". These are the ref's plain `SetText` plates (MainMenuBarBagButtons.xml l.91-99
+/// for the backpack, MainMenuBarBagButtons.lua l.86-96 for the four slots), NOT the two-line
+/// newbie kind the micro buttons next to them use — so what's pinned here is the label, the
+/// empty-slot fallback, and that they seat BESIDE the button rather than at the screen corner.
+///
+/// Those two bodies are the reference's OWN now (1751 window 3), which changes one thing this test
+/// records: **the binding-key suffix appears on the four slots too.** The reference appends
+/// `GetBindingKey("TOGGLEBAG"..(4 - (this:GetID() - CharacterBag0Slot:GetID())))` — its numbering
+/// runs the bar right-to-left, so the slot next to the backpack is `TOGGLEBAG4`, our F11
+/// (`bindings/commands.rs`, quoting ref Bindings.xml l.564-575). Our own handler never did this,
+/// so the suffix is new here and is the reference's behaviour, not a regression. The backpack's
+/// key is the reference's `TOGGLEBACKPACK` rather than the `OPENALLBAGS` ours read; both default
+/// to B, so the string is unchanged and only the reason is.
 #[test]
 fn the_bar_bag_buttons_name_themselves_on_hover() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -1410,14 +1418,13 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
     s.resolve();
 
     // The backpack: its label plus OPENALLBAGS's live key (default B; 0997's divergence note).
-    s.run("BenillaBagToggle_OnEnter(MainMenuBarBackpackButton)")
-        .unwrap();
+    hover(&mut s, "MainMenuBarBackpackButton");
     let line = s
         .eval::<String>("return GameTooltipTextLeft1:GetText()")
         .unwrap();
     assert!(
         line.starts_with("Backpack") && line.contains("(B)"),
-        "the backpack names itself and its key: {line:?}"
+        "the backpack names itself and its TOGGLEBACKPACK key: {line:?}"
     );
     // Beside the button, not the default corner — the ref's ANCHOR_LEFT.
     assert!(
@@ -1431,8 +1438,7 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
     );
 
     // An empty bag slot falls back to the ref's EQUIP_CONTAINER rather than showing nothing.
-    s.run("BenillaBagBarSlot_OnEnter(CharacterBag0Slot)")
-        .unwrap();
+    hover(&mut s, "CharacterBag0Slot");
     assert_eq!(
         s.eval::<String>("return GameTooltipTextLeft1:GetText()")
             .unwrap(),
@@ -1461,16 +1467,20 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
         enchants: Vec::new(),
     });
     s.set_inventory_slots(inv);
-    s.run("BenillaBagBarSlot_OnEnter(CharacterBag0Slot)")
+    hover(&mut s, "CharacterBag0Slot");
+    let line = s
+        .eval::<String>("return GameTooltipTextLeft1:GetText()")
         .unwrap();
-    assert_eq!(
-        s.eval::<String>("return GameTooltipTextLeft1:GetText()")
-            .unwrap(),
-        "Small Brown Pouch",
-        "an equipped slot shows that bag, not the empty-slot fallback"
+    assert!(
+        line.starts_with("Small Brown Pouch"),
+        "an equipped slot shows that bag, not the empty-slot fallback: {line:?}"
+    );
+    assert!(
+        line.contains("(F11)"),
+        "…and the reference appends this slot's own TOGGLEBAG4 key: {line:?}"
     );
 
-    s.run("BenillaBagBarButton_OnLeave()").unwrap();
+    unhover(&mut s);
     assert!(
         !s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
         "leaving hides the plate"
@@ -1651,8 +1661,7 @@ fn the_keyring_button_opens_a_keyring_window() {
     let _ = s.take_sounds();
 
     assert!(!open(&s, -2));
-    s.run("BenillaKeyRingButton_OnClick(KeyRingButton)")
-        .unwrap();
+    s.run("KeyRingButton:Click()").unwrap();
     assert!(open(&s, -2), "the button opens the keyring");
     assert_eq!(
         s.take_sounds(),
@@ -1687,8 +1696,7 @@ fn the_keyring_button_opens_a_keyring_window() {
         7146
     );
 
-    s.run("BenillaKeyRingButton_OnClick(KeyRingButton)")
-        .unwrap();
+    s.run("KeyRingButton:Click()").unwrap();
     assert!(!open(&s, -2));
     assert_eq!(
         s.take_sounds(),
@@ -1730,8 +1738,7 @@ fn a_key_dropped_on_the_button_files_itself() {
     s.run("PickupContainerItem(0, 3)").unwrap();
     assert!(s.eval::<bool>("return CursorHasItem()").unwrap());
 
-    s.run("BenillaKeyRingButton_OnClick(KeyRingButton)")
-        .unwrap();
+    s.run("KeyRingButton:Click()").unwrap();
     assert_eq!(
         s.take_container_moves(),
         vec![ContainerMove {
@@ -1762,28 +1769,42 @@ fn a_key_dropped_on_the_button_files_itself() {
     }
     s.set_container(-2, Some(full));
     s.run("PickupContainerItem(0, 3)").unwrap();
-    // The refusal is now the REFERENCE's own `PutKeyInKeyRing`, reporting through the name its
-    // own line asks for — which 1.12 never defines. `BagFrame.xml` supplies it from the string the
-    // reference meant, and that repair is what this half of the test guards (its comment there
-    // carries the reasoning).
-    s.run("BenillaKeyRingButton_OnClick(KeyRingButton)")
-        .unwrap();
+    // The refusal is the REFERENCE's own `PutKeyInKeyRing`, reporting through the name its own
+    // line asks for — `NO_EMPTY_KEYRING_SLOTS`, which 1.12 never defines. So the drop is refused
+    // and **nothing is printed**: a real 1.12 bug, and faithful here on purpose.
+    //
+    // This client un-quirked it once, by assigning the string the reference plainly meant. Window
+    // 1 of 1751 retired that (ContainerFrameAdapters.xml's header records it), but the assignment
+    // itself outlived the decision in `BagFrame.xml` for a window and a half. Window 3 deleted that
+    // file, so the stated posture and the behaviour agree again. Restoring the repair is one line
+    // in the adapters if it is ever wanted; it is not silent either way.
+    s.run("KeyRingButton:Click()").unwrap();
     assert!(
         s.take_container_moves().is_empty(),
         "a full keyring queues no move"
     );
-    // ...and says so, on the errors frame — read where a player reads it, off the drawn quads.
-    // (`UIErrorsFrame` is a real `<MessageFrame>`; its lines are the widget's, not FontStrings.)
     s.resolve();
     assert!(
-        s.extract().iter().any(|q| matches!(
+        !s.extract().iter().any(|q| matches!(
             &q.content,
-            QuadContent::Text { text: Some(t), .. } if t == "Your keyring is full."
+            QuadContent::Text { text: Some(t), .. } if t.contains("keyring is full")
         )),
-        "the refusal posts to UIErrorsFrame — the reference's own dangling string name prints \
-         nothing"
+        "the reference's own dangling string name prints nothing — un-quirking it is a decision, \
+         not a default"
     );
-    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    // The nil ALSO raises, out of `MessageFrame:AddMessage`. That is deliberately not asserted as
+    // correct: our binding takes its text as an mlua `String`, which raises on nil by default —
+    // not from a carved gate (`messageframe/plain.rs` reads `0x795590`'s rgb/alpha parse off the
+    // bytes and says nothing about the text argument). Whether 1.12 raises here, no-ops, or prints
+    // a blank line is out with wow-re. So this pins the keyring's own behaviour — the refusal, and
+    // the silence — and lets exactly that one error through by name, which still fails the test on
+    // any OTHER error the click produces.
+    let errs = s.errors();
+    assert!(
+        errs.iter()
+            .all(|e| e.contains("AddMessage") && e.contains("PutKeyInKeyRing")),
+        "the only error may be the reference's own nil message: {errs:?}"
+    );
 }
 
 /// The item-push drop animation (decision 0887): `ITEM_PUSH(container, icon)` runs the pushed item's
@@ -1806,13 +1827,13 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
     s.resolve();
 
     let shown = |s: &UiScript, name: &str| {
-        s.eval::<bool>(&format!("return {name}ItemAnim:IsShown()"))
+        s.eval::<bool>(&format!("return {name}BenillaItemPush:IsShown()"))
             .unwrap()
     };
     // The card's centre relative to its button's centre, in screen px (y-up): (dx, dy).
     let offset = |s: &UiScript, name: &str| -> (f32, f32) {
         s.eval::<(f32, f32)>(&format!(
-            "local a, b = {name}ItemAnim, {name} \
+            "local a, b = {name}BenillaItemPush, {name} \
              local ax, ay = a:GetLeft() + a:GetWidth() / 2, a:GetBottom() + a:GetHeight() / 2 \
              local bx, by = b:GetLeft() + b:GetWidth() / 2, b:GetBottom() + b:GetHeight() / 2 \
              return ax - bx, ay - by"
@@ -1820,11 +1841,11 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
         .unwrap()
     };
     let size = |s: &UiScript, name: &str| {
-        s.eval::<f32>(&format!("return {name}ItemAnim:GetWidth()"))
+        s.eval::<f32>(&format!("return {name}BenillaItemPush:GetWidth()"))
             .unwrap()
     };
     let alpha = |s: &UiScript, name: &str| {
-        s.eval::<f32>(&format!("return {name}ItemAnim:GetAlpha()"))
+        s.eval::<f32>(&format!("return {name}BenillaItemPush:GetAlpha()"))
             .unwrap()
     };
     // The card's centre relative to its button's BOTTOMRIGHT corner — the reference's OWN frame of
@@ -1834,7 +1855,7 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
     // instead is what let 0887's placement look plausible.
     let corner = |s: &UiScript, name: &str| -> (f32, f32) {
         s.eval::<(f32, f32)>(&format!(
-            "local a, b = {name}ItemAnim, {name} \
+            "local a, b = {name}BenillaItemPush, {name} \
              local ax, ay = a:GetLeft() + a:GetWidth() / 2, a:GetBottom() + a:GetHeight() / 2 \
              return ax - b:GetRight(), ay - b:GetBottom()"
         ))
@@ -1850,11 +1871,14 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
         assert!(!shown(&s, b), "{b}'s card starts hidden");
     }
 
-    // A push into equipped bag 2.
+    // A push into equipped bag 2. `arg1` is the reference's own vocabulary since 1751 window 3 —
+    // the button's INVENTORY-slot id, which is what `ItemAnim_OnEvent` compares against — so bag 2
+    // is `CharacterBag1Slot`'s 21, not the container id 2 this used to send (`ui_loot.rs`
+    // `push_container`, the `0x491bb5` selector).
     s.fire_event(
         "ITEM_PUSH",
         vec![
-            benilla_ui::script::ScriptValue::Int(2),
+            benilla_ui::script::ScriptValue::Int(21),
             benilla_ui::script::ScriptValue::Str("Interface\\Icons\\INV_Misc_Bag_08".into()),
         ],
     );
@@ -1988,11 +2012,16 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
         (cx + 16.87).abs() < 0.2 && (cy - 18.68).abs() < 0.2,
         "arrives at the ref's landing point: got ({cx}, {cy})"
     );
-    // Which is also, within a pixel, the button's own centre — the reference's card really does
-    // drop INTO the bag button, and that is the one thing 0887 got right for the wrong reason.
+    // Which is also, within a couple of pixels, the button's own centre — the reference's card
+    // really does drop INTO the bag button, and that is the one thing 0887 got right for the wrong
+    // reason. The corner-relative assertion above is the exact one; this is the sanity check, and
+    // its tolerance is a button-size term, not slack: the landing point is fixed relative to the
+    // button's BOTTOMRIGHT, so the offset from its CENTRE moves by half of any size change. The
+    // bar's buttons are 37x37 now — `ItemButtonTemplate`'s own size, inherited through the
+    // reference's `PaperDollItemSlotButtonTemplate` — where the deleted BagFrame.xml authored 36.
     let (dx, dy) = offset(&s, "CharacterBag1Slot");
     assert!(
-        dx.abs() < 1.5 && dy.abs() < 1.5,
+        dx.abs() < 2.0 && dy.abs() < 2.0,
         "lands on the button it went into: got ({dx}, {dy})"
     );
     assert!(
@@ -2064,7 +2093,7 @@ fn an_addon_that_hooks_toggle_backpack_receives_the_click() {
     .unwrap();
 
     // The button's own OnClick path — what the B binding and a plain backpack-button click run.
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
 
     assert_eq!(
         s.eval::<i64>("return HOOK_RAN").unwrap(),
@@ -2123,12 +2152,22 @@ fn the_bag_slots_carry_the_references_names_and_icon_names() {
         );
     }
 
-    // 0-based: CharacterBag0Slot is bag 1. Pinned because the off-by-one is the whole trap, and
-    // two name-building call sites had to learn it.
+    // 0-based: CharacterBag0Slot is bag 1, and the off-by-one is the whole trap. Asked the way the
+    // reference asks it, which is the only way there is now: the bar is stock
+    // `MainMenuBarBagButtons.xml` since 1751's third window, its buttons carry no `bagId` field,
+    // and every one of its handlers recomputes `this:GetID() - CharacterBag0Slot:GetID() + 1` at
+    // the call site. The ids themselves come from `GetInventorySlotInfo("Bag0Slot")` = 20 through
+    // the sourced `PaperDollItemSlotButton_OnLoad`, which is what makes the arithmetic work.
     assert_eq!(
-        s.eval::<i64>("return CharacterBag0Slot.bagId").unwrap(),
-        1,
-        "CharacterBag0Slot IS bag 1 — the reference names them 0-based"
+        s.eval::<i64>("return CharacterBag0Slot:GetID()").unwrap(),
+        20,
+        "CharacterBag0Slot's id is its INVENTORY slot — 8 corpus addons compute `GetID() - 19`"
+    );
+    assert_eq!(
+        s.eval::<i64>("return CharacterBag3Slot:GetID() - CharacterBag0Slot:GetID() + 1")
+            .unwrap(),
+        4,
+        "the reference's own translation: the fourth button is bag 4"
     );
 
     // Bagnon's exact reach.

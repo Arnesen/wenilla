@@ -501,6 +501,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             mode,
             apply,
         }],
+        ServerPacket::SplineMoveMode { guid, mode, apply } => {
+            vec![SessionEvent::SplineMoveMode { guid, mode, apply }]
+        }
         ServerPacket::KnockBack {
             guid,
             counter,

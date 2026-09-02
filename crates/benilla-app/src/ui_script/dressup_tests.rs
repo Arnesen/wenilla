@@ -49,7 +49,6 @@ fn load_room(s: &UiScript) {
         "UIParent.xml",
         "GameTooltip.xml",
         "Cooldown.xml",
-        "BagFrame.xml",
     ] {
         load_xml(s, file);
     }
@@ -107,7 +106,7 @@ fn backpack_with_jerky(s: &mut UiScript) -> String {
             slots,
         }),
     );
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     let _ = s.take_sounds();
     s.resolve();
     bag_slot_button(s, 0, 1)

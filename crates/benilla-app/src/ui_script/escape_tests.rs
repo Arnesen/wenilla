@@ -75,7 +75,7 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
     s.set_container(0, Some(one_item_backpack()));
 
     // Open the bag and the loot window; drain the open kits (not under test here).
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     s.set_loot(Some(LootState {
         fishing: false,
         master_candidates: Vec::new(),
@@ -147,7 +147,7 @@ fn escape_is_consumed_by_a_focused_editbox_and_leaves_windows_open() {
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
 
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     assert!(
         s.focus_editbox("ChatFrameEditBox"),
         "the chat edit box focuses"
@@ -264,7 +264,7 @@ fn escape_closes_an_open_stack_split_frame() {
             slots,
         }),
     );
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     assert!(bag_open(&s, 0), "the backpack window is up");
 
     // Open the spinner with a real SHIFT + left-click on the button holding slot 1 — asked of the
@@ -311,7 +311,7 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
     load_xml(&s, "MerchantFrame.xml");
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     let _ = s.take_sounds();
     assert!(bag_open(&s, 0));
     s.set_unit(
@@ -405,7 +405,7 @@ fn escape_ladder_targeting_rung_after_cast_before_windows() {
     load_xml(&s, "MerchantFrame.xml");
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     let _ = s.take_sounds();
     assert!(bag_open(&s, 0));
 

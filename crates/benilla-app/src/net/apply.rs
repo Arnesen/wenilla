@@ -12,7 +12,7 @@ use super::{
     AiReactionMessage, CharActionResultMessage, CharListMessage, EmoteMessage, EnteredWorldMessage,
     Guid, GuidIndex, LoggedOutMessage, NetCommands, NetEvents, NetStatus, ObjectStore,
     PendingTransfer, RemoteMotion, Reputations, SelfGuid, SelfPlayer, ServerSoundMessage,
-    ServerTime, ServerWallClock, TeleportMessage, WorldportMessage,
+    ServerTime, ServerWallClock, TeleportMessage, UnitMoveModes, WorldportMessage,
 };
 use benilla_world::weather::WeatherMessage;
 
@@ -106,7 +106,11 @@ pub(super) fn apply_net_updates(
     mut reputations: ResMut<Reputations>,
     mut transforms: Query<&mut Transform>,
     mut stores: Query<&mut ObjectStore>,
-    mut remote_motion: Query<&mut RemoteMotion>,
+    // One tuple param (the 16-SystemParam ceiling this signature already lives against): the two
+    // per-unit motion states the drain writes. [`RemoteMotion`] is a relayed player's dead-reckon;
+    // [`UnitMoveModes`] is any unit's server-granted movement modes (decision 1780). Different
+    // components, one concern — what the wire says about how a body we don't control is moving.
+    mut motion: (Query<&mut RemoteMotion>, Query<&mut UnitMoveModes>),
     // One tuple param (the 16-SystemParam ceiling): the session-lifecycle one-shot writers — the
     // player's teleport/worldport snaps + the glue-screen edges (decision 0193).
     session_msgs: (
@@ -487,6 +491,9 @@ pub(super) fn apply_net_updates(
     // This also removes a latent clobber: a plain per-delta `insert` on a not-yet-spawned entity would
     // overwrite an earlier partial rather than merge it (decision 0061).
     let mut pending: HashMap<u64, ObjectFields> = HashMap::new();
+    // The drain's staged [`UnitMoveModes`] grants — see [`objects::StagedModes`]. A grant and the
+    // `SMSG_MONSTER_MOVE` it refuses can land in the same drain, and the refusal has to see it.
+    let mut staged_modes = objects::StagedModes::new();
     // The same deferral trap for movers' speeds, and the one B213 fell into: a create's
     // `UnitSpeeds` insert is a Command, so a `SMSG_FORCE_*_SPEED_CHANGE` arriving later in this
     // same drain could not land on top of it. Both stage here in packet order (decision 1478).
@@ -672,7 +679,7 @@ pub(super) fn apply_net_updates(
                     &mut commands,
                     &index,
                     &self_guid,
-                    &mut remote_motion,
+                    &mut motion.0,
                     &mut transforms,
                     &mut audio.13,
                     &mut self_moves,
@@ -723,6 +730,7 @@ pub(super) fn apply_net_updates(
                 duration_ms,
                 flying,
                 run_mode,
+                objects::modes_of(guid, &index, &motion.1, &staged_modes).rooted(),
                 &mut commands,
                 &index,
                 &mut transforms,
@@ -1359,6 +1367,18 @@ pub(super) fn apply_net_updates(
                 &self_guid,
                 &mut death_net,
                 &mut move_modes,
+            ),
+            // ── The observer movement-mode family (decision 1780) — the same modes, on a body
+            //    somebody else is driving. No ack, so this arm ends the packet.
+            SessionEvent::SplineMoveMode { guid, mode, apply } => objects::spline_move_mode(
+                guid,
+                mode,
+                apply,
+                &mut commands,
+                &index,
+                &mut motion.1,
+                &mut motion.0,
+                &mut staged_modes,
             ),
             SessionEvent::KnockBack {
                 guid,

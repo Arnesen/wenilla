@@ -297,13 +297,43 @@ ErrorsFrame.xml
 # (Cooldown.xml), `UIPanelCloseButton` (UIPanelTemplates.xml) — plus `parent="UIParent"`. It
 # cannot load "first" the way a Lua-only sourcing had to.
 Interface\FrameXML\ContainerFrame.xml
-# The bag BAR: MainMenuBarBackpackButton / CharacterBag0..3Slot / KeyRingButton and the item-push
-# card — this client's stand-in for the reference's own MainMenuBarBagButtons.xml, which cannot be
-# sourced until `PutItemInBag`/`PickupBagFromSlot` are bound (the file says so at the site). After
-# ContainerFrame.xml for legibility, not necessity: every verb it calls resolves at click time. It
-# also owns `KEYRING_CONTAINER`, which is where the reference puts it and which the file above
-# reads — again a global resolved at call time, so the order does not bind.
-BagFrame.xml
+# The reference's item-SLOT button base, `PaperDollItemSlotButtonTemplate` — published for addons
+# (pfUI builds its bag bar from what inherits it) and, since window 3, a LOAD-TIME dependency of the
+# entry directly below: stock `MainMenuBarBagButtons.xml` inherits it on all five bag buttons, and
+# an `inherits=` is resolved at load. That requirement is what moved this file up from below
+# CharacterFrame.xml, where it sat only because the chain crossed the old BagFrame -> CharacterFrame
+# the wrong way. It needs ItemButtonTemplate.xml above it for the base and Cooldown.xml for the
+# $parentCooldown the doll template carries — both far above.
+#
+# `BagSlotButtonTemplate` used to be declared here too, transcribed from MainMenuBarBagButtons.xml
+# because that file could not be sourced. It is sourced now, one entry down, so the reference's own
+# declaration is the live one and the copy is deleted — the whole point of the migration.
+ItemSlotButtonTemplates.xml
+# ══ THE BAG BAR — the reference's own, off the player's chain (decision 1751, window 3) ══
+# `MainMenuBarBackpackButton`, `CharacterBag0Slot`..`CharacterBag3Slot`, `KeyRingButton`,
+# `BagSlotButtonTemplate` and the `BagSlotButton_*`/`BackpackButton_*`/`Disable_BagButtons` family
+# — the real 1.12 file, with `MainMenuBarBagButtons.lua` arriving through its own `<Script file=>`.
+# It also owns `KEYRING_CONTAINER = -2`, which is where the reference puts it (l.1).
+#
+# Our `BagFrame.xml` stood here and is deleted. Its own header named the condition it was waiting
+# on — "replaced by the reference's own file the day `PutItemInBag` / `PickupBagFromSlot` are
+# bound" — and both are bindings now (`script/cursor/bag_verbs.rs`), so the ref's own click arms
+# work: its `PutItemInBag(id)` is the equip/swap our `BenillaBagBarSlot_Place` open-coded.
+#
+# THE POSITION IS THE REQUIREMENT: `inherits="PaperDollItemSlotButtonTemplate"` on the four bag
+# slots and `inherits="ItemButtonTemplate"` on the backpack are resolved at LOAD, and so is
+# `parent="MainMenuBarArtFrame"` — so this sits below ItemSlotButtonTemplates.xml (above) and
+# ActionBar.xml (which declares the art frame). Being BELOW the sourced ContainerFrame.xml is
+# legibility, not necessity, in either direction: every verb each file calls of the other resolves
+# at call time, `KEYRING_CONTAINER` included (no top-level read of it exists in ContainerFrame.lua).
+#
+# TWO THINGS THE SWAP DID NOT INHERIT, and both live in ContainerFrameAdapters.xml below rather
+# than being edited into anything of Blizzard's: the item-push card (0887 — the reference's is a
+# `<Model>` playing an .mdx and this engine renders no FrameXML models, so ours samples that
+# model's own tracks and draws a quad), and the GlobalStrings fallbacks the install-less harnesses
+# need. The keyring's SHOW trigger moved the other way — into ActionBar.xml, our MainMenuBar.xml,
+# which is exactly where the reference keeps it (MainMenuBar.xml l.323-341).
+Interface\FrameXML\MainMenuBarBagButtons.xml
 # The stack-split spinner (decision 0216 §6/slice 2): loaded beside the bag windows, whose slot
 # click handler (the reference's `ContainerFrameItemButton_OnClick`) calls `OpenStackSplitFrame`.
 # Order between the two doesn't matter for correctness (Lua globals resolve at call time, and
@@ -318,12 +348,6 @@ ContainerFrameAdapters.xml
 # windows (Gossip/Merchant/Quest*) — it depends only on Fonts/UiPanels/GameTooltip, all
 # already loaded above.
 CharacterFrame.xml
-# The reference's item-SLOT button templates (PaperDollItemSlotButtonTemplate <-
-# BagSlotButtonTemplate), published for addons rather than used by our own windows. Here
-# rather than beside their subjects because the chain crosses BagFrame.xml (241) ->
-# CharacterFrame.xml (256) the wrong way; needs ItemButtonTemplate.xml (45) above it for the
-# base and Cooldown.xml (124) for the $parentCooldown the doll template carries.
-ItemSlotButtonTemplates.xml
 # The Pet tab (decision 1057): the same separate-top-level-file shape as SkillFrame below,
 # and ahead of it because it is the earlier tab. It leans on CharacterFrame.xml for real —
 # the `(unit, prefix)` stat setters, the `BenillaStatRow`/`BenillaMagicResistanceFrame`

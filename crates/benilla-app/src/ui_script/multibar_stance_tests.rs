@@ -5,7 +5,7 @@
 //! Since decision 1500 all four bars are player options that ship OFF, so most of what is here
 //! raises the bar it is about first — through the same two globals the Options rows write.
 
-use benilla_ui::script::{ActionSlot, QuadContent, SpellTooltipView, UiScript};
+use benilla_ui::script::{ActionSlot, QuadContent, ScriptValue, SpellTooltipView, UiScript};
 
 /// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error.
 fn load_xml(s: &UiScript, file: &str) {
@@ -799,6 +799,131 @@ fn the_grid_option_holds_the_extra_bars_empty_wells_open() {
     assert!(well(&s), "a no-op apply may not decrement");
     s.fire_event("ACTIONBAR_HIDEGRID", vec![]);
     assert!(!well(&s));
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **A held payload GHOSTS the wells it opens — the reference's `SetVertexColor(1, 1, 1, 0.5)` on
+/// a shown grid ring (`ActionButton.lua:247`), which ours skipped from 0216 to 1781.**
+///
+/// `UI-Quickslot` is not a second ring. Measured off the shipped BLPs: `UI-Quickslot2`'s interior
+/// is fully transparent (alpha 0) — a hollow border — while `UI-Quickslot`'s is solid black at
+/// alpha 0.6 across its whole middle. So the grid swap does not *outline* an empty well, it
+/// *fills* it, and at full alpha picking up a spell dropped a 60%-black square into every empty
+/// slot on every raised bar at once. That is the director's report. Half alpha takes the well to
+/// 30% black, where it reads as a drop target instead of a hole.
+///
+/// The occupied rings stay opaque, and letting go of the payload restores the wells — both
+/// DIVERGENCES, chosen in 1782. In stock 1.12.1 the dim is fanned to every button and then never
+/// cleared by anything: `SetNormalTexture(path)` reuses the region and writes only its texture
+/// handle, and a 3-argument `SetVertexColor` is `SetVertexColor(r, g, b, currentAlpha)` — so the
+/// first spell anyone picks up leaves every border at alpha 0x80 for the session (wow-re
+/// `button-state-texture-path-setter.md` §2/§7, byte-verified). That is a stuck state keyed to
+/// nothing the player can see. We take the look the dim was written for and let go of it with the
+/// payload, which is what the last two assertions here pin.
+#[test]
+fn a_held_payload_ghosts_the_empty_wells_it_opens() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    load_xml(&s, "MultiBars.xml");
+    s.set_action(
+        1,
+        Some(ActionSlot {
+            texture: Some("Interface\\Icons\\Ability_SteelMelee".into()),
+            kind: 0x00,
+            action: 100,
+            count: 0,
+            consumable: false,
+        }),
+    );
+    // The raise comes AFTER the seed: `UIParent.xml`'s PLAYER_ENTERING_WORLD arm reads the
+    // server's bar-toggle byte once and would put an early raise straight back down.
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    show_bars(&s, &[1]);
+    s.resolve();
+
+    /// The drawn alpha of every ring quad wearing `path` — `None` colour is untinted white.
+    fn ring_alphas(s: &UiScript, path: &str) -> Vec<f32> {
+        s.extract()
+            .iter()
+            .filter_map(|q| match &q.content {
+                QuadContent::Texture {
+                    path: Some(p),
+                    color,
+                    ..
+                } if p == path => Some(color.map_or(1.0, |c| c[3])),
+                _ => None,
+            })
+            .collect()
+    }
+    let quickslot = "Interface\\Buttons\\UI-Quickslot";
+    let quickslot2 = "Interface\\Buttons\\UI-Quickslot2";
+
+    // Nothing in hand: the main bar's 12 always-visible wells wear the hollow ring, all opaque.
+    assert_eq!(ring_alphas(&s, quickslot), Vec::<f32>::new());
+    let resting = ring_alphas(&s, quickslot2);
+    assert_eq!(
+        resting.len(),
+        12,
+        "the 12 main wells; the multibar's are hidden"
+    );
+    assert!(
+        resting.iter().all(|a| *a == 1.0),
+        "a resting ring is opaque: {resting:?}"
+    );
+
+    // Payload up. Every well the grid opened is the FILLED plate at HALF alpha.
+    s.fire_event("ACTIONBAR_SHOWGRID", vec![]);
+    s.resolve();
+    let ghosts = ring_alphas(&s, quickslot);
+    assert_eq!(
+        ghosts.len(),
+        23,
+        "11 empty main wells swap art + MultiBarBottomLeft's 12 appear"
+    );
+    assert!(
+        ghosts.iter().all(|a| *a == 0.5),
+        "every grid ring is the ref's half-alpha ghost, not an opaque plate: {ghosts:?}"
+    );
+
+    // …and the one OCCUPIED button is untouched by it.
+    let occupied = ring_alphas(&s, quickslot2);
+    assert_eq!(occupied, vec![1.0], "the occupied ring does not ghost");
+
+    // A well that was ghosted and is then FILLED comes back opaque. This is the assertion that
+    // outlives the engine's own `SetVertexColor` divergence (1782): the day an absent alpha stops
+    // meaning 1.0 and starts meaning "whatever is already there", a `SetRing` that let the fourth
+    // argument default would carry the 0.5 straight into the occupied ring, and only this catches
+    // it — the HIDEGRID check below would not, because that path re-derives an EMPTY well.
+    s.set_action(
+        2,
+        Some(ActionSlot {
+            texture: Some("Interface\\Icons\\Ability_Rogue_Ambush".into()),
+            kind: 0x00,
+            action: 101,
+            count: 0,
+            consumable: false,
+        }),
+    );
+    s.fire_event("ACTIONBAR_SLOT_CHANGED", vec![ScriptValue::Number(2.0)]);
+    s.resolve();
+    assert_eq!(
+        ring_alphas(&s, quickslot2),
+        vec![1.0, 1.0],
+        "a ghosted well that gets an action is opaque again, payload still held"
+    );
+
+    // Letting go restores both halves — art and tint, which is why they share one setter.
+    s.fire_event("ACTIONBAR_HIDEGRID", vec![]);
+    s.resolve();
+    assert_eq!(ring_alphas(&s, quickslot), Vec::<f32>::new());
+    let after = ring_alphas(&s, quickslot2);
+    assert_eq!(after.len(), 12);
+    // (10 empty main wells back to the hollow ring + the 2 occupied ones.)
+    assert!(
+        after.iter().all(|a| *a == 1.0),
+        "the dim does not outlive the payload (the ref's own stuck-dim bug): {after:?}"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 

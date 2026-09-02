@@ -1150,11 +1150,20 @@ pub(super) fn scaled_rate(clip: &AnimClip, speed: f32, model_scale: f32) -> Opti
 /// the flag into the spline/stationary views, so a pathing water creature plays Swim 42 and an idle
 /// one treads water (SwimIdle 41) instead of running/standing on the lakebed. Ignored for the
 /// self/remote legs — their flag arrives properly.
+///
+/// `modes` is the unit's **server-granted** movement modes ([`crate::net::UnitMoveModes`], decision
+/// 1780) — the `SMSG_SPLINE_MOVE_*` family. They are OR'd into the flags word on the remote and
+/// creature legs, because in the reference they are bits of the *same* `CMovement+0x40` word the
+/// selector already tests; a creature the server has put in walk mode or rooted has those bits set
+/// exactly like a player who arrived carrying them in a pose. The self leg deliberately skips them:
+/// our own mover's modes are the ack'd family's, held on [`crate::player::state::MoveModes`] and
+/// already folded into the controller's own `MovementState`.
 pub(super) fn unify(
     movement: Option<&MovementState>,
     remote: Option<&RemoteMotion>,
     spline: Option<&Spline>,
     creature_swimming: bool,
+    modes: Option<&crate::net::UnitMoveModes>,
 ) -> MovementState {
     // The flying-spline fact is read through to the live `Spline` on EVERY leg — the client's
     // selector reads the active CMovement's spline flags at select time (RF-0057 `0x5fd19c`),
@@ -1163,10 +1172,11 @@ pub(super) fn unify(
     if let Some(m) = movement {
         return MovementState { flying, ..*m };
     }
+    let granted = modes.map_or(0, |m| m.0);
     if let Some(r) = remote {
         return MovementState {
             speed: r.speed,
-            flags: r.flags,
+            flags: r.flags | granted,
             vertical_speed: r.vertical_velocity,
             flying,
             ..default()
@@ -1180,7 +1190,7 @@ pub(super) fn unify(
     let s = spline.map(|s| s.speed()).filter(|s| *s > MOVING_EPSILON);
     MovementState {
         speed: s.unwrap_or(0.0),
-        flags: swim | if s.is_some() { move_flags::FORWARD } else { 0 },
+        flags: granted | swim | if s.is_some() { move_flags::FORWARD } else { 0 },
         flying,
         ..default()
     }

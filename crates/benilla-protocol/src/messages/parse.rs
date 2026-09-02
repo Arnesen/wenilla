@@ -16,6 +16,7 @@ use super::{
     mirror_timer, monster_move, movement, opcode, page_text, pet, petition, progression, pvp,
     quest, social, spellbook, spells, stable, summon, taxi, trade, trainer, update_object, vendor,
     world_state, Character, CreatureQueryInfo, JumpInfo, MoveMode, ServerPacket, SpeedKind,
+    SplineMode,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -887,6 +888,45 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             ServerPacket::MoveMode {
                 guid,
                 counter,
+                mode,
+                apply,
+            }
+        }
+        // **The observer movement-mode family** (decision 1780) — the spline-move twelve. Body is a
+        // BARE packed guid: no counter, no `MovementInfo`, and nothing to ack (VERIFIED vmangos
+        // `MovementPacketSender::SendMovementFlagChangeToAll`/`SendToggleRunWalkToAll`, and the
+        // reference's single handler `0x603c80`, which reads one packed guid and dispatches).
+        // `guid` is any unit, not our mover — the constants block in `opcode` carries the arm map.
+        opcode::SMSG_SPLINE_MOVE_ROOT
+        | opcode::SMSG_SPLINE_MOVE_UNROOT
+        | opcode::SMSG_SPLINE_MOVE_WATER_WALK
+        | opcode::SMSG_SPLINE_MOVE_LAND_WALK
+        | opcode::SMSG_SPLINE_MOVE_FEATHER_FALL
+        | opcode::SMSG_SPLINE_MOVE_NORMAL_FALL
+        | opcode::SMSG_SPLINE_MOVE_SET_HOVER
+        | opcode::SMSG_SPLINE_MOVE_UNSET_HOVER
+        | opcode::SMSG_SPLINE_MOVE_START_SWIM
+        | opcode::SMSG_SPLINE_MOVE_STOP_SWIM
+        | opcode::SMSG_SPLINE_MOVE_SET_RUN_MODE
+        | opcode::SMSG_SPLINE_MOVE_SET_WALK_MODE => {
+            let (mode, apply) = match opcode {
+                opcode::SMSG_SPLINE_MOVE_ROOT => (SplineMode::Root, true),
+                opcode::SMSG_SPLINE_MOVE_UNROOT => (SplineMode::Root, false),
+                opcode::SMSG_SPLINE_MOVE_WATER_WALK => (SplineMode::WaterWalk, true),
+                opcode::SMSG_SPLINE_MOVE_LAND_WALK => (SplineMode::WaterWalk, false),
+                opcode::SMSG_SPLINE_MOVE_FEATHER_FALL => (SplineMode::FeatherFall, true),
+                opcode::SMSG_SPLINE_MOVE_NORMAL_FALL => (SplineMode::FeatherFall, false),
+                opcode::SMSG_SPLINE_MOVE_SET_HOVER => (SplineMode::Hover, true),
+                opcode::SMSG_SPLINE_MOVE_UNSET_HOVER => (SplineMode::Hover, false),
+                opcode::SMSG_SPLINE_MOVE_START_SWIM => (SplineMode::Swimming, true),
+                opcode::SMSG_SPLINE_MOVE_STOP_SWIM => (SplineMode::Swimming, false),
+                // The one inverted pair: RUN_MODE *clears* `MOVEFLAG_WALK_MODE`, because the
+                // reference's `0x617e80` feeds the opcode's bool to `SetRunMode 0x7c71c0`.
+                opcode::SMSG_SPLINE_MOVE_SET_WALK_MODE => (SplineMode::WalkMode, true),
+                _ => (SplineMode::WalkMode, false),
+            };
+            ServerPacket::SplineMoveMode {
+                guid: read_packed_guid(&mut r)?,
                 mode,
                 apply,
             }

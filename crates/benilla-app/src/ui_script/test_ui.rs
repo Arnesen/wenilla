@@ -65,7 +65,25 @@ fn read(req: &str) -> Option<Vec<u8>> {
 /// own files around it (a merchant, the bank, the action bar art), and the ORDER is the thing
 /// being reused — it is `benilla.toc`'s, trimmed to what the bags actually reach for.
 pub(super) const BAG_UI: &[&str] = &[
+    // The reference's own localized strings — `BACKPACK_TOOLTIP`, `EQUIP_CONTAINER`, `KEYRING`,
+    // the `*_FONT_COLOR_CODE` pair. The app loads this at VM setup, ahead of the manifest
+    // (`ui_script/mod.rs`, `setup_script`); a test VM has to say so itself. Not optional since
+    // 1751's third window: stock `MainMenuBarBagButtons.lua`'s hovers pass these straight into
+    // `GameTooltip:SetText`, and `SetText(nil)` raises rather than showing an empty plate. Our
+    // deleted `BagFrame.xml` carried `X = X or "…"` fallbacks for exactly this gap; the real file
+    // is the better answer, and these tests already gate on the install.
+    "Interface\\FrameXML\\GlobalStrings.lua",
     "Fonts.xml",
+    // The reference's own `PaperDollItemSlotButton_*` family, sourced at manifest entry 2. Not
+    // optional since 1751's third window: stock `BagSlotButtonTemplate`'s OnLoad *is*
+    // `PaperDollItemSlotButton_OnLoad()`, which is what gives each bag button its inventory-slot
+    // id (20..23 via `GetInventorySlotInfo`), its six event registrations and its first paint.
+    "Interface\\FrameXML\\PaperDollFrame.lua",
+    // `TEXT()` — the reference's own identity-function wrapper, which stock
+    // `MainMenuBarBackpackButton`'s OnEnter calls (`GameTooltip:SetText(TEXT(BACKPACK_TOOLTIP)…)`)
+    // and `BagSlotButton_OnEnter` calls for `EQUIP_CONTAINER`. Manifest entry 3, and not optional
+    // for the bag bar since 1751's third window made that bar the reference's own.
+    "BasicControls.xml",
     // `UIParent` itself: the twelve `ContainerFrame`s declare `parent="UIParent"`, and
     // `updateContainerFrameAnchors` anchors each open bag to `frame:GetParent()` while
     // `OpenAllBags` opens with `if not UIParent:IsVisible() then return end`. Without it the
@@ -76,16 +94,21 @@ pub(super) const BAG_UI: &[&str] = &[
     "UiPanels.xml",
     "GameTooltip.xml",
     "Cooldown.xml",
-    // The bag BAR hangs off `MainMenuBarArtFrame` and seats itself one frame level above the bar
-    // art (`BenillaActionBarArt_SeatAbove`), both at LOAD — so without this the five buttons fall
-    // back to UIParent and sit at a level no production run ever puts them at.
+    // The bag BAR declares `parent="MainMenuBarArtFrame"`, resolved at LOAD — so without this the
+    // six buttons fall back to UIParent and sit at a level no production run ever puts them at.
+    // It also carries `MainMenuBar_UpdateKeyRing`, which is what puts the keyring on the bar.
     "ActionBar.xml",
     // `UpdateMicroButtons` — the KEYRING's own OnShow/OnHide calls it (ContainerFrame.lua l.117,
     // l.137), because in the reference the keyring's existence moves the micro-button row.
     "MicroMenu.xml",
     "UIPanelTemplates.xml",
     "Interface\\FrameXML\\ContainerFrame.xml",
-    "BagFrame.xml",
+    // `PaperDollItemSlotButtonTemplate`, which every bag button inherits — resolved at load, so it
+    // has to precede the bar exactly as it does in the manifest.
+    "ItemSlotButtonTemplates.xml",
+    // The bag BAR itself, the reference's own since 1751's third window: MainMenuBarBackpackButton,
+    // CharacterBag0..3Slot, KeyRingButton, `BagSlotButtonTemplate`, and `KEYRING_CONTAINER`.
+    "Interface\\FrameXML\\MainMenuBarBagButtons.xml",
     // `StackSplitFrame` is not optional either: the reference's own
     // `ContainerFrameItemButton_OnClick` calls `StackSplitFrame:Hide()` on EVERY plain click
     // (ContainerFrame.lua l.581) before the pickup, and opens it on the shift fork.
@@ -94,9 +117,10 @@ pub(super) const BAG_UI: &[&str] = &[
     // `if ( ChatFrameEditBox:IsShown() )` (ContainerFrame.lua l.569) to decide between posting the
     // item's link and splitting the stack, so a VM without it raises before either.
     "ChatFrame.xml",
-    // Our adapters over the reference's container files — one wrapper for the keyring tooltip, and
-    // the three bag verbs 0561 shadows (`OpenBackpack`/`CloseBackpack`/`CloseAllBags`). It has to
-    // be AFTER `ContainerFrame.xml` for either job, which is why it is here and not up with
+    // Our adapters over the reference's container files — the keyring tooltip wrapper, the three
+    // bag verbs 0561 shadows (`OpenBackpack`/`CloseBackpack`/`CloseAllBags`), and the item-push
+    // card the reference draws with a `<Model>` this engine does not render (0887). It has to be
+    // AFTER `ContainerFrame.xml` and after the bar, which is why it is here and not up with
     // UiPanels.xml.
     "ContainerFrameAdapters.xml",
     // `updateContainerFrameAnchors` measures every open bag against `BankFrame:GetRight()`

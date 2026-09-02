@@ -271,7 +271,7 @@ fn jump_seed_derives_velocity_and_clamps() {
         sin_angle: 0.0,
         xy_speed: 7.0,
     };
-    let (vz, xy) = jump_seed(Some(j), 0);
+    let (vz, xy) = jump_seed(Some(j), 0, false);
     assert!(
         (vz - 7.955_547).abs() < 1e-3,
         "take-off up-speed = -zspeed (positive, rising): {vz}"
@@ -281,19 +281,19 @@ fn jump_seed_derives_velocity_and_clamps() {
         "horizontal +X: {xy:?}"
     );
     // Mid-fall (1s in): up-speed = -zspeed − g·t (now negative, descending).
-    let (vz1, _) = jump_seed(Some(j), 1000);
+    let (vz1, _) = jump_seed(Some(j), 1000, false);
     assert!(
         (vz1 - (7.955_547 - GRAVITY)).abs() < 1e-3,
         "vertical decays by gravity: {vz1}"
     );
     // A long fall is clamped to terminal velocity.
-    let (vzt, _) = jump_seed(Some(j), 10_000);
+    let (vzt, _) = jump_seed(Some(j), 10_000, false);
     assert!(
         (vzt + TERMINAL_VELOCITY).abs() < 1e-3,
         "clamped to −terminal: {vzt}"
     );
     // A non-jumping packet → grounded: no vertical, no horizontal freeze.
-    assert_eq!(jump_seed(None, 0), (0.0, [0.0, 0.0]));
+    assert_eq!(jump_seed(None, 0, false), (0.0, [0.0, 0.0]));
 }
 
 #[test]
@@ -971,6 +971,9 @@ fn a_flag_still_remote_is_left_where_the_wire_put_it() {
     ));
     app.init_asset::<Mesh>()
         .init_resource::<benilla_world::collision::ColliderEpoch>();
+    // The liquid/room facade the dead-reckon asks for a water-walker's surface (decision 1780),
+    // seeded empty — no mover here has the mode, and an empty world answers "no liquid".
+    benilla_world::world_point::init_world_point_resources(app.world_mut());
     app.finish();
     app.cleanup();
     app.insert_resource(crate::player::PlayerCapsule(Collider::capsule(

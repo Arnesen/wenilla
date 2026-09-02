@@ -455,11 +455,11 @@ fn the_item_push_card_shares_the_band_with_a_raised_bar_exactly_as_the_reference
     s.tick(0.133); // the opaque peak — the instant the card is most visible
     s.resolve();
     assert!(
-        shown(&s, "MainMenuBarBackpackButtonItemAnim"),
+        shown(&s, "MainMenuBarBackpackButtonBenillaItemPush"),
         "the card plays"
     );
 
-    let card = rect(&s, "MainMenuBarBackpackButtonItemAnim");
+    let card = rect(&s, "MainMenuBarBackpackButtonBenillaItemPush");
     let bar = rect(&s, "MultiBarBottomRight");
     assert!(
         (card.1 - 48.9).abs() < 0.5 && (card.3 - 93.1).abs() < 0.5,

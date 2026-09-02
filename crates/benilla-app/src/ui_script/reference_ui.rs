@@ -200,6 +200,137 @@ mod tests {
         assert!(s.errors().is_empty(), "{:#?}", s.errors());
     }
 
+    /// **The migration readiness probe** — which stock FrameXML file could be swapped in *today*,
+    /// asked of the running loader rather than guessed from a source scan.
+    ///
+    /// ```text
+    /// cargo test -p benilla-app --lib chain_readiness_report -- --ignored --nocapture
+    /// ```
+    ///
+    /// 1751 is a long migration — 88 manifest entries, three of them chain entries at the time this
+    /// was written — and the expensive question at every step is *which window is ready*. Picking by
+    /// eye means reading a stock file, listing the globals it calls, and grepping each one; that is
+    /// slow, and it is wrong in both directions. It over-reports (a name that exists in a comment
+    /// greps as present — `framexml-file-demand.py` states that crudeness about itself) and it
+    /// under-reports the things a grep cannot see at all: an XML element type the loader does not
+    /// build, a script handler nothing dispatches, an attribute silently dropped (1739 measured 151
+    /// of those), a template inherited before its definer.
+    ///
+    /// So the probe does not analyse. It **loads the file** — the whole shipped manifest first, into
+    /// a fresh VM, exactly as a real run does, and then the candidate off the chain on top — and
+    /// reports what the loader and the VM actually said. That is ground truth: the same machinery
+    /// that would run it for real, answering the same question, with no model of the engine in
+    /// between that could be out of date.
+    ///
+    /// **What a clean line does and does not mean.** It means the file *loads* — every element
+    /// built, every template resolved, every load-time body ran without raising. It does not mean
+    /// the window *works*: a verb that only a click reaches is not exercised by loading, and neither
+    /// is anything behind an event. Clean is "start here", not "done"; the window's own test module
+    /// and the director's eye are what finish it (§7).
+    ///
+    /// **Loading on top of the manifest, not instead of it**, because that is the position a
+    /// migrated file occupies — every template it inherits is declared by an earlier entry, and
+    /// asking whether `ContainerFrame.xml` loads *alone* only measures that it has predecessors.
+    /// Names it collides with are simply overwritten in the probe VM, which is thrown away; the
+    /// probe is asking about load failures, not about who wins a collision (the manifest's order is
+    /// what settles those, and it is settled per-window when the swap is made).
+    ///
+    /// Ignored because it stands up ~90 fresh VMs and each one loads the entire interface; it is an
+    /// instrument you run when choosing the next window, not a gate.
+    #[test]
+    #[ignore = "instrument: run by hand when choosing the next window to migrate"]
+    fn chain_readiness_report() {
+        let _data = benilla_formats::wow_data_or_skip!();
+
+        // The reference's OWN order, off the chain — never a hand-kept list here. A file's position
+        // in it is also the answer to "where does its manifest line go", so the report prints it.
+        let toc = String::from_utf8_lossy(
+            &super::read("Interface\\FrameXML\\FrameXML.toc").expect("the reference's own toc"),
+        )
+        .into_owned();
+        let stock: Vec<String> = toc
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with('#') && l.ends_with(".xml"))
+            .map(str::to_string)
+            .collect();
+
+        let migrated: Vec<String> = super::super::addons::Addon::builtin()
+            .toc
+            .files
+            .iter()
+            .filter(|f| super::is_chain_entry(f))
+            .map(|f| {
+                f.rsplit(['\\', '/'])
+                    .next()
+                    .unwrap_or(f.as_str())
+                    .to_string()
+            })
+            .collect();
+
+        println!(
+            "\n=== 1751 migration readiness — {} stock windows ===",
+            stock.len()
+        );
+        println!(
+            "{:>3}  {:<32} what stops it (empty = loads clean)",
+            "pos", "file"
+        );
+
+        let mut clean = Vec::new();
+        for (i, name) in stock.iter().enumerate() {
+            let pos = i + 1;
+            if migrated.iter().any(|m| m == name) {
+                println!("{pos:>3}  {name:<32} — already migrated");
+                continue;
+            }
+            let mut s = UiScript::new().expect("VM");
+            s.set_screen_size(1024.0, 768.0);
+            let base = super::super::manifest::load_default_ui(&s);
+            assert!(base.is_empty(), "the shipped manifest itself: {base:#?}");
+            s.resolve();
+            let before = s.errors().len();
+
+            let path = format!("Interface\\FrameXML\\{name}");
+            let addon = super::addon(vec![path.clone()]);
+            let mut said = addon.load_files(&s, std::slice::from_ref(&path));
+            s.resolve();
+            said.extend(s.errors().into_iter().skip(before));
+
+            if said.is_empty() {
+                clean.push((pos, name.clone()));
+                println!("{pos:>3}  {name:<32} CLEAN");
+            } else {
+                // One line per distinct complaint, deduped and truncated: the same missing verb
+                // reported by twelve frames is one fact, and the tail of a Lua traceback is noise.
+                let mut seen: Vec<String> = Vec::new();
+                for e in said {
+                    let one = e.lines().next().unwrap_or("").trim().to_string();
+                    let one = if one.len() > 140 {
+                        format!("{}…", &one[..140])
+                    } else {
+                        one
+                    };
+                    if !one.is_empty() && !seen.contains(&one) {
+                        seen.push(one);
+                    }
+                }
+                println!("{pos:>3}  {name:<32} {} issue(s)", seen.len());
+                for one in seen.iter().take(6) {
+                    println!("         · {one}");
+                }
+                if seen.len() > 6 {
+                    println!("         · … and {} more", seen.len() - 6);
+                }
+            }
+        }
+
+        println!("\n=== loads clean today: {} ===", clean.len());
+        for (pos, name) in &clean {
+            println!("  {pos:>3}  {name}");
+        }
+    }
+
     /// A path is a chain entry; a bare name is ours. The one-line rule the manifest rests on.
     #[test]
     fn a_separator_is_what_makes_an_entry_the_players_own_file() {

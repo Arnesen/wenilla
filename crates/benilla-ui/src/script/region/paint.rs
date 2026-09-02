@@ -38,6 +38,22 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
+    // **KNOWN DIVERGENCE, byte-pinned and deliberately not closed here (decision 1782).** An
+    // ABSENT alpha argument is 1.0 below; in the reference it is *the alpha already on the region*.
+    // `0x79abd0` reads the current colour back (`0x79ac81` -> `0x77f8c0`), packs the caller's rgb
+    // against an `a` default of 1.0 (`0x79ad43`), and then asks a SECOND time whether argument 5
+    // was present — when it was not, it copies byte 3 of the read-back colour over the packed
+    // alpha (`0x79adfe`/`0x79ae0a`) before the store. So `SetVertexColor(r, g, b)` on 1.12.1 is
+    // `SetVertexColor(r, g, b, currentAlpha)`, and a three-argument call CANNOT restore opacity.
+    // wow-re `system/ui/scratch/button-state-texture-path-setter.md` §7.
+    //
+    // Why it still says 1.0: the fix is one line, but its blast radius is every three-argument
+    // call in FrameXML and in the addon corpus, and it only bites where a region already carries
+    // alpha < 1 — where it would surface as art going permanently translucent, which is a LOOK and
+    // therefore the director's call, not a quiet correction to fold into an unrelated slice. The
+    // known live case is the action bar's grid ring, and `ActionBar.xml`'s
+    // BenillaActionButton_SetRing is already written to be correct under BOTH readings (it passes
+    // the fourth argument explicitly), so closing this cannot silently change that file.
     m.set(
         "SetVertexColor",
         lua.create_function(

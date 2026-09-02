@@ -21,7 +21,7 @@
       Bongos_ActionBar, the CT_BarMod family) hook that global and call through; they now reach the
       real thing.
 
-    ── The one adapter, and why it is not a stub ────────────────────────────────────────────────
+    ── The adapters, and why neither is a stub ──────────────────────────────────────────────────
     `ContainerFrameItemButton_OnEnter` opens with a keyring fork (ref l.615-620):
 
         if this:GetParent():GetID() == KEYRING_CONTAINER then
@@ -118,5 +118,277 @@
         OpenBackpack = BenillaOpenBackpack
         CloseBackpack = BenillaCloseBackpack
         CloseAllBags = BenillaCloseAllBags
+
+        -- ══ THE ITEM-PUSH DROP CARD, over the reference's own bag bar (decision 0887) ═════════
+        --
+        -- The bar is `Interface\FrameXML\MainMenuBarBagButtons.xml` now (1751 window 3), and its
+        -- `ItemAnimTemplate` is a `<Model>` playing `Interface\ItemAnimations\ForcedBackpackItem.mdx`.
+        -- **This engine's `<Model>` holds the scene the Lua API reads and writes but draws no
+        -- pixels** (`script/modelframe.rs` — the pane is the app renderer's job and no renderer
+        -- claims a FrameXML model), so those six frames load, register, and animate nothing.
+        --
+        -- That is a genuine engine difference, which is the one thing 1751 §2 keeps an adapter
+        -- for. So the reference's file is sourced unedited — its Models exist and are harmless —
+        -- and the card the player actually sees is built HERE, as a sibling Frame + Texture on the
+        -- same six buttons, driven by the model's OWN keyframes read out of the shipped .m2. The
+        -- bodies below moved verbatim from the deleted `BagFrame.xml`; every number in them is
+        -- byte-derived and the comments carry their provenance.
+        --
+        -- ONE THING CHANGED IN THE MOVE, and it is the reason the swap needed thought at all.
+        -- `ItemAnim_OnEvent` matches on `this:GetParent():GetID()`, which for a bag button is its
+        -- INVENTORY-slot id (20..23, via `GetInventorySlotInfo`). benilla used to translate
+        -- `ITEM_PUSH`'s `arg1` into its own container vocabulary (1..4) because the old bar was
+        -- keyed that way, and against the reference's body that comparison is false for every bag
+        -- — four cards that would simply never have played, with nothing raising. The fix was not
+        -- to adapt the reference: `ui_loot.rs`'s `push_container` stopped translating and now emits
+        -- `0x491bb5`'s selector verbatim, which is what addons expect too. So the id a card matches
+        -- on is `button:GetID()`, exactly as the reference's own body reads it.
+        -- ── The item-push drop animation (decision 0887) ─────────────────────────────────────────
+        -- An item lands in a bag: its icon pops in above the bag bar, hangs there, then falls into
+        -- the button that took it and shrinks away. ref ItemAnim (MainMenuBarBagButtons.xml l.4-16 +
+        -- .lua l.68-80, .lua l.92-94): each bag button owns a hidden child that, on ITEM_PUSH
+        -- naming its own container, swaps in the pushed item's icon, rewinds to sequence time 0 and
+        -- shows itself; OnAnimFinished hides it again. A second push on the same button RESTARTS it
+        -- (SetSequenceTime(0,0)); pushes into different bags run independently. That is exactly the
+        -- machine below, with the reference's ITEM_PUSH `arg1` translated from its inventory-slot
+        -- vocabulary (20..23) into ours (bagId 1..4) app-side — ui_loot.rs `push_container` carries
+        -- the byte-verified selector.
+        --
+        -- The reference's is a <Model> playing Interface\ItemAnimations\ForcedBackpackItem.mdx — a
+        -- single 4-vertex quad on one animated bone, i.e. a 2D icon card with keyframed scale, alpha
+        -- and offset. benilla has no Model widget (decision 0137's Cooldown took the same posture:
+        -- model the mechanism, let our own renderer draw it), so it is a Texture driven by the
+        -- model's OWN tracks, read out of the shipped .m2 with `benilla-extract m2anim`/`m2bones`:
+        --
+        --   sequence 0, CLAMP (plays once), duration 1.000 s
+        --   texture-weight (alpha)  0.000→0.0  0.133→1.0  0.267→1.0  1.000→0.0     linear
+        --   bone 0 scale            0.000→1.0  0.133→1.2  0.267→1.0  1.000→0.014   linear
+        --   bone 0 translation      0.000→(0,0)  0.500→(0,0)  1.000→(+0.010,-0.040)
+        --   the quad itself: 0.03 x 0.03 model units, blend Alpha, unlit, no depth write
+        --
+        -- So: fade in over the first 133 ms while swelling to 1.2x; settle back to full size by
+        -- 267 ms; from there dwindle and fade continuously for the remaining 733 ms — while the
+        -- POSITION holds until the half-second and only then falls. The three tracks deliberately
+        -- do not share a schedule: the card is already down to ~0.69 size and ~0.68 alpha when it
+        -- starts moving, so the drop reads as the icon being drawn into the bag rather than as a
+        -- solid tile sliding. Those numbers are the file's, not ours.
+        --
+        -- THE MODEL-UNIT → PIXEL SCALE is no longer ours to calibrate: the <Model> widget's
+        -- projection is RE-recorded now (wow-re `system/ui/scratch/modelframe-animation-clock.md`,
+        -- dispatched over the pet bar's B228 and folded back with it). The ortho leg gives
+        --
+        --     px per model unit = (5/3) * modelScale * layoutScale * screenHeightPx
+        --
+        -- which in FrameXML units is **1280 * modelScale * layoutScale**, aspect- and
+        -- resolution-independent, with the model ORIGIN at the frame rect's bottom-left. The ref's
+        -- `ItemAnimTemplate` (MainMenuBarBagButtons.xml:4) carries **no `scale` attribute**, so
+        -- modelScale is 1 and the constant is a flat 1280. Decision 0887's named gap is closed.
+        --
+        -- This REPLACES a back-fit, and the back-fit is worth naming because it looked like
+        -- evidence. The old 1200 came from assuming CooldownFrameTemplate's 0.04-unit sweep
+        -- *exactly* covers a 36 px action button at its scale="0.75" (⇒ K = 1200). The assumption
+        -- is the error: at the real projection that sweep is 0.04 · 1280 · 0.75 = **38.4 px**, so
+        -- it overhangs its button by 6.7% rather than fitting it — exactly as the autocast shine's
+        -- 30.72 px square overhangs its 30 px button. Solving against a wrong premise produced a
+        -- number that then "cross-checked" against a second model derived the same wrong way, and
+        -- both files cited the agreement as the reason to trust it.
+        --
+        -- Everything below is the model's own ratios times this constant, so the correction lands
+        -- in one place and the animation stays in proportion.
+        BENILLA_ITEM_PUSH_PX_PER_UNIT = 1280
+        BENILLA_ITEM_PUSH_DURATION = 1.0
+
+        -- ── The widget rect, and why the card is not placed against the button ─────────────────
+        -- A `<Model>` with no `<Size>` and no `setAllPoints` takes its rect from the **M2 header
+        -- bounding box** (`MD20+0xB4`, max−min per axis), consumed RAW as layout units — unlike
+        -- CSimpleTexture's texel fallback, there is no AbsDimension conversion. So the ref's
+        -- ItemAnim widget is **42.41 x 124.72**, nothing like the 36-square everyone assumes from
+        -- looking at the XML, and **model-space (0,0,0) lands on that rect's BOTTOM-LEFT corner**.
+        -- (wow-re `system/ui/scratch/modelframe-implicit-size-law.md`, §5-cross-checked: vtable
+        -- 0x81c5d8 +0x1c/+0x20 -> 0x76d080/0x76d0d0, bbox source 0x713640 at `713661 add esi,0xb4`.
+        -- The one worker who read `MD20+0xD0` — the VertexBox — got an all-zero box and concluded
+        -- the widget was degenerate; that wrong premise is exactly what the pair round exists to
+        -- catch, and it is why this looked unresolvable in 0887.)
+        --
+        -- That rect is the whole reason this animation reads the way it does: it stands 124.72 tall
+        -- off the button's own bottom edge, so the card's travel band reaches **54 px above the
+        -- button's top**. Decision 0887 could not know that and placed the card against the
+        -- button's CENTER instead, which is what put it in the wrong place in x and gave it no
+        -- horizontal drift at all.
+        BENILLA_ITEM_PUSH_FRAME_W = 42.41
+        BENILLA_ITEM_PUSH_FRAME_H = 124.72
+        -- Where that rect hangs off the button: the ref anchors the widget's BOTTOMRIGHT to the
+        -- button's, 10 in from the right for the five bag buttons and flush (0) for the keyring —
+        -- MainMenuBarBagButtons.xml l.19-27 (BagSlotButtonTemplate) and l.152-160 (KeyRingButton).
+        -- Per-button, so it is an OnLoad argument, not a constant.
+        BENILLA_ITEM_PUSH_ANCHOR_X = -10
+
+        -- ── The model's own numbers, unrounded ────────────────────────────────────────────────
+        -- Every one of these was rounded in 0887 and every rounding moved the card. The quad span
+        -- read as 0.03 (it is 0.0288 — a 4% size error), and the translation as (0.010, -0.040)
+        -- (which alone accounts for half a pixel of the landing point).
+        --
+        -- The bone transform is `v' = pivot + T(t) + S(t) * (v - pivot)` — three wow-re workers
+        -- derived that independently in three matrix conventions and agreed. The pivot
+        -- (M2CompBone+0x60) is NOT the quad's centre: it sits 0.23 px right and 0.07 px above it,
+        -- so the card shrinks *almost* in place and drifts a fifth of a pixel doing it. Keeping
+        -- the pivot as its own term rather than folding it into the centre is what makes this
+        -- reproduce the reference exactly at all three sampled times instead of nearly.
+        -- Bone 0's ROTATION track is empty (nKeys = 0), so there is no roll to model.
+        BENILLA_ITEM_PUSH_PIVOT_X = 0.017580900341272354
+        BENILLA_ITEM_PUSH_PIVOT_Y = 0.053958501666784286
+        BENILLA_ITEM_PUSH_QUAD_X  = 0.017400000942870975
+        BENILLA_ITEM_PUSH_QUAD_Y  = 0.053900001570582390
+        BENILLA_ITEM_PUSH_QUAD_SPAN = 0.028800001833587885
+
+        -- {time, value} keyframes, linear between (M2 track interpolation 1) — the file's own keys,
+        -- at full precision. The three tracks keep DIFFERENT schedules and that is the whole feel:
+        -- the card fades up while swelling to 1.2x over 133 ms, settles back to full size at
+        -- 267 ms, then dwindles and fades *continuously* for the remaining 733 ms — while its
+        -- position holds until the half second and only then falls. So it is already at ~0.69 size
+        -- and ~0.68 alpha when it starts to move, and it is invisible by the time it lands.
+        BENILLA_ITEM_PUSH_ALPHA = { {0.000, 0.0}, {0.133, 1.0}, {0.267, 1.0}, {1.000, 0.0} }
+        BENILLA_ITEM_PUSH_SCALE = { {0.000, 1.0}, {0.133, 1.2000000476837158}, {0.267, 1.0}, {1.000, 0.01441549975425005} }
+        -- Translation is per-AXIS: the card falls 51.4 px and drifts 13.3 px RIGHT, so one shared
+        -- 0..1 "drop" curve (0887's shape) cannot express it — the old code had no horizontal term
+        -- at all and moved the card the wrong way in x when it inferred one.
+        BENILLA_ITEM_PUSH_TRANS_X = { {0.000, 0.0}, {0.500, 0.0}, {1.000,  0.010394600220024586} }
+        BENILLA_ITEM_PUSH_TRANS_Y = { {0.000, 0.0}, {0.500, 0.0}, {1.000, -0.040167398750782013} }
+
+        -- Sample a {time, value} keyframe list at `t`, linear between keys, clamped at both ends
+        -- (the M2 sampler's own shape for a CLAMP sequence).
+        function BenillaItemPushAnim_Sample(track, t)
+            local last = table.getn(track)
+            if t <= track[1][1] then return track[1][2] end
+            for i = 2, last do
+                local key = track[i]
+                if t <= key[1] then
+                    local prev = track[i - 1]
+                    local span = key[1] - prev[1]
+                    if span <= 0 then return key[2] end
+                    return prev[2] + (key[2] - prev[2]) * (t - prev[1]) / span
+                end
+            end
+            return track[last][2]
+        end
+
+        -- Place/size/fade the card for the current clock, from the model's own transform.
+        --
+        -- The card's centre in MODEL space is `pivot + T(t) + S(t)*(quadCentre - pivot)`; times the
+        -- projection constant that is its offset in layout units from the model origin, which is
+        -- the widget rect's bottom-left corner. The rect's own BOTTOMRIGHT hangs off the button's,
+        -- so the card is placed against the BUTTON'S BOTTOMRIGHT — never its centre — and the
+        -- frame width is what converts between the two.
+        --
+        -- On screen: a button-sized card appears with its bottom edge ~13.6 px ABOVE the button's
+        -- top, pops to 1.2x and back while fading in, hangs there through the first half second,
+        -- then falls down-and-right INTO the button, shrinking to a half-pixel point at its centre
+        -- as it fades out. Reproduces the reference at t = 0, 0.133 and 1.0 to the hundredth of a
+        -- pixel (`modelframe-implicit-size-law.md` §3's table).
+        --
+        -- NOT modelled, deliberately, and both are named in the record: the reference's widget
+        -- CLIPS the card to its own rect, which shaves 1.94 px off the right edge at the 1.2x peak
+        -- **at 4:3 only** (16:10 and 16:9 clear it); and the widget clears the depth buffer inside
+        -- that 124.72-tall rect every paint. benilla draws this as a Texture, not a Model, so it
+        -- inherits neither — reproducing an aspect-conditional sliver would be hard-coding a
+        -- rendering artefact rather than modelling the mechanism that causes it.
+        function BenillaItemPushAnim_Paint(anim)
+            local t = anim.elapsed
+            local k = BENILLA_ITEM_PUSH_PX_PER_UNIT
+            local scale = BenillaItemPushAnim_Sample(BENILLA_ITEM_PUSH_SCALE, t)
+            local size = BENILLA_ITEM_PUSH_QUAD_SPAN * scale * k
+            local cx = (BENILLA_ITEM_PUSH_PIVOT_X
+                + BenillaItemPushAnim_Sample(BENILLA_ITEM_PUSH_TRANS_X, t)
+                + scale * (BENILLA_ITEM_PUSH_QUAD_X - BENILLA_ITEM_PUSH_PIVOT_X)) * k
+            local cy = (BENILLA_ITEM_PUSH_PIVOT_Y
+                + BenillaItemPushAnim_Sample(BENILLA_ITEM_PUSH_TRANS_Y, t)
+                + scale * (BENILLA_ITEM_PUSH_QUAD_Y - BENILLA_ITEM_PUSH_PIVOT_Y)) * k
+            anim:SetWidth(size)
+            anim:SetHeight(size)
+            anim:SetPoint("CENTER", anim:GetParent(), "BOTTOMRIGHT",
+                anim.anchorX - BENILLA_ITEM_PUSH_FRAME_W + cx, cy)
+            anim:SetAlpha(BenillaItemPushAnim_Sample(BENILLA_ITEM_PUSH_ALPHA, t))
+        end
+
+        -- ref ItemAnim_OnLoad (l.68-70): the card listens for ITEM_PUSH and nothing else. It is
+        -- authored hidden, so it costs no OnUpdate until a push shows it (events reach hidden
+        -- frames; OnUpdate does not — the reference's own split).
+        function BenillaItemPushAnim_OnLoad(anim, containerId, anchorX)
+            anim.containerId = containerId
+            -- The widget's own offset from the button's BOTTOMRIGHT: -10 for the five bag buttons,
+            -- flush 0 for the keyring (the ref's two different anchors — see the constant block).
+            anim.anchorX = anchorX or BENILLA_ITEM_PUSH_ANCHOR_X
+            anim.icon = anim.icon or getglobal(anim:GetName() .. "Icon")
+            anim.elapsed = 0
+            anim:RegisterEvent("ITEM_PUSH")
+        end
+
+        -- ref ItemAnim_OnEvent (l.72-80): `if this:GetParent():GetID() == arg1`, then
+        -- ReplaceIconTexture(arg2) / SetSequence(0) / SetSequenceTime(0,0) / Show. A push into a bag
+        -- with no button (a bank bag) matches nothing and animates nowhere, there and here.
+        function BenillaItemPushAnim_OnEvent(anim)
+            if arg1 ~= anim.containerId then return end
+            anim.icon:SetTexture(arg2)
+            anim.elapsed = 0
+            -- Seat the card above its button rather than at load: the bag bar's own level is set in
+            -- the BUTTON's OnLoad (BenillaActionBarArt_SeatAbove), which the loader may run after
+            -- this child exists. Re-deriving it per push is one call and can never read it stale.
+            anim:SetFrameLevel(anim:GetParent():GetFrameLevel() + 1)
+            BenillaItemPushAnim_Paint(anim)
+            anim:Show()
+        end
+
+        -- The CLAMP sequence's end is the ref's OnAnimFinished → this:Hide() (l.92-94).
+        function BenillaItemPushAnim_OnUpdate(anim, elapsed)
+            anim.elapsed = anim.elapsed + (elapsed or 0)
+            if anim.elapsed >= BENILLA_ITEM_PUSH_DURATION then
+                anim:Hide()
+                return
+            end
+            BenillaItemPushAnim_Paint(anim)
+        end
+
+        -- The six buttons and the offset each one's card hangs at, read off the reference's own
+        -- anchors: BOTTOMRIGHT -10 for the five bag buttons (`BagSlotButtonTemplate` l.19-27 and
+        -- `MainMenuBarBackpackButton` l.69-77), flush 0 for the keyring (l.152-160).
+        BENILLA_ITEM_PUSH_BUTTONS = {
+            { "MainMenuBarBackpackButton", -10 },
+            { "CharacterBag0Slot", -10 },
+            { "CharacterBag1Slot", -10 },
+            { "CharacterBag2Slot", -10 },
+            { "CharacterBag3Slot", -10 },
+            { "KeyRingButton", 0 },
+        }
+
+        -- Build one button's card. Authored hidden, so it costs no OnUpdate until a push shows it
+        -- — the reference's own split (events reach hidden frames, OnUpdate does not).
+        --
+        -- Named `$parentBenillaItemPush` rather than `$parentItemAnim`: the reference's Model
+        -- already owns that name on every one of these buttons, and an addon that reaches for it
+        -- must find the reference's frame, not ours.
+        function BenillaItemPushAnim_Attach(button, anchorX)
+            local anim = CreateFrame("Frame", button:GetName() .. "BenillaItemPush", button)
+            anim:Hide()
+            anim:SetWidth(36)
+            anim:SetHeight(36)
+            anim:SetPoint("CENTER", button, "CENTER", 0, 0)
+            anim.icon = anim:CreateTexture(anim:GetName() .. "Icon", "OVERLAY")
+            anim.icon:SetAllPoints(anim)
+            BenillaItemPushAnim_OnLoad(anim, button:GetID(), anchorX)
+            anim:SetScript("OnEvent", function() BenillaItemPushAnim_OnEvent(this) end)
+            anim:SetScript("OnUpdate", function() BenillaItemPushAnim_OnUpdate(this, arg1) end)
+            return anim
+        end
+
+        -- At load, because the bar is entry 48 and this file is entry 50 — every button exists and
+        -- has run its own OnLoad, so `GetID()` is already the reference's. A button that is absent
+        -- (a harness that loaded no bar) is skipped rather than raising: the card is a flourish,
+        -- and a missing bar is not this file's error to report.
+        for _, entry in ipairs(BENILLA_ITEM_PUSH_BUTTONS) do
+            local button = getglobal(entry[1])
+            if button then
+                BenillaItemPushAnim_Attach(button, entry[2])
+            end
+        end
     ]]></Script>
 </Ui>

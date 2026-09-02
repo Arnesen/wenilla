@@ -1119,6 +1119,21 @@ pub enum SessionEvent {
         mode: crate::messages::MoveMode,
         apply: bool,
     },
+    /// **Some unit's movement mode changed** — the `SMSG_SPLINE_MOVE_*` twelve (decision 1780),
+    /// the observer half of [`Self::MoveMode`]'s family. Nothing to ack; `guid` is any unit, and on
+    /// vmangos it is one the server is driving itself (a creature), which is precisely the case the
+    /// ack'd family structurally cannot reach. `apply` is always the direction of the mode's
+    /// `MOVEMENTFLAGS` bit ([`crate::messages::SplineMode::flag`]).
+    ///
+    /// The app folds it into that unit's granted-mode word, which the animation selector, the
+    /// creature ground clamp and the remote dead-reckon all read — the reference does the same and
+    /// then re-runs the unit's gait selector on the spot (`0x6014ec`), which is what makes the
+    /// family *visual* rather than bookkeeping.
+    SplineMoveMode {
+        guid: u64,
+        mode: crate::messages::SplineMode,
+        apply: bool,
+    },
     /// **A knockback aimed at our own mover** (`SMSG_MOVE_KNOCK_BACK`, decision 1702) — the server
     /// hands the controlling client a ballistic launch and lets it fly the arc itself; nothing about
     /// it is a spline or a teleport. `launch` is the packet's quad as the jump tail it becomes:

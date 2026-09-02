@@ -67,36 +67,10 @@
         </Scripts>
     </Button>
 
-    <!-- Ref MainMenuBarBagButtons.xml l.17-53. A CheckButton over a Button template — the checked
-         ring is the "this bag's window is open" light, which is why the type changes at this rung.
-         `$parentItemAnim` is the ref's item-push card; ours is BenillaItemPushAnim_* (0887), and the
-         template cannot carry it because the reference's ItemAnimTemplate binds a per-instance
-         container id our four hand-wired slots pass explicitly. A template-built button therefore
-         gets no push animation, which is a missing flourish and not a missing behaviour. -->
-    <CheckButton name="BagSlotButtonTemplate" inherits="PaperDollItemSlotButtonTemplate" virtual="true">
-        <Scripts>
-            <OnLoad>
-                PaperDollItemSlotButton_OnLoad();
-                this:RegisterEvent("BAG_UPDATE");
-                this.isBag = 1;
-                -- OURS, and the one deviation in this file's scripts. The reference's three bag
-                -- handlers each recompute a `translatedID` from these same two ids at every call
-                -- site; our bodies read `button.bagId`, the field BenillaBagBarSlot_OnLoad sets for
-                -- the four hand-wired slots. Resolving it once here is what lets a template-built
-                -- button and a hand-wired one share one implementation instead of two.
-                this.bagId = this:GetID() - CharacterBag0Slot:GetID() + 1;
-            </OnLoad>
-            <OnClick>
-                if ( IsShiftKeyDown() ) then
-                    BagSlotButton_OnShiftClick();
-                else
-                    BagSlotButton_OnClick();
-                end
-            </OnClick>
-            <OnDragStart>BagSlotButton_OnDrag();</OnDragStart>
-            <OnReceiveDrag>BagSlotButton_OnClick();</OnReceiveDrag>
-            <OnEnter>BagSlotButton_OnEnter();</OnEnter>
-        </Scripts>
-        <CheckedTexture alphaMode="ADD" file="Interface\Buttons\CheckButtonHilight"/>
-    </CheckButton>
+    <!-- `BagSlotButtonTemplate` was declared here, transcribed from MainMenuBarBagButtons.xml
+         because that file could not be sourced. It IS sourced now — benilla.toc entry 48, one line
+         below this file — so the reference's own declaration is the live one and the copy is gone
+         (decision 1751, window 3). pfUI and anything else that inherits the template now inherits
+         the reference's, including the `$parentItemAnim` Model our copy structurally could not
+         carry. -->
 </Ui>

@@ -733,7 +733,6 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
         load_xml(&s, "MoneyFrame.xml");
         load_xml(&s, "UiPanels.xml");
         load_xml(&s, "Cooldown.xml");
-        load_xml(&s, "BagFrame.xml");
         load_xml(&s, "GameTooltip.xml");
         load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
                                              // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT

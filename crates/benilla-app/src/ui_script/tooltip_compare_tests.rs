@@ -34,7 +34,6 @@ fn harness() -> UiScript {
         "ItemRef.xml",
         "MerchantFrame.xml",
         "Cooldown.xml",
-        "BagFrame.xml",
         "CharacterFrame.xml",
     ] {
         load_xml(&s, f);
@@ -159,7 +158,7 @@ fn shift_compare_over_a_bag_item_seats_on_the_doll_slot() {
     // Open the bag and hover the helm slot. The button is ASKED for by its own `GetID()` — the
     // reference numbers a window's buttons backwards and recycles the windows (1751), so neither
     // the frame name nor the button index is a property to assume.
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     s.take_sounds();
     let btn = bag_slot_button(&s, 0, 1);
     hover(&mut s, &btn);
@@ -308,7 +307,7 @@ fn doll_hover_renders_the_live_instance_and_never_self_compares() {
     // Arm a compare first through a BAG hover (the stale-arm hazard the doll hover must clear) —
     // the reference's own `ContainerFrameItemButton_OnEnter` since 1751, reached by moving the
     // mouse onto the button rather than by calling the handler.
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     s.take_sounds();
     let btn = bag_slot_button(&s, 0, 1);
     hover(&mut s, &btn);

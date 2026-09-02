@@ -22,9 +22,7 @@
 //! → coin ? [`ClientCommand::LootMoney`] : [`ClientCommand::AutostoreLootItem`] (the clicked 1-based
 //! row mapped to the item's **wire** loot slot); `CloseLoot` → [`ClientCommand::LootRelease`].
 
-use benilla_protocol::messages::{
-    slot_type, ItemPushResult, LootItem, BAG_PLAYER_INVENTORY, SLOT_BAG_FIRST,
-};
+use benilla_protocol::messages::{slot_type, ItemPushResult, LootItem, BAG_PLAYER_INVENTORY};
 use bevy::prelude::*;
 
 use benilla_ui::script::{LootRow, LootState as LootSnapshot, ScriptValue, UiScript};
@@ -107,8 +105,9 @@ struct PendingReceive {
     tries: u16,
 }
 
-/// The wire push's `(bag, slot)` → the live-API **container id** the bag bar speaks (`0` backpack,
-/// `1..=4` an equipped bag, [`KEYRING_CONTAINER`] the keyring) — `ITEM_PUSH`'s `arg1`.
+/// The wire push's `(bag, slot)` → `ITEM_PUSH`'s **`arg1`**, in the reference's own vocabulary:
+/// `0` the backpack, `20..=23` an equipped bag (the INVENTORY-slot id its bag buttons carry),
+/// [`KEYRING_CONTAINER`] the keyring.
 ///
 /// **Byte-VERIFIED** at `CGGameUI::OnItemPush` `0x491bb5`-`0x491bd6`, which is the whole selector:
 ///
@@ -125,15 +124,21 @@ struct PendingReceive {
 ///   491bd4  xor eax,eax         ;  ⇒ 0 (the backpack)
 /// ```
 ///
-/// The one translation: the reference emits `bag + 1`, which is the **inventory-slot** id its bag
-/// buttons carry (`CharacterBag0Slot` = 20 … `Bag3Slot` = 23, `GetInventorySlotInfo`); benilla's bag
-/// bar is keyed by container id like every other bag surface here (`BAG_UPDATE(bagID)`,
-/// `BenillaBagBarSlot_InvSlot` = `19 + bagId`), so the same wire slots 19..22 become `1..=4`. Both
-/// vocabularies agree on `0` and `-2`, and both leave a non-equipped-bag container (a bank bag,
-/// wire 63..68) landing on an id no bag-bar button carries — no animation, exactly as there.
+/// **No translation any more, and that is the point.** This used to emit benilla's own container
+/// vocabulary (`1..=4` for the four bags), because benilla's bag BAR was ours and was keyed that
+/// way. 1751 window 3 made the bar the reference's own `MainMenuBarBagButtons.xml`, whose
+/// `ItemAnim_OnEvent` reads `this:GetParent():GetID()` — 20..23, from `GetInventorySlotInfo` — and
+/// compares it to `arg1`. Against the translated value that comparison is false for every bag, so
+/// the four bag cards would simply never have played, silently. The fix is not to adapt the
+/// reference's body: it is to stop translating, which is also what every addon reading `ITEM_PUSH`
+/// expects, so the function is now `0x491bb5`'s selector verbatim.
+///
+/// A non-equipped-bag container (a bank bag, wire 63..68) still lands on an id no bag-bar button
+/// carries — no animation, exactly as there.
 fn push_container(bag: u8, slot: u32) -> i64 {
     if bag != BAG_PLAYER_INVENTORY {
-        return i64::from(bag) - i64::from(SLOT_BAG_FIRST) + 1;
+        // `491bbb  lea eax,[edi+1]` — the wire bag byte plus one, nothing else.
+        return i64::from(bag) + 1;
     }
     if PUSH_KEYRING_SLOTS.contains(&slot) {
         return KEYRING_CONTAINER;
@@ -2130,10 +2135,10 @@ mod tests {
     /// value that decides which bag button the drop animation plays on.
     #[test]
     fn push_container_maps_the_wire_destination_onto_a_bag_bar_button() {
-        // `bag != 255` — an equipped bag. Wire 19..22 are the four bag inventory slots; the
-        // reference emits 20..23 (its buttons' inventory-slot ids), ours the container ids 1..=4.
-        assert_eq!(push_container(19, 0), 1);
-        assert_eq!(push_container(22, 5), 4);
+        // `bag != 255` — an equipped bag. Wire 19..22 are the four bag inventory slots, and the
+        // emitted value is the reference's own `bag + 1`: 20..23, the ids its buttons carry.
+        assert_eq!(push_container(19, 0), 20);
+        assert_eq!(push_container(22, 5), 23);
         // `bag == 255` with a keyring slot (the client's own 0x51..=0x70 window) — the keyring.
         assert_eq!(push_container(BAG_PLAYER_INVENTORY, 81), KEYRING_CONTAINER);
         assert_eq!(push_container(BAG_PLAYER_INVENTORY, 96), KEYRING_CONTAINER);
@@ -2147,7 +2152,7 @@ mod tests {
         assert_eq!(push_container(BAG_PLAYER_INVENTORY, u32::MAX), 0);
         // A bank bag (wire 63..68) lands on an id no bag-bar button carries: no animation, which is
         // exactly what the reference's `bag + 1` does with the same push.
-        assert!(!(0..=4).contains(&push_container(63, 0)));
+        assert!(!(20..=23).contains(&push_container(63, 0)));
     }
 
     #[test]

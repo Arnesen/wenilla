@@ -441,7 +441,7 @@ fn vendor_leaves_an_already_open_backpack_alone() {
     equip_bag(&mut s, 0, "Backpack", 16);
 
     // Open the bag first (the 'B' toggle), then the vendor over it.
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    s.run("MainMenuBarBackpackButton:Click()").unwrap();
     assert!(bag_open(&s, 0), "fixture: the player's own bag is up first");
     let _ = s.take_sounds();
     s.set_merchant(Some(MerchantState::default()));
