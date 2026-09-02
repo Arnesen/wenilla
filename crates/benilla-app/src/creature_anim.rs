@@ -724,7 +724,7 @@ use spell_visual::{
 pub(crate) use spell_visual::arm_aura_state_fx as arm_aura_state_fx_for_test;
 pub(crate) use spell_visual::{
     held_strike_sound, ChainProcPlay, FxClass, FxStage, KitPush, MissileSpawn, SpellKitFx,
-    SpellKitSound, SpellVisuals,
+    SpellKitShake, SpellKitSound, SpellVisuals,
 };
 
 /// The per-unit animation state machine.
@@ -1022,6 +1022,7 @@ impl Plugin for CreatureAnimPlugin {
             .add_message::<CastEvent>()
             .add_message::<SpellGoTargets>()
             .add_message::<SpellKitSound>()
+            .add_message::<SpellKitShake>()
             .add_message::<SpellKitFx>()
             .add_message::<MissileSpawn>()
             // The kit's beam edge (0955) — `crate::entities` owns what it becomes.

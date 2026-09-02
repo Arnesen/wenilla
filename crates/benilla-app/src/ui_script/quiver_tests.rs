@@ -188,6 +188,19 @@ fn seat_a_hunter(root: &Path) -> UiScript {
 
     let info = super::addons::info_from_toc("Quiver", &read_toc(root, "Quiver"));
     s.register_addons(vec![info], Some(root.to_path_buf()), None, None);
+    // The in-game UI materializes on world entry (1051), so a player always exists by the time the
+    // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
+    // into its label inside its own OnLoad. A manifest load with no player is a state the client
+    // never reaches (decision 1848).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
     let failures = super::load_default_ui(&s);
     assert!(
         failures.is_empty(),

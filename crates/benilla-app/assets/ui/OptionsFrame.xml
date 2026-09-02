@@ -655,6 +655,17 @@
             .. "Below 100% trades sharpness for frame rate; above 100% is supersampling, which "
             .. "smooths edges at the cost of frame rate. Applies when you click Apply."
 
+        -- Enable Sound in Background (1847). An era row: 1.12 hardcodes the behaviour and has no
+        -- checkbox, so there is no OPTION_TOOLTIP_* to resolve and the BENILLA_ prefix applies
+        -- for the same reason Render Scale's does -- the reference's namespace stays the
+        -- reference's. The last line is not padding: mute is not pause on either client, and a
+        -- player who expects a paused fight to resume where it stopped is owed the difference.
+        BENILLA_TOOLTIP_BACKGROUND_SOUND =
+            "Keeps the game's sound playing while you are working in another window.\n\n"
+            .. "With this off, switching away silences the game and switching back restores it. "
+            .. "Sounds keep running while they are silenced, so a long one may have finished by "
+            .. "the time you return."
+
         -- Display Mode (1650). 1.12's own OPTION_TOOLTIP_WINDOWED_MODE cannot ride this row: it
         -- is written for the checkbox it belonged to ("Check to play in a non-fullscreen
         -- window..."), and its second half describes a desktop-gamma consequence of an exclusive
@@ -674,6 +685,7 @@
             Audio = {
                 "RowEnableAll", "RowMaster", "RowSound", "RowMusic", "RowAmbience",
                 "RowEnableMusic", "RowEnableAmbience", "RowEnableErrorSpeech",
+                "RowBackgroundSound",
             },
             Graphics = {
                 "RowUiScale", "RowFarclip", "RowWorldDetail",
@@ -2353,6 +2365,26 @@
                                             <Scripts><OnLoad>
                                                 OptionsRow_OnLoad(self, "EnableErrorSpeech", "Enable Error Speech",
                                                     "OPTION_TOOLTIP_ENABLE_ERROR_SPEECH")
+                                                self.soundQuirk = 1
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- Sound in the background (decision 1847). The one
+                                             Audio row 1.12 has no checkbox for: it mutes on its
+                                             window-activation event unconditionally, so this row
+                                             offers the way out the reference never did, shipped
+                                             OFF at the reference's own behaviour. Era's label and
+                                             era's CVar spelling, the autoLootDefault posture.
+                                             soundQuirk like every box on this page - the mapping
+                                             belongs to the panel, not to the row's provenance. -->
+                                        <Frame name="$parentRowBackgroundSound" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowEnableErrorSpeech" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowEnableErrorSpeech" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "Sound_EnableSoundWhenGameIsInBG",
+                                                    "Enable Sound in Background",
+                                                    "BENILLA_TOOLTIP_BACKGROUND_SOUND")
                                                 self.soundQuirk = 1
                                             </OnLoad></Scripts>
                                         </Frame>

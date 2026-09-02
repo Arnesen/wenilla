@@ -221,6 +221,19 @@ mod tests {
 
         let mut s = UiScript::new().expect("VM");
         s.set_screen_size(1024.0, 768.0);
+        // The in-game UI materializes on world entry (1051), so a player always exists by the time the
+        // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
+        // into its label inside its own OnLoad. A manifest load with no player is a state the client
+        // never reaches (decision 1848).
+        s.set_unit(
+            "player",
+            Some(benilla_ui::script::UnitState {
+                exists: true,
+                name: Some("Probefour".into()),
+                level: 60,
+                ..Default::default()
+            }),
+        );
         let failures = super::super::manifest::load_default_ui(&s);
         assert!(failures.is_empty(), "the default UI: {failures:#?}");
 
@@ -343,6 +356,19 @@ mod tests {
         let mut s = UiScript::new().expect("VM");
         s.set_screen_size(1024.0, 768.0);
 
+        // The in-game UI materializes on world entry (1051), so a player always exists by the time the
+        // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
+        // into its label inside its own OnLoad. A manifest load with no player is a state the client
+        // never reaches (decision 1848).
+        s.set_unit(
+            "player",
+            Some(benilla_ui::script::UnitState {
+                exists: true,
+                name: Some("Probefour".into()),
+                level: 60,
+                ..Default::default()
+            }),
+        );
         let failures = super::super::manifest::load_default_ui(&s);
         assert!(failures.is_empty(), "the default UI: {failures:#?}");
 
@@ -506,6 +532,19 @@ mod tests {
             }
             let mut s = UiScript::new().expect("VM");
             s.set_screen_size(1024.0, 768.0);
+            // The in-game UI materializes on world entry (1051), so a player always exists by the time the
+            // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
+            // into its label inside its own OnLoad. A manifest load with no player is a state the client
+            // never reaches (decision 1848).
+            s.set_unit(
+                "player",
+                Some(benilla_ui::script::UnitState {
+                    exists: true,
+                    name: Some("Probefour".into()),
+                    level: 60,
+                    ..Default::default()
+                }),
+            );
             let base = super::super::manifest::load_default_ui(&s);
             assert!(base.is_empty(), "the shipped manifest itself: {base:#?}");
             s.resolve();
@@ -658,6 +697,19 @@ mod tests {
         // global our own FrameXML defines.
         let mut s = UiScript::new().expect("VM");
         s.set_screen_size(1024.0, 768.0);
+        // The in-game UI materializes on world entry (1051), so a player always exists by the time the
+        // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
+        // into its label inside its own OnLoad. A manifest load with no player is a state the client
+        // never reaches (decision 1848).
+        s.set_unit(
+            "player",
+            Some(benilla_ui::script::UnitState {
+                exists: true,
+                name: Some("Probefour".into()),
+                level: 60,
+                ..Default::default()
+            }),
+        );
         let failures = super::super::manifest::load_default_ui(&s);
         assert!(failures.is_empty(), "the shipped manifest: {failures:#?}");
         let have: std::collections::HashSet<String> = s
@@ -1405,6 +1457,19 @@ mod tests {
 
         let mut s = UiScript::new().expect("VM");
         s.set_screen_size(1024.0, 768.0);
+        // The in-game UI materializes on world entry (1051), so a player always exists by the time the
+        // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
+        // into its label inside its own OnLoad. A manifest load with no player is a state the client
+        // never reaches (decision 1848).
+        s.set_unit(
+            "player",
+            Some(benilla_ui::script::UnitState {
+                exists: true,
+                name: Some("Probefour".into()),
+                level: 60,
+                ..Default::default()
+            }),
+        );
         let failures = super::super::manifest::load_default_ui(&s);
         assert!(failures.is_empty(), "the shipped manifest: {failures:#?}");
         let have: std::collections::HashSet<String> = s
@@ -1445,6 +1510,15 @@ mod tests {
         let toc = &super::super::addons::Addon::builtin().toc.files;
         let mut missing: Vec<(String, String)> = Vec::new();
         for entry in toc.iter().filter(|f| super::is_chain_entry(f)) {
+            // `GlobalStrings.lua` is 4000 lines of `NAME = "…";` and nothing else — it calls no
+            // global at all. What it DOES contain is every format specifier and every English
+            // sentence in the interface, and this scanner's `name(` shape reads `%d (`, `%s (` and
+            // "rank (" out of those literals as calls. It became a manifest entry with 1848 (the
+            // reference's own first line, which ours had been loading out of band); skipping it is
+            // not a workaround for that, it is the scanner declining to parse prose.
+            if entry.ends_with("GlobalStrings.lua") {
+                continue;
+            }
             let leaf = entry.rsplit(['\\', '/']).next().unwrap_or(entry);
             let mut text = String::new();
             let mut cands = vec![entry.replace('\\', "/")];

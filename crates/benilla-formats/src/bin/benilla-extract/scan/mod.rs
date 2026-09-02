@@ -46,7 +46,7 @@ pub use world::{doodadscan, placescan, skyboxscan, wmodoodads};
 /// [`Chain::read_file`] is handed); the `.m2` test and the prefix match are both done on a
 /// lowercased copy, and the prefix is normalized to the chain's own `\` separators, so a caller
 /// may pass either slash in either case.
-fn m2_names(chain: &mut Chain, prefix: Option<&str>) -> Result<Vec<String>> {
+pub(crate) fn m2_names(chain: &mut Chain, prefix: Option<&str>) -> Result<Vec<String>> {
     let pfx = prefix.map(|p| p.to_ascii_lowercase().replace('/', "\\"));
     Ok(chain
         .list()

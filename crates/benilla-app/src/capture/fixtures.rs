@@ -1184,9 +1184,9 @@ pub(super) fn seed_ui_fixture(
             // Slot 2 selected: the multi-line body, so the detail pane and the body box both have
             // something in them. The popup fixture then opens the chooser over that selection via
             // the ref's `MacroEditButton` path — an EDIT, so the name box arrives pre-filled.
-            seed.push_str("ShowMacroFrame()\nBenillaMacroButton2:Click()\n");
+            seed.push_str("ShowMacroFrame()\nMacroButton2:Click()\n");
             if fixture == UiFixture::MacroPopup {
-                seed.push_str("BenillaMacroEditButton:Click()\n");
+                seed.push_str("MacroEditButton:Click()\n");
             }
             if let Err(e) = script.run(&seed) {
                 warn!("capture: ui-macro seed failed: {e}");

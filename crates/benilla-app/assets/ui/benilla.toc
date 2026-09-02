@@ -39,6 +39,24 @@
 # The named virtual Font objects (decision 0084) — must load first so any FontString's
 # `inherits="GameFontNormal"` resolves against a registered object.
 Fonts.xml
+
+# ══ THE STRINGS — the reference's own first line, seated second here (1848) ══
+# **Second, not first, and that is deliberate.** Manifest entry 0 is the FONT REGISTRY:
+# `load_font_registry` takes entry 0 and `load_ingame_ui` takes the rest, so entry 0 is the boot
+# boundary itself (1051). Putting the strings there would move `Fonts.xml` across it.
+# `GlobalStrings.lua` is line 1 of the reference's `FrameXML.toc`, and it was missing from ours
+# entirely: the app loaded it out of band at Startup (`ui_script::setup_script`, "the VM's first
+# load is the real GlobalStrings.lua"), so the running client was right and the MANIFEST was not
+# self-sufficient. Every harness that loads the manifest without that pre-step got a VM with no
+# strings, which is a gap four separate windows tripped over before anyone looked at the toc.
+#
+# The stock files read these at LOAD, not just at paint: `Blizzard_MacroUI.xml`'s character tab
+# does `format(CHARACTER_SPECIFIC_MACROS, UnitName("player"))` inside its own OnLoad, and a nil
+# format string there aborts the handler.
+#
+# The app's Startup load stays where it is — the cast-fail display (0427) resolves messages before
+# the in-game UI materializes at all (1051) — so this is a second, idempotent assignment pass.
+Interface\FrameXML\GlobalStrings.lua
 # ══ THE LOCALE ADJUSTMENTS — the reference's own, off the player's chain (1751, window 5) ══
 # `Localize()` (which this file also CALLS at load, exactly as the reference's own two-part
 # `<Script>` does) and `LocalizeFrames()`. Nothing of ours ever shipped either, and the gap was
@@ -919,14 +937,21 @@ QuestLogFrame.xml
 # click opens, and whose MAX_QUESTS it shares.
 Interface\FrameXML\QuestTimerFrame.xml
 ChatFrame.xml
-# The macro window (decision 0983): the editor + its name/icon popup, driven over the
-# engine's OWN macro table (`benilla_ui::script::macros` — 1.12 macros have no server
-# side, so this is the one window whose model is not an app feed). Needs UiPanels (the
-# panel manager + `TabButtonTemplate`), ScrollTemplates (BOTH kits — the real one scrolls
-# the body box, the faux one the icon grid), MicroMenu (`UpdateMicroButtons` on
-# show/hide), and it must come AFTER SpellBookFrame, whose shift-click reaches
-# `BenillaMacroFrame_AddMacroLine`. Before GameMenuFrame, whose Macros button opens it.
-MacroFrame.xml
+# ══ THE MACRO WINDOW — the reference's own, off the player's chain (1751, window 32) ══
+# The fourth LoadOnDemand addon (1832's header carries the mechanics). ONE manifest line: its toc
+# lists `Blizzard_MacroUI.xml`, which sources its own `.lua`, plus the empty `Localization.lua`.
+#
+# Nothing to build. 1835 recorded `SaveMacros` as a missing engine verb and it is not one — the
+# only occurrence in the reference's own file is COMMENTED OUT (`--SaveMacros();` in
+# `MacroFrame_OnHide`); the triage that found it was not stripping Lua comments.
+#
+# It was BLOCKED until 1846: `MacroPopupScrollFrame` inherits FrameXML's
+# `ClassTrainerListScrollFrameTemplate`, which inherits `FauxScrollFrameTemplate` — and ours was a
+# same-named `<Frame>` with a Benilla slider that shadowed the reference's `<ScrollFrame>`. With the
+# panel kit on the chain that shadow is gone, so this window went from blocked to a plain swap.
+#
+# `ShowMacroFrame` moved to UIParent.xml, the reference's own home for it — see 1848.
+Interface\AddOns\Blizzard_MacroUI\Blizzard_MacroUI.xml
 # The script error log (decision 1495): the window `/errors` opens — the list B293's two
 # reporters asked for, which the reference's one-message-at-a-time ScriptErrors modal cannot
 # be. Ours entirely (1.12 has no counterpart), reading the retained log on the model rather

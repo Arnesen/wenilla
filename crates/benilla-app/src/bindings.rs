@@ -1560,6 +1560,18 @@ mod tests {
         let mut script = UiScript::new().expect("VM");
         script.register_bindings(&registry_commands());
         script.set_screen_size(1024.0, 768.0);
+        // The in-game UI materializes on world entry (1051), so a player always exists by the time
+        // the manifest loads — and the stock macro window's character tab formats
+        // `UnitName("player")` into its label in its own OnLoad (decision 1848).
+        script.set_unit(
+            "player",
+            Some(benilla_ui::script::UnitState {
+                exists: true,
+                name: Some("Probefour".into()),
+                level: 60,
+                ..Default::default()
+            }),
+        );
         let failures = crate::ui_script::load_default_ui(&script);
         assert!(
             failures.is_empty(),

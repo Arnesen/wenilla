@@ -250,6 +250,19 @@
             end
         end
 
+        -- ref UIParent.lua's own `ShowMacroFrame`, moved here from our MacroFrame.xml when 1848
+        -- retired that file — the third such squatter after `InspectUnit` (1832) and
+        -- `ToggleTalentFrame` (1833), and by now the expected shape.
+        --
+        -- `MacroFrame_LoadUI` is left out: the addon loads eagerly from benilla.toc, so there is
+        -- nothing for it to do, and 1203 says leave it out rather than stub it. The
+        -- `MacroFrame_Show` guard is the reference's own.
+        function ShowMacroFrame()
+            if ( MacroFrame_Show ) then
+                MacroFrame_Show();
+            end
+        end
+
         function UIParent_OnEvent(event)
             -- The reference's own first arm (UIParent.lua l.230-235). `LocalizeFrames` comes from
             -- the sourced `Interface\FrameXML\Localization.xml` (1751 window 5) and is the file

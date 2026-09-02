@@ -237,6 +237,23 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `re/cvar/cvar-register-sites.tsv` row 54) and a real 1.12 checkbox: SoundOptionsFrame.lua's
     // `ENABLE_ERROR_SPEECH`, index 4, which the master enable greys along with Ambience.
     same("EnableErrorSpeech", "1"),
+    // Sound while the window is in the background (1847). **Not a 1.12 CVar and not a 1.12
+    // checkbox**: none of the reference's 214 `CVar::Register` sites names it
+    // (`re/cvar/cvar-register-sites.tsv`), and `SoundOptionsFrame.lua` declares seven checkboxes
+    // (indices 1, 2, 4-8) and four sliders, none of them this. `CVar::Register` is the only
+    // creation path, so `Config.wtf` can hold no such key either. The spelling is the later-era
+    // engine's — the `autoLootDefault` / `nameplateShowEnemies` posture, where benilla's
+    // persistence IS the CVar store (0954) and a setting 1.12 never made settable takes the era
+    // name rather than an invented one.
+    //
+    // **`same`, not `ours`**, for the nameplate pair's reason: the reference has no CVar to match
+    // but it very much has a *behaviour* to match, and it goes quiet in the background —
+    // unconditionally, on `WM_ACTIVATE` → event-bus category 2 → `0x7a4860`'s
+    // `FSOUND_SetMute(-3, active ? 0 : 1)`, music included (wow-re
+    // `sound/scratch/focus-mute-law.md`, VERIFIED). "0" IS the reference's own behaviour. The knob
+    // is `SoundConfig::background_sound`, which carries the mechanism and the one disclosed
+    // divergence.
+    same("Sound_EnableSoundWhenGameIsInBG", "0"),
     // Zone reverb (1153). The binary registers this one `"1"` (`0x4573be`) and we register it
     // `"0"` — the only row here that knowingly leaves the registrar's default, because the
     // reference's reverb is EAX-over-hardware and that hardware has not existed since Vista:
@@ -969,6 +986,7 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "enablemusic" => knobs.sound.music_enabled = v != 0.0,
         "enableambience" => knobs.sound.ambience_enabled = v != 0.0,
         "enableerrorspeech" => knobs.sound.error_speech = v != 0.0,
+        "sound_enablesoundwhengameisinbg" => knobs.sound.background_sound = v != 0.0,
         // The client's own parse for this one is literally `!= 0` too (`0x4574d0`: `setne al`).
         "soundreverb" => knobs.sound.reverb = v != 0.0,
         "soundoutputlimiter" => knobs.sound.limiter = v != 0.0,
@@ -1337,7 +1355,7 @@ fn sync_cvars(
                 .collect(),
         );
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 43] = [
+        let session: [(&str, String); 44] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -1346,6 +1364,10 @@ fn sync_cvars(
             ("EnableMusic", flag(sound.music_enabled)),
             ("EnableAmbience", flag(sound.ambience_enabled)),
             ("EnableErrorSpeech", flag(sound.error_speech)),
+            (
+                "Sound_EnableSoundWhenGameIsInBG",
+                flag(sound.background_sound),
+            ),
             ("SoundReverb", flag(sound.reverb)),
             ("SoundOutputLimiter", flag(sound.limiter)),
             ("uiScale", scale.0.to_string()),
@@ -1683,6 +1705,14 @@ mod tests {
         assert_eq!(d["EnableMusic"] != 0.0, sound.music_enabled);
         assert_eq!(d["EnableAmbience"] != 0.0, sound.ambience_enabled);
         assert_eq!(d["EnableErrorSpeech"] != 0.0, sound.error_speech);
+        assert_eq!(
+            d["Sound_EnableSoundWhenGameIsInBG"] != 0.0,
+            sound.background_sound
+        );
+        assert!(
+            !sound.background_sound,
+            "the reference goes quiet in the background and offers no way out (decision 1847)"
+        );
         // Welded like the rest — and deliberately NOT the binary's registrar "1" (1153).
         assert_eq!(d["SoundReverb"] != 0.0, sound.reverb);
         assert_eq!(d["SoundOutputLimiter"] != 0.0, sound.limiter);

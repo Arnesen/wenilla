@@ -1,6 +1,6 @@
 //! `spellvis`: dump a spell's visual chain — spell → SpellVisual stages → each kit's anim/sound/
-//! attach effects, plus the missile block — decision 0099's phase-2 instrument (columns per
-//! decision 0107).
+//! camera shake/attach effects, plus the missile block — decision 0099's phase-2 instrument
+//! (columns per decisions 0107 and 1849).
 
 use anyhow::Result;
 use benilla_formats::Chain;
@@ -9,6 +9,7 @@ use benilla_formats::Chain;
 pub fn run(chain: &mut Chain, spell_id: u32) -> Result<()> {
     let spells = benilla_formats::load_spell_catalog(chain)?;
     let visuals = benilla_formats::load_spell_visual_catalog(chain)?;
+    let shakes = benilla_formats::load_camera_shakes(chain)?;
     let Some(spell) = spells.get(spell_id) else {
         anyhow::bail!("spell {spell_id} not in Spell.dbc");
     };
@@ -37,6 +38,23 @@ pub fn run(chain: &mut Chain, spell_id: u32) -> Result<()> {
                         kit.anim_id.map_or("—".into(), |a| a.to_string()),
                         kit.sound.map_or("—".into(), |s| s.to_string()),
                     );
+                    // The kit's CAMERA SHAKE (field 14, decision 1849): a
+                    // `SpellEffectCameraShakes` GROUP id, expanded to the presets it fires.
+                    // `benilla-extract … shakecensus` is the whole-table view.
+                    if let Some(group) = kit.shake {
+                        match shakes.group(group) {
+                            Some(g) => println!(
+                                "           shake  group {group} -> presets {}",
+                                g.shakes()
+                                    .map(|id| id.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(" · ")
+                            ),
+                            None => println!(
+                                "           shake  group {group} (NO SUCH SpellEffectCameraShakes ROW)"
+                            ),
+                        }
+                    }
                     // The kit's CharProcs (fields 15-34): what it does to the BODY.
                     crate::charprocs::print_kit_procs(&visuals, kit_id, "           ");
                     // The kit's BEAM, if it draws one (decision 0955): the chain CharProc's

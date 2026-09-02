@@ -99,6 +99,49 @@ pub(crate) struct SoundConfig {
     /// read inside `0x458250` alongside `MasterSoundEffects`, *before* any escalation state moves,
     /// so turning it off is silence rather than a muted play.
     pub error_speech: bool,
+    /// **Sound while the window is in the background** — the era engine's
+    /// `Sound_EnableSoundWhenGameIsInBG`, over a setting 1.12 hardcodes and never made settable
+    /// (decision 1847). `false` = the reference's own behaviour: alt-tab away and the client goes
+    /// quiet; come back and it returns.
+    ///
+    /// The reference's mechanism, VERIFIED end to end in wow-re
+    /// `sound/scratch/focus-mute-law.md` (§5 round, 2026-09-02, dispatched from here): **`WM_ACTIVATE`
+    /// and nothing else** — `WM_ACTIVATEAPP`, `WM_SETFOCUS` and `WM_KILLFOCUS` all fall through the
+    /// WndProc's remap table to `DefWindowProcA` — normalised to a 0/1 flag at `0x42d080`, enqueued
+    /// as OS-event tag 6 (`0x42d0cb`, the only tag-6 producer image-wide), raised as event-bus
+    /// category 2 (`0x423cc5`, the only direct category-2 raise), handled by `0x7a4860`:
+    /// `FSOUND_SetMute(-3, active ? 0 : 1)`. (`-3` is `FSOUND_ALL`; the *name* is inferred — macro
+    /// names do not survive compilation — the value and its behaviour are not.)
+    ///
+    /// **Everything goes silent, music included.** The behaviour-flag bit `0x2` that exempts music
+    /// from the `MasterSoundEffects` pause and from the open-refusal does **not** exempt it here:
+    /// `-3` sweeps `[0, FSOUND_GetMaxChannels())`, which FMOD 3.75's own allocation pools tile
+    /// exactly, and WoW plays every sound — music and SFX alike — as an ordinary stream on a channel
+    /// from those pools (it imports no `FSOUND_PlaySound` at all). This was the open question when
+    /// the gate was built and the answer decided its scope: whole output, not per category.
+    ///
+    /// A **mute, not a pause**, also verified: `SetMute` sets `[chan+0x3c]` bit `0x02` and every
+    /// software mixer gates on bit `0x10` (`SetPaused`) alone, so the playback cursor keeps being
+    /// written. A five-second sound started before you alt-tabbed is over when you come back, and
+    /// each channel's own stored volume comes back verbatim. benilla inherits that rather than
+    /// implementing it: a gate on the output cannot stop the schedulers.
+    ///
+    /// **Divergence, disclosed.** While inactive the reference also *refuses to open* a new
+    /// non-music stream (`0x7a52bf`), where a new music stream is opened and individually muted;
+    /// benilla starts everything and gates the output, so a sound that begins while you are away is
+    /// still audible on return if it outlives your absence. Bounded by an SFX's own length — the
+    /// long-lived classes are the music/ambience ones the reference start-and-mutes too — and taken
+    /// deliberately: a refusal at the kit-start layer would make an unattended capture record
+    /// silence, which is the false negative [`mixer::Mixer::set_output_gate`]'s position exists to
+    /// prevent.
+    ///
+    /// There is **no 1.12 CVar and no 1.12 checkbox** for this — `SoundOptionsFrame.lua` declares
+    /// seven checkboxes (indices 1, 2, 4–8) and four sliders, none of them this, and none of the
+    /// reference's 214 `CVar::Register` sites names it (wow-re `re/cvar/cvar-register-sites.tsv`;
+    /// `Register` is the only creation path, so `Config.wtf` can hold no such key either). So the
+    /// row is the `autoLootDefault` posture: benilla's persistence is the CVar store (0954), and a
+    /// setting with no 1.12 CVar takes the later-era engine's spelling rather than an invented one.
+    pub background_sound: bool,
     /// Zone reverb — 1.12's `SoundReverb` CVar (`0x4573be` registration, callback `0x4574d0`,
     /// flag byte `[0x835a4c]`). The flag gates **both** EAX paths: the zone/environment preset
     /// (`0x45a75b`: flag zero ⇒ `FSOUND_Reverb_SetProperties` is never called) and the
@@ -198,6 +241,7 @@ impl Default for SoundConfig {
             music_enabled: true,
             ambience_enabled: true,
             error_speech: true,
+            background_sound: false,
             reverb: false,
             world_hold: false,
             music_suppressed: false,
@@ -219,6 +263,37 @@ fn feed_world_hold(
     let hold = screen.covering();
     if config.world_hold != hold {
         config.world_hold = hold;
+    }
+}
+
+/// The **focus gate** (decision 1847): shut the output while the window is in the background,
+/// unless [`SoundConfig::background_sound`] says otherwise.
+///
+/// Reads the window's own focus rather than a live bit on [`SoundConfig`] — unlike `world_hold`
+/// and `music_suppressed`, nothing else in the frame needs to agree about it, because this gate
+/// changes exactly one thing: the level of the last effect in the main chain. No trigger, no
+/// scheduler and no meter consults it, which is the whole point (see
+/// [`mixer::Mixer::set_output_gate`]).
+///
+/// **A missing window opens the gate**, never shuts it: "we cannot tell whether anyone is looking"
+/// must not be heard as silence.
+///
+/// The `Local` snapshot is what turns a per-frame read into an **edge**: focus is polled off the
+/// window rather than watched as an event, so without it every frame would re-issue a tween and
+/// the 16 ms ramp would restart forever instead of ever landing.
+fn apply_focus_gate(
+    mut out: NonSendMut<SoundOutput>,
+    config: Res<SoundConfig>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut last: Local<Option<bool>>,
+) {
+    let open = config.background_sound || windows.single().map_or(true, |w| w.focused);
+    if *last == Some(open) {
+        return;
+    }
+    *last = Some(open);
+    if let Some(mixer) = out.mixer.as_mut() {
+        mixer.set_output_gate(open);
     }
 }
 
@@ -458,6 +533,7 @@ impl Plugin for SoundPlugin {
                 update_audio_listener.in_set(WorldStage::Stream),
                 toggle_mute,
                 apply_master_volume.after(toggle_mute),
+                apply_focus_gate,
                 poll_mix_health,
                 hal_overload::poll,
             ),

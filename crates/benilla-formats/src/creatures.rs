@@ -204,6 +204,13 @@ impl CreatureCatalog {
             .map(|(id, m)| (*id, m.path.as_str(), m.footstep_shake, m.death_thud_shake))
     }
 
+    /// Every `CreatureModelData` model path, unordered — the census surface for "is this M2 a
+    /// creature model?", which is what decides whether an animation event on it reaches
+    /// `CGUnit_C::HandleAnimEvent` at all.
+    pub fn model_paths(&self) -> impl Iterator<Item = &str> + '_ {
+        self.models.values().map(|m| m.path.as_str())
+    }
+
     /// A display's **spawned-creature render scale** — the product
     /// `CreatureModelData.modelScale × CreatureDisplayInfo.creatureModelScale`, the same number
     /// [`CreatureModel::scale`] carries, without the row's string clones.

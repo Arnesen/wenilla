@@ -141,6 +141,10 @@ pub(crate) struct Mixer {
     limiter_on: Arc<AtomicBool>,
     /// The master gain — first in the main chain, **upstream** of the limiter ([`main_track`]).
     master: VolumeControlHandle,
+    /// The output gate — **last** in the main chain, downstream of every tap ([`main_track`]).
+    /// Open (unity) or shut (silence); never a level. [`Mixer::set_output_gate`] is its only
+    /// writer.
+    output: VolumeControlHandle,
     /// The pre-limiter tap's frame clock while a probing run records; `None` otherwise.
     audio_pos: Option<Arc<AtomicU64>>,
     /// The device's negotiated sample rate — what turns a count of over-scale samples into a
@@ -158,6 +162,7 @@ impl Mixer {
         let MainChain {
             builder: main_track_builder,
             master,
+            output,
             audio_pos,
         } = main_track(&level, &limiter_on, sample_rate, probe_dir);
         let settings = AudioManagerSettings::<DefaultBackend> {
@@ -209,6 +214,7 @@ impl Mixer {
             level,
             limiter_on,
             master,
+            output,
             sample_rate,
             audio_pos,
         })
@@ -276,6 +282,28 @@ impl Mixer {
     /// only the position in the chain changes.
     pub(crate) fn set_master(&mut self, amp: f32) {
         self.master.set_volume(amp_to_db(amp), glide());
+    }
+
+    /// Open or shut the **output gate** — the focus mute (decision 1847), the seam mirror of the
+    /// reference's `FSOUND_SetMute(FSOUND_ALL, …)` on its window-activation event.
+    ///
+    /// A *gate*, not a level: unity or silence, nothing between. That is what makes it safe at
+    /// the end of the chain — the limiter upstream sees the same signal either way, so shutting
+    /// it can never make the limiter duck differently, which is the trap that keeps the master
+    /// gain at the *front* ([`main_track`]).
+    ///
+    /// Shut is a [`glide`] rather than a step for the usual reason: cutting a full mix in one
+    /// sample is a click. 16 ms is inaudible as a fade and the reference's own mute is instant,
+    /// so nothing about the ramp is a fidelity claim.
+    pub(super) fn set_output_gate(&mut self, open: bool) {
+        self.output.set_volume(
+            if open {
+                Decibels::IDENTITY
+            } else {
+                Decibels::SILENCE
+            },
+            glide(),
+        );
     }
 
     /// Arm or bypass the output limiter — the `SoundOutputLimiter` CVar (decision 1551). The
@@ -406,6 +434,11 @@ const SPATIAL_VOICE_CAPACITY: usize = 512;
 /// 2. **limiter** — the brickwall that makes it fit, so kira's own hard clamp never fires.
 /// 3. **mix tap** — records what is actually heard (decision 1112, `$WOW_MIX_TAP`; a no-op
 ///    builder unless the env var names a capture path).
+/// 4. **output gate** — the focus mute (decision 1847), and the *only* stage downstream of every
+///    tap. It is last on purpose: a mute that sits above the taps falsifies every recording made
+///    while the window is in the background, which is precisely when an unattended instrumented
+///    run records. Here it silences the speakers and nothing else — `pre.wav`, `post.wav`, the
+///    `$WOW_MIX_TAP` capture and the health meter all keep reading the mix the game produced.
 ///
 /// A free function so the offline harness (`overlapping_kits_*`, below) can build the **same**
 /// chain over kira's mock backend — a headless proof of the audible claim, not a mirror of it.
@@ -436,9 +469,14 @@ fn main_track(
     if let Some((dir, rate)) = probe {
         super::mix_tap::install_at(&mut main, &dir.join("post.wav"), rate);
     }
+    let mut main = super::mix_tap::install(main, sample_rate);
+    // Last, after every tap (see the chain doc above). Opens at unity: a run whose focus never
+    // changes — and every test in this file — is bit-identical to one built without it.
+    let output = main.add_effect(VolumeControlBuilder::new(Decibels::IDENTITY));
     MainChain {
-        builder: super::mix_tap::install(main, sample_rate),
+        builder: main,
         master,
+        output,
         audio_pos,
     }
 }
@@ -451,6 +489,8 @@ struct MainChain {
     /// left at unity forever — writing to it would reintroduce the post-limiter stage this
     /// exists to avoid.
     master: VolumeControlHandle,
+    /// The output gate, last in the chain — the focus mute's handle (see [`Mixer::set_output_gate`]).
+    output: VolumeControlHandle,
     /// The pre-limiter tap's frame clock, when a probing run armed one.
     audio_pos: Option<Arc<AtomicU64>>,
 }
@@ -926,6 +966,79 @@ mod tests {
             wav.extend_from_slice(&v.to_le_bytes());
         }
         wav
+    }
+
+    /// The **focus gate silences the output and nothing upstream** (decision 1847).
+    ///
+    /// This is the claim the whole design rests on, and the one that is expensive to be wrong
+    /// about: an instrumented run's window is unfocused by construction, so a mute placed above
+    /// the taps would make every unattended audio capture record silence — a false negative that
+    /// reads exactly like "the sound never fired". Here the gate is the last effect, so the
+    /// meter/tap plane keeps reading the mix the game produced.
+    ///
+    /// **What falsifies it:** move `output`'s `add_effect` above `meter::install` (or onto the
+    /// main track's own volume, which kira applies after every effect) and `asked` collapses to
+    /// silence with `heard` — this test fails on the first assert.
+    #[test]
+    fn the_output_gate_silences_the_output_and_nothing_upstream() {
+        use kira::backend::mock::{MockBackend, MockBackendSettings};
+
+        const RATE: u32 = 44_100;
+
+        let asked = Arc::new(MixLevel::default());
+        let heard = Arc::new(MixLevel::default());
+        let limiter_on = Arc::new(AtomicBool::new(true));
+        let chain = main_track(&asked, &limiter_on, Some(RATE), None);
+        let (mut main, mut output) = (chain.builder, chain.output);
+        // Appended after the gate, so it reads what reaches the device.
+        meter::install(&mut main, &heard);
+        let mut manager = AudioManager::<MockBackend>::new(AudioManagerSettings {
+            backend_settings: MockBackendSettings { sample_rate: RATE },
+            main_track_builder: main,
+            ..Default::default()
+        })
+        .expect("mock backend");
+
+        let data = sfx_from_bytes(full_scale_tone(RATE)).expect("tone decodes");
+        let render = |manager: &mut AudioManager<MockBackend>| {
+            manager.play(data.clone()).expect("play");
+            let blocks = (data.duration().as_secs_f64() + 0.05) * f64::from(RATE) / 128.0;
+            let backend = manager.backend_mut();
+            for _ in 0..(blocks.ceil() as usize) {
+                backend.on_start_processing();
+                backend.process();
+            }
+            (asked.take().peak, heard.take().peak)
+        };
+
+        // Gate open (its birth state): what the mix asked for is what comes out.
+        let (open_asked, open_heard) = render(&mut manager);
+        assert!(
+            open_asked > 0.9 && open_heard > 0.9,
+            "gate open: asked {open_asked:.3}, heard {open_heard:.3} — both should be full scale"
+        );
+
+        // Shut it, then settle the 16 ms ramp over silence so what follows measures the steady
+        // state and not the fade.
+        output.set_volume(Decibels::SILENCE, glide());
+        {
+            let backend = manager.backend_mut();
+            for _ in 0..((f64::from(RATE) * 0.05 / 128.0).ceil() as usize) {
+                backend.on_start_processing();
+                backend.process();
+            }
+        }
+        let _ = (asked.take(), heard.take());
+
+        let (shut_asked, shut_heard) = render(&mut manager);
+        assert!(
+            shut_heard < 1e-3,
+            "gate shut: the output must be silent, heard {shut_heard:.6}"
+        );
+        assert!(
+            shut_asked > 0.9,
+            "gate shut: the METER plane must still read the mix the game produced — asked              {shut_asked:.3}. A tap that goes silent with the speakers is the false negative              this ordering exists to prevent"
+        );
     }
 
     /// The master volume must sit **upstream** of the limiter — the ordering fix in

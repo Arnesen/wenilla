@@ -633,16 +633,39 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
         "#,
     )
     .unwrap();
+    // The stock macro window's character tab formats `UnitName("player")` into its label in its
+    // own OnLoad, so the player exists before the load (decision 1848).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
     for file in [
+        r"Interface\FrameXML\GlobalStrings.lua",
         "Fonts.xml",
+        "BasicControls.xml", // `TEXT`
         "MoneyFrame.xml",
         "UiPanels.xml",
+        // `ShowMacroFrame` lives here since 1848.
+        "UIParent.xml",
         "GameTooltip.xml",
         "Cooldown.xml",
+        // **ScrollTemplates BEFORE UIPanelTemplates, which is the manifest's own order.** Ours
+        // still carries dead `FauxScrollFrame_*` copies that the chain overrides by loading after
+        // (1846's step 3, deliberately not done); load them the other way round and OUR copies win
+        // — which is exactly the silent drift that record names.
         "ScrollTemplates.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        // The icon chooser's scroll frame inherits `ClassTrainerListScrollFrameTemplate`.
+        r"Interface\FrameXML\ClassTrainerFrameTemplates.xml",
         "MicroMenu.xml",
         "ActionBar.xml",
-        "MacroFrame.xml",
+        r"Interface\AddOns\Blizzard_MacroUI\Blizzard_MacroUI.xml",
         "SpellBookFrame.xml",
     ] {
         load_xml(&s, file);
@@ -668,15 +691,16 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
 
     s.run(r#"CreateMacro("Ambush", 1, "")"#).unwrap();
     s.run("ShowMacroFrame()").unwrap();
+    // The reference selects NOTHING on open — `MacroFrame_Update` only highlights an existing
+    // selection, it never assigns one — so the details pane stays down until a macro is clicked.
+    // Our retired file auto-selected the first (decision 1848).
+    s.run("MacroButton1:Click()").unwrap();
     s.run("ToggleSpellBook(BOOKTYPE_SPELL)").unwrap();
     assert!(s.errors().is_empty(), "open errors: {:?}", s.errors());
-    let body = |s: &UiScript| -> String {
-        s.eval::<String>("return BenillaMacroFrameText:GetText()")
-            .unwrap()
-    };
+    let body =
+        |s: &UiScript| -> String { s.eval::<String>("return MacroFrameText:GetText()").unwrap() };
     assert!(
-        s.eval::<bool>("return BenillaMacroFrameText:IsVisible()")
-            .unwrap(),
+        s.eval::<bool>("return MacroFrameText:IsVisible()").unwrap(),
         "the editor's body box is up — the ref's own `MacroFrame_AddMacroLine` gate"
     );
     assert_eq!(body(&s), "");
@@ -726,7 +750,7 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
     // write landed in the buffer synchronously, the notification did not (decision 1831).
     s.tick(0.0);
     assert!(
-        s.eval::<bool>("return BenillaMacroFrame.textChanged == 1")
+        s.eval::<bool>("return MacroFrame.textChanged == 1")
             .unwrap(),
         "the write goes through the box's own OnTextChanged, so the window is dirty"
     );
@@ -750,19 +774,17 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
     assert!(s.cursor_payload().is_none());
 
     // The name/icon popup hides the body box; the ref's AddMacroLine gates on exactly that.
-    s.run("BenillaMacroNewButton_OnClick()").unwrap();
-    assert!(!s
-        .eval::<bool>("return BenillaMacroFrameText:IsVisible()")
-        .unwrap());
+    s.run("MacroNewButton_OnClick()").unwrap();
+    assert!(!s.eval::<bool>("return MacroFrameText:IsVisible()").unwrap());
     click(&mut s, "SpellButton1", "LeftButton");
     assert!(s.errors().is_empty(), "popup-open errors: {:?}", s.errors());
     assert!(s.cursor_payload().is_none(), "still not a pickup");
-    s.run("BenillaMacroPopupFrame:Hide()").unwrap();
-    s.run("BenillaMacroFrame_Update()").unwrap();
+    s.run("MacroPopupFrame:Hide()").unwrap();
+    s.run("MacroFrame_Update()").unwrap();
     assert_eq!(body(&s), before, "nothing landed while the popup was up");
 
     // ── Editor hidden: the shift-click is a PICKUP again (ref l.281-282's else) ───────────────
-    s.run("HideUIPanel(BenillaMacroFrame)").unwrap();
+    s.run("HideUIPanel(MacroFrame)").unwrap();
     click(&mut s, "SpellButton1", "LeftButton");
     s.set_modifiers(false, false, false);
     assert!(s.errors().is_empty(), "pickup errors: {:?}", s.errors());

@@ -56,6 +56,7 @@ use crate::terrain_stream::{terrain_height_under, TerrainStreamer};
 use crate::view::WorldCamera;
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_assets::{AdtTile, WmoGroupNav, WmoModel, WmoPortalInfo};
+use bevy::camera::primitives::{Aabb, Frustum};
 use bevy::camera::Projection;
 use bevy::math::{Affine3A, Vec4};
 use bevy::prelude::*;
@@ -99,6 +100,22 @@ const PORTAL_PLANE_SNAP: f32 = 0.1;
 /// within this of the running nearest face hit still wins — a floor-hole portal coincident with the
 /// slab's collision faces flips the room at the plane.
 const NEAREST_TIE_EPS: f32 = 1.0e-4;
+/// MOGI/MOGP `0x10000` — the **callback-pass** group. The reference draws these in a third pass of
+/// its own (`0x6b3d6f..0x6b3dbc`), against the FULL camera frustum and gated on nothing, and Pass 2
+/// explicitly skips them (`0x6b3d0b`). Both passes read the bit off MOGI; benilla's
+/// [`WmoGroupNav::flags`] is MOGP, which wow-re verified is a strict SUPERSET of MOGI differing by
+/// exactly `0x1|0x4|0x200|0x800|0x1000` in all 5219 shipped groups — so the two agree on this bit
+/// and on [`EXTERIOR`], which is why reading MOGP here is safe.
+///
+/// 24 groups in 1.12 carry it: 14 in `stormwind.wmo` (the canals and the tall district shell),
+/// 6 across the two Dire Maul roots, and the 4 Razorfen enclosing shells that also carry `0x8`.
+const CALLBACK_PASS: u32 = 0x10000;
+/// The client's deferred-window worklist is a **fixed 16 records with no bound check** (`0x6b37b0`);
+/// nothing in the shipped data comes near it. We do not reproduce the overflow — emulating a buffer
+/// overrun is not fidelity — but we do watch the number, because a flood producing more windows than
+/// the reference's own designers left room for is far more likely to be OUR bug than the data's
+/// (decision 1148: one Trade District room once opened eleven windows onto Elwynn).
+const WORKLIST_CAP: usize = 16;
 /// Recursion depth cap (the client carries one) — a backstop against pathological portal cycles.
 const DEPTH_CAP: u32 = 64;
 /// Hard cap on flood iterations — a runaway-graph backstop; real WMOs settle far below this.
@@ -436,7 +453,7 @@ fn compute_wmo_pvs(
             .then(|| TraceLog::new(model, eye_local, terrain_local));
         // Compare-then-write (1362's shape): a parked camera's flood answers the same set every
         // frame, and writing it anyway re-marked every instance changed — see the branch above.
-        let fresh = compute_pvs_traced(
+        let mut fresh = compute_pvs_traced(
             model,
             eye_local,
             terrain_local,
@@ -508,20 +525,17 @@ fn compute_wmo_pvs(
                     });
                     // The deferred exterior-window list is this claiming placement's alone: the
                     // reference floods the CONTAINING map object (`[0xc7b748]`) and defers that
-                    // flood's windows. The push test is [`opens_a_window`] — `0x8` ALONE, NOT the
-                    // `0x148` on the line above. Those two are neighbours in the binary and
-                    // neighbours here, and 0774 recorded them as *correlated, not equivalent*;
-                    // the port read `0x148` anyway, which made every `0x40`-without-`0x8` group a
-                    // doorway onto the open world. Stormwind's streets are 115 of its 306 groups
-                    // (decision 0475), so one Trade District room opened eleven windows onto
-                    // Elwynn — decision 1148.
-                    windows = Some(
-                        tap.entered
-                            .iter()
-                            .filter(|(to, _)| opens_a_window(&model.group_nav, *to))
-                            .map(|(_, rect)| *rect)
-                            .collect(),
-                    );
+                    // flood's windows. It arrives already built — [`GroupPvs::windows`], the same
+                    // list the flood's own Pass 2 tested this building's exterior groups against.
+                    //
+                    // The push test inside it is [`opens_a_window`] — `0x8` ALONE, NOT the `0x148`
+                    // the `exterior_visible` line above reads. Those two are neighbours in the
+                    // binary and neighbours here, and 0774 recorded them as *correlated, not
+                    // equivalent*; the port read `0x148` anyway, which made every
+                    // `0x40`-without-`0x8` group a doorway onto the open world. Stormwind's streets
+                    // are 115 of its 306 groups (decision 0475), so one Trade District room opened
+                    // eleven windows onto Elwynn — decision 1148.
+                    windows = Some(std::mem::take(&mut fresh.windows));
                 }
             }
         }
@@ -560,13 +574,12 @@ fn compute_wmo_pvs(
 }
 
 /// The per-frame [`FloodTrace`] tap: the down-ray's in-group seed (the camera's current group), which
-/// the interior-fog resolve reads — no duplicate down-ray — plus every portal step's *destination
-/// group and narrowed rect*, from which [`ExteriorWindows`] is built.
+/// the interior-fog resolve reads — no duplicate down-ray.
 ///
-/// The windows come out of the flood for free: it already clips each doorway's polygon to a screen
-/// rect and intersects it with the rect it arrived on, which is precisely the accumulated
-/// screen-space AABB the reference defers per exterior window. We used to throw that rect away and
-/// keep only a boolean (`exterior_visible`, for weather).
+/// The deferred windows used to be reconstructed here, by filtering every entered step for an
+/// exterior destination. They are [`GroupPvs::windows`] now — the flood's own output — because the
+/// flood's **Pass 2** needs the identical list to decide which exterior groups draw (decision 1826),
+/// and two filters over the same steps are two places for the push test to drift.
 #[derive(Default)]
 struct SeedTap {
     in_group: Option<usize>,
@@ -575,24 +588,24 @@ struct SeedTap {
     /// tests (and which is NOT the flood's visible set, a confusion wow-re corrected in
     /// `models/scratch/wmo-interior-fog-gate.md`).
     across: Option<usize>,
-    /// `(destination group, rect it was entered on)` for every accepted portal step.
-    entered: Vec<(usize, Rect)>,
 }
 impl FloodTrace for SeedTap {
     fn seed(&mut self, seeds: DownRaySeeds) {
         self.in_group = seeds.in_group;
         self.across = seeds.across;
     }
-    fn entered(&mut self, _from: usize, _portal: u16, to: usize, rect: Rect, _on_plane: bool) {
-        self.entered.push((to, rect));
-    }
 }
 
 /// **The deferred-window push test.** A flood step opens a window onto the OPEN WORLD exactly when
 /// its DESTINATION group carries `0x8` — the recursion resolves the neighbour and tests
 /// `0x6b44f8 test byte [eax+0x10],0x8; 0x6b44fc je <skip-defer>` before pushing the clipped rect into
-/// `0xcbe310`/`0xcbe320` (wow-re `models/scratch/wmo-insideleg-phase3.md`, "Worklist provenance" —
-/// VERIFIED at the bytes). Nothing else qualifies: not [`EXTERIOR_LIT`], not the weather global's
+/// `[0xcbe324]`/`[0xcbe320]` (wow-re `models/scratch/wmo-insideleg-phase3.md`, "Worklist
+/// provenance", and the record layout in `wmo-antiportal-and-window-record.md` — VERIFIED at the
+/// bytes). **`0xcbe310` is not the array**: the fill's `lea edi,[4*ecx+0xcbe310]` is an addressing
+/// form whose addend is never dereferenced (record 0 is at `0xcbe324`), and `0xcbe310` itself is
+/// the tail of the per-frame view-projection matrix `[0xcbe2d8]+0x38`. wow-re's ledger row for
+/// `0x6b4680` called it the "antiportal quad depth"; that was a Ghidra artifact and is corrected
+/// there now. Nothing else qualifies: not [`EXTERIOR_LIT`], not the weather global's
 /// `0x148` (that mask lives at `0x6b42d0` and drives `[0xca80c4]`, a *correlated but different*
 /// signal — decision 0774 said so and the port read it anyway; decision 1148).
 fn opens_a_window(nav: &[WmoGroupNav], to: usize) -> bool {
@@ -608,6 +621,15 @@ pub(crate) trait FloodTrace {
     fn rect_none(&mut self, _from: usize, _portal: u16, _to: usize) {}
     fn rect_collapse(&mut self, _from: usize, _portal: u16, _to: usize) {}
     fn entered(&mut self, _from: usize, _portal: u16, _to: usize, _rect: Rect, _on_plane: bool) {}
+    /// One Pass-2 verdict: an EXTERIOR group tested against the whole deferred worklist. Without
+    /// this, "why is that wall still drawn?" has no reading at all — the flood's own hop lines
+    /// never mention a group no portal reaches, which is exactly the population Pass 2 decides.
+    fn pass2(&mut self, _group: usize, _flags: u32, _windows: usize, _admitted: bool) {}
+    /// One Pass-3 verdict: a `0x10000` callback-pass group against the full frustum.
+    fn pass3(&mut self, _group: usize, _flags: u32, _admitted: bool) {}
+    /// The flood produced more deferred windows than the reference's fixed worklist holds — a
+    /// tripwire on OUR flood, not a client behaviour (see [`WORKLIST_CAP`]).
+    fn worklist_over_cap(&mut self, _windows: usize) {}
 }
 impl FloodTrace for () {}
 
@@ -636,6 +658,18 @@ impl<A: FloodTrace, B: FloodTrace> FloodTrace for (&mut A, &mut B) {
         self.0.entered(from, portal, to, rect, on_plane);
         self.1.entered(from, portal, to, rect, on_plane);
     }
+    fn pass2(&mut self, group: usize, flags: u32, windows: usize, admitted: bool) {
+        self.0.pass2(group, flags, windows, admitted);
+        self.1.pass2(group, flags, windows, admitted);
+    }
+    fn pass3(&mut self, group: usize, flags: u32, admitted: bool) {
+        self.0.pass3(group, flags, admitted);
+        self.1.pass3(group, flags, admitted);
+    }
+    fn worklist_over_cap(&mut self, windows: usize) {
+        self.0.worklist_over_cap(windows);
+        self.1.worklist_over_cap(windows);
+    }
 }
 
 /// An absent recorder records nothing — so "attach the dump only when asked" costs no second flood.
@@ -663,6 +697,21 @@ impl<T: FloodTrace> FloodTrace for Option<T> {
     fn entered(&mut self, from: usize, portal: u16, to: usize, rect: Rect, on_plane: bool) {
         if let Some(t) = self {
             t.entered(from, portal, to, rect, on_plane);
+        }
+    }
+    fn pass2(&mut self, group: usize, flags: u32, windows: usize, admitted: bool) {
+        if let Some(t) = self {
+            t.pass2(group, flags, windows, admitted);
+        }
+    }
+    fn pass3(&mut self, group: usize, flags: u32, admitted: bool) {
+        if let Some(t) = self {
+            t.pass3(group, flags, admitted);
+        }
+    }
+    fn worklist_over_cap(&mut self, windows: usize) {
+        if let Some(t) = self {
+            t.worklist_over_cap(windows);
         }
     }
 }
@@ -714,6 +763,13 @@ pub(crate) struct GroupPvs {
     pub(crate) visible: Vec<bool>,
     /// Per absolute group index: draws with the interior fog triple (the `[0xca7f00]` equivalent).
     pub(crate) interior_fog: Vec<bool>,
+    /// The **deferred exterior-window worklist** this flood left behind — the client's
+    /// `[0xcbe324]` records (count `[0xcbe320]`), one clipped NDC [`Rect`] per doorway the flood
+    /// reached onto an `0x8` group. Two consumers, and that is the point of publishing it here:
+    /// the flood's own Pass 2 (which exterior groups of THIS building draw) and
+    /// [`ExteriorWindows`] (what of the open world draws), which the reference likewise feeds from
+    /// one list — `0x681070` `rep movsd`s the very same records into `0xc7cb7c`.
+    pub(crate) windows: Vec<Rect>,
 }
 
 /// [`compute_pvs`] with a [`FloodTrace`] tap on every decision — the same single flood; the probe dump
@@ -741,6 +797,21 @@ fn compute_pvs_traced<T: FloodTrace>(
     let mut stack: Vec<(usize, usize, Rect, u32, bool)> = Vec::new();
     let seeds = down_ray_seeds(model, eye_local, terrain_z);
     trace.seed(seeds);
+    // **The inside-leg flag** — the client's `[0xcde5ac]`, set only for Pass 1 of `0x6b3b20`
+    // (`0x6b3b47`, cleared `0x6b3c1a`), which is why Pass 1 is the ONLY pass that records deferred
+    // windows: the push itself is guarded on it (`0x6b4511`). And `0x6b3b20` runs at all only when
+    // the camera has a CONTAINING map object — `[0xc7b748]`, whose writer rejects an `0x8` group
+    // outright (round-6 Q-H(c), the same rule the interior claim below takes).
+    //
+    // So the eye standing on a building's own porch or outer terrace is the driver's OUTSIDE leg
+    // (`0x6811ca`): no worklist, no Pass 2, the building drawn like any other placement. Without
+    // this guard our flood would seed inside that exterior group anyway, push windows from its
+    // portal steps, and then let Pass 2 cull the rest of the shell from a vantage where the
+    // reference frustum-tests every group normally.
+    let inside_leg = seeds
+        .in_group
+        .and_then(|gi| nav.get(gi))
+        .is_some_and(|n| n.flags & EXTERIOR == 0);
     match seeds.in_group {
         Some(c) => {
             stack.push((c, usize::MAX, FULL_SCREEN, 0, true));
@@ -759,9 +830,14 @@ fn compute_pvs_traced<T: FloodTrace>(
         }
     }
 
-    // Did the interior flood reach a doorway onto an exterior group? The client's deferred-window gate
-    // (`wow-5875-re` `wmo-insideleg-phase3.md`): only then is the exterior shell drawn (below).
-    let mut deferred_exterior = false;
+    // The deferred-window worklist Pass 1 leaves behind — the client's `[0xcbe324]` records, reset to
+    // empty at `0x6b3b51` and filled by the recursion at `0x6b4541`. Pass 2 replays it below.
+    let mut windows: Vec<Rect> = Vec::new();
+    // The client's per-frame stamp on the PORTAL record (`0x6b4505`, `[esi+0x18]` vs `[0xca8014]`):
+    // a portal contributes **at most one** window per frame, however many paths the flood reaches it
+    // by. It guards the store alone — the recursion runs regardless — so this is a dedup, never a
+    // skip. First push wins, which our stack walk resolves the same way the reference's does.
+    let mut portal_pushed = vec![false; model.portal_infos.len()];
     let mut iters = 0u32;
     while let Some((g, came, rect, depth, chain)) = stack.pop() {
         iters += 1;
@@ -837,34 +913,115 @@ fn compute_pvs_traced<T: FloodTrace>(
                 continue;
             };
             trace.entered(g, r.portal, neighbour, inter, on_plane);
-            // Reaching a portal onto an exterior group records a deferred window; the interior neighbour
-            // is still flooded normally.
-            if nav.get(neighbour).is_some_and(|n| n.flags & EXTERIOR != 0) {
-                deferred_exterior = true;
+            // Reaching a portal onto an exterior group records a deferred window — the client's
+            // push at `0x6b44f8`(test `0x8`)/`0x6b4539`(count)/`0x6b4541`(rect). [`opens_a_window`]
+            // is the predicate, shared with nothing else because there IS nothing else: this is the
+            // one place the worklist is built.
+            if inside_leg && opens_a_window(nav, neighbour) {
+                if let Some(stamp) = portal_pushed.get_mut(r.portal as usize) {
+                    if !*stamp {
+                        *stamp = true;
+                        windows.push(inter);
+                    }
+                }
             }
             stack.push((neighbour, g, inter, depth + 1, chain_on));
         }
     }
 
-    // Deferred exterior-window pass — the faithful approximation of the client's Pass 2 (`wow-5875-re`
-    // `wmo-insideleg-phase3.md`): once the interior flood reaches a doorway onto an exterior group, the
-    // building's exterior shell is drawn — INCLUDING portal-disconnected groups (an inn's outer walls
-    // carry no portals, so the flood alone never reaches them, which is why they vanished from inside).
-    // Gated exactly like the client: no doorway onto an exterior reached ⇒ the shell stays culled (you
-    // can't see out, so it isn't drawn). We draw the shell to the full frustum (Bevy's per-Aabb cull
-    // bounds it) rather than clipped to each doorway window — a benign over-draw, since from inside you're
-    // meant to see the enclosing walls anyway.
-    if deferred_exterior {
+    // **Pass 2 — the deferred exterior-window replay** (`0x6b3c73..0x6b3d6f`), carved at the bytes in
+    // `wow-5875-re` `models/scratch/wmo-insideleg-phase3.md` (§5 1v1, VERIFIED). Gated on the worklist
+    // being non-empty (`0x6b3c87 jbe 0x6b3d6f` — a sealed room draws no exterior shell at all), and
+    // then, **per window**, every group is admitted on `0x8 ∧ visible against a frustum clipped to
+    // THAT window` (`0x6b3d13` / `0x6b3d22`) — never against the full view. That is what draws the
+    // portal-disconnected shells (an inn's outer walls carry no portals, so the flood alone never
+    // reaches them) without drawing the ones no doorway shows.
+    //
+    // We used to mark EVERY `0x8` group visible the moment any window existed, against the full
+    // frustum, with a comment calling it "a benign over-draw". It is not benign: it is the
+    // building's own far side drawing through its own walls, and decision 0784 had already flagged
+    // this exact line — *"the exemption is per placement, not per group … if a case turns up where
+    // it is not, this is the line to revisit"*. The case is the carve itself. Decision 1826.
+    //
+    // The sub-frustum is [`crate::exterior_cull::window_frustum`] — the SAME construction, and the
+    // same too-narrow-window reject, that gates the open world through these very rects. One
+    // definition, so a doorway that cannot admit a hillside cannot admit a wall either.
+    if windows.len() > WORKLIST_CAP {
+        trace.worklist_over_cap(windows.len());
+    }
+    if !windows.is_empty() {
+        let frusta: Vec<Frustum> = windows
+            .iter()
+            .filter_map(|r| crate::exterior_cull::window_frustum(*r, clip_from_world))
+            .collect();
         for (gi, g) in nav.iter().enumerate() {
-            if g.flags & EXTERIOR != 0 {
-                visible[gi] = true;
+            // `¬0x10000 ∧ 0x8` — the client's `0x6b3d0b`/`0x6b3d13`, in that order. A callback-pass
+            // group is Pass 3's alone (below); admitting it here too would be the double-submit the
+            // reference's two predicates exist to prevent.
+            if visible[gi] || g.flags & (EXTERIOR | CALLBACK_PASS) != EXTERIOR {
+                continue;
             }
+            let aabb = group_aabb(g);
+            let admitted = frusta
+                .iter()
+                .any(|f| f.intersects_obb(&aabb, world_from_local, true, true));
+            trace.pass2(gi, g.flags, frusta.len(), admitted);
+            visible[gi] |= admitted;
         }
+    }
+    // **Pass 3 — the callback pass** (`0x6b3d6f..0x6b3dbc`). Two things make it unlike Pass 2, and
+    // both matter: it tests the group against the **full camera frustum** (no window narrowing —
+    // there is no `0x682930` call on this path), and it is the `jbe` **fall-through**, so it runs
+    // even when the worklist is empty. A `0x10000` group therefore draws from a SEALED interior
+    // room, where nothing else of the building's outside does. Its draw is `0x6b4160` → `0x685d70`,
+    // the same per-group draw callback the flood itself uses, minus the portal recursion.
+    //
+    // **Both legs, unlike the two passes above.** Those live in `0x6b3b20`, which runs only when the
+    // camera has a containing map object; but the camera-OUTSIDE seed `0x6b3dd0` walks the same MOGI
+    // array with the same fork — `flags & 0x10000 -> 0x6b4160`, `flags & 0x8` frustum-pass -> the
+    // portal flood — so a callback group is drawn from outdoors by the identical callback. Gating
+    // this on the inside leg would have left 20 of the 24 undrawable from anywhere, including
+    // `stormwind.wmo#086`, a 322×236×258 yd piece of the city (wow-re ledger row `0x6b3dd0`).
+    //
+    // What this restores: the 24 groups no pass of ours reached from inside — 14 in `stormwind.wmo`
+    // (the canals and the tall district shell), 6 across the two Dire Maul roots, and Razorfen
+    // Downs'/Kraul's four 450–520 yd enclosing shells. Those last four also carry `0x8`, so before
+    // this they were window-tested by Pass 2 and vanished whenever no doorway showed them; the
+    // reference draws them regardless.
+    // **All four dispatch arms across both legs frustum-test the MOGI AABB first** — inside Pass 3 at
+    // `0x6b3d9d`, the outside `0x10000` arm at `0x6b3f2d`, and the two `0x8` arms — with byte-identical
+    // setup (`lea ecx,[eax+4]` = the record's six AABB floats, `call 0x682f60`, `test eax,eax; jne`,
+    // culled = nonzero), differing only in stack slots. `0x6b4160` itself is `__thiscall(root,
+    // groupIndex)`, `ret 4`: no rect, depth, owner or per-group stamp that could make the legs
+    // diverge.
+    let base = Frustum::from_clip_from_world(clip_from_world);
+    for (gi, g) in nav.iter().enumerate() {
+        if visible[gi] || g.flags & CALLBACK_PASS == 0 {
+            continue;
+        }
+        let aabb = group_aabb(g);
+        let admitted = base.intersects_obb(&aabb, world_from_local, true, true);
+        trace.pass3(gi, g.flags, admitted);
+        visible[gi] |= admitted;
     }
     GroupPvs {
         visible,
         interior_fog,
+        windows,
     }
+}
+
+/// A group's MOGI bounding box as a Bevy-space [`Aabb`] in the placement's LOCAL frame — the
+/// candidate bound Pass 2 hands the window frustum (the client's `0x682f60` takes the same per-group
+/// box out of the root's group-info array).
+///
+/// [`benilla_assets::coords::wow_to_bevy`] is a signed axis permutation, so an axis-aligned box maps
+/// to an axis-aligned box exactly: transforming the two corners and taking the componentwise
+/// min/max is the whole conversion, with no hull to rebuild.
+fn group_aabb(nav: &WmoGroupNav) -> Aabb {
+    let a = wow_to_bevy(nav.bbox_min);
+    let b = wow_to_bevy(nav.bbox_max);
+    Aabb::from_min_max(a.min(b), a.max(b))
 }
 
 /// The portal's polygon vertices (WoW model space), or `None` if the span is out of range or
@@ -1004,6 +1161,8 @@ mod audit;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use benilla_assets::WmoPortalRef;
 
     /// A prop is drawn while ANY room that names it is visible — the reference's per-visible-group
     /// MODR walk. Blackrock's lava falls hang through up to 19 groups; keying them to one owner hid
@@ -1242,6 +1401,211 @@ mod tests {
         );
         let clip = Mat4::perspective_rh(0.9, 16.0 / 9.0, 0.1, 1000.0) * view;
         assert!(portal_screen_rect(&model, info, &clip, &Affine3A::IDENTITY).is_none());
+    }
+
+    /// **Pass 2 is a per-window test, not a blanket** (decision 1826, `wow-5875-re`
+    /// `wmo-insideleg-phase3.md` `0x6b3d13`/`0x6b3d22`). One interior room with a narrow doorway onto
+    /// the outdoors, and two portal-disconnected exterior shells: one straight through the doorway,
+    /// one 30 yd off to the side. The reference draws each `0x8` group only where a *deferred
+    /// window* admits it, so the shell in the doorway draws and the one beside it does not.
+    ///
+    /// Before 1826 we set every `0x8` group visible the moment any window existed — so `g3`, a wall
+    /// no doorway shows, drew through the room's own walls. If this test ever goes green with `g3`
+    /// visible again, the building's far side is leaking again.
+    #[test]
+    fn pass_two_admits_only_the_exterior_shells_a_doorway_shows() {
+        let model = doorway_model();
+        // Eye 3 yd back from the doorway, WoW (-3, 0, 1) = Bevy (0, 1, 3), looking along WoW +x
+        // (Bevy −z) — straight through the opening.
+        let eye_local = [-3.0, 0.0, 1.0];
+        let view = Mat4::look_at_rh(
+            bevy::math::Vec3::new(0.0, 1.0, 3.0),
+            bevy::math::Vec3::new(0.0, 1.0, -10.0),
+            bevy::math::Vec3::Y,
+        );
+        let clip = Mat4::perspective_rh(0.9, 16.0 / 9.0, 0.1, 1000.0) * view;
+        let pvs = compute_pvs_traced(&model, eye_local, None, &clip, &Affine3A::IDENTITY, &mut ());
+
+        assert_eq!(
+            pvs.windows.len(),
+            1,
+            "the one portal onto an exterior group is the one deferred window"
+        );
+        assert!(pvs.visible[0], "the camera's own room");
+        assert!(pvs.visible[1], "the exterior group the portal opens onto");
+        assert!(
+            pvs.visible[2],
+            "a portal-disconnected shell straight through the doorway is admitted by its window \
+             — this is the half the flood alone can never reach"
+        );
+        assert!(
+            !pvs.visible[3],
+            "a portal-disconnected shell 30 yd off the doorway's axis is culled: no window shows \
+             it, and drawing it is exactly the over-draw 1826 removed"
+        );
+
+        // The control: widen the window to the whole screen (stand IN the doorway, which takes the
+        // on-plane full-screen branch) and the side shell comes back — proving the cull above is the
+        // window's doing and not the group's.
+        let in_door = compute_pvs_traced(
+            &model,
+            [0.0, 0.0, 1.0],
+            None,
+            &clip,
+            &Affine3A::IDENTITY,
+            &mut (),
+        );
+        assert!(
+            in_door.visible[3],
+            "with the doorway full-screen, every shell in front of the camera draws"
+        );
+    }
+
+    /// **Pass 3 draws a `0x10000` group from a SEALED room** — the `jbe` fall-through at
+    /// `0x6b3d6f`, against the full frustum, gated on nothing (decision 1826). This is the half
+    /// Pass 2 cannot express: with an empty worklist Pass 2 does not run at all, and every `0x8`
+    /// group is correctly dark, yet a callback-pass group still draws.
+    ///
+    /// The subjects in the real data are Razorfen Downs'/Kraul's 450–520 yd enclosing shells (which
+    /// carry `0x8` **and** `0x10000`, so Pass 2 alone would have culled them whenever no doorway
+    /// showed them) and Stormwind's canals.
+    #[test]
+    fn pass_three_draws_a_callback_group_from_a_sealed_room() {
+        // The doorway model with its portal graph removed: the room is sealed, so the flood reaches
+        // nothing and leaves no windows. g1..g3 keep their `0x8`; g3 also gains `0x10000`.
+        let mut model = doorway_model();
+        model.portal_refs.clear();
+        model.group_nav[0].ref_count = 0;
+        model.group_nav[1].ref_count = 0;
+        model.group_nav[3].flags |= CALLBACK_PASS;
+        // g3 sits 30 yd off-axis; aim the camera at it so the FULL frustum contains it while no
+        // window ever could — WoW (2..6, 30..34) → Bevy x ∈ [-34,-30], z ∈ [-6,-2].
+        let view = Mat4::look_at_rh(
+            bevy::math::Vec3::new(0.0, 1.0, 3.0),
+            bevy::math::Vec3::new(-32.0, 1.0, -4.0),
+            bevy::math::Vec3::Y,
+        );
+        let clip = Mat4::perspective_rh(0.9, 16.0 / 9.0, 0.1, 1000.0) * view;
+        let pvs = compute_pvs_traced(
+            &model,
+            [-3.0, 0.0, 1.0],
+            None,
+            &clip,
+            &Affine3A::IDENTITY,
+            &mut (),
+        );
+
+        assert!(
+            pvs.windows.is_empty(),
+            "a sealed room opens no doorway onto the outdoors"
+        );
+        assert!(pvs.visible[0], "the camera's own room");
+        assert!(
+            !pvs.visible[1] && !pvs.visible[2],
+            "plain 0x8 shells stay dark with an empty worklist — Pass 2 never runs"
+        );
+        assert!(
+            pvs.visible[3],
+            "the 0x10000 group draws anyway: Pass 3 is the jbe fall-through, full frustum, ungated"
+        );
+
+        // The control: Pass 3 is a frustum test, not an unconditional pass. Turn away from g3 and it
+        // goes dark — otherwise this test would pass just as well on a blanket.
+        let away = Mat4::perspective_rh(0.9, 16.0 / 9.0, 0.1, 1000.0)
+            * Mat4::look_at_rh(
+                bevy::math::Vec3::new(0.0, 1.0, 3.0),
+                bevy::math::Vec3::new(32.0, 1.0, 10.0),
+                bevy::math::Vec3::Y,
+            );
+        let behind = compute_pvs_traced(
+            &model,
+            [-3.0, 0.0, 1.0],
+            None,
+            &away,
+            &Affine3A::IDENTITY,
+            &mut (),
+        );
+        assert!(
+            !behind.visible[3],
+            "a callback group behind the camera is still frustum-culled"
+        );
+
+        // …and the OUTSIDE leg draws it too — the camera-outside seed `0x6b3dd0` forks on the same
+        // `0x10000` before its `0x8` frustum-pass. Eye over open ground (no floor under it ⇒ no
+        // containing group), so the flood takes its outside branch and seeds only `0x8` groups;
+        // g3 has no portal refs and would be unreachable, yet the callback arm still draws it.
+        let outside = compute_pvs_traced(
+            &model,
+            [-3.0, 0.0, 500.0],
+            None,
+            &clip,
+            &Affine3A::IDENTITY,
+            &mut (),
+        );
+        assert!(
+            outside.visible[3],
+            "the callback arm belongs to BOTH legs — gating it on the inside leg left 20 of the 24 \
+             real groups undrawable from anywhere"
+        );
+    }
+
+    /// One interior room (`g0`) whose single doorway (`p0`, WoW x=0, y ∈ [-0.5,0.5], z ∈ [0,2]) opens
+    /// onto an exterior group (`g1`), plus two portal-DISCONNECTED exterior shells: `g2` straight
+    /// ahead through the opening, `g3` 30 yd to the side. `g0` carries a floor at z=0 so the down-ray
+    /// seeds the flood there.
+    fn doorway_model() -> WmoModel {
+        let nav = |flags: u32, min: [f32; 3], max: [f32; 3], ref_start: u16, ref_count: u16| {
+            WmoGroupNav {
+                flags,
+                bbox_min: min,
+                bbox_max: max,
+                ref_start,
+                ref_count,
+                area_table_id: 0,
+                fog_indices: [0; 4],
+                group_liquid: benilla_formats::NO_GROUP_LIQUID,
+            }
+        };
+        let floor = |z: f32| {
+            vec![
+                [[-10.0, -10.0, z], [0.0, -10.0, z], [0.0, 10.0, z]],
+                [[-10.0, -10.0, z], [0.0, 10.0, z], [-10.0, 10.0, z]],
+            ]
+        };
+        WmoModel {
+            portal_vertices: vec![
+                [0.0, -0.5, 0.0],
+                [0.0, 0.5, 0.0],
+                [0.0, 0.5, 2.0],
+                [0.0, -0.5, 2.0],
+            ],
+            portal_infos: vec![WmoPortalInfo {
+                start_vertex: 0,
+                count: 4,
+                plane: [1.0, 0.0, 0.0, 0.0],
+            }],
+            // g0 -> g1 and back. `side = -1` puts the eye at x < 0 on the entering half-space.
+            portal_refs: vec![
+                WmoPortalRef {
+                    portal: 0,
+                    group: 1,
+                    side: -1,
+                },
+                WmoPortalRef {
+                    portal: 0,
+                    group: 0,
+                    side: 1,
+                },
+            ],
+            group_nav: vec![
+                nav(0x2000, [-10.0, -10.0, 0.0], [0.0, 10.0, 3.0], 0, 1),
+                nav(EXTERIOR, [1.0, -0.5, 0.0], [5.0, 0.5, 2.0], 1, 1),
+                nav(EXTERIOR, [2.0, -0.5, 0.0], [6.0, 0.5, 2.0], 0, 0),
+                nav(EXTERIOR, [2.0, 30.0, 0.0], [6.0, 34.0, 2.0], 0, 0),
+            ],
+            group_collision_tris: vec![floor(0.0), Vec::new(), Vec::new(), Vec::new()],
+            ..portal_model()
+        }
     }
 
     /// A bare model holding one vertical doorway portal in the WoW x=0 plane (y ∈ [-1,1], z ∈ [-1,1]),

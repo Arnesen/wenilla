@@ -306,6 +306,19 @@ fn the_maps_own_furniture_survives_the_hide_that_showing_it_performs() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1600.0, 900.0);
+    // The in-game UI materializes on world entry (1051), so a player always exists by the time the
+    // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
+    // into its label inside its own OnLoad. A manifest load with no player is a state the client
+    // never reaches (decision 1848).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
     let failures = super::load_default_ui(&s);
     assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
     s.resolve();

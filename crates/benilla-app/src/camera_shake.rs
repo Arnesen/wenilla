@@ -1,22 +1,37 @@
-//! **Camera shake** — the thump a heavy creature's footfall puts through the camera, and the
-//! one-off jolt as its body lands (B298; decision 1540).
+//! **Camera shake** — the thump a heavy creature's footfall puts through the camera, the one-off
+//! jolt as its body lands, and the jolt a spell effect puts through it (B298; decisions 1540/1849).
 //!
-//! Not an animation event. `$SHK` exists in the M2 vocabulary but **`CGUnit_C::HandleAnimEvent`
-//! does not decode it** — all 73 tags it dispatches were enumerated and `$SHK` is not among them;
-//! the only two handlers that decode it hang off the GameObject (typemask `0x20`) and
-//! DynamicObject (`0x40`) trampolines. A `$SHK` authored on a creature M2 logs
-//! `UNHANDLEDANIMEVENT` and does nothing, so no creature shake can be `$SHK`-driven — and in fact
-//! neither Ancient authors one.
+//! **Four producers, two id spaces, one evaluator.** Every producer ends at the same spawner —
+//! `AddShake(id, worldPos)` (`0x511d40`), whose five call sites are the whole population (proven by
+//! xref sweep, wow-re `spell/scratch/camera-shake-producers.md` §Q4: no address-dword reference to
+//! it anywhere, and no Lua, console, cinematic or quake path).
 //!
-//! The real chain is **data, not animation**:
+//! The **creature** pair names a `CameraShakes.dbc` preset **directly**:
 //!
-//! - **`CreatureModelData.FootstepShakeSize`** (field 11) → a `CameraShakes.dbc` row id, fired from
-//!   the **visual** footfall channel — the per-foot plant tags (`$FL0`/`$FR0`/`$RL0`/`$RR0`…), the
-//!   same stream [`crate::footprints`] reads. **Not `$FSD`**, which is the sound handler's alone.
+//! - **`CreatureModelData.FootstepShakeSize`** (field 11) → fired from the **visual** footfall
+//!   channel — the per-foot plant tags (`$FL0`/`$FR0`/`$RL0`/`$RR0`…), the same stream
+//!   [`crate::footprints`] reads. **Not `$FSD`**, which is the sound handler's alone.
 //! - **`CreatureModelData.DeathThudShakeSize`** (field 12) → the same table, fired on `$DTH`.
 //!
+//! The **spell** pair names a `SpellEffectCameraShakes.dbc` **group** — up to three presets at one
+//! point ([`benilla_formats::SpellShakeGroup`]):
+//!
+//! - **`SpellVisualKit` field 14** (`kit+0x38`, the `ShakeID` column) → once per kit play, via
+//!   [`SpellKitShake`] and [`fire_kit_shakes`], which carries the mechanism and the one deviation.
+//! - **the `$SHK` animation event** → its payload *is* a group id, fired ungated at the event's own
+//!   bone-transformed point ([`event_point`]).
+//!
+//! **`$SHK` is decoded by exactly two handlers**, hanging off the GameObject (typemask `0x20`,
+//! `0x5f3e20`) and DynamicObject (`0x40`, `0x5d58c0`) trampolines — the dword `0x4b485324` occurs
+//! twice image-wide, and of the six dispatchers `0x7133a0` registers only those two decode it.
+//! **`CGUnit_C::HandleAnimEvent` is not one of them**, so a `$SHK` on a creature M2 logs
+//! `UNHANDLEDANIMEVENT` and does nothing — which is not academic: CryptLord and Thunderaan both
+//! author markers on their death/emerge clips and the reference plays neither. That gate is why no
+//! creature shake can be `$SHK`-driven, and it is enforced in [`fire_shakes`].
+//!
 //! Only 25 of the 430 shipped models carry a footstep shake, and the set is exactly the
-//! thumping-giant list; 49 carry one of the two. See `benilla-extract shakecensus`.
+//! thumping-giant list; 49 carry one of the two, and 58 of the 1772 kits carry a shake group. See
+//! `benilla-extract shakecensus`, which maps all four producers onto the 24 presets.
 //!
 //! ## The law (wow-re `ui/scratch/camera-shake-law.md`, §5-verified)
 //!
@@ -68,6 +83,9 @@
 //!
 //! **Combination.** Three slots, one per axis, each keeping the single strongest live shake — same-axis
 //! shakes do **not** sum, the losers are dropped outright, and at most three shakes play in a frame.
+//! This is what a spell **group** is shaped for: its three slots name the `direction` 0·1·2 members
+//! of one preset family, so they land on three different axes and all three contribute. They are
+//! slots and not axes, though — group 4 is `15 · 14 · 15`, and the duplicate loses the tie-break.
 //! Ties keep the incumbent, and the walk is oldest→newest, so ties keep the **older** record.
 //!
 //! **Lifetime.** A record holds a *snapshot* position and no reference to its source, so a shake
@@ -82,12 +100,15 @@ use std::f32::consts::TAU;
 
 use bevy::prelude::*;
 
-use benilla_formats::{CameraShake, CameraShakeCatalog};
+use benilla_formats::{CameraShake, CameraShakeCatalog, SpellShakeGroup};
 
-use crate::creature_anim::{footfall_side, move_flags, AnimSoundEvent, MovementState};
+use crate::creature_anim::{
+    footfall_side, move_flags, AnimSoundEvent, MovementState, SpellKitShake,
+};
 use crate::entities::{BoneAttach, Creatures};
 use crate::net::{Embodied, NetEntity, ObjectStore};
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_protocol::EntityKind;
 use benilla_world::schedule::WorldStage;
 use benilla_world::view::WorldCamera;
 
@@ -128,6 +149,24 @@ impl CameraShakes {
             pos,
             start: now,
         });
+    }
+
+    /// Enqueue a whole `SpellEffectCameraShakes` **group** at a world point — the spell side's
+    /// only spawn shape (`0x6ecb40`, byte-read 2026-09-02): walk the three slots `+0x4/+0x8/+0xc`
+    /// in ascending order, skip the zeros, and `AddShake(id, pos)` each. A slot the preset table
+    /// does not carry is dropped by the same bounds check the reference makes (`0x511d40`'s
+    /// `cmp ecx,[maxId]`); a group naming the same preset twice (group 4 is `15 · 14 · 15`)
+    /// enqueues it twice and the duplicate simply loses [`Self::evaluate`]'s strict-`>` tie-break.
+    fn add_group(
+        &mut self,
+        group: &SpellShakeGroup,
+        table: &CameraShakeCatalog,
+        pos: Vec3,
+        now: f32,
+    ) {
+        for row in group.shakes().filter_map(|id| table.get(id)) {
+            self.add(*row, pos, now);
+        }
     }
 
     /// Retire what has expired and compose this frame's offset.
@@ -216,7 +255,7 @@ impl Plugin for CameraShakePlugin {
             // ever reaps — a slow leak across a long capture.
             .add_systems(
                 Update,
-                fire_shakes
+                (fire_shakes, fire_kit_shakes)
                     .in_set(WorldStage::Present)
                     .run_if(not(resource_exists::<crate::run_mode::CaptureMode>)),
             );
@@ -278,12 +317,34 @@ fn fire_shakes(
     let now = time.elapsed_secs();
     for ev in events.read() {
         let thud = &ev.ident == b"$DTH";
-        if !thud && footfall_side(&ev.ident).is_none() {
+        let shk = &ev.ident == b"$SHK";
+        if !thud && !shk && footfall_side(&ev.ident).is_none() {
             continue; // `$FSD` is the sound handler's; only the VISUAL channel shakes
         }
         let Ok((net, transform, attach, pose)) = units.get(ev.entity) else {
             continue;
         };
+        if shk {
+            // `$SHK`: the payload is a **group** id, and the tag is decoded by exactly two
+            // handlers — the GameObject (`0x5f3e20`, typemask 0x20) and DynamicObject
+            // (`0x5d58c0`, 0x40) dispatchers. `CGUnit_C::HandleAnimEvent` decodes no `$SHK`
+            // (the dword occurs twice image-wide), so a creature's marker is inert and this gate
+            // is what keeps it that way: CryptLord and Thunderaan both author one on their
+            // death/emerge clips, and the reference plays neither.
+            if !matches!(net.kind, EntityKind::GameObject | EntityKind::DynamicObject) {
+                continue;
+            }
+            let Some(group) = shakes.0.group(ev.data) else {
+                continue; // a payload the group table lacks — the reference bounds-checks too
+            };
+            // **No gates at all** — no distance, visibility, CVar or state test (the sibling
+            // `$DSL` arm and the footstep path both have them; this one has none). The position is
+            // the event's own bone-transformed point, not the object's origin.
+            let at = event_point(attach, pose, &joints, &ev.ident)
+                .unwrap_or_else(|| transform.translation());
+            live.add_group(group, &shakes.0, at, now);
+            continue;
+        }
         // The shake reads the ROOT unit's own model row — a mount's row is never stored there, so
         // a rider on a kodo gets the kodo's *footprints* and not its shake (`0x607a00` writes only
         // the decal fields). The root is also where the state gates live.
@@ -323,17 +384,80 @@ fn fire_shakes(
         }
         // The planted foot: the event's own marker through the live joint, exactly as the decal
         // derives it. No marker/joint = the unit origin.
-        let foot = attach
-            .zip(pose)
-            .and_then(|(a, p)| {
-                let (bone, offset) = a.markers.get(&ev.ident).copied()?;
-                p.posed_point(joints.get(p.joints_root).ok()?, bone, offset)
-            })
+        let foot = event_point(attach, pose, &joints, &ev.ident)
             .unwrap_or_else(|| transform.translation());
         if eye.distance_squared(foot) > EMIT_DISTANCE_SQ {
             continue;
         }
         live.add(*row, foot, now);
+    }
+}
+
+/// The world point an animation-event marker names on a live model — the planted foot for a
+/// footfall tag, the authored shake point for `$SHK`. `None` when the model carries no marker for
+/// the tag or has no live rig, and every caller falls back to the object's own origin.
+///
+/// This is the reference's own quantity: `placementMatrix · (boneMatrix[event.bone] ·
+/// event.position)`, computed once by the M2 event kernel (`0x719370`) and carried by value in the
+/// queue record it drains. The decal path derives it the same way, which is why the two share this.
+fn event_point(
+    attach: Option<&BoneAttach>,
+    pose: Option<&benilla_world::rig_anim::RigPose>,
+    joints: &Query<&GlobalTransform>,
+    ident: &[u8; 4],
+) -> Option<Vec3> {
+    let (a, p) = attach.zip(pose)?;
+    let (bone, offset) = a.markers.get(ident).copied()?;
+    p.posed_point(joints.get(p.joints_root).ok()?, bone, offset)
+}
+
+/// Fire the camera shake a spell-visual kit's field 14 names — the **spell-side producer**
+/// (decision 1849), the counterpart of `crate::sound::spell`'s kit-sound route.
+///
+/// One shake per kit play, unconditionally: the reference reaches it from the first-created effect
+/// node's one-time arm pass (`0x620e11`, gated on that node's flags snapshot carrying bit `0x10`)
+/// and falls back to the kit tail (`0x60f4e6`) only when the play created no node at all. Neither
+/// site tests the stage, and there is no cancel path — a shake outlives its kit.
+///
+/// **One deliberate deviation, and it is the whole reason this doc paragraph exists.** The
+/// reference's primary site passes `&node+0x48` — a position field the bone-attached node
+/// constructor `0x61fdd0` **never writes**, and which the site that would write it (`0x62101d`)
+/// fills twelve instructions *later*, for the sound. So in the real client a kit whose first
+/// created node is bone-attached shakes at `(0, 0, 0)` and is culled by the 80 yd cut: **26 of the
+/// 58 shipped shake kits are silently dead**, including every summon (kit 138) and Goblin Sapper
+/// Charge (1424). That is a read-before-write of a zero-initialised field, not a design — the
+/// value it wants is unambiguous, being the same one the sound leg uses a moment later — so we
+/// spawn at the kit play's real position and the authored data plays. benilla implements the
+/// mechanism, not the quirk (the contract §3, `method.md` step 3); the reference's own numbers are
+/// in `decisions/1849`, and reverting to them would mean deliberately modelling an uninitialised
+/// field we do not have.
+fn fire_kit_shakes(
+    mut events: MessageReader<SpellKitShake>,
+    time: Res<Time>,
+    transforms: Query<&GlobalTransform>,
+    shakes: Option<Res<Shakes>>,
+    mut live: ResMut<CameraShakes>,
+) {
+    if events.is_empty() {
+        return;
+    }
+    let Some(shakes) = shakes else { return };
+    let now = time.elapsed_secs();
+    for ev in events.read() {
+        let (group, at) = match *ev {
+            SpellKitShake::Play { entity, group } => {
+                let Ok(t) = transforms.get(entity) else {
+                    continue; // the unit went away between the kit play and this drain
+                };
+                (group, t.translation())
+            }
+            SpellKitShake::PlayAt { pos, group } => (group, pos),
+        };
+        let Some(row) = shakes.0.group(group) else {
+            continue; // a kit naming a group the table lacks — none ship, the bounds check is the
+                      // reference's own (`0x6ecb4d`)
+        };
+        live.add_group(row, &shakes.0, at, now);
     }
 }
 
@@ -545,6 +669,120 @@ mod tests {
         };
         let l = at(sway, Vec3::ZERO).evaluate(Vec3::ZERO, 0.0, 0.0, false);
         assert!(l.y.abs() < 1e-7 && l.z.abs() < 1e-6 && l.x < 0.0, "{l:?}");
+    }
+
+    /// The three spell rows a `SpellEffectCameraShakes` group names, one per axis — group 1's
+    /// `4 · 5 · 6`, verbatim.
+    const SPELL_4: CameraShake = CameraShake {
+        id: 4,
+        shake_type: 0,
+        direction: 0,
+        amplitude: 2.0,
+        frequency: 6.0,
+        duration: 4.0,
+        phase: 0.0,
+        coefficient: 0.4,
+    };
+    const SPELL_5: CameraShake = CameraShake {
+        id: 5,
+        direction: 1,
+        frequency: 4.0,
+        ..SPELL_4
+    };
+    const SPELL_6: CameraShake = CameraShake {
+        id: 6,
+        direction: 2,
+        amplitude: 4.0,
+        frequency: 5.2,
+        ..SPELL_4
+    };
+
+    /// A catalog holding the three spell presets plus the two groups the tests below name.
+    fn spell_catalog() -> CameraShakeCatalog {
+        CameraShakeCatalog::default()
+            .with_row(SPELL_4)
+            .with_row(SPELL_5)
+            .with_row(SPELL_6)
+            // Group 1 as shipped: one preset per axis.
+            .with_group(SpellShakeGroup {
+                id: 1,
+                slots: [4, 5, 6],
+            })
+            // Group 3's shape: one populated slot, two zeros.
+            .with_group(SpellShakeGroup {
+                id: 3,
+                slots: [6, 0, 0],
+            })
+            // A group naming a preset the table lacks, beside one it has — the reference's own
+            // bounds check drops the first and keeps the second.
+            .with_group(SpellShakeGroup {
+                id: 9,
+                slots: [4, 999, 0],
+            })
+    }
+
+    /// A **group** is the spell side's whole spawn shape: three slots walked in order, zeros
+    /// skipped, each landing on its own axis — so one group play moves the eye on all three.
+    #[test]
+    fn a_group_spawns_one_shake_per_populated_slot() {
+        let table = spell_catalog();
+        let mut s = CameraShakes::default();
+        s.add_group(table.group(1).unwrap(), &table, Vec3::ZERO, 0.0);
+        assert_eq!(s.live.len(), 3, "one record per populated slot");
+
+        // A quarter-second in, all three axes are moving: 4 → forward, 5 → left, 6 → up.
+        let at = 0.25;
+        let offset = s.evaluate(Vec3::ZERO, 0.0, at, false);
+        assert!(
+            offset.z != 0.0 && offset.x != 0.0 && offset.y != 0.0,
+            "{offset:?}"
+        );
+        // And each axis carries exactly its own preset's value — the slots do not sum.
+        assert_eq!(
+            offset.y,
+            vertical(SPELL_6, 0.0, at),
+            "axis 2 is preset 6's alone"
+        );
+    }
+
+    /// Zeros are skipped and a slot the preset table does not carry is dropped — the reference's
+    /// own `test/je` and its `cmp ecx,[maxId]`. Neither is an error; both just contribute nothing.
+    #[test]
+    fn a_group_skips_zero_slots_and_unknown_presets() {
+        let table = spell_catalog();
+        let mut one = CameraShakes::default();
+        one.add_group(table.group(3).unwrap(), &table, Vec3::ZERO, 0.0);
+        assert_eq!(one.live.len(), 1, "two zero slots contribute nothing");
+
+        let mut dangling = CameraShakes::default();
+        dangling.add_group(table.group(9).unwrap(), &table, Vec3::ZERO, 0.0);
+        assert_eq!(dangling.live.len(), 1, "the id the table lacks is dropped");
+        assert_eq!(dangling.live[0].row.id, 4);
+    }
+
+    /// The shipped groups 4 and 7 name the **same preset twice** (`15 · 14 · 15`), which is the
+    /// proof the three slots are slots and not axes. Both records spawn; the duplicate loses the
+    /// strict-`>` tie-break, so the axis reads exactly as it would with one.
+    #[test]
+    fn a_duplicate_slot_spawns_but_never_doubles_the_offset() {
+        let table = spell_catalog();
+        let mut s = CameraShakes::default();
+        s.add_group(
+            &SpellShakeGroup {
+                id: 4,
+                slots: [6, 5, 6],
+            },
+            &table,
+            Vec3::ZERO,
+            0.0,
+        );
+        assert_eq!(s.live.len(), 3, "the duplicate is a real record");
+        let at = 0.25;
+        assert_eq!(
+            s.evaluate(Vec3::ZERO, 0.0, at, false).y,
+            vertical(SPELL_6, 0.0, at),
+            "the duplicate contributes nothing on top of its twin"
+        );
     }
 
     /// A `direction` the reference cannot index writes nothing (rather than panicking on our side).

@@ -351,7 +351,7 @@
                 -- remember is a LATER client's (`ChatEdit_InsertLink`). And the gate is SHIFT,
                 -- not the mouse button: a plain right click on this page casts, same as a left one
                 -- — pinned both ways in `ui_script::spellbook_tests`.
-                local macroFrame = getglobal("BenillaMacroFrame")
+                local macroFrame = getglobal("MacroFrame")
                 if macroFrame and macroFrame:IsVisible() then
                     local spellName, subSpellName = GetSpellName(id, SpellBookFrame.bookType)
                     if spellName and not IsSpellPassive(id, SpellBookFrame.bookType) then
@@ -359,7 +359,7 @@
                         if subSpellName and string.len(subSpellName) > 0 then
                             line = line .. "(" .. subSpellName .. ")"
                         end
-                        BenillaMacroFrame_AddMacroLine(line)
+                        MacroFrame_AddMacroLine(line)
                     end
                 else
                     PickupSpell(id, SpellBookFrame.bookType)

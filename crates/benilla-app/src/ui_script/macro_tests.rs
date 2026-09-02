@@ -14,7 +14,31 @@
 use benilla_ui::script::{CursorPayload, UiScript};
 
 /// The window's real neighbourhood, in the manifest's own order.
+/// Click the first macro in the list.
+///
+/// The reference selects **nothing** when the window opens: `MacroFrame_OnShow` calls only
+/// `MacroFrame_Update`, and that function merely *highlights* whichever macro is already selected —
+/// it never assigns `MacroFrame.selectedMacro`. Our retired file added a benilla-only
+/// `BenillaMacroFrame_EnsureSelection` that picked the first one, and every test here leaned on it
+/// without saying so (decision 1848). A player clicks; so do these.
+fn select_first(s: &UiScript) {
+    s.run("MacroButton1:Click()").unwrap();
+}
+
+/// [`harness`] with a chosen player name.
+///
+/// The character tab's label is built in its own `OnLoad` — `format(CHARACTER_SPECIFIC_MACROS,
+/// UnitName("player"))` — so the name has to be in place BEFORE the load, not after it. That is
+/// also why the name is how a test chooses the label's width (decision 1848).
+fn harness_named(player: &str) -> UiScript {
+    harness_with(player)
+}
+
 fn harness() -> UiScript {
+    harness_with("Probefour")
+}
+
+fn harness_with(player: &str) -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The global strings the file reads by name (the app runs the real `GlobalStrings.lua`; here
@@ -42,27 +66,49 @@ fn harness() -> UiScript {
         "#,
     )
     .unwrap();
+    // **A synchronous measurer, because the app has one.** `PanelTemplates_TabResize` sizes a tab
+    // from its label's laid-out width at OnLoad, and `measured_wh` answers that inline only when a
+    // host font engine is installed — which `ui_script::extract` does (`AtlasMeasurer`). Without
+    // one the measure is pending, the width reads 0, and the stock file never re-runs TabResize
+    // because the reference's own measure is synchronous. This harness used to model the async
+    // round trip and lean on our retired file's OnUpdate re-check (decision 1848).
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
+
+    // `CHARACTER_SPECIFIC_MACROS` is a `%s` template the character tab formats
+    // `UnitName("player")` into, in its OnLoad — so the player exists before the load, not after.
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some(player.into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
+    // Through the shared loader, because the window is off the chain now and a private disk-only
+    // reader cannot name it (decision 1848).
     for file in [
+        r"Interface\FrameXML\GlobalStrings.lua",
         "Fonts.xml",
+        "BasicControls.xml", // `TEXT`
         "MoneyFrame.xml",
         "UiPanels.xml",
+        // The chain's `PanelTemplates_SelectTab` reaches for `GameTooltip` unguarded.
+        "GameTooltip.xml",
+        "UIParent.xml", // `ShowMacroFrame` lives here now
+        // **ScrollTemplates BEFORE UIPanelTemplates, the manifest's own order.** Ours still
+        // carries dead `FauxScrollFrame_*` copies the chain overrides by loading after (1846's
+        // step 3, deliberately not done); the other way round OUR copies win — the silent
+        // drift that record names.
         "ScrollTemplates.xml",
-        "MicroMenu.xml",
-        "MacroFrame.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        // `ClassTrainerListScrollFrameTemplate` — the icon chooser's scroll frame inherits it.
+        r"Interface\FrameXML\ClassTrainerFrameTemplates.xml",
+        "MicroMenu.xml", // stock `MacroFrame_OnShow`/`_OnHide` drive the micro button
+        r"Interface\AddOns\Blizzard_MacroUI\Blizzard_MacroUI.xml",
     ] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(
-            report.errors.is_empty(),
-            "{file}: loader errors: {:?}",
-            report.errors
-        );
+        super::test_ui::load_ui(&s, file);
     }
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     // The icon chooser's list is the app's push; three entries is enough to index into.
@@ -84,32 +130,32 @@ fn no_errors(s: &UiScript, step: &str) {
 /// wiring this file owns.
 #[test]
 fn new_then_pick_an_icon_then_okay_creates_the_macro() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = harness();
     s.run("ShowMacroFrame()").unwrap();
+    select_first(&s);
     no_errors(&s, "show");
 
     // OKAY starts disabled: no name, no icon.
-    s.run("BenillaMacroNewButton_OnClick()").unwrap();
+    s.run("MacroNewButton:Click()").unwrap();
     assert!(s
-        .eval::<bool>("return BenillaMacroPopupFrame:IsVisible()")
+        .eval::<bool>("return MacroPopupFrame:IsVisible()")
         .unwrap());
     assert!(
-        !s.eval::<bool>("return BenillaMacroPopupOkayButton:IsEnabled() ~= 0")
+        !s.eval::<bool>("return MacroPopupOkayButton:IsEnabled() ~= 0")
             .unwrap(),
         "a nameless, iconless macro cannot be created"
     );
 
-    s.run(r#"BenillaMacroPopupEditBox:SetText("Ambush")"#)
-        .unwrap();
-    s.run("BenillaMacroPopupButton_OnClick(BenillaMacroPopupButton1)")
-        .unwrap();
+    s.run(r#"MacroPopupEditBox:SetText("Ambush")"#).unwrap();
+    s.run("MacroPopupButton1:Click()").unwrap();
     assert!(
-        s.eval::<bool>("return BenillaMacroPopupOkayButton:IsEnabled() ~= 0")
+        s.eval::<bool>("return MacroPopupOkayButton:IsEnabled() ~= 0")
             .unwrap(),
         "a name and an icon enable OKAY"
     );
 
-    s.run("BenillaMacroPopupOkayButton_OnClick()").unwrap();
+    s.run("MacroPopupOkayButton:Click()").unwrap();
     no_errors(&s, "okay");
     assert_eq!(
         s.eval::<(i64, i64)>("local a, c = GetNumMacros() return a, c")
@@ -123,13 +169,13 @@ fn new_then_pick_an_icon_then_okay_creates_the_macro() {
     assert_eq!(name, "Ambush");
     assert_eq!(tex, "Interface\\Icons\\Ability_Ambush");
     assert!(
-        !s.eval::<bool>("return BenillaMacroPopupFrame:IsVisible()")
+        !s.eval::<bool>("return MacroPopupFrame:IsVisible()")
             .unwrap(),
         "OKAY closes the popup"
     );
     // …and the new macro is selected and shown in the detail pane.
     assert_eq!(
-        s.eval::<String>("return BenillaMacroFrameSelectedMacroName:GetText()")
+        s.eval::<String>("return MacroFrameSelectedMacroName:GetText()")
             .unwrap(),
         "Ambush"
     );
@@ -140,28 +186,30 @@ fn new_then_pick_an_icon_then_okay_creates_the_macro() {
 /// A regression here silently discards everything the player typed.
 #[test]
 fn typing_a_body_and_closing_the_window_commits_it() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.run(r#"CreateMacro("Ambush", 1, "")"#).unwrap();
     s.run("ShowMacroFrame()").unwrap();
-    s.run(r#"BenillaMacroFrameText:SetText("/cast Ambush\n/say pew")"#)
+    select_first(&s);
+    s.run(r#"MacroFrameText:SetText("/cast Ambush\n/say pew")"#)
         .unwrap();
     // The window's dirty flag comes from the box's `OnTextChanged`, which the drain owes until the
     // next frame (decision 1831).
     s.tick(0.0);
     no_errors(&s, "type");
     assert!(
-        s.eval::<bool>("return BenillaMacroFrame.textChanged == 1")
+        s.eval::<bool>("return MacroFrame.textChanged == 1")
             .unwrap(),
         "OnTextChanged marks the window dirty"
     );
     // The character counter is the ref's own MACROFRAME_CHAR_LIMIT fill.
     assert_eq!(
-        s.eval::<String>("return BenillaMacroFrameCharLimitText:GetText()")
+        s.eval::<String>("return MacroFrameCharLimitText:GetText()")
             .unwrap(),
         "21/255 Characters Used"
     );
 
-    s.run(r#"HideUIPanel(BenillaMacroFrame)"#).unwrap();
+    s.run(r#"HideUIPanel(MacroFrame)"#).unwrap();
     no_errors(&s, "hide");
     assert_eq!(
         s.eval::<String>("local _, _, b = GetMacroInfo(1) return b")
@@ -175,15 +223,16 @@ fn typing_a_body_and_closing_the_window_commits_it() {
 /// point: `MacroFrame.macroBase` is 0 or MAX_MACROS, and every binding takes `macroBase + i`.
 #[test]
 fn the_character_tab_creates_in_the_second_index_range_and_switching_saves() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.run(r#"CreateMacro("Acct", 1, "")"#).unwrap();
     s.run("ShowMacroFrame()").unwrap();
+    select_first(&s);
 
     // Type into the account macro, then switch tabs WITHOUT any explicit save.
-    s.run(r#"BenillaMacroFrameText:SetText("/say account")"#)
-        .unwrap();
+    s.run(r#"MacroFrameText:SetText("/say account")"#).unwrap();
     s.tick(0.0); // as above — the edit marks, the drain notifies (1831)
-    s.run("BenillaMacroFrameTab2:Click()").unwrap();
+    s.run("MacroFrameTab2:Click()").unwrap();
     no_errors(&s, "tab 2");
     assert_eq!(
         s.eval::<String>("local _, _, b = GetMacroInfo(1) return b")
@@ -191,18 +240,13 @@ fn the_character_tab_creates_in_the_second_index_range_and_switching_saves() {
         "/say account",
         "the tab switch saved the body first"
     );
-    assert_eq!(
-        s.eval::<i64>("return BenillaMacroFrame.macroBase").unwrap(),
-        18
-    );
+    assert_eq!(s.eval::<i64>("return MacroFrame.macroBase").unwrap(), 18);
 
     // Creating on this tab lands at 19 (the character range's base + 1).
-    s.run("BenillaMacroNewButton_OnClick()").unwrap();
-    s.run(r#"BenillaMacroPopupEditBox:SetText("Char")"#)
-        .unwrap();
-    s.run("BenillaMacroPopupButton_OnClick(BenillaMacroPopupButton2)")
-        .unwrap();
-    s.run("BenillaMacroPopupOkayButton_OnClick()").unwrap();
+    s.run("MacroNewButton:Click()").unwrap();
+    s.run(r#"MacroPopupEditBox:SetText("Char")"#).unwrap();
+    s.run("MacroPopupButton2:Click()").unwrap();
+    s.run("MacroPopupOkayButton:Click()").unwrap();
     no_errors(&s, "create on tab 2");
     assert_eq!(
         s.eval::<(i64, i64)>("local a, c = GetNumMacros() return a, c")
@@ -216,13 +260,10 @@ fn the_character_tab_creates_in_the_second_index_range_and_switching_saves() {
     );
 
     // …and back to tab 1 shows the account macro again.
-    s.run("BenillaMacroFrameTab1:Click()").unwrap();
+    s.run("MacroFrameTab1:Click()").unwrap();
+    assert_eq!(s.eval::<i64>("return MacroFrame.macroBase").unwrap(), 0);
     assert_eq!(
-        s.eval::<i64>("return BenillaMacroFrame.macroBase").unwrap(),
-        0
-    );
-    assert_eq!(
-        s.eval::<String>("return BenillaMacroFrameSelectedMacroName:GetText()")
+        s.eval::<String>("return MacroFrameSelectedMacroName:GetText()")
             .unwrap(),
         "Acct"
     );
@@ -232,12 +273,14 @@ fn the_character_tab_creates_in_the_second_index_range_and_switching_saves() {
 /// OnLoad, which re-selects the first macro (or clears the detail pane when none is left).
 #[test]
 fn delete_removes_the_macro_and_re_selects() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = harness();
     s.run(r#"CreateMacro("One", 1, "/say one")"#).unwrap();
     s.run(r#"CreateMacro("Two", 2, "/say two")"#).unwrap();
     s.run("ShowMacroFrame()").unwrap();
+    select_first(&s);
 
-    s.run("BenillaMacroDeleteButton:Click()").unwrap();
+    s.run("MacroDeleteButton:Click()").unwrap();
     no_errors(&s, "delete");
     assert_eq!(
         s.eval::<(i64, i64)>("local a, c = GetNumMacros() return a, c")
@@ -247,13 +290,13 @@ fn delete_removes_the_macro_and_re_selects() {
     // The list closed its gap, so slot 1 is now the survivor and it is what's selected.
     assert_eq!(s.eval::<String>("return GetMacroInfo(1)").unwrap(), "Two");
     assert_eq!(
-        s.eval::<String>("return BenillaMacroFrameSelectedMacroName:GetText()")
+        s.eval::<String>("return MacroFrameSelectedMacroName:GetText()")
             .unwrap(),
         "Two"
     );
 
     // Deleting the last one clears the detail pane rather than leaving a stale selection.
-    s.run("BenillaMacroDeleteButton:Click()").unwrap();
+    s.run("MacroDeleteButton:Click()").unwrap();
     no_errors(&s, "delete last");
     assert_eq!(
         s.eval::<(i64, i64)>("local a, c = GetNumMacros() return a, c")
@@ -261,7 +304,7 @@ fn delete_removes_the_macro_and_re_selects() {
         (0, 0)
     );
     assert!(
-        !s.eval::<bool>("return BenillaMacroFrameSelectedMacroButton:IsVisible()")
+        !s.eval::<bool>("return MacroFrameSelectedMacroButton:IsVisible()")
             .unwrap(),
         "no selection, no detail pane"
     );
@@ -272,13 +315,20 @@ fn delete_removes_the_macro_and_re_selects() {
 /// reaches the action bar.
 #[test]
 fn dragging_a_macro_button_loads_the_cursor_with_the_macro_payload() {
-    let s = harness();
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = harness();
     s.run(r#"CreateMacro("Ambush", 1, "/cast Ambush")"#)
         .unwrap();
     s.run("ShowMacroFrame()").unwrap();
+    select_first(&s);
 
-    s.run("BenillaMacroButton1:GetScript(\"OnDragStart\")(BenillaMacroButton1)")
-        .unwrap();
+    // A REAL drag gesture — press, then move — the way `bag_tests` drives one. Calling
+    // `GetScript("OnDragStart")(button)` leaves `this` nil, and the stock handler reads it
+    // (decision 1848); our retired file's took the button as an argument.
+    s.resolve();
+    let (bx, by): (f32, f32) = s.eval("return MacroButton1:GetCenter()").unwrap();
+    s.mouse_button(bx, by, "LeftButton", true);
+    s.mouse_move(bx + 60.0, by + 60.0);
     no_errors(&s, "drag");
     let payload = s.cursor_payload();
     assert!(
@@ -301,34 +351,35 @@ fn dragging_a_macro_button_loads_the_cursor_with_the_macro_payload() {
 /// blank, and a click marking the selection.
 #[test]
 fn the_icon_chooser_shows_the_pushed_list_and_hides_its_tail() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let s = harness();
     s.run("ShowMacroFrame()").unwrap();
-    s.run("BenillaMacroNewButton_OnClick()").unwrap();
+    select_first(&s);
+    s.run("MacroNewButton:Click()").unwrap();
     no_errors(&s, "popup");
 
     assert_eq!(s.eval::<i64>("return GetNumMacroIcons()").unwrap(), 3);
     for i in 1..=3 {
         assert!(
-            s.eval::<bool>(&format!("return BenillaMacroPopupButton{i}:IsVisible()"))
+            s.eval::<bool>(&format!("return MacroPopupButton{i}:IsVisible()"))
                 .unwrap(),
             "button {i} shows an icon"
         );
     }
     assert!(
-        !s.eval::<bool>("return BenillaMacroPopupButton4:IsVisible()")
+        !s.eval::<bool>("return MacroPopupButton4:IsVisible()")
             .unwrap(),
         "past the end of the list the button hides — not a blank square"
     );
 
-    s.run("BenillaMacroPopupButton_OnClick(BenillaMacroPopupButton3)")
-        .unwrap();
+    s.run("MacroPopupButton3:Click()").unwrap();
     assert_eq!(
-        s.eval::<i64>("return BenillaMacroPopupFrame.selectedIcon")
+        s.eval::<i64>("return MacroPopupFrame.selectedIcon")
             .unwrap(),
         3
     );
     assert!(
-        s.eval::<bool>("return BenillaMacroPopupButton3:GetChecked()")
+        s.eval::<bool>("return MacroPopupButton3:GetChecked()")
             .unwrap(),
         "the picked icon is checked"
     );
@@ -343,10 +394,20 @@ fn the_icon_chooser_shows_the_pushed_list_and_hides_its_tail() {
 /// so has no width anyone can know when the window is written. The reference's answer is the −15
 /// padding on both and a 150 cap on tab 2; this pins both arms, including the cap actually engaging.
 ///
-/// Widths are fed the way the app's font atlas feeds them ([`UiScript::set_measured_text`]) — the
-/// template's fit runs from OnUpdate once the measure lands, so the `tick` is load-bearing.
+/// **Driven through a SYNCHRONOUS measurer, and that is a correction** (decision 1848). This used
+/// to feed widths through the async round trip and lean on our retired file's OnUpdate re-check.
+/// The stock window has no such re-check: its tabs call `PanelTemplates_TabResize` once, in their
+/// own OnLoad, and the reference's measure is inline — so a client whose measure is pending at that
+/// moment can never size its tabs at all. The app installs `AtlasMeasurer`, so this harness
+/// installs one too; modelling the async path here was modelling a configuration the app does not
+/// have.
+///
+/// The label widths therefore come from the text rather than being chosen, so the two arms are a
+/// SHORT character name and a LONG one, and the cap is asserted against the label the measurer
+/// actually produced.
 #[test]
 fn the_two_tabs_fit_inside_the_window() {
+    let _data = benilla_formats::wow_data_or_skip!();
     /// `sideWidths` — 2 × the tab's 16-unit end slice (TabButtonTemplate, UiPanels.xml).
     const SIDES: f64 = 32.0;
     /// The reference's own padding for this window's tabs (Blizzard_MacroUI.xml l.488/511).
@@ -354,65 +415,51 @@ fn the_two_tabs_fit_inside_the_window() {
     /// …and its cap on tab 2 (l.511).
     const CAP: f64 = 150.0;
 
-    for (label_width, expect_tab2) in [
-        // A short name: under the cap, so the tab is text + PAD + SIDES.
-        (121.0, 121.0 + PAD + SIDES),
-        // A long one: the reference's cap binds at CAP + PAD + SIDES = 167, and the structural
-        // clamp does NOT — it measures 184 units of room (tab 2's left 160, the parent's right 384,
-        // less the 40-unit drawn-plate inset), which is looser.
-        //
-        // **This pinned 164 until geometry getters settled on demand.** The clamp reads
-        // `tab:GetLeft()`, and before that change the read could return a rect from BEFORE tab 1
-        // was resized — a stale left of 180, giving room 164 and making the clamp appear to be what
-        // held the line. It never was, for this window. The 3-unit difference was a stale read.
-        //
-        // The clamp is still the guarantee that matters, and it is asserted directly below rather
-        // than inferred from a width: tab 2's right edge must stay inside the DRAWN plate (unit
-        // 349, decision 1002's DXT3 alpha measurement), which 160 + 167 = 327 does.
-        (240.0, 167.0),
-    ] {
-        assert!(
-            expect_tab2 <= CAP + PAD + SIDES,
-            "the clamp may tighten the reference's cap, never loosen it"
-        );
-        let mut s = harness();
+    // A short name and a long one. `CHARACTER_SPECIFIC_MACROS` formats the name into tab 2's
+    // label, so the name is how the label's width is chosen.
+    for (name, cap_should_bind) in [("Probe", false), ("Bartholomewthelongnamed", true)] {
+        let mut s = harness_named(name);
         s.run("ShowMacroFrame()").unwrap();
-        s.resolve();
-        // Answer the measure round-trip for the two tab labels (the app's font-atlas job in-game).
-        let measures: Vec<_> = s
-            .fontstrings_needing_measure()
-            .into_iter()
-            .filter(|r| r.text.contains("Macros"))
-            .map(|r| {
-                let w = if r.text == "General Macros" {
-                    78.0
-                } else {
-                    label_width
-                };
-                (r.id, w as f32, 10.0, r.key)
-            })
-            .collect();
-        assert!(measures.len() >= 2, "both tab labels request a measure");
-        s.set_measured_text_unwrapped(&measures);
-        s.tick(0.016);
+        select_first(&s);
         s.resolve();
 
-        let (w1, w2, left1): (f64, f64, f64) = s
+        let (w1, w2, left1, label1, label2): (f64, f64, f64, f64, f64) = s
             .eval(
-                "return BenillaMacroFrameTab1:GetWidth(), BenillaMacroFrameTab2:GetWidth(), \
-                 BenillaMacroFrameTab1:GetLeft() - BenillaMacroFrame:GetLeft()",
+                "return MacroFrameTab1:GetWidth(), MacroFrameTab2:GetWidth(), \
+                 MacroFrameTab1:GetLeft() - MacroFrame:GetLeft(), \
+                 MacroFrameTab1Text:GetStringWidth(), MacroFrameTab2Text:GetStringWidth()",
             )
             .unwrap();
+
+        assert!(label1 > 0.0 && label2 > 0.0, "both labels measured");
         assert_eq!(
             w1,
-            78.0 + PAD + SIDES,
+            label1 + PAD + SIDES,
             "tab 1 is text − 15 + the end slices"
         );
-        assert_eq!(w2, expect_tab2, "tab 2, label width {label_width}");
+        let uncapped = label2 + PAD + SIDES;
+        if cap_should_bind {
+            assert_eq!(
+                w2,
+                CAP + PAD + SIDES,
+                "the reference's 150 cap binds on a long name"
+            );
+            assert!(
+                uncapped > CAP + PAD + SIDES,
+                "…and the name really was over it"
+            );
+        } else {
+            assert_eq!(w2, uncapped, "a short name is under the cap");
+        }
+        assert!(
+            w2 <= CAP + PAD + SIDES,
+            "the clamp may tighten the reference's cap, never loosen it"
+        );
+
         // The property the clamp exists for, checked outright: the tab ends inside the plate the
         // player can actually see, not merely inside the 384-unit frame rect.
         let tab2_right: f64 = s
-            .eval("return BenillaMacroFrameTab2:GetLeft() + BenillaMacroFrameTab2:GetWidth()")
+            .eval("return MacroFrameTab2:GetLeft() + MacroFrameTab2:GetWidth()")
             .unwrap();
         assert!(
             tab2_right <= 349.0,
@@ -434,13 +481,13 @@ fn the_two_tabs_fit_inside_the_window() {
 /// The frame is invisible, so its rect has exactly one observable consequence and this is it.
 #[test]
 fn the_icon_choosers_scroll_bar_sits_on_the_popup_plate() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
-    s.run("ShowMacroFrame() BenillaMacroNewButton_OnClick()")
-        .unwrap();
+    s.run("ShowMacroFrame() MacroNewButton:Click()").unwrap();
     s.resolve();
     let (bar_left, bar_right, plate_left, plate_right): (f64, f64, f64, f64) = s
         .eval(
-            "local b = BenillaMacroPopupScrollFrameScrollBar local p = BenillaMacroPopupFrame \
+            "local b = MacroPopupScrollFrameScrollBar local p = MacroPopupFrame \
              return b:GetLeft(), b:GetRight(), p:GetLeft(), p:GetRight()",
         )
         .unwrap();
@@ -457,25 +504,10 @@ fn the_icon_choosers_scroll_bar_sits_on_the_popup_plate() {
     no_errors(&s, "popup scroll bar");
 }
 
-/// Answer the measure round-trip the way the APP does — every pending request, every frame, with a
-/// stand-in font metric (6 units/char, wrapping greedily at the requested width). The point is the
-/// LOOP, not the metric: a hand-fed one-shot `set_measured_text` cannot show a fit that oscillates,
-/// because oscillation needs the engine to re-request after the fit changes the label's box.
-fn pump_measures(s: &mut UiScript) {
-    const PER_CHAR: f32 = 8.0;
-    let measures: Vec<_> = s
-        .fontstrings_needing_measure()
-        .into_iter()
-        .map(|r| {
-            let natural = r.text.chars().count() as f32 * PER_CHAR;
-            let w = r.wrap_width.map_or(natural, |cap| natural.min(cap));
-            let lines = if w > 0.0 { (natural / w).ceil() } else { 1.0 };
-            // The laid-out extent AND the natural one — the distinction this whole test is about.
-            (r.id, w, 13.0 * lines, natural, r.key)
-        })
-        .collect();
-    s.set_measured_text(&measures);
-}
+// `pump_measures` stood here: it answered the measure round-trip every frame so a fit that
+// OSCILLATED would show. Nothing oscillates now and nothing can — this harness installs a
+// synchronous measurer, because the app does (`AtlasMeasurer`), and the stock tabs size themselves
+// once in their own OnLoad with no re-check to converge. Decision 1848.
 
 /// **The tab row is stable and inside the window, frame after frame** — the director's repro
 /// (2026-08-05: a 9-character character name, "tab is still slightly overlapping"), and the check
@@ -488,23 +520,23 @@ fn pump_measures(s: &mut UiScript) {
 /// width every single frame and could be photographed at any point in the cycle.
 #[test]
 fn the_tab_row_settles_and_stays_inside_the_window() {
-    let mut s = harness();
-    s.run(r#"UnitName = function() return "Onehunter" end"#)
-        .unwrap();
+    let _data = benilla_formats::wow_data_or_skip!();
+    // The name is chosen at construction, because the stock tab builds its label in its own
+    // OnLoad; and there is no measure round trip to pump any more (decision 1848). The loop stays:
+    // "it does not change every frame" is still the property, it is just satisfied on the first
+    // pass now rather than after a convergence.
+    let mut s = harness_named("Onehunter");
     s.run("ShowMacroFrame()").unwrap();
-    s.run(r#"BenillaMacroFrameTab2:SetText(BenillaMacroFrame_TabTwoLabel())"#)
-        .unwrap();
+    select_first(&s);
 
     let mut widths = Vec::new();
     for _ in 0..12 {
-        s.resolve();
-        pump_measures(&mut s);
         s.tick(0.016);
         s.resolve();
         widths.push(
             s.eval::<(f64, f64, f64)>(
-                "return BenillaMacroFrameTab1:GetWidth(), BenillaMacroFrameTab2:GetWidth(), \
-                 BenillaMacroFrameTab2:GetRight() - BenillaMacroFrame:GetLeft()",
+                "return MacroFrameTab1:GetWidth(), MacroFrameTab2:GetWidth(), \
+                 MacroFrameTab2:GetRight() - MacroFrame:GetLeft()",
             )
             .unwrap(),
         );
@@ -532,35 +564,21 @@ fn the_tab_row_settles_and_stays_inside_the_window() {
 /// so this holds for a name no window author could have anticipated.
 #[test]
 fn no_character_name_can_push_the_tab_row_off_the_window() {
-    // `capped = false` strips the window's own `benillaTabMaxWidth`, leaving ONLY the structural
-    // clamp — which is the state every other tab in the client is in (no window but this one asks
-    // for a cap), and the state this guarantee exists for.
-    for (name, capped) in [
-        ("Ai", true),
-        ("Onehunter", true),
-        ("Bartholomewthethird", false),
-        (&"W".repeat(64), false),
-    ] {
-        let mut s = harness();
-        s.run(&format!("UnitName = function() return \"{name}\" end"))
-            .unwrap();
+    let _data = benilla_formats::wow_data_or_skip!();
+    // The `capped = false` arm is gone with decision 1848: it stripped a `benillaTabMaxWidth`
+    // field of our own, and the reference has no such switch — its cap is the literal `150` passed
+    // to `PanelTemplates_TabResize` in the tab's OnLoad, which nothing can turn off. So the
+    // guarantee is now just the guarantee, checked against four names including a 64-character one.
+    for name in ["Ai", "Onehunter", "Bartholomewthethird", &"W".repeat(64)] {
+        let mut s = harness_named(name);
         s.run("ShowMacroFrame()").unwrap();
-        if !capped {
-            s.run("BenillaMacroFrameTab2.benillaTabMaxWidth = nil")
-                .unwrap();
-        }
-        s.run("BenillaMacroFrameTab2:SetText(BenillaMacroFrame_TabTwoLabel())")
-            .unwrap();
-        for _ in 0..12 {
-            s.resolve();
-            pump_measures(&mut s);
-            s.tick(0.016);
-            s.resolve();
-        }
+        select_first(&s);
+        s.tick(0.016);
+        s.resolve();
         let (right, w2): (f64, f64) = s
             .eval(
-                "return BenillaMacroFrameTab2:GetRight() - BenillaMacroFrame:GetLeft(), \
-                 BenillaMacroFrameTab2:GetWidth()",
+                "return MacroFrameTab2:GetRight() - MacroFrame:GetLeft(), \
+                 MacroFrameTab2:GetWidth()",
             )
             .unwrap();
         assert!(
@@ -585,41 +603,69 @@ fn no_character_name_can_push_the_tab_row_off_the_window() {
 /// label, no clamp can put the glow at a width other than its tab's.**
 #[test]
 fn the_tab_highlight_is_exactly_its_tab() {
+    let _data = benilla_formats::wow_data_or_skip!();
     // A name under the reference's cap, one over it, and one long enough that the structural
     // drawn-edge clamp (1002) is what sets the width — all three must hold the same property.
     for name in ["Ai", "Onehunter", &"W".repeat(40)] {
-        let mut s = harness();
-        s.run(&format!("UnitName = function() return \"{name}\" end"))
-            .unwrap();
+        // The name is chosen at construction (the stock tab labels itself in its own OnLoad) and
+        // there is no measure round trip to pump — decision 1848. The frame loop stays: the
+        // highlight tracking its tab on EVERY frame is the property, not just on the first.
+        let mut s = harness_named(name);
         s.run("ShowMacroFrame()").unwrap();
-        s.run("BenillaMacroFrameTab2:SetText(BenillaMacroFrame_TabTwoLabel())")
-            .unwrap();
+        select_first(&s);
 
         for frame in 0..12 {
-            s.resolve();
-            pump_measures(&mut s);
             s.tick(0.016);
             s.resolve();
-            for tab in ["BenillaMacroFrameTab1", "BenillaMacroFrameTab2"] {
+            for tab in ["MacroFrameTab1", "MacroFrameTab2"] {
                 let (tl, tr, hl, hr): (f64, f64, f64, f64) = s
                     .eval(&format!(
                         "return {tab}:GetLeft(), {tab}:GetRight(), \
                          {tab}HighlightTexture:GetLeft(), {tab}HighlightTexture:GetRight()"
                     ))
                     .unwrap();
+                // **The two tabs carry DIFFERENT highlight widths, and that is the reference's,
+                // not a loader bug.** Exactly one `<OnLoad>` runs — the most-derived one; the
+                // template's is installed and then *destroyed*, because `SetScript` releases the
+                // slot's single ref before it even looks at the new body (wow-re
+                // `template-onload-replacement-law.md`). So a tab gets whichever formula ITS OWN
+                // body ends with:
+                //
+                //   * tab 2's body is just `PanelTemplates_TabResize(-15, nil, nil, 150)`, whose
+                //     own last statement sets the highlight to `tabWidth` — so highlight == width;
+                //   * tab 1's body RE-STATES `TabButtonTemplate`'s second line verbatim
+                //     (`HighlightTexture:SetWidth(this:GetTextWidth() + 31)`) after calling
+                //     TabResize — so its highlight is independent of its width, and 14 wider.
+                //
+                // That re-statement idiom is only necessary if the template's handler does not
+                // run, and the reference uses it deliberately: `FriendsFrame.xml:610`/`:899` copy
+                // both template lines while `:626`/`:881` declare none — a controlled pair in one
+                // file. Our retired transcription made the two tabs agree; the migration reverts
+                // that (decision 1848).
+                let label: f64 = s
+                    .eval(&format!("return {tab}Text:GetStringWidth()"))
+                    .unwrap();
+                let want = if tab == "MacroFrameTab1" {
+                    label + 31.0
+                } else {
+                    tr - tl
+                };
                 assert_eq!(
                     hr - hl,
-                    tr - tl,
-                    "{tab} f{frame} ({name}): highlight {} wide on a {} tab",
+                    want,
+                    "{tab} f{frame} ({name}): highlight {} wide, label {label}, tab {}",
                     hr - hl,
                     tr - tl
                 );
-                // …and seated where the reference seats it: its own +2 nudge off the tab's edges
-                // (TabButtonTemplate's highlight anchor offset), not centred on some other rect.
+                // …and seated where the reference seats it: `TabButtonTemplate` anchors the
+                // highlight `BOTTOM` with a `(2, -8)` offset, so it is **CENTRED** on the tab and
+                // nudged 2 right — not left-aligned at `tl + 2`, which is what this asserted while
+                // the template was ours (decision 1848). With the overhang above, centring is what
+                // keeps the extra 14 units split evenly rather than all trailing off one end.
                 assert_eq!(
-                    hl,
-                    tl + 2.0,
-                    "{tab} f{frame} ({name}): highlight not on the tab"
+                    (hl + hr) / 2.0,
+                    (tl + tr) / 2.0 + 2.0,
+                    "{tab} f{frame} ({name}): highlight not centred on the tab"
                 );
             }
         }

@@ -929,6 +929,46 @@ fn the_checkbox_rows_write_flags_and_the_master_greys_ambience() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// The background-sound row (decision 1847): the one Audio row 1.12 has no checkbox for. It
+/// boots UNCHECKED — the reference's own behaviour, which is to go quiet in the background — and
+/// its click writes the era CVar. It rides OUTSIDE the master's dependency rule, which names
+/// exactly two rows in `SoundOptionsFrame_UpdateDependencies` and never grew a third.
+#[test]
+fn the_background_sound_row_boots_off_and_writes_the_era_cvar() {
+    let mut s = harness_on(audio_harness());
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowAudio:Click()").unwrap();
+    let _ = s.take_cvar_changes();
+
+    assert!(
+        !s.eval::<bool>(
+            "return OptionsFrameContainerBodyAudioRowBackgroundSoundCheck:GetChecked()"
+        )
+        .unwrap(),
+        "the reference goes quiet in the background, so the box ships unticked"
+    );
+    s.run("OptionsFrameContainerBodyAudioRowBackgroundSoundCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![(
+            "Sound_EnableSoundWhenGameIsInBG".to_string(),
+            "1".to_string()
+        )]
+    );
+
+    // The master's rule greys Ambience and Error Speech and nothing else — this row stays live,
+    // because "should the game be audible at all" is not the question it answers.
+    s.run("OptionsFrameContainerBodyAudioRowEnableAllCheck:Click()")
+        .unwrap();
+    assert!(s
+        .eval::<bool>(
+            "return OptionsFrameContainerBodyAudioRowBackgroundSoundCheck:IsEnabled() ~= 0"
+        )
+        .unwrap());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// Defaults walks every Audio row's CVar back to its registered default and the rows follow —
 /// the era per-page reset, on the one page with rows.
 #[test]
@@ -2121,17 +2161,23 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
             untipped.push(row.to_string());
             continue;
         }
-        // The deliberate exceptions (1639 Render Scale, 1650 Display Mode). Neither has a 1.12
-        // counterpart whose `OPTION_TOOLTIP_*` could be resolved — Render Scale has no era row at
-        // all, and Display Mode's era row was a CHECKBOX whose string says "Check to…" — and both
-        // are rows a player needs a description for. Each carries one under a `BENILLA_` prefix so
-        // the reference's namespace stays the reference's, which is exactly what this guard is
-        // here to protect. Everything the guard was built to catch — an invented or typo'd
-        // `OPTION_TOOLTIP_` key that silently resolves to nothing — is untouched: the pairing below
-        // is exact, so a `BENILLA_` key on the wrong row still fails.
+        // The deliberate exceptions (1639 Render Scale, 1650 Display Mode, 1847 Enable Sound in
+        // Background). None has a 1.12 counterpart whose `OPTION_TOOLTIP_*` could be resolved —
+        // Render Scale has no era row at all, Display Mode's era row was a CHECKBOX whose string
+        // says "Check to…", and 1.12 has no background-sound setting at all (it mutes on its
+        // window-activation event and offers no way out) — and each is a row a player needs a
+        // description for. Each carries one under a `BENILLA_` prefix so the reference's
+        // namespace stays the reference's, which is exactly what this guard is here to protect.
+        // Everything the guard was built to catch — an invented or typo'd `OPTION_TOOLTIP_` key
+        // that silently resolves to nothing — is untouched: the pairing below is exact, so a
+        // `BENILLA_` key on the wrong row still fails.
         const BENILLA_OWNED: &[(&str, &str)] = &[
             ("BENILLA_TOOLTIP_RENDER_SCALE", "GraphicsRowRenderScale"),
             ("BENILLA_TOOLTIP_DISPLAY_MODE", "GraphicsRowDisplayMode"),
+            (
+                "BENILLA_TOOLTIP_BACKGROUND_SOUND",
+                "AudioRowBackgroundSound",
+            ),
         ];
         if let Some((_, want_row)) = BENILLA_OWNED.iter().find(|(k, _)| *k == key) {
             assert_eq!(row, *want_row, "{row}: not this row's string");
@@ -2168,12 +2214,15 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // bar as the other two. Camera Following Style is counted on the key it wears at rest (Smart's
     // OPTION_TOOLTIP_CAMERA1) and Show When on its own (Always's OPTION_TOOLTIP_TARGETOFTARGET5);
     // their other entries ride the same census as the selection moves.
-    // 55 of the 57 are 1.12's own; the other two are Render Scale (1639) and Display Mode
-    // (1650), whose descriptions are benilla's and whose carve-out is above.
+    // 55 of the 58 are 1.12's own; the other three are Render Scale (1639), Display Mode
+    // (1650) and Enable Sound in Background (1847), whose descriptions are benilla's and whose
+    // carve-out is above.
     // The 28th CVar row is Block Trades (1764), on the Controls page — its key
     // OPTION_TOOLTIP_BLOCK_TRADES is the reference's, so it is counted here like the rest; the
-    // 29th is Enable Error Speech (1815), 1.12's own fourth Sound checkbox, ditto.
-    assert_eq!(checked, 57, "every tipped row carries a live key");
+    // 29th is Enable Error Speech (1815), 1.12's own fourth Sound checkbox, ditto; the 30th is
+    // Enable Sound in Background (1847), the Audio page's fifth checkbox and the one row on that
+    // page the reference never made settable.
+    assert_eq!(checked, 58, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
@@ -2278,11 +2327,12 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
     // (the lock 1136, Always Show
     // ActionBars 1500), the Chat page's 1 (Remove Chat Hover Delay, 1589) and 6 API rows (Show
     // Cloak / Show Helm, 1472; the four multibar switches, 1500).
-    // …plus the Graphics page's Render Scale (1639) and Display Mode (1650), the two rows whose
-    // descriptions are benilla's own rather than 1.12 GlobalStrings — see the guard above.
+    // …plus the Graphics page's Render Scale (1639) and Display Mode (1650) and the Audio page's
+    // Enable Sound in Background (1847), the three rows whose descriptions are benilla's own
+    // rather than 1.12 GlobalStrings — see the guard above.
     // …and Block Trades (1764), the Controls page's 28th CVar row, and Enable Error Speech
     // (1815), the Audio page's fourth checkbox and 1.12's own.
-    assert_eq!(raised, 57, "every row but Auto Loot raises a description");
+    assert_eq!(raised, 58, "every row but Auto Loot raises a description");
 }
 
 /// The **Combat page** (decision 1134) — the first rows in this window whose store is a

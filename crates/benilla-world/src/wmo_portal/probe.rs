@@ -144,4 +144,22 @@ impl FloodTrace for TraceLog {
             if on_plane { " (in-plane)" } else { "" }
         ));
     }
+    fn pass2(&mut self, group: usize, flags: u32, windows: usize, admitted: bool) {
+        self.text.push_str(&format!(
+            "  pass2 g{group:02} EXT flags {flags:#07x} vs {windows} window(s): {}\n",
+            if admitted { "DRAWN" } else { "culled" }
+        ));
+    }
+    fn pass3(&mut self, group: usize, flags: u32, admitted: bool) {
+        self.text.push_str(&format!(
+            "  pass3 g{group:02} CALLBACK flags {flags:#07x} vs the full frustum: {}\n",
+            if admitted { "DRAWN" } else { "culled" }
+        ));
+    }
+    fn worklist_over_cap(&mut self, windows: usize) {
+        self.text.push_str(&format!(
+            "  WARN: {windows} deferred windows — the reference's worklist holds 16. Suspect our \
+             flood, not the data.\n"
+        ));
+    }
 }

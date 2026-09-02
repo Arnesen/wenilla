@@ -38,7 +38,7 @@ mod cinematics;
 mod creatures;
 mod dbc;
 mod unit_blood;
-pub use camera_shakes::{load_camera_shakes, CameraShake, CameraShakeCatalog};
+pub use camera_shakes::{load_camera_shakes, CameraShake, CameraShakeCatalog, SpellShakeGroup};
 pub use cinematics::{
     camera_model_path, load_cinematics, CinematicCameraRow, CinematicCatalog, CinematicPath,
     CinematicSequence, CinematicView, SEQUENCE_CAMERAS,

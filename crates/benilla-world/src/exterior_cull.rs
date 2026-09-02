@@ -204,12 +204,18 @@ impl Plugin for ExteriorCullPlugin {
 
 /// The sub-frustum for one NDC window rect.
 ///
+/// **Two callers, deliberately one construction** (decision 1826): this module gates the open world
+/// through these rects, and `crate::wmo_portal`'s Pass 2 gates the containing building's own
+/// exterior groups through the same ones. The reference likewise builds one volume per window and
+/// hands it to both (`0x682930` for `0x6b3b20`'s Pass 2, and the copy at `0xc7cb7c` for
+/// `0x682fa0`), so a doorway too narrow to admit a hillside cannot admit a wall either.
+///
 /// An NDC rect maps to the full screen by a scale+offset **on clip space** — `clip.x` scaled by
 /// `2/(x1-x0)` plus `clip.w` times `-(x0+x1)/(x1-x0)`, and likewise in y — so pre-multiplying
 /// `clip_from_world` by that matrix yields a projection whose 6 extracted planes bound exactly the
 /// window's sub-frustum. Depth rows are untouched: the window narrows the view laterally and inherits
 /// the camera's own near/far.
-fn window_frustum(rect: Rect, clip_from_world: &Mat4) -> Option<Frustum> {
+pub(crate) fn window_frustum(rect: Rect, clip_from_world: &Mat4) -> Option<Frustum> {
     let [x0, y0, x1, y1] = rect;
     let (w, h) = (x1 - x0, y1 - y0);
     if w < MIN_WINDOW_NDC || h < MIN_WINDOW_NDC {
