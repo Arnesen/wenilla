@@ -30,6 +30,8 @@ jobs:
         env:
           TOKEN: ${{ secrets.WENILLA_REALM_TOKEN }}
           SHA: ${{ github.sha }}
+          # For the ratchet's compare call against this (public) repository.
+          GH_TOKEN: ${{ github.token }}
           # Through the environment, never interpolated into the script: this is a commit message,
           # which is attacker-controlled text as far as a shell is concerned.
           SUBJECT: ${{ github.event.head_commit.message }}
@@ -53,6 +55,16 @@ jobs:
             if [ "${current}" = "${SHA}" ]; then
               echo "pin already at ${SHA} — nothing to do"; exit 0
             fi
+            # The ratchet: the new pin must descend from the current one. A pin that is not in
+            # main's history — hand-set to a side branch, or main force-reset (the ruleset now
+            # forbids that) — would otherwise be replaced silently, which is how the soundscape
+            # fix was dropped three times over. Failing loudly here is the point: fix the pin by
+            # hand, or land the change on main so the pin can follow.
+            status=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${current}...${SHA}" --jq .status 2>/dev/null || echo unknown)
+            case "${status}" in
+              ahead|identical) ;;
+              *) echo "refusing: ${SHA} does not contain the current pin ${current} (compare: ${status})" >&2; exit 1 ;;
+            esac
             sed -i "s|^WENILLA_COMMIT=.*|WENILLA_COMMIT=${SHA}|" upstreams.env
             git commit -am "upstreams: pin wenilla ${SHA:0:7} — ${subject}"
             if git push; then
