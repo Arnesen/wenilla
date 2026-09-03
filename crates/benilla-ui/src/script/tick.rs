@@ -7,7 +7,34 @@ use crate::widget::FrameHandle;
 
 use super::{editbox, event, tooltip, ScriptValue, UiScript};
 
+/// The most events the tap holds between drains — a frame's worth, generously (a busy raid frame
+/// fires a few hundred `UNIT_*`). Past it the tap drops rather than grows: a host that stopped
+/// draining must not turn the VM into a leak.
+const EVENT_TAP_CAP: usize = 4096;
+
 impl UiScript {
+    /// Turn the event tap on or off ([`super::Model::event_tap`]). Turning it off discards
+    /// whatever was tapped and not yet drained; turning it on twice is a no-op.
+    pub fn set_event_tap(&mut self, on: bool) {
+        let mut model = self.model_mut();
+        match (on, model.event_tap.is_some()) {
+            (true, false) => model.event_tap = Some(Vec::new()),
+            (false, true) => model.event_tap = None,
+            _ => {}
+        }
+    }
+
+    /// Drain the events tapped since the last call — every `(name, args)` that went through
+    /// [`Self::fire_event`], in dispatch order, whether or not any frame was registered for it.
+    /// Empty when the tap is off.
+    pub fn take_tapped_events(&mut self) -> Vec<(String, Vec<ScriptValue>)> {
+        self.model_mut()
+            .event_tap
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
     /// Queue an event to fire at the **start of the next tick**, into the same
     /// [`super::Model::pending_events`] list the engine's own bindings use — so it lands *after*
     /// everything queued earlier in the frame and before that tick's `OnUpdate` pass.
@@ -52,7 +79,12 @@ impl UiScript {
     /// divergence from an accident, not from a mechanism).
     pub fn fire_event(&mut self, event: &str, args: Vec<ScriptValue>) {
         let mut at = {
-            let model = self.model_mut();
+            let mut model = self.model_mut();
+            if let Some(tap) = model.event_tap.as_mut() {
+                if tap.len() < EVENT_TAP_CAP {
+                    tap.push((event.to_string(), args.clone()));
+                }
+            }
             model
                 .event_to_frames
                 .get(event)

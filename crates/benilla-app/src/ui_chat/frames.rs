@@ -38,6 +38,13 @@ pub(crate) struct ChatWindows {
     /// suppresses no header the reference would show — an empty default only ever makes the test
     /// *more* likely to print one.
     pub default_language: String,
+    /// Whether a non-window observer wants [`Self::routed`] filled — set by the web bridge
+    /// while a page is listening, off otherwise so an unobserved session never clones a line.
+    pub observe: bool,
+    /// Every event [`route`] delivered since the observer last drained it, in delivery order —
+    /// the same lines the windows and the Lua fire saw, one copy each. Empty unless
+    /// [`Self::observe`] is on.
+    pub routed: Vec<ChatEvent>,
 }
 
 impl Default for ChatWindows {
@@ -117,6 +124,8 @@ impl Default for ChatWindows {
             ],
             tell_alert_left: 0.0,
             default_language: String::new(),
+            observe: false,
+            routed: Vec::new(),
         }
     }
 }
@@ -196,6 +205,10 @@ pub(crate) fn route(
     }
     // ── everyone else: the addons, after the default UI, exactly as registration order says ──
     script.fire_event(event_name(kind), event.script_args());
+    // ── and the observer that is not a frame (the web bridge), after both ──
+    if windows.observe {
+        windows.routed.push(event.clone());
+    }
 }
 
 /// Add one composed line, converting the `0..255` table color to the seam's `0..1` floats.

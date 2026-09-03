@@ -2324,3 +2324,30 @@ fn the_posture_emotes_carry_no_swim_suppression_flag() {
         );
     }
 }
+
+/// The observer that is not a frame (`ChatWindows::routed`, the web bridge's chat feed): nothing
+/// is copied until it is asked for, then every routed line is, whichever windows wanted it.
+#[test]
+fn routed_lines_are_copied_for_an_observer_only_while_it_observes() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = chat_vm();
+    let mut windows = super::frames::ChatWindows::default();
+    super::frames::route(&mut s, &mut windows, &ev(K::Say, "unseen", "Bob"));
+    assert!(windows.routed.is_empty(), "no observer, no copy");
+
+    windows.observe = true;
+    super::frames::route(&mut s, &mut windows, &ev(K::Say, "seen", "Bob"));
+    let mut whisper = ev(K::Whisper, "psst", "Eve");
+    whisper.sender_guid = 0x42;
+    super::frames::route(&mut s, &mut windows, &whisper);
+    // A kind no window registers still reaches the observer, like it reaches an addon.
+    super::frames::route(
+        &mut s,
+        &mut windows,
+        &ev(K::CombatFriendlyPlayerHits, "x hits y", ""),
+    );
+    let kinds: Vec<K> = windows.routed.iter().filter_map(|e| e.kind).collect();
+    assert_eq!(kinds, [K::Say, K::Whisper, K::CombatFriendlyPlayerHits]);
+    assert_eq!(windows.routed[1].sender_guid, 0x42, "the guid rides along");
+    assert!(s.errors().is_empty(), "handler errors: {:?}", s.errors());
+}

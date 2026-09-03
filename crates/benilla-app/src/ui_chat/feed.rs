@@ -811,6 +811,7 @@ pub(super) fn feed_chat(
                     language: language_name(language).to_string(),
                     channel: channel_base,
                     flag: flag_of_tag(msg.chat_tag).to_string(),
+                    sender_guid: msg.sender_guid,
                     ..Default::default()
                 };
                 channels.stamp_channel(&mut event);

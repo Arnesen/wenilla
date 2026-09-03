@@ -179,6 +179,7 @@ mod ui_unit;
 mod ui_world_map;
 mod video;
 mod vplates;
+mod webbridge;
 /// The web build's env-var stand-in (a browser tab has no process environment) — see the
 /// module doc. `pub` because the plan's "Env/config on web" interface names it as
 /// `benilla_app::webenv::var` by that exact path; every in-crate caller still just writes
@@ -627,6 +628,8 @@ pub fn run(build: BuildId) -> AppExit {
     // The key-binding engine (decision 0997): the chord→command dispatch every rebindable input
     // runs through, its persistence, and the Key Bindings window's capture seam.
     .add_plugins(bindings::BindingsPlugin)
+    // The page's live window onto the game (webbridge.rs) — after the bindings it drives.
+    .add_plugins(webbridge::WebBridgePlugin)
     // The unit snapshot + event feed (decision 0068 §3): pushes ECS game state into the VM as the
     // plain data the `Unit*` bindings read, and fires the matching WoW events.
     .add_plugins(UiUnitPlugin)
