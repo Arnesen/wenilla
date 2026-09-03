@@ -1,0 +1,49 @@
+# The pull-request gate. Upstream benilla runs no CI and never builds the wasm target, so a
+# wasm-only break (a tuple that became a struct, a std::time::Instant) is invisible to it and to a
+# native `cargo check` here. This is where it is caught before it reaches `main` — and `main`'s
+# head is what wenilla-realm builds into the production image (bump-realm-pin.yml), so a red
+# `main` is a red image ~25 minutes later.
+#
+# Two jobs, both cheap next to the image build: the wasm target is *checked* (no codegen, no
+# wasm-bindgen pass), and the realm service's own tests run natively (mock SOAP, sqlite — no game
+# data). The full workspace test suite needs a 1.12.1 patch chain and is not run here.
+name: check
+on:
+  pull_request:
+  push:
+    branches: [main]
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+          cache-directories: tools
+      # wasi-sdk is the C sysroot the Lua VM's build script needs even for `cargo check`; the
+      # script also installs wasm-bindgen-cli at Cargo.lock's exact version, which `check` does
+      # not use but a later `web-build.sh` step would. Both land under tools/ and ~/.cargo/bin,
+      # which the cache above keeps.
+      - name: toolchain (scripts/web-setup.sh)
+        run: scripts/web-setup.sh
+      - name: cargo check, wasm32
+        run: cargo check --target wasm32-unknown-unknown -p wenilla --no-default-features --features webgpu
+  realm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: realm
+      - name: cargo test -p wenilla-realm
+        run: cargo test -p wenilla-realm
