@@ -37,8 +37,11 @@ jobs:
           set -euo pipefail
           git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY_OWNER}/wenilla-realm" realm
           cd realm
-          git config user.name "wenilla-ci"
-          git config user.email "ci@users.noreply.github.com"
+          # GitHub maps any <login>@users.noreply.github.com address to that login's account, so
+          # the email decides which avatar the commit shows — "ci" is a stranger's account. The
+          # id+login form below is the Actions bot's own address, so the pin lands as the bot.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # What landed on main, first line only — the pin history reads as a list of what shipped
           # rather than a column of identical "auto-bump" lines.
           subject=$(printf '%s' "${SUBJECT}" | head -n1)
