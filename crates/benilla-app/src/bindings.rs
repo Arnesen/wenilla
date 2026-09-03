@@ -166,6 +166,59 @@ impl BindingsState {
             ..Default::default()
         }
     }
+
+    // ── The synthetic seam ── commands asserted by something that is not a key: the web bridge
+    // (`crate::webbridge`). Each is an ordinary latch/fire under [`BindKey::Synth`], so every
+    // consumer reads it through the same four accessors above and cannot tell it from a key —
+    // the `follow_forward` precedent (`player/input.rs`: "synthesized input is not a keypress",
+    // but it IS a latch). The typing edge drops a synthetic Held like any other; the stuck-latch
+    // sweep never touches one (there is no physical key to read up); a VM swap clears it with the
+    // rest, and the bridge re-asserts next frame.
+
+    /// Assert a [`Kind::Held`] command for this frame. Idempotent: a command already latched
+    /// (synthetically or by a key) gains nothing; a fresh latch lands its press edge in `just`,
+    /// exactly as a key-DOWN would, so the autorun cancel set sees it. Non-Held kinds are
+    /// ignored — an Edge/EdgeUpDown body has to run through the VM ([`Self::synth_fire`] is the
+    /// wrong tool too; the bridge runs those bodies itself).
+    pub(crate) fn synth_hold(&mut self, cmd: Cmd) {
+        if !matches!(SPECS[cmd.0 as usize].kind, Kind::Held) {
+            return;
+        }
+        let key = BindKey::Synth(cmd);
+        if self.latched.iter().any(|&(k, _)| k == key) {
+            return;
+        }
+        if !self.pressed(cmd) {
+            self.just.push(cmd);
+        }
+        self.latched.push((key, Bound::Spec(cmd)));
+    }
+
+    /// Drop this command's synthetic latch, if any. A key's latch on the same command is untouched.
+    pub(crate) fn synth_release(&mut self, cmd: Cmd) {
+        self.latched.retain(|&(k, _)| k != BindKey::Synth(cmd));
+    }
+
+    /// Drop every synthetic latch — world exit, the typing edge, the bridge letting go.
+    pub(crate) fn synth_release_all(&mut self) {
+        self.latched
+            .retain(|&(k, _)| !matches!(k, BindKey::Synth(_)));
+    }
+
+    /// Fire a [`Kind::Host`] command once this frame with an analog `amount` (the wheel's notch
+    /// magnitude for the zoom; `1.0` is the reference's key step) — the wheel path's host arm
+    /// (`latch_and_dispatch`), minus the chord. Non-Host kinds are ignored, for the reason on
+    /// [`Self::synth_hold`].
+    pub(crate) fn synth_fire(&mut self, cmd: Cmd, amount: f32) {
+        if !matches!(SPECS[cmd.0 as usize].kind, Kind::Host) {
+            return;
+        }
+        self.fired.push(cmd);
+        if !self.pressed(cmd) {
+            self.just.push(cmd);
+        }
+        self.amounts.push((cmd, amount));
+    }
 }
 
 /// Which files this session's bindings live in — the macros-files pattern
@@ -689,6 +742,9 @@ fn latch_and_dispatch(
             }
             BindKey::Mouse(b) => !buttons.pressed(b),
             BindKey::WheelUp | BindKey::WheelDown => true,
+            // No physical key to read: the bridge that asserted it is the one that releases it
+            // (`BindingsState::synth_release`), every frame it still wants the hold.
+            BindKey::Synth(_) => false,
         };
         if up && !stuck.contains(&k) {
             stuck.push(k);
@@ -1649,6 +1705,110 @@ mod tests {
         assert!(
             !open(&app, 0) && !open(&app, 2),
             "SHIFT-B again shuts them all"
+        );
+    }
+
+    // ── The synthetic seam (`BindingsState::synth_*`, the web bridge's door) ──
+
+    fn state_mut(app: &mut App) -> Mut<'_, BindingsState> {
+        app.world_mut().resource_mut::<BindingsState>()
+    }
+
+    #[test]
+    fn a_synthetic_hold_is_a_latch_the_sweep_never_releases() {
+        let mut app = harness();
+        app.update();
+        state_mut(&mut app).synth_hold(cmd::MOVE_FORWARD);
+        assert!(state(&app).pressed(cmd::MOVE_FORWARD));
+        assert!(
+            state(&app).just_pressed(cmd::MOVE_FORWARD),
+            "the first assertion is the press edge"
+        );
+        // Idempotent within the frame: a second assert neither double-latches nor re-edges.
+        state_mut(&mut app).synth_hold(cmd::MOVE_FORWARD);
+        assert_eq!(
+            state(&app)
+                .latched
+                .iter()
+                .filter(|&&(k, _)| k == BindKey::Synth(cmd::MOVE_FORWARD))
+                .count(),
+            1
+        );
+        // A frame later the dispatch has swept every key that reads up — and left this one,
+        // which has no key to read.
+        app.update();
+        assert!(state(&app).pressed(cmd::MOVE_FORWARD));
+        assert!(!state(&app).just_pressed(cmd::MOVE_FORWARD));
+        state_mut(&mut app).synth_release(cmd::MOVE_FORWARD);
+        assert!(!state(&app).pressed(cmd::MOVE_FORWARD));
+    }
+
+    #[test]
+    fn a_synthetic_fire_is_a_host_edge_with_an_amount() {
+        let mut app = harness();
+        app.update();
+        state_mut(&mut app).synth_fire(cmd::CAMERA_ZOOM_IN, 2.5);
+        assert!(state(&app).fired(cmd::CAMERA_ZOOM_IN));
+        assert!(state(&app).just_pressed(cmd::CAMERA_ZOOM_IN));
+        assert_eq!(state(&app).amount(cmd::CAMERA_ZOOM_IN), 2.5);
+        app.update();
+        assert!(
+            !state(&app).fired(cmd::CAMERA_ZOOM_IN),
+            "an edge lasts one frame"
+        );
+        assert_eq!(state(&app).amount(cmd::CAMERA_ZOOM_IN), 0.0);
+    }
+
+    #[test]
+    fn the_typing_edge_drops_a_synthetic_held_like_a_keys() {
+        let mut app = harness();
+        app.update();
+        state_mut(&mut app).synth_hold(cmd::MOVE_FORWARD);
+        app.world_mut().resource_mut::<UiKeyboardCapture>().typing = true;
+        app.update();
+        assert!(
+            !state(&app).pressed(cmd::MOVE_FORWARD),
+            "a box taking focus stops movement, synthetic or not"
+        );
+        app.world_mut().resource_mut::<UiKeyboardCapture>().typing = false;
+        app.update();
+        assert!(
+            !state(&app).pressed(cmd::MOVE_FORWARD),
+            "and it stays stopped until re-asserted"
+        );
+        state_mut(&mut app).synth_hold(cmd::MOVE_FORWARD);
+        assert!(state(&app).pressed(cmd::MOVE_FORWARD));
+    }
+
+    #[test]
+    fn a_synthetic_assert_of_the_wrong_kind_is_a_no_op() {
+        let mut app = harness();
+        app.update();
+        state_mut(&mut app).synth_hold(cmd::JUMP);
+        assert!(
+            !state(&app).pressed(cmd::JUMP),
+            "JUMP is a host edge, not a hold"
+        );
+        state_mut(&mut app).synth_fire(cmd::MOVE_FORWARD, 1.0);
+        assert!(
+            !state(&app).fired(cmd::MOVE_FORWARD),
+            "MOVEFORWARD is a hold, not a fire"
+        );
+        assert!(state(&app).just.is_empty() && state(&app).latched.is_empty());
+    }
+
+    #[test]
+    fn a_key_release_never_touches_a_synthetic_latch_on_the_same_command() {
+        let mut app = harness();
+        app.update();
+        state_mut(&mut app).synth_hold(cmd::MOVE_FORWARD);
+        press_key(&mut app, KeyCode::KeyW);
+        app.update();
+        release_key(&mut app, KeyCode::KeyW);
+        app.update();
+        assert!(
+            state(&app).pressed(cmd::MOVE_FORWARD),
+            "W's latch came and went; the bridge's is still there"
         );
     }
 }

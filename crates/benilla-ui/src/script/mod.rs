@@ -105,6 +105,7 @@ pub use object::frame_kind_from_tag;
 mod party;
 mod pet;
 mod petition;
+pub mod plain;
 mod pointer;
 mod pvp;
 mod quest;

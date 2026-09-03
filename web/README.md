@@ -91,3 +91,165 @@ own accounts (a second login on one account kicks the first, as in the real clie
   `textureSample` in a per-fragment branch — `textureSampleGrad`/`textureSampleLevel` instead);
   wasm-bindgen crate and CLI versions must match exactly; wasi-libc's `fd_prestat_get` stub
   must return EBADF (`web/wasi_stubs.js`) or libc's constructor exits.
+
+## JavaScript bridge
+
+The page can see the game and drive it. `web/bridge.js` (loaded by `index.html`, and
+`window.wenilla` in the devtools console) is the API; `crates/benilla-app/src/webbridge/` is the
+wasm side. Two things it exists for: **web HUDs and addons in plain JS/HTML** on top of the
+canvas — a proximity-chat overlay, a map, a threat meter — and **control from JS**: automation
+("idle-RPG" play), and inputs the client has no path for, such as a gamepad. A third fell out of
+it: **desktop notifications while the tab is in the background** (level-ups, death, whispers,
+invites, mail, combat), which needs the game to keep ticking in a hidden tab, so the bridge
+provides that too.
+
+```js
+wenilla.state.self.pos                       // [x, y, z] in WoW yards; .facing in radians
+wenilla.on('chat', (c) => console.log(c.sender, c.senderGuid, c.text))
+wenilla.on('PLAYER_LEVEL_UP', (args) => …)   // any FrameXML event, by name
+wenilla.hold('MOVEFORWARD'); wenilla.release('MOVEFORWARD'); wenilla.fire('JUMP')
+await wenilla.lua("return UnitName('target'), UnitHealth('target')")   // → ['Defias Thug', 61]
+wenilla.chat('/say hello'); wenilla.chat('/target Bob')
+wenilla.gamepad.start(); wenilla.notify.enable()   // the 🔔 button does the latter
+```
+
+`?bridge=hud` mounts `web/examples/hud.js` (self, zone, target, the nearest units with distance
+and bearing, chat lines with how far the speaker is — the proximity prerequisite made visible);
+`?bridge=idle` runs `web/examples/idle.js`, a 30-line attack-nearest loop. `?bridge=0` turns the
+bridge off for the session.
+
+### How it works, and what it stands on
+
+The wasm exports nothing new. Once a frame it looks up `window.__wenilla_bridge` (the object
+`bridge.js` creates); absent, the bridge is idle at that one lookup's cost. Present, the wasm
+calls `onFrame(snapshot)` at `hz` (default 20/s) and `onEvent(name, payload)` as things happen,
+and drains the object's `queue` of command objects. Everything is plain properties and plain
+objects — the same `Reflect.get`/`call` pattern `webenv.rs` and `webprogress.rs` already use,
+no `serde_json` in the shipped app, no new `web-sys` features.
+
+Where the data comes from: the Lua UI is already fed by per-frame plain-data snapshots
+(`ui_unit::snapshot`, the unit frames' own view of a descriptor, with the feign-death and rage
+display rules applied), and every FrameXML event goes through one `UiScript::fire_event` — 856
+call sites. The bridge reuses the first for `self`/`target`/`units[]` and taps the second for
+the event stream, so a page and an addon can never disagree. Chat lines are copied off the same
+router that feeds the windows and the `CHAT_MSG_*` fire, with the one thing the reference's
+event never carried — the sender's **guid** — so a proximity feature can find the speaker in
+`units[]`. Zone texts are the resolve that writes `GetZoneText()`'s globals, published once more
+as a resource.
+
+Where control goes: every key the client reads collapses into one `BindingsState` resource
+that the movement controller, jump, sit, TAB-targeting, attack and the camera zoom read —
+nothing downstream reads raw keys — so the bridge asserts *commands by name* into that state
+(`MOVEFORWARD`, `JUMP`, `ACTIONBUTTON1`: the 202 names in the Key Bindings window, listed in
+the `ready` event). A page cannot do anything a key cannot, and rebinding keys does not change
+what the page's `hold('MOVEFORWARD')` does. `Kind::Held` commands latch (re-asserted every
+frame until released; dropped when the chat box takes focus, like keys, and resumed when it
+loses it, unlike keys — a stick has no re-press); host edges fire once with an amount (the
+wheel's zoom notch); action-button commands run their Lua press and release bodies
+back-to-back, the wheel-notch law that makes a button cast. Movement, jump, sit, sheath,
+autorun and interaction have no Lua verbs in 1.12, which is why the bridge goes under the
+bindings instead of through the VM for them. Casting, targeting by name, quests, bags and
+reading state back out go through the VM: `lua(chunk)` evaluates a chunk and returns its
+results as plain values (tables to depth 4, at most 512 values). Turning is
+`Player::turn_aim` — the scripted mouse-turn the probe harness uses. NPC and gameobject
+interaction (a right-click) is not exposed yet.
+
+Considered and not chosen: synthesizing DOM key events on the canvas (no Rust change, but
+chord-addressed and fragile for mouse-look), Bevy's raw input messages (the probe fleet's shape,
+still chord-addressed), and the `Model` intent queues (typed, but bypasses FrameXML's own
+side effects). The dev probes (`WOW_PROBE_KEY`/`_LUA`/`_CHAT`/`_LOOK`) are the working
+templates for each channel, but they are compiled out of the browser build with the rest of the
+dev feature, and gated on environment variables the browser does not have.
+
+### The contract
+
+`window.__wenilla_bridge` — the page owns these; `bridge.js` fills them in:
+
+| property | meaning |
+|---|---|
+| `hz` | `onFrame` calls per second, `0` = every frame (default 20, clamped to 120) |
+| `radius`, `maxUnits` | `units[]` is every streamed object within `radius` yards, nearest first, at most `maxUnits` (60, 64) |
+| `events` | Lua events to relay through `onEvent('event', …)`: a list of names, or `'*'` (a firehose — debugging only) |
+| `queue` | command objects (below); the wasm empties it every frame |
+| `onFrame(snapshot)` | called at `hz` while the object exists |
+| `onEvent(name, payload)` | called as events happen |
+| `wake()` | installed by the wasm: runs one app update (the hidden-tab keepalive) |
+
+Snapshot (`wenilla.state`): positions are `[x, y, z]` in **WoW coordinates** (+X north, +Y
+west, +Z up, yards); `facing` is the wire orientation in radians (counter-clockwise from +X);
+guids are hex strings (`"0xf130000000000001"`), because a u64 does not fit a JS number.
+
+```
+{ v: 1, seq, t,                      // t: seconds since the app started
+  session: { state: 'login'|'charselect'|'charcreate'|'inworld', connected },
+  map: { id }, zone: { id, name, realZone, subzone, minimapText, indoor, pvpType, pvpFaction, arena } | null,
+  self:   Unit + { pos, facing, mounted, casting: {spellId}|null, channeling: {spellId}|null } | null,
+  target: Unit | null,  hover: { guid } | null,
+  units: [ Unit… ] }
+Unit = { guid, kind: 'player'|'unit'|'go'|'corpse'|'dyn', name|null, pos, dist, displayId,
+         health, maxHealth, power, maxPower, powerType, level, dead, ghost, inCombat,
+         reaction (1..8, 0 unknown), hostile, friendly, isPlayer, pvp, class, race, targetGuid,
+         moveFlags, moving, swimming, falling, speed, standState, stealthed }
+```
+
+Events (`wenilla.on(name, cb)`):
+
+| name | payload |
+|---|---|
+| `ready` | `{ version, commands: [{name, kind: 'held'|'host'|'lua', category}] }` — once, when the wasm first sees the object |
+| `state` | `{ state, connected }` on change (any screen, not only in-world) |
+| `map` | `{ id }` on a worldport |
+| `zone` | the `zone` block, on change |
+| `chat` | `{ event: 'CHAT_MSG_SAY', kind: 'SAY', text, sender, senderGuid, language, channel, channelNumber, target, flag }` — every routed line |
+| `event` | `{ name, args }` — a Lua event you subscribed to; `wenilla.on('PLAYER_DEAD', …)` subscribes for you |
+| `lua` | `{ id, ok, values }` or `{ id, ok: false, error }` — `wenilla.lua()` turns these into a promise |
+| `input` | `{ heldCleared: true }` — the wasm dropped every held command (world exit, the object vanished, `release`) |
+| `error` | `{ reason, cmd? }` — an unknown command name (reported once) or a malformed queue entry |
+
+Commands (`queue` entries; the `wenilla.*` methods build them):
+
+| op | fields | does |
+|---|---|---|
+| `hold` | `cmd, down` | assert/release a held command (`MOVEFORWARD`, `TURNLEFT`, `STRAFERIGHT`, …) |
+| `fire` | `cmd, amount?` | a host edge (`JUMP`, `TARGETNEARESTENEMY`, `CAMERAZOOMIN` with `amount` notches) or an action button (`ACTIONBUTTON1`: press+release) |
+| `look` | `dyaw` | turn the aim by radians, positive = left |
+| `lua` | `id, chunk` | evaluate; answered by a `lua` event with that `id` |
+| `chat` | `text` | a line as if typed and submitted — `/say`, `/target`, `/follow`, `/sit`, `.gm` |
+| `release` | | drop every hold |
+
+### Background tabs and notifications
+
+A hidden tab gets no `requestAnimationFrame` and its timers are throttled (to 1/s, then 1/min
+after five minutes), so the game — which runs off animation frames when visible and off timers
+when the canvas loses focus — stops until the tab is looked at again. Nothing is lost (the
+WebSocket buffers), but nothing happens either. `bridge.js` fixes that from the page: while
+hidden it runs a dedicated Worker (whose timers browsers do not throttle) that calls the
+`wake()` the wasm installed at `wenilla.background.hz` (default 4/s); each wake is one full
+app update. Four a second is a few percent of a core; a bot that must react faster can raise it
+with `wenilla.set({backgroundHz: 20})`; `0` disables it.
+
+On that, `wenilla.notify` shows desktop notifications for a rule set the page may edit
+(`wenilla.notify.rules`): `PLAYER_LEVEL_UP`, `PLAYER_DEAD`, `RESURRECT_REQUEST`,
+`PARTY_INVITE_REQUEST`, `GUILD_INVITE_REQUEST`, `DUEL_REQUESTED`, `UPDATE_PENDING_MAIL`,
+`PLAYER_REGEN_DISABLED` (30 s cooldown), `QUEST_COMPLETE`, plus whispers (from `chat`) and a
+disconnect (from `state`). They show only while the tab is hidden or unfocused
+(`wenilla.notify.always = true` overrides), collapse by `tag`, focus the tab on click, and
+badge the title. `enable()` asks the browser once and has to run from a user gesture — the
+🔔 button on the dev page. Notifications need a secure context, which WebGPU already requires.
+
+### Policy, hosting, limits
+
+Everything here is reachable only by same-origin page script: the host's COOP/COEP isolate the
+page, so a cross-origin iframe or popup cannot reach the bridge, and such a script could
+already synthesize key events on the canvas and edit the saved variables in `localStorage`.
+The bridge adds convenience, not reach. Whether *automation* is welcome on a realm is the
+operator's call: a hosting page opts a session out with `bridge: '0'` in `window.__wenilla_env`
+(read once at boot; `?bridge=0` does the same on the dev page). `wenilla-realm`'s play page does
+not load `bridge.js` by default; an operator who wants it adds the one `import('./bridge.js')`
+line `index.html` has.
+
+Handlers run **synchronously on the single wasm thread**: keep `onFrame` cheap (the snapshot
+is built and handed over inside the frame) and push heavy work to a Worker. `'*'` relays every
+`UNIT_*` fire — subscribe by name. Not in this version: party/guild blocks, unit facing, look
+pitch, an `interact` (right-click) op, on-demand name resolution (names come from the cache;
+a unit can be `name: null` for a frame or two), and raw packet access — deliberately.

@@ -1407,6 +1407,13 @@ pub(crate) struct Model {
     /// re-enter the handler dispatch synchronously; one tick of deferral is invisible at frame
     /// rate (the reference fires these synchronously as pure repaint triggers).
     pub(crate) pending_events: Vec<(String, Vec<ScriptValue>)>,
+    /// **The event tap** — every event [`UiScript::fire_event`](super::UiScript::fire_event)
+    /// dispatches, copied here for a host-side observer that is not a frame (the web bridge,
+    /// which relays the stream to page JavaScript). `None` is off, and off is the default: the
+    /// tap costs a clone of the args per fire while it is on, and nothing while it is not. The
+    /// host drains it once per frame ([`UiScript::take_tapped_events`](super::UiScript::take_tapped_events));
+    /// an undrained tap is capped, not unbounded.
+    pub(crate) event_tap: Option<Vec<(String, Vec<ScriptValue>)>>,
     /// The last cursor position [`UiScript::mouse_move`](super::UiScript::mouse_move)/`mouse_button`
     /// saw (UI space: logical px, y-up — the same frame `resolve` rects live in). Behind Lua's
     /// `GetCursorPosition()`; the reference world map polls it every OnUpdate for hover/click math.
@@ -1826,6 +1833,7 @@ impl Model {
             worldmap: super::worldmap::WorldMapState::default(),
             worldstate: super::worldstate::WorldStateUiState::default(),
             pending_events: Vec::new(),
+            event_tap: None,
             cursor_pos: (0.0, 0.0),
             minimap_ping_request: None,
             minimap_ping: None,
