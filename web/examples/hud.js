@@ -51,7 +51,7 @@ wenilla.on('frame', (s) => {
           `${deg(wenilla.bearingTo(u)).padStart(5)} ${u.dead ? '☠' : u.hostile ? '!' : ''}`,
       );
     }
-    if (s.units.length > 5) lines.push(`  … ${s.units.length - 5} more within ${wenilla.state ? '' : ''}range`);
+    if (s.units.length > 5) lines.push(`  … ${s.units.length - 5} more in range`);
   }
   if (chat.length) lines.push('', ...chat);
   el.textContent = lines.join('\n');

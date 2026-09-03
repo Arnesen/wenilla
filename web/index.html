@@ -105,10 +105,11 @@
   import('./bridge.js')
     .then(({ wenilla }) => {
       const bell = document.getElementById('bell');
+      const offTitle = bell.title; // captured before the first toggle, so it can come back
       bell.addEventListener('click', async () => {
         const on = wenilla.notify.enabled ? (wenilla.notify.disable(), false) : await wenilla.notify.enable();
         bell.classList.toggle('on', on);
-        bell.title = on ? 'Notifications on — click to turn off.' : bell.title;
+        bell.title = on ? 'Notifications on — click to turn off.' : offTitle;
       });
       const example = new URLSearchParams(location.search).get('bridge');
       if (example && /^[a-z]+$/.test(example) && example !== '0') {

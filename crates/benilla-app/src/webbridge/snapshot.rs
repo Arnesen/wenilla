@@ -239,8 +239,11 @@ impl BridgeReadout<'_, '_> {
         let mut u = match store {
             Some(store) => {
                 let reaction = match (self.reputations.as_deref(), net.kind) {
+                    // `ring_reaction` returns the raw 0..7 rank, which is `UnitReaction − 1`; the
+                    // `+ 1` lands it on the Lua 1..8 scale every other caller uses (`ui_unit.rs`,
+                    // `ui_tooltip`) — and the one `unit_fields`' `hostile`/`friendly` classify on.
                     (Some(reps), EntityKind::Player | EntityKind::Unit) => {
-                        ring_reaction(self.factions.as_deref(), reps, Some(store), self_store)
+                        ring_reaction(self.factions.as_deref(), reps, Some(store), self_store) + 1
                     }
                     _ => 0,
                 };

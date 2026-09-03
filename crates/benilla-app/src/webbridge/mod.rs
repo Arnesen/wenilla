@@ -287,7 +287,13 @@ impl Plugin for WebBridgePlugin {
                     .run_if(in_state(ClientState::InWorld)),
             )
             .add_systems(Update, publish_frame.in_set(BridgeOut))
-            .add_systems(OnExit(ClientState::InWorld), release_on_exit);
+            // Both edges of the world. On the way out for the obvious reason; on the way IN
+            // because `apply_synth_input` is the only consumer of `fires`/`edges`/`taps`/`look`
+            // and it does not run outside the world — so a page driving the character screen
+            // would otherwise pile them up and have them all replay in the first in-world frame,
+            // Lua bodies and one accumulated `turn_aim` together.
+            .add_systems(OnEnter(ClientState::InWorld), release_synth_input)
+            .add_systems(OnExit(ClientState::InWorld), release_synth_input);
     }
 }
 
@@ -472,7 +478,8 @@ fn apply_synth_input(
     }
 }
 
-fn release_on_exit(mut binds: ResMut<BindingsState>, mut input: ResMut<BridgeInput>) {
+/// Drop every synthetic assertion and everything queued for one, on both edges of the world.
+fn release_synth_input(mut binds: ResMut<BindingsState>, mut input: ResMut<BridgeInput>) {
     binds.synth_release_all();
     input.held.clear();
     input.released.clear();
@@ -481,6 +488,10 @@ fn release_on_exit(mut binds: ResMut<BindingsState>, mut input: ResMut<BridgeInp
     input.fires.clear();
     input.edges.clear();
     input.look = 0.0;
+    // The pending "clear everything" flag goes too: it is consumed by `apply_synth_input`, which
+    // does not run out of world, so a hook that vanished at the character screen would otherwise
+    // leave it set and fire a spurious `heldCleared` on the next world entry.
+    input.drop_holds = false;
 }
 
 /// The outbound half: this frame's events, then the frame itself if it is due.
@@ -562,10 +573,15 @@ fn publish_frame(
 
     // ── the frame, throttled ──
     let now = readout.now();
-    if cfg.hz > 0.0 && now < memo.next_publish {
-        return;
+    if cfg.hz > 0.0 {
+        if now < memo.next_publish {
+            return;
+        }
+        // Only the throttled path schedules. Doing it unconditionally meant `hz: 0` ("every
+        // frame") clamped to 0.1 and booked the next slot TEN SECONDS out — invisible while
+        // `hz` stayed 0, then a ten-second silence the moment the page set a real rate.
+        memo.next_publish = now + 1.0 / f64::from(cfg.hz.clamp(0.1, 120.0));
     }
-    memo.next_publish = now + 1.0 / f64::from(cfg.hz.clamp(0.1, 120.0));
     memo.seq += 1;
     let frame = readout.build(&cfg, memo.seq, zone.as_deref());
     sink::emit_frame(&frame);

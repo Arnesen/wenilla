@@ -177,9 +177,20 @@ const background = {
     const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
     this.worker = new Worker(url);
     URL.revokeObjectURL(url);
+    this._misses = 0;
     this.worker.onmessage = () => {
+      // No `wake` yet. Either the wasm has not attached (a tab hidden before boot finished —
+      // worth waiting for), or this session opted out (`?bridge=0`, where the plugin returns
+      // early and never installs one — nothing will ever appear). `?.()` cannot tell those
+      // apart and would leave a Worker ticking at nothing for the life of the tab, so give the
+      // wasm a few seconds' grace and then stop.
+      if (!hook.wake) {
+        if (++this._misses > Math.max(8, this.hz * 5)) this.stop();
+        return;
+      }
+      this._misses = 0;
       try {
-        hook.wake?.();
+        hook.wake();
       } catch (e) {
         // A stale `wake` (the wasm let go of the hook): stop nagging it.
         this.stop();
