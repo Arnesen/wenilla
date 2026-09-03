@@ -42,11 +42,12 @@ pub(crate) use broadcast::Broadcast;
 pub(crate) use edit::ChannelState;
 /// Test-only: `ui_script::chat_tests` checks every name we fire against the live `ChatTypeInfo`
 /// table, which lives on that side of the tree. The app itself calls it through `event::` — the
-/// router is the only production caller and it is inside this module.
-#[cfg(test)]
+/// router is one production caller inside this module; the other is the web bridge
+/// (`crate::webbridge`), which names the event on the `chat` line it relays to the page.
 pub(crate) use event::event_name;
 pub(crate) use event::{default_color, ChatEvent, ChatEventKind};
 pub(crate) use feed::ChatLog;
+pub(crate) use frames::ChatWindows;
 
 pub(crate) struct UiChatPlugin;
 

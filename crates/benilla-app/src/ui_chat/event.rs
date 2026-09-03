@@ -402,6 +402,12 @@ pub(crate) struct ChatEvent {
     pub channel_number: u32,
     pub channel_base: String,
     pub notice: String,
+    /// The speaker's guid for a wire line (`SMSG_MESSAGECHAT`'s sender), `0` for everything
+    /// else. **Not** one of the ten script args — the reference's `CHAT_MSG_*` carries the
+    /// sender's NAME (arg2) and nothing an addon could key a position on. The bridge to page
+    /// JavaScript (`crate::webbridge`) is the consumer: a proximity feature needs to find the
+    /// speaker among the streamed units, and the guid is the only handle that does.
+    pub sender_guid: u64,
 }
 
 impl ChatEvent {

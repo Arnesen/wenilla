@@ -114,6 +114,37 @@ struct ZoneSignal {
     indoor: bool,
 }
 
+/// **The resolved zone texts, as a resource** — the same values [`feed_zone_events`] writes into
+/// the VM's `__benilla_zone_*` host globals, for a host-side reader that is not Lua (the web
+/// bridge, `crate::webbridge`). Written only when a resolve publishes (the early-return legs —
+/// unknown leaf, the indoor dedup, no change — leave it, exactly as they leave the globals), so
+/// it holds the last published state and `is_changed` marks a real transition.
+#[derive(Resource, Default, Clone, PartialEq, Debug)]
+pub(crate) struct ZoneInfo {
+    /// The zone row's id (the leaf's single-hop parent, or the leaf itself).
+    pub(crate) zone_id: u32,
+    /// `GetZoneText()` — the zone name, or the whole-WMO override indoors.
+    pub(crate) zone_text: String,
+    /// `GetRealZoneText()` — the zone row's own name, never overridden.
+    pub(crate) real_zone_text: String,
+    /// `GetSubZoneText()`.
+    pub(crate) subzone_text: String,
+    /// `GetMinimapZoneText()` — subzone, else zone.
+    pub(crate) minimap_text: String,
+    pub(crate) indoor: bool,
+    /// `GetZonePVPInfo()`'s type: `friendly` / `hostile` / `contested`, or empty on structural
+    /// failure (the reference's nil).
+    pub(crate) pvp_type: &'static str,
+    /// …and its faction name (`FactionGroup.dbc`), empty when unowned.
+    pub(crate) pvp_faction: String,
+    pub(crate) arena: bool,
+}
+
+/// The set [`feed_zone_events`] runs in — after the VM tick and the leaf authority (see the
+/// plugin); named so a reader of [`ZoneInfo`] can order itself after the write.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ZoneFeed;
+
 /// The event election, verbatim from `0x494780`: zone id changed → NEW_AREA **alone**; else any
 /// text changed → INDOORS/CHANGED by the indoor bit; else nothing.
 fn elect_event(cache: &ZoneCache, next: &ZoneSignal) -> Option<&'static str> {
@@ -142,6 +173,7 @@ fn feed_zone_events(
     factions: Option<Res<Factions>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
     mut cache: Local<crate::ui_script::VmMemo<ZoneCache>>,
+    mut info: ResMut<ZoneInfo>,
 ) {
     let (Some(mut script), Some(areas)) = (script, areas) else {
         return;
@@ -267,7 +299,7 @@ fn feed_zone_events(
     let globals = script.lua().globals();
     let pushed = globals
         .set("__benilla_zone_name", signal.zone_text.clone())
-        .and_then(|()| globals.set("__benilla_real_zone_name", real_zone_text))
+        .and_then(|()| globals.set("__benilla_real_zone_name", real_zone_text.clone()))
         .and_then(|()| globals.set("__benilla_subzone_name", signal.subzone_text.clone()))
         .and_then(|()| globals.set("__benilla_zone_text", minimap_text.clone()))
         .and_then(|()| globals.set("__benilla_pvp_type", pvp_type))
@@ -277,6 +309,19 @@ fn feed_zone_events(
         warn!("area: zone host globals: {e}");
         return;
     }
+    // The same publish, for the host-side reader ([`ZoneInfo`]); `set_if_neq` so an unchanged
+    // re-resolve (a minimap-only change re-writes every global) is not a spurious transition.
+    info.set_if_neq(ZoneInfo {
+        zone_id: signal.zone_id,
+        zone_text: signal.zone_text.clone(),
+        real_zone_text,
+        subzone_text: signal.subzone_text.clone(),
+        minimap_text: minimap_text.clone(),
+        indoor: signal.indoor,
+        pvp_type,
+        pvp_faction: pvp_faction.to_string(),
+        arena: is_arena,
+    });
 
     if let Some(event) = event {
         script.fire_event(event, vec![]);
@@ -302,7 +347,8 @@ pub(crate) struct AreaPlugin;
 
 impl Plugin for AreaPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, load_area_table.after(AssetSet::Open))
+        app.init_resource::<ZoneInfo>()
+            .add_systems(Startup, load_area_table.after(AssetSet::Open))
             .add_systems(
                 Update,
                 // After the script tick, like the other feeds: the event dispatches on the next
@@ -313,6 +359,7 @@ impl Plugin for AreaPlugin {
                 // (`0x67e510`); a fresh claim against a stale leaf fired the abbey login's
                 // spurious big splash.
                 feed_zone_events
+                    .in_set(ZoneFeed)
                     .after(crate::ui_script::UiInput)
                     .after(benilla_world::terrain_stream::AreaAuthoritySet),
             );
