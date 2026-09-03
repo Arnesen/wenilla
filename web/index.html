@@ -8,6 +8,11 @@
   #fs { position: fixed; top: 0; right: 0; z-index: 10; padding: .3rem .6rem; color: #ddd;
         background: rgba(0,0,0,.55); border: 0; border-bottom-left-radius: 6px; cursor: pointer;
         font: 12px system-ui, sans-serif; text-decoration: underline; }
+  /* The notifications bell (web/bridge.js `wenilla.notify`), left of the full-screen button. */
+  #bell { position: fixed; top: 0; right: 6.2rem; z-index: 10; padding: .2rem .5rem; color: #ddd;
+          background: rgba(0,0,0,.55); border: 0; border-bottom-left-radius: 6px; cursor: pointer;
+          font: 14px system-ui, sans-serif; opacity: .7; }
+  #bell.on { opacity: 1; }
 </style>
 <script>
   // Sound: the browser suspends any AudioContext created before the first user gesture (autoplay
@@ -62,6 +67,7 @@
   }
 </script>
 <button type="button" id="fs" title="Full screen. Captures Esc, Tab and Ctrl+W for the game — press and hold Esc to leave.">full screen</button>
+<button type="button" id="bell" title="Desktop notifications while this tab is in the background: level-ups, death, whispers, invites, mail, combat. Asks the browser once.">🔔</button>
 <canvas id="benilla"></canvas>
 <script>
   // Dev page: allow `?user=&pass=&char=` links to log in. A hosting page that fetched the
@@ -92,6 +98,25 @@
       });
     })
     .catch((e) => console.warn('platform.js:', e));
+  // The JavaScript bridge (web/bridge.js, `window.wenilla` in the console): live game state
+  // out, commands in, the hidden-tab keepalive and desktop notifications. Same posture as
+  // platform.js — dynamic, never load-bearing. `?bridge=hud` / `?bridge=idle` mount an example
+  // from web/examples/ on top; `?bridge=0` turns the bridge off for the session (webbridge.rs).
+  import('./bridge.js')
+    .then(({ wenilla }) => {
+      const bell = document.getElementById('bell');
+      const offTitle = bell.title; // captured before the first toggle, so it can come back
+      bell.addEventListener('click', async () => {
+        const on = wenilla.notify.enabled ? (wenilla.notify.disable(), false) : await wenilla.notify.enable();
+        bell.classList.toggle('on', on);
+        bell.title = on ? 'Notifications on — click to turn off.' : offTitle;
+      });
+      const example = new URLSearchParams(location.search).get('bridge');
+      if (example && /^[a-z]+$/.test(example) && example !== '0') {
+        import(`./examples/${example}.js`).catch((e) => console.warn(`examples/${example}.js:`, e));
+      }
+    })
+    .catch((e) => console.warn('bridge.js:', e));
   const w = await boot(init);
   bind(w.memory);
 </script>

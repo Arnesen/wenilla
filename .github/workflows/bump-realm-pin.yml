@@ -1,0 +1,66 @@
+# Every push to main advertises itself to the packaging repo: wenilla-realm's upstreams.env
+# gets WENILLA_COMMIT=<this sha>, which triggers its images + smoke workflows — so "merge a
+# wenilla PR" flows into fresh ghcr images with no manual pin bump. Deploys stay manual
+# (realmctl update on the VM pulls :latest when the operator says so).
+#
+# Needs a fine-grained PAT with Contents: Read+Write on Arnesen/wenilla-realm, stored here as
+# the WENILLA_REALM_TOKEN secret. Without the secret the job skips (a fork or a fresh clone
+# must not fail CI over packaging it can't reach).
+name: bump-realm-pin
+on:
+  push:
+    branches: [main]
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for the cross-repo token
+        id: gate
+        env:
+          TOKEN: ${{ secrets.WENILLA_REALM_TOKEN }}
+        run: |
+          if [ -z "${TOKEN}" ]; then
+            echo "WENILLA_REALM_TOKEN not set — skipping the pin bump" >&2
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Bump WENILLA_COMMIT in wenilla-realm
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          TOKEN: ${{ secrets.WENILLA_REALM_TOKEN }}
+          SHA: ${{ github.sha }}
+          # Through the environment, never interpolated into the script: this is a commit message,
+          # which is attacker-controlled text as far as a shell is concerned.
+          SUBJECT: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY_OWNER}/wenilla-realm" realm
+          cd realm
+          # GitHub maps any <login>@users.noreply.github.com address to that login's account, so
+          # the email decides which avatar the commit shows — "ci" is a stranger's account. The
+          # id+login form below is the Actions bot's own address, so the pin lands as the bot.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # What landed on main, first line only — the pin history reads as a list of what shipped
+          # rather than a column of identical "auto-bump" lines.
+          subject=$(printf '%s' "${SUBJECT}" | head -n1)
+          # Two merges landing together race for this push: whoever loses rebases onto the winner's
+          # pin and re-applies. The pin is one line, so a rebase here is either a no-op or a
+          # fast-forward — and if the winner already pinned this same SHA, the check below exits.
+          for attempt in 1 2 3; do
+            current=$(grep -oP '^WENILLA_COMMIT=\K\S+' upstreams.env)
+            if [ "${current}" = "${SHA}" ]; then
+              echo "pin already at ${SHA} — nothing to do"; exit 0
+            fi
+            sed -i "s|^WENILLA_COMMIT=.*|WENILLA_COMMIT=${SHA}|" upstreams.env
+            git commit -am "upstreams: pin wenilla ${SHA:0:7} — ${subject}"
+            if git push; then
+              echo "pinned ${SHA} on attempt ${attempt}"; exit 0
+            fi
+            echo "push rejected (attempt ${attempt}) — someone else pinned first; rebasing" >&2
+            git fetch origin main
+            git reset --hard origin/main
+          done
+          echo "could not push the pin after 3 attempts" >&2
+          exit 1

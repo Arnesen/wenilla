@@ -28,7 +28,9 @@ mkdir -p "${DIST}"
 strip=(--remove-name-section --remove-producers-section)
 [ "${WEB_DEBUG:-0}" = 1 ] && strip=()
 wasm-bindgen --target web --no-typescript "${strip[@]}" --out-dir "${DIST}" "${WASM}"
-cp web/index.html web/wasi_stubs.js web/boot.js web/platform.js "${DIST}/"
+cp web/index.html web/wasi_stubs.js web/boot.js web/platform.js web/bridge.js "${DIST}/"
+# The bridge examples (web/README.md § "JavaScript bridge"): a HUD, an idle loop.
+mkdir -p "${DIST}/examples" && cp web/examples/*.js "${DIST}/examples/"
 # The boot prefetch manifest (see web/boot.js) — optional so a tree that hasn't captured one
 # yet still builds; the overlay just skips the data-prefetch line.
 for m in web/boot-manifest.json web/world-manifest.json; do if [ -f "$m" ]; then cp "$m" "${DIST}/"; fi; done

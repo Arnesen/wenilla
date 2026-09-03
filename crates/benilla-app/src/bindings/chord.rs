@@ -25,6 +25,12 @@ pub(crate) enum BindKey {
     Mouse(MouseButton),
     WheelUp,
     WheelDown,
+    /// A command asserted by something that is not an input at all — the web bridge
+    /// (`crate::webbridge`), which addresses commands by NAME and owns its own release. The
+    /// command itself is the base key, so one bridge hold per command latches at most once and
+    /// releases by the same handle. Never produced by [`Chord::parse`]: no chord string names it,
+    /// so the dispatch table cannot contain it and a physical press can never resolve to it.
+    Synth(super::commands::Cmd),
 }
 
 /// One parsed binding chord: the modifier set + the base input. Equality is how a press is
