@@ -199,7 +199,18 @@ objc2-foundation = { version = "0.2", features = ["NSArray", "NSData", "NSGeomet
 wasm-bindgen = "=0.2.122"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "Location", "Storage"] }
+# `Response`/`fetch` and the audio-decode surfaces are `sound::web_load`'s: the zone soundscape
+# fetches over `fetch` and decodes through `OfflineAudioContext::decodeAudioData`, both off the
+# main thread, because doing either on it froze the frame at every zone line and doorway.
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Location",
+    "Storage",
+    "Response",
+    "AudioBuffer",
+    "BaseAudioContext",
+    "OfflineAudioContext",
+] }
 
 # Off macOS, kira's own cpal backend is the mixer's device layer (`MixBackend` in `sound::mixer`):
 # decision 1857's owned output is CoreAudio and nothing else, and wenilla ships both a Linux build

@@ -27,8 +27,11 @@ use kira::listener::ListenerHandle;
 // kira drops its whole streaming module on wasm32 (no decode threads there — `sound.rs`'s own
 // `#[cfg(not(target_arch = "wasm32"))]` on `pub mod streaming`), so the type only exists to
 // import on native. The wasm32 stand-ins live just below the `pub(crate) use` block they replace.
+// `pub(crate)` so the name resolves as `mixer::StreamingSoundData` on BOTH targets: wasm's
+// stand-in below is a `pub(crate) struct`, and `zone::finish_music` — the one completion both
+// load paths land in — has to be able to spell the type without a `#[cfg]` of its own.
 #[cfg(not(target_arch = "wasm32"))]
-use kira::sound::streaming::StreamingSoundData;
+pub(crate) use kira::sound::streaming::StreamingSoundData;
 use kira::sound::FromFileError;
 use kira::track::{SendTrackBuilder, SendTrackHandle, SpatialTrackBuilder};
 use kira::{AudioManager, AudioManagerSettings, Decibels, Mix, Tween};
@@ -81,6 +84,13 @@ pub(crate) struct StreamingSoundData<Error>(StaticSoundData, std::marker::Phanto
 impl<Error> StreamingSoundData<Error> {
     pub(crate) fn volume(self, volume: impl Into<kira::Value<Decibels>>) -> Self {
         Self(self.0.volume(volume), self.1)
+    }
+
+    /// Wear the streaming name over PCM that is already decoded. [`stream_from_bytes`] needs
+    /// `from_cursor` because it starts from compressed bytes; [`super::web_load`] hands the decode
+    /// to the browser and arrives with the samples, so it needs this instead.
+    pub(crate) fn from_static(data: StaticSoundData) -> Self {
+        Self(data, std::marker::PhantomData)
     }
 }
 
