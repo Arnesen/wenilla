@@ -312,6 +312,25 @@ impl Chain {
         })
     }
 
+    /// The URL a [`Chain::read`] of `name` would `GET`, or `None` when the name index already
+    /// says the chain has no such file — the same answer `read` gives, without the round trip.
+    ///
+    /// This exists so a caller that must not block the frame can run the fetch **itself**,
+    /// asynchronously, instead of going through `read`'s synchronous `XMLHttpRequest`: the chain
+    /// lock is held only to build this string and is released before the request starts, so
+    /// nothing holds it across an await. `sound::web_load` is the caller — see its header for the
+    /// 206 ms doorway that motivated it.
+    pub fn url_for_name(&self, name: &str) -> Option<String> {
+        crate::web::trace(name); // boot-manifest capture, exactly as `read` does
+        if self
+            .index()
+            .is_some_and(|set| !set.contains(&Self::index_key(name)))
+        {
+            return None;
+        }
+        Some(self.url_for(name))
+    }
+
     /// `&mut` alias of [`Chain::read`] — see the native impl for why this exists.
     pub fn read_file(&mut self, name: &str) -> Result<Vec<u8>> {
         self.read(name)

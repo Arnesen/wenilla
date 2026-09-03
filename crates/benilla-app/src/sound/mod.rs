@@ -51,6 +51,8 @@ mod ui;
 mod vocal;
 mod water;
 mod weather;
+#[cfg(target_arch = "wasm32")]
+mod web_load;
 mod zone;
 pub(crate) use emote::EmoteSounds;
 pub(crate) use glue::GlueSound;
