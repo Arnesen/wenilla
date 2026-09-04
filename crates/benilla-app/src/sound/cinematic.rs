@@ -50,6 +50,11 @@ pub(super) struct CinematicVoice {
     /// it had reached.
     shot: Option<(u64, usize)>,
     handle: Option<StreamingSoundHandle<kira::sound::FromFileError>>,
+    /// wasm32: this shot's narration, still being fetched and decoded by the browser
+    /// (`super::web_load`, the zone soundscape's carry). It starts on the frame it lands; a
+    /// shot change or a stop in the meantime drops it unplayed. Native opens the stream inline.
+    #[cfg(target_arch = "wasm32")]
+    pending: Option<super::web_load::Pending>,
 }
 
 impl CinematicVoice {
@@ -64,8 +69,29 @@ impl CinematicVoice {
 
     fn stop(&mut self) {
         self.shot = None;
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.pending = None;
+        }
         if let Some(mut h) = self.handle.take() {
             h.stop(mixer::fade(CUT_FADE_MS));
+        }
+    }
+
+    /// wasm32: start the narration if the browser has finished loading it. Called each frame
+    /// the shot is unchanged, so the load lands into the shot that asked for it and no other.
+    #[cfg(target_arch = "wasm32")]
+    fn land(&mut self, out: &mut SoundOutput) {
+        let Some(result) = self.pending.as_mut().and_then(|p| p.take()) else {
+            return;
+        };
+        let pending = self.pending.take().expect("a result came from it");
+        match result {
+            Ok(data) => {
+                let data = mixer::StreamingSoundData::from_static(data);
+                finish_narration(self, out, data, pending.kit_vol, &pending.path);
+            }
+            Err(e) => warn!("cinematic voice: {} — {e}", pending.path),
         }
     }
 }
@@ -113,6 +139,8 @@ fn narrate(
         return;
     };
     if voice.shot == Some((run, index)) {
+        #[cfg(target_arch = "wasm32")]
+        voice.land(out);
         return;
     }
     // A new shot: the previous one's narration, if any, does not carry over.
@@ -122,23 +150,56 @@ fn narrate(
         return;
     }
     let Some(assets) = assets else { return };
-    let Some(mixer_ref) = out.mixer.as_mut() else {
+    if out.mixer.is_none() {
         return;
-    };
+    }
     let Some((path, kit_vol)) = kits.pick_stream(sound_id) else {
         warn!("cinematic voice: sound {sound_id} has no file");
         return;
     };
-    let bytes = {
-        let chain = assets.chain.lock_recover();
-        chain.read(&path)
-    };
-    let data = match bytes.and_then(mixer::stream_from_bytes) {
-        Ok(d) => d,
-        Err(e) => {
-            warn!("cinematic voice: {path} — {e:#}");
+    // Native opens the stream inline; wasm hands the fetch and the decode to the browser
+    // (`super::web_load`) and lands in the same tail from `CinematicVoice::land`.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let bytes = {
+            let chain = assets.chain.lock_recover();
+            chain.read(&path)
+        };
+        let data = match bytes.and_then(mixer::stream_from_bytes) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("cinematic voice: {path} — {e:#}");
+                return;
+            }
+        };
+        finish_narration(voice, out, data, kit_vol, &path);
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        // The lock is held to build the URL and dropped before the request starts.
+        let url = assets.chain.lock_recover().url_for_name(&path);
+        let Some(url) = url else {
+            warn!("cinematic voice: file not in patch chain: {path}");
             return;
-        }
+        };
+        voice.pending = Some(super::web_load::begin(
+            url, path, sound_id, kit_vol, 0, false,
+        ));
+    }
+}
+
+/// The narration's completion: play the decoded stream and hold its handle. Shared by the
+/// synchronous (native) and deferred (wasm) paths, so the two differ only in *when* they arrive
+/// here — never in what happens next.
+fn finish_narration(
+    voice: &mut CinematicVoice,
+    out: &mut SoundOutput,
+    data: mixer::StreamingSoundData<kira::sound::FromFileError>,
+    kit_vol: f32,
+    path: &str,
+) {
+    let Some(mixer_ref) = out.mixer.as_mut() else {
+        return;
     };
     // **No category slider applies to this channel at all** (wow-re `cinematic-audio-law.md`,
     // VERIFIED). The narration is opened at `0x48ef29` → `0x458a40` → `0x45ce60` with behaviour

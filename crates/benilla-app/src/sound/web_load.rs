@@ -1,4 +1,7 @@
-//! wasm32: the zone soundscape's loads, taken off the frame.
+//! wasm32: the zone soundscape's loads, taken off the frame — and since then every other audio
+//! load the browser build makes: the one-shot SFX cache (`kit::deferred`), the glue theme
+//! ([`super::glue`]) and the cinematic narration ([`super::cinematic`]) all come through
+//! [`begin`].
 //!
 //! ## The freeze this closes
 //!
@@ -58,8 +61,7 @@
 //! rather than when the track plays, so a load that fails consumes the cooldown.
 
 use std::cell::RefCell;
-use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
 use kira::Frame;
@@ -81,18 +83,27 @@ pub(super) struct Pending {
     pub(super) path: String,
     /// Ambience only: the crossfade this bed was asked to arrive under.
     pub(super) fade_ms: u64,
-    slot: Rc<RefCell<Option<Result<StaticSoundData, String>>>>,
+    /// `Arc<Mutex>` rather than `Rc<RefCell>` so a `Pending` is `Send`: the SFX cache that
+    /// holds these is a Bevy `Resource` and the narration's is a `Local`, both of which demand
+    /// it. wasm has one thread, so the lock is never contended — it is a type-level formality.
+    slot: Arc<Mutex<Option<Result<StaticSoundData, String>>>>,
 }
 
 impl Pending {
     /// The result, once the browser has it. `None` = still in flight.
     ///
     /// A `Pending` that is dropped while still running (the player crossed a second border before
-    /// the first load landed) leaves its task writing into an `Rc` nobody reads — the last edge
+    /// the first load landed) leaves its task writing into an `Arc` nobody reads — the last edge
     /// wins, which is the same answer the synchronous path gave.
     pub(super) fn take(&mut self) -> Option<Result<StaticSoundData, String>> {
-        self.slot.borrow_mut().take()
+        self.slot.lock().unwrap_or_else(|p| p.into_inner()).take()
     }
+}
+
+/// [`begin`] for a one-shot SFX file (`kit::deferred`): no kit volume or fade rides along —
+/// the play that asked carries its own — and a one-shot never loops whole-file.
+pub(super) fn begin_sfx(url: String, path: String) -> Pending {
+    begin(url, path, 0, 1.0, 0, false)
 }
 
 /// Begin a load. Returns immediately — nothing after this point runs on the frame until
@@ -108,11 +119,11 @@ pub(super) fn begin(
     fade_ms: u64,
     looping: bool,
 ) -> Pending {
-    let slot: Rc<RefCell<Option<Result<StaticSoundData, String>>>> = Rc::new(RefCell::new(None));
+    let slot: Arc<Mutex<Option<Result<StaticSoundData, String>>>> = Arc::new(Mutex::new(None));
     let write = slot.clone();
     wasm_bindgen_futures::spawn_local(async move {
         let out = fetch_and_decode(&url, looping).await;
-        *write.borrow_mut() = Some(out);
+        *write.lock().unwrap_or_else(|p| p.into_inner()) = Some(out);
     });
     Pending {
         kit_id,
