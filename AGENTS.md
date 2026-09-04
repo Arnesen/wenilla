@@ -95,4 +95,5 @@ google-chrome --user-data-dir=/tmp/wenilla-chrome --enable-unsafe-webgpu --remot
 | an upstream merge broke only the wasm build | `cargo check --target wasm32…`; the `cvars.rs` struct-vs-tuple case is the pattern |
 | no sound in the browser | both pages resume the AudioContext on the first gesture; the per-target mixer backend is our carry in `sound/mixer.rs` |
 | the world freezes ~200 ms at zone lines | the soundscape carry (`sound/zone.rs`, `sound/web_load.rs`), wasm-only |
+| short stalls in the browser on the first play of a sound (combat, a new creature, footsteps on new ground) | the SFX carry (`sound/kit/deferred.rs`, the glue and cinematic arms of `sound/glue.rs`/`sound/cinematic.rs`), wasm-only |
 | the prod image is not what `main` says | wenilla-realm/docs/RELEASE.md, "When it breaks" |
