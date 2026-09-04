@@ -235,7 +235,7 @@ On that, `wenilla.notify` shows desktop notifications for a rule set the page ma
 disconnect (from `state`). They show only while the tab is hidden or unfocused
 (`wenilla.notify.always = true` overrides), collapse by `tag`, focus the tab on click, and
 badge the title. `enable()` asks the browser once and has to run from a user gesture — the
-🔔 button on the dev page. Notifications need a secure context, which WebGPU already requires.
+🔔 button, on both pages. Notifications need a secure context, which WebGPU already requires.
 
 ### Policy, hosting, limits
 
@@ -244,9 +244,10 @@ page, so a cross-origin iframe or popup cannot reach the bridge, and such a scri
 already synthesize key events on the canvas and edit the saved variables in `localStorage`.
 The bridge adds convenience, not reach. Whether *automation* is welcome on a realm is the
 operator's call: a hosting page opts a session out with `bridge: '0'` in `window.__wenilla_env`
-(read once at boot; `?bridge=0` does the same on the dev page). `wenilla-realm`'s play page does
-not load `bridge.js` by default; an operator who wants it adds the one `import('./bridge.js')`
-line `index.html` has.
+(read once at boot, and it beats any `?bridge=` a player passes; `?bridge=0` does the same for one
+session on either page). `wenilla-realm`'s play page loads `bridge.js` like the dev page does, 🔔
+included, and sets no `bridge` key: automation is on for every player until the operator adds
+`bridge: '0'` to the `__wenilla_env` object `play.html` builds.
 
 Handlers run **synchronously on the single wasm thread**: keep `onFrame` cheap (the snapshot
 is built and handed over inside the frame) and push heavy work to a Worker. `'*'` relays every
