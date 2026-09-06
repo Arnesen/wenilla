@@ -38,7 +38,8 @@ const ROOM_UI: &[&str] = &[
     "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua reads at file scope
     "Interface\\FrameXML\\UnitPopup.xml",
     "Interface\\FrameXML\\ItemRef.xml",
-    "ScrollTemplates.xml", // our window tab template, before the window that inherits it (1988)
+    "ScrollTemplates.xml", // our scroll kit + the placeholder icon
+    "Interface\\FrameXML\\CharacterFrameTemplates.xml",
     "Interface\\FrameXML\\MerchantFrame.xml",
     "Interface\\FrameXML\\StackSplitFrame.xml",
     "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from

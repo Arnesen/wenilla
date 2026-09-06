@@ -789,6 +789,7 @@ fn interface_harness() -> UiScript {
             r"Interface\FrameXML\OptionsFrameTemplates.xml",
             r"Interface\FrameXML\ReputationFrame.xml",
             "ScrollTemplates.xml",
+            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
             "Interface\\FrameXML\\MerchantFrame.xml",
             "Interface\\FrameXML\\GlobalStrings.lua",
             "Interface\\FrameXML\\BasicControls.xml",

@@ -210,6 +210,7 @@ fn escape_opens_the_menu_only_when_nothing_else_wants_the_press_and_then_closes_
         &[],
         &[
             "ScrollTemplates.xml",
+            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
             "Interface\\FrameXML\\MerchantFrame.xml",
         ],
     );
@@ -253,6 +254,7 @@ fn the_clicked_form_closes_everything_and_opens_the_menu_in_one_go() {
         &[],
         &[
             "ScrollTemplates.xml",
+            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
             "Interface\\FrameXML\\MerchantFrame.xml",
         ],
     );
@@ -282,7 +284,8 @@ fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
     let mut s = bag_harness_with(
         &[],
         &[
-            "ScrollTemplates.xml", // our window tab template, before the window that inherits it (1988)
+            "ScrollTemplates.xml", // our scroll kit + the placeholder icon
+            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
             "Interface\\FrameXML\\MerchantFrame.xml",
             // The loot window is the reference's own since 1751 — `test_ui::LOOT_UI` carries
             // what it needs and why, and PartyFrame's `MAX_PARTY_MEMBERS` is needed at LOAD.
@@ -652,6 +655,7 @@ fn nothing_opens_behind_the_world_map_and_escape_closes_it_first() {
         "Interface\\FrameXML\\BonusActionBarFrame.xml",
         r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
         r"Interface\FrameXML\WorldMapFrame.xml",
+        "Interface\\FrameXML\\CharacterFrameTemplates.xml",
         "Interface\\FrameXML\\MerchantFrame.xml",
         // The loot window is the reference's own since 1751 — see `test_ui::LOOT_UI` for what
         // each of these buys; `PartyFrame`'s MAX_PARTY_MEMBERS is needed at LOAD time.
@@ -710,14 +714,17 @@ fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
             "Interface\\FrameXML\\TextStatusBar.xml",
             "Interface\\FrameXML\\Fonts.xml",
             r"Interface\FrameXML\UIParent.xml",
-            "ScrollTemplates.xml", // the window tab template, ours (1004/1988)
+            "ScrollTemplates.xml", // our scroll kit + the placeholder icon
             "Interface\\FrameXML\\GlobalStrings.lua",
             "Interface\\FrameXML\\MainMenuBar.xml",
             "Interface\\FrameXML\\GameTooltip.xml",
             "Interface\\FrameXML\\ActionBarFrame.xml",
             "Interface\\FrameXML\\BonusActionBarFrame.xml",
         ],
-        &["Interface\\FrameXML\\MerchantFrame.xml"],
+        &[
+            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
+            "Interface\\FrameXML\\MerchantFrame.xml",
+        ],
     );
     s.set_money(0);
     s.set_container(0, Some(backpack()));

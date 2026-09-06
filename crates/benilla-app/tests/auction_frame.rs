@@ -36,6 +36,9 @@ const FILES: &[&str] = &[
     "ScrollTemplates.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
+    // `AuctionTabTemplate` inherits `CharacterFrameTabButtonTemplate`, and `inherits=`
+    // resolves at LOAD (1993).
+    r"Interface\FrameXML\CharacterFrameTemplates.xml",
     "Interface\\FrameXML\\GlobalStrings.lua",
     "Interface\\FrameXML\\BasicControls.xml",
     "Interface\\FrameXML\\LocaleProperties.lua",

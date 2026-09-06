@@ -38,7 +38,7 @@ fn harness(rank: u32) -> UiScript {
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
         r"Interface\FrameXML\UIParent.xml",
-        "ScrollTemplates.xml", // the window tab template, ours (1004/1988)
+        "ScrollTemplates.xml", // our scroll kit + the placeholder icon
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",

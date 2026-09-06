@@ -840,7 +840,7 @@ fn shipped_bag_frame_drives_end_to_end() {
             load_ui(&s, "Interface\\FrameXML\\TextStatusBar.xml");
             load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
             load_ui(&s, r"Interface\FrameXML\UIParent.xml");
-            load_ui(&s, "ScrollTemplates.xml"); // the window tab template, ours (1004/1988)
+            load_ui(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
             load_ui(&s, "Interface\\FrameXML\\GlobalStrings.lua");
             load_ui(&s, "Interface\\FrameXML\\MainMenuBar.xml");
             load_ui(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
@@ -851,6 +851,7 @@ fn shipped_bag_frame_drives_end_to_end() {
         }
     }
     load_ui(&s, "Interface\\FrameXML\\StackSplitFrame.xml");
+    load_ui(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_ui(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     assert_eq!(

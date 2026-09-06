@@ -339,6 +339,7 @@ pub(super) fn unit_move(
             pitch: mv.pitch,
             fall_time: mv.fall_time,
             jump: mv.jump,
+            transport: mv.transport,
         });
         return;
     }

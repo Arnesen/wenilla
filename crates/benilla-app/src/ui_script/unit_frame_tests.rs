@@ -653,9 +653,10 @@ fn shipped_target_frame_runs_the_level_law() {
     // GetDifficultyColor's own load chain (the quest log window, its ref home).
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\UIParent.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the window tab template, ours (1004/1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\CharacterFrameTemplates.xml"); // the window tab (1993)
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");

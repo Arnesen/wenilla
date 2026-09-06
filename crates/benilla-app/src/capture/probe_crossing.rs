@@ -32,6 +32,9 @@ impl Plugin for ProbeCrossingPlugin {
 #[derive(Resource, Default)]
 struct CrossingProbe {
     phase: Phase,
+    /// The one-shot [`BOOTSTRAP_DOCK`] send — so a body that still cannot see a ferry after the
+    /// hop (wrong continent, a `.go` the server refused) doesn't re-teleport every frame.
+    bootstrapped: bool,
 }
 
 #[derive(Default, PartialEq)]
@@ -60,6 +63,36 @@ const DROP_HEIGHT: f32 = 10.0;
 /// Seconds after the deck drop before conceding the boarding failed (settle 6 s + fall + attach,
 /// with slack) and re-arming for the next docked window.
 const BOARD_DEADLINE: f64 = 15.0;
+/// Solid ground on the Booty Bay pier, beside the Ratchet ferry's berth (WoW coords) — where the
+/// probe sends itself when no cross-continent transport is in range at all.
+///
+/// The probe used to *assume* it was standing at a dock: its `Wait` arm only reacts to a transport
+/// the server has already put in visibility range, so a probe body parked anywhere else waited
+/// forever, printing nothing. That made the instrument unrunnable from a cold login, which is the
+/// only way an unattended session ever starts it.
+const BOOTSTRAP_DOCK: [f32; 3] = [-14297.2, 531.0, 8.8];
+/// `WOW_PROBE_DOCK=x,y,z` — go to *this* dock, unconditionally, before waiting for anything.
+///
+/// Without it the probe rides whichever cross-continent ferry the login happens to be standing
+/// next to, which is not a choice at all: the 1.12 fleet's seams are not interchangeable (one
+/// path crosses mid-cycle, another crosses at the cycle wrap), so "it worked" on the ferry that
+/// answered says nothing about the one a report names. Overriding the destination is how a
+/// specific seam gets measured.
+fn dock_override() -> Option<[f32; 3]> {
+    let raw = std::env::var("WOW_PROBE_DOCK").ok()?;
+    let mut it = raw.split(',').map(|p| p.trim().parse::<f32>());
+    match (it.next(), it.next(), it.next(), it.next()) {
+        (Some(Ok(x)), Some(Ok(y)), Some(Ok(z)), None) => Some([x, y, z]),
+        _ => {
+            warn!("WOW_PROBE_DOCK={raw:?} is not `x,y,z` — ignored");
+            None
+        }
+    }
+}
+/// Seconds the probe watches for a cross-continent transport before sending itself to
+/// [`BOOTSTRAP_DOCK`] — long enough for a login's object stream to deliver one if we are already
+/// somewhere it sails from.
+const BOOTSTRAP_AFTER: f64 = 20.0;
 
 fn crossing_probe(
     time: ProbeClock,
@@ -79,6 +112,33 @@ fn crossing_probe(
     let now = time.elapsed_secs_f64();
     match probe.phase {
         Phase::Wait => {
+            // Nothing that crosses the sea is in range at all — we are not at a ferry dock. Send
+            // the body to one (once; `bootstrapped` latches) rather than waiting out the run.
+            let forced = dock_override();
+            let adrift = !transports
+                .iter()
+                .any(|(_, t, _)| t.touches_map(0) && t.touches_map(1));
+            if (forced.is_some() || adrift) && !probe.bootstrapped && now > BOOTSTRAP_AFTER {
+                probe.bootstrapped = true;
+                let [x, y, z] = forced.unwrap_or(BOOTSTRAP_DOCK);
+                info!(
+                    "PROBE crossing: going to the dock ({x:.1}, {y:.1}, {z:.1}) — {}",
+                    if forced.is_some() {
+                        "WOW_PROBE_DOCK"
+                    } else {
+                        "no cross-continent transport in range"
+                    }
+                );
+                let _ = net.0.send(ClientCommand::Chat {
+                    kind: crate::net::ChatKind::Say,
+                    target: None,
+                    text: format!(".go xyz {x} {y} {z} "),
+                });
+                return;
+            }
+            if adrift {
+                return;
+            }
             // A cross-continent transport (the 1.12 fleet crosses EK↔Kalimdor, maps 0↔1),
             // currently docked on OUR map: drop onto its deck. `sample.pos` is WoW coords —
             // exactly what `.go xyz` takes.

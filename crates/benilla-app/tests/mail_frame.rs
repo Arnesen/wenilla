@@ -22,7 +22,7 @@ const FILES: &[&str] = &[
     r"Interface\FrameXML\MoneyInputFrame.xml",
     "Interface\\FrameXML\\GlobalStrings.lua",
     r"Interface\FrameXML\UIParent.xml",
-    "ScrollTemplates.xml", // the window tab template, ours (1004/1988)
+    "ScrollTemplates.xml", // our scroll kit + the placeholder icon
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
     "Interface\\FrameXML\\BasicControls.xml",
@@ -33,6 +33,7 @@ const FILES: &[&str] = &[
     // The stock tabs inherit `FriendsFrameTabTemplate`, and `inherits=` resolves at load — so the
     // social window and the kit it needs come first, as the reference's toc has them (1970).
     "Interface\\FrameXML\\UIDropDownMenu.xml",
+    "Interface\\FrameXML\\CharacterFrameTemplates.xml",
     "Interface\\FrameXML\\FriendsFrame.xml",
     "Interface\\FrameXML\\MailFrame.xml",
 ];

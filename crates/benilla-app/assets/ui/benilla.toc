@@ -137,8 +137,8 @@ Interface\FrameXML\WorldFrame.xml
 # created hidden and never shown: the one function that would flash them, PlayerStatus_OnUpdate,
 # has no caller in the image or the chain (wow-re, decision 1999). Dead code in 5875, kept as
 # the reference keeps it.
-# What stayed ours moved out: the window tab template and its settle + the placeholder icon
-# (ScrollTemplates.xml), 0561's bag verbs (ContainerFrameAdapters.xml), the script log's row
+# What stayed ours moved out: the placeholder icon (ScrollTemplates.xml; the window tab template
+# and its settle went with it and are the chain's since 1993), 0561's bag verbs (ContainerFrameAdapters.xml), the script log's row
 # (ScriptLogFrame.xml), and three aliases in OptionsFrame.xml that answer the reference's three
 # options windows and its Cancel button.
 Interface\FrameXML\UIParent.xml
@@ -374,6 +374,23 @@ ScrollTemplates.xml
 Interface\FrameXML\UIPanelTemplates.lua
 
 Interface\FrameXML\UIPanelTemplates.xml
+# ══ THE WINDOW TAB — the reference's own, off the player's chain (1751; decision 1993) ══
+# `CharacterFrameTabButtonTemplate`, the big tab along a panel's bottom edge — the character,
+# vendor and social windows' rows, and nothing else in the client (the small `TabButtonTemplate`
+# is UIPanelTemplates.xml's, above).
+#
+# THE REFERENCE NEVER GIVES THIS FILE A TOC LINE. Neither `FrameXML.toc` lists it (base or
+# patch); `UIOptionsFrame.xml` pulls it in with `<Include file="CharacterFrameTemplates.xml"/>`
+# above its own `<Script file=>` — "Need the character tabs here" — and that file is the
+# reference's toc l.21. Our options window is ours, so the row is explicit; l.21 is exactly here,
+# right after the UIPanelTemplates pair (l.16/17) and before StaticPopup (l.23).
+#
+# Its `<OnShow>` fits each tab to its text through `PanelTemplates_TabResize(0)` — which needs
+# the line above it and a SYNCHRONOUS `GetStringWidth`, the reason our own transcription carried
+# an OnUpdate settle instead until the engine gained one (1993 retires it, and 1002's clamp with
+# it: a tab's cap is the reference's own number now, so a long label overflows the plate exactly
+# as it does in the real client).
+Interface\FrameXML\CharacterFrameTemplates.xml
 # ══ THE DIALOG ENGINE — the reference's own, off the player's chain (1751; decision 1960) ══
 # StaticPopup.xml + StaticPopup.lua: StaticPopupDialogs (all 76 of the reference's entries),
 # StaticPopup_Show/Hide/Visible/Resize/OnUpdate, the four dialog instances, the edit boxes and the
@@ -684,8 +701,9 @@ Interface\FrameXML\ContainerFrame.xml
 #
 # What the block needs from above, all far up: Fonts.xml (every `inherits=` font object),
 # ItemButtonTemplate.xml (the slot template's base, and the `SetItemButton*` family),
-# Cooldown.xml (`CooldownFrameTemplate` + `CooldownFrame_SetTimer`), GameTooltip.xml, UiPanels.xml
-# (`CharacterFrameTabButtonTemplate`, `UIPanelWindows`), UIPanelTemplates.xml (`UIPanelCloseButton`,
+# Cooldown.xml (`CooldownFrameTemplate` + `CooldownFrame_SetTimer`), GameTooltip.xml,
+# CharacterFrameTemplates.xml (`CharacterFrameTabButtonTemplate`), UIParent.xml (`UIPanelWindows`),
+# UIPanelTemplates.xml (`UIPanelCloseButton`,
 # `UIPanelButtonTemplate`, and `PanelTemplates_SetNumTabs`, which `CharacterFrame_OnLoad` calls at
 # LOAD), TextStatusBar.xml (`SetTextStatusBarTextPrefix`, called at load too, plus the
 # `TextStatusBar` the pet page's XP bar inherits), UnitFrames.xml (`PlayerFrameHealthBar` /

@@ -115,6 +115,10 @@ pub struct TerrainStreamer {
     /// nothing to do and skips the window walk (three window-sized allocations and a scan of
     /// every resident tile, on every still frame — decision 1979's floor).
     settled: bool,
+    /// The focus tile the off-grid tripwire below last reported, so a focus parked outside the
+    /// map's WDT grid says so **once** rather than every frame. `None` while the focus is on the
+    /// grid (so re-entering the state re-reports).
+    off_grid_reported: Option<(i32, i32)>,
 }
 
 /// The placement id the map-global WMO is registered under. A WMO-only map authors **no** ADT tiles
@@ -793,6 +797,36 @@ fn stream_terrain(
     let mut desired = window.wanted_tiles();
     if let Some(w) = wdt_index {
         desired.retain(|&(tx, ty)| w.has_tile(tx as u32, ty as u32));
+    }
+
+    // **The focus is off this map's tile grid** — the window touches no tile the WDT authors, so
+    // there is nothing to stream and nothing to wait for. On an ADT map that is never a place a
+    // body can legitimately stand: it means the focus was written in some *other* map's
+    // coordinates (the 2026-09-05 report — a rider composed through a cross-map transport whose
+    // own pose was still the source continent's) or has left the world entirely.
+    //
+    // It earns a tripwire because of what it does DOWNSTREAM and silently: `desired` empty makes
+    // `total == 0`, which [`WorldLoadProgress::is_ready`] reads as *not ready* — so the loading
+    // screen can never clear — while the vacuous arm below reports `focus_resident = true`, so the
+    // backstop that would have re-raised a cover cannot fire either. The player is left staring at
+    // a loading screen whose wait line reads `0/0 resident` with every other term nominal. Naming
+    // the map and the tile turns that into one greppable line. Once per focus tile, never a frame
+    // loop; `global_wmo` maps legitimately author no tiles and are excluded.
+    if wdt_index.is_some() && !state.global_wmo && desired.is_empty() {
+        let focus_tile = window.focus_tile();
+        if state.off_grid_reported != Some(focus_tile) {
+            state.off_grid_reported = Some(focus_tile);
+            let map_name = state.map_dir.clone().unwrap_or_default();
+            warn!(
+                "terrain: view focus [{:.1}, {:.1}] is OFF map {map_name}'s tile grid (tile \
+                 {focus_tile:?}) — the window wants no tile the WDT authors, so nothing streams \
+                 and a loading cover cannot clear. A focus written in another map's coordinates \
+                 is the usual cause.",
+                center[0], center[1],
+            );
+        }
+    } else if !desired.is_empty() {
+        state.off_grid_reported = None;
     }
 
     // Unload tiles no longer desired: despawn the terrain entity, release the placements, drop the

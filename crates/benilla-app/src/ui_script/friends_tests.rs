@@ -101,6 +101,45 @@ fn the_window_opens_on_friends_with_the_guild_tab_disabled() {
     assert!(!s.eval::<bool>("return FriendsFrame:IsVisible()").unwrap());
 }
 
+/// **The social window's tabs fit their labels on the first show — through TWO inheritance hops.**
+///
+/// `FriendsFrameTab1..4` inherit `FriendsFrameTabTemplate`, which inherits
+/// `CharacterFrameTabButtonTemplate` (the reference's own file, on the chain since 1993). The
+/// middle template declares an `<OnClick>` and nothing else, and handler replacement is **per
+/// handler name** (wow-re `template-onload-replacement-law.md`) — so the base template's
+/// `<OnShow>` fit still runs, two hops down. That is the arrangement this pins: a row of tabs
+/// still wearing the base template's authored 115 would mean the OnShow was lost on the way.
+#[test]
+fn the_social_tabs_fit_their_labels_on_the_first_show() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    /// `2 * FriendsFrameTab1Left:GetWidth()` — the big tab's two 20-unit end slices.
+    const SIDES: f64 = 40.0;
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    // The app installs `AtlasMeasurer`; the reference's fit is inline, so a harness that models
+    // the async round trip models a configuration the app does not have (1848's correction).
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
+    super::test_ui::load_social_ui(&mut s);
+    s.run("ToggleFriendsFrame(1)").unwrap();
+    s.resolve();
+
+    for i in 1..=4 {
+        let (label, width): (f64, f64) = s
+            .eval(&format!(
+                "return FriendsFrameTab{i}Text:GetStringWidth(), FriendsFrameTab{i}:GetWidth()"
+            ))
+            .unwrap();
+        assert!(label > 0.0, "tab {i} measured its label");
+        assert_eq!(
+            width,
+            label + SIDES,
+            "tab {i} is its text plus the two end slices, from the base template's OnShow"
+        );
+        assert_ne!(width, 115.0, "tab {i} is still at the authored pre-fit");
+    }
+    assert!(s.errors().is_empty(), "no handler errors: {:?}", s.errors());
+}
+
 /// A friend row shows name/zone/status on its top line and "Level N Class" underneath; an
 /// OFFLINE friend takes the greyed offline template instead. This is the test that fails if
 /// `GetFriendInfo`'s six returns ever come back in the wrong order.

@@ -2486,6 +2486,17 @@ pub(crate) struct SelfMoveMessage {
     pub(crate) pitch: f32,
     pub(crate) fall_time: u32,
     pub(crate) jump: Option<benilla_protocol::JumpInfo>,
+    /// The `ON_TRANSPORT` tail — **the server's own deck-local pose for us**, when it sent one.
+    ///
+    /// This used to be dropped here, and the consumer re-derived the local pose as
+    /// `world − boat.translation` against whatever the client's transport tick had last written.
+    /// That is only equal to the server's answer while the two agree about where the boat *is* —
+    /// and the one moment they provably do not is a cross-map seam, where our path clock has not
+    /// crossed yet and [`crate::transport::tick_transports`] is holding the transform frozen at the
+    /// far continent's pose. Re-deriving there yields a local offset the size of the gap between
+    /// two continents, which the next honest boat pose then multiplies into a fling off the deck.
+    /// The authoritative answer was on the wire the whole time (decision 2026).
+    pub(crate) transport: Option<benilla_protocol::TransportPose>,
 }
 
 /// The server granted or revoked control of a unit (`SMSG_CLIENT_CONTROL_UPDATE`). Written by

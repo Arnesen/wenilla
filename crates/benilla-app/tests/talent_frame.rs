@@ -40,6 +40,9 @@ const FILES: &[&str] = &[
     r"Interface\FrameXML\UIPanelTemplates.xml",
     "Interface\\FrameXML\\LocaleProperties.lua",
     "Interface\\FrameXML\\StaticPopup.xml", // the dialog engine (1960)
+    // `TalentTabTemplate` inherits `CharacterFrameTabButtonTemplate`, and `inherits=`
+    // resolves at LOAD (1993).
+    r"Interface\FrameXML\CharacterFrameTemplates.xml",
     "ScrollTemplates.xml",
     // Stock `TalentFrame_OnShow` opens with `SetButtonPulse(TalentMicroButton, 0, 1)` and then
     // `UpdateMicroButtons()` — both live here, and a nil `TalentMicroButton` throws out of OnShow

@@ -478,7 +478,8 @@ fn shipped_loot_pushed_to_center_by_merchant() {
         load_xml(&s, f);
     }
     load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     // Loot opens onto the empty left slot.

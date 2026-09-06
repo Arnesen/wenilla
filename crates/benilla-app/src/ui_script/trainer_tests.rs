@@ -71,6 +71,7 @@ fn trainer_script_base() -> UiScript {
         "OptionsFrame.xml",
         "Interface\\FrameXML\\MultiActionBars.xml",
         r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
+        "Interface\\FrameXML\\CharacterFrameTemplates.xml",
         "Interface\\FrameXML\\MerchantFrame.xml",
         "Interface\\FrameXML\\ClassTrainerFrameTemplates.xml",
     ] {

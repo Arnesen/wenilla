@@ -120,9 +120,11 @@ fn armed() -> UiScript {
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, r"Interface\FrameXML\UIParent.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the window tab template, ours (1004/1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    // The inspect window's four tabs (`Blizzard_InspectUI`) inherit it (1993).
+    load_xml(&s, r"Interface\FrameXML\CharacterFrameTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     // `InspectUnit` lives here now — the reference's own home for that name, and no longer in the
@@ -163,9 +165,11 @@ fn shipped_inspect_frame_loads_clean() {
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, r"Interface\FrameXML\UIParent.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the window tab template, ours (1004/1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    // The inspect window's four tabs (`Blizzard_InspectUI`) inherit it (1993).
+    load_xml(&s, r"Interface\FrameXML\CharacterFrameTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     // `InspectUnit` lives here now — the reference's own home for that name, and no longer in the

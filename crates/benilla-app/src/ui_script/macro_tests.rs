@@ -554,8 +554,11 @@ fn the_tab_row_settles_and_stays_inside_the_window() {
         settled.iter().all(|w| *w == last),
         "the tab fit never settles — it changes every frame: {widths:?}"
     );
-    // 344, not 384: this window's art stops 40 units short of its frame rect (MacroFrame.xml's
-    // `benillaTabRightInset`), and the frame rect is not what the player sees.
+    // 344, not 384: this window's art stops 40 units short of its frame rect, and the frame
+    // rect is not what the player sees. It holds off the reference's own numbers — the −15
+    // padding and the 150 cap the two tabs pass `TabResize` — with no clamp of ours in the way;
+    // 1002's was retired with our tab template (1993) and never reached these tabs anyway, which
+    // are `TabButtonTemplate`'s.
     assert!(
         last.2 <= 344.0,
         "tab 2 ends at {} of a window whose plate stops at 344: {widths:?}",
@@ -564,15 +567,20 @@ fn the_tab_row_settles_and_stays_inside_the_window() {
     no_errors(&s, "tab settle");
 }
 
-/// **The structural cap: no character name can push the tab row off the window** — the guarantee
-/// the reference does not have (its 150 is a number hand-tuned to its own font) and the one the
-/// director asked for by name. A tab clamps at its parent's right edge whatever it was asked for,
-/// so this holds for a name no window author could have anticipated.
+/// **No character name can push the tab row off the window** — checked against a 64-character
+/// one, because `CHARACTER_SPECIFIC_MACROS` formats the player's name into tab 2's label and no
+/// window author can know its width.
+///
+/// What holds it is the reference's own `150` cap, passed to `TabResize` by tab 2's own OnLoad.
+/// 1002 added a structural clamp on top of that — a tab may never grow past its window's drawn
+/// right edge — and 1993 retired it with our tab template; it never reached these tabs anyway
+/// (they are `TabButtonTemplate`'s, and the clamp rode our `CharacterFrameTabButtonTemplate`).
+/// So this is the reference's guarantee, asserted at the drawn edge.
 #[test]
 fn no_character_name_can_push_the_tab_row_off_the_window() {
     let _data = benilla_formats::wow_data_or_skip!();
-    // The `capped = false` arm is gone with decision 1848: it stripped a `benillaTabMaxWidth`
-    // field of our own, and the reference has no such switch — its cap is the literal `150` passed
+    // The `capped = false` arm is gone with decision 1848: it stripped a benilla-only max-width
+    // field, and the reference has no such switch — its cap is the literal `150` passed
     // to `PanelTemplates_TabResize` in the tab's OnLoad, which nothing can turn off. So the
     // guarantee is now just the guarantee, checked against four names including a 64-character one.
     for name in ["Ai", "Onehunter", "Bartholomewthethird", &"W".repeat(64)] {
@@ -610,8 +618,8 @@ fn no_character_name_can_push_the_tab_row_off_the_window() {
 #[test]
 fn the_tab_highlight_is_exactly_its_tab() {
     let _data = benilla_formats::wow_data_or_skip!();
-    // A name under the reference's cap, one over it, and one long enough that the structural
-    // drawn-edge clamp (1002) is what sets the width — all three must hold the same property.
+    // A name under the reference's cap, one over it, and a 40-character one — all three must
+    // hold the same property.
     for name in ["Ai", "Onehunter", &"W".repeat(40)] {
         // The name is chosen at construction (the stock tab labels itself in its own OnLoad) and
         // there is no measure round trip to pump — decision 1848. The frame loop stays: the

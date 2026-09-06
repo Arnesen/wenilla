@@ -133,7 +133,8 @@ fn b_opens_the_backpack_alone_and_closes_every_bag() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
@@ -215,7 +216,8 @@ fn shift_b_toggles_every_bag_at_once() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.set_container(
@@ -297,7 +299,8 @@ fn bag_bar_buttons_light_while_their_bag_is_open() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.set_container(
@@ -415,7 +418,8 @@ fn bag_tooltip_hangs_left_when_the_slot_sits_in_the_right_half() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
@@ -493,7 +497,8 @@ fn hovered_bag_tooltip_fills_itself_when_the_stats_land() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
@@ -598,7 +603,8 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
@@ -735,7 +741,8 @@ fn readable_letter_hover_shows_the_inspect_magnifier() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
@@ -806,7 +813,8 @@ fn drag_across_two_slots_queues_the_same_move_a_click_pickup_would() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
@@ -891,7 +899,8 @@ fn a_second_bag_window_feeds_and_paints_via_the_bag_bar() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
@@ -965,7 +974,8 @@ fn equipped_bag_window_snug_fits_its_row_count() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
@@ -1025,7 +1035,8 @@ fn open_backpack_with_a_five_stack(s: &mut UiScript) -> (f32, f32) {
     for file in BAG_UI {
         load_xml(s, file);
     }
-    load_xml(s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(s, "Interface\\FrameXML\\StackSplitFrame.xml");
     s.set_money(0);
@@ -1367,7 +1378,8 @@ fn bag_slot_cooldown_sweeps_through_the_xml() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.tick(100.0); // a nonzero clock epoch, like the engine cooldown tests
@@ -1437,7 +1449,8 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.resolve();
 
@@ -1572,7 +1585,8 @@ fn keyring_surface(s: &UiScript) {
     for file in BAG_UI {
         load_xml(s, file);
     }
-    load_xml(s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(s, "Interface\\FrameXML\\UIErrorsFrame.xml");
 }
@@ -1847,7 +1861,8 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     // `ForcedBackpackItem.m2` (`m2seq`/`m2batch`): one sequence, id 0, 1000 ms, clamp; the
     // header box spans the card's whole travel band — 0.02707 × 0.07962 model units, which at
@@ -2023,7 +2038,8 @@ fn an_addon_that_hooks_toggle_backpack_receives_the_click() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
@@ -2080,7 +2096,8 @@ fn the_bag_slots_carry_the_references_names_and_icon_names() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     for i in 0..4 {
@@ -2141,7 +2158,8 @@ fn the_backpack_buttons_ring_follows_its_own_window_through_real_clicks() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     // The reference's `ToggleBag` opens nothing for a container of size 0, so the backpack has to

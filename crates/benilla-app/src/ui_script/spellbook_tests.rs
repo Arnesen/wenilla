@@ -132,7 +132,7 @@ fn shipped_spellbook_loads_clean() {
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, r"Interface\FrameXML\UIParent.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the window tab template, ours (1004/1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");

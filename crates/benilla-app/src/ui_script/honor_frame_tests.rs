@@ -372,9 +372,11 @@ fn shown_inspect_honor_page() -> UiScript {
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
         r"Interface\FrameXML\UIParent.xml",
-        "ScrollTemplates.xml", // the window tab template, ours (1004/1988)
+        "ScrollTemplates.xml", // our scroll kit + the placeholder icon
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
+        // The inspect window's four tabs (`Blizzard_InspectUI`) inherit it (1993).
+        r"Interface\FrameXML\CharacterFrameTemplates.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",

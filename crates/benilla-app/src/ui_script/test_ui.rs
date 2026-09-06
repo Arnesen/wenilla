@@ -351,7 +351,10 @@ pub(super) const MERCHANT_UI: &[&str] = &[
     r"Interface\FrameXML\UIParent.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
-    "ScrollTemplates.xml", // our window tab template, before the window that inherits it (1988)
+    // The reference's own window tab (`CharacterFrameTabButtonTemplate`), whose `<OnShow>`
+    // fits each tab to its text — it needs the `UIPanelTemplates` pair above it (1993).
+    r"Interface\FrameXML\CharacterFrameTemplates.xml",
+    "ScrollTemplates.xml",
     "Interface\\FrameXML\\LocaleProperties.lua",
     "Interface\\FrameXML\\StaticPopup.xml",
     "Interface\\FrameXML\\GameTooltip.xml", // app load order: tooltip before merchant
@@ -506,6 +509,9 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     "ScrollTemplates.xml", // SkillFrame's faux list + trough
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
+    // The reference's own window tab (`CharacterFrameTabButtonTemplate`), whose `<OnShow>`
+    // fits each tab to its text — it needs the `UIPanelTemplates` pair above it (1993).
+    r"Interface\FrameXML\CharacterFrameTemplates.xml",
     // The four options templates off the chain, then ours for the one it does not carry
     // (`UIOptionsCheckButtonTemplate` — decision 1841).
     "Interface\\FrameXML\\OptionsFrameTemplates.xml",
@@ -547,6 +553,9 @@ pub(super) const SOCIAL_UI: &[&str] = &[
     "ScrollTemplates.xml",
     "Interface\\FrameXML\\UIPanelTemplates.lua",
     "Interface\\FrameXML\\UIPanelTemplates.xml",
+    // The reference's own window tab (`CharacterFrameTabButtonTemplate`), whose `<OnShow>`
+    // fits each tab to its text — it needs the `UIPanelTemplates` pair above it (1993).
+    r"Interface\FrameXML\CharacterFrameTemplates.xml",
     "Interface\\FrameXML\\OptionsFrameTemplates.xml",
     "Interface\\FrameXML\\ReputationFrame.xml",
     "Interface\\FrameXML\\StaticPopup.xml",
@@ -598,7 +607,7 @@ pub(super) const BAG_UI: &[&str] = &[
     // `OpenAllBags` opens with `if not UIParent:IsVisible() then return end`. Without it the
     // windows fall out of the cascade and the reference's own layout pass has nothing to measure.
     r"Interface\FrameXML\UIParent.xml",
-    "ScrollTemplates.xml", // the window tab template, ours (1004/1988)
+    "ScrollTemplates.xml", // our scroll kit + the placeholder icon
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
     r"Interface\FrameXML\MoneyFrame.lua",
     r"Interface\FrameXML\MoneyFrame.xml",

@@ -77,7 +77,8 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
         load_xml(&s, file);
     }
     load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // BenillaMoney_Set, BankFrame's purse helper
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
@@ -159,7 +160,8 @@ fn escape_is_consumed_by_a_focused_editbox_and_leaves_windows_open() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
@@ -263,7 +265,8 @@ fn escape_closes_an_open_stack_split_frame() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // ContainerFrameItemButton_OnClick reads MerchantFrame
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
@@ -352,7 +355,8 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
     // GameTooltip.xml (BAG_UI's, for the bag slots' tooltips) also carries TOOLTIP_DEFAULT_COLOR,
     // which the dropdown backdrop's OnLoad reads — so the kit can load straight after it.
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
@@ -454,7 +458,8 @@ fn escape_ladder_targeting_rung_after_cast_before_windows() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));

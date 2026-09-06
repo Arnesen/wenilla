@@ -737,7 +737,7 @@ fn shipped_panel_slot_pushable_promotes_to_center() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\UIParent.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the window tab template, ours (1004/1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
@@ -1176,7 +1176,7 @@ fn the_1507_registry_rows_match_the_reference_bytes() {
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, r"Interface\FrameXML\UIParent.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the window tab template, ours (1004/1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");

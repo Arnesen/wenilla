@@ -87,7 +87,8 @@ fn bag_setup() -> UiScript {
     }
     // `ContainerFrame_Update` reads `MerchantFrame:IsShown()` on any slot the tooltip owns, and
     // `BankFrame` (BAG_UI's last entry) fills its purse through `BenillaMoney_Set`.
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s

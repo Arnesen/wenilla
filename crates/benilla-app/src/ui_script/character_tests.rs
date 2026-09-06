@@ -1181,6 +1181,102 @@ fn a_keybind_page_switch_moves_the_tab_row_with_it() {
     assert!(s.errors().is_empty(), "no handler errors: {:?}", s.errors());
 }
 
+/// **The five tabs fit their labels on the first show, from the reference's own `<OnShow>`** —
+/// the whole point of retiring benilla's own copy of `CharacterFrameTabButtonTemplate`
+/// (decision 1993).
+///
+/// The reference fits a tab once, in the template's `<OnShow>`: `PanelTemplates_TabResize(0)`, so
+/// `tab = tabText:GetWidth() + 2 * $parentLeft:GetWidth()`. That needs a `GetStringWidth` that
+/// answers inside the Lua call that asked; ours landed a frame late when our template was written,
+/// which is the only reason that template ever carried an `OnUpdate` settle. The engine has a
+/// synchronous measurer now, so the falsifier is a row of tabs still wearing the template's
+/// authored 115 after the window opens — and a second one, a width that keeps moving per frame.
+#[test]
+fn the_five_tabs_fit_their_labels_on_the_first_show() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    /// `2 * CharacterFrameTab1Left:GetWidth()` — the template's two 20-unit end slices.
+    const SIDES: f64 = 40.0;
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    // The app installs `AtlasMeasurer`; a bare VM installs none, and an OnShow fit against a
+    // pending measure is a configuration the app does not have (the same correction 1848 made to
+    // the macro harness).
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
+    for f in super::test_ui::CHARACTER_UI {
+        super::test_ui::load_ui_strict(&s, f);
+    }
+    s.set_unit("player", Some(player_unit()));
+
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
+    s.resolve();
+
+    let widths = |s: &mut UiScript| -> Vec<(f64, f64)> {
+        (1..=5)
+            .map(|i| {
+                s.eval::<(f64, f64)>(&format!(
+                    "return CharacterFrameTab{i}Text:GetStringWidth(), CharacterFrameTab{i}:GetWidth()"
+                ))
+                .unwrap()
+            })
+            .collect()
+    };
+    // Tab 2 is the PET tab, and `PetTab_Update` keeps it hidden while the player has no pet
+    // (`CharacterFrame.lua`) — a hidden tab never gets an OnShow, so it is still at its authored
+    // width until a pet turns it on. That is the reference's own arrangement, and it is asserted
+    // below rather than skipped.
+    assert!(
+        !s.eval::<bool>("return CharacterFrameTab2:IsVisible()")
+            .unwrap(),
+        "the pet tab is off with no pet — the rest of this test rests on it"
+    );
+
+    let first = widths(&mut s);
+    let fitted = |label: f64| label + SIDES;
+    for i in [0, 2, 3, 4] {
+        let (label, width) = first[i];
+        assert!(label > 0.0, "tab {} measured its label", i + 1);
+        assert_eq!(
+            width,
+            fitted(label),
+            "tab {} is its text plus the two end slices, from OnShow alone",
+            i + 1
+        );
+        assert_ne!(
+            width,
+            115.0,
+            "tab {} is still at the template's authored pre-fit",
+            i + 1
+        );
+    }
+    assert_eq!(
+        first[1].1, 115.0,
+        "…and the hidden pet tab is not yet fitted"
+    );
+
+    // Turn it on the way a pet does, and it fits on ITS first show — same handler, no settle.
+    s.run("CharacterFrameTab2:Show()").unwrap();
+    s.resolve();
+    let (pet_label, pet_width) = widths(&mut s)[1];
+    assert_eq!(
+        pet_width,
+        fitted(pet_label),
+        "the pet tab fits when it is first shown"
+    );
+
+    // …and it does not move afterwards: the reference fits once, and nothing re-fits per frame.
+    for _ in 0..3 {
+        s.tick(0.016);
+    }
+    s.resolve();
+    let settled = widths(&mut s);
+    assert_eq!(
+        settled[0], first[0],
+        "the fit is once, in OnShow — nothing re-fits per frame"
+    );
+    assert_eq!(&settled[2..], &first[2..], "…for the whole row");
+    assert!(s.errors().is_empty(), "no handler errors: {:?}", s.errors());
+}
+
 /// **The tab kit's XML-facing entry point, driven the way an addon drives it.**
 ///
 /// Four corpus addons (Enchantrix, Outfitter, SimpleActionSets, TheoryCraft) put
@@ -1211,10 +1307,11 @@ fn an_addons_tab_click_selects_through_the_generic_entry_point() {
     // The reference's `PanelTemplates_SelectTab` ends with `if GameTooltip:IsOwned(tab)` —
     // an arm our deleted copy omitted ("our tabs set no tooltip"), so selecting a tab now needs
     // the tooltip to exist (1860).
-    load_xml(&s, "ScrollTemplates.xml"); // our window tab template (1988)
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\CharacterFrameTemplates.xml"); // the window tab (1993)
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");

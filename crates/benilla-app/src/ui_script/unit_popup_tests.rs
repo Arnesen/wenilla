@@ -44,6 +44,7 @@ fn load_popup_frames(s: &UiScript) {
         "Interface\\FrameXML\\TargetFrame.xml",
         "Interface\\FrameXML\\PetFrame.xml",
         "ScrollTemplates.xml",
+        "Interface\\FrameXML\\CharacterFrameTemplates.xml",
         "Interface\\FrameXML\\FriendsFrame.xml",
         // Declares ChatFrameEditBox, which the rename dialog's OnHide refocuses (1960).
         "Interface\\FrameXML\\FloatingChatFrame.xml",
