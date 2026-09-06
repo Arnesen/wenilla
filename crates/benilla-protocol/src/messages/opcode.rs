@@ -301,6 +301,39 @@ pub const MSG_MOVE_TIME_SKIPPED: u16 = 0x0319; // 793
 pub const SMSG_ATTACKSTART: u16 = 0x0143; // 323
 pub const SMSG_ATTACKSTOP: u16 = 0x0144; // 324
 pub const SMSG_ATTACKERSTATEUPDATE: u16 = 0x014A; // 330
+
+// The four melee swing REFUSALS — the server's answers to a `CMSG_ATTACKSWING` it will not honour.
+// All four bodies are EMPTY (vmangos `Server/Packets/Combat.cpp`, every `AppendBodyTo` a no-op),
+// and the reference's arms read nothing from the datastore either.
+//
+// **There is no `0x147` here, and that is the finding, not an omission.** The reference registers
+// exactly these four opcodes onto its combat handler `0x6255b0` (`0x62555f`/`0x625570`/`0x625581`/
+// `0x625592`); `0x147` SMSG_ATTACKSWING_NOTSTANDING is never registered, so the client ignores it —
+// and vmangos never sends it either (`Player::SendAttackSwingNotStanding` has zero callers). An arm
+// for it would be code no server can reach and no client ever ran.
+pub const SMSG_ATTACKSWING_NOTINRANGE: u16 = 0x0145; // 325
+pub const SMSG_ATTACKSWING_BADFACING: u16 = 0x0146; // 326
+pub const SMSG_ATTACKSWING_DEADTARGET: u16 = 0x0148; // 328
+pub const SMSG_ATTACKSWING_CANT_ATTACK: u16 = 0x0149; // 329
+
+/// The FORCED attack cancel — the swing family's fourth arm, and the one that is not an
+/// `SMSG_ATTACKSWING_*` at all. Empty body (vmangos `WorldPackets::Combat::CancelCombat`), sent by
+/// `Player::SendAttackSwingCancelAttack()` from four places: `Unit::CombatStop`,
+/// `Unit::StopAttackFaction`, `Unit::InterruptAttacksOnMe`, and a resisted feign death.
+///
+/// Registered by the SPELL TU, not the combat one (`0x5e3308`, handler `0x5e7dd0`) — which is why
+/// `0x625520`'s eight-opcode census does not list it. Its handler is **byte-identical to arm 4**
+/// (`0x625ab8`), down to the `__LINE__` it pushes: resolve the active player and StopAttack, no
+/// message on any surface.
+pub const SMSG_CANCEL_COMBAT: u16 = 0x014E; // 334
+
+/// A Feign Death the target resisted — empty body (vmangos
+/// `WorldPackets::Combat::FeignDeathResisted`), sent by `Player::SendFeignDeathResisted()` from the
+/// one site that also sends [`SMSG_CANCEL_COMBAT`] (`Objects/Unit.cpp:9445-9451`). The reference's
+/// handler `0x6e9800` is two instructions — `push 0x1a5; call 0x496720` — so it is a plain
+/// `DisplayError(421)` = `ERR_FEIGN_DEATH_RESISTED` = "Resisted", with no latch and no cooldown
+/// behind it.
+pub const SMSG_FEIGN_DEATH_RESISTED: u16 = 0x02B4; // 692
 /// Creature aggro/alert flare (VERIFIED vmangos `Opcodes_1_12_1.h`: 316; body in
 /// [`super::attack::read_ai_reaction`]).
 pub const SMSG_AI_REACTION: u16 = 0x013C; // 316

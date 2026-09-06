@@ -408,6 +408,10 @@ pub(crate) fn apply_net_updates(
             // neighbours: the outer tuple is at the 16-param ceiling.
             MessageWriter<PetTalkMessage>,
             MessageWriter<PetDismissSoundMessage>,
+            // The swing-refusal seam's two edges (`crate::swing_refusal`, decision 2037): the four
+            // `SMSG_ATTACKSWING_*` refusals, and our own landed swing, which clears their latch.
+            // ONE writer for both so the drain hands them on in packet order.
+            MessageWriter<crate::swing_refusal::SwingRefusalEdge>,
         ),
     ),
     // The aura feed's duration side-table + the clock to stamp arrivals (decisions 0255/0257): the
@@ -1520,9 +1524,13 @@ pub(crate) fn apply_net_updates(
                     &mut audio.8,
                     &mut audio.15 .1,
                     &mut audio.15 .2,
+                    &mut audio.15 .7,
                     play_seq.next(),
                 )
             }
+            SessionEvent::AttackSwingError(e) => combat::attack_swing_error(e, &mut audio.15 .7),
+            SessionEvent::CancelCombat => combat::cancel_combat(&mut audio.15 .7),
+            SessionEvent::FeignDeathResisted => combat::feign_death_resisted(&mut ui_error_keys),
             SessionEvent::SpellDamageLog(s) => {
                 combat_chat::spell_damage_log(s, &chat_ctx!(), &stores, &transforms, &mut chat_log);
                 combat_log::spell_damage_log(
@@ -2120,7 +2128,12 @@ pub(crate) fn apply_net_updates(
             // The player-trade arc (decision 0592 P1): the status packet drives the open/accept/close
             // state machine, the extended snapshot replaces one side's item/gold — both into the
             // `TradeSession` the trade feed (`crate::ui_trade`) reads.
-            SessionEvent::TradeStatus { status } => trade::trade_status(status, &mut trade_session),
+            SessionEvent::TradeStatus { status } => trade::trade_status(
+                status,
+                &mut trade_session,
+                &mut ui_error_keys,
+                &net_commands,
+            ),
             SessionEvent::TradeStatusExtended { state } => {
                 trade::trade_status_extended(&state, &mut trade_session)
             }

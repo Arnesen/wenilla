@@ -5,15 +5,15 @@
 use crate::wire::Vector3d;
 
 use super::{
-    ActionButton, AttackerState, AuctionBidderNotification, AuctionCommandTail, AuctionListEntry,
-    AuctionOwnerNotification, CastOutcome, ChannelNotify, Character, ChatMessage, CorpseLocation,
-    DamageShield, DispelFailed, EnchantmentLog, EnvironmentalDamageLog, ExplorationXp, FriendEntry,
-    FriendStatusUpdate, GameObjectQueryInfo, GmTicket, GossipOption, GossipPoi, GroupLootInfo,
-    GroupMemberEntry, GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse,
-    GuildRoster, InitWorldStates, InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo,
-    LevelUpInfo, LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry,
-    MirrorTimerStart, MoveMode, Object, PartyKillLog, PartyMemberStatsInfo, PeriodicAuraLog,
-    PetMode, PetSpells, PetitionQueryResponse, PetitionRename, PetitionShowList,
+    ActionButton, AttackSwingError, AttackerState, AuctionBidderNotification, AuctionCommandTail,
+    AuctionListEntry, AuctionOwnerNotification, CastOutcome, ChannelNotify, Character, ChatMessage,
+    CorpseLocation, DamageShield, DispelFailed, EnchantmentLog, EnvironmentalDamageLog,
+    ExplorationXp, FriendEntry, FriendStatusUpdate, GameObjectQueryInfo, GmTicket, GossipOption,
+    GossipPoi, GroupLootInfo, GroupMemberEntry, GuildCommandResult, GuildEventNotice, GuildInfo,
+    GuildQueryResponse, GuildRoster, InitWorldStates, InspectHonorStats, ItemInfo, ItemPushResult,
+    JumpInfo, LevelUpInfo, LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll,
+    MailListEntry, MirrorTimerStart, MoveMode, Object, PartyKillLog, PartyMemberStatsInfo,
+    PeriodicAuraLog, PetMode, PetSpells, PetitionQueryResponse, PetitionRename, PetitionShowList,
     PetitionShowSignatures, PetitionSignResults, PvpCredit, QuestComplete, QuestConfirmAccept,
     QuestDetails, QuestGiverList, QuestOfferReward, QuestOption, QuestPushResult,
     QuestRequestItems, QuestTemplate, ResurrectRequestBody, SpeedKind, SpellChainTargets,
@@ -677,6 +677,16 @@ pub enum ServerPacket {
     /// `SMSG_ATTACKERSTATEUPDATE` — one completed melee swing (decision 0073: the attacker's swing
     /// animation trigger).
     AttackerState(AttackerState),
+    /// The server refused our `CMSG_ATTACKSWING` — `SMSG_ATTACKSWING_NOTINRANGE` (`0x145`),
+    /// `_BADFACING` (`0x146`), `_DEADTARGET` (`0x148`) or `_CANT_ATTACK` (`0x149`), collapsed to
+    /// the three arms the reference actually wires (see [`AttackSwingError`]). Empty bodies.
+    AttackSwingError(AttackSwingError),
+    /// `SMSG_CANCEL_COMBAT` (`0x14e`) — the server forced our attack to stop. Empty body; the
+    /// reference's handler `0x5e7dd0` is arm 4's body verbatim (StopAttack, no message).
+    CancelCombat,
+    /// `SMSG_FEIGN_DEATH_RESISTED` (`0x2b4`) — the target resisted our Feign Death. Empty body;
+    /// the reference's handler `0x6e9800` is a bare `DisplayError(421)`.
+    FeignDeathResisted,
     /// `SMSG_AI_REACTION` — a creature flared aggro (2 HOSTILE) or a stealth pre-aggro alert
     /// (0 ALERT) at someone (layout in [`super::attack::read_ai_reaction`]; decision 0277).
     AiReaction {
@@ -1691,6 +1701,17 @@ impl ServerPacket {
             ServerPacket::AttackStart { .. } => "SMSG_ATTACKSTART".into(),
             ServerPacket::AttackStop { .. } => "SMSG_ATTACKSTOP".into(),
             ServerPacket::AttackerState(_) => "SMSG_ATTACKERSTATEUPDATE".into(),
+            // The wire opcode is not recoverable from the collapsed arm 4 — the client cannot tell
+            // DEADTARGET from CANT_ATTACK either, so the name says which arm ran.
+            ServerPacket::AttackSwingError(e) => match e {
+                AttackSwingError::NotInRange => "SMSG_ATTACKSWING_NOTINRANGE".into(),
+                AttackSwingError::BadFacing => "SMSG_ATTACKSWING_BADFACING".into(),
+                AttackSwingError::DeadOrUnattackable => {
+                    "SMSG_ATTACKSWING_DEADTARGET/CANT_ATTACK".into()
+                }
+            },
+            ServerPacket::CancelCombat => "SMSG_CANCEL_COMBAT".into(),
+            ServerPacket::FeignDeathResisted => "SMSG_FEIGN_DEATH_RESISTED".into(),
             ServerPacket::AiReaction { .. } => "SMSG_AI_REACTION".into(),
             ServerPacket::SpellStart(_) => "SMSG_SPELL_START".into(),
             ServerPacket::SpellGo(_) => "SMSG_SPELL_GO".into(),

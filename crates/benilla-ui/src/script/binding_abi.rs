@@ -240,12 +240,28 @@ fn trim_g(s: &str) -> &str {
     s.trim_end_matches('0').trim_end_matches('.')
 }
 
-/// A widget **predicate's return**: the NUMBER `1` for true, `nil` for false — never a Lua boolean.
+/// A **predicate's return**: the NUMBER `1` for true, `nil` for false — never a Lua boolean.
 ///
-/// The return-side counterpart to [`bool_or_default`], and the same class of fact: 1.12 widget
-/// bindings do not push booleans. `lua_pushboolean 0x6f39f0` has seven call sites in the whole
-/// image and not one of them is inside a widget registrar body — every predicate goes through
-/// `lua_pushnumber`/`lua_pushnil`. Decision 1830.
+/// The return-side counterpart to [`bool_or_default`], and the same class of fact: 1.12's widget
+/// predicates (1830) and its 29 `Unit*` predicates (2043) do not push booleans. `lua_pushboolean
+/// 0x6f39f0` has seven call sites in the whole image; **not one is inside a widget registrar body,
+/// and no binding in the 83-entry unit table at `0x850438` calls it at all** — those predicates go
+/// through `lua_pushnumber 0x6f3810` (the constant double `1.0`) / `lua_pushnil 0x6f37f0`, exactly
+/// one value at every live `ret`.
+///
+/// **Not a whole-image absolute, and 2048 corrects 2043 for saying so.** `lua_pushboolean` is real
+/// and one of its seven callers *is* a registered FrameScript binding: `IsPetAttackActive
+/// 0x4be0e0` answers a genuine Lua `true`/`false` and **never nil** (ours matches — see
+/// [`super::pet`]). The other six are `rawequal`/`pcall`/`xpcall` in the base table `0x811e28` and
+/// two unregistered helpers. So "1.12 has no `lua_pushboolean`" is false; "these two predicate
+/// families never reach it" is what the bytes support, and is what this helper encodes.
+///
+/// **The false leg is settled per body, never inherited from a neighbour.** `IsEnabled 0x7800b0`
+/// is number-`1`/number-`0`-and-never-nil (`setne` + `fild`), which is what makes
+/// `FriendsFrame.lua:404`'s `== 0` live code — so it does NOT come through here. Inside the unit
+/// table itself the *numeric getters* answer the number `0.0` where the predicates answer `nil`
+/// (`UnitLevel 0x518144`, `UnitMana 0x5177c8`, `UnitXP 0x5173f5`, ~15 more; `UnitSex 0x517f9f`
+/// pushes `2.0`).
 ///
 /// **Truthiness hides the difference and direct comparison inverts it**, which is why this survived
 /// so long. `if frame:IsVisible()` reads the same either way; `if frame:IsVisible() == nil` does

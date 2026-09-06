@@ -112,6 +112,8 @@ mod name_persist;
 mod shutdown;
 mod smart_rect;
 mod sound;
+/// The melee swing refusal's latch + 4 s repeat (`SMSG_ATTACKSWING_*`).
+mod swing_refusal;
 mod target;
 mod textinput;
 mod transport;
@@ -661,6 +663,10 @@ pub fn run(build: BuildId) -> AppExit {
     .add_plugins(BattlefieldPlugin)
     .add_plugins(BattlefieldPositionsPlugin)
     .add_plugins(TutorialPlugin)
+    // The melee swing refusals (`SMSG_ATTACKSWING_NOTINRANGE`/`_BADFACING`/`_DEADTARGET`/
+    // `_CANT_ATTACK`): the latch the packets set, and the 4 s repeat that shows it while an
+    // attack target stands and no swing lands.
+    .add_plugins(swing_refusal::SwingRefusalPlugin)
     // Being summoned (decision 1747): SMSG_SUMMON_REQUEST's latch, the CONFIRM_SUMMON dialog it
     // raises, and the CMSG_SUMMON_RESPONSE its Accept sends. The binder's twin one line up — a
     // server-asked question whose only wire answer is yes — and here for that reason.

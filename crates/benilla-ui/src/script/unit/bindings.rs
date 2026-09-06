@@ -4,9 +4,16 @@
 //!
 //! **Every predicate here returns through one function** — [`super::unit_predicate`] when it reads
 //! a snapshot field, [`predicate`] when it computes its own bool. Neither ever hands mlua a Rust
-//! `bool`: 1.12 pushes the number `1` or `nil` and has no boolean on its binding surface at all
-//! (decisions 1830, 2043). A new predicate that open-codes `Value::Integer(1)`/`Value::Nil`, or
-//! returns a `bool`, is the drift those two records exist to stop.
+//! `bool`: all 29 of the reference's unit predicates push the constant double `1.0`
+//! (`lua_pushnumber 0x6f3810`) or `nil` (`lua_pushnil 0x6f37f0`), exactly one value at every live
+//! `ret`, and **no binding in the 83-entry table at `0x850438` calls `lua_pushboolean 0x6f39f0` at
+//! all** (decisions 1830, 2043, 2048). A new predicate that open-codes
+//! `Value::Integer(1)`/`Value::Nil`, or returns a `bool`, is the drift those records exist to stop.
+//!
+//! **The scope of that claim is the unit table, not "the binding surface"** — 2043 said the wider
+//! thing and 2048 corrected it. `lua_pushboolean` exists at `0x6f39f0` with seven call sites, and
+//! one of them *is* a registered FrameScript binding: `IsPetAttackActive 0x4be0e0` answers a real
+//! Lua `true`/`false`, never nil (ours already does — `super::super::pet`).
 
 use mlua::{Lua, Value};
 
@@ -346,11 +353,21 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // UnitReaction(unit, other) → 1..8 (hated..exalted) or nil. The live API is directional (unit's
+    // UnitReaction(unit, other) → the reaction scale, or nil. The live API is directional (unit's
     // reaction toward `other`); our feed only resolves it for the "target" token toward the player,
     // which is the sole caller (`TargetFrame_CheckFaction`), so the `other` arg is accepted and
-    // unused. `0` (unknown / not yet streamed) reports as nil, the API's "can't tell" — the target
-    // frame paints its name plate blue then, exactly like the reference.
+    // unused.
+    //
+    // **NOT a 1/nil predicate, and its nil does not mean "reaction 0"** (decision 2048, correcting
+    // 2043's aside). `0x5167e0` pushes `0x6061e0(u1, u2)` **plus one** (`0x51683e inc eax`,
+    // `0x516842 fild`) — a self-compare answers **5** — so the value is 1-based and **0 is
+    // unreachable**. Its nil leg (`0x51685f`) means only that a token failed to resolve to a live
+    // UNIT.
+    //
+    // Ours maps our own `reaction == 0` to nil because that is our sentinel for "not yet fed", and
+    // the observable is the same nil an unresolved token gives. The gap is the feed's, not the
+    // shape's: a resolved unit whose reaction has not streamed answers nil here where the reference
+    // answers a number. The target frame paints its name plate blue on that nil.
     g.set(
         "UnitReaction",
         lua.create_function(|lua, (token, _other): (Value, Value)| {

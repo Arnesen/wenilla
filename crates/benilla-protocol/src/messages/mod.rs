@@ -76,7 +76,7 @@ pub use action_bar::{
 };
 pub use addons::{SecureAddon, STANDARD_MODULUS_CRC, STOCK_SECURE_ADDONS};
 pub use area_trigger::area_trigger;
-pub use attack::{attack_swing, AttackerState};
+pub use attack::{attack_swing, AttackSwingError, AttackerState};
 pub use auction::{
     auction_action, auction_duration, auction_error, auction_filter, auction_hello,
     auction_list_bidder_items, auction_list_items, auction_list_owner_items, auction_place_bid,

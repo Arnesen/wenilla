@@ -288,6 +288,88 @@ fn spell_and_action_wire() {
     }
 }
 
+/// The melee swing family's SIX opcodes and FOUR arms — plus the one that must stay unparsed.
+///
+/// Every body is empty (vmangos `Server/Packets/Combat.cpp`: `AttackSwingNotInRange`,
+/// `AttackSwingBadFacing`, `AttackSwingDeadTarget`, `AttackSwingCantAttack` all have a no-op
+/// `AppendBodyTo`), so there are no bytes to pin — what needs pinning is the **arm map**, which is
+/// the reference's and not the wire's:
+///
+/// - `0x148` DEADTARGET and `0x149` CANT_ATTACK both reach arm 4 (`0x625ab8`) verbatim, so the
+///   client cannot tell them apart and neither can we;
+/// - `0x147` NOTSTANDING is **never registered** (`0x6255b0`'s table `0x625aec` has it on the
+///   default arm `0x625ade`) and vmangos never sends it
+///   (`Player::SendAttackSwingNotStanding` has zero callers), so it must stay an unknown opcode
+///   here. A future session adding it "for completeness" fails this test, which is the point.
+#[test]
+fn attack_swing_refusal_wire() {
+    use benilla_protocol::messages::AttackSwingError;
+
+    for (op, want) in [
+        (
+            messages::opcode::SMSG_ATTACKSWING_NOTINRANGE,
+            AttackSwingError::NotInRange,
+        ),
+        (
+            messages::opcode::SMSG_ATTACKSWING_BADFACING,
+            AttackSwingError::BadFacing,
+        ),
+        (
+            messages::opcode::SMSG_ATTACKSWING_DEADTARGET,
+            AttackSwingError::DeadOrUnattackable,
+        ),
+        (
+            messages::opcode::SMSG_ATTACKSWING_CANT_ATTACK,
+            AttackSwingError::DeadOrUnattackable,
+        ),
+    ] {
+        let packet = messages::parse_server(op, &[]).unwrap_or_else(|e| panic!("{op:#x}: {e}"));
+        match &packet {
+            ServerPacket::AttackSwingError(got) => assert_eq!(*got, want, "opcode {op:#x}"),
+            other => panic!("{op:#x} parsed as {}", other.name()),
+        }
+        match decode(packet).pop().unwrap() {
+            SessionEvent::AttackSwingError(got) => assert_eq!(got, want, "opcode {op:#x} event"),
+            other => panic!("{op:#x} event, got {other:?}"),
+        }
+    }
+
+    // The family's fourth arm — a different opcode family, the same empty body and the same act.
+    assert!(
+        matches!(
+            messages::parse_server(messages::opcode::SMSG_CANCEL_COMBAT, &[]).unwrap(),
+            ServerPacket::CancelCombat
+        ),
+        "SMSG_CANCEL_COMBAT is registered (`0x5e3308` -> `0x5e7dd0`), just not by the combat TU"
+    );
+    assert!(matches!(
+        decode(ServerPacket::CancelCombat).pop().unwrap(),
+        SessionEvent::CancelCombat
+    ));
+
+    // The family's other empty-bodied sibling, sent from the same vmangos site as CANCEL_COMBAT —
+    // but a bare `DisplayError(421)` in the reference (`0x6e9800`), with no latch behind it.
+    assert!(matches!(
+        messages::parse_server(messages::opcode::SMSG_FEIGN_DEATH_RESISTED, &[]).unwrap(),
+        ServerPacket::FeignDeathResisted
+    ));
+    assert!(matches!(
+        decode(ServerPacket::FeignDeathResisted).pop().unwrap(),
+        SessionEvent::FeignDeathResisted
+    ));
+
+    // 0x147 SMSG_ATTACKSWING_NOTSTANDING — unregistered in the reference, unsent by vmangos, and
+    // therefore an UNKNOWN opcode here: it falls to the `Other` arm, which is exactly what
+    // `0x6255b0`'s default arm `0x625ade` does with it.
+    assert!(
+        matches!(
+            messages::parse_server(0x0147, &[]).unwrap(),
+            ServerPacket::Other { opcode: 0x0147 }
+        ),
+        "0x147 NOTSTANDING must stay unparsed — the reference never registers it"
+    );
+}
+
 /// The spell-visual pipeline wire (decision 0099 phase 1): `SMSG_SPELL_START`/`GO`,
 /// `SMSG_SPELL_FAILED_OTHER`, `SMSG_CANCEL_AUTO_REPEAT`, `SMSG_PLAY_SPELL_VISUAL`. Golden bytes are
 /// hand-built from the vmangos writers (`Spell.cpp:4468-4659`, `SpellCastTargetsInfo.cpp:180-234`,

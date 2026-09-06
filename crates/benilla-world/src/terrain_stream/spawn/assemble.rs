@@ -135,6 +135,18 @@ pub fn spawn_model_entities(
     // The shared delta table both registries slot into (decision 1381) — registration allocates
     // here and bakes the slot into the material.
     anim_table: &mut crate::mat_anim_table::MatAnimTable,
+    // **Is this placement a WMO doodad prop hanging off a streamed entity?** (The WMO-gameobject
+    // lane — a transport's deck cargo and cabin furniture.) It is the LANE, where `card_owner`
+    // below is only the anchor: that anchor is minted per placement and only when the model has
+    // billboard batches at all, so it answers "does this prop have cards to follow", never "which
+    // lane is this". Reading it as the lane is what left the marker below un-set on 133 of the
+    // ship's 134 props.
+    //
+    // What it decides here: [`crate::entity_shade::DoodadDefLit`] on every batch, which is the
+    // engine asserting its OWN invariant instead of trusting a caller to remember it (2047 — and
+    // 2041's lesson one level up). A prop's light is its `CMapDoodadDef`'s; it is under the net
+    // entity so it rides the deck, and the entity light node's descendant walk must pass it by.
+    entity_hosted: bool,
     // `Some(anchor)` for a prop spawned ON a streamed entity (the WMO-gameobject path): a boneless
     // model's billboard cards FOLLOW this anchor (`BillboardCard::following` — the entity-path law,
     // decision 0153) instead of baking a world pivot, so they track the moving owner and
@@ -743,6 +755,16 @@ pub fn spawn_model_entities(
             commands
                 .entity(entity)
                 .insert(crate::mesh_tag::InteriorProbePayload);
+        }
+        // …and, on the entity-hosted lane, that this batch's light is its own doodad def's rather
+        // than its host's. Asserted here rather than by the caller so the rule cannot be half
+        // applied: this is the site that knows about EVERY batch, cards included, and a card is
+        // exactly what the caller cannot reach (it is a world root kept out of the returned list,
+        // and the shade writer's card pass finds it by walking UP to the host).
+        if entity_hosted {
+            commands
+                .entity(entity)
+                .insert(crate::entity_shade::DoodadDefLit);
         }
         // Animated material alpha (decision 0130 phase 2): the rare batch whose colour-alpha/weight
         // tracks animate (fire flicker) or constantly dim gets its per-instance sampler; the

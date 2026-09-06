@@ -218,6 +218,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             vec![SessionEvent::AttackStop { attacker, victim }]
         }
         ServerPacket::AttackerState(s) => vec![SessionEvent::AttackerState(s)],
+        ServerPacket::AttackSwingError(e) => vec![SessionEvent::AttackSwingError(e)],
+        ServerPacket::CancelCombat => vec![SessionEvent::CancelCombat],
+        ServerPacket::FeignDeathResisted => vec![SessionEvent::FeignDeathResisted],
         ServerPacket::AiReaction { unit, reaction } => {
             vec![SessionEvent::AiReaction { unit, reaction }]
         }

@@ -110,6 +110,12 @@
 //!    furniture is parented under the GameObject for TRANSFORM reasons, so the entity light
 //!    node's descendant walk reached props it does not light, and every one of them went black.
 //!
+//!    **It is no longer possible to forget** (2041): [`with_shade`] and [`shade_of`] take an
+//!    [`ExteriorPayload`], which only [`exterior_payload`] mints and only when both populations
+//!    answer no. The overlap itself cannot be designed away — the four mode-independent fields
+//!    cost 19 bits, leaving 13 for a payload region the two modes want 21 of — so the guarantee
+//!    has to live in the type system instead of in a reader's memory.
+//!
 //! A further *payload* writer (stealth, ghost form, …) should claim reserved bits through a typed
 //! accessor here — never a new ad-hoc whole-payload convention (decision 0066's rule, upheld by
 //! 0173's layout).
@@ -290,12 +296,47 @@ pub fn with_alpha(tag: u32, alpha: f32) -> u32 {
     (tag & !ALPHA_MASK) | alpha_bits(alpha)
 }
 
+/// **Proof that an instance is on the EXTERIOR payload** — that bits 6..=13 are its ground-shade
+/// byte and not the low eight bits of somebody's probe slot. The shade accessors take one, so the
+/// question cannot be skipped: there is no way to reach [`with_shade`] or [`shade_of`] without
+/// having asked [`exterior_payload`] and been told yes.
+///
+/// **The overlap is forced, so the discipline has to be typed.** The four fields that mean the
+/// same thing in both modes cost 19 bits (alpha 6, rig 11, highlight 1, interior-fog 1), leaving
+/// 13 for the payload region — and the shade byte (8) plus the probe slot (13) want 21. There is
+/// no shrinking that fits: even a 4-bit shade beside an 11-bit probe needs 15. So the two fields
+/// will always share bits 6..=13, and the only question is whether a writer can reach the wrong
+/// one by forgetting to ask. Since B373 (2031, and 2041 for the witness) it cannot: it has to hold one of these.
+#[derive(Clone, Copy)]
+pub struct ExteriorPayload(());
+
+/// **Ask the payload question**, the one place it is stated. `None` means this instance's bits
+/// 6..=18 are an SH-probe slot and the shade writer must leave the whole region alone.
+///
+/// Two populations hold a probe slot, and knowing only one of them is what B373 was:
+/// - `on_bake_law` — the interior classifier's Bake law, an entity part standing in a WMO room
+///   whose slot the classifier re-seats as the body moves (`interior::InteriorLit::is_bake`). A
+///   runtime state, so it is passed in rather than read off a component here.
+/// - `own_probe` — a lit interior MODD prop, whose slot was folded once at spawn and never moves
+///   ([`InteriorProbePayload`], spawned by the placed-model assembler).
+///
+/// The second only meets an entity light node on a WMO-display GameObject, whose doodad props are
+/// parented under the net entity so they ride a moving transport — a *transform* relationship that
+/// the shade writer's descendant walk read as a *light* one, renaming every cabin prop's slot to
+/// `(slot & 0x1f00) | byte`.
+pub fn exterior_payload(on_bake_law: bool, own_probe: bool) -> Option<ExteriorPayload> {
+    (!on_bake_law && !own_probe).then_some(ExteriorPayload(()))
+}
+
 /// Write the shade byte of an exterior-payload tag (`0` = lit … `255` = fully MCSH-shadowed),
 /// preserving the alpha and rig fields and the flag bits. If the alpha field reads `0`, the tag
 /// was the whole-payload-`0` *untagged ⇒ opaque* sentinel (the field is never legitimately `0` —
 /// [`alpha_bits`] floors at `1`), so materialize it as opaque — otherwise a non-zero shade byte
 /// would defeat the sentinel and the instance would decode alpha 0 (invisible).
-pub(crate) fn with_shade(tag: u32, shade: u8) -> u32 {
+///
+/// Takes an [`ExteriorPayload`] because bits 6..=13 are shared with the probe slot: see that type
+/// for why they must be, and 2031 for what happened when a caller wrote them without asking.
+pub(crate) fn with_shade(tag: u32, shade: u8, _: ExteriorPayload) -> u32 {
     (tag & !(ALPHA_MASK | SHADE_MASK)) | carried_alpha(tag) | (u32::from(shade) << SHADE_SHIFT)
 }
 
@@ -309,8 +350,11 @@ pub fn alpha_of(tag: u32) -> f32 {
     (tag & ALPHA_MASK) as f32 / ALPHA_MAX
 }
 
-/// Read back the shade byte of an exterior-payload tag (the shade writer's change gate).
-pub(crate) fn shade_of(tag: u32) -> u8 {
+/// Read back the shade byte of an exterior-payload tag (the shade writer's change gate). Takes the
+/// same [`ExteriorPayload`] proof as [`with_shade`]: on a probe payload these bits are the slot's
+/// low eight, so the value would be meaningless — and a change gate that compares a meaningless
+/// value is how a wrong write gets *skipped* as well as how it gets made.
+pub(crate) fn shade_of(tag: u32, _: ExteriorPayload) -> u8 {
     ((tag & SHADE_MASK) >> SHADE_SHIFT) as u8
 }
 
@@ -346,10 +390,13 @@ pub fn describe(tag: u32) -> String {
         (false, true) => " fog",
         (false, false) => "",
     };
+    // Both readings come off the RAW masks, deliberately: this is the one caller that has no
+    // material context and wants none — printing the ambiguity IS its job, so it is the one place
+    // that must not take an [`ExteriorPayload`] witness (it could not honestly produce one).
     format!(
         "{tag:#010x}{flags} α {:.3} shade {} / slot {} rig {}",
         alpha_of(tag),
-        shade_of(tag),
+        (tag & SHADE_MASK) >> SHADE_SHIFT,
         (tag & PROBE_MASK) >> PROBE_SHIFT,
         rig_of(tag),
     )
@@ -359,13 +406,19 @@ pub fn describe(tag: u32) -> String {
 mod tests {
     use super::*;
 
+    /// The exterior-payload witness for a test that is about the BITS, not about which population
+    /// an instance belongs to — the population question has its own test above.
+    fn ext() -> ExteriorPayload {
+        exterior_payload(false, false).expect("neither probe population")
+    }
+
     #[test]
     fn describe_prints_both_readings_of_the_shared_bits() {
         // The 0-sentinel is called out by name rather than decoded as "α 0.000" (invisible), which
         // is the one thing it never means.
         assert!(describe(0).contains("untagged"));
         // Exterior law: the shade byte. Interior law: the same bits inside the slot. Both, always.
-        let t = with_shade(alpha_bits(1.0), 255);
+        let t = with_shade(alpha_bits(1.0), 255, ext());
         assert!(describe(t).contains("shade 255"), "{}", describe(t));
         assert!(describe(t).contains("slot 255"), "{}", describe(t));
         // A probe payload reads back its slot, and carries the fog flag it bakes in.
@@ -386,7 +439,7 @@ mod tests {
         for a in [0.0, f32::MIN_POSITIVE, 0.25, 0.5, 1.0] {
             assert_eq!(alpha_bits(a) & HIGHLIGHT_BIT, 0);
         }
-        assert_eq!(with_shade(alpha_bits(1.0), 255) & HIGHLIGHT_BIT, 0);
+        assert_eq!(with_shade(alpha_bits(1.0), 255, ext()) & HIGHLIGHT_BIT, 0);
         assert_eq!(probe_bits(8191) & HIGHLIGHT_BIT, 0);
         assert_eq!(rig_bits(2047) & HIGHLIGHT_BIT, 0);
         // Both field writers preserve an already-set flag.
@@ -395,7 +448,7 @@ mod tests {
             HIGHLIGHT_BIT
         );
         assert_eq!(
-            with_shade(HIGHLIGHT_BIT | 0x3f, 7) & HIGHLIGHT_BIT,
+            with_shade(HIGHLIGHT_BIT | 0x3f, 7, ext()) & HIGHLIGHT_BIT,
             HIGHLIGHT_BIT
         );
     }
@@ -413,14 +466,14 @@ mod tests {
     #[test]
     fn alpha_and_shade_fields_compose() {
         // Round-trip: shade survives an alpha write, alpha survives a shade write.
-        let t = with_shade(alpha_bits(1.0), 200);
-        assert_eq!(shade_of(t), 200);
+        let t = with_shade(alpha_bits(1.0), 200, ext());
+        assert_eq!(shade_of(t, ext()), 200);
         let t = with_alpha(t, 0.25);
-        assert_eq!(shade_of(t), 200);
+        assert_eq!(shade_of(t, ext()), 200);
         assert_eq!(t & ALPHA_MASK, alpha_bits(0.25));
-        let t = with_shade(t, 10);
+        let t = with_shade(t, 10, ext());
         assert_eq!(t & ALPHA_MASK, alpha_bits(0.25));
-        assert_eq!(shade_of(t), 10);
+        assert_eq!(shade_of(t, ext()), 10);
     }
 
     #[test]
@@ -445,7 +498,7 @@ mod tests {
         let spawn = rig_bits(1000) | alpha_bits(1.0);
         assert_eq!(rig_of(spawn), 1000);
         assert_eq!(rig_of(with_alpha(spawn, 0.3)), 1000); // fades (writers 1, 3, 4)
-        assert_eq!(rig_of(with_shade(spawn, 200)), 1000); // the ground-shade ramp (writer 5)
+        assert_eq!(rig_of(with_shade(spawn, 200, ext())), 1000); // the ground-shade ramp (writer 5)
         let indoor = with_interior_probe(spawn, 4321); // the classifier's Bake law (writer 2)
         assert_eq!(rig_of(indoor), 1000);
         assert_eq!((indoor & PROBE_MASK) >> PROBE_SHIFT, 4321);
@@ -471,9 +524,12 @@ mod tests {
         // its room fog).
         let t = INTERIOR_FOG_BIT | alpha_bits(1.0);
         assert_eq!(with_alpha(t, 0.25) & INTERIOR_FOG_BIT, INTERIOR_FOG_BIT);
-        assert_eq!(with_shade(t, 191) & INTERIOR_FOG_BIT, INTERIOR_FOG_BIT);
+        assert_eq!(
+            with_shade(t, 191, ext()) & INTERIOR_FOG_BIT,
+            INTERIOR_FOG_BIT
+        );
         // And it never leaks into the payload fields it rides above.
-        assert_eq!(shade_of(t), 0);
+        assert_eq!(shade_of(t, ext()), 0);
         assert_eq!(t & ALPHA_MASK, ALPHA_MASK);
         // A probe payload keeps its slot decode with the flag set.
         assert_eq!((probe_bits(6660) & PROBE_MASK) >> PROBE_SHIFT, 6660);
@@ -521,7 +577,7 @@ mod tests {
     #[test]
     fn a_shade_write_renames_a_probe_slot_instead_of_breaking_it() {
         let slot = 440u16; // 0b1_1011_1000 — bits 14..=18 hold 1, bits 6..=13 hold 184
-        let tag = with_shade(probe_bits(slot), 191);
+        let tag = with_shade(probe_bits(slot), 191, ext());
         assert_eq!(
             (tag & PROBE_MASK) >> PROBE_SHIFT,
             447,
@@ -538,11 +594,11 @@ mod tests {
     fn with_shade_materializes_the_untagged_sentinel_as_opaque() {
         // Shading an untagged (payload 0) instance must not defeat the "0 ⇒ opaque" rule by making
         // the payload non-zero with a zero alpha field.
-        let t = with_shade(0, 128);
+        let t = with_shade(0, 128, ext());
         assert_eq!(t & ALPHA_MASK, ALPHA_MASK);
-        assert_eq!(shade_of(t), 128);
+        assert_eq!(shade_of(t, ext()), 128);
         // Same through the highlight bit (payload still reads 0 under the mask).
-        let t = with_shade(HIGHLIGHT_BIT, 128);
+        let t = with_shade(HIGHLIGHT_BIT, 128, ext());
         assert_eq!(t & ALPHA_MASK, ALPHA_MASK);
     }
 }

@@ -2308,12 +2308,12 @@ mod tests {
             ),
             (
                 "TRADE_REQUEST",
-                "UIParent.lua — the trade ASK dialog; benilla's trade session (0633's sibling) \
-                 opens the window on the wire's own open and never asks",
-            ),
-            (
-                "TRADE_REQUEST_CANCEL",
-                "UIParent.lua — the cancel of that ask, same reason",
+                "UIParent.lua — the trade ASK dialog, and the one entry on this list that is \
+                 UNPRODUCEABLE rather than unbuilt: the 5875 client registers the event and \
+                 signals it from NOWHERE (a whole-image census, wow-re \
+                 ui/scratch/incoming-trade-request-law.md §3), so StaticPopupDialogs[\"TRADE\"] is \
+                 dead code THERE too. benilla wired the dialog up once and took it back out — \
+                 decision 1764. Producing this would be a divergence, not a fix",
             ),
             (
                 "TRADE_REPLACE_ENCHANT",

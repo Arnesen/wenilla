@@ -10,9 +10,9 @@
 //! Coordinates stay **raw WoW** (the `benilla` boundary applies `bevy = (-y, z, -x)`).
 
 use crate::messages::{
-    ActionButton, AttackerState, AuctionBidderNotification, AuctionCommandTail, AuctionListEntry,
-    AuctionOwnerNotification, ChannelNoticeTail, Character, CreateSpline, DamageShield,
-    DispelFailed, EnchantmentLog, EnvironmentalDamageLog, ExplorationXp, FriendEntry,
+    ActionButton, AttackSwingError, AttackerState, AuctionBidderNotification, AuctionCommandTail,
+    AuctionListEntry, AuctionOwnerNotification, ChannelNoticeTail, Character, CreateSpline,
+    DamageShield, DispelFailed, EnchantmentLog, EnvironmentalDamageLog, ExplorationXp, FriendEntry,
     FriendStatusUpdate, GmTicket, GossipOption, GroupLootInfo, GroupMemberEntry,
     GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse, GuildRoster,
     InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo, LootAllPassed, LootItem,
@@ -780,6 +780,17 @@ pub enum SessionEvent {
     /// One completed melee swing (`SMSG_ATTACKERSTATEUPDATE`) — the attacker's swing-animation
     /// trigger (decision 0073: one packet = one swing, no client timer).
     AttackerState(AttackerState),
+    /// The server refused our melee swing — `SMSG_ATTACKSWING_NOTINRANGE`/`_BADFACING`/
+    /// `_DEADTARGET`/`_CANT_ATTACK`, in the three arms the reference wires
+    /// ([`crate::messages::AttackSwingError`]). Self-only: the server sends these to the swinging
+    /// player alone.
+    AttackSwingError(AttackSwingError),
+    /// The server forced our attack to stop (`SMSG_CANCEL_COMBAT`) — the swing family's fourth
+    /// arm, whose handler is arm 4's body verbatim: StopAttack, no message.
+    CancelCombat,
+    /// The target resisted our Feign Death (`SMSG_FEIGN_DEATH_RESISTED`) — one red line,
+    /// `ERR_FEIGN_DEATH_RESISTED` ("Resisted"), with no state behind it.
+    FeignDeathResisted,
     /// A creature flared at someone (`SMSG_AI_REACTION`): reaction 2 = HOSTILE (sent on every
     /// creature melee-attack start), 0 = ALERT (stealth pre-aggro detection); any other value is
     /// a no-op. Pure audio in the client — the aggro/alert vocals (decision 0280).

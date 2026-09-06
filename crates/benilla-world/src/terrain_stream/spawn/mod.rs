@@ -208,7 +208,8 @@ pub(super) fn spawn_loaded_placements(
                         &mut uv_reg,
                         &mut tint_reg,
                         &mut anim_table,
-                        None, // world-static placement: cards bake their world pivot
+                        false, // world-static: not the entity-hosted lane
+                        None,  // world-static placement: cards bake their world pivot
                         Some((&mut *merge, MergeSite::Doodad { owner: p.owner })),
                         // The retained-pass collector (1429/1431) — ADT doodads are its lane.
                         staticgx
@@ -388,7 +389,8 @@ pub(super) fn spawn_loaded_placements(
                         &mut uv_reg,
                         &mut tint_reg,
                         &mut anim_table,
-                        None, // world-static placement: cards bake their world pivot
+                        false, // world-static: not the entity-hosted lane
+                        None,  // world-static placement: cards bake their world pivot
                         Some((
                             &mut *merge,
                             MergeSite::Wmo {
@@ -732,7 +734,8 @@ pub(super) fn spawn_loaded_placements(
                 &mut uv_reg,
                 &mut tint_reg,
                 &mut anim_table,
-                None, // world-static placement: cards bake their world pivot
+                false, // world-static: not the entity-hosted lane
+                None,  // world-static placement: cards bake their world pivot
                 // The prop merge site (1418 lane 3): keyed by the rooms that name the prop,
                 // slot baked per vertex for the interior lane.
                 Some((
