@@ -329,11 +329,11 @@ fn dragging_the_bar_steps_the_offset_by_rows_and_repaints() {
 /// on `FauxScrollFrameTemplate` whose `<OnVerticalScroll>` calls `FauxScrollFrame_OnVerticalScroll`,
 /// driven by a drag of the shared bar.
 ///
-/// The `SetScrollChild` line is the gap, made visible: the reference's template declares that child
-/// as `<ScrollChild><Frame name="$parentScrollChildFrame">`, our XML loader has no `<ScrollChild>`
-/// element, and `SetVerticalScroll` clamps into `[0, GetVerticalScrollRange()]` — which is computed
-/// from that child. Without it the range is 0, the handler fires with `arg1 = 0` and an addon's list
-/// never leaves the top. With it, the whole reference path runs.
+/// The `SetScrollChild` line predates 1205 (the loader's `<ScrollChild>`) and stays as the
+/// addon-shaped way of seating a child by hand; the range it asserts is that child's overflow
+/// (1338). The offset itself never depended on the range — the engine stores what the bar hands it
+/// (decision 2017) — so what this drives is bar value → `SetVerticalScroll` → `<OnVerticalScroll>`
+/// → `FauxScrollFrame_OnVerticalScroll`'s `floor(v / step + 0.5)`, the reference's path end to end.
 #[test]
 fn the_reference_on_vertical_scroll_path_runs_once_a_scroll_child_exists() {
     let mut s = harness();

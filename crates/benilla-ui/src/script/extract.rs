@@ -91,7 +91,6 @@ impl UiScript {
     /// [`crate::order::traversal`] zipped with the resolved rects and region visuals. Already sorted
     /// ascending by `ZKey`. Call [`UiScript::resolve`] first for populated rects.
     pub fn extract(&self) -> Vec<ExtractedQuad> {
-        let now = self.now();
         let model = self.model_ref();
         let list = order::traversal(&model.arena);
         let mut out = Vec::with_capacity(list.len());
@@ -114,18 +113,6 @@ impl UiScript {
                             zoom: m.zoom,
                             inside_zoom: m.inside_zoom,
                         },
-                        // A shown Cooldown's phase (the reference machine's derived state): the
-                        // sweep scrub while `now < start+duration`, else the 1 s flash's own
-                        // progress. `tick` hides the widget at flash end, so a stale slot never
-                        // draws (decision 0137 phase 4).
-                        Some(crate::widget::KindState::Cooldown(cd)) if cd.duration > 0.0 => {
-                            let fraction = ((now - cd.start) / cd.duration) as f32;
-                            let flash = (fraction >= 1.0).then(|| {
-                                ((now - cd.sweep_end()) / crate::widget::COOLDOWN_FLASH_SECS)
-                                    .clamp(0.0, 1.0) as f32
-                            });
-                            QuadContent::Cooldown { fraction, flash }
-                        }
                         // A `<Model>`/`<PlayerModel>` pane's content hole, carrying the pane's own
                         // name so the app can join it to the bake that window keeps (see
                         // [`QuadContent::ModelPane`]). Both widget kinds share `KindState::Model`

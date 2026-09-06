@@ -72,7 +72,7 @@ fn load_room(s: &UiScript) {
         "Interface\\FrameXML\\BasicControls.xml",
         "Interface\\FrameXML\\StaticPopup.xml",
         "Interface\\FrameXML\\GameTooltip.xml",
-        "Cooldown.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
     ] {
         load_xml(s, file);
     }

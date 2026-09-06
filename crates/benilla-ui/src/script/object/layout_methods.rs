@@ -155,6 +155,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 // A size write moves no edge and no roster membership (decision 1388).
                 model.touch_layout_frame(h);
             }
+            model.note_authored_size(h);
             Ok(())
         })?,
     )?;
@@ -169,6 +170,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             if changed {
                 model.touch_layout_frame(h);
             }
+            model.note_authored_size(h);
             Ok(())
         })?,
     )?;
@@ -185,6 +187,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             if changed {
                 model.touch_layout_frame(h);
             }
+            model.note_authored_size(h);
             Ok(())
         })?,
     )?;

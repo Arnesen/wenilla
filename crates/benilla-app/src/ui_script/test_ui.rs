@@ -16,7 +16,7 @@
 //! catch a mistake in a file somebody just edited, and `content::read`'s dev-build probe already
 //! prefers disk for the same reason.
 
-use benilla_ui::script::UiScript;
+use benilla_ui::script::{QuadContent, UiScript};
 
 /// Load one interface file into `s`, panicking on any loader error, and return how many frames it
 /// materialized (`0` for a `.lua` entry, which materializes none).
@@ -29,6 +29,70 @@ use benilla_ui::script::UiScript;
 /// `benilla_formats::wow_data_or_skip!()`; [`BAG_UI`] is a list that always does.
 pub(crate) fn load_ui(s: &UiScript, entry: &str) -> usize {
     load_entry(s, entry, false, false)
+}
+
+/// The cooldown indicator's file: `Interface\Cooldown\UI-Cooldown-Indicator.mdx`, as the
+/// stock `CooldownFrameTemplate` names it.
+pub(super) const COOLDOWN_MODEL: &str = r"Interface\Cooldown\UI-Cooldown-Indicator.mdx";
+
+/// The cooldown indicator's file facts (`benilla-extract m2seq`): sequence 0 = id 0, 1000 ms,
+/// clamp — the sweep `CooldownFrame_OnUpdateModel` scrubs; sequence 1 = id 1, 1000 ms, clamp —
+/// the finish flash, whose completion hides the frame. Handed to the engine the way the app does
+/// once the asset lands (decisions 2007/2019); every pane holding the file arms its Stand.
+pub(super) fn cooldown_facts(s: &mut UiScript) {
+    use benilla_ui::widget::{ModelFileFacts, SequenceFacts};
+    let seq = |anim_id, duration_ms| SequenceFacts {
+        anim_id,
+        duration_ms,
+        looping: false,
+    };
+    s.set_model_facts(
+        COOLDOWN_MODEL,
+        ModelFileFacts {
+            sequences: vec![seq(0, 1000), seq(1, 1000)],
+            bbox: ([0.0; 3], [0.0; 3]),
+        },
+    );
+}
+
+/// The play head `(anim_id, cursor_ms)` of the SHOWN cooldown pane `owner` names (`None` while
+/// it is hidden, or has nothing armed) — what the tile renderer samples the file at. Read the way
+/// the renderer reads it: the pane's quad in the extract joined to the engine's paint list.
+pub(super) fn cooldown_play(s: &UiScript, owner: &str) -> Option<(u16, u32)> {
+    let heads = s.visible_model_panes();
+    s.extract().into_iter().find_map(|q| match &q.content {
+        QuadContent::ModelPane {
+            handle,
+            model: Some(m),
+            ..
+        } if m.eq_ignore_ascii_case(COOLDOWN_MODEL)
+            && s.quad_owner_name(q.target).as_deref() == Some(owner) =>
+        {
+            heads
+                .iter()
+                .find(|p| p.handle == *handle)
+                .and_then(|p| p.play.map(|ph| (ph.anim_id, ph.cursor_ms)))
+        }
+        _ => None,
+    })
+}
+
+/// [`cooldown_play`] for whichever cooldown pane is shown — the bag windows number their slots
+/// from the far end (`ContainerFrame_GenerateFrame`: `Item{j}` carries id `size − j + 1`), so a
+/// test that seats one item asks for "the" sweep rather than a name.
+pub(super) fn cooldown_play_any(s: &UiScript) -> Option<(u16, u32)> {
+    let heads = s.visible_model_panes();
+    s.extract().into_iter().find_map(|q| match &q.content {
+        QuadContent::ModelPane {
+            handle,
+            model: Some(m),
+            ..
+        } if m.eq_ignore_ascii_case(COOLDOWN_MODEL) => heads
+            .iter()
+            .find(|p| p.handle == *handle)
+            .and_then(|p| p.play.map(|ph| (ph.anim_id, ph.cursor_ms))),
+        _ => None,
+    })
 }
 
 /// [`load_ui`], and **a missing template is a failure too**.
@@ -404,7 +468,7 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     r"Interface\FrameXML\MoneyFrame.xml",
     r"Interface\FrameXML\UIParent.xml", // Model_OnLoad/_Rotate*/_OnUpdate — the model panes' turntable
     "Interface\\FrameXML\\GameTooltip.xml",
-    "Cooldown.xml", // CooldownFrameTemplate + CooldownFrame_SetTimer, per equipment slot
+    "Interface\\FrameXML\\Cooldown.xml", // CooldownFrameTemplate + CooldownFrame_SetTimer, per equipment slot
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
     "Interface\\FrameXML\\StaticPopup.xml",
@@ -470,7 +534,7 @@ pub(super) const SOCIAL_UI: &[&str] = &[
     "Interface\\FrameXML\\LocaleProperties.lua",
     "Interface\\FrameXML\\BasicControls.xml",
     r"Interface\FrameXML\UIParent.xml",
-    "Cooldown.xml",
+    "Interface\\FrameXML\\Cooldown.xml",
     "Interface\\FrameXML\\ActionButtonTemplate.xml",
     "Interface\\FrameXML\\TextStatusBar.lua",
     "Interface\\FrameXML\\TextStatusBar.xml",
@@ -540,7 +604,7 @@ pub(super) const BAG_UI: &[&str] = &[
     r"Interface\FrameXML\MoneyFrame.xml",
     "Interface\\FrameXML\\LocaleProperties.lua",
     "Interface\\FrameXML\\GameTooltip.xml",
-    "Cooldown.xml",
+    "Interface\\FrameXML\\Cooldown.xml",
     // The bag BAR declares `parent="MainMenuBarArtFrame"`, resolved at LOAD — so without this the
     // six buttons fall back to UIParent and sit at a level no production run ever puts them at.
     // It also carries `MainMenuBar_UpdateKeyRing`, which is what puts the keyring on the bar.
@@ -588,9 +652,8 @@ pub(super) const BAG_UI: &[&str] = &[
     "Interface\\FrameXML\\UIPanelTemplates.lua",
     "Interface\\FrameXML\\UIPanelTemplates.xml",
     "Interface\\FrameXML\\FloatingChatFrame.xml",
-    // Our adapters over the reference's container files — the keyring tooltip wrapper, the three
-    // bag verbs 0561 shadows (`OpenBackpack`/`CloseBackpack`/`CloseAllBags`), and the item-push
-    // card the reference draws with a `<Model>` this engine does not render (0887). It has to be
+    // Our adapters over the reference's container files — the keyring tooltip wrapper and the
+    // three bag verbs 0561 shadows (`OpenBackpack`/`CloseBackpack`/`CloseAllBags`). It has to be
     // AFTER `ContainerFrame.xml` and after the bar, which is why it is here and not up with
     // UiPanels.xml.
     "ContainerFrameAdapters.xml",

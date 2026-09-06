@@ -109,13 +109,12 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     //    anything derived from the variant name — `format!("{:?}")` and friends — would hand
     //    addons `"SimpleHtml"`, and `GetObjectType` is compared with `==` (`IsObjectType`'s
     //    case-folding would hide it; the getter's would not).
-    //  · **`Cooldown` answers `"Model"`.** 1.12.1 has no `Cooldown` type — the census finds 23
-    //    type-name globals and none is that. The reference builds its cooldown as a `Model` playing
-    //    `UI-Cooldown-Indicator.mdx` (`CooldownFrameTemplate`), and OUR `FrameKind::Cooldown` is a
-    //    deliberate Era-shaped divergence that models the mechanism first-class (0137 phase 4). So
-    //    the faithful answer is what the reference's own cooldown widget IS. Answering `"Cooldown"`
-    //    would announce an Era type to a Lua ecosystem that branches on presence — precisely the
-    //    superset 1189 had to take back out.
+    //  · **There is no `Cooldown` type.** 1.12.1's census finds 23 type-name globals and none is
+    //    that: the reference builds its cooldown as a `Model` playing `UI-Cooldown-Indicator.mdx`
+    //    (`CooldownFrameTemplate`), and since decision 2019 so does this engine — the Era-shaped
+    //    `FrameKind::Cooldown` that modelled the mechanism first-class (0137 phase 4) is gone, so
+    //    `CreateFrame("Cooldown")` is the reference's own unknown-type refusal, never an announced
+    //    Era type to a Lua ecosystem that branches on presence (the superset 1189 took back out).
     fn type_chain(kind: FrameKind) -> &'static [&'static str] {
         match kind {
             FrameKind::Frame => &["Frame", "Region"],
@@ -144,7 +143,6 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             FrameKind::MovieFrame => &["MovieFrame", "Frame", "Region"],
             FrameKind::GameTooltip => &["GameTooltip", "Frame", "Region"],
             FrameKind::Minimap => &["Minimap", "Frame", "Region"],
-            FrameKind::Cooldown => &["Model", "Frame", "Region"],
         }
     }
     fn chain_of(lua: &Lua, this: &Table) -> mlua::Result<&'static [&'static str]> {

@@ -123,8 +123,8 @@ pub enum FrameKind {
     ColorSelect,
     SimpleHtml,
     MovieFrame,
-    /// The `GameTooltip` widget family (decision 0274). Like [`FrameKind::Minimap`]/
-    /// [`FrameKind::Cooldown`] a *game-layer* factory over `CSimpleFrame`; its modeled behavior —
+    /// The `GameTooltip` widget family (decision 0274). Like [`FrameKind::Minimap`], a
+    /// *game-layer* factory over `CSimpleFrame`; its modeled behavior —
     /// the line stack, owner/anchor law, auto-size, fade — lives in [`KindState::Tooltip`] and
     /// `script::tooltip`. The real class's Lua surface is the 38-binding family wow-re pinned
     /// (`ui/scratch/bindings.md` 0x530c40–0x5364a0); the line/color primitives are byte-diffed
@@ -137,12 +137,6 @@ pub enum FrameKind {
     /// the app renderer's job (decision 0203); the engine core carries only the rect and the zoom
     /// state ([`KindState::Minimap`]).
     Minimap,
-    /// The cooldown sweep widget (decision 0137 phase 4). The 1.12 reference builds it as a
-    /// `Model` playing `UI-Cooldown-Indicator.mdx` (`CooldownFrameTemplate` + `Cooldown.lua`'s
-    /// scrub/flash/hide machine); benilla models the *mechanism* as a first-class widget — the
-    /// Era API's own `Cooldown` frame type — whose state machine lives engine-side
-    /// ([`KindState::Cooldown`]) and whose pie-wipe/flash pixels are the app renderer's job.
-    Cooldown,
 }
 
 /// Whether a [`Region`] leaf is a texture or a text string. These are the client's two non-frame
@@ -190,9 +184,10 @@ pub enum KindState {
     Message(MessageFrameState),
     /// `CSimpleScrollFrame` (decision 0112 — the ScrollFrame mechanism, the engine's last structural
     /// gap: the quest log's detail pane, chat history, and every long-content window need it): the
-    /// scroll child + the vertical scroll offset. The mechanism is spec-faithful (the documented
-    /// `SetScrollChild`/`SetVerticalScroll` contract, same posture as StatusBar's fill), not
-    /// byte-pinned. Horizontal scroll is out of scope (no 1.12 template drives it).
+    /// scroll child + the vertical scroll offset. The offset setter and the range are byte-pinned
+    /// (2017: `0x786db0` stores the offset as given, no clamp; 1338: `0x786e30` measures the
+    /// child's subtree); the rest is spec-faithful to the documented contract, same posture as
+    /// StatusBar's fill. Horizontal scroll is out of scope (no 1.12 template drives it).
     Scroll(ScrollFrameState),
     /// `CSimpleSlider` (factory `0x6eee40`; LoadXML table `0x789580`, RF-28): a value in `[min, max]`
     /// with a step and orientation, positioning a thumb texture along the track. The mechanism is
@@ -207,16 +202,13 @@ pub enum KindState {
     /// widget's whole modeled behavior here; see [`crate::script::colorselect`].
     ColorSelect(ColorSelectState),
     /// The `Model` widget's scene state — the 3D pane an addon or a FrameXML frame parks a model
-    /// in. **The same split as [`KindState::Minimap`] and [`KindState::Cooldown`]**: the engine
-    /// core carries exactly what the Lua API reads and writes, and the pixels are the app
-    /// renderer's job. See [`ModelState`].
+    /// in. **The same split as [`KindState::Minimap`]**: the engine core carries exactly what
+    /// the Lua API reads and writes, and the pixels are the app renderer's job. See
+    /// [`ModelState`].
     Model(ModelState),
     /// The `<Minimap>` widget's zoom state (decision 0203). The engine core carries only what the
     /// Lua API reads/writes (`GetZoom`/`SetZoom`/`GetZoomLevels`); the tile/blip render is app-side.
     Minimap(MinimapState),
-    /// The cooldown widget's timer ([`CooldownState`]) — the reference `Cooldown.lua` machine's
-    /// inputs; the sweep/flash phases derive from them at extract time.
-    Cooldown(CooldownState),
     /// The GameTooltip widget's line stack + owner/fade state ([`TooltipState`], decision 0274).
     Tooltip(TooltipState),
 }
@@ -345,38 +337,6 @@ pub const TOOLTIP_FADE_SECS: f64 = 0.5;
 /// description/trigger-line wrap by eye.
 pub const TOOLTIP_WRAP_WIDTH: f32 = 260.0;
 
-/// The cooldown widget's timer, in the engine's `GetTime` clock (seconds): the reference
-/// `CooldownFrame_SetTimer(start, duration, enable)` stores exactly this pair (its `enable == 0`
-/// / non-positive gate hides instead of storing — kept in the Lua helper, ref-verbatim). The
-/// three phases the reference machine derives (`Cooldown.lua`, byte-authored):
-/// - `t < start + duration` — the sweep: sequence 0 scrubbed to `(now-start)/duration`.
-/// - the next [`COOLDOWN_FLASH_SECS`] — the finish flash: sequence 1 played realtime.
-/// - after that — hidden (`OnAnimFinished` → `Hide`), done engine-side in `tick`.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct CooldownState {
-    /// `GetTime`-clock start seconds (0 = no timer set).
-    pub start: f64,
-    /// Duration seconds (0 = no timer set).
-    pub duration: f64,
-}
-
-/// The finish flash's length: the model's sequence 1 is authored at exactly 1.000 s
-/// (`UI-Cooldown-Indicator.m2` m2seq; played realtime by `CooldownFrame_OnUpdateModel`'s
-/// `AdvanceTime`).
-pub const COOLDOWN_FLASH_SECS: f64 = 1.0;
-
-impl CooldownState {
-    /// The end of the sweep (= the flash's start).
-    pub fn sweep_end(&self) -> f64 {
-        self.start + self.duration
-    }
-
-    /// The moment the whole display is over (flash finished → hide).
-    pub fn finished_at(&self) -> f64 {
-        self.sweep_end() + COOLDOWN_FLASH_SECS
-    }
-}
-
 /// The model-pane scene state — **shared by [`FrameKind::Model`] and [`FrameKind::PlayerModel`]**,
 /// because the client's `CGCharacterModelBase` (`0x505680`) *extends* `CSimpleModel` (`0x76c8e0`)
 /// rather than replacing it: every field below is a `CSimpleModel` member both classes carry.
@@ -385,8 +345,8 @@ impl CooldownState {
 /// little scene of its own — the character pane, the tabard designer, the minimap ping, the pet
 /// bar's autocast shine, and every addon that wants a 3D thing in a frame. The engine core holds
 /// exactly the scene an addon can read back or write; **the render is the app's**, the same
-/// contract [`MinimapState`] and [`CooldownState`] already run under, and the reason both of those
-/// exist as state-only kinds here.
+/// contract [`MinimapState`] already runs under, and the reason both exist as state-only kinds
+/// here.
 ///
 /// **Every field is a 1.12 binding's storage, and which binding is read off the registrar, not off
 /// a string scan.** wow-re enumerated the whole family at the pair bytes on 2026-08-30
@@ -442,6 +402,13 @@ pub struct ModelState {
     /// `0x710ec0`), which lives on the model instance and dies with it: `SetModel` and
     /// `ClearModel` clear it. `None` = the file's own textures.
     pub icon: Option<String>,
+    /// The frame's size is the **implicit rect** — the file's bounding-box extent in layout units
+    /// (`bboxExtent · 768·√(a²+1)` FrameXML units; render law §3, `implicit-size-law.md` §1),
+    /// written by the engine because the pane authored no size (decision 2015). The geometry
+    /// getters `0x76d080`/`0x76d0d0` answer it whenever no size is authored; here it is written
+    /// into the layout input when the file's facts land and re-derived when the screen's aspect
+    /// moves, and an authored `SetWidth`/`SetHeight`/`SetSize` clears it for good.
+    pub implicit_size: bool,
     /// The pane's yaw in radians — `CSimpleModel+0x39c`. **One slot, written by two verbs on two
     /// different classes**: `Model:SetFacing` (`0x76dce0`) and `PlayerModel:SetRotation`
     /// (`0x505f00` → `0x505bb0`, whose last act is `0x505c44 mov [esi+0x39c], eax` — literally the
@@ -489,6 +456,7 @@ impl Default for ModelState {
             armed: None,
             pending_seed: false,
             icon: None,
+            implicit_size: false,
             facing: 0.0,
             scale: 1.0,
             camera: 0,
@@ -573,6 +541,14 @@ impl ModelFileFacts {
     /// argument is `0`, never `-1`, on this path).
     pub fn sequence(&self, anim_id: u16) -> Option<&SequenceFacts> {
         self.sequences.iter().find(|s| s.anim_id == anim_id)
+    }
+
+    /// The header bounding box's `(x, y)` extent in model units — the implicit rect of a
+    /// size-less pane (render law §3) and the arrow's re-centring (`0x4a7b20`: `½·GetWidth`,
+    /// `½·GetHeight`, both the geometry override's bbox extent).
+    pub fn extent(&self) -> (f32, f32) {
+        let (min, max) = self.bbox;
+        ((max[0] - min[0]).max(0.0), (max[1] - min[1]).max(0.0))
     }
 
     /// The loader's idle seed (`0x70ebd0`'s tail, `0x710153`–`0x71019b`): **id 0 (`Stand`) if
@@ -842,17 +818,19 @@ pub const MINIMAP_DEFAULT_PLAYER_MODEL: &str = "Interface\\Minimap\\MinimapArrow
 
 /// A `CSimpleScrollFrame`'s runtime state: the frame whose anchors are overridden to track the
 /// scroll offset ([`crate::script::UiScript::resolve`]'s scroll-child override), and the current
-/// vertical scroll position. `SetVerticalScroll` clamps into `[0, GetVerticalScrollRange()]`, where
-/// the range is always computed live from the resolved rects (never cached here) — so this struct
-/// carries only the two members the client's `SetScrollChild`/`SetVerticalScroll` actually set.
+/// vertical scroll position. `SetVerticalScroll` stores the offset VERBATIM — the reference's
+/// `0x786db0` never reads the range (decision 2017) — and the range is always computed live from
+/// the resolved rects (never cached here), so this struct carries only the two members the
+/// client's `SetScrollChild`/`SetVerticalScroll` actually set (`[+0x318]`, `[+0x328]`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ScrollFrameState {
     /// The scroll child (`SetScrollChild`) — the one frame whose content pans within this frame's
     /// rect. `None` = no child (nothing to clip or offset).
     pub child: Option<FrameHandle>,
-    /// The vertical scroll offset in px (`SetVerticalScroll`), always in `[0, range]`. XML
-    /// y-positive-up: a positive offset lifts the child (`child.top = scrollframe.top + vertical`),
-    /// bringing content below the fold into view.
+    /// The vertical scroll offset in px (`SetVerticalScroll`), unclamped — the reference's
+    /// `[+0x328]`. XML y-positive-up: a positive offset lifts the child
+    /// (`child.top = scrollframe.top + vertical`), bringing content below the fold into view. The
+    /// scroll bar's `[min, max]` is what keeps it inside the range — in FrameXML, never here.
     pub vertical: f32,
 }
 

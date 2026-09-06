@@ -672,3 +672,70 @@ fn selecting_a_row_reads_back_in_the_same_tick() {
         .take_social_requests()
         .contains(&SocialRequest::SelectFriend(2)));
 }
+
+/// **B363 — the who list reaches its last rows.** Liho's `/who` found 49, showed 17, and the knob
+/// travelled while the rows stayed. On the stock window the mechanism is a one-row loss:
+/// `WhoListScrollFrame` is 287 tall (stock `FriendsFrame.xml` l.1661) against seventeen rows of
+/// sixteen, so the child's overflow past the frame, `n × 16 − 287`, sits fifteen pixels under the
+/// bar's `(n − 17) × 16`, and an engine that clamped `SetVerticalScroll` into that overflow
+/// stopped the row offset at `n − 18`. The reference stores the bar's value as given (decision
+/// 2017). Drives the bar to its end and reads the seventeenth row: the forty-ninth name.
+#[test]
+fn the_who_list_reaches_its_last_row_at_the_bars_end() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = setup();
+    s.run("ShowWhoPanel()").unwrap();
+    let who: Vec<WhoInfo> = (1..=49)
+        .map(|i| WhoInfo {
+            name: format!("Who{i:02}"),
+            guild: String::new(),
+            level: 60,
+            race: "Human".to_string(),
+            class: "Warrior".to_string(),
+            zone: "Elwynn Forest".to_string(),
+        })
+        .collect();
+    push(
+        &mut s,
+        SocialState {
+            who,
+            who_total: 49,
+            ..Default::default()
+        },
+        "WHO_LIST_UPDATE",
+    );
+    s.resolve();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    // The reference's own numbers, and the control: the overflow is shorter than the bar.
+    let (_, bar_max) = s
+        .eval::<(f64, f64)>("return WhoListScrollFrameScrollBar:GetMinMaxValues()")
+        .unwrap();
+    assert_eq!(bar_max, 512.0, "(49 − 17) × 16");
+    let overflow = s
+        .eval::<f64>("return WhoListScrollFrame:GetVerticalScrollRange()")
+        .unwrap();
+    assert_eq!(
+        overflow, 497.0,
+        "49 × 16 − 287: the frame is taller than its rows"
+    );
+
+    s.run("WhoListScrollFrameScrollBar:SetValue(512)").unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(
+        s.eval::<i64>("return FauxScrollFrame_GetOffset(WhoListScrollFrame)")
+            .unwrap(),
+        32
+    );
+    assert_eq!(
+        s.eval::<String>("return WhoFrameButton1Name:GetText()")
+            .unwrap(),
+        "Who33"
+    );
+    assert_eq!(
+        s.eval::<String>("return WhoFrameButton17Name:GetText()")
+            .unwrap(),
+        "Who49",
+        "the last hit is on the last row"
+    );
+}

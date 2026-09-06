@@ -365,7 +365,15 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// each whole-scene input of the still-frame skips (1979) read as changed. Counted in the
 /// world crate so the probe names ONE static instead of the four resources the skips read; the
 /// reading is what says whether a gate ever engages.
-const CEILING: usize = 175;
+/// And 175 → 176: `mat_anim_table::affine_row`, a PUBLISH. The mat-anim table's second row
+/// kind (decision 2019): a texture transform's rotation and scale as deltas from the identity,
+/// `[cos − 1, sin, sx − 1, sy − 1]`, so that row 0 — the pinned zero every static material
+/// reads — IS the identity. That encoding is the table's own law (the same zero-is-identity
+/// rule its translation rows and the tint table run under), and the shader's fold is written
+/// against it; a lane that owns rows in the table — the UI model tiles, sampling the cooldown's
+/// quadrant rotations off the pane's play head — has to write them in the table's encoding,
+/// not one of its own. One function, "encode this affine the way the table reads it".
+const CEILING: usize = 176;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

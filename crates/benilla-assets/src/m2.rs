@@ -395,6 +395,8 @@ impl AssetLoader for M2ModelLoader {
                 alpha_anim: sub.alpha_anim.clone().map(std::sync::Arc::new),
                 uv_anim: sub.uv_anim.clone().map(std::sync::Arc::new),
                 uv_seq: sub.uv_seq.clone().map(std::sync::Arc::new),
+                uv_rot_seq: sub.uv_rot_seq.clone().map(std::sync::Arc::new),
+                uv_scale_seq: sub.uv_scale_seq.clone().map(std::sync::Arc::new),
                 rgb_anim: sub.rgb_anim.clone().map(std::sync::Arc::new),
                 rgb_seq: sub.rgb_seq.clone().map(std::sync::Arc::new),
                 wmo_batch: None,                // M2 batches have no MOBA section

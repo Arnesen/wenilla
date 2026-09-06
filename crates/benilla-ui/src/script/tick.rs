@@ -1,6 +1,6 @@
 //! The host runtime loop — an `impl UiScript` block beside its concern (the `layout.rs` pattern):
 //! the event fan-out to registered frames ([`UiScript::fire_event`]), the per-frame advance
-//! ([`UiScript::tick`]: OnUpdate + the engine-side fades/cooldowns), and the FrameXML session clock
+//! ([`UiScript::tick`]: OnUpdate + the engine-side fades and the model panes' clocks), and the FrameXML session clock
 //! ([`UiScript::now`]). The low-level handler-firing these drive lives in [`super::event`].
 
 use mlua::Lua;
@@ -188,7 +188,6 @@ impl super::UiScript {
         // Advance every ScrollingMessageFrame's per-line fade (the client's OnUpdate `0x788460`).
         // Independent of the frame's own OnUpdate script — the fade is C++ behavior, not Lua. The
         // AtBottom freeze gate lives inside `ScrollingMessageState::tick`.
-        let now = self.now();
         let mut model = self.model_mut();
         // The sibling class's OnUpdate (`0x786200`): the same two-phase fade with no scroll gate,
         // plus the capacity law that is this class's stand-in for `maxLines` — the cap is what fits
@@ -216,7 +215,6 @@ impl super::UiScript {
                 mf.trim_to_viewport(viewport_rows);
             }
         }
-        let mut finished_cooldowns: Vec<FrameHandle> = Vec::new();
         for &h in &ticked {
             let Some(frame) = model.arena.frame_mut(h) else {
                 continue;
@@ -224,17 +222,6 @@ impl super::UiScript {
             if let crate::widget::KindState::ScrollingMessage(smf) = &mut frame.kind_state {
                 smf.tick(elapsed);
             }
-            // A Cooldown whose flash has finished hides itself — the reference machine's
-            // `OnAnimFinished` → `Hide()` edge (`Cooldown.lua`), modeled engine-side like the
-            // message fade above (C++-equivalent behavior, not Lua).
-            if let crate::widget::KindState::Cooldown(cd) = &frame.kind_state {
-                if frame.shown && cd.duration > 0.0 && now >= cd.finished_at() {
-                    finished_cooldowns.push(h);
-                }
-            }
-        }
-        for h in finished_cooldowns {
-            model.arena.set_shown(h, false);
         }
         drop(model);
         // Advance fading tooltips (FadeOut's ramp + end-of-ramp hide) — engine behavior like the

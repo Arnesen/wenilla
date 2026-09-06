@@ -94,9 +94,70 @@ use mlua::{Lua, MultiValue, Table, Value};
 
 use super::object::frame_handle_of;
 use super::Model;
-use crate::widget::{model_key, KindState, ModelFileFacts, ModelState};
+use crate::widget::{model_key, FrameHandle, KindState, ModelFileFacts, ModelState};
 
 impl Model {
+    /// FrameXML units per **layout unit** — `768 · √(a²+1)` for the screen's aspect `a`
+    /// (render law §3; the `G48 = 1/√(a²+1)` root scale against the `768`-tall FrameXML
+    /// space). `SetPosition`'s space, and the unit a size-less pane's implicit rect is measured
+    /// in. `4/3` before a screen exists.
+    pub(crate) fn layout_unit(&self) -> f32 {
+        let (w, h) = (self.screen.width(), self.screen.height());
+        let a = if h > 0.0 && w > 0.0 { w / h } else { 4.0 / 3.0 };
+        768.0 * (a * a + 1.0).sqrt()
+    }
+
+    /// The **implicit rect** (decision 2015): a model pane that authored no size takes its
+    /// file's bounding-box extent, in layout units, as its size — the reference's geometry
+    /// overrides (`0x76d080`/`0x76d0d0`) answer the bbox whenever no size is authored, and its
+    /// layout consumes them like any size. Written into the layout input when the facts are
+    /// known; a pane with an authored size, or no file, or no facts yet, is left alone.
+    pub(crate) fn apply_implicit_rect(&mut self, h: FrameHandle) {
+        let unit = self.layout_unit();
+        let extent = {
+            let Some(f) = self.arena.frame(h) else { return };
+            let KindState::Model(m) = &f.kind_state else {
+                return;
+            };
+            let Some(path) = m.path.as_deref() else {
+                return;
+            };
+            let Some(facts) = self.model_facts.get(&model_key(path)) else {
+                return;
+            };
+            let authored = !m.implicit_size
+                && self
+                    .layout_inputs
+                    .get(&h)
+                    .is_some_and(|i| i.width != 0.0 || i.height != 0.0);
+            if authored {
+                return;
+            }
+            facts.extent()
+        };
+        let (w, ht) = (extent.0 * unit, extent.1 * unit);
+        let input = self.layout_inputs.entry(h).or_default();
+        let changed =
+            input.width.to_bits() != w.to_bits() || input.height.to_bits() != ht.to_bits();
+        input.width = w;
+        input.height = ht;
+        if changed {
+            self.touch_layout_frame(h);
+        }
+        if let Some(KindState::Model(m)) = self.arena.frame_mut(h).map(|f| &mut f.kind_state) {
+            m.implicit_size = true;
+        }
+    }
+
+    /// A size was AUTHORED on `h` (`SetWidth`/`SetHeight`/`SetSize`, the XML `<Size>` through
+    /// them): an implicit rect no longer applies to it, for good — the reference's override
+    /// yields to any authored size.
+    pub(crate) fn note_authored_size(&mut self, h: FrameHandle) {
+        if let Some(KindState::Model(m)) = self.arena.frame_mut(h).map(|f| &mut f.kind_state) {
+            m.implicit_size = false;
+        }
+    }
+
     /// The facts the host has handed over for `path`, or `None` — in which case the path is
     /// queued for the host to load ([`crate::script::UiScript::model_facts_wanted`]), once.
     pub(crate) fn model_facts_for(&mut self, path: &str) -> Option<Arc<ModelFileFacts>> {
@@ -236,7 +297,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 .app_data_mut::<Model>()
                 .expect("model app_data")
                 .model_facts_for(&path);
-            with_model(lua, &this, |m| m.set_file(path, facts.as_deref()))
+            with_model(lua, &this, |m| m.set_file(path, facts.as_deref()))?;
+            // A size-less pane takes the file's rect the moment the file is known (2015).
+            let h = frame_handle_of(lua, &this)?;
+            lua.app_data_mut::<Model>()
+                .expect("model app_data")
+                .apply_implicit_rect(h);
+            Ok(())
         })?,
     )?;
     m.set(
@@ -559,6 +626,27 @@ impl crate::script::UiScript {
             if let Some(KindState::Model(m)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
                 m.seed_from_facts(&facts);
             }
+            model.apply_implicit_rect(h);
+        }
+    }
+
+    /// The screen's aspect moved: every implicit rect is measured in layout units, which scale
+    /// with `√(a²+1)`, so each one is re-derived (decision 2015). An authored size is untouched.
+    pub(crate) fn reapply_implicit_rects(&mut self) {
+        let mut model = self.model_mut();
+        let panes: Vec<FrameHandle> = model
+            .arena
+            .ticked_kinds()
+            .iter()
+            .copied()
+            .filter(|&h| {
+                model.arena.frame(h).is_some_and(
+                    |f| matches!(&f.kind_state, KindState::Model(m) if m.implicit_size),
+                )
+            })
+            .collect();
+        for h in panes {
+            model.apply_implicit_rect(h);
         }
     }
 

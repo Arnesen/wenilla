@@ -1,63 +1,9 @@
-//! The Cooldown widget kind (decision 0137 phase 4): the `SetCooldown` API, the reference
-//! machine's derived phases through extraction, and the tick auto-hide (`Cooldown.lua`'s
-//! `OnAnimFinished` → `Hide` edge), plus the per-action dynamic-state read API.
+//! The cooldown **bindings**: the per-action dynamic-state read API and the `GetTime`-space
+//! cooldown triples the stock `Cooldown.lua` machine consumes (the widget itself is the
+//! reference's own `<Model>` since decision 2019 — `tests::model_clock` runs that file verbatim).
 
 use super::common::script;
 use crate::script::*;
-
-fn cooldown_content(s: &UiScript) -> Option<(f32, Option<f32>)> {
-    s.extract().into_iter().find_map(|q| match q.content {
-        QuadContent::Cooldown { fraction, flash } => Some((fraction, flash)),
-        _ => None,
-    })
-}
-
-/// The machine, end to end on the engine clock: hidden → sweep (fraction scrubs with GetTime) →
-/// the 1 s finish flash → auto-hidden by tick.
-#[test]
-fn cooldown_widget_sweeps_flashes_and_hides() {
-    let mut s = script();
-    s.set_screen_size(800.0, 600.0);
-    s.run(
-        r#"
-        cd = CreateFrame("Cooldown", "TestCooldown")
-        cd:SetWidth(36); cd:SetHeight(36); cd:SetPoint("CENTER")
-        cd:Hide()
-    "#,
-    )
-    .unwrap();
-    s.resolve();
-    assert_eq!(cooldown_content(&s), None, "hidden — no slot emitted");
-
-    // Arm a 10 s cooldown that started 2.5 s ago (the reference's start-in-the-past shape from
-    // GetActionCooldown) and show — the sweep reads 25 %.
-    s.run("cd:SetCooldown(GetTime() - 2.5, 10); cd:Show()")
-        .unwrap();
-    s.resolve();
-    let (fraction, flash) = cooldown_content(&s).expect("shown — the slot is emitted");
-    assert!(
-        (fraction - 0.25).abs() < 1e-3,
-        "sweep at 25%, got {fraction}"
-    );
-    assert_eq!(flash, None, "no flash while the sweep runs");
-
-    // Advance past the sweep end into the flash's middle: fraction ≥ 1, flash ≈ 0.5.
-    s.tick(8.0); // now 0.5 s into the flash window
-    s.resolve();
-    let (fraction, flash) = cooldown_content(&s).expect("flash phase still emits");
-    assert!(fraction >= 1.0);
-    let f = flash.expect("the finish flash runs for 1 s after the sweep");
-    assert!((f - 0.5).abs() < 0.05, "flash midway, got {f}");
-
-    // Past the flash: tick hides the widget (the OnAnimFinished → Hide edge).
-    s.tick(1.0);
-    s.resolve();
-    assert_eq!(cooldown_content(&s), None, "finished — tick hid the widget");
-    assert!(
-        !s.eval::<bool>("return cd:IsVisible() == 1").unwrap(),
-        "the frame itself is hidden, not just skipped"
-    );
-}
 
 /// The per-action dynamic-state API: the 1/nil conventions, IsActionInRange's tri-state, and
 /// GetActionCooldown's GetTime-space triple that goes cold at expiry.

@@ -1,5 +1,5 @@
-//! The shipped **Skills tab** (`assets/ui/SkillFrame.xml`) driven end-to-end, engine-only (no
-//! Bevy) — the per-window test module the spellbook/trainer/bank files already establish, split
+//! The stock **Skills tab** (`Interface\FrameXML\SkillFrame.xml`, off the player's chain since
+//! 1956) driven end-to-end, engine-only (no Bevy) — the per-window test module the spellbook/trainer/bank files already establish, split
 //! out of `character_tests.rs` (which owns the paperdoll + the tab round-trip) so the skills-pane
 //! paint law has a home of its own.
 //!
@@ -12,10 +12,9 @@
 //! hunter's `Beast Mastery` on vmangos arrives as `300/300` and must still read gray and
 //! numberless, exactly as it does in the real client.
 //!
-//! **The window around the page is the reference's own since 1751** — `CharacterFrame.xml` and
-//! `PaperDollFrame.xml` off the player's chain — so every test that opens the page loads
-//! [`super::test_ui::CHARACTER_UI`] and opens with `wow_data_or_skip!()`. The page itself
-//! (`assets/ui/SkillFrame.xml`) is still ours.
+//! **The whole window is the reference's own** — `CharacterFrame.xml` and `PaperDollFrame.xml`
+//! since 1751, the page itself since 1956 — so every test that opens the page loads
+//! [`super::test_ui::CHARACTER_UI`] and opens with `wow_data_or_skip!()`.
 
 use benilla_ui::script::{QuadContent, SkillEntry, SkillsState, UiScript, UnitState};
 
@@ -505,4 +504,138 @@ fn the_expand_tab_fits_its_label_at_load() {
         66.0
     );
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+}
+
+/// **B370 — the list reaches its last rows.** MarcusAga's Skills tab stopped three rows short of
+/// the end: the knob mid-track, Maces the last row shown. The reference's own
+/// `FauxScrollFrame_Update` sizes the bar to `(n − 12) × 15` and the scroll child to `n × 15`, and
+/// `SkillListScrollFrame` is 220 tall (stock `SkillFrame.xml` l.468) against twelve rows of
+/// fifteen — so the child's overflow past the frame, `n × 15 − 220`, is forty pixels short of
+/// where the bar goes. An engine that clamped `SetVerticalScroll` into that overflow stopped the
+/// row offset at `n − 15`; the reference stores the bar's value as given (decision 2017).
+///
+/// Drives the bar to its end and reads the twelfth row: the block's last line. The control is the
+/// pre-fix mechanism itself — the overflow really is shorter than the bar's range.
+#[test]
+fn the_list_reaches_its_last_row_at_the_bars_end() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for f in super::test_ui::CHARACTER_UI {
+        super::test_ui::load_ui_strict(&s, f);
+    }
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            exists: true,
+            level: 60,
+            race: Some("Human".into()),
+            race_file: Some("Human".into()),
+            class: Some("Warrior".into()),
+            class_file: Some("WARRIOR".into()),
+            ..UnitState::default()
+        }),
+    );
+    // A warrior's kind of block — twenty-two lines under three headers, twenty-five rows: more than
+    // twelve by more than the frame's slack, so the tail is only reachable past the overflow.
+    let mut entries = Vec::new();
+    for (i, name) in [
+        "Axes",
+        "Bows",
+        "Crossbows",
+        "Daggers",
+        "Defense",
+        "Guns",
+        "Maces",
+        "Polearms",
+        "Staves",
+        "Swords",
+        "Thrown",
+        "Two-Handed Axes",
+        "Two-Handed Maces",
+        "Two-Handed Swords",
+        "Unarmed",
+    ]
+    .iter()
+    .enumerate()
+    {
+        entries.push(skill(
+            100 + i as u32,
+            name,
+            300,
+            300,
+            false,
+            (6, "Weapon Skills", 5),
+        ));
+    }
+    for (i, name) in ["Cloth", "Leather", "Mail", "Plate", "Shield"]
+        .iter()
+        .enumerate()
+    {
+        entries.push(skill(
+            400 + i as u32,
+            name,
+            1,
+            1,
+            false,
+            (8, "Armor Proficiencies", 6),
+        ));
+    }
+    for (i, name) in ["Language: Common", "Language: Dwarven"].iter().enumerate() {
+        entries.push(skill(
+            500 + i as u32,
+            name,
+            300,
+            300,
+            false,
+            (10, "Languages", 8),
+        ));
+    }
+    s.set_skills(SkillsState { entries });
+    s.run(r#"ToggleCharacter("SkillFrame")"#).unwrap();
+    s.resolve();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    let n = s.eval::<i64>("return GetNumSkillLines()").unwrap();
+    assert_eq!(n, 25, "22 lines under 3 headers");
+    let (last_name, last_is_header) = s
+        .eval::<(String, Option<i64>)>(&format!("local n, h = GetSkillLineInfo({n}) return n, h"))
+        .unwrap();
+    assert!(
+        last_is_header.is_none(),
+        "the tail row is a line, read off SkillRankFrame12"
+    );
+
+    // The reference's own numbers: the bar runs to (n − 12) × 15, the child's overflow past the
+    // 220-tall frame is 40 px less — the control that the reported mechanism is the real one.
+    let (_, bar_max) = s
+        .eval::<(f64, f64)>("return SkillListScrollFrameScrollBar:GetMinMaxValues()")
+        .unwrap();
+    assert_eq!(bar_max, f64::from((n as i32 - 12) * 15));
+    let overflow = s
+        .eval::<f64>("return SkillListScrollFrame:GetVerticalScrollRange()")
+        .unwrap();
+    assert_eq!(overflow, f64::from(n as i32 * 15 - 220));
+    assert!(
+        overflow < bar_max,
+        "the frame is taller than its twelve rows"
+    );
+
+    // The knob dragged to the end: bar → SetVerticalScroll → <OnVerticalScroll> →
+    // FauxScrollFrame_OnVerticalScroll → SkillFrame_UpdateSkills.
+    s.run("SkillListScrollFrameScrollBar:SetValue(select(2, SkillListScrollFrameScrollBar:GetMinMaxValues()))")
+        .unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(
+        s.eval::<i64>("return FauxScrollFrame_GetOffset(SkillListScrollFrame)")
+            .unwrap(),
+        n - 12,
+        "the row offset reaches the bar's end, not the overflow's"
+    );
+    assert_eq!(
+        s.eval::<String>("return SkillRankFrame12SkillName:GetText()")
+            .unwrap(),
+        last_name,
+        "the twelfth row is the block's last line"
+    );
 }

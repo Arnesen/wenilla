@@ -85,24 +85,10 @@ pub enum QuadContent {
         /// `inside` flag it pushed down.
         inside_zoom: u8,
     },
-    /// A `Cooldown` widget's draw slot (decision 0137 phase 4): the engine-derived phase of the
-    /// reference machine (`Cooldown.lua`), for the app renderer's pie-wipe/flash draw. Emitted
-    /// only while the widget is shown; `tick` hides it once the flash ends.
-    Cooldown {
-        /// Sweep progress `0..1` (`(now-start)/duration`, the `Cooldown.lua` scrub); `>= 1` =
-        /// the sweep is over (the flash below runs) — no dark pie draws.
-        fraction: f32,
-        /// The finish flash's progress `0..1` over its authored 1.000 s (the model's sequence 1),
-        /// `None` while the sweep still runs. The alpha ramp is the model's own texture-weight
-        /// track — byte-read off `UI-Cooldown-Indicator.m2` (linear 0→1 over the first third,
-        /// hold to the half, 1→0 over the back half) — applied app-side.
-        flash: Option<f32>,
-    },
     /// A `Model` / `PlayerModel` widget's own draw slot: the 3D pane's content hole. The engine
     /// core carries the resolved rect and the pane's identity; the app renderer puts pixels in it
-    /// — the same division of labour [`QuadContent::Minimap`] and [`QuadContent::Cooldown`] use,
-    /// and for the same reason (the scene state is [`crate::widget::ModelState`]; the render is
-    /// not this crate's).
+    /// — the same division of labour [`QuadContent::Minimap`] uses, and for the same reason (the
+    /// scene state is [`crate::widget::ModelState`]; the render is not this crate's).
     ///
     /// **The clock is deliberately NOT here.** A pane's play head moves every tick, and the
     /// host memoizes its whole quad conversion on the extracted list being unchanged — a
@@ -125,10 +111,9 @@ pub enum QuadContent {
         /// The pane's global frame name (`$parent`-expanded), or `None` for an anonymous
         /// `CreateFrame("Model")` — pfUI's autocast shine is the corpus example of the latter.
         name: Option<String>,
-        /// The `SetModel` path the pane holds (`None` for a unit pane or an empty one). Decision
-        /// 1980: the world-map arrow is an anonymous `Model` child whose file is the minimap arrow
-        /// (`crate::script::ARROW_MODEL`) — the one path the app draws as a sprite, so the seam
-        /// carries it with the facing and the pane's `SetModelScale`.
+        /// The `SetModel` path the pane holds (`None` for a unit pane or an empty one) — what the
+        /// host's tile renderer draws (decision 2013), the map arrow's `crate::script::ARROW_MODEL`
+        /// among them since 2015.
         model: Option<String>,
         /// `SetFacing`'s radians (0 default).
         facing: f32,

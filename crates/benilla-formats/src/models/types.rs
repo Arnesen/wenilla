@@ -493,6 +493,15 @@ pub struct RenderSubmesh {
     /// only slot the shared-material registry can read — is a dead hold). `None` for every batch
     /// whose slots agree, which is the shared lane unchanged.
     pub uv_seq: Option<SeqLoops<[f32; 2]>>,
+    /// The batch's texture-transform **rotation** loop per file sequence slot — the raw
+    /// quaternion keys ([`tex_anim::bake_uv_rot_seqs`](super::tex_anim::bake_uv_rot_seqs),
+    /// decision 2019), for the lanes that own a material per instance (the UI model tiles;
+    /// the cooldown indicator's sweep is this channel). `None` for a transform that never
+    /// rotates — every placed world doodad — and all of WMO.
+    pub uv_rot_seq: Option<SeqLoops<[f32; 4]>>,
+    /// The batch's texture-transform **scaling** loop per file sequence slot (`(x, y)`), on the
+    /// same rule as [`Self::uv_rot_seq`].
+    pub uv_scale_seq: Option<SeqLoops<[f32; 2]>>,
     /// The batch's **animated RGB tint** (the M2Color colour track, time-varying only — a spell
     /// effect's white-hot flash cooling to red): baked by [`mat_anim`](super::mat_anim). When
     /// `Some`, the static vertex-colour tint is **skipped** for this batch (the two would
@@ -616,6 +625,8 @@ impl Default for RenderSubmesh {
             alpha_anim: None,
             uv_anim: None,
             uv_seq: None,
+            uv_rot_seq: None,
+            uv_scale_seq: None,
             rgb_anim: None,
             rgb_seq: None,
             wmo_batch: None,

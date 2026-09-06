@@ -241,7 +241,7 @@ fn your_own_portrait_explains_the_menu_instead_of_showing_your_health() {
 #[test]
 fn action_button_hover_takes_the_default_corner() {
     let mut s = harness(&[
-        "Cooldown.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
@@ -282,7 +282,7 @@ fn action_button_hover_takes_the_default_corner() {
 #[test]
 fn ubertooltips_off_seats_action_bar_plates_beside_the_button() {
     let mut s = harness(&[
-        "Cooldown.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
@@ -362,7 +362,7 @@ fn ubertooltips_off_seats_action_bar_plates_beside_the_button() {
 #[test]
 fn ubertooltips_off_seats_stance_plates_beside_the_button() {
     let mut s = harness(&[
-        "Cooldown.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
@@ -415,7 +415,7 @@ fn ubertooltips_off_seats_stance_plates_beside_the_button() {
 #[test]
 fn buff_hover_hangs_below_left_of_the_button() {
     let mut s = harness(&[
-        "Cooldown.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",

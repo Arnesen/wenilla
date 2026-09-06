@@ -409,6 +409,73 @@ fn a_loop_completes_once_and_a_fileless_pane_paints_nothing() {
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
+/// **The implicit rect** (decision 2015): a model pane that authored no size takes its file's
+/// bounding-box extent in LAYOUT units — `768·√(a²+1)` FrameXML units per unit, `1280` at 4:3
+/// — the moment the facts are known; it follows the screen's aspect; an authored size wins.
+#[test]
+fn a_size_less_pane_takes_its_files_rect_in_layout_units() {
+    let mut s = script();
+    s.set_screen_size(1024.0, 768.0);
+    // The map arrow's own box (`MinimapArrow.m2`, render law §2): 0.0262 × 0.0263 units.
+    let arrow = |s: &mut UiScript| {
+        s.set_model_facts(
+            r"Interface\Minimap\MinimapArrow.mdx",
+            ModelFileFacts {
+                sequences: vec![SequenceFacts {
+                    anim_id: 0,
+                    duration_ms: 3333,
+                    looping: true,
+                }],
+                bbox: ([-0.0127, -0.0118, 0.0], [0.0135, 0.0145, 0.0]),
+            },
+        );
+    };
+    s.run(
+        r#"
+        a = CreateFrame("Model", "Sized", UIParent)
+        a:SetPoint("CENTER")
+        b = CreateFrame("Model", "Authored", UIParent)
+        b:SetPoint("CENTER") b:SetWidth(50) b:SetHeight(20)
+        a:SetModel("Interface\\Minimap\\MinimapArrow.mdx")
+        b:SetModel("Interface\\Minimap\\MinimapArrow.mdx")
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert_eq!(
+        s.eval::<f32>("return Sized:GetWidth()").unwrap(),
+        0.0,
+        "no facts yet: no rect"
+    );
+    arrow(&mut s);
+    s.resolve();
+    let (w, h): (f32, f32) = s
+        .eval("return Sized:GetWidth(), Sized:GetHeight()")
+        .unwrap();
+    assert!(
+        (w - 0.0262 * 1280.0).abs() < 0.05 && (h - 0.0263 * 1280.0).abs() < 0.05,
+        "{w}×{h}"
+    );
+    let (bw, bh): (f32, f32) = s
+        .eval("return Authored:GetWidth(), Authored:GetHeight()")
+        .unwrap();
+    assert_eq!((bw, bh), (50.0, 20.0), "an authored size is untouched");
+    assert!(pane(&s, "Sized").implicit_size && !pane(&s, "Authored").implicit_size);
+
+    // 16:9 — a layout unit is 768·√((16/9)²+1) = 1566.4 FrameXML units.
+    s.set_screen_size(1600.0, 900.0);
+    s.resolve();
+    let w: f32 = s.eval("return Sized:GetWidth()").unwrap();
+    assert!((w - 0.0262 * 1566.4).abs() < 0.1, "{w}");
+
+    // Authoring a size later ends the implicit rect for good.
+    s.run("Sized:SetWidth(10)").unwrap();
+    assert!(!pane(&s, "Sized").implicit_size);
+    s.set_screen_size(1024.0, 768.0);
+    s.resolve();
+    assert_eq!(s.eval::<f32>("return Sized:GetWidth()").unwrap(), 10.0);
+}
+
 /// `ReplaceIconTexture` is the type-14 texture override on the INSTANCE: stored over a file
 /// (queued and replayed while it streams), dropped with no file, released by `SetModel` and
 /// `ClearModel`.

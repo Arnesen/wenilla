@@ -474,6 +474,19 @@ fn the_item_push_card_shares_the_band_with_a_raised_bar_exactly_as_the_reference
     );
     let failures = super::load_default_ui(&s);
     assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    // The card is the stock `<Model>` since 2015, sized by its file's box once the facts land
+    // (`ForcedBackpackItem.m2`: one 1000 ms clamp; the box 0.02707 × 0.07962 model units).
+    s.set_model_facts(
+        r"Interface\ItemAnimations\ForcedBackpackItem.mdx",
+        benilla_ui::widget::ModelFileFacts {
+            sequences: vec![benilla_ui::widget::SequenceFacts {
+                anim_id: 0,
+                duration_ms: 1000,
+                looping: false,
+            }],
+            bbox: ([0.0, 0.0, 0.0], [0.02707, 0.07962, 0.0]),
+        },
+    );
     s.run("MultiBarBottomLeft:Show() MultiBarBottomRight:Show() UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();
@@ -488,15 +501,23 @@ fn the_item_push_card_shares_the_band_with_a_raised_bar_exactly_as_the_reference
     s.tick(0.133); // the opaque peak — the instant the card is most visible
     s.resolve();
     assert!(
-        shown(&s, "MainMenuBarBackpackButtonBenillaItemPush"),
+        shown(&s, "MainMenuBarBackpackButtonItemAnim"),
         "the card plays"
     );
 
-    let card = rect(&s, "MainMenuBarBackpackButtonBenillaItemPush");
+    // The pane's rect is the file's box in layout units at 16:9 — the card's whole travel band,
+    // 42.41 × 124.72 hung off the button's BOTTOMRIGHT (−10, 0) — and the card the file's keys
+    // put inside it at its opaque peak is the reference's 48.9..93.1 above the screen floor
+    // (0887 measured that quad by hand; it sits inside this band).
+    let card = rect(&s, "MainMenuBarBackpackButtonItemAnim");
     let bar = rect(&s, "MultiBarBottomRight");
     assert!(
-        (card.1 - 48.9).abs() < 0.5 && (card.3 - 93.1).abs() < 0.5,
-        "the card's band is the reference's 48.9..93.1 above the screen floor: got {card:?}"
+        (card.2 - card.0 - 42.41).abs() < 0.05 && (card.3 - card.1 - 124.72).abs() < 0.05,
+        "the pane's rect is the file's box: {card:?}"
+    );
+    assert!(
+        card.1 <= 48.9 && card.3 >= 93.1,
+        "the reference's card peak 48.9..93.1 lies inside the pane's band: {card:?}"
     );
     assert!(
         overlaps(bar, card),

@@ -101,7 +101,6 @@ const FRAME_TAGS: &[&str] = &[
     "Minimap",
     "MovieFrame",
     "WorldFrame",
-    "Cooldown",
 ];
 
 /// The five `<Scripts>` handler names that auto-enable the MOUSE kind, and only those five

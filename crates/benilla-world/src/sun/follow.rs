@@ -634,8 +634,8 @@ pub(super) fn follow_moons(
 
 /// Camera-anchor the star dome (just inside the sky gradient dome, at `far*0.88` — over the gradient at
 /// `far*0.9`, behind the sun/moon at `far*0.85`; the reference draws stars FIRST among the bodies —
-/// though the sky-internal order is the `sky_order` bias ladder and world occlusion is `star.wgsl`'s
-/// forced far depth, so this radius decides neither, only the dots' screen scale) and
+/// though the sky-internal order is the `sky_order` bias ladder and world occlusion is the far depth
+/// `sky_vertex.wgsl` pins, so this radius decides neither, only the dots' screen scale) and
 /// drive its **global alpha** from the verified star curve. The reference quantises the curve to the
 /// model-global byte `trunc(curve·254 + 1)` and SKIPS the draw below 2 (`0x6d1b50`/`0x7e6120`, decision
 /// 0485); each patch then multiplies its own authored transparency weight ([`StarDome::weight`]) under

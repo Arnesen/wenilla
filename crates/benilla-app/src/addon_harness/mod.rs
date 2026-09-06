@@ -2085,7 +2085,6 @@ const PROBE_FRAME_KINDS: &[&str] = &[
     "MovieFrame",
     "GameTooltip",
     "Minimap",
-    "Cooldown",
 ];
 
 /// **Type the receiver of a `:` call where the file says what it is** — the whole basis of the

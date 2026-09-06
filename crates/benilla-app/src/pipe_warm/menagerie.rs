@@ -766,6 +766,8 @@ fn warm_quad(colors: bool, skinned: bool) -> RenderSubmesh {
         interior: false,
         emissive: false,
         icon_slot: false,
+        uv_rot_seq: None,
+        uv_scale_seq: None,
         sidn: None,
         window: false,
         additive: false,

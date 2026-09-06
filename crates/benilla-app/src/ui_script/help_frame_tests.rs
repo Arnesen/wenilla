@@ -39,7 +39,7 @@ fn setup() -> UiScript {
         // The stock file's `HelpFrame_OnShow` calls `UpdateMicroButtons()` before
         // `GetGMStatus()`, so without the micro row the OnShow raises and the status ask never
         // happens. Ours never called it. The row needs the bar's button kit under it.
-        "Cooldown.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",

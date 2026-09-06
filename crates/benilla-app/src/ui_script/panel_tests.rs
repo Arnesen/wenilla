@@ -850,7 +850,7 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
         load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
         load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
         load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-        load_xml(&s, "Cooldown.xml");
+        load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
         load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
         load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
                                              // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT

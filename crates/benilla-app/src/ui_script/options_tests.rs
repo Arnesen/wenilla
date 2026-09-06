@@ -775,7 +775,7 @@ fn interface_harness() -> UiScript {
             // VARIABLES_LOADED fires the slider exists. A test that fires the event has to have
             // loaded it too.
             "Interface\\FrameXML\\ColorPickerFrame.xml",
-            "Cooldown.xml",
+            "Interface\\FrameXML\\Cooldown.xml",
             "Interface\\FrameXML\\ActionButtonTemplate.xml",
             "Interface\\FrameXML\\MainMenuBar.xml",
             "Interface\\FrameXML\\ActionBarFrame.xml",
@@ -850,7 +850,7 @@ fn actionbars_harness() -> UiScript {
         &[
             "Interface\\FrameXML\\Fonts.xml",
             r"Interface\FrameXML\UIParent.xml",
-            "Cooldown.xml",
+            "Interface\\FrameXML\\Cooldown.xml",
             "Interface\\FrameXML\\ActionButtonTemplate.xml",
             "Interface\\FrameXML\\TextStatusBar.lua",
             "Interface\\FrameXML\\TextStatusBar.xml",

@@ -137,7 +137,9 @@ impl Plugin for DepthProbePlugin {
             // Between the opaque pass (which draws `Opaque3d` *and* `AlphaMask3d`) and the
             // transmissive/transparent ones. That is the depth as it stood when the opaque fight was
             // decided, which is the question — see [`DepthReadbackNode`] for what reading it later
-            // gets you instead.
+            // gets you instead. The retained static pass draws BEFORE the opaque pass (2016), so
+            // its walls are in this read too; while it ran after, the graph left the two
+            // unordered and a probe could read a wall-less depth on some frames.
             //
             // `WOW_DEPTH_AFTER=1` moves the copy to AFTER the transparent pass — deliberately
             // measuring the thing the placement note warns about: the depth the transparent pass

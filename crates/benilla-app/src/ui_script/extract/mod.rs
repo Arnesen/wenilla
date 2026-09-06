@@ -16,9 +16,7 @@ use crate::ui_text::UiFontAtlas;
 use benilla_assets::WorldAssets;
 
 mod colorselect;
-mod cooldown;
 mod text;
-use cooldown::cooldown_quads;
 
 /// `WOW_UI_COST=1` — the untraced per-frame cost meter for this system's phases (the premise
 /// instrument for the UI epoch-gate lane, 0730's warm slice): one `[ui-cost]` line per frame with
@@ -94,7 +92,6 @@ fn report_ui_pick(eq: &benilla_ui::script::ExtractedQuad, rect: Rect, at: Vec2, 
     let what = match &eq.content {
         QuadContent::Frame => "frame-slot".to_string(),
         QuadContent::Minimap { .. } => "minimap".to_string(),
-        QuadContent::Cooldown { .. } => "cooldown".to_string(),
         QuadContent::Texture {
             path,
             color,
@@ -118,7 +115,6 @@ fn content_kind(c: &QuadContent) -> &'static str {
     match c {
         QuadContent::Frame => "frame",
         QuadContent::Minimap { .. } => "minimap",
-        QuadContent::Cooldown { .. } => "cooldown",
         QuadContent::ModelPane { .. } => "modelpane",
         QuadContent::Texture { .. } => "texture",
         QuadContent::ColorWheel => "colorwheel",
@@ -354,7 +350,6 @@ fn span_bounds(spans: &[u32], i: usize) -> (usize, usize) {
 fn splice_simple(eq: &benilla_ui::script::ExtractedQuad) -> bool {
     match &eq.content {
         QuadContent::Frame
-        | QuadContent::Cooldown { .. }
         | QuadContent::Backdrop { .. }
         // A model pane writes at most one quad and one idempotent tile request (decision 2008)
         // — and the map's arrow changes facing on every turn while the map is open.
@@ -1310,14 +1305,6 @@ fn convert_entry(
                 alpha: eq.alpha,
             });
         }
-        // The Cooldown widget's pie wipe + finish flash (decision 0137 phase 4) — the
-        // byte-pinned look of `UI-Cooldown-Indicator.m2`, rebuilt natively (see
-        // [`cooldown_quads`]).
-        QuadContent::Cooldown { fraction, flash } => {
-            cooldown_quads(
-                rect, eq.z, eq.alpha, fraction, flash, clip, assets, images, out,
-            );
-        }
         // A `<Model>`/`<PlayerModel>` pane's content: the off-screen body bake its window keeps,
         // sampled square edge to edge. The pane→booth join is
         // [`crate::portrait::model_pane_booth`], whose doc says why it is a table of frame names.
@@ -1328,8 +1315,9 @@ fn convert_entry(
         // own file, which declares a bare `<PlayerModel>` and no Texture at all — so the widget
         // itself has to draw, or the character sheet's paper doll is an empty rectangle.
         //
-        // A pane with no name, or one no window claims, draws nothing (`SetModel` panes included:
-        // this engine holds their scene and renders no M2 into it). Nothing is stubbed white.
+        // A FILE pane is a tile (2013; the map arrow among them since 2015); a UNIT pane joins
+        // the booth its window keeps. A pane with no name, or one no window claims, draws
+        // nothing. Nothing is stubbed white.
         QuadContent::ModelPane {
             handle,
             name,
@@ -1341,44 +1329,6 @@ fn convert_entry(
             icon,
         } => {
             use crate::portrait::PortraitSource;
-            // The world-map arrow (decision 1980): the stock `WorldMapFrame.lua` /
-            // `Blizzard_BattlefieldMinimap.lua` create an anonymous `Model` child, `SetModel` it to
-            // the minimap arrow, and steer it with `SetFacing`/`SetPosition` every update. benilla
-            // draws that one file as the minimap's own arrow sprite — the same art the minimap
-            // ring draws (`crate::minimap::blips`), turned the same way (`-facing`: the M2's yaw
-            // is CCW-positive, the screen's is CW), filling the pane the engine sized to the
-            // reference's 33.6 px footprint times the arrow's `SetModelScale`. No 3D pane needs
-            // to exist for a two-triangle arrow.
-            if model.as_deref() == Some(benilla_ui::script::ARROW_MODEL) {
-                use crate::minimap::blips::{
-                    PLAYER_ARROW_OFFSET_PX, PLAYER_ARROW_QUAD_PX, PLAYER_ARROW_TEXTURE,
-                };
-                let Some(handle) = assets
-                    .as_mut()
-                    .and_then(|a| a.sprite_texture(PLAYER_ARROW_TEXTURE, images))
-                else {
-                    return;
-                };
-                // The M2's single quad sits off its origin by an authored offset that turns with
-                // the facing — the minimap's arrow applies the same one at its 33.6 px basis, and
-                // the pane the engine sized (`worldmap_arrow.rs`: the footprint times the
-                // `SetModelScale`) scales it here. `model_scale` is already in the rect.
-                let rotation = -facing;
-                let (sin, cos) = rotation.sin_cos();
-                let off = PLAYER_ARROW_OFFSET_PX * (rect.width() / PLAYER_ARROW_QUAD_PX);
-                let off = Vec2::new(off.x * cos - off.y * sin, off.x * sin + off.y * cos);
-                let rect = Rect::from_center_size(rect.center() + off, rect.size());
-                out.push(UiQuad {
-                    rect,
-                    z_key: eq.z,
-                    texture: Some(handle),
-                    color: [1.0, 1.0, 1.0, eq.alpha],
-                    rotation,
-                    clip,
-                    ..default()
-                });
-                return;
-            }
             // A FILE pane (decision 2008): publish what the tile renderer needs — the pane's
             // device-pixel size and the render law's unit ladder off it — and draw the tile's
             // atlas cell when the renderer has one. The request is idempotent, so the memoized

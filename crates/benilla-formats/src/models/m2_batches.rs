@@ -578,6 +578,12 @@ pub fn parse_m2_render_submeshes(
         // the lane it has always taken.
         let uv_seq = tex_anim::bake_uv_seqs(model, batch.texture_transform_combo_index, &seq_slots)
             .filter(|set| set.uniform().is_none());
+        // The rotation and scaling channels, per slot (decision 2019): consumed only by a lane
+        // that owns its materials per instance (the UI model tiles), so they are carried whole.
+        let uv_rot_seq =
+            tex_anim::bake_uv_rot_seqs(model, batch.texture_transform_combo_index, &seq_slots);
+        let uv_scale_seq =
+            tex_anim::bake_uv_scale_seqs(model, batch.texture_transform_combo_index, &seq_slots);
         // The batch's animated RGB tint (the M2Color colour track's runtime half): only a
         // time-varying track bakes — a `Some` here *replaces* the static vertex tint below (a
         // spell effect's white-hot flash cooling to red would otherwise freeze on its first key).
@@ -724,6 +730,8 @@ pub fn parse_m2_render_submeshes(
             sub.alpha_anim = alpha_anim.clone(); // every billboard-split group shares the batch's loops
             sub.uv_anim = uv_anim.clone();
             sub.uv_seq = uv_seq.clone();
+            sub.uv_rot_seq = uv_rot_seq.clone();
+            sub.uv_scale_seq = uv_scale_seq.clone();
             sub.rgb_anim = rgb_anim.clone();
             sub.rgb_seq = rgb_seq.clone();
             out.push(sub);

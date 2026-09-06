@@ -1464,9 +1464,6 @@ fn a_frames_type_chain_matches_the_roster() {
             "DressUpModel",
             &["DressUpModel", "PlayerModel", "Model", "Frame", "Region"],
         ),
-        // **Our Era-shaped divergence reports what 1.12's cooldown IS**: a Model. 1.12.1 has no
-        // `Cooldown` type name at all (the roster is 23 and none is that).
-        ("Cooldown", "Model", &["Model", "Frame", "Region"]),
     ];
     for (kind, leaf, chain) in cases {
         s.run(&format!(r#"TC = CreateFrame("{kind}")"#))

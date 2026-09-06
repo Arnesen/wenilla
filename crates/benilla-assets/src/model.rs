@@ -132,6 +132,12 @@ pub struct ModelSubmesh {
     /// because which loop applies depends on the sequence the *instance* is playing (decision
     /// 1408). Like [`Self::uv_anim`], the `Arc` doubles as a material-dedup identity.
     pub uv_seq: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 2]>>>,
+    /// The batch's texture-transform **rotation** loop per file sequence slot (decision 2019)
+    /// — the UI model tiles sample it off the pane's play head into the material's affine row;
+    /// no world lane reads it (no placed doodad authors one). `None` for the rest.
+    pub uv_rot_seq: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 4]>>>,
+    /// The scaling twin of [`Self::uv_rot_seq`].
+    pub uv_scale_seq: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 2]>>>,
     /// The batch's **animated RGB tint** (the M2Color colour track, time-varying only — a spell
     /// effect's white-hot flash cooling to red). When `Some`, the static vertex tint was skipped
     /// at parse (`benilla-formats`): the render side seeds the material's tint at the first key —

@@ -3,12 +3,14 @@
 //! `0xffff`/out-of-range = none) → the record's **translation** track, baked to a loopable UV-offset
 //! loop on the same clocks as the material-alpha bake (gseq wrap / seq-0 band).
 //!
-//! Translation only, deliberately: the full 7968-model 1.12 corpus sweep found 281 of 286
-//! transforms translation-keyed, and every rotation/scaling user is a UI/spell-effect/goober model
-//! — **zero placed world doodads** — so the doodad lane (0130's scope) needs no rotation/scaling.
-//! The baked offset is the track's raw x/y; how the real client maps it onto U/V (sign/axis, and
-//! the application mechanism) is under RE in wow-re — the renderer applies the convention once,
-//! when it consumes this.
+//! The translation channel is what the world's shared-material lane consumes: the full 7968-model
+//! 1.12 corpus sweep found 281 of 286 transforms translation-keyed, and every rotation/scaling
+//! user is a UI/spell-effect/goober model — **zero placed world doodads**. The rotation and
+//! scaling channels bake per file sequence slot ([`bake_uv_rot_seqs`] / [`bake_uv_scale_seqs`],
+//! decision 2019) for the lanes that own their materials per instance — the UI model tiles, whose
+//! cooldown indicator is four quadrant quads turned by their rotation tracks. The baked values are
+//! the tracks' raw numbers; the law that composes them is [`uv_transform`], and the shader is its
+//! twin.
 
 use benilla_m2::M2Model;
 
@@ -23,6 +25,18 @@ impl KeyAnim<[f32; 2]> {
     /// for a defensively-empty loop the bake never emits).
     pub fn sample(&self, elapsed: f32) -> [f32; 2] {
         self.sample_or(elapsed, [0.0, 0.0])
+    }
+}
+
+/// One baked texture-transform **rotation** loop — the raw quaternion keys, component-lerped
+/// (see [`bake_uv_rot_seqs`]).
+pub type UvRotAnim = KeyAnim<[f32; 4]>;
+
+impl KeyAnim<[f32; 4]> {
+    /// The raw quaternion at `elapsed` seconds on the loop clock (the identity `(0, 0, 0, 1)`
+    /// for a defensively-empty loop the bake never emits).
+    pub fn sample(&self, elapsed: f32) -> [f32; 4] {
+        self.sample_or(elapsed, [0.0, 0.0, 0.0, 1.0])
     }
 }
 
@@ -90,10 +104,176 @@ pub(super) fn bake_uv_seqs(
     )
 }
 
+/// A rotation quaternion within a hair of the identity `(0, 0, 0, 1)`.
+fn is_quat_identity(q: [f32; 4]) -> bool {
+    q[0].abs() < 1e-6 && q[1].abs() < 1e-6 && q[2].abs() < 1e-6 && (q[3] - 1.0).abs() < 1e-6
+}
+
+/// A scale within a hair of `(1, 1)`.
+fn is_scale_identity(v: [f32; 2]) -> bool {
+    (v[0] - 1.0).abs() < 1e-6 && (v[1] - 1.0).abs() < 1e-6
+}
+
+/// Bake the batch's texture-transform **rotation** loop per file sequence slot — the raw
+/// quaternion keys, **component-lerped and never normalised**, which is what the reference does
+/// (`0x713ea0` lerps each component and `0x7bddb0` consumes the result as is: between two 22.5°
+/// keys `|q|` dips to cos 11.25° and the block is a rotation with a slight shrink — wow-re
+/// `modelframe-texanim-and-sequence-law.md` §3.4). `None` when the transform is absent or its
+/// rotation never leaves the identity.
+pub(super) fn bake_uv_rot_seqs(
+    model: &M2Model,
+    combo_index: u16,
+    slots: &[SeqSlot],
+) -> Option<SeqLoops<[f32; 4]>> {
+    let ti = *model.texture_transform_lookup.get(combo_index as usize)?;
+    let t = model.texture_transforms.get(ti as usize)?;
+    SeqLoops::new(
+        slots
+            .iter()
+            .map(|&slot| {
+                bake_track(
+                    &t.rotation,
+                    &model.global_sequences,
+                    Some(slot),
+                    |q| q,
+                    is_quat_identity,
+                    is_quat_identity,
+                )
+            })
+            .collect(),
+    )
+}
+
+/// Bake the batch's texture-transform **scaling** loop per file sequence slot (`(x, y)` of the
+/// track's vec3). `None` when the transform is absent or its scale never leaves `(1, 1)`.
+pub(super) fn bake_uv_scale_seqs(
+    model: &M2Model,
+    combo_index: u16,
+    slots: &[SeqSlot],
+) -> Option<SeqLoops<[f32; 2]>> {
+    let ti = *model.texture_transform_lookup.get(combo_index as usize)?;
+    let t = model.texture_transforms.get(ti as usize)?;
+    SeqLoops::new(
+        slots
+            .iter()
+            .map(|&slot| {
+                bake_track(
+                    &t.scaling,
+                    &model.global_sequences,
+                    Some(slot),
+                    |v| [v[0], v[1]],
+                    is_scale_identity,
+                    is_scale_identity,
+                )
+            })
+            .collect(),
+    )
+}
+
+/// **The texture transform's law**, from the file to the texel (wow-re
+/// `modelframe-texanim-and-sequence-law.md` §3.4, VERIFIED trio-convergent):
+///
+/// > `uv' = R_q((uv + t − p) ⊙ s) + p`, `p = (½, ½)`
+///
+/// — the translation is added first, the scale is applied about the pivot, then the rotation
+/// about the pivot. `R_q` is the standard active rotation of the raw (unnormalised) quaternion;
+/// for the z-only quaternions every shipped UI asset authors, `c = 1 − 2z²`, `s = 2zw`, and
+/// `+θ` turns counter-clockwise in the `u`-right / `v`-up frame. A quaternion with x/y components
+/// would turn the plane out of itself; this reads its z-rotation alone (the shipped population
+/// has none). `wow_model.wgsl`'s UV fold is this function's twin: keep the two in step.
+pub fn uv_transform(uv: [f32; 2], t: [f32; 2], q: [f32; 4], s: [f32; 2]) -> [f32; 2] {
+    let (c, sn) = rotation_2x2(q);
+    let dx = (uv[0] + t[0] - 0.5) * s[0];
+    let dy = (uv[1] + t[1] - 0.5) * s[1];
+    [0.5 + dx * c - dy * sn, 0.5 + dx * sn + dy * c]
+}
+
+/// The `(cos, sin)` of a raw quaternion's z-rotation, as the reference's matrix builder yields
+/// them — `1 − 2z²`, `2zw`, unnormalised (see [`uv_transform`]).
+pub fn rotation_2x2(q: [f32; 4]) -> (f32, f32) {
+    let (z, w) = (q[2], q[3]);
+    (1.0 - 2.0 * z * z, 2.0 * z * w)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use benilla_m2::M2Vec3Track;
+
+    /// The law's handedness, on the note's own worked example: `θ = +90°` (`z = w = √½`),
+    /// `p = (½, ½)`, no translation, unit scale — `(1, 0.5) ↦ (0.5, 1.0)`, a counter-clockwise
+    /// turn in the `u`-right / `v`-up frame; and a `z < 0` key (every key of the cooldown model)
+    /// turns the other way.
+    #[test]
+    fn the_uv_law_turns_counter_clockwise_for_a_positive_z() {
+        let r = std::f32::consts::FRAC_1_SQRT_2;
+        let got = uv_transform([1.0, 0.5], [0.0, 0.0], [0.0, 0.0, r, r], [1.0, 1.0]);
+        assert!(
+            (got[0] - 0.5).abs() < 1e-6 && (got[1] - 1.0).abs() < 1e-6,
+            "{got:?}"
+        );
+        let cw = uv_transform([1.0, 0.5], [0.0, 0.0], [0.0, 0.0, -r, r], [1.0, 1.0]);
+        assert!(
+            (cw[0] - 0.5).abs() < 1e-6 && (cw[1] - 0.0).abs() < 1e-6,
+            "{cw:?}"
+        );
+        // Identity in, identity out — the static path's whole population.
+        let id = uv_transform([0.2, 0.7], [0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0]);
+        assert!((id[0] - 0.2).abs() < 1e-6 && (id[1] - 0.7).abs() < 1e-6);
+        // A translation is added BEFORE the pivoted rotation: `(uv + t − p)` turns.
+        let tr = uv_transform([0.5, 0.5], [0.5, 0.0], [0.0, 0.0, r, r], [1.0, 1.0]);
+        assert!(
+            (tr[0] - 0.5).abs() < 1e-6 && (tr[1] - 1.0).abs() < 1e-6,
+            "{tr:?}"
+        );
+        // The lerped, unnormalised midpoint between 0° and 45° keys shrinks: |q| < 1 ⇒ the
+        // block's scale is below 1 (the note's cos 11.25° effect, at a coarser pair here).
+        let (c, sn) = rotation_2x2([
+            0.0,
+            0.0,
+            0.5 * (0.0 + (22.5f32).to_radians().sin()),
+            0.5 * (1.0 + (22.5f32).to_radians().cos()),
+        ]);
+        assert!((c * c + sn * sn).sqrt() < 1.0);
+    }
+
+    /// The cooldown indicator's own rotation tracks, straight off the client data: transform 0's
+    /// keys turn `0 → −90°` over the first 250 ms of sequence 0 (`z` from 0 to `−√½`) and hold
+    /// there to the sequence's end; sequence 1's window is the identity throughout (its keys at
+    /// 1167 and 2167 ms are both `(0, 0, 0, 1)`). Skips without client data.
+    #[test]
+    fn the_cooldown_indicators_rotation_bakes_per_sequence() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let bytes = chain
+            .read_file(r"Interface\Cooldown\UI-Cooldown-Indicator.m2")
+            .expect("read the cooldown indicator");
+        let subs = super::super::parse_m2_render_submeshes(&bytes, "", &[]).expect("parse");
+        let rot = subs[0]
+            .uv_rot_seq
+            .as_ref()
+            .expect("the top-right quadrant's rotation loop");
+        let seq0 = rot.seq(Some(0)).expect("sequence 0 keys it");
+        assert!(!seq0.wrap, "sequence 0 clamps (flags 0x1)");
+        let r = std::f32::consts::FRAC_1_SQRT_2;
+        let at = |t: f32| seq0.sample(t);
+        assert!(at(0.0)[2].abs() < 1e-5, "{:?}", at(0.0));
+        assert!(
+            (at(0.25)[2] + r).abs() < 1e-3,
+            "−90° at 250 ms: {:?}",
+            at(0.25)
+        );
+        assert!(
+            (at(0.9)[2] + r).abs() < 1e-3,
+            "held to the end: {:?}",
+            at(0.9)
+        );
+        // The lerp between the 0 and 62 ms keys is component-wise on the raw quaternion.
+        let mid = at(0.031);
+        assert!(mid[2] < 0.0 && mid[2] > -r);
+        assert!(subs[0].uv_scale_seq.is_none(), "no scale track");
+        assert!(subs[4].uv_rot_seq.is_none(), "the star has no transform");
+    }
 
     fn track(gseq: u16, interp: u16, keys: &[(u32, [f32; 3])]) -> M2Vec3Track {
         M2Vec3Track {

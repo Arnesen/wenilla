@@ -582,7 +582,7 @@ fn the_world_map_cannot_open_behind_the_menu_and_gives_its_slot_back() {
         r"Interface\FrameXML\UIPanelTemplates.xml",
         // The stock map's OnShow/OnHide call `UpdateMicroButtons` unguarded (1980), which the
         // micro menu defines over the action bar it sits in — the spellbook kit's cluster.
-        "Cooldown.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
@@ -643,7 +643,7 @@ fn nothing_opens_behind_the_world_map_and_escape_closes_it_first() {
         r"Interface\FrameXML\UIPanelTemplates.xml",
         // The action-bar cluster the micro menu sits in — the stock map's OnShow/OnHide call
         // `UpdateMicroButtons` unguarded (1980).
-        "Cooldown.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
@@ -704,7 +704,7 @@ fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
     // BagFrame.xml precisely because most harnesses load no bar).
     let mut s = bag_harness_with(
         &[
-            "Cooldown.xml",
+            "Interface\\FrameXML\\Cooldown.xml",
             "Interface\\FrameXML\\ActionButtonTemplate.xml",
             "Interface\\FrameXML\\TextStatusBar.lua",
             "Interface\\FrameXML\\TextStatusBar.xml",

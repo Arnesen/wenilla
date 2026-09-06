@@ -14,7 +14,7 @@ fn action_ids(s: &mut UiScript) -> Vec<u32> {
 fn shipped_action_bar_drives_end_to_end() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    super::test_ui::load_ui(&s, "Cooldown.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Cooldown.xml");
     // `load_ui` returns the same `report.frames` the disk reader asserted on, so this
     // count is the one that always stood here — moved, not re-derived.
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
@@ -180,7 +180,7 @@ fn shipped_action_bar_drives_end_to_end() {
 }
 
 fn load_action_bar(s: &UiScript) {
-    super::test_ui::load_ui(s, "Cooldown.xml");
+    super::test_ui::load_ui(s, "Interface\\FrameXML\\Cooldown.xml");
     super::test_ui::load_ui(s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     super::test_ui::load_ui(s, "Interface\\FrameXML\\TextStatusBar.lua");
     super::test_ui::load_ui(s, "Interface\\FrameXML\\TextStatusBar.xml");
@@ -251,17 +251,18 @@ fn state_feedback_drives_cooldown_checked_and_usable_through_the_xml() {
         }),
     );
     s.fire_event("ACTIONBAR_UPDATE_COOLDOWN", vec![]);
+    // The stock machine (decision 2019): `CooldownFrame_SetTimer` arms sequence 0 and shows the
+    // pane; the next paint's `OnUpdateModel` scrubs it to `(GetTime() − start) / duration`.
+    super::test_ui::cooldown_facts(&mut s);
+    s.tick(0.0);
     s.resolve();
-    let sweep = s.extract().into_iter().find_map(|q| match q.content {
-        QuadContent::Cooldown { fraction, flash } => Some((fraction, flash)),
-        _ => None,
-    });
-    let (fraction, flash) = sweep.expect("the button's Cooldown widget is showing");
-    assert!(
-        (fraction - 0.4).abs() < 1e-3,
-        "6 s of 10 s left ⇒ the sweep sits at 40%, got {fraction}"
+    let play = super::test_ui::cooldown_play(&s, "ActionButton1Cooldown")
+        .expect("the button's cooldown pane is showing, sequence 0 armed");
+    assert_eq!(
+        play,
+        (0, 400),
+        "6 s of 10 s left ⇒ the sweep sits at 40 %: sequence 0 at 400 ms"
     );
-    assert_eq!(flash, None);
 
     // The checked ring on the current action (the transcribed UpdateState).
     s.set_action_state(
@@ -351,7 +352,11 @@ fn the_cooldown_sweep_paints_over_the_buttons_icon_and_ring() {
         &|c| matches!(c, QuadContent::Texture { path: Some(p), .. } if p.contains("UI-Quickslot2")),
     )
     .expect("the NormalTexture ring quad");
-    let sweep = pos(&|c| matches!(c, QuadContent::Cooldown { .. })).expect("the sweep quad");
+    let sweep = pos(&|c| {
+        matches!(c, QuadContent::ModelPane { model: Some(m), .. }
+            if m.eq_ignore_ascii_case(super::test_ui::COOLDOWN_MODEL))
+    })
+    .expect("the sweep pane's quad");
     assert!(
         icon < sweep,
         "the sweep (index {sweep}) must paint over the icon (index {icon})"
@@ -829,7 +834,7 @@ fn shipped_bag_frame_drives_end_to_end() {
     let mut bar_frames = 0;
     for file in BAG_UI {
         let frames = load_ui(&s, file);
-        if *file == "Cooldown.xml" {
+        if *file == "Interface\\FrameXML\\Cooldown.xml" {
             load_ui(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
             load_ui(&s, "Interface\\FrameXML\\TextStatusBar.lua");
             load_ui(&s, "Interface\\FrameXML\\TextStatusBar.xml");
@@ -1351,7 +1356,7 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
         // Fonts first: the pane's check-box labels colour from `RED_FONT_COLOR` in their own OnLoad.
         "Interface\\FrameXML\\Fonts.xml",
         r"Interface\FrameXML\UIParent.xml",
-        "Cooldown.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
@@ -1517,7 +1522,7 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
 fn bonus_bar_slides_up_with_sound_and_down_without() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    super::test_ui::load_ui(&s, "Cooldown.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Cooldown.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.xml");
@@ -1739,7 +1744,7 @@ fn bonus_bar_slides_up_with_sound_and_down_without() {
 fn bonus_bar_turnaround_continues_from_position() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    super::test_ui::load_ui(&s, "Cooldown.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Cooldown.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.xml");
@@ -1821,7 +1826,7 @@ fn bonus_bar_turnaround_continues_from_position() {
 fn the_page_arrows_do_not_steal_each_other_s_clicks() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    super::test_ui::load_ui(&s, "Cooldown.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Cooldown.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.xml");

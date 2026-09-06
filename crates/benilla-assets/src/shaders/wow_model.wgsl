@@ -51,22 +51,14 @@
     mesh_functions,
 }
 
-// Our own fragment output, so the SKY lane can force the far depth. Bevy's `forward_io::FragmentOutput`
-// is `@location(0) color` and nothing else (bevy_pbr 0.18.1 `forward_io.wgsl`), so this is that struct
-// plus one optional builtin — not a divergence from it.
-//
-// **`WOW_SKY_DEPTH` is a pipeline-key branch, never an unconditional field.** Declaring
-// `@builtin(frag_depth)` disables early-Z for the whole pipeline, and the model lane draws every
-// doodad, creature and WMO wall in the frame. The def is pushed only for the WMO-skybox lane
-// (`clutter_fade.z` bit 13, `model_render::SKY_DEPTH_MARKER`), which is one camera-anchored model.
+// Our own fragment output — bevy's `forward_io::FragmentOutput` verbatim (`@location(0) color` and
+// nothing else, bevy_pbr 0.18.1 `forward_io.wgsl`), kept as a named struct so the lane's output
+// has one place to grow. The WMO-skybox lane's forced far depth (`WOW_SKY_DEPTH`) used to add a
+// fragment-depth builtin here; it is a VERTEX-stage pin now (below, decision 2016) — a fragment
+// depth write costs the pipeline its early-Z, and even on the one camera-anchored model that lane
+// draws, the same number decided one stage earlier is free.
 struct WowFragOut {
     @location(0) color: vec4<f32>,
-#ifdef WOW_SKY_DEPTH
-    // Reverse-Z "infinitely far", under bevy's `GreaterEqual` test — the sky depth law
-    // (`benilla_world::sky_order`, "The depth law"): the world paints over the sky whatever the
-    // shell's radius, and the sky can never land in front of world geometry.
-    @builtin(frag_depth) depth: f32,
-#endif
 }
 
 // Per-material model uniforms packed at binding 100 (see `WowModelExt` in terrain.rs). Light + fog + the
@@ -190,9 +182,10 @@ struct WowLight {
     rig_origin: array<vec4<f32>, 2048>,
     // The mat-anim delta table (decision 1381; mat_anim_table.rs mirrors the size): row 0 is the
     // pinned-zero identity every static material's anim_slots = 0 reads; a live row is the drawn
-    // batch's sampled UV-scroll delta (xy, added to sun_scale.zw) or tint delta (xyz, added to
-    // tint.rgb). Zero region = every batch at its built seed — the studio buffers and
-    // deterministic captures ride that exactly like the tint table's zero-identity.
+    // batch's sampled UV-scroll delta (xy, added to sun_scale.zw), tint delta (xyz, added to
+    // tint.rgb), or texture-transform affine (decision 2019: [cos − 1, sin, sx − 1, sy − 1]).
+    // Zero region = every batch at its built seed — the studio buffers and deterministic
+    // captures ride that exactly like the tint table's zero-identity.
     matanim: array<vec4<f32>, 2048>,
     palettes: array<vec4<f32>>,
 };
@@ -202,6 +195,13 @@ struct WowLight {
 // `debug_panel::VANILLA_ALPHA_KEY_REF`. Used to re-apply the hard cutout on the distance-fade blend
 // twin so its silhouette matches the steady cutout exactly.
 const VANILLA_ALPHA_KEY: f32 = 0.8784314;
+
+// The detail-doodad (ground clutter) texture LOD bias — the reference sets
+// `D3DSAMP_MIPMAPLODBIAS = +0.25` on stage 0 for its detail-doodad pass alone (`0x6813f4`,
+// capture-confirmed on all 29 doodad batches). It is what makes the distance cut resolve per pixel
+// rather than per leaf; the full derivation is at the use site in `fragment`, and in wow-re
+// `terrain/scratch/doodad-fade-pixel-granularity.md`.
+const DETAIL_DOODAD_LOD_BIAS: f32 = 0.25;
 
 // bevy's `VertexOutput` (same fields, same locations, same defs) + the per-vertex dynamic
 // point-light term at a free location. One extra interpolant is why this can't BE `VertexOutput`;
@@ -515,6 +515,15 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
     // but as uniform DATA: as pipeline state it made every batch index its own pipeline, and a
     // first city sight synchronously compiled ~3000 of them on the render thread (decision 0837).
     out.position.z *= 1.0 + m.sun_scale.y * 1.1920929e-7;
+#ifdef WOW_SKY_DEPTH
+    // The WMO-skybox lane (`clutter_fade.z` bit 13, `model_render::SKY_DEPTH_MARKER`): clip z
+    // pinned to 0 — reverse-Z "infinitely far" for every fragment, whatever w — under bevy's
+    // `GreaterEqual` test: the sky depth law (`benilla_world::sky_order`, "The depth law"). The
+    // world paints over the painted sky whatever the shell's radius, and the sky can never land
+    // in front of world geometry. A pipeline-key branch, never unconditional: every other model
+    // draw keeps its real depth.
+    out.position.z = 0.0;
+#endif
 #ifdef WOW_MERGED_FADE
     // The merged fader lane (decision 1418). Alpha channel: the faithful curve, per vertex.
     // Hidden channel: a fully-faded placement collapses its clip position past the far plane —
@@ -612,11 +621,14 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     }
     // Rebuild bevy's `VertexOutput` from our extended interstage struct (WowVsOut carries one extra
     // interpolant — the per-vertex point term — which the pbr entry point doesn't know about).
-    // M2 UV animation folds in here (decision 0130 phase 3, wow-re m2-texanim-uv): add the batch's
-    // live texture-transform translation to the stage UVs before the base-colour sample — the real
-    // client's composed matrix collapses to exactly this for the translation-only doodad corpus
-    // (translation is un-pivoted; rotation/scaling — pivoted at (0.5, 0.5) — are authored by no
-    // placed world doodad). `sun_scale.zw` is 0 for static batches, so this is a no-op there.
+    // M2 UV animation folds in here (decision 0130 phase 3, wow-re m2-texanim-uv; the full law
+    // since decision 2019, wow-re modelframe-texanim-and-sequence-law §3.4):
+    //     uv' = R((uv + t − p) ⊙ s) + p,  p = (½, ½)
+    // — the batch's live texture-transform TRANSLATION is added to the stage UVs (`sun_scale.zw`
+    // is the built seed, the mat-anim row its delta), then the scale is applied about the pivot,
+    // then the rotation about the pivot. The affine row (`anim_slots.z`) carries `[cos − 1, sin,
+    // sx − 1, sy − 1]`; row 0 is all zeros, so a static batch and every translation-only doodad
+    // read `uv + t` exactly as before. `benilla_formats::uv_transform` is this fold's twin.
     var vo: VertexOutput;
     vo.position = in.position;
     vo.world_position = in.world_position;
@@ -636,7 +648,11 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     if ((u32(m.clutter_fade.z) & 4096u) != 0u) {
         vo.uv = in.uv;
     } else {
-        vo.uv = in.uv + m.sun_scale.zw + wow_light.matanim[u32(m.anim_slots.x)].xy;
+        let uv_t = in.uv + m.sun_scale.zw + wow_light.matanim[u32(m.anim_slots.x)].xy;
+        let affine = wow_light.matanim[u32(m.anim_slots.z)];
+        let d = (uv_t - vec2<f32>(0.5, 0.5)) * vec2<f32>(1.0 + affine.z, 1.0 + affine.w);
+        let c = 1.0 + affine.x;
+        vo.uv = vec2<f32>(0.5 + d.x * c - d.y * affine.y, 0.5 + d.x * affine.y + d.y * c);
     }
 #endif
 #ifdef VERTEX_UVS_B
@@ -680,6 +696,45 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
 #endif
     }
 #endif
+    // **The detail-doodad LOD BIAS** — the state that decides whether the fade cuts a leaf pixel by
+    // pixel or takes it whole (wow-re `terrain/scratch/doodad-fade-pixel-granularity.md`, 2021).
+    // `0x6813d0` sets `D3DSAMP_MIPMAPLODBIAS = +0.25` on stage 0 at `0x6813f4`, once per frame,
+    // immediately before the pass dispatches `0x6c02d0` — outside `[0x6b1000, 0x6b3200)`, which is
+    // why 2004's state census missed it. Capture-confirmed: all 29 doodad batches bind a sampler
+    // with `GL_TEXTURE_LOD_BIAS = 0.25` where the draws just before them bind an otherwise
+    // byte-identical sampler with bias 0.
+    //
+    // Why a quarter-mip is worth a re-sample: three of the shipped detail atlases (Elwynn's among
+    // them) carry a **binary** alpha pyramid — mip 0 has DXT3's 16 levels, every level below it has
+    // two. A fragment can only reach `a ≈ 1.0`, and so share the terminal death depth, inside a 2×2
+    // all-opaque texel neighbourhood; those neighbourhoods run out between mip 2 and mip 3. Biasing
+    // a quarter-mip blurrier lands the reference past that cliff, so no fragment holds full alpha
+    // and the tuft erodes continuously instead of every leaf crossing together. Measured on the
+    // dominant Elwynn cell, the share of a tuft's pixels leaving in the last half-yard: **2.2 %**
+    // with this bias, **11.6 %** without it.
+    //
+    // wgpu has no sampler LOD bias (WebGPU dropped it), so it goes on the sample. Re-sampling here
+    // rather than pre-biasing the sampler is what keeps it *this lane's* bias: the sampler is shared
+    // with every other model batch, which must keep the reference's 0. Same UV, same implicit
+    // derivatives, so the texture cache makes the second tap nearly free.
+    // `pbr_input_from_standard_material` folds ATTRIBUTE_COLOR and the material tint into what it
+    // sampled; for clutter the material tint is white and the vertex colour is the MCSH lit/shadow
+    // grey, so re-applying `vo.color` reproduces the fold exactly — no divide-back-out, which is the
+    // trap the WMO branch above documents.
+    if (m.clutter_fade.w > 0.5) {
+#ifdef VERTEX_UVS_A
+        var biased = textureSampleBias(
+            pbr_bindings::base_color_texture,
+            pbr_bindings::base_color_sampler,
+            vo.uv,
+            view.mip_bias + DETAIL_DOODAD_LOD_BIAS,
+        );
+#ifdef VERTEX_COLORS
+        biased = biased * vo.color;
+#endif
+        base_color = biased;
+#endif
+    }
     // Ground-clutter distance fade — the reference's stage-1 ramp, byte-exact and capture-confirmed
     // (wow-re `terrain/scratch/detail-doodad-distance-fade.md`, 2004). Three facts shape this:
     //
@@ -1138,9 +1193,6 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
 
 
     var out: WowFragOut;
-#ifdef WOW_SKY_DEPTH
-    out.depth = 0.0;
-#endif
     // Raw gamma out (GAMMA LANE, 0161 — the frame's one decode is the FFXGlow combine). Alpha = the
     // faded cutout alpha (tex × fade) for the blend twin; ignored (blend off) on steady/opaque draws.
     // OPAQUE-INTENT alpha pin (clutter_fade.z bit 3, set in model_render for steady opaque/alpha-key

@@ -297,24 +297,6 @@ pub fn join_ref(base: &str, path: &str) -> String {
     out.join("/")
 }
 
-/// The frame KIND an element materializes as — its tag, with one substitution.
-///
-/// **A `<Model>` playing the cooldown indicator IS this engine's `<Cooldown>` widget.** The
-/// reference draws a cooldown sweep as a `Model` running
-/// `Interface\Cooldown\UI-Cooldown-Indicator.mdx` — that is what `CooldownFrameTemplate` is, and
-/// every consumer writes `<Model … inherits="CooldownFrameTemplate"/>`: the reference's own
-/// `ContainerFrameItemButtonTemplate` (ContainerFrame.xml l.13), its action buttons, and three
-/// corpus addons. benilla renders no FrameXML models at all, and it does not need to for this one:
-/// decision 0263 put the whole scrub/finish-flash machine inside a NATIVE `Cooldown` widget, which
-/// is the same picture by a different route.
-///
-/// So the mapping is on the MODEL FILE, not on the template name — the file is the thing's
-/// identity, an addon may reach the same art without inheriting the template, and a template name
-/// is a string anyone can shadow. Anything else keeps its tag and stays an inert `Model`.
-///
-/// Without this, decision 1751's bag swap silently loses the bag-slot cooldown sweep: our own
-/// `BenillaBagSlotTemplate` carried a real `<Cooldown>` child, the reference's carries a `<Model>`,
-/// and `CooldownFrame_SetTimer`'s Model branch shows and hides the frame and nothing more.
 /// Is `tag` one of the four model-pane kinds — the `CSimpleModel` family, whose own `LoadXML`
 /// (`0x76cac0`) reads the `scale=` attribute into the MODEL scale (`geometry.rs`'s
 /// `apply_attrs`, decision 2007).
@@ -322,18 +304,6 @@ pub(super) fn model_kind_tag(tag: &str) -> bool {
     ["Model", "PlayerModel", "DressUpModel", "TabardModel"]
         .iter()
         .any(|k| k.eq_ignore_ascii_case(tag))
-}
-
-fn frame_kind_of(el: &Element) -> String {
-    const COOLDOWN_MODEL: &str = "ui-cooldown-indicator.mdx";
-    if el.tag.eq_ignore_ascii_case("Model")
-        && el
-            .attr("file")
-            .is_some_and(|f| f.to_ascii_lowercase().ends_with(COOLDOWN_MODEL))
-    {
-        return "Cooldown".to_string();
-    }
-    el.tag.clone()
 }
 
 /// The `.lua` test `0x6ede10` opens with: `strrchr(path, '.')` on the **whole resolved path**,
@@ -792,7 +762,7 @@ impl Loader<'_> {
             }
         };
         let wrapper: Table =
-            match create.call((frame_kind_of(el), resolved_name.clone(), parent.cloned())) {
+            match create.call((el.tag.clone(), resolved_name.clone(), parent.cloned())) {
                 Ok(w) => w,
                 Err(e) => {
                     self.report.errors.push(format!(

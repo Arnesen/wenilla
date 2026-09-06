@@ -64,7 +64,6 @@ mod chat_window;
 mod clip;
 mod colorselect;
 mod container;
-mod cooldown;
 mod craft;
 mod cursor;
 mod death;
@@ -211,7 +210,7 @@ pub use tabard::{
     emblem_mask_path, TabardHost, TabardIntent, EMBLEM_MASK_TOKEN, TABARD_COUNTS,
     TABARD_CREATION_COST,
 };
-pub use worldmap_arrow::{ARROW_FOOTPRINT_PX, ARROW_MODEL};
+pub use worldmap_arrow::ARROW_MODEL;
 
 pub(crate) use button::{set_label_font_justify_h_lua, LabelFont};
 pub use inspect::{InspectView, UnitReach};
@@ -667,7 +666,6 @@ impl UiScript {
         colorselect::install(&lua)?;
         minimap::install(&lua)?;
         modelframe::install(&lua)?;
-        cooldown::install(&lua)?;
         tooltip::install(&lua)?;
         worldmap::install(&lua)?;
         worldstate::install(&lua)?;
@@ -790,6 +788,9 @@ impl UiScript {
         }
         model.screen = new;
         model.touch_layout();
+        drop(model);
+        // The implicit rects are measured in layout units, which follow the aspect (2015).
+        self.reapply_implicit_rects();
         true
     }
 
@@ -1474,7 +1475,6 @@ impl UiScript {
                 crate::widget::FrameKind::MovieFrame => "MovieFrame",
                 crate::widget::FrameKind::GameTooltip => "GameTooltip",
                 crate::widget::FrameKind::Minimap => "Minimap",
-                crate::widget::FrameKind::Cooldown => "Cooldown",
             });
         }
         // The region leaves publish into their own name table (`region_names`), not the arena's —

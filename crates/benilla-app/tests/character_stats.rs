@@ -54,7 +54,7 @@ const FILES: &[&str] = &[
     // buttons runs `PaperDollItemSlotButton_Update` from its own OnLoad, which calls
     // `CooldownFrame_SetTimer` on `$parentCooldown` unconditionally (`PaperDollFrame.lua:692`) —
     // so leaving this out is 20 loader errors before the first assertion.
-    "Cooldown.xml",
+    "Interface\\FrameXML\\Cooldown.xml",
     "Interface\\FrameXML\\PaperDollFrame.xml",
 ];
 

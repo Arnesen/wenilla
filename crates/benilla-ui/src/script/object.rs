@@ -249,7 +249,6 @@ fn frame_kind_from_str(s: &str) -> Option<FrameKind> {
         "MOVIEFRAME" => FrameKind::MovieFrame,
         "GAMETOOLTIP" => FrameKind::GameTooltip,
         "MINIMAP" => FrameKind::Minimap,
-        "COOLDOWN" => FrameKind::Cooldown,
         _ => return None,
     })
 }
@@ -458,7 +457,6 @@ fn kind_method_registries(lua: &Lua, this: &Table) -> &'static [&'static str] {
             super::modelframe::REG_MODEL_METHODS,
         ],
         Some(FrameKind::Minimap) => &[super::minimap::REG_MINIMAP_METHODS],
-        Some(FrameKind::Cooldown) => &[super::cooldown::REG_COOLDOWN_METHODS],
         Some(FrameKind::GameTooltip) => &[super::tooltip::REG_TOOLTIP_METHODS],
         _ => &[],
     }

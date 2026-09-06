@@ -27,12 +27,18 @@ use super::Model;
 /// The arrow's model — `0x8453c0`, and NOT `Rotating-MinimapArrow`.
 pub const ARROW_MODEL: &str = "Interface\\Minimap\\MinimapArrow.mdx";
 
-/// The arrow's footprint at the reference basis: `MinimapArrow.mdx`'s single quad at 1280 px per
-/// model unit — 33.6 px on the 1024×768 sheet, the same number the minimap's player arrow is
-/// drawn at (`minimap::blips::PLAYER_ARROW_QUAD_PX`). The world-map arrow's model scale is
-/// `G48 · 5/3` (`= 1.0` at 4:3, `G48 = 1/√(aspect² + 1)`) and the mini's `G48 · 10/9`, so both
-/// hold a constant apparent size as the window's shape changes.
-pub const ARROW_FOOTPRINT_PX: f32 = 33.6;
+/// The arrow's rect is the file's own bounding box — the implicit rect of a size-less pane
+/// (decision 2015; `MinimapArrow.mdx`'s `0.0262 × 0.0263` model units read as layout units,
+/// `1280·extent = 33.5 × 33.7` FrameXML units at 4:3). The world-map arrow's model scale is
+/// `G48 · 5/3` (`= 1.0` at 4:3, `G48 = 1/√(aspect² + 1)`) and the mini's `G48 · 10/9`, so the
+/// quad holds a constant apparent size as the window's shape changes while its rect grows with
+/// `√(a²+1)` (render law §2, the worked arrow).
+fn centre_of(facts: Option<&crate::widget::ModelFileFacts>) -> (f32, f32, f32) {
+    facts.map_or((0.0, 0.0, 0.0), |f| {
+        let (x, y) = f.extent();
+        (x * 0.5, y * 0.5, 0.0)
+    })
+}
 
 /// Which of the two singletons a binding addresses.
 #[derive(Clone, Copy)]
@@ -144,18 +150,17 @@ fn create(lua: &Lua, which: Arrow, parent: Value) -> mlua::Result<()> {
         ("Model".to_string(), None, Some(Value::Table(t)), None),
     )?;
     let id = decode_id(&wrapper)?;
-    let (scale, side) = {
+    let scale = {
         let model = lua.app_data_ref::<Model>().expect("model app_data");
-        let scale = arrow_scale(&model, which);
-        (scale, ARROW_FOOTPRINT_PX * scale)
+        arrow_scale(&model, which)
     };
-    // The widget's rect is the resident model's bounding box (§2.2); the footprint at this scale.
-    wrapper.call_method::<()>("SetWidth", side)?;
-    wrapper.call_method::<()>("SetHeight", side)?;
     // `SetModel("Interface\Minimap\MinimapArrow.mdx")` in C++ (`0x4a7a80` → `0x76c8e0`): the
     // same file set every pane takes, seeded with the file's facts when the host has them
     // (decision 2007 — the arrow's Stand loops its 3.333 s with no bone keyed, so nothing
-    // moves; the arm is the reference's, not a look).
+    // moves; the arm is the reference's, not a look). No authored size: the widget's rect is
+    // the file's bounding box (§2.2, decision 2015), and `0x4a7b20`'s `SetPosition(½·GetWidth,
+    // ½·GetHeight, 0)` — the geometry override's bbox extent, in layout units — centres the
+    // model on it.
     let facts = lua
         .app_data_mut::<Model>()
         .expect("model app_data")
@@ -163,9 +168,11 @@ fn create(lua: &Lua, which: Arrow, parent: Value) -> mlua::Result<()> {
     super::modelframe::with_model(lua, &wrapper, |m| {
         m.set_file(ARROW_MODEL.to_string(), facts.as_deref());
         m.scale = scale;
-        m.position = (side * 0.5, side * 0.5, 0.0);
+        m.position = centre_of(facts.as_deref());
     })?;
+    let h = frame_handle_of(lua, &wrapper)?;
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    model.apply_implicit_rect(h);
     which.set_slot(&mut model, id);
     Ok(())
 }
@@ -187,17 +194,16 @@ fn update(lua: &Lua) -> mlua::Result<()> {
         let Some(wrapper) = arrow_wrapper(lua, which)? else {
             continue;
         };
-        let (facing, tracked) = {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let (facing, tracked, facts) = {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             (
                 model.worldmap.player_facing,
                 model.worldmap.player_uv.is_some(),
+                model.model_facts_for(ARROW_MODEL),
             )
         };
-        let w: f32 = wrapper.call_method("GetWidth", ())?;
-        let h: f32 = wrapper.call_method("GetHeight", ())?;
         super::modelframe::with_model(lua, &wrapper, |m| {
-            m.position = (w * 0.5, h * 0.5, 0.0);
+            m.position = centre_of(facts.as_deref());
             if tracked {
                 m.facing = facing;
             }
@@ -334,6 +340,22 @@ mod tests {
     use super::*;
     use crate::script::UiScript;
 
+    /// The arrow file's facts, as the host hands them over (2007/2015): the header box the
+    /// implicit rect and the re-centring read.
+    fn arrow_facts(s: &mut UiScript) {
+        s.set_model_facts(
+            ARROW_MODEL,
+            crate::widget::ModelFileFacts {
+                sequences: vec![crate::widget::SequenceFacts {
+                    anim_id: 0,
+                    duration_ms: 3333,
+                    looping: true,
+                }],
+                bbox: ([-0.0127, -0.0118, 0.0], [0.0135, 0.0145, 0.0]),
+            },
+        );
+    }
+
     fn vm() -> UiScript {
         let mut s = UiScript::new().unwrap();
         s.set_screen_size(1024.0, 768.0);
@@ -350,7 +372,7 @@ mod tests {
     /// loaded with the arrow, born shown, sized to its footprint; a second create a no-op.
     #[test]
     fn create_validates_its_parent_and_makes_one_arrow_per_session() {
-        let s = vm();
+        let mut s = vm();
         for (call, want) in [
             (
                 "CreateWorldMapArrowFrame(5)",
@@ -388,9 +410,28 @@ mod tests {
             .unwrap();
         assert_eq!(kind, "Model");
         assert!(shown, "born shown");
+        assert_eq!(w, 0.0, "no authored size, no facts yet: no rect");
+        // The file lands: the rect is its box in layout units — 0.0262 × 1280 at 4:3 — and the
+        // model is centred on it (`0x4a7b20`, half the box, in layout units).
+        arrow_facts(&mut s);
+        // The C++ re-centres on create and on every `UpdateWorldMapArrowFrames` (`0x4a7b20`);
+        // a file that lands after the create is picked up by the next update.
+        s.run("UpdateWorldMapArrowFrames()").unwrap();
+        s.resolve();
+        let w: f32 = s.eval("return ({WM:GetChildren()})[2]:GetWidth()").unwrap();
+        assert!((w - 0.0262 * 1280.0).abs() < 0.05, "the box at 4:3: {w}");
+        let pos = {
+            let model = s.lua().app_data_ref::<Model>().expect("model");
+            let id = model.worldmap.arrow_world.expect("the singleton");
+            let fh = model.id_to_frame.get(&id).copied().expect("live");
+            match &model.arena.frame(fh).expect("frame").kind_state {
+                crate::widget::KindState::Model(m) => m.position,
+                _ => panic!("not a Model"),
+            }
+        };
         assert!(
-            (w - ARROW_FOOTPRINT_PX).abs() < 1e-3,
-            "the footprint at 4:3: {w}"
+            (pos.0 - 0.0131).abs() < 1e-5 && (pos.1 - 0.01315).abs() < 1e-5 && pos.2 == 0.0,
+            "centred on the box: {pos:?}"
         );
         assert!(
             s.eval::<bool>("return select('#', CreateWorldMapArrowFrame(WM)) == 0")
@@ -408,6 +449,8 @@ mod tests {
         s.run("PositionWorldMapArrowFrame(1, 2) ShowWorldMapArrowFrame('x') UpdateWorldMapArrowFrames()")
             .unwrap();
         s.run("CreateWorldMapArrowFrame(WM)").unwrap();
+        // The file's facts: a size-less pane has no rect to anchor until its box is known.
+        arrow_facts(&mut s);
         s.run("arrow = ({WM:GetChildren()})[2]").unwrap();
         for (call, want) in [
             (

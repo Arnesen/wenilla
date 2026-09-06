@@ -21,9 +21,13 @@
 //! bitmap (`Interface\WorldMap\<Continent>.zmp`, remapped app-side to 1-based zone indices; the
 //! source + cell law are wow-re-verified, `0x4a6ec0` / the Q1 §5 verdict 2026-07-07). The cell
 //! law itself is transcribed here ([`area_grid_cell`]) rather than in the app's `map_proj`
-//! because its only callers are these bindings. `UpdateMapHighlight` returns the hovered zone's
-//! NAME only for now — the highlight-texture halves (fileName + the `0x4a7fa0` POT extents) land
-//! with phase 3's overlay machinery, which shares them.
+//! because its only callers are these bindings. `UpdateMapHighlight` answers per level exactly
+//! as `0x4a7fa0` does (wow-re 15b2a8ea): at continent level the hovered zone's name **and** its
+//! highlight quad; at zone level a **name only** — a revealed overlay's sub-area when the cursor
+//! is inside its `WorldMapOverlay` hit rect, else the neighbouring zone or city whose grid cell
+//! the cursor is in through the displayed zone's rect window, never the displayed zone itself —
+//! with a nil fileName, so the frame hides the quad (report B360). The world sheet's continent
+//! highlight is not built: hovering a continent there answers the nil/zero tail.
 //!
 //! Zone maps carry **exploration fog**: the base tiles are the unexplored parchment, and each
 //! discovered sub-area's overlay art (`GetNumMapOverlays`/`GetMapOverlayInfo`, filtered by the
@@ -95,6 +99,15 @@ pub struct WorldMapOverlayView {
     /// The AreaTable `exploreFlag` bit indices that reveal this overlay (any set bit shows it;
     /// empty = never shown — an overlay whose areas are unknown).
     pub explore_bits: Vec<u32>,
+    /// The hover hit rect `(top, left, bottom, right)`, px of the 1002×668 detail frame — the
+    /// DBC's own `HitRect*` fields. The zone-level `UpdateMapHighlight` scales it by 1/1002 and
+    /// 1/668 and tests the normalized cursor against it, both edges inclusive (wow-re 15b2a8ea
+    /// §1d, `0x4a7ffc..0x4a80ea`).
+    pub hit_rect: (u32, u32, u32, u32),
+    /// The name that hover shows inside the rect: the localized AreaTable name of the overlay's
+    /// FIRST area slot (`0x4a7fa0` reads `+0x8` only). `None` when that slot resolves to no row —
+    /// the client then walks past the overlay exactly as if the cursor were outside it.
+    pub area_name: Option<String>,
 }
 
 /// One continent. Its 1-based position IS the continent index Lua sees.
@@ -247,6 +260,121 @@ fn explored_bit(explored: &[u32], n: u32) -> bool {
     explored
         .get((n / 32) as usize)
         .is_some_and(|w| w & (1 << (n % 32)) != 0)
+}
+
+/// The reciprocals `0x4a7fa0` scales a `WorldMapOverlay` hit rect by: the rect is authored in
+/// pixels of the 1002×668 detail frame, the cursor arrives normalized, and the client brings the
+/// rect to the cursor (`fild` → `fmul` a f32 constant → `fstp dword`), so the edges are f32.
+const OVERLAY_RECIP_X: f32 = 1.0 / 1002.0;
+const OVERLAY_RECIP_Y: f32 = 1.0 / 668.0;
+
+/// The zone-level **overlay pre-search** (`0x4a7ffc..0x4a80ea`, wow-re 15b2a8ea §1d): the first
+/// REVEALED overlay whose hit rect contains the cursor names its first area. Both edges are
+/// inclusive; a rect with a zero-width edge never hits; a NaN cursor never hits; an overlay whose
+/// first area resolves to no AreaTable row is walked past, not stopped at. The list is the one
+/// `GetNumMapOverlays` counts — the exploration-gated one (`[0xb6e630]`, built by `0x4a6ad9`
+/// under the explored-byte read at `0x4a6bfa`), so a fogged sub-area has no name.
+fn overlay_hover(state: &WorldMapState, x: f32, y: f32) -> Option<String> {
+    revealed_overlays(state).into_iter().find_map(|o| {
+        let (top, left, bottom, right) = o.hit_rect;
+        let (xlo, xhi) = (
+            left as f32 * OVERLAY_RECIP_X,
+            right as f32 * OVERLAY_RECIP_X,
+        );
+        let (ylo, yhi) = (
+            top as f32 * OVERLAY_RECIP_Y,
+            bottom as f32 * OVERLAY_RECIP_Y,
+        );
+        let inside = xhi - xlo != 0.0
+            && yhi - ylo != 0.0
+            && (xlo..=xhi).contains(&x)
+            && (ylo..=yhi).contains(&y);
+        if inside {
+            o.area_name.clone()
+        } else {
+            None
+        }
+    })
+}
+
+/// What `UpdateMapHighlight` answers for a cursor at map UV `(x, y)` under the current selection.
+enum Hover {
+    /// Continent level, over a zone: its name and the highlight quad — fileName, texPercentageY,
+    /// textureX/Y, scrollChildX/Y (texPercentageX is that branch's constant 1.0).
+    Highlight {
+        name: String,
+        file: String,
+        tex_pct_y: f64,
+        texture: (f64, f64),
+        scroll: (f64, f64),
+    },
+    /// Zone level: a name only — fileName nil, six zeros, the frame hides the quad.
+    Name(String),
+    /// Off every area: the nil/zero tail.
+    Miss,
+}
+
+/// The continent-level answer for the hovered zone (the `0x4a81de → 0x4a822a` highlight-compute
+/// path, zone-search branch): fileName = its art folder (the frame draws `<file>\<file>Highlight`),
+/// the six coords seat/size/crop that texture over the zone's rect within the continent, keeping
+/// the client's f32/f64 asymmetric narrowing.
+fn continent_hover(cont: &WorldMapContinentView, zone: &WorldMapZoneView) -> Option<Hover> {
+    let (cl, cr, ct, cb) = cont.loc_rect;
+    let (zl, zr, zt, zb) = zone.loc_rect;
+    let (w, h) = (zl - zr, zt - zb);
+    let (cont_w, cont_h) = (cl - cr, ct - cb);
+    if w == 0.0 || h == 0.0 || cont_w == 0.0 || cont_h == 0.0 {
+        return None;
+    }
+    let recip_x = 1.0f32 / cont_w;
+    let recip_y_f32 = 1.0f32 / cont_h;
+    let texture_x = f64::from(recip_x * w);
+    let texture_y = (1.0f64 / f64::from(cont_h)) * f64::from(h);
+    let scroll_x = f64::from(recip_x * (cl - zl));
+    let scroll_y = f64::from(recip_y_f32 * (ct - zt));
+    // texPctY = dim/potdim, dim = __ftol((h·128)/w) (rect-form K = 128).
+    let dim = ((h * 128.0) / w) as i64;
+    let potdim = next_pow2(dim);
+    let tex_pct_y = if potdim > 0 {
+        dim as f64 / potdim as f64
+    } else {
+        0.0
+    };
+    Some(Hover::Highlight {
+        name: zone.name.clone(),
+        file: zone.map_file.clone(),
+        tex_pct_y,
+        texture: (texture_x, texture_y),
+        scroll: (scroll_x, scroll_y),
+    })
+}
+
+/// `0x4a7fa0`'s level dispatch (wow-re 15b2a8ea §1a). Continent level: the grid cell's zone lights
+/// up. Zone level: the overlay pre-search first, then the same grid re-windowed by the displayed
+/// zone's own rect (`0x4a7620`), which returns nothing for the displayed zone itself — and only the
+/// name-only tail is reachable from there (`0x4a812e`). World level: the continent highlight is
+/// not built, so the tail.
+fn hover(wm: &WorldMapState, x: f32, y: f32) -> Hover {
+    let (c, z) = wm.selection;
+    let Some(cont) = c.checked_sub(1).and_then(|i| wm.continents.get(i as usize)) else {
+        return Hover::Miss;
+    };
+    if z != 0 {
+        if let Some(name) = overlay_hover(wm, x, y) {
+            return Hover::Name(name);
+        }
+        return match grid_area(wm, x, y) {
+            Some(zi) if u32::from(zi) != z => cont
+                .zones
+                .get(zi as usize - 1)
+                .map_or(Hover::Miss, |zone| Hover::Name(zone.name.clone())),
+            _ => Hover::Miss,
+        };
+    }
+    grid_area(wm, x, y)
+        .and_then(|zi| cont.zones.get(zi as usize - 1))
+        .and_then(|zone| continent_hover(cont, zone))
+        .unwrap_or(Hover::Miss)
 }
 
 /// The current selection's zone view, if a zone map is displayed.
@@ -570,82 +698,37 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // UpdateMapHighlight(x, y) → name, fileName, texPctX, texPctY, textureX, textureY,
-    // scrollChildX, scrollChildY (wow-re 15b2a8ea, 0x4a7fa0). Continent level: the hovered zone
-    // lights up — fileName = its art folder (the frame draws `<file>\<file>Highlight`), the six
-    // coords seat/size/crop that texture over the zone's rect within the continent, keeping the
-    // client's f32/f64 asymmetric narrowing. World-level continent highlight and zone-level
-    // overlay-name are deferred: those exits return the nil/zero tail (the frame hides the quad).
+    // scrollChildX, scrollChildY (wow-re 15b2a8ea, 0x4a7fa0) — the per-level law is [`hover`].
+    // Eight values always: the frame reads `fileName` to decide whether a quad is drawn at all,
+    // so a name-only answer carries a nil there and six zeros behind it.
     g.set(
         "UpdateMapHighlight",
         lua.create_function(|lua, (x, y): (f32, f32)| {
-            // (name, fileName, texPctY, textureX, textureY, scrollChildX, scrollChildY); texPctX
-            // is the constant 1.0 the continent branch always returns.
-            let hit: Option<(String, String, f64, f64, f64, f64, f64)> = {
+            let hit = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                let wm = &model.worldmap;
-                let (c, z) = wm.selection;
-                if c == 0 || z != 0 {
-                    None
-                } else {
-                    grid_area(wm, x, y)
-                        .and_then(|zi| wm.continents.get(c as usize - 1).zip(Some(zi)))
-                        .and_then(|(cont, zi)| cont.zones.get(zi as usize - 1).zip(Some(cont)))
-                        .and_then(|(zone, cont)| {
-                            let (cl, cr, ct, cb) = cont.loc_rect;
-                            let (zl, zr, zt, zb) = zone.loc_rect;
-                            let (w, h) = (zl - zr, zt - zb);
-                            let (cont_w, cont_h) = (cl - cr, ct - cb);
-                            if w == 0.0 || h == 0.0 || cont_w == 0.0 || cont_h == 0.0 {
-                                return None;
-                            }
-                            let recip_x = 1.0f32 / cont_w;
-                            let recip_y_f32 = 1.0f32 / cont_h;
-                            let texture_x = f64::from(recip_x * w);
-                            let texture_y = (1.0f64 / f64::from(cont_h)) * f64::from(h);
-                            let scroll_x = f64::from(recip_x * (cl - zl));
-                            let scroll_y = f64::from(recip_y_f32 * (ct - zt));
-                            // texPctY = dim/potdim, dim = __ftol((h·128)/w) (rect-form K = 128).
-                            let dim = ((h * 128.0) / w) as i64;
-                            let potdim = next_pow2(dim);
-                            let tex_pct_y = if potdim > 0 {
-                                dim as f64 / potdim as f64
-                            } else {
-                                0.0
-                            };
-                            Some((
-                                zone.name.clone(),
-                                zone.map_file.clone(),
-                                tex_pct_y,
-                                texture_x,
-                                texture_y,
-                                scroll_x,
-                                scroll_y,
-                            ))
-                        })
-                }
+                hover(&model.worldmap, x, y)
             };
-            match hit {
-                Some((name, file, tex_pct_y, tx, ty, sx, sy)) => Ok((
-                    Value::String(lua.create_string(&name)?),
-                    Value::String(lua.create_string(&file)?),
+            let string = |s: &str| Ok::<_, mlua::Error>(Value::String(lua.create_string(s)?));
+            Ok(match hit {
+                Hover::Highlight {
+                    name,
+                    file,
+                    tex_pct_y,
+                    texture,
+                    scroll,
+                } => (
+                    string(&name)?,
+                    string(&file)?,
                     1.0f64,
                     tex_pct_y,
-                    tx,
-                    ty,
-                    sx,
-                    sy,
-                )),
-                None => Ok((
-                    Value::Nil,
-                    Value::Nil,
-                    0.0f64,
-                    0.0f64,
-                    0.0f64,
-                    0.0f64,
-                    0.0f64,
-                    0.0f64,
-                )),
-            }
+                    texture.0,
+                    texture.1,
+                    scroll.0,
+                    scroll.1,
+                ),
+                Hover::Name(name) => (string(&name)?, Value::Nil, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                Hover::Miss => (Value::Nil, Value::Nil, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            })
         })?,
     )?;
 

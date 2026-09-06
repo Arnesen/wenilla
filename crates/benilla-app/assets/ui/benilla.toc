@@ -413,9 +413,12 @@ OptionsFrame.xml
 #    (l.73-74). Replaces ActionBar.xml, MultiBars.xml and StanceBar.xml.
 Interface\FrameXML\MainMenuBar.xml
 
-# The shared CooldownFrame_SetTimer (the ref's Cooldown.lua file split) — before its
-# consumers (the action, multibar, bonus and shapeshift buttons; the bag slots).
-Cooldown.xml
+# The cooldown indicator — the reference's own file, off the player's chain (1751; decision
+# 2019): `CooldownFrameTemplate`, a <Model> playing UI-Cooldown-Indicator.mdx whose OnUpdateModel
+# scrubs the sweep and whose OnAnimFinished hides the flash (Cooldown.lua), rendered as a tile
+# (2013) with its four quadrant quads turned by the file's own texture-transform rotation tracks.
+# Before its consumers (the action, multibar, bonus and shapeshift buttons; the bag slots).
+Interface\FrameXML\Cooldown.xml
 # ══ THE ACTION-BUTTON REGIONS — the reference's own, off the player's chain (1751) ══
 # `ActionButtonTemplate`: the REGIONS-ONLY half of the reference's two-level split — icon, count,
 # hotkey, name, border, flash, cooldown and normal texture. It declares NO scripts and calls
@@ -720,12 +723,11 @@ Interface\FrameXML\PetPaperDollFrame.xml
 # legibility, not necessity, in either direction: every verb each file calls of the other resolves
 # at call time, `KEYRING_CONTAINER` included (no top-level read of it exists in ContainerFrame.lua).
 #
-# TWO THINGS THE SWAP DID NOT INHERIT, and both live in ContainerFrameAdapters.xml below rather
-# than being edited into anything of Blizzard's: the item-push card (0887 — the reference's is a
-# `<Model>` playing an .mdx and this engine renders no FrameXML models, so ours samples that
-# model's own tracks and draws a quad), and the GlobalStrings fallbacks the install-less harnesses
-# need. The keyring's SHOW trigger moved the other way — into the main bar's file, which is exactly
-# where the reference keeps it (MainMenuBar.xml l.323-341; stock since 1938).
+# The item-push card is the reference's own `<Model>` since 2015 (0887's Lua card is gone with
+# it): `ItemAnim_OnEvent` puts the icon on the pane and arms it, the tile renderer draws the
+# file (2013), the pane's own clock ends it. The keyring's SHOW trigger moved the other way —
+# into the main bar's file, which is exactly where the reference keeps it (MainMenuBar.xml
+# l.323-341; stock since 1938).
 Interface\FrameXML\MainMenuBarBagButtons.xml
 # The stack-split spinner (decision 0216 §6/slice 2): loaded beside the bag windows, whose slot
 # click handler (the reference's `ContainerFrameItemButton_OnClick`) calls `OpenStackSplitFrame`.

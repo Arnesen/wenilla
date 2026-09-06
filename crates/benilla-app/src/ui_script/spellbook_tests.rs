@@ -90,7 +90,7 @@ pub(super) fn spellbook_ui(w: f32, h: f32) -> UiScript {
     for f in [
         "Interface\\FrameXML\\Fonts.xml",
         r"Interface\FrameXML\UIParent.xml",
-        "Cooldown.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
@@ -268,23 +268,19 @@ fn shipped_spellbook_shows_the_cooldown_pie() {
     b.slots[0].cooldown = Some((6_000, 10_000, true));
     s.set_spellbook(b);
     s.fire_event("SPELL_UPDATE_COOLDOWN", vec![]);
+    // The stock machine (decision 2019): sequence 0 armed by `CooldownFrame_SetTimer`, scrubbed
+    // by the next paint's `OnUpdateModel`.
+    super::test_ui::cooldown_facts(&mut s);
+    s.tick(0.0);
     s.resolve();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-    let sweep = s.extract().into_iter().find_map(|q| {
-        if s.quad_owner_name(q.target).as_deref() != Some("SpellButton1Cooldown") {
-            return None;
-        }
-        match q.content {
-            QuadContent::Cooldown { fraction, flash } => Some((fraction, flash)),
-            _ => None,
-        }
-    });
-    let (fraction, flash) = sweep.expect("SpellButton1's Cooldown widget is showing");
-    assert!(
-        (fraction - 0.4).abs() < 1e-3,
-        "4 s elapsed of 10 ⇒ the sweep sits at 40%, got {fraction}"
+    let play = super::test_ui::cooldown_play(&s, "SpellButton1Cooldown")
+        .expect("SpellButton1's cooldown pane is showing");
+    assert_eq!(
+        play,
+        (0, 400),
+        "4 s elapsed of 10 ⇒ the sweep sits at 40 %: sequence 0 at 400 ms"
     );
-    assert_eq!(flash, None);
 
     // An on-hold triple: no sweep (CooldownFrame_SetTimer's enable gate), the icon dims to 40%.
     let mut b = book();
@@ -706,7 +702,7 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
         "Interface\\FrameXML\\StaticPopup.xml",
         // `ShowMacroFrame` lives here since 1848.
         "Interface\\FrameXML\\GameTooltip.xml",
-        "Cooldown.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
         // **ScrollTemplates BEFORE UIPanelTemplates, which is the manifest's own order.** Ours
         // still carries dead `FauxScrollFrame_*` copies that the chain overrides by loading after
         // (1846's step 3, deliberately not done); load them the other way round and OUR copies win

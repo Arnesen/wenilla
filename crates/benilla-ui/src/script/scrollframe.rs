@@ -1,10 +1,12 @@
 //! The `ScrollFrame` method surface (`CSimpleScrollFrame`) — the ScrollFrame mechanism (decision
 //! 0112, the engine's last structural gap): `SetScrollChild`/`GetScrollChild`, the vertical scroll
 //! offset (`SetVerticalScroll`/`GetVerticalScroll`), and the live range
-//! (`GetVerticalScrollRange`/`UpdateScrollChildRect`). Spec-faithful to the documented widget
-//! contract (the Era `ScrollFrameTemplate` Lua drives its scrollbar off exactly these), not
-//! byte-pinned — same posture as StatusBar's fill. Horizontal scroll (`SetHorizontalScroll`/…) is
-//! out of scope: no 1.12 template drives it.
+//! (`GetVerticalScrollRange`/`UpdateScrollChildRect`). The offset setter and the range are
+//! byte-pinned (decisions 1338, 2017): `0x786db0` stores the offset VERBATIM — the engine never
+//! clamps it — and `0x786e30` measures the range off the scroll child's subtree. The rest is
+//! spec-faithful to the documented widget contract (the Era `ScrollFrameTemplate` Lua drives its
+//! scrollbar off exactly these), same posture as StatusBar's fill. Horizontal scroll
+//! (`SetHorizontalScroll`/…) is out of scope: no 1.12 template drives it.
 //!
 //! The actual geometry — the scroll child's anchors pinned to the frame + the scroll offset, and
 //! the clip every descendant of the child draws/hits within — lives in [`super::mod@super`]'s
@@ -203,26 +205,33 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SetVerticalScroll(px) — clamps into [0, GetVerticalScrollRange()] (computed live), stores, and
-    // fires OnVerticalScroll(self, offset) — the scrollbar's OnValueChanged wiring's other half.
+    // SetVerticalScroll(px) — stores the offset VERBATIM and, only when it actually changed,
+    // re-lays the child out and fires OnVerticalScroll(self, offset) — the scrollbar's
+    // OnValueChanged wiring's other half.
+    //
+    // **No clamp** (decision 2017). The reference's `0x786db0` compares the new value against the
+    // OLD one alone (an epsilon change-gate: unchanged → nothing happens, not even the script),
+    // writes it to `[+0x328]`, re-anchors the scroll child off it (`0x787100` →
+    // `SetPoint(child, self, hScroll, vScroll)`) and fires the handler. `[+0x320]` — the range —
+    // is never read on this path. Every clamp the reference exhibits is FrameXML's own, through
+    // the scroll bar's `[min, max]` (`ScrollFrameTemplate_OnMouseWheel`,
+    // `ScrollFrame_OnScrollRangeChanged`). The clamp this carried from 07-05 (a3fce6a76) to 2017
+    // cost every faux list whose frame is taller than `rows × step` its last rows (B370): the
+    // reference's `FauxScrollFrame_Update` drives the bar to `(n − rows) × step`, which is past
+    // `n × step − frameHeight` whenever the frame has slack under its last row.
     m.set(
         "SetVerticalScroll",
         lua.create_function(|lua, (this, px): (Table, f32)| {
-            let h = frame_handle_of(lua, &this)?;
-            let range = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                scroll_range(&model, h)
-            };
-            let clamped = px.clamp(0.0, range);
             let changed = with_scroll(lua, &this, |s| {
-                let changed = s.vertical.to_bits() != clamped.to_bits();
-                s.vertical = clamped;
+                let changed = s.vertical.to_bits() != px.to_bits();
+                s.vertical = px;
                 changed
             })?;
-            if changed {
-                lua.app_data_mut::<Model>().expect("model").touch_layout();
+            if !changed {
+                return Ok(());
             }
-            fire_vertical_scroll(lua, &this, clamped)
+            lua.app_data_mut::<Model>().expect("model").touch_layout();
+            fire_vertical_scroll(lua, &this, px)
         })?,
     )?;
     m.set(

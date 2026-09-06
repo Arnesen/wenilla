@@ -104,6 +104,8 @@ fn the_shape_ignores_edge_on_correct_and_degenerate_batches() {
         interior: false,
         emissive: false,
         icon_slot: false,
+        uv_rot_seq: None,
+        uv_scale_seq: None,
         sidn: None,
         window: false,
         additive: false,

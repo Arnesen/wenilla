@@ -760,7 +760,7 @@ mod tests {
                     "ScrollFrame",
                     "Slider", "ColorSelect", "MessageFrame", "ScrollingMessageFrame",
                     "SimpleHTML", "Model", "PlayerModel", "DressUpModel", "TabardModel",
-                    "Minimap", "MovieFrame", "Cooldown",
+                    "Minimap", "MovieFrame",
                 }}
                 for i = 1, table.getn(types) do
                     local ok, w = pcall(function()

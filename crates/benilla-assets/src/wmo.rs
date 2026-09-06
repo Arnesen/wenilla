@@ -670,6 +670,8 @@ impl AssetLoader for WmoModelLoader {
                     alpha_anim: None,           // WMO batches carry no M2 colour/weight tracks
                     uv_anim: None,              // …nor texture transforms
                     uv_seq: None,               // …so no per-sequence set either (1408)
+                    uv_rot_seq: None,
+                    uv_scale_seq: None,
                     rgb_anim: None,
                     rgb_seq: None,            // …nor M2Color tints
                     wmo_batch: sub.wmo_batch, // the MOBA section — an interior group's lighting law

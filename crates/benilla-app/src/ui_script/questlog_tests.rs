@@ -1225,7 +1225,7 @@ fn selection_change_resets_detail_scroll_but_a_quest_log_update_refresh_does_not
     s.resolve();
     answer_measures(&mut s);
     s.resolve(); // the measured span reaches the scroll range, and the bar, on this pass
-    s.resolve(); // GetVerticalScrollRange (SetVerticalScroll's clamp) reads resolved rects.
+    s.resolve(); // GetVerticalScrollRange (the bar's [min, max]) reads resolved rects.
 
     // Scroll THROUGH the bar, as the wheel and the thumb do (ScrollFrameTemplate_OnMouseWheel sets
     // the bar; its OnValueChanged moves the frame): a reselect's `ScrollBar:SetValue(0)` is what

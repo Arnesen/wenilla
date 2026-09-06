@@ -44,17 +44,20 @@
 //! and not read here (the reference's `SetLight(0, …)` is a no-op too; the enabled form has no
 //! caller in 1.12's FrameXML).
 //!
+//! ## Texture transforms (decision 2019)
+//!
+//! A batch whose texture transform animates gets a material of its own per tile — a clone of
+//! the twin with two mat-anim rows: the translation delta (the world's lane, `anim_slots.x`)
+//! and the **affine** row (`anim_slots.z`: rotation and scale as deltas from the identity), both
+//! sampled here off the pane's play head at the sequence's file slot, never off the world clock.
+//! The shader composes them as the reference does — `uv' = R((uv + t − p) ⊙ s) + p` — which is
+//! how the cooldown indicator's four quadrant quads turn their mask into the clockwise sweep.
+//!
 //! ## What is deliberately NOT here yet
 //!
 //! - The **perspective leg** (`SetCamera(n)` naming a real M2 camera; the character panes): a
 //!   plain `<Model>` in the shipped interface never picks one, and the character panes keep
 //!   their booths. Named, not built.
-//! - **Texture-transform rotation** (the cooldown indicator's sweep is four quadrant quads whose
-//!   UV rotation tracks turn the mask): the formats bake carries translation only. The cooldown
-//!   stays on the native `Cooldown` widget until that channel lands; this module renders every
-//!   other UI file.
-//! - The **implicit rect** of a size-less `<Model>` from the file's bounds (§3): the map arrow
-//!   keeps its 1980 footprint and its sprite for now.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -67,11 +70,13 @@ use bevy::render::render_resource::Buffer;
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 
 use benilla_assets::materials::WowModelMaterial;
-use benilla_assets::{m2_url, M2Model, WorldAssets};
+use benilla_assets::{m2_url, quantize, M2Model, WorldAssets};
+use benilla_formats::{SeqLoops, UvAnim};
 use benilla_ui::script::{ModelPaneFrame, UiScript};
 use benilla_ui::widget::{FrameHandle, ModelFileFacts, SequenceFacts};
 use benilla_world::doodad_anim::spawn_anim_host;
 use benilla_world::lighting::LightBlob;
+use benilla_world::mat_anim_table::{affine_row, MatAnimTable};
 use benilla_world::model_forms::ModelForms;
 use benilla_world::model_render::M2BatchMaterials;
 use benilla_world::particles::buffer::EffectLightOverride;
@@ -163,6 +168,80 @@ struct AlphaPart {
     anim: Arc<benilla_formats::AlphaAnim>,
 }
 
+/// One batch whose texture transform animates: the tile's OWN clone of the batch's material
+/// (two panes on one file must not share a row — two cooldowns at different fractions), with
+/// the table rows it writes per frame off the pane's play head (decision 2019).
+struct UvPart {
+    /// Held so the clone outlives its parts' handles by exactly the tile's lifetime.
+    #[allow(dead_code)]
+    material: Handle<WowModelMaterial>,
+    /// The translation row: its slot, and the built seed the delta is measured from
+    /// (`sun_scale.zw`, the loop's sample at 0).
+    trans: Option<(u16, [f32; 2])>,
+    /// The affine row's slot — rotation and scale ([`affine_row`]).
+    affine: Option<u16>,
+    uv_anim: Option<Arc<UvAnim>>,
+    uv_seq: Option<Arc<SeqLoops<[f32; 2]>>>,
+    uv_rot: Option<Arc<SeqLoops<[f32; 4]>>>,
+    uv_scale: Option<Arc<SeqLoops<[f32; 2]>>>,
+}
+
+impl UvPart {
+    /// Write this frame's rows for the sequence at `(seq_slot, cursor_s)` on the pane's clock
+    /// `gseq_s`: the translation delta (quantized like the world's lane), and the affine row
+    /// from the raw quaternion and the scale.
+    fn write_rows(
+        &self,
+        table: &mut MatAnimTable,
+        seq_slot: Option<usize>,
+        cursor_s: f32,
+        gseq_s: f64,
+    ) {
+        if let Some((slot, seed)) = self.trans {
+            let uv = match (&self.uv_seq, &self.uv_anim) {
+                (Some(seqs), _) => seqs
+                    .seq(seq_slot)
+                    .map_or([0.0, 0.0], |l| l.sample(l.clock(cursor_s, gseq_s))),
+                (None, Some(a)) => a.sample(a.clock(cursor_s, gseq_s)),
+                (None, None) => [0.0, 0.0],
+            };
+            table.set(
+                slot,
+                [
+                    quantize(uv[0], 4096.0) - seed[0],
+                    quantize(uv[1], 4096.0) - seed[1],
+                    0.0,
+                    0.0,
+                ],
+            );
+        }
+        if let Some(slot) = self.affine {
+            let q = self
+                .uv_rot
+                .as_ref()
+                .and_then(|r| r.seq(seq_slot))
+                .map_or([0.0, 0.0, 0.0, 1.0], |l| {
+                    l.sample(l.clock(cursor_s, gseq_s))
+                });
+            let sc = self
+                .uv_scale
+                .as_ref()
+                .and_then(|r| r.seq(seq_slot))
+                .map_or([1.0, 1.0], |l| l.sample(l.clock(cursor_s, gseq_s)));
+            table.set(slot, affine_row(q, sc));
+        }
+    }
+
+    fn free(&self, table: &mut MatAnimTable) {
+        if let Some((slot, _)) = self.trans {
+            table.free(slot);
+        }
+        if let Some(slot) = self.affine {
+            table.free(slot);
+        }
+    }
+}
+
 /// A live tile: its entity tree and what it was built from.
 struct Tile {
     root: Entity,
@@ -178,9 +257,20 @@ struct Tile {
     /// Which id the player is currently arming (to re-arm only on change).
     armed: Option<u16>,
     alpha_parts: Vec<AlphaPart>,
+    uv_parts: Vec<UvPart>,
     emitters: Vec<Entity>,
     /// The last frame this tile was on the engine's paint list.
     last_seen: u64,
+}
+
+impl Tile {
+    /// Tear the tile down: its tree, and the table rows its animated materials held.
+    fn retire(self, commands: &mut Commands, table: &mut MatAnimTable) {
+        for p in &self.uv_parts {
+            p.free(table);
+        }
+        commands.entity(self.root).despawn();
+    }
 }
 
 /// Frames a tile survives off the paint list before its tree is torn down — long enough that a
@@ -301,6 +391,8 @@ struct TileRender<'w> {
     mats: M2BatchMaterials<'w>,
     palettes: ResMut<'w, RigPalettes>,
     rig: ResMut<'w, TileRig>,
+    /// The shared mat-anim table: the tiles' animated materials own rows in it (2019).
+    table: ResMut<'w, MatAnimTable>,
 }
 
 /// The per-frame pass: feed the engine the facts it asked for, keep one tile per visible pane,
@@ -338,7 +430,7 @@ fn sync_tiles(
     let Some(mut script) = script else {
         // No VM: nothing paints. Tear everything down so a dead UI leaves no live camera.
         for (_, tile) in state.tiles.drain() {
-            commands.entity(tile.root).despawn();
+            tile.retire(&mut commands, &mut render.table);
         }
         bridge.cells.clear();
         set_camera_active(&mut cams, false);
@@ -394,7 +486,7 @@ fn sync_tiles(
             .is_some_and(|t| t.key != key || t.icon != req.icon);
         if stale {
             if let Some(t) = state.tiles.remove(handle) {
-                commands.entity(t.root).despawn();
+                t.retire(&mut commands, &mut render.table);
             }
         }
         let tile = state.tiles.entry(*handle).or_insert_with(|| Tile {
@@ -413,6 +505,7 @@ fn sync_tiles(
             clips: HashMap::new(),
             armed: None,
             alpha_parts: Vec::new(),
+            uv_parts: Vec::new(),
             emitters: Vec::new(),
             last_seen: frame,
         });
@@ -444,6 +537,7 @@ fn sync_tiles(
                     );
                     tile.clips = built.clips;
                     tile.alpha_parts = built.alpha_parts;
+                    tile.uv_parts = built.uv_parts;
                     tile.emitters = built.emitters;
                     tile.built = true;
                 }
@@ -460,7 +554,7 @@ fn sync_tiles(
         .collect();
     for h in dead {
         if let Some(t) = state.tiles.remove(&h) {
-            commands.entity(t.root).despawn();
+            t.retire(&mut commands, &mut render.table);
         }
         bridge.requests.remove(&h);
     }
@@ -588,6 +682,9 @@ fn sync_tiles(
                 }
             }
         }
+        for part in &tile.uv_parts {
+            part.write_rows(&mut render.table, seq_slot, cursor_s, gseq_s);
+        }
         for &e in &tile.emitters {
             if let Ok(mut em) = emitters.get_mut(e) {
                 em.set_size_scale(req.star_px_per_unit);
@@ -695,6 +792,7 @@ fn shelf_pack(sizes: &[UVec2], edge: u32) -> Vec<Cell> {
 struct BuiltTile {
     clips: HashMap<u16, (AnimationNodeIndex, usize)>,
     alpha_parts: Vec<AlphaPart>,
+    uv_parts: Vec<UvPart>,
     emitters: Vec<Entity>,
 }
 
@@ -726,6 +824,7 @@ fn build_tile(
     // Materials first — every one must be resident before anything spawns, or a retry would
     // leave half a tree behind.
     let mut part_mats: Vec<Handle<WowModelMaterial>> = Vec::with_capacity(model.submeshes.len());
+    let mut uv_parts: Vec<UvPart> = Vec::new();
     for (i, sub) in model.submeshes.iter().enumerate() {
         let texture = if sub.icon_slot {
             icon_tex.clone()
@@ -742,7 +841,41 @@ fn build_tile(
             render.mats.materials(),
             true,
         )?;
-        part_mats.push(twin);
+        // A batch whose texture transform animates draws through a clone of its own, with its
+        // own table rows — the rows are written off THIS pane's play head, so two panes on one
+        // file cannot share them (decision 2019).
+        let animated = sub.uv_anim.is_some()
+            || sub.uv_seq.is_some()
+            || sub.uv_rot_seq.is_some()
+            || sub.uv_scale_seq.is_some();
+        if animated {
+            let mut own = render.mats.materials().get(&twin).cloned()?;
+            let seed = [own.extension.sun_scale.z, own.extension.sun_scale.w];
+            let trans = (sub.uv_anim.is_some() || sub.uv_seq.is_some())
+                .then(|| render.table.alloc())
+                .flatten()
+                .map(|slot| {
+                    own.extension.anim_slots.x = f32::from(slot);
+                    (slot, seed)
+                });
+            let affine = (sub.uv_rot_seq.is_some() || sub.uv_scale_seq.is_some())
+                .then(|| render.table.alloc())
+                .flatten()
+                .inspect(|&slot| own.extension.anim_slots.z = f32::from(slot));
+            let handle = render.mats.materials().add(own);
+            uv_parts.push(UvPart {
+                material: handle.clone(),
+                trans,
+                affine,
+                uv_anim: sub.uv_anim.clone(),
+                uv_seq: sub.uv_seq.clone(),
+                uv_rot: sub.uv_rot_seq.clone(),
+                uv_scale: sub.uv_scale_seq.clone(),
+            });
+            part_mats.push(handle);
+        } else {
+            part_mats.push(twin);
+        }
     }
 
     // The rig: the collapsed pose buffer + a palette slot, when the file has bones. The tile
@@ -862,6 +995,7 @@ fn build_tile(
     Some(BuiltTile {
         clips,
         alpha_parts,
+        uv_parts,
         emitters,
     })
 }

@@ -83,7 +83,7 @@ impl MatAnimTable {
     /// Allocate a slot (1-based; 0 is the identity row). `None` when the table is full — the
     /// caller then simply doesn't register, and the batch stays frozen at its built seed: a
     /// degraded look only a >511-material session could see, never a wrong pixel.
-    pub(crate) fn alloc(&mut self) -> Option<u16> {
+    pub fn alloc(&mut self) -> Option<u16> {
         if let Some(slot) = self.free.pop() {
             return Some(slot);
         }
@@ -98,7 +98,7 @@ impl MatAnimTable {
 
     /// Free a slot when its registry entry dies (the material was unloaded): the row zeroes —
     /// back to identity — so the next allocation can never inherit a dead batch's delta.
-    pub(crate) fn free(&mut self, slot: u16) {
+    pub fn free(&mut self, slot: u16) {
         self.set(slot, [0.0; 4]);
         self.free.push(slot);
     }
@@ -106,7 +106,7 @@ impl MatAnimTable {
     /// Write slot `slot`'s delta row; a same-value write costs nothing (the tick's quantized
     /// samples make equality the common case on slow loops). Slot 0 — the shared identity — is
     /// refused: writing it would scroll every static batch in the world at once.
-    pub(crate) fn set(&mut self, slot: u16, row: [f32; 4]) {
+    pub fn set(&mut self, slot: u16, row: [f32; 4]) {
         let i = slot as usize;
         if i == 0 || i >= MAX_MAT_ANIM_SLOTS || self.rows[i] == row {
             return;
@@ -120,6 +120,15 @@ impl MatAnimTable {
     pub(crate) fn get(&self, slot: u16) -> [f32; 4] {
         self.rows.get(slot as usize).copied().unwrap_or([0.0; 4])
     }
+}
+
+/// The **affine row** (decision 2019): a texture transform's rotation and scale as the deltas
+/// from the identity the shader adds back — `[cos − 1, sin, sx − 1, sy − 1]`, with `cos`/`sin`
+/// the raw quaternion's `1 − 2z²` / `2zw` ([`benilla_formats::rotation_2x2`]). The identity
+/// encodes as the zero row, which is what lets slot 0 serve every material with no transform.
+pub fn affine_row(q: [f32; 4], scale: [f32; 2]) -> [f32; 4] {
+    let (c, s) = benilla_formats::rotation_2x2(q);
+    [c - 1.0, s, scale[0] - 1.0, scale[1] - 1.0]
 }
 
 /// Render world (`PrepareResources`): write the whole 8 KB region when anything changed, gated on
@@ -160,6 +169,22 @@ pub fn plugin(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The affine row's identity is the zero row — the whole reason the encoding is deltas.
+    #[test]
+    fn the_affine_identity_is_the_zero_row() {
+        assert_eq!(affine_row([0.0, 0.0, 0.0, 1.0], [1.0, 1.0]), [0.0; 4]);
+        let r = std::f32::consts::FRAC_1_SQRT_2;
+        let row = affine_row([0.0, 0.0, r, r], [2.0, 0.5]);
+        assert!(
+            (row[0] + 1.0).abs() < 1e-6 && (row[1] - 1.0).abs() < 1e-6,
+            "{row:?}"
+        );
+        assert!(
+            (row[2] - 1.0).abs() < 1e-6 && (row[3] + 0.5).abs() < 1e-6,
+            "{row:?}"
+        );
+    }
 
     /// Slot 0 is the identity row every static material in the world reads — the setter refuses
     /// it, and freeing can never zero it "again" into a generation bump.
