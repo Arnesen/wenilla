@@ -1083,7 +1083,7 @@ fn seat_probe_slot(commands: &mut Commands, anchor: Entity, new: u16) {
     commands.queue(
         move |world: &mut World| match world.get_entity_mut(anchor) {
             Ok(mut e) => {
-                e.remove::<PropProbeSlot>();
+                // One insert: the slot's `on_replace` hook frees the outgoing slot (2005).
                 e.insert(PropProbeSlot(new));
             }
             Err(_) => world.resource_mut::<PropProbes>().release(new),

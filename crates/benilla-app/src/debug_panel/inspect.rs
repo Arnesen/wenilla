@@ -99,6 +99,21 @@ type EntityLightReadout = (
     Has<benilla_world::interior::ContainmentAttach>,
 );
 
+/// One pickable part as the card's `parts alive` and glow-card lines read it: the object, its
+/// draw verdict, its transform, whether it is a billboard card, the material + mesh tag the glow
+/// line names, and the visibility class the STACKED count reads. A tuple alias like
+/// [`EntityLightReadout`] above, for the same reason: as an inline `Query<>` the field trips
+/// clippy's `type_complexity` at the workspace gate.
+type PartReadout = (
+    &'static benilla_world::interact::WorldObject,
+    &'static bevy::camera::visibility::ViewVisibility,
+    &'static GlobalTransform,
+    Has<benilla_world::billboard::BillboardCard>,
+    Option<&'static MeshMaterial3d<benilla_assets::materials::WowModelMaterial>>,
+    Option<&'static bevy::mesh::MeshTag>,
+    Option<&'static bevy::camera::visibility::VisibilityClass>,
+);
+
 /// Everything the identity card reads off the **net entity** under the cursor, as one named
 /// [`SystemParam`] — the descriptor store and the coarse kind the line gates go by, the GameObject
 /// collision readout (decision 0763), the light readout, and the two remaining inputs of the
@@ -111,16 +126,11 @@ pub(super) struct InspectStores<'w, 's> {
     kinds: Query<'w, 's, &'static crate::net::NetEntity>,
     /// Every pickable part with its draw verdict, for the card's `parts alive` line: a prop
     /// spawned twice reads twice its model's batch count here, and nowhere else.
-    objects: Query<
-        'w,
-        's,
-        (
-            &'static benilla_world::interact::WorldObject,
-            &'static bevy::camera::visibility::ViewVisibility,
-            &'static GlobalTransform,
-            Has<benilla_world::billboard::BillboardCard>,
-        ),
-    >,
+    objects: Query<'w, 's, PartReadout>,
+    /// The realized materials + images, for the card line: which material a glow card is bound
+    /// to, whether that material still says ADDITIVE, and whether its texture is resident.
+    model_mats: Res<'w, Assets<benilla_assets::materials::WowModelMaterial>>,
+    images: Res<'w, Assets<bevy::image::Image>>,
     collision: Query<'w, 's, GoCollisionReadout>,
     lit: Query<'w, 's, EntityLightReadout>,
     motion: Query<'w, 's, MotionReadout>,
@@ -248,24 +258,64 @@ pub(super) fn inspect_ui(
     // drew this frame. A doodad has one part per render batch; a doubled placement shows twice
     // that here — the census the FPS probe prints as `orphan_parts=`, at the cursor.
     let parts_line = {
-        let (mut alive, mut drawn) = (0usize, 0usize);
+        let (mut alive, mut drawn, mut stacked) = (0usize, 0usize, 0usize);
         let mut cards: Vec<String> = Vec::new();
-        for (w, vv, gt, card) in stores.objects.iter() {
+        for (w, vv, gt, card, mat, tag, class) in stores.objects.iter() {
             if w.kind == obj.kind && w.id == obj.id {
                 alive += 1;
                 drawn += usize::from(vv.get());
+                // A part whose `VisibilityClass` lists its mesh class more than once is queued
+                // that many times — drawn stacked on itself (`model_render::park`'s dedup).
+                stacked += usize::from(class.is_some_and(|c| c.len() > 1));
                 if card {
-                    // A glow card's live world scale — the placement scale times the bone's
-                    // pulse; a doubled or squared pulse reads here.
-                    cards.push(format!("{:.2}", gt.compute_transform().scale.x));
+                    // One glow card, as the draw sees it: its live world scale (the placement
+                    // scale times the bone's pulse), its tag alpha, and the bound material's
+                    // marker word — ADDITIVE is `clutter_fade.z` bit 2, the bit `specialize`
+                    // keys the (ONE, ONE) blend on and the shader keys the alpha fold on; a card
+                    // whose material lost it draws its texture unweighted, a hard bright disc.
+                    let scale = gt.compute_transform().scale.x;
+                    let alpha = tag.map_or(-1.0, |t| benilla_world::mesh_tag::alpha_of(t.0));
+                    let m = mat.and_then(|m| stores.model_mats.get(&m.0));
+                    let state = match m {
+                        Some(m) => {
+                            let z = m.extension.clutter_fade.z as u32;
+                            let tex = m.base.base_color_texture.as_ref().map_or(
+                                "none".to_string(),
+                                |h| {
+                                    let loaded = stores.images.get(h).is_some();
+                                    format!("{}{}", h.id(), if loaded { "" } else { " MISSING" })
+                                },
+                            );
+                            format!(
+                                "add {} fade {:.0} unlit {:.0} nodw {} tex {tex}",
+                                u8::from(z & 4 != 0),
+                                m.extension.model_flags.y,
+                                m.extension.model_flags.w,
+                                u8::from(z & 1 != 0),
+                            )
+                        }
+                        None => match mat {
+                            Some(_) => "material UNREALIZED".to_string(),
+                            None => "no material".to_string(),
+                        },
+                    };
+                    cards.push(format!(
+                        "[scale {scale:.2} α {alpha:.2} vis {} {state}]",
+                        u8::from(vv.get())
+                    ));
                 }
             }
         }
+        let stacked = if stacked > 0 {
+            format!(", STACKED {stacked}")
+        } else {
+            String::new()
+        };
         if cards.is_empty() {
-            format!("parts alive {alive}, drawn {drawn}")
+            format!("parts alive {alive}, drawn {drawn}{stacked}")
         } else {
             format!(
-                "parts alive {alive}, drawn {drawn}, cards {} (scale {})",
+                "parts alive {alive}, drawn {drawn}{stacked}, cards {} {}",
                 cards.len(),
                 cards.join(" ")
             )

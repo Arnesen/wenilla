@@ -390,7 +390,81 @@ fn a_dead_unit_reports_dead_and_zero_health() {
     assert!(s.eval::<bool>(r#"return UnitExists("target")"#).unwrap());
     assert!(s.eval::<bool>(r#"return UnitIsDead("target")"#).unwrap());
     assert_eq!(s.eval::<i64>(r#"return UnitHealth("target")"#).unwrap(), 0);
-    // Name unknown (no name-query yet) → nil, the absent-name shape.
+    // Name unknown (no name-query yet) → `UNKNOWNOBJECT`, never nil: the unit RESOLVED, and the
+    // reference pushes nil for a zero GUID only (decision 2002; the shape is pinned below). A bare
+    // VM carries no GlobalStrings, so this is the binary's own literal.
+    assert_eq!(
+        s.eval::<String>(r#"return UnitName("target")"#).unwrap(),
+        "Unknown Being"
+    );
+}
+
+/// `UnitName`'s value 1 is nil in exactly two cases — a zero GUID, and the `"player"` fast path
+/// over an empty local-name buffer — and a STRING everywhere else: the cached name, or
+/// `FrameScript_GetText("UNKNOWNOBJECT")` for a unit that resolved but whose name the cache has not
+/// answered (`0x517020` §2.1; `0x609324`). The stock stable window concatenates the answer on
+/// `UNIT_PET` (`PetStable.lua:129`), the instant a called pet's name is still in flight — the
+/// director's `attempt to concatenate a nil value` dialog (decision 2002).
+#[test]
+fn unitname_reads_unknownobject_for_a_resolved_unit_whose_name_is_in_flight() {
+    let mut s = UiScript::new().unwrap();
+    let pending = UnitState {
+        exists: true,
+        has_object: true,
+        name: None,
+        level: 58,
+        guid: 0xF140_0000_0000_0001,
+        ..Default::default()
+    };
+    s.set_unit("pet", Some(pending.clone()));
+
+    // No GlobalStrings loaded: the literal the binary falls back to (`0x860fa4`).
+    assert_eq!(
+        s.eval::<String>(r#"return UnitName("pet")"#).unwrap(),
+        "Unknown Being"
+    );
+    // With the stock global seated, its (localizable) value — read out of the VM, not baked in.
+    s.run(r#"UNKNOWNOBJECT = "Unknown""#).unwrap();
+    assert_eq!(
+        s.eval::<String>(r#"return UnitName("pet")"#).unwrap(),
+        "Unknown"
+    );
+    // An EMPTY global is the same miss as an absent one (`0x609324`'s empty check).
+    s.run(r#"UNKNOWNOBJECT = """#).unwrap();
+    assert_eq!(
+        s.eval::<String>(r#"return UnitName("pet")"#).unwrap(),
+        "Unknown Being"
+    );
+    // Still two returns, the second nil (1840).
+    assert_eq!(
+        s.eval::<i64>(r#"local t = {UnitName("pet")}; return table.getn(t)"#)
+            .unwrap(),
+        1,
+        "a trailing nil is not counted by getn"
+    );
+    assert!(s
+        .eval::<bool>(r#"local _, realm = UnitName("pet"); return realm == nil"#)
+        .unwrap());
+
+    // The name lands: the string, and nothing else changes.
+    let mut named = pending.clone();
+    named.name = Some("Snarl".into());
+    s.set_unit("pet", Some(named));
+    assert_eq!(
+        s.eval::<String>(r#"return UnitName("pet")"#).unwrap(),
+        "Snarl"
+    );
+
+    // The `"player"` fast path never reaches the resolver: an empty local-name buffer is nil.
+    s.set_unit("player", Some(pending));
+    assert!(s
+        .eval::<bool>(r#"return UnitName("player") == nil"#)
+        .unwrap());
+    assert!(s
+        .eval::<bool>(r#"return UnitName("PLAYER") == nil"#)
+        .unwrap());
+
+    // A token nothing resolves is GUID 0 → nil (the shape `absent_token_…` pins too).
     assert!(s
         .eval::<bool>(r#"return UnitName("target") == nil"#)
         .unwrap());

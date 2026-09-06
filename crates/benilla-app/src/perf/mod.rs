@@ -39,6 +39,7 @@
 //! GPU-bound frame is identified rather than timed: it is the one that runs long while the CPU
 //! meters stay flat (read them side by side in the journal or a probe line).
 
+mod blend_check;
 mod census;
 mod clock;
 mod gpu;
@@ -54,6 +55,7 @@ mod trace;
 use bevy::prelude::*;
 use bevy::render::diagnostic::RenderDiagnosticsPlugin;
 
+pub(crate) use blend_check::BlendMismatchShared;
 pub(crate) use clock::{process_cpu_secs, process_faults, system_cpu_ticks, thread_cpu_table};
 pub(crate) use gpu::{GpuMsShared, WgpuCensusShared};
 pub(crate) use hud::PerfHud;
@@ -167,5 +169,6 @@ impl Plugin for PerfPlugin {
         // 1389 resolve-on-a-later-submission trap). Registers nothing when off, so campaign
         // anchors never carry its ~0.03 ms sentinel cost uninvited.
         gpu::plugin(app);
+        blend_check::plugin(app);
     }
 }

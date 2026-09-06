@@ -217,6 +217,7 @@ pub(super) fn pill_quads(
     atlas: Option<Res<UiFontAtlas>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut quads: ResMut<UiQuads>,
+    mismatch: Option<Res<super::BlendMismatchShared>>,
     mut cache: Local<Option<PillCache>>,
 ) {
     if !hud.visible {
@@ -227,8 +228,14 @@ pub(super) fn pill_quads(
     };
     let win_w = win.width();
     let top = hud.pill_top();
-    let stale =
-        !matches!(&*cache, Some(c) if c.snap_at == hud.snap_at && c.win_w == win_w && c.top == top);
+    // Draws this frame that bound a blend state contradicting their material (the additive
+    // check, `perf::blend_check`): shown red the frame it happens, so a wrong halo on screen
+    // and a non-zero count here are seen together.
+    let mismatch = mismatch.map_or(0, |m| m.0.load(std::sync::atomic::Ordering::Relaxed));
+    let stale = !matches!(
+        &*cache,
+        Some(c) if c.snap_at == hud.snap_at && c.win_w == win_w && c.top == top && c.mismatch == mismatch
+    );
     if stale {
         let cpu = hud.snap.cpu.mean();
         let main = hud.snap.main.mean();
@@ -238,13 +245,16 @@ pub(super) fn pill_quads(
         // sum dim at the end (every thread, the number a CPU % agrees with — decision 1954: a
         // raid read 17 on it at a solid 60 with the main thread at 7, and the sum was taken for
         // a frame time by everyone who looked at it).
-        let text = match (main, cpu) {
+        let mut text = match (main, cpu) {
             (Some(main), Some(cpu)) => {
                 format!("{Q_DIM_MARKUP}{fps:.0} fps|r  {main:.1} ms  {Q_DIM_MARKUP}{cpu:.1} cpu|r")
             }
             (None, Some(cpu)) => format!("{Q_DIM_MARKUP}{fps:.0} fps|r  {cpu:.1} cpu"),
             _ => format!("{Q_DIM_MARKUP}-- ms"),
         };
+        if mismatch > 0 {
+            text.push_str(&format!("  |cffff5050blend x{mismatch}|r"));
+        }
         let center = Vec2::new(win_w * 0.5, 0.0); // measured first, then shifted under PILL_TOP
         let mut e = atlas.lock();
         let glyphs = layout_text_quads(
@@ -294,6 +304,7 @@ pub(super) fn pill_quads(
             snap_at: hud.snap_at,
             win_w,
             top,
+            mismatch,
             quads: out,
         });
     }
@@ -307,6 +318,8 @@ pub(super) struct PillCache {
     snap_at: f32,
     win_w: f32,
     top: f32,
+    /// The blend-mismatch count the text was laid out with (`perf::blend_check`).
+    mismatch: u64,
     quads: Vec<UiQuad>,
 }
 

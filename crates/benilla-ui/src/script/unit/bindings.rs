@@ -19,6 +19,19 @@ use super::{
 const CLASS_ROGUE: u32 = 4;
 const CLASS_DRUID: u32 = 11;
 
+/// `FrameScript_GetText("UNKNOWNOBJECT")` as the name resolvers call it (`0x517220`, `0x609324`):
+/// the VM's own GlobalString — read out of `_G` exactly as `0x703bf0` reads it, so a translated
+/// `GlobalStrings.lua` translates this too (enUS: `"Unknown"`, `GlobalStrings.lua:4444`) — and,
+/// when the global is missing or empty, the binary's own literal `"Unknown Being"` (`0x860fa4`,
+/// the bytes at that address in `WoW.exe`). Always a string: this is the "name not yet known"
+/// state, and it is never nil. Decision 2002.
+fn unknownobject(lua: &Lua) -> mlua::Result<Value> {
+    match lua.globals().get::<Value>("UNKNOWNOBJECT") {
+        Ok(Value::String(s)) if !s.as_bytes().is_empty() => Ok(Value::String(s)),
+        _ => Ok(Value::String(lua.create_string("Unknown Being")?)),
+    }
+}
+
 /// Register the `Unit*` globals reading the per-token snapshot store (the same style/place the
 /// object model and stdlib register their globals — bare globals on `_G`, matching the live API
 /// surface).
@@ -171,10 +184,36 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             // `GetUnitName(unit, showServerName)` wrapper, which calls this binding with ONE
             // argument. The engine's real second argument is a strict `LUA_TBOOLEAN` and is not
             // modelled — no consumer passes it.
-            let name = with_unit(lua, &token, None, |u| u.name.clone())?;
+            //
+            // Value 1 — and the ONLY two nils a recognised token can produce (`0x517020`, wow-re
+            // `ui/scratch/binding-shape-arity-law.md` §2.1): the `"player"` fast path reads the
+            // local name buffer and pushes nil when it is empty (`0x517083` → `0x5abdc0`), and a
+            // token that resolves to GUID 0 pushes nil (`0x5170c0`). EVERY other path ends in a
+            // string — the cached name, or `FrameScript_GetText("UNKNOWNOBJECT")`: `0x517220` for
+            // a GUID with no object and no cache row, `0x609324` inside `CGUnit_C::GetUnitName`
+            // for a unit whose name cache has not answered or is stale (a pet's is
+            // `petnamecache.wdb`, keyed by `UNIT_FIELD_PETNUMBER`, `pet-action-bar-api.md`
+            // §11c.6). A freshly called pet is that case by construction: `UNIT_PET` fires off the
+            // descriptor and the name lands a `CMSG_PET_NAME_QUERY` round-trip later, and stock
+            // `PetStable.lua:129` concatenates the answer in between.
+            //
+            // "Resolved to a GUID" is a SEATED SNAPSHOT — not `exists`. The reference's
+            // `UnitExists` is a conjunction with `IsSelectable` (the `UnitState::exists` doc's
+            // named gap), so a not-selectable unit reads its name there with `UnitExists` nil; the
+            // name resolver's own nil is GUID 0 and nothing else, and a feed that seats a token
+            // has resolved it. Decision 2002.
+            let name = with_unit(lua, &token, None, |u| Some(u.name.clone()))?;
             let name = match name {
-                Some(n) => Value::String(lua.create_string(&n)?),
                 None => Value::Nil,
+                Some(Some(n)) => Value::String(lua.create_string(&n)?),
+                Some(None)
+                    if token
+                        .as_deref()
+                        .is_some_and(|t| t.eq_ignore_ascii_case("player")) =>
+                {
+                    Value::Nil
+                }
+                Some(None) => unknownobject(lua)?,
             };
             Ok((name, Value::Nil))
         })?,

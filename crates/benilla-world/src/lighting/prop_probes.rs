@@ -267,16 +267,20 @@ pub(super) fn upload_prop_probes(
 }
 
 /// Attached to ONE entity of each lit interior prop instance (they despawn together with the
-/// placement); the on-remove hook returns the slot to the table whoever despawns it.
+/// placement); the hook returns the slot to the table whoever despawns it — and `on_replace`,
+/// not `on_remove` (the `RigSkin` shape, decision 2005): `on_remove` never fires on an
+/// insert-overwrite, so a re-seat that wrote a fresh slot over the old one leaked the old slot
+/// for the life of the session, and only a remove-then-insert discipline at the one re-seat
+/// site kept that from happening. `on_replace` fires once per transition on both edges.
 #[derive(Component)]
-#[component(on_remove = free_prop_probe_slot)]
+#[component(on_replace = free_prop_probe_slot)]
 pub struct PropProbeSlot(pub u16);
 
 fn free_prop_probe_slot(mut world: DeferredWorld, ctx: HookContext) {
     let slot = world
         .get::<PropProbeSlot>(ctx.entity)
         .map(|s| s.0)
-        .expect("on_remove runs with the component still present");
+        .expect("on_replace runs with the outgoing component still present");
     world.resource_mut::<PropProbes>().release(slot);
 }
 
@@ -302,6 +306,28 @@ mod tests {
         let c2 = t.alloc(c).unwrap();
         assert_eq!(c2, a);
         assert_eq!(t.high, 2);
+    }
+
+    /// The hook is `on_replace`, so an insert over a live slot frees the old one — the leak
+    /// `on_remove` would have let through (it never fires on an overwrite).
+    #[test]
+    fn overwriting_a_probe_slot_frees_the_old_one() {
+        let mut w = World::new();
+        let mut t = PropProbes::default();
+        let a = t.alloc([Vec4::splat(0.5); 7]).unwrap();
+        let b = t.alloc([Vec4::splat(0.25); 7]).unwrap();
+        w.insert_resource(t);
+        let e = w.spawn(PropProbeSlot(a)).id();
+        w.entity_mut(e).insert(PropProbeSlot(b));
+        let t = w.resource::<PropProbes>();
+        assert_eq!(
+            t.rows[a as usize], [[0.0; 4]; 7],
+            "the overwritten slot is freed"
+        );
+        assert_ne!(t.rows[b as usize], [[0.0; 4]; 7], "the new slot is live");
+        w.entity_mut(e).despawn();
+        let t = w.resource::<PropProbes>();
+        assert_eq!(t.rows[b as usize], [[0.0; 4]; 7], "despawn still frees");
     }
 
     #[test]

@@ -450,10 +450,6 @@ Interface\FrameXML\PetActionBarFrame.xml
 # (UI-AutoCastButton.mdx) and this engine's <Model> draws no pixels; the shine benilla draws is
 # its own token texture (1383). BENILLA_ALLOW_OWN_UI=1.
 PetActionBarAdapters.xml
-# The bonus (stance-page) bar AND the shapeshift bar — one stock file declares both, and the
-# reference's toc seats it right after PetActionBarFrame (l.73-74): the bonus buttons'
-# Up/Down call PetActionButtonUp/Down, which PetActionBar.xml above defines.
-Interface\FrameXML\BonusActionBarFrame.xml
 # The micro-button row in the bar's right-hand recess — the reference's own file (1751;
 # decision 1987), which its toc seats right after MainMenuBar (l.34-35). After MainMenuBar.xml:
 # the eight buttons carry parent="MainMenuBarArtFrame", resolved by name at load (1734), and a
@@ -1057,6 +1053,21 @@ Interface\FrameXML\QuestTimerFrame.xml
 Interface\FrameXML\ChatFrame.xml
 Interface\FrameXML\FloatingChatFrame.xml
 
+# The bonus (stance-page) bar AND the shapeshift bar — one stock file declares both. The
+# reference's toc seats it at l.74, after PetActionBarFrame (the bonus buttons' Up/Down call
+# PetActionButtonUp/Down). It sits HERE, right before WorldStateFrame at the tail, because the
+# two files depend on each other through the stock UIParent_ManageFramePositions:
+# ShapeshiftBar_OnLoad shows the bar, its OnShow runs the pass, and the pass indexes
+# ReputationWatchBar, QuestTimerFrame, QuestWatchFrame, the chat frames and the rest UNGUARDED
+# (UIParent.lua l.1592-1775) — so this file follows every one of them (ours seats the quest and
+# chat files later than the reference does); and WorldStateAlwaysUpFrame's OnLoad runs the same
+# pass, whose shapeshift-appearance arm indexes ShapeshiftBarLeft/Middle/Right (l.1710-1725) —
+# so that file follows THIS one, as in the reference (l.74 then l.89). Beside the bar files this
+# raised at UIParent.lua:1618 on every login and the shelf was never seated: the shelf art sat
+# at its XML anchor until something re-ran the pass (the director's sliver above Defensive
+# Stance; decision 2001). `every_load_time_runner_of_the_managed_pass_follows_what_it_reads`
+# enforces both directions.
+Interface\FrameXML\BonusActionBarFrame.xml
 # ══ THE WORLD-STATE FRAMES — the reference's own, off the player's chain (1751; decision 1972) ══
 # WorldStateFrame.xml + WorldStateFrame.lua: the always-up readout 1586 built (the tower/flag/base
 # counters at top-centre, `UPDATE_WORLD_STATES` from `crate::world_state_ui`), the capture bars,

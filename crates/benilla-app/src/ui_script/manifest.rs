@@ -221,6 +221,19 @@ pub(crate) fn load_default_ui(script: &UiScript) -> Vec<String> {
     let mut failures = load_manifest(script, &Addon::builtin().toc.files);
     failures.extend(bootstrap_positions(script));
     script.pop_sound_suppression();
+    // **A handler that raised DURING the walk is a load failure.** The loader's own report holds
+    // the raises it dispatched itself (a `<Script file=>` chunk, an OnLoad); a raise one call
+    // deeper — an OnLoad that `Show()`s a frame whose OnShow indexes a global its file has not
+    // loaded yet — lands in the VM's error list instead, and until 2001 nothing read that list
+    // here: the stance bar's load-order defect shipped with the manifest reporting clean and a
+    // WARN line the smoke does not fail on. The errors stay in the VM (the player's dialog and
+    // the retained log still get them); this is the walk's own verdict growing the row.
+    failures.extend(
+        script
+            .errors()
+            .into_iter()
+            .map(|e| format!("a handler raised during the load walk: {e}")),
+    );
     failures
 }
 
@@ -397,6 +410,81 @@ mod tests {
     /// `StaticPopup1`/`StaticPopup2`'s parents there would have written two declarations that did
     /// nothing at all. The reference's own order is the fix (FrameXML.toc: BasicControls.xml l.6,
     /// UIParent.xml l.8), and this keeps it.
+    /// **Every load-time runner of `UIParent_ManageFramePositions` follows every frame the pass
+    /// reads.** The stock pass (`UIParent.lua:1592-1775`) indexes a dozen HUD frames unguarded —
+    /// `ReputationWatchBar`, `QuestTimerFrame`, `QuestWatchFrame`, `MinimapCluster`,
+    /// `DurabilityFrame`, the bars — and several stock files run it from an OnLoad or the OnShow
+    /// of a frame their OnLoad shows. In the reference's toc the readers all precede the runners;
+    /// ours had the stance bar (a runner, through `ShapeshiftBar_OnLoad` → `Show` → `OnShow`)
+    /// three hundred lines above `ReputationFrame.xml` (a read), so every login raised at
+    /// `UIParent.lua:1618` and the shelf was never seated — the director's sliver above Defensive
+    /// Stance (decision 2001). The pairs below are the reference's own dependency, read off the
+    /// pass's body; a new runner or a new read joins the table, not a comment.
+    #[test]
+    fn every_load_time_runner_of_the_managed_pass_follows_what_it_reads() {
+        let files = manifest_files();
+        let at = |leaf: &str| {
+            files
+                .iter()
+                .position(|f| f.ends_with(&format!("\\{leaf}")))
+                .unwrap_or_else(|| panic!("the manifest lists {leaf}"))
+        };
+        // What the pass reads by name (`UIParent.lua:1598-1775`), and the file that declares it.
+        const READS: &[(&str, &str)] = &[
+            (
+                "MultiBarLeft / MultiBarRight / MultiBarBottomLeft",
+                "MultiActionBars.xml",
+            ),
+            (
+                "PetActionBarFrame + SlidingActionBarTexture0/1",
+                "PetActionBarFrame.xml",
+            ),
+            ("ReputationWatchBar", "ReputationFrame.xml"),
+            (
+                "MainMenuExpBar / MainMenuBarMaxLevelBar / MainMenuBar",
+                "MainMenuBar.xml",
+            ),
+            ("CastingBarFrame", "CastingBarFrame.xml"),
+            ("QuestTimerFrame", "QuestTimerFrame.xml"),
+            ("QuestWatchFrame", "QuestLogFrame.xml"),
+            ("DurabilityFrame + its three glyphs", "DurabilityFrame.xml"),
+            ("MinimapCluster", "Minimap.xml"),
+            (
+                "ChatFrame1 / ChatFrame2 (+ FCF_DockUpdate)",
+                "FloatingChatFrame.xml",
+            ),
+            // The shapeshift-appearance arm (l.1705-1732): a runner's file can be a READ too —
+            // the stance bar declares these and runs the pass, so it precedes the other runner.
+            (
+                "ShapeshiftBarLeft / Middle / Right",
+                "BonusActionBarFrame.xml",
+            ),
+        ];
+        // Who runs it at LOAD: an OnLoad, or the OnShow of a frame its OnLoad shows.
+        const RUNNERS: &[(&str, &str)] = &[
+            (
+                "ShapeshiftBar_OnLoad → Show → OnShow",
+                "BonusActionBarFrame.xml",
+            ),
+            ("WorldStateAlwaysUpFrame OnLoad", "WorldStateFrame.xml"),
+        ];
+        for (what, runner) in RUNNERS {
+            for (name, read) in READS {
+                if read == runner {
+                    continue; // its own declarations precede its own OnLoad
+                }
+                assert!(
+                    at(read) < at(runner),
+                    "{runner} ({what}) loads at {} but reads {name}, declared by {read} at {} — \
+                     the pass raises at load and never seats the frame it was run for. Move the \
+                     runner below the read, as the reference's toc has it.",
+                    at(runner),
+                    at(read)
+                );
+            }
+        }
+    }
+
     #[test]
     fn nothing_declares_a_uiparent_child_before_uiparent_itself_loads() {
         let files = manifest_files();

@@ -81,6 +81,10 @@ pub struct CensusReport {
     /// Placed (doodad/WMO) parts alive that no registered placement owns — the duplicate
     /// census. Zero in a healthy world; a doubled prop is exactly one of these per part.
     pub orphan_parts: usize,
+    /// Parts whose `VisibilityClass` holds a duplicate entry — each is queued and drawn once
+    /// per entry (`model_render::park`'s dedup is the fix; this is the census that names a
+    /// regression).
+    pub stacked_parts: usize,
     /// The orphans by `(placement id, model label, parts)`, most parts first.
     pub orphans: Vec<(u32, String, usize)>,
     /// Resident tiles `(furnished, in window)`, off the streamer.
@@ -232,10 +236,14 @@ impl WorldCensus<'_, '_> {
 
         let owned = self.placements.as_ref().map(|p| p.owned());
         let mut orphans: HashMap<(u32, String), usize> = HashMap::new();
-        for (entity, vis, part, gated, object, want, aabb, card, group, path_why) in
+        let mut stacked_parts = 0usize;
+        for (entity, vis, part, gated, object, want, aabb, card, group, path_why, class) in
             self.parts.iter()
         {
             submeshes += 1;
+            // A part whose `VisibilityClass` lists its mesh class more than once is queued
+            // that many times a frame — drawn stacked on itself (`model_render::park`).
+            stacked_parts += usize::from(class.is_some_and(|c| c.len() > 1));
             // The duplicate census: a doodad/WMO part is spawned by exactly one placement and
             // recorded on it; one alive outside every placement's list outlived a respawn. The
             // one population that lives outside the registry by design is the retained pass's
@@ -313,6 +321,7 @@ impl WorldCensus<'_, '_> {
         CensusReport {
             submeshes,
             drawn,
+            stacked_parts,
             orphan_parts,
             orphans,
             tiles: self.streamer.as_ref().map(|s| s.residency()),
@@ -410,6 +419,7 @@ type CensusData = (
     Has<crate::billboard::BillboardCard>,
     Option<&'static WmoGroupVis>,
     Option<&'static crate::model_render::EntityPathWhy>,
+    Option<&'static bevy::camera::visibility::VisibilityClass>,
 );
 
 /// The census column order, pinned: entry `i` names [`kind_index`]'s slot `i`. Column positions

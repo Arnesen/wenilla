@@ -122,6 +122,12 @@ impl Plugin for DevProbesPlugin {
                 "WOW_PROBE_CLAM",
                 "WOW_RIG",
                 "WOW_LIVE_FPS",
+                // A screenshot burst and a pick burst are wall-clock schedules too, and on an
+                // occluded window they capture the same stale drawable over and over: a whole
+                // day of lamppost A/Bs on the Air read identical to the decimal because every
+                // frame in every burst was one frame (the halo record).
+                "WOW_LIVE_SHOT",
+                "WOW_PICK",
             ]
             .iter()
             .any(|k| std::env::var(k).is_ok())

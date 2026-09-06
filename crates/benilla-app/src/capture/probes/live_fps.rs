@@ -186,6 +186,9 @@ type ScreenParams<'w, 's> = (
     MessageReader<'w, 's, AssetEvent<benilla_assets::materials::WowModelMaterial>>,
     Res<'w, Time<bevy::time::Virtual>>,
     ResMut<'w, crate::perf::MainThreadSplit>,
+    // The additive blend-state check (`perf::blend_check`): draws whose bound blend state
+    // contradicted their material this frame — `blend_mismatch=` on the line.
+    Option<Res<'w, crate::perf::BlendMismatchShared>>,
 );
 
 #[derive(SystemParam)]
@@ -241,6 +244,10 @@ fn drive_live_fps(
     let (mesh_events, mat_events) = (&mut screen.7, &mut screen.8);
     let paced_ms = screen.9.delta_secs() * 1000.0;
     let main_split = &mut screen.10;
+    let blend_mismatch = screen
+        .11
+        .as_ref()
+        .map_or(0, |m| m.0.load(std::sync::atomic::Ordering::Relaxed));
     // Read every frame (a reader that only reads inside the window would report the whole
     // backlog on its first sampled frame).
     let mesh_added = mesh_events
@@ -661,7 +668,7 @@ fn drive_live_fps(
                 );
             }
             let residency_line = format!(
-                " mats={} mats_parked={} meshes={} images={} uv={} tint={} views={} ui_batches={}{vis}{tiles} orphan_parts={orphans}",
+                " mats={} mats_parked={} meshes={} images={} uv={} tint={} views={} ui_batches={}{vis}{tiles} orphan_parts={orphans} stacked_parts={stacked} blend_mismatch={blend_mismatch}",
                 seen.mats,
                 seen.mats_parked,
                 seen.meshes,
@@ -699,6 +706,7 @@ fn drive_live_fps(
                     )
                 },
                 orphans = seen.orphan_parts,
+                stacked = seen.stacked_parts,
             );
             println!(
                 "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={} active={} particles={} submeshes={} drawn={} streamed={} parked={} entities={}{rigs}{residency_line} px={}x{}{cpu}{sys}{present}{display}{gpu_line} occluded_frames={}{at_pin}{cam_pose}{gate}{sky}{ribbons}{culled}",

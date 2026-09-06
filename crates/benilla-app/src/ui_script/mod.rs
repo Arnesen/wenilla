@@ -854,6 +854,9 @@ mod pet_bar_tests;
 mod pet_frame_tests;
 
 #[cfg(test)]
+mod pet_stable_tests;
+
+#[cfg(test)]
 mod tot_frame_tests;
 
 #[cfg(test)]

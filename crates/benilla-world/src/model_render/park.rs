@@ -27,6 +27,10 @@
 //! render layer of their own: a portrait booth's mirror parts show and hide with the booth's
 //! wake, and its bake window is four frames.
 
+use std::any::TypeId;
+
+use bevy::camera::visibility::VisibilityClass;
+use bevy::ecs::world::EntityWorldMut;
 use bevy::prelude::*;
 
 use super::ModelPart;
@@ -68,7 +72,15 @@ pub(super) fn park_hidden_parts(
                 commands
                     .entity(entity)
                     .insert(Mesh3d(parked.0.clone()))
-                    .remove::<ParkedMesh>();
+                    .remove::<ParkedMesh>()
+                    // Bevy's `Mesh3d` add hook pushes the mesh's `VisibilityClass` entry every
+                    // time the component is (re)added, and nothing ever dedups that list;
+                    // `check_visibility` queues an entity once PER entry, so each park →
+                    // unpark cycle drew the part one more time. Opaque parts hide it; an
+                    // additive glow card stacks on itself — the director's lamppost halo,
+                    // doubling after every teleport that hid it and healed only by a relog.
+                    // One entry per class, applied after the hook has run.
+                    .queue(dedup_visibility_class);
             }
             if let Some(mut f) = frames {
                 if f.0 != 0 {
@@ -90,6 +102,21 @@ pub(super) fn park_hidden_parts(
                     .remove::<Mesh3d>();
             }
         }
+    }
+}
+
+/// Leave one entry per class in an entity's [`VisibilityClass`] (see the unpark site).
+fn dedup_visibility_class(mut e: EntityWorldMut) {
+    if let Some(mut class) = e.get_mut::<VisibilityClass>() {
+        let mut seen: Vec<TypeId> = Vec::with_capacity(class.len());
+        class.retain(|t| {
+            if seen.contains(t) {
+                false
+            } else {
+                seen.push(*t);
+                true
+            }
+        });
     }
 }
 
@@ -142,6 +169,39 @@ mod tests {
         );
         assert!(!w.entity(e).contains::<ParkedMesh>());
         assert_eq!(w.entity(e).get::<HiddenFrames>().unwrap().0, 0);
+    }
+
+    /// Bevy's `Mesh3d` add hook pushes a `VisibilityClass` entry on every (re)add and
+    /// `check_visibility` queues an entity once per entry: without the dedup an unparked part
+    /// is drawn twice, three times after the next cycle — the stacking lamppost halo. The
+    /// world here registers the hook and the requirement exactly as bevy's plugin does.
+    #[test]
+    fn an_unparked_part_keeps_one_visibility_class_entry() {
+        let mut w = World::new();
+        w.register_required_components::<Mesh3d, VisibilityClass>();
+        w.register_component_hooks::<Mesh3d>()
+            .on_add(bevy::camera::visibility::add_visibility_class::<Mesh3d>);
+        let e = w
+            .spawn((
+                ModelPart {
+                    kind: super::super::ModelKind::Doodad,
+                    blend: benilla_formats::ModelBlend::Blend,
+                },
+                Mesh3d(Handle::default()),
+                InheritedVisibility::HIDDEN,
+            ))
+            .id();
+        assert_eq!(w.entity(e).get::<VisibilityClass>().unwrap().len(), 1);
+        run(&mut w, PARK_AFTER_FRAMES as usize);
+        assert!(!w.entity(e).contains::<Mesh3d>(), "parked");
+        w.entity_mut(e).insert(InheritedVisibility::VISIBLE);
+        run(&mut w, 1);
+        assert!(w.entity(e).contains::<Mesh3d>(), "unparked");
+        assert_eq!(
+            w.entity(e).get::<VisibilityClass>().unwrap().len(),
+            1,
+            "the re-added Mesh3d's hook pushed a second class entry — the part draws twice"
+        );
     }
 
     #[test]
