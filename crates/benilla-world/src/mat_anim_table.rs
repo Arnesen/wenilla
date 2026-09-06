@@ -56,6 +56,22 @@ pub(crate) fn region_bytes() -> u64 {
     (MAX_MAT_ANIM_SLOTS * 16) as u64
 }
 
+/// Off-world `wow_light`-layout buffers that also carry the mat-anim region — registered by key,
+/// the shape of [`crate::instance_tint::InstanceTintMirrors`] and, like it, deliberately its own
+/// list.
+///
+/// A lane whose materials bind a light buffer of their own — the UI model tiles, whose twins
+/// carry the widget's black light — reads `matanim[slot]` out of THAT buffer, so rows it writes
+/// into the table reach it only if the table is uploaded there too (decision 2023: the cooldown
+/// sweep's rotation rows were written every frame into a region only the world's materials ever
+/// sampled, and the tile read the zero-initialised identity). The portrait booths are not on it:
+/// a bake stands in for a world instance whose animated materials keep the world's rows, and the
+/// studio buffers' zeroed region is the seed pose those bakes were built to show.
+#[derive(Resource, Clone, Default, ExtractResource)]
+pub struct MatAnimMirrors(
+    pub std::collections::HashMap<&'static str, bevy::render::render_resource::Buffer>,
+);
+
 /// The live delta table. `Arc`-shared so the render-world extract is a pointer bump, and
 /// generation-stamped so a scene with nothing animated in view uploads nothing at all
 /// ([`crate::instance_tint`]'s pattern, verbatim).
@@ -94,6 +110,12 @@ impl MatAnimTable {
         } else {
             None
         }
+    }
+
+    /// Read slot `slot`'s row as last written (the identity row for an out-of-range slot) — the
+    /// tile probe's view of what a lane wrote.
+    pub fn row(&self, slot: u16) -> [f32; 4] {
+        self.rows.get(slot as usize).copied().unwrap_or([0.0; 4])
     }
 
     /// Free a slot when its registry entry dies (the material was unloaded): the row zeroes —
@@ -138,26 +160,33 @@ pub fn affine_row(q: [f32; 4], scale: [f32; 2]) -> [f32; 4] {
 fn upload_mat_anim(
     queue: Res<RenderQueue>,
     shared: Option<Res<crate::lighting::SharedLightBuffer>>,
+    mirrors: Option<Res<MatAnimMirrors>>,
     table: Option<Res<MatAnimTable>>,
     mut last: Local<Option<u64>>,
 ) {
-    let (Some(shared), Some(table)) = (shared, table) else {
-        return;
-    };
-    if *last == Some(table.generation) {
+    let Some(table) = table else { return };
+    // The generation gate covers the mirror list too (the tint table's rule): a mirror
+    // registered after the last write would otherwise hold the zero region until the next
+    // animated frame. One comparison closes the hole by construction.
+    let mirrors = mirrors
+        .map(|m| m.0.values().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let gate = table.generation ^ ((mirrors.len() as u64) << 40);
+    if *last == Some(gate) {
         return;
     }
-    *last = Some(table.generation);
-    queue.write_buffer(
-        &shared.0,
-        region_offset(),
-        bytemuck::cast_slice(table.rows.as_slice()),
-    );
+    *last = Some(gate);
+    let rows = bytemuck::cast_slice(table.rows.as_slice());
+    for buffer in shared.iter().map(|s| &s.0).chain(mirrors.iter()) {
+        queue.write_buffer(buffer, region_offset(), rows);
+    }
 }
 
 pub fn plugin(app: &mut App) {
     app.init_resource::<MatAnimTable>()
-        .add_plugins(ExtractResourcePlugin::<MatAnimTable>::default());
+        .init_resource::<MatAnimMirrors>()
+        .add_plugins(ExtractResourcePlugin::<MatAnimTable>::default())
+        .add_plugins(ExtractResourcePlugin::<MatAnimMirrors>::default());
     if let Some(render) = app.get_sub_app_mut(RenderApp) {
         render.add_systems(
             Render,

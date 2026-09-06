@@ -90,15 +90,15 @@ const SCAN_TIMEOUT_SECS: f64 = 20.0;
 const WINDOW_TIMEOUT_SECS: f64 = 20.0;
 /// How long the re-click gate's latch may lag the window it belongs to.
 ///
-/// It is allowed to lag **at all** because `feed_interact_npc` and the net apply are both in
-/// `WorldStage::Net` and deliberately unordered against each other (`ui_session`, decision 1741's
-/// note: "whether a window's first frame is seen now or next frame is invisible"), so the token can
-/// arm one frame after the window opens. A human's second right-click is a hundred milliseconds and
-/// many frames away, so one frame is invisible — but "one frame" and "never" are the same reading
-/// if you sample once, which is exactly what the first run of this assert did: it failed the quest
-/// and trainer legs, whose windows open on the packet, and passed the gossip legs only because the
-/// gossip frame holds shut for several frames waiting on its greeting query (B292). So the probe
-/// polls, and prints how long it actually took.
+/// It no longer lags by construction: `feed_interact_npc` is seated after the net apply since
+/// decision 2022, so the token arms on the very frame the window opens. It USED to be allowed to
+/// lag a frame (`ui_session` was "deliberately unordered" against the apply, on decision 1741's
+/// reading that a window's first frame is invisible) — and "one frame" and "never" are the same
+/// reading if you sample once, which is exactly what the first run of this assert did: it failed
+/// the quest and trainer legs, whose windows open on the packet, and passed the gossip legs only
+/// because the gossip frame holds shut for several frames waiting on its greeting query (B292).
+/// The poll stays for the other reason a single sample lies — a starved observer during a terrain
+/// load — and prints how long the latch actually took.
 const GATE_TIMEOUT_SECS: f64 = 3.0;
 
 /// **The vendor fork's leg** (decision 1914) — Brother Danil, `creature_template.entry = 152`,

@@ -30,7 +30,8 @@ mod apply;
 pub(crate) mod io;
 mod motion;
 
-use apply::{apply_net_updates, tag_self_player};
+pub(crate) use apply::apply_net_updates;
+use apply::tag_self_player;
 
 // The per-frame motion model lives in [`motion`]: `RemoteMotion`/`Spline` are re-exported for the
 // crate (the animation selector reads them); the integration systems + pose helpers stay `pub(super)`
@@ -151,12 +152,13 @@ impl Plugin for NetPlugin {
                     drive_display_facing,
                 )
                     .chain()
-                    .in_set(WorldStage::Net)
-                    // `drive_display_facing` reads `InteractNpc`; ordering the chain after its
-                    // writer keeps the read deterministic rather than schedule-order-dependent.
-                    // The cost is that the writer sees last frame's window state, which cannot
-                    // matter: a window is open for seconds and the ease takes ~8 frames.
-                    .after(crate::ui_session::feed_interact_npc),
+                    .in_set(WorldStage::Net),
+                // `InteractNpc`'s writer (`ui_session::feed_interact_npc`) seats itself INSIDE
+                // this chain — after `apply_net_updates`, before `drive_display_facing` — and
+                // declares both edges itself. It used to sit ahead of the whole chain, which
+                // read the window state one frame late; harmless for an ~8-frame facing ease,
+                // and exactly the frame the `"npc"` unit token was stale on when a window's
+                // own `MERCHANT_SHOW` handler read it (decision 2022).
             )
             // Not part of the movement chain above: one send on the world-enter message.
             .add_systems(Update, send_query_time.in_set(WorldStage::Net))
@@ -330,7 +332,7 @@ pub(crate) struct ActiveMover;
 
 /// The inbound event channel — drained each frame by [`apply_net_updates`].
 #[derive(Resource)]
-struct NetEvents(Receiver<SessionEvent>);
+pub(crate) struct NetEvents(Receiver<SessionEvent>);
 
 /// The outbound command channel — cloned by the player/chat systems to send movement + chat.
 #[derive(Resource)]

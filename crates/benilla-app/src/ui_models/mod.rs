@@ -20,12 +20,22 @@
 //! quad pass, so a scene becomes a **tile**: every visible pane holding a file renders into its
 //! own cell of one shared render-target atlas, at the pane's device-pixel size, through ONE
 //! orthographic camera whose view is the atlas plane — each tile's model root is placed at its
-//! cell, scaled to pixels per model unit, and the camera never moves. The extract's `ModelPane`
-//! arm then draws the cell as a premultiplied quad at `ZKey::callback(Artwork)` (1995's rank —
-//! after every texture and font string of the pane's layer), which is the same picture the
-//! reference's callback drain produces: the cell is cleared to transparent like the reference
-//! clears its depth, the 2-D layers under it stay under it, and the ones over it stay over it.
-//! Cells never overlap, so one depth buffer serves every tile.
+//! cell, scaled to pixels per model unit, and the camera never moves. [`compose_tiles`] then
+//! draws every cell as a premultiplied quad over its pane's rect at `ZKey::callback(Artwork)`
+//! (1995's rank — after every texture and font string of the pane's layer), which is the same
+//! picture the reference's callback drain produces: the cell is cleared to transparent like the
+//! reference clears its depth, the 2-D layers under it stay under it, and the ones over it stay
+//! over it. Cells never overlap, so one depth buffer serves every tile.
+//!
+//! **The composite is this renderer's per-frame output, never the extract's** (decision 2023).
+//! The extract's `ModelPane` arm publishes the request — the pane's rect, paint key, alpha and
+//! clip beside the unit ladder — and pushes no quad; the quad is appended in the
+//! [`UiQuadAppend`] lane (the minimap fill's lane) from THIS frame's cells. The first shape had
+//! the arm draw the cell it found in the bridge, which is last frame's at best and, because the
+//! conversion is memoized on the engine's list, usually never: a cooldown armed on a quiet
+//! interface extracted once (no cell yet), the cell arrived a frame later, and nothing ever
+//! re-ran the conversion — the sweep drew only while the interface happened to be churning (the
+//! stance bar at UI load), and never on an action press.
 //!
 //! The pipeline is the booths' (`crate::portrait`): the same HDR view shape, the same
 //! `FfxGlow::UI_PANE` decode, the same material twin with only the light storage swapped, the
@@ -76,7 +86,7 @@ use benilla_ui::script::{ModelPaneFrame, UiScript};
 use benilla_ui::widget::{FrameHandle, ModelFileFacts, SequenceFacts};
 use benilla_world::doodad_anim::spawn_anim_host;
 use benilla_world::lighting::LightBlob;
-use benilla_world::mat_anim_table::{affine_row, MatAnimTable};
+use benilla_world::mat_anim_table::{affine_row, MatAnimMirrors, MatAnimTable};
 use benilla_world::model_forms::ModelForms;
 use benilla_world::model_render::M2BatchMaterials;
 use benilla_world::particles::buffer::EffectLightOverride;
@@ -89,6 +99,19 @@ use benilla_world::rig_palette::{RigPaletteMirrors, RigPalettes, RigPart, RigSki
 use crate::portrait::{
     booth_view_shape, material_variant, new_target_image_sized, StageRig, UI_MODELS_LAYER,
 };
+use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuads, UvRect};
+
+/// `WOW_TILE_TRACE=1` — the tile probe: one `tile-trace:` line per pane per frame from the
+/// renderer (the request, the cell, the play head, the sampled alphas and the rows written) and
+/// one from the extract's composite arm (the quad's rect, rank and alpha, or "no cell yet").
+/// A pane that is on the engine's paint list but draws nothing names the gate it stopped at.
+/// The `test_ui` cooldown tests prove the engine scrubs; this is the instrument for the half
+/// they cannot reach — whether the tile exists, where it is, and what it sampled. Read once.
+pub(crate) fn trace_on() -> bool {
+    static ON: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var("WOW_TILE_TRACE").as_deref() == Ok("1"));
+    *ON
+}
 
 /// One pane's request for a tile this frame — what the extract knows about the widget: its
 /// size on the device, the unit ladder the render law derives from it, and the Lua-set scene.
@@ -115,6 +138,15 @@ pub(crate) struct TileRequest {
     pub position: Vec3,
     /// `ReplaceIconTexture`'s path — the type-14 batches' texture.
     pub icon: Option<String>,
+    /// The pane's rect on the window — y-down logical px, the quad pass's space — where the
+    /// cell composites.
+    pub rect: Rect,
+    /// The pane's paint key: `ZKey::callback(Artwork)` (1995), the composite's rank.
+    pub z_key: u64,
+    /// The frame's OWN alpha (render law §4.4): the composite draws at it.
+    pub alpha: f32,
+    /// The enclosing ScrollFrame clip, if any (decision 0112), in the quad pass's space.
+    pub clip: Option<Rect>,
 }
 
 /// Where a tile sits in the atlas — texel space, `y` down — for the composite quad.
@@ -307,7 +339,10 @@ impl Plugin for UiModelsPlugin {
             .add_systems(Startup, setup_tiles)
             // After the extract published this frame's requests, and before the pose/palette
             // passes read the roots' transforms (they run in PostUpdate).
-            .add_systems(Update, sync_tiles.after(crate::ui_script::UiInput));
+            .add_systems(Update, sync_tiles.after(crate::ui_script::UiInput))
+            // The composite: this frame's cells, appended in the lane the minimap fill uses —
+            // after the cells are packed, before the mesh rebuild reads the lane.
+            .add_systems(Update, compose_tiles.in_set(UiQuadAppend).after(sync_tiles));
     }
 }
 
@@ -317,14 +352,19 @@ fn setup_tiles(
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
     mut mirrors: ResMut<RigPaletteMirrors>,
+    mut anim_mirrors: ResMut<MatAnimMirrors>,
 ) {
     // `<Model>`'s embedded light is disabled: no ambient, no diffuse, no fog (render law §5.2).
     // The direction is irrelevant at zero intensity; the builder wants one.
     let blob = LightBlob::model([0.0; 3], [0.0; 3], Vec3::NEG_Y);
     let light = blob.create(&device, "wow_ui_model_light");
     blob.write(&queue, &light);
-    // Tile rigs skin from THIS buffer's palette region (decision 0720's mirror law).
+    // Tile rigs skin from THIS buffer's palette region (decision 0720's mirror law), and the
+    // tiles' animated materials read their mat-anim rows from it too (decision 2023): a twin
+    // binds this buffer, not the world's, so the table has to be mirrored here or the rows the
+    // tiles write every frame reach a buffer nothing in a tile ever samples.
     mirrors.0.insert("ui_models", light.clone());
+    anim_mirrors.0.insert("ui_models", light.clone());
     let layer = RenderLayers::layer(UI_MODELS_LAYER);
     commands.spawn((
         Name::new("ui model tiles camera"),
@@ -464,9 +504,25 @@ fn sync_tiles(
     let mut live: Vec<(FrameHandle, TileRequest, ModelPaneFrame)> = Vec::new();
     for pane in panes {
         let Some(req) = bridge.requests.get(&pane.handle) else {
+            if trace_on() {
+                info!(
+                    "tile-trace: pane {:?} {} (under {}) on the paint list, not extracted yet",
+                    pane.handle,
+                    script.frame_name(pane.handle).unwrap_or_default(),
+                    script
+                        .target_owner_name(benilla_ui::order::ZTarget::Frame(pane.handle))
+                        .unwrap_or_default()
+                );
+            }
             continue; // not extracted yet — next frame
         };
         if req.size_px.x == 0 || req.size_px.y == 0 {
+            if trace_on() {
+                info!(
+                    "tile-trace: {} pane {:?} has a zero rect",
+                    req.path, pane.handle
+                );
+            }
             continue;
         }
         live.push((pane.handle, req.clone(), pane));
@@ -478,6 +534,9 @@ fn sync_tiles(
     for (handle, req, _) in &live {
         let key = benilla_ui::widget::model_key(&req.path);
         let Some(m2) = state.loaded.get(&key).cloned() else {
+            if trace_on() {
+                info!("tile-trace: {} facts not landed (key {key})", req.path);
+            }
             continue; // facts not landed ⇒ the engine would not have listed it; defensive
         };
         let stale = state
@@ -535,12 +594,26 @@ fn sync_tiles(
                         built.emitters.len(),
                         built.alpha_parts.len()
                     );
+                    if trace_on() {
+                        for (i, p) in built.uv_parts.iter().enumerate() {
+                            info!(
+                                "tile-trace: {} uv part {i}: trans slot {:?} affine slot {:?}",
+                                req.path,
+                                p.trans.map(|(s, _)| s),
+                                p.affine
+                            );
+                        }
+                    }
                     tile.clips = built.clips;
                     tile.alpha_parts = built.alpha_parts;
                     tile.uv_parts = built.uv_parts;
                     tile.emitters = built.emitters;
                     tile.built = true;
+                } else if trace_on() {
+                    info!("tile-trace: {} waiting on materials", req.path);
                 }
+            } else if trace_on() {
+                info!("tile-trace: {} asset not resident", req.path);
             }
         }
     }
@@ -663,8 +736,12 @@ fn sync_tiles(
             facts_slot
         });
         let gseq_s = pane.clock_ms as f64 / 1000.0;
+        let mut trace_alphas: Vec<f32> = Vec::new();
         for part in &tile.alpha_parts {
             let a = part.anim.sample(seq_slot, cursor_s, gseq_s);
+            if trace_on() {
+                trace_alphas.push(a);
+            }
             if let Ok((mut tag, mut pvis)) = parts.get_mut(part.entity) {
                 // The `A ≤ 0` cull (wow-re `m2-alpha-combine-cull`): a batch the artist keyed
                 // off in this sequence is skipped, not drawn at zero.
@@ -684,6 +761,34 @@ fn sync_tiles(
         }
         for part in &tile.uv_parts {
             part.write_rows(&mut render.table, seq_slot, cursor_s, gseq_s);
+        }
+        if trace_on() {
+            let rows: Vec<String> = tile
+                .uv_parts
+                .iter()
+                .map(|p| {
+                    let t = p.trans.map(|(s, _)| render.table.row(s));
+                    let a = p.affine.map(|s| render.table.row(s));
+                    format!("t={t:?} a={a:?}")
+                })
+                .collect();
+            info!(
+                "tile-trace: {} {} cell=({},{} {}x{}) px/unit={:.2} pos_px/unit={:.2} armed={:?} cursor={:.3}s slot={:?} clock={}ms alphas={:?} rows=[{}]",
+                req.path,
+                script.frame_name(*handle).unwrap_or_default(),
+                cell.origin.x,
+                cell.origin.y,
+                cell.size.x,
+                cell.size.y,
+                req.px_per_unit,
+                req.pos_px_per_unit,
+                armed,
+                cursor_s,
+                seq_slot,
+                pane.clock_ms,
+                trace_alphas,
+                rows.join(", ")
+            );
         }
         for &e in &tile.emitters {
             if let Ok(mut em) = emitters.get_mut(e) {
@@ -722,6 +827,53 @@ fn set_camera_active(
             cam.is_active = active;
         }
     }
+}
+
+/// The composite: one premultiplied quad per cell packed THIS frame, over its pane's rect at the
+/// pane's paint key and alpha, clipped as the pane is — appended to the UI pass's overlay lane
+/// every frame (the lane is cleared at the top of [`UiQuadAppend`] and diffed by the rebuild, so
+/// an unchanged set costs no re-batch). A pane with a request and no cell draws nothing; a cell
+/// whose request vanished (the linger reaper) draws nothing.
+pub(crate) fn compose_tiles(bridge: Res<UiModelTiles>, mut quads: ResMut<UiQuads>) {
+    quads.overlays.extend(composite_quads(&bridge));
+}
+
+/// [`compose_tiles`]'s pure half: the quads for every `(request, cell)` pair the bridge holds,
+/// ordered by paint key so the overlay diff sees the same sequence for the same set.
+pub(crate) fn composite_quads(bridge: &UiModelTiles) -> Vec<UiQuad> {
+    let Some(atlas) = bridge.atlas.clone() else {
+        return Vec::new();
+    };
+    let a = bridge.atlas_size.as_vec2();
+    if a.x <= 0.0 || a.y <= 0.0 {
+        return Vec::new();
+    }
+    let mut out: Vec<UiQuad> = bridge
+        .cells
+        .iter()
+        .filter_map(|(handle, cell)| {
+            let req = bridge.requests.get(handle)?;
+            let (u0, v0) = (cell.origin.x as f32 / a.x, cell.origin.y as f32 / a.y);
+            let (u1, v1) = (
+                (cell.origin.x + cell.size.x) as f32 / a.x,
+                (cell.origin.y + cell.size.y) as f32 / a.y,
+            );
+            Some(UiQuad {
+                rect: req.rect,
+                z_key: req.z_key,
+                texture: Some(atlas.clone()),
+                uv: UvRect::from_tex_coords([u0, u1, v0, v1]),
+                // The instance draws at the widget's OWN alpha (render law §4.4).
+                color: [1.0, 1.0, 1.0, req.alpha],
+                // A render target: premultiplied by construction (`UiQuad` doc).
+                premultiplied: true,
+                clip: req.clip,
+                ..default()
+            })
+        })
+        .collect();
+    out.sort_by_key(|q| q.z_key);
+    out
 }
 
 /// The engine's facts for a resident file: its sequence table and header bounds.
@@ -1033,6 +1185,68 @@ mod tests {
         let (cells, atlas) = pack(&huge);
         assert!(cells.is_empty());
         assert_eq!(atlas, UVec2::splat(ATLAS_MAX));
+    }
+
+    /// The composite is a function of the bridge alone (decision 2023): a request with no cell
+    /// draws nothing, a cell draws its request's rect at the request's key and alpha with the
+    /// cell's texel window, and a cell whose request is gone draws nothing — no extract in the
+    /// loop.
+    #[test]
+    fn the_composite_is_the_bridges_cells_over_their_requests() {
+        // Two live handles off a real arena — the bridge is keyed by them, nothing more.
+        let mut arena = benilla_ui::widget::WidgetArena::new();
+        let handle = arena.create(benilla_ui::widget::FrameKind::Frame, None, None);
+        let stray = arena.create(benilla_ui::widget::FrameKind::Frame, None, None);
+        let req = TileRequest {
+            path: r"Interface\Cooldown\UI-Cooldown-Indicator.mdx".into(),
+            size_px: UVec2::new(63, 63),
+            px_per_unit: 1680.75,
+            pos_px_per_unit: 2742.62,
+            star_px_per_unit: 2742.62,
+            facing: 0.0,
+            position: Vec3::ZERO,
+            icon: None,
+            rect: Rect::new(303.2, 767.1, 334.9, 798.8),
+            z_key: 3_458_840_389_530_157_056,
+            alpha: 0.5,
+            clip: Some(Rect::new(0.0, 700.0, 400.0, 800.0)),
+        };
+        let mut bridge = UiModelTiles::default();
+        bridge.requests.insert(handle, req.clone());
+        assert!(
+            composite_quads(&bridge).is_empty(),
+            "no atlas, no cell: nothing"
+        );
+        bridge.atlas = Some(Handle::default());
+        bridge.atlas_size = UVec2::splat(512);
+        assert!(composite_quads(&bridge).is_empty(), "no cell yet: nothing");
+        bridge.cells.insert(
+            handle,
+            Cell {
+                origin: UVec2::new(67, 2),
+                size: UVec2::new(63, 63),
+            },
+        );
+        // A cell the reaper's request drop orphaned: nothing to place it at.
+        bridge.cells.insert(
+            stray,
+            Cell {
+                origin: UVec2::new(2, 2),
+                size: UVec2::new(63, 63),
+            },
+        );
+        let quads = composite_quads(&bridge);
+        assert_eq!(quads.len(), 1, "one cell with a request draws once");
+        let q = &quads[0];
+        assert_eq!(q.rect, req.rect);
+        assert_eq!(q.z_key, req.z_key);
+        assert_eq!(q.color, [1.0, 1.0, 1.0, 0.5], "the frame's own alpha");
+        assert!(q.premultiplied);
+        assert_eq!(q.clip, req.clip);
+        assert!(q.texture.is_some());
+        let [tl, _, br, _] = q.uv.corners;
+        assert!((tl[0] - 67.0 / 512.0).abs() < 1e-6 && (tl[1] - 2.0 / 512.0).abs() < 1e-6);
+        assert!((br[0] - 130.0 / 512.0).abs() < 1e-6 && (br[1] - 65.0 / 512.0).abs() < 1e-6);
     }
 
     /// The axis fix is a proper rotation that puts WoW `+X` right, `+Y` up, `+Z` toward the

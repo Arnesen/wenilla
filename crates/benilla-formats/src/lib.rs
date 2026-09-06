@@ -371,6 +371,95 @@ pub fn blp_to_png(blp_bytes: &[u8], out: &Path) -> Result<(u32, u32)> {
     Ok((w, h))
 }
 
+/// One authored mip level's texel census — what a sampler minifying onto this level actually
+/// reads. Split by the alpha byte because the renderer's multiply lanes (Mod2x, `2·src·dst`) read
+/// **no alpha**: a texel the author left transparent still modulates the scene by its colour, so
+/// the "outside" colour of a cut-out is a look-bearing fact, not padding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlpMipStats {
+    pub level: u32,
+    pub width: u32,
+    pub height: u32,
+    /// Texels with alpha 0 (the authored "outside") and with alpha > 0 (the "inside").
+    pub outside: usize,
+    pub inside: usize,
+    /// `(min, mean, max)` of the RGB **luma** (`(r+g+b)/3`) over the outside / inside texels;
+    /// `None` when that class is empty.
+    pub outside_luma: Option<(u8, f32, u8)>,
+    pub inside_luma: Option<(u8, f32, u8)>,
+    /// Texels whose luma is below 128 — under Mod2x each of these DARKENS the scene.
+    pub below_128: usize,
+}
+
+/// Census every authored mip level of an in-memory BLP (see [`BlpMipStats`]), decoding through the
+/// same [`benilla_blp::decode`] every CPU consumer uses. The "what does the far sampler see"
+/// instrument: a texture whose mip 0 reads neutral can still carry dark tail levels, and the tail
+/// is all a minified streak or sprite ever samples.
+pub fn blp_mip_stats(blp_bytes: &[u8]) -> Result<Vec<BlpMipStats>> {
+    let decoded =
+        benilla_blp::decode(blp_bytes).map_err(|e| anyhow::anyhow!("decoding BLP: {e}"))?;
+    Ok(decoded
+        .mips
+        .iter()
+        .enumerate()
+        .map(|(level, m)| {
+            let mut outside = (0usize, u8::MAX, 0u64, u8::MIN);
+            let mut inside = (0usize, u8::MAX, 0u64, u8::MIN);
+            let mut below_128 = 0usize;
+            for px in m.rgba.chunks_exact(4) {
+                let luma = ((px[0] as u32 + px[1] as u32 + px[2] as u32) / 3) as u8;
+                if luma < 128 {
+                    below_128 += 1;
+                }
+                let acc = if px[3] == 0 {
+                    &mut outside
+                } else {
+                    &mut inside
+                };
+                acc.0 += 1;
+                acc.1 = acc.1.min(luma);
+                acc.2 += luma as u64;
+                acc.3 = acc.3.max(luma);
+            }
+            let fold = |(n, lo, sum, hi): (usize, u8, u64, u8)| {
+                (n > 0).then(|| (lo, sum as f32 / n as f32, hi))
+            };
+            BlpMipStats {
+                level: level as u32,
+                width: m.width,
+                height: m.height,
+                outside: outside.0,
+                inside: inside.0,
+                outside_luma: fold(outside),
+                inside_luma: fold(inside),
+                below_128,
+            }
+        })
+        .collect())
+}
+
+/// Write **every** authored mip level of a BLP as `<stem>.mip<N>.png` beside `out` (whose own
+/// path receives level 0, exactly as [`blp_to_png`] does), and return the per-level census.
+pub fn blp_mips_to_png(blp_bytes: &[u8], out: &Path) -> Result<Vec<BlpMipStats>> {
+    let decoded =
+        benilla_blp::decode(blp_bytes).map_err(|e| anyhow::anyhow!("decoding BLP: {e}"))?;
+    let stem = out.with_extension("");
+    for (level, m) in decoded.mips.iter().enumerate() {
+        let path = if level == 0 {
+            out.to_path_buf()
+        } else {
+            let mut p = stem.as_os_str().to_owned();
+            p.push(format!(".mip{level}.png"));
+            std::path::PathBuf::from(p)
+        };
+        image::RgbaImage::from_raw(m.width, m.height, m.rgba.clone())
+            .ok_or_else(|| anyhow::anyhow!("BLP RGBA buffer size mismatch at level {level}"))?
+            .save(&path)
+            .with_context(|| format!("writing PNG {}", path.display()))?;
+    }
+    blp_mip_stats(blp_bytes)
+}
+
 /// Decode a BLP texture (raw bytes) to RGBA8: `(width, height, pixels)`.
 ///
 /// For feeding GPU textures (the renderer) without a disk round-trip; mip level 0.
@@ -813,6 +902,62 @@ mod tests {
             "no-mipmaps BLP must yield 1 level, not 0"
         );
         assert_eq!(chain.mips[0].len(), 2 * 2 * 4);
+    }
+
+    /// **B358 / B225, "black rain", pinned on the shipped asset.** `RainDrop01.blp` (16×128
+    /// DXT3) under-stores its sub-block levels — 16 bytes for the 2×16 level where the block grid
+    /// needs 64, 16 for the 1×8 where it needs 32 — and a decoder that zero-fills the difference
+    /// makes those levels three-quarters and half BLACK (an all-zero BC2 block is colour 0 at
+    /// alpha 0). The rain streak draws that texture under Mod2x, which reads no alpha, so a far
+    /// streak minifying onto levels 3–4 multiplied the scene toward black. The reference completes
+    /// a short level from the bytes that follow it in the file (`0x5a5780`), which for this asset
+    /// are the next levels' own grey blocks. This is the census the fix was judged by: every level
+    /// the sampler can reach stays inside the texture's authored neutral band, and level 3's second
+    /// block IS level 4's first — the reference's copy, byte for byte. Skips without the client data.
+    #[test]
+    fn the_rain_streak_texture_is_neutral_on_every_level_the_sampler_reaches() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = open_chain(&data).expect("open chain");
+        let path = "textures\\Weather\\RainDrop01.blp";
+        let bytes = chain
+            .read_file(path)
+            .unwrap_or_else(|e| panic!("{path}: {e}"));
+        let native = blp_bytes_to_native_chain(&bytes).expect("decodes natively");
+        assert_eq!((native.width, native.height), (16, 128));
+        assert_eq!(native.texels, benilla_blp::BlpTexels::Bc2);
+        assert!(
+            native.mips.len() >= 5,
+            "the tail levels are what this is about"
+        );
+        // Level 3 (2×16) is four blocks wide-grid; the file stores one. Blocks 2–4 are the
+        // following levels' — block 2 is level 4's own first block.
+        assert_eq!(native.mips[3].len(), 64);
+        assert_eq!(
+            &native.mips[3][16..32],
+            &native.mips[4][..16],
+            "level 3's second block must be the file's next 16 bytes — level 4's block"
+        );
+        assert!(
+            native.mips[3][16..].iter().any(|&x| x != 0),
+            "level 3's completion is never zero-filled"
+        );
+        // And the look-bearing fact, as the Mod2x lane reads it: no texel on any level darkens
+        // the scene by more than the authored grey does (luma ≥ 120; the authored band is 125–164).
+        let stats = blp_mip_stats(&bytes).expect("census");
+        for s in &stats {
+            for (class, luma) in [("outside", s.outside_luma), ("inside", s.inside_luma)] {
+                if let Some((lo, _, _)) = luma {
+                    assert!(
+                        lo >= 120,
+                        "level {} ({}x{}) {class} texels reach luma {lo} — a Mod2x streak sampling \
+                         this level darkens the scene (B358)",
+                        s.level,
+                        s.width,
+                        s.height
+                    );
+                }
+            }
+        }
     }
 
     /// Every table the CSV dumper claims in its error hint really has a schema, and each dumps

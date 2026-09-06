@@ -1200,3 +1200,37 @@ fn the_constructors_string_arguments_are_four_shapes_not_one() {
          constructor reads the result"
     );
 }
+
+/// The token is CANONICAL on the way out — `"NPC"`, which the stock merchant, guild registrar
+/// and trade windows all write (`MerchantFrame.lua:68`, `GuildRegistrarFrame.lua:4`,
+/// `TradeFrame.lua:41`), binds as `"npc"`. The reference resolves every unit token
+/// case-insensitively (`0x515970`'s ten compares are all `_strnicmp`), and the app samples the
+/// booth by this exact string — a raw `"NPC"` matched no slot and left the ring empty on all
+/// three windows (decision 2022).
+#[test]
+fn set_portrait_texture_folds_the_token_to_lowercase() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local f = CreateFrame("Frame", "NFrame")
+        f:SetPoint("TOPLEFT", 0, 0)
+        f:SetSize(100, 100)
+        local p = f:CreateTexture("NFramePortrait", "BACKGROUND")
+        p:SetSize(64, 64)
+        p:SetPoint("TOPLEFT", 0, 0)
+        SetPortraitTexture(p, "NPC")
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let bound = s.extract().into_iter().find_map(|q| match q.content {
+        QuadContent::Texture {
+            portrait_unit: Some(u),
+            ..
+        } => Some(u),
+        _ => None,
+    });
+    assert_eq!(bound.as_deref(), Some("npc"));
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}

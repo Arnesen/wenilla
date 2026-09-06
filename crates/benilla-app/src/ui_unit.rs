@@ -1375,6 +1375,11 @@ fn feed_units(
     let group_changed = group.is_changed();
     let reps_changed = reputations.is_changed();
     let factions_changed = factions.as_ref().is_some_and(|r| r.is_changed());
+    // The interaction NPC is an input of the `"npc"` snapshot below, and it moves on frames
+    // nothing else does: a vendor window opening or swapping to a second vendor changes no
+    // descriptor, no selection, no group. Without this term such a frame skipped the whole
+    // feed and the window's own `MERCHANT_SHOW` handler read the previous NPC (decision 2022).
+    let interact_changed = interact.as_ref().is_some_and(|r| r.is_changed());
     gate::trace(
         "feed_units",
         &[
@@ -1387,6 +1392,7 @@ fn feed_units(
             ("group", group_changed),
             ("reputations", reps_changed),
             ("factions", factions_changed),
+            ("interact", interact_changed),
         ],
     );
     let gate = gate::Gate::new(
@@ -1398,7 +1404,8 @@ fn feed_units(
             || stores_removed
             || group_changed
             || reps_changed
-            || factions_changed,
+            || factions_changed
+            || interact_changed,
     );
     stores.removed.clear();
     if gate.skip() {
@@ -1640,7 +1647,12 @@ fn feed_units(
             Some(s)
         });
     // "Absence IS data" again: closing an NPC window must clear the token, or the next window's
-    // first frame paints the last NPC's name.
+    // first frame paints the last NPC's name. **The memo is written here, not only read**: for
+    // its first eight days this diff compared against a row nothing ever inserted, so a `Some`
+    // re-pushed every frame and a `None` never cleared — `UnitExists("npc")` stayed true after
+    // the window closed, and the stale name was what the next window's first frame painted
+    // (decision 2022). No `fire_transitions` leg: the reference's watch bridge fires `UNIT_*`
+    // for the frames that draw a unit, and nothing draws `"npc"` as a unit frame.
     let npc_dirty = match (&npc, memo.last.get("npc")) {
         (Some(cur), Some(prev)) => cur != prev,
         (None, None) => false,
@@ -1649,6 +1661,14 @@ fn feed_units(
     if npc_dirty {
         gate.audit("feed_units", "the interaction-NPC snapshot");
         script.set_unit("npc", npc.clone());
+        match &npc {
+            Some(cur) => {
+                memo.last.insert("npc".to_string(), cur.clone());
+            }
+            None => {
+                memo.last.remove("npc");
+            }
+        }
     }
 
     // The XP bar's feed: push our own avatar's PLAYER_XP / PLAYER_NEXT_LEVEL_XP (both PRIVATE, only
@@ -2523,5 +2543,87 @@ mod tests {
             "beta tiers are gated off (cmp esi,3; jae)"
         );
         assert_eq!(rest_state_message(1, 5), None);
+    }
+
+    /// The `"npc"` token follows the interaction NPC on the frame it moves — including a frame
+    /// on which NOTHING else moves — and is cleared when the window closes (decision 2022). The
+    /// legs are the vendor-swap probe's first run, in order: a second vendor opened over an
+    /// open window kept the first vendor's snapshot (the dirty gate had no interact input), and
+    /// a closed window left `UnitExists("npc")` true (the memo row was never written). The
+    /// feed runs in a real `Update` schedule rather than `run_system_once`, because a fresh
+    /// system instance sees every resource as changed and would hold the gate open by itself.
+    #[test]
+    fn the_npc_token_follows_the_interaction_npc_and_clears_with_it() {
+        use crate::ui_session::InteractNpc;
+        use benilla_protocol::messages::ObjectFields;
+
+        const FIELD_UNIT_LEVEL: u16 = 34;
+        // Two `HIGHGUID_UNIT` guids (the high word decides the family — `guid::is_player`).
+        const BROG: u64 = 0xF130_0000_9700_0001;
+        const DOBBINS: u64 = 0xF130_0001_D100_0002;
+
+        let mut app = App::new();
+        app.init_resource::<UnitFeedState>()
+            .init_resource::<Selection>()
+            .init_resource::<NameCache>()
+            .init_resource::<Reputations>()
+            .init_resource::<crate::ui_party::GroupState>()
+            .init_resource::<ChatLog>()
+            .init_resource::<crate::ui_guild::GuildState>()
+            .init_resource::<InteractNpc>();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        app.insert_resource(NetCommands(tx));
+        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.add_systems(Update, feed_units);
+        // Two vendors, told apart by level alone — no name cache, no descriptor beyond it.
+        let mut vendor = |level: u32| {
+            app.world_mut()
+                .spawn(ObjectStore(ObjectFields::from_pairs(&[(
+                    FIELD_UNIT_LEVEL,
+                    level,
+                )])))
+                .id()
+        };
+        let brog = vendor(7);
+        let dobbins = vendor(9);
+        let eval = |app: &mut App, expr: &str| -> i64 {
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .eval::<i64>(expr)
+                .unwrap()
+        };
+        let exists = |app: &mut App| eval(app, r#"return UnitExists("npc") and 1 or 0"#) == 1;
+        let level = |app: &mut App| eval(app, r#"return UnitLevel("npc")"#);
+
+        // Nothing open: no token.
+        app.update();
+        assert!(!exists(&mut app), "no window open, yet UnitExists(\"npc\")");
+
+        // Brog's window opens.
+        *app.world_mut().resource_mut::<InteractNpc>() = InteractNpc(Some(brog), Some(BROG));
+        app.update();
+        assert_eq!(
+            level(&mut app),
+            7,
+            "the token names the vendor whose window opened"
+        );
+
+        // Dobbins' window opens OVER it: the interaction NPC is the only thing that moved this
+        // frame — no descriptor, no selection, no group — and the token must still follow.
+        *app.world_mut().resource_mut::<InteractNpc>() = InteractNpc(Some(dobbins), Some(DOBBINS));
+        app.update();
+        assert_eq!(
+            level(&mut app),
+            9,
+            "a second vendor over an open window swaps the token"
+        );
+
+        // Closed: absence is data.
+        *app.world_mut().resource_mut::<InteractNpc>() = InteractNpc::default();
+        app.update();
+        assert!(
+            !exists(&mut app),
+            "the window closed, yet UnitExists(\"npc\")"
+        );
     }
 }

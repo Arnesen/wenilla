@@ -638,6 +638,9 @@ pub(in crate::net) fn extrapolate_remote_units(
                     vel,
                     time.delta(),
                     crate::player::mover::Support {
+                        // A watched player is a player body: `0x5fa550` is TRUE for an
+                        // uncharmed player object, so its `H` is the player's own 1.0.
+                        rise: crate::player::STEP_UP_HEIGHT,
                         offset: if modes & move_flags::HOVER != 0 {
                             crate::player::HOVER_HEIGHT
                         } else {

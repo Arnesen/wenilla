@@ -179,7 +179,14 @@ pub(super) const STEP_SNAP_SLACK: f32 = 0.027_777_8;
 /// 0209's note invited us to fix — "one number to nudge if a real spot feels too restrictive" —
 /// which the director's captures found twice: a 0.91 yd Stormwind step (`14282v1`, a 66° face onto a
 /// flat top) and 1121's deferred 1.04 yd ledge.
-pub(super) const STEP_UP_HEIGHT: f32 = 1.0;
+pub(crate) const STEP_UP_HEIGHT: f32 = 1.0;
+/// The rise budget of a body the reference does **not** treat as player-controlled — a creature, a
+/// pet, a charmed/possessed/feared/confused/rooted player (decision 1125, wow-re
+/// `mover-collision-scalars.md`): `0x617430` takes `0x5fa550`'s FALSE leg and returns the constant
+/// `2.0` at `[0x801628]`, where a player's is its own `[CMovement+0xb8]` = 1.0. So a creature steps
+/// twice as high as we do, and its certify advance (`H·tan50°`) reaches twice as far; the creature
+/// clamp's walker step ([`crate::net::motion::spline::ground_clamp_creatures`]) is the consumer.
+pub(crate) const CREATURE_STEP_UP_HEIGHT: f32 = 2.0;
 /// The step-up **certify advance** (yd): how far ahead the maneuver looks for the tread it would
 /// stand on. A property of the BODY, never of the frame (decision 1121).
 ///
@@ -209,6 +216,11 @@ pub(super) const STEP_UP_HEIGHT: f32 = 1.0;
 /// whose *face* is unwalkable for most of a yard before the flat top begins, where a probe that stops
 /// at one radius is still over the face and reads it as a steep floor.
 pub(super) const STEP_UP_ADVANCE: f32 = 1.191_753_6;
+/// The certify reach **per yard of rise budget** — `tan 50°`, since the reference's reach is
+/// `max(H·tan50°, r + 1/720)` with `H` the mover's own budget (`0x636147`–`0x636190`, wow-re
+/// `ret2-commit-law.md`). [`STEP_UP_ADVANCE`] is this at the player's `H` of 1.0; a creature's 2.0
+/// (`CREATURE_STEP_UP_HEIGHT`) reaches 2.38 yd through the same law.
+pub(super) const STEP_UP_ADVANCE_PER_YARD: f32 = STEP_UP_ADVANCE / STEP_UP_HEIGHT;
 /// The **foot cone's height** (yd): how far above the feet the reference's movement solid is still
 /// narrower than its full radius — and therefore the band within which a blocking edge is *ridden
 /// up* rather than stepped onto (decision 1123).
@@ -596,6 +608,32 @@ impl MoverInput {
     /// they share `0x514755`: they share `0x5144e0`.
     pub(crate) fn may_turn(self, stunned: bool) -> bool {
         self.ready() && !stunned
+    }
+
+    /// **`0x5145e0` — "may the MOUSE hand the camera's facing to the body?"** (decision 2025). The
+    /// third predicate, consumed at `0x514474` (`je 0x514480`) in the mouse-MOVE handler `0x514400`
+    /// to gate the camera→body hand-off `0x51447b call 0x5103e0`, and again at `0x51495a` for the
+    /// both-button site. Its conjuncts, in the binary's order: the stun predicate above
+    /// (`0x5145eb call 0x5145b0`, which carries the shared precondition), the mouse-look input bit
+    /// (`0x5145fa test byte [esi+4],1` — the session's own right-button condition, which is the
+    /// caller's here), and **`GetStandState() == 0`** (`0x51460c call [eax+0xa4]` → the CGPlayer
+    /// override `0x5ed570`, the client-predicted cache `[player+0x1d68]`; `0x514612 neg; sbb; inc`).
+    /// The commit is refused a second, independent time downstream: `0x5151b0` re-tests the raw
+    /// descriptor byte at `0x51520a` (wow-re `local-move-input-gate.md` §6.4,
+    /// `standstate-movement-trigger.md` §4.1, both VERIFIED).
+    ///
+    /// So a right-drag while **seated** — sitting, in a chair (2, and the server-driven 4/5/6),
+    /// asleep — turns the camera and leaves the body exactly where it is, and puts nothing on the
+    /// wire. It does not stand the body up either: the turn emitter `0x514f50` skips its stand arm
+    /// while the RMB bit is held (`0x514f6d`), and `MSG_MOVE_SET_FACING` is exempt from the
+    /// emitter's stand table. Standing up is the keyboard's (`turned`), the X key's, or a flick's
+    /// (1766); the moment the predicted stand state reads 0 again, the next motion sample hands
+    /// the camera's yaw to the body like any other right-drag.
+    ///
+    /// `stand_state` is the **predicted** value — our `stand_pending` overlaid on the descriptor
+    /// byte — because that is what `0x5ed570` returns for the active player.
+    pub(crate) fn mouse_may_turn_body(self, stunned: bool, stand_state: u8) -> bool {
+        self.may_turn(stunned) && stand_state == 0
     }
 
     /// **The input tick's teardown leg** — `0x5146d6 call 0x60fb60(0, 1)`, which cancels
@@ -1834,6 +1872,44 @@ mod move_mode_tests {
     /// server's root on death, and a pure root leaves the pivot live *on purpose*, so a dead body
     /// could be spun with the turn keys or a right-drag. The predicate that stops it must not need
     /// the root, the stun, or the server's cooperation.
+    /// **A seated body is not re-faced by the mouse** (decision 2025): `0x5145e0`'s last conjunct
+    /// is `GetStandState() == 0`, so sitting, a chair (client 2 and the server's 4/5/6) and sleep
+    /// all refuse the camera→body hand-off — while the keyboard turn (`may_turn`) is untouched,
+    /// because that path stands you up instead of being refused.
+    #[test]
+    fn a_seated_body_refuses_the_mouse_turn_and_keeps_the_keyboard_one() {
+        let m = MoverInput {
+            dead: false,
+            view_is_out: false,
+        };
+        for seated in [1u8, 2, 3, 4, 5, 6] {
+            assert!(
+                !m.mouse_may_turn_body(false, seated),
+                "stand state {seated}: the mouse hand-off is refused at `0x51460c`"
+            );
+            assert!(
+                m.may_turn(false),
+                "stand state {seated}: the keyboard turn is not refused — it stands the body"
+            );
+        }
+        assert!(
+            m.mouse_may_turn_body(false, 0),
+            "standing: the hand-off runs"
+        );
+        assert!(
+            !m.mouse_may_turn_body(true, 0),
+            "stunned: refused through `0x5145b0` before the stand state is even read"
+        );
+        assert!(
+            !MoverInput {
+                dead: true,
+                view_is_out: false
+            }
+            .mouse_may_turn_body(false, 0),
+            "dead: refused through the shared precondition `0x5144e0`"
+        );
+    }
+
     #[test]
     fn death_drops_both_movement_input_predicates() {
         // (dead, rooted, stunned) -> (may_translate, may_turn)

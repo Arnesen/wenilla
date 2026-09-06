@@ -57,6 +57,11 @@ pub(super) struct Frame {
     pub dx: f32,
     pub grounded: bool,
     pub on_walkable: bool,
+    /// Whether the keys asked for any horizontal motion this frame. A frame that travelled with
+    /// **no** input is a body being moved by the resolve alone — a push-out, a slide off a
+    /// contact — and that is the whole shape of "I sat down and ended up beside the chair"
+    /// (B359), so it is interesting on its own even while grounded and level.
+    pub moving: bool,
     pub vel_y: f32,
     /// The step-down snap, when the walk-mode block ran: `(probe reach, what the probe found)`;
     /// the inner pair is `(hit distance, hit normal.y)` — a steep hit is recorded too, so a lip
@@ -334,7 +339,16 @@ pub(super) fn frame(f: Frame) {
         .and_then(|(_, hit)| hit)
         .map_or(0.0, |(dist, _)| dist);
     let flipped = f.grounded != PREV_GROUNDED.swap(f.grounded, Ordering::Relaxed);
-    if !(flipped || !f.grounded || dy.abs() > 0.05 || snap_dist > 0.05 || f.climb.is_some()) {
+    // Input-less travel: the resolve moved a body nobody was steering. A millimetre a frame is
+    // the signature (1458's chair extrusion ran at 1–2 mm), so the floor is well under it.
+    let creep = !f.moving && f.dx > 1.0e-4;
+    if !(flipped
+        || !f.grounded
+        || dy.abs() > 0.05
+        || snap_dist > 0.05
+        || f.climb.is_some()
+        || creep)
+    {
         return;
     }
     let snap = match f.snap {
@@ -392,10 +406,11 @@ pub(super) fn frame(f: Frame) {
     let left = if left { " LEFT-SURFACE" } else { "" };
     let climb = f.climb.map_or(String::new(), |t| format!(" climb={t:+.3}"));
     let anchored = if f.anchored { " ROOTED" } else { "" };
+    let creep = if creep { " CREEP" } else { "" };
     trace::line(
         "move",
         &format!(
-            "y {:9.3} -> {:9.3} dy={:+.3}{} grounded={} walk={} vy={:+7.2} {}{}{}{}",
+            "y {:9.3} -> {:9.3} dy={:+.3}{} grounded={} walk={} vy={:+7.2} {}{}{}{}{}",
             f.y_in,
             f.y_out,
             dy,
@@ -406,7 +421,8 @@ pub(super) fn frame(f: Frame) {
             snap,
             left,
             climb,
-            anchored
+            anchored,
+            creep
         ),
     );
 }

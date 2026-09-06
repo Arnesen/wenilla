@@ -373,7 +373,14 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// against it; a lane that owns rows in the table — the UI model tiles, sampling the cooldown's
 /// quadrant rotations off the pane's play head — has to write them in the table's encoding,
 /// not one of its own. One function, "encode this affine the way the table reads it".
-const CEILING: usize = 176;
+/// And 176 → 177: `mat_anim_table::MatAnimMirrors`, a PUBLISH — the mat-anim table's twin of
+/// `instance_tint::InstanceTintMirrors` (decision 2023). A lane whose materials bind a light
+/// buffer of their own reads the table out of THAT buffer, so the UI model tiles' rows — the
+/// cooldown sweep's rotations, written every frame off the pane's play head — reached a region
+/// nothing in a tile ever sampled until the tile's buffer was on a mirror list. Registered once
+/// at the tile renderer's startup, the same shape and the same reason as the palette mirror
+/// beside it.
+const CEILING: usize = 177;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

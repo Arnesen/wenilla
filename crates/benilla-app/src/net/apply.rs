@@ -92,7 +92,7 @@ fn addressed_store<'a>(
 // the 5-element ResMut tuples as "very complex types", but a named alias per tuple would be less
 // legible than the inline, commented groups.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub(super) fn apply_net_updates(
+pub(crate) fn apply_net_updates(
     mut commands: Commands,
     events: Res<NetEvents>,
     mut index: ResMut<GuidIndex>,

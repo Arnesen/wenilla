@@ -1330,9 +1330,12 @@ fn convert_entry(
         } => {
             use crate::portrait::PortraitSource;
             // A FILE pane (decision 2008): publish what the tile renderer needs — the pane's
-            // device-pixel size and the render law's unit ladder off it — and draw the tile's
-            // atlas cell when the renderer has one. The request is idempotent, so the memoized
-            // conversion may re-publish it freely; which panes draw is the engine's paint list.
+            // device-pixel size, the render law's unit ladder off it, and where the composite
+            // goes (its rect, paint key, alpha and clip). The request is idempotent, so the
+            // memoized conversion may re-publish it freely; which panes draw is the engine's
+            // paint list, and the quad itself is the renderer's per-frame output
+            // (`ui_models::compose_tiles`, decision 2023) — NOT pushed here, because a cell
+            // packed after this conversion would wait on a re-conversion nothing triggers.
             if let Some(path) = model.as_deref() {
                 let tiles = &mut booths.tiles;
                 let dpi = tiles.dpi.max(0.01);
@@ -1357,27 +1360,27 @@ fn convert_entry(
                         facing,
                         position: Vec3::new(position.0, position.1, position.2),
                         icon: icon.clone(),
-                    },
-                );
-                if let (Some(cell), Some(atlas)) = (tiles.cells.get(&handle), tiles.atlas.clone()) {
-                    let a = tiles.atlas_size.as_vec2();
-                    let (u0, v0) = (cell.origin.x as f32 / a.x, cell.origin.y as f32 / a.y);
-                    let (u1, v1) = (
-                        (cell.origin.x + cell.size.x) as f32 / a.x,
-                        (cell.origin.y + cell.size.y) as f32 / a.y,
-                    );
-                    out.push(UiQuad {
                         rect,
                         z_key: eq.z,
-                        texture: Some(atlas),
-                        uv: UvRect::from_tex_coords([u0, u1, v0, v1]),
                         // The instance draws at the widget's OWN alpha (render law §4.4).
-                        color: [1.0, 1.0, 1.0, own_alpha],
-                        // A render target: premultiplied by construction (`UiQuad` doc).
-                        premultiplied: true,
+                        alpha: own_alpha,
                         clip,
-                        ..default()
-                    });
+                    },
+                );
+                if crate::ui_models::trace_on() {
+                    info!(
+                        "tile-trace: composite {path} pane {handle:?} {} rect=({:.1},{:.1})-({:.1},{:.1}) size_px={}x{} z={:?} alpha={own_alpha:.2} cell={:?} atlas={:?}",
+                        name.as_deref().unwrap_or("<anonymous>"),
+                        rect.min.x,
+                        rect.min.y,
+                        rect.max.x,
+                        rect.max.y,
+                        size_px.x,
+                        size_px.y,
+                        eq.z,
+                        tiles.cells.get(&handle),
+                        tiles.atlas_size
+                    );
                 }
                 return;
             }

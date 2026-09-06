@@ -132,7 +132,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let rh = region_handle_of(lua, &region)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let data = model.region_data.entry(rh).or_default();
-            data.portrait_unit = Some(unit);
+            // CANONICAL (lowercase) on the way in, like `set_unit`'s map key: the binding
+            // resolves its token through the one resolver every `Unit*` binding shares
+            // (`0x519ef0` → `0x515970`), whose every compare is `_strnicmp` — so the stock
+            // `MerchantFrame.lua:68`, `GuildRegistrarFrame.lua:4` and `TradeFrame.lua:41` all
+            // write `"NPC"` and mean `"npc"`. The app samples the booth by this string
+            // (`portrait::PortraitImages`, keyed by the lowercase slot names), and a raw `"NPC"`
+            // reached it and matched nothing: an empty portrait ring on all three windows
+            // (decision 2022).
+            data.portrait_unit = Some(unit.to_ascii_lowercase());
             data.texture = None;
             data.fill = None;
             data.circular = true;

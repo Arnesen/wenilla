@@ -224,7 +224,12 @@ pub(super) fn control(
     // let you spin your own body on the ground (decision 1753). Off the MOVER's descriptor, not
     // ours — `esi` in `0x5144e0` is whatever we are driving (1277) — and a ghost is not dead by it,
     // because the server puts a released player's health at 1 (0308).
-    let (stunned, dead) = body
+    // **The stand state** is read in the same pass for the mouse alone (decision 2025): the
+    // reference's camera→body hand-off predicate `0x5145e0` ends on `GetStandState() == 0`
+    // (`0x51460c`, the CGPlayer override `0x5ed570` = the client-predicted cache), so a seated
+    // body — sitting, in a chair, asleep — is never re-faced by a right-drag, and never stood up
+    // by one either. Predicted, not merely echoed: `stand_pending` is our `[player+0x1d68]`.
+    let (stunned, dead, stand_byte) = body
         .single()
         .ok()
         .and_then(|(.., store, _, _, _, _, _)| {
@@ -232,10 +237,12 @@ pub(super) fn control(
                 (
                     s.0.unit_flags() & UNIT_FLAG_STUNNED != 0,
                     s.0.unit_is_dead(),
+                    s.0.unit_stand_state(),
                 )
             })
         })
-        .unwrap_or((false, false));
+        .unwrap_or((false, false, 0));
+    let stand_state = player.stand_pending.unwrap_or(stand_byte);
     // The shared precondition `0x5144e0`, assembled once for this tick the way the reference
     // evaluates it once for the mover — health above, and the far-sight conjunct here.
     //
@@ -255,6 +262,9 @@ pub(super) fn control(
     // `0x5145b0`, evaluated here because the first thing it suppresses is the mouse turn below. Its
     // translate sibling waits until after `apply_server_moves`, where the root edge it reads lands.
     let may_turn = mover.may_turn(stunned);
+    // `0x5145e0`, the mouse's own hand-off gate — `may_turn` plus the stand-state conjunct the
+    // keyboard path does not have (it stands you up instead; the mouse is refused).
+    let mouse_turns_body = mover.mouse_may_turn_body(stunned, stand_state);
     // Drunkenness (B210): this frame's wobble angle, computed once — the facing veer and the
     // swim-pitch porpoise ([`swim::drive_step`]) both read it. Zero while sober (`wobble` early-outs on a 0.0
     // fraction), and zero whenever the turn predicate is down — the reference's wobble sits behind
@@ -339,7 +349,14 @@ pub(super) fn control(
     // all, because `0x50fee0` (the camera rotate at `0x514446`) runs before any object lookup and
     // the hand-off simply does not run. Ours writes and puts back, which is indistinguishable
     // downstream and keeps the approved camera path intact — a shape difference, not a copy.
-    if !may_turn || player.control_lost || player.reseat {
+    //
+    // **A seated body enters through the same door too** (decision 2025). `0x5145e0`'s last
+    // conjunct is `GetStandState() == 0` — the right-drag orbits the camera round a body that keeps
+    // facing its chair, sends nothing, and does not stand it up (1766 had already taken the stand
+    // off this gesture; this takes the turn off it). Stand up — X, a turn key, a flick — and the
+    // next motion sample hands the camera's yaw to the body again, which is the snap the reference
+    // shows too: `0x5103e0` commits the camera's own facing, not a delta.
+    if !mouse_turns_body || player.control_lost || player.reseat {
         player.face_yaw = yaw_before_look;
     }
     {

@@ -452,9 +452,14 @@ fn the_meeting_stone_icon_follows_the_queue_across_meetingstone_changed() {
 
 /// **The ping's pixels are the stock `<Model>`'s own file** (decision 2008): shown by
 /// `MINIMAP_PING` with the file's facts landed, the extract publishes ONE tile request for the
-/// pane — at its device size and the render law's unit ladder — and, once the renderer has
-/// handed back a cell, draws that cell as one premultiplied quad over the pane's rect. Drives the
-/// real `drive_script` in the headless harness the clip-plumb tests use.
+/// pane — at its device size, the render law's unit ladder, and the composite's rect/key/alpha
+/// — and pushes no quad of its own. Once the renderer has handed back a cell, the cell draws as
+/// one premultiplied quad over the pane's rect **on the very next frame, with nothing else in
+/// the interface moving** (decision 2023): the composite is the renderer's per-frame output in
+/// the overlay lane, never a product of the memoized conversion — which is exactly what the
+/// first shape got wrong, and why this test used to re-ping to "move the pane" before asking
+/// for the quad. Drives the real `drive_script` in the headless harness the clip-plumb tests
+/// use.
 #[test]
 fn a_shown_ping_pane_asks_for_a_tile_and_draws_its_cell() {
     use bevy::prelude::*;
@@ -541,17 +546,36 @@ fn a_shown_ping_pane_asks_for_a_tile_and_draws_its_cell() {
         },
         PrimaryWindow,
     ));
-    app.add_systems(Update, super::extract::drive_script);
+    // The extract, then the composite off the bridge — the app's own order (the appender runs
+    // in the `UiQuadAppend` window, after `sync_tiles`, which packs the cells this harness hands
+    // over by hand below). The lane is cleared by hand between frames, as `clear_ui_overlays`
+    // does at the top of every append window.
+    app.add_systems(
+        Update,
+        (
+            super::extract::drive_script,
+            crate::ui_models::compose_tiles,
+        )
+            .chain(),
+    );
     app.update();
 
     let premultiplied = |app: &App| {
-        app.world()
-            .resource::<UiQuads>()
-            .quads
+        let quads = app.world().resource::<UiQuads>();
+        assert!(
+            quads.quads.iter().all(|q| !q.premultiplied),
+            "the base lane never carries a tile: the composite is not the extract's"
+        );
+        quads
+            .overlays
             .iter()
             .filter(|q| q.premultiplied)
             .cloned()
             .collect::<Vec<_>>()
+    };
+    let next_frame = |app: &mut App| {
+        app.world_mut().resource_mut::<UiQuads>().overlays.clear();
+        app.update();
     };
     {
         let tiles = app.world().resource::<UiModelTiles>();
@@ -580,11 +604,19 @@ fn a_shown_ping_pane_asks_for_a_tile_and_draws_its_cell() {
             req.star_px_per_unit
         );
         assert_eq!(req.icon, None);
+        // The composite's own inputs: the pane's rect in the quad pass's space (y-down window
+        // px), its callback rank, its own alpha.
+        assert!(
+            (req.rect.width() - 50.0).abs() < 1e-3 && (req.rect.height() - 50.0).abs() < 1e-3,
+            "{:?}",
+            req.rect
+        );
+        assert!((req.alpha - 1.0).abs() < 1e-6);
         assert!(premultiplied(&app).is_empty(), "no cell yet: nothing drawn");
     }
 
-    // The renderer hands a cell back; a fresh ping moves the pane, so the memoized conversion
-    // runs again and the arm draws the cell.
+    // The renderer hands a cell back. NOTHING else changes — no ping, no frame moves, the
+    // memoized conversion skips — and the next frame draws the cell anyway.
     {
         let atlas = app
             .world_mut()
@@ -601,15 +633,9 @@ fn a_shown_ping_pane_asks_for_a_tile_and_draws_its_cell() {
             },
         );
     }
-    {
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
-        // The stock handler seats the frame from `GetPingPosition()`, not the event's args.
-        script.set_minimap_ping((-0.125, 0.25));
-        ping_at(&mut script, -0.125, 0.25);
-    }
-    app.update();
+    next_frame(&mut app);
     let drawn = premultiplied(&app);
-    assert_eq!(drawn.len(), 1, "the cell, once");
+    assert_eq!(drawn.len(), 1, "the cell, once, on a quiet frame");
     let q = &drawn[0];
     assert!((q.rect.width() - 50.0).abs() < 1e-3 && (q.rect.height() - 50.0).abs() < 1e-3);
     let [tl, _, br, _] = q.uv.corners;
@@ -617,4 +643,24 @@ fn a_shown_ping_pane_asks_for_a_tile_and_draws_its_cell() {
     assert!((br[0] - 52.0 / 512.0).abs() < 1e-6 && (br[1] - 52.0 / 512.0).abs() < 1e-6);
     assert_eq!(q.color, [1.0, 1.0, 1.0, 1.0], "the frame's own alpha");
     assert!(q.texture.is_some());
+    // And every quiet frame after it — the lane is re-emitted per frame, not on change.
+    next_frame(&mut app);
+    assert_eq!(
+        premultiplied(&app).len(),
+        1,
+        "still drawn on the frame after"
+    );
+
+    // A fresh ping moves the pane: the conversion runs again, the request follows the rect, and
+    // the composite follows the request — still exactly one quad.
+    {
+        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        // The stock handler seats the frame from `GetPingPosition()`, not the event's args.
+        script.set_minimap_ping((-0.125, 0.25));
+        ping_at(&mut script, -0.125, 0.25);
+    }
+    next_frame(&mut app);
+    let moved = premultiplied(&app);
+    assert_eq!(moved.len(), 1, "one quad after the pane moved");
+    assert_ne!(moved[0].rect, q.rect, "the composite followed the pane");
 }
