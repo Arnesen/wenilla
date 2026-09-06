@@ -56,6 +56,32 @@ impl Loader<'_> {
                 }
             }
         }
+        // The model pane's own fog attributes and `<FogColor>` child (`CSimpleModel::LoadXML`
+        // `0x76cac0`, render law §5.4). `fogNear`/`fogFar` are **clamped at `≥ 0`** here and only
+        // here (`76cbbb`-`76cbd2` / `76cbf3`-`76cc0a`: `0.0 fcomp value ; jne store ; else store
+        // 0.0`) — the Lua setters store raw. The `<FogColor>` child writes the packed colour AND
+        // arms the fog bit, so it is `SetFogColor` in every respect; nothing in XML touches the
+        // light. Decision 2027.
+        if model_kind {
+            for (attr, verb) in [("fogNear", "SetFogNear"), ("fogFar", "SetFogFar")] {
+                if let Some(v) = el.attr(attr).and_then(|v| v.trim().parse::<f32>().ok()) {
+                    self.call(wrapper, verb, v.max(0.0), dbg);
+                }
+            }
+            if let Some(fc) = children_named(el, "FogColor").next() {
+                let ch = |k: &str, d: f32| {
+                    fc.attr(k)
+                        .and_then(|v| v.trim().parse::<f32>().ok())
+                        .unwrap_or(d)
+                };
+                self.call(
+                    wrapper,
+                    "SetFogColor",
+                    (ch("r", 0.0), ch("g", 0.0), ch("b", 0.0), ch("a", 1.0)),
+                    dbg,
+                );
+            }
+        }
         if let Some(id) = el.attr("id") {
             if let Ok(n) = id.parse::<i64>() {
                 self.call(wrapper, "SetID", n, dbg);

@@ -485,6 +485,7 @@ fn the_item_push_card_shares_the_band_with_a_raised_bar_exactly_as_the_reference
                 looping: false,
             }],
             bbox: ([0.0, 0.0, 0.0], [0.02707, 0.07962, 0.0]),
+            cameras: 0,
         },
     );
     s.run("MultiBarBottomLeft:Show() MultiBarBottomRight:Show() UIParent_ManageFramePositions()")

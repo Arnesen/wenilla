@@ -121,6 +121,7 @@ impl Plugin for DevProbesPlugin {
                 "WOW_PROBE_CHEST",
                 "WOW_PROBE_CLAM",
                 "WOW_PROBE_VENDOR_SWAP",
+                "WOW_PROBE_MODEL_CAMERA",
                 "WOW_RIG",
                 "WOW_LIVE_FPS",
                 // A screenshot burst and a pick burst are wall-clock schedules too, and on an
@@ -348,6 +349,13 @@ impl Plugin for DevProbesPlugin {
             // 2022's instrument (see `capture::ProbeVendorSwapPlugin`).
             if std::env::var("WOW_PROBE_VENDOR_SWAP").is_ok() {
                 app.add_plugins(crate::capture::ProbeVendorSwapPlugin);
+            }
+            // The `<Model>` perspective-leg live probe: `WOW_PROBE_MODEL_CAMERA=1` builds a plain
+            // pane on a camera-bearing file and reads the renderer's own camera and root back to
+            // check the three cancellations against an orthographic control (decision 2027's
+            // instrument; see `capture::ProbeModelCameraPlugin`, whose module doc is the recipe).
+            if std::env::var("WOW_PROBE_MODEL_CAMERA").is_ok() {
+                app.add_plugins(crate::capture::ProbeModelCameraPlugin);
             }
             // The GM trouble-ticket live probe: `WOW_PROBE_GMTICKET=1` drives the whole five-opcode
             // ticket wire through the live VM's own bindings — queue status, clean slate, file, edit,

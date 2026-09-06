@@ -53,7 +53,13 @@ impl BoothRig {
             }
             return world.clone();
         };
-        match material_variant(&mut self.variants, &buffer, world, materials, false) {
+        match material_variant(
+            &mut self.variants,
+            &buffer,
+            world,
+            materials,
+            VariantLane::World,
+        ) {
             Some(twin) => twin,
             None => {
                 self.unready = true;
@@ -106,16 +112,30 @@ pub(super) fn reap_dead_variants(
     }
 }
 
+/// Which lane a [`material_variant`] twin draws on — the two axes the twin can differ from its
+/// world source on, as one closed choice rather than a bool nobody can read at the call site.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum VariantLane {
+    /// The world's own shade lane, the batch's authored fog policy kept — the portrait booths,
+    /// which render a model exactly as the world would but under a frozen light.
+    World,
+    /// The scene's authored M2 light rig ([`benilla_world::model_render::ShadeSel::Rig`] — the
+    /// probe-slot SH eval + the buffer's point table, decisions 0429/0435) **with fog forced
+    /// OFF**: the glue CHARACTER model takes no fog in the reference (its fill callback stages
+    /// none, its collector's fog stays zeroed — wow-re `glue-model-lighting.md` §5), and so does
+    /// a `<Model>` pane that never armed any.
+    RigUnfogged,
+    /// The rig lane with the batch's **authored** fog policy kept — a `<Model>` pane whose Lua
+    /// armed fog (decision 2027). The per-material UNFOGGED bit (`0x02`) then does its own work,
+    /// which is the reference's own per-batch fork: a fogged pane still draws its UNFOGGED
+    /// materials unfogged (render law §5.6). The glue background scene takes this lane too.
+    RigFogged,
+}
+
 /// The twin of a world-built material against `buffer`, cached in `variants` — same
-/// texture/blend/flags, only the light storage swapped. [`BoothRig::variant`] is this against one of
-/// the two fixed booth buffers; the create scene passes its own authored-rig buffer with `rig` set,
-/// which additionally flips the twin onto the [`benilla_world::model_render::ShadeSel::Rig`] lane (the
-/// probe-slot SH eval + the buffer's point table — the scene's authored M2 light rig, decision
-/// 0429/0435) instead of the world sun/intensity lane the material was built for — and forces the
-/// twin's fog OFF: the glue CHARACTER model takes no fog in the reference (its fill callback
-/// stages none, its collector fog stays zeroed — wow-re `glue-model-lighting.md §5`; the
-/// background scene model, built by `sync_create_scene` with its own fog policy, keeps the
-/// `CharModelFogInfo` fog).
+/// texture/blend/flags, only the light storage swapped, plus whatever [`VariantLane`] asks for.
+/// [`BoothRig::variant`] is this on [`VariantLane::World`] against one of the two fixed booth
+/// buffers; the create scene and the UI model tiles pass their own buffers on a rig lane.
 ///
 /// **`None` means the source material is not resident yet** — there is no twin to hand back, and
 /// the world material is NOT an acceptable substitute in a booth (wrong light buffer; see
@@ -125,7 +145,7 @@ pub(crate) fn material_variant(
     buffer: &bevy::render::render_resource::Buffer,
     world: &Handle<WowModelMaterial>,
     materials: &mut Assets<WowModelMaterial>,
-    rig: bool,
+    lane: VariantLane,
 ) -> Option<Handle<WowModelMaterial>> {
     if let Some(twin) = variants.get(&world.id()) {
         return Some(twin.clone());
@@ -136,8 +156,10 @@ pub(crate) fn material_variant(
     let mat = materials.get(world)?;
     let mut twin = mat.clone();
     twin.extension.light_buf = buffer.clone();
-    if rig {
+    if lane != VariantLane::World {
         twin.extension.sun_scale.x = benilla_world::model_render::ShadeSel::Rig.selector();
+    }
+    if lane == VariantLane::RigUnfogged {
         // Force fog OFF while preserving every pipeline marker `specialize` keys on (bits 0-3
         // AND the 0528 multiply markers, bits 7-8) — the mask is owned by `model_render`, next
         // to the packer. A hand-rolled `as u8 & 0x0f` here once dropped the multiply markers

@@ -78,7 +78,9 @@ use crate::target::Selection;
 use benilla_assets::materials::WowModelMaterial;
 
 mod framing;
-pub(crate) use framing::{attachment_point, head_anchor, PortraitAnchors};
+pub(crate) use framing::{
+    attachment_point, head_anchor, pane_projection, PortraitAnchors, WowPortraitProjection,
+};
 use framing::{body_frame, frame, PORTRAIT_FOV};
 mod booth;
 /// The translucency twins ride the *preview* shapes as well as the booth ones — one type for both
@@ -97,7 +99,7 @@ pub(crate) use glue_booth::{
     PreviewBillboard, PreviewEffects, PreviewPart, PreviewRider, SelectLook, GLUE_SLOT,
 };
 mod light;
-pub(crate) use light::material_variant;
+pub(crate) use light::{material_variant, VariantLane};
 use light::{model_pane_light, studio_light, BoothLight};
 mod test_bake;
 
@@ -230,6 +232,19 @@ pub(crate) const MINIMAP_COMPOSITE_LAYER: usize = WARM_BOOTH_LAYER + 1;
 /// The UI model tiles' layer (`crate::ui_models`, decision 2008): every `<Model>` widget's M2
 /// renders into one atlas through one camera on this layer.
 pub(crate) const UI_MODELS_LAYER: usize = MINIMAP_COMPOSITE_LAYER + 1;
+/// The base of the **perspective model panes'** layer block (decision 2027). A `<Model>` framed
+/// by its file's own camera cannot share the tile atlas's one orthographic camera — it needs a
+/// camera of its own, rendering into its own cell of the same atlas through a viewport — and one
+/// camera per pane means one layer per pane, or every perspective camera would draw every other
+/// pane's model over its cell. The block runs `BASE + i` for `i < UI_MODEL_CAM_LAYERS` and sits at
+/// the TOP of the ladder, so it can be widened without colliding with anything above it.
+pub(crate) const UI_MODEL_CAM_LAYER_BASE: usize = UI_MODELS_LAYER + 1;
+/// How many perspective model panes can draw at once — the size of the layer block above and of
+/// the camera pool beside it. Each is a full render pass into the atlas, and a UI showing eight
+/// authored-camera 3-D scenes at once is already far past anything the reference's interface or
+/// the addon corpus does; a ninth pane holds its cell and draws nothing, the same degrade the
+/// atlas already makes for a tile that does not fit.
+pub(crate) const UI_MODEL_CAM_LAYERS: usize = 8;
 
 // The ladder must stay collision-free: a booth camera's layer is its identity for both rendering
 // and the emitter→camera match, and the failure above was silent in both.
@@ -247,7 +262,8 @@ const _: () = assert!(
         && DRESSUP_LAYER > GLUE_LAYER
         && WARM_BOOTH_LAYER > DRESSUP_LAYER
         && MINIMAP_COMPOSITE_LAYER > WARM_BOOTH_LAYER
-        && UI_MODELS_LAYER > MINIMAP_COMPOSITE_LAYER,
+        && UI_MODELS_LAYER > MINIMAP_COMPOSITE_LAYER
+        && UI_MODEL_CAM_LAYER_BASE > UI_MODELS_LAYER,
     "booth render layers must be distinct — see GLUE_LAYER"
 );
 const _: () = assert!(

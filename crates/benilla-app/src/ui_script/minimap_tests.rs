@@ -499,6 +499,7 @@ fn a_shown_ping_pane_asks_for_a_tile_and_draws_its_cell() {
         ModelFileFacts {
             sequences: vec![seq(127, 1333, false), seq(0, 833, true), seq(1, 333, false)],
             bbox: ([0.0; 3], [0.0; 3]),
+            cameras: 0,
         },
     );
     assert!(

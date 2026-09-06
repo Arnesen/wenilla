@@ -255,8 +255,10 @@ pub(super) fn disconnected(
     *duel = crate::ui_duel::DuelState::default();
     // The friend/ignore lists and the last `/who` are session state too (decision 0668): the
     // server re-pushes both lists at the next login, and a stale ignore list would silence the
-    // wrong guids after a reconnect renumbers nothing but re-streams everything.
-    *social = crate::ui_social::SocialState::default();
+    // wrong guids after a reconnect renumbers nothing but re-streams everything. The `/who` sort
+    // chain is the one thing that survives — it is per-PROCESS in the reference, not per-login
+    // (decision 2030), which is why this is a `clear_session` and not a `default()`.
+    social.clear_session();
     // The guild session is login-scoped the same way (decision 1257) — and more strictly, because
     // the next login may be a *different character*, whose guild id, rank, rights and roster share
     // nothing with this one's. The identity cache goes too: it is keyed by guild id, so it would

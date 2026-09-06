@@ -1071,6 +1071,11 @@ impl Plugin for MinimapPlugin {
                     probe_minimap_widget
                         .in_set(UiQuadAppend)
                         .before(emit_minimap),
+                    // Deliberately NOT on the lighting resolve's read side, though it reads
+                    // `WowLighting` (decision 2032): joining `LightingConsumeSet` would put a
+                    // 178th engine item through the world API wall, and what it buys is one
+                    // frame of the right day-night tint on a 140 px map — invisible even on a
+                    // submersion crossing, which is the one moment that value jumps.
                     emit_minimap.in_set(UiQuadAppend),
                     // After the emit that fills it: the composite camera draws what THIS frame's
                     // interior branch asked for, so the target the blit quad samples is never a

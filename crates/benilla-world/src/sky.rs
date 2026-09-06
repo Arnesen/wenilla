@@ -127,7 +127,11 @@ impl Plugin for SkyPlugin {
             .add_systems(
                 Update,
                 (
-                    update_sky_colors,
+                    // The dome's stops are the resolved atmosphere, so the push belongs on the
+                    // READ side of the resolve (`lighting::LightingConsumeSet`) — unordered it
+                    // runs at the top of `Update` and paints last frame's palette, which on a
+                    // surfacing frame is the underwater one (B354, decision 2032).
+                    update_sky_colors.in_set(crate::lighting::LightingConsumeSet),
                     // The dome stands down for a WMO skybox, so its gate must read the SETTLED
                     // resolve, not whichever side of it the executor picked (`crate::skybox`).
                     apply_sky_visibility

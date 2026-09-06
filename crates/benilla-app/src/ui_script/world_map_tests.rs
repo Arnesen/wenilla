@@ -65,6 +65,7 @@ fn arrow_facts(s: &mut UiScript) {
                 looping: true,
             }],
             bbox: ([-0.0127, -0.0118, 0.0], [0.0135, 0.0145, 0.0]),
+            cameras: 0,
         },
     );
 }

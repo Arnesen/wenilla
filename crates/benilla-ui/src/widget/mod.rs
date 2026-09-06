@@ -176,11 +176,11 @@ pub use kinds::{
     model_key, slider_fraction, slider_grab, ArmedSequence, ButtonFont, ButtonState,
     ButtonVisualState, ColorSelectState, EditAction, EditBoxState, EditOutcome, EditUnit,
     FrameKind, InsertMode, KindState, MessageFrameState, MessageLine, MinimapState, ModelFileFacts,
-    ModelPlayHead, ModelState, RegionKind, ScrollFrameState, ScrollingMessageState, SequenceFacts,
-    SliderState, StatusBarState, TooltipState, MINIMAP_DEFAULT_ARROW_MODEL, MINIMAP_DEFAULT_MASK,
-    MINIMAP_DEFAULT_PLAYER_MODEL, MINIMAP_DEFAULT_ZOOM, MINIMAP_ENGINE_CHILDREN,
-    MINIMAP_ZOOM_LEVELS, TOOLTIP_DOUBLE_GAP, TOOLTIP_FADE_SECS, TOOLTIP_LINE_GAP, TOOLTIP_PAD,
-    TOOLTIP_WRAP_WIDTH,
+    ModelFog, ModelLight, ModelPlayHead, ModelState, RegionKind, ScrollFrameState,
+    ScrollingMessageState, SequenceFacts, SliderState, StatusBarState, TooltipState,
+    MINIMAP_DEFAULT_ARROW_MODEL, MINIMAP_DEFAULT_MASK, MINIMAP_DEFAULT_PLAYER_MODEL,
+    MINIMAP_DEFAULT_ZOOM, MINIMAP_ENGINE_CHILDREN, MINIMAP_ZOOM_LEVELS, TOOLTIP_DOUBLE_GAP,
+    TOOLTIP_FADE_SECS, TOOLTIP_LINE_GAP, TOOLTIP_PAD, TOOLTIP_WRAP_WIDTH,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────

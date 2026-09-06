@@ -205,15 +205,23 @@ impl Transport {
     }
 
     /// Re-anchor this transport's clock so its cycle sits at the head of `map_id`'s leg, and
-    /// return the sample there. `None` if the drive has no leg on that map (a lift never does).
+    /// return the sample there **plus the cycle instant it was moved to, if it moved at all**.
+    /// `None` if the drive has no leg on that map (a lift never does).
     ///
     /// The anchor is stored as `progress_ms` + the instant it was taken, so seeking is simply
     /// "restamp both": the clock runs on from the new cycle position exactly as it would have.
+    ///
+    /// **The second element must be how the caller decides whether anything happened.** The stored
+    /// `progress_ms` is the server's own uptime-scale path progress until a seek replaces it —
+    /// unbounded, and nothing like a cycle position — so "did it change?" cannot be answered by
+    /// comparing it against a `% period` cycle value. Doing exactly that made the healthy
+    /// already-agreed crossing print `our path clock was 157334 ms behind` with a target of
+    /// 35081741 ms, which is 9.7 hours: the server's uptime, not a position in a 350 s loop.
     pub(crate) fn reseek_to_map(
         &self,
         anchor: &mut TransportAnchor,
         map_id: u32,
-    ) -> Option<TransportSample> {
+    ) -> Option<(TransportSample, Option<u32>)> {
         let Drive::Taxi(t) = &self.drive else {
             return None;
         };
@@ -224,12 +232,12 @@ impl Transport {
         // Only a clock that actually disagrees with the server gets corrected.
         let here = t.sample(cycle);
         if here.map == map_id {
-            return Some(here);
+            return Some((here, None));
         }
         let target = t.first_cycle_on_map(cycle, map_id)?;
         anchor.progress_ms = target;
         anchor.at = Instant::now();
-        Some(t.sample(target))
+        Some((t.sample(target), Some(target)))
     }
 
     /// Whether any leg of this transport's cycle lies on `map_id` — the cross-map worldport's
@@ -598,7 +606,7 @@ fn reseek_ridden_transport_at_worldport(
             continue;
         };
         let before = transport.cycle_ms(&anchor);
-        let Some(sample) = transport.reseek_to_map(&mut anchor, w.map_id) else {
+        let Some((sample, moved_to)) = transport.reseek_to_map(&mut anchor, w.map_id) else {
             warn!(
                 "transport {:#x}: rode a transfer to map {} its own path never visits — cannot \
                  re-anchor; the rider's pose will be composed through a stale one",
@@ -606,17 +614,16 @@ fn reseek_ridden_transport_at_worldport(
             );
             continue;
         };
-        let after = anchor.progress_ms;
         // Silent when we were already there (the healthy crossing — the two clocks agreed and the
-        // seek was a no-op). Loud when it moved, carrying **how far behind the server our own
-        // path clock was**: this is the only measurement of client-vs-server transport drift the
-        // client can take, and it is worth a line every time it is not zero.
+        // seek was a no-op, which `moved_to == None` is the ONLY sound way to detect). Loud when it
+        // moved, carrying **how far behind the server our own path clock was**: this is the only
+        // measurement of client-vs-server transport drift the client can take.
         //
         // Measured **forward around the cycle**, because a crossing is very often the cycle wrap
         // (on taxi path 241 the Kalimdor legs are the *first* frames, so "cross to Kalimdor" IS
         // the wrap): a plain `after - before` reports a 144 ms nudge as −356 140 ms and reads as
         // the clock running half a cycle ahead, which is the opposite of what happened.
-        if before != after {
+        if let Some(after) = moved_to {
             let period = transport.period_ms().max(1);
             let behind =
                 (u64::from(after) + u64::from(period) - u64::from(before)) % u64::from(period);
@@ -934,10 +941,14 @@ mod tests {
             progress_ms: on_azeroth,
             at: Instant::now(),
         };
-        let sample = transport
+        let (sample, moved_to) = transport
             .reseek_to_map(&mut anchor, 1)
             .expect("path 241 visits Kalimdor");
         assert_eq!(sample.map, 1, "the re-anchored sample must be on Kalimdor");
+        assert!(
+            moved_to.is_some(),
+            "a clock on Azeroth's leg told it is on Kalimdor must report that it moved"
+        );
         assert_eq!(
             transport.sample(anchor.progress_ms, 0).map,
             1,
@@ -951,13 +962,21 @@ mod tests {
             progress_ms: on_kalimdor,
             at: Instant::now(),
         };
-        let sample = transport
+        let (sample, moved_to) = transport
             .reseek_to_map(&mut anchor, 1)
             .expect("path 241 visits Kalimdor");
         assert_eq!(sample.map, 1);
         assert_eq!(
             anchor.progress_ms, on_kalimdor,
             "an agreeing clock must not be touched"
+        );
+        // **And it must SAY it did nothing.** The stored anchor is the server's uptime-scale path
+        // progress until a seek replaces it, so a caller cannot infer "unchanged" by comparing it
+        // against a cycle value — it reported a 9.7-hour raw progress as a 157 s clock skew until
+        // this flag existed.
+        assert_eq!(
+            moved_to, None,
+            "a no-op seek must report that it did not move the clock"
         );
 
         // A map the path never visits has no answer — the caller warns rather than inventing one.

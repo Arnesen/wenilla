@@ -17,6 +17,24 @@ fn setup() -> UiScript {
     s
 }
 
+/// One `/who` row as the app's feed would have resolved it.
+fn who(name: &str, level: u32, class: &str, zone: &str) -> WhoInfo {
+    WhoInfo {
+        name: name.to_string(),
+        guild: String::new(),
+        level,
+        race: "Human".to_string(),
+        class: class.to_string(),
+        zone: zone.to_string(),
+    }
+}
+
+/// The name painted into who row `row`.
+fn who_name(s: &UiScript, row: u32) -> String {
+    s.eval::<String>(&format!("return WhoFrameButton{row}Name:GetText()"))
+        .unwrap()
+}
+
 fn friend(name: &str, level: u32, class: &str, area: &str, connected: bool) -> FriendInfo {
     FriendInfo {
         name: name.to_string(),
@@ -435,6 +453,60 @@ fn the_who_dropdown_switches_the_variable_column() {
         s.take_social_requests(),
         vec![SocialRequest::SortWho("level".to_string())]
     );
+}
+
+/// **B365's retest, pinned.** The Who list's column headers sort, the same header clicked twice
+/// REVERSES, and the earlier click survives as a tie-breaker — the reference's seven-slot chain
+/// (`SortWho 0x5ad890`, decision 2030).
+///
+/// What makes this the *window's* test rather than the chain's: every assertion reads the painted
+/// row straight after `Click()`, with **no feed tick in between**. That can only pass if
+/// `WHO_LIST_UPDATE` fires synchronously from inside the binding, the way `SignalEvent` does — the
+/// half of the bug the director could see, since our old sort redrew a tick later and only ever
+/// ascended.
+#[test]
+fn the_who_headers_sort_and_a_repeated_click_reverses() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = setup();
+    s.run("ShowWhoPanel()").unwrap();
+    push(
+        &mut s,
+        SocialState {
+            who: vec![
+                who("Galas", 60, "Warrior", "Elwynn Forest"),
+                who("Erdrin", 12, "Mage", "Elwynn Forest"),
+            ],
+            who_total: 2,
+            ..Default::default()
+        },
+        "WHO_LIST_UPDATE",
+    );
+    let _ = s.take_social_requests();
+    assert_eq!(who_name(&s, 1), "Galas", "the server's order, unsorted");
+
+    // Header 1 is Name (`FriendsFrame.xml:1313`).
+    s.run("WhoFrameColumnHeader1:Click()").unwrap();
+    assert_eq!(who_name(&s, 1), "Erdrin", "Name, ascending");
+    assert_eq!(
+        s.take_social_requests(),
+        vec![SocialRequest::SortWho("name".to_string())],
+        "and the app hears the click too"
+    );
+
+    s.run("WhoFrameColumnHeader1:Click()").unwrap();
+    assert_eq!(who_name(&s, 1), "Galas", "the same header again reverses");
+
+    // Header 3 is Level (`:1394`) — ascending puts the level 12 first.
+    s.run("WhoFrameColumnHeader3:Click()").unwrap();
+    assert_eq!(who_name(&s, 1), "Erdrin", "Level, ascending");
+    s.run("WhoFrameColumnHeader3:Click()").unwrap();
+    assert_eq!(who_name(&s, 1), "Galas", "and Level reverses too");
+
+    // Back to Name: promoted from behind, it keeps the descending direction it was left in
+    // rather than flipping — the chain's memory, not a per-click toggle.
+    s.run("WhoFrameColumnHeader1:Click()").unwrap();
+    assert_eq!(who_name(&s, 1), "Galas", "Name, still descending");
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
 /// The who buttons need a selected row, and selecting one enables both. A fresh answer clears

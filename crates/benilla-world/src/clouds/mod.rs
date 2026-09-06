@@ -78,7 +78,13 @@ impl Plugin for CloudsPlugin {
                     // After the submersion verdict: the surfacing edge (wet→dry) must fire the
                     // full rebuild the SAME frame the dome un-hides, or the first visible frame
                     // still shows the submerged-era tile.
-                    tick_clouds.after(crate::liquid::SubmersionVerdict),
+                    // …and on the READ side of the lighting resolve: the surfacing rebuild
+                    // below takes its density and palette from `WowLighting`, so an unordered
+                    // tick rebuilds the field from the atmosphere we just LEFT — the underwater
+                    // one, whose cloud density is 0.0 in Stranglethorn (B354, decision 2032).
+                    tick_clouds
+                        .after(crate::liquid::SubmersionVerdict)
+                        .in_set(crate::lighting::LightingConsumeSet),
                     // After the resolve: the dome and the painted skybox must agree WITHIN a frame,
                     // or one frame draws both (the ordering `crate::sky`'s gate already takes) —
                     // and after the submersion verdict, for the same one-frame-agreement reason.

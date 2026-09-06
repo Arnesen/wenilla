@@ -474,19 +474,22 @@
             OptionsFrame:SetScale(k)
         end
 
-        -- The era tab width law (MinimalTab.lua l.7): label width + 40. Era measures at OnLoad;
-        -- our measure round-trip answers a frame late, so OnUpdate polls until the width is real
-        -- (the chat-header converge idiom), then latches. Deliberate divergence: the era
-        -- measures with the MEDIUM font it is about to swap away (an accident of its code
-        -- order, ~6 units of extra padding); we measure the small font the label actually
-        -- wears.
+        -- The era tab width law (MinimalTab.lua l.7): label width + 40, measured ONCE per show —
+        -- the 1.12 CharacterFrameTabButtonTemplate's own seat (its <OnShow> calls
+        -- PanelTemplates_TabResize; decision 1993), and it has to be a show rather than the era's
+        -- OnLoad for a reason that outlives the measure: GetStringWidth answers in the REGION'S
+        -- OWN units, so its number depends on the owner's effective scale (glyph advances snap to
+        -- whole physical pixels, so the same label is not proportionally the same width at two
+        -- scales) — and this window's scale is set by OptionsFrame_UpdateScale in its own <OnShow>,
+        -- after every OnLoad has already run. Fired from the tabs' <OnShow>, which the engine
+        -- runs pre-order behind the window's own, the scale is the drawn one. No poll and no latch:
+        -- the engine's font measurer answers inside the Lua call that asked (benilla-ui
+        -- script/measure.rs), and a re-show re-fits at whatever scale the window then wears.
+        -- Deliberate divergence: the era measures with the MEDIUM font it is about to swap away
+        -- (an accident of its code order, ~6 units of extra padding); we measure the small font
+        -- the label actually wears.
         function OptionsTab_FitWidth(tab)
-            if tab.fitted then return end
-            local w = getglobal(tab:GetName() .. "Text"):GetStringWidth()
-            if w and w > 0 then
-                tab:SetWidth(w + 40)
-                tab.fitted = true
-            end
+            tab:SetWidth(getglobal(tab:GetName() .. "Text"):GetStringWidth() + 40)
         end
 
         -- Each row's OnLoad: remember the key + title, paint the label, size the wash plate —
@@ -686,9 +689,10 @@
             return bottom
         end
 
-        -- Size the body to that, from the scroll frame's OnUpdate. Frame-late by nature (rects
-        -- resolve after Lua runs, so a reflow answers a frame later — the OptionsTab_FitWidth
-        -- idiom), and write-gated: SetWidth/SetHeight invalidate layout, so an every-frame write
+        -- Size the body to that, from the scroll frame's OnUpdate. Frame-late by nature, and for
+        -- a reason that has nothing to do with the text measure: RECTS resolve after Lua runs, so
+        -- a pass that reads GetHeight() to reflow answers off the previous resolve however it is
+        -- driven. Write-gated: SetWidth/SetHeight invalidate layout, so an every-frame write
         -- would fight the resolver. UpdateScrollChildRect re-drives the bar through
         -- OnScrollRangeChanged, which is what shows and hides it (and its trough).
         function OptionsScroll_Fit()
@@ -2098,15 +2102,14 @@
                  Tab1 BOTTOMLEFT → Categories TOPLEFT (6,-3)) — the file-folder read, no dead
                  band above (0981; 0978 floated them at the era's TOPLEFT (32,-27) over a
                  24-unit bare strip, the director's gap report). Era width/text law kept
-                 (width text+40, selected white small text at BOTTOM+6 vs gold at BOTTOM+4),
+                 (width text+40 measured once per show, selected white small text at BOTTOM+6
+                 vs gold at BOTTOM+4),
                  authored STATIC: Game is the only tab with anything behind it, so it wears
                  the selected state permanently and AddOns the unselected one (still dead to
                  clicks; the mixin port comes with an addon list). The PLATE is the 0978
                  mapping, kept: one UI-Character-{Active,InActive}Tab piece, bottom-anchored
                  at the era plate height (26/23), flipped vertically via TexCoords (1.12 only
-                 ships bottom-tab plates; the flip turns them top-tab). The era's width law is
-                 text + 40, measured at OnLoad — our measure round-trip answers a frame late,
-                 so OnUpdate polls until the width is real, the chat-header idiom. -->
+                 ships bottom-tab plates; the flip turns them top-tab). -->
             <Button name="$parentGameTab">
                 <Size><AbsDimension x="72" y="37"/></Size>
                 <Anchors>
@@ -2131,7 +2134,7 @@
                 <HighlightFont inherits="GameFontHighlightSmall"/>
                 <DisabledFont inherits="GameFontHighlightSmall"/>
                 <Scripts>
-                    <OnUpdate>OptionsTab_FitWidth(this)</OnUpdate>
+                    <OnShow>OptionsTab_FitWidth(self)</OnShow>
                 </Scripts>
             </Button>
             <Button name="$parentAddOnsTab">
@@ -2161,7 +2164,7 @@
                      GOLD (not disabled grey) — the director's capture is the call. -->
                 <Scripts>
                     <OnLoad>self:Disable()</OnLoad>
-                    <OnUpdate>OptionsTab_FitWidth(this)</OnUpdate>
+                    <OnShow>OptionsTab_FitWidth(self)</OnShow>
                 </Scripts>
             </Button>
 

@@ -130,6 +130,18 @@ pub enum QuadContent {
         /// `ReplaceIconTexture`'s path — the type-14 texture override, or `None` for the file's
         /// own textures.
         icon: Option<String>,
+        /// The installed camera as a RAW index into the file's camera table, or `None` for the
+        /// NULL camera. **This is the render leg** (decision 2027): `None` is the orthographic
+        /// one — the model laid flat over the pane's rect — and `Some(n)` the perspective one,
+        /// framed by the file's own record `n`.
+        camera: Option<u32>,
+        /// The pane's embedded `CGLight`. Disabled on every shipped pane, which is why an
+        /// unlit-on-every-material UI M2 never notices; a LIT batch under a disabled light draws
+        /// black, and that is the reference's answer, not a gap.
+        light: crate::widget::ModelLight,
+        /// The pane's fog, only when armed — colour, near and far as the fill callback stages
+        /// them. Per-batch from there: a material with the UNFOGGED bit ignores it.
+        fog: Option<crate::widget::ModelFog>,
     },
     /// A `Texture` region: a BLP path *or* a solid/vertex color (or both — a tinted texture).
     Texture {

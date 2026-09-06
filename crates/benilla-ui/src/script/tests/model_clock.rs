@@ -28,6 +28,7 @@ fn facts(rows: &[(u16, u32, bool)]) -> ModelFileFacts {
             })
             .collect(),
         bbox: ([0.0; 3], [0.0; 3]),
+        cameras: 0,
     }
 }
 
@@ -46,7 +47,7 @@ fn ping_facts() -> ModelFileFacts {
 }
 
 /// The pane's scene state, read through the arena (1.12 has no getter for any of it).
-fn pane(s: &UiScript, name: &str) -> ModelState {
+pub(super) fn pane(s: &UiScript, name: &str) -> ModelState {
     let model = s.lua().app_data_ref::<Model>().expect("model");
     let fh = model.arena.lookup(name).expect("pane frame");
     match &model.arena.frame(fh).expect("live frame").kind_state {
@@ -427,6 +428,7 @@ fn a_size_less_pane_takes_its_files_rect_in_layout_units() {
                     looping: true,
                 }],
                 bbox: ([-0.0127, -0.0118, 0.0], [0.0135, 0.0145, 0.0]),
+                cameras: 0,
             },
         );
     };

@@ -40,16 +40,42 @@
 //!   docked windows share one level. It joins the file the day a window can be raised for good —
 //!   the honest-tree rule (1134 §4), the same one the chat-look file applies next door.
 //!
-//! ## The write posture — [`crate::ui_chat`]'s `settings`, verbatim
+//! ## The write posture — the reference's shutdown tail, plus a debounce it has not got
 //!
-//! Dirty flag keyed to the VM ([`VmMemo`]), one quiet second, plus both session edges
-//! (`OnExit(InWorld)` and `AppExit`). The VM key is the load-bearing part and it is one-way: the
-//! geometry lives in the VM, so a plain `bool` surviving a VM replacement would let a save compose
-//! the player's file out of a fresh tree that has no user-placed frame in it at all — i.e. wipe it.
-//! A fresh VM starts undirty and cannot write until a drag writes.
+//! **The reference writes this file in exactly one place**: step three of the UI shutdown's
+//! ordered tail `0x490bd0` — `PLAYER_LEAVING_WORLD` → `PLAYER_LOGOUT` (`0x490c2a`) →
+//! **`layout-cache.txt` (`0x490c79`)** → the flat saved file (`0x490c7e`) → the per-addon files →
+//! `AddOns.txt` → the frame teardown. It rides the same five lifecycle roots as SavedVariables —
+//! logout to the character screen, quit, disconnect, application exit and **`/reload`** — and
+//! there is no autosave, no dirty bit and no per-frame write (wow-5875-re `system/ui/ui.md`;
+//! `scratch/camera-settings-persistence.md` §4).
 //!
-//! A drag is a slider-shaped gesture, so the debounce matters for the same reason it does there:
-//! a resize writes on every mouse-move, and the quiet second coalesces the lot into one file write.
+//! Ours takes that slot: [`save_now`], called from [`crate::ui_script::shutdown_ui_state`]
+//! between `PLAYER_LOGOUT` and the flat file. **That is the load-bearing part, and it is what
+//! B353 was.** The tail is ONE function called from every root, which is the only way a
+//! `/reload` gets a write at all: a reload never leaves `InWorld` — `run_pending_reload` calls
+//! the shutdown and the rebuild back to back — so a saver hung off `OnExit(InWorld)` is invisible
+//! to it, and an unlocked chat window came back on its authored anchors after every `/reload`
+//! with `benilla-config/layout/` never created. The same edge is *also* not an ordering: two
+//! unconstrained systems on one state edge are placed by the executor, and measured here (bevy
+//! 0.18, five systems on one `OnExit`) the placement moves with nothing but the registration
+//! positions — a saver that needs the dying VM ran *after* the exclusive session-ender in one
+//! arrangement and before it in another. So this module's `OnExit` saver was reading a VM it was
+//! racing for. The tail cannot race: it runs inside `end_ui_session`, ahead of the replacement,
+//! by construction. That is the mistake [`crate::ui_script::shutdown_ui_state`]'s own doc says
+//! the tail exists to prevent, made once more one module over.
+//!
+//! **The one thing we keep that the reference has not got is a debounced autosave** —
+//! [`save_layout`], dirty flag keyed to the VM ([`VmMemo`]), one quiet second. The reference has
+//! no crash-path write either (its exception filter reaches no writer) and we would rather not
+//! lose a session's windows to one; a drag is a slider-shaped gesture, so the quiet second
+//! coalesces a resize's per-mouse-move writes into one. It is a *second* writer of the same
+//! file, never the only one: every orderly end goes through the tail.
+//!
+//! The VM key on the dirty flag is one-way and load-bearing: the geometry lives in the VM, so a
+//! plain `bool` surviving a VM replacement would let a save compose the player's file out of a
+//! fresh tree that has no user-placed frame in it at all — i.e. wipe it. A fresh VM starts
+//! undirty and cannot write until a drag writes.
 
 use std::path::PathBuf;
 
@@ -179,11 +205,15 @@ pub(crate) fn parse(text: &str) -> Vec<FrameLayout> {
 
 /// Seat the player's saved geometry into the VM, once per character per VM.
 ///
+/// `pub(crate)` so `ui_script::world_entry_tests` can run it against a real post-reload VM:
+/// the file half of the loop is only worth anything if a window actually comes BACK, and
+/// that is the half a test of `render`/`parse` alone cannot see.
+///
 /// Runs in `Update` under `InWorld`, which is *after* the UI tree is built and after decision
 /// 0272's load-time `UIParent_ManageFramePositions()` bootstrap — both of which matter: the frames
 /// have to exist to be looked up by name, and the managed pass has to have had its say first,
 /// because from here on it skips these frames (`IsUserPlaced`, `UIParent.xml`).
-fn load_layout(
+pub(crate) fn load_layout(
     script: Option<NonSendMut<UiScript>>,
     roster: Res<crate::char_select::Roster>,
     mut file: ResMut<LayoutFile>,
@@ -239,18 +269,15 @@ fn watch_layout(script: Option<NonSendMut<UiScript>>, mut file: ResMut<LayoutFil
     file.last_change = Some(std::time::Instant::now());
 }
 
-/// Dirty + one quiet second (or the app exiting) → rewrite the file atomically.
-fn save_layout(
-    script: Option<NonSendMut<UiScript>>,
-    mut file: ResMut<LayoutFile>,
-    mut exits: MessageReader<AppExit>,
-) {
-    let exiting = exits.read().next().is_some();
+/// Dirty + one quiet second → rewrite the file atomically. **The crash writer, and only that**
+/// (see the module doc): every orderly end — logout, disconnect, quit, `/reload` — is the
+/// shutdown tail's, so this never has to reason about an exit message or an edge.
+fn save_layout(script: Option<NonSendMut<UiScript>>, mut file: ResMut<LayoutFile>) {
     let Some(script) = script else { return };
     if !*file.dirty.get(&script) {
         return;
     }
-    if !(exiting || file.last_change.is_none_or(|t| t.elapsed() >= SAVE_QUIET)) {
+    if !file.last_change.is_none_or(|t| t.elapsed() >= SAVE_QUIET) {
         return;
     }
     let Some(path) = file.path.clone() else {
@@ -266,42 +293,54 @@ fn save_layout(
     *file.dirty.get(&script) = false;
 }
 
-/// `OnExit(InWorld)` — a `/logout` back to the glue, or a disconnect. The same edge the camera pose,
-/// the chat look and the saved variables flush on, and it must not wait for the quiet second.
-fn save_on_session_end(script: Option<NonSendMut<UiScript>>, mut file: ResMut<LayoutFile>) {
-    let Some(script) = script else { return };
-    if !*file.dirty.get(&script) {
-        return;
+/// **The reference's own step of the UI shutdown** (`0x490c79`, between `PLAYER_LOGOUT` and the
+/// flat saved file): write the player's layout cache from the live VM, now. Called from
+/// [`crate::ui_script::shutdown_ui_state`], so it reaches every root the tail does — logout,
+/// disconnect, quit and `/reload` — which is what an `OnExit(InWorld)` system could not (module
+/// doc, and B353).
+///
+/// It takes the **identity the tail is holding** rather than reading [`LayoutFile`], for the
+/// reason [`crate::ui_script::AddOnIdentity`] exists at all: that is the character the UI
+/// actually loaded under, remembered because the roster's pick can be gone by the time the
+/// shutdown runs. It is the same `(realm, character)` [`load_layout`] built its path from —
+/// both are [`crate::ui_macro::identity`] of the same roster — so the tail writes back to the
+/// file the load read.
+///
+/// Unconditional, like every other resident of the tail: the file is composed whole from the
+/// live tree, so a session that placed nothing writes back what it restored, and a session that
+/// un-placed a window writes the row's absence. The one guard is the tail's own — a session
+/// whose in-game UI never loaded does not run it, so a UI-less VM cannot answer with its
+/// emptiness.
+pub(crate) fn save_now(script: &UiScript, identity: Option<&(String, String)>) {
+    let Some((realm, character)) = identity else {
+        return; // no character loaded under — a capture, a scenario, a test world
+    };
+    let Some(path) = crate::local_state::layout_character_path(realm, character) else {
+        return; // hermetic capture, or no state folder — session-only
+    };
+    let body = render(&script.user_placed_layouts());
+    if let Err(e) = crate::local_state::write_atomic(&path, &body) {
+        warn!("layout: cannot write {}: {e}", path.display());
     }
-    if let Some(path) = file.path.clone() {
-        let body = render(&script.user_placed_layouts());
-        if let Err(e) = crate::local_state::write_atomic(&path, &body) {
-            warn!("layout: cannot write {}: {e}", path.display());
-        }
-    }
-    *file.dirty.get(&script) = false;
 }
 
-/// The layout cache's plugin — the chat look's shape one store over.
+/// The layout cache's plugin. **Not the chat look's shape any more** (2029): that module keeps
+/// its own session edge because its reference is the type-7 chat-cache saver `0x499a80`;
+/// this file's reference is `0x490bd0`'s ordered tail, so its every orderly write lives in
+/// [`save_now`] and the plugin has no edge left to own.
 pub(crate) struct UiLayoutPlugin;
 
 impl Plugin for UiLayoutPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<LayoutFile>()
-            .add_systems(
-                Update,
-                (load_layout, watch_layout)
-                    .chain()
-                    .run_if(in_state(crate::char_select::ClientState::InWorld)),
-            )
-            .add_systems(
-                OnExit(crate::char_select::ClientState::InWorld),
-                save_on_session_end,
-            );
-        // The quit flush rides the exit edge rather than `Update` for decision 1528's reason: the
-        // close button's `AppExit` is not written until `PostUpdate`, so a save chained beside the
-        // watcher would lose the last second of a drag to the process ending.
-        crate::shutdown::on_app_exit(app, save_layout.into_configs());
+        // **One chain, and no session edges of its own.** Restore, watch, and the crash-only
+        // debounce; every orderly end is [`crate::ui_script::shutdown_ui_state`]'s [`save_now`],
+        // which is the reference's own single write site and the only one a `/reload` reaches.
+        app.init_resource::<LayoutFile>().add_systems(
+            Update,
+            (load_layout, watch_layout, save_layout)
+                .chain()
+                .run_if(in_state(crate::char_select::ClientState::InWorld)),
+        );
     }
 }
 

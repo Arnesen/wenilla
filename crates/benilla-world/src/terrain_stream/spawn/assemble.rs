@@ -617,9 +617,15 @@ pub fn spawn_model_entities(
         // (`mesh_tag::probe_bits` — bits 16-29 since the 0355 re-lane): this site kept the old
         // bits-0..=15 write through that re-lane, so every static interior prop read probe slot 0,
         // taking whichever probe won the streaming race — the director's inn-doodad regression.
-        let mesh_tag = match interior_slot {
-            Some(slot) if interior_probe => MeshTag(crate::mesh_tag::probe_bits(slot)),
-            _ => MeshTag(alpha_bits(1.0)),
+        // ONE decision for "does this batch's payload carry a probe slot", read twice below —
+        // once for the tag's bits and once for the component that SAYS so
+        // ([`crate::mesh_tag::InteriorProbePayload`]). Two independent predicates could drift,
+        // and a reader that disagrees with the writer about which payload a part is on is
+        // exactly B373.
+        let probe_slot = interior_slot.filter(|_| interior_probe);
+        let mesh_tag = match probe_slot {
+            Some(slot) => MeshTag(crate::mesh_tag::probe_bits(slot)),
+            None => MeshTag(alpha_bits(1.0)),
         };
         // A billboard batch (glow card / chain) faces the camera each frame, so its transform is owned
         // by the billboard system. It still distance-fades with its doodad (same `radius` band) — the
@@ -728,6 +734,16 @@ pub fn spawn_model_entities(
             (entity, local_center)
         };
         by_batch[batch_idx] = Some(entity);
+        // This batch's payload is a PROBE SLOT, said as a component so the exterior-payload
+        // writer can see it (`mesh_tag::InteriorProbePayload`). Cards included, for the same
+        // reason they carry the slot at all: they are batches of the same model, shaded through
+        // the same light node (0778) — and `entity_shade`'s card pass reaches a card by walking
+        // UP from its owner, a route its descendant-walk guard never covers.
+        if probe_slot.is_some() {
+            commands
+                .entity(entity)
+                .insert(crate::mesh_tag::InteriorProbePayload);
+        }
         // Animated material alpha (decision 0130 phase 2): the rare batch whose colour-alpha/weight
         // tracks animate (fire flicker) or constantly dim gets its per-instance sampler; the
         // visibility authority composes the value into the render-alpha tag + the A ≤ 0 cull.

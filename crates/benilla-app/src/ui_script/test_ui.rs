@@ -51,6 +51,7 @@ pub(super) fn cooldown_facts(s: &mut UiScript) {
         ModelFileFacts {
             sequences: vec![seq(0, 1000), seq(1, 1000)],
             bbox: ([0.0; 3], [0.0; 3]),
+            cameras: 0,
         },
     );
 }

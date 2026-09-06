@@ -1073,8 +1073,10 @@ pub(super) fn seed_ui_fixture(
             };
             // The dropdown list open (0992, re-seated onto Camera Following Style by 1649), same
             // posture as the page fixtures: real CVar set, the live open-select-toggle path. The
-            // list's width settles from its OnUpdate a frame later (the kit's WIDTH SETTLE law) —
-            // inside the capture's settle frames.
+            // list's width lands inside the click that opens it — the stock kit's
+            // `UIDropDownMenu_Refresh` sizes every button from `normalText:GetWidth() + 60`
+            // (`UIDropDownMenu.lua` l.395-422) and the engine's measurer answers that getter in
+            // the call that asked, so there is no settle to wait out.
             script.register_cvars(crate::cvars::registered_pairs());
             if let Err(e) = script.run(
                 "ShowUIPanel(OptionsFrame); OptionsFrameCategoryListRowControls:Click(); \

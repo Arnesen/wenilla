@@ -683,8 +683,11 @@ fn cell(model: &Model, rh: crate::widget::RegionHandle) -> Cell {
 /// for each live GameTooltip, frame size = max measured line width (a double line is
 /// left + gap + right) + 2·pad, floored by `SetMinimumWidth`, × summed line heights + gaps; each
 /// visible right column's anchor re-points so its right edge sits at the text inset. Skips
-/// frames whose lines haven't been measured yet (the XML default size holds until the measure
-/// round-trip lands, one frame later — the same convergence the Lua loop had).
+/// frames whose lines haven't been measured yet — the XML default size holds until the extents
+/// land. With a [`TextMeasure`](super::TextMeasure) installed that is the SAME `resolve`
+/// (`resolve` solves, fills the pending measures inline, and solves again, so this pre-pass runs
+/// a second time with real extents); without one it is the host's batch round-trip, one frame
+/// later, which is the engine-less path every measurer-free VM still takes.
 pub(super) fn layout_tooltips(model: &mut Model) {
     // The arena's tooltip registry, not the resolve's whole frame roster: this pre-pass runs at
     // the top of EVERY resolve, and finding two or three tooltips by scanning ~4000 ids was most
@@ -715,8 +718,9 @@ pub(super) fn layout_tooltips(model: &mut Model) {
         // already the wrapped one; no second round-trip.)
         // Per-line metrics next (one read pass), then the size + right-flush writes. Only
         // measured cells contribute — a row with no measured cell adds no height and no gap, and
-        // a tooltip with nothing measured yet is skipped whole (its declared size holds until
-        // the measure round-trip lands, one frame later).
+        // a tooltip with nothing measured yet is skipped whole (its declared size holds until the
+        // extents land — this resolve's own `fill_measures` with a measurer installed, the host's
+        // batch round-trip a frame later without one).
         let n = num.min(lefts.len()).min(rights.len());
         let rows: Vec<(Cell, Cell)> = (0..n)
             .map(|i| (cell(model, lefts[i]), cell(model, rights[i])))

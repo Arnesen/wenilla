@@ -948,7 +948,19 @@ impl Plugin for FfxGlowPlugin {
                 ExtractResourcePlugin::<FfxHazeMix>::default(),
                 ExtractResourcePlugin::<FfxWave>::default(),
             ))
-            .add_systems(Update, (sync_gain, sync_haze, sync_wave, ensure_ffx_glow));
+            .add_systems(
+                Update,
+                (
+                    // The gain is the zone's `LightParams.glow`, so the sync is on the resolve's
+                    // read side; the haze floor and the wave's arm are the camera-eye submersion
+                    // verdict, so they are after the slot that writes it. Unordered, both flipped
+                    // a frame late — the underwater blur and warp outlived the surfacing frame
+                    // they belong to, exactly like the sky dome's stops (decision 2032).
+                    sync_gain.in_set(crate::lighting::LightingConsumeSet),
+                    (sync_haze, sync_wave).after(crate::liquid::SubmersionVerdict),
+                    ensure_ffx_glow,
+                ),
+            );
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };

@@ -417,16 +417,28 @@ pub struct ModelState {
     pub facing: f32,
     /// `SetModelScale` — the model's own scale within the pane, default 1.
     pub scale: f32,
-    /// `SetCamera(index)` — which of the model's baked camera setups to view it through.
-    pub camera: i32,
+    /// The **pending** camera index (`CSimpleModel+0x320`) — `Some(n)` while the camera question
+    /// is open, `None` once it is settled. The ctor writes `Some(0)`, a standing request for raw
+    /// camera 0, which the model-ready hook applies ([`ModelState::seed_from_facts`]); `SetCamera`
+    /// with no facts yet defers into it (`0x76cec0`'s two early legs). **While it is `Some`, the
+    /// pane draws nothing at all** — the reference's draw gate is
+    /// `76d5f0 cmp [this+0x320],-1 ; jne <skip everything>` (decision 2027).
+    pub camera_pending: Option<i32>,
+    /// The **installed** camera (`+0x31c`) as a RAW index into the file's camera table, or `None`
+    /// for the NULL camera — which is what an index past the table's count installs (`76cf08`)
+    /// and what a file with no cameras always gets. `None` is the **orthographic** render leg;
+    /// `Some(n)` is the perspective one, framed by the file's own record `n`.
+    ///
+    /// Raw is the whole point: `0x76cec0` reads the count off `MD20+0x124` and the record at
+    /// `[model+0x3c4] + idx·0x84 + 0x80`, and **never consults `cameraLookup`** — that array is
+    /// the portrait bake's path (wow-re `modelframe-camera-law.md` §2.1).
+    pub camera: Option<u32>,
     /// `SetPosition(x, y, z)` — the model's offset within the pane's scene.
     pub position: (f32, f32, f32),
-    /// `SetLight(...)` — the scene's light, stored verbatim as the 14-number tuple the binding
-    /// takes (`enabled, omni, dirX, dirY, dirZ, ambIntensity, ambR, ambG, ambB, dirIntensity,
-    /// dirR, dirG, dirB` plus the leading `enabled`). Opaque here on purpose: the engine core has
-    /// no lighting model, and inventing a typed one would be asserting a scene semantics we have
-    /// not verified.
-    pub light: Option<Vec<f32>>,
+    /// The pane's embedded `CGLight` (`CSimpleModel+0x324`) — see [`ModelLight`]. Typed since
+    /// decision 2027: the render law (§5.1–§5.3) carves every field, its consumer and both of
+    /// `SetLight`'s traps, so the tuple no longer has to be stored opaquely.
+    pub light: ModelLight,
     /// `SetFogColor(r, g, b, a)` as the reference stores it: **one packed `0xAARRGGBB` dword**,
     /// which is why its getter is four values wide and why a Set→Get round trip is **lossy** —
     /// eight bits per channel (decision 1845).
@@ -435,10 +447,90 @@ pub struct ModelState {
     /// not four zeros. It used to be `Option<(f32, f32, f32)>` here: three components, no alpha,
     /// and `None` for unset — every one of those three wrong.
     ///
-    /// The client's fog surface is seven verbs, not two: this pair plus
-    /// `SetFogNear`/`GetFogNear`/`SetFogFar`/`GetFogFar`/`ClearFog`, which the struct doc names as
-    /// unbuilt.
+    /// All seven fog verbs are built as of decision 2027 — this pair plus
+    /// `SetFogNear`/`GetFogNear`/`SetFogFar`/`GetFogFar`/`ClearFog` — because the render law
+    /// (§5.4) carves every one of their bodies.
     pub fog_color: u32,
+    /// `+0x3a4` **bit 0** — fog armed. Set by `SetFogColor` (`76f059 or [edi+0x3a4],1`) and by the
+    /// XML `<FogColor>` child; cleared by `ClearFog` (`76f5c5 and [edi+0x3a4],-2` — **bit 0 only**,
+    /// so the colour, near and far all survive a clear and come back on the next `SetFogColor`).
+    /// The ctor leaves it off.
+    pub fog: bool,
+    /// `+0x3ac` — fog near, raw and unclamped from `SetFogNear` (`76f282 fstp`), clamped at `≥ 0`
+    /// only on the XML `fogNear` attribute path (`76cbbb`). Ctor `0.0`.
+    pub fog_near: f32,
+    /// `+0x3b0` — fog far, same shape as [`Self::fog_near`] (`76f432`, XML `fogFar` at `76cbf3`).
+    /// **Ctor `1.0`**, not `0.0`: the fill callback stages `1/(far − near)` and the batch fogs
+    /// only when that is `> 0`, so the ctor's pair is already a valid (if tiny) ramp.
+    pub fog_far: f32,
+}
+
+/// A model pane's **armed** fog — [`ModelState::armed_fog`]'s answer, and the whole of what the
+/// renderer needs: the disarmed values are engine state that nothing draws.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModelFog {
+    /// The packed `0xAARRGGBB` colour (`+0x3a8`). The alpha byte exists and is **never read** by
+    /// the fill callback (`0x76d680` takes bytes 2,1,0 only).
+    pub color: u32,
+    /// `+0x3ac` / `+0x3b0`, raw. The fill stages `1/(far − near)` and a batch fogs only when that
+    /// is `> 0`, so a `far <= near` pair arms the flag and still draws unfogged.
+    pub near: f32,
+    pub far: f32,
+}
+
+impl ModelFog {
+    /// The colour as linear `[r, g, b]` in `0..=1` — the fill callback's own unpack
+    /// (`0x7bbf20` -> bytes 2,1,0 × 1/255).
+    pub fn rgb(&self) -> [f32; 3] {
+        [16, 8, 0].map(|shift| ((self.color >> shift) & 0xff) as f32 / 255.0)
+    }
+}
+
+/// A model pane's embedded **`CGLight`** — the 0x6c-byte object at `CSimpleModel+0x324` that the
+/// per-paint fill callback `0x76d680` adds to the model's light collector, and the only light a
+/// `<Model>` widget has (wow-re `modelframe-render-law.md` §5.1/§5.2).
+///
+/// **A plain `<Model>`'s is DISABLED and stays that way unless Lua enables it.** The ctor
+/// `0x76c8e0` leaves `+0x60 = 0`, so `0x71bf90` returns before adding anything and the collector
+/// finalizes with zero ambient and zero diffuse — under which a LIT batch draws **black**. That
+/// is harmless by asset design (every in-game UI M2 is UNLIT on every material, §5.7) and it is
+/// the faithful answer for an addon's lit one. `<PlayerModel>`'s ctor `0x505680` enables its own
+/// instead, which is why the paper doll is lit; those panes are the portrait booth's, not this
+/// widget's.
+///
+/// Each colour is stored **already multiplied by its intensity** — `SetLight` folds
+/// `rgb/255 × intensity` before the copy — which is why there is no separate intensity field.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModelLight {
+    /// `CGLight+0x60` — enabled. `SetLight`'s first argument writes it, and **only when nonzero**:
+    /// `SetLight(0, …)` returns at `76e2cb` without touching the widget at all, so it is not a
+    /// way to turn a light off (§5.3 trap 1).
+    pub enabled: bool,
+    /// `+0x08` — type. `true` = point/omni (`1`, what both ctors write), `false` = directional.
+    /// Chooses which of the two vector setters `SetLight`'s `(x, y, z)` reaches.
+    pub omni: bool,
+    /// `+0x0c` position (when [`Self::omni`]) or `+0x24` direction (when not) — the direction is
+    /// **normalised on write** by `0x71b6a0`, and is a *from-light* vector.
+    pub vector: [f32; 3],
+    /// `+0x30` ambient, intensity already folded in.
+    pub ambient: [f32; 3],
+    /// `+0x3c` diffuse, intensity already folded in.
+    pub diffuse: [f32; 3],
+}
+
+/// The `<Model>` ctor's light (`0x76c8e0`): `0x71b4a0` (type 1, everything else zero), then
+/// enabled `0` at `76c99c`, type `1` at `76c9a5`, ambient `(1,1,1)` at `76c9b4`–`76c9d3` and
+/// diffuse `(1,1,1)` at `76c9d6`–`76c9ff`. White, and switched off.
+impl Default for ModelLight {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            omni: true,
+            vector: [0.0; 3],
+            ambient: [1.0; 3],
+            diffuse: [1.0; 3],
+        }
+    }
 }
 
 /// A fresh `Model` pane: no content, sequence 0, unrotated, unit scale, camera 0, at the origin.
@@ -459,10 +551,14 @@ impl Default for ModelState {
             implicit_size: false,
             facing: 0.0,
             scale: 1.0,
-            camera: 0,
+            camera_pending: Some(0),
+            camera: None,
             position: (0.0, 0.0, 0.0),
-            light: None,
+            light: ModelLight::default(),
             fog_color: 0xffff_ffff,
+            fog: false,
+            fog_near: 0.0,
+            fog_far: 1.0,
         }
     }
 }
@@ -527,6 +623,11 @@ pub struct ModelFileFacts {
     /// The header bounding box, raw WoW model space (`min`, `max`) — the implicit rect of a
     /// size-less `<Model>` (render law §3) and the arrow's re-centring.
     pub bbox: ([f32; 3], [f32; 3]),
+    /// How many records the file's **camera table** holds (`MD20+0x124`) — the bound
+    /// `Model:SetCamera(n)` is checked against (`0x76cec0`: `76ceeb if idx >= count -> install
+    /// NULL`). `0` for the overwhelming majority of models, which is why a plain `<Model>` almost
+    /// always ends on the orthographic leg. Decision 2027.
+    pub cameras: u32,
 }
 
 impl ModelFileFacts {
@@ -549,6 +650,13 @@ impl ModelFileFacts {
     pub fn extent(&self) -> (f32, f32) {
         let (min, max) = self.bbox;
         ((max[0] - min[0]).max(0.0), (max[1] - min[1]).max(0.0))
+    }
+
+    /// Which camera raw index `idx` installs: `Some(idx)` when the table has it, `None` — the
+    /// **NULL** camera, i.e. the orthographic leg — when it does not. Negative indices land in the
+    /// same place the reference's unsigned `jae` puts them.
+    pub fn camera_at(&self, idx: i32) -> Option<u32> {
+        u32::try_from(idx).ok().filter(|&i| i < self.cameras)
     }
 
     /// The loader's idle seed (`0x70ebd0`'s tail, `0x710153`–`0x71019b`): **id 0 (`Stand`) if
@@ -646,6 +754,41 @@ impl ModelState {
             if !u16::try_from(armed.anim_id).is_ok_and(|id| facts.owns(id)) {
                 self.armed = None;
             }
+        }
+        // The model-ready hook's other half (`0x76ce00` `76ce3e`): apply the pending camera index
+        // if the question is still open. The ctor's standing `Some(0)` is what gives a plain
+        // `<Model>` its default camera 0, and it is applied here, once, exactly as the reference
+        // applies it on the asset-ready edge.
+        if let Some(idx) = self.camera_pending {
+            self.install_camera(idx, Some(facts));
+        }
+    }
+
+    /// The pane's fog, **only when it is armed** (`+0x3a4` bit 0) — the fill callback's own gate
+    /// (`76d68a test byte [esi+0x3a4],1 ; je`). A disarmed pane stages nothing, and its collector
+    /// keeps the zeroed `1/(far − near)` that the per-batch fog test refuses.
+    pub fn armed_fog(&self) -> Option<ModelFog> {
+        self.fog.then_some(ModelFog {
+            color: self.fog_color,
+            near: self.fog_near,
+            far: self.fog_far,
+        })
+    }
+
+    /// `0x76cec0` — select a camera by RAW table index. With no facts yet (the reference's "no
+    /// model" / "not ready" legs at `76cece`/`76cedb`) the index is **deferred** into
+    /// [`Self::camera_pending`] and nothing draws until it resolves; with facts, the index is
+    /// bounds-checked against the table's count and either installed or answered with the NULL
+    /// camera, and **either way the pending index is cleared** (`0x76ce80`'s
+    /// `76cead mov [esi+0x320],-1` — installing *any* camera, NULL included, settles the
+    /// question).
+    pub fn install_camera(&mut self, idx: i32, facts: Option<&ModelFileFacts>) {
+        match facts {
+            Some(f) => {
+                self.camera = f.camera_at(idx);
+                self.camera_pending = None;
+            }
+            None => self.camera_pending = Some(idx),
         }
     }
 

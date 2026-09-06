@@ -106,6 +106,40 @@ pub(crate) use surface::{
     spawn_liquids, spawn_wmo_liquids, LiquidAssets, LiquidSoundSource, LiquidSurface,
 };
 
+/// `WOW_FORCE_SUB=<frames>` — **hold the camera-eye verdict submerged for the first `<frames>`
+/// frames, then release it.** The surfacing crossing on demand, with no server, no swim and no
+/// water under the camera: everything that forks on the verdict (the atmosphere, the sky and
+/// cloud domes' gates, the drift cloud, the FFX haze and warp) takes the wet→dry edge on a frame
+/// this names, so a transition artefact can be photographed or logged deterministically inside
+/// the capture harness (`WOW_CAPTURE=<scenario>`).
+///
+/// Built for B354 (decision 2032), where the whole defect lived in the ONE frame after the edge
+/// and the reported spot was a dusk swim off the Savage Coast — a place a screenshot harness
+/// cannot get to and a bug a still frame cannot catch. It reproduced in `water-noon` in one
+/// command.
+fn forced_submersion_frames() -> u32 {
+    std::env::var("WOW_FORCE_SUB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+/// The [`forced_submersion_frames`] override, applied after the real probe so it overwrites a
+/// genuine verdict rather than racing it. Prints the release frame, which is the frame every
+/// crossing artefact is read against. Registered only when the env names a hold.
+fn force_submersion(mut underwater: ResMut<Underwater>, mut frame: Local<u32>) {
+    let hold = forced_submersion_frames();
+    *frame += 1;
+    if *frame <= hold {
+        underwater.0 = benilla_formats::Submersion::Water;
+    } else if *frame == hold + 1 {
+        info!(
+            "WOW_FORCE_SUB: frame {} — eye verdict released to Dry",
+            *frame
+        );
+    }
+}
+
 /// The frame slot where [`Underwater`] is written — the label every consumer of the submersion
 /// verdict orders itself `.after(..)`. The submerged view is a whole-screen swap (atmosphere, clear
 /// colour, and the sky-pass suppression all flip on it), so a consumer reading a frame-old verdict
@@ -161,6 +195,17 @@ impl Plugin for LiquidPlugin {
                     .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate)
                     .run_if(|| std::env::var_os("WOW_NO_LIQUID").is_some()),
             );
+        // The scripted surfacing crossing (see [`force_submersion`]) — the node is only added
+        // when the env asks for it, so an ordinary run carries neither the system nor a per-frame
+        // run condition that would re-read the environment to say "no" 60 times a second.
+        if forced_submersion_frames() > 0 {
+            app.add_systems(
+                Update,
+                force_submersion
+                    .after(query::detect_submersion)
+                    .in_set(SubmersionVerdict),
+            );
+        }
         // The underwater drift cloud — the one thing in this subsystem that RENDERS because the
         // eye is submerged, rather than answering where the liquid is (see the layout note above).
         drift::register(app);

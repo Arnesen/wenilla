@@ -418,7 +418,11 @@ impl Plugin for InteriorPlugin {
             // placements it rays are the ones this frame's residency published.
             .add_systems(
                 Update,
-                classify_entity_interior.after(crate::wmo_portal::WmoPvsSet),
+                classify_entity_interior
+                    .after(crate::wmo_portal::WmoPvsSet)
+                    // The fold reads the resolved `WowLighting`, so it belongs on the resolve's
+                    // read side (`lighting::LightingConsumeSet`, decision 2032).
+                    .in_set(crate::lighting::LightingConsumeSet),
             )
             .add_observer(enqueue_on_fade_latch);
     }

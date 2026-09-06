@@ -587,7 +587,17 @@ pub(super) fn plugin(app: &mut App) {
         )
         .add_systems(
             OnExit(crate::char_select::ClientState::InWorld),
-            save_on_session_end,
+            // **Explicitly before the session ender, because the edge is not an ordering.** This
+            // flush composes the file out of the DYING VM, and `end_ui_session` replaces that VM
+            // with a fresh boot one on the same edge. Two unconstrained systems there are placed
+            // by the executor, and that placement was measured (bevy 0.18, five systems on one
+            // `OnExit`) to move with nothing but their registration positions — a VM-reading
+            // saver ran after the exclusive ender in one arrangement and before it in another.
+            // Winning that race by luck is what B353 cost the layout cache one module over; the
+            // layout cache answered it by joining the reference's shutdown tail, which this file
+            // cannot do (its reference is the type-7 chat-cache saver `0x499a80`, not
+            // `0x490bd0`'s tail), so it says the order instead.
+            save_on_session_end.before(crate::ui_script::end_ui_session),
         );
     // The quit flush rides the exit edge rather than `Update` for decision 1528's reason: the
     // close button's `AppExit` is not written until `PostUpdate`, so a save chained beside the

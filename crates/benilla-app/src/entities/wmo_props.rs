@@ -60,8 +60,9 @@ use benilla_world::lighting::{PropProbeSlot, PropProbes};
 use benilla_world::model_render::ShadeSel;
 use benilla_world::particles;
 use benilla_world::terrain_stream::{
-    build_collider_task, fold_interior_probe, m2_anim_bound, m2_fade, placement_collider_data,
-    point_light, spawn_model_entities, PendingCollider, PropLobeLight, SpawnedModel,
+    build_collider_task, fold_interior_probe, hex_word, m2_anim_bound, m2_fade,
+    placement_collider_data, point_light, spawn_model_entities, PendingCollider, PropLobeLight,
+    SpawnedModel,
 };
 
 use super::{GameObjects, ModelHandle, VisualAttached};
@@ -271,7 +272,23 @@ pub(super) fn spawn_wmo_gameobject_props(
                     .map(|p| p.path().to_string_lossy().into_owned())
                     .unwrap_or_default(),
                 id: 0,
-                detail: "WMO gameobject prop".into(),
+                // The prop's LANE, the way a terrain-placed prop's identity names it
+                // (`PropLight::inspector_label`): a prop that looks wrong is almost always on the
+                // wrong lane or reading the wrong probe, and neither is visible from the model
+                // path. This lane's props were the ones the entity shade writer renamed out from
+                // under (B373), and a hover said nothing at all.
+                detail: match (&prop.interior, interior_slot) {
+                    (Some(lane), Some(slot)) => format!(
+                        "WMO gameobject prop · interior amb {} dif {} · {} MOLR · probe slot {slot}",
+                        hex_word(lane.ambient),
+                        hex_word(lane.diffuse),
+                        lane.lights.len(),
+                    ),
+                    (Some(_), None) => {
+                        "WMO gameobject prop · interior, NO PROBE SLOT (table full — sky-lit)".into()
+                    }
+                    (None, _) => "WMO gameobject prop · sky-lit".into(),
+                },
             });
             let SpawnedModel {
                 entities: ents,

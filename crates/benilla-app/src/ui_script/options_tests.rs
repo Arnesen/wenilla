@@ -3964,3 +3964,114 @@ fn the_action_bars_page_toggles_the_real_bars() {
     assert_eq!(s.eval::<f64>("return CONTAINER_OFFSET_Y").unwrap(), 70.0);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+// ── The window tabs (decision 2028) ─────────────────────────────────────────────────────────────
+
+/// A measurer that models the one property `FixedWidthFont` throws away: **glyph advances step to
+/// whole physical pixels**, so a label is not proportionally the same width at two scales. Six
+/// units per character at the DRAWN raster size (`6 × scale`, rounded), divided back by the scale
+/// — the shape `ui_text::measurer` really has, small enough to predict by hand.
+struct SteppedFont(f32);
+
+impl benilla_ui::script::TextMeasure for SteppedFont {
+    fn measure(&mut self, req: &benilla_ui::script::MeasureRequest) -> (f32, f32, f32) {
+        let per_glyph = (self.0 * req.scale).round();
+        let natural = req.text.chars().count() as f32 * per_glyph / req.scale;
+        (natural, 12.0, natural)
+    }
+}
+
+/// **Both tabs fit their labels once per show** — the era's width law (`MinimalTab.lua` l.7:
+/// label + 40) on the 1.12 tab template's own seat (`<OnShow>` → `PanelTemplates_TabResize`,
+/// decision 1993), with no OnUpdate poll behind it and no `fitted` latch. The engine's measurer
+/// answers `GetStringWidth` inside the Lua call that asks it, so one call is the whole fit.
+///
+/// **The seat is a show and not the era's OnLoad, and that is what the numbers below pin.**
+/// `GetStringWidth` answers in the region's OWN units, so its number depends on the owner's
+/// effective scale — and this window's scale is set by `OptionsFrame_UpdateScale` in the window's
+/// own `<OnShow>`, after every `<OnLoad>` has already run. At OnLoad these tabs measure at scale 1
+/// (64 and 76 here); on the show, behind the window's own OnShow, they measure at the drawn 0.78.
+#[test]
+fn the_two_option_tabs_fit_their_labels_at_the_drawn_scale() {
+    let mut s = UiScript::new().unwrap();
+    s.set_text_measurer(Box::new(SteppedFont(6.0)));
+    let mut s = harness_on(s);
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.resolve();
+
+    let num = |s: &mut UiScript, expr: &str| -> f32 { s.eval(&format!("return {expr}")).unwrap() };
+    assert_eq!(
+        num(&mut s, "OptionsFrame:GetScale()"),
+        0.78,
+        "ERA_WINDOW_SCALE"
+    );
+
+    // The law, against each tab's own live measure.
+    for tab in ["OptionsFrameGameTab", "OptionsFrameAddOnsTab"] {
+        let w = num(&mut s, &format!("{tab}:GetWidth()"));
+        let l = num(&mut s, &format!("{tab}Text:GetStringWidth()"));
+        assert!(
+            (w - (l + 40.0)).abs() < 0.01,
+            "{tab} is {w} wide; the era's law is its label ({l}) + 40"
+        );
+    }
+    // …and the numbers themselves, which say WHEN it ran. At 0.78 a 6-unit glyph rasterizes at 5
+    // physical px and reads back 5/0.78 units, so "Game" (4) is 25.64 and "AddOns" (6) is 38.46.
+    // An OnLoad fit — before the window's OnShow set the scale — would have measured at 1 and left
+    // these at 64 and 76, which is 3.3 and 15.5 units off the drawn label.
+    let close = |a: f32, b: f32| (a - b).abs() < 0.01;
+    assert!(close(
+        num(&mut s, "OptionsFrameGameTab:GetWidth()"),
+        65.641_03
+    ));
+    assert!(close(
+        num(&mut s, "OptionsFrameAddOnsTab:GetWidth()"),
+        78.461_54
+    ));
+
+    // Nothing re-fits them afterwards: the same two numbers with four frames run, which is the
+    // value the retired OnUpdate settle used to converge to and latch.
+    for _ in 0..4 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    assert!(close(
+        num(&mut s, "OptionsFrameGameTab:GetWidth()"),
+        65.641_03
+    ));
+    assert!(close(
+        num(&mut s, "OptionsFrameAddOnsTab:GetWidth()"),
+        78.461_54
+    ));
+
+    // A re-show re-fits rather than latching — the stock template's own behaviour, and what lets
+    // a tab follow the window's scale when the screen changes under it.
+    s.run("HideUIPanel(OptionsFrame) ShowUIPanel(OptionsFrame)")
+        .unwrap();
+    s.resolve();
+    assert!(close(
+        num(&mut s, "OptionsFrameGameTab:GetWidth()"),
+        65.641_03
+    ));
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The falsifier: **with no measurer installed**, the same one-shot measures 0 and each tab comes
+/// out 40 wide — the law's padding and nothing else. That is the engine-less truth (`benilla-ui`
+/// `script/measure.rs`: absent is a supported state, metrics stay 0 until the host's batch
+/// round-trip fills them), and it is why the fit is a *shown* frame's job: by then the app has
+/// seated `AtlasMeasurer` for certain, whatever order the boot took.
+#[test]
+fn without_a_seated_measurer_the_same_fit_reads_zero() {
+    let mut s = harness_on(UiScript::new().unwrap());
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.resolve();
+    for tab in ["OptionsFrameGameTab", "OptionsFrameAddOnsTab"] {
+        let w: f32 = s.eval(&format!("return {tab}:GetWidth()")).unwrap();
+        assert!(
+            (w - 40.0).abs() < 0.01,
+            "{tab} is {w} wide, not the bare 40"
+        );
+    }
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

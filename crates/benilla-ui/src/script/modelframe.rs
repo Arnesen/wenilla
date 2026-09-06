@@ -94,7 +94,7 @@ use mlua::{Lua, MultiValue, Table, Value};
 
 use super::object::frame_handle_of;
 use super::Model;
-use crate::widget::{model_key, FrameHandle, KindState, ModelFileFacts, ModelState};
+use crate::widget::{model_key, FrameHandle, KindState, ModelFileFacts, ModelLight, ModelState};
 
 impl Model {
     /// FrameXML units per **layout unit** — `768 · √(a²+1)` for the screen's aspect `a`
@@ -232,6 +232,103 @@ fn int(v: &Value) -> i32 {
     num(v) as i32
 }
 
+/// `lua_isnumber` — a number, or a string that converts, and **nothing else**. Distinct from
+/// [`num`] on purpose: `SetLight` *raises* on a non-number where the coordinate setters coerce,
+/// so the two questions cannot share one helper.
+fn number(v: &Value) -> Option<f32> {
+    match v {
+        Value::Number(n) => Some(*n as f32),
+        Value::Integer(i) => Some(*i as f32),
+        Value::String(s) => s.to_str().ok().and_then(|t| t.trim().parse().ok()),
+        _ => None,
+    }
+}
+
+/// `[0x8029d4]` — the client's "is this float zero" epsilon, shared by `SetLight`'s intensity
+/// gate, `0x71b6a0`'s direction normalise and the paint's degenerate-rect test.
+const FLOAT_EPS: f32 = 2.384_185_8e-7;
+
+/// `Model:SetLight`'s usage string (`0x878c00`), which the binding raises verbatim.
+const SET_LIGHT_USAGE: &str = "Usage: Model:SetLight(enabled[, omni, dirX, dirY, dirZ, \
+     ambIntensity[, ambR, ambG, ambB], dirIntensity[, dirR, dirG, dirB]]";
+
+/// What [`parse_set_light`] decided.
+enum SetLight {
+    /// A non-number where the binding requires one — `luaL_error(SET_LIGHT_USAGE)`.
+    Raise,
+    /// **Trap 1.** `enabled == 0` returns at `76e2cb` *before* the local light is copied into the
+    /// widget, so the call writes nothing at all: it neither disables a light nor edits one.
+    NoOp,
+    /// The light to copy wholesale over the widget's (`76e777 0x76cf30`, `rep movsd 0x1b`).
+    Set(ModelLight),
+}
+
+/// `Model:SetLight` `0x76e1e0`'s argument walk (render law §5.3), over the arguments **after
+/// `self`** — so `a[0]` is the reference's Lua index 2.
+///
+/// The binding builds a **local** `CGLight` from `0x71b4a0` — type 1, every colour ZERO, which is
+/// not the widget ctor's white — fills it, and copies the whole thing over the widget's at the
+/// end. So an omitted colour block lands the *binding's* black, never the ctor's white.
+///
+/// **Trap 2** is the walking cursor: the ambient colour triple is read only when its intensity is
+/// nonzero **and** all three components are numbers; when either fails, the colour stays white
+/// and the cursor does *not* advance past it — so the second intensity is read at index 8 rather
+/// than 11, and `SetLight(1, 0, x, y, z, ambI, dirI)` is a legal seven-argument form.
+fn parse_set_light(a: &[Value]) -> SetLight {
+    let Some(enabled) = a.first().and_then(number) else {
+        return SetLight::Raise;
+    };
+    if enabled as i32 == 0 {
+        return SetLight::NoOp;
+    }
+    // Indices 3..=7 — omni, x, y, z, ambIntensity — are all mandatory once the light is enabled.
+    let mut head = [0.0f32; 5];
+    for (i, slot) in head.iter_mut().enumerate() {
+        match a.get(i + 1).and_then(number) {
+            Some(v) => *slot = v,
+            None => return SetLight::Raise,
+        }
+    }
+    let omni = head[0] as i32 != 0;
+    let mut vector = [head[1], head[2], head[3]];
+    if !omni {
+        // `0x71b6a0` normalises a DIRECTION on write (`71b6c5`-`71b705`); the position setter
+        // `0x71b650` stores raw.
+        let len = (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt();
+        if len > FLOAT_EPS {
+            vector = vector.map(|v| v / len);
+        }
+    }
+    // The colour blocks: each packed to 8 bits per channel and unpacked again (`0x76f900`), so a
+    // Set→Get round trip is lossy exactly the way `SetFogColor`'s is.
+    let quantize = |v: f32| ((v.clamp(0.0, 1.0) * 255.0).round()) / 255.0;
+    let block = |at: usize| -> Option<[f32; 3]> {
+        let c: Vec<f32> = (at..at + 3)
+            .filter_map(|k| a.get(k).and_then(number))
+            .collect();
+        (c.len() == 3).then(|| [quantize(c[0]), quantize(c[1]), quantize(c[2])])
+    };
+    let ambient_i = head[4];
+    let (ambient_rgb, next) = match block(6).filter(|_| ambient_i.abs() > FLOAT_EPS) {
+        Some(rgb) => (rgb, 9), // the cursor advanced: Lua index 11
+        None => ([1.0; 3], 6), // white, and the cursor stayed: Lua index 8
+    };
+    let mut light = ModelLight {
+        enabled: true,
+        omni,
+        vector,
+        ambient: ambient_rgb.map(|c| c * ambient_i),
+        diffuse: [0.0; 3],
+    };
+    if let Some(diffuse_i) = a.get(next).and_then(number) {
+        let rgb = block(next + 1)
+            .filter(|_| diffuse_i.abs() > FLOAT_EPS)
+            .unwrap_or([1.0; 3]);
+        light.diffuse = rgb.map(|c| c * diffuse_i);
+    }
+    SetLight::Set(light)
+}
+
 /// **Shape A's gate** (decision 1717's taxonomy, for a *string* position): the client's
 /// `lua_isstring` accepts tags 3|4 — a string **or a number** — and nothing else. A number is
 /// rendered to decimal text and used as the path, which is why this coerces rather than matching
@@ -366,11 +463,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetModelScale",
         lua.create_function(|lua, this: Table| with_model(lua, &this, |m| m.scale))?,
     )?;
+    // `SetCamera(n)` = `0x76e0e0` -> `0x76cec0`: select the file's camera by **RAW table index**
+    // (`cameraLookup` is not on this path). With the file's facts in hand the index is resolved
+    // now — an index past the table's count installs the NULL camera, which is the orthographic
+    // leg; without them it is deferred, and the pane draws nothing until it resolves.
     m.set(
         "SetCamera",
         lua.create_function(|lua, (this, c): (Table, Value)| {
             let c = int(&c);
-            with_model(lua, &this, |m| m.camera = c)
+            let facts = facts_of_pane(lua, &this)?;
+            with_model(lua, &this, |m| m.install_camera(c, facts.as_deref()))
         })?,
     )?;
     m.set(
@@ -390,9 +492,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // ── The scene: light and fog ────────────────────────────────────────────────────────────
     //
-    // `SetLight`'s numbers are stored VERBATIM and handed back verbatim. The engine core has no
-    // lighting model, so typing this tuple would be asserting a scene semantics nobody has
-    // verified — and a wrong typing is worse than an opaque one, because it reads as knowledge.
+    // Typed since decision 2027, off the render law's §5.1-§5.4: the widget's embedded `CGLight`
+    // and the four fog fields, with `SetLight`'s argument walk and both of its traps.
     m.set(
         "SetLight",
         lua.create_function(|lua, args: MultiValue| {
@@ -401,19 +502,36 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(Value::Table(t)) => t,
                 _ => return Err(mlua::Error::runtime("expected a Model")),
             };
-            let nums: Vec<f32> = it.map(|v| num(&v)).collect();
-            with_model(lua, &this, |m| m.light = Some(nums))
+            let a: Vec<Value> = it.collect();
+            match parse_set_light(&a) {
+                SetLight::Raise => Err(mlua::Error::runtime(SET_LIGHT_USAGE)),
+                SetLight::NoOp => with_model(lua, &this, |_| ()),
+                SetLight::Set(l) => with_model(lua, &this, |m| m.light = l),
+            }
         })?,
     )?;
     m.set(
         "GetLight",
         lua.create_function(|lua, this: Table| {
-            let light = with_model(lua, &this, |m| m.light.clone())?;
-            let out = light
-                .unwrap_or_default()
-                .into_iter()
-                .map(|n| Value::Number(f64::from(n)))
-                .collect::<Vec<_>>();
+            let l = with_model(lua, &this, |m| m.light)?;
+            let mut out: Vec<Value> = vec![
+                Value::Number(f64::from(u8::from(l.enabled))),
+                Value::Number(f64::from(u8::from(l.omni))),
+                Value::Number(f64::from(l.vector[0])),
+                Value::Number(f64::from(l.vector[1])),
+                Value::Number(f64::from(l.vector[2])),
+            ];
+            // Each colour block comes back as `1.0, r, g, b` when ANY component is `> 0`, and as
+            // a lone `0` otherwise (`76e91f`/`76e92f`/`76e93f je 0x76e953` -> `push 1.0`) — which
+            // is what makes the arity 7 | 10 | 13 rather than a fixed 13.
+            for c in [l.ambient, l.diffuse] {
+                if c.iter().any(|&v| v > 0.0) {
+                    out.push(Value::Number(1.0));
+                    out.extend(c.iter().map(|&v| Value::Number(f64::from(v))));
+                } else {
+                    out.push(Value::Number(0.0));
+                }
+            }
             Ok(MultiValue::from_vec(out))
         })?,
     )?;
@@ -429,7 +547,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
                 let a = a.as_ref().map_or(1.0, num);
                 let packed = (q(a) << 24) | (q(num(&r)) << 16) | (q(num(&g)) << 8) | q(num(&b));
-                with_model(lua, &this, |m| m.fog_color = packed)
+                // `76f059 or [edi+0x3a4],1` — setting the colour ARMS the fog. That is the only
+                // arming verb (with the XML `<FogColor>` child); there is no `SetFogEnabled`.
+                with_model(lua, &this, |m| {
+                    m.fog_color = packed;
+                    m.fog = true;
+                })
             },
         )?,
     )?;
@@ -442,6 +565,39 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let ch = |shift: u32| f64::from((packed >> shift) & 0xff) / 255.0;
             Ok((ch(16), ch(8), ch(0), ch(24)))
         })?,
+    )?;
+
+    // `SetFogNear 0x76f1e0` / `SetFogFar 0x76f390` store the number RAW — no clamp, no ordering
+    // check (`76f282`/`76f432 fstp`); the `≥ 0` clamp exists only on the XML attribute path. The
+    // getters read the same fields back. Nothing here arms the fog.
+    m.set(
+        "SetFogNear",
+        lua.create_function(|lua, (this, v): (Table, Value)| {
+            let v = num(&v);
+            with_model(lua, &this, |m| m.fog_near = v)
+        })?,
+    )?;
+    m.set(
+        "GetFogNear",
+        lua.create_function(|lua, this: Table| with_model(lua, &this, |m| m.fog_near))?,
+    )?;
+    m.set(
+        "SetFogFar",
+        lua.create_function(|lua, (this, v): (Table, Value)| {
+            let v = num(&v);
+            with_model(lua, &this, |m| m.fog_far = v)
+        })?,
+    )?;
+    m.set(
+        "GetFogFar",
+        lua.create_function(|lua, this: Table| with_model(lua, &this, |m| m.fog_far))?,
+    )?;
+    // `ClearFog 0x76f540`: `76f5c5 and [edi+0x3a4],-2` — **bit 0 and nothing else**. The colour,
+    // the near and the far all survive, so a later `SetFogColor` re-arms the same ramp. A clear
+    // that also reset them would read as knowledge and be wrong.
+    m.set(
+        "ClearFog",
+        lua.create_function(|lua, this: Table| with_model(lua, &this, |m| m.fog = false))?,
     )?;
 
     // ── The two verbs that touch no pane state ──────────────────────────────────────────────
@@ -683,6 +839,13 @@ impl crate::script::UiScript {
                 };
                 let path = m.path.as_deref()?;
                 let facts = model.model_facts.get(&model_key(path))?;
+                // The reference's draw gate (`76d5f0 cmp [this+0x320],-1 ; jne`): a pane whose
+                // camera question is still open paints NOTHING — not the model, not its
+                // `OnUpdateModel`. Reachable from Lua by `SetCamera(n)` on a pane whose file has
+                // not landed yet (decision 2027).
+                if m.camera_pending.is_some() {
+                    return None;
+                }
                 Some(ModelPaneFrame {
                     handle: h,
                     clock_ms: m.clock_ms,

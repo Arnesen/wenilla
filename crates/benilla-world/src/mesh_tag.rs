@@ -98,8 +98,17 @@
 //!    re-opaque it — since 0755 that writer carries alpha through rather than forcing it).
 //! 5. `entity_shade::update_ground_shade` owns the **shade field** on entity M2 parts (decision
 //!    0173): read-modify-write via [`with_shade`], never touching alpha — so it composes with 1–4
-//!    instead of racing them. It skips interior-classified parts (their payload is a colour) and
-//!    runs after 2 to re-assert the byte over 2's exterior reclaim.
+//!    instead of racing them, and runs after 2 to re-assert the byte over 2's exterior reclaim.
+//!
+//!    **It must skip every part whose payload is a PROBE SLOT, and there are TWO such
+//!    populations, not one.** The shade byte and the probe slot overlap in bits 6..=13, so a
+//!    shade write into a probe payload silently renames the slot — `(slot & 0x1f00) | byte`,
+//!    a foreign probe or an unallocated (zeroed ⇒ **black**) row. The classifier's Bake parts
+//!    are one population and answer with `InteriorLit::is_bake`; a WMO doodad prop spawned with
+//!    its own folded probe is the other, and it holds no `InteriorLit` at all — it answers with
+//!    [`InteriorProbePayload`]. Asking only the first question is B373: a transport's cabin
+//!    furniture is parented under the GameObject for TRANSFORM reasons, so the entity light
+//!    node's descendant walk reached props it does not light, and every one of them went black.
 //!
 //! A further *payload* writer (stealth, ghost form, …) should claim reserved bits through a typed
 //! accessor here — never a new ad-hoc whole-payload convention (decision 0066's rule, upheld by
@@ -110,6 +119,21 @@
 //! parts every frame. The payload writers above all run in Update and re-derive the payload bits
 //! (dropping the flag); running after them re-asserts it the same frame, so they never need to know
 //! it exists.
+
+/// **This instance's payload is the interior-probe mode** — bits 6..=18 are an SH-probe table
+/// slot ([`probe_bits`]), not a ground-shade byte. Spawned onto every batch of a lit interior
+/// MODD prop (`terrain_stream`'s placed-model assembler), cards included, and read by the
+/// exterior-payload writer as its "hands off" (`entity_shade`).
+///
+/// It exists because the *other* probe-slot population — the interior classifier's Bake-law
+/// entity parts — is recognised by a component the props do not carry (`InteriorLit`), and the
+/// shade writer's guard asked for that one instead of asking the payload question. Where the two
+/// populations meet is a WMO-display GameObject: its doodad props are parented under the net
+/// entity so they ride a moving transport, which puts them inside the entity light node's
+/// descendant walk while their light is their own baked MODD colour (the reference's
+/// `CMapDoodadDef` provider `0x6a8050`, never the WENTITY node). See decision 2031 / bug B373.
+#[derive(bevy::prelude::Component)]
+pub struct InteriorProbePayload;
 
 /// Bit 31 of the `MeshTag`: the hover/target **model-brighten** flag (the real client's
 /// per-model highlight emissive — `SetHighlight 0x614550` writing the config RGB into the CM2;
@@ -486,6 +510,28 @@ mod tests {
         // The untagged-⇒-opaque sentinel is materialized, never propagated as alpha 0 (invisible).
         assert_eq!(with_interior_probe(0, 1234) & ALPHA_MASK, ALPHA_MASK);
         assert_eq!(with_exterior_reset(0) & ALPHA_MASK, ALPHA_MASK);
+    }
+
+    /// **Why the shade writer must never touch a probe payload** (B373): the byte lives in bits
+    /// 6..=13 and the slot in 6..=18, so a shade write does not *corrupt* the slot in a way
+    /// anything downstream can notice — it RENAMES it, to `(slot & 0x1f00) | byte`, which is a
+    /// perfectly well-formed index into somebody else's probe (or into an unallocated, zeroed
+    /// row: solid black). Pinned here because the failure has no error path anywhere: the prop
+    /// simply draws under another prop's light.
+    #[test]
+    fn a_shade_write_renames_a_probe_slot_instead_of_breaking_it() {
+        let slot = 440u16; // 0b1_1011_1000 — bits 14..=18 hold 1, bits 6..=13 hold 184
+        let tag = with_shade(probe_bits(slot), 191);
+        assert_eq!(
+            (tag & PROBE_MASK) >> PROBE_SHIFT,
+            447,
+            "the boat's shade byte replaced the slot's low 8 bits: 1<<8 | 191"
+        );
+        assert_eq!(
+            alpha_of(tag),
+            1.0,
+            "and the alpha field rode through intact"
+        );
     }
 
     #[test]

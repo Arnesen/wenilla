@@ -248,6 +248,26 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     );
 }
 
+/// Install the host's font engine into `script` for the CURRENT raster seam, if the glyph atlas
+/// exists yet — the load edge's half of [`super::extract::seat_text_measurer`].
+///
+/// No atlas means no measure to be had (it bakes on the first `Update`, from the patch chain and
+/// the window's real `scale_factor`); the per-frame pass seats one on the first frame it appears,
+/// exactly as before.
+fn seat_text_measurer_for_load(world: &mut World, script: &mut UiScript) {
+    let ui_scale = world
+        .get_resource::<super::UiScaleCvar>()
+        .map_or(1.0, |c| c.0);
+    let h = {
+        let mut q = world.query_filtered::<&Window, With<bevy::window::PrimaryWindow>>();
+        q.single(world).map_or(0.0, Window::height)
+    };
+    let Some(atlas) = world.get_resource::<crate::ui_text::UiFontAtlas>() else {
+        return;
+    };
+    super::extract::seat_text_measurer(script, atlas, super::seam_scale(h, ui_scale));
+}
+
 /// Materialize the in-game UI for **this** session.
 ///
 /// **Once per world entry, not once per process** (decision 1290). The reference builds the whole
@@ -311,6 +331,16 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
                 .get_resource::<crate::cvars::CvarPersist>()
                 .is_none_or(crate::cvars::CvarPersist::addon_version_check)
         });
+    // **The VM's font engine, before the first `<OnLoad>` runs** (decision 2028). Every file the
+    // walk below loads may measure the text it just set — the era's own tab law is
+    // `label:GetStringWidth() + 40` at OnLoad, and the addon corpus writes the same pair — and a
+    // `GetStringWidth` with no measurer installed answers 0. Seated only from the per-frame pass
+    // (`extract::drive_script`, an `Update` system), a VM that is BORN and LOADED inside one
+    // exclusive `PreUpdate` slot never sees it: that is exactly `ReloadUI()`, which mints a fresh
+    // boot VM in `end_ui_session` and calls straight into here, so every `/reload` measured 0
+    // through its whole load edge and only converged a frame later off whatever poll the caller
+    // had written to survive it.
+    seat_text_measurer_for_load(world, &mut script);
     let _ = load_ingame_ui(&mut script, identity.as_ref(), version_check);
     // The Minimap widget was born a moment ago with `MinimapState::default()`; seed its two live
     // zoom indices from the persisted CVars now, before anything reads them — the reference's own
@@ -448,12 +478,24 @@ pub(crate) struct AddOnIdentity(pub(crate) Option<(String, String)>);
 /// three independent Bevy systems on one state edge cannot express that, and until this landed the
 /// flat write and the `AddOns.txt` write were exactly that.
 ///
+/// **The layout cache is step three, and it was missing until B353.** The quote above has always
+/// carried `layout-cache.txt`; the body skipped it, because [`crate::ui_layout`] had hung its own
+/// saver off `OnExit(InWorld)` instead. Two things follow from being outside the tail, and the
+/// bug report is both of them: a `/reload` never leaves `InWorld` ([`run_pending_reload`] calls
+/// this function and the rebuild back to back), so that saver never ran on the root a player uses
+/// most; and on the roots where it did run it was racing [`end_ui_session`]'s VM replacement on
+/// the same unordered edge — measured (bevy 0.18) to move with nothing but registration
+/// positions. In the tail it is neither: one call, ahead of the replacement, on every root.
+/// (It is also the one step that keeps a writer *outside* this function: a debounced
+/// crash-save, which the reference has not got and which the next paragraph is not about.)
+///
 /// **There is no autosave**, deliberately: the reference has none (decision 1128, and
 /// `ds:0xb4b3f4` has three references image-wide). These are a handful of scalars a player toggles
 /// a few times a session, and every file is written whole from the live globals.
 pub(crate) fn shutdown_ui_state(script: &mut UiScript, identity: Option<&(String, String)>) {
     script.fire_event("PLAYER_LEAVING_WORLD", vec![]);
     script.fire_event("PLAYER_LOGOUT", vec![]);
+    crate::ui_layout::save_now(script, identity);
     crate::ui_saved::save(script);
     addons::save_addon_variables(script, identity);
     addons::save_enable_state(script, identity);

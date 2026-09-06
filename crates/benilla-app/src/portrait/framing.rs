@@ -199,7 +199,7 @@ pub(super) fn glue_zoom_floor(fov: f32) -> f32 {
 /// write — it would stomp ours. `update` is a deliberate no-op, and that is faithful: the client's
 /// bake emits the *same* matrix at 1152×648 and at 1280×800 (1543).
 #[derive(Debug, Clone)]
-pub(super) struct WowPortraitProjection {
+pub(crate) struct WowPortraitProjection {
     /// The M2 record's fov (radians) — a *diagonal* angle in the client's convention, NOT fovy.
     pub(super) fov: f32,
     pub(super) near: f32,
@@ -525,7 +525,7 @@ pub(super) fn pane_camera(a: &PortraitAnchors) -> benilla_assets::PortraitCamera
 /// The falsifier, if anyone is tempted to propagate the portrait's `1.0` here anyway: the viewport
 /// comes from that same rect, so projection and viewport aspects agree by construction, and a
 /// transplanted `1.0` would render a sphere **1.42× wider than tall** in the 318×224 pet pane.
-pub(super) fn pane_projection(
+pub(crate) fn pane_projection(
     cam: &benilla_assets::PortraitCamera,
     aspect: f32,
 ) -> WowPortraitProjection {

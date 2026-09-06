@@ -152,6 +152,9 @@ mod trainer;
 mod types;
 mod unit;
 mod weapon_enchant;
+/// The `/who` list's seven-key sort chain and its comparator — its header is the whole
+/// mechanism, including why a repeated header click reverses (decision 2030).
+mod who_sort;
 mod worldmap;
 mod worldstate;
 mod worn_display;
@@ -268,6 +271,7 @@ pub use unit::{
     grey_band, level_reads_unknown, power_token, unit_is_grey, SelectionRequest, UnitState,
 };
 pub use weapon_enchant::WeaponEnchant;
+pub use who_sort::{WhoSortChain, WhoSortKey};
 pub use worldmap::{
     WorldMapContinentView, WorldMapLandmarkView, WorldMapOverlayView, WorldMapState,
     WorldMapZoneView,

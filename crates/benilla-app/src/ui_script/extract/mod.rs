@@ -486,6 +486,27 @@ fn quad_summary(q: Option<&UiQuad>) -> String {
     )
 }
 
+/// **Hand the VM the host's font engine** — the one construction site for
+/// [`crate::ui_text::AtlasMeasurer`], so a `SetText` → `GetStringWidth` pair *inside one Lua call*
+/// returns a real number instead of 0 (the reference answers that getter inline, `0x79e510` →
+/// `0x772890`).
+///
+/// `seam` is the raster seam the atlas answers under ([`super::seam_scale`]): a measurer built
+/// under one seam does not answer for another, which is why both callers re-seat rather than
+/// check first.
+///
+/// Two callers, and the second one is the point (decision 2028): this pass, at the seam edge and
+/// on the first frame the atlas exists — and [`super::lifecycle::load_ingame_ui_on_world_entry`],
+/// **before the manifest loads**, because that is where every `<OnLoad>` in the in-game UI runs.
+/// Seated only from here, a VM born and loaded inside one exclusive system — which is exactly
+/// what `ReloadUI()` does — runs its whole load edge measuring 0.
+pub(crate) fn seat_text_measurer(script: &mut UiScript, atlas: &UiFontAtlas, seam: f32) {
+    script.set_text_measurer(Box::new(crate::ui_text::AtlasMeasurer::new(
+        atlas.engine(),
+        seam,
+    )));
+}
+
 /// Per frame: screen size → `tick` (OnUpdate) → `resolve` → `extract` → [`UiQuads`]. Script errors
 /// drain to the log (throttled by being drained — each fires once).
 #[allow(clippy::too_many_arguments)] // a Bevy system: each param is one resource, the app's convention
@@ -621,13 +642,11 @@ pub(super) fn drive_script(
     //
     // Seated BEFORE the tick below, so the first update that runs already has it, and rebuilt only
     // on the seam edge or the frame the atlas first exists — an `Arc` clone and an `f32`, never a
-    // per-frame cost.
+    // per-frame cost. This is the *frame* edge; the *load* edge is
+    // [`super::lifecycle::load_ingame_ui_on_world_entry`]'s own call to the same seat (2028).
     if let Some(atlas) = font_atlas.as_deref() {
         if seam_moved || !script.has_text_measurer() {
-            script.set_text_measurer(Box::new(crate::ui_text::AtlasMeasurer::new(
-                atlas.engine(),
-                s,
-            )));
+            seat_text_measurer(&mut script, atlas, s);
         }
     }
     // Phase spans (visible under `bevy/trace_chrome`): this system is the biggest flat CPU cost
@@ -1327,6 +1346,9 @@ fn convert_entry(
             position,
             own_alpha,
             icon,
+            camera,
+            light,
+            fog,
         } => {
             use crate::portrait::PortraitSource;
             // A FILE pane (decision 2008): publish what the tile renderer needs — the pane's
@@ -1359,6 +1381,18 @@ fn convert_entry(
                         star_px_per_unit: 768.0 * diag * s * dpi,
                         facing,
                         position: Vec3::new(position.0, position.1, position.2),
+                        // The PERSPECTIVE leg's root (decision 2027), which is in model units,
+                        // not pixels: `T(pos · layoutScale) · R(facing) · S(s)` with
+                        // `s = G48·(5/3)·modelScale·layoutScale` — and `G48·(5/3)` is exactly
+                        // `√((4/3)²+1)/√(a²+1)`, the 4:3 renormalizer (camera-law §11.2). The
+                        // camera is carried through the same matrix, so both terms cancel for
+                        // framing; they are here because the record's near/far are NOT scaled
+                        // with them, and because the geometry has to be drawn somewhere.
+                        root_scale: (5.0 / 3.0) / diag * model_scale * layout,
+                        root_pos: Vec3::new(position.0, position.1, position.2) * layout,
+                        camera,
+                        light,
+                        fog,
                         icon: icon.clone(),
                         rect,
                         z_key: eq.z,

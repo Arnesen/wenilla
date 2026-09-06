@@ -37,16 +37,26 @@
 //! attachments from the owner's node; independent sampling would flicker at shadow edges mid-swing).
 //!
 //! Interplay: the interior classifier ([`crate::interior`]) owns a part's tag while it stands in a WMO
-//! room (packed floor colour — no sun indoors, so no shade either); this system skips those parts and
+//! room (an SH-probe slot — no sun indoors, so no shade either); this system skips those parts and
 //! runs after the classifier to re-assert the byte over its exterior reclaim. Fades own the alpha field
 //! only (they write through `with_alpha`), so shade rides through appear/despawn/zoom feathering.
+//!
+//! **The descendant tree is a TRANSFORM relation, not a light one, and the difference is a bug we
+//! shipped** (B373). A WMO-display GameObject's doodad props — a transport's cabin furniture — are
+//! parented under the net entity so they sail with the deck (decision 0474), but their light is
+//! their own baked MODD colour folded into an SH probe, the reference's `CMapDoodadDef` provider
+//! (`0x6a8050`) rather than the WENTITY node this file models. They were nonetheless in the walk,
+//! and since the shade byte overlaps the probe slot in bits 6..=13, every one of them was pushed
+//! onto a *different* probe: a neighbouring prop's light where the renamed index happened to be
+//! live, and an unallocated — zeroed — row where it was not, which draws solid black. Both write
+//! sites now ask [`probe_payload`], the payload question rather than the classifier question.
 
 use benilla_assets::AdtTile;
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 
 use crate::interior::{classify_entity_interior, InteriorLit};
-use crate::mesh_tag::{shade_of, with_shade};
+use crate::mesh_tag::{shade_of, with_shade, InteriorProbePayload};
 use crate::terrain_stream::{doodad_ground_shade, ShadeResolve, TerrainStreamer};
 
 // Decision 0354 generalized this file from "the MCSH ground-shade byte" to the entity light
@@ -276,15 +286,27 @@ pub(crate) fn update_ground_shade(
         Option<&Visibility>,
     )>,
     children: Query<&Children>,
-    // Parts are matched by carrying a `MeshTag`; interior-classified ones are skipped (their payload
-    // is the packed floor colour). Fading parts are NOT skipped — shade and fade own disjoint fields.
+    // Parts are matched by carrying a `MeshTag`; a part whose payload is a PROBE SLOT is skipped,
+    // because the shade byte lives in the same bits (see [`probe_payload`]). Fading parts are NOT
+    // skipped — shade and fade own disjoint fields.
     mut parts: Query<
-        (&mut MeshTag, Option<&InteriorLit>),
+        (
+            &mut MeshTag,
+            Option<&InteriorLit>,
+            Has<InteriorProbePayload>,
+        ),
         Without<crate::billboard::BillboardCard>,
     >,
     // A card is a world ROOT (the facing system owns its transform), so the descendant walk below
     // cannot reach one — it carries its owner instead. Disjoint from `parts` by the filter above.
-    mut cards: Query<(&crate::billboard::BillboardCard, &mut MeshTag)>,
+    // It asks the same payload question: an interior prop's glow card carries its doodad's probe
+    // slot, and this pass reaches it by walking UP from the card's owner (B373).
+    mut cards: Query<(
+        &crate::billboard::BillboardCard,
+        &mut MeshTag,
+        Option<&InteriorLit>,
+        Has<InteriorProbePayload>,
+    )>,
     // Reused across frames: each shaded ROOT → its shade byte this frame (a few hundred entries).
     // The card pass walks `ChildOf` up to the nearest such root — this map used to record every
     // descendant too (~10-20k inserts/frame) so that walk could be a single lookup.
@@ -410,11 +432,11 @@ pub(crate) fn update_ground_shade(
         // joint entities deeper down — same full-tree walk as the self-fade). Change-gated per part on
         // the byte, so a settled entity writes nothing and never re-triggers render extraction.
         for part in children.iter_descendants(root) {
-            let Ok((mut tag, lit)) = parts.get_mut(part) else {
+            let Ok((mut tag, lit, own_probe)) = parts.get_mut(part) else {
                 continue;
             };
-            if lit.is_some_and(InteriorLit::is_bake) {
-                continue; // the footprint-bake lane: the classifier owns the payload (probe slot)
+            if probe_payload(lit, own_probe) {
+                continue;
             }
             if shade_of(tag.0) != byte {
                 tag.0 = with_shade(tag.0, byte);
@@ -429,7 +451,10 @@ pub(crate) fn update_ground_shade(
     // anchor or a deep joint) resolves to the NEAREST shaded root above it: with nested roots (a
     // mounted unit — rider and mount each carry a node) that is the mount's, matching the
     // one-node-per-object structure above; the old whole-tree map made this pick last-writer-wins.
-    for (card, mut tag) in &mut cards {
+    for (card, mut tag, lit, own_probe) in &mut cards {
+        if probe_payload(lit, own_probe) {
+            continue;
+        }
         let Some(byte) = card_root_shade(&root_shade, &child_of, card.follows()) else {
             continue; // a fixed terrain doodad's card — its shade rides the material selector
         };
@@ -437,6 +462,27 @@ pub(crate) fn update_ground_shade(
             tag.0 = with_shade(tag.0, byte);
         }
     }
+}
+
+/// **Does this instance's `MeshTag` payload carry an SH-probe slot?** If it does, this file must
+/// not touch it: the shade byte occupies bits 6..=13 and the probe slot 6..=18, so a shade write
+/// renames the slot to `(slot & 0x1f00) | byte` — a foreign probe, or an unallocated (zeroed ⇒
+/// **black**) row.
+///
+/// Two populations answer yes, by two different components, and the guard used to know only the
+/// first:
+/// - the interior classifier's **Bake law** — an entity part standing in a WMO room, whose slot
+///   the classifier re-seats as the body moves ([`InteriorLit::is_bake`]);
+/// - a lit interior **MODD prop**, whose slot was folded once at spawn and never moves
+///   ([`InteriorProbePayload`]).
+///
+/// The second only ever meets this walk on a WMO-display GameObject, whose doodad props are
+/// parented under the net entity so they ride a moving transport (decision 0474) — a *transform*
+/// relationship that the descendant walk read as a *light* one. That is bug B373: every cabin
+/// prop on every 1.12 transport read probe slot `(its own & 0x1f00) | the boat's shade byte`, and
+/// the ones that landed on an unallocated row drew as solid black silhouettes beside lit walls.
+fn probe_payload(lit: Option<&InteriorLit>, own_probe: bool) -> bool {
+    own_probe || lit.is_some_and(InteriorLit::is_bake)
 }
 
 /// The shade byte a card inherits: the NEAREST shaded root at or above `follows` (the owner itself
@@ -551,6 +597,35 @@ mod tests {
             resolve(&mut world, &map, Some(stray)),
             None,
             "no shaded ancestor"
+        );
+    }
+
+    /// **The payload question, both populations** (B373). The guard used to ask "is this part on
+    /// the classifier's Bake law", which is only one of the two ways a `MeshTag` comes to hold a
+    /// probe slot; a WMO doodad prop holds one from spawn and carries no `InteriorLit` at all.
+    /// A transport's cabin furniture is where the second population lands inside an entity's
+    /// descendant walk, and every one of those props drew under a foreign probe.
+    ///
+    /// (The Bake half is the classifier's own state and is pinned by `interior`'s tests; what is
+    /// new here is that the marker answers on its own, whatever the classifier says.)
+    #[test]
+    fn a_spawned_probe_payload_is_hands_off_with_no_interior_lit_at_all() {
+        let matte = InteriorLit::new(crate::interior::InteriorKind::Matte, Handle::default());
+        assert!(
+            probe_payload(None, true),
+            "a spawn-time MODD prop owns its payload, with no InteriorLit to say so"
+        );
+        assert!(
+            probe_payload(Some(&matte), true),
+            "and it owns it whatever law the classifier would have applied"
+        );
+        assert!(
+            !probe_payload(Some(&matte), false),
+            "the matte indoor lane carries no slot — the byte is its field"
+        );
+        assert!(
+            !probe_payload(None, false),
+            "an ordinary exterior part takes the shade byte"
         );
     }
 

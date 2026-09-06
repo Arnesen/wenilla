@@ -172,6 +172,15 @@ enum Command {
         /// Internal path to the `.m2` (forward or back slashes accepted).
         internal_path: String,
     },
+    /// Dump an M2's **camera table** by raw file index — the index space a `<Model>` widget's
+    /// `Model:SetCamera(n)` walks (decision 2027): type, rest eye/target, diagonal fov, near/far,
+    /// roll, and each track's key count (which says still rig vs authored path). The
+    /// `cameraLookup` table is printed beside it — the portrait bake selects through that, the
+    /// pane does not.
+    M2cam {
+        /// Internal path to the `.m2` (forward or back slashes accepted).
+        internal_path: String,
+    },
     /// Dump an M2's animation EVENT keyframes per sequence (`$CSS`/`$CAH`/`$AH0-3`/`$CPP`/`$HIT`…,
     /// time + payload) — the event-order instrument (decision 0279: whether `$CPP` precedes the
     /// impact tag decides defense-anim vs flinch on the shared swing record).
@@ -892,6 +901,7 @@ fn main() -> Result<()> {
         }
         Command::Glueextent { batches } => glueextent::glueextent(&mut chain, batches)?,
         Command::M2coll { internal_path } => m2dump::m2coll(&mut chain, &internal_path)?,
+        Command::M2cam { internal_path } => m2dump::m2cam(&mut chain, &internal_path)?,
         Command::M2seq { internal_path } => m2dump::m2seq(&mut chain, &internal_path)?,
         Command::M2events { internal_path } => m2dump::m2events(&mut chain, &internal_path)?,
         Command::M2attach { internal_path } => m2dump::m2attach(&mut chain, &internal_path)?,

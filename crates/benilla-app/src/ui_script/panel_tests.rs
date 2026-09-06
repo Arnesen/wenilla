@@ -51,10 +51,12 @@ fn shipped_gossip_frame_drives_end_to_end() {
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, r"Interface\FrameXML\UIParent.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-                                         // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
-                                         // optional: a missing template is a loader *warning*, not an error, so an under-loaded
-                                         // list passes load_xml and then loses the scrollbar silently.
+    load_xml(&s, "ScrollTemplates.xml"); // our file: the two scroll kits + the placeholder icon
+                                         // (BenillaScroll_Step is only this suite's pan driver). The window's own
+                                         // scroll frame inherits the reference's UIPanelScrollFrameTemplate, which
+                                         // lives in UIPanelTemplates.xml (next) — NOT optional: a missing template is
+                                         // a loader *warning*, not an error, so an under-loaded list passes load_xml
+                                         // and then loses the scrollbar silently.
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
@@ -256,10 +258,12 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, r"Interface\FrameXML\UIParent.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-                                         // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
-                                         // optional: a missing template is a loader *warning*, not an error, so an under-loaded
-                                         // list passes load_xml and then loses the scrollbar silently.
+    load_xml(&s, "ScrollTemplates.xml"); // our file: the two scroll kits + the placeholder icon
+                                         // (BenillaScroll_Step is only this suite's pan driver). The window's own
+                                         // scroll frame inherits the reference's UIPanelScrollFrameTemplate, which
+                                         // lives in UIPanelTemplates.xml (next) — NOT optional: a missing template is
+                                         // a loader *warning*, not an error, so an under-loaded list passes load_xml
+                                         // and then loses the scrollbar silently.
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
@@ -419,10 +423,12 @@ fn shipped_gossip_rows_grow_to_their_wrapped_labels() {
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, r"Interface\FrameXML\UIParent.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-                                         // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
-                                         // optional: a missing template is a loader *warning*, not an error, so an under-loaded
-                                         // list passes load_xml and then loses the scrollbar silently.
+    load_xml(&s, "ScrollTemplates.xml"); // our file: the two scroll kits + the placeholder icon
+                                         // (BenillaScroll_Step is only this suite's pan driver). The window's own
+                                         // scroll frame inherits the reference's UIPanelScrollFrameTemplate, which
+                                         // lives in UIPanelTemplates.xml (next) — NOT optional: a missing template is
+                                         // a loader *warning*, not an error, so an under-loaded list passes load_xml
+                                         // and then loses the scrollbar silently.
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
@@ -478,8 +484,9 @@ fn shipped_gossip_rows_grow_to_their_wrapped_labels() {
             .collect();
         s.set_measured_text_unwrapped(&answers);
     };
-    // Frame 1: the labels are measured (their heights land for the NEXT tick — the round-trip is a
-    // frame late, exactly as the tab-fit and quest-panel resizes already live with).
+    // Frame 1: the labels are measured (their heights land for the NEXT tick — this harness drives
+    // the host's BATCH round-trip by hand, which is a frame late by construction; the app's own
+    // synchronous measurer closes the same loop inside `resolve`).
     answer_measures(&mut s);
     s.resolve();
     // Frame 2: the frame's own settle pass reads those measures and sizes each row.
@@ -537,10 +544,12 @@ fn gossip_show_hide_plays_open_and_close_kits() {
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, r"Interface\FrameXML\UIParent.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-                                         // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
-                                         // optional: a missing template is a loader *warning*, not an error, so an under-loaded
-                                         // list passes load_xml and then loses the scrollbar silently.
+    load_xml(&s, "ScrollTemplates.xml"); // our file: the two scroll kits + the placeholder icon
+                                         // (BenillaScroll_Step is only this suite's pan driver). The window's own
+                                         // scroll frame inherits the reference's UIPanelScrollFrameTemplate, which
+                                         // lives in UIPanelTemplates.xml (next) — NOT optional: a missing template is
+                                         // a loader *warning*, not an error, so an under-loaded list passes load_xml
+                                         // and then loses the scrollbar silently.
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
@@ -583,10 +592,12 @@ fn shipped_panel_slot_replaces_gossip_with_merchant() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\UIParent.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-                                         // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
-                                         // optional: a missing template is a loader *warning*, not an error, so an under-loaded
-                                         // list passes load_xml and then loses the scrollbar silently.
+    load_xml(&s, "ScrollTemplates.xml"); // our file: the two scroll kits + the placeholder icon
+                                         // (BenillaScroll_Step is only this suite's pan driver). The window's own
+                                         // scroll frame inherits the reference's UIPanelScrollFrameTemplate, which
+                                         // lives in UIPanelTemplates.xml (next) — NOT optional: a missing template is
+                                         // a loader *warning*, not an error, so an under-loaded list passes load_xml
+                                         // and then loses the scrollbar silently.
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
@@ -678,10 +689,12 @@ fn displacing_an_npc_window_ends_the_displaced_session() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\UIParent.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-                                         // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
-                                         // optional: a missing template is a loader *warning*, not an error, so an under-loaded
-                                         // list passes load_xml and then loses the scrollbar silently.
+    load_xml(&s, "ScrollTemplates.xml"); // our file: the two scroll kits + the placeholder icon
+                                         // (BenillaScroll_Step is only this suite's pan driver). The window's own
+                                         // scroll frame inherits the reference's UIPanelScrollFrameTemplate, which
+                                         // lives in UIPanelTemplates.xml (next) — NOT optional: a missing template is
+                                         // a loader *warning*, not an error, so an under-loaded list passes load_xml
+                                         // and then loses the scrollbar silently.
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
@@ -852,10 +865,12 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
         load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
         load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
         load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
-        load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-                                             // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
-                                             // optional: a missing template is a loader *warning*, not an error, so an under-loaded
-                                             // list passes load_xml and then loses the scrollbar silently.
+        load_xml(&s, "ScrollTemplates.xml"); // our file: the two scroll kits + the placeholder icon
+                                             // (BenillaScroll_Step is only this suite's pan driver). The window's own
+                                             // scroll frame inherits the reference's UIPanelScrollFrameTemplate, which
+                                             // lives in UIPanelTemplates.xml (next) — NOT optional: a missing template is
+                                             // a loader *warning*, not an error, so an under-loaded list passes load_xml
+                                             // and then loses the scrollbar silently.
                                              // Before BankFrame, not after: its close and purchase buttons inherit UIPanelCloseButton
                                              // and UIPanelButtonTemplate, and an `inherits=` is resolved at LOAD.
         load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");

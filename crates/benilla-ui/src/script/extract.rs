@@ -127,6 +127,9 @@ impl UiScript {
                             position: m.position,
                             own_alpha: frame.map_or(1.0, |f| f.alpha),
                             icon: m.icon.clone(),
+                            camera: m.camera,
+                            light: m.light,
+                            fog: m.armed_fog(),
                         },
                         _ => QuadContent::Frame,
                     };

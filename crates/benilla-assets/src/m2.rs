@@ -17,6 +17,8 @@
 //! References use `.mdx`/`.mdl`, but the physical archive file is `.m2`; callers map the extension when
 //! forming the `mpq://…m2` load path (the loader registers for `m2`).
 
+use std::sync::Arc;
+
 use benilla_formats::{
     hand_grip_finger_poses, parse_m2_animations, parse_m2_attachments, parse_m2_bounds,
     parse_m2_collision_hull, parse_m2_global_sequence_bones, parse_m2_lights,
@@ -118,6 +120,13 @@ pub struct M2Model {
     /// model with fewer than two cameras, where the client synthesizes a *fixed* camera instead
     /// (transcribed at the framing site). Same Bevy-space conversion as `portrait_camera`.
     pub pane_camera: Option<PortraitCamera>,
+    /// The **whole camera table**, in file order — the raw index space a `<Model>` widget's
+    /// `SetCamera(n)` walks (decision 2027). `camera0` and `pane_camera` above are the two fixed
+    /// indices two other paths take; this is the general one, and it is the only one that can
+    /// answer "how many cameras does this file have", which is the question that decides whether
+    /// a pane renders through the perspective leg at all (an index past the count installs a NULL
+    /// camera and the pane falls back to the orthographic leg).
+    pub cameras: Vec<PaneCamera>,
     /// A bow's `$WTT`/`$WTB` bowstring anchors (wow-re `nocked-ammo-cancel.md` §G2), baked to Bevy
     /// space: `[top, bottom]` as `(bone index, model-local position)` — the two limb-tip points the
     /// engine-drawn string spans. `None` for every non-bow model.
@@ -143,6 +152,11 @@ pub struct M2SequenceInfo {
     pub seq_index: usize,
     /// `end − start` on the file's timeline, ms.
     pub duration_ms: u32,
+    /// The band's **start** on the file's global timeline, ms (`M2Sequence+0x04`) — what a
+    /// per-sequence cursor is added to before an absolute-timeline track is sampled. The camera
+    /// tracks are the one consumer: their keys are absolute like every other M2 track's, while a
+    /// pane's play head is a cursor inside the armed band.
+    pub start_ms: u32,
     /// Loops (flag bit 0 clear); a clamped sequence holds its last frame.
     pub looping: bool,
 }
@@ -164,6 +178,49 @@ pub struct PortraitCamera {
     pub fov: f32,
     pub near: f32,
     pub far: f32,
+}
+
+/// One record of the file's camera table, by **raw index** — see [`M2Model::cameras`].
+///
+/// The rest rig ([`Self::still`]) is Bevy space like every other camera on this asset; the
+/// authored tracks stay raw WoW space behind [`Self::at`], which does the conversion, so there is
+/// no mixed-convention field to misread.
+#[derive(Clone)]
+pub struct PaneCamera {
+    /// The record's `type` word — `0` portrait, `1` "characterinfo", `-1` on the fly-bys and the
+    /// six glue scenes. Carried, never selected on: the widget's index is raw.
+    pub camera_type: i32,
+    /// The rig at rest (bases + each track's first key), Bevy space. The whole answer for every
+    /// model a `<Model>` pane can name — wow-re's census over the composite's 9691 `.m2` found
+    /// every one of those cameras keying a single `(0,0,0)` on all three tracks.
+    pub still: PortraitCamera,
+    /// The authored tracks, raw WoW space, kept only when one of them actually moves — the
+    /// `Cameras\*.m2` fly-bys. Read through [`Self::at`].
+    tracks: Option<Arc<benilla_formats::M2CameraTracks>>,
+}
+
+impl PaneCamera {
+    /// The rig at absolute file-timeline `ms`, Bevy space — [`Self::still`] for a static camera,
+    /// the cubically sampled tracks for a moving one (`benilla_m2::M2Track::sample_ms`, the
+    /// reference's own four-way `interp` dispatch).
+    ///
+    /// `wow_to_bevy` is linear, so converting the summed `base + track(t)` is the same as
+    /// converting each — which is why the tracks can stay raw behind this one door.
+    pub fn at(&self, ms: u32) -> PortraitCamera {
+        let Some(t) = self.tracks.as_deref() else {
+            return self.still;
+        };
+        let add = |b: [f32; 3], v: Option<[f32; 3]>| {
+            let v = v.unwrap_or([0.0; 3]);
+            wow_to_bevy([b[0] + v[0], b[1] + v[1], b[2] + v[2]])
+        };
+        PortraitCamera {
+            eye: add(t.position_base, t.positions.sample_ms(ms)),
+            target: add(t.target_base, t.target.sample_ms(ms)),
+            roll: t.roll.sample_ms(ms).unwrap_or(self.still.roll),
+            ..self.still
+        }
+    }
 }
 
 /// The **billboard frame** an emitter's bone chain reaches — the host bone's arm, its pivot in raw
@@ -535,6 +592,7 @@ impl AssetLoader for M2ModelLoader {
                 anim_id: a.anim_id,
                 seq_index: a.seq_index,
                 duration_ms: a.end_ms.saturating_sub(a.start_ms),
+                start_ms: a.start_ms,
                 looping: a.looping,
             })
             .collect();
@@ -805,6 +863,15 @@ impl AssetLoader for M2ModelLoader {
         let portrait_camera = parse_m2_portrait_camera(&bytes).map(to_bevy);
         let camera0 = benilla_formats::parse_m2_camera(&bytes, 0).map(to_bevy);
         let pane_camera = benilla_formats::parse_m2_camera(&bytes, 1).map(to_bevy);
+        // The whole table, raw index — the `<Model>` widget's `SetCamera(n)` space (2027).
+        let cameras: Vec<PaneCamera> = benilla_formats::parse_m2_pane_cameras(&bytes)
+            .into_iter()
+            .map(|c| PaneCamera {
+                camera_type: c.camera_type,
+                still: to_bevy(c.still),
+                tracks: c.tracks.map(|t| Arc::new(*t)),
+            })
+            .collect();
 
         // The bowstring anchors (bows only): raw WoW positions → Bevy, the meshes' frame.
         let string_anchors = benilla_formats::parse_m2_string_anchors(&bytes).map(|a| {
@@ -840,6 +907,7 @@ impl AssetLoader for M2ModelLoader {
             portrait_camera,
             camera0,
             pane_camera,
+            cameras,
             string_anchors,
             cch_marker,
             global_flags,

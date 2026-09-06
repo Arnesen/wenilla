@@ -1878,6 +1878,7 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
                 looping: false,
             }],
             bbox: ([0.0, 0.0, 0.0], [0.02707, 0.07962, 0.0]),
+            cameras: 0,
         },
     );
     s.resolve();

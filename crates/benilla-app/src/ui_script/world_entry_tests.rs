@@ -964,3 +964,198 @@ fn a_repeating_error_is_one_row_with_a_count_not_a_flood() {
     drop(world);
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// ── B353 · the layout cache is a resident of the shutdown tail ───────────────────────────────
+//
+// st1rk, 2026-09-01: *"Unlock a chat window (right-click tab → Unlock Window), resize or drag it,
+// `/logout` or `/reload`, log back in. It's back at the original size. `benilla-config/layout/`
+// isnt created."* The engine seam and the file round trip were already proven by
+// [`crate::ui_script::chat_resize_tests::the_geometry_round_trips_through_the_save_file`]; what
+// was wrong is which edge writes. [`crate::ui_layout`] hung its saver off `OnExit(InWorld)`, and a
+// `/reload` never leaves `InWorld` — [`super::run_pending_reload`] calls the shutdown and the
+// rebuild back to back — so on the root a player uses most nothing was written at all. These two
+// drive the roots themselves, which is the only place that distinction is visible.
+
+/// A window the player has placed, made the way a drag makes one: movable first, then the
+/// userPlaced bit (`SetUserPlaced` refuses a frame that is neither movable nor resizable).
+/// Parentless, so its anchor is the screen root — the file's `-` target — which is what lets this
+/// need no FrameXML and no install.
+fn place_a_window(world: &mut World) {
+    world
+        .get_non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .expect("a VM to place a window in")
+        .run(
+            "local f = CreateFrame(\"Frame\", \"B353Probe\") \
+             f:SetWidth(413) f:SetHeight(147) \
+             f:SetPoint(\"BOTTOMLEFT\", 61, 29) \
+             f:SetMovable(true) f:SetUserPlaced(true)",
+        )
+        .expect("place the probe window");
+}
+
+/// The layout cache the shutdown left behind for this character, if any.
+fn layout_cache(character: &str) -> Option<String> {
+    let path = crate::local_state::layout_character_path("Realm", character)?;
+    std::fs::read_to_string(path).ok()
+}
+
+/// What a saved window's row has to say for the player to get it back.
+fn assert_probe_row(text: &str) {
+    for want in [
+        "Frame: B353Probe",
+        "W: 413",
+        "H: 147",
+        "Point: BOTTOMLEFT - BOTTOMLEFT 61 29",
+    ] {
+        assert!(
+            text.contains(want),
+            "the saved row is missing `{want}`:\n{text}"
+        );
+    }
+}
+
+/// **Logging out writes the window's geometry** — the tail's step three, on the root that leaves
+/// the world.
+#[test]
+fn a_placed_window_is_written_at_logout() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("layout-logout");
+    let mut world = booted_world();
+
+    log_in_as(&mut world, "Onehunter", 1);
+    place_a_window(&mut world);
+    assert!(
+        layout_cache("Onehunter").is_none(),
+        "nothing is written while the session is running"
+    );
+
+    super::end_ui_session(&mut world);
+    assert_probe_row(&layout_cache("Onehunter").expect("the logout wrote the layout cache"));
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// **`/reload` writes it too — B353 itself.** The reload root never leaves `InWorld`, so it is
+/// exactly the root an `OnExit(InWorld)` saver cannot see: pre-fix this finds no file at all, and
+/// the player's unlocked chat window comes back on its authored anchors.
+#[test]
+fn a_placed_window_is_written_at_reload() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("layout-reload");
+    let mut world = booted_world();
+
+    log_in_as(&mut world, "Onehunter", 1);
+    place_a_window(&mut world);
+    reload(&mut world, crate::char_select::ClientState::InWorld);
+
+    assert_probe_row(&layout_cache("Onehunter").expect(
+        "the reload wrote the layout cache — it runs the shutdown tail without a state edge",
+    ));
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The file is **per character**, and the tail writes back to the one the UI loaded under: a
+/// second character's logout must not answer with the first one's windows.
+#[test]
+fn each_character_gets_its_own_layout_cache() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("layout-two-chars");
+    let mut world = booted_world();
+
+    log_in_as(&mut world, "Onehunter", 1);
+    place_a_window(&mut world);
+    super::end_ui_session(&mut world);
+
+    log_in_as(&mut world, "Onewarrior", 2);
+    super::end_ui_session(&mut world);
+
+    assert_probe_row(&layout_cache("Onehunter").expect("the first character's file"));
+    let second = layout_cache("Onewarrior").expect("the second character's file");
+    assert!(
+        !second.contains("B353Probe"),
+        "a character who placed nothing must not inherit another's window:\n{second}"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A window as FrameXML would author it — the shape the restore has to overwrite. Same name as
+/// [`place_a_window`]'s, different geometry, and **not** user-placed: this is the fresh tree a
+/// relog meets.
+fn author_a_window(world: &mut World) {
+    world
+        .get_non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .expect("a VM to author a window in")
+        .run(
+            "local f = CreateFrame(\"Frame\", \"B353Probe\") \
+             f:SetWidth(100) f:SetHeight(100) \
+             f:SetPoint(\"BOTTOMLEFT\", 0, 0) \
+             f:SetMovable(true)",
+        )
+        .expect("author the probe window");
+}
+
+/// The probe window's live geometry, as the player sees it.
+fn window_geometry(world: &World) -> (f32, f32, String, f32, f32) {
+    world
+        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .expect("a VM")
+        .eval::<(f32, f32, String, f32, f32)>(
+            "local p, _, _, x, y = B353Probe:GetPoint(1) \
+             return B353Probe:GetWidth(), B353Probe:GetHeight(), p, x, y",
+        )
+        .expect("read the probe window back")
+}
+
+/// **The whole loop, on the root that reported it** — st1rk's retest, in one test: place a window,
+/// `/reload`, meet a fresh tree that has it on its authored anchors, and let the loader seat the
+/// saved geometry back over the top.
+///
+/// [`crate::ui_layout::load_layout`] is run directly because this harness drives the world's edges
+/// rather than its schedules; the authored window stands in for the FrameXML the real reload
+/// rebuilds.
+#[test]
+fn a_placed_window_comes_back_after_a_reload() {
+    use bevy::ecs::system::RunSystemOnce;
+
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("layout-roundtrip");
+    let mut world = booted_world();
+    world.init_resource::<crate::ui_layout::LayoutFile>();
+
+    log_in_as(&mut world, "Onehunter", 1);
+    place_a_window(&mut world);
+    let placed = window_geometry(&world);
+
+    reload(&mut world, crate::char_select::ClientState::InWorld);
+    author_a_window(&mut world);
+    assert_ne!(
+        window_geometry(&world),
+        placed,
+        "the rebuilt tree starts on its authored anchors — otherwise this proves nothing"
+    );
+
+    world
+        .run_system_once(crate::ui_layout::load_layout)
+        .expect("the layout loader ran");
+    assert_eq!(
+        window_geometry(&world),
+        placed,
+        "the window the player placed is back where they left it"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
