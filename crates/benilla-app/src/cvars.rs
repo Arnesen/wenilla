@@ -746,6 +746,19 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "1639: benilla's own — the reference has no off-screen buffer to hang a resolution dial \
          on; its nearest equivalent, `gxResolution`, drops the interface with the world",
     ),
+    // **The FPS journal** (decision 2008) — benilla's own, and the one instrument that ships:
+    // `/console fpsJournal 1` appends a per-second row of position, frame cost and the GPU's
+    // per-pass split to `benilla-config/Diagnostics/fps-journal.csv` in any build, which is how
+    // a player on hardware we do not own measures for us. The knob is
+    // [`crate::perf::FpsJournalSetting`]. Off by default; persisted like every row, so a
+    // reporter who turns it on keeps it on until they turn it off — the file is theirs to
+    // attach and theirs to delete.
+    ours(
+        "fpsJournal",
+        "0",
+        "2008: benilla's own — 1.12 has no player-side perf log; its nearest thing is the \
+         Ctrl+R framerate label, a number with no file behind it",
+    ),
     same(crate::char_select::CVAR_LAST_CHARACTER, "0"),
 ];
 
@@ -888,6 +901,7 @@ pub(crate) struct KnobParams<'w> {
     block_trades: ResMut<'w, crate::ui_trade::BlockTrades>,
     auto_self_cast: ResMut<'w, crate::ui_action::AutoSelfCast>,
     realmlist: ResMut<'w, crate::realmlist::Realmlist>,
+    fps_journal: ResMut<'w, crate::perf::FpsJournalSetting>,
 }
 
 impl KnobParams<'_> {
@@ -923,6 +937,7 @@ impl KnobParams<'_> {
             block_trades: &mut self.block_trades,
             auto_self_cast: &mut self.auto_self_cast,
             realmlist: &mut self.realmlist,
+            fps_journal: &mut self.fps_journal,
         }
     }
 }
@@ -954,6 +969,7 @@ struct Knobs<'a> {
     block_trades: &'a mut crate::ui_trade::BlockTrades,
     auto_self_cast: &'a mut crate::ui_action::AutoSelfCast,
     realmlist: &'a mut crate::realmlist::Realmlist,
+    fps_journal: &'a mut crate::perf::FpsJournalSetting,
 }
 
 /// Apply one CVar to its knob resource (parse + the knob's own clamp). `false` = not a knob this
@@ -1076,6 +1092,10 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "renderscale" => {
             knobs.render_scale.0 = v.clamp(*RENDER_SCALE_RANGE.start(), *RENDER_SCALE_RANGE.end());
         }
+        // The FPS journal switch (2008): a flag, the client's int-parse + `!= 0`. The journal
+        // system reads the knob every frame, so the file opens on the next second and closes
+        // the second it is turned off.
+        "fpsjournal" => knobs.fps_journal.0 = v != 0.0,
         // Multisampling (1629) — the reference's own `atoi`-then-clamp `[1, 16]` at `0x63b250`.
         // Writing the knob live is faithful, not a bug: the CVar holds the PENDING value (latched),
         // and nothing reads this resource after the world camera's spawn.
@@ -1334,6 +1354,7 @@ fn sync_cvars(
             msaa_formats,
             tex_filter,
             realmlist,
+            fps_journal,
         } = &params;
         // The config file's values go in FIRST (decision 1291): registration — ours below, or an
         // addon's `RegisterCVar` later — starts a key at its saved value. This is what carries a
@@ -1366,7 +1387,7 @@ fn sync_cvars(
                 .collect(),
         );
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 44] = [
+        let session: [(&str, String); 45] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -1427,6 +1448,7 @@ fn sync_cvars(
             ("gxMultisample", msaa.samples.to_string()),
             ("trilinear", flag(tex_filter.trilinear)),
             ("anisotropic", tex_filter.aniso.to_string()),
+            ("fpsJournal", flag(fps_journal.0)),
             // The other string-valued row (1667): what the next logon attempt will actually dial,
             // including a `$WOW_HOST` the player never typed.
             (
@@ -1874,6 +1896,7 @@ mod tests {
         let mut realmlist =
             crate::realmlist::Realmlist::unpinned(crate::realmlist::DEFAULT_REALMLIST);
         let mut auto_self_cast = crate::ui_action::AutoSelfCast::default();
+        let mut fps_journal = crate::perf::FpsJournalSetting::default();
         let mut knobs = Knobs {
             sound: &mut sound,
             auto_self_cast: &mut auto_self_cast,
@@ -1898,6 +1921,7 @@ mod tests {
             tex_filter: &mut tex_filter,
             msaa_formats: &msaa_formats,
             realmlist: &mut realmlist,
+            fps_journal: &mut fps_journal,
         };
         assert!(apply_to_knobs("MusicVolume", "0.7", &mut knobs));
         assert_eq!(knobs.sound.music, 0.7);
@@ -1967,6 +1991,12 @@ mod tests {
         assert_eq!(knobs.render_scale.0, *RENDER_SCALE_RANGE.end());
         assert!(apply_to_knobs("renderscale", "0", &mut knobs));
         assert_eq!(knobs.render_scale.0, *RENDER_SCALE_RANGE.start());
+        // The FPS journal switch (2008): a flag, case-insensitive, off as shipped.
+        assert!(!knobs.fps_journal.0);
+        assert!(apply_to_knobs("fpsJournal", "1", &mut knobs));
+        assert!(knobs.fps_journal.0);
+        assert!(apply_to_knobs("fpsjournal", "0", &mut knobs));
+        assert!(!knobs.fps_journal.0);
         // Enable flags: any nonzero is on, zero is off (the client's int-parse + != 0).
         assert!(apply_to_knobs("EnableMusic", "0", &mut knobs));
         assert!(!knobs.sound.music_enabled);
@@ -2176,6 +2206,7 @@ mod tests {
             .init_resource::<crate::ui_guild::GuildMemberNotify>()
             .init_resource::<crate::ui_trade::BlockTrades>()
             .init_resource::<crate::ui_action::AutoSelfCast>()
+            .init_resource::<crate::perf::FpsJournalSetting>()
             .add_plugins(CvarPlugin);
         app.insert_non_send_resource(UiScript::new().unwrap());
         app

@@ -262,6 +262,10 @@ pub struct ParticleEmitter {
     /// The live instance pool (one slot per drawn particle, grown on demand, hidden past the
     /// live count). Each slot's mesh entities carry per-instance tint-clone materials.
     model_instances: Vec<model::ModelInstance>,
+    /// The lane's size unit for this cloud's unflagged particle half-extents —
+    /// [`quads::DrawFrame::size_scale`]. `1.0` (a yard) for every world lane; a UI model tile
+    /// sets its pixels-per-unit through [`Self::set_size_scale`].
+    size_scale: f32,
 }
 
 /// One wired CHILD emitter (see [`ParticleEmitter::children`]): the recursion model's own
@@ -350,6 +354,13 @@ impl ParticleEmitter {
     /// Live particle count — read by the perf probe ([`crate::capture`]).
     pub fn live(&self) -> usize {
         self.particles.len()
+    }
+
+    /// Set the lane's size unit for this cloud — see [`quads::DrawFrame::size_scale`]. A UI
+    /// model tile (decision 2008) stores its cloud in device pixels and passes the reference's
+    /// pixels-per-model-unit for a particle's half-extent; every world lane leaves the default.
+    pub fn set_size_scale(&mut self, size_scale: f32) {
+        self.size_scale = size_scale;
     }
 
     /// The authored def — read by the particle census probe ([`crate::capture`]), which prints
@@ -687,6 +698,7 @@ pub fn spawn_emitter(
             children: Vec::new(),
             geometry: emitter.geometry.clone(),
             model_instances: Vec::new(),
+            size_scale: 1.0,
         },
     ));
     if emitter.recursion.is_some() {

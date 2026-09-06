@@ -1316,6 +1316,26 @@ fn real_alias_table_resolves_the_shipped_commands() {
     }
     assert_eq!(parse_line("/macrohelp"), ParsedChat::MacroHelp);
     assert_eq!(parse_line("/convertraid"), ParsedChat::ConvertRaid);
+    // `/console` from a line that skipped the stock edit box (a probe rig) forwards to the verb
+    // the stock handler calls, so a CVar write lands like a typed one (2008). The long-bracket
+    // quoting steps its level past anything the text could close.
+    assert_eq!(
+        parse_line("/console fpsJournal 1"),
+        ParsedChat::Lua {
+            body: "ConsoleExec([[fpsJournal 1]])".into()
+        }
+    );
+    assert_eq!(
+        parse_line("/console reloadUI"),
+        ParsedChat::Lua {
+            body: "ConsoleExec([[reloadUI]])".into()
+        }
+    );
+    assert_eq!(super::input::lua_long_string("a]]b"), "[=[a]]b]=]");
+    assert_eq!(
+        super::input::lua_long_string("a]]b]=]c"),
+        "[==[a]]b]=]c]==]"
+    );
     // The whole shipped surface, so a table that half-loaded fails loudly: **225 distinct emote
     // commands** over the 169 `EmotesText` names (the strings repeat — `EMOTE87_CMD1` and `_CMD2`
     // are both "/sit" — and EMOTE27 "UNUSED" has no row, so it contributes none), and **68 distinct

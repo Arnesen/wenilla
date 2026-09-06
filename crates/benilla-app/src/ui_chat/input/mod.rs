@@ -13,6 +13,8 @@
 use bevy::prelude::*;
 
 mod parse;
+#[cfg(test)]
+pub(super) use parse::lua_long_string;
 pub(super) use parse::{parse_line, ParsedChat};
 
 use crate::creature_anim::{move_flags, MovementState};
@@ -916,10 +918,13 @@ pub(super) fn drain_chat_input(
             }
             ParsedChat::ConsoleUnknown { cmd } => {
                 let text = if cmd.is_empty() {
-                    "console: no command given (this client implements: reloadUI)".to_string()
+                    "console: no command given (this client implements: reloadUI, and \
+                     `<cvar> <value>`)"
+                        .to_string()
                 } else {
                     format!(
-                        "console: '{cmd}' is not implemented (this client implements: reloadUI)"
+                        "console: '{cmd}' is not implemented (this client implements: reloadUI, \
+                         and `<cvar> <value>`)"
                     )
                 };
                 chat_log.push_event(super::event::ChatEvent::text_only(

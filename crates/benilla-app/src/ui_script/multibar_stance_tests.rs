@@ -1716,3 +1716,211 @@ fn the_middle_strip_tiles_along_its_length_only() {
     assert_eq!(wraps_of(&s, "ShapeshiftBarMiddle"), vec![(false, false)]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// **The director's picture (2026-09-05, decision 2009)**: a three-stance warrior with the
+/// bottom-left bar up, and a silver plate around Defensive Stance — `ShapeshiftBarMiddle` drawn
+/// alone, both end caps down.
+///
+/// The reference fires `UPDATE_SHAPESHIFT_FORMS` for exactly one thing: the form LIST changed
+/// (learn / unlearn / rank — wow-re `shapeshift-bar-api.md`, the fires at `0x4b28ff`/`0x4b2e43`).
+/// Our feed fired it for any change in the pushed view — a stance switch, a castable flip, the
+/// shared 1 s category cooldown arming and then EXPIRING. Every fire runs the stock
+/// `ShapeshiftBar_Update` (BonusActionBarFrame.lua l.170): `ShapeshiftBarMiddle:Show()`
+/// unconditionally past two forms, then `ShapeshiftBarFrame:Show()` on a frame already shown —
+/// no OnShow, so no manage pass, and the strip stays up over the raised bar (UIParent.lua
+/// l.1706-1712 is the only thing that takes it down). 2000 and 2001 each fixed a real thing in
+/// this band and neither touched this, which is the director's "no change from before".
+///
+/// Driven through the feed's own diff ([`crate::ui_shapeshift::push_forms`]), so what fails here
+/// is the feed's rule, not a hand-fired event. A form's STATE rides the reference's state events,
+/// which the feeds owning those transitions fire (`PLAYER_AURAS_CHANGED` for the form aura's
+/// slot, `SPELL_UPDATE_COOLDOWN` for the store's generation edge) — checked below by firing the
+/// one the switch really carries and reading the checked ring.
+#[test]
+fn a_forms_state_change_leaves_the_shelf_down_over_the_raised_bar() {
+    use crate::ui_shapeshift::{push_forms, FormsEdge, StanceMemory};
+    use benilla_ui::script::ShapeshiftFormView;
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
+    // A recorder for the two events a push may announce.
+    s.run(
+        "STANCE_LOG = {} local f = CreateFrame('Frame') \
+         f:RegisterEvent('UPDATE_SHAPESHIFT_FORMS') f:RegisterEvent('SPELL_UPDATE_USABLE') \
+         f:SetScript('OnEvent', function() table.insert(STANCE_LOG, event) end)",
+    )
+    .unwrap();
+    let log = |s: &UiScript| {
+        s.eval::<String>("local l = table.concat(STANCE_LOG, ',') STANCE_LOG = {} return l")
+            .unwrap()
+    };
+    let shown = |s: &UiScript, region: &str| {
+        s.eval::<bool>(&format!("return {region}:IsShown()"))
+            .unwrap()
+    };
+    let shelf = [
+        "ShapeshiftBarLeft",
+        "ShapeshiftBarMiddle",
+        "ShapeshiftBarRight",
+    ];
+    let ring = |s: &UiScript| {
+        s.eval::<f64>("return ShapeshiftButton1NormalTexture:GetWidth()")
+            .unwrap()
+    };
+    let checked = |s: &UiScript, i: u32| {
+        s.eval::<bool>(&format!("return ShapeshiftButton{i}:GetChecked() == 1"))
+            .unwrap()
+    };
+    let stance = |id: u32, active: bool, castable: bool, cooldown| ShapeshiftFormView {
+        spell_id: id,
+        texture: Some(format!("Interface\\Icons\\Stance_{id}")),
+        name: format!("Stance {id}"),
+        active,
+        castable,
+        cooldown,
+    };
+    let mut memory = StanceMemory::default();
+
+    // Login: the list arrives — the reference's learn edge — with Battle Stance active.
+    assert_eq!(
+        push_forms(
+            &mut s,
+            &mut memory,
+            vec![
+                stance(2457, true, true, None),
+                stance(71, false, true, None),
+                stance(2458, false, true, None),
+            ],
+        ),
+        FormsEdge::List
+    );
+    assert_eq!(log(&s), "UPDATE_SHAPESHIFT_FORMS");
+    assert!(checked(&s, 1) && !checked(&s, 2));
+    // The bottom-left bar up, the way the Options row raises it: the pass seats the stance bar a
+    // row higher and takes the whole shelf down (UIParent.lua l.1706-1716).
+    show_bars(&s, &[1]);
+    for region in shelf {
+        assert!(!shown(&s, region), "{region} is down under a raised bar");
+    }
+    assert_eq!(ring(&s), 50.0);
+
+    // A stance switch: the form byte flips to Defensive and category 47 arms for a second on all
+    // three. State, not list — the reference announces it through the aura and cooldown events.
+    let cd = Some((0, 1000, true));
+    let edge = push_forms(
+        &mut s,
+        &mut memory,
+        vec![
+            stance(2457, false, true, cd),
+            stance(71, true, true, cd),
+            stance(2458, false, true, cd),
+        ],
+    );
+    for region in shelf {
+        assert!(
+            !shown(&s, region),
+            "{region}: the director's plate — the shelf re-shown over the raised bar"
+        );
+    }
+    assert_eq!(ring(&s), 50.0);
+    assert_eq!(edge, FormsEdge::Silent);
+    assert_eq!(log(&s), "", "a state move fires no list edge");
+    // …and the checked ring follows on the event the switch really carries.
+    assert!(
+        checked(&s, 1) && !checked(&s, 2),
+        "no repaint before the state event"
+    );
+    s.fire_event("PLAYER_AURAS_CHANGED", vec![]);
+    assert!(
+        !checked(&s, 1) && checked(&s, 2),
+        "the aura event repaints the ring"
+    );
+    for region in shelf {
+        assert!(
+            !shown(&s, region),
+            "{region}: a state repaint never touches the shelf"
+        );
+    }
+
+    // The cooldown running out is the same silent edge — the widget hides itself, the reference's
+    // store fires nothing at expiry, and neither do we.
+    assert_eq!(
+        push_forms(
+            &mut s,
+            &mut memory,
+            vec![
+                stance(2457, false, true, None),
+                stance(71, true, true, None),
+                stance(2458, false, true, None),
+            ],
+        ),
+        FormsEdge::Silent
+    );
+    assert_eq!(log(&s), "");
+    assert!(!shown(&s, "ShapeshiftBarMiddle"));
+
+    // A castable flip is a usability move — the reference's own SPELL_UPDATE_USABLE — and the
+    // stock bar greys the icon on it without touching the shelf.
+    assert_eq!(
+        push_forms(
+            &mut s,
+            &mut memory,
+            vec![
+                stance(2457, false, false, None),
+                stance(71, true, true, None),
+                stance(2458, false, true, None),
+            ],
+        ),
+        FormsEdge::Usable
+    );
+    assert_eq!(log(&s), "SPELL_UPDATE_USABLE");
+    let grey = s
+        .eval::<f64>("local r = ShapeshiftButton1Icon:GetVertexColor() return r")
+        .unwrap();
+    assert!(
+        (grey - 0.4).abs() < 1e-6,
+        "not castable: the 0.4 grey, got {grey}"
+    );
+    assert!(!shown(&s, "ShapeshiftBarMiddle"));
+
+    // Nothing moved: nothing pushed, nothing fired.
+    assert_eq!(
+        push_forms(
+            &mut s,
+            &mut memory,
+            vec![
+                stance(2457, false, false, None),
+                stance(71, true, true, None),
+                stance(2458, false, true, None),
+            ],
+        ),
+        FormsEdge::Unchanged
+    );
+    assert_eq!(log(&s), "");
+
+    // The control — a fourth stance LEARNED is the list edge, and the reference's own Update
+    // shows the strip across the raised bar until the next pass (the sibling test pins that).
+    assert_eq!(
+        push_forms(
+            &mut s,
+            &mut memory,
+            vec![
+                stance(2457, false, false, None),
+                stance(71, true, true, None),
+                stance(2458, false, true, None),
+                stance(768, false, true, None),
+            ],
+        ),
+        FormsEdge::List
+    );
+    assert_eq!(log(&s), "UPDATE_SHAPESHIFT_FORMS");
+    assert!(
+        shown(&s, "ShapeshiftBarMiddle"),
+        "the learn edge: Update shows the strip"
+    );
+    s.run("UIParent_ManageFramePositions()").unwrap();
+    assert!(!shown(&s, "ShapeshiftBarMiddle"));
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

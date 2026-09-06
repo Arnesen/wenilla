@@ -152,8 +152,16 @@ fn create(lua: &Lua, which: Arrow, parent: Value) -> mlua::Result<()> {
     // The widget's rect is the resident model's bounding box (§2.2); the footprint at this scale.
     wrapper.call_method::<()>("SetWidth", side)?;
     wrapper.call_method::<()>("SetHeight", side)?;
+    // `SetModel("Interface\Minimap\MinimapArrow.mdx")` in C++ (`0x4a7a80` → `0x76c8e0`): the
+    // same file set every pane takes, seeded with the file's facts when the host has them
+    // (decision 2007 — the arrow's Stand loops its 3.333 s with no bone keyed, so nothing
+    // moves; the arm is the reference's, not a look).
+    let facts = lua
+        .app_data_mut::<Model>()
+        .expect("model app_data")
+        .model_facts_for(ARROW_MODEL);
     super::modelframe::with_model(lua, &wrapper, |m| {
-        m.path = Some(ARROW_MODEL.to_string());
+        m.set_file(ARROW_MODEL.to_string(), facts.as_deref());
         m.scale = scale;
         m.position = (side * 0.5, side * 0.5, 0.0);
     })?;

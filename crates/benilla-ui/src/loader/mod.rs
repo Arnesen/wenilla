@@ -315,6 +315,15 @@ pub fn join_ref(base: &str, path: &str) -> String {
 /// Without this, decision 1751's bag swap silently loses the bag-slot cooldown sweep: our own
 /// `BenillaBagSlotTemplate` carried a real `<Cooldown>` child, the reference's carries a `<Model>`,
 /// and `CooldownFrame_SetTimer`'s Model branch shows and hides the frame and nothing more.
+/// Is `tag` one of the four model-pane kinds — the `CSimpleModel` family, whose own `LoadXML`
+/// (`0x76cac0`) reads the `scale=` attribute into the MODEL scale (`geometry.rs`'s
+/// `apply_attrs`, decision 2007).
+pub(super) fn model_kind_tag(tag: &str) -> bool {
+    ["Model", "PlayerModel", "DressUpModel", "TabardModel"]
+        .iter()
+        .any(|k| k.eq_ignore_ascii_case(tag))
+}
+
 fn frame_kind_of(el: &Element) -> String {
     const COOLDOWN_MODEL: &str = "ui-cooldown-indicator.mdx";
     if el.tag.eq_ignore_ascii_case("Model")

@@ -337,13 +337,13 @@ fn the_two_model_tables_are_the_references_own() {
     }
 }
 
-/// **`SetSequenceTime` is a scrub INTO the current sequence**, so changing the sequence drops it.
-///
-/// The cooldown indicator drives this pair every frame — `SetSequence(n)` then
-/// `SetSequenceTime(n, ms)` — and carrying a stale scrub across a sequence change would park the
-/// new animation at a time belonging to the previous one.
+/// **`SetSequence` and `SetSequenceTime` are one arm** (`0x7121a0`): each interrupts what plays
+/// and anchors the new sequence's cursor — at 0, or at the caller's `ms` — on the pane's own
+/// clock. The clock law itself (advance, wrap, completion, the two handlers) is
+/// `script::tests::model_clock`; this is the binding-level shape, with no file facts known, which
+/// is the state the reference's queued replay covers.
 #[test]
-fn a_sequence_change_drops_the_scrub() {
+fn the_two_sequence_verbs_arm_the_pane_on_its_own_clock() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
     s.run(
@@ -356,30 +356,33 @@ fn a_sequence_change_drops_the_scrub() {
     )
     .unwrap();
 
-    // 1.12 has no `GetSequence`, so the scrub is read off the model the way `simplehtml`'s tests
+    // 1.12 has no `GetSequence`, so the arm is read off the model the way `simplehtml`'s tests
     // read their blocks — through the arena, because there is no Lua getter to read it through.
-    let scrub = |s: &UiScript| {
+    let armed = |s: &UiScript| {
         let lua = s.lua();
         let model = lua.app_data_ref::<crate::script::Model>().expect("model");
         let fh = model.arena.lookup("MSeq").expect("MSeq frame");
         match &model.arena.frame(fh).expect("live frame").kind_state {
-            crate::widget::KindState::Model(m) => (m.sequence, m.sequence_time),
+            crate::widget::KindState::Model(m) => {
+                (m.sequence, m.armed.map(|a| (a.anim_id, a.anchor_ms)))
+            }
             _ => panic!("MSeq is not a Model"),
         }
     };
-    assert_eq!(scrub(&s), (0, Some((0, 250))));
+    // The scrub anchors the cursor 250 ms in: `anchor = clock − ms` at clock 0.
+    assert_eq!(armed(&s), (0, Some((0, -250))));
 
     s.run("MSeq:SetSequence(3)").unwrap();
     assert_eq!(
-        scrub(&s),
-        (3, None),
-        "a new sequence starts unscrubbed — the old (sequence, ms) pair is not carried across"
+        armed(&s),
+        (3, Some((3, 0))),
+        "a new sequence starts at its own 0 — the old anchor is not carried across"
     );
 
-    // ...and ClearModel drops the scrub with the content.
+    // ...and ClearModel releases the instance, arm included.
     s.run("MSeq:SetSequenceTime(3, 40) MSeq:ClearModel()")
         .unwrap();
-    assert_eq!(scrub(&s).1, None);
+    assert_eq!(armed(&s).1, None);
 }
 
 /// `SetLight`'s numbers are stored and returned **verbatim**, however many there are.

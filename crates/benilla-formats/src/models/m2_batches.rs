@@ -39,7 +39,9 @@ fn resolve_texture(
     tex: &benilla_m2::M2Texture,
     dir: &str,
     skins: &[Option<String>],
-) -> (Option<String>, Option<u8>, Option<CharSkinSlot>) {
+) -> (Option<String>, Option<u8>, Option<CharSkinSlot>, bool) {
+    // Texture type 14 is the ICON slot — `ReplaceIconTexture`'s target (decision 2008).
+    let icon_slot = matches!(tex.texture_type, M2TextureType::Other(14));
     let embedded = {
         let f = tex.filename.string.to_string_lossy();
         (!f.is_empty()).then(|| f.into_owned())
@@ -65,10 +67,10 @@ fn resolve_texture(
     // Skin slots resolve to the variation if supplied, else the (usually empty) embedded name; the slot
     // is reported so a skin-less load can fill it at spawn.
     match tex.texture_type {
-        M2TextureType::Monster1 => (variation(0).or(embedded), Some(0), None),
-        M2TextureType::Monster2 => (variation(1).or(embedded), Some(1), None),
-        M2TextureType::Monster3 => (variation(2).or(embedded), Some(2), None),
-        _ => (embedded, None, char_slot),
+        M2TextureType::Monster1 => (variation(0).or(embedded), Some(0), None, false),
+        M2TextureType::Monster2 => (variation(1).or(embedded), Some(1), None, false),
+        M2TextureType::Monster3 => (variation(2).or(embedded), Some(2), None, false),
+        _ => (embedded, None, char_slot, icon_slot),
     }
 }
 
@@ -451,9 +453,9 @@ pub fn parse_m2_render_submeshes(
             .and_then(|&ti| model.textures.get(ti as usize));
         // The record's address mode (`flags & 0x1/0x2`). Absent record ⇒ repeat, the old default.
         let (wrap_x, wrap_y) = tex_record.map_or((true, true), |t| (t.wrap_x, t.wrap_y));
-        let (texture, skin_slot, char_slot) = tex_record
+        let (texture, skin_slot, char_slot, icon_slot) = tex_record
             .map(|t| resolve_texture(t, dir, skins))
-            .unwrap_or((None, None, None));
+            .unwrap_or((None, None, None, false));
         let material = model.materials.get(batch.material_index as usize);
         let blend = match material.map(|m| m.blend_mode.bits()) {
             Some(0) | None => ModelBlend::Opaque,
@@ -692,6 +694,7 @@ pub fn parse_m2_render_submeshes(
             sub.wrap_x = wrap_x; // texture record flags 0x1/0x2 — clamp is a silhouette decision
             sub.wrap_y = wrap_y;
             sub.char_slot = char_slot; // character runtime slot (body/hair) — filled per-player at spawn
+            sub.icon_slot = icon_slot; // texture type 14 — `ReplaceIconTexture`'s slot (decision 2008)
                                        // Skeletal skin binding (decision 0019), per local vertex in `globals` order: the M2
                                        // vertex's 4 bone indices (global bone-array indices → joint indices directly) + their
                                        // normalised weights. The skinned-mesh builder uploads these; the static mesh ignores them.

@@ -138,6 +138,15 @@ impl PlayerAuraCache {
     }
 }
 
+/// The aura-event cut: [`feed_auras`] fires `PLAYER_AURAS_CHANGED` / `UNIT_AURA("player")`
+/// **synchronously** (`UiScript::fire_event` walks the handlers inline), so a feed whose pushed
+/// state a handler re-reads on them runs `.before(AuraEvents)` — the stance feed, whose
+/// `isActive` is the form aura's own slot and is pushed silently on that edge (decision 2009) —
+/// or the handler reads last frame's state and the repaint waits for the next unrelated event.
+/// The twin of [`crate::ui_action::CooldownEvents`].
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct AuraEvents;
+
 /// Adds the aura feed. The `UnitAura` bindings live in `benilla-ui`; this supplies their data and
 /// fires `UNIT_AURA`, and drains `CancelUnitBuff` back to the wire.
 pub(crate) struct UiAuraPlugin;
@@ -149,7 +158,13 @@ impl Plugin for UiAuraPlugin {
             .init_resource::<AuraFeedMemory>()
             // Feed before the VM dispatch (like the unit feed), so a frame's OnEvent sees the fresh
             // list; drain the cancels after, once the VM has queued them.
-            .add_systems(Update, feed_auras.in_set(UnitFeed).before(UiInput))
+            .add_systems(
+                Update,
+                feed_auras
+                    .in_set(UnitFeed)
+                    .in_set(AuraEvents)
+                    .before(UiInput),
+            )
             .add_systems(Update, drain_aura_cancels.after(UiInput))
             // The ONLY teardown of the aura state, and it hangs off the session edge — never off
             // the avatar entity's existence, which a worldport interrupts mid-session (0900).

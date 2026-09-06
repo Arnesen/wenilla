@@ -339,11 +339,17 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 ///   frame/attribute system; there is no such slot in any 1.12 resolver. That addon is asking for a
 ///   later client and should hear so.
 /// * **`OnHorizontalScroll` · `OnHyperlinkEnter` · `OnHyperlinkLeave` · `OnMessageScrollChanged` ·
-///   `OnUpdateModel` · `OnAnimFinished` · `OnMovieFinished`/`ShowSubtitle`/`HideSubtitle` ·
-///   `OnInputLanguageChanged`** — **raising.** Real 1.12 slots that we do not
-///   fire, and measured at **zero** call sites across the 218-addon corpus, so there is nothing to
-///   weigh against the trap: they land when their mechanism does (horizontal scroll isn't modeled at
-///   all — see [`crate::script::scrollframe`]'s module doc).
+///   `OnMovieFinished`/`ShowSubtitle`/`HideSubtitle` · `OnInputLanguageChanged`** — **raising.**
+///   Real 1.12 slots that we do not fire, and measured at **zero** call sites across the
+///   218-addon corpus, so there is nothing to weigh against the trap: they land when their
+///   mechanism does (horizontal scroll isn't modeled at all — see
+///   [`crate::script::scrollframe`]'s module doc).
+/// * **`OnUpdateModel` · `OnAnimFinished`** — **accepted since decision 2007**, because the tick
+///   fires them: the model pane's scene clock runs in this engine now (`tick.rs`), `OnUpdateModel`
+///   at the top of every paint of a visible pane with a file (`0x76d1a0`) and `OnAnimFinished`
+///   from a sequence's natural completion (`0x76cdc0`, mode 0 — once per arm, a loop's first
+///   pass included). The shipped
+///   `Cooldown.xml` and `MainMenuBarBagButtons.xml` declare both.
 fn set_script(lua: &Lua, this: &Table, name: &str, func: Option<Function>) -> mlua::Result<()> {
     let kind = SCRIPT_KINDS
         .iter()
@@ -373,6 +379,7 @@ fn set_script(lua: &Lua, this: &Table, name: &str, func: Option<Function>) -> ml
                 match kind {
                     "OnUpdate" => model.on_update_frames.push(h),
                     "OnSizeChanged" => model.on_size_changed_frames.push(h),
+                    "OnUpdateModel" => model.on_update_model_frames.push(h),
                     _ => {}
                 }
             }
@@ -387,6 +394,7 @@ fn set_script(lua: &Lua, this: &Table, name: &str, func: Option<Function>) -> ml
                         "OnSizeChanged" => {
                             model.on_size_changed_frames.retain(|&x| x != h);
                         }
+                        "OnUpdateModel" => model.on_update_model_frames.retain(|&x| x != h),
                         _ => {}
                     }
                 }

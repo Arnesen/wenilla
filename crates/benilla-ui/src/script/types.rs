@@ -104,6 +104,13 @@ pub enum QuadContent {
     /// and for the same reason (the scene state is [`crate::widget::ModelState`]; the render is
     /// not this crate's).
     ///
+    /// **The clock is deliberately NOT here.** A pane's play head moves every tick, and the
+    /// host memoizes its whole quad conversion on the extracted list being unchanged — a
+    /// cursor in this variant would re-convert the entire interface every frame a cooldown or a
+    /// ping is showing. The host reads the play heads straight off the engine instead
+    /// (`UiScript::visible_model_panes`, decision 2008); this variant carries only what the
+    /// layout and the Lua setters decide.
+    ///
     /// **Why the NAME travels rather than the scene.** benilla draws a body pane by sampling an
     /// off-screen bake the app already keeps per *window* (the paper doll's, the inspect window's,
     /// the pet page's), and which bake a pane samples is a fact about that window, not about the
@@ -112,6 +119,9 @@ pub enum QuadContent {
     /// invent a meaning for. A pane with no name, or one no window has claimed, draws nothing;
     /// that is also what a `SetModel` pane does today, and it is honest rather than a white slab.
     ModelPane {
+        /// The pane's frame handle — the renderer's key for the tile it keeps per pane (a name
+        /// is optional and shared by nothing; the handle is neither). Decision 2007.
+        handle: crate::widget::FrameHandle,
         /// The pane's global frame name (`$parent`-expanded), or `None` for an anonymous
         /// `CreateFrame("Model")` — pfUI's autocast shine is the corpus example of the latter.
         name: Option<String>,
@@ -124,6 +134,17 @@ pub enum QuadContent {
         facing: f32,
         /// `SetModelScale`'s factor (1 default).
         model_scale: f32,
+        /// `SetPosition`'s offset, in the ortho leg's layout units (render law §2: the root is
+        /// `T(pos · layoutScale) · R(facing) · S(…)`).
+        position: (f32, f32, f32),
+        /// The frame's **own** alpha — what the model instance draws at. The reference re-pushes
+        /// `[widget+0xc8]/255` into the instance on every `Frame:SetAlpha` (`0x76d120`), and
+        /// nothing folds the parent chain in: a pane under a faded parent draws at its own
+        /// alpha (render law §4.4). [`ExtractedQuad::alpha`] carries the effective one.
+        own_alpha: f32,
+        /// `ReplaceIconTexture`'s path — the type-14 texture override, or `None` for the file's
+        /// own textures.
+        icon: Option<String>,
     },
     /// A `Texture` region: a BLP path *or* a solid/vertex color (or both — a tinted texture).
     Texture {

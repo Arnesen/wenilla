@@ -86,6 +86,14 @@ impl M2BatchMaterials<'_> {
         self.light.is_some()
     }
 
+    /// The material store this param already holds — for a spawner that builds a batch's world
+    /// material here and then clones it against a light buffer of its own (the UI model tiles'
+    /// twin, decision 2013). Taking a second `ResMut<Assets<WowModelMaterial>>` beside this
+    /// param is a schedule-time conflict (B0002), which is why the store is reached through it.
+    pub fn materials(&mut self) -> &mut Assets<WowModelMaterial> {
+        &mut self.materials
+    }
+
     /// One steady material for an authored batch drawn in the world on the sky lane.
     ///
     /// `order` is the authored batch index + 1 (`0` = unordered), the transparent-pass sort bias

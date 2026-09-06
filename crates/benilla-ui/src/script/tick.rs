@@ -184,6 +184,7 @@ impl super::UiScript {
                 self.push_error(e);
             }
         }
+        self.tick_model_panes(elapsed);
         // Advance every ScrollingMessageFrame's per-line fade (the client's OnUpdate `0x788460`).
         // Independent of the frame's own OnUpdate script — the fade is C++ behavior, not Lua. The
         // AtBottom freeze gate lives inside `ScrollingMessageState::tick`.
@@ -258,5 +259,127 @@ impl super::UiScript {
         // `WOW_UI_HANDLERS=<secs>` — who spent the frame (decision 1395). Last, so a report covers
         // everything this tick fired; a no-op unless the instrument is armed.
         self.report_handler_profile(elapsed);
+    }
+}
+
+impl UiScript {
+    /// The model panes' per-frame pass (decision 2007; wow-re `modelframe-render-law.md` §4).
+    ///
+    /// Three things the reference does each frame for a **visible** model pane, in this order:
+    /// the widget's own `OnUpdate` (`0x76d7f0`, walked by the UI pump with the Lua OnUpdates the
+    /// caller just fired) advances its private scene clock by `trunc(elapsed · 1000)` ms — a
+    /// truncation, no `+0.5` (`76d854 __ftol`); the paint (`vt+0x98`, `0x76d1a0`) fires
+    /// `OnUpdateModel` before it builds the scene; and the scene's animate runs the completion
+    /// callback (`0x76cdc0`) when the armed sequence has run its length — `OnAnimFinished`, on
+    /// natural completion only (mode 0), once per arm, for a looping sequence's first pass as
+    /// much as for a clamped one's end (the flag test sits after the enqueue — wow-re
+    /// `modelframe-texanim-and-sequence-law.md`, Q4). A hidden pane gets none of the three: its
+    /// clock stands still and it completes nothing, which is what makes the minimap ping "resume
+    /// where the last one stopped".
+    ///
+    /// The completion is read AFTER `OnUpdateModel` because the handler may re-arm (the cooldown
+    /// flips to its flash there), and a fresh arm has nothing to complete.
+    fn tick_model_panes(&mut self, elapsed: f32) {
+        let dt_ms = (elapsed * 1000.0).trunc().max(0.0) as u64;
+        let update_ids: Vec<u32> = {
+            let mut model = self.model_mut();
+            let ticked: Vec<FrameHandle> = model.arena.ticked_kinds().to_vec();
+            for h in ticked {
+                let Some(f) = model.arena.frame_mut(h) else {
+                    continue;
+                };
+                if !f.effective_visible {
+                    continue;
+                }
+                if let crate::widget::KindState::Model(m) = &mut f.kind_state {
+                    m.clock_ms += dt_ms;
+                }
+            }
+            // The handler population, maintained by `SetScript` like `on_update_frames`; a
+            // destroyed frame's handle compacts out on its first miss.
+            if model
+                .on_update_model_frames
+                .iter()
+                .any(|&h| model.arena.frame(h).is_none())
+            {
+                let arena = &model.arena;
+                let live: Vec<FrameHandle> = model
+                    .on_update_model_frames
+                    .iter()
+                    .copied()
+                    .filter(|&h| arena.frame(h).is_some())
+                    .collect();
+                model.on_update_model_frames = live;
+            }
+            // Visible MODEL panes WITH A MODEL INSTALLED: the handler is `CSimpleModel::LoadXML`'s
+            // (`+0x3cc`) and the paint that fires it (`76d1bc`) is reached only past the
+            // `[widget+0x318] ≠ 0` gate at `76d24c` — a file set, resident or still streaming;
+            // a pane with no file paints nothing and fires nothing (wow-re
+            // `modelframe-texanim-and-sequence-law.md`, Q4). A script of that name on any
+            // other kind is inert, as it is in the reference.
+            let frames: Vec<FrameHandle> = model
+                .on_update_model_frames
+                .iter()
+                .copied()
+                .filter(|&h| {
+                    model.arena.frame(h).is_some_and(|f| {
+                        f.effective_visible
+                            && matches!(&f.kind_state, crate::widget::KindState::Model(m) if m.path.is_some())
+                    })
+                })
+                .collect();
+            let mut ids: Vec<u32> = frames.into_iter().map(|h| model.frame_id(h)).collect();
+            ids.sort_unstable(); // creation order — the OnUpdate sweep's own law
+            ids
+        };
+        for id in update_ids {
+            if let Err(e) = event::fire_widget_handler(&self.lua, id, "OnUpdateModel", Vec::new()) {
+                self.push_error(e);
+            }
+        }
+        let finished_ids: Vec<u32> = {
+            let mut model = self.model_mut();
+            let ticked: Vec<FrameHandle> = model.arena.ticked_kinds().to_vec();
+            let mut due: Vec<FrameHandle> = Vec::new();
+            for h in ticked {
+                let Some(f) = model.arena.frame(h) else {
+                    continue;
+                };
+                if !f.effective_visible {
+                    continue;
+                }
+                let crate::widget::KindState::Model(m) = &f.kind_state else {
+                    continue;
+                };
+                let Some(path) = m.path.as_deref() else {
+                    continue;
+                };
+                let Some(facts) = model.model_facts.get(&crate::widget::model_key(path)) else {
+                    continue;
+                };
+                if m.completion_due(facts) {
+                    due.push(h);
+                }
+            }
+            let mut ids = Vec::with_capacity(due.len());
+            for h in due {
+                if let Some(crate::widget::KindState::Model(m)) =
+                    model.arena.frame_mut(h).map(|f| &mut f.kind_state)
+                {
+                    if let Some(a) = &mut m.armed {
+                        a.finished = true;
+                    }
+                }
+                ids.push(model.frame_id(h));
+            }
+            ids.sort_unstable();
+            ids
+        };
+        for id in finished_ids {
+            if let Err(e) = event::fire_widget_handler(&self.lua, id, "OnAnimFinished", Vec::new())
+            {
+                self.push_error(e);
+            }
+        }
     }
 }

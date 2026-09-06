@@ -28,13 +28,34 @@
 //!   `SpellShapeshiftForm.dbc` flags bit `0x2` blocks it (warrior stances: silent no-op, the
 //!   `0x4b4963` guard); any other form casts through the shared [`send_spell_cast`] path.
 //!
-//! The refresh model is one diff-and-fire: the feed rebuilds the pushed list each frame
-//! (identity, active, castable, cooldown) and fires `UPDATE_SHAPESHIFT_FORMS` on any change — the
-//! real client's learn/unlearn edge (`0x5e9c20`/`0x5e9fe0`) plus its separate per-state repaint events
-//! collapse into one (our `StanceBar.xml` documented that as its deliberate divergence; since 1938 the
-//! stock shapeshift bar registers the reference's six events, and this one event drives them all). Cooldown
-//! remainders re-push only on a [`Cooldowns::generation`] change (`state.rs`'s own churn gate) —
-//! the engine extrapolates the sweep from the absolute start between pushes.
+//! **The refresh model keeps the reference's two edges apart** (decision 2009). The feed rebuilds
+//! the pushed list each frame and diffs it, and what it announces depends on WHAT moved:
+//!
+//! - **The list** — which spells sit on the bar, in what order — fires `UPDATE_SHAPESHIFT_FORMS`,
+//!   the real client's learn/unlearn/rank edge (`0x5e9c20`/`0x5e9fe0`/`0x4b2f50` → event `0x183`
+//!   at `0x4b28ff`/`0x4b2e43`, VERIFIED in wow-re's `shapeshift-bar-api.md`) and the ONLY thing
+//!   that fires it there. The stock `ShapeshiftBar_Update` treats every fire as a list rebuild: it
+//!   re-seats the shelf, shows the middle strip past two forms unconditionally, and `Show()`s a
+//!   frame that is already shown — no `OnShow`, no `UIParent_ManageFramePositions`, and nothing
+//!   takes the strip back down over a raised bottom-left bar. Firing it on a state change painted
+//!   exactly that plate (the one-event model this file carried until 2009: our own `StanceBar.xml`
+//!   had documented the collapse as a deliberate divergence, and 1938's stock bar inherited it).
+//! - **A form's state** — active, texture, cooldown — is pushed silently; the stock bar repaints
+//!   state on the reference's own state events, which the feeds that own those transitions fire:
+//!   `PLAYER_AURAS_CHANGED` for the form byte (a MOD_SHAPESHIFT aura holds an aura slot — the
+//!   warrior stances are `Attributes 0x9050010`, not passive, so vmangos slots them — and the
+//!   switch is an aura change, `ui_aura`'s edge) and `SPELL_UPDATE_COOLDOWN` for the cooldown
+//!   store's generation edge (`ui_action::state`). The silent push is safe because this feed runs
+//!   `.before(AuraEvents)` and `.before(CooldownEvents)`: a handler re-reads this list, so it is
+//!   fresh before those events walk.
+//! - **A form's castability** fires `SPELL_UPDATE_USABLE` from here: the reference's `0x4b31c0`
+//!   fires it on every usable recompute, and a form spell that is not on an action bar has no
+//!   other feed watching its usability.
+//!
+//! A cooldown's natural EXPIRY changes the pushed triple (`Some` → `None`) and announces nothing —
+//! the reference's widget hides itself from `(start, duration)` and its store fires nothing at
+//! expiry either (`cooldowns.rs`); the old model fired the list edge there too, so one stance
+//! switch (category 47, 1 s) re-showed the strip three times over.
 
 use std::time::Instant;
 
@@ -121,11 +142,63 @@ fn form_texture(d: &benilla_formats::SpellDisplay, active: bool) -> Option<Strin
     }
 }
 
-/// What the feed last pushed (the `state.rs` pattern). No cooldown-churn gate needed: the
-/// triple carries the ABSOLUTE start, which is frame-stable for a running cooldown.
+/// What the feed last pushed (the `state.rs` pattern). The triple carries the ABSOLUTE start, so
+/// a running cooldown re-derives the same view every frame; only an arm or an expiry moves it.
 #[derive(Default)]
-struct StanceMemory {
+pub(crate) struct StanceMemory {
     pushed: Option<Vec<ShapeshiftFormView>>,
+}
+
+/// Which of the reference's edges one push crossed — what [`push_forms`] announced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FormsEdge {
+    /// Nothing moved: no push, no event.
+    Unchanged,
+    /// The list itself (membership or order) — `UPDATE_SHAPESHIFT_FORMS`, the learn/unlearn edge.
+    List,
+    /// A form's usability — `SPELL_UPDATE_USABLE`.
+    Usable,
+    /// State the other feeds' events already announce (active, texture, cooldown) — pushed, silent.
+    Silent,
+}
+
+/// Push the rebuilt list and announce the edge it crossed (module docs). Split out of the system
+/// so the harness can drive the real diff against the stock bar without a Bevy world.
+pub(crate) fn push_forms(
+    script: &mut UiScript,
+    memory: &mut StanceMemory,
+    fresh: Vec<ShapeshiftFormView>,
+) -> FormsEdge {
+    let old: &[ShapeshiftFormView] = memory.pushed.as_deref().unwrap_or(&[]);
+    let edge = if old == fresh.as_slice() {
+        FormsEdge::Unchanged
+    } else if old.len() != fresh.len()
+        || old
+            .iter()
+            .zip(&fresh)
+            .any(|(o, n)| o.spell_id != n.spell_id)
+    {
+        FormsEdge::List
+    } else if old
+        .iter()
+        .zip(&fresh)
+        .any(|(o, n)| o.castable != n.castable)
+    {
+        FormsEdge::Usable
+    } else {
+        FormsEdge::Silent
+    };
+    if edge == FormsEdge::Unchanged {
+        return edge;
+    }
+    memory.pushed = Some(fresh.clone());
+    script.set_shapeshift_forms(fresh);
+    match edge {
+        FormsEdge::List => script.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]),
+        FormsEdge::Usable => script.fire_event("SPELL_UPDATE_USABLE", vec![]),
+        FormsEdge::Silent | FormsEdge::Unchanged => {}
+    }
+    edge
 }
 
 pub(crate) struct UiShapeshiftPlugin;
@@ -135,9 +208,15 @@ impl Plugin for UiShapeshiftPlugin {
         app.add_systems(
             Update,
             (
-                // Feed rides with the unit feed (before UiInput, like ui_action's own); the drain
-                // runs after the input pass so a stance click goes out the same frame.
-                feed_shapeshift_bar.in_set(UnitFeed).before(UiInput),
+                // Feed rides with the unit feed (before UiInput, like ui_action's own), and
+                // BEFORE the two event cuts whose handlers re-read this list — a form's state is
+                // pushed silently and repainted on those events (module docs); the drain runs
+                // after the input pass so a stance click goes out the same frame.
+                feed_shapeshift_bar
+                    .in_set(UnitFeed)
+                    .before(UiInput)
+                    .before(crate::ui_action::CooldownEvents)
+                    .before(crate::ui_aura::AuraEvents),
                 drain_shapeshift_casts.after(UiInput),
             ),
         );
@@ -236,14 +315,10 @@ fn feed_shapeshift_bar(
         })
         .collect();
 
-    if memory.pushed.as_ref() != Some(&fresh) {
-        debug!(
-            "ui_shapeshift: {} form(s), active form byte {form_byte}",
-            fresh.len()
-        );
-        memory.pushed = Some(fresh.clone());
-        script.set_shapeshift_forms(fresh);
-        script.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
+    let count = fresh.len();
+    let edge = push_forms(&mut script, memory, fresh);
+    if edge != FormsEdge::Unchanged {
+        debug!("ui_shapeshift: {count} form(s), active form byte {form_byte}, {edge:?} edge");
     }
 }
 

@@ -84,6 +84,10 @@ pub struct ModelSubmesh {
     /// This batch is unlit (see [`benilla_formats::RenderSubmesh::emissive`]) — rendered fullbright:
     /// M2 `UNLIT (0x01)` glass/glow, or WMO `UNLIT` on an exterior-group batch. `false` otherwise.
     pub emissive: bool,
+    /// This batch's texture is the **icon slot** (M2 texture type 14, see
+    /// [`benilla_formats::RenderSubmesh::icon_slot`]): the spawn site fills it from
+    /// `Model:ReplaceIconTexture`'s path. `false` for every other batch and all of WMO.
+    pub icon_slot: bool,
     /// The WMO MOMT **SIDN** night-glow colour (see [`benilla_formats::RenderSubmesh::sidn`]) — the
     /// authored emissive RGB the shader ramps by the night fraction on lit lanes. `None` for M2.
     pub sidn: Option<[u8; 3]>,

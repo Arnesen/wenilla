@@ -59,13 +59,26 @@
 //! `base + 8*i`, and settle "which table owns method M" by counting image-wide dword references to
 //! M's name VA.
 //!
+//! ## The clock is the engine's; the pixels are the host's (decision 2007)
+//!
+//! A pane's animation state is not "a sequence index the host interprets": the reference widget
+//! owns a private `CM2Scene` whose clock its own `OnUpdate` advances, arms sequences through
+//! `0x7121a0` with an anchor the sampler re-reads, fires `OnUpdateModel` at the top of every
+//! paint and `OnAnimFinished` from the completion callback (wow-re
+//! `ui/scratch/modelframe-render-law.md` §4). All of that is Lua-observable — the shipped
+//! cooldown is nothing but those two handlers scrubbing `SetSequenceTime` — so it lives here:
+//! [`ModelState::clock_ms`] / [`ModelState::armed`], the tick's model pass, and the bindings
+//! below. What the engine does NOT have is the file: which ids it owns, how long each sequence
+//! runs, whether it loops. Those are the file's **facts** ([`crate::widget::ModelFileFacts`]),
+//! handed over by the host once the asset is resident ([`crate::script::UiScript::set_model_facts`])
+//! — the reference's own "asset ready" edge, on which the loader's Stand seed runs.
+//!
 //! ## What is deliberately NOT here
 //!
-//! Seven of `Model`'s own 23 — `AdvanceTime 0x76eca0`, `ReplaceIconTexture 0x76ed70`,
-//! `SetFogNear 0x76f1e0`, `GetFogNear 0x76f2d0`, `SetFogFar 0x76f390`, `GetFogFar 0x76f480`,
-//! `ClearFog 0x76f540`. No corpus caller, and their bodies are uncarved: `ClearFog`'s exact effect
-//! on the colour/near/far triple is a guess until someone reads it, and a guessed clear reads as
-//! knowledge. Named, not stubbed.
+//! Five of `Model`'s own 23 — `SetFogNear 0x76f1e0`, `GetFogNear 0x76f2d0`, `SetFogFar 0x76f390`,
+//! `GetFogFar 0x76f480`, `ClearFog 0x76f540`. No corpus caller, and their bodies are uncarved:
+//! `ClearFog`'s exact effect on the colour/near/far triple is a guess until someone reads it, and
+//! a guessed clear reads as knowledge. Named, not stubbed.
 //!
 //! Also absent, and correctly so: `SetCreature` and `SetCustomRace`. Neither string exists in
 //! 5875 in any form (substring scan of the whole mapped image returns 0, against a positive
@@ -75,11 +88,41 @@
 //! And any interpretation of `SetLight`'s numbers — the engine core has no lighting model, so the
 //! tuple is stored verbatim rather than typed into a scene semantics nobody has verified.
 
+use std::sync::Arc;
+
 use mlua::{Lua, MultiValue, Table, Value};
 
 use super::object::frame_handle_of;
 use super::Model;
-use crate::widget::{KindState, ModelState};
+use crate::widget::{model_key, KindState, ModelFileFacts, ModelState};
+
+impl Model {
+    /// The facts the host has handed over for `path`, or `None` — in which case the path is
+    /// queued for the host to load ([`crate::script::UiScript::model_facts_wanted`]), once.
+    pub(crate) fn model_facts_for(&mut self, path: &str) -> Option<Arc<ModelFileFacts>> {
+        let key = model_key(path);
+        match self.model_facts.get(&key) {
+            Some(facts) => Some(facts.clone()),
+            None => {
+                if !self.model_facts_wanted.contains(&key) {
+                    self.model_facts_wanted.push(key);
+                }
+                None
+            }
+        }
+    }
+}
+
+/// The facts of the file `this` pane currently holds (`None` for an empty pane or a file the
+/// host has not loaded yet).
+fn facts_of_pane(lua: &Lua, this: &Table) -> mlua::Result<Option<Arc<ModelFileFacts>>> {
+    let path = with_model(lua, this, |m| m.path.clone())?;
+    Ok(path.and_then(|p| {
+        lua.app_data_mut::<Model>()
+            .expect("model app_data")
+            .model_facts_for(&p)
+    }))
+}
 
 /// Registry key of the `Model` method table (the MAXCSTACK discipline: Lua-side root, named key).
 pub(super) const REG_MODEL_METHODS: &str = "__benilla_model_methods";
@@ -186,10 +229,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let path = string_arg(&path)
                 .ok_or_else(|| usage(lua, &this, "SetModel(\"file\")"))?
                 .to_string();
-            with_model(lua, &this, |m| {
-                m.path = Some(path);
-                m.unit = None;
-            })
+            // The file's facts, if the host has handed them over — the reference's "asset
+            // resident" test (`71d5a3`), which decides whether the loader's Stand seed runs
+            // now or when the file lands ([`ModelState::set_file`]).
+            let facts = lua
+                .app_data_mut::<Model>()
+                .expect("model app_data")
+                .model_facts_for(&path);
+            with_model(lua, &this, |m| m.set_file(path, facts.as_deref()))
         })?,
     )?;
     m.set(
@@ -198,37 +245,30 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     m.set(
         "ClearModel",
-        lua.create_function(|lua, this: Table| {
-            with_model(lua, &this, |m| {
-                m.path = None;
-                m.unit = None;
-                m.sequence_time = None;
-            })
-        })?,
+        lua.create_function(|lua, this: Table| with_model(lua, &this, ModelState::clear_file))?,
     )?;
-    // ── Animation ───────────────────────────────────────────────────────────────────────────
+    // ── Animation (decision 2007) ───────────────────────────────────────────────────────────
+    //
+    // Both verbs are the same arm, `0x7121a0(model, -1, id, 0, ms, 1.0f, 0, 1)` — `SetSequence`
+    // with `ms = 0` (`0x76dec0` → `0x76cf50`), `SetSequenceTime` with the caller's `ms`
+    // (`0x76dfc0` → `0x76cf80`). The arm interrupts whatever plays, resolves the id through the
+    // file's `animationLookup`, and bakes the anchor `cursor_lo = sceneClock − trunc(ms)` that
+    // the sampler re-reads every frame (render law §4.2). The id is an `AnimationData` id, not a
+    // file slot; one the file does not own stops the playing track and arms nothing.
     m.set(
         "SetSequence",
         lua.create_function(|lua, (this, seq): (Table, Value)| {
             let seq = int(&seq);
-            with_model(lua, &this, |m| {
-                m.sequence = seq;
-                // A fresh sequence starts unscrubbed: `SetSequenceTime` is a scrub INTO the
-                // current sequence, so carrying the old pair across a change would park the new
-                // animation at a time that belongs to the previous one. The cooldown indicator
-                // drives exactly this pair every frame and is the reason to get it right.
-                m.sequence_time = None;
-            })
+            let facts = facts_of_pane(lua, &this)?;
+            with_model(lua, &this, |m| m.arm(seq, 0, facts.as_deref()))
         })?,
     )?;
     m.set(
         "SetSequenceTime",
         lua.create_function(|lua, (this, seq, ms): (Table, Value, Value)| {
-            let pair = (int(&seq), int(&ms));
-            with_model(lua, &this, |m| {
-                m.sequence = pair.0;
-                m.sequence_time = Some(pair);
-            })
+            let (seq, ms) = (int(&seq), int(&ms));
+            let facts = facts_of_pane(lua, &this)?;
+            with_model(lua, &this, |m| m.arm(seq, i64::from(ms), facts.as_deref()))
         })?,
     )?;
 
@@ -361,23 +401,29 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // no unit, and stores nothing on the `0x3dc`-byte widget — the override lives on the CM2Model
     // and dies with it when `SetModel`/`ClearModel` releases the instance.
     //
-    // **Which is why storing nothing here is faithful rather than lazy.** The reference's two
-    // "not ready" cases behave OPPOSITELY: with a `CM2Model` present but its data not resident the
-    // call is queued on `[cm2+0x3c]` and replayed; with **no CM2Model at all**
-    // (`[widget+0x318] == 0`) it is **dropped and never replayed**. This engine renders no
-    // FrameXML models, so our panes are permanently the second case — dropping it is what the
-    // client does in exactly our state.
+    // The reference's two "not ready" cases behave OPPOSITELY: with a `CM2Model` present but its
+    // data not resident the call is queued on `[cm2+0x3c]` and replayed; with **no CM2Model at
+    // all** (`[widget+0x318] == 0`) it is **dropped and never replayed**. Since decision 2007 a
+    // pane with a file has an instance the host renders, so the override is STORED on the pane
+    // (`ModelState::icon`, the queued-and-replayed case — the host applies it whenever the file
+    // is resident) and a pane with no file drops it, as the client does. The stock
+    // `MainMenuBarBagButtons.lua` is the caller: `ItemAnim_OnEvent` puts the pushed item's icon
+    // on `ForcedBackpackItem.mdx`, whose one batch carries no texture of its own.
     //
-    // The argument gate is real and is shape A: `lua_isstring` (tags 3|4) then `lua_tostring`,
-    // raising `Usage: %s:ReplaceIconTexture("texture")` on anything else. It is kept because it is
-    // the whole observable behaviour left.
+    // The argument gate is shape A: `lua_isstring` (tags 3|4) then `lua_tostring`, raising
+    // `Usage: %s:ReplaceIconTexture("texture")` on anything else.
     m.set(
         "ReplaceIconTexture",
         lua.create_function(|lua, (this, path): (Table, Value)| {
-            if string_arg(&path).is_none() {
+            let Some(path) = string_arg(&path) else {
                 return Err(usage(lua, &this, "ReplaceIconTexture(\"texture\")"));
-            }
-            with_model(lua, &this, |_| ())
+            };
+            let path = path.to_string();
+            with_model(lua, &this, |m| {
+                if m.path.is_some() {
+                    m.icon = Some(path);
+                }
+            })
         })?,
     )?;
 
@@ -485,4 +531,89 @@ impl crate::script::UiScript {
     pub fn model_pane_facing(&self, name: &str) -> f32 {
         self.model_pane(name).map_or(0.0, |m| m.facing)
     }
+
+    /// The host hands over what it knows about a model **file** (decision 2007): its sequences
+    /// and bounds, read off the loaded asset. Every pane holding that file then runs the
+    /// reference's residency completion — the loader's Stand seed for a pane that was waiting,
+    /// the ownership check for an arm that was queued ([`ModelState::seed_from_facts`]) — and
+    /// its clock starts answering ([`ModelState::play_head`]).
+    pub fn set_model_facts(&mut self, path: &str, facts: ModelFileFacts) {
+        let key = model_key(path);
+        let facts = Arc::new(facts);
+        let mut model = self.model_mut();
+        model.model_facts.insert(key.clone(), facts.clone());
+        model.model_facts_wanted.retain(|k| *k != key);
+        // A one-off walk per file, not per frame: the panes that named this file are the
+        // waiters the reference links on the streaming drain (`0x71d640`).
+        let handles: Vec<_> = model
+            .arena
+            .iter_frames()
+            .filter_map(|(h, f)| match &f.kind_state {
+                KindState::Model(m) if m.path.as_deref().is_some_and(|p| model_key(p) == key) => {
+                    Some(h)
+                }
+                _ => None,
+            })
+            .collect();
+        for h in handles {
+            if let Some(KindState::Model(m)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
+                m.seed_from_facts(&facts);
+            }
+        }
+    }
+
+    /// The model files panes have named that no facts have arrived for — drained: the host
+    /// loads each once and answers through [`Self::set_model_facts`]. Keys are
+    /// [`crate::widget::model_key`]s (case-folded, `/`-separated, no extension).
+    pub fn model_facts_wanted(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.model_mut().model_facts_wanted)
+    }
+
+    /// Does the engine hold facts for `path`'s file — the host's "already answered" test.
+    pub fn has_model_facts(&self, path: &str) -> bool {
+        self.model_ref().model_facts.contains_key(&model_key(path))
+    }
+
+    /// **The paint list**: every effectively-visible model pane holding a file whose facts the
+    /// engine has — with its scene clock and, when something is armed, its play head. The host's
+    /// renderer reads this once per frame (decision 2008) instead of the extract carrying a
+    /// cursor that moves every tick (`QuadContent::ModelPane`'s doc says why). Handle order —
+    /// the arena's registry order, stable across frames.
+    pub fn visible_model_panes(&self) -> Vec<ModelPaneFrame> {
+        let model = self.model_ref();
+        model
+            .arena
+            .ticked_kinds()
+            .iter()
+            .filter_map(|&h| {
+                let f = model.arena.frame(h)?;
+                if !f.effective_visible {
+                    return None;
+                }
+                let KindState::Model(m) = &f.kind_state else {
+                    return None;
+                };
+                let path = m.path.as_deref()?;
+                let facts = model.model_facts.get(&model_key(path))?;
+                Some(ModelPaneFrame {
+                    handle: h,
+                    clock_ms: m.clock_ms,
+                    play: m.play_head(facts),
+                })
+            })
+            .collect()
+    }
+}
+
+/// One visible model pane as the host's renderer sees it this frame —
+/// [`UiScript::visible_model_panes`]'s row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelPaneFrame {
+    pub handle: crate::widget::FrameHandle,
+    /// The pane's private scene clock, ms ([`ModelState::clock_ms`]) — the global-sequence
+    /// clock of everything the pane draws.
+    pub clock_ms: u64,
+    /// Where the armed sequence stands, or `None` while nothing is armed (the file draws at its
+    /// rest pose).
+    pub play: Option<crate::widget::ModelPlayHead>,
 }

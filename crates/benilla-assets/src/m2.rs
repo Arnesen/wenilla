@@ -84,6 +84,13 @@ pub struct M2Model {
     /// file-order-first one; they coincide on every effect model probed (single-sequence models).
     /// `None` for a model with no sequences at all.
     pub first_seq_span: Option<f32>,
+    /// **Every sequence the file owns, in file order** — id, slot, length, loop — whatever
+    /// [`Self::animations`] kept a clip for. The UI model pane's clock needs exactly this
+    /// (decision 2008): which `AnimationData` ids the file answers to, how long each runs and
+    /// whether it clamps — for sequences that key no bone too, which `ModelAnimations` drops
+    /// (the cooldown indicator's sweep keys a constant on its one bone; its texture transforms
+    /// and colour tracks are what move). Empty for a file with no sequences.
+    pub sequences: Vec<M2SequenceInfo>,
     /// The model's attachment points (decision 0072 — held items): weapon/shield hand slots, sheath
     /// points, etc. Each carries the bone it rides + its bind-pose-relative offset (see
     /// [`ModelAttachment`]). Empty for a model with no attachment table (most doodads/WMO props).
@@ -124,6 +131,20 @@ pub struct M2Model {
     /// mount + most quadrupeds), `3` = pitch **and** roll (kodo/crab/spider), `0`/`2` = level.
     /// The entity layer reads it to conform a standing model to the terrain under it.
     pub global_flags: u32,
+}
+
+/// One sequence of an M2, as the file table has it — see [`M2Model::sequences`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct M2SequenceInfo {
+    /// The `AnimationData.dbc` id (`M2Sequence+0x00`).
+    pub anim_id: u16,
+    /// The sequence's file slot — the axis the per-sequence material bakes are keyed on
+    /// ([`benilla_formats::ModelAnimation::seq_index`]).
+    pub seq_index: usize,
+    /// `end − start` on the file's timeline, ms.
+    pub duration_ms: u32,
+    /// Loops (flag bit 0 clear); a clamped sequence holds its last frame.
+    pub looping: bool,
 }
 
 /// An M2's authored portrait-camera rig in Bevy space (see [`M2Model::portrait_camera`]): eye/target
@@ -358,6 +379,7 @@ impl AssetLoader for M2ModelLoader {
                 skin_slot: sub.skin_slot,
                 geoset_id: sub.geoset_id,
                 char_slot: sub.char_slot,
+                icon_slot: sub.icon_slot,
                 blend: sub.blend,
                 two_sided: sub.two_sided,
                 interior: false,        // M2 has no interior/exterior group concept
@@ -505,6 +527,15 @@ impl AssetLoader for M2ModelLoader {
         // least one sequence produced an animated clip.
         let sequences = parse_m2_animations(&bytes);
         let first_seq_span = sequences.first().map(|a| a.duration).filter(|d| *d > 0.0);
+        let sequence_infos: Vec<M2SequenceInfo> = sequences
+            .iter()
+            .map(|a| M2SequenceInfo {
+                anim_id: a.anim_id,
+                seq_index: a.seq_index,
+                duration_ms: a.end_ms.saturating_sub(a.start_ms),
+                looping: a.looping,
+            })
+            .collect();
         let animations = {
             let mut graph = AnimationGraph::new();
             let root = graph.root;
@@ -801,6 +832,7 @@ impl AssetLoader for M2ModelLoader {
             inverse_bindposes,
             animations,
             first_seq_span,
+            sequences: sequence_infos,
             attachments,
             markers,
             portrait_camera,

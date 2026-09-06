@@ -97,7 +97,8 @@ pub(crate) use glue_booth::{
     PreviewBillboard, PreviewEffects, PreviewPart, PreviewRider, SelectLook, GLUE_SLOT,
 };
 mod light;
-use light::{material_variant, model_pane_light, studio_light, BoothLight};
+pub(crate) use light::material_variant;
+use light::{model_pane_light, studio_light, BoothLight};
 mod test_bake;
 
 /// The portrait slots we bake, each with its own render layer/camera: the player + target unit
@@ -226,6 +227,9 @@ pub(crate) const WARM_BOOTH_LAYER: usize = DRESSUP_LAYER + 1;
 /// "the next layer past the paper doll's" in their own file landed on the same number, and the
 /// clash was silent in both rendering and the emitter→camera match.
 pub(crate) const MINIMAP_COMPOSITE_LAYER: usize = WARM_BOOTH_LAYER + 1;
+/// The UI model tiles' layer (`crate::ui_models`, decision 2008): every `<Model>` widget's M2
+/// renders into one atlas through one camera on this layer.
+pub(crate) const UI_MODELS_LAYER: usize = MINIMAP_COMPOSITE_LAYER + 1;
 
 // The ladder must stay collision-free: a booth camera's layer is its identity for both rendering
 // and the emitter→camera match, and the failure above was silent in both.
@@ -242,7 +246,8 @@ const _: () = assert!(
         && INSPECT_LAYER != GLUE_LAYER
         && DRESSUP_LAYER > GLUE_LAYER
         && WARM_BOOTH_LAYER > DRESSUP_LAYER
-        && MINIMAP_COMPOSITE_LAYER > WARM_BOOTH_LAYER,
+        && MINIMAP_COMPOSITE_LAYER > WARM_BOOTH_LAYER
+        && UI_MODELS_LAYER > MINIMAP_COMPOSITE_LAYER,
     "booth render layers must be distinct — see GLUE_LAYER"
 );
 const _: () = assert!(
@@ -1035,6 +1040,9 @@ pub(crate) struct BoothPanes(pub(crate) HashMap<String, f32>);
 pub(crate) struct BoothBridge<'w> {
     pub(crate) images: Res<'w, PortraitImages>,
     pub(crate) panes: ResMut<'w, BoothPanes>,
+    /// The file panes' half of the same seam (decision 2008): the `ModelPane` arm publishes a
+    /// tile request per pane and samples the tile's atlas cell back.
+    pub(crate) tiles: ResMut<'w, crate::ui_models::UiModelTiles>,
 }
 
 /// The group-facing inputs [`sync_portraits`] needs, in one param: who is in the party
@@ -1261,10 +1269,15 @@ impl Plugin for PortraitPlugin {
 /// A fresh transparent render-target image of `size²`, usable as a camera target and sampled by the
 /// UI. Portrait slots pass [`PORTRAIT_SIZE`]; the paper doll passes [`PAPERDOLL_SIZE`].
 fn new_target_image(size: u32) -> Image {
+    new_target_image_sized(size, size)
+}
+
+/// [`new_target_image`] at any size — the UI model tiles' atlas (`crate::ui_models`).
+pub(crate) fn new_target_image_sized(width: u32, height: u32) -> Image {
     let mut image = Image::new_fill(
         Extent3d {
-            width: size,
-            height: size,
+            width,
+            height,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
@@ -1300,7 +1313,7 @@ fn new_target_image(size: u32) -> Image {
 /// booth — because the warm pass compiles the samples=1 twin of every model pipeline against
 /// exactly this shape behind the loading cover (decisions 0938/0958): a booth camera whose shape
 /// drifts from the warm booth's is a live pipeline stall on its first bake.
-fn booth_view_shape() -> impl Bundle {
+pub(crate) fn booth_view_shape() -> impl Bundle {
     (
         Camera3d::default(),
         bevy::render::view::Hdr,

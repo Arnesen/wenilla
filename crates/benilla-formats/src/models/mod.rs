@@ -84,6 +84,7 @@ fn remap_submesh(
             skin_slot: None,
             geoset_id: 0, // set by the caller per batch (the M2 path; WMO leaves it 0)
             char_slot: None, // set by the caller per batch (M2 only)
+            icon_slot: false, // set by the caller per batch (M2 texture type 14)
             blend,
             // Repeat is the pre-0763 behaviour and stays WMO's; the M2 batch loop overrides both
             // from the texture record's own flags.

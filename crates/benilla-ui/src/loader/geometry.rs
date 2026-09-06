@@ -24,6 +24,43 @@ impl Loader<'_> {
                 self.call(wrapper, "SetAlpha", a, dbg);
             }
         }
+        // `scale=` on a MODEL pane is the model's own scale, not the frame's: `CSimpleModel::
+        // LoadXML` (`0x76cac0`) writes it into `+0x3a0` at `76cb61` — the field `SetModelScale`
+        // writes — and raises `Frame %s: Invalid model scale: %s` at `76cb92` for `≤ 0` (a raise,
+        // not a clamp; wow-re `modelframe-render-law.md` §2). Every `scale=` in the shipped
+        // FrameXML sits on a model pane (the cooldown indicator's 0.75, the autocast shine's
+        // 1.2/1.22, the pings' 0.4, the dressing room's 2.0), and until decision 2007 the loader
+        // read none of them. Whether the generic frame loader (`0x769820`) reads a `scale`
+        // attribute of its own is not carved; a plain frame's `scale=` is left as it was.
+        //
+        // Gated on the kind the element MATERIALIZES as, not on its tag: a `<Model>` playing the
+        // cooldown indicator is this engine's `Cooldown` widget (`frame_kind_of`), which has no
+        // model scale — and the shipped template carries exactly that pairing (`scale="0.75"`
+        // on the cooldown file), applied through every action and bag button that inherits it.
+        // `file=` on a model pane is `SetModel` (`CSimpleModel::LoadXML` `0x76cac0` installs the
+        // file into the widget, resident or streaming — decision 2013). Until 2013 no XML-declared
+        // pane ever held a file: the loader read `file=` for the cooldown mapping alone, and the
+        // pings, the shine and the item card were bare panes to the engine. Gated on the
+        // materialized kind like `scale=` below: a `<Model>` playing the cooldown indicator is
+        // this engine's `Cooldown` widget, which has no file.
+        let model_kind = super::model_kind_tag(&super::frame_kind_of(el));
+        if model_kind {
+            if let Some(file) = el.attr("file") {
+                let text = self.resolve_text(file, dbg);
+                self.call(wrapper, "SetModel", text, dbg);
+            }
+        }
+        if let Some(scale) = el.attr("scale") {
+            if model_kind {
+                match scale.trim().parse::<f32>() {
+                    Ok(s) if s > 0.0 => self.call(wrapper, "SetModelScale", s, dbg),
+                    _ => self.warn_once(
+                        &format!("model-scale:{dbg}"),
+                        format!("Frame {dbg}: Invalid model scale: {scale}"),
+                    ),
+                }
+            }
+        }
         if let Some(id) = el.attr("id") {
             if let Ok(n) = id.parse::<i64>() {
                 self.call(wrapper, "SetID", n, dbg);

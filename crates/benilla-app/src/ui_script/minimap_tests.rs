@@ -350,7 +350,7 @@ fn get_ping_position_answers_two_numbers_always() {
 
     // The stock lifetime, end to end: MINIMAP_PING shows the model frame and starts the 5 s
     // timer; OnUpdate re-seats it from GetPingPosition every frame; past 5 s it "fades" and
-    // hides. The app's sprite follows this frame (`minimap/ping.rs`).
+    // hides. The frame's own file draws in it (`crate::ui_models`, decision 2008).
     assert!(
         !s.eval::<bool>("return MiniMapPing:IsVisible()").unwrap(),
         "hidden until a ping"
@@ -448,4 +448,174 @@ fn the_meeting_stone_icon_follows_the_queue_across_meetingstone_changed() {
     s.set_meeting_stone(0, Some("Looking for more for Unknown".into()));
     s.fire_event("MEETINGSTONE_CHANGED", vec![]);
     assert!(!vis(&s), "area 0 hides it again");
+}
+
+/// **The ping's pixels are the stock `<Model>`'s own file** (decision 2008): shown by
+/// `MINIMAP_PING` with the file's facts landed, the extract publishes ONE tile request for the
+/// pane — at its device size and the render law's unit ladder — and, once the renderer has
+/// handed back a cell, draws that cell as one premultiplied quad over the pane's rect. Drives the
+/// real `drive_script` in the headless harness the clip-plumb tests use.
+#[test]
+fn a_shown_ping_pane_asks_for_a_tile_and_draws_its_cell() {
+    use bevy::prelude::*;
+    use bevy::window::PrimaryWindow;
+
+    use benilla_ui::widget::{ModelFileFacts, SequenceFacts};
+
+    use crate::ui_models::{Cell, UiModelTiles};
+    use crate::ui_pass::UiQuads;
+
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run("function GetMinimapZoneText() return '' end")
+        .unwrap();
+    s.run("function PlaySound() end").unwrap();
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\BattlefieldFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\Minimap.xml");
+
+    // The file's facts, as `benilla-extract m2seq` reads them off the install: the ping's
+    // `SetSequence(0)` from its OnLoad was queued behind them and replays now.
+    const PING: &str = r"Interface\MiniMap\Ping\MinimapPing.mdx";
+    let seq = |anim_id, duration_ms, looping| SequenceFacts {
+        anim_id,
+        duration_ms,
+        looping,
+    };
+    s.set_model_facts(
+        PING,
+        ModelFileFacts {
+            sequences: vec![seq(127, 1333, false), seq(0, 833, true), seq(1, 333, false)],
+            bbox: ([0.0; 3], [0.0; 3]),
+        },
+    );
+    assert!(
+        s.visible_model_panes().is_empty(),
+        "hidden until a ping: nothing to paint"
+    );
+    let ping_at = |s: &mut UiScript, nx: f64, ny: f64| {
+        s.fire_event(
+            "MINIMAP_PING",
+            vec![
+                benilla_ui::script::ScriptValue::Str("player".into()),
+                benilla_ui::script::ScriptValue::Number(nx),
+                benilla_ui::script::ScriptValue::Number(ny),
+            ],
+        );
+    };
+    ping_at(&mut s, 0.25, -0.125);
+    let panes = s.visible_model_panes();
+    assert_eq!(panes.len(), 1, "the ping pane is on the paint list");
+    let pane = panes[0];
+    assert_eq!(
+        pane.play.map(|p| (p.anim_id, p.cursor_ms)),
+        Some((0, 0)),
+        "the OnLoad's SetSequence(0) replayed over the seed: Stand, at 0"
+    );
+
+    let mut app = App::new();
+    app.insert_non_send_resource(s);
+    app.init_resource::<UiQuads>();
+    app.init_resource::<Assets<Image>>();
+    app.init_resource::<crate::portrait::PortraitImages>();
+    app.init_resource::<crate::portrait::BoothPanes>();
+    app.init_resource::<UiModelTiles>();
+    app.init_resource::<crate::minimap::MinimapWidget>();
+    app.init_resource::<crate::autocast_shine::ShineSites>();
+    app.init_resource::<crate::ui_script::UiFrameCost>();
+    app.init_resource::<crate::ui_script::UiCostWanted>();
+    app.init_resource::<Time>();
+    app.init_resource::<Time<Real>>();
+    app.init_resource::<crate::ui_script::UiClock>();
+    app.init_resource::<crate::ui_script::UiScaleCvar>();
+    app.world_mut().spawn((
+        Window {
+            resolution: UVec2::new(1024, 768).into(),
+            ..default()
+        },
+        PrimaryWindow,
+    ));
+    app.add_systems(Update, super::extract::drive_script);
+    app.update();
+
+    let premultiplied = |app: &App| {
+        app.world()
+            .resource::<UiQuads>()
+            .quads
+            .iter()
+            .filter(|q| q.premultiplied)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    {
+        let tiles = app.world().resource::<UiModelTiles>();
+        let req = tiles
+            .requests
+            .get(&pane.handle)
+            .expect("one request for the ping pane");
+        assert_eq!(req.path, PING);
+        // `<Size>50×50</Size>` at s = 1 (768-tall window), DPI 1: 50 device px a side.
+        assert_eq!(req.size_px, UVec2::new(50, 50));
+        // `scale="0.4"`: 1280 · 0.4 = 512 px per model unit — 1596's own "1 model unit at 512 px".
+        assert!(
+            (req.px_per_unit - 512.0).abs() < 1e-3,
+            "{}",
+            req.px_per_unit
+        );
+        // A layout unit, and a particle's unit: 768 · √((4/3)² + 1) = 1280 at 4:3.
+        assert!(
+            (req.pos_px_per_unit - 1280.0).abs() < 0.1,
+            "{}",
+            req.pos_px_per_unit
+        );
+        assert!(
+            (req.star_px_per_unit - 1280.0).abs() < 0.1,
+            "{}",
+            req.star_px_per_unit
+        );
+        assert_eq!(req.icon, None);
+        assert!(premultiplied(&app).is_empty(), "no cell yet: nothing drawn");
+    }
+
+    // The renderer hands a cell back; a fresh ping moves the pane, so the memoized conversion
+    // runs again and the arm draws the cell.
+    {
+        let atlas = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(Image::default());
+        let mut tiles = app.world_mut().resource_mut::<UiModelTiles>();
+        tiles.atlas = Some(atlas);
+        tiles.atlas_size = UVec2::splat(512);
+        tiles.cells.insert(
+            pane.handle,
+            Cell {
+                origin: UVec2::new(2, 2),
+                size: UVec2::new(50, 50),
+            },
+        );
+    }
+    {
+        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        // The stock handler seats the frame from `GetPingPosition()`, not the event's args.
+        script.set_minimap_ping((-0.125, 0.25));
+        ping_at(&mut script, -0.125, 0.25);
+    }
+    app.update();
+    let drawn = premultiplied(&app);
+    assert_eq!(drawn.len(), 1, "the cell, once");
+    let q = &drawn[0];
+    assert!((q.rect.width() - 50.0).abs() < 1e-3 && (q.rect.height() - 50.0).abs() < 1e-3);
+    let [tl, _, br, _] = q.uv.corners;
+    assert!((tl[0] - 2.0 / 512.0).abs() < 1e-6 && (tl[1] - 2.0 / 512.0).abs() < 1e-6);
+    assert!((br[0] - 52.0 / 512.0).abs() < 1e-6 && (br[1] - 52.0 / 512.0).abs() < 1e-6);
+    assert_eq!(q.color, [1.0, 1.0, 1.0, 1.0], "the frame's own alpha");
+    assert!(q.texture.is_some());
 }

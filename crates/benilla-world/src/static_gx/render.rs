@@ -21,6 +21,7 @@ use bevy::image::Image;
 use bevy::mesh::VertexBufferLayout;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
+use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::mesh::allocator::MeshAllocator;
@@ -811,6 +812,9 @@ impl ViewNode for StaticGxNode {
         }
         let depth_attachment = depth.get_attachment(StoreOp::Store);
         let color_attachment = target.get_color_attachment();
+        // The pass's diagnostic span — `render/static_gx/elapsed_gpu` where the device times
+        // passes (Vulkan/DX12), the CPU span everywhere: the journal's `gpu_static` column (2008).
+        let diagnostics = render_context.diagnostic_recorder();
         let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("static_gx"),
             color_attachments: &[Some(color_attachment)],
@@ -818,6 +822,7 @@ impl ViewNode for StaticGxNode {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+        let span = diagnostics.pass_span(&mut pass, "static_gx");
         pass.set_bind_group(0, &view_bind.0, &[view_offset.offset]);
         for (gpu, draw, sel) in &resolved {
             let Some(mesh) = meshes.get(draw.mesh.id()) else {
@@ -855,6 +860,7 @@ impl ViewNode for StaticGxNode {
                 );
             }
         }
+        span.end(&mut pass);
         Ok(())
     }
 }

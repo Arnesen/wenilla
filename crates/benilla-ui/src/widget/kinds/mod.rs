@@ -415,12 +415,33 @@ pub struct ModelState {
     /// not — `SetUnit` is [`FrameKind::PlayerModel`]'s (`0x84f1fc[0]` → `0x505d70`), and a plain
     /// `<Model>` has no way to reach it.
     pub unit: Option<String>,
-    /// `SetSequence(n)` — the animation index the pane plays.
+    /// `SetSequence(n)` — the last animation id asked for (the raw id lands in
+    /// `[bone0 block + 0xf8]`, which `PlayerModel`'s per-paint stomp reads). What actually
+    /// PLAYS is [`Self::armed`].
     pub sequence: i32,
-    /// `SetSequenceTime(sequence, ms)` — the scrub point, as `(sequence, milliseconds)`. The
-    /// cooldown indicator's whole mechanism is this pair driven per frame, which is why it is
-    /// stored rather than folded into [`Self::sequence`].
-    pub sequence_time: Option<(i32, i32)>,
+    /// **The widget's private scene clock**, milliseconds — `[scene+0xc]` of the `CM2Scene` the
+    /// widget owns (`0x76cfc0`, cached at `+0x314`; never the world's `[0xc7b298]`). Advanced by
+    /// the widget's own `OnUpdate` (`0x76d7f0`: `trunc(elapsed · 1000)`, no `+0.5`), which the UI
+    /// pump walks for **visible** frames only — so a hidden pane's clock stands still and a
+    /// re-shown one resumes where it stopped (the minimap ping's "ping N resumes where ping N−1
+    /// left off"). Nothing else advances it: `AdvanceTime` is inert. The scene outlives the
+    /// model, so `SetModel` does not reset it. Decision 2007.
+    pub clock_ms: u64,
+    /// What is armed on bone slot 0 — the sequence the pane plays and the anchor its cursor is
+    /// read against. `None` while nothing plays: before any file, after `ClearModel`, or after
+    /// a `SetSequence` naming an id the file does not own (which stops what was playing and
+    /// arms nothing — `0x7121a0`'s interrupt runs before its bounds check).
+    pub armed: Option<ArmedSequence>,
+    /// `SetModel` ran but the loader's own arm has not — the file's facts ([`ModelFileFacts`])
+    /// were not known at the call. The reference links the instance as a waiter for the
+    /// streaming drain and runs the completion (`0x70ebd0`: arm Stand, variation 0) when the
+    /// asset lands; [`ModelState::seed_from_facts`] is that completion, run when the host hands
+    /// the facts over.
+    pub pending_seed: bool,
+    /// `ReplaceIconTexture(path)` — the type-14 texture override (`0x76cfe0(0xe, path)` →
+    /// `0x710ec0`), which lives on the model instance and dies with it: `SetModel` and
+    /// `ClearModel` clear it. `None` = the file's own textures.
+    pub icon: Option<String>,
     /// The pane's yaw in radians — `CSimpleModel+0x39c`. **One slot, written by two verbs on two
     /// different classes**: `Model:SetFacing` (`0x76dce0`) and `PlayerModel:SetRotation`
     /// (`0x505f00` → `0x505bb0`, whose last act is `0x505c44 mov [esi+0x39c], eax` — literally the
@@ -464,7 +485,10 @@ impl Default for ModelState {
             path: None,
             unit: None,
             sequence: 0,
-            sequence_time: None,
+            clock_ms: 0,
+            armed: None,
+            pending_seed: false,
+            icon: None,
             facing: 0.0,
             scale: 1.0,
             camera: 0,
@@ -472,6 +496,225 @@ impl Default for ModelState {
             light: None,
             fog_color: 0xffff_ffff,
         }
+    }
+}
+
+/// What a pane's bone slot 0 is playing — the reference's `0x7121a0` arm (`SetSequence`
+/// `0x76dec0` → `0x76cf50`, `SetSequenceTime` `0x76dfc0` → `0x76cf80`, and the loader's own
+/// seed `0x70ebd0`): the id, and the **anchor** the cursor is read against. The reference
+/// bakes `cursor_lo = sceneClock − trunc(ms)` once and its sampler re-reads that anchor every
+/// frame; there is no counter that advances on its own, which is what lets the cooldown scrub
+/// the pane every paint without the clock fighting it. Decision 2007.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArmedSequence {
+    /// The `AnimationData.dbc` id — `SetSequence`'s argument, or the loader's Stand seed.
+    pub anim_id: i32,
+    /// The scene-clock value the cursor counts from: `cursor = clock_ms − anchor_ms`, so a
+    /// `SetSequenceTime(id, ms)` at clock `c` stores `c − ms`.
+    pub anchor_ms: i64,
+    /// The scene clock when the arm was made — so a queued arm (made before the file's facts
+    /// were known) can replay at residency with its original offset: `armed_at − anchor` is the
+    /// `ms` the call asked for.
+    pub armed_at_ms: u64,
+    /// The completion callback has fired for this arm — the sequence ran its length (a clamp's
+    /// end, or a loop's first pass) and the widget's `OnAnimFinished` ran. Once per arm: a
+    /// re-arm starts a fresh one.
+    pub finished: bool,
+}
+
+/// The playing sequence's cursor, as the renderer samples it — [`ModelState::play_head`]'s
+/// answer under the file's facts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelPlayHead {
+    /// The `AnimationData.dbc` id of the armed sequence (the file owns it — see
+    /// [`ModelFileFacts::owns`]).
+    pub anim_id: u16,
+    /// Milliseconds into the sequence: wrapped for a looping one, held at the last frame for a
+    /// clamped one that has completed.
+    pub cursor_ms: u32,
+}
+
+/// One sequence of a model file, as the clock needs it — see [`ModelFileFacts`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SequenceFacts {
+    /// The `AnimationData.dbc` id (`M2Sequence+0x00`).
+    pub anim_id: u16,
+    /// The sequence's length, `end − start` on the file's timeline (`+0x08 − +0x04`).
+    pub duration_ms: u32,
+    /// The sequence loops (the flag the formats crate decodes as `looping`); a clamped one
+    /// holds its last frame and fires the completion callback once.
+    pub looping: bool,
+}
+
+/// What the engine needs to know about a model **file** to run a pane's clock — the reference
+/// reads these off the resident `MD20` (`animationLookup` at `md20+0x24`, the sequence table,
+/// the header bounds); here the host's M2 loader has them and hands them over through
+/// `UiScript::set_model_facts` once the asset lands. Keyed by the `SetModel` path
+/// ([`model_key`]), shared by every pane holding that file. Decision 2007.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelFileFacts {
+    /// The sequences the file owns, **in file order** — the first is `animations[0]`, the
+    /// loader's fallback seed when the file does not own id 0.
+    pub sequences: Vec<SequenceFacts>,
+    /// The header bounding box, raw WoW model space (`min`, `max`) — the implicit rect of a
+    /// size-less `<Model>` (render law §3) and the arrow's re-centring.
+    pub bbox: ([f32; 3], [f32; 3]),
+}
+
+impl ModelFileFacts {
+    /// Does the file own `anim_id` — the reference's `0x711960` ("does `animationLookup` map
+    /// it"): a model owns an id iff some sequence carries it.
+    pub fn owns(&self, anim_id: u16) -> bool {
+        self.sequences.iter().any(|s| s.anim_id == anim_id)
+    }
+
+    /// The sequence `SetSequence(anim_id)` plays: the id's **first** file slot — variation 0,
+    /// which is what both the loader's seed and the widget's arm pass (`0x7121a0`'s third
+    /// argument is `0`, never `-1`, on this path).
+    pub fn sequence(&self, anim_id: u16) -> Option<&SequenceFacts> {
+        self.sequences.iter().find(|s| s.anim_id == anim_id)
+    }
+
+    /// The loader's idle seed (`0x70ebd0`'s tail, `0x710153`–`0x71019b`): **id 0 (`Stand`) if
+    /// the file owns it, else `animations[0]`'s own id**; `None` only for a file with no
+    /// sequences at all.
+    pub fn stand_id(&self) -> Option<u16> {
+        if self.owns(0) {
+            Some(0)
+        } else {
+            self.sequences.first().map(|s| s.anim_id)
+        }
+    }
+}
+
+/// The key a model path is filed under: case-folded, forward slashes, no extension — so
+/// `Interface\Cooldown\UI-Cooldown-Indicator.mdx` and its shipped `.m2` twin are one file, as
+/// they are for the loader.
+pub fn model_key(path: &str) -> String {
+    let p = path.to_ascii_lowercase().replace('\\', "/");
+    let stem = p
+        .strip_suffix(".mdx")
+        .or_else(|| p.strip_suffix(".mdl"))
+        .or_else(|| p.strip_suffix(".m2"))
+        .unwrap_or(&p);
+    stem.to_string()
+}
+
+impl ModelState {
+    /// `SetModel(path)` — `vt+0x94` (`0x76cce0`): a **fresh instance** of the file (`CreateModel`
+    /// with flags 5), which displaces a unit, drops the previous instance's icon override and
+    /// its arm, and runs the loader's completion (`0x70ebd0`) synchronously when the file is
+    /// resident — [`Self::seed_from_facts`] — else waits for it ([`Self::pending_seed`]). The
+    /// scene clock is the WIDGET's, not the instance's, and keeps running.
+    pub fn set_file(&mut self, path: String, facts: Option<&ModelFileFacts>) {
+        self.path = Some(path);
+        self.unit = None;
+        self.icon = None;
+        self.armed = None;
+        self.pending_seed = true;
+        if let Some(facts) = facts {
+            self.seed_from_facts(facts);
+        }
+    }
+
+    /// `ClearModel` — releases the instance: no file, no unit, no override, nothing armed.
+    pub fn clear_file(&mut self) {
+        self.path = None;
+        self.unit = None;
+        self.icon = None;
+        self.armed = None;
+        self.pending_seed = false;
+    }
+
+    /// `SetSequence` / `SetSequenceTime` — the `0x7121a0` arm. It **interrupts** whatever plays
+    /// first (the completion callback fires with a non-zero mode there, which the widget's
+    /// `OnAnimFinished` gate ignores — §4.5: natural completion only), then arms `id` at `ms`
+    /// into it — or arms nothing when the file does not own the id (the bounds check at
+    /// `71247c` returns having armed nothing). With the facts not known yet the arm is kept and
+    /// re-checked when they land ([`Self::seed_from_facts`]) — the reference's queued replay for
+    /// a file still streaming.
+    pub fn arm(&mut self, id: i32, ms: i64, facts: Option<&ModelFileFacts>) {
+        self.sequence = id;
+        let owned = u16::try_from(id)
+            .ok()
+            .is_some_and(|id| facts.is_none_or(|f| f.owns(id)));
+        self.armed = owned.then(|| ArmedSequence {
+            anim_id: id,
+            anchor_ms: self.clock_ms as i64 - ms,
+            armed_at_ms: self.clock_ms,
+            finished: false,
+        });
+    }
+
+    /// The loader's completion for a file that just became resident (`0x70ebd0`), then the
+    /// replay of what was queued behind the load: the seed arms Stand (variation 0); an explicit
+    /// `SetSequence`/`SetSequenceTime` made while the file streamed replays AFTER it — at its
+    /// original offset — and decides the final state, which for an id the file does not own is
+    /// **nothing armed** (the interrupt ran, the bounds check armed nothing). Idempotent once
+    /// the seed has run: a second hand-over of the same facts only re-checks ownership.
+    pub fn seed_from_facts(&mut self, facts: &ModelFileFacts) {
+        let queued = self.armed.filter(|_| self.pending_seed);
+        if self.pending_seed {
+            self.pending_seed = false;
+            self.armed = facts.stand_id().map(|id| ArmedSequence {
+                anim_id: i32::from(id),
+                anchor_ms: self.clock_ms as i64,
+                armed_at_ms: self.clock_ms,
+                finished: false,
+            });
+        }
+        if let Some(q) = queued {
+            let offset = q.armed_at_ms as i64 - q.anchor_ms;
+            self.arm(q.anim_id, offset, Some(facts));
+        } else if let Some(armed) = self.armed {
+            if !u16::try_from(armed.anim_id).is_ok_and(|id| facts.owns(id)) {
+                self.armed = None;
+            }
+        }
+    }
+
+    /// Where the armed sequence stands on the scene clock, under `facts`: wrapped for a looping
+    /// sequence, held at the end for a clamped one. `None` when nothing is armed or the arm names
+    /// a sequence the facts do not carry.
+    pub fn play_head(&self, facts: &ModelFileFacts) -> Option<ModelPlayHead> {
+        let armed = self.armed?;
+        let anim_id = u16::try_from(armed.anim_id).ok()?;
+        let seq = facts.sequence(anim_id)?;
+        let raw = (self.clock_ms as i64 - armed.anchor_ms).max(0) as u64;
+        let dur = u64::from(seq.duration_ms);
+        let cursor = if dur == 0 {
+            0
+        } else if seq.looping {
+            raw % dur
+        } else {
+            raw.min(dur)
+        };
+        Some(ModelPlayHead {
+            anim_id,
+            cursor_ms: cursor as u32,
+        })
+    }
+
+    /// Has the armed sequence run its length without its completion having fired — the edge the
+    /// tick turns into `OnAnimFinished` (the completion callback `0x76cdc0`, `mode == 0`). Once
+    /// per arm, and **for a looping sequence too**: `0x719370` enqueues the completion when the
+    /// widget clock reaches `lo + duration · replays` and tests the loop flag only after it, so a
+    /// loop's first pass completes exactly like a clamp's end (wow-re
+    /// `modelframe-texanim-and-sequence-law.md`, Q4; corrects 2007's "clamped only").
+    pub fn completion_due(&self, facts: &ModelFileFacts) -> bool {
+        let Some(armed) = self.armed else {
+            return false;
+        };
+        if armed.finished {
+            return false;
+        }
+        let Some(seq) = u16::try_from(armed.anim_id)
+            .ok()
+            .and_then(|id| facts.sequence(id))
+        else {
+            return false;
+        };
+        (self.clock_ms as i64 - armed.anchor_ms) >= i64::from(seq.duration_ms)
     }
 }
 

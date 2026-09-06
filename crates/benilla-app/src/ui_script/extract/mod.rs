@@ -357,6 +357,9 @@ fn splice_simple(eq: &benilla_ui::script::ExtractedQuad) -> bool {
         QuadContent::Frame
         | QuadContent::Cooldown { .. }
         | QuadContent::Backdrop { .. }
+        // A model pane writes at most one quad and one idempotent tile request (decision 2008)
+        // — and the map's arrow changes facing on every turn while the map is open.
+        | QuadContent::ModelPane { .. }
         // Both colour-picker arms write one quad and nothing else — and they change on every
         // step of a drag, which is exactly the traffic the splice exists for.
         | QuadContent::ColorWheel
@@ -615,6 +618,8 @@ pub(super) fn drive_script(
     // the atlas's bake generation, which followed the same two terms; with nothing to re-bake, the
     // honest thing to watch is the term itself.)
     let dpi = window.scale_factor();
+    // The tile renderer sizes its cells in device pixels off this (decision 2008).
+    booths.tiles.dpi = dpi;
     let generation = font_atlas.as_deref().map(|a| a.generation);
     let seam_moved = *last_seam != s || *last_dpi != dpi;
     if seam_moved {
@@ -1346,10 +1351,14 @@ fn convert_entry(
         // A pane with no name, or one no window claims, draws nothing (`SetModel` panes included:
         // this engine holds their scene and renders no M2 into it). Nothing is stubbed white.
         QuadContent::ModelPane {
+            handle,
             name,
             model,
             facing,
-            model_scale: _,
+            model_scale,
+            position,
+            own_alpha,
+            icon,
         } => {
             use crate::portrait::PortraitSource;
             // The world-map arrow (decision 1980): the stock `WorldMapFrame.lua` /
@@ -1388,6 +1397,58 @@ fn convert_entry(
                     clip,
                     ..default()
                 });
+                return;
+            }
+            // A FILE pane (decision 2008): publish what the tile renderer needs — the pane's
+            // device-pixel size and the render law's unit ladder off it — and draw the tile's
+            // atlas cell when the renderer has one. The request is idempotent, so the memoized
+            // conversion may re-publish it freely; which panes draw is the engine's paint list.
+            if let Some(path) = model.as_deref() {
+                let tiles = &mut booths.tiles;
+                let dpi = tiles.dpi.max(0.01);
+                let aspect = if h > 0.0 { w / h } else { 4.0 / 3.0 };
+                let diag = (aspect * aspect + 1.0).sqrt();
+                let layout = eq.scale;
+                let size_px = UVec2::new(
+                    (rect.width() * dpi).round().max(1.0) as u32,
+                    (rect.height() * dpi).round().max(1.0) as u32,
+                );
+                tiles.requests.insert(
+                    handle,
+                    crate::ui_models::TileRequest {
+                        path: path.to_string(),
+                        size_px,
+                        // `1 model unit = 1280 · modelScale · layoutScale` FrameXML units (§3).
+                        px_per_unit: 1280.0 * model_scale * layout * s * dpi,
+                        // `SetPosition` is in layout units: `768 · √(a²+1)` FrameXML per unit.
+                        pos_px_per_unit: 768.0 * diag * layout * s * dpi,
+                        // A particle's half-extent: eye space, neither scale (§6).
+                        star_px_per_unit: 768.0 * diag * s * dpi,
+                        facing,
+                        position: Vec3::new(position.0, position.1, position.2),
+                        icon: icon.clone(),
+                    },
+                );
+                if let (Some(cell), Some(atlas)) = (tiles.cells.get(&handle), tiles.atlas.clone()) {
+                    let a = tiles.atlas_size.as_vec2();
+                    let (u0, v0) = (cell.origin.x as f32 / a.x, cell.origin.y as f32 / a.y);
+                    let (u1, v1) = (
+                        (cell.origin.x + cell.size.x) as f32 / a.x,
+                        (cell.origin.y + cell.size.y) as f32 / a.y,
+                    );
+                    out.push(UiQuad {
+                        rect,
+                        z_key: eq.z,
+                        texture: Some(atlas),
+                        uv: UvRect::from_tex_coords([u0, u1, v0, v1]),
+                        // The instance draws at the widget's OWN alpha (render law §4.4).
+                        color: [1.0, 1.0, 1.0, own_alpha],
+                        // A render target: premultiplied by construction (`UiQuad` doc).
+                        premultiplied: true,
+                        clip,
+                        ..default()
+                    });
+                }
                 return;
             }
             let Some(slot) = name.as_deref().and_then(crate::portrait::model_pane_booth) else {
@@ -1998,6 +2059,7 @@ mod clip_plumb_tests {
         app.init_resource::<Assets<Image>>();
         app.init_resource::<PortraitImages>();
         app.init_resource::<crate::portrait::BoothPanes>();
+        app.init_resource::<crate::ui_models::UiModelTiles>();
         app.init_resource::<crate::minimap::MinimapWidget>();
         app.init_resource::<crate::autocast_shine::ShineSites>();
         app.init_resource::<crate::ui_script::UiFrameCost>();
@@ -2085,6 +2147,7 @@ mod clip_plumb_tests {
         app.init_resource::<Assets<Image>>();
         app.init_resource::<PortraitImages>();
         app.init_resource::<crate::portrait::BoothPanes>();
+        app.init_resource::<crate::ui_models::UiModelTiles>();
         app.init_resource::<crate::minimap::MinimapWidget>();
         app.init_resource::<crate::autocast_shine::ShineSites>();
         app.init_resource::<crate::ui_script::UiFrameCost>();
@@ -2292,6 +2355,7 @@ mod extract_gate_tests {
         app.init_resource::<Assets<Image>>();
         app.init_resource::<PortraitImages>();
         app.init_resource::<crate::portrait::BoothPanes>();
+        app.init_resource::<crate::ui_models::UiModelTiles>();
         app.init_resource::<crate::minimap::MinimapWidget>();
         app.init_resource::<crate::autocast_shine::ShineSites>();
         app.init_resource::<crate::ui_script::UiFrameCost>();

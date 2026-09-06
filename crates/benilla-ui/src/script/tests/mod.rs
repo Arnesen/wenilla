@@ -23,6 +23,7 @@ mod keyboard;
 mod layout_gate;
 mod measure;
 mod minimap;
+mod model_clock;
 mod modelframe;
 mod movable;
 mod object_model;

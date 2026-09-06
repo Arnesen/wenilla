@@ -738,6 +738,7 @@ pub(super) fn simulate_particles(
             seq,
             rng,
             owner_reach,
+            size_scale,
             water_bound,
             texture,
             recursion: _,
@@ -1218,6 +1219,7 @@ pub(super) fn simulate_particles(
             anchored,
             alpha: *alpha,
             ride: *ride,
+            size_scale: *size_scale,
         };
         let cam = CamBasis {
             right: e_right,
@@ -1658,6 +1660,7 @@ mod tests {
             anchored: true, // 0x10 CLEAR — the world store
             alpha: 1.0,
             ride: crate::ride_frame::StoredFrame::default(), // on the ground: no fold
+            size_scale: 1.0,
         };
         // Every host pose we can think of, including ones no bone reaches.
         for placement in [
@@ -1699,6 +1702,7 @@ mod tests {
             anchored: true,
             alpha: 1.0,
             ride,
+            size_scale: 1.0,
         };
         assert_eq!(
             particle_center(&frame, &placement, &p),
@@ -1729,6 +1733,7 @@ mod tests {
             anchored: false, // 0x10 SET — the emitter-local store
             alpha: 1.0,
             ride: crate::ride_frame::StoredFrame::default(),
+            size_scale: 1.0,
         };
         let moved = Transform::from_translation(Vec3::new(10.0, 0.0, 0.0));
         assert_eq!(

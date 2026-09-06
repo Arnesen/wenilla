@@ -103,6 +103,7 @@ fn the_shape_ignores_edge_on_correct_and_degenerate_batches() {
         vertex_colors: vec![],
         interior: false,
         emissive: false,
+        icon_slot: false,
         sidn: None,
         window: false,
         additive: false,

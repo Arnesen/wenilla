@@ -21,7 +21,7 @@ use benilla_assets::LockRecover;
 use benilla_assets::{AssetSet, WorldAssets};
 use benilla_formats::{
     load_ground_effect_catalog, load_m2_mesh, scatter_ground_doodads, ChunkMesh,
-    GroundDoodadPlacement, GroundEffectCatalog, RenderSubmesh, SHADOW_MAP_SIZE,
+    GroundDoodadPlacement, GroundEffectCatalog, ModelBlend, RenderSubmesh, SHADOW_MAP_SIZE,
 };
 
 /// Ground clutter as its own subsystem: loads the `GroundEffect*` catalog + config at startup, and runs
@@ -175,23 +175,32 @@ pub(crate) struct ClutterGeometry(
 /// per-tile hitch. Owned by its tile (despawned on unload, which cascades to `built`).
 #[derive(Component)]
 pub(crate) struct ClutterChunk {
-    /// Chunk centre in Bevy space — its distance from the camera gates build vs teardown.
-    center: Vec3,
+    /// The chunk's clutter AABB in Bevy space (its terrain box, grown by a tuft's height).
+    /// Build/teardown gate on the camera's distance to the BOX — its nearest point — which is what
+    /// "any of this chunk is still within reach" actually means. A centre distance has to carry a
+    /// chunk-radius margin to approximate it, and that margin is a horizontal figure: on relief a
+    /// 33 yd chunk's vertical spread pushes its centre past the margin while its near corner is
+    /// still deep inside the visible band, and the whole chunk's grass pops in on approach (2004).
+    bounds: (Vec3, Vec3),
     /// Scattered placements grouped by model path; each becomes one merged mesh per submesh when built.
     models: Vec<(String, Vec<ShadedPlacement>)>,
     /// The spawned merged meshes while built (children of this entity); empty ⇒ not currently built.
     built: Vec<Entity>,
 }
 
-/// A chunk centre this far (yd) beyond the fade horizon still has near-corner grass inside the chunk, so
-/// we build out to here. ≈ the 33.3 yd chunk's half-diagonal. At the horizon the fade ramp is already
-/// alpha 0, so building/tearing down at this range is invisible (no pop) — the same reason the reference
-/// ties the build distance to the fade end.
-const CLUTTER_BUILD_MARGIN: f32 = 24.0;
+/// Slack (yd) past the reach computed below, so a chunk is built a moment before any of its grass
+/// could be visible and the per-frame build cap has room to spend. Past the reach the ramp is
+/// already alpha 0, so building/tearing down here is invisible — the same reason the reference ties
+/// its build distance to the fade end.
+const CLUTTER_BUILD_MARGIN: f32 = 8.0;
 
 /// Hysteresis (yd) between the build distance and the teardown distance, so a chunk hovering at the
 /// boundary doesn't thrash build↔despawn every frame.
 const CLUTTER_TEARDOWN_HYSTERESIS: f32 = 6.0;
+
+/// How far above the terrain surface a tuft reaches (yd) — the chunk's clutter AABB is its terrain
+/// box grown by this, so the gate measures the geometry that actually draws.
+const CLUTTER_TUFT_HEIGHT: f32 = 3.0;
 
 /// Build at most this many chunks' clutter per frame, so entering a dense area (or a teleport) spreads
 /// the mesh-build + GPU upload over a few frames instead of one stutter.
@@ -295,17 +304,20 @@ pub(crate) fn scatter_tile_clutter(
         if by_model.is_empty() {
             continue;
         }
-        // Chunk centre (average of its vertices) in Bevy space — what the LOD system measures.
-        let n = chunk.positions.len().max(1) as f32;
-        let sum = chunk
-            .positions
-            .iter()
-            .fold([0.0f32; 3], |a, p| [a[0] + p[0], a[1] + p[1], a[2] + p[2]]);
-        let center = wow_to_bevy([sum[0] / n, sum[1] / n, sum[2] / n]);
+        // The chunk's terrain AABB in Bevy space — what the LOD system measures against.
+        let mut lo = Vec3::splat(f32::MAX);
+        let mut hi = Vec3::splat(f32::MIN);
+        for p in &chunk.positions {
+            let v = wow_to_bevy(*p);
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+        // Tufts stand ON the surface, so the drawn geometry reaches a little above the terrain box.
+        hi.y += CLUTTER_TUFT_HEIGHT;
         entities.push(
             commands
                 .spawn(ClutterChunk {
-                    center,
+                    bounds: (lo, hi),
                     models: by_model.into_iter().collect(),
                     built: Vec::new(),
                 })
@@ -385,10 +397,17 @@ fn build_chunk_clutter(
             mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
             mesh.insert_indices(Indices::U32(indices));
             let mesh = meshes.add(mesh);
+            // **The detail-doodad pass owns its render state** — it is not the batch's (2004).
+            // The reference sets one state for every tuft in the frame (`0x6b2b80`: blend mode 2
+            // = SRC_ALPHA/INV_SRC_ALPHA, ALPHAREF = `detailDoodadAlpha` 128, cull OFF, depth-write
+            // ON) and its per-slot draw `0x6b2d60` binds nothing but the texture — the M2 batch's
+            // own blend/cull is never consulted for a detail doodad. Passing `sub.blend` through
+            // gave the two Opaque-authored detail models no cutout at all (their transparent
+            // margin drew as solid card) and left five single-sided ones showing only one face.
             let material = assets.model_material(
                 sub.texture.as_deref(),
-                sub.blend,
-                sub.two_sided,
+                ModelBlend::AlphaTest, // the pass's cutout, not the batch's authored blend
+                true,                  // cull off for every tuft, like the reference's pass
                 Some(alpha_ref), // detail-doodad alpha-test ref (≈0.5), not the higher general key
                 Some(fade_far),  // detail-doodad distance fade (≈70 yd horizon — opacity, dc30e1f)
                 false,           // clutter is not WMO (keeps its ground-normal N·L path)
@@ -430,15 +449,40 @@ fn build_chunk_clutter(
     out
 }
 
-/// The per-chunk clutter LOD: build a chunk's clutter when its centre comes within the detail-doodad
-/// horizon (+ a chunk-radius margin) and tear it down when it leaves — the reference's `CDetailDoodad`
-/// lifecycle (`ground-effects.md` §7). Bounds live grass to a ~70 yd bubble (not every loaded tile) and,
-/// with the per-frame build cap, spreads the cost so a tile-load no longer builds 256 chunks at once.
-/// Build/teardown happen where the fade ramp is already alpha 0, so they're invisible.
+/// Squared distance from a point to an axis-aligned box — zero inside it. The clutter LOD's measure:
+/// "is any of this chunk within reach", which a centre distance can only approximate.
+fn box_distance_squared(p: Vec3, (lo, hi): (Vec3, Vec3)) -> f32 {
+    (lo - p).max(p - hi).max(Vec3::ZERO).length_squared()
+}
+
+/// How far (as a multiple of the fade horizon) a chunk can sit from the eye and still have grass the
+/// shader will draw.
+///
+/// The fade is keyed on **view-space depth** (`wow_model.wgsl`, the reference's camera-space texgen),
+/// so the horizon is a plane across the view, not a sphere around the eye: a fragment out at the
+/// frustum's corner is `1/cos θ` further in straight-line distance than one dead ahead at the same
+/// depth. The LOD gate measures straight-line distance — it must not depend on where the camera
+/// happens to be pointing, or a turn would drop and rebuild chunks that are still being drawn — so it
+/// takes the worst case, the corner ray, and that is exactly this factor. Derived from the live
+/// projection rather than pinned, because it moves with the aspect ratio: ~1.31 at 16:9 and ~1.45 at
+/// 21:9, and a constant tuned on one monitor silently clips the screen edges on a wider one.
+fn frustum_corner_reach(fov_y: f32, aspect: f32) -> f32 {
+    let tan_v = (fov_y * 0.5).tan();
+    let tan_h = tan_v * aspect;
+    (1.0 + tan_v * tan_v + tan_h * tan_h).sqrt()
+}
+
+/// The per-chunk clutter LOD: build a chunk's clutter when its BOX comes within reach of the
+/// detail-doodad horizon and tear it down when it leaves — the reference's `CDetailDoodad` lifecycle
+/// (per-chunk build/unlink at the 70 yd `[0x867958]`, which it measures as the nearest view-space
+/// depth of the chunk's bounding sphere and then never frees). Bounds live grass to a bubble around
+/// the player instead of every loaded tile and, with the per-frame build cap, spreads the cost so a
+/// tile-load no longer builds 256 chunks at once. Build/teardown happen where the fade ramp is
+/// already alpha 0, so they are invisible.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stream_chunk_clutter(
     mut commands: Commands,
-    cam: Query<&GlobalTransform, With<WorldCamera>>,
+    cam: Query<(&GlobalTransform, Option<&Projection>), With<WorldCamera>>,
     mut chunks: Query<(Entity, &mut ClutterChunk)>,
     cfg: Res<ClutterConfig>,
     geometry: Option<ResMut<ClutterGeometry>>,
@@ -454,14 +498,26 @@ pub(crate) fn stream_chunk_clutter(
     let (Some(mut geometry), Some(mut assets)) = (geometry, assets) else {
         return;
     };
-    let Some(cam_pos) = cam.iter().next().map(|t| t.translation()) else {
+    let Some((cam_tf, projection)) = cam.iter().next() else {
         return;
     };
-    let build_d2 = (cfg.fade_far + CLUTTER_BUILD_MARGIN).powi(2);
-    let drop_d2 = (cfg.fade_far + CLUTTER_BUILD_MARGIN + CLUTTER_TEARDOWN_HYSTERESIS).powi(2);
+    let cam_pos = cam_tf.translation();
+    // The straight-line reach the view-depth fade implies at the frustum's corner (see the helper).
+    // A missing/non-perspective projection falls back to Bevy's own perspective default, the one
+    // `view.rs` leaves in place (≈ the reference's 44.1° vertical) at 16:9.
+    let reach = cfg.fade_far
+        * match projection {
+            Some(Projection::Perspective(p)) => frustum_corner_reach(p.fov, p.aspect_ratio),
+            _ => {
+                let d = PerspectiveProjection::default();
+                frustum_corner_reach(d.fov, d.aspect_ratio)
+            }
+        };
+    let build_d2 = (reach + CLUTTER_BUILD_MARGIN).powi(2);
+    let drop_d2 = (reach + CLUTTER_BUILD_MARGIN + CLUTTER_TEARDOWN_HYSTERESIS).powi(2);
     let mut budget = CLUTTER_BUILDS_PER_FRAME;
     for (ent, mut cc) in &mut chunks {
-        let d2 = cam_pos.distance_squared(cc.center);
+        let d2 = box_distance_squared(cam_pos, cc.bounds);
         if cc.built.is_empty() {
             if d2 <= build_d2 && budget > 0 {
                 budget -= 1;
@@ -485,5 +541,77 @@ pub(crate) fn stream_chunk_clutter(
                 commands.entity(e).try_despawn();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ramp `wow_model.wgsl` evaluates, mirrored here so the reference's four landmarks are
+    /// **checkable** rather than a comment. Not a second implementation to keep in sync — a pin: if
+    /// anyone retunes `0.75`, the `254`/`256` texel-centre constants or the `252/255` cap without
+    /// re-deriving them, these numbers move and the test says so.
+    fn ramp(z: f32, far: f32) -> f32 {
+        let near = far * 0.75;
+        let u = (z - near) / (far - near);
+        ((254.0 - 256.0 * u) / 255.0).clamp(0.0, 252.0 / 255.0)
+    }
+
+    /// wow-re `terrain/scratch/detail-doodad-distance-fade.md`: a 64-texel CLAMP/LINEAR ramp whose
+    /// texel centres give `alpha = (254 − 256u)/255`, capped at texel 0's `252/255`. So the plateau
+    /// runs to 52.63672 yd (not 52.5), the ramp hits zero at 69.86328 yd (not 70), the slope is
+    /// −0.0573670 per yard, and the 128/255 detail-doodad cutout erases a fully-opaque texel at
+    /// 61.11328 yd — the horizon grass actually vanishes at, well short of the 70 yd draw distance.
+    #[test]
+    fn the_ramp_hits_the_reference_landmarks() {
+        assert!(
+            (ramp(0.0, 70.0) - 252.0 / 255.0).abs() < 1e-6,
+            "near plateau"
+        );
+        assert!(
+            (ramp(52.63672, 70.0) - 252.0 / 255.0).abs() < 1e-5,
+            "plateau ends at 52.63672, not 52.5"
+        );
+        assert!(
+            ramp(52.7, 70.0) < 252.0 / 255.0,
+            "past the plateau it falls"
+        );
+        assert!(ramp(69.86328, 70.0) < 1e-5, "zero at 69.86328, not 70");
+        assert_eq!(ramp(70.0, 70.0), 0.0);
+        let slope = ramp(60.0, 70.0) - ramp(61.0, 70.0);
+        assert!((slope - 0.0573670).abs() < 1e-6, "slope per yard");
+        // The cutout erases a fully-opaque texel where the ramp crosses the 128/255 reference.
+        assert!(ramp(61.11328, 70.0) < DETAIL_DOODAD_ALPHA_REF + 1e-5);
+        assert!(ramp(61.11, 70.0) > DETAIL_DOODAD_ALPHA_REF);
+    }
+
+    /// The gate measures the chunk's box, not its centre: zero inside, and the nearest point outside.
+    #[test]
+    fn box_distance_measures_the_nearest_point() {
+        let b = (Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0));
+        assert_eq!(box_distance_squared(Vec3::ZERO, b), 0.0);
+        assert_eq!(box_distance_squared(Vec3::new(4.0, 0.0, 0.0), b), 9.0);
+        // A tall thin chunk: a point level with the top face is 3 yd away, though its CENTRE — the
+        // old measure — is 5 yd away. That gap is the relief case that popped whole chunks.
+        let tall = (Vec3::new(-1.0, -4.0, -1.0), Vec3::new(1.0, 4.0, 1.0));
+        assert_eq!(box_distance_squared(Vec3::new(4.0, 4.0, 0.0), tall), 9.0);
+    }
+
+    /// The fade is keyed on view depth, so the LOD's straight-line reach is the corner ray's — and it
+    /// widens with the aspect ratio, which is why it is derived and not pinned to one monitor.
+    #[test]
+    fn the_corner_reach_widens_with_the_aspect() {
+        let fov = PerspectiveProjection::default().fov;
+        let wide = frustum_corner_reach(fov, 16.0 / 9.0);
+        let ultrawide = frustum_corner_reach(fov, 21.0 / 9.0);
+        assert!((wide - 1.309).abs() < 0.01, "16:9 reach was {wide}");
+        assert!(
+            (ultrawide - 1.451).abs() < 0.01,
+            "21:9 reach was {ultrawide}"
+        );
+        assert!(ultrawide > wide);
+        // Dead ahead is the degenerate case: no width, no extra reach.
+        assert!((frustum_corner_reach(0.0, 0.0) - 1.0).abs() < 1e-6);
     }
 }

@@ -120,7 +120,7 @@ pub(super) fn reap_dead_variants(
 /// **`None` means the source material is not resident yet** — there is no twin to hand back, and
 /// the world material is NOT an acceptable substitute in a booth (wrong light buffer; see
 /// [`BoothRig::variant`]). Callers wait and retry rather than baking something wrong.
-pub(super) fn material_variant(
+pub(crate) fn material_variant(
     variants: &mut HashMap<AssetId<WowModelMaterial>, Handle<WowModelMaterial>>,
     buffer: &bevy::render::render_resource::Buffer,
     world: &Handle<WowModelMaterial>,

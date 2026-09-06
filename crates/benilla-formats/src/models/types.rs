@@ -429,6 +429,12 @@ pub struct RenderSubmesh {
     /// while the interior drawer IGNORES the flag: lit/unlit there is dictated by the batch section
     /// alone ([`Self::wmo_batch`]). Byte law: wow-re `wmo-lit-selector` §1.2/§1.3.
     pub emissive: bool,
+    /// This batch's texture record is **type 14 — the icon slot**: no file of its own, filled at
+    /// runtime by `Model:ReplaceIconTexture` (`0x710ec0` swaps every type-14 handle on the
+    /// instance). The shipped user is `Interface\ItemAnimations\ForcedBackpackItem.m2`, the
+    /// bag buttons' item-push card, whose one batch is the pushed item's icon (decision 2008).
+    /// `false` for every other batch and all of WMO.
+    pub icon_slot: bool,
     /// The MOMT **SIDN** (`0x10` — self-illum day/night) authored colour, RGB gamma bytes: the
     /// windows-glow-at-night mechanism. The real client scales it per frame by the night fraction
     /// (1 overnight, 0 all day, ramping 20:30→21:30 and 06:00→07:00) and binds it as the GL material
@@ -598,6 +604,7 @@ impl Default for RenderSubmesh {
             vertex_colors: Vec::new(),
             interior: false,
             emissive: false,
+            icon_slot: false,
             sidn: None,
             window: false,
             additive: false,

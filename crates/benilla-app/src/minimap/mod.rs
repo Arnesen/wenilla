@@ -274,10 +274,6 @@ struct MinimapAssets {
     /// (`Rotating-MinimapArrow.mdx`) the reference re-animates per blip source. See
     /// [`blips::RimArrow`] for the sequence→layer table and why there are four of them.
     rim_arrows: blips::RimArrowArt,
-    /// The ping marker's three drawn layers — the flat re-expression of `MinimapPing.mdx`'s
-    /// coincident additive quads, at the model's own byte-measured sizes and animation
-    /// ([`ping::PingArt`], decisions 1596/1599).
-    ping: ping::PingArt,
     /// The unit-blip atlas (`Interface\Minimap\ObjectIcons`, five 32-px dot cells) — the
     /// quest-giver dots.
     object_icons: Option<Handle<Image>>,
@@ -323,29 +319,6 @@ fn setup_minimap(
             }
             let object_icons =
                 assets.sprite_texture("Interface\\Minimap\\ObjectIcons", &mut images);
-            // `ping6` is deliberately absent: the model carries it on two quads whose weight
-            // track is a single key of 0, so the client culls those batches before it reads their
-            // blend mode. Loading it would be loading art that never draws.
-            let ping = ping::PingArt {
-                ping5: assets.sprite_texture("Interface\\Minimap\\Ping\\ping5", &mut images),
-                ping2: assets.sprite_texture("Interface\\Minimap\\Ping\\ping2", &mut images),
-                ping4: assets.sprite_texture("Interface\\Minimap\\Ping\\ping4", &mut images),
-            };
-            // Per layer, not just "none of them": the three do different jobs, and a silently
-            // absent `ping4` would cost the ring — the one thing the eye actually reads — while
-            // the marker still looked plausible (1203's rule, applied to art).
-            for (name, present) in [
-                ("ping5", ping.ping5.is_some()),
-                ("ping2", ping.ping2.is_some()),
-                ("ping4", ping.ping4.is_some()),
-            ] {
-                if !present {
-                    warn!(
-                        "minimap: Interface\\Minimap\\Ping\\{name} missing — the ping marker \
-                           will draw without that layer"
-                    );
-                }
-            }
             if mask.is_none() {
                 warn!("minimap: MinimapMask.blp missing — the map will draw square");
             }
@@ -366,7 +339,6 @@ fn setup_minimap(
                 poi,
                 rim_arrows,
                 object_icons,
-                ping,
                 forms,
             });
         }
@@ -471,14 +443,7 @@ fn emit_minimap(
     // always spent in the frame it was made. Held across frames it would seat against geometry
     // the player never clicked on; and a click made on a frame the map does not draw is simply
     // not a ping (decision 1596).
-    // The stock `MiniMapPing` frame's alpha is read beside it: the ping's lifetime is that
-    // frame's (`ping.rs`), so the sprite wants the frame as it stands after this tick.
-    let (click, ping_shown) = script.map_or((None, None), |mut s| {
-        (
-            s.take_minimap_ping_request(),
-            s.frame_effective_alpha(ping::PING_FRAME),
-        )
-    });
+    let click = script.and_then(|mut s| s.take_minimap_ping_request());
     let (Some(slot), Some(assets), Some(map), Some(catalog)) =
         (widget.0.as_ref(), assets, map, catalog)
     else {
@@ -939,14 +904,12 @@ fn emit_minimap(
         }
     }
 
-    // The ping draws LAST — above the dots and the player arrow. In the reference `MiniMapPing` is
-    // a Lua Frame child of the Minimap, so it composites over everything the engine drew into the
-    // widget's hole; ours is engine-drawn but keeps that place in the order.
-    //
-    // This is also where a `Minimap:PingLocation` click is drained: the geometry it must resolve
-    // against is the geometry standing right here, this frame (decision 1596).
+    // A `Minimap:PingLocation` click is seated here, against the geometry standing right here,
+    // this frame (decision 1596). The marker itself is the stock `MiniMapPing` `<Model>`, a Lua
+    // child of the Minimap that composites over everything the engine drew into the widget's
+    // hole — rendered by `crate::ui_models` since decision 2008.
     if let Some(ctx) = &blip_ctx {
-        ping::emit_ping(ctx, &mut ping, click, ping_shown, &assets.ping, &mut quads);
+        ping::seat_click(ctx, &mut ping, click);
     }
 }
 

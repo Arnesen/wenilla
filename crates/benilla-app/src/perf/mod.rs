@@ -1,4 +1,5 @@
-//! `perf` — performance instrumentation + the standing dev HUD ([`PerfPlugin`]).
+//! `perf` — performance instrumentation + the standing dev HUD ([`PerfPlugin`]), and the one
+//! instrument that ships to players: the FPS journal ([`FpsJournalPlugin`], decision 2008).
 //!
 //! Owns the **frame-cost measurement layer** that every future subsystem is measured against (the
 //! standard), and draws the always-on cost pill (top-center) — the whole HUD since 1454; anything
@@ -9,9 +10,16 @@
 //! - [`clock`] — the three CPU clocks (process, main thread, machine) every number is denominated in,
 //! - [`stats`] — the rolling windows the pill reads,
 //! - [`hud`] — the standing cost pill,
-//! - [`trace`] / [`journal`] — the two CSV instruments (`WOW_STREAM_TRACE`, `WOW_FPS_JOURNAL`),
+//! - [`trace`] / [`journal`] — the two CSV instruments (`WOW_STREAM_TRACE`, `WOW_FPS_JOURNAL`);
+//!   the journal also answers the `fpsJournal` CVar, in every build (2008),
 //! - [`stall`] — the stuck-main-thread self-sampler (macOS),
 //! - [`census`] — the env-gated premise counters.
+//!
+//! **The dev seam runs through this module.** 1173 named `perf` dev wholesale; 2008 carved the
+//! journal, and the clocks it reads, out to the player side: `clock` and `journal` compile in the
+//! player build, everything else — the HUD, the meters, the census counters, [`PerfPlugin`]
+//! itself — is `#[cfg(feature = "dev")]`. The rule is unchanged (`dev.rs`): dev may see anything;
+//! nothing may depend on dev. The journal depends on nothing on the dev side.
 //!
 //! **The law the whole surface obeys (0717): while synced, wall frame time measures the display's
 //! present grant, not our cost.** Only the CPU series measure work. That is why the pill's headline
@@ -27,53 +35,71 @@
 //!
 //! ⚠️ **macOS/Metal — GPU timing.** We have `Features::TIMESTAMP_QUERY` on this machine, but
 //! **`TIMESTAMP_QUERY_INSIDE_PASSES` is `false`**: Apple GPUs sample counters only at stage
-//! boundaries (`MTLCounterSamplingPoint::AtStageBoundary`). Bevy's `RenderDiagnosticsPlugin` writes
-//! its timestamps *inside* passes, so on Apple Silicon every span falls through to the CPU-only
-//! branch and the store carries **zero** `elapsed_gpu` paths — verified on a live run: 14 diagnostic
-//! paths, all `elapsed_cpu`. (bevy_render's own "Vulkan and DX12 only" comment is stale as a
-//! statement about the *platform* — an Intel Mac would report `INSIDE_PASSES` and emit GPU spans.)
-//! Pass-boundary `timestamp_writes` **does** work here and is the route to real GPU-ms — measured
-//! 0.015/0.019/0.049 ms across 256²/1920×1080/4096² clears, 12/12 reproducible. It needs two
-//! sentinel render-graph nodes at ~0.03 ms/frame, and the query set must be resolved in a
-//! *different* command buffer than the timed pass or Metal returns zeros. Until that is built, a
-//! GPU-bound frame is identified rather than timed: it is the one that runs long while the CPU
-//! meters stay flat (read them side by side in the journal or a probe line).
+//! boundaries (`MTLCounterSamplingPoint::AtStageBoundary`). Bevy's `RenderDiagnosticsPlugin`
+//! (registered by the journal, so present in every build) writes its timestamps *inside* passes,
+//! so on Apple Silicon every span falls through to the CPU-only branch and the store carries
+//! **zero** `elapsed_gpu` paths — verified on a live run: 14 diagnostic paths, all `elapsed_cpu`.
+//! (bevy_render's own "Vulkan and DX12 only" comment is stale as a statement about the
+//! *platform* — an Intel Mac would report `INSIDE_PASSES` and emit GPU spans.) Where the feature
+//! IS present — Vulkan and DX12, so the Linux and Windows builds — those spans are the journal's
+//! `gpu_*` columns (2008), which is how a Steam Deck's frame gets read without a Deck here.
+//! Pass-boundary `timestamp_writes` **does** work on Apple and is the route to whole-frame
+//! GPU-ms — built as [`gpu`] (`WOW_GPU_MS=1`): two sentinel render-graph nodes at ~0.03 ms/frame,
+//! the query set resolved in a *different* command buffer than the timed pass or Metal returns
+//! zeros (1389). Per-pass on Apple remains unbuilt: a GPU-bound frame here is identified rather
+//! than timed — the one that runs long while the CPU meters stay flat, read side by side in the
+//! journal or a probe line.
 
+#[cfg(feature = "dev")]
 mod blend_check;
+#[cfg(feature = "dev")]
 mod census;
 mod clock;
+#[cfg(feature = "dev")]
 mod gpu;
+#[cfg(feature = "dev")]
 mod hud;
 mod journal;
+#[cfg(feature = "dev")]
 mod main_split;
+#[cfg(feature = "dev")]
 mod phases;
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "dev", target_os = "macos"))]
 mod stall;
+#[cfg(feature = "dev")]
 mod stats;
+#[cfg(feature = "dev")]
 mod trace;
 
+#[cfg(feature = "dev")]
 use bevy::prelude::*;
-use bevy::render::diagnostic::RenderDiagnosticsPlugin;
 
+#[cfg(feature = "dev")]
 pub(crate) use blend_check::BlendMismatchShared;
+#[cfg(feature = "dev")]
 pub(crate) use clock::{process_cpu_secs, process_faults, system_cpu_ticks, thread_cpu_table};
+#[cfg(feature = "dev")]
 pub(crate) use gpu::{GpuMsShared, WgpuCensusShared};
+#[cfg(feature = "dev")]
 pub(crate) use hud::PerfHud;
-pub(crate) use journal::FpsJournalPlugin;
+pub(crate) use journal::{FpsJournalPlugin, FpsJournalSetting};
+#[cfg(feature = "dev")]
 pub(crate) use main_split::MainThreadSplit;
 
 /// The frame budget: a 60 fps floor. No frame should exceed this.
 pub const FRAME_BUDGET_MS: f32 = 1000.0 / 60.0;
 
+/// The dev-side instruments, as one plugin — everything in this module but the journal (2008).
+#[cfg(feature = "dev")]
 pub struct PerfPlugin;
 
+#[cfg(feature = "dev")]
 impl Plugin for PerfPlugin {
     fn build(&self, app: &mut App) {
-        // Render-pass timing (CPU-only on Apple Silicon — see the module header). Harmless if
-        // the backend can't record it; also the hook Tracy GPU uses on Vulkan/DX12.
+        // (bevy's render-pass diagnostics — the CPU spans here, the GPU spans on Vulkan/DX12, and
+        // the hook Tracy's GPU zones ride — are registered by `FpsJournalPlugin`, in every build.)
         main_split::plugin(app);
-        app.add_plugins(RenderDiagnosticsPlugin)
-            .init_resource::<stats::FrameStats>()
+        app.init_resource::<stats::FrameStats>()
             .init_resource::<PerfHud>()
             .insert_resource(trace::StreamTrace {
                 path: std::env::var("WOW_STREAM_TRACE").unwrap_or_default(),

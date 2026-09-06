@@ -3,33 +3,33 @@
 //! ## The pin
 //!
 //! A ping marks a **place in the world**, so a world point `(x, y)` is the only thing this module
-//! stores. Where it lands on screen is *derived*, every frame, by [`BlipCtx::offset`] — the exact
-//! same function the party dots, the quest dots and the corpse blip go through. It therefore
+//! stores. Where it lands on screen is *derived* — by the stock `Minimap_OnUpdate`, which
+//! re-seats the `MiniMapPing` frame every frame from `GetPingPosition()`, the normalized offset
+//! [`drive_minimap_ping`] republishes from the pin against the live view radius. It therefore
 //! cannot drift from the map, cannot lag the pan by a frame, and cannot survive a zoom change at
 //! the old scale: there is no second copy of the position to fall out of step with.
 //!
 //! That is the whole difference from the first attempt (decision 0453 / 0471), which stored the
-//! world point in the engine but drew the marker from **Lua** — a `MiniMapPing` frame re-seated by
-//! `Minimap_OnUpdate` through `SetPoint` from a normalized offset the app pushed. Four
-//! independent ways to be wrong, and it was wrong in three of them; 1596 §2 has the autopsy.
+//! world point in the engine but drew the marker from **Lua** off a stale push; 1596 §2 has the
+//! autopsy.
 //!
 //! ## The three legs
 //!
-//! - **In** — a click reaches Lua's `Minimap_OnClick` (ours, and hookable: the corpus's
+//! - **In** — a click reaches Lua's `Minimap_OnClick` (the stock one, hookable: the corpus's
 //!   `CleanMinimap` replaces that global outright), which calls `Minimap:PingLocation(dx, dy)`
-//!   with centre-relative offsets in **UI units**. [`emit_ping`]'s caller drains it in the *same
+//!   with centre-relative offsets in **UI units**. [`seat_click`]'s caller drains it in the *same
 //!   frame it draws the map*, converting through that frame's own geometry: UI units × the 0582
 //!   seam scale = window px, ÷ `px_per_yd` = yards. (Skipping that seam multiply is what put the
 //!   first version's ping ~27 % too far from the player at 1080p.)
 //! - **Across** — our own ping sends `MSG_MINIMAP_PING` (raw world floats; the server relays them
 //!   verbatim to the rest of the group and nowhere else). A group member's arrives through the
-//!   session event and seats the same way. A ping is drawn **locally at click time**, never waited
-//!   for off the wire: vanilla pings work solo.
+//!   session event and seats the same way. A ping is seated **locally at click time**, never
+//!   waited for off the wire: vanilla pings work solo.
 //! - **Out** — `MINIMAP_PING (unitToken, nx, ny)` fires for addons, with the same normalized
 //!   offsets the byte-verified relay `0x4ee330` hands Lua (`(−dy·k, dx·k)`, `k = 1/(2·radius)` —
 //!   wow-re `party-group-wire.md` §TU-D). `Minimap:GetPingPosition()` reads the live value back.
 //!
-//! ## Lifetime — the stock `Minimap.lua`'s, not ours (1974)
+//! ## Lifetime and pixels — the stock `Minimap.lua`'s and its `<Model>`'s, not ours
 //!
 //! The reference splits the ping in two: the engine stores the world point in a pair of statics
 //! **nothing ever clears** (wow-re `minimap-ping-law.md` §3 — six instructions touch those cells
@@ -37,10 +37,13 @@
 //! `MiniMapPing` `<Model>` it shows on `MINIMAP_PING`, re-seats every frame from
 //! `GetPingPosition()`, holds 5 s (`MINIMAPPING_TIMER`), "fades" 0.5 s through a `SetAlpha(255·t)`
 //! that clamps to full until the last ~2 ms, and hides. Since 1751's swap that file runs here
-//! verbatim, and this engine's `<Model>` draws no pixels — so the sprite below is **that frame's
-//! renderer**: it draws while `MiniMapPing` is effectively visible, at its effective alpha, and
-//! keeps no clock of its own. The world point is likewise never cleared: `GetPingPosition()`
-//! answers two numbers always, which the stock `Minimap_OnUpdate` multiplies without a nil test.
+//! verbatim (1974), and since decision 2008 the `<Model>` it shows **renders its own file**
+//! (`Interface\MiniMap\Ping\MinimapPing.mdx`, through `crate::ui_models`): the spinner on its
+//! global-sequence clock, the static centre, the ring on the looping Stand — the model's own
+//! bones, weight tracks and additive quads, on the pane's private clock that runs only while the
+//! frame is shown (decision 2007). The sprite this module used to draw in their place (1596/1599's
+//! byte-measured re-expression of those quads) is gone with it, and so is the world-map ping gap
+//! 1980 named: `WorldMapPing` is the same file on the map sheet.
 //!
 //! What is *not* a lifetime: proximity. The first version applied the client's 10-yd
 //! `d² < 100` auto-clear to the party ping, and that clear belongs to the **`SMSG_GOSSIP_POI`
@@ -55,116 +58,6 @@ use benilla_ui::script::{ScriptValue, UiScript};
 use super::blips::BlipCtx;
 use crate::net::{ClientCommand, Guid, NetCommands, SelfPlayer};
 use crate::player::Player;
-use crate::ui_pass::{UiQuad, UiQuads};
-
-/// The stock frame whose pixels this module draws: `Minimap.xml`'s `<Model name="MiniMapPing">`.
-/// Its show/hide and alpha ARE the ping's lifetime (module doc). The reference's "fade" pops
-/// rather than fades — `Minimap_OnUpdate` writes `SetAlpha(255 · t/0.5)` and `Frame:SetAlpha`
-/// (`0x774e90`) clamps to [0,1] first, so the frame reads full alpha for 498 of the 500 ms — and
-/// that arrives here through the frame's effective alpha, with no constant of ours to keep it.
-pub(super) const PING_FRAME: &str = "MiniMapPing";
-
-/// **The marker, byte-measured** (wow-re `system/ui/scratch/minimap-ping-law.md` §10, VERIFIED).
-///
-/// `MiniMapPing` is a `<Model>` on `Interface\MiniMap\Ping\MinimapPing.mdx` at XML `scale="0.4"`,
-/// which puts **1 model unit at 512 px** on the client's stock basis. The model is *five coincident
-/// full-UV quads* sharing one centre, every one of them `blendMode = 4` — **additive**
-/// `SRC_ALPHA/ONE` — with `flags = 0x0011` (unlit, no depth write). Three of them draw:
-///
-/// | texture | model units | px | behaviour |
-/// |---|---|---|---|
-/// | `ping5` | `0.069 × 0.350634` | **12.39** | spins CW, one turn per 4833 ms, alpha 1 |
-/// | `ping2` | `0.025` | **12.80** | fully static — its bone has no tracks at all |
-/// | `ping4` | `0.00625 × (1→10)` | **3.20 → 32.00** | the expanding, fading ring |
-///
-/// `ping6` (two of the five quads) is **culled, not invisible**: its weight track is a single key
-/// of 0, so the batch is skipped before `blendMode` is read. It is not emitted here.
-///
-/// Sizes are px on the frozen 140.8-px minimap basis, like every other blip constant
-/// ([`super::blips::BLIP_BASIS_PX`]) — the model's px-per-unit and the widget's size both scale
-/// with the same screen basis, so their ratio is the constant.
-///
-/// The paused first version drew one flat 40 px stack: **~3× too big, and missing the ring** —
-/// which is the motion the eye actually reads.
-const PING5_PX: f32 = 0.069 * 0.350_634 * PX_PER_MODEL_UNIT;
-const PING2_PX: f32 = 0.025 * PX_PER_MODEL_UNIT;
-const PING4_PX: f32 = 0.006_25 * PX_PER_MODEL_UNIT;
-
-/// `scale="0.4"` on a `<Model>` frame ⇒ `(5/3) · 0.4 · 768` px per model unit at the reference's
-/// screen basis (aspect- and resolution-independent — the terms cancel).
-const PX_PER_MODEL_UNIT: f32 = 512.0;
-
-/// The **sequence** clock: sequence 1 "Stand", looped. `ping4`'s ring rides this.
-const PING_SEQ_MS: f32 = 833.0;
-/// The **global** clock (`globalSequence = 0`), which never consults the sequence window at all.
-/// `ping5`'s spin rides this — the two periods are coprime, so they re-phase only after ~67 min.
-const PING_SPIN_MS: f32 = 4833.0;
-
-/// `ping4`'s alpha: linear `0 → 1` over the first 400 ms of the loop, then `1 → 0` over the
-/// remaining 433 ms. Peak alpha lands at 400 ms, when the ring is `1 + 9·400/833 = 5.32×`.
-const PING4_ALPHA_PEAK_MS: f32 = 400.0;
-
-/// `ping5`'s spin, as the model's own 21 keys — `(ms, degrees clockwise on screen)`, unwrapped and
-/// monotonic (wow-re §10.3). The rate is **not** uniform: ~67.5 °/s over the first half-turn,
-/// ~83.1 °/s over the second, with a 108 °/s burst across 225°→270° that an average hides.
-///
-/// Kept as the table rather than collapsed to a constant rate for exactly that reason. wow-re's
-/// three transcription warnings do not bite here — they are about interpolating the model's
-/// *quaternions* (a shortest-path slerp collapses the revolution to no motion, and a `w ≥ 0`
-/// canonicalisation reverses it at 180°). Interpolating the **angle** linearly, as below, is the
-/// sanctioned form: it deviates by at most 0.014°.
-const PING5_SPIN: [(f32, f32); 21] = [
-    (0.0, 0.0),
-    (333.0, 22.5),
-    (667.0, 45.0),
-    (889.0, 60.0),
-    (1111.0, 75.0),
-    (1333.0, 90.0),
-    (1666.0, 112.5),
-    (2000.0, 135.0),
-    (2222.0, 150.0),
-    (2444.0, 165.0),
-    (2667.0, 180.0),
-    (2847.0, 195.0),
-    (3027.0, 210.0),
-    (3208.0, 225.0),
-    (3416.0, 247.5),
-    (3625.0, 270.0),
-    (3805.0, 285.0),
-    (3986.0, 300.0),
-    (4167.0, 315.0),
-    (4500.0, 337.5),
-    (4833.0, 360.0),
-];
-
-/// The spin angle at `ms` into the global clock, in **radians clockwise on screen** — which is our
-/// quad `rotation`'s own sense (the player arrow negates a WoW facing for the same reason).
-fn spin_radians(ms: f32) -> f32 {
-    let t = ms.rem_euclid(PING_SPIN_MS);
-    let deg = PING5_SPIN
-        .windows(2)
-        .find(|w| t <= w[1].0)
-        .map_or(0.0, |w| {
-            let (t0, a0) = w[0];
-            let (t1, a1) = w[1];
-            let u = if t1 > t0 { (t - t0) / (t1 - t0) } else { 0.0 };
-            a0 + (a1 - a0) * u
-        });
-    deg.to_radians()
-}
-
-/// The **art**, one handle per drawn layer. Named rather than a list: the three do different
-/// things, and a `Vec` that silently changed order would change the animation.
-#[derive(Default)]
-pub(super) struct PingArt {
-    /// The spinner (draw order 0 in the model — though with additive and no depth write, order
-    /// cannot change the image).
-    pub(super) ping5: Option<Handle<Image>>,
-    /// The static centre.
-    pub(super) ping2: Option<Handle<Image>>,
-    /// The expanding ring.
-    pub(super) ping4: Option<Handle<Image>>,
-}
 
 /// The stored ping — the reference's two statics. One, never cleared: the reference keeps no
 /// list, and no map tag either (a worldport mid-ping re-projects the old point against the new
@@ -180,20 +73,11 @@ struct LivePing {
 
 /// The engine-owned ping state (decision 1596). Seated by a click (drained in the renderer, with
 /// that frame's geometry) or by a group member's `MSG_MINIMAP_PING`; announced by
-/// [`drive_minimap_ping`]; shown for exactly as long as the stock `MiniMapPing` frame is.
+/// [`drive_minimap_ping`]; drawn by the stock `MiniMapPing` frame for exactly as long as that
+/// frame shows itself.
 #[derive(Resource, Default)]
 pub(crate) struct MinimapPing {
     live: Option<LivePing>,
-    /// [`PING_FRAME`]'s effective alpha while it is effectively visible, as the renderer last read
-    /// it — `None` hidden. The model clock below runs only while this is `Some`.
-    shown: Option<f32>,
-    /// The model's own clock, in **milliseconds, accumulated only while a ping is shown** — which
-    /// is the reference's behaviour rather than a simplification of it. `SetSequence(0)` runs once
-    /// in the ref's `OnLoad` and stores an *anchor*; the sampler free-runs from it, and a Model
-    /// frame's private clock advances only while the frame is shown. The ref then only `Show()`s
-    /// per ping. So **ping N resumes where ping N−1 left off**, and no two consecutive pings look
-    /// alike (wow-re §10, VERIFIED). One accumulator reproduces that; a per-ping reset would not.
-    shown_ms: f32,
     /// A ping seated since the last [`drive_minimap_ping`] — it still owes the world an outbound
     /// `MSG_MINIMAP_PING` (if it is ours) and a `MINIMAP_PING` event (either way).
     fresh: bool,
@@ -231,95 +115,29 @@ fn click_to_world(ctx: &BlipCtx, ui: (f32, f32), seam: f32) -> Option<(f32, f32)
     Some((ctx.wx + up_yd, ctx.wy - right_yd))
 }
 
-/// Seat this frame's `Minimap:PingLocation` click and draw the ping — both inside the
-/// renderer, against the geometry the player actually clicked on and the map actually drew at.
-/// `shown` is the stock [`PING_FRAME`]'s effective alpha this frame (`None` = hidden), read
-/// beside the click: the frame is the ping's lifetime (module doc), so nothing draws without it.
+/// Seat this frame's `Minimap:PingLocation` click — inside the renderer, against the geometry
+/// the player actually clicked on and the map actually drew at.
 ///
 /// The seat happens here rather than in a system of its own precisely so there is no window in
 /// which a click is held against a *stale* view scale: the first version parked the click for a
 /// separate system that read the scale the renderer had left behind on the previous frame, and
 /// dropped the click outright whenever that leftover was still zero. (The *drain* is the caller's,
 /// one step earlier, so the click is spent even on a frame that draws no map — see there.)
-pub(super) fn emit_ping(
-    ctx: &BlipCtx,
-    ping: &mut MinimapPing,
-    click: Option<(f32, f32)>,
-    shown: Option<f32>,
-    art: &PingArt,
-    quads: &mut UiQuads,
-) {
+pub(super) fn seat_click(ctx: &BlipCtx, ping: &mut MinimapPing, click: Option<(f32, f32)>) {
     if let Some(world) = click.and_then(|c| click_to_world(ctx, c, ctx.seam)) {
         ping.seat(world, 0);
     }
-
-    ping.shown = shown;
-    let Some(alpha) = shown else { return };
-    let Some(live) = ping.live.as_ref() else {
-        return;
-    };
-    let (px, py) = live.world;
-
-    // The reference's Lua hides the marker outside the disc and keeps the ping alive
-    // (`Minimap_SetPing`'s else-branch is `MiniMapPing:Hide()`, not a clear) — so walking back
-    // into range brings it back for the rest of its 5 s. The stock file makes that test itself
-    // and hides the frame; this one is the same test in yards, for the frame it cannot see.
-    let d = (px - ctx.wx).hypot(py - ctx.wy);
-    if d >= ctx.radius_yd {
-        return;
-    }
-    let at = ctx.center + ctx.offset([px, py, 0.0]);
-    // px on the frozen 140.8 basis → this widget's px, the blip layer's own scalar.
-    let k = ctx.side / super::blips::BLIP_BASIS_PX;
-    let a = alpha * ctx.alpha;
-    let mut layer = |art: &Option<Handle<Image>>, side_px: f32, alpha: f32, rotation: f32| {
-        let Some(texture) = art.clone() else { return };
-        if alpha <= 0.0 {
-            return;
-        }
-        quads.overlays.push(UiQuad {
-            rect: Rect::from_center_size(at, Vec2::splat(side_px * k)),
-            z_key: ctx.z,
-            texture: Some(texture),
-            color: [1.0, 1.0, 1.0, alpha],
-            // Every one of the model's quads is `blendMode = 4`, SRC_ALPHA/ONE.
-            additive: true,
-            rotation,
-            ..default()
-        });
-    };
-
-    // The spinner, on the 4833 ms global clock.
-    layer(&art.ping5, PING5_PX, a, spin_radians(ping.shown_ms));
-    // The static centre.
-    layer(&art.ping2, PING2_PX, a, 0.0);
-    // The ring, on the 833 ms sequence loop: geometry scale `1 + 9·t/833` about its own centre
-    // (the model carries NO texture-transform chunk, so this is a real size change, not a UV one),
-    // under a two-leg alpha that peaks 400 ms in.
-    let t = ping.shown_ms.rem_euclid(PING_SEQ_MS);
-    let ring_alpha = if t <= PING4_ALPHA_PEAK_MS {
-        t / PING4_ALPHA_PEAK_MS
-    } else {
-        (PING_SEQ_MS - t) / (PING_SEQ_MS - PING4_ALPHA_PEAK_MS)
-    };
-    layer(
-        &art.ping4,
-        PING4_PX * (1.0 + 9.0 * t / PING_SEQ_MS),
-        a * ring_alpha,
-        0.0,
-    );
 }
 
 /// Announce a fresh ping and republish the position — everything that is *not* geometry.
 ///
 /// Runs before the script tick so the `MINIMAP_PING` event and the position behind
 /// `Minimap:GetPingPosition()` land in the same tick, and so an addon's handler sees a ping that
-/// is already on screen (the renderer seated and drew it at the end of the previous frame).
+/// is already seated (the renderer seated it at the end of the previous frame).
 #[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(super) fn drive_minimap_ping(
     script: Option<bevy::ecs::system::NonSendMut<UiScript>>,
     mut ping: ResMut<MinimapPing>,
-    time: Res<Time>,
     player: Res<Player>,
     widget: Res<super::MinimapWidget>,
     inside: Res<super::MinimapInside>,
@@ -327,13 +145,6 @@ pub(super) fn drive_minimap_ping(
     self_q: Query<&Guid, With<SelfPlayer>>,
     commands: Res<NetCommands>,
 ) {
-    // The model clock runs only while the frame is shown — see `shown_ms`. (The reference's
-    // `Hide()` covers the off-disc case too; ours keeps running there, a difference of a few
-    // tenths of a phase on a marker nobody can see.)
-    if ping.shown.is_some() {
-        ping.shown_ms += time.delta_secs() * 1000.0;
-    }
-
     let Some(mut script) = script else { return };
     let Some(live) = ping.live.as_ref() else {
         return;
@@ -495,196 +306,33 @@ mod tests {
     /// **No proximity clear** (decision 1596 §2.2). The first version applied the client's 10-yd
     /// `d² < 100` auto-clear to the party ping; wow-re `party-group-wire.md` §TU-D shows that
     /// clear belongs to the `SMSG_GOSSIP_POI` marker, and that `MSG_MINIMAP_PING` has no C-side
-    /// storage to clear at all. Standing on your own ping must not delete it.
+    /// storage to clear at all. Standing on your own ping must not delete it — and a frame with
+    /// no click seats nothing over it.
     #[test]
     fn reaching_the_ping_does_not_clear_it() {
         let mut c = ctx();
         let mut ping = MinimapPing::default();
-        let mut quads = UiQuads::default();
         ping.seat((1.0, 1.0), 0);
-        // Walk onto the point: it still draws.
+        // Walk onto the point: the pin stands.
         c.wx = 1.0;
         c.wy = 1.0;
-        emit_ping(&c, &mut ping, None, Some(1.0), &art(), &mut quads);
-        assert!(!quads.overlays.is_empty(), "a reached ping still draws");
+        seat_click(&c, &mut ping, None);
+        let live = ping.live.as_ref().expect("a reached ping is still a ping");
+        assert_eq!(live.world, (1.0, 1.0));
     }
 
-    /// **The lifetime is the stock frame's** (1974): the sprite draws while `MiniMapPing` is
-    /// shown, at the frame's alpha, and nothing here ages it. The model clock advances only
-    /// while the frame is shown.
+    /// A click seats a fresh pin at the clicked world point, replacing the last one; the
+    /// announcement flag rides the seat.
     #[test]
-    fn the_marker_draws_only_while_the_stock_frame_is_shown() {
+    fn a_click_seats_a_fresh_pin() {
         let c = ctx();
         let mut ping = MinimapPing::default();
-        let mut quads = UiQuads::default();
-        ping.seat((0.0, 0.0), 0);
-        emit_ping(&c, &mut ping, None, None, &art(), &mut quads);
-        assert!(quads.overlays.is_empty(), "hidden frame: nothing drawn");
-        assert!(ping.shown.is_none());
-        emit_ping(&c, &mut ping, None, Some(0.5), &art(), &mut quads);
-        assert!(!quads.overlays.is_empty(), "shown frame: drawn");
-        assert!(
-            quads
-                .overlays
-                .iter()
-                .all(|q| (q.color[3] - 0.5).abs() < 1e-6 || q.color[3] == 0.0),
-            "at the frame's alpha (the ring is transparent at phase 0)"
-        );
-        assert_eq!(ping.shown, Some(0.5));
-        assert!(
-            ping.live.is_some(),
-            "the world point outlives the frame's show"
-        );
-    }
-
-    fn art() -> PingArt {
-        PingArt {
-            ping5: Some(Handle::default()),
-            ping2: Some(Handle::default()),
-            ping4: Some(Handle::default()),
-        }
-    }
-
-    /// **It draws, and where.** The pin's whole claim is that the marker's rect comes out of
-    /// [`BlipCtx::offset`] like every other blip's — so this drives the real emitter and checks
-    /// the rect, rather than trusting the caller. It also pins the two layers' byte-measured
-    /// sizes, and the fact that the ring contributes **nothing** at phase 0 (its alpha track
-    /// starts at zero, so a "three layers ⇒ three quads" assertion would be wrong).
-    #[test]
-    fn the_emitter_puts_the_measured_layers_at_the_pinned_point() {
-        let c = ctx();
-        let mut ping = MinimapPing::default();
-        let mut quads = UiQuads::default();
-        let art = art();
-
-        // No ping: nothing drawn.
-        emit_ping(&c, &mut ping, None, Some(1.0), &art, &mut quads);
-        assert!(quads.overlays.is_empty());
-
-        // A click 30 UI units up (north) at seam 1 seats a ping 30/px_per_yd yards north.
-        emit_ping(
-            &c,
-            &mut ping,
-            Some((0.0, 30.0)),
-            Some(1.0),
-            &art,
-            &mut quads,
-        );
-        assert_eq!(
-            quads.overlays.len(),
-            2,
-            "the ring is transparent at phase 0"
-        );
-        let want = c.center + c.offset([30.0 / c.px_per_yd, 0.0, 0.0]);
-        let k = c.side / super::super::blips::BLIP_BASIS_PX;
-        for q in &quads.overlays {
-            let mid = (q.rect.min + q.rect.max) * 0.5;
-            assert!((mid - want).length() < 1e-3, "{mid:?} vs {want:?}");
-            assert!(q.additive, "every quad of the model is SRC_ALPHA/ONE");
-        }
-        // ping5 (12.39 px) draws first, ping2 (12.80 px) second — the model's own order.
-        assert!((quads.overlays[0].rect.width() - PING5_PX * k).abs() < 1e-3);
-        assert!((quads.overlays[1].rect.width() - PING2_PX * k).abs() < 1e-3);
-        assert!(
-            (PING5_PX - 12.39).abs() < 0.01 && (PING2_PX - 12.80).abs() < 0.01,
-            "the byte-measured sizes: {PING5_PX} / {PING2_PX}"
-        );
-
-        // Out of range it stops drawing WITHOUT dying: walk 200 yd away, then back. (The
-        // reference's Lua hides the marker off-disc; it does not clear the ping.)
-        quads.overlays.clear();
-        let mut far = ctx();
-        far.wx = -200.0;
-        emit_ping(&far, &mut ping, None, Some(1.0), &art, &mut quads);
-        assert!(quads.overlays.is_empty(), "off the disc: hidden");
-        emit_ping(&c, &mut ping, None, Some(1.0), &art, &mut quads);
-        assert_eq!(quads.overlays.len(), 2, "back in range: visible again");
-    }
-
-    /// **The ring is the motion the eye reads** (wow-re §10.4): a geometry scale `1 + 9·t/833`
-    /// from 3.2 px to 32 px across the sequence loop, under an alpha that rises over 400 ms and
-    /// falls over the remaining 433 — peaking when the ring is 5.32× its base. The paused version
-    /// had no ring at all.
-    #[test]
-    fn the_ring_expands_and_peaks_at_four_hundred_milliseconds() {
-        let c = ctx();
-        let k = c.side / super::super::blips::BLIP_BASIS_PX;
-        let art = art();
-        let ring_at = |ms: f32| {
-            let mut ping = MinimapPing::default();
-            ping.seat((0.0, 0.0), 0);
-            ping.shown_ms = ms;
-            let mut quads = UiQuads::default();
-            emit_ping(&c, &mut ping, None, Some(1.0), &art, &mut quads);
-            // The ring is the third layer whenever it is visible at all.
-            quads
-                .overlays
-                .get(2)
-                .map(|q| (q.rect.width() / k, q.color[3]))
-        };
-        assert_eq!(ring_at(0.0), None, "alpha 0 at the loop start: not emitted");
-        let (w, a) = ring_at(PING4_ALPHA_PEAK_MS).expect("visible at the peak");
-        assert!((a - 1.0).abs() < 1e-3, "peak alpha: {a}");
-        assert!(
-            (w / PING4_PX - 5.32).abs() < 0.01,
-            "5.32x its base at the peak: {}",
-            w / PING4_PX
-        );
-        // It keeps growing past the alpha peak, all the way to 10x, while fading out.
-        let (w_late, a_late) = ring_at(PING_SEQ_MS - 1.0).expect("still visible near the end");
-        assert!(w_late > w, "still expanding: {w_late} vs {w}");
-        assert!(a_late < 0.02, "nearly gone: {a_late}");
-        assert!(
-            (w_late / PING4_PX - 10.0).abs() < 0.02,
-            "10x at the loop end: {}",
-            w_late / PING4_PX
-        );
-        assert!(
-            (PING4_PX - 3.2).abs() < 0.01 && (PING4_PX * 10.0 - 32.0).abs() < 0.05,
-            "3.2 → 32.0 px"
-        );
-    }
-
-    /// **The spin is not uniform**, and reproducing it as a constant rate would be wrong by up to
-    /// 15° (wow-re §10.3's 108 °/s burst across 225°→270°). The table's own keys, and the
-    /// direction, are what this pins: one clockwise turn per 4833 ms, monotonic, never reversing.
-    #[test]
-    fn the_spin_follows_the_models_own_non_uniform_keys() {
-        for (ms, deg) in PING5_SPIN {
-            let got = spin_radians(ms).to_degrees();
-            // The last key is a full turn, which wraps to 0 — the same rotation.
-            let want = if ms >= PING_SPIN_MS { 0.0 } else { deg };
-            assert!((got - want).abs() < 0.01, "at {ms} ms: {got} vs {want}");
-        }
-        // Monotonic clockwise across the whole revolution (positive rotation = CW on screen, the
-        // sense the player arrow's `-facing` already establishes).
-        let mut prev = -1.0;
-        for i in 0..480 {
-            let t = i as f32 * (PING_SPIN_MS / 480.0);
-            let deg = spin_radians(t).to_degrees();
-            assert!(deg >= prev - 1e-3, "never reverses: {deg} after {prev}");
-            prev = deg;
-        }
-        // The burst the half-turn average hides: 225°→270° takes 417 ms, not the ~667 a uniform
-        // rate would give.
-        let quarter = spin_radians(3208.0).to_degrees();
-        let burst_end = spin_radians(3625.0).to_degrees();
-        assert!((quarter - 225.0).abs() < 0.01 && (burst_end - 270.0).abs() < 0.01);
-    }
-
-    /// The model clock is **not** reset per ping: the reference's Model frame free-runs and only
-    /// ticks while shown, so consecutive pings resume mid-animation. Seating a second ping must
-    /// leave the phase alone.
-    #[test]
-    fn a_second_ping_resumes_the_animation_rather_than_restarting_it() {
-        let mut ping = MinimapPing::default();
-        ping.seat((0.0, 0.0), 0);
-        ping.shown_ms = 1234.0;
-        ping.seat((10.0, 10.0), 0);
-        assert!(
-            (ping.shown_ms - 1234.0).abs() < f32::EPSILON,
-            "the clock is the model's, not the ping's"
-        );
+        ping.seat((5.0, 5.0), 0);
+        ping.fresh = false;
+        seat_click(&c, &mut ping, Some((0.0, 20.0))); // 20 UI units up = 20 px = 28.57 yd north
+        let live = ping.live.as_ref().unwrap();
+        assert!((live.world.0 - 20.0 / c.px_per_yd).abs() < 1e-3 && live.world.1.abs() < 1e-3);
+        assert!(ping.fresh, "a seat owes the world its event");
     }
 
     /// A degenerate frame (the widget has not drawn yet) drops the click rather than seating a

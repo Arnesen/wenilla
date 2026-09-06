@@ -72,10 +72,11 @@ struct WowFragOut {
 // Per-material model uniforms packed at binding 100 (see `WowModelExt` in terrain.rs). Light + fog + the
 // SH coeffs moved OUT to the shared global-light storage buffer (below); only the per-material draw flags
 // remain. Field order MUST match the Rust struct.
-//   clutter_fade — x = full-opacity radius (yd); y = fully-gone radius (yd); w = enabled (>0.5).
-//                  The client draws clutter only within ~70 yd with a ramp over the last quarter;
-//                  we reproduce by multiplying cutout alpha by clamp((y−d)/(y−x)) so distant grass
-//                  erodes away through the alpha test (ground-effects.md Q4/Q10). 0 = off.
+//   clutter_fade — x = plateau-end VIEW DEPTH (yd, = 0.75·far); y = ramp-zero view depth (yd, the
+//                  ~70 yd detail-doodad horizon `[0x867958]`); w = enabled (>0.5). The client draws
+//                  clutter only within that horizon, with the reference's quantised 64-texel ramp
+//                  over the last quarter, addressed by VIEW-SPACE DEPTH — see the fragment note
+//                  (2004). 0 = off.
 //   model_flags  — x = is_wmo (>0.5 ⇒ the WMO surface lanes); y = fade-blend twin;
 //                  z = interior (>0.5): a WMO interior group (with is_wmo ⇒ the INT/TRANS batch-class
 //                      lanes below) OR an interior M2 doodad prop (without is_wmo ⇒ lit by its folded
@@ -679,14 +680,31 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
 #endif
     }
 #endif
-    // Ground-clutter distance fade: multiply the cutout alpha by the camera-distance ramp BEFORE the
-    // alpha test, so distant detail doodads ERODE out by `clutter_fade.y` yd (the client's ~70-yd
-    // horizon — clutter's own faithful alpha-test fade). No-op where `clutter_fade.w == 0`. Distinct
-    // from the world-doodad fade below; this stays before the test, that one does not.
+    // Ground-clutter distance fade — the reference's stage-1 ramp, byte-exact and capture-confirmed
+    // (wow-re `terrain/scratch/detail-doodad-distance-fade.md`, 2004). Three facts shape this:
+    //
+    //  * **The coordinate is VIEW-SPACE DEPTH, not radial distance.** `0x6b2b80` texgens
+    //    `D3DTSS_TCI_CAMERASPACEPOSITION` (`EGxRs 0x30 = 3`, `TEXCOORDINDEX = stage | 0x20000`)
+    //    through `T(0,0,−52.5)·Ry(π/2)·S(1/17.5)`, giving `u = (z_eye − 52.5) / 17.5`. The fade
+    //    boundary is therefore a PLANE across the view, not a sphere around the camera — which is
+    //    what a radial `distance()` drew here until 2004, and a sphere reads as a hard ring on the
+    //    ground that sweeps as the player moves.
+    //  * **The ramp is a quantised 64-texel table, not a clean 1→0 line.** `0x6b2320` fills a 64×8
+    //    CLAMP/LINEAR texture, RGB white, `alpha = 4·(63 − col)`; a bilinear read across texel
+    //    centres is `alpha = (254 − 256·u)/255`, capped at texel 0's `252/255`. So the plateau ends
+    //    at `near + 0.0078·band` and the ramp reaches zero at `far − 0.0078·band`, never quite at
+    //    the two named radii, and near clutter tops out at 98.8 % opaque, never 100 %.
+    //  * **It multiplies into the alpha the CUTOUT reads.** Both stages take texenv preset 1
+    //    (`MODULATE` on colour AND alpha) and `ALPHAREF` is `detailDoodadAlpha` = 128, so the test
+    //    sees `tex0.a × ramp`: survivors blend at 0.502..0.988 (the visible opacity fade) and the
+    //    tuft erodes out entirely at ramp 128/255, i.e. 61.11 yd of the 70 yd horizon. That erosion
+    //    is the reference's own behaviour, not our artefact — the blend is what makes it read as a
+    //    fade rather than a cut, so what matters is that the survivors are genuinely translucent.
     if (m.clutter_fade.w > 0.5) {
-        let d = distance(view.world_position.xyz, in.world_position.xyz);
-        let f = clamp((m.clutter_fade.y - d) / max(m.clutter_fade.y - m.clutter_fade.x, 0.001), 0.0, 1.0);
-        base_color.a = base_color.a * f;
+        let z_eye = -(view.view_from_world * vec4<f32>(in.world_position.xyz, 1.0)).z;
+        let u = (z_eye - m.clutter_fade.x) / max(m.clutter_fade.y - m.clutter_fade.x, 0.001);
+        let ramp = clamp((254.0 - 256.0 * u) / 255.0, 0.0, 252.0 / 255.0);
+        base_color.a = base_color.a * ramp;
     }
 
     // Faithful per-object WORLD-DOODAD distance fade (`FUN_00683f80`/`model_fade.rs`): the fade alpha

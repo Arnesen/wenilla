@@ -52,7 +52,8 @@ mod tex_filter;
 pub use tex_filter::{publish_tex_filter, tex_filter, TexFilterSetting, ANISO_RANGE};
 mod m2;
 pub use m2::{
-    EmitterBillboard, M2Model, M2ModelLoader, ModelEmitter, ModelLight, ModelRibbon, PortraitCamera,
+    EmitterBillboard, M2Model, M2ModelLoader, M2SequenceInfo, ModelEmitter, ModelLight,
+    ModelRibbon, PortraitCamera,
 };
 mod wmo;
 pub use benilla_formats::{WmoPortalInfo, WmoPortalRef};

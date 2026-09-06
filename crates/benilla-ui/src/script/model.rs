@@ -324,6 +324,19 @@ pub(crate) struct Model {
     /// resolve at a 3,988-frame roster, which made it the biggest phase left in the preamble
     /// (decision 1634's `[layout-pre] watched=`).
     pub(crate) on_size_changed_frames: Vec<FrameHandle>,
+    /// The frames carrying an `OnUpdateModel` script — the list the tick fires at the top of
+    /// every paint of a visible model pane (`0x76d1a0`'s first act; decision 2007). Same one
+    /// writer as the two lists above.
+    pub(crate) on_update_model_frames: Vec<FrameHandle>,
+    /// What the engine knows about each model **file** a pane has named — the sequences and
+    /// bounds a pane's clock needs ([`crate::widget::ModelFileFacts`]), handed over by the host
+    /// once the asset is resident, keyed by [`crate::widget::model_key`]. The reference reads
+    /// these off the loaded `MD20`; this engine parses no M2, so the facts arrive from the app's
+    /// loader through `UiScript::set_model_facts`.
+    pub(crate) model_facts: HashMap<String, std::sync::Arc<crate::widget::ModelFileFacts>>,
+    /// Model files a pane named that no facts have arrived for yet — drained by the host
+    /// (`UiScript::model_facts_wanted`) to load them. Deduplicated on push.
+    pub(crate) model_facts_wanted: Vec<String>,
     /// Edit boxes whose text changed and whose `OnTextChanged` has **not fired yet** — the
     /// reference's `textChanged` dirty bit (`[E+0x31c]` bit 0), which `SetText`/`Insert` raise and
     /// only the dirty-word drain `0x77d3e0` clears (decision 1831).
@@ -1749,6 +1762,9 @@ impl Model {
             scripts: HashMap::new(),
             on_update_frames: Vec::new(),
             on_size_changed_frames: Vec::new(),
+            on_update_model_frames: Vec::new(),
+            model_facts: HashMap::new(),
+            model_facts_wanted: Vec::new(),
             dirty_editboxes: Vec::new(),
             event_to_frames: HashMap::new(),
             frame_events: HashMap::new(),

@@ -654,6 +654,7 @@ impl AssetLoader for WmoModelLoader {
                     skin_slot: sub.skin_slot, // always None for WMO groups (no creature skins)
                     geoset_id: 0,             // WMO has no M2 geoset concept
                     char_slot: None,          // WMO is never a character body
+                    icon_slot: false,         // M2-only (texture type 14)
                     blend: sub.blend,
                     two_sided: sub.two_sided,
                     interior: sub.interior,

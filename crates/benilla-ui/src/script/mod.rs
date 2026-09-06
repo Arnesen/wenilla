@@ -202,6 +202,7 @@ pub use guild::{
     GuildMemberInfo, GuildRankEdit, GuildRankInfo, GuildRequest, GuildState, LastOnline, UnitGuild,
     MAX_RANKS, MIN_RANKS, RANK_RIGHT_BITS,
 };
+pub use modelframe::ModelPaneFrame;
 pub use petition::{
     validate_guild_name, PetitionRecordView, PetitionRequest, PetitionState, PETITION_TYPE_CHARTER,
     PETITION_TYPE_PETITION,
@@ -447,10 +448,15 @@ pub const SCREEN: crate::layout::Handle = 0;
 /// corpus call sites across 91 addons); it removes working behaviour from the 23 sites that remain,
 /// so it is still a change to make deliberately rather than as a side effect of widening this list
 /// — but the FrameXML half of "with FrameXML fixed first" is most of the way there now.
-const SCRIPT_KINDS: [&str; 35] = [
+const SCRIPT_KINDS: [&str; 37] = [
     "OnLoad",
     "OnEvent",
     "OnUpdate",
+    // The model pane's two: fired by the tick's model pass — `OnUpdateModel` at the top of every
+    // paint of a visible pane, `OnAnimFinished` when a clamped sequence completes (decision 2007;
+    // `object::events_regions::set_script`'s doc has the sites).
+    "OnUpdateModel",
+    "OnAnimFinished",
     "OnShow",
     "OnHide",
     "OnClick",

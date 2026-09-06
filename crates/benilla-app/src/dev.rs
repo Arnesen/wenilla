@@ -407,11 +407,9 @@ impl Plugin for DevProbesPlugin {
             app.add_plugins(crate::capture::ProbeLookPlugin);
             app.add_plugins(crate::capture::ProbePitchPlugin);
             app.add_plugins(crate::capture::ProbeCamPlugin);
-            // The FPS journal: `WOW_FPS_JOURNAL=<csv>` appends per-second position + frame-time rows on a
-            // director-driven run — "where does it dip" as coordinates (see `perf::FpsJournalPlugin`).
-            if std::env::var("WOW_FPS_JOURNAL").is_ok() {
-                app.add_plugins(crate::perf::FpsJournalPlugin);
-            }
+            // (The FPS journal — `WOW_FPS_JOURNAL=<csv>`, or the `fpsJournal` CVar — is
+            // registered from `lib.rs` in every build since 2008: it is the one instrument a
+            // player runs for us.)
         }
     }
 }

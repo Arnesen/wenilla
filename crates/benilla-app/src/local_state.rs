@@ -300,7 +300,7 @@ pub(crate) fn screenshots_dir() -> Option<PathBuf> {
 }
 
 /// `benilla-config/Diagnostics/` — where the stuck-thread self-sampler drops its profiles
-/// ([`crate::perf::stall`]).
+/// ([`crate::perf::stall`]) and the FPS journal its rows ([`fps_journal_path`]).
 ///
 /// **This was `~/Library/Logs/benilla/` until 2026-08-27, hand-built from `$HOME`** — a platform
 /// log directory, which is the exact shape the one-folder rule names as forbidden ("never a
@@ -316,10 +316,15 @@ pub(crate) fn screenshots_dir() -> Option<PathBuf> {
 /// this instrument was built for — the director's, and the long probe rounds — keep it. The
 /// alternative, an ungated second accessor, would put "which paths are exempt from hermetic?" back
 /// into someone's head, which is what the single rule exists to prevent.
-// Same one reader as `sound::output::device_open`: the macOS-only stall watchdog.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn diagnostics_dir() -> Option<PathBuf> {
     home().map(|h| h.join("Diagnostics"))
+}
+
+/// `benilla-config/Diagnostics/fps-journal.csv` — the FPS journal's rows while the `fpsJournal`
+/// CVar is on (decision 2008): the file a reporter attaches. `None` on a hermetic run like
+/// everything here; the harness names its own path through `WOW_FPS_JOURNAL` instead.
+pub(crate) fn fps_journal_path() -> Option<PathBuf> {
+    diagnostics_dir().map(|d| d.join("fps-journal.csv"))
 }
 
 /// Make an arbitrary realm/character name safe as one path component: anything outside
