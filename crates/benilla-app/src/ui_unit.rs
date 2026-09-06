@@ -1008,7 +1008,12 @@ pub(crate) fn enrich_unit(
     let Some(entry) = benilla_protocol::guid::entry(guid) else {
         return;
     };
-    if let Some(rec) = names.creature_record(entry) {
+    // The ask-once creature record — `CGUnit+0xb30`, filled from `SMSG_CREATURE_QUERY_RESPONSE`.
+    // `None` is the round trip before the answer lands, and it is a REAL state the plate is drawn
+    // in, not a "nothing is known yet" to render blank: the name reads `UNKNOWNOBJECT` there
+    // (decision 2040), and the lines below split on exactly what the record does or does not gate.
+    let rec = names.creature_record(entry);
+    if let Some(rec) = rec {
         state.subtitle = rec.subname.clone();
         state.creature_type_name = creature_type_word(rec.creature_type).map(str::to_string);
         // The client's one rank getter, both gates (`gated_rank`, decision 0782) — never `rec.rank`
@@ -1017,25 +1022,31 @@ pub(crate) fn enrich_unit(
         state.rank = crate::names::gated_rank(Some(rec), Some(store));
         state.civilian = rec.civilian;
         state.racial_leader = rec.racial_leader;
-        // The faction-name line ("Stormwind", between level and PvP) — the unit builder's tail
-        // block, every gate transcribed: the record's HIDE_FACTION_TOOLTIP type flag (0x10, the
-        // `0x612610` gate), the template → Faction.dbc hop, the reputation-slot gate
-        // (rep_index ≥ 0), and the race/class slot walk with its hidden flag (0x4). The record
-        // gate also stands in for the bytes' "no creature info → pass": before the query
-        // answers we have no name line either, and the tooltip rebuilds when it lands.
-        if rec.type_flags & 0x10 == 0 {
-            state.faction_name = (|| {
-                let catalog = factions?.catalog();
-                let faction_id = catalog.template(store.0.unit_faction_template()?)?.faction;
-                let info = catalog.reputation_faction(faction_id)?;
-                let self_store = self_store?;
-                let race = self_store.0.unit_race().unwrap_or(0);
-                let class = self_store.0.unit_class().unwrap_or(0);
-                info.tooltip_shows_for(race, class)
-                    .then(|| catalog.faction_name(faction_id).map(str::to_string))
-                    .flatten()
-            })();
-        }
+    }
+    // The faction-name line ("Stormwind", between level and PvP) — the unit builder's tail block,
+    // every gate transcribed: the record's HIDE_FACTION_TOOLTIP type flag (0x10), the template →
+    // Faction.dbc hop, the reputation-slot gate (rep_index ≥ 0), and the race/class slot walk with
+    // its hidden flag (0x4).
+    //
+    // **Its entry gate is NOT the record.** `0x612610` reads `[unit+0xb30]` and returns 1 when
+    // there is none — that is how a PLAYER passes a gate whose only field lives in CreatureInfo,
+    // and a creature whose query has not answered takes the identical leg. So the line resolves
+    // off the DESCRIPTOR's `UNIT_FIELD_FACTIONTEMPLATE`, which is already streamed, and shows
+    // under a pending name exactly as it does under a known one. It was gated on the record here
+    // on the premise that "before the query answers we have no name line either" — the premise
+    // decision 2002 corrected, and 2040 with it.
+    if rec.is_none_or(|r| r.type_flags & 0x10 == 0) {
+        state.faction_name = (|| {
+            let catalog = factions?.catalog();
+            let faction_id = catalog.template(store.0.unit_faction_template()?)?.faction;
+            let info = catalog.reputation_faction(faction_id)?;
+            let self_store = self_store?;
+            let race = self_store.0.unit_race().unwrap_or(0);
+            let class = self_store.0.unit_class().unwrap_or(0);
+            info.tooltip_shows_for(race, class)
+                .then(|| catalog.faction_name(faction_id).map(str::to_string))
+                .flatten()
+        })();
     }
 }
 
@@ -2482,6 +2493,99 @@ mod tests {
         let mut s = UnitState::default();
         enrich_unit(&mut s, GUID ^ (1 << 24), &names, &store, None, None);
         assert_eq!(s.rank, 0, "an un-queried creature has no classification");
+    }
+
+    /// **The faction-name line does not wait for the creature query** (decision 2040).
+    ///
+    /// Its entry gate `0x612610` reads `[unit+0xb30]` and **returns 1 when there is none** — the
+    /// leg a PLAYER takes through a gate whose only field lives in CreatureInfo, and the leg a
+    /// creature takes for the round trip before `SMSG_CREATURE_QUERY_RESPONSE` lands. Everything
+    /// the line itself needs is on the descriptor (`UNIT_FIELD_FACTIONTEMPLATE`) and already
+    /// streamed, so it shows under the pending `UNKNOWNOBJECT` title rather than arriving a round
+    /// trip after it. It was gated on the record here, on the premise that a pending creature had
+    /// no name line either — the premise decision 2002 corrected.
+    ///
+    /// The record still owns the line's ONE creature-side gate, `HIDE_FACTION_TOOLTIP` (type flag
+    /// `0x10`), which is why the answer landing can take the line away again — the reference's
+    /// own sequence, not a flicker of ours.
+    #[test]
+    fn the_faction_line_does_not_wait_for_the_creature_query() {
+        use benilla_protocol::messages::ObjectFields;
+
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let catalog = benilla_formats::load_faction_catalog(&mut chain).expect("Faction.dbc");
+        let factions = crate::target::Factions::from_catalog(catalog);
+
+        /// `UNIT_FIELD_FACTIONTEMPLATE` / `UNIT_FIELD_BYTES_0` — absolute descriptor indices.
+        const FACTIONTEMPLATE: u16 = 35;
+        const BYTES_0: u16 = 36;
+        /// The local player the slot walk is matched against: race 1 (human), class 1 (warrior),
+        /// packed as `UNIT_FIELD_BYTES_0` bytes 0 and 1.
+        const HUMAN_WARRIOR: u32 = 1 | (1 << 8);
+        /// A creature entry the cache below is deliberately never told about.
+        const ENTRY: u32 = 299;
+        const GUID: u64 = (0xF130u64 << 48) | ((ENTRY as u64) << 24) | 0x7;
+
+        let me = ObjectStore(ObjectFields::from_pairs(&[(BYTES_0, HUMAN_WARRIOR)]));
+        // The first template id whose faction carries a reputation slot this character can see.
+        // Derived from the real DBC rather than guessed, so the test names no id it cannot justify.
+        let (template_id, expected) = (1u32..3000)
+            .find_map(|id| {
+                let f = factions.catalog().template(id)?.faction;
+                let info = factions.catalog().reputation_faction(f)?;
+                info.tooltip_shows_for(1, 1)
+                    .then(|| factions.catalog().faction_name(f))
+                    .flatten()
+                    .map(|n| (id, n.to_string()))
+            })
+            .expect("some faction template shows a tooltip line to a human warrior");
+        let store = ObjectStore(ObjectFields::from_pairs(&[(FACTIONTEMPLATE, template_id)]));
+
+        let line_for = |names: &NameCache| {
+            let mut state = UnitState::default();
+            enrich_unit(&mut state, GUID, names, &store, Some(&factions), Some(&me));
+            state
+        };
+
+        // The query is still in flight: no record, so no name, no subtitle and no rank — and the
+        // faction line all the same.
+        let pending = line_for(&NameCache::default());
+        assert_eq!(pending.name, None, "the name is the thing still in flight");
+        assert_eq!(pending.subtitle, None);
+        assert_eq!(
+            pending.faction_name.as_deref(),
+            Some(expected.as_str()),
+            "the faction line resolves off the descriptor alone"
+        );
+
+        let record = |type_flags: u32| crate::names::CreatureRecord {
+            name: "Stormwind Guard".into(),
+            subname: None,
+            creature_type: 7,
+            pet_family: 0,
+            rank: 0,
+            type_flags,
+            civilian: false,
+            racial_leader: false,
+            display_id: 0,
+        };
+        let mut answered = NameCache::default();
+        answered.insert_creature(ENTRY, Some(record(0)));
+        assert_eq!(
+            line_for(&answered).faction_name.as_deref(),
+            Some(expected.as_str()),
+            "the answer landing keeps the line it was already showing"
+        );
+
+        // The one creature-side gate the record does own.
+        let mut hidden = NameCache::default();
+        hidden.insert_creature(ENTRY, Some(record(0x10)));
+        assert_eq!(
+            line_for(&hidden).faction_name,
+            None,
+            "HIDE_FACTION_TOOLTIP takes the line away once the record says so"
+        );
     }
 
     /// The PvP-preference announcement law (decision 0652), as the reference's changed-bits handler

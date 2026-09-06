@@ -117,6 +117,8 @@ impl Plugin for NetPlugin {
             .add_message::<ServerSoundMessage>()
             .add_message::<EmoteMessage>()
             .add_message::<AiReactionMessage>()
+            .add_message::<PetTalkMessage>()
+            .add_message::<PetDismissSoundMessage>()
             .add_message::<WorldportMessage>()
             .add_message::<CharListMessage>()
             .add_message::<CharActionResultMessage>()
@@ -2630,6 +2632,26 @@ pub(crate) enum EmoteKind {
 pub(crate) struct AiReactionMessage {
     pub(crate) unit: Entity,
     pub(crate) hostile: bool,
+}
+
+/// The pet spoke (`SMSG_PET_ACTION_SOUND`, bridged from the Net drain; decision 2039): `talk` is
+/// the wire's own selector (`PET_TALK_ORDER` / `PET_TALK_ATTACK`), not a `SoundEntries` id — the
+/// kit comes off the pet's own `CreatureSoundData` row. Pure audio in the client (`0x6040c0`
+/// resolves the guid and calls the bark dispatcher, nothing else); consumer: `sound::creature`.
+#[derive(Message, Clone, Copy)]
+pub(crate) struct PetTalkMessage {
+    pub(crate) unit: Entity,
+    pub(crate) talk: u32,
+}
+
+/// A dismissed pet's parting sound (`SMSG_PET_DISMISS_SOUND`, decision 2039): a
+/// `CreatureModelData` id and the point, already in Bevy space. **No entity** — the packet names
+/// no guid and the pet is gone by the time it arrives, which is the whole reason it carries a
+/// position at all. Consumer: `sound::creature`.
+#[derive(Message, Clone, Copy)]
+pub(crate) struct PetDismissSoundMessage {
+    pub(crate) model_id: u32,
+    pub(crate) pos: Vec3,
 }
 
 #[cfg(test)]

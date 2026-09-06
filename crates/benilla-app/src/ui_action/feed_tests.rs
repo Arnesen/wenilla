@@ -17,7 +17,7 @@ use benilla_ui::script::UiScript;
 use bevy::prelude::*;
 
 use super::feed::{feed_actions, MISSING_ITEM_ICON};
-use super::{CastErrors, MountErrors, PlayerActions, UiErrorKeys, UiErrorTexts};
+use super::{CastErrors, MountErrors, PetTameFailures, PlayerActions, UiErrorKeys, UiErrorTexts};
 use crate::entities::ItemDisplays;
 use crate::items::{test_template, Items};
 use crate::net::{ClientCommand, NetCommands};
@@ -60,6 +60,7 @@ fn app_with_food_on_the_bar() -> (App, crossbeam_channel::Receiver<ClientCommand
         .init_resource::<Items>()
         .init_resource::<CastErrors>()
         .init_resource::<MountErrors>()
+        .init_resource::<PetTameFailures>()
         .init_resource::<UiErrorKeys>()
         .init_resource::<UiErrorTexts>()
         // The cast-failure combat-log line (1703) rides the same drain.
@@ -311,6 +312,7 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
         .init_resource::<Items>()
         .init_resource::<CastErrors>()
         .init_resource::<MountErrors>()
+        .init_resource::<PetTameFailures>()
         .init_resource::<UiErrorKeys>()
         .init_resource::<UiErrorTexts>()
         // The cast-failure combat-log line (1703) rides the same drain.
@@ -473,5 +475,145 @@ fn pre_resolved_lines_land_on_the_errors_frame_in_the_arms_colour() {
             ),
         ],
         "red UI_ERROR_MESSAGE for the notice, yellow UI_INFO_MESSAGE for the area trigger"
+    );
+}
+
+/// **A pet's refused cast is not written to the combat log** (decision 2033).
+///
+/// `HandleCastFailed 0x6e1a00` calls the log formatter `0x62c360` beside its `DisplayError`;
+/// `HandlePetCastFailed 0x6e8eb0` calls neither it nor the error sound — its whole call set is the
+/// two packet readers, `0x496720`, and the string plumbing behind it. Until this guard the drain
+/// treated both queue entries alike, so a pet's refused Growl printed "You fail to cast Growl:
+/// ..." in the log, worded as the player's own failure.
+///
+/// Driven through the real system with the two entries **side by side and the same spell**, so the
+/// assert cannot pass by the line failing to build for some unrelated reason: one goes in, one
+/// comes out.
+#[test]
+fn a_pets_refused_cast_writes_no_combat_log_line() {
+    use crate::ui_action::{CastFail, Caster, Spells};
+    use benilla_formats::{SpellCatalog, SpellDisplay};
+
+    const GROWL: u32 = 2649;
+
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let mut app = App::new();
+    let mut errors = CastErrors::default();
+    // 0x5f ROOTED: an override on BOTH tables, so neither entry can be dropped for want of a
+    // string, and the red line still gets two lines — it is only the log that differs.
+    errors.0.push(CastFail {
+        spell_id: GROWL,
+        reason: 0x5F,
+        arg: None,
+        caster: Caster::Player,
+    });
+    errors.push_pet(GROWL, 0x5F);
+
+    app.insert_resource(PlayerActions::default())
+        .insert_resource(errors)
+        .insert_resource(Spells {
+            catalog: SpellCatalog::from_displays(HashMap::from([(
+                GROWL,
+                SpellDisplay {
+                    name: "Growl".into(),
+                    ..Default::default()
+                },
+            )])),
+            ..Spells::empty_for_tests()
+        })
+        .init_resource::<Items>()
+        .init_resource::<MountErrors>()
+        .init_resource::<PetTameFailures>()
+        .init_resource::<UiErrorKeys>()
+        .init_resource::<UiErrorTexts>()
+        .init_resource::<crate::ui_chat::ChatLog>()
+        .init_resource::<crate::sound::MessageSounds>()
+        .insert_resource(NetCommands(tx));
+    let script = UiScript::new().unwrap();
+    // Only the two strings the log line needs; the red line's own text is `cast_fail`'s business
+    // and has its own tests.
+    script
+        .run(r#"SPELL_FAILED_ROOTED = "You are unable to move";"#)
+        .unwrap();
+    app.insert_non_send_resource(script);
+    app.add_systems(Update, feed_actions);
+    app.update();
+
+    assert_eq!(
+        app.world()
+            .resource::<crate::ui_chat::ChatLog>()
+            .pending_len(),
+        1,
+        "the player's failure logs and the pet's does not"
+    );
+}
+
+/// **The taming refusal is TWO GlobalStrings lookups, in order** (decision 2039) — the one
+/// message benilla shows whose argText is itself a key.
+///
+/// The reference's `0x6e6a20` resolves `PETTAME_<reason>` through the script VM first and hands
+/// the resulting *string* to `DisplayError(0xee)`, so `ERR_TAME_FAILED` ("%s.") renders the
+/// reason's sentence with a period after it. Getting the order wrong is not a compile error and
+/// not a silent no-op — it would print the literal key on the red line — so it is pinned here at
+/// both ends of the reason table's bounds check.
+#[test]
+fn a_tame_failure_composes_the_reason_string_into_err_tame_failed() {
+    let (mut app, _rx) = app_with_food_on_the_bar();
+    {
+        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        // The two strings verbatim from 1.12's `GlobalStrings.lua`, plus a recorder for the
+        // event the sink fires — this test is about the composition, not the frame.
+        script
+            .run(
+                r#"
+                ERR_TAME_FAILED = "%s.";
+                PETTAME_TOOHIGHLEVEL = "Creature is too high level for you to tame";
+                PETTAME_UNKNOWNERROR = "Unknown taming error";
+                BENILLA_TEST_LINES = {};
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("UI_ERROR_MESSAGE")
+                f:SetScript("OnEvent", function()
+                    table.insert(BENILLA_TEST_LINES, arg1)
+                end)
+                "#,
+            )
+            .unwrap();
+    }
+    let line = |app: &mut App, i: usize| {
+        app.world_mut()
+            .non_send_resource::<UiScript>()
+            .eval::<Option<String>>(&format!("return BENILLA_TEST_LINES[{i}]"))
+            .unwrap()
+    };
+
+    // 9 = PETTAME_TOOHIGHLEVEL, the middle of the jump table; 12 is vmangos's own out-of-range
+    // twelfth value, which the reference's `reason - 1 > 0xa` bound sends to the default arm.
+    app.world_mut().resource_mut::<PetTameFailures>().0.push(9);
+    app.world_mut().resource_mut::<PetTameFailures>().0.push(12);
+    app.update();
+
+    assert!(
+        app.world().resource::<PetTameFailures>().0.is_empty(),
+        "the feed drains the queue"
+    );
+    assert_eq!(
+        line(&mut app, 1).as_deref(),
+        Some("Creature is too high level for you to tame."),
+        "the reason string fills ERR_TAME_FAILED's %s — not the key, and not the reason alone"
+    );
+    assert_eq!(
+        line(&mut app, 2).as_deref(),
+        Some("Unknown taming error."),
+        "out of range takes the default arm rather than showing nothing"
+    );
+
+    // The reference's data-suppression face: a reason whose PETTAME string is not loaded shows
+    // NOTHING rather than a bare "." — the inner lookup fails, so the whole line is suppressed.
+    app.world_mut().resource_mut::<PetTameFailures>().0.push(1);
+    app.update();
+    assert_eq!(
+        line(&mut app, 3),
+        None,
+        "an unresolvable reason shows nothing"
     );
 }

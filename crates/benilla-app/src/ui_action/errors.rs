@@ -57,15 +57,43 @@ pub(crate) struct CastFail {
     pub spell_id: u32,
     pub reason: u8,
     pub arg: Option<u32>,
+    /// **Whose** refusal this is — which decides which of the reference's two message tables
+    /// resolves it. See [`Caster`].
+    pub caster: Caster,
+}
+
+/// Who failed to cast — the one input that picks between the reference's **two** cast-failure
+/// message tables (decision 2033).
+///
+/// It is not a flag on one handler: `SMSG_CAST_FAILED` and `SMSG_PET_CAST_FAILED` land in two
+/// separate functions, `0x6e1a00` and `0x6e8eb0`, each with its own reason -> errorId map. Ten of
+/// the pet's reasons resolve to something the player's never says, six of them to the
+/// `ERR_PET_SPELL_*` catalog rows that exist for no other purpose. Everything else about the two
+/// — the first-layer `SPELL_FAILED_*` vocabulary, the argument arms, the strip fallback — is
+/// literally the same code, which is why this rides the shared queue instead of forking it.
+///
+/// [`super::cast_fail::cast_fail_text`] is the reader; nothing downstream of it asks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Caster {
+    /// Ours — `SMSG_CAST_FAILED` and every client-local refusal we raise for ourselves.
+    #[default]
+    Player,
+    /// The pet's or the charm's — `SMSG_PET_CAST_FAILED` only.
+    Pet,
 }
 
 impl CastFail {
     /// A **client-local** refusal — no wire argument (see [`Self::arg`]).
+    ///
+    /// Always the player's: every local refusal benilla raises is raised on its own cast, and the
+    /// reference has no client-side path that refuses on the pet's behalf — a pet's refusals are
+    /// all decided server-side and arrive as `SMSG_PET_CAST_FAILED`.
     pub(crate) const fn local(spell_id: u32, reason: u8) -> Self {
         Self {
             spell_id,
             reason,
             arg: None,
+            caster: Caster::Player,
         }
     }
 }
@@ -83,6 +111,21 @@ impl CastErrors {
             spell_id,
             reason,
             arg: Some(arg),
+            caster: Caster::Player,
+        });
+    }
+
+    /// Queue the **pet's** wire refusal (`SMSG_PET_CAST_FAILED`). Same queue, same drain, same
+    /// sink — [`Caster::Pet`] is the whole difference, and it is read once, at the table pick.
+    ///
+    /// No argument word: `PetCastFailed::AppendBodyTo` writes none, so the reference's own
+    /// argument arms on this path have nothing to read.
+    pub(crate) fn push_pet(&mut self, spell_id: u32, reason: u8) {
+        self.0.push(CastFail {
+            spell_id,
+            reason,
+            arg: None,
+            caster: Caster::Pet,
         });
     }
 }
@@ -92,6 +135,18 @@ impl CastErrors {
 /// VM's own GlobalStrings by key ([`mount_result_key`]), the [`CastErrors`] shape exactly.
 #[derive(Resource, Default)]
 pub(crate) struct MountErrors(pub Vec<(bool, u32)>);
+
+/// Taming refusals queued for the UI error line, as the raw `SMSG_PET_TAME_FAILURE` reason byte
+/// (decision 2039) — [`MountErrors`]' shape, and here for the same reason: it is a **wire code
+/// family**, resolved by a code table, not a client-local key.
+///
+/// It cannot ride [`UiErrorKeys`] because its message is a *nested* lookup, which is exactly what
+/// the reference does: `0x6e6a20` resolves the reason's `PETTAME_*` key through the script VM
+/// (`0x703bf0`) and then passes that **string** as `DisplayError(0xee)`'s argText, filling
+/// `ERR_TAME_FAILED`'s lone `%s`. [`UiError`]'s `fill_s` is text the raise site already has; here
+/// the raise site has only a byte, and the VM is only reachable at the drain.
+#[derive(Resource, Default)]
+pub(crate) struct PetTameFailures(pub Vec<u8>);
 
 /// Where a client message is SHOWN is **not a decision this crate makes** — it is the `kind` field
 /// (`+0x04`) of the reference's message record, and it now arrives from the catalog
@@ -204,10 +259,21 @@ impl Shown {
     ///
     /// A key with no row falls back to [`MsgKind::Error`] and no sound. That cannot arise in the
     /// reference (a message is an *index*, so an unknown key is not expressible), so it only ever
-    /// means benilla named a key the client does not have — and
-    /// `every_error_key_in_the_source_is_a_catalog_row` is what keeps it unreachable.
+    /// means benilla named a key the client does not have.
+    ///
+    /// `every_error_key_in_the_source_is_a_catalog_row` was supposed to keep that unreachable and
+    /// **could not**: all 465 catalog keys begin `ERR_`, so that walk collects `"ERR_…"` literals
+    /// — which makes it blind to exactly the mistake it is guarding against, a raise site that
+    /// named something else. `PET_SPELL_NOPATH` and `SPELL_FAILED_OUT_OF_RANGE` sat on the pet's
+    /// feedback line for months, took this fallback every time, and no gate could see them
+    /// (decision 2033). Widening the walk is not possible from the text — `SPELL_FAILED_*` keys
+    /// are legitimate GlobalStrings lookups elsewhere in this very module — so the tripwire moves
+    /// to the funnel: this is where a non-row key becomes observable, so it says so.
     pub(crate) fn keyed(key: &str, text: String) -> Self {
         let record = benilla_ui::messages::by_key(key);
+        if record.is_none() {
+            warn!("message {key:?} is not a catalog row — surface and sound are a guess");
+        }
         Self {
             record,
             kind: record.map_or(MsgKind::Error, |r| r.kind),

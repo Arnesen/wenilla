@@ -85,6 +85,44 @@ impl<A: Asset> Parked<A> {
         self.0.remove(&id);
     }
 
+    /// The value behind `id` **wherever it currently lives** — the store when the asset exists,
+    /// the parked half when it does not yet. `None` only when neither holds it (a foreign handle,
+    /// or one dropped everywhere).
+    ///
+    /// This is the address a build-time stamp needs. Deferral split "the material a spawner just
+    /// built" into two homes, and a lane that reaches for the store alone reads a *live feature*
+    /// as an absent asset: the mat-anim registration wrote its table slot with
+    /// `Assets::get_mut`, got `None` for every deferred material, and silently froze every
+    /// UV-scroll and animated-tint batch in the world (decision 2038). Realizing the asset to
+    /// stamp it would work and would also throw away exactly the residency deferral buys; the
+    /// stamp belongs in the value, not in the store it happens to be sitting outside of.
+    pub fn value_mut<'a>(
+        &'a mut self,
+        store: &'a mut Assets<A>,
+        id: AssetId<A>,
+    ) -> Option<&'a mut A> {
+        // Store first: once realized it is the truth, and a parked value for a live id could
+        // only be a stale leftover.
+        if store.contains(id) {
+            return store.get_mut(id);
+        }
+        self.0.get_mut(&id)
+    }
+
+    /// [`Self::value_mut`]'s read-only twin — for a reader that must not dirty the asset
+    /// (`Assets::get_mut` marks it `Modified`, which is a bind-group rebuild on the Metal
+    /// non-bindless path: the exact cost 1381 removed from this lane).
+    pub fn value<'a>(&'a self, store: &'a Assets<A>, id: AssetId<A>) -> Option<&'a A> {
+        store.get(id).or_else(|| self.0.get(&id))
+    }
+
+    /// Either half holds a value for `id` — "this material is alive", the deferral-aware form of
+    /// `Assets::contains`. A registry that evicts on the store alone drops every entry whose
+    /// material is merely parked.
+    pub fn holds(&self, store: &Assets<A>, id: AssetId<A>) -> bool {
+        store.contains(id) || self.0.contains_key(&id)
+    }
+
     /// Realize every parked value some *visible* binding names. `bound` yields each binding
     /// with its view-visibility (`None` = not on the visibility lane at all — a booth part
     /// before its camera, a test world — which counts as visible: bound is enough).
@@ -142,6 +180,44 @@ pub fn realize_all(materials: &mut Assets<WowModelMaterial>) {
     with_pending(|p| p.realize_all(materials));
 }
 
+/// Apply `f` to a built material **wherever it lives** — see [`Parked::value_mut`]. `None` when
+/// neither the store nor the parked half holds `id`.
+///
+/// The write-side counterpart of [`realize`], and the right call for a **one-shot build-time
+/// stamp**: a lane that must leave a mark on a material it just built, without forcing the
+/// material into the store (which is what deferral exists to avoid) and without caring whether
+/// something has drawn it yet. The closure form is not a style choice — the parked table lives
+/// behind a mutex, so a `&mut` into it cannot leave the lock.
+pub fn with_material_mut<R>(
+    materials: &mut Assets<WowModelMaterial>,
+    id: AssetId<WowModelMaterial>,
+    f: impl FnOnce(&mut WowModelMaterial) -> R,
+) -> Option<R> {
+    with_pending(|p| p.value_mut(materials, id).map(f))
+}
+
+/// Read a built material **wherever it lives** — [`with_material_mut`]'s non-dirtying twin
+/// ([`Parked::value`]). What a readout wants: a probe that reached for the store alone would
+/// report a parked material's fields as absent and reproduce the very confusion it exists to
+/// resolve.
+pub fn with_material<R>(
+    materials: &Assets<WowModelMaterial>,
+    id: AssetId<WowModelMaterial>,
+    f: impl FnOnce(&WowModelMaterial) -> R,
+) -> Option<R> {
+    with_pending(|p| p.value(materials, id).map(f))
+}
+
+/// Either half holds a value for `id` — see [`Parked::holds`]. The liveness test a registry
+/// keyed by material asset id must evict on; `Assets::contains` alone reads a parked material as
+/// dead.
+pub fn holds(materials: &Assets<WowModelMaterial>, id: AssetId<WowModelMaterial>) -> bool {
+    // The store answers without the lock, and a REALIZED material is the common case for
+    // everything a per-frame lane asks about (only a parked one can be undrawn), so the mutex is
+    // reached for exactly the entries the store cannot settle.
+    materials.contains(id) || with_pending(|p| p.holds(materials, id))
+}
+
 /// How many values are parked — the census figure beside `mats=`.
 pub fn pending_len() -> usize {
     with_pending(|p| p.len())
@@ -190,6 +266,43 @@ mod tests {
         // An id nobody parked and the store lacks: false, nothing inserted.
         let stray = store.reserve_handle();
         assert!(!parked.realize(&mut store, stray.id()));
+    }
+
+    /// **The law decision 2038 was written from**: a value that is only PARKED is still a live
+    /// material — writable in place, and `holds`-alive — so a lane that stamps a material it just
+    /// built lands its mark whether or not anything has drawn it yet, and a registry keyed by
+    /// asset id does not evict it as dead. Reaching for the store alone is what silently froze
+    /// every UV-scroll and animated-tint batch in the world.
+    #[test]
+    fn a_parked_value_is_writable_and_counts_as_held() {
+        let mut store = Assets::<Stub>::default();
+        let mut parked = Parked::default();
+        let deferred = parked.defer(&store, Stub(1));
+        // The store does not have it — the read that used to answer "no such material".
+        assert!(!store.contains(deferred.id()));
+        assert!(store.get_mut(deferred.id()).is_none());
+        // …and both deferral-aware reads do.
+        assert!(parked.holds(&store, deferred.id()));
+        assert_eq!(parked.value(&store, deferred.id()).map(|s| s.0), Some(1));
+        parked
+            .value_mut(&mut store, deferred.id())
+            .expect("the parked value is addressable")
+            .0 = 7;
+        // The stamp survives realization: the value goes into the store as written.
+        assert!(parked.realize(&mut store, deferred.id()));
+        assert_eq!(store.get(&deferred).map(|s| s.0), Some(7));
+        // Realized, the store is the half that answers — and still the same value.
+        assert_eq!(parked.value(&store, deferred.id()).map(|s| s.0), Some(7));
+        parked
+            .value_mut(&mut store, deferred.id())
+            .expect("realized values stay addressable")
+            .0 = 9;
+        assert_eq!(store.get(&deferred).map(|s| s.0), Some(9));
+        // An id neither half holds is the only `None` — and the only not-held.
+        let stray = store.reserve_handle();
+        assert!(!parked.holds(&store, stray.id()));
+        assert!(parked.value(&store, stray.id()).is_none());
+        assert!(parked.value_mut(&mut store, stray.id()).is_none());
     }
 
     #[test]

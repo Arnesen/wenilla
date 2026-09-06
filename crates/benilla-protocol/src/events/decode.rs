@@ -136,6 +136,18 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                 CastOutcome::Failed { reason, .. } => Some(reason),
             },
         }],
+        ServerPacket::PetTameFailure { reason } => vec![SessionEvent::PetTameFailure { reason }],
+        ServerPacket::PetNameInvalid => vec![SessionEvent::PetNameInvalid],
+        ServerPacket::PetBroken => vec![SessionEvent::PetBroken],
+        ServerPacket::PetActionSound { pet_guid, talk } => {
+            vec![SessionEvent::PetActionSound { pet_guid, talk }]
+        }
+        ServerPacket::PetDismissSound { model_id, position } => {
+            vec![SessionEvent::PetDismissSound {
+                model_id,
+                position: [position.x, position.y, position.z],
+            }]
+        }
         ServerPacket::ItemQueryResponse { entry, info } => {
             vec![SessionEvent::ItemTemplate { entry, info }]
         }

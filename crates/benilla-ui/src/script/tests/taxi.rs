@@ -50,7 +50,7 @@ fn taxi_snapshot_surfaces_and_intents_drain() {
         assert(GetNumRoutes(1) == 0 and GetNumRoutes(2) == 1)
         assert(math.abs(TaxiGetSrcX(2, 1) - 0.5) < 1e-6)
         assert(math.abs(TaxiGetDestY(2, 1) - 0.8) < 1e-6)
-        assert(UnitOnTaxi("player") == false)
+        assert(UnitOnTaxi("player") == nil)          -- 1/nil, never a boolean (2043)
 
         TakeTaxiNode(2)
         CloseTaxiMap()
@@ -74,6 +74,6 @@ fn taxi_snapshot_surfaces_and_intents_drain() {
 
     // The ride flag reaches UnitOnTaxi.
     s.set_on_taxi(true);
-    s.run(r#"assert(UnitOnTaxi("player") == true)"#).unwrap();
+    s.run(r#"assert(UnitOnTaxi("player") == 1)"#).unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

@@ -612,6 +612,21 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             let (spell_id, outcome) = pet::read_pet_cast_failed(&mut r)?;
             ServerPacket::PetCastFailed { spell_id, outcome }
         }
+        opcode::SMSG_PET_TAME_FAILURE => ServerPacket::PetTameFailure {
+            reason: pet::read_pet_tame_failure(&mut r)?,
+        },
+        // Both bodies really are empty — the opcode is the whole message on either (vmangos's
+        // `AppendBodyTo` writes nothing, and the reference's handlers read nothing).
+        opcode::SMSG_PET_NAME_INVALID => ServerPacket::PetNameInvalid,
+        opcode::SMSG_PET_BROKEN => ServerPacket::PetBroken,
+        opcode::SMSG_PET_ACTION_SOUND => {
+            let (pet_guid, talk) = pet::read_pet_action_sound(&mut r)?;
+            ServerPacket::PetActionSound { pet_guid, talk }
+        }
+        opcode::SMSG_PET_DISMISS_SOUND => {
+            let (model_id, position) = pet::read_pet_dismiss_sound(&mut r)?;
+            ServerPacket::PetDismissSound { model_id, position }
+        }
         opcode::SMSG_ATTACKSTART => {
             let (attacker, victim) = attack::read_attack_start(&mut r)?;
             ServerPacket::AttackStart { attacker, victim }

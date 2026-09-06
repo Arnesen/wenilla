@@ -1807,3 +1807,112 @@ fn share_quest_click_queues_the_selected_quests_id() {
     assert!(s.take_quest_log_pushes().is_empty(), "drained");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// **The reference's title width cap is live, it bites, and it does not wrap the row.**
+///
+/// Stock `QuestLogFrame.lua:196-203` shrinks a tagged row's title to `275 − 15 − tagWidth` so a
+/// long name cannot run under the right-flush `(Elite)`. Decision 1873 declined to implement that
+/// cap in our own (now deleted) copy of the window, on the reading that an explicit width is a
+/// **wrap** width here and would spill the title onto a second line inside the 16-unit row;
+/// 1944 then put the reference's own file on the chain and the cap arrived with it, unrevisited.
+///
+/// It is correct, and the reading was wrong about our own engine: the title FontString carries a
+/// DECLARED height (`<ButtonText …><AbsDimension x="0" y="10"/>`), which arms both overflow
+/// regimes — the line stack and the height-gated ellipsis — so the paint is one truncated line,
+/// which is the reference's own result (wow-re `fontstring-overflow.md`: the ellipsis gate is
+/// `boxW > 0 && boxH > 0`, and only an AUTO-height FontString escapes it). The render half is
+/// pinned on the real font in `ui_text::layout`'s
+/// `a_capped_quest_log_title_ellipsizes_on_one_line`; this is the geometry half — that the row
+/// really hands that pass a box narrower than its own text.
+#[test]
+fn the_stock_title_width_cap_bites_and_is_sticky_per_row_button() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    // The cap is arithmetic over `questTitleTag:GetWidth()`, read inside the update — the app's
+    // measure seam is synchronous (`extract::seat_text_measurer`), so the harness installs its
+    // stand-in or every tag measures 0 and the cap comes out at the wrong number.
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\MainMenuBarMicroButtons.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
+
+    // A real 1.11 Dungeon-tagged quest, and the longest title the tag branch has to survive.
+    const LONG: &str = "The Left Piece of Lord Valthalak's Amulet";
+    let mut state = eight_entries();
+    state.entries[0].title = LONG.into();
+    state.entries[0].tag = Some("Dungeon".into());
+    // Row 2 carries the same name with NO tag: the else branch never sets a width at all.
+    state.entries[1].title = LONG.into();
+    state.entries[1].tag = None;
+    s.set_quest_log(state.clone());
+    s.run("ToggleQuestLog()").unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    let width =
+        |s: &mut UiScript, q: &str| s.eval::<f32>(&format!("return {q}:GetWidth()")).unwrap();
+    let ink = |s: &mut UiScript, q: &str| {
+        s.eval::<f32>(&format!("return {q}:GetStringWidth()"))
+            .unwrap()
+    };
+
+    // The cap is the reference's own arithmetic, over the tag string it just painted.
+    let tag_w = width(&mut s, "QuestLogTitle1Tag");
+    let capped = width(&mut s, "QuestLogTitle1NormalText");
+    assert!(
+        (capped - (275.0 - 15.0 - tag_w)).abs() < 0.5,
+        "the row's title is capped at 275-15-tagWidth ({tag_w} wide): got {capped}"
+    );
+    // And it BITES — the box is narrower than the title's own extent, which is the whole case
+    // 1873 refused. What the paint does with that is the render half's test.
+    let natural = ink(&mut s, "QuestLogTitle1NormalText");
+    assert!(natural > capped, "the fixture title ({natural} px) must overflow the {capped} px cap or this test proves nothing");
+    // The row's title box is one line tall — the declared height that arms both overflow regimes.
+    // An auto-height FontString would escape the ellipsis gate and stack a second line into a
+    // 16-unit row, which is exactly the defect that was feared.
+    assert!(
+        (s.eval::<f32>("return QuestLogTitle1NormalText:GetHeight()")
+            .unwrap()
+            - 10.0)
+            .abs()
+            < 0.5,
+        "the ButtonText's declared height (QuestLogFrame.xml:94-96)"
+    );
+
+    // An untagged row is never capped: the else branch's reset only fires above 275.
+    assert!(
+        (width(&mut s, "QuestLogTitle2NormalText") - ink(&mut s, "QuestLogTitle2NormalText")).abs()
+            < 0.5,
+        "an untagged title keeps its natural width"
+    );
+
+    // **The cap is sticky per row button, and that is the reference's too**: once the title has an
+    // explicit width, `questNormalText:GetWidth()` answers it (ours and the client's both), so the
+    // else branch's `> 275` reset can never fire and a row that has shown a tagged quest keeps the
+    // narrow box when an untagged one scrolls into it. Reproduced, not a benilla defect — but the
+    // day our metric reads stop being sticky this row silently changes width, so it is pinned.
+    state.entries[0].tag = None;
+    s.set_quest_log(state);
+    s.run("QuestLog_Update()").unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert!(
+        (width(&mut s, "QuestLogTitle1NormalText") - capped).abs() < 0.5,
+        "the capped box survives the row going untagged (the ref's own 275 reset never fires)"
+    );
+}

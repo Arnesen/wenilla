@@ -240,13 +240,29 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // → whether the given unit is riding a taxi. Only our own player is tracked (the reference
-    // UI only ever asks about "player"); any other token reads false.
+    // `UnitOnTaxi(unit)` (`0x517a40`) → **the number 1 or nil**, never a Lua boolean — the unit
+    // predicate family's one return shape (decisions 1830, 2043; the push law is
+    // `crate::script::binding_abi::predicate`). It lives here rather than beside its 22 siblings
+    // because the ride flag it reads is this module's, not `UnitState`'s — which is exactly how it
+    // came to be the one predicate still answering a `bool` after the family was fixed.
+    //
+    // Only our own player is tracked (the reference UI only ever asks about `"player"`); any other
+    // token reads nil.
+    //
+    // The token argument is `Value`, not `String`, so the miss is the reference's own message: the
+    // binding carries an `lua_isstring` gate at `0x517a48` whose failure arm is
+    // `luaL_error("Usage: UnitOnTaxi(\"unit\")")` (wow-re
+    // `ui/scratch/nil-unit-token-arg-law.md` §10, row 33). A Rust `String` parameter raised mlua's
+    // own type-conversion error there instead.
     g.set(
         "UnitOnTaxi",
-        lua.create_function(|lua, unit: String| {
+        lua.create_function(|lua, unit: mlua::Value| {
+            let unit =
+                crate::script::binding_abi::string_arg(lua, unit, r#"Usage: UnitOnTaxi("unit")"#)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(unit.eq_ignore_ascii_case("player") && model.taxi_riding)
+            Ok(crate::script::binding_abi::predicate(
+                unit.eq_ignore_ascii_case("player") && model.taxi_riding,
+            ))
         })?,
     )?;
 

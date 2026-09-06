@@ -42,6 +42,35 @@ const VIEW_START: (f32, f32) = SPAWN_XY;
 /// Height above the spawn point the camera opens at, in yards.
 const VIEW_START_HEIGHT: f32 = 60.0;
 
+/// `WOW_WORLDVIEW_AT=<x>,<y>[,<z>]` — **open the viewer somewhere else** (raw WoW coords; `z`
+/// defaults to [`VIEW_OPEN_Z`]). The viewer is the only **live, server-less** run we have — a real
+/// clock, real streaming, no login — and it was pinned to Northshire, so every question that needs
+/// time to pass at a named spot had to go through the capture harness, which freezes the clock by
+/// design. That is the gap decision 2038 was diagnosed across: the registration half was
+/// answerable in a capture, the per-frame tick was not, at any position but one.
+///
+/// Unparseable or absent leaves the viewer at [`VIEW_START`] — the enforcer's own anchor, which
+/// must stay the default (the two binaries stream the same tiles, and a difference between them is
+/// a difference in the engine).
+fn view_start() -> [f32; 3] {
+    let Some(v) = std::env::var("WOW_WORLDVIEW_AT").ok() else {
+        return [VIEW_START.0, VIEW_START.1, VIEW_OPEN_Z];
+    };
+    let c: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+    match c.len() {
+        2 => [c[0], c[1], VIEW_OPEN_Z],
+        3 => [c[0], c[1], c[2]],
+        _ => {
+            warn!("worldview: WOW_WORLDVIEW_AT wants `x,y[,z]` — staying at the default anchor");
+            [VIEW_START.0, VIEW_START.1, VIEW_OPEN_Z]
+        }
+    }
+}
+
+/// The look-at point's height when `WOW_WORLDVIEW_AT` names no `z` — high enough over Northshire
+/// to clear the valley floor, which is what the viewer has always opened above.
+const VIEW_OPEN_Z: f32 = 100.0;
+
 /// Near plane, in yards — the client's ([`crate::view::CAM_NEAR`]) value, kept in step by hand
 /// until the camera itself moves engine-side (decision 1160, stage zero).
 const NEAR: f32 = 0.1;
@@ -317,7 +346,7 @@ struct ViewCam {
 }
 
 fn spawn_view_camera(mut commands: Commands, msaa: Res<crate::view::MsaaSetting>) {
-    let start = wow_to_bevy([VIEW_START.0, VIEW_START.1, 100.0]);
+    let start = wow_to_bevy(view_start());
     let far = crate::view::CAM_FAR;
     commands.spawn((
         Camera3d::default(),

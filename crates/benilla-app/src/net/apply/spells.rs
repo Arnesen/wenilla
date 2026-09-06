@@ -184,6 +184,8 @@ pub(super) fn cast_result(
                     spell_id,
                     reason,
                     arg,
+                    // `SMSG_CAST_FAILED` is addressed to the caster, and this handler is ours.
+                    caster: crate::ui_action::Caster::Player,
                 });
             }
         }

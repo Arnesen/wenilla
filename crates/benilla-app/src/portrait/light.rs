@@ -182,8 +182,11 @@ pub(crate) fn material_variant(
 ///   `CharacterModelBase` (`0x3f8` B, the source-path string at `0x84351c`) and runs the ctor
 ///   `0x505680`. `DressUpModel`/`TabardModel` are subclasses of the same base — same light.
 /// - That ctor configures the widget's embedded `CGLight` at `+0x324`: **directional**
-///   (`0x71b620(light, 0)` @`0x5056c9`), **to-light direction `(0, 1, 0)`** (`0x71b6a0` @`0x505761`
-///   — it overwrites an earlier `(0, −0.7071, −0.7071)` set at `0x5056e9`, dead code), **diffuse
+///   (`0x71b620(light, 0)` @`0x5056c9`), **direction `(0, 1, 0)` — the direction the light
+///   PROPAGATES** (`0x71b6a0` @`0x505761` writes `CGLight+0x24`, which `0x71bce0` negates — three
+///   `fchs` at `71be7c`/`71be81`/`71be86` — before building the SH basis, wow-re
+///   `modelframe-facing-cancels.md` Q4; 0638 read the field as a to-light vector, 2034 corrects
+///   it — it overwrites an earlier `(0, −0.7071, −0.7071)` set at `0x5056e9`, dead code), **diffuse
 ///   `(0.8, 0.8, 0.64)`** (`+0x3c`, @`0x505702`), **ambient `(0.7, 0.7, 0.7)`** (`+0x30`,
 ///   @`0x50572e`), then **enables** it (`0x71b780(light, 1)` @`0x50576a`).
 /// - It is the widget's ONLY light: the per-frame fill callback `0x76d680` (registered on the
@@ -196,17 +199,21 @@ pub(crate) fn material_variant(
 ///   `glue-model-lighting.md §4`), so row 19's dial stays at the studio's `0.4` = intensity 1.0.
 ///
 /// **Why this reads so much darker than the studio light, and why that is the point.** The
-/// reference's light is a pure SIDE light: WoW `(0, 1, 0)` is the model's own left, which
-/// [`wow_to_bevy`] maps to Bevy `(−1, 0, 0)` — square across the camera axis, since the body rig
-/// puts the eye on `−Z` looking at the model's front ([`framing::body_frame`]). Everything the pane
-/// actually shows the viewer is therefore lit by **ambient alone** (`0.7`), with the diffuse only
-/// grazing the figure's screen-right side. The studio light aims its diffuse from the camera's own
+/// reference's light is a pure SIDE light: it travels toward WoW `(0, 1, 0)`, the model's own left
+/// — Bevy `(−1, 0, 0)` under [`wow_to_bevy`] — so it falls on the figure from its right, square
+/// across the camera axis, since the body rig puts the eye on `−Z` looking at the model's front
+/// ([`framing::body_frame`]). Everything the pane actually shows the viewer is therefore lit by
+/// **ambient alone** (`0.7`), with the diffuse only grazing the figure's screen-left side (its own
+/// right; 0638 had it grazing the screen-right side, the same grazing light from the opposite
+/// side, which is why the A/B that approved 0638's look could not tell the two apart — 2034). The
+/// studio light aims its diffuse from the camera's own
 /// side, so the same surfaces got `0.58 + 0.85·(N·L≈1) ≈ 1.4` — roughly twice the reference, which
 /// is exactly the "too brightly lit" the director reported.
 pub(super) fn model_pane_light() -> LightBlob {
     // The builder takes the light's PROPAGATION direction (it negates it back into a to-light
-    // vector for the SH fold), so the ctor's to-light `(0,1,0)` goes in negated.
-    let sun_dir = -benilla_assets::coords::wow_to_bevy([0.0, 1.0, 0.0]);
+    // vector for the SH fold) — and the ctor's `(0,1,0)` IS the propagation direction
+    // (`CGLight+0x24`, negated by `0x71bce0` before the SH basis), so it goes in as written.
+    let sun_dir = benilla_assets::coords::wow_to_bevy([0.0, 1.0, 0.0]);
     LightBlob::model(
         [0.7, 0.7, 0.7],  // CharacterModelBase ctor, CGLight+0x30
         [0.8, 0.8, 0.64], // CharacterModelBase ctor, CGLight+0x3c
@@ -250,8 +257,9 @@ mod tests {
     /// The reference `<PlayerModel>` light, pinned at the values the 1.12 `CharacterModelBase`
     /// constructor writes (decision 0638) — and, more importantly, pinned at the *consequence*:
     /// its light is square across the body rig's view axis, so what the pane shows the viewer is
-    /// ambient-lit only. A flipped sign or a swapped axis here is exactly the bug this replaced
-    /// (a frontal studio key, ~2× the reference on every surface the director can see).
+    /// ambient-lit only. A swapped axis here is the bug 0638 replaced (a frontal studio key, ~2×
+    /// the reference on every surface the director can see); a flipped sign is 0638's own reading
+    /// of `CGLight+0x24` as a to-light vector, which 2034 corrected to the propagation direction.
     #[test]
     fn model_pane_light_is_the_reference_widget_light_across_the_view_axis() {
         let blob = model_pane_light();
@@ -259,12 +267,18 @@ mod tests {
         assert_eq!(rows[0][..3], [0.7, 0.7, 0.7], "ambient (CGLight+0x30)");
         assert_eq!(rows[1][..3], [0.8, 0.8, 0.64], "diffuse (CGLight+0x3c)");
 
-        // Row 2 is the light's PROPAGATION direction; the ctor's to-light is WoW (0,1,0).
+        // Row 2 is the light's PROPAGATION direction, and the ctor's (0,1,0) IS that direction
+        // (`0x71bce0` negates `CGLight+0x24` before the SH basis — 2034); the to-light is its
+        // negation.
         let sun = Vec3::from_slice(&rows[2][..3]);
+        assert!(
+            sun.abs_diff_eq(benilla_assets::coords::wow_to_bevy([0.0, 1.0, 0.0]), 1e-6),
+            "propagation = wow_to_bevy(0,1,0): {sun:?}"
+        );
         let to_light = -sun;
         assert!(
-            to_light.abs_diff_eq(Vec3::new(-1.0, 0.0, 0.0), 1e-6),
-            "to-light = wow_to_bevy(0,1,0): {to_light:?}"
+            to_light.abs_diff_eq(Vec3::new(1.0, 0.0, 0.0), 1e-6),
+            "to-light = -wow_to_bevy(0,1,0): {to_light:?}"
         );
         // The body rig puts the eye on −Z looking at +Z (`framing::body_frame`), so a surface facing
         // the camera has normal −Z: N·L = 0, i.e. NO diffuse on anything the pane shows front-on.
@@ -273,12 +287,10 @@ mod tests {
             facing_camera.dot(to_light).abs() < 1e-6,
             "the reference light grazes the pane's visible face, it does not key it"
         );
-        // …while the figure's screen-right side (+X toward the camera's right is −X in world) is
-        // the one that catches it.
-        assert!(
-            Vec3::NEG_X.dot(to_light) > 0.99,
-            "lit from the viewer's right"
-        );
+        // …while the figure's screen-LEFT side (the camera's right is −X in world, so +X is its
+        // left) is the one that catches it — the model's own right, the side the light travels
+        // away from.
+        assert!(Vec3::X.dot(to_light) > 0.99, "lit from the viewer's left");
     }
 
     /// The studio light — the round portraits' — is the OPPOSITE arrangement on purpose: its key

@@ -363,12 +363,24 @@ pub fn register_uv(
         bevy::log::warn_once!("mat-anim table full — a UV-scroll batch stays at its seed");
         return;
     };
-    let Some(mat) = materials.get_mut(id) else {
+    // **Through the parked half, not `Assets::get_mut`** (decision 2038). A material this
+    // spawner just built is not in the store yet — `model_render::lazy` reserves its handle and
+    // parks the value until something view-visible binds it — so the store-only read returned
+    // `None` for *every* registration, freed the slot again and left the registry empty: no UV
+    // scroll and no animated tint anywhere in the world, silently, from the day deferral landed.
+    let Some(seed) = crate::model_render::lazy::with_material_mut(materials, id, |mat| {
+        let seed = [mat.extension.sun_scale.z, mat.extension.sun_scale.w];
+        mat.extension.anim_slots.x = f32::from(slot);
+        seed
+    }) else {
+        // Neither half holds it: a dead or foreign handle, and nothing to animate. Loud, because
+        // the silent version of this branch is what cost three days of frozen water.
+        bevy::log::warn_once!(
+            "mat-anim: no material behind {id} — a UV-scroll batch stays at its seed"
+        );
         table.free(slot);
         return;
     };
-    let seed = [mat.extension.sun_scale.z, mat.extension.sun_scale.w];
-    mat.extension.anim_slots.x = f32::from(slot);
     if let UvLoop::PerSeq { host, .. } = &anim {
         // The breadcrumb for the lane that has no other tell: a per-placement material is invisible
         // in every count (it is one more material, one more row), so "did the bubbles take the new
@@ -431,10 +443,22 @@ pub(super) fn tick_anim_materials(
         bevy::platform::collections::HashSet<AssetId<benilla_assets::materials::WowModelMaterial>>,
     >,
 ) {
-    if (uv_reg.0.is_empty() && tint_reg.0.is_empty())
-        || crate::dev_state::deterministic_run()
-        || matanim_off(&real)
-    {
+    if uv_reg.0.is_empty() && tint_reg.0.is_empty() {
+        // **The tripwire for decision 2038's whole class.** [`AnimMatPart`] and the registration
+        // next to it share ONE predicate at the spawn site, so a world holding marked parts with
+        // an empty registry is never "a scene with no animated content" — it is this lane dead,
+        // which is exactly how every waterfall, canal and lava sheet in the game froze silently
+        // for three days. Free: the marker is archetype-filtered, so this is one iterator probe
+        // on a frame that was about to return anyway, and it says nothing in the ordinary empty
+        // case.
+        if parts.iter().next().is_some() {
+            bevy::log::warn_once!(
+                "mat-anim: parts are marked animated but NOTHING is registered — the UV/tint lane is dead"
+            );
+        }
+        return;
+    }
+    if crate::dev_state::deterministic_run() || matanim_off(&real) {
         return;
     }
     drawn.clear();
@@ -459,7 +483,12 @@ pub(super) fn tick_anim_materials(
     // and its slot zeroes back to identity ([`crate::mat_anim_table`]'s free law).
     let gseq_now = f64::from(now);
     uv_reg.0.retain(|id, entry| {
-        if !materials.contains(*id) {
+        // **Alive means either half holds it** (decision 2038): a material still parked by
+        // `model_render::lazy` — built, handle reserved, nothing view-visible bound to it yet —
+        // is not in the store, and `Assets::contains` alone reads that as death. Evicting there
+        // would drop the entry a spawn just made and never rebuild it, because registration
+        // happens once, at spawn.
+        if !crate::model_render::lazy::holds(&materials, *id) {
             table.free(entry.slot);
             return false;
         }
@@ -472,7 +501,7 @@ pub(super) fn tick_anim_materials(
         true
     });
     tint_reg.0.retain(|id, entry| {
-        if !materials.contains(*id) {
+        if !crate::model_render::lazy::holds(&materials, *id) {
             table.free(entry.slot);
             return false;
         }
@@ -589,17 +618,167 @@ pub fn register_tint(
         bevy::log::warn_once!("mat-anim table full — a tint batch stays at its seed");
         return;
     };
-    let Some(mat) = materials.get_mut(id) else {
+    // The parked half, exactly as [`register_uv`] reaches it (decision 2038).
+    let Some(seed) = crate::model_render::lazy::with_material_mut(materials, id, |mat| {
+        let seed = [
+            mat.extension.tint.x,
+            mat.extension.tint.y,
+            mat.extension.tint.z,
+        ];
+        mat.extension.anim_slots.y = f32::from(slot);
+        seed
+    }) else {
+        bevy::log::warn_once!("mat-anim: no material behind {id} — a tint batch stays at its seed");
         table.free(slot);
         return;
     };
-    let seed = [
-        mat.extension.tint.x,
-        mat.extension.tint.y,
-        mat.extension.tint.z,
-    ];
-    mat.extension.anim_slots.y = f32::from(slot);
     reg.0.insert(id, TintAnimEntry { anim, slot, seed });
+}
+
+/// **The animated-material probe** (`WOW_MATANIM_PROBE=<secs>`): once, `secs` after boot, print
+/// one line per live [`AnimMatPart`] — the parts whose material can be a [`UvAnimMaterials`] /
+/// [`TintAnimMaterials`] key — with everything that decides whether it actually moves on screen:
+///
+/// ```text
+/// matanim  <model>#<uid>  mat <asset id>[ FAR][ PARKED]  anim_slots (1, 0, 0)  vis Inherited drawn 1
+///   uv slot 1 seed (+0.0000,+0.0000) row (+0.0000,-0.2122) live (+0.0000,-0.2122)
+///   shared period 9.967s loop (+0.0000,+0.0000) (+0.0000,-0.2542) (+0.0000,-0.5083) (+0.0000,-0.7542)
+/// ```
+/// (one line per part; wrapped here)
+///
+/// Four questions, one line each, because a frozen scroll can fail at any of them and the pixels
+/// say the same thing every time: is the batch **registered** at all (a missing line is a batch
+/// whose loop never reached the registry — an exhausted table, a period-0 constant, a lane that
+/// forgot to register); does its **loop** actually move (the four quarter-phase samples — a
+/// flat row here is an asset that scrolls nowhere, not a renderer fault); is the **table row**
+/// live (the value the shader will read — flat while the loop moves means the tick's draw gate
+/// never picked this material up, which is 1375's failure mode); and is the part **drawn** (the
+/// gate's own input).
+///
+/// It samples the loop itself rather than watching the row over time, so it is a **one-shot that
+/// works in a deterministic capture** — where [`tick_anim_materials`] is skipped entirely and the
+/// rows stay zero by design. In a live run the `row` column is the tick's real output and the two
+/// halves can be compared directly.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn matanim_probe(
+    time: Res<Time>,
+    uv_reg: Res<UvAnimMaterials>,
+    tint_reg: Res<TintAnimMaterials>,
+    table: Res<crate::mat_anim_table::MatAnimTable>,
+    materials: Res<Assets<benilla_assets::materials::WowModelMaterial>>,
+    twins: Res<crate::model_render::FarSideTwins>,
+    hosts: SeqHosts,
+    parts: Query<ProbeReadout, With<AnimMatPart>>,
+    mut fired: Local<bool>,
+) {
+    let Some(at) = probe_at() else { return };
+    // Not latched while the world is still empty: a capture holds the game clock at 0 while the
+    // scene builds, so "elapsed >= at" alone would fire the probe on frame one, before a single
+    // doodad had spawned, and report nothing.
+    if *fired || time.elapsed_secs() < at || parts.iter().next().is_none() {
+        return;
+    }
+    *fired = true;
+    let now = time.elapsed_secs();
+    let gseq_now = f64::from(now);
+    let mut rows: Vec<String> = Vec::new();
+    for (mat, vis, vv, obj) in &parts {
+        // A far-classified part carries the TWIN's id; the registry is always keyed by the near
+        // one — the same fold `tick_anim_materials`' draw scan makes (1375).
+        let far = twins.near_of(mat.id());
+        let id = far.unwrap_or(mat.id());
+        let label = obj.map_or_else(|| "-".to_string(), |o| format!("{}#{}", o.label, o.id));
+        // Through the parked half (`lazy::with_material`), or the readout would report every
+        // not-yet-drawn material's stamp as a zero it never had — the deferral confusion this
+        // probe exists to resolve (decision 2038). `parked` says which half answered.
+        let parked = !materials.contains(id);
+        let slots =
+            crate::model_render::lazy::with_material(&materials, id, |m| m.extension.anim_slots)
+                .unwrap_or_default();
+        let uv = uv_reg.0.get(&id).map(|e| {
+            let playing = host_seq(&hosts, e.host());
+            // The per-placement lane has one loop per sequence, so its phase sweep is meaningless
+            // without a play head — it prints the head instead, and samples on the shared clock.
+            let (lane, period) = match &e.anim {
+                UvLoop::Shared(a) => (format!("shared period {:.3}s", a.period), a.period),
+                UvLoop::PerSeq { .. } => (format!("per-seq playing {playing:?}"), 0.0),
+            };
+            // Four quarter-phase samples of the loop itself: a flat set is an asset that scrolls
+            // nowhere, whatever the row says.
+            let phases: Vec<String> = (0u8..4)
+                .map(|i| {
+                    let t = period * f32::from(i) / 4.0;
+                    let d = e.delta(t, f64::from(t), playing);
+                    format!("({:+.4},{:+.4})", d[0], d[1])
+                })
+                .collect();
+            let live = e.delta(now, gseq_now, playing);
+            format!(
+                "uv slot {} seed ({:+.4},{:+.4}) row ({:+.4},{:+.4}) live ({:+.4},{:+.4}) {lane} loop {}",
+                e.slot,
+                e.seed[0],
+                e.seed[1],
+                table.row(e.slot)[0],
+                table.row(e.slot)[1],
+                live[0],
+                live[1],
+                phases.join(" "),
+            )
+        });
+        let tint = tint_reg.0.get(&id).map(|e| {
+            format!(
+                "tint slot {} row ({:+.4},{:+.4},{:+.4})",
+                e.slot,
+                table.row(e.slot)[0],
+                table.row(e.slot)[1],
+                table.row(e.slot)[2],
+            )
+        });
+        let channels = match (uv, tint) {
+            (None, None) => "UNREGISTERED".to_string(),
+            (a, b) => [a, b].into_iter().flatten().collect::<Vec<_>>().join(" · "),
+        };
+        rows.push(format!(
+            "matanim  {label}  mat {id}{}{}  anim_slots ({}, {}, {})  vis {vis:?} drawn {}  {channels}",
+            if far.is_some() { " FAR" } else { "" },
+            if parked { " PARKED" } else { "" },
+            slots.x as u32,
+            slots.y as u32,
+            slots.z as u32,
+            u8::from(vv.is_some_and(|v| v.get())),
+        ));
+    }
+    rows.sort();
+    bevy::log::info!(
+        "matanim probe at {now:.2}s — {} animated part(s), {} uv / {} tint registry entries",
+        rows.len(),
+        uv_reg.0.len(),
+        tint_reg.0.len(),
+    );
+    for r in rows {
+        bevy::log::info!("{r}");
+    }
+}
+
+/// One animated part as [`matanim_probe`] reads it: the material it is bound to (the far twin's
+/// id while it is far-classified), the two halves of the draw verdict the tick's gate turns on,
+/// and the placement that names it. A tuple alias because the inline form trips the workspace
+/// gate's `type_complexity`, the same shape `debug_panel::inspect`'s readouts take.
+type ProbeReadout = (
+    &'static MeshMaterial3d<benilla_assets::materials::WowModelMaterial>,
+    &'static Visibility,
+    Option<&'static bevy::camera::visibility::ViewVisibility>,
+    Option<&'static crate::interact::WorldObject>,
+);
+
+/// `WOW_MATANIM_PROBE` — unset is off; bare (or unparseable) fires at 20 s. Read once
+/// ([`matanim_off`]'s pattern): the system runs every frame to check its own latch.
+fn probe_at() -> Option<f32> {
+    static AT: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *AT.get_or_init(|| {
+        let v = std::env::var("WOW_MATANIM_PROBE").ok()?;
+        Some(v.trim().parse().unwrap_or(20.0))
+    })
 }
 
 #[cfg(test)]

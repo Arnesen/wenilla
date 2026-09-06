@@ -643,6 +643,27 @@ pub enum ServerPacket {
         spell_id: u32,
         outcome: CastOutcome,
     },
+    /// `SMSG_PET_TAME_FAILURE` — one `PetTameFailureReason` byte; the red line's text comes from
+    /// [`super::pet::pet_tame_failure_key`].
+    PetTameFailure {
+        reason: u8,
+    },
+    /// `SMSG_PET_NAME_INVALID` — the refused rename. Empty body: the opcode IS the message.
+    PetNameInvalid,
+    /// `SMSG_PET_BROKEN` — the pet's loyalty hit zero and it ran away. Empty body.
+    PetBroken,
+    /// `SMSG_PET_ACTION_SOUND` — the pet's voice: which unit, and which of the two talk
+    /// selectors ([`super::pet::PET_TALK_ORDER`] / [`super::pet::PET_TALK_ATTACK`]).
+    PetActionSound {
+        pet_guid: u64,
+        talk: u32,
+    },
+    /// `SMSG_PET_DISMISS_SOUND` — a `CreatureModelData` id and the point to play its column-29
+    /// kit at. No guid: the pet is already gone.
+    PetDismissSound {
+        model_id: u32,
+        position: Vector3d,
+    },
     /// `SMSG_ATTACKSTART` — a unit began melee auto-attack (including our own echo).
     AttackStart {
         attacker: u64,
@@ -1661,6 +1682,11 @@ impl ServerPacket {
             ServerPacket::PetSpells(_) => "SMSG_PET_SPELLS".into(),
             ServerPacket::PetMode(_) => "SMSG_PET_MODE".into(),
             ServerPacket::PetActionFeedback { .. } => "SMSG_PET_ACTION_FEEDBACK".into(),
+            ServerPacket::PetTameFailure { .. } => "SMSG_PET_TAME_FAILURE".into(),
+            ServerPacket::PetNameInvalid => "SMSG_PET_NAME_INVALID".into(),
+            ServerPacket::PetBroken => "SMSG_PET_BROKEN".into(),
+            ServerPacket::PetActionSound { .. } => "SMSG_PET_ACTION_SOUND".into(),
+            ServerPacket::PetDismissSound { .. } => "SMSG_PET_DISMISS_SOUND".into(),
             ServerPacket::PetCastFailed { .. } => "SMSG_PET_CAST_FAILED".into(),
             ServerPacket::AttackStart { .. } => "SMSG_ATTACKSTART".into(),
             ServerPacket::AttackStop { .. } => "SMSG_ATTACKSTOP".into(),

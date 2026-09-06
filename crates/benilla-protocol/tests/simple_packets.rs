@@ -229,20 +229,22 @@ fn set_faction_standing_parses_and_decodes() {
 /// opcode numbers.
 #[test]
 fn unknown_opcode_decodes_to_packet_dropped() {
-    // 0x0324 = SMSG_PET_ACTION_SOUND — assigned in 1.12.1 but deliberately unparsed by benilla.
+    // 0x021E = SMSG_SET_REST_START — assigned in 1.12.1 but deliberately unparsed by benilla.
     // (The sentinel used to be 0x0319 `MSG_MOVE_TIME_SKIPPED`, which decision 1935 gave a parse
-    // arm: an observed mover's skipped time has to reach its relay chain or that unit hitches.)
-    let packet = messages::parse_server(0x0324, &hx("0102030405")).unwrap();
-    assert!(matches!(packet, ServerPacket::Other { opcode: 0x0324 }));
+    // arm; then 0x0324 `SMSG_PET_ACTION_SOUND`, which decision 2039 gave one — the pet's voice
+    // turned out to drive two real `CreatureSoundData` columns. A sentinel earning a parse arm is
+    // this test working, not this test breaking.)
+    let packet = messages::parse_server(0x021E, &hx("0102030405")).unwrap();
+    assert!(matches!(packet, ServerPacket::Other { opcode: 0x021E }));
     match decode(packet).as_slice() {
         [SessionEvent::PacketDropped {
-            opcode: 0x0324,
+            opcode: 0x021E,
             unparseable: false,
         }] => {}
         other => panic!("expected one PacketDropped event, got {other:?}"),
     }
     // The generated name table: a known opcode resolves, an unassigned number doesn't.
-    assert_eq!(messages::opcode_name(0x0324), Some("SMSG_PET_ACTION_SOUND"));
+    assert_eq!(messages::opcode_name(0x021E), Some("SMSG_SET_REST_START"));
     assert_eq!(
         messages::opcode_name(messages::opcode::SMSG_UPDATE_OBJECT),
         Some("SMSG_UPDATE_OBJECT")
@@ -528,5 +530,96 @@ fn client_control_update_reads_a_packed_mover_and_the_allow_byte() {
             mover: 0,
             allow_move: true
         }
+    ));
+}
+
+/// The hunter pet-feedback family (decision 2039) — the three arms that were name-table-only, on
+/// their real bodies.
+///
+/// The two **empty** bodies are the point of half this test: `SMSG_PET_NAME_INVALID` and
+/// `SMSG_PET_BROKEN` carry nothing at all (vmangos's `AppendBodyTo` writes nothing; the
+/// reference's handlers read nothing), so "parses" here means "the opcode alone produced the
+/// event" — and a body that arrives with junk on it must not change that.
+#[test]
+fn pet_feedback_family_parses_and_decodes() {
+    use benilla_protocol::messages::opcode;
+
+    // SMSG_PET_TAME_FAILURE: one reason byte. 9 = PETTAME_TOOHIGHLEVEL.
+    let p = messages::parse_server(opcode::SMSG_PET_TAME_FAILURE, &hx("09")).unwrap();
+    assert!(matches!(p, ServerPacket::PetTameFailure { reason: 9 }));
+    assert!(matches!(
+        decode(p)[..],
+        [SessionEvent::PetTameFailure { reason: 9 }]
+    ));
+    // The reason -> GlobalStrings key table, at both ends of the reference's bounds check
+    // (`0x6e6a20`: `reason - 1` bounded at `0xa`) and in the middle.
+    assert_eq!(messages::pet_tame_failure_key(1), "PETTAME_INVALIDCREATURE");
+    assert_eq!(
+        messages::pet_tame_failure_key(5),
+        "PETTAME_ANOTHERSUMMONACTIVE"
+    );
+    assert_eq!(messages::pet_tame_failure_key(11), "PETTAME_NOTDEAD");
+    // Out of range on BOTH sides falls to the default arm — including vmangos's own 12th value,
+    // which is `PETTAME_UNKNOWNERROR` in the enum and reaches the same string by the other road.
+    assert_eq!(messages::pet_tame_failure_key(0), "PETTAME_UNKNOWNERROR");
+    assert_eq!(messages::pet_tame_failure_key(12), "PETTAME_UNKNOWNERROR");
+    assert_eq!(messages::pet_tame_failure_key(200), "PETTAME_UNKNOWNERROR");
+
+    // SMSG_PET_NAME_INVALID / SMSG_PET_BROKEN: empty bodies, and unread ones — a body with bytes
+    // on it still decodes to the bare event, because neither handler reads one.
+    for body in ["", "deadbeef"] {
+        let p = messages::parse_server(opcode::SMSG_PET_NAME_INVALID, &hx(body)).unwrap();
+        assert!(matches!(p, ServerPacket::PetNameInvalid), "body {body:?}");
+        assert!(matches!(decode(p)[..], [SessionEvent::PetNameInvalid]));
+
+        let p = messages::parse_server(opcode::SMSG_PET_BROKEN, &hx(body)).unwrap();
+        assert!(matches!(p, ServerPacket::PetBroken), "body {body:?}");
+        assert!(matches!(decode(p)[..], [SessionEvent::PetBroken]));
+    }
+
+    // SMSG_PET_ACTION_SOUND: u64 guid then the u32 talk selector.
+    let body = hx("2a0000000000401001000000");
+    let p = messages::parse_server(opcode::SMSG_PET_ACTION_SOUND, &body).unwrap();
+    assert!(matches!(
+        p,
+        ServerPacket::PetActionSound {
+            pet_guid: 0x1040_0000_0000_002A,
+            talk: messages::PET_TALK_ATTACK,
+        }
+    ));
+    assert!(matches!(
+        decode(p)[..],
+        [SessionEvent::PetActionSound {
+            pet_guid: 0x1040_0000_0000_002A,
+            talk: 1
+        }]
+    ));
+
+    // SMSG_PET_DISMISS_SOUND: a CreatureModelData id then a raw WoW x/y/z. Model 726, at
+    // (-8949.95, -132.493, 83.5312) — the human starting point, chosen because its bytes are
+    // recognisable if the field order ever slips. The handler's `+1.0` on z is a PLAY detail and
+    // must NOT appear here.
+    let mut body = hx("d6020000"); // model 726
+    for f in [-8949.95_f32, -132.493, 83.5312] {
+        body.extend_from_slice(&f.to_le_bytes());
+    }
+    let p = messages::parse_server(opcode::SMSG_PET_DISMISS_SOUND, &body).unwrap();
+    assert!(matches!(
+        p,
+        ServerPacket::PetDismissSound {
+            model_id: 726,
+            position: benilla_protocol::wire::Vector3d {
+                x: -8949.95,
+                y: -132.493,
+                z: 83.5312,
+            },
+        }
+    ));
+    assert!(matches!(
+        decode(p)[..],
+        [SessionEvent::PetDismissSound {
+            model_id: 726,
+            position: [-8949.95, -132.493, 83.5312],
+        }]
     ));
 }

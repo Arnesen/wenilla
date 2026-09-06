@@ -157,6 +157,53 @@ fn unit_frame_hover_takes_the_default_corner_and_drops_on_leave() {
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
 }
 
+/// **The title a world hover paints while the creature query is still in flight**, over the
+/// shipped files: `UNKNOWNOBJECT` as `GlobalStrings.lua` defines it on the PLAYER'S OWN CHAIN.
+/// Read out of the VM at the assert rather than written as a literal, because that is the whole
+/// point of the resolver's `0x703bf0` read — a translated GlobalStrings translates the
+/// placeholder too (decision 2040, closing 2002's residue).
+///
+/// The engine half (the miss legs, the empty-global fallback, the `"player"` case) is
+/// `benilla_ui`'s own `tooltip_unit` suite; what this adds is the chain: the string really is
+/// defined, the plate really reads it, and the answer really replaces it.
+#[test]
+fn a_pending_name_hover_titles_the_chains_unknownobject() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = harness(&["Interface\\FrameXML\\GlobalStrings.lua"]);
+    // The snapshot the feed pushes before `SMSG_CREATURE_QUERY_RESPONSE` lands: the descriptor is
+    // in, and the name and the type word — which ride the same record — are not.
+    s.set_unit(
+        "mouseover",
+        Some(UnitState {
+            name: None,
+            creature_type_name: None,
+            ..wolf()
+        }),
+    );
+    assert!(s.world_tooltip_unit("mouseover"), "the hover shows");
+    let global = s.eval::<String>("return UNKNOWNOBJECT").unwrap();
+    assert!(
+        !global.is_empty(),
+        "the chain's GlobalStrings.lua defines UNKNOWNOBJECT"
+    );
+    assert_eq!(
+        s.eval::<String>("return GameTooltipTextLeft1:GetText()")
+            .unwrap(),
+        global,
+        "a name in flight titles the plate with the GlobalString, not an empty line"
+    );
+
+    // The query answers; the next paint of the same hover carries the real name.
+    s.set_unit("mouseover", Some(wolf()));
+    assert!(s.world_tooltip_unit("mouseover"));
+    assert_eq!(
+        s.eval::<String>("return GameTooltipTextLeft1:GetText()")
+            .unwrap(),
+        "Timber Wolf"
+    );
+    assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+}
+
 /// The detailed-tooltip fork (ref UnitFrame_OnEnter l.58-67, director-approved 0663): with tips on
 /// — the 1.12 default — the frame explains its RIGHT-CLICK MENU and returns BEFORE `SetUnit`, so
 /// the unit lines never render. Your own portrait always; another player's whenever they're your

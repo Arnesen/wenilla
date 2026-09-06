@@ -671,6 +671,9 @@ impl Plugin for DoodadAnimPlugin {
             (
                 sample_mat_anim.before(crate::model_render::ModelVisSet),
                 tick_anim_materials.after(crate::model_render::ModelVisSet),
+                // The readout of everything that lane just decided (`WOW_MATANIM_PROBE`), after
+                // it, so the `row` column is this frame's write and not the previous one's.
+                mat_anim::matanim_probe.after(tick_anim_materials),
             ),
         );
     }

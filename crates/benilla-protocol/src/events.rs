@@ -681,6 +681,22 @@ pub enum SessionEvent {
     /// The pet's cast refusal (`SMSG_PET_CAST_FAILED`) — [`Self::CastResult`]'s vocabulary, but
     /// the caster is the pet, so it never touches OUR cast state.
     PetCastFailed { spell_id: u32, reason: Option<u8> },
+    /// A refused tame / Call Pet / Revive Pet (`SMSG_PET_TAME_FAILURE`): one
+    /// `PetTameFailureReason` byte, whose text is a `PETTAME_*` GlobalStrings key filling
+    /// `ERR_TAME_FAILED`.
+    PetTameFailure { reason: u8 },
+    /// A refused pet rename (`SMSG_PET_NAME_INVALID`) — no payload; the reference raises
+    /// `ERR_INVALID_PETNAME` on the strength of the opcode alone.
+    PetNameInvalid,
+    /// The pet's loyalty hit zero and it ran away (`SMSG_PET_BROKEN`) — no payload;
+    /// `ERR_PET_BROKEN`.
+    PetBroken,
+    /// The pet's voice (`SMSG_PET_ACTION_SOUND`) — one of two talk selectors on a named unit,
+    /// resolved against that unit's own `CreatureSoundData` row.
+    PetActionSound { pet_guid: u64, talk: u32 },
+    /// A dismissed pet's parting sound (`SMSG_PET_DISMISS_SOUND`) — a `CreatureModelData` id and
+    /// the raw WoW point to play its column-29 kit at. No guid, because the pet has gone.
+    PetDismissSound { model_id: u32, position: [f32; 3] },
     /// An item template's display head (`SMSG_ITEM_QUERY_SINGLE_RESPONSE`, answering our
     /// `CMSG_ITEM_QUERY_SINGLE`). Keyed by template entry; `None` = the server doesn't know it
     /// (undiscovered) — cached negative, like an unknown creature entry. Boxed for the same reason

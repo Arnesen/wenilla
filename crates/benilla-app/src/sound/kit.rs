@@ -160,18 +160,27 @@ pub(super) enum Latch {
     Greeting,
     /// The one-shot creature bark's `[unit+0xb20]` — the per-unit slot of the reference's bark
     /// dispatch `0x623a40` (5-way jump table `0x623afc`; wow-re
-    /// `object-layer/scratch/smsg-ai-reaction.md`).
+    /// `object-layer/scratch/smsg-ai-reaction.md`, `feign-death-dyndead.md` §11).
     ///
-    /// The reference keeps the latched **category** beside the handle in `[unit+0xb24]` and uses
-    /// it for an interrupt rule — only a *strictly higher* category stops what is playing
-    /// (`0x623a8d`, after `0x623a95 call 0x7a5700`). benilla does not carry the category, because
-    /// the ordering of that 5-way table is an open wow-re question and guessing it would invent
-    /// an interrupt the client may not have. Today only the HOSTILE aggro bark (`0x623a40(0)`,
-    /// `CreatureSoundData` col 10) is routed through the slot, and it is byte-verified as the
-    /// table's **lowest** category: it never interrupts a playing bark and is dropped outright
-    /// while this latch is held — which is exactly what plain liveness already gives. When the
-    /// ordering is pinned, the category becomes a payload here.
-    Voice,
+    /// **The payload is the reference's `[unit+0xb24]` — the latched bark STATE**, which is the
+    /// interrupt rule's whole input: `0x623a82`/`0x623a88` abort a new bark whose state is `<=`
+    /// the one already sounding, and let a strictly higher one through (stopping the old at
+    /// `0x623a95`). It was left off until decision 2039 because the table's ordering was an open
+    /// question and inventing an interrupt is worse than missing one; the five arms are now read
+    /// out of the image dword for dword:
+    ///
+    /// | state | `CreatureSoundData` column | what |
+    /// |---|---|---|
+    /// | 0 | 10 | the HOSTILE aggro bark (`SMSG_AI_REACTION`) |
+    /// | 1 | 28 | the pet's ORDER bark (`SMSG_PET_ACTION_SOUND` selector 0) |
+    /// | 2 | 27 | the pet's ATTACK bark (`SMSG_PET_ACTION_SOUND` selector 1) |
+    /// | 3 | — | plays nothing, and *still* stops and latches |
+    /// | 4 | 6 | the death bark — the maximum, so nothing supersedes it |
+    ///
+    /// Carrying it on the channel is equivalent to carrying it on the unit, because the reference
+    /// only ever consults `[0xb24]` while `[0xb20]` holds a live handle (`0x623a74`/`0x623a7d`
+    /// jump past the comparison otherwise).
+    Voice(u8),
     /// A **server-pushed object sound** live on this unit — `SMSG_PLAY_OBJECT_SOUND`
     /// (opcode `0x278`), the `AISOUNDDESC` pool at `[0xb05f38]`.
     ///
@@ -786,18 +795,34 @@ pub(super) fn play_kit_ext(
 }
 
 /// Does `unit` hold a **live one-shot voice channel** — the reference's `[unit+0xb20]` handle,
-/// nonzero-gated (wow-re `object-layer/scratch/smsg-ai-reaction.md`)? The slot's liveness IS the
-/// gate: the HOSTILE aggro bark is the lowest category in `0x623a40`'s table, so it never
-/// interrupts what is sounding and is simply dropped while this is true.
+/// nonzero-gated (wow-re `object-layer/scratch/smsg-ai-reaction.md`) — and if so, at which
+/// **state**? `Some(state)` is the pair `[0xb20]` live + `[0xb24]`; `None` is a free slot, which
+/// is `0x623a74`/`0x623a7d`'s "allowed, no comparison" path.
 ///
-/// Scoped to channels that actually latched a category, which is the whole point — the reference
+/// Scoped to channels that actually latched a state, which is the whole point — the reference
 /// keeps this handle separate from the combat drone (`0x623800` carries its own latch) and from
 /// the greeting line (`[unit+0xb1c]`), so a humming elemental or a talking quest-giver must not
 /// mute its own barks.
-pub(super) fn unit_voice_playing(out: &SoundOutput, unit: Entity) -> bool {
-    out.channels
-        .iter()
-        .any(|c| occupies_voice_slot(c.source, c.latch, unit))
+pub(super) fn unit_voice_state(out: &SoundOutput, unit: Entity) -> Option<u8> {
+    out.channels.iter().find_map(|c| match c.latch {
+        Latch::Voice(state) if c.source == Some(unit) => Some(state),
+        _ => None,
+    })
+}
+
+/// Stop whatever holds `unit`'s voice slot — the reference's `0x623a95 call 0x7a5700` on
+/// `&[unit+0xb20]`, which runs on **every** admitted bark, before the column is even read. So a
+/// bark whose column is `0` still silences the one it superseded: the handle is overwritten with
+/// the (null) result of playing nothing (`0x623aee`).
+pub(super) fn stop_unit_voice(out: &mut SoundOutput, unit: Entity) {
+    out.channels.retain_mut(|c| {
+        if occupies_voice_slot(c.source, c.latch, unit) {
+            c.handle.stop(mixer::declick());
+            false
+        } else {
+            true
+        }
+    });
 }
 
 /// Does one channel, described by its `(source, voice)` identity, occupy `unit`'s **voice** slot
@@ -806,7 +831,7 @@ pub(super) fn unit_voice_playing(out: &SoundOutput, unit: Entity) -> bool {
 /// them: a bark and a greeting line are different handles in the reference and must not mute each
 /// other.
 pub(super) fn occupies_voice_slot(source: Option<Entity>, latch: Latch, unit: Entity) -> bool {
-    source == Some(unit) && latch == Latch::Voice
+    source == Some(unit) && matches!(latch, Latch::Voice(_))
 }
 
 /// The complement — the greeting latch's own test (see [`source_playing`] for what else currently
@@ -1377,7 +1402,7 @@ mod tests {
     fn the_voice_slot_and_the_greeting_latch_are_disjoint() {
         let bear = Entity::from_raw_u32(1).expect("valid entity id");
         let other = Entity::from_raw_u32(2).expect("valid entity id");
-        let bark = (Some(bear), Latch::Voice);
+        let bark = (Some(bear), Latch::Voice(0));
         let greet = (Some(bear), Latch::Greeting);
         // The case decision 1399 was actually about: a channel tagged with the unit for
         // *ownership* — its body loop, a missile's travel loop, a water splash — takes no latch
@@ -1498,7 +1523,7 @@ mod tests {
             "a greeting line holds [unit+0xb1c] — stealing it lets the unit re-greet at once"
         );
         assert!(
-            !stealable(false, Latch::Voice),
+            !stealable(false, Latch::Voice(0)),
             "a bark holds [unit+0xb20] — stealing it lets the unit re-bark at once"
         );
         assert!(

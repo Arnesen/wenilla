@@ -342,7 +342,7 @@ fn set_unit_is_read_by_the_bindings() {
     let mut s = UiScript::new().unwrap();
     s.set_unit("player", Some(player()));
 
-    assert!(s.eval::<bool>(r#"return UnitExists("player")"#).unwrap());
+    assert_eq!(s.eval::<i64>(r#"return UnitExists("player")"#).unwrap(), 1);
     assert_eq!(
         s.eval::<String>(r#"return UnitName("player")"#).unwrap(),
         "Benilla"
@@ -353,13 +353,19 @@ fn set_unit_is_read_by_the_bindings() {
         100
     );
     assert_eq!(s.eval::<i64>(r#"return UnitLevel("player")"#).unwrap(), 12);
-    assert!(!s.eval::<bool>(r#"return UnitIsDead("player")"#).unwrap());
+    assert!(s
+        .eval::<bool>(r#"return UnitIsDead("player") == nil"#)
+        .unwrap());
 }
 
 #[test]
 fn absent_token_reports_not_existing_with_zero_numbers() {
     let s = UiScript::new().unwrap();
-    assert!(!s.eval::<bool>(r#"return UnitExists("target")"#).unwrap());
+    // **nil, not `false`** — the family's false leg (decision 2043). `== nil` is the comparison a
+    // boolean would invert, so it is the one worth asserting.
+    assert!(s
+        .eval::<bool>(r#"return UnitExists("target") == nil"#)
+        .unwrap());
     assert_eq!(s.eval::<i64>(r#"return UnitHealth("target")"#).unwrap(), 0);
     assert_eq!(
         s.eval::<i64>(r#"return UnitHealthMax("target")"#).unwrap(),
@@ -369,7 +375,9 @@ fn absent_token_reports_not_existing_with_zero_numbers() {
     assert!(s
         .eval::<bool>(r#"return UnitName("target") == nil"#)
         .unwrap());
-    assert!(!s.eval::<bool>(r#"return UnitIsDead("target")"#).unwrap());
+    assert!(s
+        .eval::<bool>(r#"return UnitIsDead("target") == nil"#)
+        .unwrap());
 }
 
 #[test]
@@ -387,8 +395,8 @@ fn a_dead_unit_reports_dead_and_zero_health() {
             ..Default::default()
         }),
     );
-    assert!(s.eval::<bool>(r#"return UnitExists("target")"#).unwrap());
-    assert!(s.eval::<bool>(r#"return UnitIsDead("target")"#).unwrap());
+    assert_eq!(s.eval::<i64>(r#"return UnitExists("target")"#).unwrap(), 1);
+    assert_eq!(s.eval::<i64>(r#"return UnitIsDead("target")"#).unwrap(), 1);
     assert_eq!(s.eval::<i64>(r#"return UnitHealth("target")"#).unwrap(), 0);
     // Name unknown (no name-query yet) → `UNKNOWNOBJECT`, never nil: the unit RESOLVED, and the
     // reference pushes nil for a zero GUID only (decision 2002; the shape is pinned below). A bare
@@ -534,9 +542,11 @@ fn unit_xp_reads_the_player_globals_only_for_the_player_token() {
 fn set_unit_none_removes_the_token() {
     let mut s = UiScript::new().unwrap();
     s.set_unit("player", Some(player()));
-    assert!(s.eval::<bool>(r#"return UnitExists("player")"#).unwrap());
+    assert_eq!(s.eval::<i64>(r#"return UnitExists("player")"#).unwrap(), 1);
     s.set_unit("player", None);
-    assert!(!s.eval::<bool>(r#"return UnitExists("player")"#).unwrap());
+    assert!(s
+        .eval::<bool>(r#"return UnitExists("player") == nil"#)
+        .unwrap());
     assert_eq!(s.eval::<i64>(r#"return UnitHealth("player")"#).unwrap(), 0);
 }
 
@@ -945,9 +955,11 @@ fn a_unit_token_resolves_whatever_its_case() {
                 .unwrap(),
             12
         );
-        assert!(s
-            .eval::<bool>(&format!(r#"return UnitExists("{spelling}")"#))
-            .unwrap());
+        assert_eq!(
+            s.eval::<i64>(&format!(r#"return UnitExists("{spelling}")"#))
+                .unwrap(),
+            1
+        );
     }
     for spelling in ["target", "Target", "TARGET"] {
         assert_eq!(
@@ -998,7 +1010,8 @@ fn seating_a_token_folds_its_key_too() {
     // …and clearing it through the other spelling really clears it, rather than leaving a shadow.
     s.set_unit("TARGET", None);
     assert!(
-        !s.eval::<bool>(r#"return UnitExists("target")"#).unwrap(),
+        s.eval::<bool>(r#"return UnitExists("target") == nil"#)
+            .unwrap(),
         "removal folds too — no shadowed entry survives"
     );
 }
@@ -1182,9 +1195,9 @@ fn unit_is_visible_is_object_presence_not_existence() {
         None,
         "no object -> nil, even though the token still exists"
     );
-    assert!(
-        s.eval::<bool>(r#"return UnitExists("party1") and true or false"#)
-            .unwrap(),
+    assert_eq!(
+        s.eval::<i64>(r#"return UnitExists("party1")"#).unwrap(),
+        1,
         "...and UnitExists must NOT have moved with it — the roster fallback is the difference"
     );
 
@@ -1524,4 +1537,366 @@ fn a_two_token_predicate_raises_on_either_nil_argument() {
     ] {
         assert!(s.run(&format!("{none}()")).is_ok(), "{none} takes no token");
     }
+}
+
+// ── The family's return SHAPE, pinned per binding ───────────────────────────────────────────────
+
+/// **Every `Unit*` predicate answers the number `1` or `nil` — never a Lua boolean** (decision
+/// 2043; the law is 1830's, made for the widget predicates a family earlier).
+///
+/// The reference cannot produce a boolean here. Its pushes are `lua_pushnumber 0x6f3810` (tag 3,
+/// the double `1.0`) and `lua_pushnil 0x6f37f0` (tag 0); `lua_pushboolean 0x6f39f0` has seven call
+/// sites image-wide and not one is a registered binding body, so **tag 1 is never written**
+/// (wow-re `ui/scratch/binding-shape-arity-law.md`, `ui/scratch/button-enabled-state.md`, restated
+/// `ui.md` l.4700 and l.7348; the per-binding carves for `UnitExists 0x515fb0`,
+/// `UnitIsVisible 0x516030`, `UnitIsTapped 0x519c90`, `UnitAffectingCombat 0x517e10`,
+/// `UnitPlayerControlled 0x516410`, `UnitInRaid 0x516350`, `UnitIsCharmed 0x516cf0` and
+/// `UnitHasRelicSlot 0x519e50` each state it outright).
+///
+/// **Truthiness is exactly why this needs a test rather than a reading.** `if UnitIsDead(u)` and
+/// `if not UnitIsDead(u)` are identical under either shape, and mlua's `bool` conversion maps
+/// `Integer(1)` to `true` as happily as it maps `Boolean(true)` — so a test that reads the value
+/// as a Rust `bool` passes under the bug. Only `type(...)`, `== 1` and `== nil` separate them, and
+/// `== nil` is the one that *inverts*: a boolean `false` is not `nil`, so a caller comparing
+/// against `nil` concludes the opposite of the truth.
+///
+/// The table is the whole registered family, so a new predicate added outside the seam fails here
+/// rather than shipping its own shape.
+#[test]
+fn every_unit_predicate_is_one_or_nil_and_never_a_boolean() {
+    // (binding, the call as an addon writes it, a UnitState that makes it TRUE)
+    let table: Vec<(&str, &str, UnitState)> = vec![
+        (
+            "UnitExists",
+            r#"UnitExists("target")"#,
+            UnitState {
+                exists: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitIsVisible",
+            r#"UnitIsVisible("target")"#,
+            UnitState {
+                exists: true,
+                has_object: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitIsDead",
+            r#"UnitIsDead("target")"#,
+            UnitState {
+                exists: true,
+                dead: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitIsGhost",
+            r#"UnitIsGhost("target")"#,
+            UnitState {
+                exists: true,
+                ghost: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitIsDeadOrGhost",
+            r#"UnitIsDeadOrGhost("target")"#,
+            UnitState {
+                exists: true,
+                dead: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitIsCorpse",
+            r#"UnitIsCorpse("target")"#,
+            UnitState {
+                exists: true,
+                corpse_object: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitIsPlayer",
+            r#"UnitIsPlayer("target")"#,
+            UnitState {
+                exists: true,
+                is_player: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitPlayerControlled",
+            r#"UnitPlayerControlled("target")"#,
+            UnitState {
+                exists: true,
+                player_controlled: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitIsCharmed",
+            r#"UnitIsCharmed("target")"#,
+            UnitState {
+                exists: true,
+                charmed: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitIsTapped",
+            r#"UnitIsTapped("target")"#,
+            UnitState {
+                exists: true,
+                tapped: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitIsTappedByPlayer",
+            r#"UnitIsTappedByPlayer("target")"#,
+            UnitState {
+                exists: true,
+                tapped_by_player: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitAffectingCombat",
+            r#"UnitAffectingCombat("target")"#,
+            UnitState {
+                exists: true,
+                in_combat: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitIsConnected",
+            r#"UnitIsConnected("target")"#,
+            UnitState {
+                exists: true,
+                is_connected: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitIsAFK",
+            r#"UnitIsAFK("target")"#,
+            UnitState {
+                exists: true,
+                is_afk: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitIsDND",
+            r#"UnitIsDND("target")"#,
+            UnitState {
+                exists: true,
+                is_dnd: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitIsPVP",
+            r#"UnitIsPVP("target")"#,
+            UnitState {
+                exists: true,
+                pvp: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitIsPVPFreeForAll",
+            r#"UnitIsPVPFreeForAll("target")"#,
+            UnitState {
+                exists: true,
+                is_pvp_ffa: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitHasRelicSlot",
+            r#"UnitHasRelicSlot("target")"#,
+            UnitState {
+                exists: true,
+                has_relic_slot: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitCanAttack",
+            r#"UnitCanAttack("player", "target")"#,
+            UnitState {
+                exists: true,
+                can_attack: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitIsEnemy",
+            r#"UnitIsEnemy("player", "target")"#,
+            UnitState {
+                exists: true,
+                reaction: 1,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitIsFriend",
+            r#"UnitIsFriend("player", "target")"#,
+            UnitState {
+                exists: true,
+                reaction: 5,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitCanCooperate",
+            r#"UnitCanCooperate("player", "target")"#,
+            UnitState {
+                exists: true,
+                is_player: true,
+                reaction: 5,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitIsUnit",
+            r#"UnitIsUnit("target", "target")"#,
+            UnitState {
+                exists: true,
+                guid: 42,
+                ..Default::default()
+            },
+        ),
+    ];
+
+    for (name, call, live) in table {
+        // ---- the TRUE leg: the number 1, one value, and NOT a boolean ----
+        let mut s = UiScript::new().unwrap();
+        s.set_unit("player", Some(player()));
+        s.set_unit("target", Some(live));
+
+        assert_eq!(
+            s.eval::<String>(&format!("return type({call})")).unwrap(),
+            "number",
+            "{name} pushes a boolean where the reference pushes tag 3 (lua_pushnumber)"
+        );
+        assert_eq!(
+            s.eval::<i64>(&format!("return {call}")).unwrap(),
+            1,
+            "{name}'s true leg is the number 1"
+        );
+        assert!(
+            s.eval::<bool>(&format!("return {call} == 1")).unwrap(),
+            "{name}: the corpus idiom `== 1` must match on the true leg"
+        );
+        assert!(
+            !s.eval::<bool>(&format!("return {call} == true")).unwrap(),
+            "{name}: `== true` must NEVER match — the reference cannot push tag 1"
+        );
+        assert_eq!(
+            s.eval::<i64>(&format!("return select('#', {call})"))
+                .unwrap(),
+            1,
+            "{name} returns exactly one value on the true leg"
+        );
+
+        // ---- the FALSE leg: nil, one value, and NOT `false` ----
+        // The token is cleared rather than re-flagged, so this also covers the "no such unit" arm
+        // the reference shares with a false predicate.
+        let mut s = UiScript::new().unwrap();
+        s.set_unit("player", Some(player()));
+        s.set_unit("target", None);
+
+        assert!(
+            s.eval::<bool>(&format!("return {call} == nil")).unwrap(),
+            "{name}'s false leg is nil — a boolean `false` is not nil, and a caller comparing \
+             against nil would read the opposite of the truth"
+        );
+        assert!(
+            !s.eval::<bool>(&format!("return {call} == false")).unwrap(),
+            "{name}: `== false` must never match"
+        );
+        assert_eq!(
+            s.eval::<i64>(&format!("return select('#', {call})"))
+                .unwrap(),
+            1,
+            "{name} returns exactly one value on the false leg too — nil, never zero values"
+        );
+    }
+}
+
+/// The corpus idiom, spelled the way an addon spells it, on a live token and a dead one.
+///
+/// This is the shape a `bool` breaks and truthiness hides: `if UnitExists("target") == 1` is
+/// simply never true under a boolean, and `if UnitExists("target") == nil` is never true either —
+/// the branch silently picks the wrong arm in both directions at once.
+#[test]
+fn the_equals_one_idiom_branches_correctly_on_a_live_and_a_dead_token() {
+    let mut s = UiScript::new().unwrap();
+    s.set_unit("player", Some(player()));
+    s.set_unit("target", Some(player()));
+
+    assert_eq!(
+        s.eval::<String>(
+            r#"if UnitExists("target") == 1 then return "live" else return "dead" end"#
+        )
+        .unwrap(),
+        "live"
+    );
+
+    s.set_unit("target", None);
+    assert_eq!(
+        s.eval::<String>(
+            r#"if UnitExists("target") == 1 then return "live" else return "dead" end"#
+        )
+        .unwrap(),
+        "dead"
+    );
+    assert_eq!(
+        s.eval::<String>(
+            r#"if UnitExists("target") == nil then return "gone" else return "here" end"#
+        )
+        .unwrap(),
+        "gone",
+        "the `== nil` half — the comparison a boolean INVERTS"
+    );
+}
+
+/// `UnitOnTaxi` (`0x517a40`) is the family's one predicate registered outside `unit/`, over the
+/// taxi module's own ride flag — which is how it stayed a `bool` when its 22 siblings were fixed.
+/// Same shape, and the same `Usage:` raise its gate at `0x517a48` carries.
+#[test]
+fn unit_on_taxi_is_one_or_nil_and_raises_the_reference_usage() {
+    let mut s = UiScript::new().unwrap();
+    s.set_unit("player", Some(player()));
+
+    assert!(s
+        .eval::<bool>(r#"return UnitOnTaxi("player") == nil"#)
+        .unwrap());
+    s.set_on_taxi(true);
+    assert_eq!(
+        s.eval::<String>(r#"return type(UnitOnTaxi("player"))"#)
+            .unwrap(),
+        "number"
+    );
+    assert_eq!(s.eval::<i64>(r#"return UnitOnTaxi("player")"#).unwrap(), 1);
+    assert!(!s
+        .eval::<bool>(r#"return UnitOnTaxi("player") == true"#)
+        .unwrap());
+    // Any other token is nil, not false — only our own player is tracked.
+    assert!(s
+        .eval::<bool>(r#"return UnitOnTaxi("target") == nil"#)
+        .unwrap());
+
+    let err = s.eval::<mlua::Value>("return UnitOnTaxi()").unwrap_err();
+    assert!(
+        err.to_string().contains(r#"Usage: UnitOnTaxi("unit")"#),
+        "the gate's own message, not mlua's type error: {err}"
+    );
 }

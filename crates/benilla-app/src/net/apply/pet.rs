@@ -6,11 +6,13 @@
 //! [`crate::ui_pet`]'s, latched on the press because the server never answers one (that file's
 //! module doc has the why). The only state this file writes is what actually arrives on the wire.
 //!
-//! The two refusal arms deliberately reuse the *player's* red-line queues rather than growing pet
-//! copies: both resolve their text through the VM's own `GlobalStrings.lua` the same way, and the
-//! cast-fail resolver keys its power family on the failing **spell's** record ([`cast_fail`]'s
-//! `power_keys(spell.power_type)`), so a pet's focus ability already reads "Not enough focus"
-//! with no pet-awareness anywhere in the display layer.
+//! The two refusal arms share the player's red-line **queues** — one drain, one sink, one
+//! GlobalStrings lookup — but they do **not** share his message table, and believing they did is
+//! what decision 2033 corrects. The reference gives each of these packets its own handler with its
+//! own reason -> errorId map (`0x4bdb70` for the feedback byte, `0x6e8eb0` for the cast refusal),
+//! and both maps exist precisely to say "your **pet** is dead / rooted / out of range" where the
+//! player's says "you are". So the caster rides the queue as far as [`cast_fail`], which picks the
+//! table; everything downstream of that stays pet-unaware, as it should be.
 //!
 //! [`cast_fail`]: crate::ui_action
 
@@ -20,7 +22,10 @@ use bevy::prelude::*;
 
 use benilla_protocol::messages::{PetMode, PetSpells};
 
-use crate::ui_action::{CastErrors, Spells, UiError, UiErrorKeys};
+use benilla_assets::coords::wow_to_bevy;
+
+use super::super::{GuidIndex, PetDismissSoundMessage, PetTalkMessage};
+use crate::ui_action::{CastErrors, PetTameFailures, Spells, UiError, UiErrorKeys};
 use crate::ui_pet::PetBar;
 
 /// `SMSG_PET_SPELLS` — replace the whole bar, and reseed the pet's own cooldown store from the
@@ -136,31 +141,151 @@ pub(super) fn pet_action_feedback(reason: u8, errors: &mut UiErrorKeys) {
     }
 }
 
-/// The `SMSG_PET_ACTION_FEEDBACK` reason → its `GlobalStrings.lua` key.
+/// The `SMSG_PET_ACTION_FEEDBACK` reason → the message-catalog row the reference raises for it.
 ///
-/// vmangos sends exactly two (`Unit::SendPetActionFeedback`'s call sites): `1` when the pet cannot
-/// path to the ordered spot, `2` when the ordered target is out of its reach. Both keys ship in
-/// 1.12's `GlobalStrings.lua` (`PET_SPELL_NOPATH` at l.3054, `SPELL_FAILED_OUT_OF_RANGE`), so the
-/// text — and its localization — comes from the VM like every other error line.
+/// **The whole map, read off the handler** (`0x4bdb70`, decision 2033). The byte is decremented
+/// and bounded — `dec eax; cmp eax,0x3; ja` — then indexes the four-entry jump table at
+/// `0x4bdbe8`, so `0` and anything from `5` up fall past every arm and display nothing. Each arm
+/// is a bare `push <errorId>; call CGGameUI::DisplayError 0x496720`, with no argument and no
+/// state write: this opcode is a message and nothing else.
+///
+/// | byte | vmangos `PetFeedback` | errorId | catalog row |
+/// |---|---|---|---|
+/// | `1` | `FEEDBACK_PET_DEAD` | `0x150` | `ERR_PET_SPELL_DEAD` |
+/// | `2` | `FEEDBACK_NOTHING_TO_ATT` | `0x0a0` | `ERR_NO_ATTACK_TARGET` |
+/// | `3` | `FEEDBACK_CANT_ATT_TARGET` | `0x0a1` | `ERR_INVALID_ATTACK_TARGET` |
+/// | `4` | `FEEDBACK_NO_PATH_TO` | `0x151` | `ERR_PET_SPELL_NOPATH` |
+///
+/// The four line up one-for-one with `Pet.h`'s enum and with its four `SendPetActionFeedback`
+/// call sites. **That is what the two-entry map this replaces got wrong**: it read the sends as
+/// "exactly two" and paired them with `1`/`2`, so a dead pet's refusal said "No path available
+/// for your pet", a targetless attack said "Out of range", and `3`/`4` said nothing at all.
+///
+/// **`ERR_PET_SPELL_NOPATH` has no `GlobalStrings.lua` string in 5875**, so a no-path order is
+/// silent in the reference too — its own data-suppression face, not a gap here. The key
+/// `PET_SPELL_NOPATH` ("No path available for your pet") *does* exist, which is what made the old
+/// map look right on screen; it is not this row's key, and nothing in the shipped client raises
+/// it.
 fn pet_feedback_key(reason: u8) -> Option<&'static str> {
     Some(match reason {
-        1 => "PET_SPELL_NOPATH",
-        2 => "SPELL_FAILED_OUT_OF_RANGE",
+        1 => "ERR_PET_SPELL_DEAD",
+        2 => "ERR_NO_ATTACK_TARGET",
+        3 => "ERR_INVALID_ATTACK_TARGET",
+        4 => "ERR_PET_SPELL_NOPATH",
         _ => return None,
     })
 }
 
-/// `SMSG_PET_CAST_FAILED` — the pet's cast refusal, queued onto the SAME red line as our own
-/// through [`CastErrors`], because the resolver is spell-keyed and needs no pet-awareness.
+/// `SMSG_PET_TAME_FAILURE` — the reason byte, straight onto [`PetTameFailures`] for the drain to
+/// resolve (decision 2039).
 ///
-/// What it deliberately does NOT do is touch our cast state: the caster is the pet, so there is no
-/// pending cast of ours to revert, no GCD of ours to clear and no button of ours to unflash — the
-/// three things `cast_result`'s own failure path does. Reusing that path would have made a pet's
-/// refused Growl cancel the player's cast bar.
+/// **Not only taming, despite the name**: vmangos raises it for Call Pet with no pet available
+/// (`SpellEffects.cpp:3167`), Revive Pet on a live pet (`Spell.cpp:6136`), and any summon while a
+/// pet is already out (`Spell.cpp:5463`) — which is why the reason vocabulary carries
+/// `PETTAME_NOPETAVAILABLE`, `PETTAME_DEAD` and `PETTAME_NOTDEAD`, three values the taming spell
+/// itself can never produce.
+///
+/// No local state moves: the refusal is the server's last word on a spell that never took, and
+/// the client's own cast bookkeeping was already unwound by the `SMSG_CAST_RESULT` that came with
+/// it.
+pub(super) fn pet_tame_failure(reason: u8, failures: &mut PetTameFailures) {
+    debug!(
+        "net: pet tame failure {reason} ({})",
+        benilla_protocol::messages::pet_tame_failure_key(reason)
+    );
+    failures.0.push(reason);
+}
+
+/// `SMSG_PET_NAME_INVALID` — the server refused the rename; raise `ERR_INVALID_PETNAME`.
+///
+/// The packet carries nothing at all, so the opcode IS the message — which is exactly what the
+/// reference's arm does (`0x5e3e33`: `push 0xf7; call 0x496720`, no body read). Decision 1066
+/// recorded the opposite ("a refused rename silently does nothing") from a carve that had
+/// attributed `SMSG_PET_BROKEN`'s handler to this opcode; the two are different functions.
+///
+/// Nothing else moves: the rename was optimistic-free by design (1066), so there is no local name
+/// to roll back, and the popup has already closed.
+pub(super) fn pet_name_invalid(errors: &mut UiErrorKeys) {
+    debug!("net: pet name refused");
+    errors.0.push(UiError::key("ERR_INVALID_PETNAME"));
+}
+
+/// `SMSG_PET_BROKEN` — the pet's loyalty hit zero and it left; raise `ERR_PET_BROKEN`
+/// ("Your pet has run away").
+///
+/// Empty body, and the reference's handler `0x4bdc00` is five instructions that read none of it:
+/// the *bar* teardown is not this packet's job. vmangos sends it immediately before
+/// `Unsummon(PET_SAVE_AS_DELETED)` (`Pet.cpp:822`), so the zero-guid `SMSG_PET_SPELLS` that
+/// actually clears the bar arrives on its own heels — which is why touching the bar here would be
+/// a second, racing teardown rather than a fix.
+pub(super) fn pet_broken(errors: &mut UiErrorKeys) {
+    debug!("net: pet ran away");
+    errors.0.push(UiError::key("ERR_PET_BROKEN"));
+}
+
+/// `SMSG_PET_ACTION_SOUND` — the pet's voice: resolve the guid, hand the selector to the sound
+/// layer (decision 2039).
+///
+/// The reference resolves the packet's guid through the object manager and **drops the packet on
+/// a miss** (`0x604101 je`), which is what the index lookup below is: a bark for a unit that has
+/// not streamed in has nothing to play from and no position to play at.
+///
+/// The selector is not validated here — [`crate::sound::creature`]'s reader is where the
+/// two-armed `cmp` lives, because that is where the reference has it too (`0x604106`/`0x60411c`).
+pub(super) fn pet_action_sound(
+    pet_guid: u64,
+    talk: u32,
+    index: &GuidIndex,
+    talks: &mut MessageWriter<PetTalkMessage>,
+) {
+    debug!("net: pet talk {talk} from {pet_guid:#x}");
+    if let Some(&unit) = index.0.get(&pet_guid) {
+        talks.write(PetTalkMessage { unit, talk });
+    }
+}
+
+/// `SMSG_PET_DISMISS_SOUND` — the parting sound's model id and point, converted into Bevy space
+/// for the sound layer (decision 2039).
+///
+/// The `+1.0` on `z` is the reference's own (`0x6041d0 fadd [0x7ff9d8]`), applied **before** the
+/// basis change because it is a WoW-space offset: the point on the wire is where the pet stood,
+/// and the kit sounds a yard above it.
+pub(super) fn pet_dismiss_sound(
+    model_id: u32,
+    position: [f32; 3],
+    sounds: &mut MessageWriter<PetDismissSoundMessage>,
+) {
+    debug!("net: pet dismissed — model {model_id} at {position:?}");
+    sounds.write(PetDismissSoundMessage {
+        model_id,
+        pos: wow_to_bevy([position[0], position[1], position[2] + 1.0]),
+    });
+}
+
+/// `SMSG_PET_CAST_FAILED` — the pet's cast refusal, queued onto the SAME red line as our own
+/// through [`CastErrors`], but **marked as the pet's** so the display picks the reference's pet
+/// message table rather than the player's (`push_pet`, decision 2033).
+///
+/// The reference handles this opcode in its own function, `Spell_C::HandlePetCastFailed`
+/// (`0x6e8eb0`), which is not the player's `0x6e1a00` with a flag — it is a separate switch over
+/// a separate 142-byte index table. Ten reasons resolve differently there, six of them to the
+/// `ERR_PET_SPELL_*` rows that exist for no other purpose ("Your pet is in combat." where the
+/// player reads "You are in combat"). The queue is shared; the table is not.
+///
+/// Two things it deliberately does NOT do, both because the caster is the pet:
+///
+/// - **Touch our cast state.** There is no pending cast of ours to revert, no GCD of ours to
+///   clear and no button of ours to unflash — the three things `cast_result`'s own failure path
+///   does. Reusing that path would have made a pet's refused Growl cancel the player's cast bar.
+/// - **Write a combat-log line.** `0x6e1a00` calls the log formatter `0x62c360` beside its
+///   `DisplayError`; `0x6e8eb0` calls neither it nor the error-sound `0x458a50` — its whole call
+///   set is the two packet readers, `0x496720`, and the string plumbing behind it. So a pet's
+///   refusal never prints "You fail to cast Growl: ..." in the log, and the drain's combat twin
+///   skips it.
 pub(super) fn pet_cast_failed(spell_id: u32, reason: Option<u8>, errors: &mut CastErrors) {
     debug!("net: pet cast failed — spell {spell_id} reason {reason:?}");
     if let Some(reason) = reason {
-        errors.push_local(spell_id, reason);
+        errors.push_pet(spell_id, reason);
     }
 }
 
@@ -237,17 +362,47 @@ mod tests {
         assert!(!bar.attacking, "a different pet is not attacking");
     }
 
-    /// Only the two codes vmangos actually sends resolve; anything else draws nothing rather than
-    /// putting a bare number on the red line.
+    /// The whole feedback map, in the reference's own order (`0x4bdbe8`) — and the bound that
+    /// makes `0` and everything from `5` up draw nothing rather than putting a bare number on the
+    /// red line.
+    ///
+    /// Written as the four keys in sequence rather than four asserts because the defect this
+    /// replaces was an *ordering* one: a two-entry map that paired the right vocabulary with the
+    /// wrong bytes still looked plausible read one row at a time.
     #[test]
-    fn only_the_shipped_feedback_codes_resolve() {
+    fn the_feedback_map_is_the_jump_table_at_0x4bdbe8() {
         let mut errors = UiErrorKeys::default();
-        for reason in [0u8, 1, 2, 3, 200] {
+        for reason in [0u8, 1, 2, 3, 4, 5, 200] {
             pet_action_feedback(reason, &mut errors);
         }
         assert_eq!(
             errors.0.iter().map(|e| e.key).collect::<Vec<_>>(),
-            ["PET_SPELL_NOPATH", "SPELL_FAILED_OUT_OF_RANGE"]
+            [
+                "ERR_PET_SPELL_DEAD",
+                "ERR_NO_ATTACK_TARGET",
+                "ERR_INVALID_ATTACK_TARGET",
+                "ERR_PET_SPELL_NOPATH",
+            ]
         );
+    }
+
+    /// Every arm names a real `DisplayError` row — which is the check the old map could not have
+    /// passed, and was never asked to: neither `PET_SPELL_NOPATH` nor `SPELL_FAILED_OUT_OF_RANGE`
+    /// is a catalog key, and `message_keys`' source walk only reads `ERR_*` literals, so both
+    /// slipped past it. Naming the rows is also what gives these lines their surface and their
+    /// error-speech: `ERR_NO_ATTACK_TARGET` and `ERR_INVALID_ATTACK_TARGET` carry type tags
+    /// `0x26`/`0x0b`, so the client speaks them.
+    #[test]
+    fn every_feedback_arm_is_a_catalog_row() {
+        for reason in 1..=4u8 {
+            let key = pet_feedback_key(reason).expect("an arm");
+            let row = benilla_ui::messages::by_key(key)
+                .unwrap_or_else(|| panic!("{key} is not a message-catalog row"));
+            assert_eq!(
+                row.kind,
+                benilla_ui::messages::MsgKind::Error,
+                "{key} is the red line"
+            );
+        }
     }
 }

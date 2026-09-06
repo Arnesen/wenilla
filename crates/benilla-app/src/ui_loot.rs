@@ -6,19 +6,20 @@
 //! at its fixed position ([`LootState::remove_slot`] — the layout never compacts while open);
 //! `SMSG_LOOT_CLEAR_MONEY` → the coin row becomes the same kind of gap
 //! ([`LootState::clear_money`]); `SMSG_LOOT_RELEASE_RESPONSE` → the window closes
-//! ([`LootState::clear`]); the error shape → [`LootErrors`]; `SMSG_ITEM_PUSH_RESULT` → a queued
-//! "You receive loot" line ([`LootState::receives`]). A removal that empties the window arms the
-//! client-authoritative **auto-close** ([`LootState::auto_release`] — the real engine's
-//! close-on-last-slot), released by [`drain_loot`].
+//! ([`LootState::clear`]); the error shape → a red line by GlobalStrings key, raised straight from
+//! the bridge ([`crate::net::apply::loot::loot_error`] — it needs no queue on this side);
+//! `SMSG_ITEM_PUSH_RESULT` → a queued "You receive loot" line ([`LootState::receives`]). A removal
+//! that empties the window arms the client-authoritative **auto-close**
+//! ([`LootState::auto_release`] — the real engine's close-on-last-slot), released by
+//! [`drain_loot`].
 //!
-//! Each frame [`feed_loot`] surfaces the errors + receive lines on the red UI error line (the
-//! equip-error path's exact shape — an ErrorsFrame-style v1 stopgap that migrates to the chat frame
-//! next arc), resolves each wire [`LootItem`] to a Lua-facing [`LootRow`] (icon straight from the
-//! wire `display_info_id` through the same `ItemDisplayInfo.dbc` catalog the bags use — no template
-//! wait; name + quality via the ask-once item-template cache, `None`/re-fed while in flight),
-//! prepends the synthesized coin row when the loot carries gold, pushes the snapshot
-//! ([`benilla_ui::script::UiScript::set_loot`]), and fires `LOOT_OPENED` on open / `LOOT_UPDATE` on a
-//! content change / `LOOT_CLOSED` on clear. [`drain_loot`] pulls the Lua intents back out: `LootSlot`
+//! Each frame [`feed_loot`] surfaces the receive lines, resolves each wire [`LootItem`] to a
+//! Lua-facing [`LootRow`] (icon straight from the wire `display_info_id` through the same
+//! `ItemDisplayInfo.dbc` catalog the bags use — no template wait; name + quality via the ask-once
+//! item-template cache, `None`/re-fed while in flight), prepends the synthesized coin row when the
+//! loot carries gold, pushes the snapshot ([`benilla_ui::script::UiScript::set_loot`]), and fires
+//! `LOOT_OPENED` on open / `LOOT_UPDATE` on a content change / `LOOT_CLOSED` on clear.
+//! [`drain_loot`] pulls the Lua intents back out: `LootSlot`
 //! → coin ? [`ClientCommand::LootMoney`] : [`ClientCommand::AutostoreLootItem`] (the clicked 1-based
 //! row mapped to the item's **wire** loot slot); `CloseLoot` → [`ClientCommand::LootRelease`].
 
@@ -448,11 +449,6 @@ impl LootState {
     }
 }
 
-/// A loot refusal (`SMSG_LOOT_RESPONSE`'s error shape) queued by the net bridge for the UI error line
-/// — the loot twin of [`crate::ui_merchant::MerchantErrors`]. Carries the wire `u8` `LootError` code.
-#[derive(Resource, Default)]
-pub(crate) struct LootErrors(pub Vec<u8>);
-
 /// The loot player knob (decision 0961): `autoLootDefault` — era's Controls-page checkbox (no
 /// 1.12 CVar exists; vanilla only had the shift-click), settable from the Options window
 /// through the CVar store (0954). The reference implements auto-loot ENGINE-side (era's own
@@ -598,7 +594,6 @@ pub(crate) struct UiLootPlugin;
 impl Plugin for UiLootPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LootState>()
-            .init_resource::<LootErrors>()
             .init_resource::<LootConfig>()
             .init_resource::<LootLatch>()
             .init_resource::<LootKneel>()
@@ -615,32 +610,6 @@ impl Plugin for UiLootPlugin {
                     resolve_loot_kneel.after(benilla_world::schedule::WorldStage::Net),
                 ),
             );
-    }
-}
-
-/// The client's message string for a `LootError` refusal (`SMSG_LOOT_RESPONSE`'s error shape); values
-/// from [`benilla_protocol::messages::loot_error`] (VERIFIED vmangos `LootMgr.h`). Only the
-/// subset a plain `CMSG_LOOT` can surface is spelled out; the rest print their code.
-fn loot_error_text(reason: u8) -> String {
-    use benilla_protocol::messages::loot_error as e;
-    match reason {
-        e::DIDNT_KILL => "You don't have permission to loot that corpse.".into(),
-        e::TOO_FAR => "You are too far away to loot that.".into(),
-        e::BAD_FACING => "You can't loot that from there.".into(),
-        e::LOCKED => "Someone is already looting that corpse.".into(),
-        e::NOTSTANDING => "You need to be standing up to loot.".into(),
-        e::STUNNED => "You can't do that while stunned.".into(),
-        e::PLAYER_NOT_FOUND => "You can't loot that right now.".into(),
-        e::ALREADY_PICKPOCKETED => "Those pockets are already empty.".into(),
-        // The master looter's three refusals (decision 1675). These reach only the master looter,
-        // in answer to a `CMSG_LOOT_MASTER_GIVE` the server would not honour
-        // (`LootHandler.cpp:718-729`), and unlike the lines above they are QUOTED from 1.12's own
-        // GlobalStrings (l.1679-1681) rather than composed — the reference has real strings for
-        // exactly this trio.
-        e::MASTER_INV_FULL => "That player's inventory is full".into(),
-        e::MASTER_UNIQUE_ITEM => "Player has too many of that item already".into(),
-        e::MASTER_OTHER => "Can't assign item to that player".into(),
-        other => format!("You can't loot that ({other})."),
     }
 }
 
@@ -953,7 +922,6 @@ fn feed_loot(
     mut items: ResMut<Items>,
     icons: Option<Res<ItemDisplays>>,
     commands: Res<NetCommands>,
-    mut errors: ResMut<LootErrors>,
     mut chat: ResMut<crate::ui_chat::ChatLog>,
     mut last: Local<crate::ui_script::VmMemo<Option<LootSnapshot>>>,
     cfg: Res<LootConfig>,
@@ -976,15 +944,6 @@ fn feed_loot(
         props: props.as_deref(),
         enchants: enchants.as_deref(),
     };
-    // Loot refusals + "You receive …" lines migrate to the chat window (decision 0084's chat arc):
-    // refusals as informational SYSTEM-yellow lines, receive lines as LOOT-green. The ErrorsFrame
-    // keeps only the cast/equip red toasts.
-    for reason in errors.0.drain(..) {
-        chat.push_event(crate::ui_chat::ChatEvent::text_only(
-            crate::ui_chat::ChatEventKind::System,
-            loot_error_text(reason),
-        ));
-    }
     drain_receives(
         &mut loot,
         &mut items,
@@ -1486,7 +1445,6 @@ mod tests {
             let mut app = App::new();
             app.add_message::<crate::sound::LootPickupSound>()
                 .init_resource::<LootState>()
-                .init_resource::<LootErrors>()
                 .init_resource::<crate::ui_chat::ChatLog>()
                 .init_resource::<GroupState>()
                 .init_resource::<NameCache>()
@@ -1752,7 +1710,6 @@ mod tests {
         let mut app = App::new();
         app.add_message::<crate::sound::LootPickupSound>()
             .init_resource::<LootState>()
-            .init_resource::<LootErrors>()
             .init_resource::<crate::ui_chat::ChatLog>()
             .init_resource::<GroupState>()
             .init_resource::<NameCache>()

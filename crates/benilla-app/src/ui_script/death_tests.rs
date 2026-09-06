@@ -385,11 +385,17 @@ fn the_ghost_predicates() {
             ..Default::default()
         }),
     );
-    assert!(!s.eval::<bool>("return UnitIsDead(\"player\")").unwrap());
-    assert!(s.eval::<bool>("return UnitIsGhost(\"player\")").unwrap());
+    // The trio's shape is 1/nil, never a boolean (decision 2043), so these read the value rather
+    // than its truthiness — `== nil` is the comparison a boolean would invert.
     assert!(s
-        .eval::<bool>("return UnitIsDeadOrGhost(\"player\")")
+        .eval::<bool>("return UnitIsDead(\"player\") == nil")
         .unwrap());
+    assert_eq!(s.eval::<i64>("return UnitIsGhost(\"player\")").unwrap(), 1);
+    assert_eq!(
+        s.eval::<i64>("return UnitIsDeadOrGhost(\"player\")")
+            .unwrap(),
+        1
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 

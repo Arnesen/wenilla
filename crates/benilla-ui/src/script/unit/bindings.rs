@@ -1,13 +1,20 @@
 //! The `Unit*` global registrations (see the parent module's doc for the seam and the return
 //! shapes): every binding reads the per-token [`UnitState`](super::UnitState) snapshot store
 //! through the parent's `with_unit`/`pick_unit_token` helpers.
+//!
+//! **Every predicate here returns through one function** — [`super::unit_predicate`] when it reads
+//! a snapshot field, [`predicate`] when it computes its own bool. Neither ever hands mlua a Rust
+//! `bool`: 1.12 pushes the number `1` or `nil` and has no boolean on its binding surface at all
+//! (decisions 1830, 2043). A new predicate that open-codes `Value::Integer(1)`/`Value::Nil`, or
+//! returns a `bool`, is the drift those two records exist to stop.
 
 use mlua::{Lua, Value};
 
+use super::super::binding_abi::predicate;
 use super::super::Model;
 use super::{
     check_unit_token, classification_word, grey_band, level_reads_unknown, pick_unit_token,
-    with_unit, SelectionRequest,
+    unit_predicate, unknownobject, with_unit, SelectionRequest,
 };
 
 /// The two class ids `GetComboPoints 0x51a190` accepts — the literals `4` and `0xb` it compares
@@ -19,19 +26,6 @@ use super::{
 const CLASS_ROGUE: u32 = 4;
 const CLASS_DRUID: u32 = 11;
 
-/// `FrameScript_GetText("UNKNOWNOBJECT")` as the name resolvers call it (`0x517220`, `0x609324`):
-/// the VM's own GlobalString — read out of `_G` exactly as `0x703bf0` reads it, so a translated
-/// `GlobalStrings.lua` translates this too (enUS: `"Unknown"`, `GlobalStrings.lua:4444`) — and,
-/// when the global is missing or empty, the binary's own literal `"Unknown Being"` (`0x860fa4`,
-/// the bytes at that address in `WoW.exe`). Always a string: this is the "name not yet known"
-/// state, and it is never nil. Decision 2002.
-fn unknownobject(lua: &Lua) -> mlua::Result<Value> {
-    match lua.globals().get::<Value>("UNKNOWNOBJECT") {
-        Ok(Value::String(s)) if !s.as_bytes().is_empty() => Ok(Value::String(s)),
-        _ => Ok(Value::String(lua.create_string("Unknown Being")?)),
-    }
-}
-
 /// Register the `Unit*` globals reading the per-token snapshot store (the same style/place the
 /// object model and stdlib register their globals — bare globals on `_G`, matching the live API
 /// surface).
@@ -41,7 +35,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "UnitExists",
         lua.create_function(|lua, token: Option<String>| {
-            with_unit(lua, &token, false, |u| u.exists)
+            unit_predicate(lua, &token, |u| u.exists)
         })?,
     )?;
 
@@ -62,11 +56,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "UnitIsVisible",
         lua.create_function(|lua, token: Option<String>| {
-            Ok(if with_unit(lua, &token, false, |u| u.has_object)? {
-                Value::Integer(1)
-            } else {
-                Value::Nil
-            })
+            unit_predicate(lua, &token, |u| u.has_object)
         })?,
     )?;
 
@@ -115,7 +105,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 })?;
                 // One value, and it is the NUMBER 1 or nil — never a boolean, the same shape the
                 // rest of this family answers in.
-                Ok(if hit { Value::Integer(1) } else { Value::Nil })
+                Ok(predicate(hit))
             })?,
         )?;
     }
@@ -157,11 +147,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 .as_ref()
                 .and_then(|t| model.unit(t))
                 .map_or(0, |u| u.guid);
-            Ok(if by_flag || guid == model.party.leader_guid {
-                Value::Integer(1)
-            } else {
-                Value::Nil
-            })
+            Ok(predicate(by_flag || guid == model.party.leader_guid))
         })?,
     )?;
 
@@ -213,7 +199,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 {
                     Value::Nil
                 }
-                Some(None) => unknownobject(lua)?,
+                Some(None) => Value::String(unknownobject(lua)?),
             };
             Ok((name, Value::Nil))
         })?,
@@ -282,11 +268,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "UnitIsCorpse",
         lua.create_function(|lua, token: Option<String>| {
-            Ok(if with_unit(lua, &token, false, |u| u.corpse_object)? {
-                Value::Integer(1)
-            } else {
-                Value::Nil
-            })
+            unit_predicate(lua, &token, |u| u.corpse_object)
         })?,
     )?;
 
@@ -311,11 +293,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 r#"Usage: UnitCanAttack("unit", "otherUnit")"#,
             )?);
             let token = pick_unit_token(&a, &b);
-            Ok(if with_unit(lua, &token, false, |u| u.can_attack)? {
-                Value::Integer(1)
-            } else {
-                Value::Nil
-            })
+            unit_predicate(lua, &token, |u| u.can_attack)
         })?,
     )?;
 
@@ -339,7 +317,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 token,
                 r#"Usage: UnitIsDead("unit")"#,
             )?);
-            with_unit(lua, &token, false, |u| u.dead)
+            unit_predicate(lua, &token, |u| u.dead)
         })?,
     )?;
 
@@ -353,7 +331,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 token,
                 r#"Usage: UnitIsGhost("unit")"#,
             )?);
-            with_unit(lua, &token, false, |u| u.ghost)
+            unit_predicate(lua, &token, |u| u.ghost)
         })?,
     )?;
     g.set(
@@ -364,7 +342,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 token,
                 r#"Usage: UnitIsDeadOrGhost("unit")"#,
             )?);
-            with_unit(lua, &token, false, |u| u.dead || u.ghost)
+            unit_predicate(lua, &token, |u| u.dead || u.ghost)
         })?,
     )?;
 
@@ -422,11 +400,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             )?);
             let token = pick_unit_token(&a, &b);
             let r = with_unit(lua, &token, 0u8, |u| u.reaction)?;
-            Ok(if (1..=2).contains(&r) {
-                Value::Integer(1)
-            } else {
-                Value::Nil
-            })
+            Ok(predicate((1..=2).contains(&r)))
         })?,
     )?;
     g.set(
@@ -446,11 +420,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             )?);
             let token = pick_unit_token(&a, &b);
             let r = with_unit(lua, &token, 0u8, |u| u.reaction)?;
-            Ok(if r >= 5 {
-                Value::Integer(1)
-            } else {
-                Value::Nil
-            })
+            Ok(predicate(r >= 5))
         })?,
     )?;
 
@@ -480,10 +450,10 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             )?);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let player_level = model.player_req.level;
-            Ok(match unit.and_then(|u| model.unit(&u)) {
-                Some(u) if super::is_civilian_kill(u, player_level) => Value::Integer(1),
-                _ => Value::Nil,
-            })
+            Ok(predicate(
+                unit.and_then(|u| model.unit(&u))
+                    .is_some_and(|u| super::is_civilian_kill(u, player_level)),
+            ))
         })?,
     )?;
     // UnitPlayerControlled(unit) → 1 if a PLAYER is driving this unit, else nil. `UNIT_FIELD_FLAGS`
@@ -495,20 +465,16 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "UnitPlayerControlled",
         lua.create_function(|lua, unit: Option<String>| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(match unit.and_then(|u| model.unit(&u)) {
-                Some(u) if u.player_controlled => Value::Integer(1),
-                _ => Value::Nil,
-            })
+            Ok(predicate(
+                unit.and_then(|u| model.unit(&u))
+                    .is_some_and(|u| u.player_controlled),
+            ))
         })?,
     )?;
     g.set(
         "UnitIsPlayer",
         lua.create_function(|lua, token: Option<String>| {
-            Ok(if with_unit(lua, &token, false, |u| u.is_player)? {
-                Value::Integer(1)
-            } else {
-                Value::Nil
-            })
+            unit_predicate(lua, &token, |u| u.is_player)
         })?,
     )?;
 
@@ -542,11 +508,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             if !ua.exists || !ub.exists {
                 return Ok(Value::Nil);
             }
-            if a == b || (ua.guid != 0 && ua.guid == ub.guid) {
-                Ok(Value::Integer(1))
-            } else {
-                Ok(Value::Nil)
-            }
+            Ok(predicate(a == b || (ua.guid != 0 && ua.guid == ub.guid)))
         })?,
     )?;
 
@@ -570,7 +532,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 "Usage: UnitAffectingCombat(\"unit\")",
             )?;
             let hot = with_unit(lua, &Some(token), false, |u| u.exists && u.in_combat)?;
-            Ok(if hot { Value::Integer(1) } else { Value::Nil })
+            Ok(predicate(hot))
         })?,
     )?;
 
@@ -599,11 +561,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "HasFullControl",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(if model.player_control {
-                Value::Integer(1)
-            } else {
-                Value::Nil
-            })
+            Ok(predicate(model.player_control))
         })?,
     )?;
 
@@ -642,7 +600,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                     !model.party.members.is_empty()
                 };
                 let hit = grouped && (in_group(u.guid) || in_group(u.owner));
-                Ok(if hit { Value::Integer(1) } else { Value::Nil })
+                Ok(predicate(hit))
             })?,
         )?;
     }
@@ -663,7 +621,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                         .iter()
                         .any(|m| m.guid != 0 && m.guid == u.guid)
                 });
-            Ok(if hit { Value::Integer(1) } else { Value::Nil })
+            Ok(predicate(hit))
         })?,
     )?;
 
@@ -693,7 +651,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                             .members
                             .iter()
                             .any(|m| m.guid != 0 && m.guid == u.guid)));
-            Ok(if hit { Value::Integer(1) } else { Value::Nil })
+            Ok(predicate(hit))
         })?,
     )?;
 
@@ -720,7 +678,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             let ok = with_unit(lua, &token, false, |u| {
                 u.exists && u.is_player && u.reaction >= 5
             })?;
-            Ok(if ok { Value::Integer(1) } else { Value::Nil })
+            Ok(predicate(ok))
         })?,
     )?;
 
@@ -746,8 +704,16 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // The party-frame status predicates (decision 0434 §2/§3): connection, AFK/DND, and the two PvP
-    // flags. All 1/nil, the live API's own shape for these — unlike UnitIsDead/UnitIsGhost above (a
-    // stated v1 shortcut, module doc), these are new and follow the era shape from the start.
+    // flags. All 1/nil, through the family's one push site (2043).
+    //
+    // **`UnitIsAFK`/`UnitIsDND` are OURS, not the reference's** — this comment used to claim they
+    // "follow the era shape from the start", which named the wrong authority. wow-re's raw byte
+    // census over the whole image finds ZERO occurrences of `UnitIsAFK`, `UnitIsDND`, `IsAFK` or
+    // `IsDND`, as bindings or as strings (positive control: `UnitIsPVP\0` and `UnitIsGhost\0`
+    // each return exactly 1) — `ui/scratch/nil-unit-token-arg-law.md` §11. 1.12 surfaces a
+    // member's AFK/DND state through `GetGuildRosterInfo` and the `CHAT_FLAG_AFK`/`CHAT_FLAG_DND`
+    // GlobalStrings; there is no unit predicate for it. They wear the family's shape because that
+    // is the right shape for an invention of ours to wear, not because a binding was read.
     g.set(
         "UnitIsConnected",
         lua.create_function(|lua, token: Value| {
@@ -756,31 +722,19 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 token,
                 r#"Usage: UnitIsConnected("unit")"#,
             )?);
-            Ok(if with_unit(lua, &token, false, |u| u.is_connected)? {
-                Value::Integer(1)
-            } else {
-                Value::Nil
-            })
+            unit_predicate(lua, &token, |u| u.is_connected)
         })?,
     )?;
     g.set(
         "UnitIsAFK",
         lua.create_function(|lua, token: Option<String>| {
-            Ok(if with_unit(lua, &token, false, |u| u.is_afk)? {
-                Value::Integer(1)
-            } else {
-                Value::Nil
-            })
+            unit_predicate(lua, &token, |u| u.is_afk)
         })?,
     )?;
     g.set(
         "UnitIsDND",
         lua.create_function(|lua, token: Option<String>| {
-            Ok(if with_unit(lua, &token, false, |u| u.is_dnd)? {
-                Value::Integer(1)
-            } else {
-                Value::Nil
-            })
+            unit_predicate(lua, &token, |u| u.is_dnd)
         })?,
     )?;
     // UnitIsPVP reads the same `pvp` field the unit tooltip's "PvP" line already does (one flag,
@@ -793,11 +747,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 token,
                 r#"Usage: UnitIsPVP("unit")"#,
             )?);
-            Ok(if with_unit(lua, &token, false, |u| u.pvp)? {
-                Value::Integer(1)
-            } else {
-                Value::Nil
-            })
+            unit_predicate(lua, &token, |u| u.pvp)
         })?,
     )?;
     g.set(
@@ -808,11 +758,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 token,
                 r#"Usage: UnitIsPVPFreeForAll("unit")"#,
             )?);
-            Ok(if with_unit(lua, &token, false, |u| u.is_pvp_ffa)? {
-                Value::Integer(1)
-            } else {
-                Value::Nil
-            })
+            unit_predicate(lua, &token, |u| u.is_pvp_ffa)
         })?,
     )?;
     // UnitFactionGroup(unit) → (englishGroup, localizedName), the pair the PvP icon law reads:
@@ -932,7 +878,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 r#"Usage: UnitHasRelicSlot("unit")"#,
             )?);
             let has = with_unit(lua, &token, false, |u| u.has_relic_slot)?;
-            Ok(if has { Value::Integer(1) } else { Value::Nil })
+            Ok(predicate(has))
         })?,
     )?;
 
@@ -1137,13 +1083,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "UnitIsCharmed",
         lua.create_function(|lua, token: Option<String>| {
-            with_unit(lua, &token, Value::Nil, |u| {
-                if u.charmed {
-                    Value::Number(1.0)
-                } else {
-                    Value::Nil
-                }
-            })
+            unit_predicate(lua, &token, |u| u.charmed)
         })?,
     )?;
 
@@ -1251,11 +1191,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "IsResting",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(if model.resting {
-                Value::Integer(1)
-            } else {
-                Value::Nil
-            })
+            Ok(predicate(model.resting))
         })?,
     )?;
     // PartialPlayTime() / NoPlayTime() → 1/nil: the two anti-addiction play-time regimes, read
@@ -1268,22 +1204,14 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "PartialPlayTime",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(if model.partial_play_time {
-                Value::Integer(1)
-            } else {
-                Value::Nil
-            })
+            Ok(predicate(model.partial_play_time))
         })?,
     )?;
     g.set(
         "NoPlayTime",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(if model.no_play_time {
-                Value::Integer(1)
-            } else {
-                Value::Nil
-            })
+            Ok(predicate(model.no_play_time))
         })?,
     )?;
     // GetBillingTimeRested() → the account's rested billing MINUTES, as one number, always
@@ -1505,12 +1433,11 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "ClearTarget",
         lua.create_function(|lua, ()| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if model.unit("target").is_some_and(|u| u.exists) {
+            let had = model.unit("target").is_some_and(|u| u.exists);
+            if had {
                 model.target_clear = true;
-                Ok(Value::Integer(1))
-            } else {
-                Ok(Value::Nil)
             }
+            Ok(predicate(had))
         })?,
     )?;
 

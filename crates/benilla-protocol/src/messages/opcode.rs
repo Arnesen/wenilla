@@ -210,6 +210,65 @@ pub const SMSG_PET_ACTION_FEEDBACK: u16 = 0x02C6; // 710
 /// because the caster that failed is the pet, not us.
 pub const SMSG_PET_CAST_FAILED: u16 = 0x0138; // 312
 
+// The three remaining pet-feedback arms, carved together (decision 2039). Each was name-table-only
+// until then, and each has a handler in the reference that does something visible.
+/// **The taming refusal** — one `u8` reason from `PetTameFailureReason`. Not only taming: vmangos
+/// sends it for Call Pet and Revive Pet too (`SpellEffects.cpp:3167/3174`, `Spell.cpp:5463/6113`).
+///
+/// The reference's handler `0x6e97e0` reads the byte and hands it to `0x6e6a20`, which turns
+/// `reason - 1` into one of eleven `PETTAME_*` GlobalStrings keys through the jump table at
+/// `0x6e6ac0`, resolves it (`0x703bf0`) and raises `DisplayError(0xee)` =
+/// `ERR_TAME_FAILED` (`"%s."`) with that string as the fill. Anything outside `1..=11` — `0` and
+/// `12` included — takes the default arm's `PETTAME_UNKNOWNERROR`. The map is in
+/// [`super::pet::pet_tame_failure_key`].
+pub const SMSG_PET_TAME_FAILURE: u16 = 0x0173; // 371
+/// **The refused rename** — an EMPTY body, and a visible error all the same.
+///
+/// vmangos's `SendPetNameInvalid` drops both the reason code and the name with the comment "not
+/// read by vanilla client" (`PetHandler.cpp:542-548`), and the reference agrees: its arm reads no
+/// body. What it does read is the *opcode* — 0x178 lands in the shared dispatcher `0x5e38c0`,
+/// whose index byte at `0x5e4c6c[0]` selects target `0x5e4c40[0]` = `0x5e3e33`, five instructions:
+/// `push 0xf7; call 0x496720` = `DisplayError(247)` = **`ERR_INVALID_PETNAME`**, "Error, invalid
+/// name entered.".
+///
+/// **Decision 1066 said the opposite** — that a refused rename "silently does nothing, which is
+/// what the reference does too" — on a carve that had attributed [`SMSG_PET_BROKEN`]'s handler
+/// `0x4bdc00` to this opcode. `re/net/opcode-handlers.tsv` maps 0x178 to `0x5e38c0` and 0x2AF to
+/// `0x4bdc00`; they are different functions raising different messages.
+pub const SMSG_PET_NAME_INVALID: u16 = 0x0178; // 376
+/// **The pet ran away** — an empty body; vmangos sends it when a hunter pet's loyalty hits zero
+/// (`Pet.cpp:822`, immediately before `Unsummon(PET_SAVE_AS_DELETED)`).
+///
+/// Handler `0x4bdc00`: `push 0x1a3; call 0x496720` = `DisplayError(419)` = `ERR_PET_BROKEN`,
+/// "Your pet has run away". It reads no body, writes no state and fires no event — the bar's
+/// teardown rides the `SMSG_PET_SPELLS` zero-guid form as usual (wow-re
+/// `ui/scratch/pet-action-bar-api.md` §11c.5).
+pub const SMSG_PET_BROKEN: u16 = 0x02AF; // 687
+/// **The pet's voice** — `u64 petGuid` then a `u32` *talk* selector (not a `SoundEntries` id):
+/// `0` = `PET_TALK_SPECIAL_SPELL`, `1` = `PET_TALK_ATTACK` (vmangos `Pet.h:98`,
+/// `Unit::SendPetTalk`).
+///
+/// Handler `0x6040c0` resolves the guid, then calls the creature bark dispatcher
+/// `0x623a40(unit, state)` with **state 1 for selector 0 and state 2 for selector 1** — i.e.
+/// `CreatureSoundData` columns 28 (`PetOrder`) and 27 (`PetAttack`). Any other selector plays
+/// nothing. The bark rides the unit's ordinary one-shot voice slot and its priority latch, so it
+/// is not a free-standing sound (see `crate::sound::creature`'s bark core on the benilla side).
+pub const SMSG_PET_ACTION_SOUND: u16 = 0x0324; // 804
+/// **The dismissed pet's parting sound** — `u32 creatureModelDataId` then a `f32` x/y/z, and the
+/// odd one of the family in every way.
+///
+/// Handler `0x604140` reads those four fields, walks **`CreatureModelData[id]` → its own
+/// `SoundID` (col 13, `[row+0x34]`) → `CreatureSoundData` → column 29**, and plays that kit at the
+/// given point with `z + 1.0` (`0x7ff9d8`) and a free-picked variation. No unit is involved: it is
+/// off the bark dispatcher's table entirely, takes no voice latch and has no attach point —
+/// because by the time it sounds the pet has gone. That fresh, inlined, by-id resolve is also why
+/// a census over the *cached* `[unit+0xb40]` row's consumers concluded column 29 was dead.
+///
+/// **vmangos never sends it** (no `SendPetDismissSound` anywhere in the tree; the opcode is
+/// registered only as server-bound). Built because the reference is the spec and this handler is
+/// what makes column 29 load-bearing — not because anything we talk to can trigger it.
+pub const SMSG_PET_DISMISS_SOUND: u16 = 0x0325; // 805
+
 /// The client's ack that a server-authored spline (`SMSG_MONSTER_MOVE` to our own guid — Charge,
 /// knockback, taxi) finished. Body: a `MovementInfo` at the endpoint, the `splineId` being acked,
 /// and a trailing float the server `read_skip`s (VERIFIED vmangos `Opcodes_1_12_1.h`: 713;
@@ -408,11 +467,10 @@ pub const CMSG_PET_ABANDON: u16 = 0x0176; // 374
 /// disappears after the first rename (`PetHandler.cpp:302-345`). Nothing client-side clears it —
 /// wow-re's census found no writer of that byte anywhere in `.text`.
 ///
-/// A refused name answers with `SMSG_PET_NAME_INVALID` (0x178), which is **not modelled** and does
-/// not need to be: vmangos sends it with an empty body — `SendPetNameInvalid` drops both the reason
-/// code and the name with the comment "not read by vanilla client" (`PetHandler.cpp:542-548`) — and
-/// the shipped 1.12 `FrameXML` has no event and no string for it. It lands in `ServerPacket::Other`
-/// under its own name, which is the whole of what there is to do with it.
+/// A refused name answers with [`SMSG_PET_NAME_INVALID`] (0x178). Its body really is empty — but
+/// the reference is **not** silent about it: the handler raises `ERR_INVALID_PETNAME` on the red
+/// line. Decision 1066's claim that it does nothing was a mis-attributed handler; see that
+/// constant's own note.
 pub const CMSG_PET_RENAME: u16 = 0x0177; // 375
 
 /// VERIFIED vmangos `Opcodes_1_12_1.h`: 94 (decision 0236). Body in

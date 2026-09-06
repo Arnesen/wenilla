@@ -1417,9 +1417,10 @@ fn a_feigning_target_paints_empty_bars_and_the_dead_text() {
         "the WORD is the GlobalString `DEAD` (l.898), never the key: a literal \"DEAD\" here \
          is the caps bug the director caught on Onyxia"
     );
-    assert!(
-        s.eval::<bool>(r#"return UnitIsDead("target")"#).unwrap(),
-        "UnitIsDead 0x517ac0's dynflag leg reaches the API too"
+    assert_eq!(
+        s.eval::<i64>(r#"return UnitIsDead("target")"#).unwrap(),
+        1,
+        "UnitIsDead 0x517ac0's dynflag leg reaches the API too — as the number 1 (2043)"
     );
 
     // He stands back up: the flag clears, and nothing about the body needed restoring.
