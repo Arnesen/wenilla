@@ -640,17 +640,47 @@ pub(crate) fn implicit_creation_anchor(model: &mut Model, rh: RegionHandle) {
             ];
         }
         RegionKind::FontString => {
-            // The exact byte compare chain: `& 7` then equality against LEFT (1) and RIGHT (4) —
-            // every other value, the CENTER bit and the cleared axis included, falls to CENTER.
-            let point = match data.justify.0 & crate::justify::H_MASK {
-                0x01 => Point::Left,
-                0x04 => Point::Right,
-                _ => Point::Center,
-            };
+            let point = justify_anchor_point(data.justify.0);
             data.anchors = vec![Anchor::new(point, owner_id, point, 0.0, 0.0)];
         }
         RegionKind::Title => return,
     }
+    model.touch_layout();
+}
+
+/// The middle-row point a justify word selects — the compare chain the FontString creation
+/// post-step (`0x771480`) and the Button label adopter (`CSimpleButton::SetFontString 0x778d20`)
+/// share: `& 7`, then equality against LEFT (1) and RIGHT (4); every other value — the CENTER bit
+/// and a cleared axis alike — falls to CENTER. What differs between the two callers is only WHOSE
+/// word is read: the post-step reads the string's own (`+0x120`), the adopter reads the button's
+/// normal font's (`+0x390`) — see [`super::button`]'s `adopt_label` (decision 1996).
+pub(crate) fn justify_anchor_point(word: u32) -> crate::layout::Point {
+    use crate::layout::Point;
+    match word & crate::justify::H_MASK {
+        0x01 => Point::Left,
+        0x04 => Point::Right,
+        _ => Point::Center,
+    }
+}
+
+/// One middle-row anchor `point → the owner's same point, (0,0)`, installed only when the region
+/// has no anchor of its own — the nine-slot scan every implicit-anchor site runs first, so any
+/// anchor from any source suppresses it. [`implicit_creation_anchor`]'s FontString arm is this
+/// with the region's own justify word; the Button adopter is this with the button's.
+pub(crate) fn anchor_unanchored_at(
+    model: &mut Model,
+    rh: RegionHandle,
+    point: crate::layout::Point,
+) {
+    let Some(owner) = model.arena.region(rh).map(|r| r.owner) else {
+        return;
+    };
+    let owner_id = model.frame_id(owner);
+    let data = model.region_data.entry(rh).or_default();
+    if !data.anchors.is_empty() {
+        return;
+    }
+    data.anchors = vec![Anchor::new(point, owner_id, point, 0.0, 0.0)];
     model.touch_layout();
 }
 

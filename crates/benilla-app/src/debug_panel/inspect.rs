@@ -109,6 +109,18 @@ type EntityLightReadout = (
 pub(super) struct InspectStores<'w, 's> {
     stores: Query<'w, 's, &'static ObjectStore>,
     kinds: Query<'w, 's, &'static crate::net::NetEntity>,
+    /// Every pickable part with its draw verdict, for the card's `parts alive` line: a prop
+    /// spawned twice reads twice its model's batch count here, and nowhere else.
+    objects: Query<
+        'w,
+        's,
+        (
+            &'static benilla_world::interact::WorldObject,
+            &'static bevy::camera::visibility::ViewVisibility,
+            &'static GlobalTransform,
+            Has<benilla_world::billboard::BillboardCard>,
+        ),
+    >,
     collision: Query<'w, 's, GoCollisionReadout>,
     lit: Query<'w, 's, EntityLightReadout>,
     motion: Query<'w, 's, MotionReadout>,
@@ -232,6 +244,33 @@ pub(super) fn inspect_ui(
         .entity
         .and_then(|e| stores.tags.get(e).ok())
         .map(|t| format!("tag {}", benilla_world::mesh_tag::describe(t.0)));
+    // The duplicate readout: every live part naming this same object, and how many of them
+    // drew this frame. A doodad has one part per render batch; a doubled placement shows twice
+    // that here — the census the FPS probe prints as `orphan_parts=`, at the cursor.
+    let parts_line = {
+        let (mut alive, mut drawn) = (0usize, 0usize);
+        let mut cards: Vec<String> = Vec::new();
+        for (w, vv, gt, card) in stores.objects.iter() {
+            if w.kind == obj.kind && w.id == obj.id {
+                alive += 1;
+                drawn += usize::from(vv.get());
+                if card {
+                    // A glow card's live world scale — the placement scale times the bone's
+                    // pulse; a doubled or squared pulse reads here.
+                    cards.push(format!("{:.2}", gt.compute_transform().scale.x));
+                }
+            }
+        }
+        if cards.is_empty() {
+            format!("parts alive {alive}, drawn {drawn}")
+        } else {
+            format!(
+                "parts alive {alive}, drawn {drawn}, cards {} (scale {})",
+                cards.len(),
+                cards.join(" ")
+            )
+        }
+    };
     let (stores, kinds, collision, lit, motion, go_anims) = (
         &stores.stores,
         &stores.kinds,
@@ -592,6 +631,7 @@ pub(super) fn inspect_ui(
     if let Some(line) = &tag_line {
         lines.push(line.clone());
     }
+    lines.push(parts_line.clone());
     lines.push(format!("{:.1} yd away", mouseover.distance));
 
     // The inspector owns left-click while armed (player::control suppresses left-orbit during inspect),

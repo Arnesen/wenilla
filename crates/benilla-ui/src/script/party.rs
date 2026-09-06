@@ -275,7 +275,7 @@ impl super::UiScript {
         let now = clock(lua);
         let mut model = self.model_mut();
         if we_lead {
-            if model.ready_check.deadline.is_some() && model.ready_check.unanswered.is_empty() {
+            if model.ready_check.deadline.is_some() && !ready_check_pending_online(&model) {
                 ready_check_force_close(lua, &mut model);
             }
         } else {
@@ -283,20 +283,36 @@ impl super::UiScript {
         }
     }
 
-    /// One member's answer, forwarded to the leader (`{guid, status}`, decision 1989): the
-    /// member's "has not answered" flag clears (`0x4ba40e`), and once nobody is left pending the
-    /// check closes at once (`0x4ba4ce` → the worker) rather than at the deadline.
-    ///
-    /// **INFERRED, pending wow-re:** the flag clears on ANY answer, ready or not — the flag's
-    /// meaning is "has not answered yet" (its writer census), and the summary the reference
-    /// prints is headed "AFK", not "not ready". The polarity of the store at `0x4ba40e` against
-    /// the wire byte is dispatched for a byte read; `ready` is carried here so that one line
-    /// changes if the answer says otherwise.
-    pub fn ready_check_answered(&mut self, guid: u64, _ready: bool) {
+    /// One member's answer, forwarded to the leader (`{guid, status}`, decisions 1989/1997).
+    /// The handler's leader arm (`0x4ba360`, wow-re `ui/scratch/readycheck-response-store.md`):
+    /// the record's guid is matched against the roster entry in full (`0x4ba3f9`/`0x4ba405`),
+    /// and a match stores **the constant 0** into the "has not answered" flag whatever the status
+    /// byte says (`0x4ba40e`; `ecx` is zeroed before the loop and never written) — so any answer,
+    /// ready or not, clears the member. The status byte gates one thing: a `0` prints
+    /// `RAID_MEMBER_NOT_READY` ("%s is not ready") for that member at arrival (`0x4ba414`), the
+    /// same raw-`_G` → format → `CHAT_MSG_SYSTEM` path as the summary. Then the close test: once
+    /// no member is both pending and ONLINE the check closes at once (`0x4ba4ce` → the worker)
+    /// rather than at the deadline — an offline member who never answered does not hold the
+    /// check open, and is still listed as AFK when it closes.
+    pub fn ready_check_answered(&mut self, guid: u64, ready: bool) {
         let lua = self.lua();
         let mut model = self.model_mut();
+        let Some(member) = model.party.raid.iter().find(|m| m.guid == guid) else {
+            return; // an unmatched guid writes nothing (`0x4ba491`)
+        };
+        let name = member.name.clone();
         model.ready_check.unanswered.retain(|g| *g != guid);
-        if model.ready_check.deadline.is_some() && model.ready_check.unanswered.is_empty() {
+        if !ready {
+            let template: String = lua
+                .globals()
+                .get::<String>("RAID_MEMBER_NOT_READY")
+                .unwrap_or_default();
+            model
+                .ready_check
+                .lines
+                .push(template.replacen("%s", &name, 1));
+        }
+        if model.ready_check.deadline.is_some() && !ready_check_pending_online(&model) {
             ready_check_force_close(lua, &mut model);
         }
     }
@@ -916,6 +932,17 @@ fn ready_check_tick(lua: &Lua, model: &mut Model, now: f64) {
         raw("RAID_MEMBERS_AFK").replacen("%s", &names.join(", "), 1)
     };
     model.ready_check.lines.push(text);
+}
+
+/// The `0x322` handler's close predicate (`0x4ba498`–`0x4ba4cc`, decision 1997): a member still
+/// holds the check open only while they are BOTH flagged unanswered AND online (`[entry+0x18]`
+/// bit 0, the `SMSG_GROUP_LIST` online byte). An empty roster closes at once (`0x4ba3ea`).
+fn ready_check_pending_online(model: &Model) -> bool {
+    model
+        .ready_check
+        .unanswered
+        .iter()
+        .any(|g| model.party.raid.iter().any(|m| m.guid == *g && m.online))
 }
 
 /// The two C-side force-close sites (`0x4ba4d4`, `0x4bacb4`): the deadline is set to `now − 1`
@@ -1660,6 +1687,7 @@ mod tests {
         let row = |name: &str, guid: u64| crate::script::RaidMemberInfo {
             name: name.into(),
             guid,
+            online: true,
             ..Default::default()
         };
         PartyState {
@@ -1716,15 +1744,16 @@ mod tests {
         );
     }
 
-    /// An answer — ready or not — clears its member's flag; the answer that leaves nobody pending
-    /// closes the check at once (`0x4ba4d9`), well before the deadline.
+    /// An answer clears its member's flag; the answer that leaves nobody pending (and online)
+    /// closes the check at once (`0x4ba4d9`), well before the deadline. (A "not ready" answer
+    /// does the same and prints its line first — the test below.)
     #[test]
     fn an_answer_clears_its_member_and_the_last_one_closes_the_check_at_once() {
         let mut s = UiScript::new().unwrap();
         let party = raid_we_lead(&s);
         s.set_party(party);
         s.run("__benilla_now = 100 DoReadyCheck()").unwrap();
-        s.ready_check_answered(0xA11CE, false);
+        s.ready_check_answered(0xA11CE, true);
         assert!(
             s.take_ready_check_lines().is_empty(),
             "Bob is still pending"
@@ -1737,6 +1766,57 @@ mod tests {
         );
         s.run("__benilla_now = 130 CheckReadyCheckTime()").unwrap();
         assert!(s.take_ready_check_lines().is_empty());
+    }
+
+    /// A "not ready" answer prints `RAID_MEMBER_NOT_READY` for that member the moment it arrives —
+    /// and clears their flag all the same, because the leader arm stores the constant 0 whatever
+    /// the byte says (`0x4ba40e`, wow-re `readycheck-response-store.md`). A guid the roster does
+    /// not hold writes nothing.
+    #[test]
+    fn a_not_ready_answer_prints_its_line_and_still_clears_the_member() {
+        let mut s = UiScript::new().unwrap();
+        let party = raid_we_lead(&s);
+        s.run(r#"RAID_MEMBER_NOT_READY = "%s is not ready""#)
+            .unwrap();
+        s.set_party(party);
+        s.run("__benilla_now = 100 DoReadyCheck()").unwrap();
+        s.ready_check_answered(0xDEAD, false);
+        assert!(
+            s.take_ready_check_lines().is_empty(),
+            "an unmatched guid writes nothing"
+        );
+        s.ready_check_answered(0xA11CE, false);
+        assert_eq!(
+            s.take_ready_check_lines(),
+            vec!["Alice is not ready".to_string()]
+        );
+        s.run("__benilla_now = 130 CheckReadyCheckTime()").unwrap();
+        assert_eq!(
+            s.take_ready_check_lines(),
+            vec!["The following players are AFK: Bob".to_string()],
+            "Alice answered — not ready is not AFK"
+        );
+    }
+
+    /// An OFFLINE member who never answers does not hold the check open (`0x4ba4a7 test byte
+    /// [eax+0x18],dl`), but the summary that closes it still lists them: the worker walks the
+    /// flags with no online test (`0x4bb3a8`).
+    #[test]
+    fn an_offline_member_never_blocks_the_close_but_is_still_listed() {
+        let mut s = UiScript::new().unwrap();
+        let mut party = raid_we_lead(&s);
+        party
+            .raid
+            .iter_mut()
+            .for_each(|m| m.online = m.guid != 0xB0B); // Bob is offline
+        s.set_party(party);
+        s.run("__benilla_now = 100 DoReadyCheck()").unwrap();
+        s.ready_check_answered(0xA11CE, true);
+        assert_eq!(
+            s.take_ready_check_lines(),
+            vec!["The following players are AFK: Bob".to_string()],
+            "Alice's answer was the last ONLINE one, so the check closed and listed offline Bob"
+        );
     }
 
     /// The tick is leader-gated: a member's client arms the same 30 s on the open form and the

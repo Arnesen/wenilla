@@ -235,6 +235,9 @@ impl UiScript {
                     // (UIPanelButtonTemplate's gold/white/gray trio).
                     let mut state_font: Option<&FontObject> = None;
                     let mut state_color: Option<[f32; 4]> = None;
+                    // The current instance's OWN justify (`<…Font justifyH=>`, a local write on
+                    // the embedded font — [`crate::widget::ButtonState::normal_justify_h`]).
+                    let mut state_justify: Option<super::JustifyH> = None;
                     // `Button:SetFont` — the face/size/flags written on the button's own embedded
                     // fonts rather than on any object they inherit.
                     let mut button_font: Option<&crate::widget::ButtonFont> = None;
@@ -284,16 +287,30 @@ impl UiScript {
                             // shows its label. Every state-colour caller in our own UI ships the
                             // matching font object, so the two readings agree on all of them.
                             let highlighted = hovered || bs.locked_highlight;
-                            let (name, color) = if !bs.enabled && bs.disabled_font.is_some() {
-                                (bs.disabled_font.as_ref(), bs.disabled_color)
-                            } else if bs.enabled && highlighted && bs.highlight_font.is_some() {
-                                (bs.highlight_font.as_ref(), bs.highlight_color)
-                            } else {
-                                (bs.normal_font.as_ref(), bs.normal_color)
-                            };
+                            let (name, color, justify) =
+                                if !bs.enabled && bs.disabled_font.is_some() {
+                                    (
+                                        bs.disabled_font.as_ref(),
+                                        bs.disabled_color,
+                                        bs.disabled_justify_h,
+                                    )
+                                } else if bs.enabled && highlighted && bs.highlight_font.is_some() {
+                                    (
+                                        bs.highlight_font.as_ref(),
+                                        bs.highlight_color,
+                                        bs.highlight_justify_h,
+                                    )
+                                } else {
+                                    (
+                                        bs.normal_font.as_ref(),
+                                        bs.normal_color,
+                                        bs.normal_justify_h,
+                                    )
+                                };
                             state_font = name.and_then(|n| model.font_object(n));
                             button_font = bs.font.as_ref();
                             state_color = color;
+                            state_justify = justify;
                         }
                     }
                     // A TITLE REGION NEVER DRAWS. It is a hit rectangle, not a visual: wow-re
@@ -345,13 +362,22 @@ impl UiScript {
                         if !data.font_explicit.color {
                             data.vertex_color = fo.color.or(data.vertex_color);
                         }
-                        // The object's own justify (`<NormalFont inherits=… justifyH="LEFT"/>` —
-                        // how the ref left-aligns a ButtonText).
-                        if let Some(j) = fo.justify_h {
-                            data.justify.set_h(j);
+                        // The instance's justify: its own `<…Font justifyH=>` (a local write on
+                        // the embedded font, decision 1996), else the object's. Between frames
+                        // the label's own word carries the NORMAL instance's value
+                        // (`button::apply_normal_font`, the live link); a hover or a disable swaps
+                        // it here the way the client re-links the label to another instance
+                        // (`0x779810`) — behind the severance mask like every other axis, so a
+                        // label that `SetJustifyH`'d for itself keeps its own.
+                        if !data.font_explicit.justify_h {
+                            if let Some(j) = state_justify.or(fo.justify_h) {
+                                data.justify.set_h(j);
+                            }
                         }
-                        if let Some(j) = fo.justify_v {
-                            data.justify.set_v(j);
+                        if !data.font_explicit.justify_v {
+                            if let Some(j) = fo.justify_v {
+                                data.justify.set_v(j);
+                            }
                         }
                     }
                     // `Button:SetFont` sits BETWEEN the two: it is a local set on the button's own
@@ -474,9 +500,11 @@ impl UiScript {
             // This is what puts the world map's player arrow over the zone overlays: both frames
             // sit at `WorldMapFrame.level + 1`, the overlays are ARTWORK quads there, and the
             // arrow's callback drains after them (the director's report, and the case the carve
-            // was dispatched on). A model's own OVERLAY/HIGHLIGHT regions still draw over it.
+            // was dispatched on). A model's own OVERLAY/HIGHLIGHT regions still draw over it. The
+            // CALLBACK rank (1995) is what puts the scene after that layer's font strings too,
+            // whatever their link stamps — the content key alone sat at the text rank.
             let z = match &content {
-                QuadContent::ModelPane { .. } => zkey.content(order::DrawLayer::Artwork).raw(),
+                QuadContent::ModelPane { .. } => zkey.callback(order::DrawLayer::Artwork).raw(),
                 _ => zkey.raw(),
             };
             out.push(ExtractedQuad {

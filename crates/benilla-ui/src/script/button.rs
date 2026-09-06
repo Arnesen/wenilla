@@ -21,7 +21,8 @@ use mlua::{Lua, MultiValue, ObjectLike, Table, Value};
 
 use super::object::{as_f32, frame_handle_of};
 use super::region::region_wrapper;
-use super::{event, Model, RegionData};
+use super::{event, JustifyH, Model, RegionData};
+use crate::justify::Justify;
 use crate::order::DrawLayer;
 use crate::widget::{
     ButtonFont, ButtonState, FrameHandle, FrameKind, KindState, RegionHandle, RegionKind,
@@ -81,8 +82,57 @@ impl Slot {
     }
 }
 
-/// Point the ButtonText at the button's NORMAL font object, so the label's *query* surface answers
-/// what its paint already shows.
+/// The NORMAL embedded font's justify word — `[button+0x390]` (`+0x33c`, the normal `CSimpleFont`,
+/// plus its `+0x54` justify cell): the element-level `<NormalFont justifyH=>` when the template
+/// wrote one (a local write on that instance, severed from what it inherits), else what the
+/// instance inherits from its font object, else the ctor default (CENTER). The word the label
+/// adopter anchors by — decision 1996.
+fn normal_font_justify(model: &Model, bs: &ButtonState) -> Justify {
+    let mut word = Justify::default();
+    let inherited = || {
+        bs.normal_font
+            .as_deref()
+            .and_then(|n| model.font_object(n))
+            .and_then(|fo| fo.justify_h)
+    };
+    if let Some(j) = bs.normal_justify_h.or_else(inherited) {
+        word.set_h(j);
+    }
+    word
+}
+
+/// `CSimpleButton::SetFontString 0x778d20`'s tail — the ONE path a button label enters by,
+/// whether `SetText` made it (`0x778dc0` allocates, then calls this) or Lua handed one over
+/// (`SetFontString`): anchor it to the button **only if it has no anchor of its own** and **by the
+/// NORMAL font's justify word** (`[button+0x390]`: LEFT→LEFT, RIGHT→RIGHT, else CENTER — never
+/// the string's own `+0x120`, which on a fresh string is the ctor's CENTER), then apply the
+/// button's per-state font to it on the spot (`0x779810`). wow-re
+/// `system/ui/scratch/resize-bounds-and-button-fontstring.md` §5.2, every clause VERIFIED.
+///
+/// The word's source is the whole bug this fixes (decision 1996): a `UIMenuButtonTemplate` row
+/// has no `<ButtonText>` — its label is born from the reference's `UIMenu_AddButton` →
+/// `button:SetText(text)` — and its `<NormalFont inherits="GameFontNormal" justifyH="LEFT"/>` is
+/// the only thing that puts the label at the row's left edge. Reading the fresh string's own
+/// word instead seated every row CENTER, and with the shortcut string anchored RIGHT in a fixed
+/// 104-wide row, "Macro" ran into "/macro".
+fn adopt_label(model: &mut Model, owner: FrameHandle, rh: RegionHandle) {
+    let point = {
+        let Some(frame) = model.arena.frame(owner) else {
+            return;
+        };
+        let KindState::Button(bs) = &frame.kind_state else {
+            return;
+        };
+        super::region::justify_anchor_point(normal_font_justify(model, bs).0)
+    };
+    super::region::anchor_unanchored_at(model, rh, point);
+    apply_normal_font(model, owner);
+}
+
+/// Point the ButtonText at the button's NORMAL font — object and local justify — so the label's
+/// *query* surface answers what its paint already shows. The live link the reference's per-state
+/// applier `0x779810` → `0x770c60` installs: the instance's field block flows onto the label
+/// behind the label's own severance mask.
 ///
 /// Before this, the two disagreed. `extract` resolves the per-state font object every frame and
 /// overlays it onto a CLONE of the region's data (`extract.rs` l.114-122), so the label painted
@@ -105,23 +155,74 @@ impl Slot {
 /// either way, and no corpus site reads a label's font mid-state.
 ///
 /// `font::repaint` honours the severance mask, so a `<FontHeight>` or `SetTextColor` the label set
-/// for itself survives the link (the rule wow-re pinned in `font-object-lua-surface.md`).
-fn link_label_to_font_object(lua: &Lua, text: Option<RegionHandle>, name: Option<&str>) {
-    let Some(rh) = text else { return };
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-    let Some(name) = name else {
-        model.region_data.entry(rh).or_default().font_object = None;
-        return;
+/// for itself survives the link (the rule wow-re pinned in `font-object-lua-surface.md`), and the
+/// local justify goes behind the same mask.
+fn apply_normal_font(model: &mut Model, owner: FrameHandle) {
+    let (rh, name, local_justify) = {
+        let Some(frame) = model.arena.frame(owner) else {
+            return;
+        };
+        let KindState::Button(bs) = &frame.kind_state else {
+            return;
+        };
+        let Some(rh) = bs.text else {
+            return;
+        };
+        (rh, bs.normal_font.clone(), bs.normal_justify_h)
     };
     // An unregistered name is not an error here: `SetTextFontObject` already accepted it, and the
     // loader's own log-and-continue rule (0068) owns the reporting.
-    let Some(fo) = model.font_object(name).cloned() else {
-        return;
-    };
+    let fo = name.as_deref().and_then(|n| model.font_object(n).cloned());
     let d = model.region_data.entry(rh).or_default();
-    d.font_object = Some(name.to_string());
-    super::font::repaint(d, &fo);
+    match (&name, fo) {
+        (None, _) => d.font_object = None,
+        (Some(_), None) => {}
+        (Some(name), Some(fo)) => {
+            d.font_object = Some(name.clone());
+            super::font::repaint(d, &fo);
+        }
+    }
+    if let Some(j) = local_justify {
+        if !d.font_explicit.justify_h {
+            d.justify.set_h(j);
+        }
+    }
     model.touch_measure(rh);
+}
+
+/// Which of the button's three embedded font instances a `<…Font>` element writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LabelFont {
+    Normal,
+    Highlight,
+    Disabled,
+}
+
+/// `<NormalFont justifyH=>` / `<HighlightFont justifyH=>` / `<DisabledFont justifyH=>` — the
+/// loader-facing write of a per-state embedded font's own justify (`CSimpleButton::LoadXML
+/// 0x7788c0` → the `<Font>` loader `0x783c30` on `+0x33c`/`+0x3b8`/`+0x434`: a `<Font>`-typed
+/// element, so the attribute lands on the instance itself, severed from whatever it inherits).
+/// No 1.12 Lua verb writes this — the API trio sets the OBJECT each instance inherits, never its
+/// local fields — which is why it is crate-internal rather than a method. A label already
+/// adopted keeps its anchor (the reference decided that at adoption) while its own justify word
+/// follows the normal instance, as the live link propagates the write.
+pub(crate) fn set_label_font_justify_h_lua(
+    lua: &Lua,
+    wrapper: &Table,
+    which: LabelFont,
+    j: JustifyH,
+) -> mlua::Result<()> {
+    let owner = frame_handle_of(lua, wrapper)?;
+    with_button(lua, wrapper, |bs| match which {
+        LabelFont::Normal => bs.normal_justify_h = Some(j),
+        LabelFont::Highlight => bs.highlight_justify_h = Some(j),
+        LabelFont::Disabled => bs.disabled_justify_h = Some(j),
+    })?;
+    if which == LabelFont::Normal {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        apply_normal_font(&mut model, owner);
+    }
+    Ok(())
 }
 
 /// Run `f` over a frame's Button state under one short write borrow.
@@ -197,18 +298,22 @@ fn ensure_slot(lua: &Lua, this: &Table, slot: Slot) -> mlua::Result<u32> {
                 },
             );
             model.touch_layout(); // a region entered the layout gate's read set (decision 0740)
-                                  // A freshly built slot region gets the creation-path implicit anchor (decision 1310):
-                                  // the reference's C++ string setters SetAllPoints a fresh state texture outright
-                                  // (`0x778f9d`/`0x7790db` — fresh means zero anchors, so the conditional form is
-                                  // equivalent), and ButtonText creation runs the FontString post-step (`0x778b96` →
-                                  // `0x771480`), which seats a fresh label CENTER. The XML loader re-derives after
-                                  // applying authored `<Anchors>` (see `loader/widgets.rs`); an EXISTING slot region is
-                                  // never touched here — the get half of get-or-create changes no geometry.
-            super::region::implicit_creation_anchor(&mut model, rh);
             if let Some(frame) = model.arena.frame_mut(h) {
                 if let KindState::Button(bs) = &mut frame.kind_state {
                     slot.set(bs, rh);
                 }
+            }
+            // A freshly built slot region gets its creation-path implicit anchor (decision 1310)
+            // — an EXISTING slot region is never touched here; the get half of get-or-create
+            // changes no geometry. Which anchor depends on the slot: the reference's C++ string
+            // setters SetAllPoints a fresh state texture outright (`0x778f9d`/`0x7790db` — fresh
+            // means zero anchors, so the conditional form is equivalent), while a fresh LABEL is
+            // handed to the adopter (`SetText 0x778dc0` → `0x778d20`), which anchors it by the
+            // button's normal font and links it (decision 1996). The XML loader re-derives after
+            // applying authored `<Anchors>` (see `loader/widgets.rs`).
+            match slot {
+                Slot::Text => adopt_label(&mut model, h, rh),
+                _ => super::region::implicit_creation_anchor(&mut model, rh),
             }
             rh
         }
@@ -357,17 +462,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     //    (`0x77fd10(parent, 2, 1)` — layer id 2 in the client's own `.rdata 0x811a80` name table).
     //    Always, whatever it was parented to or drawn in before.
     //  · **it is anchored only if it has NO anchors of its own** (a scan of all nine
-    //    `anchorPoints` slots): LEFT/RIGHT/CENTER by the justify bits, to the matching point on
-    //    the button. That is exactly [`super::region::implicit_creation_anchor`]'s FontString arm,
-    //    which already transcribes the same `& 7` → LEFT(1)/RIGHT(4)/else-CENTER chain, so it is
-    //    reused rather than re-written. One stated difference: the reference reads the *button's*
-    //    Normal `CSimpleFont` justify word and ours reads the string's own — they agree in the
-    //    ordinary case, because our extract resolves the button's per-state font onto the label
-    //    every frame anyway.
-    //
-    // The fifth clause — apply the button's per-state font immediately — needs no code: our
-    // extract re-points the label at the current state's font object every frame
-    // ([`ButtonState::normal_font`]), so binding the label IS applying it.
+    //    `anchorPoints` slots): LEFT/RIGHT/CENTER by the justify bits of the **button's normal
+    //    font** (`[button+0x390]`), to the matching point on the button — [`adopt_label`], the
+    //    same `& 7` → LEFT(1)/RIGHT(4)/else-CENTER chain the FontString post-step runs, over the
+    //    other word. (It used to reuse the post-step and read the string's own word; the two
+    //    only agree when the normal font has no justify — decision 1996.)
+    //  · **the button's per-state font is applied immediately** (`0x779810`) — the same
+    //    [`adopt_label`] links the label to the normal font, so its query surface answers.
     m.set(
         "SetFontString",
         lua.create_function(|lua, args: MultiValue| {
@@ -438,7 +539,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             if let Some(r) = model.arena.region_mut(rh) {
                 r.draw_layer = DrawLayer::Artwork;
             }
-            super::region::implicit_creation_anchor(&mut model, rh);
+            adopt_label(&mut model, owner, rh);
             // A new label, a new owner and a possible new anchor — the layout's read set moved,
             // and the string's extents are what the button's own `GetTextWidth` reports.
             model.touch_layout();
@@ -504,11 +605,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetTextFontObject",
         lua.create_function(|lua, (this, font): (Table, Value)| {
             let name = super::font::resolve("SetTextFontObject", &font)?;
-            let text = with_button(lua, &this, |bs| {
-                bs.normal_font.clone_from(&name);
-                bs.text
-            })?;
-            link_label_to_font_object(lua, text, name.as_deref());
+            let owner = frame_handle_of(lua, &this)?;
+            with_button(lua, &this, |bs| bs.normal_font = name)?;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            apply_normal_font(&mut model, owner);
             Ok(())
         })?,
     )?;

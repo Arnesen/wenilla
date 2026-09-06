@@ -22,8 +22,8 @@
 //!
 //! ## The total order (most- to least-significant)
 //!
-//! `(stratum, frame level, draw layer, texture<fontstring, frame link-stamp, is-region, sub-level,
-//! declaration order)` — packed big-endian-by-priority into one sortable [`ZKey`] (`u64`), so the
+//! `(stratum, frame level, draw layer, batch rank quad<text<callback, frame link-stamp, is-region,
+//! sub-level, declaration order)` — packed big-endian-by-priority into one sortable [`ZKey`] (`u64`), so the
 //! whole render list is produced by one sort on the key. The `is-region` bit is benilla's own: the
 //! binary has no frame-level drawable (only regions draw), so it sits *below* the layer key purely
 //! to keep a frame's backdrop/scissor slot ahead of that frame's own regions.
@@ -214,14 +214,38 @@ impl Default for DrawLayer {
 const STRATUM_SHIFT: u32 = 60;
 const LEVEL_SHIFT: u32 = 44;
 const LAYER_SHIFT: u32 = 41;
-const FONTSTRING_SHIFT: u32 = 40;
+/// The batch RANK within a `(strata, level, layer)`: the three sub-arrays a layer batch carries and
+/// the order `0x76fb00` drains them — its quads (`+0x10`), its string batch (`+0x18`), then its
+/// render-callback list (`+0x1c`; wow-re `ui/scratch/model-frame-draw-order.md`, decision 1995).
+/// Two bits at 39..40, where the one font-string bit used to be; the link stamp below lost a bit
+/// for it (18, from 19 — the arena renumbers at the cap either way).
+const RANK_SHIFT: u32 = 39;
 const INSERTION_SHIFT: u32 = 21;
 const IS_REGION_SHIFT: u32 = 20;
 const SUBLEVEL_SHIFT: u32 = 12;
 const DECL_SHIFT: u32 = 0;
 
-pub(crate) const INSERTION_BITS: u32 = 19;
+pub(crate) const INSERTION_BITS: u32 = 18;
 const DECL_BITS: u32 = 12;
+
+/// Which of a layer batch's three sub-arrays an entry drains from — in the order `0x76fb00` drains
+/// them. The client keeps them as three arrays on one batch object (ctor `0x772e80`: quads at
+/// `+0x10`, the `CGxStringBatch` at `+0x18`, a `RENDERCALLBACKNODE` list at `+0x1c`) and empties
+/// them in this order, so within one `(strata, level, layer)` every texture precedes every font
+/// string, and every font string precedes every model scene (wow-re
+/// `ui/scratch/model-frame-draw-order.md`; decision 1995).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum BatchRank {
+    /// A texture quad — drained first.
+    Quad = 0,
+    /// A font string — the string batch, drained second.
+    Text = 1,
+    /// A `Model` frame's scene — the callback list, drained last. Registered for ARTWORK only
+    /// (`0x76d17f cmp ebx,2`), which is why [`ZKey::callback`] takes the layer it is asked for
+    /// but a model's is always `ARTWORK`.
+    Callback = 2,
+}
 
 /// The packed draw-order key: a single `u64` whose natural `Ord` *is* the client's total draw
 /// order. Build one with [`ZKey::frame`] or [`ZKey::region`]; sort ascending to get painter order.
@@ -271,7 +295,12 @@ impl ZKey {
             | (1u64 << IS_REGION_SHIFT)
             | (u64::from(layer.index()) << LAYER_SHIFT)
             | (sub_biased << SUBLEVEL_SHIFT)
-            | (u64::from(is_fontstring) << FONTSTRING_SHIFT)
+            | ((if is_fontstring {
+                BatchRank::Text
+            } else {
+                BatchRank::Quad
+            }) as u64)
+                << RANK_SHIFT
             | (u64::from(decl) << DECL_SHIFT);
         ZKey(bits)
     }
@@ -294,10 +323,29 @@ impl ZKey {
             self.0
                 | (1u64 << IS_REGION_SHIFT)
                 | ((layer.index() as u64) << LAYER_SHIFT)
-                // Sub-level 0 in the same +128 bias `region` uses, and the font-string bit: content
-                // is text, so it takes the same textures-draw-first slot a font string would.
+                // Sub-level 0 in the same +128 bias `region` uses, and the text rank: content is
+                // text, so it takes the same textures-draw-first slot a font string would.
                 | (128u64 << SUBLEVEL_SHIFT)
-                | (1u64 << FONTSTRING_SHIFT),
+                | ((BatchRank::Text as u64) << RANK_SHIFT),
+        )
+    }
+
+    /// The key a `Model` frame's **scene** draws at: its bare [`ZKey::frame`] slot promoted into
+    /// its region band at `layer` with the CALLBACK rank — after every texture and every font
+    /// string of that `(strata, level, layer)`, whatever their link stamps. That is the client's
+    /// own place for it: `0x76d160` registers the model's render callback into the layer batch,
+    /// and `0x76fb00` drains the callback list after the quads and the text. Two scenes in one
+    /// bucket keep the link-stamp order below the rank (registration order = FIFO), which the
+    /// bare slot's own insertion carries here (decision 1995).
+    #[inline]
+    #[must_use]
+    pub const fn callback(self, layer: DrawLayer) -> ZKey {
+        ZKey(
+            self.0
+                | (1u64 << IS_REGION_SHIFT)
+                | ((layer.index() as u64) << LAYER_SHIFT)
+                | (128u64 << SUBLEVEL_SHIFT)
+                | ((BatchRank::Callback as u64) << RANK_SHIFT),
         )
     }
 
@@ -328,7 +376,10 @@ pub struct ZParts {
     pub level: u16,
     /// The draw layer (0..=4, [`DrawLayer::index`]) — bucket-wide, above the frame (decision 0884).
     pub layer: u8,
-    /// `true` for a font string: all textures of a `(strata, level, layer)` precede all its text.
+    /// The batch rank: all textures of a `(strata, level, layer)` precede all its text, and all its
+    /// text precedes its model scenes ([`BatchRank`]).
+    pub rank: BatchRank,
+    /// `rank == Text` — kept for the readers that only ask the old question.
     pub is_fontstring: bool,
     /// The owning frame's link-stamp — its position in the client's intrusive bucket list.
     pub insertion: u32,
@@ -347,7 +398,12 @@ pub const fn unpack(raw: u64) -> ZParts {
         strata: ((raw >> STRATUM_SHIFT) & 0xf) as u8,
         level: ((raw >> LEVEL_SHIFT) & 0xffff) as u16,
         layer: ((raw >> LAYER_SHIFT) & 0x7) as u8,
-        is_fontstring: (raw >> FONTSTRING_SHIFT) & 1 == 1,
+        rank: match (raw >> RANK_SHIFT) & 0x3 {
+            0 => BatchRank::Quad,
+            1 => BatchRank::Text,
+            _ => BatchRank::Callback,
+        },
+        is_fontstring: (raw >> RANK_SHIFT) & 0x3 == 1,
         insertion: ((raw >> INSERTION_SHIFT) & ((1 << INSERTION_BITS) - 1)) as u32,
         is_region: (raw >> IS_REGION_SHIFT) & 1 == 1,
         sub_level: (((raw >> SUBLEVEL_SHIFT) & 0xff) as i16 - 128) as i8,
@@ -622,6 +678,26 @@ mod tests {
             b_art < a_text,
             "a later frame's texture still precedes an earlier frame's fontstring"
         );
+        // …and ALL its font strings precede a model's scene, whatever the link stamps: the scene
+        // drains from the layer batch's callback list, after its quads and its text (1995). The
+        // world map's arrow (a Model linked FIRST under WorldMapFrame) over the zone overlays and
+        // the area label (a later-linked ARTWORK texture and font string) is exactly this pair.
+        let earlier_model = ZKey::frame(Strata::Medium, 0, 9).callback(DrawLayer::Artwork);
+        let later_text = ZKey::region(Strata::Medium, 0, 11, DrawLayer::Artwork, 0, true, 0);
+        assert!(
+            later_text < earlier_model,
+            "an earlier-linked model's scene still draws after a later frame's ARTWORK text"
+        );
+        // The rank sits BELOW the layer: an OVERLAY quad still covers an ARTWORK scene.
+        let b_overlay = ZKey::region(Strata::Medium, 0, 11, DrawLayer::Overlay, 0, false, 0);
+        assert!(
+            earlier_model < b_overlay,
+            "the layer outranks the batch rank"
+        );
+        // Two scenes in one bucket: registration order, which the link stamp carries.
+        let later_model = ZKey::frame(Strata::Medium, 0, 12).callback(DrawLayer::Artwork);
+        assert!(earlier_model < later_model);
+        assert_eq!(unpack(earlier_model.raw()).rank, BatchRank::Callback);
 
         // A frame's own slot is benilla's backdrop/scissor hook: it sits BELOW the layer key, so
         // it precedes only its own regions, starting with its BACKGROUND.

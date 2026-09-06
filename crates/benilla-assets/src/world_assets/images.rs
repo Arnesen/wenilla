@@ -272,7 +272,27 @@ pub fn portrait_image(width: u32, height: u32, mut rgba: Vec<u8>) -> Image {
 /// slice must *wrap*, not clamp-stretch. The real client flags exactly this on the backdrop's
 /// `SetTexture` (arg2 pushed twice into the load descriptor — `backdrop-mechanism.md` §2, INFERRED
 /// U+V wrap). sRGB + no mips, same as the clamp sprite (UI art, one authored gamma round-trip).
+///
+/// Both axes wrap — the backdrop's bg tiles both ways, and its edge strips are atlas crops on
+/// their bounded axis, kept off the image edge by `inset_atlas_bleed`. A texture that tiles
+/// along ONE axis and spans the whole image on the other takes [`sprite_image_wrapped`] instead
+/// (decision 2000).
 pub fn sprite_image_tiled(width: u32, height: u32, rgba: Vec<u8>) -> Image {
+    sprite_image_wrapped(width, height, rgba, (true, true))
+}
+
+/// [`sprite_image`]'s decode with the address mode chosen **per axis**: `Repeat` where `wrap`
+/// says so, `ClampToEdge` elsewhere.
+///
+/// The reference's tiling idiom, `SetTexCoord(0, n, 0, 1)` on an n-slot strip, runs past the
+/// texture along one axis only; the other spans exactly `[0, 1]`. Sampling that bounded axis
+/// with `Repeat` is a bleed: bilinear filtering at `v = 0` weighs in the texture's LAST row, so a
+/// strip whose bottom row is opaque draws that row as a faint hairline along its own top edge —
+/// the stance shelf's middle piece (`ShapeshiftBarMiddle.blp`: rows 0-7 transparent, row 31
+/// opaque grey) wore a one-device-px grey line across the top of the strip at every four-form
+/// bar, over the world. Wrapping only the axis that actually tiles is the fix at the root: the
+/// bounded axis clamps at its edge, exactly as a stand-alone clamped sprite would (decision 2000).
+pub fn sprite_image_wrapped(width: u32, height: u32, rgba: Vec<u8>, wrap: (bool, bool)) -> Image {
     let mut image = Image::new(
         Extent3d {
             width,
@@ -284,9 +304,16 @@ pub fn sprite_image_tiled(width: u32, height: u32, rgba: Vec<u8>) -> Image {
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD,
     );
+    let mode = |repeat: bool| {
+        if repeat {
+            ImageAddressMode::Repeat
+        } else {
+            ImageAddressMode::ClampToEdge
+        }
+    };
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-        address_mode_u: ImageAddressMode::Repeat,
-        address_mode_v: ImageAddressMode::Repeat,
+        address_mode_u: mode(wrap.0),
+        address_mode_v: mode(wrap.1),
         mag_filter: ImageFilterMode::Linear,
         min_filter: ImageFilterMode::Linear,
         ..default()
@@ -440,5 +467,44 @@ mod tests {
             TextureFormat::Rgba8Unorm,
         );
         assert_eq!(image_gpu_bytes(&rgba), 84);
+    }
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    use super::*;
+
+    fn modes(image: &Image) -> (ImageAddressMode, ImageAddressMode) {
+        match &image.sampler {
+            ImageSampler::Descriptor(d) => (d.address_mode_u, d.address_mode_v),
+            other => panic!("a sprite carries its own sampler, got {other:?}"),
+        }
+    }
+
+    /// The stance shelf's case: tiles along its length, spans the whole texture in height — the
+    /// height axis must CLAMP, or the strip's opaque bottom row bleeds into its top edge.
+    #[test]
+    fn a_one_axis_tile_wraps_that_axis_and_clamps_the_other() {
+        let img = sprite_image_wrapped(2, 2, vec![0; 16], (true, false));
+        assert_eq!(
+            modes(&img),
+            (ImageAddressMode::Repeat, ImageAddressMode::ClampToEdge)
+        );
+        let img = sprite_image_wrapped(2, 2, vec![0; 16], (false, true));
+        assert_eq!(
+            modes(&img),
+            (ImageAddressMode::ClampToEdge, ImageAddressMode::Repeat)
+        );
+    }
+
+    /// The backdrop's case is unchanged: both axes wrap.
+    #[test]
+    fn the_tiled_sprite_still_wraps_both_axes() {
+        let img = sprite_image_tiled(2, 2, vec![0; 16]);
+        assert_eq!(
+            modes(&img),
+            (ImageAddressMode::Repeat, ImageAddressMode::Repeat)
+        );
+        assert_eq!(img.texture_descriptor.format, TextureFormat::Rgba8UnormSrgb);
     }
 }

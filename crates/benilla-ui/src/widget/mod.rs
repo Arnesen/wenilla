@@ -581,7 +581,7 @@ impl WidgetArena {
     /// `set_frame_level 0x76a4f0` remove-then-add a visible frame — an intrusive-list add appends.
     /// Called by the [`propagation`] mutators on exactly those transitions (module doc).
     pub(crate) fn resequence_to_tail(&mut self, h: FrameHandle) {
-        // The seq lives in a 19-bit field of the packed `ZKey`; unbounded show-bumping could
+        // The seq lives in an 18-bit field of the packed `ZKey`; unbounded show-bumping could
         // exhaust it over a marathon session, so at the cap renumber every frame in its current
         // order (order-preserving, so no visible change) instead of tripping ZKey's assert.
         if self.next_insertion >= (1 << crate::order::INSERTION_BITS) {

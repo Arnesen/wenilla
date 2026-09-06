@@ -788,3 +788,119 @@ fn set_font_string_anchors_only_an_unanchored_label() {
         ("CENTER", "CENTER", 0.0, 0.0)
     );
 }
+
+/// A label the button makes for itself (`SetText`'s lazy creator `0x778dc0`) or adopts
+/// (`SetFontString`) is anchored by the BUTTON's normal font justify, not by the fresh string's
+/// own ctor-default word: both funnel through `CSimpleButton::SetFontString 0x778d20`, whose
+/// unanchored-label leg reads `[button+0x390]` — the NORMAL embedded `CSimpleFont`'s justify —
+/// LEFT→LEFT / RIGHT→RIGHT / else CENTER, then links the label to that font (`0x779810`).
+/// wow-re `resize-bounds-and-button-fontstring.md` §5.2, VERIFIED; decision 1996.
+///
+/// `<NormalFont justifyH=>` is what writes that word in FrameXML (`UIMenuButtonTemplate`,
+/// `MailFrame.xml`'s RIGHT money button), so this is the chat menu's "Macro/macro" in miniature.
+#[test]
+fn a_lazily_made_label_is_anchored_by_the_normal_fonts_justify() {
+    let mut s = script();
+    s.set_screen_size(1024.0, 768.0);
+    let doc = crate::framexml::parse(
+        r#"<Ui>
+             <Font name="ProbeFont" font="Fonts\FRIZQT__.TTF" virtual="true">
+               <FontHeight><AbsValue val="12"/></FontHeight>
+             </Font>
+             <Font name="ProbeFontRight" inherits="ProbeFont" justifyH="RIGHT" virtual="true"/>
+             <Button name="LeftRowTemplate" virtual="true">
+               <Size><AbsDimension x="104" y="16"/></Size>
+               <NormalFont inherits="ProbeFont" justifyH="LEFT"/>
+               <HighlightFont inherits="ProbeFont" justifyH="LEFT"/>
+             </Button>
+             <Button name="RightRowTemplate" virtual="true">
+               <Size><AbsDimension x="104" y="16"/></Size>
+               <NormalFont inherits="ProbeFontRight"/>
+             </Button>
+             <Button name="PlainRowTemplate" virtual="true">
+               <Size><AbsDimension x="104" y="16"/></Size>
+               <NormalFont inherits="ProbeFont"/>
+             </Button>
+           </Ui>"#,
+    )
+    .expect("valid FrameXML");
+    let report = crate::loader::load(&s, &doc, &|_| None);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+
+    s.run(
+        r#"
+        left = CreateFrame("Button", "LeftRow", nil, "LeftRowTemplate")
+        left:SetPoint("CENTER", nil, "CENTER", 0, 0)
+        right = CreateFrame("Button", "RightRow", nil, "RightRowTemplate")
+        right:SetPoint("CENTER", nil, "CENTER", 0, 0)
+        plain = CreateFrame("Button", "PlainRow", nil, "PlainRowTemplate")
+        plain:SetPoint("CENTER", nil, "CENTER", 0, 0)
+        "#,
+    )
+    .unwrap();
+    // `<NormalFont>` alone creates no label — the reference's LoadXML never touches `+0x338` on
+    // that leg — so `GetFontString()` is nil until something sets text.
+    assert!(s
+        .eval::<bool>("return left:GetFontString() == nil")
+        .unwrap());
+
+    s.run(r#"left:SetText("Say") right:SetText("12") plain:SetText("Okay")"#)
+        .unwrap();
+    let point = |s: &UiScript, who: &str| -> (String, String, f64, f64) {
+        let (p, _rel, rp, x, y): (String, mlua::Value, String, f64, f64) = s
+            .eval(&format!("return {who}:GetFontString():GetPoint(1)"))
+            .unwrap();
+        (p, rp, x, y)
+    };
+    assert_eq!(
+        point(&s, "left"),
+        ("LEFT".into(), "LEFT".into(), 0.0, 0.0),
+        "the element-level justifyH on <NormalFont> anchors the lazy label LEFT"
+    );
+    assert_eq!(
+        point(&s, "right"),
+        ("RIGHT".into(), "RIGHT".into(), 0.0, 0.0),
+        "a justify the normal font INHERITS from its object counts the same"
+    );
+    assert_eq!(
+        point(&s, "plain"),
+        ("CENTER".into(), "CENTER".into(), 0.0, 0.0),
+        "no justify anywhere → the else leg, CENTER"
+    );
+    for who in ["left", "right", "plain"] {
+        assert_eq!(
+            s.eval::<i64>(&format!("return {who}:GetFontString():GetNumPoints()"))
+                .unwrap(),
+            1
+        );
+    }
+    // The link is applied on the spot: the label's own word and object answer the normal font's.
+    assert_eq!(
+        s.eval::<String>("return left:GetFontString():GetJustifyH()")
+            .unwrap(),
+        "LEFT"
+    );
+    assert!(s
+        .eval::<bool>("return left:GetFontString():GetFontObject() == ProbeFont")
+        .unwrap());
+
+    // Adoption reads the same word: an unanchored string handed to the LEFT button seats LEFT.
+    s.run(
+        r#"
+        bare = left:CreateFontString(nil, "OVERLAY")
+        bare:ClearAllPoints()
+        left:SetFontString(bare)
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        point(&s, "left"),
+        ("LEFT".into(), "LEFT".into(), 0.0, 0.0),
+        "SetFontString anchors by the normal font's justify too"
+    );
+
+    // A later `SetTextFontObject` re-links the normal font but does NOT re-anchor — the anchor
+    // was decided at adoption and is an ordinary anchor from then on.
+    s.run("left:SetTextFontObject(ProbeFontRight)").unwrap();
+    assert_eq!(point(&s, "left"), ("LEFT".into(), "LEFT".into(), 0.0, 0.0));
+}

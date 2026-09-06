@@ -27,7 +27,7 @@ use benilla_ui::script::UiScript;
 ///
 /// **A chain entry needs client data**, so a test that names one has to open with
 /// `benilla_formats::wow_data_or_skip!()`; [`BAG_UI`] is a list that always does.
-pub(super) fn load_ui(s: &UiScript, entry: &str) -> usize {
+pub(crate) fn load_ui(s: &UiScript, entry: &str) -> usize {
     load_entry(s, entry, false, false)
 }
 
@@ -291,6 +291,27 @@ pub(super) const MERCHANT_UI: &[&str] = &[
     "Interface\\FrameXML\\LocaleProperties.lua",
     "Interface\\FrameXML\\StaticPopup.xml",
     "Interface\\FrameXML\\GameTooltip.xml", // app load order: tooltip before merchant
+];
+
+/// The stock gossip window's dependencies in `benilla.toc` order — the list
+/// `panel_tests::shipped_gossip_frame_drives_end_to_end` and its siblings load by hand, shared so
+/// a feed-level test in `ui_gossip` can drive the reference's own `GossipFrame.xml` (1751).
+/// `UIParent.xml` brings the slot manager (`ShowUIPanel`/`HideUIPanel`) the window's OnEvent
+/// calls; `ScrollTemplates.xml` is our scroll kit the greeting pane inherits — a missing template
+/// is a loader *warning*, so an under-loaded list passes and silently loses the scrollbar.
+///
+/// Needs client data: open with `benilla_formats::wow_data_or_skip!()`.
+pub(crate) const GOSSIP_UI: &[&str] = &[
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
+    r"Interface\FrameXML\UIParent.xml",
+    "ScrollTemplates.xml",
+    r"Interface\FrameXML\UIPanelTemplates.lua",
+    r"Interface\FrameXML\UIPanelTemplates.xml",
+    r"Interface\FrameXML\GlobalStrings.lua",
+    r"Interface\FrameXML\BasicControls.xml",
+    r"Interface\FrameXML\LocaleProperties.lua",
+    r"Interface\FrameXML\StaticPopup.xml",
 ];
 
 pub(super) const LOOT_UI: &[&str] = &[

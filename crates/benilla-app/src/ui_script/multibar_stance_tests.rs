@@ -1638,3 +1638,81 @@ fn an_extra_bars_empty_well_keeps_its_bound_hotkey_label() {
     assert_eq!(label(&s, "MultiBarBottomLeftButton2"), "");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// **Decision 2000 — the shelf's middle strip tiles along its LENGTH only.**
+///
+/// Past two forms `ShapeshiftBar_Update` maps the middle strip `SetTexCoord(0, n-2, 0, 1)`
+/// (BonusActionBarFrame.lua l.198-206): one slot of art per extra form, repeated along u — the
+/// reference's tiling idiom — while v spans exactly the texture. The renderer serves such a strip
+/// from a repeat-sampled image, and until 2000 that image wrapped BOTH axes: bilinear filtering
+/// at the strip's top edge weighed in the texture's LAST row (`ShapeshiftBarMiddle.blp` row 31 —
+/// opaque grey; rows 0-7 transparent), so every four-form bar wore a one-device-px grey hairline
+/// along the top of its middle piece, over the world: 0.81-0.84× the world's luma over the strip
+/// against 1.00 over the clamp-sampled end caps, in a live four-form shot.
+///
+/// The seam this pins is the ask itself: the wrap the shelf's three pieces request of the
+/// renderer, derived from the UV mapping the VM extracts — u alone for the middle strip past two
+/// forms, nothing at three forms (`SetTexCoord(0, 1, 0, 1)` is the whole texture), and never for
+/// the end caps (atlas crops of `ShapeshiftBarEnds`).
+#[test]
+fn the_middle_strip_tiles_along_its_length_only() {
+    use super::extract::tiling_axes;
+    use crate::ui_pass::UvRect;
+    use benilla_ui::script::{ShapeshiftFormView, TexCoords};
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
+    show_bars(&s, &[]); // bars down: the shelf is the state under test
+
+    let form = |id: u32| ShapeshiftFormView {
+        spell_id: id,
+        texture: Some(format!("Interface\\Icons\\Stance_{id}")),
+        name: format!("Form {id}"),
+        active: id == 2457,
+        castable: true,
+        cooldown: None,
+    };
+    // Every drawn piece whose texture path ends in `piece`, as the wrap it asks the renderer for.
+    let wraps_of = |s: &UiScript, piece: &str| -> Vec<(bool, bool)> {
+        s.extract()
+            .into_iter()
+            .filter_map(|q| match q.content {
+                QuadContent::Texture {
+                    path: Some(p),
+                    tex_coords,
+                    ..
+                } if p.ends_with(piece) => Some(tiling_axes(&match tex_coords {
+                    Some(TexCoords::Rect(e)) => UvRect::from_tex_coords(e),
+                    Some(TexCoords::Corners(c)) => UvRect::from_corners(c),
+                    None => UvRect::FULL,
+                })),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // Four forms (a druid; a GM-learned warrior): the middle strip carries two slots and wraps
+    // along u ONLY. Both end caps stay clamped on both axes.
+    s.set_shapeshift_forms(vec![form(2457), form(71), form(768), form(2458)]);
+    s.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
+    s.resolve();
+    assert_eq!(
+        wraps_of(&s, "ShapeshiftBarMiddle"),
+        vec![(true, false)],
+        "four forms: the strip tiles along its length and clamps across it"
+    );
+    assert_eq!(
+        wraps_of(&s, "ShapeshiftBarEnds"),
+        vec![(false, false), (false, false)],
+        "the end caps are atlas crops and never tile"
+    );
+
+    // Three forms (the plain warrior): one slot, the whole texture — nothing tiles.
+    s.set_shapeshift_forms(vec![form(2457), form(71), form(2458)]);
+    s.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
+    s.resolve();
+    assert_eq!(wraps_of(&s, "ShapeshiftBarMiddle"), vec![(false, false)]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

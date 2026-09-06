@@ -45,6 +45,10 @@ pub struct WorldCensus<'w, 's> {
     /// Every spawned model submesh, with the facts that make a visible one accountable.
     parts: Query<'w, 's, CensusData>,
     emitters: Query<'w, 's, &'static ParticleEmitter>,
+    /// The placement registry, for the duplicate census (`orphan_parts=`): a placed part alive
+    /// that no registered placement owns. Optional for a viewer with no streamer.
+    placements: Option<Res<'w, crate::terrain_stream::Placements>>,
+    streamer: Option<Res<'w, crate::terrain_stream::TerrainStreamer>>,
     /// The exterior-scene gate's two terms (decision 0774) and what the cull actually did with
     /// them. Optional so the census works in a viewer that has not installed the portal system.
     claim: Option<Res<'w, CameraInteriorClaim>>,
@@ -74,6 +78,13 @@ pub struct WorldCensus<'w, 's> {
 pub struct CensusReport {
     /// Every model submesh that exists.
     pub submeshes: usize,
+    /// Placed (doodad/WMO) parts alive that no registered placement owns — the duplicate
+    /// census. Zero in a healthy world; a doubled prop is exactly one of these per part.
+    pub orphan_parts: usize,
+    /// The orphans by `(placement id, model label, parts)`, most parts first.
+    pub orphans: Vec<(u32, String, usize)>,
+    /// Resident tiles `(furnished, in window)`, off the streamer.
+    pub tiles: Option<(usize, usize)>,
     /// …and how many of them the render world will actually draw (`ViewVisibility`).
     pub drawn: usize,
     /// Visible submeshes per model subsystem — `(column name, visible, of-those-gated)` — in a
@@ -219,8 +230,24 @@ impl WorldCensus<'_, '_> {
         let (mut tagged, mut hidden, mut exempt_n, mut no_aabb) = (0, 0, 0, 0);
         let (mut submeshes, mut drawn) = (0usize, 0usize);
 
-        for (vis, part, gated, object, want, aabb, card, group, path_why) in self.parts.iter() {
+        let owned = self.placements.as_ref().map(|p| p.owned());
+        let mut orphans: HashMap<(u32, String), usize> = HashMap::new();
+        for (entity, vis, part, gated, object, want, aabb, card, group, path_why) in
+            self.parts.iter()
+        {
             submeshes += 1;
+            // The duplicate census: a doodad/WMO part is spawned by exactly one placement and
+            // recorded on it; one alive outside every placement's list outlived a respawn. The
+            // one population that lives outside the registry by design is the retained pass's
+            // fader EXILES (`static_gx::cull`, decision 1431): the feather-band respawns are
+            // recorded on their fader seed, not on the placement, and they name themselves.
+            let exile = path_why.is_some_and(|w| w.0 == "exile");
+            if let (Some(owned), Some(o), false) = (owned.as_ref(), object, exile) {
+                if matches!(o.kind, ModelKind::Doodad | ModelKind::Wmo) && !owned.contains(&entity)
+                {
+                    *orphans.entry((o.id, o.label.clone())).or_default() += 1;
+                }
+            }
             resident[kind_index(part.kind)] += 1;
             *why.entry(path_why.map_or("-", |w| w.0)).or_default() += 1;
             drawn += usize::from(vis.get());
@@ -249,6 +276,9 @@ impl WorldCensus<'_, '_> {
             }
         }
 
+        let orphan_parts = orphans.values().sum();
+        let mut orphans: Vec<_> = orphans.into_iter().map(|((i, l), n)| (i, l, n)).collect();
+        orphans.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
         let mut escaped: Vec<_> = escaped.into_iter().map(|((l, c), n)| (l, c, n)).collect();
         escaped.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
         let mut labels: Vec<_> = labels.into_iter().map(|((l, g), n)| (l, g, n)).collect();
@@ -283,6 +313,9 @@ impl WorldCensus<'_, '_> {
         CensusReport {
             submeshes,
             drawn,
+            orphan_parts,
+            orphans,
+            tiles: self.streamer.as_ref().map(|s| s.residency()),
             why: {
                 let mut v: Vec<_> = why.into_iter().collect();
                 v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
@@ -367,6 +400,7 @@ impl WorldCensus<'_, '_> {
 
 /// What the census reads off every model submesh — the query shape.
 type CensusData = (
+    Entity,
     &'static ViewVisibility,
     &'static ModelPart,
     Has<ExteriorScene>,

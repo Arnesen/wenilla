@@ -737,10 +737,16 @@ fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<VmMemo<
         // choice about what to photograph, not a default: `MultiActionBar_Update` is the same
         // function the row calls, so nothing here is a private door into the bars. Guarded because
         // this feed also runs with `WOW_CAPTURE_UI` unset, where no interface has been loaded.
-        let _ = script.run(
-            "SHOW_MULTI_ACTIONBAR_1 = 1 SHOW_MULTI_ACTIONBAR_2 = 1 \
-             if MultiActionBar_Update then MultiActionBar_Update() end",
-        );
+        // `WOW_DEMO_BOTTOM_BARS=0` leaves them down — the shipped default a player logs in to
+        // (1500), and the only state in which the stance SHELF draws at all: the manage pass
+        // hides the shelf art whenever the bottom-left bar is up, so a capture of the shelf
+        // (decision 2000's hairline lived on it) needs the bars where the player has them.
+        if std::env::var("WOW_DEMO_BOTTOM_BARS").as_deref() != Ok("0") {
+            let _ = script.run(
+                "SHOW_MULTI_ACTIONBAR_1 = 1 SHOW_MULTI_ACTIONBAR_2 = 1 \
+                 if MultiActionBar_Update then MultiActionBar_Update() end",
+            );
+        }
         script.fire_event("PLAYER_XP_UPDATE", vec![]);
         for token in ["player", "target"] {
             script.fire_event("UNIT_HEALTH", vec![ScriptValue::Str(token.into())]);
@@ -769,7 +775,7 @@ impl benilla_ui::script::TextMeasure for FixedWidthFont {
 }
 
 #[cfg(test)]
-mod test_ui;
+pub(crate) mod test_ui;
 
 /// The chat loader's two login events (wow-re chat-cache-grammar.md §8; `ui_chat::settings`):
 /// `UPDATE_CHAT_WINDOWS` once, then `UPDATE_CHAT_COLOR` for every registry entry. The reference's
@@ -912,6 +918,11 @@ mod group_loot_tests;
 
 #[cfg(test)]
 mod chat_tests;
+
+/// The chat bubble's `UIMenu` kit driven as a menu — the rows' label/shortcut anchoring
+/// (decision 1996), kept apart from `chat_tests` because it is the kit under test, not the window.
+#[cfg(test)]
+mod ui_menu_tests;
 
 /// The chat tab's options menu, end to end (decision 1589 / B246) — its own file because it needs
 /// the whole dropdown + colour-picker stack under `ChatFrame.xml`, where `chat_tests` deliberately

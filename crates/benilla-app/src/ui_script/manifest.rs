@@ -74,8 +74,61 @@ fn bootstrap_positions(script: &UiScript) -> Vec<String> {
         error!("ui_script: buff-duration layout: {e}");
         return vec![format!("buff-duration layout: {e}")];
     }
+    if let Err(e) = install_chat_plate_guard(script) {
+        error!("ui_script: chat plate guard: {e}");
+        return vec![format!("chat plate guard: {e}")];
+    }
     Vec::new()
 }
+
+/// **A stated repair of a reference defect, installed rather than edited in** (decision 1998):
+/// the chat plate's hover fade must survive a quick exit and re-entry.
+///
+/// The stock `FCF_OnUpdate` (FloatingChatFrame.lua l.809-987) keeps per-window state across
+/// ticks: `hover` (the mouse is over the window), `oldAlpha` (the alpha the plate returns to, and
+/// the gate the fade-in needs — `oldAlpha < DEFAULT_CHATFRAME_ALPHA`), and `hasBeenFaded`. Two of
+/// its arms disagree about who owns them. The leave arm clears `hover` only inside the textures'
+/// fade-out condition (l.913-918); the tabs' fade-out is queued with `FCF_ChatTabFadeFinished`
+/// as its `finishedFunc` (l.931/973), which fires `CHAT_FRAME_FADE_TIME` (0.15 s) later and sets
+/// `oldAlpha = nil` (l.991) — unconditionally. Re-enter the window inside that 0.15 s and the
+/// re-entry's hover-start arm has already run (it keeps `oldAlpha`, still valid); then the tab's
+/// fade completes, `oldAlpha` goes nil under a live hover, the plate arm (`chatFrame.oldAlpha
+/// and chatFrame.oldAlpha < DEFAULT_CHATFRAME_ALPHA`, l.873) never passes again, and every later
+/// leave skips the arm that would clear `hover` — so the hover-start re-read of `oldAlpha` (l.907)
+/// never runs either. The tab keeps fading in; the plate never does, for the rest of the session.
+/// `FCF_SetWindowAlpha` (the tab menu's opacity slider) reseats `oldAlpha` and is the one way
+/// out, which is the shape the director reported: an existing window shows no plate on hover, a
+/// new window (opened at `DEFAULT_CHATFRAME_ALPHA`, no fade needed) shows one, and "setting the
+/// background to zero once" makes the hover work from then on. The gesture that arms it is
+/// ordinary: the scroll buttons sit 32 units outside the window's left edge
+/// (`FCF_SetButtonSide`, l.1038) and the hover box reaches only 5 (`MouseIsOver(chatFrame, 45,
+/// -10, -5, 5)`), so a flick from the text to a scroll button and back does it.
+///
+/// The repair is the smallest one: the tab's finished callback leaves `oldAlpha` alone while the
+/// window is hovered (`hover` set), and behaves as the reference's when it is not. The Lua is the
+/// reference's own and the engine verbs it uses (`GetCursorPosition`, a texture's `GetAlpha`, the
+/// OnUpdate `elapsed`) are settled, so the trap is inferred to be 1.12's as well — a client-side
+/// A/B is the director's to run (`./run-ref-client.sh`; the record has the script). Installed from
+/// Rust for the durability hook's reasons above: `assets/ui` does not grow (1779), and a repair of
+/// a reference defect is not a `ContainerFrameAdapters`-class engine-difference shim (1751 §2).
+///
+/// Re-stated rather than wrapped (the reference body is two lines), so re-running it after a
+/// `ReloadUI` re-defines the same function instead of stacking. Guarded on the function's
+/// presence: the font-registry-only load has no chat files.
+pub(super) fn install_chat_plate_guard(script: &UiScript) -> Result<(), String> {
+    script.run(CHAT_PLATE_GUARD).map_err(|e| e.to_string())
+}
+
+const CHAT_PLATE_GUARD: &str = r#"
+if FCF_ChatTabFadeFinished then
+    function FCF_ChatTabFadeFinished(chatTab, chatFrame)
+        chatTab:Hide()
+        if not chatFrame.hover then
+            chatFrame.oldAlpha = nil
+        end
+    end
+end
+"#;
 
 /// **Apply `SHOW_BUFF_DURATIONS` to the buff bar once, at load** (1751 window 18).
 ///

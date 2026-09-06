@@ -212,6 +212,7 @@ pub use tabard::{
 };
 pub use worldmap_arrow::{ARROW_FOOTPRINT_PX, ARROW_MODEL};
 
+pub(crate) use button::{set_label_font_justify_h_lua, LabelFont};
 pub use inspect::{InspectView, UnitReach};
 pub use item_stats::{item_usable, ItemSetView, ItemTemplateView, PlayerReqState};
 pub use item_text::ItemTextState;

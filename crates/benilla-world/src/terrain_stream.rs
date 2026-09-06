@@ -173,7 +173,7 @@ struct TileState {
 /// own cross-tile dedup (a building straddling N tiles is spawned once and refcounted). The model assets
 /// are loaded by `Handle`, so the `AssetServer` dedups the *decode*; this dedups the *instance*.
 #[derive(Resource, Default)]
-struct Placements {
+pub(crate) struct Placements {
     /// By MDDF/MODF uniqueId: the placement + how many loaded tiles reference it.
     by_id: HashMap<u32, Placement>,
     /// Material dedup, so submeshes sharing a (texture, blend, sidedness, kind, fade-variant) share one
@@ -185,6 +185,18 @@ struct Placements {
     /// steady state). Kept by the register/handoff/release sites here; the spawner itself settles
     /// it as models land (and adds a WMO's props the moment they resolve).
     pending_spawns: usize,
+}
+
+impl Placements {
+    /// Every entity some registered placement owns — the set a despawn walks. The duplicate
+    /// census (`world_census`) subtracts it from the live `WorldObject` population: a placed
+    /// part alive outside this set outlived its registration, which is what a doubled prop is.
+    pub(crate) fn owned(&self) -> std::collections::HashSet<Entity> {
+        self.by_id
+            .values()
+            .flat_map(|p| p.entities.iter().copied())
+            .collect()
+    }
 }
 
 /// A shared placement: its resident model handle, world transform, and spawned submesh entities. Doodad

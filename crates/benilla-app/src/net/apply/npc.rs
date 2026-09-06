@@ -34,9 +34,11 @@ fn npc_gender(guid: u64, index: &GuidIndex, stores: &Query<&mut ObjectStore>) ->
 
 /// A gossip menu opened (`SMSG_GOSSIP_MESSAGE`): fill the [`GossipState`] the gossip feed
 /// (`crate::ui_gossip`) reads. A first visit to the text id sends the ask-once
-/// `CMSG_NPC_TEXT_QUERY` and the menu **stays closed until [`npc_greeting`] answers it** (B292's
-/// hold — the mechanics and the reference law live on [`GossipState::open_menu`]); a revisit
-/// serves from the cache and opens right away. [`gossip_complete`] closes it.
+/// `CMSG_NPC_TEXT_QUERY` and **the feed fires nothing until [`npc_greeting`] answers it** — a
+/// hidden frame stays hidden, an open one keeps its previous menu painted (B292's hold and
+/// 1994's no-event edge; the mechanics and the reference law live on
+/// [`GossipState::open_menu`]); a revisit serves from the cache and repaints right away.
+/// [`gossip_complete`] closes it.
 ///
 /// The greeting is **drawn here**, not at the packet — this is the reference's own moment for it
 /// (`0x4e2010`), and the draw needs both this NPC's gender ([`npc_gender`]) and a fresh roll.

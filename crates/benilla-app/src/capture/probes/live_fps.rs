@@ -642,8 +642,26 @@ fn drive_live_fps(
                     )
                 })
                 .unwrap_or_default();
+            let tiles = seen
+                .tiles
+                .map(|(f, w)| format!(" tiles={f}/{w}"))
+                .unwrap_or_default();
+            if !seen.orphans.is_empty() {
+                let top: Vec<String> = seen
+                    .orphans
+                    .iter()
+                    .take(8)
+                    .map(|(id, label, n)| format!("#{id} {label} x{n}"))
+                    .collect();
+                info!(
+                    "FPS_PROBE orphan placed parts: {} across {} placements — {}",
+                    seen.orphan_parts,
+                    seen.orphans.len(),
+                    top.join("; ")
+                );
+            }
             let residency_line = format!(
-                " mats={} mats_parked={} meshes={} images={} uv={} tint={} views={} ui_batches={}{vis}",
+                " mats={} mats_parked={} meshes={} images={} uv={} tint={} views={} ui_batches={}{vis}{tiles} orphan_parts={orphans}",
                 seen.mats,
                 seen.mats_parked,
                 seen.meshes,
@@ -680,6 +698,7 @@ fn drive_live_fps(
                         n[0], n[1], n[2], n[3]
                     )
                 },
+                orphans = seen.orphan_parts,
             );
             println!(
                 "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={} active={} particles={} submeshes={} drawn={} streamed={} parked={} entities={}{rigs}{residency_line} px={}x{}{cpu}{sys}{present}{display}{gpu_line} occluded_frames={}{at_pin}{cam_pose}{gate}{sky}{ribbons}{culled}",

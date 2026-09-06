@@ -11,13 +11,18 @@
 //! guarded, never sent — decision 0081), and `CloseGossip` → a local clear (vanilla's client-side
 //! close sends no packet; verified against the 1.12 opcode set — there is no `CMSG_GOSSIP_CLOSE`).
 //!
-//! **The menu opens only with its greeting resolved** — a first visit to a text id keeps the frame
-//! closed for the query round trip instead of showing options over an empty page (B292). That is
-//! the reference's own law, VERIFIED at the bytes (wow-re `gossip-npctext-law.md` §4): its greeting
-//! write and `GOSSIP_SHOW` are adjacent and unconditional on one success path, every other exit of
-//! `0x4e2010` fires no event, so "gossip frame open with a blank greeting" is not a reachable
-//! state. [`snapshot`] encodes the hold; [`GossipState::open_menu`]/[`GossipState::text_arrived`]
-//! are the two wire edges that resolve it.
+//! **The menu opens only with its greeting resolved, and the hold fires nothing** — a first visit
+//! to a text id keeps the frame exactly as it was for the query round trip: hidden if it was
+//! hidden (never options over an empty page — B292, decision 1508), and **still painted with the
+//! previous menu if it was open** (a sub-menu's first visit repaints in place when its text lands,
+//! never hides and re-shows the window — decision 1994). Both are the reference's own law,
+//! VERIFIED at the bytes (wow-re `gossip-npctext-law.md` §1/§4): on a cache miss `0x4e2010` sets
+//! its select latch and returns — no greeting write, no event — and its greeting write and
+//! `GOSSIP_SHOW` are adjacent and unconditional on the one success path, so "gossip frame open
+//! with a blank greeting" is not a reachable state, and neither is "gossip frame hidden by a
+//! pending reply". [`GossipState::text_pending`] is the latch; [`feed_gossip`] fires nothing
+//! while it holds; [`GossipState::open_menu`]/[`GossipState::text_arrived`] are the two wire
+//! edges that set and resolve it.
 
 use std::collections::HashMap;
 
@@ -49,9 +54,10 @@ pub(crate) struct GossipState {
     /// The open menu's `NpcText` id (drives the text query / cache).
     pub(crate) text_id: u32,
     /// The greeting drawn for THIS menu-open, or `None` while its query is in flight — the state
-    /// [`snapshot`] holds the menu closed on (B292; module doc). A record that names no line
-    /// ("Missing gossip text!") never parks here: [`GossipState::resolve_greeting`] ends the
-    /// interaction instead, as the reference does.
+    /// [`GossipState::text_pending`] reads, on which the feed fires nothing and the drains refuse
+    /// selects (B292; module doc). A record that names no line ("Missing gossip text!") never
+    /// parks here: [`GossipState::resolve_greeting`] ends the interaction instead, as the
+    /// reference does.
     pub(crate) greeting: Option<String>,
     /// The selectable option rows (wire `GossipOption`: `index` echoed on select, `icon`, `coded`,
     /// `message`).
@@ -86,12 +92,21 @@ impl GossipState {
         select_greeting(blocks, npc_gender, greeting_roll()).map(str::to_string)
     }
 
+    /// The reference's text-pending latch (`[0xbbb670]`, wow-re `gossip-npctext-law.md` §1): a
+    /// session is latched but its greeting has not resolved — its `CMSG_NPC_TEXT_QUERY` is in
+    /// flight, or (`text_id == 0`) was never sent. While it holds, [`feed_gossip`] fires nothing
+    /// and both drains refuse every select (decisions 1508, 1994).
+    pub(crate) fn text_pending(&self) -> bool {
+        self.npc.is_some() && self.greeting.is_none()
+    }
+
     /// A gossip menu arrived (`SMSG_GOSSIP_MESSAGE`): latch the session. Returns `true` when the
     /// greeting still needs its `CMSG_NPC_TEXT_QUERY` (first visit to this text id) — the caller
-    /// sends it, and the menu stays closed until [`Self::text_arrived`] resolves it (B292's hold,
-    /// module doc). A cached record opens the menu right here; a `text_id` of 0 never queries and
-    /// never opens — the reference's `DBCache::Get` refuses id 0 before sending anything, so its
-    /// frame stays closed with option selects latched off, which is what our pending state is.
+    /// sends it, and the frame keeps whatever it shows until [`Self::text_arrived`] resolves it
+    /// (the hold, module doc). A cached record resolves the menu right here; a `text_id` of 0
+    /// never queries and never resolves — the reference's `DBCache::Get` refuses id 0 before
+    /// sending anything, so its frame stays as it was with option selects latched off, which is
+    /// what our pending state is.
     pub(crate) fn open_menu(
         &mut self,
         npc: u64,
@@ -258,9 +273,10 @@ const GOSSIP_ICON_TYPES: [&str; 14] = [
     "gossip",
 ];
 
-/// Build the Lua-facing snapshot from [`GossipState`] — `None` when no menu is open, **and while
-/// the greeting query is in flight**: the second `?` is B292's hold (module doc). The frame opens
-/// once, complete, when the text answers — never options over an empty page.
+/// Build the Lua-facing snapshot from [`GossipState`] — `None` when no menu is open. The second
+/// `?` is the hold's type-level edge (a `GossipMenu` always has its greeting — B292, module doc);
+/// [`feed_gossip`] gates on [`GossipState::text_pending`] before ever calling this, so a `None`
+/// it sees means no session, never "pending" — a pending frame keeps its last snapshot.
 fn snapshot(state: &GossipState) -> Option<GossipMenu> {
     state.npc?;
     Some(GossipMenu {
@@ -311,6 +327,27 @@ fn feed_gossip(
     let last = last.get(&script);
     let last_name = last_name.get(&script);
     let last_npc = last_npc.get(&script);
+    // The gossip NPC's name resolves through the NameCache (ask-once — the merchant feed's pattern),
+    // delivered as arg1 of GOSSIP_SHOW; `None`/empty while the query is in flight, and the diff below
+    // tracks it so a name-only landing still re-fires GOSSIP_SHOW to repaint the title. It rides an
+    // event arg rather than a `GossipMenu` field so no benilla-ui engine change is needed for the title.
+    // Asked ahead of the hold, so a first visit's name query goes out beside its text query rather
+    // than a round trip after it.
+    let npc_name = state
+        .npc
+        .and_then(|g| names.resolve(g, &commands).map(str::to_string));
+    // **The hold fires nothing** (decision 1994). While the greeting query is in flight the
+    // reference's handler has set its select latch and RETURNED — no greeting write, no event
+    // (wow-re `gossip-npctext-law.md` §1/§4) — so its frame keeps whatever it last painted:
+    // hidden if it was hidden, the previous menu if it was open, clicks refused (`drain_gossip`).
+    // A pending menu is therefore NOT a closed one: the VM keeps its last snapshot, `last` keeps
+    // its memory, and the text landing is a plain in-place `GOSSIP_SHOW` below. Reading the hold
+    // as a close (the snapshot going `Some → None`) hid the open window for the round trip and
+    // re-showed it when the text answered — the flash on a sub-menu's first visit, first visit
+    // only because the record cache serves every later one without a hold.
+    if state.text_pending() {
+        return;
+    }
     let mut fresh = snapshot(&state);
     // Expand the greeting's chat-text macros ($N/$B/$G/$<n>w) client-side, as the real client does.
     if let Some(greeting) = fresh.as_mut().map(|m| &mut m.greeting) {
@@ -323,22 +360,14 @@ fn feed_gossip(
             },
         );
     }
-    // The gossip NPC's name resolves through the NameCache (ask-once — the merchant feed's pattern),
-    // delivered as arg1 of GOSSIP_SHOW; `None`/empty while the query is in flight, and the diff below
-    // tracks it so a name-only landing still re-fires GOSSIP_SHOW to repaint the title. It rides an
-    // event arg rather than a `GossipMenu` field so no benilla-ui engine change is needed for the title.
-    let npc_name = state
-        .npc
-        .and_then(|g| names.resolve(g, &commands).map(str::to_string));
     let name_changed = *last_name != npc_name;
     // A different NPC while the menu is already open is a real close+open (decision 0096 /
     // [`crate::ui_session::npc_switched`]); a cross-window switch is handled by OnHide → CloseX on
-    // panel displacement (decision 0095). Switch is judged on the SHOWN menu's NPC, not the
-    // session's: a switch into a first-visit hold (open A → pending B) is a plain close now and a
-    // plain open when B's text answers — pairing them here would fire `GOSSIP_SHOW` on an empty VM
-    // menu, the blank frame B292 exists to make unreachable.
-    let shown_npc = if fresh.is_some() { state.npc } else { None };
-    let switched = npc_switched(*last_npc, shown_npc);
+    // panel displacement (decision 0095). Past the hold, `fresh` is `Some` exactly when a session
+    // is latched, so the shown menu's NPC is the session's — and a switch INTO a first-visit hold
+    // (open A → pending B) is judged here when B's text answers, as one close+open pair; nothing
+    // fires at the pending edge.
+    let switched = npc_switched(*last_npc, state.npc);
     if fresh == *last && !name_changed && !switched {
         return;
     }
@@ -355,22 +384,15 @@ fn feed_gossip(
         match (&*last, &fresh) {
             // Opened, or the greeting/options/name changed while open → (re)paint via GOSSIP_SHOW.
             (_, Some(_)) => script.fire_event("GOSSIP_SHOW", name_arg()),
-            // Closed.
-            (Some(_), None) => {
-                script.fire_event("GOSSIP_CLOSED", vec![]);
-                // When the close is a switch INTO a hold (open A → pending B), OnHide → CloseGossip
-                // queued a close intent for a session that must survive the wait — consume it, as
-                // the switched branch does, so the drain doesn't cancel pending B.
-                if state.npc.is_some() {
-                    let _ = script.take_gossip_close();
-                }
-            }
+            // Closed — the session is over (`clear`). OnHide → CloseGossip queues a close intent
+            // for a session already gone; the drain's clear is a no-op, so nothing to consume.
+            (Some(_), None) => script.fire_event("GOSSIP_CLOSED", vec![]),
             (None, None) => {}
         }
     }
     *last = fresh;
     *last_name = npc_name;
-    *last_npc = shown_npc;
+    *last_npc = state.npc;
 }
 
 /// Drain the Lua intents: a selected option → `CMSG_GOSSIP_SELECT_OPTION` (mapped to the wire option
@@ -386,10 +408,11 @@ fn drain_gossip(
     };
     for pos in script.take_gossip_selects() {
         let Some(npc) = state.npc else { continue };
-        // While the greeting query is in flight the menu isn't open (B292's hold) — refuse the
-        // select, as the reference does: its `SelectGossipOption` (`0x4e2320`) is silently refused
-        // while the text-pending latch `0xbbb670` is set (wow-re `gossip-npctext-law.md` §1).
-        if state.greeting.is_none() {
+        // While the greeting query is in flight — the frame may still show the previous menu
+        // (1994) — refuse the select, as the reference does: its `SelectGossipOption` (`0x4e2320`)
+        // is silently refused while the text-pending latch `0xbbb670` is set (wow-re
+        // `gossip-npctext-law.md` §1).
+        if state.text_pending() {
             debug!(
                 "ui_gossip: SelectGossipOption({pos}) while the text query is in flight — refused"
             );
@@ -416,8 +439,8 @@ fn drain_gossip(
     for pos in script.take_gossip_quest_selects() {
         let Some(npc) = state.npc else { continue };
         // Same session-pending rule as the option selects above (the latch there is the verified
-        // one; these rows belong to the same not-yet-open menu).
-        if state.greeting.is_none() {
+        // one; these rows belong to the same not-yet-resolved menu).
+        if state.text_pending() {
             debug!(
                 "ui_gossip: SelectGossipQuest({pos}) while the text query is in flight — refused"
             );
@@ -508,6 +531,254 @@ mod tests {
         let menu = snapshot(&state).expect("text landed — the menu opens now, complete");
         assert_eq!(menu.greeting, "The Alliance needs you!");
         assert_eq!(menu.options.len(), 1, "options open WITH the greeting");
+    }
+
+    // ── The hold fires nothing (decision 1994): the real feed, driven ─────────────────────────
+
+    /// A Lua event recorder for the two gossip events — what the VM saw, in order.
+    const RECORDER: &str = r#"
+        SEEN = {}
+        local f = CreateFrame("Frame")
+        f:RegisterEvent("GOSSIP_SHOW")
+        f:RegisterEvent("GOSSIP_CLOSED")
+        f:SetScript("OnEvent", function() table.insert(SEEN, event) end)
+    "#;
+
+    /// The real [`feed_gossip`] + [`drain_gossip`] over a VM — the [`crate::ui_quest`] harness
+    /// shape: a minimal `App` with the feed's resources, the script as the non-send resource,
+    /// the two systems in their plugin order. `prepare` seeds the VM (the recorder, or the stock
+    /// window); the receiver is what the drain sent.
+    fn feed_app(
+        prepare: impl FnOnce(&mut UiScript),
+    ) -> (App, crossbeam_channel::Receiver<ClientCommand>) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.insert_resource(NetCommands(tx))
+            .init_resource::<GossipState>()
+            .init_resource::<NameCache>()
+            .init_resource::<crate::world_state::WorldStates>()
+            .add_systems(Update, (feed_gossip, drain_gossip).chain());
+        let mut script = UiScript::new().unwrap();
+        prepare(&mut script);
+        app.insert_non_send_resource(script);
+        (app, rx)
+    }
+
+    fn state(app: &mut App) -> Mut<'_, GossipState> {
+        app.world_mut().resource_mut::<GossipState>()
+    }
+
+    /// One frame: run the feed, then what the VM saw — the recorder's `SEEN` (drained) and
+    /// `GetGossipText()` (`""` for nil).
+    fn tick(app: &mut App) -> (Vec<String>, String) {
+        app.update();
+        let s = app.world_mut().non_send_resource_mut::<UiScript>();
+        assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+        let seen = s.eval::<Vec<String>>("return SEEN").unwrap();
+        s.run("SEEN = {}").unwrap();
+        let text = s.eval::<String>("return GetGossipText() or ''").unwrap();
+        (seen, text)
+    }
+
+    fn record(line: &str) -> Vec<NpcTextBlock> {
+        vec![NpcTextBlock {
+            probability: 0.0,
+            male: line.into(),
+            female: String::new(),
+        }]
+    }
+
+    fn option(label: &str) -> Vec<GossipOption> {
+        vec![GossipOption {
+            index: 0,
+            icon: 0,
+            coded: false,
+            message: label.into(),
+        }]
+    }
+
+    /// The selects the drain actually sent, out of everything on the channel (the feed's own
+    /// ask-once name query rides it too).
+    fn selects_sent(rx: &crossbeam_channel::Receiver<ClientCommand>) -> usize {
+        rx.try_iter()
+            .filter(|c| matches!(c, ClientCommand::GossipSelectOption { .. }))
+            .count()
+    }
+
+    const GUARD: u64 = 0xF130_0000_0000_0007; // HIGHGUID_UNIT
+
+    /// **The hold fires nothing** (decision 1994) — the director's *"the whole window flashes
+    /// before it shows the content"* on a Stormwind guard's *"Where is …"* option, first click
+    /// only. The real feed is driven through the sequence the wire produces: the greeting menu
+    /// open from the cache, then the select's answer — a NEW `SMSG_GOSSIP_MESSAGE` on the SAME NPC
+    /// whose text id is a first visit, so the `CMSG_NPC_TEXT_QUERY` round trip — then its
+    /// `SMSG_NPC_TEXT_UPDATE`.
+    ///
+    /// Before 1994 the pending step fired `GOSSIP_CLOSED` (the snapshot went `Some → None` and
+    /// the feed read that as a close) and the landing fired `GOSSIP_SHOW`: `HideUIPanel` then
+    /// `ShowUIPanel` across a server round trip — the flash. First click only, because the record
+    /// cache serves the second visit with no hold. The reference fires nothing at the pending
+    /// step (wow-re `gossip-npctext-law.md` §1/§4): its frame keeps the previous menu painted,
+    /// selects refused, until the text answers — then one in-place repaint.
+    #[test]
+    fn the_hold_fires_nothing_a_pending_submenu_keeps_the_frame_painted() {
+        let (mut app, rx) = feed_app(|s| s.run(RECORDER).unwrap());
+
+        // The greeting menu, its text already cached: opens at once.
+        {
+            let mut st = state(&mut app);
+            st.remember_record(50, record("What are you looking for?"));
+            assert!(!st.open_menu(GUARD, 50, option("The bank"), Vec::new(), 0));
+        }
+        assert_eq!(
+            tick(&mut app),
+            (
+                vec!["GOSSIP_SHOW".to_string()],
+                "What are you looking for?".to_string()
+            )
+        );
+
+        // "The bank" is clicked; the answer is a new menu on the same NPC with a text id never
+        // seen — the query is owed, and for the whole round trip NOTHING fires: the first menu
+        // stays in the VM, and a click on one of its (stale) rows is refused, not sent.
+        assert!(
+            state(&mut app).open_menu(GUARD, 51, option("Goodbye"), Vec::new(), 0),
+            "first visit to the sub-menu's text: the query is owed"
+        );
+        for _ in 0..3 {
+            assert_eq!(
+                tick(&mut app),
+                (Vec::new(), "What are you looking for?".to_string()),
+                "the hold fires nothing — the previous menu stays painted"
+            );
+        }
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("SelectGossipOption(1)")
+            .unwrap();
+        let _ = tick(&mut app);
+        assert_eq!(
+            selects_sent(&rx),
+            0,
+            "a select during the hold is refused (the latch)"
+        );
+
+        // The text lands: one in-place repaint, never a close — and selects work again.
+        state(&mut app).text_arrived(51, record("The bank is north of here."), 0);
+        assert_eq!(
+            tick(&mut app),
+            (
+                vec!["GOSSIP_SHOW".to_string()],
+                "The bank is north of here.".to_string()
+            )
+        );
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("SelectGossipOption(1)")
+            .unwrap();
+        let _ = tick(&mut app);
+        assert_eq!(selects_sent(&rx), 1);
+
+        // Controls. A real end of the session still closes …
+        state(&mut app).clear();
+        assert_eq!(
+            tick(&mut app),
+            (vec!["GOSSIP_CLOSED".to_string()], String::new())
+        );
+        // … and a first-ever visit from a closed frame still holds shut (B292) and opens once,
+        // complete, when its text answers.
+        assert!(state(&mut app).open_menu(GUARD, 52, option("Goodbye"), Vec::new(), 0));
+        assert_eq!(
+            tick(&mut app),
+            (Vec::new(), String::new()),
+            "hidden stays hidden through the hold"
+        );
+        state(&mut app).text_arrived(52, record("Yes?"), 0);
+        assert_eq!(
+            tick(&mut app),
+            (vec!["GOSSIP_SHOW".to_string()], "Yes?".to_string())
+        );
+    }
+
+    /// The same sequence through the stock `GossipFrame.xml` (the reference's own file, 1751) —
+    /// the symptom at the window: across the round trip it stays **visible**, plays no close kit,
+    /// and still lists the first menu's row; the text landing repaints in place, and since
+    /// `ShowUIPanel` early-returns on a visible frame (0096's own mechanism) that plays no open
+    /// kit either. Needs client data.
+    #[test]
+    fn stock_gossip_frame_stays_visible_through_a_first_visit_submenu() {
+        use benilla_ui::script::SoundRequest;
+        let _data = benilla_formats::wow_data_or_skip!();
+        let (mut app, _rx) = feed_app(|s| {
+            s.set_screen_size(1024.0, 768.0);
+            s.set_text_measurer(Box::new(crate::ui_script::FixedWidthFont(6.0)));
+            for f in crate::ui_script::test_ui::GOSSIP_UI {
+                crate::ui_script::test_ui::load_ui(s, f);
+            }
+            crate::ui_script::test_ui::load_ui(s, r"Interface\FrameXML\GossipFrame.xml");
+            s.run(RECORDER).unwrap();
+        });
+        // What the window shows: visible?, the greeting, the first row's label, the kits played.
+        let window = |app: &mut App| -> (bool, String, String, Vec<SoundRequest>) {
+            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            (
+                s.eval::<bool>("return GossipFrame:IsVisible()").unwrap(),
+                s.eval::<String>("return GossipGreetingText:GetText() or ''")
+                    .unwrap(),
+                s.eval::<String>("return GossipTitleButton1:GetText() or ''")
+                    .unwrap(),
+                s.take_sounds(),
+            )
+        };
+
+        {
+            let mut st = state(&mut app);
+            st.remember_record(50, record("What are you looking for?"));
+            st.open_menu(GUARD, 50, option("The bank"), Vec::new(), 0);
+        }
+        let _ = tick(&mut app);
+        assert_eq!(
+            window(&mut app),
+            (
+                true,
+                "What are you looking for?".to_string(),
+                "The bank".to_string(),
+                vec![SoundRequest::KitName("igQuestListOpen".into())]
+            ),
+            "the greeting menu opens with its kit"
+        );
+
+        // The click's answer holds on its text: the window must not so much as blink.
+        assert!(state(&mut app).open_menu(GUARD, 51, option("Goodbye"), Vec::new(), 0));
+        for _ in 0..3 {
+            let (seen, _) = tick(&mut app);
+            assert!(seen.is_empty(), "nothing fires during the hold: {seen:?}");
+            assert_eq!(
+                window(&mut app),
+                (
+                    true,
+                    "What are you looking for?".to_string(),
+                    "The bank".to_string(),
+                    Vec::new()
+                ),
+                "the window stays up, unchanged and silent, for the round trip — a hide here IS the flash"
+            );
+        }
+
+        // The text lands: repainted in place — new greeting, new row, no kit.
+        state(&mut app).text_arrived(51, record("The bank is north of here."), 0);
+        let (seen, _) = tick(&mut app);
+        assert_eq!(seen, vec!["GOSSIP_SHOW".to_string()]);
+        assert_eq!(
+            window(&mut app),
+            (
+                true,
+                "The bank is north of here.".to_string(),
+                "Goodbye".to_string(),
+                Vec::new()
+            ),
+            "an in-place repaint: ShowUIPanel on a visible frame is a no-op, no kit"
+        );
     }
 
     /// A revisit (record cached) opens immediately with no query — the half of B292 the reporter

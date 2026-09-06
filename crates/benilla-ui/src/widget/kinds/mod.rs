@@ -697,6 +697,25 @@ pub struct ButtonState {
     pub highlight_font: Option<String>,
     /// See [`ButtonState::normal_font`] — the disabled state.
     pub disabled_font: Option<String>,
+    /// The NORMAL embedded font's own justify — `<NormalFont justifyH=>` (or the `<NormalText>`
+    /// alias), a **local** write on the instance at `+0x33c` (`CSimpleButton::LoadXML 0x7788c0`
+    /// → the `<Font>` loader `0x783c30`), severed from whatever object the instance inherits and
+    /// surviving a later `SetTextFontObject`. `None` = the instance shows its object's justify.
+    ///
+    /// Two readers, and the first is the one that made this a field of the *button*: the label
+    /// adopter `CSimpleButton::SetFontString 0x778d20` — the tail `SetText`'s lazy creation and
+    /// the Lua adopter share — anchors an unanchored label to the button by exactly this word
+    /// (`[button+0x390]`: LEFT→LEFT, RIGHT→RIGHT, else CENTER), which is how a row of the
+    /// reference's `UIMenuButtonTemplate` (no `<ButtonText>`, `SetText` from Lua) hugs its left
+    /// edge. The second is the label's paint and query surface, reached through the live link
+    /// (`script::button::apply_normal_font`, `script::extract`). Decision 1996.
+    pub normal_justify_h: Option<crate::script::JustifyH>,
+    /// See [`ButtonState::normal_justify_h`] — `<HighlightFont justifyH=>`, the highlight instance
+    /// (`+0x3b8`). Paint only: the adopter reads the normal instance alone.
+    pub highlight_justify_h: Option<crate::script::JustifyH>,
+    /// See [`ButtonState::normal_justify_h`] — `<DisabledFont justifyH=>`, the disabled instance
+    /// (`+0x434`). Paint only.
+    pub disabled_justify_h: Option<crate::script::JustifyH>,
     /// `Button:SetFont(file, height [, flags])` — the button's own face/size/flags, set on the
     /// embedded font objects themselves rather than on any font object they inherit. See
     /// [`ButtonFont`] for why one record covers the client's three.
@@ -747,6 +766,9 @@ impl Default for ButtonState {
             normal_font: None,
             highlight_font: None,
             disabled_font: None,
+            normal_justify_h: None,
+            highlight_justify_h: None,
+            disabled_justify_h: None,
             font: None,
             normal_color: None,
             highlight_color: None,

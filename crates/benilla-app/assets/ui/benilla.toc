@@ -133,7 +133,10 @@ Interface\FrameXML\WorldFrame.xml
 # sixty-six globally-routed events and their arms. It sources LocaleProperties.lua itself. Its
 # OnUpdate also ticks FCF_OnUpdate, UnitPopup_OnUpdate, BattlefieldFrame_OnUpdate, the
 # battlefield-position ask (1980) and the ready-check timeout (1989) — call-time names, all of
-# them below. LowHealthFrame (parent WorldFrame, above) and OutOfControlFrame ride along.
+# them below. LowHealthFrame (parent WorldFrame, above) and OutOfControlFrame ride along —
+# created hidden and never shown: the one function that would flash them, PlayerStatus_OnUpdate,
+# has no caller in the image or the chain (wow-re, decision 1999). Dead code in 5875, kept as
+# the reference keeps it.
 # What stayed ours moved out: the window tab template and its settle + the placeholder icon
 # (ScrollTemplates.xml), 0561's bag verbs (ContainerFrameAdapters.xml), the script log's row
 # (ScriptLogFrame.xml), and three aliases in OptionsFrame.xml that answer the reference's three

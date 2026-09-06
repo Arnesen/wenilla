@@ -128,6 +128,23 @@ fn content_kind(c: &QuadContent) -> &'static str {
     }
 }
 
+/// Which axes of a texture region's UV mapping run PAST the texture — the reference's tiling idiom
+/// (`SetTexCoord(0, n, 0, 1)` repeats the art n times along u) — and so must sample with `Repeat`.
+/// Per axis, because the two answers are independent and the wrong one on the bounded axis is a
+/// visible bleed (decision 2000): with both axes on `Repeat`, a strip that spans exactly `[0, 1]`
+/// in v has its top pixel row filtered against the texture's LAST row. The stance shelf's middle
+/// piece keeps an opaque grey row there, and drew it as a hairline along its own top edge at
+/// every four-form bar. The same tolerance [`uv_clamp_window`] uses to tell a tiling axis from a
+/// whole-texture one, so the two laws cannot disagree about which axis is which.
+pub(crate) fn tiling_axes(uv: &UvRect) -> (bool, bool) {
+    let past = |axis: usize| {
+        uv.corners
+            .iter()
+            .any(|c| !(-0.001..=1.001).contains(&c[axis]))
+    };
+    (past(0), past(1))
+}
+
 /// The half-texel-inset UV window a **cropped** quad may sample — [`UiQuad::uv_clamp`]'s producer
 /// (decision 1608), `None` when neither axis needs one.
 ///
@@ -1557,12 +1574,14 @@ fn convert_entry(
             // stance shelf's middle carries one slot per extra form exactly that way
             // (stock `ShapeshiftBar_Update`). Clamp-sampled it smears the last column
             // across the extra width instead. Clamp/repeat bake into the `Image`, so this picks
-            // the tiled GPU image + cache entry, as the `Backdrop` arm's `tile` does below.
-            let tiled = uv
-                .corners
-                .iter()
-                .flatten()
-                .any(|c| !(-0.001..=1.001).contains(c));
+            // a wrapped GPU image + cache entry — wrapped on the tiling axis ALONE
+            // (`tiling_axes`, decision 2000): the other axis spans the whole texture, and a
+            // `Repeat` sampler there is a bleed, not a tile — bilinear at `v = 0` weighs in the
+            // texture's last row, which on `ShapeshiftBarMiddle` is opaque grey, so every
+            // four-form stance bar drew a one-px grey hairline along the top of its middle
+            // strip, over the world. The `Backdrop` arm below keeps both axes on: its bg tiles
+            // both ways and its edge crops never reach the image edge (`inset_atlas_bleed`).
+            let wrap = tiling_axes(&uv);
             let handle = match (path.as_deref(), assets.as_mut()) {
                 (Some(p), Some(a)) => {
                     // The tabard designer's emblem cells (1977): the reference installs a
@@ -1573,8 +1592,8 @@ fn convert_entry(
                         a.emblem_mask_texture(blp, images)
                     } else if circular {
                         a.portrait_texture(p, images)
-                    } else if tiled {
-                        a.sprite_texture_tiled(p, images)
+                    } else if wrap != (false, false) {
+                        a.sprite_texture_wrapped(p, wrap, images)
                     } else {
                         a.sprite_texture(p, images)
                     };
@@ -1810,7 +1829,7 @@ fn cursor_icon_quad(pos: Vec2, texture: Handle<Image>) -> UiQuad {
 /// cell.
 #[cfg(test)]
 mod uv_clamp_tests {
-    use super::{uv_clamp_window, UvRect};
+    use super::{tiling_axes, uv_clamp_window, UvRect};
 
     /// The bug's own numbers: `POIIcons` is 128², a world-map POI samples cell (7,1), and the
     /// window has to stop half a texel (`0.5/128`) inside it — a hair below texel row 16's centre
@@ -1831,6 +1850,46 @@ mod uv_clamp_tests {
     #[test]
     fn the_whole_texture_asks_for_no_window() {
         assert!(uv_clamp_window(&UvRect::FULL, (128, 128)).is_none());
+    }
+
+    /// The stance shelf's middle strip past two forms: `SetTexCoord(0, n-2, 0, 1)` tiles along u
+    /// and spans the whole texture in v — only u wraps. Both axes `Repeat` was the four-form
+    /// bar's hairline (decision 2000).
+    #[test]
+    fn a_one_axis_strip_wraps_that_axis_only() {
+        assert_eq!(
+            tiling_axes(&UvRect::from_tex_coords([0.0, 2.0, 0.0, 1.0])),
+            (true, false)
+        );
+        assert_eq!(
+            tiling_axes(&UvRect::from_tex_coords([0.0, 1.0, 0.0, 3.0])),
+            (false, true)
+        );
+    }
+
+    /// Three forms: `SetTexCoord(0, 1, 0, 1)` is the whole texture — nothing tiles, the plain
+    /// clamped sprite serves it. And a crop inside the texture is a cell, never a tile.
+    #[test]
+    fn a_bounded_mapping_tiles_nothing() {
+        assert_eq!(
+            tiling_axes(&UvRect::from_tex_coords([0.0, 1.0, 0.0, 1.0])),
+            (false, false)
+        );
+        assert_eq!(tiling_axes(&UvRect::FULL), (false, false));
+        assert_eq!(
+            tiling_axes(&UvRect::from_tex_coords([0.453125, 0.875, 0.0, 1.0])),
+            (false, false)
+        );
+    }
+
+    /// A mapping past the texture on both axes (a tiled backdrop bg) wraps both — the tiled
+    /// image's case, unchanged.
+    #[test]
+    fn a_two_axis_tile_wraps_both() {
+        assert_eq!(
+            tiling_axes(&UvRect::from_tex_coords([0.0, 4.0, 0.0, 2.5])),
+            (true, true)
+        );
     }
 
     /// `SetTexCoord(0, n, 0, 1)` on an n-slot strip is the reference's TILING idiom (the stance
