@@ -1,7 +1,7 @@
 //! The shipped **questgiver window** open/close sound, driven engine-only (no Bevy): the real
-//! `assets/ui/QuestFrame.xml` loaded behind `UiPanels.xml` and shown/hidden through the wire events.
-//! The window-sound convention's machine check for the quest arc (decision 0090), the sibling of the
-//! merchant/gossip/bag/loot sound tests.
+//! `Interface\FrameXML\QuestFrame.xml` loaded behind `UIParent.xml` and shown/hidden through the
+//! wire events. The window-sound convention's machine check for the quest arc (decision 0090), the
+//! sibling of the merchant/gossip/bag/loot sound tests.
 
 use benilla_ui::script::{QuestPanel, QuestState, ScriptValue, SoundRequest, UiScript};
 

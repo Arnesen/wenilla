@@ -22,8 +22,10 @@
 //! continuation** alone. The C dispatcher `0x4c2790(slot, flag)` takes the row only on `flag == 0`,
 //! which no Lua binding reaches — the row click is the C `CLootButton`'s own behaviour — while
 //! `LootSlot 0x4c2e70` passes `flag = 1`, whose arm refuses every slot but the one a bind confirm
-//! is pending for. benilla has no `CLootButton`, so the click arm is `BenillaTakeLootSlot(slot)`
-//! and `LootSlot` keeps the reference's meaning exactly.
+//! is pending for. benilla builds that widget — [`crate::widget::FrameKind::LootButton`], decision
+//! 1799 — so the row click's take runs where the reference runs it, in `script::button`'s click
+//! path under the same no-modifier gate; `BenillaTakeLootSlot` is the Lua-reachable entry to the
+//! same queue, and `LootSlot` keeps the reference's meaning exactly.
 //!
 //! The **coin pile is a synthesized client-side row** (first in the list when the loot carries gold):
 //! `LootSlotIsCoin` is true for it, its `item` text is the formatted money amount, and `LootSlot(1)`

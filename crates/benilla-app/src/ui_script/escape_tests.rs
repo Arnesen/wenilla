@@ -79,7 +79,9 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
     load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // BenillaMoney_Set, BankFrame's purse helper
+    // The reference's own `ContainerFrameItemButton_OnClick` reads `MerchantFrame:IsShown()`
+    // on the bag-slot click below; the coin rig this line used to name is gone (1937/1962).
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
 

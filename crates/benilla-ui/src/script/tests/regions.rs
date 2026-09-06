@@ -1043,11 +1043,10 @@ fn the_size_getters_take_the_author_first_then_the_natural_width_and_wrapped_hei
 
 /// The floor, and the state the reference does not have. `0x772930`/`0x772a60` end in a one-unit
 /// clamp, so a genuinely empty string reads back **1**, never `0.0`. But a measure that has not
-/// LANDED is not an extent at all — it is our async round-trip, which the reference has no
-/// equivalent of — and our own convergence drivers (`BenillaGossipRow_Resize` and the tab fit,
-/// which guard `if h <= 0 then return end` and re-run from `OnUpdate`) read that zero as
-/// "not yet". Flooring it would tell them to stop waiting. So: floor a known extent, not the
-/// absence of one.
+/// LANDED is not an extent at all — it is the host round-trip a VM with **no measurer installed**
+/// still takes, which the reference has no equivalent of. A caller that guards
+/// `if h <= 0 then return end` reads that zero as "not yet"; flooring it would tell them to stop
+/// waiting. So: floor a known extent, not the absence of one.
 #[test]
 fn an_empty_string_reads_back_one_unit_and_a_pending_measure_reads_back_zero() {
     let mut s = script();

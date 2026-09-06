@@ -398,8 +398,10 @@ fn the_level_line_names_the_family_and_is_untouched_without_one() {
     // level line at all", because our deleted `assets/ui/PetPaperDollFrame.xml` declared
     // `PetLevelText` with no `text=` and it started empty. The reference declares it
     // `text="Level level race class"` (stock `PetPaperDollFrame.xml:70`) — a design-time
-    // placeholder, and not a GlobalStrings key, so the loader's `text=` lookup falls through to the
-    // literal and that literal is what a player sees in this state, un-replaced. Both spellings say
+    // placeholder, and not a GlobalStrings key. **A real 1.12 client draws that literal too**:
+    // `CSimpleFontString::LoadXML` substitutes the raw attribute when `FrameScript_GetText` comes
+    // back empty (`771029`-`771032 mov eax,esi`), exactly as `Button::LoadXML 0x778c31` does — so
+    // this is fidelity, not the loader divergence this comment used to call it. Both spellings say
     // the same thing about the guard; this one says it about the file that ships.
     let drawn = with_family(None);
     assert!(

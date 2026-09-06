@@ -186,8 +186,9 @@ pub(super) fn chat_wrong_faction(chat_log: &mut ChatLog) {
 /// (wow-re `system/ui/ui.md` l.2459). Nothing on this path touches the chat composer.
 ///
 /// **This used to push into the chat feed**, as a stand-in from before benilla had an errors
-/// frame. It has had a real one for a long time (`assets/ui/ErrorsFrame.xml`, the ref
-/// `UIErrorsFrame` as a genuine `MessageFrame`), and the stand-in outlived its reason: vmangos
+/// frame. It has had a real one for a long time — the ref `UIErrorsFrame`, a genuine
+/// `MessageFrame` (ours until 1751's fourteenth window, the chain's own
+/// `Interface\FrameXML\UIErrorsFrame.xml` since) — and the stand-in outlived its reason: vmangos
 /// `Player::SetGameMaster` answers `.gm on|off` with **both** `SendSysMessage` and
 /// `SendNotification` (`Objects/Player.cpp:2676-2677`/`2701-2702`), so a client that sinks the
 /// notification into chat prints "GM mode is ON" **twice** where the reference prints it once.
@@ -382,8 +383,8 @@ mod tests {
     /// handler `0x401800` is "read the cstring, `mov edx,1`, `call 0x4945b0`" — event `0xe0`
     /// `UI_ERROR_MESSAGE`, the UIErrorsFrame toast — plus a console log, and it never reaches the
     /// chat composer. Benilla used to park the notice in the chat feed for want of an errors
-    /// frame; it has had one since `assets/ui/ErrorsFrame.xml`, and the stand-in was what printed
-    /// "GM mode is ON" twice.
+    /// frame; it has had one since our own `ErrorsFrame.xml` (the chain's `UIErrorsFrame.xml`
+    /// since 1751), and the stand-in was what printed "GM mode is ON" twice.
     ///
     /// The pair is the test: BOTH halves of one toggle, one chat line, one toast.
     #[test]

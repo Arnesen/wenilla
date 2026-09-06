@@ -1,5 +1,5 @@
-//! The shipped `assets/ui/ActionBar.xml`'s performance ("ping") meter — the tinted bar in the
-//! main bar's last empty recess — over the real files, never a stub.
+//! The stock `Interface\FrameXML\ActionBarFrame.xml`'s performance ("ping") meter — the tinted bar
+//! in the main bar's last empty recess — over the real files, never a stub.
 //!
 //! What these guard, in order: the ref geometry that puts the bar IN the recess (the whole point of
 //! the slice); the LOW-strata draw order that makes it show *through* the bar art instead of over

@@ -15,9 +15,10 @@
 //!   **`autoFocus` DOES focus on show** (corrected 2026-08-29, wow-re `editbox-selection-focus-law.md`
 //!   §6): the OnShow override tail-jumps `SetFocus` when nothing else holds focus, and the OnHide
 //!   mirror tail-jumps `ClearFocus`. The old "verified by absence" negative came from a `call`-only
-//!   census that could not see a tail-`jmp`. **Not implemented here yet** — see [`EditBoxState::
-//!   auto_focus`](crate::widget::EditBoxState::auto_focus) for why it waits on the attribute default.
-//!   The self-acquire-on-first-key half stands and is what this module implements.
+//!   census that could not see a tail-`jmp`. Both overrides are [`visibility_focus`] here, and the
+//!   construction default is `true` off the bytes (see
+//!   [`EditBoxState::auto_focus`](crate::widget::EditBoxState::auto_focus)). The
+//!   self-acquire-on-first-key half stands beside it.
 //! - **Routing (§2):** a focused box processes and CONSUMES every key/char (`return 1` past the
 //!   guard); an unfocused non-autoFocus box ignores input. The override fires ONLY the specialized
 //!   scripts (Enter/Escape/Space/Tab/TextChanged/TextSet/focus), never generic `OnKeyDown`/`OnChar`.

@@ -665,7 +665,7 @@ pub(super) const BAG_UI: &[&str] = &[
     // Our adapters over the reference's container files — the keyring tooltip wrapper and the
     // three bag verbs 0561 shadows (`OpenBackpack`/`CloseBackpack`/`CloseAllBags`). It has to be
     // AFTER `ContainerFrame.xml` and after the bar, which is why it is here and not up with
-    // UiPanels.xml.
+    // `UIParent.xml`.
     "ContainerFrameAdapters.xml",
     // `updateContainerFrameAnchors` measures every open bag against `BankFrame:GetRight()`
     // (ContainerFrame.lua l.505) on EVERY open and close, so the bank window is not optional

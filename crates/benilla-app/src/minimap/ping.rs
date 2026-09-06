@@ -37,7 +37,7 @@
 //! `MiniMapPing` `<Model>` it shows on `MINIMAP_PING`, re-seats every frame from
 //! `GetPingPosition()`, holds 5 s (`MINIMAPPING_TIMER`), "fades" 0.5 s through a `SetAlpha(255·t)`
 //! that clamps to full until the last ~2 ms, and hides. Since 1751's swap that file runs here
-//! verbatim (1974), and since decision 2008 the `<Model>` it shows **renders its own file**
+//! verbatim (1974), and since decision 2013 the `<Model>` it shows **renders its own file**
 //! (`Interface\MiniMap\Ping\MinimapPing.mdx`, through `crate::ui_models`): the spinner on its
 //! global-sequence clock, the static centre, the ring on the looping Stand — the model's own
 //! bones, weight tracks and additive quads, on the pane's private clock that runs only while the

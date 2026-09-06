@@ -20,12 +20,17 @@ fn text_quad(s: &UiScript) -> Option<String> {
 
 // ── §1/§2 focus acquisition + routing ───────────────────────────────────────────────────────
 
+/// **The self-acquire path**, path 2 of the two: a box that has had no show TRANSITION (created
+/// already visible, so `visibility_focus` never runs for it) still takes the keyboard on the first
+/// key or char event, and processes that same event. Path 1, focus-on-show, is
+/// [`an_autofocus_box_takes_the_keyboard_when_it_is_shown`] below — this test's name used to assert
+/// its absence, which stopped being true at decision 1686.
 #[test]
-fn autofocus_does_not_focus_on_show_but_self_acquires_first_event() {
+fn an_autofocus_box_self_acquires_on_the_first_event() {
     let mut s = script();
     s.run(r#"E = CreateFrame("EditBox", "E"); E:SetAutoFocus(true)"#)
         .unwrap();
-    // autoFocus does NOT focus on show — nothing owns the keyboard yet.
+    // No show transition has run for this box, so nothing owns the keyboard yet.
     assert!(!s.has_keyboard_focus());
     assert!(!s.eval::<bool>("return E:HasFocus()").unwrap());
 

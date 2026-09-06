@@ -23,7 +23,7 @@ use benilla_ui::script::UiScript;
 ///
 /// **Two of the templates under test are the REFERENCE's since 1860** — `FauxScrollFrameTemplate`
 /// and `TabButtonTemplate` were ours until the dead-copy sweep, and both now come off the player's
-/// chain from `Interface\FrameXML\UIPanelTemplates.xml`, seated below `UiPanels.xml` exactly as
+/// chain from `Interface\FrameXML\UIPanelTemplates.xml`, seated below `UIParent.xml` exactly as
 /// the manifest seats it. So this list carries the chain pair and the loader below has to be able
 /// to READ a chain entry, which a disk-only provider under `assets/ui` cannot.
 const FILES: &[&str] = &[
@@ -61,11 +61,11 @@ fn load_ui(script: &UiScript) {
 
 /// The line an addon writes, and the globals it reads on the next one.
 ///
-/// `TabButtonTemplate` (UiPanels.xml) is a `<Button>` carrying a `<Size>`, six `<Layers>` slices,
-/// a `<ButtonText name="$parentText">`, a `<HighlightTexture name="$parentHighlightTexture">`, the
-/// three state fonts and an `<OnUpdate>` — i.e. every decoration pass at once. Instantiating it as
-/// `BenillaTemplateProbeTab` must publish `BenillaTemplateProbeTab*`, and must publish nothing
-/// named after the template.
+/// `TabButtonTemplate` (`UIPanelTemplates.xml`) is a `<Button>` carrying a `<Size>`, six `<Layers>`
+/// slices, a `<ButtonText name="$parentText">`, a `<HighlightTexture
+/// name="$parentHighlightTexture">`, the three state fonts and an `<OnUpdate>` — i.e. every
+/// decoration pass at once. Instantiating it as `BenillaTemplateProbeTab` must publish
+/// `BenillaTemplateProbeTab*`, and must publish nothing named after the template.
 #[test]
 fn a_real_template_reaches_an_addon_through_create_frame() {
     let _data = benilla_formats::wow_data_or_skip!();

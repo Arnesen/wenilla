@@ -162,8 +162,8 @@ impl Loader<'_> {
             self.call(wrapper, "SetToplevel", true, dbg);
         }
         // `enableKeyboard="true"` — the XML half of the flag, which enables BOTH key kinds
-        // (`scripts-auto-enable.md` §1-2). The flag is now real and round-trips; key delivery is
-        // still not gated on it, which the method's own doc states rather than this warning.
+        // (`scripts-auto-enable.md` §1-2). The flag is real, and `script::keyboard`'s delivery
+        // walk is what reads it (1319).
         if el.attr_bool("enableKeyboard") {
             self.call(wrapper, "EnableKeyboard", true, dbg);
         }

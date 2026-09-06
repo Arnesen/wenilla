@@ -1,5 +1,5 @@
-//! The shipped `assets/ui/UIPanelTemplates.xml` + `assets/ui/OptionsFrameTemplates.xml` — the
-//! reference's SHARED widget kit, driven the way an addon drives it.
+//! The stock `Interface\FrameXML\UIPanelTemplates.xml` + our `assets/ui/OptionsFrameTemplates.xml`
+//! — the reference's SHARED widget kit, driven the way an addon drives it.
 //!
 //! **These are not tests of a window.** Nothing benilla ships instantiates a single template in
 //! either file: their only consumer is a third-party addon writing
@@ -238,7 +238,7 @@ fn a_panel_button_from_the_template_labels_and_paints() {
 
 /// `UIPanelCloseButton` — 8 call sites across 4 corpus addons, and the one template here whose
 /// whole point is its script: `HideUIPanel(this:GetParent())`, resolved at click time against
-/// `UiPanels.xml`.
+/// the chain's `UIParent.xml`.
 #[test]
 fn the_templated_close_button_hides_the_frame_it_sits_on() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -438,7 +438,7 @@ fn the_options_check_button_resolves_its_whole_inheritance_chain() {
 /// real 1.12.1 client has, read from `reference/1.12-globals.tsv`.
 ///
 /// Scoped to these two files on purpose: the rest of `assets/ui` is full of deliberately
-/// benilla-shaped template names (`BenillaScrollBarTemplate`, `BenillaMacroPanelButtonTemplate`,
+/// benilla-shaped template names (`BenillaScrollBarTemplate`, `BenillaScriptLogRowTemplate`,
 /// `OptionsRedButtonTemplate`), and a whole-tree sweep would be asserting something else. These
 /// two files make the opposite claim — *these are the reference's own names, which is why an addon
 /// can find them* — so that claim is the one worth gating. A template renamed to something

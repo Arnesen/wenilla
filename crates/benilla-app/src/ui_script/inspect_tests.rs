@@ -1,7 +1,7 @@
 //! The shipped **inspect window** driven end-to-end, engine-only (no Bevy): the real
-//! `assets/ui/InspectFrame.xml` loaded behind `Fonts.xml`/`UiPanels.xml`/`GameTooltip.xml` and fed a
-//! synthetic target snapshot + a foreign equipment view (decision 0631). `character_tests.rs`'s
-//! harness, turned onto the other paper doll.
+//! The reference's own `Blizzard_InspectUI` addon loaded behind
+//! `Fonts.xml`/`UIParent.xml`/`GameTooltip.xml` and fed a synthetic target snapshot + a foreign
+//! equipment view (decision 0631). `character_tests.rs`'s harness, turned onto the other paper doll.
 //!
 //! What these are here to falsify, in order of how quietly it could have shipped broken:
 //!

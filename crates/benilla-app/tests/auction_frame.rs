@@ -1,4 +1,5 @@
-//! Drives the REAL `assets/ui/AuctionFrame.xml` through the engine (decision 1511) — the auction
+//! Drives the reference's own `Blizzard_AuctionUI` addon through the engine (decision 1511; 1971
+//! put it on the player's chain) — the auction
 //! twin of `mail_frame.rs`: it loads the same file chain the app does (cut to the auction window's
 //! dependency prefix), pushes a synthetic `AuctionState`, opens the window with the app's own
 //! `AUCTION_HOUSE_SHOW`/`AUCTION_ITEM_LIST_UPDATE` events, and asserts the transcribed Lua actually

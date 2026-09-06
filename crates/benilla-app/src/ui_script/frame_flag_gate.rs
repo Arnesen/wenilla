@@ -23,10 +23,10 @@
 //! answers the same whichever way it came.
 //!
 //! **Divergences are an explicit list with a reason each, never a pattern.** [`KNOWN`] carries
-//! them, in both directions; a new one cannot hide inside a tolerance. The list is where the
-//! seven frames the reference makes interactive through *handlers we do not carry* are recorded —
-//! those want the handler (and its tooltip), never a bare `enableMouse="true"` that would swallow
-//! the click and give nothing back.
+//! them, in both directions; a new one cannot hide inside a tolerance. **It is empty today** —
+//! 1751's window migrations, 1795, 1970 and 1980 each retired a group, and the in-body notes are
+//! the record of what each one was. The array stays because an empty list is the thing that
+//! notices a divergence arriving.
 //!
 //! ## Four flags, and only four
 //!
@@ -68,8 +68,8 @@
 //!
 //! The reference side is **XML only**: a `SetID` or `EnableMouse` the reference makes from Lua at
 //! `OnLoad` is invisible here and reads as absent. That blind spot only ever under-reports — it
-//! can hide a divergence, never invent one — so nothing it misses turns into a false failure; the
-//! handful of frames it does hide are in `KNOWN` with that reason.
+//! can hide a divergence, never invent one — so nothing it misses turns into a false failure. It
+//! would be a `KNOWN` entry's reason if any frame still needed one.
 //!
 //! The whole module skips cleanly with no install — `_extracted_framexml/` is a gitignored
 //! Blizzard asset, like every other client-data test here.
@@ -157,16 +157,18 @@ impl std::fmt::Display for Flag {
     }
 }
 
-/// The accepted differences, in four groups: **seven frames the reference makes mouse-interactive
-/// through HANDLERS we do not carry**, the merchant rows whose mouse we take where it does not,
-/// the faux scroll panes we build from a different widget kind, and the ids the reference sets
-/// from Lua. Every entry is a judgement someone made; none of them is a tolerance.
+/// The accepted differences — **none, today**. The four groups this list once carried (the frames
+/// the reference made mouse-interactive through handlers we did not carry, the merchant rows, the
+/// faux scroll panes, the Lua-set ids) each retired with the window that owned them; the in-body
+/// notes below name the record for each. An empty array is not an oversight: it is what fails the
+/// gate the moment a new divergence appears, and every entry it ever holds is a judgement someone
+/// made, never a tolerance.
 const KNOWN: &[Known] = &[
-    // ── The reference has it, we do not: all seven are handler gaps, not flag gaps ─────────────
+    // ── The reference had it and we did not: seven handler gaps, not flag gaps (all retired) ───
     //
-    // In each of these the reference's mouse comes from an `<OnEnter>`/`<OnLeave>` pair whose body
-    // we have not built, and the interaction the player would notice is the TOOLTIP those handlers
-    // show — not the click-blocking the flag gives. Declaring `enableMouse="true"` here would make
+    // In each of these the reference's mouse came from an `<OnEnter>`/`<OnLeave>` pair whose body
+    // we had not built, and the interaction the player would notice was the TOOLTIP those handlers
+    // show — not the click-blocking the flag gives. Declaring `enableMouse="true"` would have made
     // the frame swallow the click and hand back nothing, which is worse than the gap.
     // `PetPaperDollFrameExpBar` RETIRED here (decision 1751's character-sheet window). It read
     // "the reference bar inherits TextStatusBar, whose OnEnter/OnLeave show the value text; ours is

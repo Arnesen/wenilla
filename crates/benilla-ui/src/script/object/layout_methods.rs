@@ -47,7 +47,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     )?;
     // GetPoint([n]) → point, relativeTo, relativePoint, xOfs, yOfs — the n-th (1-based, default
     // first) anchor. relativeTo is nil when the target is the screen root (the client returns
-    // UIParent there; benilla has no UIParent wrapper yet — stated, a consensus-list call).
+    // UIParent there; ours is the distinct `script::SCREEN` sentinel, which has no wrapper of its
+    // own — the arena's `UIParent` frame is a different handle — stated, a consensus-list call).
     m.set(
         "GetPoint",
         lua.create_function(|lua, (this, n): (Table, Option<i64>)| {
@@ -233,9 +234,13 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     )?;
 
     // GetEffectiveScale() — the frame's real effective scale (parentScale · ownScale, the arena's
-    // propagated product). benilla has no uiScale CVar, so the root factor is 1; a SetScale'd
-    // subtree (the windowed world map) reports its true factor, and the reference's
-    // `GetCursorPosition()/GetEffectiveScale()` transcriptions convert screen→local correctly.
+    // propagated product). The ROOT factor is 1, and that is not because benilla lacks a `uiScale`
+    // CVar (it has one, `cvars.rs`, default 0.9): the dial is applied at the RASTER seam — it sets
+    // how many UI units tall the virtual screen is, `768/uiScale` (`ui_script::seam_scale`, 0584) —
+    // rather than as a scale on UIParent. So every coordinate the VM hands Lua is already in those
+    // units, `GetCursorPosition()` included, and the reference's
+    // `GetCursorPosition()/GetEffectiveScale()` transcriptions convert screen→local correctly with
+    // a root of 1; a SetScale'd subtree (the windowed world map) still reports its true factor.
     m.set(
         "GetEffectiveScale",
         lua.create_function(|lua, this: Table| {

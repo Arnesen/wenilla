@@ -376,10 +376,11 @@ fn the_pages_close_button_sits_where_the_reference_seats_it_and_closes_the_windo
     // **"Close", not "CLOSE".** An XML `text=` attribute is a GlobalStrings LOOKUP, not a literal
     // (`loader::Loader::resolve_text`, wow-re `rf28-typed-widget-loadxml.md` l.36 —
     // `FrameScript_GetText 0x703bf0`), and `CLOSE = "Close"` (`GlobalStrings.lua:760`). This test
-    // read "CLOSE" while the page's list carried no `GlobalStrings.lua`: it was asserting our
-    // loader's miss-fallback (the LITERAL, a deliberate divergence for benilla-authored files),
-    // not the label the reference client draws. [`super::test_ui::CHARACTER_UI`] loads the
-    // player's own strings first, as the app does, so this is the real label now.
+    // read "CLOSE" while the page's list carried no `GlobalStrings.lua`: it was asserting the
+    // miss-fallback (the raw attribute), which is the REFERENCE's own arm too (`0x778c31` /
+    // `0x771032`), not the label a client with the strings loaded draws.
+    // [`super::test_ui::CHARACTER_UI`] loads the player's own strings first, as the app does, so
+    // this is the real label now.
     let label = page_quads(&s)
         .iter()
         .find_map(|q| match &q.content {

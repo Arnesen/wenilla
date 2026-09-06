@@ -1452,8 +1452,8 @@ fn a_frames_type_chain_matches_the_roster() {
         ("Minimap", "Minimap", &["Minimap", "Frame", "Region"]),
         // `PlayerModel` derives from `Model`, which is why `SetUnit` on a portrait pane finds
         // `SetCamera` too (wow-re `ui/scratch/widget-type-identity.md` §6) — and `DressUpModel`
-        // derives from it in turn: the roster's maximum depth, 5 (1969; the unbuilt `TabardModel`
-        // would be the other).
+        // derives from it in turn: the roster's maximum depth, 5 (1969; `TabardModel` is the
+        // other depth-5 chain — built by 1977).
         (
             "PlayerModel",
             "PlayerModel",

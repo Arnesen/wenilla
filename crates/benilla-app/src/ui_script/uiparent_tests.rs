@@ -1,4 +1,4 @@
-//! `assets/ui/UIParent.xml`'s addon-facing helpers, driven from Lua the way an addon drives them.
+//! Stock `Interface\FrameXML\UIParent.xml`'s addon-facing helpers, driven from Lua the way an addon drives them.
 //!
 //! The panel/ESC machinery in that file is covered by `panel_tests` and `escape_tests`; this is for
 //! the loose functions the reference's `UIParent.lua` also defines, which benilla itself may never

@@ -1,4 +1,4 @@
-//! The shipped `assets/ui/MacroFrame.xml` — the macro editor + its name/icon popup (decision
+//! The reference's own `Blizzard_MacroUI` addon — the macro editor + its name/icon popup (decision
 //! 0983), driven against the engine's own macro table.
 //!
 //! What these guard, end to end through the real file: the window loads clean in its real

@@ -1,9 +1,9 @@
 //! Shipped end-to-end tests for the chat window + input (decision 0084, the chat arc): the real
-//! `assets/ui/ChatFrame.xml` loaded through the engine loader, driven exactly as the app drives it —
-//! `add_chat_message` → `resolve`/`extract` (lines render in the pinned colors), the wheel → the Lua
-//! `OnMouseWheel` handler → `ScrollUp` (which freezes the fade), and the input EditBox's ENTER →
-//! `OnEnterPressed` → `SubmitChatInput` → `take_chat_input` (the app then parses it — see
-//! `crate::ui_chat`'s `parse_line` tests for the `/say`//`/yell`//`/w` mapping).
+//! `Interface\FrameXML\ChatFrame.xml` loaded through the engine loader, driven exactly as the app
+//! drives it — `add_chat_message` → `resolve`/`extract` (lines render in the pinned colors), the
+//! wheel → the Lua `OnMouseWheel` handler → `ScrollUp` (which freezes the fade), and the input
+//! EditBox's ENTER → `OnEnterPressed` → `SubmitChatInput` → `take_chat_input` (the app then parses
+//! it — see `crate::ui_chat`'s `parse_line` tests for the `/say`//`/yell`//`/w` mapping).
 
 use benilla_ui::script::{ExtractedQuad, QuadContent, UiScript};
 
@@ -378,11 +378,11 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
 
 // ── ChatTypeInfo: the addon-facing color table ────────────────────────────────────────────────
 
-/// `ChatTypeInfo` carries the shipped default chat colors twice: once in `assets/ui/ChatFrame.xml`
-/// for addons to read, and once in [`crate::ui_chat::default_color`] for our own feed to render.
-/// Both are the same wow-re byte table (`chat-color-table.md`, the static registry at
-/// `.rdata 0x804710`) — so this is the gate that makes the duplication safe: every kind we model
-/// must agree to the byte, and the table's shape (`sticky`/`id`) must be the reference's.
+/// `ChatTypeInfo` carries the shipped default chat colors twice: once in
+/// `Interface\FrameXML\ChatFrame.xml` for addons to read, and once in
+/// [`crate::ui_chat::default_color`] for our own feed to render. Both are the same wow-re byte
+/// table (`chat-color-table.md`, the static registry at `.rdata 0x804710`) — so this is the gate
+/// that makes the duplication safe: every kind we model must agree to the byte, and the table's shape (`sticky`/`id`) must be the reference's.
 #[test]
 fn chat_type_info_matches_the_host_color_table() {
     use crate::ui_chat::{default_color, ChatEventKind as K};

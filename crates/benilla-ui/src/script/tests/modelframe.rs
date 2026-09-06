@@ -242,8 +242,8 @@ fn the_string_setters_gate_their_argument_and_a_number_is_a_string() {
 /// - **no superset** — a name the reference does not have on a table must not resolve there
 ///   (1189: a name we have and the reference lacks routes an addon down a path the real client
 ///   never takes);
-/// - **the seven we deliberately do not build must stay absent**, so "unbuilt" cannot quietly
-///   become "stubbed" without this test being edited to say so.
+/// - **the `UNBUILT` set must stay absent** — it is empty since 2027, so "unbuilt" cannot
+///   quietly become "stubbed" without this test being edited to say so.
 #[test]
 fn the_two_model_tables_are_the_references_own() {
     /// `Model` — `CSimpleModel`, table `0x878948`, 23 entries, in table order.

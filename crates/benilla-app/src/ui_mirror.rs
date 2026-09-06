@@ -3,7 +3,7 @@
 //!
 //! The net bridge queues [`MirrorTimerEdge`]s and the drain fires the reference client's
 //! FrameScript events into the script VM — `MIRROR_TIMER_START` / `_PAUSE` / `_STOP`, the exact
-//! contract `assets/ui/MirrorTimer.xml` (the transcribed 1.12 `MirrorTimer1/2/3`) registers for.
+//! contract stock `Interface\FrameXML\MirrorTimer.xml` (`MirrorTimer1/2/3`) registers for.
 //! The bars themselves are the reference's: the frame stores the value and integrates
 //! `value + scale * elapsed` every OnUpdate, so a packet every few seconds is enough to paint a
 //! smooth countdown.

@@ -174,9 +174,10 @@ Interface\FrameXML\MoneyFrame.xml
 # It is groundwork rather than a window, and the windows it is groundwork FOR are named so the
 # next session does not have to re-derive it: stock `TradeFrame.xml` and `MailFrame.xml` both build
 # their amount entry from this template and call `MoneyInputFrame_SetMode`/`_GetCopper`/
-# `_SetCopper`/`_ClearFocus`/`_SetTextColor`/`_SetOnvalueChangedFunc` — six of the names below —
-# and neither can be sourced until they exist. (Trade still needs four ENGINE verbs beyond this:
-# `AddTradeMoney`, `GetCursorMoney`, `GetTradePlayerItemLink`, `GetTradeTargetItemLink`.)
+# `_SetCopper`/`_ClearFocus`/`_SetTextColor`/`_SetOnvalueChangedFunc` — six of the names below.
+# Both windows are migrated now: `MailFrame.xml` at l.897 and `TradeFrame.xml` at l.906, the
+# latter once 1966 bound the four engine verbs it also needed (`AddTradeMoney`,
+# `GetCursorMoney`, `GetTradePlayerItemLink`, `GetTradeTargetItemLink`).
 #
 # **TWO entries, and the `.lua` was missing.** This `.xml` declares only the template and does not
 # source its `.lua`; the reference's toc lists both (l.11-12). Listing the `.xml` alone brought the
@@ -489,8 +490,8 @@ Interface\FrameXML\MainMenuBarMicroButtons.xml
 Interface\FrameXML\BattlefieldFrame.xml
 # Minimap.xml + Minimap.lua: the cluster around the engine-rendered <Minimap> widget hole
 # (`crate::minimap` fills it), the zone text, the zoom buttons, the tracking / mail / meeting
-# stone / battlefield icons, and `MiniMapPing` — a <Model> this engine draws no pixels for; the
-# app's ping sprite (`minimap/ping.rs`) follows that frame's own show/hide and alpha, so the
+# stone / battlefield icons, and `MiniMapPing` — a <Model> that renders its own MinimapPing.mdx
+# since 2013; `minimap/ping.rs` keeps the pin, the click seat and the wire half, so the
 # 5 s lifetime is this file's, as the reference's is. After GameTooltip (the zone-text hover).
 # 0203's transcription is gone.
 Interface\FrameXML\Minimap.xml
@@ -579,8 +580,8 @@ Interface\FrameXML\ColorPickerFrame.xml
 # <Include>s its own blip templates (WorldMapFrameTemplates.xml) before the frames that inherit
 # them. Its player arrow is the Create/Position/Show/UpdateWorldMapArrowFrames family
 # (`script/worldmap_arrow.rs`), an anonymous Model pane the app draws as the minimap's arrow
-# sprite; its WorldMapPing is a MinimapPing.mdx Model pane this engine holds and draws nothing
-# into (named gap, 1980).
+# sprite; its WorldMapPing is the same MinimapPing.mdx Model pane, which draws its own file on
+# the map sheet since 2013 (closing the gap 1980 named).
 Interface\FrameXML\WorldMapFrame.xml
 # ══ THE CAST BAR — the reference's own, off the player's chain (1751) ══
 # `CastingBarFrame` + its Border/Flash/Spark/Text children, driven by the SPELLCAST_* events
@@ -964,7 +965,7 @@ Interface\FrameXML\BankFrame.xml
 # a `CSimpleFrame` and nothing else, so it is `FrameKind::Frame` and the route lines stay what the
 # reference makes them: plain `<Texture>` children rotated by an 8-argument `SetTexCoord`.
 #
-# Pulls only `TaxiFrame.lua`, and still needs only Fonts/UiPanels/GameTooltip (SetTooltipMoney),
+# Pulls only `TaxiFrame.lua`, and still needs only Fonts/UIParent/GameTooltip (SetTooltipMoney),
 # all loaded above — so it keeps its seat in the "NPC session windows grouped" cluster.
 Interface\FrameXML\TaxiFrame.xml
 # The stable-master window (decision 1676): the hunter's three-slot pet stable over the stable
@@ -1186,8 +1187,8 @@ Interface\FrameXML\TutorialFrame.xml
 # options family, the same chain `MainMenuBarMicroButtons` is deferred behind. All three columns
 # read clean because the file LOADS clean; what it needs is a sibling window, not a verb.
 #
-# Its CAMP/QUIT dialogs and their event driver HAVE moved out, to UiPanels.xml — the reference's
-# own homes (StaticPopup.lua l.564/586 for the dialogs, UIParent.lua l.304-315 for the three
-# events). The ESC menu never owned them; it was just where ours were first needed. That is one
-# less thing to move when the options family lands.
+# Its CAMP/QUIT dialogs and their event driver HAVE moved out — the dialogs to `StaticPopup.xml`,
+# the driver to `UIParent.xml`, the reference's own homes (StaticPopup.lua l.564/586 for the
+# dialogs, UIParent.lua l.304-315 for the three events), both stock since 1988. The ESC menu never
+# owned them; it was just where ours were first needed. That is one less thing to move when the options family lands.
 GameMenuFrame.xml

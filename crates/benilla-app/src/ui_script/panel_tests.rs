@@ -4,9 +4,9 @@ use benilla_ui::script::{
 };
 
 /// Load one manifest entry into `s`, panicking on any loader error and returning the frame count
-/// it materialized — the panel tests all load `UiPanels.xml` (decision 0084 §2's slot manager)
-/// before the panel frame(s) under test, exactly as `benilla.toc`'s own order does, so
-/// `ShowUIPanel`/`HideUIPanel` already exist when a frame's OnLoad/OnEvent references them.
+/// it materialized — the panel tests all load `Interface\FrameXML\UIParent.xml` (decision 0084 §2's
+/// slot manager) before the panel frame(s) under test, exactly as `benilla.toc`'s own order does,
+/// so `ShowUIPanel`/`HideUIPanel` already exist when a frame's OnLoad/OnEvent references them.
 ///
 /// This was a private disk-only reader until 1751's second window: `BankFrame.xml` is the
 /// reference's own file off the player's chain now, and a reader that only knows `assets/ui`
@@ -30,7 +30,7 @@ fn frame_rect(quads: &[ExtractedQuad], w: f32, h: f32) -> benilla_ui::layout::Re
         .unwrap_or_else(|| panic!("no bare-frame quad sized {w}x{h}"))
 }
 
-/// Load the real `assets/ui/GossipFrame.xml` (the shipped gossip window) behind `UiPanels.xml`
+/// Load the stock `Interface\FrameXML\GossipFrame.xml` behind `UIParent.xml`
 /// into a bare engine and drive it with a synthetic gossip menu — the whole phase-3 chain minus
 /// Bevy (decision 0081), now over the UIPanel slot manager (decision 0084): the hidden→shown
 /// lifecycle on GOSSIP_SHOW goes through ShowUIPanel (landing the window at the left slot,
@@ -738,7 +738,7 @@ fn displacing_an_npc_window_ends_the_displaced_session() {
 }
 
 /// Pin §4's pushable path: a higher-`pushable` occupant (loot's future pushable=7 row, already
-/// registered in `UiPanels.xml`) gets pushed to the center slot rather than replaced when a
+/// registered in `UIParent.xml`) gets pushed to the center slot rather than replaced when a
 /// pushable=0 frame (merchant) wants the left spot (UIParent.lua l.734-741) — the synthetic
 /// registrant the pin calls for, since no loot window ships yet. A bare `CreateFrame` with a
 /// distinctive 50×50 size stands in for it: it has no visual layers, but `extract` still emits

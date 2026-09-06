@@ -45,12 +45,6 @@
     on — hovering an ordinary bag slot — runs the real client's code, unedited.
 
     ── Named, not hidden: what still does not work through the sourced files ────────────────────
-    · `MerchantItemButton_OnClick`. The reference's `ContainerFrameItemButton_OnClick` closes its
-      shift-right-click-at-a-vendor arm with a `SplitStack` closure that calls that global, and
-      benilla's merchant window publishes `BenillaMerchantItem_OnClick` instead. Confirming a stack
-      split with a vendor open therefore raises. That is the same "a Benilla name shadows the
-      reference's" class this whole seam exists to close, one window over, and it is left loud
-      rather than guarded (1203): the fix is to publish the merchant global, not to hide the call.
     · `REPAIR_COST` is read by the reference's repair-mode arm. It is a `GlobalStrings.lua` key and
       this client sources that file too, so it resolves at runtime — and the arm is unreachable
       today regardless, since `GameTooltip:SetBagItem`'s repairCost is an INTERIM 0.

@@ -1,4 +1,4 @@
-//! Drives the REAL `assets/ui/TalentFrame.xml` through the engine — the first test that
+//! Drives the reference's own `Blizzard_TalentUI` addon through the engine — the first test that
 //! executes the transcribed talent Lua at all (before this, the window's machinery only ever
 //! ran inside a live client session; both of the director's day-one reports — no prereq branch
 //! lines, no tooltip on first hover — slipped through that gap).

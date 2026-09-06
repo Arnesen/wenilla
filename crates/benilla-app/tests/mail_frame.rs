@@ -1,6 +1,6 @@
-//! Drives the REAL `assets/ui/MailFrame.xml` through the engine (decision 0544 P1/P2) — the mail
-//! twin of `tradeskill_frame.rs`: it loads the same file chain the app does (cut to the mail
-//! window's dependency prefix), pushes a synthetic inbox, opens the window with the app's own
+//! Drives the stock `Interface\FrameXML\MailFrame.xml` through the engine (decision 0544 P1/P2) —
+//! the mail twin of `tradeskill_frame.rs`: it loads the same file chain the app does (cut to the
+//! mail window's dependency prefix), pushes a synthetic inbox, opens the window with the app's own
 //! `MAIL_SHOW`/`MAIL_INBOX_UPDATE` events, and asserts the transcribed Lua actually paints — the
 //! named regions exist, the rows populate from a fed `MailState`, the paging math is right, and the
 //! unread/read row state tracks the wire `wasRead` flag.

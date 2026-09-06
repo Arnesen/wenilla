@@ -1,5 +1,5 @@
-//! The group-loot roll popups (decision 0591, `assets/ui/GroupLootFrame.xml`): the four stacked
-//! `GroupLootFrame`s that answer `START_LOOT_ROLL`/`CANCEL_LOOT_ROLL` off a pushed
+//! The group-loot roll popups (decision 0591, stock `Interface\FrameXML\GroupLootFrame.xml`): the
+//! four stacked `GroupLootFrame`s that answer `START_LOOT_ROLL`/`CANCEL_LOOT_ROLL` off a pushed
 //! [`LootRollsState`] snapshot (the `loot_roll.rs` seam's own harness idiom, mirrored here the way
 //! `loot_tests.rs` mirrors it for `set_loot`/`LootState`).
 

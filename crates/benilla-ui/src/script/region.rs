@@ -887,11 +887,14 @@ pub(super) fn virtual_span(model: &Model, rh: RegionHandle) -> (f32, f32) {
             // **The floor applies to a KNOWN extent, and a pending measure is not one.** On the
             // reference every extent is known — the getter measures inline — so `0.0` never comes
             // back and the question never arises. Ours can be *waiting*, which is not a size but
-            // the absence of an answer, and several of our own convergence drivers read exactly
-            // that: `BenillaGossipRow_Resize`, the tab fit and the quest panel all guard
-            // `if h <= 0 then return end` and re-run from `OnUpdate` until the round-trip lands.
-            // Flooring a pending measure to one unit hands them a number, so they stop waiting and
-            // seat every row at 3px (`shipped_gossip_frame_drives_end_to_end` catches it).
+            // the absence of an answer. **Where that state still lives is a VM with no measurer
+            // installed** (`script::measure`'s is optional): the app seats one at the load edge
+            // (2028), so no in-app caller observes a pending measure any more, and the three
+            // convergence drivers this used to name went with their windows —
+            // `BenillaGossipRow_Resize` (gossip, 1751), our tab fit (1993/2028) and our quest
+            // panel (1944). Flooring a pending measure to one unit hands a measurer-less caller a
+            // number where it should read "not yet"; the surviving `OnUpdate` fits
+            // (`OptionsScroll_Fit`, `BenillaScroll_ResizeChild`) guard on RECTS, not on this.
             //
             // A genuinely EMPTY string is a different thing: its extent is known and it is zero, so
             // it floors — which is the case the reference's floor exists for. The layout sweep

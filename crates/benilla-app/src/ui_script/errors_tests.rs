@@ -1,5 +1,5 @@
-//! The shipped errors/info frame (`assets/ui/ErrorsFrame.xml` — the ref UIErrorsFrame, a real
-//! `<MessageFrame>`) driven engine-only: the yellow `UI_INFO_MESSAGE` toast (the quest
+//! The errors/info frame — stock `Interface\FrameXML\UIErrorsFrame.xml`, a real
+//! `<MessageFrame>` — driven engine-only: the yellow `UI_INFO_MESSAGE` toast (the quest
 //! objective-progress popup's surface), the red `UI_ERROR_MESSAGE` line, insertMode-TOP stacking,
 //! and the hold+fade expiry.
 //!
@@ -124,7 +124,7 @@ fn an_error_toast_draws_over_an_open_panel_window() {
     load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // BenillaMoney_* — QuestLogDetail's reward money row
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // QuestLogDetail's reward money row (1928)
                                                             // pane's UIPanelScrollFrameTemplate). A MISSING template is a loader *warning*, so an
                                                             // under-loaded list passes and then dies on the first FauxScrollFrame_Update.
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");

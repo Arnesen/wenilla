@@ -1,6 +1,6 @@
-//! The shipped **Reputation tab** (`assets/ui/ReputationFrame.xml`) and the **reputation watch
-//! bar** (`assets/ui/ActionBar.xml`) driven end-to-end, engine-only (no Bevy) — the per-window test
-//! module the skills/spellbook/bank files already establish.
+//! The stock **Reputation tab** (`Interface\FrameXML\ReputationFrame.xml`) and the **reputation
+//! watch bar** (`Interface\FrameXML\ActionBarFrame.xml`) driven end-to-end, engine-only (no Bevy) —
+//! the per-window test module the skills/spellbook/bank files already establish.
 //!
 //! What it pins is the PAINT law, which is the half `benilla-ui`'s own
 //! `script::reputation::tests` structurally cannot reach: that module drives the twelve globals and

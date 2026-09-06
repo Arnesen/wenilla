@@ -108,7 +108,8 @@
           permanently, AddOns the unselected gold — the era swaps these in code
           (MinimalTabMixin), and with nothing behind AddOns the selection can never change, so
           the two states are authored rather than driven. The mixin port comes with the addon
-          list. Width is era's text+40 law via an OnUpdate measure poll; the era's
+          list. Width is era's text+40 law, fitted once from each tab's own `<OnShow>` (2028 —
+          the engine's measurer answers in the call that asks); the era's
           measure-at-the-medium-font quirk is deliberately dropped (~6 units of padding).
         - **Search WORKS (0984)** — the era SettingsPanel mechanism re-expressed (the Script
           block's search section): label-tag substring match scored by matched length,
@@ -1186,10 +1187,12 @@
         -- numbering our page does not use, so each row names the child it drives instead.
         --
         -- NOT bound, and named rather than faked: pfUI's module goes on to hook `SetWorldDetail`
-        -- and drive `ConsoleExec("frillDensity ...")`, `lodDist`, `nearClip`, `maxLOD`. benilla has
-        -- no console and none of those CVars. Neither verb is called at load, so the module loads
-        -- and its slider write lands; its EXTENDED arm cannot work here and a no-op ConsoleExec
-        -- would be exactly the silent pretence 1203 exists to forbid.
+        -- (unbound) and drive `ConsoleExec("frillDensity ...")`, `lodDist`, `nearClip`, `maxLOD`.
+        -- `ConsoleExec` itself IS bound (1948 — it writes a registered CVar or pushes a console
+        -- command the app dispatches), but none of those four CVars is registered, so those
+        -- writes reach nothing. Neither verb is called at load, so the module loads and its
+        -- slider write lands; its EXTENDED arm cannot work here, and registering a CVar nothing
+        -- reads would be exactly the silent pretence 1203 exists to forbid.
         OptionsFrameSliders = {
             { text = "UI Scale", func = "uiscale",
               minValue = 0.64, maxValue = 1.0, valueStep = 0.01, benillaRow = "RowUiScale" },
@@ -1546,8 +1549,9 @@
         -- Grey or wake one row, whichever control it wears (the Audio rule above predates this and
         -- reaches its one checkbox by name). A dropdown row greys the way 1.12's own
         -- OptionsFrame_DisableDropDown does — the capsule's toggle BUTTON disabled so the list
-        -- cannot open, and its text in GRAY_FONT_COLOR — since our kit's
-        -- UIDropDownMenu_DisableButton addresses a LIST row (level, id), not the capsule.
+        -- cannot open, and its text in GRAY_FONT_COLOR — since the chain's own
+        -- UIDropDownMenu_DisableButton addresses a LIST row (level, id), not the capsule, and
+        -- 1.12 has no `UIDropDownMenu_DisableDropDown` at all.
         function OptionsRow_SetEnabled(row, on)
             local name = row:GetName()
             local box = getglobal(name .. "Check")

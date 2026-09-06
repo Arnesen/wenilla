@@ -1,5 +1,5 @@
-//! The shipped `assets/ui/ColorPickerFrame.xml` + the dropdown's colour-swatch row, driven the way
-//! the corpus drives them.
+//! The stock `Interface\FrameXML\ColorPickerFrame.xml` + the dropdown's colour-swatch row, driven
+//! the way the corpus drives them.
 //!
 //! Nothing benilla ships opens this window. Its consumers are third-party addons — 86 of the 218
 //! reach `ColorPickerFrame`, and 64 of those files are copies of `Dewdrop-2.0.lua`, THE Ace2 menu

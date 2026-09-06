@@ -1,6 +1,6 @@
-//! The player buff bar (`assets/ui/BuffFrame.xml`, decisions 0255/0257) against its reference
-//! behaviour. The XML/Lua is the unit under test; the app-side feed (`crate::ui_aura`) is stubbed by
-//! pushing an [`AuraState`] list straight through [`UiScript::set_auras`] and firing
+//! The player buff bar (stock `Interface\FrameXML\BuffFrame.xml`, decisions 0255/0257) against its
+//! reference behaviour. The XML/Lua is the unit under test; the app-side feed (`crate::ui_aura`) is
+//! stubbed by pushing an [`AuraState`] list straight through [`UiScript::set_auras`] and firing
 //! `PLAYER_AURAS_CHANGED`, so these exercise the *button* handlers — the row/filter wiring, the
 //! dispel-tinted border, the stack count, the countdown, the warning flash, and the right-click
 //! cancel — the way the reference's own `BuffButton_*` do.

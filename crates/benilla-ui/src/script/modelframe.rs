@@ -75,12 +75,11 @@
 //!
 //! ## What is deliberately NOT here
 //!
-//! Five of `Model`'s own 23 — `SetFogNear 0x76f1e0`, `GetFogNear 0x76f2d0`, `SetFogFar 0x76f390`,
-//! `GetFogFar 0x76f480`, `ClearFog 0x76f540`. No corpus caller, and their bodies are uncarved:
-//! `ClearFog`'s exact effect on the colour/near/far triple is a guess until someone reads it, and
-//! a guessed clear reads as knowledge. Named, not stubbed.
+//! Nothing of `Model`'s own 23 — the fog near/far/clear set was the last hold-out and 2027 carved
+//! it (`ClearFog 0x76f540` is `76f5c5 and [edi+0x3a4],-2`, bit 0 and nothing else, so the guess
+//! that kept it out is gone; see the install below).
 //!
-//! Also absent, and correctly so: `SetCreature` and `SetCustomRace`. Neither string exists in
+//! Absent, and correctly so: `SetCreature` and `SetCustomRace`. Neither string exists in
 //! 5875 in any form (substring scan of the whole mapped image returns 0, against a positive
 //! control of 27 hits for `Creature`) — they are later-expansion names, and publishing one would
 //! be decision 1189's error.
@@ -704,8 +703,9 @@ fn playermodel_install(lua: &Lua) -> mlua::Result<()> {
     // it inverted), plays it unless that id is already armed on bone slot 0, and then
     // UNCONDITIONALLY sets `[+0x3e8] = 1` and `[+0x3ec] = now_ms + 100` — a 100 ms turn hold that
     // the per-paint `0x505c50` expires. Every one of those is invisible to Lua (no getter reads
-    // them) and lands on a model renderer we have not built, so storing them here would be state
-    // nobody writes and nobody reads. The addresses are the pin for the day the renderer exists.
+    // them). The app's `<Model>` renderer (`benilla-app` `ui_models`, 2013/2019/2027) draws its
+    // pane off the file's own clock and does not model a turn hold, so storing the pair here
+    // would be state nobody writes and nobody reads. The addresses are the pin if it ever does.
     m.set(
         "SetRotation",
         lua.create_function(|lua, (this, rad): (Table, Value)| {

@@ -1,7 +1,7 @@
 //! The shipped **spellbook window** driven end-to-end, engine-only (no Bevy): the real
-//! `assets/ui/SpellBookFrame.xml` loaded behind `Fonts.xml`/`UiPanels.xml`/`GameTooltip.xml`
-//! (plus `ActionBar.xml` for the cross-window place test) and fed a small synthetic book —
-//! mirroring `character_tests.rs`'s/`action_bar_tests.rs`'s harness (decision 0216 §8, slice 5).
+//! `Interface\FrameXML\SpellBookFrame.xml` loaded behind
+//! `Fonts.xml`/`UIParent.xml`/`GameTooltip.xml` (plus `ActionBar.xml` for the cross-window place
+//! test) and fed a small synthetic book — mirroring `character_tests.rs`'s/`action_bar_tests.rs`'s harness (decision 0216 §8, slice 5).
 
 use benilla_ui::script::{SpellBookState, SpellSlotView, SpellTabView, UiScript};
 

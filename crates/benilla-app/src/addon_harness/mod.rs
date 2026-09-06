@@ -1121,7 +1121,7 @@ fn load_dependencies(
 ///
 /// **A string literal in the fourth argument, OR a local bound to one in the same file.** The
 /// literal-only form was the honest under-report this doc used to name — and then a decision was
-/// made on the number it produced. `assets/ui/ItemButtonTemplate.xml` declined to build
+/// made on the number it produced. `Interface\FrameXML\ItemButtonTemplate.xml` declined to build
 /// `ItemButtonTemplate` citing "the harness's template demand ranks it at zero on both axes"; the
 /// zero was real, and pfUI wanted `ContainerFrameItemButtonTemplate` (which inherits it) the whole
 /// time, through
@@ -3575,10 +3575,10 @@ mod dependency_tests {
     /// **A template named through a local resolves; the shapes that still cannot are asserted too.**
     ///
     /// The literal-only scan was an honest under-report — stated at `missing_templates` — and a
-    /// decision was then made on the number it produced: `assets/ui/ItemButtonTemplate.xml`
-    /// declined to build `ItemButtonTemplate` citing a demand of zero "on both axes". The zero was
-    /// real and the demand was not: pfUI binds `local tpl = "ContainerFrameItemButtonTemplate"`
-    /// and passes the variable, so the one addon that wanted it was invisible to the ranking.
+    /// decision was then made on the number it produced:
+    /// `Interface\FrameXML\ItemButtonTemplate.xml` declined to build `ItemButtonTemplate` citing a
+    /// demand of zero "on both axes". The zero was real and the demand was not: pfUI binds `local
+    /// tpl = "ContainerFrameItemButtonTemplate"` and passes the variable, so the one addon that wanted it was invisible to the ranking.
     ///
     /// Both halves are asserted, because a scanner that quietly widened would be the worse fix:
     /// the shape it now sees, AND the shapes it still does not, so the next decision quoting this

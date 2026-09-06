@@ -1,5 +1,5 @@
-//! `GameTooltipTemplate` as an ADDON sees it — the shipped `assets/ui/GameTooltip.xml` driven the
-//! way the corpus drives it.
+//! `GameTooltipTemplate` as an ADDON sees it — the stock `Interface\FrameXML\GameTooltip.xml`
+//! driven the way the corpus drives it.
 //!
 //! **This is not a test of our tooltip window** (that is `tooltip_anchor_tests` /
 //! `tooltip_compare_tests`, and they are the regression suite this refactor had to leave

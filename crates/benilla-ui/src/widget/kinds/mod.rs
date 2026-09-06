@@ -90,7 +90,7 @@ pub enum FrameKind {
     /// ([`KindState::Model`], shared with [`FrameKind::Model`]); the pixels are the app renderer's.
     /// `CGCharacterModelBase` adds `0x1c` bytes of members over `CSimpleModel` — the turn-animation
     /// flag/expiry at `+0x3e8`/`+0x3ec` that `SetRotation` arms — and those are **not modeled**:
-    /// no getter reads them, and they drive a shuffle animation on a renderer we have not built.
+    /// no getter reads them, and the app's `<Model>` renderer draws no shuffle animation.
     /// `script::modelframe`'s `SetRotation` carries the addresses.
     PlayerModel,
     /// `DressUpModel` — `CGDressUpModelFrame` (`Ui\DressUpModelFrame.cpp`, factory `0x495c00`,
@@ -357,10 +357,10 @@ pub const TOOLTIP_WRAP_WIDTH: f32 = 260.0;
 /// table owns it*, and `SetUnit`'s single pooled string `0x84f22c` is referenced by two entries in
 /// two different tables. Ownership now comes from a dword-reference count over the name's VA.
 ///
-/// **Seven of `Model`'s 23 are not published yet** — `AdvanceTime 0x76eca0`,
-/// `ReplaceIconTexture 0x76ed70`, `SetFogNear 0x76f1e0`, `GetFogNear 0x76f2d0`,
-/// `SetFogFar 0x76f390`, `GetFogFar 0x76f480`, `ClearFog 0x76f540` — named here rather than
-/// stubbed (decision 1134 §4). They have no corpus caller and their bodies are uncarved.
+/// **All 23 of `Model`'s are published** (decision 2027 carved the last seven — `AdvanceTime`,
+/// `ReplaceIconTexture` and the fog near/far/clear set). `script::tests::modelframe`'s `UNBUILT`
+/// array is the live count and is empty; the wall around it is what notices a name arriving or
+/// leaving (1134 §4's naming rule, with nothing left to name).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelState {
     /// The M2/MDX path last given to `SetModel`, or `None` after `ClearModel` / before any set.

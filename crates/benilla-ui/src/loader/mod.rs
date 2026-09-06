@@ -428,18 +428,28 @@ impl Loader<'_> {
     ///
     /// wow-re `system/ui/scratch/rf28-typed-widget-loadxml.md`: `<Button text=>` (l.36) and
     /// `<FontString text=>` (l.115) BOTH resolve through `FrameScript_GetText 0x703bf0`, which
-    /// `scratch/inventory-change-failure-display.md` l.119 carves VERIFIED — it resolves the value as
-    /// a Lua global and, **when that global is not a string, returns a pre-seeded EMPTY string**
-    /// (`0x882748`), never the key name. That is why the reference's `text="LOGOUT"` renders "Logout",
-    /// and why `GlobalStrings.lua` runs before any XML (`ui_script::load_global_strings`).
+    /// `scratch/framescript.md` carves VERIFIED — it resolves the value as a Lua global and,
+    /// **when that global is not a string, returns a pre-seeded EMPTY string** (`0x882748`), never
+    /// the key name. That is why the reference's `text="LOGOUT"` renders "Logout", and why
+    /// `GlobalStrings.lua` runs before any XML (`ui_script::load_global_strings`).
     ///
-    /// **One deliberate divergence: a miss falls back to the LITERAL** rather than the reference's
-    /// empty string. benilla authors its own FrameXML (0068) and writes plain English in it —
-    /// `text="Send Mail"`, `text="No results found."` — which the reference's rule would blank. The
-    /// fallback is a strict superset for transcriptions (every real key resolves identically) and it
-    /// fails LOUDER than the reference: a **key-shaped** value that misses keeps its key on screen
-    /// *and* warns here — exactly the signal that was missing when the macro window shipped with
-    /// "CREATE_MACROS" across its title bar (0983 → 0991).
+    /// **The MISS falls back to the raw attribute, and that is the reference's own behaviour — not
+    /// a benilla divergence, which is what this comment used to claim.** `0x703bf0`'s empty return
+    /// never reaches a label: all three `text=` readers image-wide test it and substitute the raw
+    /// attribute string. `Button::LoadXML` at `0x778c07` — recorded in wow-re
+    /// `scratch/template-onload-replacement-law.md` §5, "a fallback to the raw attribute when the
+    /// lookup comes back empty (`0x778c31 mov eax,esi`)" — and byte-identically
+    /// `CSimpleFontString::LoadXML` at `0x771006` (`771012 mov esi,eax` … `771029 test eax,eax` /
+    /// `77102b je 0x771032` / `77102d cmp BYTE [eax],0` / `771030 jne` / `771032 mov eax,esi`), and
+    /// the third reader at `0x7292a6`, which expresses the same law through a copy
+    /// (`7292db mov al,[ebp-0x424]` / `7292e1 test al,al`, empty arm pushes `edi` = the raw).
+    ///
+    /// So the reference's `PetPaperDollFrame.xml:70` `text="Level level race class"` really does
+    /// draw that placeholder until Lua overwrites it, and benilla's plain-English `text="Send
+    /// Mail"` renders for the same reason the reference's would. What IS ours is the extra signal:
+    /// a **key-shaped** value that misses warns here as well as keeping its key on screen — the
+    /// signal that was missing when the macro window shipped with "CREATE_MACROS" across its title
+    /// bar (0983 → 0991).
     pub(super) fn resolve_text(&mut self, raw: &str, dbg: &str) -> String {
         if let Ok(s) = self.lua().globals().get::<String>(raw) {
             return s;

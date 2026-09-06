@@ -17,7 +17,7 @@ fn load_popup_frames(s: &UiScript) {
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
         r"Interface\FrameXML\UIParent.xml",
-        // `SmallMoneyFrame_OnLoad`, which UiPanels' own StaticPopup money rows call at load.
+        // `SmallMoneyFrame_OnLoad`, which the chain's StaticPopup money rows call at load.
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
         // `StaticPopupDialogs` and the `PanelTemplates_*` family, both of which FriendsFrame.xml
@@ -75,8 +75,9 @@ fn bake_strings(s: &UiScript) {
         -- The newbie tooltip the stock unit frame raises on a HOVER, which every test in this file
         -- takes on its way to a right-click. `UnitFrame_OnEnter` (ref `UnitFrame.lua:58-65`) runs
         -- the detailed-tip branch whenever `SHOW_NEWBIE_TIPS == "1"` — 1.12's own default
-        -- (`UIOptionsFrame.lua:100`), which our `GameTooltip.xml:46` sets at load — and for a
-        -- player-controlled target that is not us it calls
+        -- (`UIOptionsFrame.lua:100`, a file benilla does not build; our `assets/ui/OptionsFrame.xml`
+        -- is the definer, and this harness loads no options file, so the branch is not reached
+        -- here). For a player-controlled target that is not us that branch calls
         -- `GameTooltip_AddNewbieTip(PLAYER_OPTIONS_LABEL, 1, 1, 1, NEWBIE_TOOLTIP_PLAYEROPTIONS)`.
         -- Both are nil in a bare harness, and `GameTooltip:SetText(nil)` raises. Verbatim from the
         -- real `Interface\FrameXML\GlobalStrings.lua` off the 1.12.1 chain (l.3081 and l.2755).
@@ -476,7 +477,7 @@ fn solo_target_inspect_click_reaches_inspect_unit() {
 
 // ── The PET menu (decision 1066; report B219) ───────────────────────────────────────────────────
 
-/// The pet menu's own prefix. What joins the popup prefix is `UiPanels.xml` — the StaticPopup
+/// The pet menu's own prefix. What joins the popup prefix is `StaticPopup.xml` — the StaticPopup
 /// engine, because two of the four rows go behind a dialog, and since 1953 where the pet arc's
 /// three dialogs are registered (they rode our pet-bar file until it became the reference's).
 /// `Cooldown.xml` and

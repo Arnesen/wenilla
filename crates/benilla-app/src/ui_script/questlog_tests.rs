@@ -1,7 +1,7 @@
 //! The shipped **quest log window** driven end-to-end, engine-only (no Bevy): the real
-//! `assets/ui/QuestLogFrame.xml` loaded behind `UiPanels.xml`/`MerchantFrame.xml` (the money helpers
-//! its reward rows reuse) and fed a synthetic 8-entry log + a resolved detail — mirroring
-//! `quest_tests.rs`/`bag_tests.rs`'s engine-only harness for the quest-log slice (decision 0088 arc).
+//! `Interface\FrameXML\QuestLogFrame.xml` loaded behind `UIParent.xml`/`MerchantFrame.xml` (the
+//! money helpers its reward rows reuse) and fed a synthetic 8-entry log + a resolved detail —
+//! mirroring `quest_tests.rs`/`bag_tests.rs`'s engine-only harness for the quest-log slice (decision 0088 arc).
 
 use benilla_ui::script::{
     ExtractedQuad, PartyMemberInfo, PartyState, QuadContent, QuestItemView, QuestLogDetail,
@@ -843,15 +843,19 @@ fn empty_quest_log_hides_rows_and_disables_abandon() {
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
-    // A bare FontString region has no Show/Hide/IsVisible in this engine (only Frames/Buttons do —
-    // `region.rs`'s method table) — the empty-state message is a toggled SetText, read back here.
     // The empty log says the reference's QUESTLOG_NO_QUESTS_TEXT (GlobalStrings.lua:3225) through
-    // stock QuestLogNoQuestsText; "Your quest log is empty." was ours (1944).
+    // stock QuestLogNoQuestsText; "Your quest log is empty." was ours (1944). Regions carry the
+    // real `Show`/`Hide`/`IsShown`/`IsVisible` (0138), so the label's visibility is assertable
+    // too — and nothing ever hides this one: `QuestLogFrame.xml:427` is its only mention in the
+    // whole chain, so it stands behind the rows whether or not the log is empty.
     assert_eq!(
         s.eval::<String>("return QuestLogNoQuestsText:GetText()")
             .unwrap(),
         "No Active Quests"
     );
+    assert!(s
+        .eval::<bool>("return QuestLogNoQuestsText:IsVisible()")
+        .unwrap());
     assert!(!s.eval::<bool>("return QuestLogTitle1:IsVisible()").unwrap());
     assert!(!s
         .eval::<bool>("return QuestLogFrameAbandonButton:IsEnabled() ~= 0")
@@ -968,13 +972,27 @@ fn reward_rows_follow_the_refs_two_per_row_layout() {
 
     // With choices present, the receive text reads "...also..." (QuestFrame.lua:461-462) — it
     // anchors under choice row 1 (the left/odd column: index=2 is even -> anchorIndex-1 -> 1, this
-    // function's own logic). GetPoint() isn't wired for FontString regions in this engine (only
-    // Frame/Button — `region.rs` has no GetPoint), so the anchor CHAIN itself is verified via the
-    // mandatory capture-loop screenshot (this task's report), not introspected here.
+    // function's own logic). Regions carry `GetPoint` (1244), so the anchor CHAIN is introspected
+    // here rather than deferred to a screenshot: TOPLEFT of QuestLogItem1's BOTTOMLEFT, +3/-5.
     assert_eq!(
         s.eval::<String>("return QuestLogItemReceiveText:GetText()")
             .unwrap(),
         "You will also receive:"
+    );
+    assert_eq!(
+        s.eval::<String>(
+            "local p, rel, rp = QuestLogItemReceiveText:GetPoint() \
+             return p .. '|' .. rel:GetName() .. '|' .. rp"
+        )
+        .unwrap(),
+        "TOPLEFT|QuestLogItem1|BOTTOMLEFT"
+    );
+    assert_eq!(
+        s.eval::<(f64, f64)>(
+            "local _, _, _, x, y = QuestLogItemReceiveText:GetPoint() return x, y"
+        )
+        .unwrap(),
+        (3.0, -5.0)
     );
 
     // One fixed reward shows, chained under the receive text (its own SetPoint target).

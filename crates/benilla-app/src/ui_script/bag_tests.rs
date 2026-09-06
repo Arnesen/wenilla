@@ -937,7 +937,8 @@ fn a_second_bag_window_feeds_and_paints_via_the_bag_bar() {
     );
 
     assert!(!open(&s, 1), "hidden by default");
-    // CharacterBag0Slot == bag id 1 (BenillaBagBarSlot_OnLoad(self, 1) in BagFrame.xml).
+    // CharacterBag0Slot == bag id 1: the stock bar's handlers carry no `bagId` field and
+    // recompute `this:GetID() - CharacterBag0Slot:GetID() + 1` (see `:2119` below).
     s.run("CharacterBag0Slot:Click()").unwrap();
     let _ = s.take_sounds();
     assert!(open(&s, 1), "the bag-bar click opened bag 1's window");

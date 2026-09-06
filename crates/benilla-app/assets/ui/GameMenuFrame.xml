@@ -30,9 +30,9 @@
           Options", SOUNDOPTIONS_MENU "Sound Options", UIOPTIONS_MENU "Interface Options",
           MACROS "Macros", LOGOUT "Logout", EXIT_GAME "Exit Game",
           RETURN_TO_GAME "Return to Game", MAIN_MENU "Main Menu". Declared as the real globals
-          (they are addon-visible API, decision 0068) and read back into each button's label in its
-          OnLoad — the ref's `text="LOGOUT"` attribute IS a global lookup, which this engine's
-          literal `text=` is not.
+          (they are addon-visible API, decision 0068) and carried on each button's own
+          `text=` attribute — which this engine resolves as a global-string lookup exactly as
+          the reference does (decision 0995, `loader/widgets.rs`'s `resolve_text`).
         · **The sounds** — the ref's own OnClick lines: igMainMenuOption (the five option buttons),
           igMainMenuLogout, igMainMenuQuit, igMainMenuContinue. All four kits verified present in
           SoundEntries.dbc (patch-2.MPQ) alongside the igMainMenuOpen/Close pair already in use.
@@ -94,10 +94,9 @@
           scripts, so it never actually moves).
           `frameStrata="DIALOG"` is what puts it over the world UI, and that is kept.
           **The "no frame-level raise" half of that reason is gone**: the raise law is built
-          (`script::object::toplevel`, wow-re `ui/scratch/toplevel-raise.md`) and the loader honours
-          `toplevel="true"`. Re-adding it here is a one-word change and would make the Esc menu come
-          to the front over any other DIALOG-strata frame it overlaps; left off pending the
-          director's call on the look, not on the mechanism.
+          (`script::object::toplevel`, wow-re `ui/scratch/toplevel-raise.md`), the loader honours
+          `toplevel="true"`, and the frame below carries it — so the Esc menu does come to the
+          front over any other DIALOG-strata frame it overlaps.
     -->
     <Script><![CDATA[
         -- The reference GlobalStrings (patch-2.MPQ Interface\FrameXML\GlobalStrings.lua), quoted
@@ -164,7 +163,7 @@
                 <!-- Era swaps the header text to 13px (MainMenuFrameMixin:OnLoad →
                      SetHeaderFont(GameFontNormalMed1)); the seat is the 1.12 one (within half a
                      unit of era's — header SCOPE note). -->
-                <FontString name="GameMenuFrameTitle" inherits="GameFontNormalMed1">
+                <FontString name="GameMenuFrameTitle" inherits="GameFontNormalMed1" text="MAIN_MENU">
                     <Anchors>
                         <Anchor point="TOP" relativeTo="GameMenuFrameHeader"><Offset><AbsDimension x="0" y="-14"/></Offset></Anchor>
                     </Anchors>
@@ -184,12 +183,11 @@
                  the center-replacement rule for the swap (ShowUIPanel l.697-702: native-center
                  frames replace each other); hiding the menu explicitly says the same thing
                  without relying on the eviction path. -->
-            <Button name="GameMenuButtonOptions" inherits="GameMenuButtonTemplate">
+            <Button name="GameMenuButtonOptions" inherits="GameMenuButtonTemplate" text="Options">
                 <Anchors>
                     <Anchor point="TOPLEFT"><Offset><AbsDimension x="28" y="-32"/></Offset></Anchor>
                 </Anchors>
                 <Scripts>
-                    <OnLoad>self:SetText("Options")</OnLoad>
                     <OnClick>
                         PlaySound("igMainMenuOption")
                         HideUIPanel(GameMenuFrame)
@@ -210,14 +208,13 @@
                 </Anchors>
                 <Scripts><OnLoad>GameMenuButton_Pending(self, GAMEMENU_SUPPORT)</OnLoad></Scripts>
             </Button>
-            <Button name="GameMenuButtonMacros" inherits="GameMenuButtonTemplate">
+            <Button name="GameMenuButtonMacros" inherits="GameMenuButtonTemplate" text="MACROS">
                 <Anchors>
                     <Anchor point="TOPLEFT" relativeTo="GameMenuButtonSupport" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
                 </Anchors>
                 <!-- LIVE since decision 0983 (MacroFrame.xml). The ref's own body
                      (GameMenuFrame.xml l.118-122): hide the menu, then ShowMacroFrame(). -->
                 <Scripts>
-                    <OnLoad>self:SetText(MACROS)</OnLoad>
                     <OnClick>
                         PlaySound("igMainMenuOption")
                         HideUIPanel(getglobal("GameMenuFrame"))
@@ -230,12 +227,11 @@
                  button while either logout dialog is already up (you cannot re-arm a running
                  countdown); it runs on the menu's own show, which is when a re-opened menu has to
                  re-read that state. -->
-            <Button name="GameMenuButtonLogout" inherits="GameMenuButtonTemplate">
+            <Button name="GameMenuButtonLogout" inherits="GameMenuButtonTemplate" text="LOGOUT">
                 <Anchors>
                     <Anchor point="TOPLEFT" relativeTo="GameMenuButtonMacros" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
                 </Anchors>
                 <Scripts>
-                    <OnLoad>self:SetText(LOGOUT)</OnLoad>
                     <OnShow>
                         if not StaticPopup_Visible("CAMP") and not StaticPopup_Visible("QUIT") then
                             self:Enable()
@@ -250,12 +246,11 @@
                     </OnClick>
                 </Scripts>
             </Button>
-            <Button name="GameMenuButtonQuit" inherits="GameMenuButtonTemplate">
+            <Button name="GameMenuButtonQuit" inherits="GameMenuButtonTemplate" text="EXIT_GAME">
                 <Anchors>
                     <Anchor point="TOPLEFT" relativeTo="GameMenuButtonLogout" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
                 </Anchors>
                 <Scripts>
-                    <OnLoad>self:SetText(EXIT_GAME)</OnLoad>
                     <OnShow>
                         if not StaticPopup_Visible("CAMP") and not StaticPopup_Visible("QUIT") then
                             self:Enable()
@@ -270,12 +265,11 @@
                     </OnClick>
                 </Scripts>
             </Button>
-            <Button name="GameMenuButtonContinue" inherits="GameMenuButtonTemplate">
+            <Button name="GameMenuButtonContinue" inherits="GameMenuButtonTemplate" text="RETURN_TO_GAME">
                 <Anchors>
                     <Anchor point="TOPLEFT" relativeTo="GameMenuButtonQuit" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
                 </Anchors>
                 <Scripts>
-                    <OnLoad>self:SetText(RETURN_TO_GAME)</OnLoad>
                     <OnClick>
                         PlaySound("igMainMenuContinue")
                         HideUIPanel(GameMenuFrame)
@@ -286,11 +280,10 @@
         <!-- ref GameMenuFrame OnShow/OnHide, verbatim: the micro row's Main Menu button pushes in
              while the menu is up, and the bag bar greys out under it (you cannot open bags from
              behind the menu — ShowUIPanel's center gate would refuse the window anyway, so the
-             greying is the visible half of a rule the panel manager already enforces). Guarded, the
-             the old UiPanels.xml `CloseMenus and CloseMenus()` posture: a headless test loads this file
-             without the action bar behind it. -->
+             greying is the visible half of a rule the panel manager already enforces). Guarded, in
+             the `CloseMenus and CloseMenus()` posture our retired panel file used: a headless test
+             loads this file without the action bar behind it. -->
         <Scripts>
-            <OnLoad>GameMenuFrameTitle:SetText(MAIN_MENU)</OnLoad>
             <OnShow>
                 -- The shared era-window scale first (ERA_WINDOW_SCALE, OptionsFrame.xml — loaded
                 -- before this file): the era menu has no scale of its own (GameMenuFrame.xml +

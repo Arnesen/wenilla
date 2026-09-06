@@ -1,4 +1,4 @@
-//! The always-up world-state readout (`assets/ui/WorldStateFrame.xml`) against the shipped XML —
+//! The always-up world-state readout (stock `Interface\FrameXML\WorldStateFrame.xml`) —
 //! report B190's second half, driven the way the client drives it: rows pushed, then
 //! `UPDATE_WORLD_STATES` fired.
 //!

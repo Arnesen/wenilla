@@ -1,10 +1,10 @@
-//! Drives the REAL `assets/ui/TradeFrame.xml` through the engine (decision 0592 P1) — the trade twin
-//! of `mail_frame.rs`: it loads the same file chain the app does (cut to the trade window's dependency
-//! prefix), pushes a synthetic two-sided offer, opens the window with the app's own `TRADE_SHOW`
-//! event, and asserts the transcribed Lua actually paints — the named regions exist, both columns
-//! populate from a fed `TradeState`, the money coin trios render, and the accept glow tracks the
-//! `TRADE_ACCEPT_UPDATE(my, his)` args. This is the machine gate for the XML (a Lua error / missing
-//! global / wrong region name fails here); the director's eye judges only the *look*.
+//! Drives the stock `Interface\FrameXML\TradeFrame.xml` through the engine (decision 0592 P1) — the
+//! trade twin of `mail_frame.rs`: it loads the same file chain the app does (cut to the trade
+//! window's dependency prefix), pushes a synthetic two-sided offer, opens the window with the app's
+//! own `TRADE_SHOW` event, and asserts the transcribed Lua actually paints — the named regions
+//! exist, both columns populate from a fed `TradeState`, the money coin trios render, and the
+//! accept glow tracks the `TRADE_ACCEPT_UPDATE(my, his)` args. This is the machine gate for the XML
+//! (a Lua error / missing global / wrong region name fails here); the director's eye judges only the *look*.
 
 mod common;
 

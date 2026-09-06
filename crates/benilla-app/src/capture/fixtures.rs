@@ -252,8 +252,8 @@ pub(super) fn seed_ui_fixture(
             gossip.quests = vec![(783, 0, 5, "Eagan Peltskinner".into())];
             // One short option AND four that WRAP — the live shape both gossip bugs came in as
             // (the director's screenshots), and a menu deliberately TALLER than the parchment so
-            // the capture covers the whole chain: the per-row auto-height
-            // (`BenillaGossipRow_Resize`), the scroll frame that contains the overflow, and the
+            // the capture covers the whole chain: the stock `GossipResize`'s per-row auto-height,
+            // the scroll frame that contains the overflow, and the
             // scrollbar that appears with it. A fixture of one-line labels showed none of this —
             // every row fit the template's 16 px and nothing ever overflowed.
             let judgement = [

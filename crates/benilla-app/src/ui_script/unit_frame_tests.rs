@@ -603,13 +603,11 @@ fn raid_mark_clicks_through_the_nested_level() {
         .unwrap();
     s.mouse_button(sx as f32, sy as f32, "LeftButton", true);
     s.mouse_button(sx as f32, sy as f32, "LeftButton", false);
-    // RED while the `SetRaidTarget` engine binding is absent, and deliberately left that way.
     // `UnitPopup.xml`'s row calls `SetRaidTargetIcon(menu.unit, mark)`; the definition of that
     // used to be ours, and since the migration it is the reference's own — `TargetFrame.lua`
-    // l.486-492 — whose whole body is `SetRaidTarget(unit, 0 or index)`. `SetRaidTarget` is an
-    // engine verb this house does not have yet, so the click raises
-    // "attempt to call global 'SetRaidTarget' (a nil value)" and no intent is queued. 1203: it
-    // gets built, never stubbed.
+    // l.486-492 — whose whole body is `SetRaidTarget(unit, 0 or index)`. That is the ENGINE
+    // verb, built by 1820 (`benilla-ui` `script/party.rs`), never the wrapper's name on our
+    // body: this asserts the intent it queues, and `:638` asserts nothing raised.
     assert_eq!(
         s.take_party_requests(),
         vec![benilla_ui::script::PartyRequest::SetRaidTarget {
@@ -1211,8 +1209,8 @@ fn the_party_art_paints_over_the_bars() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The loot test's prefix (`loot_tests.rs`): PartyFrame's inline <Script> reads
-    // StaticPopupDialogs, which UiPanels.xml defines, and its per-member dropdown OnLoad walks the
-    // whole popup kit.
+    // StaticPopupDialogs, which the chain's `StaticPopup.xml` defines, and its per-member dropdown
+    // OnLoad walks the whole popup kit.
     // GlobalStrings first, for the same reason `load_unit_frames` names it — the stock unit-frame
     // files resolve it at LOAD (`CombatFeedback.lua` l.7-17, `UnitFrame.lua` l.1-6).
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
@@ -1865,10 +1863,9 @@ fn no_two_numeral_strings_overlap_on_any_frame() {
 /// function UnitFrame_OnEnter() originalUnitFrame_OnEnter() … end
 /// ```
 ///
-/// Against a missing global that captured nil and raised on the first hover. Note these are
-/// ADAPTERS, not renames: the reference's contract takes no arguments and reads `this`, ours takes
-/// the frame explicitly, so a rename would have reached our body with a nil frame — reachable but
-/// broken, which is worse than inert.
+/// Against a missing global that captured nil and raised on the first hover. Our own adapter
+/// (`BenillaUnitFrame_OnEnter(frame)`, which took the frame explicitly) went with the file 1751's
+/// twenty-second window deleted: what runs here is the reference's own `this`-shaped body.
 ///
 /// The same class as the Bagnon bag bug, and equally invisible to the corpus survey: it loads
 /// addons and fires events, but never hovers anything.

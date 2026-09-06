@@ -263,15 +263,14 @@ pub struct Frame {
     /// `enableKeyboard`) — the kind-0/kind-1 bucket membership `0x76af00` writes as
     /// `[frame+0xcc] |= 1<<kind`.
     ///
-    /// Default **false**, the client's own default. **The flag round-trips; key DELIVERY is not
-    /// gated on it yet** — the same shape [`Self::mouse_wheel_enabled`] shipped in (1198), and for
-    /// the same reason: the machinery it gates (the strata 8→0 walk, the kind buckets, the
-    /// `OnKeyDown`/`OnKeyUp`/`OnChar` script kinds) does not exist here, so gating on the flag
-    /// would change nothing while pretending otherwise. wow-re's
-    /// `scratch/frame-key-script-delivery.md` §3.2 is explicit that the two are separable:
-    /// `EnableKeyboard(true)` on a script-less frame "puts it in the walk where it is called and
-    /// declines — transparent to everything downstream", so **being enabled is not being a
-    /// handler**, and storing the flag alone is the faithful half rather than a stub of the whole.
+    /// Default **false**, the client's own default. **This is the field key delivery gates on**:
+    /// [`crate::script::keyboard`]'s walk builds its candidate set from
+    /// `effective_visible && keyboard_enabled`, then orders it strata 8→0 / level high→low /
+    /// oldest-registration-first (built 2026-08-14, decision 1319). wow-re's
+    /// `scratch/frame-key-script-delivery.md` §3.2 is explicit that the flag and a handler are
+    /// separable: `EnableKeyboard(true)` on a script-less frame "puts it in the walk where it is
+    /// called and declines — transparent to everything downstream", so **being enabled is not
+    /// being a handler**.
     pub keyboard_enabled: bool,
     /// Clamp-to-screen (`SetClampedToScreen` / XML `clampedToScreen` — the client's geometry
     /// flags **bit4**, applied inside rect assembly `0x767a20`, wow-re `layout.md`): the layout

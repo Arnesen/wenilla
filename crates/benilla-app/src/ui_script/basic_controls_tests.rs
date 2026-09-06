@@ -1,5 +1,5 @@
-//! The shipped `assets/ui/BasicControls.xml` — the reference's second file, driven the way an
-//! addon drives it.
+//! The stock `Interface\FrameXML\BasicControls.xml` — the reference's second file, driven the way
+//! an addon drives it.
 //!
 //! Nothing benilla ships calls `message`, `TEXT` or `_ERRORMESSAGE`; their only consumers are
 //! third-party addons (26 call `TEXT`, ~10 genuinely call `message`, two replace `_ERRORMESSAGE`).

@@ -299,42 +299,19 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 /// `system/ui/ui.md` l.544-556 summarises it), so what is missing here is never a mystery — it is a
 /// deliberate not-yet. What the corpus actually asks for, and why each answer is what it is:
 ///
-/// * **`OnKeyDown` / `OnKeyUp` / `OnChar`** (14 + 1 + 4 corpus sites over 13 addons) — **raising,
-///   and now unblocked**: the delivery law was the second §5 this work dispatched, and it landed
-///   (wow-re `scratch/frame-key-script-delivery.md`). benilla still has none of the machinery it
-///   describes — `EnableKeyboard`/`IsKeyboardEnabled` now exist and the flag round-trips, but there
-///   is still no keyboard index and no strata walk, and keys are routed straight to the focused
-///   EditBox — so the names stay out until that exists, which is the whole rule above. What has to
-///   get built, so the next pass does not have to re-derive it:
-///
-///   The frame must be in the hit-test root's **kind-0 / kind-1 bucket**
-///   (`scratch/scripts-auto-enable.md` §1-2: `0x76af00(kind, …)`, `OnChar` = kind 0,
-///   `OnKeyDown`/`OnKeyUp` = kind 1; XML `enableKeyboard` enables both, a `<Scripts>` block
-///   auto-enables per handler, and Lua `SetScript` auto-enables **nothing** — so a Lua-only frame
-///   is not in the bucket at all and its bound handler can never fire). The dispatcher then walks
-///   **strata 8 → 0, level high → low, ties oldest-registration-first**, calling each frame's base
-///   input virtual (`0x765f10` key-down → vtable `+0x60`; `0x765df0` char → `+0x5c`) and
-///   **stopping at the first nonzero return**. `arg1` is a **key-name string** with no modifier
-///   prefix, decoded from the *same* table the keybinding chord names use — verified byte-identical
-///   over 273 codes, which is the opposite of the mouse case's two-table shape. `OnChar` gets the
-///   literal character, UTF-8.
-///
-///   Two findings that will bite whoever implements it. The consumption gate is **existence, not
-///   handling** — a 1.12 handler cannot signal "handled" (the fire's return is discarded at all
-///   three sites), so merely having a key script bound suppresses the key's binding; and
-///   asymmetrically, a frame with **only** an `OnKeyUp` script consumes every key-down and runs
-///   nothing. And `CGWorldFrame` sits at **strata 0 / level 0** — last in the walk — which is
-///   precisely why any keyboard-enabled frame pre-empts the entire binding system.
-///
-///   (The old gloss here called `0x76bba0` a "frame-script pre-gate" walking the index, after
-///   `scratch/keybinding-dispatch-law.md` §1. That is refuted: `0x76bba0` is `CSimpleFrame::OnKeyUp`,
-///   one frame's base virtual. The walk is one level up, in the dispatcher.)
+/// * **`OnKeyDown` / `OnKeyUp` / `OnChar`** (14 + 1 + 4 corpus sites over 13 addons) — **accepted**
+///   since decision 1319 built the delivery walk ([`crate::script::keyboard`], whose module doc is
+///   the mechanism: the kind buckets, the strata 8→0 order, the key-name table, and the
+///   existence-not-handling consumption gate). They were this list's standing exception; the rule
+///   above let them in the moment something fired them.
 /// * **`OnCursorChanged`** (4 sites over 3 addons — all of them the Era `ScrollingEdit_OnCursorChanged`
-///   auto-scroll idiom) — **raising.** It is the EditBox's own slot (RF-28 `+0x428`), fired by the
-///   caret flush `0x77da80` with **four float caret-POSITION args**, and caret geometry is the one
-///   thing this engine deliberately does not have: text is measured host-side. Accepting it would
-///   hand every caller four zeros, which for its single idiom means a scroll box that silently
-///   never follows the caret.
+///   auto-scroll idiom) — **raising**, by this list's own rule: nothing fires it. It is the
+///   EditBox's own slot (RF-28 `+0x428`), fired by the reference's caret flush `0x77da80` with
+///   **four float caret-POSITION args**. The geometry itself is no longer the obstacle — the paint
+///   seam computes `caret_row`/`caret_x` off the host-answered advance table
+///   ([`crate::script::editbox::seam`]) — but that is a per-extract recompute with no event edge,
+///   so there is no counterpart to the flush to fire from. Accepting the name before building one
+///   would mean a scroll box that silently never follows the caret.
 /// * **`OnAttributeChanged`** (1 site, `Roid-Macros`) — **raising, permanently.** It is 2.0's secure
 ///   frame/attribute system; there is no such slot in any 1.12 resolver. That addon is asking for a
 ///   later client and should hear so.

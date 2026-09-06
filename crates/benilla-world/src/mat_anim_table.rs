@@ -98,7 +98,7 @@ impl Default for MatAnimTable {
 impl MatAnimTable {
     /// Allocate a slot (1-based; 0 is the identity row). `None` when the table is full — the
     /// caller then simply doesn't register, and the batch stays frozen at its built seed: a
-    /// degraded look only a >511-material session could see, never a wrong pixel.
+    /// degraded look only a >2047-material session could see, never a wrong pixel.
     pub fn alloc(&mut self) -> Option<u16> {
         if let Some(slot) = self.free.pop() {
             return Some(slot);

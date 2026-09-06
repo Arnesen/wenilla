@@ -1,5 +1,5 @@
 //! The world-map data feed (decision 0203 phase 2) — the app half behind
-//! `assets/ui/WorldMapFrame.xml` and benilla-ui's `script/worldmap.rs` bindings.
+//! stock `Interface\FrameXML\WorldMapFrame.xml` and benilla-ui's `script/worldmap.rs` bindings.
 //!
 //! Two systems, the quest-log seam shape:
 //! - [`load_world_map_ui`] (once, when the chain + VM + Map.dbc catalog all exist): builds the

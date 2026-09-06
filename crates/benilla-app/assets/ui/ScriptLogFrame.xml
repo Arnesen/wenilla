@@ -216,9 +216,9 @@
         end
     ]]></Script>
 
-    <!-- One list row: the `#N xCount` index column, then the message head. Same shape as
-         BenillaCraftSkillButtonTemplate (fixed columns — this engine has no FontString-width-based
-         dynamic anchor). -->
+    <!-- One list row: the `#N xCount` index column, then the message head. Fixed columns, 1.12's
+         own list idiom — not a width limitation: a FontString with a zero-authored axis takes its
+         measured box into the resolve (`benilla-ui` `script/layout.rs`, decision 1664). -->
     <Button name="BenillaScriptLogRowTemplate" virtual="true" hidden="true">
         <Size><AbsDimension x="293" y="16"/></Size>
         <Layers>
@@ -275,15 +275,12 @@
             </Layer>
         </Layers>
         <Frames>
-            <!-- The top-right X. This engine ships no UIPanelCloseButton; the minimize-button art
-                 stands in, MacroFrame/TrainerFrame's precedent. -->
-            <Button name="BenillaScriptLogCloseButton">
-                <Size><AbsDimension x="32" y="32"/></Size>
+            <!-- The top-right X: the chain's own `UIPanelCloseButton` (seated at benilla.toc's
+                 `Interface\FrameXML\UIPanelTemplates.xml`, 757 lines above this file). Its
+                 32x32, its three minimize-button state textures and its
+                 `HideUIPanel(this:GetParent())` are byte-for-byte what stood here authored. -->
+            <Button name="BenillaScriptLogCloseButton" inherits="UIPanelCloseButton">
                 <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-29" y="-8"/></Offset></Anchor></Anchors>
-                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
-                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
-                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
-                <Scripts><OnClick>HideUIPanel(getglobal("BenillaScriptLogFrame"))</OnClick></Scripts>
             </Button>
 
             <!-- Declared BEFORE the rows so row text paints over the glow (the house z-tiebreak). -->

@@ -24,7 +24,7 @@
 //! `CMSG_ACTIVATETAXIEXPRESS` with the full node chain; a click on the `Current` node is a
 //! client-side no-op.
 //!
-//! `TaxiFrame.xml` (`crates/benilla-app/assets/ui/TaxiFrame.xml`) is the window; its header comment
+//! Stock `Interface\FrameXML\TaxiFrame.xml` is the window; the toc's header comment
 //! carries the three engine-forced deviations from the literal reference Lua (a static node-button
 //! pool, the title reading an event arg, the error line's call target).
 

@@ -46,9 +46,9 @@ pub const EQUIPMENT_BAG: i64 = -100;
 
 /// What the cursor carries — the client's payload-mode global [0xb4d900] as a typed enum
 /// (wow-re cursor-dragdrop-payload.md §1: 1 = live item, 3 = spell, **4 = pet action**, **8 =
-/// macro**, **10 = stabled pet**; our Action arm is the client's bar-slot pickup; the
-/// money/preview arms stay unbuilt). One transition seam for every surface, so sounds,
-/// CURSOR_UPDATE, and lock display can't drift apart per window (decision 0216).
+/// macro**, **10 = stabled pet**; our Action arm is the client's bar-slot pickup; the money arm
+/// is mode 2 ([`CursorMoney`], 1962/1965) and the preview arm stays unbuilt). One transition seam
+/// for every surface, so sounds, CURSOR_UPDATE, and lock display can't drift apart per window (decision 0216).
 #[derive(Clone, Debug, PartialEq)]
 pub enum CursorPayload {
     Item(CursorItem),

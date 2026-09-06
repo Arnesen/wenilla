@@ -648,9 +648,10 @@ mod tests {
     /// reasoning that widget methods are not in `_G`. True, and it meant the report could not see
     /// a widget method we had *not built*. `MerchantFrame.xml` read `0 engine` and
     /// [`chain_readiness_report`] read CLEAN while the stock row's `<OnEnter>` called
-    /// `ShoppingTooltip1:SetMerchantCompareItem(...)`, which this engine does not have — so the
-    /// file loaded, every check passed, and hovering a vendor row would have raised in play. Both
-    /// instruments were right about what they measure. Neither measured the window.
+    /// `ShoppingTooltip1:SetMerchantCompareItem(...)`, which this engine did not have then (1802
+    /// built it) — so the file loaded, every check passed, and hovering a vendor row would have
+    /// raised in play. Both instruments were right about what they measure. Neither measured the
+    /// window.
     ///
     /// **A remaining `<?>` in the `fx=` column is usually a LoadOnDemand addon**, not something to
     /// build. `ClassTrainerFrame_Show`, `CraftFrame_Show`, `MacroFrame_SaveMacro`,
@@ -1881,8 +1882,9 @@ mod tests {
     /// read by the next session as if it were live.
     ///
     /// That is not a tidiness problem. Our copies DIVERGE from the reference deliberately, and the
-    /// divergence is what dies: `UiPanels.xml`'s `PanelTemplates_TabResize` carried a benilla-only
-    /// `return tabWidth` that the tab settle reads, and the reference's returns nothing.
+    /// divergence is what dies: our retired `UiPanels.xml` carried a `PanelTemplates_TabResize`
+    /// with a benilla-only `return tabWidth` that our tab settle read, and the reference's
+    /// returns nothing (both are gone — 1988, 1993).
     ///
     /// The reverse direction — ours seated BELOW the chain's, so we silently override the
     /// reference — is a real category too, and a wider audit than this gate.

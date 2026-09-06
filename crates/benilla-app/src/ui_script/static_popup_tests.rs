@@ -1,7 +1,7 @@
 //! The shared StaticPopup engine (decision 0308 §3 — the ref's registry + Show + OnUpdate
-//! machinery, transcribed in UiPanels.xml): the countdown/StartDelay/cancels/ESC laws the death
-//! arc's dialogs ride. Entries here are inline test dialogs — the real entries (DELETE_ITEM,
-//! ABANDON_QUEST, the death family) are covered by their features' own tests.
+//! machinery, stock `Interface\FrameXML\StaticPopup.xml` since 1988): the
+//! countdown/StartDelay/cancels/ESC laws the death arc's dialogs ride. Entries here are inline test
+//! dialogs — the real entries (DELETE_ITEM, ABANDON_QUEST, the death family) are covered by their features' own tests.
 
 use benilla_ui::script::UiScript;
 

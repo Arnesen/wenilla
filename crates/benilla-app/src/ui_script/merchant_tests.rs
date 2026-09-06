@@ -1,6 +1,6 @@
-//! The shipped **merchant window** driven end-to-end, engine-only (no Bevy): the real
-//! `assets/ui/MerchantFrame.xml` (+ `GameTooltip.xml` for the hover chain) loaded behind
-//! `UiPanels.xml` and fed synthetic stock — the phase-4 vendor arc's machine checks (decision
+//! The **merchant window** driven end-to-end, engine-only (no Bevy): the stock
+//! `Interface\FrameXML\MerchantFrame.xml` (+ `GameTooltip.xml` for the hover chain) loaded behind
+//! `UIParent.xml` and fed synthetic stock — the phase-4 vendor arc's machine checks (decision
 //! 0081/0084). Split from `panel_tests` (which keeps gossip + the slot manager itself) along the
 //! folder's one-file-per-window convention.
 
@@ -40,7 +40,7 @@ fn frame_rect(quads: &[ExtractedQuad], w: f32, h: f32) -> benilla_ui::layout::Re
         .unwrap_or_else(|| panic!("no bare-frame quad sized {w}x{h}"))
 }
 
-/// Load the real `assets/ui/MerchantFrame.xml` (the shipped vendor window) behind `UiPanels.xml`
+/// Load the stock `Interface\FrameXML\MerchantFrame.xml` behind `UIParent.xml`
 /// into a bare engine and drive it with a synthetic 2-item stock + a purse — the whole phase-4
 /// chain minus Bevy (decision 0081), now over the UIPanel slot manager (decision 0084): the
 /// hidden→shown lifecycle on MERCHANT_SHOW goes through ShowUIPanel (landing at the left slot),
@@ -1092,7 +1092,7 @@ fn trade_recipient_money_renders_the_digit_not_ellipsis() {
         load_xml(&s, f);
     }
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
-    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // the BenillaMoney_* helpers
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // MerchantFrame:IsShown(), read on the slot click
                                                             // TradeFrame's money entry is the chain's own since 1882 — its OnLoad calls MoneyInputFrame_*.
     load_xml(&s, "Interface\\FrameXML\\MoneyInputFrame.lua");
     load_xml(&s, "Interface\\FrameXML\\MoneyInputFrame.xml");

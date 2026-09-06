@@ -1,6 +1,6 @@
-//! Drives the REAL `assets/ui/TradeSkillFrame.xml` through the engine — the crafting-book twin
-//! of `talent_frame.rs`, and the first test that executes the transcribed tradeskill Lua at all
-//! (the polish pass's own discovery: no suite loaded this file, so a runtime bug in the
+//! Drives the reference's own `Blizzard_TradeSkillUI` addon through the engine — the crafting-book
+//! twin of `talent_frame.rs`, and the first test that executes the transcribed tradeskill Lua at
+//! all (the polish pass's own discovery: no suite loaded this file, so a runtime bug in the
 //! Show/Update/dropdown code would only ever surface in a live session).
 //!
 //! The harness loads the same file chain the app does (`ui_script/mod.rs`'s list, cut to the

@@ -724,14 +724,15 @@ fn load_definers(s: &UiScript, files: &[&str]) {
 
 /// The Interface page's harness (decision 1136), the same posture as `combat_harness` above: the
 /// **real** definers ahead of the window, in the manifest's own order, so each row captures the
-/// same file-scope value it captures in the client. `SHOW_NEWBIE_TIPS` rides in on `GameTooltip.xml`
-/// which `harness_on` already loads; the two quest globals need their own windows —
-/// `MerchantFrame.xml` for the coin helpers both quest files reuse and `ScrollTemplates.xml` for
-/// the kit `QuestFrame.xml` inherits from (the same chain `quest_tests`/`questlog_tests` load).
-/// `SHOW_BUFF_DURATIONS` arrives with the bar it re-anchors (1139), behind the two files
-/// `buff_tests` loads ahead of it — `Cooldown.xml` (every button's child) and `ActionBar.xml`
-/// (`BENILLA_FALLBACK_ICON`), themselves behind `UIParent.xml`. `TextStatusBar.xml` rides in
-/// ahead of them for the Status Bar Text row's consumer — the XP bar's numerals (1140).
+/// same file-scope value it captures in the client. `SHOW_NEWBIE_TIPS` is set by our own
+/// `assets/ui/OptionsFrame.xml` (it lived in our `GameTooltip.xml` until the tooltip went stock,
+/// 1968; the reference keeps it in `UIOptionsFrame.lua`), which `harness_on` already loads; the two
+/// quest globals need their own windows — `MerchantFrame.xml` for the coin helpers both quest files
+/// reuse and `ScrollTemplates.xml` for the kit `QuestFrame.xml` inherits from (the same chain
+/// `quest_tests`/`questlog_tests` load). `SHOW_BUFF_DURATIONS` arrives with the bar it re-anchors
+/// (1139), behind the two files `buff_tests` loads ahead of it — `Cooldown.xml` (every button's
+/// child) and `ActionBar.xml` (`BENILLA_FALLBACK_ICON`), themselves behind `UIParent.xml`.
+/// `TextStatusBar.xml` rides in ahead of them for the Status Bar Text row's consumer — the XP bar's numerals (1140).
 fn interface_harness() -> UiScript {
     let mut s = audio_harness();
     s.set_screen_size(1024.0, 768.0);
@@ -1847,8 +1848,9 @@ fn defaults_resets_the_controls_page_to_registered_defaults() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// Drive the window a few frames so the frame-late fits (the scroll body, the tab widths)
-/// converge: rects resolve after Lua runs, so OptionsScroll_Fit answers one frame behind.
+/// Drive the window a few frames so the scroll body's frame-late fit converges: rects resolve
+/// after Lua runs, so `OptionsScroll_Fit` answers one frame behind. (The tab widths are not in
+/// that set — 2028 put them on a one-shot `<OnShow>OptionsTab_FitWidth`.)
 fn settle(s: &mut UiScript) {
     for _ in 0..4 {
         s.resolve();
