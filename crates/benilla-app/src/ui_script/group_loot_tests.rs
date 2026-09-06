@@ -78,7 +78,7 @@ fn setup() -> UiScript {
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
@@ -87,7 +87,6 @@ fn setup() -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
-    load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\MainMenuBar.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
@@ -155,7 +154,7 @@ fn rolls() -> LootRollsState {
 fn shipped_group_loot_frame_loads_clean_and_starts_hidden() {
     let _data = benilla_formats::wow_data_or_skip!();
     let s = setup();
-    load_xml(&s, "UIParent.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\UIDropDownMenu.xml");
     load_xml(&s, r"Interface\FrameXML\PartyMemberFrame.lua");
     // The four roll popups arrive INSIDE the chain's loot window, so there is no exact frame count
@@ -547,14 +546,13 @@ fn managed_positions_engage_for_the_bare_frame_name() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "UIParent.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     // UiPanels.xml before GroupLootFrame.xml, mirroring the shipped manifest order
     // (`ui_script::load_default_ui`): the roll file's CONFIRM_LOOT_ROLL entry indexes
     // `StaticPopupDialogs`, and indexing a nil there aborts the WHOLE inline <Script> chunk —
     // taking every BenillaGroupLootFrame_* function down with it, not just the popup.
-    load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
@@ -578,7 +576,12 @@ fn managed_positions_engage_for_the_bare_frame_name() {
     // The bar stubs carry a no-op SetPoint: `MultiBarBottomLeft` and `ShapeshiftBarFrame` are
     // themselves rows in UIPARENT_MANAGED_FRAME_POSITIONS, so since those frames wear their
     // reference names the pass positions them as well as reading their visibility.
-    s.run("MultiBarBottomLeft = { IsShown = function() return true end, SetPoint = function() end, ClearAllPoints = function() end }; MultiBarBottomRight = MultiBarBottomLeft; UIParent_ManageFramePositions()")
+    // **The bottom-bar flags come from the SAVED GLOBALS, not from the frames.** The stock pass
+    // reads `SHOW_MULTI_ACTIONBAR_1`/`_2` (`UIParent.lua:1598-1606`) and never asks the bars
+    // whether they are shown — our retired copy asked, which is why this drive used to fake a
+    // frame with an `IsShown`. The fake also had no `IsObjectType`, which the pass calls on every
+    // row it seats (1988).
+    s.run("SHOW_MULTI_ACTIONBAR_1 = 1 SHOW_MULTI_ACTIONBAR_2 = 1 UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();
     assert_eq!(bottom(&s), 102.0, "60 + bottomEither 42 — the row engaged");
@@ -592,13 +595,16 @@ fn managed_positions_engage_for_the_bare_frame_name() {
          ShapeshiftBarLeft, ShapeshiftBarMiddle, ShapeshiftBarRight = t, t, t",
     )
     .unwrap();
-    s.run("ShapeshiftBarFrame = { IsShown = function() return true end, SetPoint = function() end, ClearAllPoints = function() end }; UIParent_ManageFramePositions()")
+    s.run(
+        "ShapeshiftBarFrame = ShapeshiftBarFrame or CreateFrame(\"Frame\", \"ShapeshiftBarFrame\") \
+         ShapeshiftBarFrame:Show() UIParent_ManageFramePositions()",
+    )
         .unwrap();
     s.resolve();
     assert_eq!(bottom(&s), 144.0, "60 + 42 + pet 42");
 
     // And it settles back when the stance bar hides.
-    s.run("ShapeshiftBarFrame = { IsShown = function() return false end, SetPoint = function() end, ClearAllPoints = function() end }; UIParent_ManageFramePositions()")
+    s.run("ShapeshiftBarFrame:Hide() UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();
     assert_eq!(bottom(&s), 102.0, "back to the multibar-only stack");
@@ -617,7 +623,7 @@ fn ctrl_and_shift_on_the_roll_icon_preview_and_post_its_link() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     load_group_loot(&s);
-    load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink, the shared shift-insert helper
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml"); // UIParent + UIParent.lua, the reference's own (1988)
     load_xml(&s, "Interface\\FrameXML\\DressUpFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
@@ -626,7 +632,6 @@ fn ctrl_and_shift_on_the_roll_icon_preview_and_post_its_link() {
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
     load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
-    load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
     s.set_loot_rolls(rolls());

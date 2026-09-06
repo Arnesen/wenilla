@@ -343,6 +343,7 @@ fn merchant_show_hide_plays_open_and_close_kits() {
     for f in super::test_ui::MERCHANT_UI {
         load_xml(&s, f);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     // Hidden at load: no open sound (never transitions on startup).
@@ -392,6 +393,7 @@ fn vendor_open_opens_the_backpack_and_layers_the_sound() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     equip_bag(&mut s, 0, "Backpack", 16);
@@ -442,6 +444,7 @@ fn vendor_leaves_an_already_open_backpack_alone() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     equip_bag(&mut s, 0, "Backpack", 16);
@@ -490,6 +493,7 @@ fn vendor_opens_and_closes_all_equipped_bags() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     equip_bag(&mut s, 0, "Backpack", 16);
@@ -526,6 +530,7 @@ fn merchant_switch_plays_close_then_open_and_queues_the_consumable_close() {
     for f in super::test_ui::MERCHANT_UI {
         load_xml(&s, f);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     // Vendor A open.
@@ -579,6 +584,7 @@ fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
     // every FrameXML file loads before any hover fires, so load it here too — with the dropdown
     // kit its GroupLootDropDown initializes against at load (benilla.toc l.64 vs 383).
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     s.set_merchant(Some(MerchantState {
@@ -818,6 +824,7 @@ fn merchant_tabs_drive_buyback_page_and_repair_pair() {
     for f in super::test_ui::MERCHANT_UI {
         load_xml(&s, f);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(500);
 
@@ -939,6 +946,7 @@ fn merchant_tabs_fit_their_labels() {
     for f in super::test_ui::MERCHANT_UI {
         load_xml(&s, f);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.set_merchant(Some(MerchantState::default()));
@@ -988,6 +996,7 @@ fn shipped_merchant_frame_arms_the_buy_cursor_on_hover() {
     for f in super::test_ui::MERCHANT_UI {
         load_xml(&s, f);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     // A purse of 50c: row 1 (25c) is affordable, row 2 (100c) is not.
@@ -1081,6 +1090,7 @@ fn trade_recipient_money_renders_the_digit_not_ellipsis() {
     for f in super::test_ui::MERCHANT_UI {
         load_xml(&s, f);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // the BenillaMoney_* helpers
                                                             // TradeFrame's money entry is the chain's own since 1882 — its OnLoad calls MoneyInputFrame_*.
     load_xml(&s, "Interface\\FrameXML\\MoneyInputFrame.lua");
@@ -1140,7 +1150,8 @@ fn ctrl_and_shift_on_a_vendor_row_preview_and_post_without_buying() {
         load_xml(&s, f);
     }
     for file in [
-        "UIParent.xml", // BenillaChatEdit_InsertLink, the shared shift-insert helper
+        r"Interface\FrameXML\UIParent.xml", // UIParent + UIParent.lua, the reference's own (1988)
+        "ScrollTemplates.xml",              // the window tab template, ours (1004/1988)
         "Interface\\FrameXML\\MerchantFrame.xml",
         "Interface\\FrameXML\\DressUpFrame.xml",
         "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from

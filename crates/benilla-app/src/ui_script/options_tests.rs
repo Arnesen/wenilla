@@ -50,10 +50,9 @@ fn harness_on(mut s: UiScript) -> UiScript {
         "Interface\\FrameXML\\Fonts.xml",
         // Every panel window declares `parent="UIParent"`, resolved at LOAD — so UIParent has to
         // exist by the time they are read, exactly as it does in the manifest (decision 1734).
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
@@ -700,7 +699,7 @@ fn audio_harness() -> UiScript {
 fn combat_harness() -> UiScript {
     let mut s = audio_harness();
     s.set_screen_size(1024.0, 768.0);
-    load_definers(&s, &["UIParent.xml"]);
+    load_definers(&s, &[r"Interface\FrameXML\UIParent.xml"]);
     // The family's definers are the options window's own since 1964 (the reference's
     // UIOptionsFrame.lua block); the addon itself is LoadOnDemand off the chain, seated so the
     // master row's apply can load it the way the client does.
@@ -743,13 +742,12 @@ fn interface_harness() -> UiScript {
             r"Interface\FrameXML\MoneyFrame.lua",
             r"Interface\FrameXML\MoneyFrame.xml",
             "Interface\\FrameXML\\GlobalStrings.lua",
-            "UiPanels.xml",
+            r"Interface\FrameXML\UIParent.xml",
             r"Interface\FrameXML\UIPanelTemplates.lua",
             r"Interface\FrameXML\UIPanelTemplates.xml",
             "Interface\\FrameXML\\BasicControls.xml",
             "Interface\\FrameXML\\LocaleProperties.lua",
             "Interface\\FrameXML\\StaticPopup.xml",
-            "UIParent.xml",
             // The target-of-target pair's definer (1576) and the three files ahead of it, all in
             // their manifest seats. The chain is a real load-ORDER requirement rather than
             // tidiness: `UnitFrames`' three menu hosts initialize into the dropdown kit at load
@@ -818,14 +816,13 @@ fn chat_harness() -> UiScript {
             "Interface\\FrameXML\\Fonts.xml",
             r"Interface\FrameXML\MoneyFrame.lua",
             r"Interface\FrameXML\MoneyFrame.xml",
-            "UiPanels.xml",
+            r"Interface\FrameXML\UIParent.xml",
             r"Interface\FrameXML\UIPanelTemplates.lua",
             r"Interface\FrameXML\UIPanelTemplates.xml",
             "Interface\\FrameXML\\LocaleProperties.lua",
             "Interface\\FrameXML\\GlobalStrings.lua",
             "Interface\\FrameXML\\BasicControls.xml",
             "Interface\\FrameXML\\StaticPopup.xml",
-            "UIParent.xml",
             "Interface\\FrameXML\\GameTooltip.xml",
             "Interface\\FrameXML\\UIDropDownMenu.xml",
             "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
@@ -852,7 +849,7 @@ fn actionbars_harness() -> UiScript {
         &s,
         &[
             "Interface\\FrameXML\\Fonts.xml",
-            "UIParent.xml",
+            r"Interface\FrameXML\UIParent.xml",
             "Cooldown.xml",
             "Interface\\FrameXML\\ActionButtonTemplate.xml",
             "Interface\\FrameXML\\TextStatusBar.lua",
@@ -873,7 +870,6 @@ fn actionbars_harness() -> UiScript {
             r"Interface\FrameXML\OptionsFrameTemplates.xml",
             r"Interface\FrameXML\ReputationFrame.xml",
             "Interface\\FrameXML\\ActionBarFrame.xml",
-            "UiPanels.xml",
             "Interface\\FrameXML\\UIDropDownMenu.xml",
             "ScrollTemplates.xml",
             r"Interface\FrameXML\UIPanelTemplates.lua",

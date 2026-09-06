@@ -20,7 +20,7 @@ fn load_unit_frames(s: &UiScript) {
     // own file; naming the file is the only version that cannot drift. (`DEAD` is l.898 of it.)
     load_xml(s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(s, "UIParent.xml");
+    load_xml(s, r"Interface\FrameXML\UIParent.xml");
     // The bars' numerals machinery (decision 1082), which the manifest loads immediately ahead of
     // UnitFrames.xml and which every bar's OnLoad wires into since 1143.
     load_xml(s, "Interface\\FrameXML\\TextStatusBar.lua");
@@ -652,7 +652,8 @@ fn shipped_target_frame_runs_the_level_law() {
     load_unit_frames(&s);
     // GetDifficultyColor's own load chain (the quest log window, its ref home).
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // the window tab template, ours (1004/1988)
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
@@ -661,7 +662,6 @@ fn shipped_target_frame_runs_the_level_law() {
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
-    load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -1218,7 +1218,7 @@ fn the_party_art_paints_over_the_bars() {
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
@@ -1229,7 +1229,6 @@ fn the_party_art_paints_over_the_bars() {
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     // Before UnitPopup: that file reads ITEM_QUALITY_COLORS at FILE SCOPE and its
     // declarer is UIParent (ref UIParent.lua:65) since 1888.
-    load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, "Interface\\FrameXML\\UnitPopup.xml");
     // The reference's own kit, in the manifest's order. `UIParent.xml` is not decoration here:

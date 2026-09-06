@@ -33,7 +33,7 @@ fn setup() -> UiScript {
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
-        "UiPanels.xml",
+        r"Interface\FrameXML\UIParent.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
         // The stock file's `HelpFrame_OnShow` calls `UpdateMicroButtons()` before
@@ -43,7 +43,6 @@ fn setup() -> UiScript {
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
-        "UIParent.xml",
         "Interface\\FrameXML\\MainMenuBar.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
         "Interface\\FrameXML\\BonusActionBarFrame.xml",

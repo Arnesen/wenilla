@@ -1207,10 +1207,11 @@ fn an_addons_tab_click_selects_through_the_generic_entry_point() {
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     // The reference's `PanelTemplates_SelectTab` ends with `if GameTooltip:IsOwned(tab)` —
     // an arm our deleted copy omitted ("our tabs set no tooltip"), so selecting a tab now needs
     // the tooltip to exist (1860).
+    load_xml(&s, "ScrollTemplates.xml"); // our window tab template (1988)
     load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
@@ -1218,7 +1219,6 @@ fn an_addons_tab_click_selects_through_the_generic_entry_point() {
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-    load_xml(&s, "UIParent.xml");
 
     // A conforming row: tabs named `<frame>Tab1..N` (what `PanelTemplates_UpdateTabs` getglobals)
     // and each carrying its own id, exactly as an addon's XML declares them.

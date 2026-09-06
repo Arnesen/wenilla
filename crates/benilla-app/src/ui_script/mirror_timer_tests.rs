@@ -19,13 +19,12 @@ fn harness() -> UiScript {
     // The bars' START driver: `UIParent_OnEvent`'s MIRROR_TIMER_START arm is what calls
     // `MirrorTimer_Show`, which is where the reference keeps it (UIParent.lua l.97 + l.374-377)
     // and where window 7 moved ours back to. Without this file the event reaches nothing.
-    load_xml(&s, "UIParent.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     // `STATICPOPUP_NUMDIALOGS`, which the reference's own `MirrorTimer_Show` bounds its free-bar
     // search by (MirrorTimer.lua l.32 — a copy-paste from StaticPopup.lua, and its own bug). A
     // session without it searches `1, nil` and finds no free bar at all, so this is not scenery.
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");

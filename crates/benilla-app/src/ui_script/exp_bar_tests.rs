@@ -16,7 +16,7 @@ fn exp_bar_harness() -> UiScript {
     // wrong store — and would leave its `<Script file="TextStatusBar.lua"/>` unresolved besides.
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
         "Interface\\FrameXML\\GameTooltip.xml",

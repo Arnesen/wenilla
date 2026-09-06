@@ -26,10 +26,9 @@ const FILES: &[&str] = &[
     "Interface\\FrameXML\\Fonts.xml",
     r"Interface\FrameXML\MoneyFrame.lua",
     r"Interface\FrameXML\MoneyFrame.xml",
-    "UiPanels.xml",
+    r"Interface\FrameXML\UIParent.xml",
     // `GetMaterialTextColors`, which the reference's own `ItemTextFrame_OnEvent` calls to pick the
     // page and title ink. 1.12 keeps it in UIParent.lua and ours does the same (1751 window 9).
-    "UIParent.xml",
     "ScrollTemplates.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",

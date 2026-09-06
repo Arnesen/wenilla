@@ -29,9 +29,8 @@ const FILES: &[&str] = &[
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
     r"Interface\FrameXML\MoneyFrame.lua",
     r"Interface\FrameXML\MoneyFrame.xml",
-    "UiPanels.xml",
+    r"Interface\FrameXML\UIParent.xml",
     // `ToggleTalentFrame` lives here now, not in the window's own file (decision 1833).
-    "UIParent.xml",
     "Interface\\FrameXML\\GameTooltip.xml",
     // `UIPanelScrollFrameTemplate` — the stock scroll frame's whole substance: its `$parentScrollBar`
     // Slider AND its `<OnMouseWheel>`. Nothing else in the tree declares it, and a missing template

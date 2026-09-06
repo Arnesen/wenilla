@@ -43,7 +43,7 @@ fn harness() -> UiScript {
     s.set_screen_size(1024.0, 768.0);
     for f in [
         "Interface\\FrameXML\\Fonts.xml",
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
         "Interface\\FrameXML\\GameTooltip.xml",

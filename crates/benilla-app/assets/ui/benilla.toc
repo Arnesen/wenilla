@@ -124,7 +124,21 @@ Interface\FrameXML\BasicControls.xml
 # the reference's toc has it (l.7-8). Needs Fonts.xml's SystemFont above; everything else it
 # names is call-time.
 Interface\FrameXML\WorldFrame.xml
-UIParent.xml
+# UIParent itself and its Lua — the reference's own file (1751; decision 1988), at the slot its
+# toc gives it (l.8, right after BasicControls). UIParent.lua is the whole of the glue this
+# engine used to carry as UIParent.xml + UiPanels.xml: the UIPanelWindows table and the slot
+# manager (Show/HideUIPanel, CloseAllWindows, ToggleGameMenu's ESC ladder), the fade/flash/pulse
+# kits (ticked from UIParent's own OnUpdate, so the three driver frames of ours retired with
+# it), the managed bottom-stack positions, the model turntable, the LoadOnDemand shims, and the
+# sixty-six globally-routed events and their arms. It sources LocaleProperties.lua itself. Its
+# OnUpdate also ticks FCF_OnUpdate, UnitPopup_OnUpdate, BattlefieldFrame_OnUpdate, the
+# battlefield-position ask (1980) and the ready-check timeout (1989) — call-time names, all of
+# them below. LowHealthFrame (parent WorldFrame, above) and OutOfControlFrame ride along.
+# What stayed ours moved out: the window tab template and its settle + the placeholder icon
+# (ScrollTemplates.xml), 0561's bag verbs (ContainerFrameAdapters.xml), the script log's row
+# (ScriptLogFrame.xml), and three aliases in OptionsFrame.xml that answer the reference's three
+# options windows and its Cancel button.
+Interface\FrameXML\UIParent.xml
 # ══ THE ITEM-SLOT BASE — the reference's own, off the player's chain (1751, window 24) ══
 # `ItemButtonTemplate` and the eight `SetItemButton*` verbs out of `ItemButtonTemplate.lua`. It
 # sits as early as it can be read: no frames, no dependencies of its own, and every window that
@@ -169,12 +183,6 @@ Interface\FrameXML\MoneyFrame.xml
 # `every_chain_xml_brings_its_own_lua` is now a gate so neither can recur.
 Interface\FrameXML\MoneyInputFrame.lua
 Interface\FrameXML\MoneyInputFrame.xml
-# The UIPanel slot manager (decision 0084 §2) and the fade/flash/pulse kits — the UIParent.lua
-# halves this engine still carries itself: script-only but for the kits' tick drivers, loaded
-# before any panel frame so ShowUIPanel/HideUIPanel already exist when those frames' OnLoad/OnEvent
-# reference them. The StaticPopup engine and every dialog it used to carry are the reference's
-# own file now, far below at the reference's own slot after UIPanelTemplates (decision 1960).
-UiPanels.xml
 # ══ THE TOOLTIP — the reference's own, off the player's chain (1751; decision 1968) ══
 # GameTooltip.xml sources HealthBar.lua and GameTooltip.lua and <Include>s GameTooltipTemplate.xml:
 # the two virtual templates (GameTooltipTemplate, ShoppingTooltipTemplate — thirty declared line
@@ -592,14 +600,6 @@ Interface\FrameXML\CastingBarFrame.xml
 #   1.12 never reaches it — vmangos refuses to send that packet and substitutes a full START,
 #   saying so in `Player::SendMirrorTimers` — and `ui_mirror.rs`'s Pause edge carries the note.
 Interface\FrameXML\MirrorTimer.xml
-# ══ THE WORLD-STATE FRAMES — the reference's own, off the player's chain (1751; decision 1972) ══
-# WorldStateFrame.xml + WorldStateFrame.lua: the always-up readout 1586 built (the tower/flag/base
-# counters at top-centre, `UPDATE_WORLD_STATES` from `crate::world_state_ui`), the capture bars,
-# and the battleground SCOREBOARD ours never had — `WorldStateScoreFrame`, over the score family
-# 1972 built (`MSG_PVP_LOG_DATA`, the eleven verbs, `UPDATE_BATTLEFIELD_SCORE`) and UIParent.xml's
-# `BattlefieldMinimap_LoadUI`. Needs Fonts, GameTooltip, the panel kit (its close button, tabs,
-# faux scroll frame) — all above; sits beside the mirror timers, which share its top-centre lane.
-Interface\FrameXML\WorldStateFrame.xml
 # ══ THE DURABILITY ALERT — the reference's own, off the player's chain (1751, window 4) ══
 # The "armor guy" under the minimap: `DurabilityFrame`, its eleven glyph textures, and
 # `DurabilityFrame_SetAlerts` / `_OnUpdate` with `INVENTORY_ALERT_STATUS_SLOTS` and
@@ -1053,6 +1053,20 @@ Interface\FrameXML\QuestTimerFrame.xml
 # CHAT_MSG_* events the reference's ChatFrame_OnEvent prints from — it no longer prints them itself.
 Interface\FrameXML\ChatFrame.xml
 Interface\FrameXML\FloatingChatFrame.xml
+
+# ══ THE WORLD-STATE FRAMES — the reference's own, off the player's chain (1751; decision 1972) ══
+# WorldStateFrame.xml + WorldStateFrame.lua: the always-up readout 1586 built (the tower/flag/base
+# counters at top-centre, `UPDATE_WORLD_STATES` from `crate::world_state_ui`), the capture bars,
+# and the battleground SCOREBOARD ours never had — `WorldStateScoreFrame`, over the score family
+# 1972 built (`MSG_PVP_LOG_DATA`, the eleven verbs, `UPDATE_BATTLEFIELD_SCORE`) and UIParent.xml's
+# `BattlefieldMinimap_LoadUI`. Needs Fonts, GameTooltip, the panel kit (its close button, tabs,
+# faux scroll frame) — all above. It sat beside the mirror timers until 1988: the always-up
+# frame's OnLoad runs the stock UIParent_ManageFramePositions, and that pass indexes half the
+# HUD unguarded — ReputationWatchBar, QuestTimerFrame, QuestWatchFrame (QuestLogFrame.xml),
+# MinimapCluster, DurabilityFrame, the bars and their sliding textures — and ends by calling
+# FCF_DockUpdate and re-anchoring the container frames. So this file sits after all of them,
+# which is why the reference's own toc has it at l.89, near the end (1988).
+Interface\FrameXML\WorldStateFrame.xml
 # ══ THE MACRO WINDOW — the reference's own, off the player's chain (1751, window 32) ══
 # A LoadOnDemand addon with no row here since 1967 (the addons header far above); what stays in
 # this slot is the FrameXML file it needs loaded first.

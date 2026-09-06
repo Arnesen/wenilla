@@ -28,13 +28,12 @@ fn harness() -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     // `SecondsToTime`, which the reference's `QuestTimerFrame_Update` formats every row with, and
     // `UIParent_ManageFramePositions`, which its OnShow/OnHide call.
-    load_xml(&s, "UIParent.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     // `MAX_QUESTS`, the loop bound the reference's repaint hides its spare rows with. 1.12
     // declares it on QuestLogFrame.lua:2 and so do we (1751 window 16) — a nil there is
     // `'for' limit must be a number` on the first repaint, not a missing row.
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");

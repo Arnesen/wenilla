@@ -478,6 +478,7 @@ fn shipped_loot_pushed_to_center_by_merchant() {
         load_xml(&s, f);
     }
     load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     // Loot opens onto the empty left slot.
@@ -607,7 +608,7 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
         load_xml(&s, f);
     }
     for file in [
-        "UIParent.xml", // BenillaChatEdit_InsertLink, the shared shift-insert helper
+        r"Interface\FrameXML\UIParent.xml", // UIParent + UIParent.lua, the reference's own (1988)
         "Interface\\FrameXML\\LootFrame.xml",
         "Interface\\FrameXML\\DressUpFrame.xml",
         "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
@@ -617,7 +618,6 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "Interface\\FrameXML\\UIPanelTemplates.lua",
         "Interface\\FrameXML\\UIPanelTemplates.xml",
-        "UiPanels.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\FloatingChatFrame.xml",
     ] {

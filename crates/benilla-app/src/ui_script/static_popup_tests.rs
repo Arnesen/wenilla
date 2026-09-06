@@ -13,7 +13,7 @@ fn setup() -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
@@ -271,7 +271,7 @@ fn hide_and_find_address_one_instance_by_data_only_for_a_multiple_dialog() {
 fn the_verb_dialogs_open_from_their_events_and_call_their_verbs() {
     use benilla_ui::script::ScriptValue;
     let mut s = setup();
-    load_xml(&s, "UIParent.xml"); // the arms
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml"); // the arms
     s.set_money(50_000);
     // The pet trainer's question: the dialog, its money frame at the cost, Accept → the confirm.
     s.fire_event("CONFIRM_PET_UNLEARN", vec![ScriptValue::Int(12_345)]);
@@ -306,9 +306,22 @@ fn the_verb_dialogs_open_from_their_events_and_call_their_verbs() {
     assert!(s
         .eval::<bool>("return StaticPopup_Visible(\"AREA_SPIRIT_HEAL\") ~= nil")
         .unwrap());
+    // **The reference's dialog accepts on SHOW and its one button CANCELS** — the 1.12 file keeps
+    // the old two-button version commented out and ships the auto-accepting one
+    // (`StaticPopup.lua:1204-1240`): `OnShow` calls `AcceptAreaSpiritHeal()`, `button1` is CANCEL,
+    // and its `OnAccept` calls `CancelAreaSpiritHeal()`. So the accept is already in by the time
+    // the popup is on screen (1988 — our retired UIParent arm showed it without that OnShow).
+    assert!(
+        s.take_area_spirit_accepts() >= 1,
+        "showing the dialog IS the accept"
+    );
     s.run("StaticPopup_OnClick(StaticPopup_FindVisible(\"AREA_SPIRIT_HEAL\"), 1)")
         .unwrap();
-    assert_eq!(s.take_area_spirit_accepts(), 1);
+    assert_eq!(
+        s.take_area_spirit_accepts(),
+        0,
+        "the button cancels; it does not accept again"
+    );
     s.fire_event("AREA_SPIRIT_HEALER_OUT_OF_RANGE", vec![]);
     s.tick(0.0);
     assert!(!s

@@ -21,7 +21,7 @@ fn harness(extra: &[&str]) -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "UIParent.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
@@ -246,7 +246,7 @@ fn action_button_hover_takes_the_default_corner() {
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
         "Interface\\FrameXML\\Fonts.xml",
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\MainMenuBar.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
@@ -287,13 +287,12 @@ fn ubertooltips_off_seats_action_bar_plates_beside_the_button() {
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
         "Interface\\FrameXML\\Fonts.xml",
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\MainMenuBar.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
         "Interface\\FrameXML\\BonusActionBarFrame.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
-        "UiPanels.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
@@ -368,7 +367,7 @@ fn ubertooltips_off_seats_stance_plates_beside_the_button() {
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
         "Interface\\FrameXML\\Fonts.xml",
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\MainMenuBar.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
@@ -421,7 +420,7 @@ fn buff_hover_hangs_below_left_of_the_button() {
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
         "Interface\\FrameXML\\Fonts.xml",
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\MainMenuBar.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",

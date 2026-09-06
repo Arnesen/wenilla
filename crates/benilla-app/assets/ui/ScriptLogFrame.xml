@@ -26,7 +26,8 @@
         attached, so the detail is genuinely variable-height content, which is what the real kit is
         for; `GossipFrame.xml`'s greeting pane is the same wiring).
 
-        The window is registered in `UIPanelWindows` (`UiPanels.xml`), which is what seats it in the
+        The window registers itself in `UIPanelWindows` (below; the table is the stock UIParent.lua's
+        since 1988), which is what seats it in the
         left slot and gets it closed by `CloseAllWindows()` — i.e. by ESC — with no code here. Our
         own toplevels deliberately stay OUT of `UISpecialFrames`: that table is the addons' (0544's
         note, 1206).
@@ -40,6 +41,10 @@
         feed and nothing to keep in step — the window polls the log it is a view of.
     -->
     <Script><![CDATA[
+        -- The slot-manager row (decision 1495): a left-area window one tier above every stock
+        -- panel's pushable, so opening a game window pushes the log aside rather than the reverse.
+        UIPanelWindows["BenillaScriptLogFrame"] = { area = "left", pushable = 9, whileDead = 1 }
+
         BENILLA_SCRIPTLOG_ROWS = 13
         BENILLA_SCRIPTLOG_ROW_HEIGHT = 16
         -- How much of a message a ROW shows. The full text is the detail pane's job; a row is an

@@ -4063,9 +4063,14 @@
          is down (MainMenuBarMicroButtons.lua l.47-52; decision 1987). These two aliases are the
          adapter: a stock read of either sibling is answered by this window, which is the honest
          answer — while ours is up, the reference's question "is an options window open" is yes.
-         BENILLA_ALLOW_OWN_UI=1 -->
+         The third alias is the ESC ladder's: the stock `ToggleGameMenu` (UIParent.lua l.1465-1497,
+         off the chain since 1988) closes an open options window with `OptionsFrameCancel:Click()`,
+         the reference's Cancel button; ours has a corner X whose click is the same discard-and-hide
+         (`HideUIPanel(OptionsFrame)`, and OnHide discards the pending page), so that button answers
+         to the reference's name. BENILLA_ALLOW_OWN_UI=1 -->
     <Script><![CDATA[
         UIOptionsFrame = OptionsFrame
         SoundOptionsFrame = OptionsFrame
+        OptionsFrameCancel = OptionsFrameCloseButton
     ]]></Script>
 </Ui>

@@ -47,7 +47,7 @@
 //!    **send a name query** (`0x55f1fa`), whose arrival signals nothing. So the real name surfaces
 //!    only because the popup engine re-reads all three getters every OnUpdate frame — *a client
 //!    that formats the text once shows an empty summoner forever.* That is what makes
-//!    `UiPanels.xml`'s `CONFIRM_SUMMON` countdown arm the mechanism rather than a transcription,
+//!    `UIParent.lua`'s `CONFIRM_SUMMON` countdown arm the mechanism rather than a transcription,
 //!    and it is why the event is not held back for the name the way `DUEL_REQUESTED` (0633) is:
 //!    that event carries its name as `arg1`, and this one has no argument to hold.
 //!

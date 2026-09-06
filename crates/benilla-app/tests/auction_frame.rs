@@ -28,10 +28,9 @@ const FILES: &[&str] = &[
     // the `MoneyInputFrame_*` verbs, replacing our own verbatim copy of both.
     r"Interface\FrameXML\MoneyInputFrame.lua",
     r"Interface\FrameXML\MoneyInputFrame.xml",
-    "UiPanels.xml",
+    r"Interface\FrameXML\UIParent.xml",
     // `auctionRowName` colours each row from ITEM_QUALITY_COLORS, whose declarer is
     // UIParent (ref UIParent.lua:65) since 1888 put the font registry on the chain.
-    "UIParent.xml",
     "Interface\\FrameXML\\GameTooltip.xml",
     "Interface\\FrameXML\\UIDropDownMenu.xml",
     "ScrollTemplates.xml",

@@ -113,7 +113,7 @@ fn an_error_toast_draws_over_an_open_panel_window() {
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
@@ -122,13 +122,11 @@ fn an_error_toast_draws_over_an_open_panel_window() {
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "Interface\\FrameXML\\UIErrorsFrame.xml");
     load_xml(&s, "Cooldown.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // BenillaMoney_* — QuestLogDetail's reward money row
-                                                            // ScrollTemplates.xml (the faux kit the list rides) + UIPanelTemplates.xml (the detail
                                                             // pane's UIPanelScrollFrameTemplate). A MISSING template is a loader *warning*, so an
                                                             // under-loaded list passes and then dies on the first FauxScrollFrame_Update.
-    load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
-    load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
     load_xml(&s, r"Interface\FrameXML\MainMenuBarMicroButtons.xml");

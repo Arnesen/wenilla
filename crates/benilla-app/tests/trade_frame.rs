@@ -6,9 +6,9 @@
 //! `TRADE_ACCEPT_UPDATE(my, his)` args. This is the machine gate for the XML (a Lua error / missing
 //! global / wrong region name fails here); the director's eye judges only the *look*.
 
-use benilla_ui::script::{ScriptValue, TradeSideState, TradeSlotItem, TradeState, UiScript};
+mod common;
 
-const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
+use benilla_ui::script::{ScriptValue, TradeSideState, TradeSlotItem, TradeState, UiScript};
 
 /// The trade window's load prefix — the app's own order (`ui_script/mod.rs`), members only.
 /// MerchantFrame.xml rides along because TradeFrame.xml reuses its global `BenillaMoney_*` coin
@@ -22,7 +22,7 @@ const FILES: &[&str] = &[
     // which is benilla.toc's own order.
     r"Interface\FrameXML\MoneyInputFrame.lua",
     r"Interface\FrameXML\MoneyInputFrame.xml",
-    "UiPanels.xml",
+    r"Interface\FrameXML\UIParent.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
     "Interface\\FrameXML\\GlobalStrings.lua",
@@ -36,48 +36,8 @@ const FILES: &[&str] = &[
 ];
 
 fn load_ui(script: &UiScript) {
-    let dir = std::path::Path::new(UI_DIR);
-    // A manifest entry carrying a path separator is the PLAYER's own file and comes off the patch
-    // chain; a bare name is ours, under `assets/ui`. `tests/common` already draws this line — this
-    // binary grew it when 1860 moved `PanelTemplates_*` onto the chain.
-    let chain = benilla_formats::wow_data().and_then(|d| benilla_formats::open_chain(&d).ok());
-    let read = |req: &str| -> Option<Vec<u8>> {
-        let norm = req.replace('\\', "/");
-        if norm.contains('/') {
-            if let Some(b) = chain.as_ref().and_then(|c| c.read(&norm).ok()) {
-                return Some(b);
-            }
-        }
-        let base = norm.rsplit('/').next().unwrap_or(&norm);
-        std::fs::read(dir.join(&norm))
-            .or_else(|_| std::fs::read(dir.join(base)))
-            .ok()
-    };
-    let provider = |req: &str| -> Option<Vec<u8>> { read(req) };
     for file in FILES {
-        let bytes = read(file).unwrap_or_else(|| panic!("reading {file}"));
-        // A `.lua` entry is a CHUNK, not a document.
-        if file.to_ascii_lowercase().ends_with(".lua") {
-            script
-                .run_chunk_named(&bytes, &format!("@{file}"))
-                .unwrap_or_else(|e| panic!("{file}: {e}"));
-            continue;
-        }
-        let text = benilla_ui::source::decode(&bytes);
-        let doc = benilla_ui::framexml::parse(&text).unwrap_or_else(|e| {
-            panic!("parsing {file}: {e}");
-        });
-        // The document's OWN path, not the path-less `load` (1923). The base is what every
-        // relative `<Script file=>` / `<Include file=>` inside resolves against (1186); with
-        // an empty base they stay bare and miss the provider entirely, so a self-sourcing
-        // stock file loads as an empty shell and every handler in it goes missing — silently,
-        // because nothing in these lists used to be self-sourcing.
-        let report = benilla_ui::loader::load_in(script, &doc, &file.replace('\\', "/"), &provider);
-        assert!(
-            report.errors.is_empty(),
-            "{file} loaded with errors: {:#?}",
-            report.errors
-        );
+        common::load_ui(script, file);
     }
 }
 

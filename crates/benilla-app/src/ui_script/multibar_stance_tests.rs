@@ -19,7 +19,7 @@ use super::test_ui::load_ui as load_xml;
 fn load_action_bar(s: &UiScript) {
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
         "Interface\\FrameXML\\GameTooltip.xml",
@@ -43,7 +43,6 @@ fn load_action_bar(s: &UiScript) {
         // window publishes — the reference's own load order (UIOptionsFrame.xml l.21 before
         // MultiActionBars.xml l.39), and the manifest's since 1938.
         "Interface\\FrameXML\\UIDropDownMenu.xml",
-        "UiPanels.xml", // StaticPopupDialogs, which the options window's pages register into
         "Interface\\FrameXML\\BasicControls.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
@@ -280,8 +279,7 @@ fn shipped_stance_bar_drives_end_to_end() {
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -463,7 +461,7 @@ fn multibar_hover_renders_the_buttons_own_action() {
     s.set_screen_size(1024.0, 768.0);
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
         "Interface\\FrameXML\\GameTooltip.xml",
@@ -484,7 +482,6 @@ fn multibar_hover_renders_the_buttons_own_action() {
         r"Interface\FrameXML\OptionsFrameTemplates.xml",
         r"Interface\FrameXML\ReputationFrame.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
-        "UiPanels.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
@@ -585,8 +582,7 @@ fn the_vertical_multibars_exist_hidden_on_the_reference_pages() {
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -648,8 +644,7 @@ fn every_extra_bar_stays_down_until_its_own_toggle_is_set() {
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -736,8 +731,7 @@ fn raising_a_bottom_bar_moves_the_managed_bottom_stack() {
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -801,8 +795,7 @@ fn viewable_action_bar_pages_follow_the_bar_toggles() {
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -868,8 +861,7 @@ fn the_grid_option_holds_the_extra_bars_empty_wells_open() {
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -972,8 +964,7 @@ fn a_held_payload_ghosts_the_empty_wells_it_opens() {
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -1116,8 +1107,7 @@ fn a_bar_toggle_sends_the_byte_its_globals_pack_to() {
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -1204,8 +1194,7 @@ fn the_shipped_setter_passes_exactly_four_arguments() {
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -1257,8 +1246,7 @@ fn the_stance_bar_sits_where_the_pass_puts_it() {
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -1318,8 +1306,8 @@ fn the_stance_bar_sits_where_the_pass_puts_it() {
 /// the missing border the DEFAULT look rather than an edge case.
 ///
 /// The last block is the point of the whole test: one `MultiActionBar_Update()` flips the seat AND
-/// the art, which is what proves the art rides `UIParent_RegisterManagedPositionListener` rather
-/// than having been set once at load.
+/// the art, which is what proves the art rides the managed-position pass rather than having been
+/// set once at load.
 #[test]
 fn the_stance_shelf_follows_the_bottom_left_bar() {
     use benilla_ui::script::ShapeshiftFormView;
@@ -1330,8 +1318,7 @@ fn the_stance_shelf_follows_the_bottom_left_bar() {
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -1452,8 +1439,7 @@ fn the_stance_shelf_is_as_long_as_the_form_count() {
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -1570,8 +1556,7 @@ fn an_extra_bars_empty_well_keeps_its_bound_hotkey_label() {
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");

@@ -24,7 +24,7 @@ const FILES: &[&str] = &[
     "Interface\\FrameXML\\Fonts.xml",
     r"Interface\FrameXML\MoneyFrame.lua",
     r"Interface\FrameXML\MoneyFrame.xml",
-    "UiPanels.xml",
+    r"Interface\FrameXML\UIParent.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
     "Interface\\FrameXML\\GlobalStrings.lua",
@@ -38,7 +38,6 @@ const FILES: &[&str] = &[
     // `*_LoadUI` then `*_Show`), not from a registration of their own — so UIParent.xml is a
     // dependency of the event path this suite drives (1973). With no addon registry here the
     // load reports ADDON_LOAD_FAILED through `message`, which is a shown frame, not an error.
-    "UIParent.xml",
     // The reference's own addons (1973), off the chain — both inherit the trainer window's
     // list/detail kit, which the manifest seats above them. An integration test has no addon
     // registry, so the files load as chain files, the way the manifest's own entries do.

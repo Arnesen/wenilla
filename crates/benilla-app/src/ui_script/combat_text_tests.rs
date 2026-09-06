@@ -21,7 +21,7 @@ fn load_combat_text() -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua"); // ENTERING_COMBAT & co.
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml"); // TEXT()
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "UIParent.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     // The reference's own addon, LoadOnDemand off the chain, loaded the way the options window
     // loads it (1964).
     super::test_ui::seat_chain_addon(&mut s, "Blizzard_CombatText");

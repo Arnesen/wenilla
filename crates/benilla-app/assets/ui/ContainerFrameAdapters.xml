@@ -96,25 +96,72 @@
             refItemButtonOnEnter(button)
         end
 
-        -- ══ Re-publishing the three bag verbs 0561 shadows, and why it is HERE ═════════════
+        -- ══ The three bag verbs benilla answers differently (decisions 0561 + 1751) ═════════
         --
-        -- `OpenBackpack`, `CloseBackpack` and `CloseAllBags` are all defined by the sourced
-        -- `ContainerFrame.lua` (l.187-217, l.702-707) — and benilla answers all three differently,
-        -- for one reason: **0561, the director's call that a window opening your bags opens EVERY
-        -- equipped bag**, not just the backpack. The vendor, bank, mail and trade windows call
-        -- `OpenBackpack` from their OnShow so your bags come up with them and you can sell or
-        -- deposit from one.
+        -- `CloseAllBags`, `OpenBackpack` and `CloseBackpack` all exist in the sourced
+        -- `ContainerFrame.lua` too, and benilla's differ for one reason, not three: **0561, the
+        -- director's call that a window which opens your bags opens EVERY equipped bag**, not just
+        -- the backpack. The vendor/bank/mail/trade windows call `OpenBackpack` from their OnShow so
+        -- your bags come up with them and you can sell or deposit from one; the reference's own
+        -- body touches bag 0 alone. `CloseBackpack` is its inverse and has to match it, and
+        -- `CloseAllBags` is the same family's unconditional form.
         --
-        -- The bodies live in `UiPanels.xml`, because every window that calls them is loaded by
-        -- harnesses that have no bag stack at all, and a nil `OpenBackpack` in a merchant test is
-        -- a nil for no reason. But UiPanels is manifest entry 7 and the reference's container file
-        -- is entry 46, so **its publications lose the collision** — the reference's bodies land on
-        -- top and the vendor silently stops opening your bags. That is not hypothetical: it is
-        -- what shipped for the length of one session before a test caught it.
+        -- **The `Benilla*` names, and the publish under them, are load ORDER** (1751). Order
+        -- decides every collision and the manifest is the order: this file loads after the
+        -- reference's `ContainerFrame.xml`, so the three publishes at the foot are the ones that
+        -- stand. The bodies lived in our UIParent.lua counterpart until 1988 retired it — a
+        -- harness with no bag stack now meets the loader's stand-ins for the three names
+        -- (`test_ui::UIPARENT_STAND_INS`), not a nil.
         --
-        -- So the bodies stay where their callers can reach them, under `Benilla*` names that
-        -- nothing overwrites, and this file — entry 49, after the reference's — puts them back on
-        -- the reference's names. Three lines, and they are the whole of the fix.
+        -- What CHANGED with the swap is only the plumbing: these used to walk five benilla windows
+        -- by name and stash `wasOpen` on each frame. The windows are the reference's recycled
+        -- `ContainerFrame1..12` now — frame N is a different bag every time it opens — so the
+        -- was-open memory is keyed by BAG ID, and every open and close goes through the
+        -- reference's own `OpenBag`/`CloseBag`/`IsBagOpen` rather than a raw Show/Hide. That buys
+        -- the reference's own guards for free (OpenBag's CanOpenPanels + NotWhileDeadError,
+        -- ToggleBag's `size > 0`) and means an addon replacing those verbs is honoured here too.
+        BENILLA_BAG_WAS_OPEN = {}
+
+        -- The UNCONDITIONAL close, called by ShowUIPanel's native-center branch above: a centre
+        -- frame takes the whole screen, so nothing is being "restored afterwards" the way a vendor
+        -- window restores the bags it opened, and the was-open memory is deliberately ignored.
+        -- Range 0..NUM_CONTAINER_FRAMES rather than the old five names — the reference's own
+        -- CloseAllBags covers the bank bags too (l.702-707), and now so does this.
+        function BenillaCloseAllBags()
+            for bagId = 0, (NUM_CONTAINER_FRAMES or -1) do
+                CloseBag(bagId)
+            end
+        end
+
+        -- OpenBackpack — 0561's all-bags form. A bag already open is REMEMBERED and left alone, so
+        -- the paired CloseBackpack does not close a window the player opened themselves; that
+        -- memory is the reference's own `backpackWasOpen`, one entry per bag instead of one flag.
+        function BenillaOpenBackpack()
+            for bagId = 0, (NUM_BAG_FRAMES or -1) do
+                -- The backpack always exists; an equipped-bag window only when a bag is in the
+                -- slot — `OpenBag` makes the same test itself, but the memory has to agree with it.
+                if bagId == 0 or GetContainerNumSlots(bagId) > 0 then
+                    if IsBagOpen(bagId) then
+                        BENILLA_BAG_WAS_OPEN[bagId] = 1
+                    else
+                        BENILLA_BAG_WAS_OPEN[bagId] = nil
+                        OpenBag(bagId)
+                    end
+                end
+            end
+        end
+
+        function BenillaCloseBackpack()
+            for bagId = 0, (NUM_BAG_FRAMES or -1) do
+                if not BENILLA_BAG_WAS_OPEN[bagId] then
+                    CloseBag(bagId)
+                end
+            end
+        end
+
+        -- The publish — after the reference's container file, so these are the definitions that
+        -- stand (the stock `ShowUIPanel` calls `CloseAllBags` and the vendor's OnShow
+        -- `OpenBackpack`, and they reach 0561's bodies).
         OpenBackpack = BenillaOpenBackpack
         CloseBackpack = BenillaCloseBackpack
         CloseAllBags = BenillaCloseAllBags

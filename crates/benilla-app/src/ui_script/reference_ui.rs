@@ -1777,7 +1777,7 @@ mod tests {
             "Interface/FrameXML/ContainerFrame.xml"
         ));
         assert!(!super::is_chain_entry("BagFrame.xml"));
-        assert!(!super::is_chain_entry("UIParent.xml"));
+        assert!(!super::is_chain_entry("ScrollTemplates.xml"));
     }
     /// Every global function and virtual template name a manifest entry declares.
     ///
@@ -2252,6 +2252,72 @@ mod tests {
         // Registered by a chain file we load, produced by nothing. Each is a feature we have not
         // built; none is 1819-shaped, because no PAIR is split (a half-fired pair is the tell).
         const UNPRODUCED: &[(&str, &str)] = &[
+            // ── The stock `UIParent.lua`'s own listeners (1988) — every one is a dialog or a
+            // notice the reference's engine raises for a condition benilla's session does not
+            // reach yet. Each names the arm that would fire.
+            (
+                "ADDON_ACTION_FORBIDDEN",
+                "UIParent.lua — the protected-action refusal; benilla has no protected-call \
+                 taint model, so nothing can raise it",
+            ),
+            (
+                "MACRO_ACTION_FORBIDDEN",
+                "UIParent.lua — the macro half of ADDON_ACTION_FORBIDDEN, same reason",
+            ),
+            (
+                "AUTOEQUIP_BIND_CONFIRM",
+                "UIParent.lua — the bind-on-equip confirm for an AUTOEQUIP (right-click) path; \
+                 benilla's equip path fires the EQUIP_BIND_CONFIRM sibling only",
+            ),
+            (
+                "EQUIP_BIND_CONFIRM",
+                "UIParent.lua — the bind-on-equip confirm; benilla's inventory feed does not \
+                 derive the server's confirm ask yet",
+            ),
+            (
+                "USE_BIND_CONFIRM",
+                "UIParent.lua — the bind-on-use confirm, the same gap from the use path",
+            ),
+            (
+                "BILLING_NAG_DIALOG",
+                "UIParent.lua — the subscription-time nag; vmangos never sends it",
+            ),
+            (
+                "IGR_BILLING_NAG_DIALOG",
+                "UIParent.lua — the internet-cafe billing nag, likewise never sent",
+            ),
+            (
+                "GOSSIP_ENTER_CODE",
+                "UIParent.lua — the code-entry gossip option (a door with a combination); \
+                 benilla's gossip feed carries no code-entry option kind yet",
+            ),
+            (
+                "MEMORY_EXHAUSTED",
+                "UIParent.lua — the client's own out-of-memory dialog; benilla's allocator \
+                 failure is a Rust abort, not a Lua event",
+            ),
+            (
+                "MEMORY_RECOVERED",
+                "UIParent.lua — the other half of MEMORY_EXHAUSTED",
+            ),
+            (
+                "PLAYER_SKINNED",
+                "UIParent.lua — the corpse-skinned notice; benilla's loot feed does not derive it",
+            ),
+            (
+                "TRADE_REQUEST",
+                "UIParent.lua — the trade ASK dialog; benilla's trade session (0633's sibling) \
+                 opens the window on the wire's own open and never asks",
+            ),
+            (
+                "TRADE_REQUEST_CANCEL",
+                "UIParent.lua — the cancel of that ask, same reason",
+            ),
+            (
+                "TRADE_REPLACE_ENCHANT",
+                "UIParent.lua — the enchant-replacement confirm inside a trade; benilla's trade \
+                 feed does not derive it",
+            ),
             ("BAG_OPEN", "ContainerFrame.lua"),
             (
                 "CLOSE_WORLD_MAP",

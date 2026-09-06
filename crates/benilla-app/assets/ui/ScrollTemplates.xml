@@ -394,6 +394,207 @@
         </Layers>
     </Frame>
 
+    <!-- ══ Carried here from UiPanels.xml when that file went stock (decision 1988) ══
+         Three things our UIParent.lua counterpart held that are not the reference's, seated in
+         the earliest file of ours every consumer loads after: the placeholder icon, the tab
+         settle, and the window tab template the settle drives. -->
+    <Script><![CDATA[
+        -- The placeholder icon for an item/spell whose texture has not arrived yet (Craft, Quest,
+        -- QuestLog, Trainer and TradeSkill read it). Was ActionBar.xml's (stock since 1938), then
+        -- UiPanels.xml's (stock since 1988); this file is the earliest of ours every reader loads
+        -- after. A benilla name, so nothing stock reads it.
+        BENILLA_FALLBACK_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
+
+        -- The tab kit — `PanelTemplates_*` — is the REFERENCE's, off the player's chain
+        -- (`Interface\FrameXML\UIPanelTemplates.lua`, seated below this file in the manifest).
+        -- Moved here from our UIParent.lua counterpart with 1988, beside the template that calls it.
+        -- Our eleven transcribed copies stood here dead from the day that entry landed, and one
+        -- of them was carrying a benilla-only return the settle below read (1855/1860). What
+        -- stays is that settle, which is ours because our text measure is a frame late and the
+        -- reference's is not.
+
+        -- The tab template's per-frame settle: the ref does TabResize(0) once, in OnShow
+        -- (CharacterFrameTemplates.xml l.77-80), trusting a synchronous text measure. Our
+        -- GetStringWidth has a frame of latency, so the template's OnUpdate calls this until the
+        -- measured width settles (then it's a no-op compare per frame). The ref sizes the hover
+        -- highlight alongside it; this kit does not — both tab templates anchor their highlight to
+        -- their own side edges, so it is the tab by construction and no settle can desync it
+        -- (decision 1004).
+        --
+        -- The fit PARAMETERS live on the tab (`benillaTabPadding`/`benillaTabMaxWidth`, defaulting
+        -- to the +0 fit every window tab has always used) rather than at the call site, because
+        -- there is exactly one call site and it is this settle loop: an instance that ran its own
+        -- TabResize in OnLoad — as the reference's macro tabs do — would just be overwritten on the
+        -- next frame. Setting the two fields IS how an instance asks for the reference's own fit.
+        -- THE STRUCTURAL CLAMP — a tab may never grow past its window's drawn right edge, whatever
+        -- the instance asked for (decision 1002; the director's "fix this properly to prevent it
+        -- ever again"). The reference's own caps are numbers hand-tuned to ITS font: the macro
+        -- window's 150 is right for the enUS FRIZQT__ the 1.12 client rasterizes and for nothing
+        -- else in particular, and the label it guards carries a CHARACTER NAME — the one string
+        -- whose width no window author can know. So the instance's cap is a preference and the
+        -- window's edge is the law.
+        --
+        -- `benillaTabRightInset` is how a window declares how far its DRAWN plate stops short of
+        -- its frame rect, because no kit can introspect an art margin. The macro window's is 40:
+        -- its 384-unit frame is painted by a 256-wide slice plus a 128-wide one that carries a
+        -- transparent tail. Clamping to the frame rect instead — the first attempt — clamped to a
+        -- boundary the player cannot see, and the tab still walked out over the world.
+        --
+        -- The clamp is applied to the RESULT, through TabResize's own `absoluteSize` arm, rather
+        -- than folded into `maxWidth`: that parameter is compared against `text + padding` but
+        -- assigned as `maxWidth + padding`, so a room budget expressed through it is off by the
+        -- padding and silently fails to bind. `absoluteSize` sets the tab width outright, which is
+        -- exactly what a room budget is.
+        function BenillaTab_Room(tab)
+            local parent = tab:GetParent()
+            if not parent then return nil end
+            local left, right = tab:GetLeft(), parent:GetRight()
+            if not left or not right then return nil end
+            local room = (right - (tab.benillaTabRightInset or 0)) - left
+            if room < 1 then room = 1 end
+            return room
+        end
+
+        function BenillaTabButton_OnUpdate(tab)
+            local name = tab:GetName()
+            local text = getglobal(name .. "Text")
+            local w = (text and text:GetStringWidth()) or 0
+            if w <= 0 then return end
+            local pad = tab.benillaTabPadding or 0
+            local room = BenillaTab_Room(tab)
+            if tab.benillaFitWidth == w and tab.benillaFitRoom == room then return end
+            tab.benillaFitWidth, tab.benillaFitRoom = w, room
+            PanelTemplates_TabResize(pad, tab, nil, tab.benillaTabMaxWidth)
+            -- THE CLAMP READS THE FIT BACK OFF THE ART, not off a return value and not off the
+            -- button. `PanelTemplates_TabResize` is the REFERENCE's now (1837 put
+            -- `UIPanelTemplates.lua` on the chain below this file, so its definition wins) and it
+            -- returns nothing; our own copy's benilla-only `return tabWidth` had already stopped
+            -- running, which is what took 1002's clamp off the air silently. `tab:GetWidth()`
+            -- cannot serve either — it reads the last RESOLVED rect, this frame's stale input
+            -- inside a settle, which is the whole reason 1002 added that return.
+            --
+            -- `$parentMiddle` can. `PanelTemplates_TabResize` sets it on its way out, a Texture's
+            -- width is its AUTHORED size, and a region's GetWidth reports the authored value
+            -- without consulting a resolved rect (region::virtual_span) — so it is the number the
+            -- verb just computed, same tick. The tab is that plus its two end caps, which is the
+            -- reference's own `tabWidth = width + sideWidths`.
+            if room then
+                local middle = getglobal(name .. "Middle")
+                local left = getglobal(name .. "Left")
+                local fitted = (middle and middle:GetWidth() or 0)
+                    + 2 * (left and left:GetWidth() or 0)
+                if fitted > room then
+                    PanelTemplates_TabResize(pad, tab, room)
+                end
+            end
+            -- No highlight sizing here on purpose — BOTH tab templates anchor their highlight to
+            -- their own two side edges, so it IS the tab by construction (decision 1004).
+        end
+    ]]></Script>
+
+    <!--
+        The window tab button (ref CharacterFrameTabButtonTemplate — Interface\FrameXML\
+        CharacterFrameTemplates.xml in patch.MPQ, NOT the base FrameXML.toc set; extracted via
+        mpqx, transcribed VERBATIM: 115x32, the Active/InActive three-slice pair with the ref's
+        exact TexCoords, text CENTER +2, the ADD highlight inset 10px). "Disabled" IS "selected"
+        here — PanelTemplates_SelectTab (script kit above) disables the button and shows the
+        *Disabled (= Active) slices. The ref's OnShow text-fit (PanelTemplates_TabResize(0)) runs
+        from OnUpdate here instead — BenillaTabButton_OnUpdate settles once the async text measure
+        lands, then no-ops (the ref's C measure is synchronous; the 115px XML width is just the
+        pre-fit state). Its OnShow *also* sets the highlight width, which is dead code in the
+        reference and dropped here: this highlight is anchored LEFT/RIGHT, and two opposing anchors
+        resolve the size from the span without consulting the width at all (wow-re layout.md,
+        VERIFIED). The small tab now says the same thing the same way (1004).
+
+        **The OnLoad raise and the OnClick are the reference's own, and both were dropped here
+        until decision 1810.** The note that stood in their place said the raise was unnecessary —
+        "the tabs sit below the window art's hit-rect so nothing overlaps them" — and that "OnClick
+        is the instance's to define". Both were true of our own CharacterFrame.xml, and both are
+        false of the reference's, which is the file that runs now:
+
+          - the reference's `PaperDollFrame` is `setAllPoints enableMouse="true"` with a
+            `bottom=45` hit inset, and the reference's tabs are anchored INSIDE the window (CENTER
+            to BOTTOMLEFT +60,+62), so the page's hit rect covers the whole row. Frame levels come
+            out CharacterFrame 1 / PaperDollFrame 2 / tabs 2, later-created winning — the page eats
+            every tab click. `SetFrameLevel(+4)` is what lifts the row out, and is why the
+            reference has it.
+          - stock `CharacterFrame.xml` gives its five tabs only `<OnEnter>`/`<OnLeave>`; the
+            dispatch lives HERE. Without it `CharacterFrameTab4:GetScript("OnClick")` is nil and
+            the character window's tabs do nothing at all.
+
+        The body hardcodes `CharacterFrame`, which reads odd on a shared template until you check
+        the other consumers: the reference's `MerchantFrameTab1/2` and every one of ours
+        (Auction/Friends/Inspect/Mail/Talent) declares its own `<OnClick>`, and an instance's
+        handler REPLACES the inherited one rather than adding to it. So this reaches exactly the
+        window it names, which is the reference's own arrangement.
+
+        Still ours (moved here from UiPanels.xml with 1988 — that file is the reference's
+        UIParent.lua now), and still why this template is not simply sourced off the chain:
+        `Interface\FrameXML\CharacterFrameTemplates.xml` fits its text in `<OnShow>` through
+        `PanelTemplates_TabResize(0)`, which needs the reference's SYNCHRONOUS string measure. Ours
+        lands a frame late, so the fit runs from `BenillaTabButton_OnUpdate` instead and an
+        OnShow-only fit would leave every tab at its pre-fit 115px. That divergence is 1004's, it
+        spans six windows, and it is what this template's own migration waits on.
+    -->
+    <Button name="CharacterFrameTabButtonTemplate" virtual="true">
+        <Size><AbsDimension x="115" y="32"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentLeftDisabled" file="Interface\PaperDollInfoFrame\UI-Character-ActiveTab">
+                    <Size><AbsDimension x="20" y="32"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="5"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0" right="0.15625" top="0" bottom="1.0"/>
+                </Texture>
+                <Texture name="$parentMiddleDisabled" file="Interface\PaperDollInfoFrame\UI-Character-ActiveTab">
+                    <Size><AbsDimension x="88" y="32"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentLeftDisabled" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0.15625" right="0.84375" top="0" bottom="1.0"/>
+                </Texture>
+                <Texture name="$parentRightDisabled" file="Interface\PaperDollInfoFrame\UI-Character-ActiveTab">
+                    <Size><AbsDimension x="20" y="32"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentMiddleDisabled" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0.84375" right="1.0" top="0" bottom="1.0"/>
+                </Texture>
+                <Texture name="$parentLeft" file="Interface\PaperDollInfoFrame\UI-Character-InActiveTab">
+                    <Size><AbsDimension x="20" y="32"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                    <TexCoords left="0" right="0.15625" top="0" bottom="1.0"/>
+                </Texture>
+                <Texture name="$parentMiddle" file="Interface\PaperDollInfoFrame\UI-Character-InActiveTab">
+                    <Size><AbsDimension x="88" y="32"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0.15625" right="0.84375" top="0" bottom="1.0"/>
+                </Texture>
+                <Texture name="$parentRight" file="Interface\PaperDollInfoFrame\UI-Character-InActiveTab">
+                    <Size><AbsDimension x="20" y="32"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentMiddle" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0.84375" right="1.0" top="0" bottom="1.0"/>
+                </Texture>
+            </Layer>
+        </Layers>
+        <ButtonText name="$parentText">
+            <Anchors><Anchor point="CENTER"><Offset><AbsDimension x="0" y="2"/></Offset></Anchor></Anchors>
+        </ButtonText>
+        <NormalFont inherits="GameFontNormalSmall"/>
+        <HighlightFont inherits="GameFontHighlightSmall"/>
+        <DisabledFont inherits="GameFontHighlightSmall"/>
+        <HighlightTexture name="$parentHighlightTexture" file="Interface\PaperDollInfoFrame\UI-Character-Tab-Highlight" alphaMode="ADD">
+            <Anchors>
+                <Anchor point="LEFT"><Offset><AbsDimension x="10" y="2"/></Offset></Anchor>
+                <Anchor point="RIGHT"><Offset><AbsDimension x="-10" y="2"/></Offset></Anchor>
+            </Anchors>
+        </HighlightTexture>
+        <Scripts>
+            <!-- ref CharacterFrameTemplates.xml:69-81, verbatim. -->
+            <OnLoad>this:SetFrameLevel(this:GetFrameLevel() + 4)</OnLoad>
+            <OnClick>
+                PanelTemplates_Tab_OnClick(CharacterFrame)
+                CharacterFrameTab_OnClick()
+            </OnClick>
+            <OnUpdate>BenillaTabButton_OnUpdate(self)</OnUpdate>
+        </Scripts>
+    </Button>
+
     <!-- `FauxScrollFrameTemplate` and the `FauxScrollFrame_*`/`ScrollFrame_*`/`ScrollingEdit_*`
          API are the REFERENCE's, off the player's chain (`Interface\FrameXML\UIPanelTemplates`,
          seated below this file — so its declarations win). Our transcriptions stood here dead

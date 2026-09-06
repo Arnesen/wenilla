@@ -16,13 +16,12 @@ use super::test_ui::load_ui as load_xml;
 fn load_popup_frames(s: &UiScript) {
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         // `SmallMoneyFrame_OnLoad`, which UiPanels' own StaticPopup money rows call at load.
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
         // `StaticPopupDialogs` and the `PanelTemplates_*` family, both of which FriendsFrame.xml
         // reaches at LOAD (its tab row and its confirm dialogs).
-        "UiPanels.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\BasicControls.xml",
         "Interface\\FrameXML\\LocaleProperties.lua", // `TEXT`, read at file scope below
@@ -484,11 +483,10 @@ fn solo_target_inspect_click_reaches_inspect_unit() {
 fn load_pet_menu_frames(s: &UiScript) {
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
-        "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
         "Interface\\FrameXML\\BasicControls.xml",

@@ -93,12 +93,11 @@ fn harness_with(player: &str) -> UiScript {
         "Interface\\FrameXML\\BasicControls.xml", // `TEXT`
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "UiPanels.xml",
+        r"Interface\FrameXML\UIParent.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
         // The chain's `PanelTemplates_SelectTab` reaches for `GameTooltip` unguarded.
         "Interface\\FrameXML\\GameTooltip.xml",
-        "UIParent.xml", // `ShowMacroFrame` lives here now
         // **ScrollTemplates BEFORE UIPanelTemplates, the manifest's own order.** Ours still
         // carries dead `FauxScrollFrame_*` copies the chain overrides by loading after (1846's
         // step 3, deliberately not done); the other way round OUR copies win — the silent

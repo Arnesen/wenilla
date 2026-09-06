@@ -100,7 +100,7 @@ fn shipped_xml() -> Vec<(String, String)> {
 fn no_shipped_file_declares_its_own_copy_of_a_managed_offset() {
     let mut offences = Vec::new();
     for (name, text) in shipped_xml() {
-        if name == "UIParent.xml" {
+        if name == r"Interface\FrameXML\UIParent.xml" {
             continue; // the owner: its var rows are where these numbers are defined
         }
         for (n, line) in without_xml_comments(&text).lines().enumerate() {
@@ -208,11 +208,17 @@ const BOTTOM_EXEMPT: &[(&str, &str)] = &[
 /// not need to. Failing here is not a bug report; it is a prompt to pick one.
 #[test]
 fn every_bottom_anchored_top_level_frame_is_accounted_for() {
-    let pass = std::fs::read_to_string(ui_dir().join("UIParent.xml")).expect("UIParent.xml");
+    // The pass is the stock `UIParent.lua`'s since 1988 — read off the player's chain.
+    let _data = benilla_formats::wow_data_or_skip!();
+    let pass = String::from_utf8_lossy(
+        &super::reference_ui::read(r"Interface\FrameXML\UIParent.lua")
+            .expect("the stock UIParent.lua off the chain"),
+    )
+    .into_owned();
     for f in MANAGED_FRAMES {
         assert!(
             pass.contains(f),
-            "{f} is listed here as managed but does not appear in UIParent.xml's pass — this \
+            "{f} is listed here as managed but does not appear in UIParent.lua's pass — this \
              list has drifted from the file it mirrors"
         );
     }
@@ -222,8 +228,7 @@ fn every_bottom_anchored_top_level_frame_is_accounted_for() {
         let doc = benilla_ui::framexml::parse(&text).unwrap_or_else(|e| panic!("{file}: {e}"));
         for (name, anchors) in bottom_anchored_top_level(&doc) {
             let known = MANAGED_FRAMES.contains(&name.as_str())
-                || BOTTOM_EXEMPT.iter().any(|(n, _)| *n == name)
-                || registers_a_listener(&text, &name);
+                || BOTTOM_EXEMPT.iter().any(|(n, _)| *n == name);
             if !known {
                 unaccounted.push(format!("{file}: {name} ({anchors})"));
             }
@@ -233,19 +238,10 @@ fn every_bottom_anchored_top_level_frame_is_accounted_for() {
         unaccounted.is_empty(),
         "these top-level frames anchor to the screen's bottom edge but nothing decides their \
          clearance over the action bars. Give each one a row in \
-         UIPARENT_MANAGED_FRAME_POSITIONS (UIParent.xml), or seat it from a managed global and \
-         register UIParent_RegisterManagedPositionListener, or add it to BOTTOM_EXEMPT here with \
-         the reason it needs neither (decision 1499):\n{}",
+         UIPARENT_MANAGED_FRAME_POSITIONS (the stock UIParent.lua's table, since 1988), or add \
+         it to BOTTOM_EXEMPT here with the reason it needs no row (decision 1499):\n{}",
         unaccounted.join("\n")
     );
-}
-
-/// A file that registers a managed-position listener is seating something itself; the frames it
-/// declares are covered by that registration. Coarse on purpose — the listener seats a whole
-/// family (the bag stack is five windows), and naming each one here would be the same drift trap
-/// `MANAGED_FRAMES` guards against.
-fn registers_a_listener(text: &str, _frame: &str) -> bool {
-    text.contains("UIParent_RegisterManagedPositionListener")
 }
 
 /// Every top-level INSTANCE (a `<Frame>`/`<Button>`/… that is not `virtual` and carries no
@@ -358,6 +354,20 @@ fn no_bottom_band_frame_overlaps_a_raised_bar() {
         let mut raised = Vec::new();
         for (i, bar) in RAISABLE_BARS.iter().enumerate() {
             let on = mask & (1 << i) != 0;
+            // **Through the saved globals, not a bare Show.** The stock pass reads
+            // `SHOW_MULTI_ACTIONBAR_1`/`_2` for its bottom-bar flags (`UIParent.lua:1598-1606`),
+            // never the frames' shown state, so raising a bar by hand and running the pass is a
+            // state the client never reaches — and it clears nothing (1988; our retired copy of
+            // the pass read `IsShown`, which is what let this drive work before).
+            let global = match *bar {
+                "MultiBarBottomLeft" => Some("SHOW_MULTI_ACTIONBAR_1"),
+                "MultiBarBottomRight" => Some("SHOW_MULTI_ACTIONBAR_2"),
+                _ => None,
+            };
+            if let Some(g) = global {
+                s.run(&format!("{g} = {}", if on { "1" } else { "nil" }))
+                    .unwrap();
+            }
             s.run(&format!(
                 "if {bar} then {bar}:{}() end",
                 if on { "Show" } else { "Hide" }

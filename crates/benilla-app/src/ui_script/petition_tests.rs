@@ -94,7 +94,7 @@ fn setup() -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
@@ -105,7 +105,6 @@ fn setup() -> UiScript {
     // without this the rows build with no art at all and nothing goes red — which is exactly the
     // failure `load_ui_strict` exists to turn into a red test.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");

@@ -36,7 +36,7 @@ fn harness() -> UiScript {
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         // The eight labels and their NEWBIE_TOOLTIP_* lines, read at each button's OnLoad…
         "Interface\\FrameXML\\GlobalStrings.lua",
         // …through `TEXT()`.

@@ -58,7 +58,8 @@ fn harness() -> UiScript {
 /// the other window the compare flow crosses, and `ItemRef.xml`, which declares the chat-link
 /// router's own `ItemRefTooltip`. Both were in this harness's hand-copied list before 1751; the
 /// manifest's order is the one kept (`FrameXML.toc` 63 → 77).
-const ROUTER_UI: [&str; 2] = [
+const ROUTER_UI: [&str; 3] = [
+    "ScrollTemplates.xml", // our window tab template, before the window that inherits it (1988)
     "Interface\\FrameXML\\MerchantFrame.xml",
     "Interface\\FrameXML\\ItemRef.xml",
 ];

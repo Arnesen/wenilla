@@ -19,7 +19,7 @@ fn harness() -> UiScript {
         "Interface\\FrameXML\\Fonts.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "UiPanels.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
@@ -587,4 +587,131 @@ fn hovering_the_player_blip_on_a_scaled_map_names_the_player() {
         "Probefour"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The player arrow draws over the zone's explored-area overlays** — the director's report: on a
+/// zone sheet the arrow was nowhere, and only the zoomed-out continent sheet (which has no
+/// overlays) showed it.
+///
+/// The stock file creates those overlays as `WorldMapDetailFrame:CreateTexture(…, "ARTWORK")`
+/// (`WorldMapFrame.lua:108`) and the arrow as a `Model` child of `WorldMapFrame`
+/// (`WorldMapFrame.lua:15`) — two frames at the SAME level, and inside one `(strata, level)`
+/// bucket the draw layer outranks the frame (decision 0884). A frame's own slot is layer 0, so
+/// the arrow lost to every one of those ARTWORK textures. Reproduced here with the reference's own
+/// call, and asserted as the render list's order rather than a z-key's internals.
+#[test]
+fn the_player_arrow_draws_over_the_zones_explored_overlays() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1600.0, 900.0);
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
+    assert!(super::load_default_ui(&s).is_empty());
+    s.resolve();
+    s.run("ShowUIPanel(WorldMapFrame)").unwrap();
+    s.resolve();
+    s.set_world_map_feed(None, Some((0.5, 0.5)), 0.0, None, Vec::new(), Vec::new());
+    update(&mut s);
+    // The overlay the stock file lays over a zone sheet, in its own words — covering the whole
+    // detail frame, which is what an explored zone's art amounts to.
+    s.run(
+        r#"local o = WorldMapDetailFrame:CreateTexture("WorldMapOverlay1", "ARTWORK")
+           o:SetTexture("Interface\\WorldMap\\Elwynn\\ElwynnForest1")
+           o:SetAllPoints(WorldMapDetailFrame)
+           o:Show()"#,
+    )
+    .unwrap();
+    s.resolve();
+
+    let quads = s.extract();
+    let arrow = quads
+        .iter()
+        .find(|q| {
+            matches!(&q.content, QuadContent::ModelPane { model: Some(m), .. } if m == ARROW_MODEL)
+        })
+        .expect("the arrow pane is in the render list");
+    let overlay = quads
+        .iter()
+        .find(|q| {
+            matches!(
+                &q.content,
+                QuadContent::Texture { path: Some(p), .. } if p.contains("ElwynnForest1")
+            )
+        })
+        .expect("the overlay texture is in the render list");
+    assert!(
+        arrow.z > overlay.z,
+        "the arrow must paint after the zone overlay (arrow {:#x}, overlay {:#x})",
+        arrow.z,
+        overlay.z
+    );
+}
+
+/// **A click over a map POI still answers the map's UV** — the director's report: alt-clicking to
+/// jump did nothing while the cursor was over a town like Goldshire, "like the name display is
+/// blocking it".
+///
+/// It was: the stock file makes every POI icon a child of `WorldMapButton`
+/// (`WorldMapFrame.lua:178`), so the topmost frame over a town is the icon, and the UV query
+/// demanded the button itself. The player's own blip (a child of the button too) is the same
+/// story, which is what this drives — it needs no landmark data to be real.
+#[test]
+fn a_click_over_a_blip_still_answers_the_maps_uv() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1600.0, 900.0);
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
+    assert!(super::load_default_ui(&s).is_empty());
+    s.resolve();
+    s.run("ShowUIPanel(WorldMapFrame)").unwrap();
+    s.resolve();
+    s.set_world_map_feed(None, Some((0.4, 0.6)), 0.0, None, Vec::new(), Vec::new());
+    update(&mut s);
+    s.resolve();
+
+    let (px, py, eff) = s
+        .eval::<(f64, f64, f64)>(
+            "local x, y = WorldMapPlayer:GetCenter() return x, y, WorldMapPlayer:GetEffectiveScale()",
+        )
+        .unwrap();
+    let (x, y) = ((px * eff) as f32, (py * eff) as f32);
+    assert_eq!(
+        s.hit_test_name(x, y).as_deref(),
+        Some("WorldMapPlayer"),
+        "the blip is what the mouse is over"
+    );
+    let (u, v) = s
+        .world_map_uv_at(x, y)
+        .expect("the click still lands on the map");
+    // The blip sits where the feed put it, so the UV under it is that position.
+    assert!(
+        (u - 0.4).abs() < 0.01 && (v - 0.6).abs() < 0.01,
+        "the UV under the blip is the blip's own: {u}, {v}"
+    );
+    // …and a click on the map's own chrome is still not a map click.
+    let (cx, cy, ceff) = s
+        .eval::<(f64, f64, f64)>(
+            "local x, y = WorldMapFrameCloseButton:GetCenter() return x, y, WorldMapFrameCloseButton:GetEffectiveScale()",
+        )
+        .unwrap();
+    assert!(
+        s.world_map_uv_at((cx * ceff) as f32, (cy * ceff) as f32)
+            .is_none(),
+        "the close button is not the map"
+    );
 }

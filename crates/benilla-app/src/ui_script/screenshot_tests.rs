@@ -17,7 +17,7 @@ fn harness() -> UiScript {
         "Interface\\FrameXML\\Fonts.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "UiPanels.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
@@ -25,7 +25,6 @@ fn harness() -> UiScript {
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
         r"Interface\FrameXML\WorldFrame.xml",
-        "UIParent.xml",
     ] {
         load_xml(&s, f);
     }

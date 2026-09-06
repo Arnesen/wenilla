@@ -18,7 +18,7 @@ use super::test_ui::load_ui as load_xml;
 pub(super) fn load_pet_bar(s: &UiScript) {
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         "Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
@@ -35,7 +35,6 @@ pub(super) fn load_pet_bar(s: &UiScript) {
         r"Interface\FrameXML\UIPanelTemplates.xml",
         r"Interface\FrameXML\OptionsFrameTemplates.xml",
         r"Interface\FrameXML\ReputationFrame.xml",
-        "UiPanels.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",

@@ -1335,10 +1335,9 @@ fn the_inspect_cursor_pair_takes_both_arms() {
 ///
 /// - `CinematicFrame` — the frame being *shown*. The reference declares it with no parent for
 ///   exactly this reason, and `SetFullScreenFrame` shows it in the same breath as hiding UIParent.
-/// - `BenillaFadeDriver` — a 1x1 frame with no textures and no layers, whose only content is an
-///   `OnUpdate` running `UIFrameFadeUpdate`. It draws nothing, and it must not be hidden: a hidden
-///   frame's `OnUpdate` does not run, so parenting it would freeze every in-flight `UIFrameFade`
-///   the instant a cinematic started and leave frames stranded mid-fade.
+/// - (Until 1988 a `BenillaFadeDriver` survived beside it — our fade kit's tick frame. The stock
+///   `UIFrameFadeUpdate` runs from UIParent's own OnUpdate, which a cinematic's `UIParent:Hide()`
+///   stops exactly as the reference's does.)
 #[test]
 fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
     let mut s = benilla_ui::script::UiScript::new().unwrap();
@@ -1360,7 +1359,26 @@ fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
     assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
     s.resolve();
 
-    let names = shipped_frame_names();
+    // The sweep's subjects: the frames OUR files declare — plus the reference's own HUD, because
+    // `assets/ui` is nearly empty now (1988 retired the last of the glue) and a sweep over what is
+    // left would pass without ever looking at the interface the cascade actually hides.
+    let mut names = shipped_frame_names();
+    names.extend(
+        [
+            "MainMenuBar",
+            "ChatFrame1",
+            "PlayerFrame",
+            "MinimapCluster",
+            "BuffFrame",
+            "MainMenuBarBackpackButton",
+            "CharacterMicroButton",
+            "UIErrorsFrame",
+            // The frame being SHOWN — the sweep's one expected survivor.
+            "CinematicFrame",
+        ]
+        .into_iter()
+        .map(String::from),
+    );
     let visible = |s: &benilla_ui::script::UiScript, n: &str| -> bool {
         s.eval::<i64>(&format!(
             "local f = getglobal(\"{n}\") \
@@ -1376,9 +1394,9 @@ fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
     assert!(
         // 50 until 1938 took the three bar files stock, 20 until 1974 took the minimap cluster
         // (its 22 named frames were most of what this sweep counted), 12 until 1987 took the
-        // micro row; the floor follows the census of OUR files down, and 2 is what is left —
-        // the glue and dev frames.
-        before >= 2,
+        // micro row and 1988 the glue. The floor is over the named HUD above now, not over our
+        // files' census, so it stops following the migration down.
+        before >= 6,
         "only {before} frames visible before the cinematic — the sweep found no interface to \
          hide, so it would pass no matter what the cascade did"
     );
@@ -1395,7 +1413,7 @@ fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
     after.sort_unstable();
     assert_eq!(
         after,
-        ["BenillaFadeDriver", "CinematicFrame"],
+        ["CinematicFrame"],
         "something is drawing over the fly-by (see this test's header for why exactly these \
          two are allowed to survive)"
     );

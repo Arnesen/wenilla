@@ -18,14 +18,13 @@ pub(crate) fn harness() -> UiScript {
         "Interface\\FrameXML\\Fonts.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "UiPanels.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\BasicControls.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
-        "UIParent.xml",
         "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\WorldStateFrame.xml", // the reference's own (1972)
     ] {

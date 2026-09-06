@@ -39,7 +39,7 @@
         · **The two logout dialogs** — ref `StaticPopup.lua` l.564-600 (CAMP + QUIT) is the
           SPECIFICATION for them: the two dialog keys, the field names, the 20 s timeout and the
           asymmetric button sets are contract, and the entries carrying them are written here in
-          our own shape on the shared popup engine (UiPanels.xml), whose countdown-text branch
+          our own shape on the shared popup engine (the stock StaticPopup), whose countdown-text branch
           already lists both `which` names. Their driver events are the reference's own
           (`re/events/event-catalog.tsv`: 276 PLAYER_CAMPING, 277 PLAYER_QUITING,
           278 LOGOUT_CANCEL), fired by `crate::ui_logout` off `SMSG_LOGOUT_RESPONSE`.
@@ -119,7 +119,7 @@
             button:Disable()
         end
 
-        -- The CAMP/QUIT dialogs and the three-event driver MOVED OUT, to UiPanels.xml — the
+        -- The CAMP/QUIT dialogs and the three-event driver MOVED OUT, to our UIParent.lua counterpart (the stock UIParent.lua since 1988) — the
         -- reference's own homes for both (StaticPopup.lua l.564/586; UIParent.lua l.304-315).
         -- They were here only because this is where they were first needed, and 1751 moving them
         -- is one less thing to carry when this window follows them onto the chain.
@@ -287,7 +287,7 @@
              while the menu is up, and the bag bar greys out under it (you cannot open bags from
              behind the menu — ShowUIPanel's center gate would refuse the window anyway, so the
              greying is the visible half of a rule the panel manager already enforces). Guarded, the
-             UiPanels.xml `CloseMenus and CloseMenus()` posture: a headless test loads this file
+             the old UiPanels.xml `CloseMenus and CloseMenus()` posture: a headless test loads this file
              without the action bar behind it. -->
         <Scripts>
             <OnLoad>GameMenuFrameTitle:SetText(MAIN_MENU)</OnLoad>

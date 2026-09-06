@@ -119,14 +119,14 @@ fn armed() -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // the window tab template, ours (1004/1988)
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     // `InspectUnit` lives here now — the reference's own home for that name, and no longer in the
     // window's own file (decision 1832). The manifest's order, and 49 other harnesses'.
-    load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     // Before InspectFrame.xml, and required rather than tidy: this window's honor page inherits
     // HonorFrame.xml's five row templates and `inherits=` resolves at LOAD, so without it the
@@ -162,14 +162,14 @@ fn shipped_inspect_frame_loads_clean() {
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // the window tab template, ours (1004/1988)
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     // `InspectUnit` lives here now — the reference's own home for that name, and no longer in the
     // window's own file (decision 1832). The manifest's order, and 49 other harnesses'.
-    load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     // Before InspectFrame.xml, and required rather than tidy: this window's honor page inherits
     // HonorFrame.xml's five row templates and `inherits=` resolves at LOAD, so without it the

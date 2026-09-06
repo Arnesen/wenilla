@@ -465,9 +465,23 @@ impl UiScript {
                     (rect, alpha, content, clip, scale)
                 }
             };
+            // **A `Model` frame's scene draws out of its bucket's ARTWORK batch, last** — wow-re
+            // `ui/scratch/model-frame-draw-order.md` (2026-09-04): the batch object carries a
+            // third sub-array beside the quads and the text, a render-callback list, and
+            // `0x76fb00` drains the three in that order; `0x76d160` registers the model's callback
+            // only for `layer == 2` (`0x76d17f cmp ebx,2`). So a model is neither a separate pass
+            // nor the frame's own layer-0 slot — it is ARTWORK content, after that layer's quads.
+            // This is what puts the world map's player arrow over the zone overlays: both frames
+            // sit at `WorldMapFrame.level + 1`, the overlays are ARTWORK quads there, and the
+            // arrow's callback drains after them (the director's report, and the case the carve
+            // was dispatched on). A model's own OVERLAY/HIGHLIGHT regions still draw over it.
+            let z = match &content {
+                QuadContent::ModelPane { .. } => zkey.content(order::DrawLayer::Artwork).raw(),
+                _ => zkey.raw(),
+            };
             out.push(ExtractedQuad {
                 target,
-                z: zkey.raw(),
+                z,
                 rect,
                 alpha,
                 content,

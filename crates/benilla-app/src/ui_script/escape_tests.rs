@@ -77,6 +77,7 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
         load_xml(&s, file);
     }
     load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // BenillaMoney_Set, BankFrame's purse helper
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
@@ -133,7 +134,16 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
         s.take_loot_close(),
         "closing the loot fired the release (OnHide → CloseLoot)"
     );
-    assert!(s.cursor_item().is_none(), "ESC dropped the held cursor");
+    // **ESC does NOT drop the cursor's item.** Our retired ladder opened with
+    // `if CursorHasItem() then ClearCursor() end`; the reference's `ToggleGameMenu`
+    // (`UIParent.lua:1465-1497`) has no such arm, and wow-re's cursor carve places the
+    // ESC→ClearCursor wiring in FrameXML rather than the engine
+    // (`ui/scratch/cursor-dragdrop-payload.md`) — so in 1.12 the held item survives the key
+    // (1988).
+    assert!(
+        s.cursor_item().is_some(),
+        "the held item survives ESC, as it does in the reference"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -149,6 +159,7 @@ fn escape_is_consumed_by_a_focused_editbox_and_leaves_windows_open() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
@@ -157,7 +168,7 @@ fn escape_is_consumed_by_a_focused_editbox_and_leaves_windows_open() {
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
     load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
     s.set_money(0);
@@ -193,7 +204,7 @@ fn escape_closes_the_options_window_before_opening_the_menu() {
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
@@ -252,6 +263,7 @@ fn escape_closes_an_open_stack_split_frame() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // ContainerFrameItemButton_OnClick reads MerchantFrame
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
@@ -259,7 +271,7 @@ fn escape_closes_an_open_stack_split_frame() {
     load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml"); // …and ChatFrameEditBox, the shift fork's first test
     load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
     load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\StackSplitFrame.xml");
@@ -340,6 +352,7 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
     // GameTooltip.xml (BAG_UI's, for the bag slots' tooltips) also carries TOOLTIP_DEFAULT_COLOR,
     // which the dropdown backdrop's OnLoad reads — so the kit can load straight after it.
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
@@ -441,6 +454,7 @@ fn escape_ladder_targeting_rung_after_cast_before_windows() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
@@ -507,7 +521,7 @@ fn an_addon_frame_registered_in_uispecialframes_closes_on_escape() {
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");

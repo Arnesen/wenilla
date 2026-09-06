@@ -386,7 +386,7 @@ fn managed_positions_track_the_bottom_bar_stack() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "UIParent.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\CastingBarFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
@@ -398,7 +398,6 @@ fn managed_positions_track_the_bottom_bar_stack() {
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
     load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
-    load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
@@ -417,7 +416,12 @@ fn managed_positions_track_the_bottom_bar_stack() {
     // The bar stubs carry a no-op SetPoint: `MultiBarBottomLeft` and `ShapeshiftBarFrame` are
     // themselves rows in UIPARENT_MANAGED_FRAME_POSITIONS, so since those frames wear their
     // reference names the pass positions them as well as reading their visibility.
-    s.run("MultiBarBottomLeft = { IsShown = function() return true end, SetPoint = function() end, ClearAllPoints = function() end }; MultiBarBottomRight = MultiBarBottomLeft; UIParent_ManageFramePositions()")
+    // **The bottom-bar flags come from the SAVED GLOBALS, not from the frames.** The stock pass
+    // reads `SHOW_MULTI_ACTIONBAR_1`/`_2` (`UIParent.lua:1598-1606`) and never asks the bars
+    // whether they are shown — our retired copy asked, which is why this drive used to fake a
+    // frame with an `IsShown`. The fake also had no `IsObjectType`, which the pass calls on every
+    // row it seats (1988).
+    s.run("SHOW_MULTI_ACTIONBAR_1 = 1 SHOW_MULTI_ACTIONBAR_2 = 1 UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();
     assert_eq!(bottom(&s, "CastingBarFrame"), 100.0, "60 + bottomEither 40");
@@ -432,7 +436,10 @@ fn managed_positions_track_the_bottom_bar_stack() {
          ShapeshiftBarLeft, ShapeshiftBarMiddle, ShapeshiftBarRight = t, t, t",
     )
     .unwrap();
-    s.run("ShapeshiftBarFrame = { IsShown = function() return true end, SetPoint = function() end, ClearAllPoints = function() end }; UIParent_ManageFramePositions()")
+    s.run(
+        "ShapeshiftBarFrame = ShapeshiftBarFrame or CreateFrame(\"Frame\", \"ShapeshiftBarFrame\") \
+         ShapeshiftBarFrame:Show() UIParent_ManageFramePositions()",
+    )
         .unwrap();
     s.resolve();
     assert_eq!(bottom(&s, "CastingBarFrame"), 140.0, "60 + 40 + pet 40");
@@ -443,7 +450,7 @@ fn managed_positions_track_the_bottom_bar_stack() {
     );
 
     // It hides again (a druid leaving forms is the live case): everything settles back.
-    s.run("ShapeshiftBarFrame = { IsShown = function() return false end, SetPoint = function() end, ClearAllPoints = function() end }; UIParent_ManageFramePositions()")
+    s.run("ShapeshiftBarFrame:Hide() UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();
     assert_eq!(bottom(&s, "CastingBarFrame"), 100.0);

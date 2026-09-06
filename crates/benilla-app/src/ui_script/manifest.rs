@@ -55,7 +55,7 @@ pub(super) fn shipped_manifest_files() -> Vec<String> {
 /// Run decision 0272's load-time `UIParent_ManageFramePositions()` pass.
 ///
 /// Only meaningful once the frames that table names exist, so the font-registry-only load
-/// ([`load_font_registry`]) skips it. It is defined in `UIParent.xml`, which is in the deferred
+/// ([`load_font_registry`]) skips it. It is defined in the stock `UIParent.lua`, which is in the deferred
 /// half; calling it after `Fonts.xml` alone is a nil-global error, not a no-op.
 ///
 /// The ref applies `UIPARENT_MANAGED_FRAME_POSITIONS` once at load, then re-fires from the bottom
@@ -112,8 +112,8 @@ pub(super) fn apply_buff_durations(script: &UiScript) -> Result<(), String> {
 /// that home rather than a FrameXML one: `assets/ui` does not grow (1779), and this is the wrong
 /// side of the line for a `ContainerFrameAdapters`-class shim anyway — that clause is for a genuine
 /// engine difference (1751 §2), and this is a deliberate repair of a reference defect. Rust is also
-/// the durable home: our `UIParent.xml` is itself a transcription awaiting its own window, and a
-/// hook parked there would be homeless again the day it migrates.
+/// the durable home: our `UIParent.xml` was a transcription awaiting its own window (it migrated
+/// with 1988), and a hook parked there would have been homeless that day.
 ///
 /// Idempotent by its own latch, so a `ReloadUI` cannot stack wrappers. The reference's handler
 /// still runs first and unchanged: `this`, `event` and `arg1` are globals the engine has already
@@ -340,7 +340,7 @@ mod tests {
     /// not fail, it *half-works* — the frame keeps drawing, keeps answering `IsShown`, and simply
     /// never joins the cascade `UIParent:Hide()` walks. That is precisely how it would be missed.
     ///
-    /// It nearly was: `UIParent.xml` sat below `UiPanels.xml` until decision 1734, so restoring
+    /// It nearly was: our `UIParent.xml` sat below `UiPanels.xml` until decision 1734, so restoring
     /// `StaticPopup1`/`StaticPopup2`'s parents there would have written two declarations that did
     /// nothing at all. The reference's own order is the fix (FrameXML.toc: BasicControls.xml l.6,
     /// UIParent.xml l.8), and this keeps it.
@@ -349,7 +349,7 @@ mod tests {
         let files = manifest_files();
         let at = files
             .iter()
-            .position(|f| f == "UIParent.xml")
+            .position(|f| f == r"Interface\FrameXML\UIParent.xml")
             .expect("the manifest lists UIParent.xml");
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
         for early in &files[..at] {

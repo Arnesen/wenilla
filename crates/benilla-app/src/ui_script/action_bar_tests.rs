@@ -21,7 +21,7 @@ fn shipped_action_bar_drives_end_to_end() {
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
-    super::test_ui::load_ui(&s, "UIParent.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIParent.xml");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.lua");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\GameTooltip.xml");
@@ -185,7 +185,7 @@ fn load_action_bar(s: &UiScript) {
     super::test_ui::load_ui(s, "Interface\\FrameXML\\TextStatusBar.lua");
     super::test_ui::load_ui(s, "Interface\\FrameXML\\TextStatusBar.xml");
     super::test_ui::load_ui(s, "Interface\\FrameXML\\Fonts.xml");
-    super::test_ui::load_ui(s, "UIParent.xml");
+    super::test_ui::load_ui(s, r"Interface\FrameXML\UIParent.xml");
     super::test_ui::load_ui(s, "Interface\\FrameXML\\GlobalStrings.lua");
     super::test_ui::load_ui(s, "Interface\\FrameXML\\MainMenuBar.xml");
     super::test_ui::load_ui(s, r"Interface\FrameXML\MoneyFrame.lua");
@@ -208,7 +208,6 @@ fn load_action_bar(s: &UiScript) {
     // The options window: `LOCK_ACTIONBAR` and `ALWAYS_SHOW_MULTIBARS` are declared there, as the
     // reference declares them in UIOptionsFrame_Init (1938) — and the manifest loads it before
     // the bars.
-    super::test_ui::load_ui(s, "UiPanels.xml");
     // The dialog engine — the keybindings page registers its two confirms into its table (1960).
     super::test_ui::load_ui(s, r"Interface\FrameXML\BasicControls.xml"); // `TEXT`
     super::test_ui::load_ui(s, r"Interface\FrameXML\LocaleProperties.lua"); // `GetText`
@@ -835,7 +834,8 @@ fn shipped_bag_frame_drives_end_to_end() {
             load_ui(&s, "Interface\\FrameXML\\TextStatusBar.lua");
             load_ui(&s, "Interface\\FrameXML\\TextStatusBar.xml");
             load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
-            load_ui(&s, "UIParent.xml");
+            load_ui(&s, r"Interface\FrameXML\UIParent.xml");
+            load_ui(&s, "ScrollTemplates.xml"); // the window tab template, ours (1004/1988)
             load_ui(&s, "Interface\\FrameXML\\GlobalStrings.lua");
             load_ui(&s, "Interface\\FrameXML\\MainMenuBar.xml");
             load_ui(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
@@ -1350,7 +1350,7 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
     for file in [
         // Fonts first: the pane's check-box labels colour from `RED_FONT_COLOR` in their own OnLoad.
         "Interface\\FrameXML\\Fonts.xml",
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         "Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
@@ -1371,7 +1371,6 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
         r"Interface\FrameXML\OptionsFrameTemplates.xml",
         r"Interface\FrameXML\ReputationFrame.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
-        "UiPanels.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
@@ -1523,7 +1522,7 @@ fn bonus_bar_slides_up_with_sound_and_down_without() {
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
-    super::test_ui::load_ui(&s, "UIParent.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIParent.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\MainMenuBar.xml");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.lua");
@@ -1745,7 +1744,7 @@ fn bonus_bar_turnaround_continues_from_position() {
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
-    super::test_ui::load_ui(&s, "UIParent.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIParent.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\MainMenuBar.xml");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.lua");
@@ -1827,7 +1826,7 @@ fn the_page_arrows_do_not_steal_each_other_s_clicks() {
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
-    super::test_ui::load_ui(&s, "UIParent.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIParent.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\MainMenuBar.xml");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.lua");

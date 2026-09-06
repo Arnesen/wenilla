@@ -11,7 +11,10 @@ fn ui_parent() -> UiScript {
     let mut s = UiScript::new().unwrap();
     // Through the chain-aware reader: this list names chain files now, and a
     // reader that joins `assets/ui` cannot resolve one (1838, 1887, 1888).
-    for file in ["Interface\\FrameXML\\Fonts.xml", "UIParent.xml"] {
+    for file in [
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\UIParent.xml",
+    ] {
         crate::ui_script::test_ui::load_ui(&s, file);
     }
     s.set_screen_size(1024.0, 768.0);

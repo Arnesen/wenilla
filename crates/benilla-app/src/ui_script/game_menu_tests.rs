@@ -40,10 +40,9 @@ fn harness_with(extra: &[&str]) -> UiScript {
         "Interface\\FrameXML\\Fonts.xml",
         // `GameMenuFrame` and the panels it opens declare `parent="UIParent"`, resolved at LOAD
         // (decision 1734) — UIParent must already be there, as it is in the manifest.
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
@@ -207,7 +206,13 @@ fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
 #[test]
 fn escape_opens_the_menu_only_when_nothing_else_wants_the_press_and_then_closes_it() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = bag_harness_with(&[], &["Interface\\FrameXML\\MerchantFrame.xml"]);
+    let mut s = bag_harness_with(
+        &[],
+        &[
+            "ScrollTemplates.xml",
+            "Interface\\FrameXML\\MerchantFrame.xml",
+        ],
+    );
     s.set_money(0);
     s.set_container(0, Some(backpack()));
 
@@ -244,7 +249,13 @@ fn escape_opens_the_menu_only_when_nothing_else_wants_the_press_and_then_closes_
 #[test]
 fn the_clicked_form_closes_everything_and_opens_the_menu_in_one_go() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = bag_harness_with(&[], &["Interface\\FrameXML\\MerchantFrame.xml"]);
+    let mut s = bag_harness_with(
+        &[],
+        &[
+            "ScrollTemplates.xml",
+            "Interface\\FrameXML\\MerchantFrame.xml",
+        ],
+    );
     s.set_money(0);
     s.set_container(0, Some(backpack()));
     s.run("MainMenuBarBackpackButton:Click()").unwrap();
@@ -271,6 +282,7 @@ fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
     let mut s = bag_harness_with(
         &[],
         &[
+            "ScrollTemplates.xml", // our window tab template, before the window that inherits it (1988)
             "Interface\\FrameXML\\MerchantFrame.xml",
             // The loot window is the reference's own since 1751 — `test_ui::LOOT_UI` carries
             // what it needs and why, and PartyFrame's `MAX_PARTY_MEMBERS` is needed at LOAD.
@@ -697,7 +709,8 @@ fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
             "Interface\\FrameXML\\TextStatusBar.lua",
             "Interface\\FrameXML\\TextStatusBar.xml",
             "Interface\\FrameXML\\Fonts.xml",
-            "UIParent.xml",
+            r"Interface\FrameXML\UIParent.xml",
+            "ScrollTemplates.xml", // the window tab template, ours (1004/1988)
             "Interface\\FrameXML\\GlobalStrings.lua",
             "Interface\\FrameXML\\MainMenuBar.xml",
             "Interface\\FrameXML\\GameTooltip.xml",

@@ -59,7 +59,7 @@ fn setup() -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
@@ -72,7 +72,6 @@ fn setup() -> UiScript {
     load_xml(&s, r"Interface\FrameXML\UIDropDownMenu.xml");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, r"Interface\FrameXML\FloatingChatFrame.xml"); // declares ChatFrameEditBox
-    load_xml(&s, "UIParent.xml");
     s.set_money(0);
     s
 }
@@ -88,6 +87,7 @@ fn bag_setup() -> UiScript {
     }
     // `ContainerFrame_Update` reads `MerchantFrame:IsShown()` on any slot the tooltip owns, and
     // `BankFrame` (BAG_UI's last entry) fills its purse through `BenillaMoney_Set`.
+    load_xml(&s, "ScrollTemplates.xml"); // our window tab template, before the window that inherits it (1988)
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s

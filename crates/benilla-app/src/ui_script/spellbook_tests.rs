@@ -89,7 +89,7 @@ pub(super) fn spellbook_ui(w: f32, h: f32) -> UiScript {
     s.set_screen_size(w, h);
     for f in [
         "Interface\\FrameXML\\Fonts.xml",
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         "Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
@@ -106,7 +106,6 @@ pub(super) fn spellbook_ui(w: f32, h: f32) -> UiScript {
         r"Interface\FrameXML\UIPanelTemplates.xml",
         r"Interface\FrameXML\OptionsFrameTemplates.xml",
         r"Interface\FrameXML\ReputationFrame.xml",
-        "UiPanels.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
@@ -132,7 +131,8 @@ fn shipped_spellbook_loads_clean() {
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // the window tab template, ours (1004/1988)
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
@@ -687,11 +687,10 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
         "Interface\\FrameXML\\BasicControls.xml", // `TEXT`
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "UiPanels.xml",
+        r"Interface\FrameXML\UIParent.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
         // `ShowMacroFrame` lives here since 1848.
-        "UIParent.xml",
         "Interface\\FrameXML\\GameTooltip.xml",
         "Cooldown.xml",
         // **ScrollTemplates BEFORE UIPanelTemplates, which is the manifest's own order.** Ours

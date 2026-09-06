@@ -354,9 +354,17 @@ impl super::UiScript {
     pub fn world_map_uv_at(&self, x: f32, y: f32) -> Option<(f32, f32)> {
         let id = self.hit_test(x, y)?;
         let model = self.model_ref();
-        let fh = model.id_to_frame.get(&id).copied()?;
-        if model.arena.frame(fh)?.name.as_deref() != Some("WorldMapButton") {
-            return None;
+        let hit = model.id_to_frame.get(&id).copied()?;
+        // The map button, or **anything sitting on it**: the stock file makes every POI icon a
+        // child of `WorldMapButton` (`WorldMapFrame.lua:178`), and so are the player arrow's clear
+        // button and the party/raid blips, so the topmost frame over a town or a teammate is one
+        // of those and not the button. Requiring the button itself made the click deaf exactly
+        // where the map has something to show — the director's report on the stock map. Walking
+        // up rather than widening the name test keeps everything else out: a click on the
+        // continent dropdown or the close button is over neither the button nor its subtree.
+        let mut fh = hit;
+        while model.arena.frame(fh)?.name.as_deref() != Some("WorldMapButton") {
+            fh = model.arena.frame(fh)?.parent?;
         }
         let r = model.resolved.get(&fh)?;
         let (w, h) = (r.right - r.left, r.top - r.bottom);

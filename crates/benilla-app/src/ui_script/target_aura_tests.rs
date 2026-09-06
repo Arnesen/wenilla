@@ -28,7 +28,7 @@ fn harness() -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
-    load_xml(&s, "UIParent.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\MainMenuBar.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
