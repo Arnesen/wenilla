@@ -46,6 +46,11 @@ pub(crate) struct AdditiveMaterials(pub(crate) Arc<HashSet<AssetId<WowModelMater
 #[derive(Resource, Clone)]
 pub(crate) struct BlendMismatchShared(pub(crate) Arc<AtomicU64>);
 
+/// How many consecutive frames a mismatch must last before it is worth a warning — one frame is
+/// the pipeline specialization catching up with a material swap, which a 2026-09-06 login
+/// confirmed by ending four such runs at exactly one frame.
+const REPORT_AFTER_FRAMES: u32 = 2;
+
 /// One mismatching draw, tracked across frames so a transient (one frame after a material
 /// swap, the specialization tick catching up) reads differently from a PERSISTING one — the
 /// director's strong halo holds until a relog, and that difference is the finding.
@@ -59,6 +64,12 @@ pub(crate) struct Mismatch {
     /// The `frames` count the main world last reported at, so each entry logs on its first
     /// frame and then once every couple of seconds while it persists.
     pub(crate) reported: u32,
+    /// The draw has left the transparent phase — the run is over, and its LENGTH is the fact the
+    /// log could not previously state. Kept one more pass so the main world can narrate the end
+    /// before the entry is dropped.
+    pub(crate) ended: bool,
+    /// …and narrated exactly once.
+    pub(crate) end_reported: bool,
 }
 
 /// The live mismatch table, by main-world entity — kept by the render world, read and
@@ -142,15 +153,34 @@ fn check_blend_states(
                         bound_add: is_add,
                         frames: 0,
                         reported: 0,
+                        ended: false,
+                        end_reported: false,
                     });
                     e.material = id;
                     e.bound_add = is_add;
                     e.frames += 1;
+                    e.ended = false; // back in the phase — the run is still running
                 }
             }
         }
     }
-    table.retain(|e, _| seen.contains(e));
+    // **A run's end is reported, not dropped.** This used to be a bare `retain`, so an entry
+    // vanished the moment its entity left the transparent phase — despawned, culled, hidden, or
+    // genuinely fixed — and the run's LENGTH went with it. That was half of why a mismatch line
+    // was unanswerable: every run of 1..119 frames prints "1 frame(s)" (the report fires on
+    // frame 1 and then only on multiples of 120), so a two-second visible defect and a
+    // single-frame specialization hiccup were the same text. Entries are held one extra pass
+    // marked `ended`, which is what lets the main world state the length it actually ran.
+    table.retain(|e, m| {
+        if seen.contains(e) {
+            return true;
+        }
+        if m.ended {
+            return false; // its end has been narrated — now it can go
+        }
+        m.ended = true;
+        true
+    });
     shared.0.store(mismatches, Ordering::Relaxed);
 }
 
@@ -166,8 +196,29 @@ fn report_blend_mismatches(
 ) {
     let mut table = live.0.lock().unwrap();
     for (entity, m) in table.iter_mut() {
-        if m.reported == m.frames || (m.frames != 1 && m.frames % 120 != 0) {
-            continue;
+        // **A one-frame run is the specialization tick, and is no longer shouted about.** The
+        // module always said so; it warned on frame 1 anyway, because nothing could tell a
+        // one-frame run from a 119-frame one. Now something can, and a real login settled it:
+        // four entries reported "1 frame(s) so far" and "ran 1 frame(s), now clear" 26 ms later
+        // (2026-09-06). So the warn waits for a run to SURVIVE the tick, and a run that does not
+        // is recorded at debug rather than as a warning about a defect nobody has.
+        let ending = m.ended && !m.end_reported;
+        if ending {
+            m.end_reported = true;
+            if m.reported == 0 {
+                debug!(
+                    "blend mismatch: transient on entity {entity} — ran {} frame(s), never \
+                     survived the specialization tick",
+                    m.frames,
+                );
+                continue;
+            }
+        } else {
+            let due = m.frames == REPORT_AFTER_FRAMES
+                || (m.frames > REPORT_AFTER_FRAMES && m.frames % 120 == 0);
+            if !due || m.reported == m.frames {
+                continue;
+            }
         }
         m.reported = m.frames;
         let who = objects.get(*entity).map_or_else(
@@ -185,15 +236,28 @@ fn report_blend_mismatches(
         };
         warn!(
             "blend mismatch: {who} entity {entity} material {mat} tex {tex} — material \
-             additive={} but bound pipeline {} — {} frame(s){}",
+             additive={} but bound pipeline {} — {}{}",
             !m.bound_add,
             if m.bound_add {
                 "ADD (One,One)"
             } else {
                 "alpha-blend"
             },
-            m.frames,
-            if m.frames > 1 { " PERSISTING" } else { "" },
+            // "1 frame(s)" was printed for every run from 1 to 119 frames long, so the line could
+            // not distinguish a specialization hiccup from a two-second visible defect. An ended
+            // run now states the length it actually ran.
+            if ending {
+                format!("ran {} frame(s), now clear", m.frames)
+            } else {
+                format!("{} frame(s) so far", m.frames)
+            },
+            // Only a run still going can be persisting; an ended one has already said how long
+            // it lasted, and "now clear PERSISTING" is a contradiction.
+            if !ending && m.frames > 1 {
+                " PERSISTING"
+            } else {
+                ""
+            },
         );
     }
 }

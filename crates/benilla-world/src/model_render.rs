@@ -1139,8 +1139,17 @@ pub fn plugin(app: &mut App) {
     app.init_resource::<ModelMaterials>()
         .add_systems(Update, (scope_model_materials, evict_model_materials));
     // Deferred realization (`lazy`): a built material becomes an asset the frame something
-    // visible binds it. `Last`, after every writer and the `PostUpdate` twin spawns.
-    app.add_systems(Last, lazy::realize_bound);
+    // visible binds it. The top of `PostUpdate` — `Assets::insert` only QUEUES its
+    // `AssetEvent::Added`, so the sweep has to land before the store publishes
+    // (`AssetEventSystems`) or the bound entity loses a frame of drawing, and before
+    // `VisibilityPropagate` clears the view-visibility bits it reads. Both bounds and why they
+    // are the only two available: `lazy`'s module doc.
+    app.add_systems(
+        PostUpdate,
+        lazy::realize_bound
+            .before(bevy::asset::AssetEventSystems)
+            .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate),
+    );
     // Parking (`park`): a long-hidden streamed part puts its `Mesh3d` down. `Update`, after the
     // authority, on last frame's propagated verdict — the order the module doc explains.
     if park::enabled() {

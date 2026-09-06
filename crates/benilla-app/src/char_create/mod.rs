@@ -698,18 +698,15 @@ fn char_result_text<'a>(strings: &'a GlueStrings, code: u8) -> &'a str {
 #[cfg(test)]
 mod tests {
     /// **Every char-create result resolves to the sentence 1.12 actually ships**, read off the
-    /// player's own `GlueStrings.lua` — the regression for three bugs that literals had hidden
-    /// (decision 2045). Skips without client data.
+    /// player's own chain — `GlueStrings.lua` with `GlueLocalization.lua`'s `Localize()` patch over
+    /// it, assembled by the loader's own helper so this cannot assert a sentence the running client
+    /// would not show (2052). The regression for three bugs that literals had hidden (decision
+    /// 2045). Skips without client data.
     #[test]
     fn every_char_create_result_resolves_in_the_real_glue_strings() {
         let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
-        let src = chain
-            .read_file("Interface\\GlueXML\\GlueStrings.lua")
-            .expect("GlueStrings.lua in the chain");
-        let strings = GlueStrings::from_map(crate::glue_strings::parse_glue_strings(
-            &String::from_utf8_lossy(&src),
-        ));
+        let strings = crate::glue_strings::table_from_chain(&mut chain);
 
         // `0x36` used to stop at "…temporarily disabled."; the shipped string carries a second
         // sentence, and a re-typed string is one nobody diffed.
@@ -751,10 +748,7 @@ mod tests {
     fn the_reserved_name_code_names_the_reserved_key_not_the_in_use_one() {
         let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
-        let src = chain
-            .read_file("Interface\\GlueXML\\GlueStrings.lua")
-            .expect("GlueStrings.lua in the chain");
-        let map = crate::glue_strings::parse_glue_strings(&String::from_utf8_lossy(&src));
+        let map = crate::glue_strings::table_from_chain(&mut chain).into_map();
 
         // Both keys exist and agree in enUS — which is why the mix-up was invisible.
         let reserved = map.get("CHAR_NAME_RESERVED").expect("CHAR_NAME_RESERVED");

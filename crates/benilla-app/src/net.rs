@@ -74,6 +74,28 @@ pub(crate) struct NetPlugin {
 #[derive(Resource)]
 pub(crate) struct NetOffline;
 
+/// Release the ask-once latches at world enter — the counterpart to the disconnect teardown in
+/// `apply::session`, which clears them when a socket DIES but never when one is born.
+///
+/// The asymmetry was load-bearing and wrong. `Items::template` (and `NameCache`'s resolvers) mark
+/// an id pending *before* sending the query, and a command sent while the io thread holds no
+/// writer evaporates with a warn — so an ask made before the first connect latched the id for the
+/// life of the process. On 2026-09-06 that emptied the mail send tab's stationery list for an
+/// entire session, in silence. The ask site that did it is fixed; this makes the class harmless,
+/// because a redundant re-ask costs one packet and a wrong latch costs a dead feature nobody can
+/// see is dead.
+fn release_ask_once_latches_on_enter(
+    mut entered: MessageReader<EnteredWorldMessage>,
+    mut items: ResMut<crate::items::Items>,
+    mut names: ResMut<crate::names::NameCache>,
+) {
+    if entered.read().count() == 0 {
+        return;
+    }
+    items.clear_pending();
+    names.clear_pending();
+}
+
 impl Plugin for NetPlugin {
     fn build(&self, app: &mut App) {
         let handles = io::spawn_net(io::NetConfig::from_env(), self.connect);
@@ -134,6 +156,7 @@ impl Plugin for NetPlugin {
                 Update,
                 (
                     apply_net_updates,
+                    release_ask_once_latches_on_enter,
                     tag_self_player,
                     sample_splines,
                     // Derive each creature's swim state from the water over its feet (the wire never

@@ -18,22 +18,57 @@ use super::{
     WORD_SHADE_LIT, WORD_TEXTURED, WORD_UNLIT, WORD_WINDOW, WORD_WMO, WORD_WRAP_X, WORD_WRAP_Y,
 };
 
+/// The declined-batch census (`declined`), printed once a streaming burst SETTLES rather than on
+/// every count change.
+///
+/// Two things were wrong with printing on change. It fires from a `PostUpdate` system that runs
+/// every frame, so a zone streaming in emitted a near-identical INFO line per frame — a Goldshire
+/// login produced ten, climbing 8 → 1630, which reads like a fault rather than a residency count.
+/// And the line named only refusals, so it could not be told apart from a dead pass; `accepted` is
+/// now beside them (at Goldshire the refusals sit against a five-digit accepted population, which
+/// is the fact the line was missing).
+///
+/// The grain is the honest one for a running total: hold until the counts have not moved for
+/// [`CENSUS_SETTLE_FRAMES`], then print the total once — with [`CENSUS_MAX_HOLD_FRAMES`] as the
+/// ceiling, so a stream that never goes quiet (a long flight path) still reports instead of
+/// trading one silence for another.
+fn census_declines(gx: &mut StaticGx, frame: u32) {
+    if gx.declined == gx.declined_logged {
+        return;
+    }
+    if gx.declined != gx.declined_seen {
+        gx.declined_seen = gx.declined;
+        gx.declined_changed = frame;
+    }
+    let settled = frame.wrapping_sub(gx.declined_changed) >= CENSUS_SETTLE_FRAMES;
+    let overdue = frame.wrapping_sub(gx.declined_printed) >= CENSUS_MAX_HOLD_FRAMES;
+    if !settled && !overdue {
+        return;
+    }
+    gx.declined_printed = frame;
+    let d = gx.declined;
+    info!(
+        "static-gx: {} batch(es) accepted; declined — env-map {}, depth-flag {}, shade-family {}, \
+         prop-fader {} (batches), prop-no-instance {} (props)",
+        gx.accepted, d[0], d[1], d[2], d[3], d[4]
+    );
+    gx.declined_logged = d;
+}
+
+/// How long the decline counts must sit still before the census prints — ~1 s at 60 fps, which is
+/// shorter than a streaming burst and longer than the gaps inside one.
+const CENSUS_SETTLE_FRAMES: u32 = 60;
+
+/// The ceiling on that hold — ~10 s at 60 fps. Counts that never settle (a flight path streaming
+/// continuously) report on this instead, so the throttle can never turn the census silent.
+const CENSUS_MAX_HOLD_FRAMES: u32 = 600;
+
 /// Bake dirty-and-quiet cells into retained draw data; publish into [`render::GxWorld`].
 pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Assets<Mesh>>) {
     let _t = super::gx_perf_guard(0);
     gx.frame = gx.frame.wrapping_add(1);
     let frame = gx.frame;
-    for i in 0..5 {
-        if gx.declined[i] != gx.declined_logged[i] {
-            let d = gx.declined;
-            info!(
-                "static-gx: declined so far — env-map {}, depth-flag {}, shade-family {}, \
-                 prop-fader {} (batches), prop-no-instance {} (props)",
-                d[0], d[1], d[2], d[3], d[4]
-            );
-            gx.declined_logged = d;
-        }
-    }
+    census_declines(&mut gx, frame);
     // The reveal gate's "publish what you have" (see [`StaticGx::flush_now`]): consumed here, so
     // one request bakes one flush's worth of dirty regions and the windows resume next frame.
     let now = std::mem::take(&mut gx.flush_now);
@@ -351,6 +386,59 @@ mod tests {
     use crate::model_render::ShadeSel;
     use benilla_formats::{ModelBlend, RenderSubmesh, WmoBatchClass};
     use std::sync::Arc;
+
+    /// **The census reports once per burst, and cannot be starved into silence.** It used to
+    /// print on any count change from a system that runs every frame, so a Goldshire login
+    /// emitted ten near-identical INFO lines climbing 8 → 1630 — a residency count that read as
+    /// a fault. Three things are pinned here: a moving count stays quiet, a settled one prints
+    /// exactly once, and a count that never settles still reports on the ceiling.
+    #[test]
+    fn the_decline_census_prints_once_a_burst_settles() {
+        let mut gx = StaticGx::default();
+        let mut frame = 0u32;
+        let tick = |gx: &mut StaticGx, frame: &mut u32| {
+            *frame += 1;
+            census_declines(gx, *frame);
+        };
+        // A burst: the count moves every frame, and nothing is reported while it does.
+        for _ in 0..10 {
+            gx.declined[3] += 1;
+            tick(&mut gx, &mut frame);
+        }
+        assert_eq!(gx.declined_logged, [0; 5], "a moving count stays quiet");
+        // It settles: after the window, the total lands once and stays landed.
+        for _ in 0..CENSUS_SETTLE_FRAMES {
+            tick(&mut gx, &mut frame);
+        }
+        assert_eq!(gx.declined_logged[3], 10, "the settled total reports");
+        let logged = gx.declined_logged;
+        for _ in 0..CENSUS_SETTLE_FRAMES * 2 {
+            tick(&mut gx, &mut frame);
+        }
+        assert_eq!(gx.declined_logged, logged, "…once, not every frame after");
+        // A stream that never goes quiet reports on the ceiling instead of never.
+        for _ in 0..CENSUS_MAX_HOLD_FRAMES + 1 {
+            gx.declined[3] += 1;
+            tick(&mut gx, &mut frame);
+        }
+        assert!(
+            gx.declined_logged[3] > 10,
+            "a count that never settles still reports"
+        );
+    }
+
+    /// The census counts THIS world's population: a map change resets it, or the line reports the
+    /// sum of two worlds and reads as a leak (`static_merge::reset`'s own rationale).
+    #[test]
+    fn a_map_change_resets_the_census() {
+        let mut gx = StaticGx::default();
+        let g = tri([0.0; 3]);
+        assert!(gx.divert(batch(&g, Vec3::ZERO, None, ModelBlend::Opaque)));
+        gx.tally_prop_declined(false);
+        assert_eq!((gx.accepted, gx.declined[3]), (1, 1));
+        gx.clear();
+        assert_eq!((gx.accepted, gx.declined[3]), (0, 0), "a fresh world");
+    }
 
     /// The bake cadence (B3, decision 1432): first bakes wait only the short window, re-bakes
     /// of a published region wait for the long one, and the age cap consolidates a

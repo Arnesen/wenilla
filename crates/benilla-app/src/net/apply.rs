@@ -1358,22 +1358,22 @@ pub(crate) fn apply_net_updates(
             // byte addresses are on `ui_guild::apply::event`).
             SessionEvent::GuildEvent(notice) => crate::ui_guild::apply::event(
                 &mut guild,
-                &mut chat_log,
+                &mut ui_error_keys,
                 &social,
                 &guild_notify,
                 self_guid.0,
                 notice,
             ),
             SessionEvent::GuildCommandResult(result) => {
-                crate::ui_guild::apply::command_result(&mut guild, &mut chat_log, result)
+                crate::ui_guild::apply::command_result(&mut guild, &mut ui_error_keys, result)
             }
             SessionEvent::GuildInvite { inviter, guild: g } => {
-                crate::ui_guild::apply::invite(&mut guild, &mut chat_log, inviter, g)
+                crate::ui_guild::apply::invite(&mut guild, &mut ui_error_keys, inviter, g)
             }
             SessionEvent::GuildDecline { name } => {
-                crate::ui_guild::apply::decline(&mut chat_log, &name)
+                crate::ui_guild::apply::decline(&mut ui_error_keys, &name)
             }
-            SessionEvent::GuildInfo(info) => crate::ui_guild::apply::info(&mut chat_log, info),
+            SessionEvent::GuildInfo(info) => crate::ui_guild::apply::info(&mut guild, info),
             // ── The petition family (decision 1672): founding a guild. The registrar half is an
             // NPC window, the charter half is item-bound, and they are two resources for that
             // reason — see `ui_petition`'s module doc.

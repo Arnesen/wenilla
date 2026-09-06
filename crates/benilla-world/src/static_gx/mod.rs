@@ -42,7 +42,9 @@
 //! `faders=`/`fade_events=`.
 //!
 //! Exclusions the collector refuses (each falls through to the ordinary merge/entity path, and
-//! the flush logs a one-line census so a declined population is never silent): env-mapped
+//! the flush logs a one-line census — refusals beside the ACCEPTED count, once a streaming burst
+//! settles — so a declined population is never silent, and never mistakable for a dead pass in
+//! the other direction either): env-mapped
 //! batches (`texture_unit_lookup > 2` — view-generated UVs), the depth-flag oddities
 //! (`no_depth_write`/`no_depth_test` — pipeline-state per batch), and the `ShadeSel::Matte`/
 //! `Rig` families (exterior WMO MODD props ride the prop site, not this lane).
@@ -443,10 +445,24 @@ pub struct StaticGx {
     pub(crate) world: render::GxWorld,
     frame: u32,
     /// Declined-batch census (env-map / depth-flag / shade-family / prop-fader /
-    /// prop-without-instance refusals), logged once per count change so a silently-thinner
-    /// population can't masquerade as covered (1429's no-silent-caps note).
+    /// prop-without-instance refusals), logged once a streaming burst settles so a
+    /// silently-thinner population can't masquerade as covered (1429's no-silent-caps note).
     declined: [u32; 5],
     declined_logged: [u32; 5],
+    /// The census's last-seen counts, the frame they last MOVED, and the frame it last PRINTED —
+    /// the settle timer that turns a login's per-frame line storm into one line per burst. Before
+    /// it, the census fired on ANY count change from a `PostUpdate` system that runs every frame,
+    /// so streaming in a zone emitted a near-identical INFO line per frame (ten of them in one
+    /// Goldshire login). The two frame stamps are distinct on purpose: the settle window measures
+    /// from the last change, the ceiling from the last line, or a count that moves every frame
+    /// resets its own deadline forever and never reports.
+    declined_seen: [u32; 5],
+    declined_changed: u32,
+    declined_printed: u32,
+    /// Batches the divert ACCEPTED, against which the refusals above are read. Without it the
+    /// census line cannot distinguish "1,630 declined out of ~25,000" from "the pass is dead" —
+    /// which is exactly the reading it forced when a log was triaged on 2026-09-06.
+    accepted: u32,
     /// Exiled entities whose seed died out from under them (owner release, map clear) —
     /// drained and despawned by the scan, which owns the exile lifecycle end to end.
     pending_despawn: Vec<Entity>,
@@ -799,6 +815,7 @@ impl StaticGx {
         }
         entry.dirty = true;
         entry.last_change = self.frame;
+        self.accepted += 1;
         true
     }
 
@@ -891,6 +908,15 @@ impl StaticGx {
         self.world.props.clear();
         self.world.visible.clear();
         self.world.visible_wmos.clear();
+        // The census counts THIS world's population. `static_merge::reset` exists for exactly
+        // this reason — a cumulative counter carried across a map change reports the sum of two
+        // worlds and reads as a leak.
+        self.declined = [0; 5];
+        self.declined_logged = [0; 5];
+        self.declined_seen = [0; 5];
+        self.declined_changed = 0;
+        self.declined_printed = 0;
+        self.accepted = 0;
     }
 }
 

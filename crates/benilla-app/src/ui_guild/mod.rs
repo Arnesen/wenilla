@@ -39,7 +39,7 @@ use std::collections::{HashMap, HashSet};
 
 use benilla_formats::GuildEmblem;
 use benilla_protocol::messages::{
-    guild_event, GuildCommandResult, GuildEventNotice, GuildQueryResponse, GuildRoster,
+    guild_event, GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse, GuildRoster,
     GuildRosterMember, GUILD_RANKS_MAX_COUNT,
 };
 use benilla_protocol::ObjectFields;
@@ -200,6 +200,13 @@ pub(crate) struct GuildState {
     /// Set whenever the pushed snapshot went stale — the feed rebuilds and pushes on this and
     /// skips the work otherwise (a 500-member roster is not worth re-resolving every frame).
     dirty: bool,
+    /// `/ginfo` answers waiting for the VM. Their two lines are `GUILD_NAME_TEMPLATE` and
+    /// `GUILD_INFO_TEMPLATE`, which are **not** catalog rows — `0x5e6fb0` resolves each token
+    /// through the script VM and emits chat directly, passing no message record — so unlike every
+    /// other line in this module they cannot ride [`crate::ui_action::UiErrorKeys`], whose whole
+    /// contract is that the catalog names the surface. They wait here for [`feed`] instead, which
+    /// is where the VM is (decision 2054).
+    pending_info: Vec<GuildInfo>,
 }
 
 impl GuildState {
@@ -606,18 +613,20 @@ fn guild_emblem(
 }
 
 /// The net drain's `SessionEvent::Guild*` arms, factored here so the wire laws live beside the
-/// state they drive ([`crate::ui_social::apply`]'s shape). The ones that owe chat lines push what
-/// [`lines`] composed, the way `crate::net::apply`'s group shims do.
+/// state they drive ([`crate::ui_social::apply`]'s shape). The ones that owe a line queue the
+/// **message id** [`lines`] named, the way `crate::net::apply`'s group shims do — the surface and
+/// the sound come off the catalog at the drain, not from here (decision 2054).
 pub(crate) mod apply {
     use super::*;
-    use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
+    use crate::ui_action::{UiError, UiErrorKeys};
     use crate::ui_social::SocialState;
-    use benilla_protocol::messages::GuildInfo;
 
-    fn push_lines(chat_log: &mut ChatLog, lines: impl IntoIterator<Item = String>) {
-        for line in lines {
-            chat_log.push_event(ChatEvent::text_only(ChatEventKind::System, line));
-        }
+    /// Queue what [`lines`] named. The key IS the lookup and the catalog row behind it names the
+    /// surface and the sound, so nothing here decides either — which is the difference decision
+    /// 2054 made: this used to push composed English straight onto the system chat log, and two
+    /// of these messages are not chat lines at all.
+    fn push_lines(errors: &mut UiErrorKeys, lines: impl IntoIterator<Item = UiError>) {
+        errors.0.extend(lines);
     }
 
     /// `SMSG_GUILD_QUERY_RESPONSE`.
@@ -655,7 +664,7 @@ pub(crate) mod apply {
     ///    this conjunct's entire job.
     pub(crate) fn event(
         guild: &mut GuildState,
-        chat_log: &mut ChatLog,
+        errors: &mut UiErrorKeys,
         social: &SocialState,
         notify: &GuildMemberNotify,
         self_guid: Option<u64>,
@@ -663,7 +672,7 @@ pub(crate) mod apply {
     ) {
         let announce = announce_signon(social, notify, self_guid, notice.guid);
         guild.apply_event(&notice);
-        push_lines(chat_log, lines::event_line(&notice, announce));
+        push_lines(errors, lines::event_line(&notice, announce));
     }
 
     /// The sign-on/sign-off pair's four-conjunct display condition, as one predicate — see
@@ -692,33 +701,36 @@ pub(crate) mod apply {
     /// `SMSG_GUILD_COMMAND_RESULT`.
     pub(crate) fn command_result(
         guild: &mut GuildState,
-        chat_log: &mut ChatLog,
+        errors: &mut UiErrorKeys,
         result: GuildCommandResult,
     ) {
         guild.apply_command_result(&result);
-        push_lines(chat_log, lines::command_line(&result));
+        push_lines(errors, lines::command_line(&result));
     }
 
     /// `SMSG_GUILD_INVITE` — the popup's arm edge, plus the notice line the reference prints
     /// beside it.
     pub(crate) fn invite(
         guild: &mut GuildState,
-        chat_log: &mut ChatLog,
+        errors: &mut UiErrorKeys,
         inviter: String,
         guild_name: String,
     ) {
-        push_lines(chat_log, [lines::invite_line(&inviter, &guild_name)]);
+        push_lines(errors, [lines::invite_line(&inviter, &guild_name)]);
         guild.apply_invite(inviter, guild_name);
     }
 
     /// `SMSG_GUILD_DECLINE` — a line only; there is no state behind it.
-    pub(crate) fn decline(chat_log: &mut ChatLog, name: &str) {
-        push_lines(chat_log, [lines::decline_line(name)]);
+    pub(crate) fn decline(errors: &mut UiErrorKeys, name: &str) {
+        push_lines(errors, [lines::decline_line(name)]);
     }
 
     /// `SMSG_GUILD_INFO` — the `/ginfo` answer, two lines and no state.
-    pub(crate) fn info(chat_log: &mut ChatLog, info: GuildInfo) {
-        push_lines(chat_log, lines::info_lines(&info));
+    ///
+    /// Parked rather than composed: its templates are not catalog rows, so the lines are built
+    /// where the VM is ([`GuildState::pending_info`]).
+    pub(crate) fn info(guild: &mut GuildState, info: GuildInfo) {
+        guild.pending_info.push(info);
     }
 }
 

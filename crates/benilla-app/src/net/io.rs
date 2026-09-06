@@ -799,11 +799,21 @@ fn writer_loop(
                     // No live writer: the session is gone and this command evaporates. Traced
                     // unconditionally — this is the state in which a client keeps *deciding* to send
                     // movement (`snd` lines) that no one will ever receive (decision 0621).
+                    // **Both lines name the command.** They used to write a fixed string, so a
+                    // login that dropped five commands before the writer existed said only that
+                    // five of something went missing — and since `writer` is set exactly once and
+                    // never reset, this can only ever fire before the first `player_login`, which
+                    // makes the WHICH the entire question. A census of all 322 send sites could
+                    // not answer it from the source; `cmd` is owned and unused here and
+                    // `ClientCommand` derives `Debug`, so one login now answers it outright.
                     if benilla_assets::trace::enabled() {
-                        benilla_assets::trace::line("wire", "DROPPED — no live session");
+                        benilla_assets::trace::line(
+                            "wire",
+                            &format!("DROPPED — no live session: {cmd:?}"),
+                        );
                     }
                     if warned < SEND_WARN_CAP {
-                        bevy::log::warn!("net: dropping command — not connected");
+                        bevy::log::warn!("net: dropping command — not connected: {cmd:?}");
                         warned += 1;
                     }
                     continue;

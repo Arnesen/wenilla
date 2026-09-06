@@ -701,11 +701,9 @@ fn answer_trade_request(
         // `GlobalStrings.lua` and routes it. Row `0xbb` carries `kind = 0`, chat type `0xa`, no
         // sound cue — a system chat line, not the red `UI_ERROR_MESSAGE` (`kind = 2`) — but no
         // line here says so, and that is the point: this arm no longer knows or decides.
-        errors.0.push(crate::ui_action::UiError {
-            key: "ERR_TRADE_BLOCKED_S",
-            fill_s: Some(name),
-            fill_d: None,
-        });
+        errors
+            .0
+            .push(crate::ui_action::UiError::s("ERR_TRADE_BLOCKED_S", name));
         return;
     }
 
@@ -903,11 +901,7 @@ fn feed_trade(
             continue;
         }
         match names.resolve(line.who, &commands).map(str::to_string) {
-            Some(name) => errors.0.push(crate::ui_action::UiError {
-                key: line.key,
-                fill_s: Some(name),
-                fill_d: None,
-            }),
+            Some(name) => errors.0.push(crate::ui_action::UiError::s(line.key, name)),
             // Not cached yet: `resolve` has asked, so park the debt again and retry next frame.
             None => trade.owe_named_line(line),
         }
@@ -1471,11 +1465,10 @@ mod tests {
 
         assert_eq!(
             app.world().resource::<crate::ui_action::UiErrorKeys>().0,
-            vec![crate::ui_action::UiError {
-                key: "ERR_INITIATE_TRADE_S",
-                fill_s: Some("Grubbis".to_string()),
-                fill_d: None,
-            }],
+            vec![crate::ui_action::UiError::s(
+                "ERR_INITIATE_TRADE_S",
+                "Grubbis".to_string()
+            )],
         );
         assert_eq!(
             benilla_ui::messages::kind_of("ERR_INITIATE_TRADE_S"),
@@ -1542,11 +1535,10 @@ mod tests {
         app.update();
         assert_eq!(
             app.world().resource::<crate::ui_action::UiErrorKeys>().0,
-            vec![crate::ui_action::UiError {
-                key: "ERR_PLAYER_BUSY_S",
-                fill_s: Some("Grubbis".to_string()),
-                fill_d: None,
-            }],
+            vec![crate::ui_action::UiError::s(
+                "ERR_PLAYER_BUSY_S",
+                "Grubbis".to_string()
+            )],
         );
     }
 
@@ -1581,11 +1573,10 @@ mod tests {
         app.update();
         assert_eq!(
             app.world().resource::<crate::ui_action::UiErrorKeys>().0,
-            vec![crate::ui_action::UiError {
-                key: "ERR_INITIATE_TRADE_S",
-                fill_s: Some("Skarrid".to_string()),
-                fill_d: None,
-            }],
+            vec![crate::ui_action::UiError::s(
+                "ERR_INITIATE_TRADE_S",
+                "Skarrid".to_string()
+            )],
         );
     }
 
@@ -1632,11 +1623,10 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(ClientCommand::BusyTrade)));
         assert_eq!(
             app.world().resource::<crate::ui_action::UiErrorKeys>().0,
-            vec![crate::ui_action::UiError {
-                key: "ERR_TRADE_BLOCKED_S",
-                fill_s: Some("Grubbis".to_string()),
-                fill_d: None,
-            }],
+            vec![crate::ui_action::UiError::s(
+                "ERR_TRADE_BLOCKED_S",
+                "Grubbis".to_string()
+            )],
             "the refusal raises the reference's own `0x496720(0xbb, name)`"
         );
         // …and the row it names is a CHAT row, which is the half a re-implementation gets wrong:

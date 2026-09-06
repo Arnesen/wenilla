@@ -168,8 +168,13 @@ pub(super) fn resolve_wmo_gameobject_props(
             })
             .collect();
         if !props.is_empty() {
+            // Named by the ENTITY as well as the display: the resolver visits each entity once
+            // (`WmoPropsResolved` is inserted before any `continue`), so two identical lines mean
+            // two instances of one display — two ships of the same model — not a repeat of the
+            // work. Without the instance in the message that is unreadable, and it read as a
+            // caching bug on 2026-09-06.
             info!(
-                "wmo props: {} set-0 doodads resolved for display {}",
+                "wmo props: {} set-0 doodads resolved for display {} on {entity}",
                 props.len(),
                 net.display_id.unwrap_or_default()
             );
@@ -481,9 +486,12 @@ pub(super) fn spawn_wmo_gameobject_props(
         if hulls + emitters + ribbons + lights + interior > 0 {
             // The instrument line the probe greps: what this host's props actually authored
             // (zero anywhere is legal — collide-iff-hull, emit-iff-authored, indoor-iff-owned).
+            // The host is in the message for the same reason as above — and doubly here, because
+            // this line fires once per host per frame in which anything spawned, so ONE host's
+            // 134 props land over several batches and emit several honest lines.
             info!(
                 "wmo props: {hulls} cargo hulls, {emitters} emitters, {ribbons} ribbons, \
-                 {lights} lights, {interior} interior-lane props (riding the host)"
+                 {lights} lights, {interior} interior-lane props (riding host {entity})"
             );
         }
         if props.0.is_empty() {

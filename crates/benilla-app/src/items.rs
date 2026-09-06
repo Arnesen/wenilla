@@ -596,6 +596,22 @@ impl Items {
 
     /// Disconnect: drop the instances (the server re-streams inventory at login) and the in-flight
     /// asks (a query dropped by a dead writer must be re-askable); keep the templates (static).
+    /// Release the ask-once latch without dropping what the cache LEARNED — the world-enter
+    /// counterpart to [`Self::clear_session`]'s disconnect teardown.
+    ///
+    /// `template` marks an entry pending *before* the send, and a send made while the io thread
+    /// holds no writer evaporates. Nothing told the cache, so the entry stayed pending for the
+    /// life of the process and was never re-asked. That is not hypothetical: `feed_mail` carries
+    /// no run condition, so on 2026-09-06 it asked all five `Stationery.dbc` templates at the
+    /// login screen, every one was dropped "not connected", and the send tab's stationery list
+    /// was empty for the whole session — which the stock `SendMailFrame_Reset` turns into every
+    /// send silently unsent. The ask site is fixed; this makes the CLASS harmless, because the
+    /// cost of a wrong latch (a feature dead all session, in silence) is nothing like the cost of
+    /// a redundant re-ask.
+    pub(crate) fn clear_pending(&mut self) {
+        self.pending.clear();
+    }
+
     pub(crate) fn clear_session(&mut self) {
         self.objects.clear();
         self.enchant_deadlines.clear();

@@ -620,10 +620,9 @@ fn feed_auction(
                 },
             };
             let get = |key: &str| script.lua().globals().get::<String>(key).ok();
-            let err = UiError {
-                key: msg.key,
-                fill_s: fill,
-                fill_d: None,
+            let err = match fill {
+                Some(s) => UiError::s(msg.key, s),
+                None => UiError::key(msg.key),
             };
             if let Some(text) = ui_error_text(&err, &get) {
                 lines.push(Shown::keyed(msg.key, text));

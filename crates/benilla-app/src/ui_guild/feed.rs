@@ -11,7 +11,7 @@
 
 use benilla_formats::AreaTableCatalog;
 use benilla_protocol::messages::{
-    guild_presence, GuildRosterMember, GUILD_RANKS_MAX_COUNT, GUILD_RANKS_MIN_COUNT,
+    guild_presence, GuildInfo, GuildRosterMember, GUILD_RANKS_MAX_COUNT, GUILD_RANKS_MIN_COUNT,
     GUILD_RANK_MAX_LENGTH,
 };
 use benilla_ui::script::{
@@ -48,6 +48,7 @@ pub(super) fn feed_guild(
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     areas: Option<Res<AreaTableRes>>,
     commands: Res<NetCommands>,
+    mut sink: crate::ui_action::MessageSink,
     mut fed: Local<crate::ui_script::VmMemo<FedGuild>>,
 ) {
     let Some(mut script) = script else {
@@ -173,6 +174,55 @@ pub(super) fn feed_guild(
             );
         }
     }
+
+    // `/ginfo`'s two lines, resolved here because their templates are not catalog rows.
+    let info_lines: Vec<crate::ui_action::Shown> = std::mem::take(&mut guild.pending_info)
+        .iter()
+        .flat_map(|info| ginfo_lines(&script, info))
+        .collect();
+    if !info_lines.is_empty() {
+        crate::ui_action::show_messages(&mut script, &mut sink, "ui_guild", info_lines);
+    }
+}
+
+/// `SMSG_GUILD_INFO`'s two chat lines — `GUILD_NAME_TEMPLATE` then `GUILD_INFO_TEMPLATE`, in the
+/// order `0x5e6fb0` emits them (`0x5e700f`, then `0x5e706b`).
+///
+/// **Neither is a message record**, so neither can ride the by-key queue: the handler resolves each
+/// token through the script VM (`0x703bf0`) and formats it into a chat line itself, with no `kind`
+/// and no sound to read. `MsgKind::Chat` here is therefore the handler's own surface rather than a
+/// catalog lookup, and the absent key is silent — the same GlobalStrings data-suppression the keyed
+/// route wears (decision 2054).
+///
+/// **The date is month-day-year and the wire is day-month-year.** The handler's cdecl pushes
+/// (`0x5e704d`–`0x5e7061`) place the arguments **wire#2, wire#1, wire#3, wire#4, wire#5** — the
+/// first two swapped — which is exactly what an enUS `m-d-y` template does to vmangos's
+/// `createdDay, createdMonth, createdYear` order.
+fn ginfo_lines(script: &UiScript, info: &GuildInfo) -> Vec<crate::ui_action::Shown> {
+    use benilla_ui::strings::Arg;
+    let get = |key: &str| script.lua().globals().get::<String>(key).ok();
+    let line = |template: Option<String>, args: &[Arg<'_>]| {
+        let text = benilla_ui::strings::fill(&template?, args);
+        (!text.is_empty())
+            .then(|| crate::ui_action::Shown::unkeyed(benilla_ui::messages::MsgKind::Chat, text))
+    };
+    let d = |v: u32| Arg::D(i64::from(v));
+    [
+        line(get("GUILD_NAME_TEMPLATE"), &[Arg::S(&info.name)]),
+        line(
+            get("GUILD_INFO_TEMPLATE"),
+            &[
+                d(info.created_month),
+                d(info.created_day),
+                d(info.created_year),
+                d(info.member_count),
+                d(info.account_count),
+            ],
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// The roster in display order — **every** member, sorted, never filtered (see [`super::sort`]).

@@ -1,8 +1,10 @@
 //! **No user-facing sentence is written in Rust when the reference ships one.**
 //!
 //! The real client never composes display text: every sentence is a key into `GlobalStrings.lua`
-//! (in-game) or `GlueStrings.lua` (the login/character screens), resolved at runtime from the
-//! player's own install. Writing the English in Rust throws away three things at once —
+//! (in-game) or `GlueStrings.lua` (the login/character screens) — each with a `Localize()` patch
+//! file laid over it, which is where a good many of the sentences the player actually reads come
+//! from (decision 2052) — resolved at runtime from the player's own install. Writing the English in
+//! Rust throws away three things at once —
 //! localization, and, for anything that goes through the message catalog, the *surface* the
 //! message is shown on and the *voice line* it speaks with (decisions 1770, 1815, 2035).
 //!
@@ -29,7 +31,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// The drift still standing, per file: **252 literals over 32 files**, each a sentence the
+/// The drift still standing, per file: **208 literals over 31 files**, each a sentence the
 /// reference ships and we re-typed.
 ///
 /// **These numbers may only decrease.** They are not a budget to spend; every one is a string that
@@ -45,7 +47,6 @@ use std::path::{Path, PathBuf};
 /// is exactly how the first cut of this list carried a row the gates then failed on.
 const ALLOWED: &[(&str, usize)] = &[
     ("benilla-app/src/ui_chat/frames.rs", 48),
-    ("benilla-app/src/ui_guild/lines.rs", 34),
     ("benilla-app/src/ui_tooltip/mod.rs", 28),
     ("benilla-app/src/ui_party/mod.rs", 12),
     ("benilla-app/src/ui_social/mod.rs", 18),
@@ -198,21 +199,33 @@ fn no_user_facing_sentence_is_written_in_rust_when_the_reference_ships_one() {
     };
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
     let mut shipped = HashMap::new();
+    // The base tables AND the locale patches laid over them (decision 2052): where `Localize()`
+    // redefines a key, its wording is the one the player actually reads, so a set that stopped at
+    // the base files would be grading against text this install never shows.
     for file in [
         "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\Localization.lua",
         "Interface\\GlueXML\\GlueStrings.lua",
+        "Interface\\GlueXML\\GlueLocalization.lua",
     ] {
         let src = chain
             .read_file(file)
             .unwrap_or_else(|e| panic!("{file}: {e}"));
+        let mut taken = 0usize;
         for (k, v) in lua_table(&String::from_utf8_lossy(&src)) {
             let n = normalize(&v);
             // A one-word or punctuation-only value ("Locked", "%s") is too weak a signal: it
             // collides with ordinary program text. Sentences are what this is after.
             if n.split(' ').count() >= 2 && n.chars().any(|c| c.is_ascii_lowercase()) {
                 shipped.entry(n).or_insert(k);
+                taken += 1;
             }
         }
+        // A file that reads fine but parses to nothing would make this whole test pass vacuously
+        // — and the two `Localize()` files wrap their assignments in a function, a shape the base
+        // tables never have. Every source has to contribute or the walk is grading against less
+        // than it claims.
+        assert!(taken > 0, "{file} contributed no sentences");
     }
 
     let mut sources = Vec::new();

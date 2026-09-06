@@ -1063,15 +1063,7 @@ mod tests {
         );
         // …and the named one, filled.
         assert_eq!(
-            ui_error_text(
-                &UiError {
-                    key: questgiver_failed_key(4),
-                    fill_s: Some("A Threat Within".into()),
-                    fill_d: None,
-                },
-                &g
-            )
-            .as_deref(),
+            ui_error_text(&UiError::s(questgiver_failed_key(4), "A Threat Within"), &g).as_deref(),
             Some("A Threat Within failed: Inventory is full.")
         );
         // The log-full line is the RED one and carries no fill.

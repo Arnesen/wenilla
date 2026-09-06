@@ -177,11 +177,7 @@ fn feed_quest_share(
         };
         match names.resolve(v.member, &commands).map(str::to_string) {
             Some(name) => {
-                let err = UiError {
-                    key,
-                    fill_s: Some(name),
-                    fill_d: None,
-                };
+                let err = UiError::s(key, name);
                 let get = |k: &str| script.lua().globals().get::<String>(k).ok();
                 if let Some(text) = ui_error_text(&err, &get) {
                     lines.push(Shown::keyed(err.key, text));
@@ -292,14 +288,7 @@ mod tests {
         // the answer a decline produces.
         let line = |raw: u8| {
             let key = verdict_message(QuestShareMsg(raw)).unwrap();
-            ui_error_text(
-                &UiError {
-                    key,
-                    fill_s: Some("Mate".into()),
-                    fill_d: None,
-                },
-                &g,
-            )
+            ui_error_text(&UiError::s(key, "Mate"), &g)
         };
         assert_eq!(
             line(QuestShareMsg::SHARING_QUEST.0).as_deref(),

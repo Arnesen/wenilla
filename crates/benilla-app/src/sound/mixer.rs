@@ -754,6 +754,18 @@ pub(crate) struct StreamWatch {
     last_pos: Option<f64>,
     expected: f64,
     advanced: f64,
+    /// When the open window began, in WALL time — carried so the report can state the span it
+    /// actually covered beside the time it counted.
+    ///
+    /// **Because the two disagreed and nothing could say why.** A 2026-09-06 login closed a 1.0 s
+    /// window 0.756 s of wall after the stream started, which is arithmetically impossible if the
+    /// fed `dt` is the real frame delta — and the fix that put this watch on `Time<Real>` did not
+    /// change it. Rather than reason further from log timestamps, the line now carries both
+    /// numbers: if they disagree the caller's clock is still wrong, and if they agree the
+    /// starvation is real and the timestamps were the misreading.
+    window_start: Option<std::time::Instant>,
+    /// The closing window's counted totals, kept for the report (`observe` zeroes them).
+    closed: (f64, f64),
 }
 
 impl StreamWatch {
@@ -763,6 +775,8 @@ impl StreamWatch {
             last_pos: None,
             expected: 0.0,
             advanced: 0.0,
+            window_start: None,
+            closed: (0.0, 0.0),
         }
     }
 
@@ -770,11 +784,24 @@ impl StreamWatch {
     pub(crate) fn feed(&mut self, handle: &StreamingSoundHandle<FromFileError>, dt: f64) {
         use kira::sound::PlaybackState as S;
         let audible = matches!(handle.state(), S::Playing | S::Stopping);
+        if audible && self.expected == 0.0 {
+            self.window_start = Some(std::time::Instant::now());
+        }
         if let Some(lost) = self.observe(audible, handle.position(), dt) {
+            let span = self
+                .window_start
+                .take()
+                .map_or(f64::NAN, |t| t.elapsed().as_secs_f64());
+            let (counted, advanced) = self.closed;
+            // **No cause is named.** This used to say "(decode thread outrun)", which is one of
+            // three mechanisms that freeze a stream's position identically — a starved decoder, a
+            // render thread that did not run, or a closed/rebuilding device — and the meter cannot
+            // tell them apart. Asserting one of the three in the line is how a log hands a reader
+            // a conclusion the instrument never reached.
             warn!(
-                "audio: {} stream starved — ~{:.0} ms of injected silence in the last \
-                 {STREAM_WATCH_WINDOW_SECS:.0} s (decode thread outrun) — this is what a \
-                 crackle sounds like",
+                "audio: {} stream starved — ~{:.0} ms of injected silence over a {span:.2} s \
+                 window (counted {counted:.2} s, position advanced {advanced:.2} s) — this is \
+                 what a crackle sounds like",
                 self.label,
                 lost * 1000.0,
             );
@@ -787,6 +814,7 @@ impl StreamWatch {
         self.last_pos = None;
         self.expected = 0.0;
         self.advanced = 0.0;
+        self.window_start = None;
     }
 
     /// The accounting core, pure so the tests below can drive it without a device. Returns
@@ -808,6 +836,7 @@ impl StreamWatch {
             return None;
         }
         let lost = self.expected - self.advanced;
+        self.closed = (self.expected, self.advanced);
         self.expected = 0.0;
         self.advanced = 0.0;
         (lost > STREAM_STARVED_MIN_SECS).then_some(lost)

@@ -317,11 +317,7 @@ impl GroupState {
         member: &str,
         result: u32,
     ) -> Option<UiError> {
-        let named = |key: &'static str| UiError {
-            key,
-            fill_s: Some(member.to_string()),
-            fill_d: None,
-        };
+        let named = |key: &'static str| UiError::s(key, member);
         match result {
             party_result::OK => match operation {
                 // The empty-name guard is the reference's, not defensiveness: an invite ack that
@@ -679,11 +675,7 @@ mod tests {
         assert_eq!(g.pending_invite.as_deref(), Some("Bob"));
         assert_eq!(
             g.apply_command_result(party_operation::INVITE, "Carol", party_result::OK),
-            Some(UiError {
-                key: "ERR_INVITE_PLAYER_S",
-                fill_s: Some("Carol".into()),
-                fill_d: None
-            })
+            Some(UiError::s("ERR_INVITE_PLAYER_S", "Carol"))
         );
         assert_eq!(
             g.apply_command_result(
@@ -691,19 +683,11 @@ mod tests {
                 "Carol",
                 party_result::ALREADY_IN_GROUP
             ),
-            Some(UiError {
-                key: "ERR_ALREADY_IN_GROUP_S",
-                fill_s: Some("Carol".into()),
-                fill_d: None
-            })
+            Some(UiError::s("ERR_ALREADY_IN_GROUP_S", "Carol"))
         );
         assert_eq!(
             g.apply_command_result(party_operation::INVITE, "Xz", party_result::BAD_PLAYER_NAME),
-            Some(UiError {
-                key: "ERR_BAD_PLAYER_NAME_S",
-                fill_s: Some("Xz".into()),
-                fill_d: None
-            })
+            Some(UiError::s("ERR_BAD_PLAYER_NAME_S", "Xz"))
         );
         assert_eq!(
             g.apply_declined("Carol"),
@@ -846,7 +830,7 @@ mod tests {
             // The `%s` arms are exactly the arms the binary passes `&name` to, which is an
             // independent cross-check: every one of them is an `_S` key.
             assert_eq!(
-                msg.fill_s.is_some(),
+                msg.arg_s().is_some(),
                 takes_name,
                 "result {result} name fill"
             );
@@ -965,7 +949,7 @@ mod tests {
             // An `_S` key must actually carry the hole its fill expects.
             assert_eq!(
                 text.contains("%s"),
-                msg.fill_s.is_some(),
+                msg.arg_s().is_some(),
                 "{} vs its fill",
                 msg.key
             );

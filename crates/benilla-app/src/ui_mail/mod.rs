@@ -634,8 +634,18 @@ fn feed_mail(
     // by BuyPrice ascending. The templates are asked ahead of any mailbox (the catalog is five
     // rows) so the list is whole the frame the window opens: the stock `SendMailFrame_Reset`
     // selects row 1 on show, and an empty list then would leave every send silently unsent.
+    //
+    // **Only once there is a player.** `feed_mail` carries no run condition, so it runs from the
+    // first frame of the process — the login screen, before the socket exists. The five asks went
+    // out there, the io thread dropped them ("not connected"), and `Items::template` had already
+    // latched all five in its ask-once `pending` set, which is cleared on DISCONNECT and never on
+    // connect. The templates were therefore never re-asked, the list stayed empty for the whole
+    // session, and the failure this very comment describes — every send silently unsent — is what
+    // it caused. Gating on the self player is also what the list means: "what may I use", which is
+    // not a question until there is a me.
     let usable = stationery
         .as_deref()
+        .filter(|_| !self_q.is_empty())
         .map(|catalog| stationeries(catalog, &self_q, &mut items, icons.as_deref(), &commands))
         .unwrap_or_default();
     let memo = last_stationeries.get(&script);

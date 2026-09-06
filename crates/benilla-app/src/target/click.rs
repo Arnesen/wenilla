@@ -1060,7 +1060,7 @@ fn route_lock_refusal(
     lock_type_name: Option<&str>,
     key: KeyFact,
 ) -> Option<crate::ui_action::UiError> {
-    use crate::ui_action::UiError;
+    use crate::ui_action::{FillArg, UiError};
     if flag_locked {
         return Some(UiError::key(match go_type {
             0 => "ERR_DOOR_LOCKED",
@@ -1071,27 +1071,19 @@ fn route_lock_refusal(
     match slot0.key_type {
         benilla_formats::LOCK_KEY_ITEM => match key {
             KeyFact::Unknown => None,
-            KeyFact::Named(name) => Some(UiError {
-                key: "ERR_USE_LOCKED_WITH_ITEM_S",
-                fill_s: Some(name),
-                fill_d: None,
-            }),
+            KeyFact::Named(name) => Some(UiError::s("ERR_USE_LOCKED_WITH_ITEM_S", name)),
         },
         benilla_formats::LOCK_KEY_SKILL => {
             let name = lock_type_name.unwrap_or("UNKNOWN").to_string();
             if opener_known {
                 let required = super::lock::required_skill(slot0, go_level).max(0) as u32;
-                Some(UiError {
-                    key: "ERR_USE_LOCKED_WITH_SPELL_KNOWN_SI",
-                    fill_s: Some(name),
-                    fill_d: Some(required),
-                })
+                // String-then-Integer, the template's own order (cursor-system.md §8.8).
+                Some(UiError::args(
+                    "ERR_USE_LOCKED_WITH_SPELL_KNOWN_SI",
+                    vec![FillArg::S(name), FillArg::D(i64::from(required))],
+                ))
             } else {
-                Some(UiError {
-                    key: "ERR_USE_LOCKED_WITH_SPELL_S",
-                    fill_s: Some(name),
-                    fill_d: None,
-                })
+                Some(UiError::s("ERR_USE_LOCKED_WITH_SPELL_S", name))
             }
         }
         _ => Some(UiError::key("ERR_USE_CANT_OPEN")),
@@ -1541,7 +1533,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            (e.key, e.fill_s.as_deref(), e.fill_d),
+            (e.key, e.arg_s(), e.arg_d()),
             ("ERR_USE_LOCKED_WITH_SPELL_S", Some("Herbalism"), None)
         );
         // Vein, Mining known but rank < 155 → 0xe0 "Requires %s %d" with the slot's Skill[0].
@@ -1556,7 +1548,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            (e.key, e.fill_s.as_deref(), e.fill_d),
+            (e.key, e.arg_s(), e.arg_d()),
             (
                 "ERR_USE_LOCKED_WITH_SPELL_KNOWN_SI",
                 Some("Mining"),
@@ -1574,7 +1566,7 @@ mod tests {
             KeyFact::Unknown,
         )
         .unwrap();
-        assert_eq!(e.fill_d, Some(100));
+        assert_eq!(e.arg_d(), Some(100));
         // A missing LockType row fills the ref's literal fallback (`0x838044`).
         let e = route_lock_refusal(
             &skill_slot(9999, 0),
@@ -1586,7 +1578,7 @@ mod tests {
             KeyFact::Unknown,
         )
         .unwrap();
-        assert_eq!(e.fill_s.as_deref(), Some("UNKNOWN"));
+        assert_eq!(e.arg_s(), Some("UNKNOWN"));
         // Key lock, key absent + named → 0xde "Requires %s" with the item name; the template
         // miss is silent, like the ref (a key we DO hold never reaches the toast at all — the
         // resolver returns `OpenByKey` and the click casts it, decision 0752).
@@ -1607,7 +1599,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            (e.key, e.fill_s.as_deref()),
+            (e.key, e.arg_s()),
             ("ERR_USE_LOCKED_WITH_ITEM_S", Some("Shadowforge Key"))
         );
         assert!(
@@ -1631,7 +1623,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(e.key, key);
-            assert_eq!(e.fill_s, None);
+            assert_eq!(e.arg_s(), None);
         }
         // Slot-0 type neither key nor skill → 0xda "You can't open that."
         let odd = LockSlot {

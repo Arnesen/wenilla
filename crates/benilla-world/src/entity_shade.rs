@@ -273,35 +273,53 @@ pub(crate) fn detect_shade_reclaims(
     }
 }
 
-/// TEMP-VERIFY: how many parts carry the doodad-def marker, and how many of those the shade walk
-/// would otherwise have reached.
-pub fn b373_marker_count(
+/// `WOW_SHADE_CENSUS=<secs>` (any unparseable value = 5): a periodic one-line count of the two
+/// populations this pass has to keep apart — every part carrying the doodad-def marker, and the
+/// tagged parts *under* a shade root with the marked subset called out. B373 (2031/2041/2047) is
+/// what made the pair worth counting: a transport's cabin prop sits under the boat's shade root
+/// and must NOT take the boat's light, so "under a root" and "marked" diverging is the whole
+/// diagnosis, and the two numbers moving together again is how a regression shows up. Zero-cost
+/// when off: one env read, once.
+fn shade_census_every() -> Option<f32> {
+    static EVERY: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *EVERY.get_or_init(|| {
+        std::env::var("WOW_SHADE_CENSUS")
+            .ok()
+            .map(|v| v.parse().unwrap_or(5.0))
+    })
+}
+
+/// The `shade-census` printer (`WOW_SHADE_CENSUS=<secs>`) — see [`shade_census_every`].
+fn census_shade_marks(
     marked: Query<(), With<DoodadDefLit>>,
     roots: Query<Entity, With<GroundShade>>,
     children: Query<&Children>,
-    is_marked: Query<(), With<DoodadDefLit>>,
     tagged: Query<(), With<MeshTag>>,
     time: Res<Time>,
     mut next: Local<f32>,
 ) {
-    if time.elapsed_secs() < *next {
+    let Some(every) = shade_census_every() else {
+        return;
+    };
+    let now = time.elapsed_secs();
+    if now < *next {
         return;
     }
-    *next = time.elapsed_secs() + 5.0;
+    *next = now + every;
     let mut under_roots = 0usize;
     let mut marked_under_roots = 0usize;
     for r in &roots {
         for e in children.iter_descendants(r) {
             if tagged.get(e).is_ok() {
                 under_roots += 1;
-                if is_marked.get(e).is_ok() {
+                if marked.get(e).is_ok() {
                     marked_under_roots += 1;
                 }
             }
         }
     }
     info!(
-        "B373-VERIFY DoodadDefLit total {} | tagged parts under a shade root {under_roots}, of which marked {marked_under_roots}",
+        "shade-census: DoodadDefLit total {} | tagged parts under a shade root {under_roots}, of which marked {marked_under_roots}",
         marked.iter().count(),
     );
 }
@@ -318,7 +336,7 @@ impl Plugin for EntityShadePlugin {
             (
                 detect_shade_reclaims,
                 update_ground_shade,
-                b373_marker_count,
+                census_shade_marks,
             )
                 .chain()
                 .after(classify_entity_interior),

@@ -178,7 +178,16 @@ fn hand_off_glue_music(
 /// back from the top — the login screen no longer falls silent for good after one play-through.
 /// **In the world it does not**, and that asymmetry is the point of [`start_glue_music`]'s run
 /// condition: a theme that outlives a music-less zone must run out, not loop under it (1550).
-fn watch_glue_music(mut music: NonSendMut<GlueMusic>, time: Res<Time>, config: Res<SoundConfig>) {
+fn watch_glue_music(
+    mut music: NonSendMut<GlueMusic>,
+    // **`Real`, not the generic clock** — the watch compares elapsed time against the audio
+    // stream's own position, so it must be fed WALL time. `Res<Time>` is the paced virtual clock:
+    // `frame_pace` median-snaps it and caps it at `max_delta`, so during a loading burst it
+    // neither matches wall nor errs in a predictable direction, and the "ms of injected silence"
+    // it produced was not a measurement of anything.
+    time: Res<Time<bevy::time::Real>>,
+    config: Res<SoundConfig>,
+) {
     let music = &mut *music;
     // The Music slider is live on this stream, as it is on the world's (wow-re §5 §5c: the
     // `MusicVolume` handler's re-apply walker `0x7a6660(ecx=2)` matches the glue wrapper, so moving

@@ -236,11 +236,10 @@ pub(super) fn quest_giver_failed(
                 .map(|t| t.title.clone())
         })
         .unwrap_or_default();
-    quest.push_message(UiError {
-        key: crate::ui_quest::questgiver_failed_key(reason),
-        fill_s: Some(title),
-        fill_d: None,
-    });
+    quest.push_message(UiError::s(
+        crate::ui_quest::questgiver_failed_key(reason),
+        title,
+    ));
     if matches!(reason, 4 | 50) {
         quest.push_message(UiError::key("ERR_INV_FULL"));
     }
@@ -377,11 +376,7 @@ mod tests {
         );
         assert_eq!(
             msgs[0],
-            UiError {
-                key: "ERR_QUEST_FAILED_BAG_FULL_S",
-                fill_s: Some("A Threat Within".into()),
-                fill_d: None,
-            }
+            UiError::s("ERR_QUEST_FAILED_BAG_FULL_S", "A Threat Within")
         );
         assert_eq!(
             benilla_ui::messages::kind_of(msgs[1].key),
@@ -421,7 +416,7 @@ mod tests {
         quest_giver_failed(999, 17, &mut giver, &mut log, &commands);
         let msgs = giver.take_messages();
         assert_eq!(msgs[0].key, "ERR_QUEST_FAILED_MAX_COUNT_S");
-        assert_eq!(msgs[0].fill_s.as_deref(), Some(""));
+        assert_eq!(msgs[0].arg_s(), Some(""));
     }
 
     // ── The share's BUSY refusal (decision 1738) ─────────────────────────────────────────────────

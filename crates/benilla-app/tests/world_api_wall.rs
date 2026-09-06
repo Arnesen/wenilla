@@ -380,7 +380,17 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// nothing in a tile ever sampled until the tile's buffer was on a mirror list. Registered once
 /// at the tile renderer's startup, the same shape and the same reason as the palette mirror
 /// beside it.
-const CEILING: usize = 177;
+/// And 177 → 178: `model_fade::UnitRenderAlpha`, a PUBLISH — one streamed unit's live render
+/// alpha, composed from the unit ROOT's own presentation state. `ModelAlphas` beside it is the
+/// read side for a consumer that can wait for `PostUpdate`'s publish; this is the read side for
+/// one that cannot — the blob shadow runs in `Update`, and on the frame a unit's presentation
+/// begins the published component does not exist yet. Published as a door rather than as its
+/// three inputs (`UnitAppearFade`, `DespawnFade`, `model_render_alpha`) precisely because the
+/// lane that reconstructed the answer from parts got it wrong the same way every time: it read
+/// "no part is fading" as opaque, which is false of a *pending* unit, and put a full-strength
+/// shadow on the ground under an invisible creature for the length of a load. A caller asking
+/// one question cannot make that mistake; a caller handed the inputs can.
+const CEILING: usize = 178;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

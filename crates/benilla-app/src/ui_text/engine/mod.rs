@@ -428,6 +428,22 @@ impl TextEngine {
             }
             return;
         }
+        // **A control character is not a missing glyph.** `\n` reaches here because the pre-warm
+        // walks raw text (`ensure_str`), and no face shapes it — so it used to pay a full shape,
+        // then warn as if a face were missing one. Caching the miss stopped the repeat work but
+        // still left the warn, which is noise about a character that is SUPPOSED to have no glyph:
+        // the markup parser consumes `\n` as a line break and it never reaches a draw. Answered
+        // here, before the shape, so the warn stays meaningful for a real missing glyph.
+        if ch.is_control() {
+            self.chars.insert(
+                (face, ppem, ch),
+                CharCell {
+                    glyphs: Vec::new(),
+                    floor_sum: 0.0,
+                },
+            );
+            return;
+        }
         let Some(f) = self.faces.get(face) else {
             return;
         };
@@ -469,6 +485,20 @@ impl TextEngine {
             if self.complained.insert(ch) {
                 warn!("ui_text: no glyph for {ch:?} in any registered face");
             }
+            // **Cache the miss.** `complained` only silenced the WARNING; the shape itself was
+            // re-run on every call, because the insert below was never reached. The pre-warm walks
+            // `text.chars()` raw (`ensure_str`), so every `\n` in a drawn multi-line string paid a
+            // full `Buffer::new` + `set_text` + `shape_until_scroll` per FontString per frame,
+            // forever — `RAID_DESCRIPTION` alone carries three. An empty cell is exactly what the
+            // consumers already do with the `None` they used to get: `char_cell` hands back zero
+            // glyphs, so the pen steps nothing and draws nothing, and `floor_sum` sums nothing.
+            self.chars.insert(
+                (face, ppem, ch),
+                CharCell {
+                    glyphs,
+                    floor_sum: 0.0,
+                },
+            );
             return;
         }
         self.stats.chars_shaped += 1;
@@ -972,6 +1002,31 @@ mod ppem_tests {
         let raster = e.stats.cells_rasterized;
         e.ensure_str(face, 14, 0, " ");
         assert_eq!(e.stats.cells_rasterized, raster, "the miss is paid once");
+    }
+
+    /// **A character no face shapes is asked once too.** The sibling above pins that for a
+    /// character that DOES shape; this one pins the miss, which was the leak: `complained`
+    /// silenced the warning and nothing cached the result, so the shape re-ran on every ask. The
+    /// pre-warm walks raw text (`ensure_str`), so a drawn multi-line FontString re-shaped every
+    /// `\n` it held, every frame, for the life of the session.
+    #[test]
+    fn an_unshapeable_character_is_cached_as_a_miss() {
+        let Some(mut e) = engine_or_skip() else {
+            return;
+        };
+        let face = e.face_for(None);
+        let shaped = e.stats.chars_shaped;
+        e.ensure_str(face, 14, 0, "\n");
+        let c = e
+            .char_cell(face, 14, '\n')
+            .expect("the miss is cached, so the second ask short-circuits");
+        // An empty cell is what every consumer already did with the `None` it used to get.
+        assert!(c.glyphs.is_empty(), "a newline draws nothing");
+        assert_eq!(c.floor_sum, 0.0, "…and steps nothing");
+        assert_eq!(
+            e.stats.chars_shaped, shaped,
+            "a control character is answered before the shape, not by failing one"
+        );
     }
 
     /// Each face resolves to itself, and an unknown path falls back to Friz.

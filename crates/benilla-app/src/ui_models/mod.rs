@@ -931,9 +931,19 @@ fn sync_tiles(
                     light_slot,
                     &layer,
                 ) {
-                    info!(
-                        "ui_models: tile built for {} — {} parts, {} emitters, {} animated alphas",
+                    // **Named by its PANE, and at debug.** A tile is per-widget by construction
+                    // (`state.tiles` is keyed by `FrameHandle`, and 2019 requires it: two panes on
+                    // one file must not share their `MatAnimTable` rows, or two cooldowns at
+                    // different fractions would fight). So five cooldowns up at once legitimately
+                    // build five tiles — which, logged at info with only the PATH, arrived as five
+                    // byte-identical lines that read like a caching bug. The path alone also
+                    // recurs: `TILE_LINGER_FRAMES` is ~10 s, so any longer cooldown rebuilds and
+                    // re-logs at combat rate.
+                    debug!(
+                        "ui_models: tile built for {} on pane {} — {} parts, {} emitters, \
+                         {} animated alphas",
                         req.path,
+                        script.frame_name(*handle).unwrap_or_default(),
                         model.submeshes.len(),
                         built.emitters.len(),
                         built.alpha_parts.len()
