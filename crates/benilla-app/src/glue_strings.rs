@@ -22,6 +22,13 @@ const GLUE_STRINGS: &str = "Interface\\GlueXML\\GlueStrings.lua";
 pub(crate) struct GlueStrings(HashMap<String, String>);
 
 impl GlueStrings {
+    /// Build a table straight from parsed pairs — the test seam for code that has to resolve
+    /// against the *real* shipped file rather than a stub.
+    #[cfg(test)]
+    pub(crate) fn from_map(map: HashMap<String, String>) -> Self {
+        Self(map)
+    }
+
     /// The string for a key, or `None` (unknown key / no data).
     pub(crate) fn get(&self, key: &str) -> Option<&str> {
         self.0.get(key).map(String::as_str)
@@ -50,7 +57,7 @@ pub(crate) fn load_glue_strings(mut commands: Commands, assets: Option<Res<World
 
 /// Parse the `KEY = "value";` assignments (one per line; `\n`/`\t`/`\"`/`\\` escapes unfolded).
 /// Anything else — comments, code, multi-line constructs — is skipped.
-fn parse_glue_strings(src: &str) -> HashMap<String, String> {
+pub(crate) fn parse_glue_strings(src: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for line in src.lines() {
         let Some((key, rest)) = line.split_once('=') else {

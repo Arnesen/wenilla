@@ -652,12 +652,23 @@ impl StaticGx {
             return false; // the B4 lever: prop batches back to the merge/entity path
         }
         // The shade family gates CELLS only: the WMO lane never reads the selector (the
-        // entity path passes `Matte` for every WMO batch and lights on the FFP N·L), and
-        // the prop lane admits Matte as its own word bit (B4 — an exterior MODD prop's
-        // fixed-1.0 family; an interior prop also arrives Matte, selector unread).
+        // entity path passes `Matte` for every WMO batch and lights on the FFP N·L).
+        //
+        // **`Matte` is now BOTH doodad classes' family, not just the prop lane's** (2050): an
+        // ADT map doodad is fixed-1.0 exactly like an exterior MODD prop, because they are one
+        // C++ class (`CMapDoodadDef`) and the 2.5 belongs to the WENTITY node, which neither
+        // has. So the arm no longer requires `prop.is_some()`. `Shaded` still lands on neither
+        // bit and still reads 0.5, because the shader's `shade_t` defaults to 1.0 without
+        // `WORD_SHADE_LIT`.
+        //
+        // That leaves `ShadeSel::Lit` with no producer in this lane at all — its three
+        // populations are ADT doodads, WMO group geometry and WMO props, and entities (the only
+        // holders of a light node) never divert here. The arm is kept as a backstop rather than
+        // deleted: retiring `WORD_SHADE_LIT` and its shader branch is a word-layout change and
+        // wants its own round, named in 2050 rather than folded in here.
         let (shade_lit, matte) = match (&b.wmo, &b.prop, b.shade) {
             (Some(_), _, _) => (false, false),
-            (None, Some(_), ShadeSel::Matte) => (false, true),
+            (None, _, ShadeSel::Matte) => (false, true),
             (None, _, ShadeSel::Lit) => (true, false),
             (None, _, ShadeSel::Shaded) => (false, false),
             _ => {
@@ -1027,6 +1038,14 @@ mod tests {
 
     /// The collector refuses exactly the recorded exclusion families — and says so in the
     /// census — while an eligible batch diverts (1429's no-silent-caps note).
+    ///
+    /// **The shade-family exclusion is `Rig` now, not `Matte`** (2050). A cell arriving `Matte`
+    /// used to be refused, but only because nothing could produce one: ADT doodads were on
+    /// `Lit`, props carried `prop: Some`, group geometry `wmo: Some`. Since ADT doodads are the
+    /// fixed-1.0 family — the same C++ class as an exterior MODD prop — a `Matte` cell is the
+    /// ordinary case and MUST divert, which is what the added assertion below pins. What is left
+    /// genuinely excluded is the authored-rig booth material, which has no business in the
+    /// world's retained lane at all.
     #[test]
     fn the_divert_declines_the_excluded_families() {
         let mut gx = StaticGx::default();
@@ -1038,9 +1057,16 @@ mod tests {
         b.no_depth_write = true;
         assert!(!gx.divert(b));
         let mut b = batch(&g, Vec3::ZERO, None, ModelBlend::Opaque);
-        b.shade = ShadeSel::Matte;
-        assert!(!gx.divert(b));
+        b.shade = ShadeSel::Rig;
+        assert!(!gx.divert(b), "a glue-booth rig material never diverts");
         assert_eq!(gx.declined, [1, 1, 1, 0, 0]);
+        // The ADT doodad's own family: a cell on fixed-1.0, no prop record.
+        let mut b = batch(&g, Vec3::ZERO, None, ModelBlend::Opaque);
+        b.shade = ShadeSel::Matte;
+        assert!(
+            gx.divert(b),
+            "an ADT map doodad is Matte and still belongs here"
+        );
         assert!(gx.divert(batch(&g, Vec3::ZERO, None, ModelBlend::Opaque)));
         assert_eq!(gx.cells.len(), 1);
     }

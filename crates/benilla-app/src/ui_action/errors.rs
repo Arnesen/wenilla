@@ -223,13 +223,13 @@ impl UiErrorTexts {
 /// `None` (absent or empty key) = show nothing: GlobalStrings data-suppression, faithfully
 /// (the ref's own `[record+0x00]` null/empty guard at `0x4967bd`/`0x4967c5`).
 pub(crate) fn ui_error_text(e: &UiError, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
-    let mut text = get(e.key)?;
-    if let Some(s) = &e.fill_s {
-        text = text.replace("%s", s);
-    }
-    if let Some(d) = e.fill_d {
-        text = text.replace("%d", &d.to_string());
-    }
+    // Through the one shared filler (2045). This used `str::replace`, which fills EVERY `%s`
+    // with the same argument — latent only because no message on this queue carries two yet.
+    // The order is the templates' own: `ERR_USE_LOCKED_WITH_SPELL_KNOWN_SI` is String-then-Integer.
+    let mut args: Vec<benilla_ui::strings::Arg<'_>> = Vec::new();
+    args.extend(e.fill_s.as_deref().map(benilla_ui::strings::Arg::S));
+    args.extend(e.fill_d.map(|d| benilla_ui::strings::Arg::D(i64::from(d))));
+    let text = benilla_ui::strings::fill(&get(e.key)?, &args);
     (!text.is_empty()).then_some(text)
 }
 
@@ -308,10 +308,13 @@ pub(crate) fn keyed_line(script: &UiScript, key: &'static str) -> Option<Shown> 
 /// reference's `format`-with-pushed-arguments face of the same catalog rows (the battleground
 /// join verdict's map name, the joined-or-left player's name, 1974).
 pub(crate) fn keyed_line_s(script: &UiScript, key: &'static str, args: &[&str]) -> Option<Shown> {
-    let mut text = script.lua().globals().get::<String>(key).ok()?;
-    for arg in args {
-        text = text.replacen("%s", arg, 1);
-    }
+    let template = script.lua().globals().get::<String>(key).ok()?;
+    let args: Vec<benilla_ui::strings::Arg<'_>> = args
+        .iter()
+        .copied()
+        .map(benilla_ui::strings::Arg::S)
+        .collect();
+    let text = benilla_ui::strings::fill(&template, &args);
     (!text.is_empty()).then(|| Shown::keyed(key, text))
 }
 

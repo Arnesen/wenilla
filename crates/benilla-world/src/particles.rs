@@ -248,6 +248,17 @@ pub struct ParticleEmitter {
     /// owner is out of the frame's draw set — the edge on which model-instance entities are
     /// hidden. Quads need no flag: a gated pool simply pushes nothing into the shared stream.
     gated: bool,
+    /// **The owner's own freeze** — the scene-level "this cloud is not being drawn" answer for a
+    /// scene whose CAMERA cannot give it (decision 2046). [`sim::booth_frozen`] reads a
+    /// booth-layered emitter's freeze off its camera's `is_active` bit, which is exact while one
+    /// camera means one scene — and the `<Model>` tile atlas broke that: EVERY orthographic pane
+    /// on the sheet shares one camera, and that camera is deliberately kept active whenever any
+    /// cell is packed, so a pane that leaves the paint list still has a camera saying "drawn".
+    /// The owner sets this instead, on the frame its own scene stops being drawn. The freeze it buys is exactly the
+    /// booth's — pool + age HELD, one frame's dt on re-entry, no catch-up, no quads — and, like
+    /// the booth's, it never applies to a [`Self::draining`] emitter, which has to run its pool
+    /// out or leak for the session.
+    frozen: bool,
     /// The pending recursion model (wow-re `part-child-recursion.md`): once the asset resolves,
     /// [`wire_child_emitters`] turns its own emitters (cap 4, the reference's `0x7b5dfe`) into
     /// [`Self::children`] and clears this.
@@ -361,6 +372,26 @@ impl ParticleEmitter {
     /// pixels-per-model-unit for a particle's half-extent; every world lane leaves the default.
     pub fn set_size_scale(&mut self, size_scale: f32) {
         self.size_scale = size_scale;
+    }
+
+    /// Freeze or thaw this cloud from the OWNER's side — see [`Self::frozen`]. A draining emitter
+    /// ignores it.
+    ///
+    /// **Thawing clears [`Self::gated`]**, because the draw-set arm's cheap early-out
+    /// (`gated && gate_inputs_still && !fade.is_changed()`, decision 1979's floor) reads none of
+    /// the owner's inputs: a world-lane cloud left gated here on a still camera could never
+    /// re-enter its own draw set. One full gate evaluation on the thaw edge is the price.
+    pub fn set_frozen(&mut self, frozen: bool) {
+        self.frozen = frozen;
+        if !frozen {
+            self.gated = false;
+        }
+    }
+
+    /// Is this cloud owner-frozen? ([`Self::set_frozen`]) — so an owner writing the same value
+    /// every frame need not touch the component and trip change detection.
+    pub fn is_frozen(&self) -> bool {
+        self.frozen
     }
 
     /// The authored def — read by the particle census probe ([`crate::capture`]), which prints
@@ -694,6 +725,7 @@ pub fn spawn_emitter(
             water_bound: emitter.water_bound,
             texture,
             gated: false,
+            frozen: false,
             recursion: emitter.recursion.clone(),
             children: Vec::new(),
             geometry: emitter.geometry.clone(),

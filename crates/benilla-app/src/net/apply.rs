@@ -1242,7 +1242,7 @@ pub(crate) fn apply_net_updates(
                 operation,
                 member,
                 result,
-            } => group::command_result(&mut group, &mut chat_log, operation, &member, result),
+            } => group::command_result(&mut group, &mut ui_error_keys, operation, &member, result),
             SessionEvent::PartyMemberStats { guid, full, info } => {
                 group.apply_stats(guid, full, *info)
             }

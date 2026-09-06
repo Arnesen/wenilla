@@ -88,6 +88,25 @@
 //! The shader composes them as the reference does — `uv' = R((uv + t − p) ⊙ s) + p` — which is
 //! how the cooldown indicator's four quadrant quads turn their mask into the clockwise sweep.
 //!
+//! ## What a pane that stops drawing costs: nothing (decision 2046)
+//!
+//! A pane that leaves the engine's paint list keeps its tile for [`TILE_LINGER_FRAMES`] so a
+//! cooldown that re-arms every few seconds, a ping, or a bag that reopens keeps its tree — but
+//! the tree has to cost NOTHING while it waits, and hiding the root was never enough. Two of a
+//! tile's three per-frame costs do not travel down the scene graph at all: an emitter entity is
+//! a world root the particle lane walks directly, and the global-sequence bone channels are
+//! written by a driver that reads no `Visibility`. So a hidden tile is **parked**, explicitly,
+//! on the frame it stops drawing — [`AnimParked`] on the root (which holds the pose evaluation,
+//! the compose, the palette write and the global-sequence writes) and
+//! `ParticleEmitter::set_frozen` on every emitter (pool + age held, no quads).
+//!
+//! The emitter half is not a nicety. The particle lane's own freeze asks a CAMERA whether its
+//! scene is drawn, which is exact for a booth (one camera, one scene) and cannot be asked here:
+//! every orthographic pane on the sheet shares one camera, and that camera stays active whenever
+//! ANY cell is packed, because it is the camera that clears the atlas. Before the park, a hidden
+//! autocast-shine pane's four spline emitters kept integrating and kept pushing quads for the
+//! whole linger, at the root's last-written cell — which after a repack belongs to another pane.
+//!
 //! ## What is deliberately NOT here
 //!
 //! - The **character panes** (`PlayerModel`/`DressUpModel`/`TabardModel`) keep their booths
@@ -123,7 +142,7 @@ use benilla_world::particles::buffer::EffectLightOverride;
 use benilla_world::particles::{
     spawn_emitter, EmitClock, EmitterFrames, OwnerLoss, ParticleEmitter,
 };
-use benilla_world::rig_anim::{GlobalSeqDrive, RigPose};
+use benilla_world::rig_anim::{AnimParked, GlobalSeqDrive, RigPose};
 use benilla_world::rig_palette::{RigPaletteMirrors, RigPalettes, RigPart, RigSkin};
 
 use crate::portrait::{
@@ -496,6 +515,11 @@ struct Tile {
     emitters: Vec<Entity>,
     /// The last frame this tile was on the engine's paint list.
     last_seen: u64,
+    /// Parked: this tile drew no cell last frame, so its rig and its emitters are held (decision
+    /// 2046; the module doc's "what a pane that stops drawing costs"). A fresh tile starts
+    /// `false` and is parked by the same walk on its first non-drawing frame, so there is one
+    /// code path and no spawn-time special case.
+    parked: bool,
 }
 
 impl Tile {
@@ -708,6 +732,7 @@ fn sync_tiles(
             &mut Transform,
             &mut Visibility,
             Option<&mut AnimationPlayer>,
+            Option<&mut GlobalSeqDrive>,
         ),
         (
             With<TileRoot>,
@@ -883,6 +908,7 @@ fn sync_tiles(
             uv_parts: Vec::new(),
             emitters: Vec::new(),
             last_seen: frame,
+            parked: false,
         });
         tile.last_seen = frame;
         if !tile.built {
@@ -997,7 +1023,6 @@ fn sync_tiles(
     let atlas_h = atlas_size.y as f32;
 
     // ── 5. Place every drawing tile: cell, unit ladder, facing, play head ───────────────
-    let mut hidden: Vec<Entity> = state.tiles.values().map(|t| t.root).collect();
     let mut aimed = [false; UI_MODEL_CAM_LAYERS];
     for (i, (handle, req, pane)) in drawing.iter().enumerate() {
         let Some(cell) = cells.get(i).copied() else {
@@ -1006,9 +1031,8 @@ fn sync_tiles(
         let Some(tile) = state.tiles.get_mut(handle) else {
             continue;
         };
-        hidden.retain(|&e| e != tile.root);
         bridge.cells.insert(*handle, cell);
-        let Ok((mut tf, mut vis, player)) = roots.get_mut(tile.root) else {
+        let Ok((mut tf, mut vis, player, drive)) = roots.get_mut(tile.root) else {
             continue;
         };
 
@@ -1142,6 +1166,18 @@ fn sync_tiles(
             facts_slot
         });
         let gseq_s = pane.clock_ms as f64 / 1000.0;
+        // …and the BONE global-sequence channels read it too, not the world clock (decision
+        // 2046). The animation kernel's Phase B cursor is `[[model+0x2c]+0xc] − [model+0x68]`
+        // — the clock of the scene that OWNS the instance, minus the attach snapshot — and a
+        // `<Model>` widget owns a private `CM2Scene` (`CSimpleModel+0x314`) that only its own
+        // `OnUpdate` advances (wow-re `gseq-anchor.md` §1/§2, `modelframe-animation-clock.md`
+        // §1.1/§3, both byte-verified). The visible case is the ping's 4833 ms spinner: its
+        // phase belongs to the pane, which is why "ping N resumes where ping N−1 stopped" needs
+        // no accumulator of ours (2013). The drive stamps its own anchor on its first tick, which
+        // is the attach.
+        if let Some(mut d) = drive {
+            d.set_clock(gseq_s);
+        }
         let light_trace = if trace_on() {
             let sc = &render.rig.lights[tile.light_slot].scene;
             format!(
@@ -1221,11 +1257,49 @@ fn sync_tiles(
             }
         }
     }
-    for root in hidden {
-        if let Ok((_, mut vis, _)) = roots.get_mut(root) {
-            if *vis != Visibility::Hidden {
+    // ── 6. Park what is not drawing; thaw what is ──────────────────────────────────────
+    //
+    // "Drawing" is exactly "has a cell this frame" — the same set the placement loop above wrote.
+    // Parking is the module doc's contract: `AnimParked` holds the rig (the 0712 evaluator, the
+    // compose, the palette write and the global-sequence bone writes), the freeze holds every
+    // emitter's pool, age and quads, and the root is hidden so no batch draws. This walk replaces
+    // the `hidden` vector the placement loop used to `retain` out of once per drawing tile — the
+    // same verdict, without the quadratic.
+    for (handle, tile) in state.tiles.iter_mut() {
+        let park = !draws_this_frame(&bridge, handle);
+        // The emitter freeze is COMPARED, not edge-triggered off `tile.parked`: a tile can be
+        // built while it is already parked (its pane is on the paint list but its cell did not
+        // fit the capped atlas), and an emitter is born thawed. The comparison is a `Deref`, so
+        // a steady state touches no change tick.
+        for &e in &tile.emitters {
+            if let Ok(mut em) = emitters.get_mut(e) {
+                if em.is_frozen() != park {
+                    em.set_frozen(park);
+                }
+            }
+        }
+        if tile.parked == park {
+            continue;
+        }
+        tile.parked = park;
+        if trace_on() {
+            info!(
+                "tile-trace: tile {:?} {} — {} emitters",
+                handle,
+                if park { "PARKED" } else { "thawed" },
+                tile.emitters.len()
+            );
+        }
+        if park {
+            if let Ok((_, mut vis, _, _)) = roots.get_mut(tile.root) {
                 *vis = Visibility::Hidden;
             }
+            commands.entity(tile.root).insert(AnimParked);
+        } else {
+            // The marker drops before `AnimationSystems` (this is `Update`, the lane is
+            // `PostUpdate`), so the first thawed frame evaluates and composes before anything
+            // reads the pose — 0739's wake law, the same as every world rig's.
+            commands.entity(tile.root).remove::<AnimParked>();
         }
     }
     for (mut cam, _, _, _, marker) in &mut pane_cams {
@@ -1359,6 +1433,25 @@ fn set_camera_active(
 /// whose request vanished (the linger reaper) draws nothing.
 pub(crate) fn compose_tiles(bridge: Res<UiModelTiles>, mut quads: ResMut<UiQuads>) {
     quads.overlays.extend(composite_quads(&bridge));
+}
+
+/// **Does this tile draw this frame?** — which is the park verdict inverted, and deliberately
+/// ONE function beside [`composite_quads`] so the two cannot drift apart (decision 2046).
+///
+/// The answer is "the bridge holds a cell for it", and that is exact rather than approximate:
+/// [`composite_quads`] draws precisely the `cells ∩ requests` pairs, and [`sync_tiles`] fills
+/// `cells` in the same pass that reads it — stage 4 clears the map, stage 5 inserts a cell for
+/// every drawing pane the packer placed, and that insert happens BEFORE any of the loop's later
+/// `continue`s. So the two cases that look as though they could strand a visible pane cannot:
+///
+/// - an **atlas repack** (the 512→1024 growth) re-allocates the target image in a separate `if`
+///   that does not touch the insert loop, so every pane the packer placed still gets its cell on
+///   the repack frame;
+/// - a pane that **did not fit the capped atlas** gets no cell at all ([`shelf_pack`] returns a
+///   prefix of its input) — and therefore pushes no quad, so freezing its cloud is the right
+///   answer rather than a dropped frame.
+fn draws_this_frame(bridge: &UiModelTiles, handle: &FrameHandle) -> bool {
+    bridge.cells.contains_key(handle)
 }
 
 /// [`compose_tiles`]'s pure half: the quads for every `(request, cell)` pair the bridge holds,
@@ -1787,6 +1880,79 @@ mod tests {
         let [tl, _, br, _] = q.uv.corners;
         assert!((tl[0] - 67.0 / 512.0).abs() < 1e-6 && (tl[1] - 2.0 / 512.0).abs() < 1e-6);
         assert!((br[0] - 130.0 / 512.0).abs() < 1e-6 && (br[1] - 65.0 / 512.0).abs() < 1e-6);
+    }
+
+    /// **The park verdict and the composite are the same question** (decision 2046). A tile
+    /// parks exactly when it pushed no quad, and `sync_tiles` reads both off `bridge.cells` in one
+    /// pass — so neither an atlas repack nor an atlas too full for one more pane can freeze a
+    /// cloud on a frame its pane is visibly drawing. This pins the two sides to each other: what
+    /// [`composite_quads`] draws IS the un-parked set, so a later change to either has to change
+    /// both. The third pane here is the one the capped atlas had no room for: it draws nothing,
+    /// which is exactly why parking it is right.
+    #[test]
+    fn the_park_verdict_is_exactly_what_the_composite_draws() {
+        let mut arena = benilla_ui::widget::WidgetArena::new();
+        let mut bridge = UiModelTiles {
+            atlas: Some(Handle::default()),
+            atlas_size: UVec2::splat(512),
+            ..Default::default()
+        };
+        // Three panes on the paint list; the packer placed the first two and ran out of atlas.
+        let panes: Vec<FrameHandle> = (0..3)
+            .map(|_| arena.create(benilla_ui::widget::FrameKind::Frame, None, None))
+            .collect();
+        for (i, &h) in panes.iter().enumerate() {
+            bridge.requests.insert(
+                h,
+                TileRequest {
+                    path: r"Interface\Buttons\UI-AutoCastButton.mdx".into(),
+                    size_px: UVec2::new(63, 63),
+                    px_per_unit: 1.0,
+                    pos_px_per_unit: 1.0,
+                    star_px_per_unit: 1.0,
+                    facing: 0.0,
+                    position: Vec3::ZERO,
+                    root_scale: 1.0,
+                    root_pos: Vec3::ZERO,
+                    camera: None,
+                    light: ModelLight::default(),
+                    fog: None,
+                    icon: None,
+                    rect: Rect::new(0.0, 0.0, 63.0, 63.0),
+                    z_key: 1_000 + i as u64,
+                    alpha: 1.0,
+                    clip: None,
+                },
+            );
+            if i < 2 {
+                bridge.cells.insert(
+                    h,
+                    Cell {
+                        origin: UVec2::new(2 + 65 * i as u32, 2),
+                        size: UVec2::new(63, 63),
+                    },
+                );
+            }
+        }
+        let drawn: std::collections::HashSet<u64> =
+            composite_quads(&bridge).iter().map(|q| q.z_key).collect();
+        assert_eq!(drawn.len(), 2, "the packer placed two, so two quads");
+        for (i, &h) in panes.iter().enumerate() {
+            assert_eq!(
+                draws_this_frame(&bridge, &h),
+                drawn.contains(&(1_000 + i as u64)),
+                "pane {i}: the park verdict and the composite must agree"
+            );
+        }
+        // And the repack: growing the atlas moves every cell's texel window without changing WHO
+        // has one, so no pane's verdict flips on a growth frame.
+        bridge.atlas_size = UVec2::splat(1024);
+        let regrown: std::collections::HashSet<u64> =
+            composite_quads(&bridge).iter().map(|q| q.z_key).collect();
+        assert_eq!(
+            regrown, drawn,
+            "a repack changes texel windows, not the drawn set"
+        );
     }
 
     /// A `TileRequest` for the perspective tests: the pane's own size and root terms, nothing

@@ -144,8 +144,12 @@ pub struct MatKey {
 /// intensity per instance via the `MeshTag` shade byte ([`crate::entity_shade`]).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShadeSel {
-    /// Lit ground, the boosted intensity family (the binary's 2.5): ADT map doodads on unshadowed
-    /// ground, and every entity M2.
+    /// Lit ground, the boosted intensity family (the binary's 2.5): **every entity M2, and only
+    /// those** — a unit, a player, a GameObject. The 2.5 and its 3.3333/s chase live on the
+    /// WENTITY light node (vtable `0x810810`, hung off `[obj+0xe0]`); an object without one
+    /// cannot reach either. ADT map doodads were on this variant until 2050 and are not entities:
+    /// they are `CMapDoodadDef`s, whose `[+0xa4]` is only ever {0.0, 0.5, 1.0} and which have no
+    /// ramp target field at all (`+0xf8` is `m[2][3]` of their world matrix).
     ///
     /// Entities still select this, but what it *means* for them changed in 0809. The selector is
     /// only the static half — the per-instance `MeshTag` shade byte carries the rest, and
@@ -154,8 +158,14 @@ pub enum ShadeSel {
     /// GameObjects keep the real 2.5/0.5 chase. So for an entity this variant reads "on the light-node
     /// path"; the node decides the amplitude.
     Lit,
-    /// Lit ground, intensity 1.0: an exterior WMO MODD prop — §8b, byte-verified never to reach
-    /// the 2.5 site (a Stormwind street fountain is NOT brightened like an Elwynn tree).
+    /// Lit ground, intensity 1.0: **either doodad class** — an exterior WMO MODD prop *and* an ADT
+    /// map doodad, byte-verified never to reach the 2.5 site.
+    ///
+    /// The parenthetical this doc carried until 2050 — "a Stormwind street fountain is NOT
+    /// brightened like an Elwynn tree" — was exactly backwards about the tree: both are
+    /// `CMapDoodadDef`s and both commit 1.0 lit / 0.5 shadowed. What is brightened is the
+    /// *entity* walking past them. Measured over six trace frames: 111 identified MDDF
+    /// placements, 356 draws, gains only ∈ {0.5, 1.0}.
     Matte,
     /// The base sits on MCSH-shadowed terrain: the dim intensity (the binary's 0.5).
     Shaded,

@@ -214,15 +214,18 @@ pub(super) fn roster_deactivated(
 /// `SMSG_PARTY_COMMAND_RESULT` — the verdict on an invite/kick/leave we asked for.
 pub(super) fn command_result(
     group: &mut GroupState,
-    chat_log: &mut ChatLog,
+    errors: &mut crate::ui_action::UiErrorKeys,
     operation: u32,
     member: &str,
     result: u32,
 ) {
-    push_group_lines(
-        chat_log,
-        group.apply_command_result(operation, member, result),
-    );
+    // By KEY, not by sentence, and into the shared queue rather than straight into chat: the
+    // catalog row decides the surface, so `result == 7` reaches the red `UIErrorsFrame` line while
+    // the other nine stay chat lines (wow-re `party-command-result-law.md`; decision 2035's
+    // shape). `None` is the reference's own silence — three inputs display nothing at all.
+    errors
+        .0
+        .extend(group.apply_command_result(operation, member, result));
 }
 
 #[cfg(test)]

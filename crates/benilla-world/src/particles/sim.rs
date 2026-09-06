@@ -430,8 +430,28 @@ fn is_above(d: f32, r: f32) -> bool {
 ///
 /// A **draining** emitter never freezes either way: its pool has to run out, and freezing one
 /// strands it forever (the world arm's rule further down).
+///
+/// **This is the camera's half of the answer, not the whole of it** — see [`scene_frozen`].
 fn booth_frozen(cam_active: bool, throttled: bool, draining: bool) -> bool {
     !cam_active && !throttled && !draining
+}
+
+/// Does this emitter's SCENE freeze it this frame? The whole law, in one place because it has two
+/// sources and having only one of them was a defect (decision 2046).
+///
+/// [`booth_frozen`] asks about a CAMERA, and that was exact for as long as one camera meant one
+/// scene: every booth before the `<Model>` tiles owned its own. The tile atlas broke the premise —
+/// every orthographic pane on the sheet renders through ONE camera on ONE layer, and that camera
+/// is deliberately kept active whenever any cell is packed, because it is the camera that CLEARS
+/// the atlas. So the camera bit answers "drawn" for every pane on the sheet, including the ones
+/// that left the paint list, and the question can only be answered by the owner — which is what
+/// [`super::ParticleEmitter::set_frozen`] is.
+///
+/// `booth` is `(cam_active, throttled)` for a booth-layered emitter, `None` for a world-lane one.
+/// A **draining** pool ignores both sources, for [`booth_frozen`]'s reason.
+fn scene_frozen(booth: Option<(bool, bool)>, owner_frozen: bool, draining: bool) -> bool {
+    booth.is_some_and(|(cam_active, throttled)| booth_frozen(cam_active, throttled, draining))
+        || (owner_frozen && !draining)
 }
 
 /// Per-frame: emit, integrate, and expand each emitter's pool into the shared effect-quad
@@ -571,20 +591,27 @@ pub(super) fn simulate_particles(
             .filter(|l| !l.intersects(&RenderLayers::default()))
             .and_then(|l| booth_cams.iter().find(|(_, _, cl, ..)| cl.intersects(l)));
         let is_booth = booth.is_some();
-        if let Some((_, _, _, booth_cam, throttled)) = booth {
-            if booth_frozen(booth_cam.is_active, throttled, emitter.draining) {
-                if !emitter.gated {
-                    emitter.gated = true;
-                    for slot in &emitter.model_instances {
-                        for (e, _) in &slot.meshes {
-                            if let Ok((_, _, mut cv)) = child_draws.get_mut(*e) {
-                                *cv = Visibility::Hidden;
-                            }
+        // The scene freeze ([`scene_frozen`]) — a sleeping booth camera, or an owner that froze
+        // this cloud because its scene's camera cannot say so. Same shape either way: pool + age
+        // held, no quads, model-instance entities hidden on the edge.
+        if scene_frozen(
+            booth.map(|(_, _, _, c, throttled)| (c.is_active, throttled)),
+            emitter.frozen,
+            emitter.draining,
+        ) {
+            if !emitter.gated {
+                emitter.gated = true;
+                for slot in &emitter.model_instances {
+                    for (e, _) in &slot.meshes {
+                        if let Ok((_, _, mut cv)) = child_draws.get_mut(*e) {
+                            *cv = Visibility::Hidden;
                         }
                     }
                 }
-                continue;
             }
+            continue;
+        }
+        if is_booth {
             emitter.gated = false;
         }
         let (draw_cam, e_cam_pos, e_right, e_up) = match booth {
@@ -747,6 +774,7 @@ pub(super) fn simulate_particles(
             geometry: _,
             model_instances,
             gated: _,
+            frozen: _,
         } = &mut *emitter;
         // The water-interleave MODEL frame, captured before the draw-anchor local shadows the
         // `anchor` field below: the cloud anchor is "the MODEL, never the bone" — its transform
@@ -1460,7 +1488,8 @@ fn fold_committed_light(
 mod tests {
     use super::{
         booth_frozen, fold_committed_light, follow_fraction, inherit_trigger, integrate_particle,
-        is_above, ChildEmitter, EffectLighting, EffectVertex, Particle, StepEnv, Vec3,
+        is_above, scene_frozen, ChildEmitter, EffectLighting, EffectVertex, Particle, StepEnv,
+        Vec3,
     };
     use bevy::prelude::{Quat, Transform};
 
@@ -1542,6 +1571,35 @@ mod tests {
         // A draining pool runs out on any camera — freezing one strands it.
         assert!(!booth_frozen(false, false, true));
         assert!(!booth_frozen(false, true, true));
+    }
+
+    /// **A camera is not a scene any more** (decision 2046). Every booth before the `<Model>`
+    /// tile atlas owned its own camera, so `is_active` answered "is this scene drawn". The atlas
+    /// puts EVERY orthographic pane behind one camera that stays active whenever any cell is
+    /// packed — it is the camera that clears the sheet — so for a pane that left the paint list
+    /// the camera says "drawn" and only the owner can say otherwise. Before this, a hidden
+    /// autocast-shine pane's four spline emitters kept integrating AND kept pushing quads for the
+    /// whole 600-frame linger, at the cell the packer had since given to another pane.
+    #[test]
+    fn an_owner_freezes_a_cloud_whose_camera_still_says_drawn() {
+        // The tile atlas's own shape: the camera is up, and the pane is not.
+        assert!(!scene_frozen(Some((true, false)), false, false), "drawing");
+        assert!(
+            scene_frozen(Some((true, false)), true, false),
+            "the owner parked the pane — the camera cannot see that"
+        );
+        // The booth's camera still answers entirely on its own where it owns the scene.
+        assert!(scene_frozen(Some((false, false)), false, false));
+        assert!(
+            !scene_frozen(Some((false, true)), false, false),
+            "…and a throttled camera is awake (1559)"
+        );
+        // A world-lane emitter has no booth camera at all; the owner's lever still reaches it.
+        assert!(!scene_frozen(None, false, false));
+        assert!(scene_frozen(None, true, false));
+        // Draining overrides both sources, for `booth_frozen`'s reason.
+        assert!(!scene_frozen(Some((false, false)), true, true));
+        assert!(!scene_frozen(None, true, true));
     }
 
     fn particle(pos: Vec3, vel: Vec3) -> Particle {

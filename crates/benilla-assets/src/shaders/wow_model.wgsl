@@ -904,11 +904,12 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // pixels, demoted the justification) → 0799 (the A/B) → 0803, back on the curve for good.
     //
     // The per-material `sun_scale.x` selector has THREE states (model_render::ShadeSel): ≥0.85 =
-    // the lit-ground family (ADT doodads and every entity M2 — animator target 2.5, mixed toward
+    // the lit-ground family — **entity M2s only** since 2050 (animator target 2.5, mixed toward
     // 0.5 by the per-instance tag shade byte, which units/players/GameObjects ramp CPU-side like
-    // the binary's `0x69e770`; statics leave it 0), 0.5..0.85 = fixed intensity 1.0 (an exterior
-    // WMO MODD prop — the 2.5 site is one a MODD prop never reaches, §8b), <0.5 = statically
-    // MCSH-shadowed (0.5). The ramp runs in animator units and the COMMIT clamps.
+    // the binary's `0x69e770`); 0.5..0.85 = fixed intensity 1.0, which is **both doodad classes**
+    // (an ADT map doodad and an exterior WMO MODD prop are one C++ class and neither can reach the
+    // 2.5 site); <0.5 = statically MCSH-shadowed (0.5). Statics leave the tag byte 0. The ramp
+    // runs in animator units and the COMMIT clamps.
     //
     // **`min(I, 1)` is OURS, and it is the one unfaithful term in this lane (0803 §3, 0814, 0821).**
     // The reference does not cap the gain. On the VS/SH lane — the default config, and the lane this
@@ -916,10 +917,25 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // FFP lane `0x71c730`→`0x71ca80` clamps the **product** `D × I` (by max-channel, preserving hue),
     // never the multiplier. So the cap below is a benilla choice, and it costs us twice:
     //
-    //   1. **Brightness.** A lit ADT doodad commits ×1.0 where the reference gives ×2.5, so doodads
-    //      and characters in sun read dimmer than the reference. Still open — lifting it pushes a
-    //      sun-facing surface well past 1.0 (with an over-gamut sun, into green as well), which is a
-    //      world-wide look change and the director's call, not one to self-grade.
+    //   1. **Brightness.** A lit ENTITY — unit, player, GameObject — commits ×1.0 where the
+    //      reference gives ×2.5, so characters in sun read dimmer than the reference. Still open —
+    //      lifting it pushes a sun-facing surface well past 1.0 (with an over-gamut sun, into green
+    //      as well), which is a world-wide look change and the director's call, not one to
+    //      self-grade. (Doodads were in this sentence until 2050; see below.)
+    //
+    //      **Doodads are NOT in that sentence any more (2050).** wow-re settled it at the bytes
+    //      and in the capture: a `CMapDoodadDef` — ADT MDDF and WMO MODD alike — commits 1.0 lit /
+    //      0.5 shadowed and never ramps; it has no ramp target field (`+0xf8` is `m[2][3]` of its
+    //      world matrix), and the 2.5 belongs to the WENTITY node an entity hangs off `[obj+0xe0]`.
+    //      §6's attribution of 2.5 to ADT doodads was the error. So this cap is a **no-op on the
+    //      faithful doodad input** and never dimmed a tree; what it dims is units, players and
+    //      GameObjects, which is what item 1 above is now about.
+    //
+    //      The trap that leaves behind, and why 2050 moved the selector rather than waiting for
+    //      the cap: feeding every M2 a lit 2.5 and then capping emits the right number for a lit
+    //      doodad **for the wrong reason**. Lifting the cap without giving doodads their own 1.0
+    //      would have taken every tree in Elwynn to 2.5×, and a uniformly too-bright world is the
+    //      kind of wrong nobody files. The scale is per-class now, so that is no longer coupled.
     //   2. **Timing — fixed CPU-side (0821).** Because the cap sits on the multiplier, every target
     //      from 2.5 down to 1.0 renders identically, so a unit ramping 2.5 → 0.5 spent its first
     //      0.45 s (75 % of the chase) invisibly pinned at 1.0 and then dropped in 0.15 s. It read as a
@@ -929,7 +945,10 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     //      3.3333 intensity-units/s. The cap is a backstop here, not the thing the ramp fights.
     //
     // Two faces of one bug, and they unwind together: **cut `min(I, 1)` and `LIT_T` goes back to 0.0**
-    // so the full 2.5 → 0.5 sweep becomes visible on its own. Do not cut one alone. (Units are on this
+    // so the full 2.5 → 0.5 sweep becomes visible on its own. Do not cut one alone — and note that
+    // the pair is now an ENTITY-only concern: since 2050 no doodad rides this band, so lifting the
+    // cap changes units, players and GameObjects and leaves the world's trees and props where they
+    // are. That decoupling was the prerequisite, and it is done. (Units are on this
     // chain again — 0809's flat ×1.0 pin was wrong and 0814 reverted it; the null fallback that
     // motivated it is real, but it is a lifecycle state we do not model.)
     let inst_shade = select(f32((fade_tag >> 6u) & 0xffu) / 255.0, 0.0, interior_prop);
