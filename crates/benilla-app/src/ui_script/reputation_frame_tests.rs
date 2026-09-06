@@ -13,12 +13,13 @@
 //! Steamwheedle over Booty Bay, the parentless bucket last) so a failure here reads against a shape
 //! that is already pinned one layer down, and the two can be compared line for line.
 //!
-//! **The window around the page is the reference's own since 1751** — `CharacterFrame.xml` and
-//! `PaperDollFrame.xml` off the player's chain — so every test here opens with
-//! `wow_data_or_skip!()` and loads [`super::test_ui::CHARACTER_UI`]. The page itself
-//! (`ReputationFrame.xml`) and the watch bar (`ActionBar.xml`) are still ours.
+//! **All of it is the reference's own now** — the window since 1751 (`CharacterFrame.xml`,
+//! `PaperDollFrame.xml`), the page itself (`ReputationFrame.xml`) with it, and the watch bar with
+//! `ActionBar.xml`'s retirement into `ActionBarFrame.xml`. So every test here opens with
+//! `wow_data_or_skip!()` and loads [`super::test_ui::CHARACTER_UI`], and what it pins is our
+//! ENGINE under stock XML rather than XML of ours.
 
-use benilla_ui::script::{FactionEntry, ReputationState, UiScript, UnitState};
+use benilla_ui::script::{FactionEntry, QuadContent, ReputationState, UiScript, UnitState};
 
 /// An ordinary bar row: visible, not a header, `standing_id` 5 ("Friendly") sitting 1000 into a
 /// 6000-wide rank window. The same numbers `benilla-ui`'s own fixture uses.
@@ -525,6 +526,95 @@ fn clicking_a_bar_opens_the_detail_popup_on_that_faction() {
         shown(&mut s, "ReputationDetailFrame"),
         "and a click there opens the popup, the same as a click on the bar"
     );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **B369 — a disabled box is still a box.** The reported symptom, at the quad level.
+///
+/// `ReputationDetailAtWarCheckBox` (stock `ReputationFrame.xml`) carries a `<NormalTexture>` and
+/// **no `<DisabledTexture>`**, and `ReputationFrame_Update` `Disable()`s it for every faction whose
+/// war flag cannot be toggled (`ReputationFrame.lua` l.115-120). The client's `SetState 0x779790`
+/// gates its hide-old step on the new state having a texture, so the `UI-CheckBox-Up` box stays up
+/// and the row reads "a greyed **At War** beside an empty box". Ours resolved the shown texture as
+/// a pure function of the state, hid it, and left a bare grey label with nothing beside it — which
+/// is what MarcusAga photographed on Ironforge.
+///
+/// Three rows, because the tick is the half that made the report confusing: a peace-forced faction
+/// that is NOT at war shows the empty box (the shot), a peace-forced faction that IS at war shows
+/// the box plus its grey `DisabledCheckedTexture` (*"the tick renders, however"*), and a
+/// toggleable one is the control that must not move.
+#[test]
+fn the_at_war_box_keeps_its_art_while_it_is_disabled() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_page(&s);
+    s.set_unit("player", Some(player(40)));
+    let mut st = state();
+    for e in &mut st.entries {
+        match e.name.as_str() {
+            // The report: peace-forced and at peace.
+            "Ironforge" => e.can_toggle_at_war = false,
+            // Peace-forced and at war — the same box, wearing the grey tick.
+            "Stormwind" => {
+                e.can_toggle_at_war = false;
+                e.at_war = true;
+            }
+            _ => {}
+        }
+    }
+    s.set_reputation(st);
+    s.run(r#"ToggleCharacter("ReputationFrame")"#).unwrap();
+    s.resolve();
+
+    /// Every texture the At War box itself draws, in painter order.
+    fn box_art(s: &UiScript) -> Vec<String> {
+        s.extract()
+            .iter()
+            .filter(|q| {
+                s.quad_owner_name(q.target).as_deref() == Some("ReputationDetailAtWarCheckBox")
+            })
+            .filter_map(|q| match &q.content {
+                QuadContent::Texture { path: Some(p), .. } => Some(p.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+    let up = "Interface\\Buttons\\UI-CheckBox-Up".to_string();
+
+    // Ironforge (row 2): peace-forced, at peace — the photographed case.
+    click_center(&mut s, "ReputationBar2");
+    assert_eq!(
+        s.eval::<i64>("return ReputationDetailAtWarCheckBox:IsEnabled()")
+            .unwrap(),
+        0,
+        "the box is disabled for a faction whose war flag is locked"
+    );
+    assert_eq!(
+        box_art(&s),
+        vec![up.clone()],
+        "and it still draws its box — the sticky shown texture"
+    );
+
+    // Stormwind (row 3): peace-forced and at war — box plus the grey disabled tick.
+    click_center(&mut s, "ReputationBar3");
+    assert_eq!(
+        box_art(&s),
+        vec![
+            up.clone(),
+            "Interface\\Buttons\\UI-CheckBox-Check-Disabled".to_string()
+        ],
+        "a peace-forced faction at war keeps the box under its grey tick"
+    );
+
+    // Booty Bay (row 5): the control — toggleable, and unchanged by any of this.
+    click_center(&mut s, "ReputationBar5");
+    assert_eq!(
+        s.eval::<i64>("return ReputationDetailAtWarCheckBox:IsEnabled()")
+            .unwrap(),
+        1
+    );
+    assert_eq!(box_art(&s), vec![up], "a live box is the same box");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 

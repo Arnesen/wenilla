@@ -46,7 +46,6 @@ mod area_trigger;
 #[cfg(feature = "dev")]
 mod asset_churn;
 mod aura_visual;
-mod autocast_shine;
 mod bindings;
 mod blob_shadow;
 mod bowstring;
@@ -606,7 +605,6 @@ pub fn run(build: BuildId) -> AppExit {
     .add_plugins(minimap::MinimapPlugin)
     // The pet-bar / spellbook autocast shine, drawn on the append lane from the conversion's
     // parked sites — zero per-frame script-layout traffic (decision 1383, B282).
-    .add_plugins(autocast_shine::AutocastShinePlugin)
     // The `<Model>` widgets' M2s, rendered as tiles of one atlas and composited at the
     // callback rank (decision 2008).
     .add_plugins(ui_models::UiModelsPlugin)

@@ -40,12 +40,50 @@ impl Plugin for ClutterPlugin {
             .add_systems(
                 Update,
                 (
+                    remesh_on_cutout_change,
                     stream_chunk_clutter,
                     evict_clutter_geometry,
                     scope_clutter_geometry,
-                ),
+                )
+                    .chain(),
             );
     }
+}
+
+/// Drop every built clutter mesh when the detail-doodad **cutout** moves, so the lazy builder
+/// re-meshes the bubble against the new reference — the alpha-test ref is baked into the material at
+/// build time (it is part of `model_material`'s dedup key), so nothing already on screen would
+/// otherwise notice. `detailDoodadAlpha` is a live console command in the reference
+/// (`0x6739a0`, registrar `0x63f9e0` — a command, not a CVar, so it never persists), where the
+/// global is read at draw time and needs no rebuild; ours costs a re-mesh of the ~30 chunks in the
+/// bubble, which the per-frame cap spreads over a few frames.
+///
+/// Watches the **value**, not `is_changed()`, for the reason `terrain_stream::rescatter_clutter`
+/// spells out: the cvar sync deref-muts every knob resource whenever any cvar moves, so the flag
+/// over-fires. First sight only arms.
+fn remesh_on_cutout_change(
+    mut commands: Commands,
+    cfg: Res<ClutterConfig>,
+    mut chunks: Query<&mut ClutterChunk>,
+    mut last: Local<Option<f32>>,
+) {
+    let Some(prev) = last.replace(cfg.alpha_ref) else {
+        return;
+    };
+    if prev == cfg.alpha_ref {
+        return;
+    }
+    let mut n = 0;
+    for mut cc in &mut chunks {
+        for e in cc.built.drain(..) {
+            commands.entity(e).try_despawn();
+            n += 1;
+        }
+    }
+    info!(
+        "clutter: detailDoodadAlpha {} — dropped {n} built mesh(es) to re-cut",
+        (cfg.alpha_ref * 255.0).round() as u32
+    );
 }
 
 /// Drop the decoded clutter-geometry cache on a cross-map transition (`world_map::MapChange` —
@@ -515,32 +553,74 @@ pub(crate) fn stream_chunk_clutter(
         };
     let build_d2 = (reach + CLUTTER_BUILD_MARGIN).powi(2);
     let drop_d2 = (reach + CLUTTER_BUILD_MARGIN + CLUTTER_TEARDOWN_HYSTERESIS).powi(2);
-    let mut budget = CLUTTER_BUILDS_PER_FRAME;
+    // The LATE-BUILD tripwire (2012). A chunk built while its nearest corner is ALREADY inside the
+    // fade horizon had grass the player could see before the mesh existed — the "it popped in"
+    // class, and the thing to rule out first whenever clutter is reported appearing abruptly.
+    // Straight-line distance under the horizon implies view depth under it too, so this catches
+    // every genuinely-visible case (and some invisible ones, which is the safe direction). Two
+    // causes, and the line says which: the gate let it through late, or the per-frame cap deferred
+    // it — the second is expected in the burst right after a login or a teleport, when the whole
+    // bubble is built at once, and is why this reports the backlog rather than just the count.
+    let visible_d2 = cfg.fade_far.powi(2);
+
+    // Pass 1: measure every chunk, tear down what has left, and collect what wants building.
+    // **Nearest first** (2012). The build budget is spent in whatever order the query hands the
+    // chunks over, which is archetype order — so a chunk 90 yd away, where the ramp is already
+    // alpha 0 and nobody can see it, would take a build slot ahead of one at 48 yd that is inside
+    // the visible band. On a cold fill that is a pop with a free fix: sort the candidates by
+    // distance and the cap always buys the most visible grass first.
+    let mut wanted: Vec<(f32, Entity)> = Vec::new();
     for (ent, mut cc) in &mut chunks {
         let d2 = box_distance_squared(cam_pos, cc.bounds);
         if cc.built.is_empty() {
-            if d2 <= build_d2 && budget > 0 {
-                budget -= 1;
-                let built = build_chunk_clutter(
-                    ent,
-                    &cc.models,
-                    cfg.scale,
-                    cfg.alpha_ref,
-                    cfg.fade_far,
-                    &mut geometry,
-                    &mut assets,
-                    &mut meshes,
-                    &mut images,
-                    &mut materials,
-                    &mut commands,
-                );
-                cc.built = built;
+            if d2 <= build_d2 {
+                wanted.push((d2, ent));
             }
         } else if d2 > drop_d2 {
             for e in cc.built.drain(..) {
                 commands.entity(e).try_despawn();
             }
         }
+    }
+    wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let backlog = wanted.len().saturating_sub(CLUTTER_BUILDS_PER_FRAME);
+
+    // Pass 2: spend the frame's budget on the nearest of them.
+    let (mut late, mut late_nearest) = (0usize, f32::MAX);
+    for &(d2, ent) in wanted.iter().take(CLUTTER_BUILDS_PER_FRAME) {
+        let Ok((_, mut cc)) = chunks.get_mut(ent) else {
+            continue;
+        };
+        if d2 < visible_d2 {
+            late += 1;
+            late_nearest = late_nearest.min(d2.sqrt());
+        }
+        let built = build_chunk_clutter(
+            ent,
+            &cc.models,
+            cfg.scale,
+            cfg.alpha_ref,
+            cfg.fade_far,
+            &mut geometry,
+            &mut assets,
+            &mut meshes,
+            &mut images,
+            &mut materials,
+            &mut commands,
+        );
+        cc.built = built;
+    }
+    if late > 0 {
+        warn!(
+            "clutter: {late} chunk(s) built INSIDE the {:.0} yd horizon (nearest {late_nearest:.1} yd) \
+             — grass appeared where it could already be seen; {}",
+            cfg.fade_far,
+            if backlog > 0 {
+                format!("{backlog} more still queued behind the {CLUTTER_BUILDS_PER_FRAME}/frame cap (expected in a login/teleport burst)")
+            } else {
+                "no build backlog, so the DISTANCE GATE let it through late".to_string()
+            }
+        );
     }
 }
 

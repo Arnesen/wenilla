@@ -884,9 +884,28 @@ pub struct ButtonFont {
     pub flags: String,
 }
 
-/// A Button's state model: which of the state textures draws is a *function of interaction state*
-/// (the client's texture array `+0x4b8` with a current-shown pointer `+0x4c4`), so the regions all
-/// exist in the arena and [`Self::region_visible`] picks at extract time.
+/// The client's button STATE INDEX — `[CSimpleButton+0x328]`, the one variable `SetState
+/// 0x779790` writes and `IsEnabled 0x7800b0` / `GetButtonState 0x780180` read back.
+///
+/// The client numbers them 0 DISABLED / 1 NORMAL / 2 PUSHED, which is also the index into its
+/// state-texture array (`[this + state*4 + 0x4b8]`); we name the variants instead, because
+/// nothing here indexes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ButtonVisualState {
+    /// `Disable()` — the button fires no clicks and draws from the Disabled slot.
+    Disabled,
+    /// The resting state a button is born in.
+    #[default]
+    Normal,
+    /// A mouse press captured over the button, or `SetButtonState("PUSHED")`.
+    Pushed,
+}
+
+/// A Button's state model: which of the state textures draws is a **latched** consequence of the
+/// interaction state, not a pure function of it — the client's texture array `+0x4b8` plus its
+/// currently-shown pointer `+0x4c4`, which moves only on a transition into a state that *has* a
+/// texture ([`Self::settle`]). The regions all exist in the arena; [`Self::region_visible`] reads
+/// the pointer at extract time.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ButtonState {
     /// `Enable`/`Disable`. A disabled button shows its DisabledTexture and fires no clicks.
@@ -894,10 +913,15 @@ pub struct ButtonState {
     /// The scripted PUSHED state — `SetButtonState("PUSHED"/"NORMAL") 0x780270` /
     /// `GetButtonState 0x780180`, the keybind visual's engine half (ref `ActionButtonDown/Up`,
     /// `ActionButton.lua:15-28`). ORs with the mouse-derived held+hovered press in
-    /// [`Self::region_visible`]; the mouse press itself stays outside the widget (the app's
-    /// capture), so `GetButtonState` reads only this flag — INTERIM: a mouse-held button
-    /// answers "NORMAL" here where the real engine's one state variable would say "PUSHED".
-    /// Nothing in the transcribed FrameXML reads the state mid-mouse-press.
+    /// [`Self::input_state`]; the mouse press itself stays outside the widget (the app's capture),
+    /// which is why the state machine takes it as an argument.
+    ///
+    /// **The reference has one variable where we have two**, and the difference is stated rather
+    /// than implied: `SetButtonState(state, locked)` writes `[+0x328]` *and* the lock at `+0x32c`,
+    /// and an unlocked scripted push is therefore cleared by the next mouse press/release
+    /// (`0x7793c2`'s `SetState(NORMAL)`, gated on `locked == 0`). Ours keeps the flag until Lua
+    /// clears it. No 1.12 caller pushes without meaning it to stick: `ActionButtonDown` pairs
+    /// every push with its own `ActionButtonUp`, and the micro buttons pass `locked = 1`.
     pub pushed_state: bool,
     /// [`FrameKind::LootButton`]'s own field — `CLootButton +0x4dc`, the **0-based** loot slot
     /// this row takes when clicked. `None` until `SetSlot` writes it (the ctor's zero is a slot
@@ -910,16 +934,23 @@ pub struct ButtonState {
     pub checked: bool,
     /// `<NormalTexture>`/`SetNormalTexture` (`+0x4bc`).
     pub normal: Option<RegionHandle>,
-    /// `<PushedTexture>` (`+0x4c0`) — shown while the mouse is held down over the button.
+    /// `<PushedTexture>` (`+0x4c0`) — taken on the press transition. A button with none keeps
+    /// whatever it was showing ([`Self::set_state`]), which is not a fallback but the absence of
+    /// one.
     pub pushed: Option<RegionHandle>,
     /// `<DisabledTexture>` (`+0x4b8`).
     pub disabled: Option<RegionHandle>,
     /// `<HighlightTexture>` (`+0x4c8`) — additive over the current state texture while hovered
     /// (it lives in the HIGHLIGHT draw layer, above the others, not instead of them).
     pub highlight: Option<RegionHandle>,
-    /// CheckButton `<CheckedTexture>` (`+0x4e0`) — additive while checked.
+    /// CheckButton `<CheckedTexture>` (`+0x4e0`) — additive while checked. A SEPARATE array from
+    /// the state textures, with its own rule (`0x7854c0`): hide both, then show
+    /// [`Self::disabled_checked`] if checked ∧ it exists ∧ the state is DISABLED, else this one if
+    /// it exists, else nothing. **The fallback is one-way** — a disabled checked button with no
+    /// DisabledChecked art falls back to this; a checked one never falls the other way.
     pub checked_tex: Option<RegionHandle>,
     /// CheckButton `<DisabledCheckedTexture>` (`+0x4e4`) — replaces CheckedTexture when disabled.
+    /// The greyed tick a peace-forced faction's At War box wears (B369).
     pub disabled_checked: Option<RegionHandle>,
     /// The `<ButtonText>` fontstring (`+0x338`; `SetText`). Always drawn.
     pub text: Option<RegionHandle>,
@@ -989,6 +1020,16 @@ pub struct ButtonState {
     /// windows lean on the second alone — a tradeskill/craft/trainer recipe row blanks its
     /// highlight texture to `""` and locks the selected row anyway, purely for the white label.
     pub locked_highlight: bool,
+    /// The client's **currently-shown state texture** — the pointer at `+0x4c4`. Private, and the
+    /// only thing [`Self::region_visible`] consults for the three state textures: it is written by
+    /// [`Self::set_state`] and [`Self::set_state_slot`] alone, which is what makes the transition
+    /// rule un-bypassable.
+    shown: Option<RegionHandle>,
+    /// The state [`Self::shown`] was last resolved for — the client's `[+0x328]`. Latched from the
+    /// three inputs ([`Self::enabled`], [`Self::pushed_state`] and the mouse's held+hovered) by
+    /// [`Self::settle`], so a *transition* can be detected at all; the client keeps the same one
+    /// variable for the same reason.
+    state: ButtonVisualState,
 }
 
 impl Default for ButtonState {
@@ -1017,45 +1058,133 @@ impl Default for ButtonState {
             highlight_color: None,
             disabled_color: None,
             locked_highlight: false,
+            shown: None,
+            state: ButtonVisualState::Normal,
         }
     }
 }
 
 impl ButtonState {
-    /// Whether a region of this button draws, given the interaction inputs (`hovered` = the cursor
-    /// is over the button; `held` = a mouse press captured it and hasn't released). The exclusive
-    /// state textures resolve to one "current": disabled → Disabled, with **no** Normal fallback.
-    /// This is the byte-verified rule (decision 0227; wow-re
-    /// `system/ui/scratch/button-check-and-state-texture.md`, `SetState 0x779790`): the shown
-    /// pointer `+0x4c4` always holds the *current state's own* slot (`[this+state*4+0x4b8]`), so a
-    /// null new-state slot draws nothing — the reference's empty spellbook slots are exactly this
-    /// (born-disabled SpellButtons whose UI-Quickslot2 NormalTexture never shows). Held+hovered →
-    /// Pushed, falling back to Normal when unset (a pressed button without pushed art keeps its
-    /// normal art in the reference). Else Normal. Highlight/Checked draw additively per their own
-    /// conditions. Any region that is not one of the state textures (ButtonText, user regions)
-    /// always draws.
+    /// The slot a state draws from — the client's `[this + state*4 + 0x4b8]`.
+    fn state_slot(&self, state: ButtonVisualState) -> Option<RegionHandle> {
+        match state {
+            ButtonVisualState::Disabled => self.disabled,
+            ButtonVisualState::Normal => self.normal,
+            ButtonVisualState::Pushed => self.pushed,
+        }
+    }
+
+    /// The state the three inputs put the button in — disabled wins, then the press (the mouse's
+    /// held+hovered, or the scripted [`Self::pushed_state`]), else resting.
+    fn input_state(&self, hovered: bool, held: bool) -> ButtonVisualState {
+        if !self.enabled {
+            ButtonVisualState::Disabled
+        } else if (held && hovered) || self.pushed_state {
+            ButtonVisualState::Pushed
+        } else {
+            ButtonVisualState::Normal
+        }
+    }
+
+    /// **`CSimpleButton::SetState 0x779790`** — the transition, and the whole of why the shown
+    /// texture is state rather than a lookup.
     ///
-    /// One known divergence from the byte-exact `0x779790` (INTERIM, not load-bearing): the client
-    /// only *updates* `+0x4c4` when the new state HAS a texture — hiding the old is gated on that,
-    /// so disabling an already-shown button with a null Disabled slot leaves the OLD texture
-    /// sticky-visible. This is a pure function of the current state instead, so it hides that
-    /// texture. The visible case that matters — a born-disabled slot — agrees either way (never in
-    /// the normal state, so nothing was ever shown). Reproducing the sticky path needs a stateful
-    /// shown-pointer this model deliberately doesn't carry yet.
-    pub fn region_visible(&self, rh: RegionHandle, hovered: bool, held: bool) -> bool {
+    /// Both halves of the swap test the SAME dword — the new state's own slot: `0x7797b5` loads
+    /// `[esi + 4*edi + 0x4b8]` and `0x7797be` skips the hide when it is null; `0x7797d9`/`0x7797e2`
+    /// skips the show on the same value. The state itself is written regardless (`0x779801`). So a
+    /// transition into a state with no texture of its own **changes nothing** — the
+    /// previously-shown texture stays up, and there is no fallback path to Normal anywhere in the
+    /// function. The equality early-out sits at `0x7797a3`/`0x7797a9`, *after* the unconditional
+    /// `[+0x32c] = locked` store and *before* every texture step. wow-re
+    /// `system/ui/scratch/button-disabled-state-texture-law.md`, VERIFIED.
+    ///
+    /// **A button is NORMAL before its art is loaded, which is what makes the rule bite.** The
+    /// `CSimpleButton` ctor `0x7786a0` writes `[+0x328] = 0` and `[+0x4c4] = 0`, then ends
+    /// `push 1; call 0x779160` → `[vtbl+0x9c]` = this function with NORMAL. Only then does
+    /// `LoadXML` install the art, each child through the `0x778fd0` setter family
+    /// ([`Self::set_state_slot`]) — `<NormalTexture>` at `0x77890e` with idx 1, which matches, so
+    /// it is shown on the spot. Every button in the family therefore reaches its first `Disable()`
+    /// already wearing its normal art.
+    ///
+    /// Three things the reference draws out of that one rule, which a pure `state → slot`
+    /// resolution cannot:
+    ///
+    /// - **A press with no PushedTexture keeps its normal art.** (Our old resolution special-cased
+    ///   this as `pushed.or(normal)` — the fallback was never a rule, it was this mechanism seen
+    ///   from one side.)
+    /// - **`Disable()` on a button with no DisabledTexture keeps its normal art.** This is B369:
+    ///   `ReputationDetailAtWarCheckBox` has a `<NormalTexture>` and no `<DisabledTexture>`, and
+    ///   `ReputationFrame_Update` `Disable()`s it for a faction whose war flag cannot be toggled —
+    ///   in the reference the box stays on screen (greyed label, still a box); resolving the shown
+    ///   texture as a pure function of the state made it vanish, leaving a bare label.
+    ///   `Disable 0x77ffd0` reaches here through `0x78009a call [vtbl+0x90](0)` → `0x779160`.
+    /// - **So does an empty spellbook slot's `UI-Quickslot2` ring**, which is the same shape and
+    ///   was the case decision 0227 got backwards — see 2011.
+    fn set_state(&mut self, new: ButtonVisualState) {
+        if new == self.state {
+            return;
+        }
+        self.state = new;
+        if let Some(slot) = self.state_slot(new) {
+            self.shown = Some(slot);
+        }
+    }
+
+    /// Run the state machine over the current inputs — the caller's job at every point one of them
+    /// can have moved (`script::button::settle`, which reads the mouse's two off the model).
+    ///
+    /// The client has no such call because it has no derived inputs: its mouse handlers call
+    /// `SetState` directly (`0x7791ed` enter, `0x7793f0` leave, `0x7792ad` down, `0x7793c2` up,
+    /// each gated on `locked == 0`) and so do `Enable`/`Disable`. Ours keeps the inputs as fields
+    /// and latches [`Self::state`] from them here; the transitions that result are the same ones,
+    /// in the same order.
+    pub fn settle(&mut self, hovered: bool, held: bool) {
+        self.set_state(self.input_state(hovered, held));
+    }
+
+    /// **`SetNormalTexture`/`SetPushedTexture`/`SetDisabledTexture 0x778fd0`** — the slot store,
+    /// plus the conditional push to the shown pointer: `[this+idx*4+0x4b8] = tex`, and `+0x4c4`
+    /// takes it **only when `idx == [this+0x328]`** (the gate at `0x779027`). Setting a state's
+    /// texture while the button is in a *different* state does not display it: a fresh region is
+    /// born hidden (`0x77f695` writes `+0xc4 = 0`), so a non-current slot is installed dark.
+    ///
+    /// This is also how a button's art first reaches the screen at all — see [`Self::set_state`]
+    /// for why LoadXML always finds the button in NORMAL.
+    ///
+    /// **One stated divergence.** When the write DISPLACES an occupant, the reference *destroys*
+    /// it (`0x77900a` calls the old object's `vtbl[0](1)`) and clears `+0x4c4` if that occupant
+    /// was the shown one. Ours never gets there: `script::button::ensure_slot` creates a slot's
+    /// region once and later `SetNormalTexture` calls repaint that same region, so the handle is
+    /// stable and an addon holding `GetNormalTexture()` keeps a live object where the reference
+    /// would have handed it a dead one. Nothing in the corpus reads a state texture across a
+    /// replacement; the object-identity half is not modeled.
+    pub fn set_state_slot(&mut self, state: ButtonVisualState, rh: Option<RegionHandle>) {
+        match state {
+            ButtonVisualState::Disabled => self.disabled = rh,
+            ButtonVisualState::Normal => self.normal = rh,
+            ButtonVisualState::Pushed => self.pushed = rh,
+        }
+        if state == self.state {
+            self.shown = rh;
+        }
+    }
+
+    /// Whether a region of this button draws. The three state textures answer from the shown
+    /// pointer alone ([`Self::set_state`]) — which is why the press is no longer an argument here:
+    /// it is an *input to the transition*, consumed at [`Self::settle`], not something a paint
+    /// re-derives. `hovered` stays because the Highlight is not a state texture and really does
+    /// track the cursor with no latch of its own. Checked draws additively per its own condition,
+    /// and any region that is not one of these (ButtonText, user regions) always draws.
+    pub fn region_visible(&self, rh: RegionHandle, hovered: bool) -> bool {
         let some = Some(rh);
         if some == self.normal || some == self.pushed || some == self.disabled {
-            let current = if !self.enabled {
-                self.disabled
-            } else if (held && hovered) || self.pushed_state {
-                self.pushed.or(self.normal)
-            } else {
-                self.normal
-            };
-            return some == current;
+            return some == self.shown;
         }
         if some == self.highlight {
-            return self.enabled && (hovered || self.locked_highlight);
+            // No `enabled` term: a disabled button loses its highlight because `Disable()` turns
+            // the whole HIGHLIGHT draw layer off (`script::button::set_enabled`), which extract
+            // applies before it ever reaches here.
+            return hovered || self.locked_highlight;
         }
         if some == self.checked_tex {
             return self.checked && (self.enabled || self.disabled_checked.is_none());

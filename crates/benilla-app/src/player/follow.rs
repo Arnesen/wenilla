@@ -255,9 +255,12 @@ pub(super) struct FollowInput<'w, 's> {
     /// It already carries the typing gate this struct used to hold `UiKeyboardCapture` for
     /// (typing "we should go" in chat must not break the follow).
     binds: Res<'w, crate::bindings::BindingsState>,
-    /// The camera rig, for the mouse-look level. Read one frame behind `control`'s own update,
+    /// The camera rig, for the mouse-look level and the world's own mouse buttons
+    /// ([`super::camera::WorldMouse`]). The look level is read one frame behind `control`'s own update,
     /// which is deliberate and harmless: the cancel then lands on the frame *after* the look
-    /// begins, versus the reference's same-frame commit.
+    /// begins, versus the reference's same-frame commit. The button latch is **not** behind —
+    /// [`super::camera::latch_world_mouse`] is ordered ahead of this system precisely so the both-button
+    /// cancel below sees this frame's edge.
     rig: Res<'w, CameraControl>,
     /// The **mover's** descriptor block, for the terms of the cancel set that are not inputs:
     /// its health and its stun. See [`FollowInput::input_torn_down`].
@@ -341,10 +344,12 @@ pub(super) fn steer_follow(
         return;
     }
     // ── The cancel set ── before anything else this frame (see the doc above).
-    let both_engaged = input.buttons.pressed(MouseButton::Left)
-        && input.buttons.pressed(MouseButton::Right)
-        && (input.buttons.just_pressed(MouseButton::Left)
-            || input.buttons.just_pressed(MouseButton::Right));
+    // Off the WORLD's buttons ([`super::camera::WorldMouse`], ledger B364), not the device's: the
+    // reference's both-button run is its two bindings held, and a press a UI frame captured
+    // dispatches neither — so two primaries pressed over a bag are two clicks, not a cancel.
+    let both_engaged = input.rig.world_mouse.both()
+        && (input.rig.world_mouse.down(LookButton::Left)
+            || input.rig.world_mouse.down(LookButton::Right));
     if follow_cancelled(
         input.move_start(),
         // The ON edge only: `control` toggles `autorun` AFTER this runs, so the flag we read here

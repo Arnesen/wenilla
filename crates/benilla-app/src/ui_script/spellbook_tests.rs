@@ -151,12 +151,7 @@ fn shipped_spellbook_loads_clean() {
         "window + close + prev/next + 12 spell buttons (each with its Cooldown and AutoCast \
          Model children) + 8 skill-line tabs + the 3 Spell/Pet toggle tabs + the tab flash frame"
     );
-    for name in [
-        "SpellBookFrame",
-        "SpellButton12",
-        "SpellButton1AutoCast",
-        "SpellButton1Shine",
-    ] {
+    for name in ["SpellBookFrame", "SpellButton12", "SpellButton1AutoCast"] {
         assert!(
             s.eval::<bool>(&format!("return {name} ~= nil")).unwrap(),
             "{name} exists"
@@ -322,14 +317,24 @@ fn shipped_spellbook_shows_the_cooldown_pie() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The empty-slot LOOK, pinned at the quad level (the regression that shipped with slice 5): a
-/// slot past the book's length is a **disabled** SpellButton with no DisabledTexture and an
-/// unchecked ring — so it draws its UI-Spellbook-SpellBackground square and **nothing else**. The
-/// slice-5 build leaked both the UI-Quickslot2 NormalTexture (disabled wrongly fell back to
-/// Normal) and the CheckButtonHilight ring (the reference's `SetChecked(0)` was read Lua-truthy),
-/// putting a gold ring on all 12 slots — the director's "spellbook looks very wrong".
+/// The empty-slot LOOK, pinned at the quad level: a slot past the book's length is a **disabled**
+/// SpellButton, and it draws its `UI-Spellbook-SpellBackground` square **and its `UI-Quickslot2`
+/// socket ring** — but no `CheckButtonHilight` glow.
+///
+/// **The ring was wrong to remove, and this test asserted the wrong half for a year** (decision
+/// 2011, correcting 0227's second finding). 0227 read the empty slot as a *born-disabled* button
+/// whose Normal texture had therefore never been shown — but stock `SpellButton_UpdateButton`
+/// `Disable()`s a button that was created enabled and has been wearing its ring since LoadXML
+/// (l.328, and the `CSimpleButton` ctor `0x7786a0` ends in `SetState(NORMAL)`), so the shown
+/// pointer `+0x4c4` is already on the ring when the disable arrives and `SetState 0x779790` has
+/// no step that takes it off. The reference's own Lua is the tell: the disable branch resets that
+/// very ring's vertex colour to white (l.337), which is only meaningful on a ring that draws.
+///
+/// What the slice-5 build really got wrong was the OTHER ring — the `CheckButtonHilight` glow on
+/// all 12 slots, from reading the reference's `SetChecked(0)` as Lua-truthy (0227's first
+/// finding, which stands). That is the half this still pins.
 #[test]
-fn shipped_spellbook_empty_slot_draws_only_the_background() {
+fn shipped_spellbook_empty_slot_draws_its_background_and_socket_ring() {
     let mut s = spellbook_ui(640.0, 700.0);
     // A one-spell book: slot 5 takes the reference's `id > offset + numSpells` disable path. (A
     // book with NO spells is a state no character is ever in — the reference's own
@@ -354,8 +359,11 @@ fn shipped_spellbook_empty_slot_draws_only_the_background() {
     }
     assert_eq!(
         slot5_paths,
-        vec!["Interface\\Spellbook\\UI-Spellbook-SpellBackground".to_string()],
-        "an empty slot draws its background square and nothing else (no ring, no checked glow)"
+        vec![
+            "Interface\\Spellbook\\UI-Spellbook-SpellBackground".to_string(),
+            "Interface\\Buttons\\UI-Quickslot2".to_string(),
+        ],
+        "an empty slot keeps its socket ring and gains no checked glow"
     );
     // The reference passes SetChecked(0) — numeric coercion, not Lua truthiness.
     assert!(!s
@@ -507,13 +515,13 @@ fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
             .unwrap(),
         "a passive is not autocastable"
     );
-    // …and the shine marker follows the SECOND (is it on) — the native lane (decision 1383)
-    // draws the sparkle wherever a shown marker sits, so shown-ness IS the enable.
+    // …and the shine MODEL follows the SECOND (is it on) — the stock `$parentAutoCast`, whose
+    // file the tile renderer draws (2013/2014), so shown-ness IS the enable.
     assert!(s
-        .eval::<bool>("return SpellButton1Shine:IsVisible()")
+        .eval::<bool>("return SpellButton1AutoCast:IsVisible()")
         .unwrap());
     assert!(!s
-        .eval::<bool>("return SpellButton3Shine:IsVisible()")
+        .eval::<bool>("return SpellButton3AutoCast:IsVisible()")
         .unwrap());
     // The corner brackets' RECT, through the live widget. Asserted on the resolved rect rather
     // than the XML, so an anchor bug between the two is still caught — and CENTERED with no
@@ -543,29 +551,35 @@ fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
         br[3]
     );
 
-    // The marker's RECT: 1391 gave it the ref's own 36x36 at CENTER (1,1); 1393 squares it on the
-    // button instead, so the glow and the brackets share a centre. Checked here rather than
-    // trusted to the XML, because the whole spell-book thread turns on where this viewport sits.
-    let geom: Vec<f32> = ["GetWidth", "GetHeight"]
+    // The pane's RECT: the ref's own template gives it 36x36 at CENTER (1,1); 1393 squares it on
+    // the button instead (now by re-seating the stock Model, 2014), so the glow and the brackets
+    // share a centre. Checked here rather than trusted to the XML, because the whole spell-book
+    // thread turns on where this viewport sits.
+    let geom: Vec<f32> = ["GetWidth", "GetHeight", "GetModelScale"]
         .iter()
         .map(|m| {
-            s.eval::<f32>(&format!("return SpellButton1Shine:{m}()"))
+            s.eval::<f32>(&format!("return SpellButton1AutoCast:{m}()"))
                 .unwrap()
         })
         .collect();
     assert!(
         (geom[0] - 37.0).abs() < 0.01 && (geom[1] - 37.0).abs() < 0.01,
-        "shine marker is {geom:?}, expected 37x37 (1393 squares it on the button)"
+        "shine pane is {geom:?}, expected 37x37 (1393 squares it on the button)"
+    );
+    assert!(
+        (geom[2] - 1.48).abs() < 0.001,
+        "shine pane's model scale is {}, expected 1393's 1.48 (the pet button's rim ratio)",
+        geom[2]
     );
     let dx = s
-        .eval::<f32>("return SpellButton1Shine:GetLeft() - SpellButton1:GetLeft()")
+        .eval::<f32>("return SpellButton1AutoCast:GetLeft() - SpellButton1:GetLeft()")
         .unwrap();
     let dy = s
-        .eval::<f32>("return SpellButton1Shine:GetBottom() - SpellButton1:GetBottom()")
+        .eval::<f32>("return SpellButton1AutoCast:GetBottom() - SpellButton1:GetBottom()")
         .unwrap();
     assert!(
         dx.abs() < 0.01 && dy.abs() < 0.01,
-        "shine marker sits at ({dx}, {dy}) inside the button; 1393 squares it on the button so it \
+        "shine pane sits at ({dx}, {dy}) inside the button; 1393 squares it on the button so it \
          is concentric with the brackets — the ref's +1,+1 is what read as a top/right bias"
     );
 

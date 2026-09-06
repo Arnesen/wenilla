@@ -171,8 +171,16 @@ pub(in crate::ui_chat) enum ParsedChat {
     /// session seam like [`ParsedChat::Logout`]; [`crate::ui_script::run_pending_reload`] runs it
     /// at the top of the next frame.
     ReloadUi,
-    /// A `/console` command that is not `reloadUI` — the engine console this client does not
-    /// have. Answered with a system line naming what was asked, because a claimed alias that
+    /// `/console detailDoodadAlpha [0..255]` — the **ground-clutter cutout reference**, a real
+    /// console command in the reference (`0x6739a0`; registrar `0x63f9e0`, a command table and not
+    /// `CVar::Register`, so it never persists — 1804 does not apply to it). It decides where grass
+    /// first appears: the detail-doodad draw alpha-tests `texel.a x distance_ramp` against this, so
+    /// at the default 128 nothing survives past ~61 yd of the 70 yd horizon, and lowering it walks
+    /// that onset out toward the horizon. Bare = report the current value (the reference reads an
+    /// uninitialised stack slot there; a readout is the useful reading of "no argument").
+    DetailDoodadAlpha { value: Option<u8> },
+    /// A `/console` command this client does not implement — the engine console is otherwise not
+    /// here. Answered with a system line naming what was asked, because a claimed alias that
     /// silently drops its argument reads as a hang.
     ConsoleUnknown { cmd: String },
     /// A slash line matching neither a chat command nor an `EmotesText` name — dropped.
@@ -242,6 +250,27 @@ pub(in crate::ui_chat) fn lua_long_string(s: &str) -> String {
 
 /// The per-command argument grammar. Each arm is the reference handler's own body reduced to what
 /// it does with `msg` — the aliases that reach it are the table's business, never this function's.
+/// Classify one **console command** line — what is left after `ConsoleExec` has written the CVar
+/// lines (2008), i.e. a name the engine's own command table owns rather than `CVar::Register`'s.
+/// Pure, so the arms are testable without a VM; called from `engine_verbs`'s console drain.
+pub(in crate::ui_chat) fn console_command(line: &str) -> ParsedChat {
+    let mut words = line.split_whitespace();
+    match words.next() {
+        Some(cmd) if cmd.eq_ignore_ascii_case("reloadui") => ParsedChat::ReloadUi,
+        // The reference rejects an out-of-range value rather than saturating
+        // (`0x6739b9: cmp eax,0xff; jbe`), so out-of-range and unparseable are the same `None`
+        // here and the handler says so. A bare name reports the current value.
+        Some(cmd) if cmd.eq_ignore_ascii_case("detaildoodadalpha") => {
+            ParsedChat::DetailDoodadAlpha {
+                value: words.next().and_then(|v| v.parse::<u8>().ok()),
+            }
+        }
+        _ => ParsedChat::ConsoleUnknown {
+            cmd: line.trim().to_string(),
+        },
+    }
+}
+
 fn slash_command(index: SlashIndex, args: &str) -> ParsedChat {
     use SlashIndex as S;
     match index {

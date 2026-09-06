@@ -288,7 +288,16 @@ impl UiScript {
                         .then(|| model.frame_to_id.get(&h).copied())
                         .flatten()
                 });
+                let old_handle = model.mouseover;
                 model.mouseover = new_handle;
+                // The client's `0x7793f0` (leave) and `0x7791ed` (enter) both call `SetState`:
+                // a press held over a button and then walked off it drops back to NORMAL, and
+                // walking back on picks PUSHED up again. Ours latches the same transition from
+                // the moved hover — both sides of the boundary, since each one's `hovered`
+                // changed.
+                for h in [old_handle, new_handle].into_iter().flatten() {
+                    button::settle(&mut model, h);
+                }
                 (old_id, drag_start, true, slider_change, color_change)
             }
         };
@@ -507,13 +516,15 @@ impl UiScript {
             let mut model = self.model_mut();
             let hit_handle = hit_id.and_then(|id| model.id_to_frame.get(&id).copied());
             if down {
-                match hit_handle {
-                    Some(h) => {
-                        model.mouse_down_on.insert(button.to_string(), h);
-                    }
-                    None => {
-                        model.mouse_down_on.remove(button);
-                    }
+                let displaced = match hit_handle {
+                    Some(h) => model.mouse_down_on.insert(button.to_string(), h),
+                    None => model.mouse_down_on.remove(button),
+                };
+                // `0x7792ad`: the press SetState(PUSHED), unconditional past the registration
+                // and hit gates. The displaced entry is settled too — a second press of the same
+                // button elsewhere releases whatever it was holding.
+                for h in [displaced, hit_handle].into_iter().flatten() {
+                    button::settle(&mut model, h);
                 }
                 // `0x7663e6` writes the resolved target into `root+0x80` — capture-else-hover, so
                 // this is an `or`, not an assignment: an existing capture is not displaced by a
@@ -551,6 +562,10 @@ impl UiScript {
                 (click, None, false, jump, None, abandoned, color_jump)
             } else {
                 let pressed = model.mouse_down_on.remove(button);
+                // `0x7793c2`: the release SetState(NORMAL) on the frame the press captured.
+                if let Some(h) = pressed {
+                    button::settle(&mut model, h);
+                }
                 // `root+0x80` is cleared at `0x7664bb` **only when the post-event button mask is
                 // zero** — a chorded release keeps the capture for the button still held. With the
                 // per-button map already drained above, "mask is zero" is "the map is empty".

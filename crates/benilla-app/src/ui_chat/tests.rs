@@ -2186,3 +2186,44 @@ fn level_up_gains_are_matched_by_level_and_a_miss_is_not_an_absence() {
         "the entry was taken, not copied"
     );
 }
+
+/// `detailDoodadAlpha` — the reference's own console command (`0x6739a0`), and the dial that
+/// decides where ground clutter first appears (the detail-doodad draw alpha-tests
+/// `texel.a × distance_ramp` against it). It is a **console command**, not a CVar (registrar
+/// `0x63f9e0`, not `CVar::Register`), so it arrives through the console drain rather than the
+/// CVar store `ConsoleExec` writes — this pins the classifier that splits the two. The three
+/// cases the reference distinguishes: in range sets it, out of range is REJECTED rather than
+/// saturated (`0x6739b9: cmp eax,0xff; jbe`), and unparseable is that same rejection.
+#[test]
+fn console_detail_doodad_alpha_parses() {
+    use super::input::{console_command, ParsedChat};
+    assert_eq!(
+        console_command("detailDoodadAlpha 8"),
+        ParsedChat::DetailDoodadAlpha { value: Some(8) }
+    );
+    // The console is case-insensitive, like the engine's own table lookup.
+    assert_eq!(
+        console_command("DETAILDOODADALPHA 255"),
+        ParsedChat::DetailDoodadAlpha { value: Some(255) }
+    );
+    assert_eq!(
+        console_command("detailDoodadAlpha 256"),
+        ParsedChat::DetailDoodadAlpha { value: None }
+    );
+    assert_eq!(
+        console_command("detailDoodadAlpha wat"),
+        ParsedChat::DetailDoodadAlpha { value: None }
+    );
+    // Bare = report the current value; and the sibling command still routes.
+    assert_eq!(
+        console_command("detailDoodadAlpha"),
+        ParsedChat::DetailDoodadAlpha { value: None }
+    );
+    assert_eq!(console_command("reloadUI"), ParsedChat::ReloadUi);
+    assert_eq!(
+        console_command("nosuchthing"),
+        ParsedChat::ConsoleUnknown {
+            cmd: "nosuchthing".to_string()
+        }
+    );
+}

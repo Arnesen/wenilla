@@ -5,10 +5,10 @@
 //! (`Normal/Pushed/Disabled/Highlight`), the `ButtonText` fontstring + `text` attribute, the
 //! `OnClick` script slot (`+0x4cc`); CheckButton runs Button's loader first and adds
 //! `CheckedTexture`/`DisabledCheckedTexture` + the `checked` bool (`+0x4dc`). Which texture *shows*
-//! is interaction state ([`ButtonState::region_visible`], applied at extract) — faithful to the
-//! documented widget model (texture array + current pointer `+0x4c4`), not byte-pinned. Two stated
-//! v1 gaps: the highlight draws with normal blending (the client ADD-blends it; the quad pass has
-//! no blend modes yet), and `PushedTextOffset` is not modeled. Per-state label fonts *are*: the
+//! is **latched on the transition**, not resolved at paint: [`ButtonState::set_state`] is the
+//! client's `SetState 0x779790` and [`settle`] is where the derived inputs reach it. Two stated v1
+//! gaps: the highlight draws with normal blending (the client ADD-blends it; the quad pass has no
+//! blend modes yet), and `PushedTextOffset` is not modeled. Per-state label fonts *are*: the
 //! `*FontObject` trio picks which object each state inherits and `extract` re-resolves it every
 //! frame, while `SetFont` writes the button's own face/size/flags over all of them
 //! ([`crate::widget::ButtonFont`]).
@@ -25,7 +25,8 @@ use super::{event, JustifyH, Model, RegionData};
 use crate::justify::Justify;
 use crate::order::DrawLayer;
 use crate::widget::{
-    ButtonFont, ButtonState, FrameHandle, FrameKind, KindState, RegionHandle, RegionKind,
+    ButtonFont, ButtonState, ButtonVisualState, FrameHandle, FrameKind, KindState, RegionHandle,
+    RegionKind,
 };
 
 pub(super) const REG_BUTTON_METHODS: &str = "__benilla_button_methods";
@@ -56,11 +57,15 @@ impl Slot {
         }
     }
 
+    /// The three STATE slots go through [`ButtonState::set_state_slot`] — the client's
+    /// `0x778fd0` family, which stores the slot *and* pushes it to the shown pointer when it is
+    /// the current state's. Every other slot is a plain field: the highlight, the checked pair
+    /// and the label are not in the state array and have show rules of their own.
     fn set(self, bs: &mut ButtonState, rh: crate::widget::RegionHandle) {
         match self {
-            Slot::Normal => bs.normal = Some(rh),
-            Slot::Pushed => bs.pushed = Some(rh),
-            Slot::Disabled => bs.disabled = Some(rh),
+            Slot::Normal => bs.set_state_slot(ButtonVisualState::Normal, Some(rh)),
+            Slot::Pushed => bs.set_state_slot(ButtonVisualState::Pushed, Some(rh)),
+            Slot::Disabled => bs.set_state_slot(ButtonVisualState::Disabled, Some(rh)),
             Slot::Highlight => bs.highlight = Some(rh),
             Slot::Checked => bs.checked_tex = Some(rh),
             Slot::DisabledChecked => bs.disabled_checked = Some(rh),
@@ -226,6 +231,11 @@ pub(crate) fn set_label_font_justify_h_lua(
 }
 
 /// Run `f` over a frame's Button state under one short write borrow.
+/// Run `f` over a frame's Button state under one short write borrow, then **settle the state
+/// machine** — `f` is every Lua write that can move an input (`Enable`/`Disable`,
+/// `SetButtonState`, `RegisterForClicks`), and the client's own writers call `SetState` on the
+/// spot rather than leaving a paint to notice. Settling a read is a no-op (the transition guard is
+/// `new == state`), so this stays on the one path instead of splitting into read/write halves.
 fn with_button<T>(
     lua: &Lua,
     this: &Table,
@@ -233,13 +243,83 @@ fn with_button<T>(
 ) -> mlua::Result<T> {
     let h = frame_handle_of(lua, this)?;
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let (hovered, held) = press_inputs(&model, h);
     let frame = model
         .arena
         .frame_mut(h)
         .ok_or_else(|| mlua::Error::runtime("stale frame handle"))?;
     match &mut frame.kind_state {
-        KindState::Button(bs) => Ok(f(bs)),
+        KindState::Button(bs) => {
+            let out = f(bs);
+            bs.settle(hovered, held);
+            Ok(out)
+        }
         _ => Err(mlua::Error::runtime("not a Button")),
+    }
+}
+
+/// The two interaction inputs the model owns rather than the button: the cursor is over it, and a
+/// registered press is holding it.
+fn press_inputs(model: &Model, h: FrameHandle) -> (bool, bool) {
+    (model.mouseover == Some(h), press_held(model, h))
+}
+
+/// `Enable()` / `Disable()` — and the second thing they do, which is not the state texture.
+///
+/// `Disable 0x77ffd0` ends `0x78009a call [vtbl+0x90](0)`, reaching the shared helper
+/// `0x779160`; the constructor reaches the same helper with `1` (`0x778766`), which is what puts
+/// a fresh button in NORMAL. That helper does **two** things:
+///
+/// - `[vtbl+0x9c](state)` = `SetState 0x779790` — [`ButtonState::settle`]'s half; and
+/// - `0x7791bb push 4; call 0x76a730` — the per-layer enable for layer **4 = HIGHLIGHT**, written
+///   into the very `[frame+0x198]` array that `Enable/DisableDrawLayer` writes and that
+///   `0x76b3a0` reads back at draw time.
+///
+/// So a disabled button's highlight is switched off **at the layer**, which takes every region
+/// the frame owns there with it — not only the HighlightTexture. That is why the highlight is no
+/// longer gated on `enabled` inside [`ButtonState::region_visible`]: one mechanism, in the place
+/// the client keeps it, instead of a second rule that agreed with it on the common case and
+/// disagreed on `<Layer level="HIGHLIGHT">` art the button did not put there itself.
+///
+/// The reference has one array and one writer, so an addon's `DisableDrawLayer("HIGHLIGHT")` is
+/// undone by the next `Enable()`, exactly as here.
+fn set_enabled(lua: &Lua, this: &Table, on: bool) -> mlua::Result<()> {
+    let h = frame_handle_of(lua, this)?;
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let (hovered, held) = press_inputs(&model, h);
+    let frame = model
+        .arena
+        .frame_mut(h)
+        .ok_or_else(|| mlua::Error::runtime("stale frame handle"))?;
+    match &mut frame.kind_state {
+        KindState::Button(bs) => {
+            bs.enabled = on;
+            bs.settle(hovered, held);
+        }
+        _ => return Err(mlua::Error::runtime("not a Button")),
+    }
+    let bit = 1u8 << DrawLayer::Highlight.index();
+    if on {
+        frame.disabled_layers &= !bit;
+    } else {
+        frame.disabled_layers |= bit;
+    }
+    Ok(())
+}
+
+/// Re-latch a button's state texture after something OUTSIDE the widget moved an input — the
+/// mouse crossing its boundary, a press landing or lifting, a capture dropped when the pointer
+/// left the window, or the hover cleared because the frame was hidden under the cursor.
+///
+/// These are the client's own `SetState` call sites (`0x7791ed` enter, `0x7793f0` leave,
+/// `0x7792ad` down, `0x7793c2` up); ours reach the same transition through the derived inputs.
+/// Harmless on a non-Button handle, and on a stale one.
+pub(super) fn settle(model: &mut Model, h: FrameHandle) {
+    let (hovered, held) = press_inputs(model, h);
+    if let Some(frame) = model.arena.frame_mut(h) {
+        if let KindState::Button(bs) = &mut frame.kind_state {
+            bs.settle(hovered, held);
+        }
     }
 }
 
@@ -788,11 +868,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     m.set(
         "Enable",
-        lua.create_function(|lua, this: Table| with_button(lua, &this, |bs| bs.enabled = true))?,
+        lua.create_function(|lua, this: Table| set_enabled(lua, &this, true))?,
     )?;
     m.set(
         "Disable",
-        lua.create_function(|lua, this: Table| with_button(lua, &this, |bs| bs.enabled = false))?,
+        lua.create_function(|lua, this: Table| set_enabled(lua, &this, false))?,
     )?;
     // IsEnabled() → the NUMBER 1 or the NUMBER 0 — never a boolean, and never nil.
     //

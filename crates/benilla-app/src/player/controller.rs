@@ -80,7 +80,6 @@ pub(super) fn control(
         Res<MoveSpeed>,
         Res<PlayerCapsule>,
         Res<CameraProbe>,
-        Res<PointerOverUi>,
         Res<InspectMode>,
         Res<crate::ui_script::UiKeyboardCapture>,
         Res<crate::ui_script::PlayerUiClickConsumed>,
@@ -108,7 +107,7 @@ pub(super) fn control(
     mut rig: ResMut<CameraControl>,
     // Avian's kinematic move-and-slide: sweeps the capsule against the streamed colliders (decision 0009).
     collide: benilla_world::collision::WorldCollision,
-    mut cameras: Query<(&mut Transform, &mut FlyCam, &Camera)>,
+    mut cameras: Query<(&mut Transform, &mut FlyCam), With<Camera>>,
     // **The body in our hands** — see [`BodyQuery`] for what rides on it and why a possessed
     // creature needs nothing special here.
     mut body: BodyQuery,
@@ -140,27 +139,26 @@ pub(super) fn control(
 ) {
     let (world, transports, child_of) = (&world_q.0, &world_q.1, &world_q.2);
     let (left_click, right_click) = (&mut *click_test.0, &mut *click_test.1);
-    let Ok((mut cam_t, mut cam, camera)) = cameras.single_mut() else {
+    let Ok((mut cam_t, mut cam)) = cameras.single_mut() else {
         return;
     };
     let (mut window, mut cursor_opts) = window.into_inner();
     let mouse_motion = &pointer.0;
     let look_cfg = *pointer.1;
     let zoom_max = pointer.2.max;
-    let (move_speed, capsule, cam_probe, pointer_over_ui, inspect, ui_capture, click_consumed) = (
+    let (move_speed, capsule, cam_probe, inspect, ui_capture, click_consumed) = (
         &speed_capsule.0,
         &speed_capsule.1 .0,
         &speed_capsule.2 .0,
         &speed_capsule.3,
         &speed_capsule.4,
         &speed_capsule.5,
-        &speed_capsule.6,
     );
-    let binds = &speed_capsule.7;
-    let view_subject = &speed_capsule.8;
-    let self_guid = speed_capsule.9 .0;
-    let scoped = &speed_capsule.10;
-    let covered = speed_capsule.11.covering();
+    let binds = &speed_capsule.6;
+    let view_subject = &speed_capsule.7;
+    let self_guid = speed_capsule.8 .0;
+    let scoped = &speed_capsule.9;
+    let covered = speed_capsule.10.covering();
     // The auto-follow knobs (decisions 1493/1502), with far sight's one exception folded in here so
     // both camera seats below agree: while the rig orbits somebody ELSE's body (Mind Vision, Sentry
     // Totem), our own facing is not what "behind" means, so the return is forced off rather than
@@ -190,13 +188,18 @@ pub(super) fn control(
     // anymore. Nothing here reads a bare key any more (decision 1043) — the free-fly toggle is on
     // the dev chord, and the Ctrl run boost is gone.
 
+    // Which mouse buttons the world owns this frame is [`camera::latch_world_mouse`]'s, decided
+    // in a system ahead of this one (ledger B364). Every *press* below is taken from that latch —
+    // the look session's engage, the camera's command word, the both-button run — so a press the
+    // UI ate reaches none of them. The raw buttons are still read below, but only for the hold and
+    // release of a gesture the world already owns.
     // The both-button state and the camera's input command word ([`input::look_input`]) — read
     // here, before the look session, because the not-driving path below seats its camera from the
     // same word and returns without ever reaching the movement axes.
     let input::LookInput {
         both_buttons,
         follow_command,
-    } = input::look_input(&buttons, binds, &player);
+    } = input::look_input(binds, &player, &rig);
 
     // The look session gets a SHADOW copy of `CursorOptions`, written back only on a real change:
     // handing it the component's `Mut` directly reborrowed mutably every frame, which marks it
@@ -292,8 +295,6 @@ pub(super) fn control(
         &mut player.face_yaw,
         &mut window,
         &mut opts_shadow,
-        camera,
-        pointer_over_ui.0,
         inspect.enabled,
         click_consumed.0,
         &mut world_clicks.0,

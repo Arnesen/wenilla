@@ -446,10 +446,6 @@ Interface\FrameXML\MultiActionBars.xml
 # right-click dialogs — ABANDON_PET / RENAME_PET / PETRENAMECONFIRM — now live). 0982's
 # transcription is gone.
 Interface\FrameXML\PetActionBarFrame.xml
-# The one adapter the reference's file needs from this engine: its autocast shine is a <Model>
-# (UI-AutoCastButton.mdx) and this engine's <Model> draws no pixels; the shine benilla draws is
-# its own token texture (1383). BENILLA_ALLOW_OWN_UI=1.
-PetActionBarAdapters.xml
 # The micro-button row in the bar's right-hand recess — the reference's own file (1751;
 # decision 1987), which its toc seats right after MainMenuBar (l.34-35). After MainMenuBar.xml:
 # the eight buttons carry parent="MainMenuBarArtFrame", resolved by name at load (1734), and a
@@ -823,9 +819,9 @@ Interface\FrameXML\DressUpFrame.xml
 # action-bar files it calls into and after MainMenuBarMicroButtons (UpdateMicroButtons on show). The 'P' binding
 # calls its own ToggleSpellBook(BOOKTYPE_SPELL). 0216's transcription is gone.
 Interface\FrameXML\SpellBookFrame.xml
-# The one adapter the reference's file needs from this engine: its pet-page autocast shine is a
-# <Model> (UI-AutoCastButton.mdx) and this engine's <Model> draws no pixels; the shine benilla
-# draws is its own token texture (1383/1392/1393). BENILLA_ALLOW_OWN_UI=1.
+# The director's two look deviations on the pet page's autocast button (1392/1393), re-seated onto
+# the reference's own Model now that this engine renders it (2013/2014): the corner brackets at
+# 71.53 and the shine pane squared on the button at scale 1.48. BENILLA_ALLOW_OWN_UI=1.
 SpellBookAdapters.xml
 # ══ THE SOCIAL WINDOW — the reference's own, off the player's chain (1751; decision 1959) ══
 # FriendsFrame.xml + FriendsFrame.lua: the O-key window's four tabs — friends/ignore, who, the

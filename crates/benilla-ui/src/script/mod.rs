@@ -1248,7 +1248,14 @@ impl UiScript {
             self.fire_drag_stop(source);
         }
         let mut model = self.model_mut();
+        let held: Vec<crate::widget::FrameHandle> = model.mouse_down_on.values().copied().collect();
         model.mouse_down_on.clear();
+        // Every button that capture was holding down goes back to NORMAL — the release the OS
+        // never fed us (`0x7793c2`'s transition), without which a button walked off the window
+        // edge mid-press keeps its pushed art for the rest of the session.
+        for h in held {
+            button::settle(&mut model, h);
+        }
         // …and its one-slot twin `root+0x80`, which the mouse-down raise reads: a capture left
         // behind would aim the next press's raise at whatever the pointer was last holding.
         model.mouse_capture = None;

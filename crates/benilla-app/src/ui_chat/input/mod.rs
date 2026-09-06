@@ -15,7 +15,7 @@ use bevy::prelude::*;
 mod parse;
 #[cfg(test)]
 pub(super) use parse::lua_long_string;
-pub(super) use parse::{parse_line, ParsedChat};
+pub(super) use parse::{console_command, parse_line, ParsedChat};
 
 use crate::creature_anim::{move_flags, MovementState};
 use crate::net::{ClientCommand, NetCommands, SelfPlayer};
@@ -136,6 +136,10 @@ pub(super) struct ChatOut<'w> {
     /// since a resource reachable twice from one system is a `B0002` panic on the first live frame
     /// (1903). Nothing else in this system touches `UiErrorKeys`.
     ui_errors: ResMut<'w, crate::ui_action::UiErrorKeys>,
+    /// `/console detailDoodadAlpha` — the ground-clutter cutout reference. Rides this bundle for
+    /// the same arity reason as `ui_errors` above, and like it, nothing else in this system
+    /// touches `ClutterConfig` (a resource reachable twice from one system is a `B0002` panic).
+    clutter: ResMut<'w, benilla_world::clutter::ClutterConfig>,
 }
 
 // One parameter per concern — the chat drain fans out to every command's consumer.
@@ -167,14 +171,11 @@ fn engine_verbs(
     }
     for line in script.take_console_lines() {
         // `ConsoleExec` already wrote the CVar lines to the store; what reaches here is a
-        // console COMMAND, of which this client implements the one the reference's `/reload`
-        // alias spells out.
-        let cmd = line.trim().to_string();
-        if cmd.eq_ignore_ascii_case("reloadui") {
-            out.push((line, ParsedChat::ReloadUi));
-        } else {
-            out.push((line, ParsedChat::ConsoleUnknown { cmd }));
-        }
+        // console COMMAND — a name the engine's own command table owns rather than
+        // `CVar::Register`'s, which is why `detailDoodadAlpha` lives here and not in the CVar
+        // store (wow-re: registrar `0x63f9e0`, so it never persists — 2012).
+        let parsed = console_command(&line);
+        out.push((line, parsed));
     }
     for cmd in script.take_channel_commands() {
         out.push((String::new(), ParsedChat::Channel(cmd)));
@@ -916,15 +917,35 @@ pub(super) fn drain_chat_input(
             ParsedChat::ReloadUi => {
                 script.queue_session_request(benilla_ui::script::SessionRequest::ReloadUi)
             }
+            // `/console detailDoodadAlpha [0..255]` — the reference's own console command
+            // (`0x6739a0`), and the dial that decides where ground clutter first appears: the
+            // detail-doodad draw alpha-tests `texel.a x distance_ramp` against it, so 128 (the
+            // default) hides everything past ~61 yd of the 70 yd fade horizon and a lower value
+            // walks that onset out toward the horizon. Non-persistent, exactly as the reference's
+            // command table is.
+            ParsedChat::DetailDoodadAlpha { value } => {
+                let text = match value {
+                    Some(v) => {
+                        chat_out.clutter.alpha_ref = f32::from(v) / 255.0;
+                        format!("detailDoodadAlpha set to {v}")
+                    }
+                    None => format!(
+                        "detailDoodadAlpha is {} (usage: /console detailDoodadAlpha 0-255)",
+                        (chat_out.clutter.alpha_ref * 255.0).round() as u32
+                    ),
+                };
+                chat_log.push_event(super::event::ChatEvent::text_only(
+                    super::event::ChatEventKind::System,
+                    text,
+                ));
+            }
             ParsedChat::ConsoleUnknown { cmd } => {
+                const IMPLEMENTED: &str = "reloadUI, detailDoodadAlpha, and `<cvar> <value>`";
                 let text = if cmd.is_empty() {
-                    "console: no command given (this client implements: reloadUI, and \
-                     `<cvar> <value>`)"
-                        .to_string()
+                    format!("console: no command given (this client implements: {IMPLEMENTED})")
                 } else {
                     format!(
-                        "console: '{cmd}' is not implemented (this client implements: reloadUI, \
-                         and `<cvar> <value>`)"
+                        "console: '{cmd}' is not implemented (this client implements: {IMPLEMENTED})"
                     )
                 };
                 chat_log.push_event(super::event::ChatEvent::text_only(

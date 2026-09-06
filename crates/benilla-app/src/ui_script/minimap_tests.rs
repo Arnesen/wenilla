@@ -528,7 +528,6 @@ fn a_shown_ping_pane_asks_for_a_tile_and_draws_its_cell() {
     app.init_resource::<crate::portrait::BoothPanes>();
     app.init_resource::<UiModelTiles>();
     app.init_resource::<crate::minimap::MinimapWidget>();
-    app.init_resource::<crate::autocast_shine::ShineSites>();
     app.init_resource::<crate::ui_script::UiFrameCost>();
     app.init_resource::<crate::ui_script::UiCostWanted>();
     app.init_resource::<Time>();

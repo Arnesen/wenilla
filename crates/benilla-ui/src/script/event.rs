@@ -169,6 +169,10 @@ pub(super) fn fire_visibility_changes(lua: &Lua, changed: Vec<FrameHandle>) {
             .filter(|&m| items.iter().any(|&(h, _, vis)| h == m && !vis));
         if let Some(m) = hidden_hover {
             model.mouseover = None;
+            // The hover the hide just dropped is an input to the button state machine, so the
+            // frame under it re-latches here as it would on a mouse-out (`0x7793f0`) — a button
+            // hidden mid-press must not come back up still wearing its pushed art.
+            super::button::settle(&mut model, m);
             if model.drag.as_ref().is_some_and(|d| d.source == m) {
                 model.drag = None;
             }

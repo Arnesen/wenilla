@@ -88,6 +88,175 @@ fn button_state_textures_switch_with_interaction() {
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
+/// **The shown texture is STICKY: a state with no art of its own changes nothing.**
+///
+/// `SetState 0x779790` gates the hide-old step *and* the show-new step on the NEW state's slot
+/// being non-null (wow-re `button-check-and-state-texture.md` §2), so the shown pointer `+0x4c4`
+/// only ever moves onto a real texture — it is never cleared, and there is no fallback path in the
+/// function at all. Three consequences, and they are one mechanism seen from three sides:
+///
+/// - a press with no `<PushedTexture>` keeps the normal art (which our old model hard-coded as a
+///   `pushed.or(normal)` fallback — the special case *was* this rule, seen from one side);
+/// - **`Disable()` with no `<DisabledTexture>` keeps the normal art** — B369, where the reference's
+///   `ReputationDetailAtWarCheckBox` stays a visible box for a faction whose war flag is locked
+///   while ours went to a bare grey label;
+/// - a state texture assigned while the button is in a *different* state is not displayed
+///   (`0x778fd0`'s `idx == [this+0x328]` gate), so a button disabled *before* it is given normal
+///   art draws nothing — the two disabled cases differ only in whether anything was ever shown.
+#[test]
+fn a_state_with_no_texture_leaves_the_shown_one_standing() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local b = CreateFrame("Button", "StickyBtn")
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(100, 100)
+        b:SetNormalTexture("Interface\\N.blp")
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+
+    let visible = |s: &UiScript, owner: &str| -> Vec<String> {
+        s.extract()
+            .iter()
+            .filter(|q| s.quad_owner_name(q.target).as_deref() == Some(owner))
+            .filter_map(|q| match &q.content {
+                QuadContent::Texture { path: Some(p), .. } => Some(p.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let n = vec!["Interface\\N.blp".to_string()];
+
+    assert_eq!(visible(&s, "StickyBtn"), n, "resting on its normal art");
+
+    // Pressed with no PushedTexture: SetState(2) finds a null slot, so nothing moves.
+    s.mouse_move(50.0, 50.0);
+    s.mouse_button(50.0, 50.0, "LeftButton", true);
+    assert_eq!(visible(&s, "StickyBtn"), n, "a press with no pushed art");
+    s.mouse_button(50.0, 50.0, "LeftButton", false);
+    s.mouse_move(400.0, 400.0);
+
+    // Disabled with no DisabledTexture: the same null slot, the same nothing. **B369.**
+    s.run("StickyBtn:Disable()").unwrap();
+    assert_eq!(
+        visible(&s, "StickyBtn"),
+        n,
+        "a disable with no disabled art leaves the box on screen"
+    );
+    // Giving it disabled art NOW does show it — `0x778fd0` pushes to `+0x4c4` because the slot
+    // being written IS the current state's.
+    s.run("StickyBtn:SetDisabledTexture(\"Interface\\\\D.blp\")")
+        .unwrap();
+    assert_eq!(
+        visible(&s, "StickyBtn"),
+        vec!["Interface\\D.blp".to_string()],
+        "and real disabled art displaces it on the spot"
+    );
+    s.run("StickyBtn:Enable()").unwrap();
+    assert_eq!(visible(&s, "StickyBtn"), n, "back to normal on Enable");
+
+    // The other side of the same gate: a button disabled BEFORE it has normal art shows nothing,
+    // because the write lands in a slot that is not the current state's.
+    s.run(
+        r#"
+        local b = CreateFrame("Button", "BornDeadBtn")
+        b:SetPoint("BOTTOMLEFT", 200, 0); b:SetSize(100, 100)
+        b:Disable()
+        b:SetNormalTexture("Interface\\N.blp")
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert!(
+        visible(&s, "BornDeadBtn").is_empty(),
+        "art set while in another state is stored, not shown"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// **`Disable()` switches off the HIGHLIGHT draw LAYER, not just the HighlightTexture.**
+///
+/// The helper both `Enable`/`Disable` and the constructor reach (`0x779160`) does two things: the
+/// `SetState` above, and `0x7791bb push 4; call 0x76a730` — the per-layer enable for layer 4,
+/// written into the same `[frame+0x198]` array `Enable/DisableDrawLayer` writes. So a region the
+/// button owns in HIGHLIGHT that is not its HighlightTexture goes dark with it, and an explicit
+/// `EnableDrawLayer` brings the whole layer back on a still-disabled button. Our old rule gated
+/// the HighlightTexture alone on `enabled`, which agreed on the common case and not on this one.
+#[test]
+fn disabling_a_button_takes_its_whole_highlight_layer() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local b = CreateFrame("Button", "LayerBtn")
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(100, 100)
+        b:SetNormalTexture("Interface\\N.blp")
+        b:SetHighlightTexture("Interface\\H.blp")
+        local own = b:CreateTexture(nil, "HIGHLIGHT")
+        own:SetAllPoints(b)
+        own:SetTexture("Interface\\Own.blp")
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+
+    let art = |s: &UiScript| -> Vec<String> {
+        s.extract()
+            .iter()
+            .filter(|q| s.quad_owner_name(q.target).as_deref() == Some("LayerBtn"))
+            .filter_map(|q| match &q.content {
+                QuadContent::Texture { path: Some(p), .. } => Some(p.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // Hovered and enabled: normal art, the button's own HIGHLIGHT region, and the HighlightTexture.
+    s.mouse_move(50.0, 50.0);
+    let v = art(&s);
+    for want in ["Interface\\N.blp", "Interface\\Own.blp", "Interface\\H.blp"] {
+        assert!(
+            v.contains(&want.to_string()),
+            "{want} draws while enabled: {v:?}"
+        );
+    }
+
+    // Disabled under the same cursor: the layer is off, so BOTH highlight-layer regions go — and
+    // the normal art stays, because no state texture moved (the sticky rule).
+    s.run("LayerBtn:Disable()").unwrap();
+    assert_eq!(
+        art(&s),
+        vec!["Interface\\N.blp".to_string()],
+        "the whole HIGHLIGHT layer goes with the disable"
+    );
+
+    // The layer is a layer: turning it back on lights both again, disabled or not.
+    s.run(r#"LayerBtn:EnableDrawLayer("HIGHLIGHT")"#).unwrap();
+    let v = art(&s);
+    assert!(
+        v.contains(&"Interface\\Own.blp".to_string())
+            && v.contains(&"Interface\\H.blp".to_string()),
+        "EnableDrawLayer restores the layer on a still-disabled button: {v:?}"
+    );
+    assert_eq!(
+        s.eval::<i64>("return LayerBtn:IsEnabled()").unwrap(),
+        0,
+        "and it really is still disabled"
+    );
+
+    // …and Enable() writes the same one array, so it undoes an addon's DisableDrawLayer.
+    s.run(r#"LayerBtn:DisableDrawLayer("HIGHLIGHT") LayerBtn:Enable()"#)
+        .unwrap();
+    let v = art(&s);
+    assert!(
+        v.contains(&"Interface\\Own.blp".to_string()),
+        "one array, one writer: Enable() clears the addon's own disable too: {v:?}"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
 /// **A right-click lights a button up too** — the director's report, and `0x77924b`'s law.
 ///
 /// `CButton::OnMouseDown` gates the PushedTexture on `[this+0x330] & (m | m << 8)`: the button

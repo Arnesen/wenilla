@@ -1,24 +1,27 @@
 <Ui>
     <!--
-        BENILLA_ALLOW_OWN_UI=1 — the one adapter the reference's own SpellBookFrame.xml needs from
-        this engine (decision 1952; 1751 §2 keeps an adapter for exactly a genuine engine difference).
+        BENILLA_ALLOW_OWN_UI=1 — the director's two LOOK deviations on the pet page's autocast
+        button, over the reference's own SpellBookFrame.xml (decisions 1392/1393; re-seated by 2014
+        onto the reference's own Model now that this engine renders it — 2013).
 
-        The pet page's autocast shine. The reference's `$parentAutoCast` on every SpellButton is a
-        <Model> playing `Interface\Buttons\UI-AutoCastButton.mdx` (36x36, CENTER (1,1), scale 1.22),
-        shown and hidden by its own `SpellButton_UpdateButton` (SpellBookFrame.lua l.367-377). This
-        engine's <Model> holds the scene the Lua API reads and writes and draws no pixels
-        (`script/modelframe.rs`); the shine benilla draws is its own lane — the
-        `benilla:autocast-shine:<scale>` token texture (decisions 1383/1392, `autocast_shine.rs`),
-        which reads the model's OWN tracks out of the shipped .m2. So each SpellButton gets a Shine
-        texture beside the model, at the numbers 1393 squared onto this button (37x37 CENTER (0,0),
-        scale 1.48 — the reference's 36x36 CENTER (1,1) at 1.22, one ratio each, recorded there), and
-        the reference's SpellButton_UpdateButton is wrapped to carry the shine with the model.
+        Since 2013 the `$parentAutoCast` <Model> on every SpellButton draws its own file
+        (Interface\Buttons\UI-AutoCastButton.mdx) as a tile: four bones chasing the corners of a
+        0.02-unit square, four spline emitters trailing GlowStar sparks off them, on the pane's own
+        clock. The reference declares it 36x36 at CENTER (1,1) at scale 1.22 — a 0.87x rim that
+        floats clear of the viewport edge, never clipped, washing the icon; the real 1.12 client
+        looks the same way (director-checked, 1392), so this is taste, not fidelity, and the
+        director chose the pet button's proportions instead:
 
-        1393's other number rides along for the same reason: the bracket overlay is 71.53 rather
-        than the reference's 60, so the art — which fills 33/64 of UI-AutoCastableOverlay.blp —
-        lands on this button's corners at the pet button's own 0.997x.
+        · the shine pane squared on the button — 37x37 at CENTER (0,0), scale 1.48 — so the rim
+          runs ON the viewport edge (1.024x, the pet button's own ratio) and the tile's cell, the
+          widget's own scissor, halves every star; and so the glow and the brackets share a centre
+          (1393's "top and right are off" was the reference's own +1,+1);
+        · the corner brackets at 71.53 rather than the reference's 60 — the art fills 33/64 of
+          UI-AutoCastableOverlay.blp, and 71.53 = 37 x 58/30 puts the bracket square on this
+          button's corners at the pet button's 0.997x.
 
-        Nothing else. The reference's file is sourced unedited: its Models exist and are harmless.
+        Reverting the widget to 1.12 exactly is: overlay 60, pane 36x36 CENTER (1,1), scale 1.22 —
+        i.e. deleting this file. Nothing else here: the reference's file is sourced unedited.
     -->
     <Script><![CDATA[
         for i = 1, 12 do
@@ -26,30 +29,12 @@
             local overlay = getglobal("SpellButton" .. i .. "AutoCastable")
             overlay:SetWidth(71.53)
             overlay:SetHeight(71.53)
-            local shine = button:CreateTexture("SpellButton" .. i .. "Shine", "OVERLAY")
-            shine:SetTexture("benilla:autocast-shine:1.48")
-            shine:SetWidth(37)
-            shine:SetHeight(37)
-            shine:SetPoint("CENTER", button, "CENTER", 0, 0)
-            shine:Hide()
-        end
-
-        local reference_SpellButton_UpdateButton = SpellButton_UpdateButton
-        function SpellButton_UpdateButton()
-            reference_SpellButton_UpdateButton()
-            if not this then
-                return
-            end
-            local name = this:GetName()
-            local model = getglobal(name .. "AutoCast")
-            local shine = getglobal(name .. "Shine")
-            if model and shine then
-                if model:IsShown() then
-                    shine:Show()
-                else
-                    shine:Hide()
-                end
-            end
+            local pane = getglobal("SpellButton" .. i .. "AutoCast")
+            pane:SetWidth(37)
+            pane:SetHeight(37)
+            pane:ClearAllPoints()
+            pane:SetPoint("CENTER", button, "CENTER", 0, 0)
+            pane:SetModelScale(1.48)
         end
     ]]></Script>
 </Ui>

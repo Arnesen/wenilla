@@ -35,7 +35,6 @@ use bevy::window::{CursorOptions, PrimaryWindow};
 use crate::creature_anim::{move_flags, wrap_pi, BodyTwist, MovementState};
 use crate::net::{ClientCommand, Embodied, NetCommands, TeleportMessage, WorldportMessage};
 use crate::ui_script::InspectMode;
-use crate::ui_script::PointerOverUi;
 use benilla_assets::coords::wow_to_bevy;
 use benilla_assets::AssetSet;
 use benilla_world::interact::{WorldClick, WorldRightClick, WorldRightPress};
@@ -432,6 +431,18 @@ impl Plugin for PlayerPlugin {
                 // capture keeps the doodad rail static: a pinned camera that a passing kodo
                 // could nudge is not a regression baseline any more.
                 .run_if(not(resource_exists::<crate::run_mode::CaptureMode>)),
+        )
+        // **Which mouse buttons the world owns** (ledger B364) — decoded once, ahead of all
+        // three readers: `/follow`'s both-button cancel below, the look session, and the camera's
+        // input command word. `control` cannot own it, because `steer_follow` runs before
+        // `control` and would then read it a frame late.
+        .add_systems(
+            Update,
+            camera::latch_world_mouse
+                .in_set(WorldStage::Input)
+                .before(control)
+                .before(follow::steer_follow)
+                .run_if(in_state(crate::char_select::ClientState::InWorld)),
         )
         // `/follow` (decision 0890): steer the facing and decide this tick's synthesized forward
         // input immediately BEFORE the controller, which folds the flag into its forward axis.
