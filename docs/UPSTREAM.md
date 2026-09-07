@@ -43,9 +43,27 @@ cargo test -p wenilla-realm
 scripts/web-build.sh          # then boot it in a WebGPU browser: login, world entry, sound, cross a zone line
 ```
 
+**The browser boot is not optional, and it is not a formality.** `std::time::Instant::now` and
+`SystemTime::now` COMPILE on wasm32 and panic when called, so a sync that adds them passes
+`cargo check --target wasm32` *and* the whole test suite and still dies at boot with
+`RuntimeError: unreachable` and a blank canvas. Nothing but a browser catches it. Upstream does
+not build wasm, so every sync tends to bring a fresh crop: the 2026-09-07 one brought seven, two
+of them on per-frame systems that aborted the client in its first seconds. Before booting, this
+sweep costs nothing and finds most of them:
+
+```bash
+# every file the sync added or touched that reaches a clock through std rather than the carry
+git diff --stat main..HEAD --name-only -- '*.rs' | xargs grep -ln 'use std::time::.*Instant\|std::time::\(Instant\|SystemTime\)::now'
+```
+
+`Duration` is fine — it is arithmetic, not a clock. `Instant` and `SystemTime` are not; they take
+`bevy::platform::time::Instant` and `web_time::SystemTime`. Watch for the brace form
+(`use std::time::{Duration, Instant}`), which a grep for the plain import misses.
+
 Open the pull request against `Arnesen/wenilla` (`gh pr create -R Arnesen/wenilla …`) with three
 sections: *what comes in*, *conflicts and how each was resolved*, *verification*. PR #12 is the
-model. `check.yml` runs the wasm check and the realm tests on it.
+model, PR #21 the one that added the sweep above. `check.yml` runs the wasm check and the realm
+tests on it — neither of which can see a wasm time panic, which is the whole point.
 
 **Merge it with a merge commit, not squash.** A squash turns the merge back into a single-parent
 content copy, and git forgets that upstream was merged (see below). The pin bot then moves prod's
