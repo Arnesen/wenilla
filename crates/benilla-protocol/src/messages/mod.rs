@@ -21,6 +21,7 @@ mod area_trigger;
 mod attack;
 mod auction;
 mod bank;
+mod battlefield;
 mod binder;
 mod broadcast;
 mod channel;
@@ -38,6 +39,7 @@ mod instance;
 mod items;
 mod loot;
 mod mail;
+mod meeting_stone;
 mod mirror_timer;
 mod monster_move;
 mod movement;
@@ -60,9 +62,11 @@ mod spellbook;
 mod spells;
 mod stable;
 mod summon;
+mod tabard;
 mod taxi;
 mod trade;
 mod trainer;
+mod tutorial;
 mod update_object;
 mod vendor;
 mod world_state;
@@ -72,7 +76,7 @@ pub use action_bar::{
 };
 pub use addons::{SecureAddon, STANDARD_MODULUS_CRC, STOCK_SECURE_ADDONS};
 pub use area_trigger::area_trigger;
-pub use attack::{attack_swing, AttackerState};
+pub use attack::{attack_swing, AttackSwingError, AttackerState};
 pub use auction::{
     auction_action, auction_duration, auction_error, auction_filter, auction_hello,
     auction_list_bidder_items, auction_list_items, auction_list_owner_items, auction_place_bid,
@@ -81,6 +85,11 @@ pub use auction::{
 };
 pub use bank::{
     autobank_item, autostore_bank_item, bank_slot_result, banker_activate, buy_bank_slot,
+};
+pub use battlefield::{
+    battlefield_join, battlefield_list, battlefield_port, battlemaster_join, leave_battlefield,
+    BattlefieldList, BattlefieldPosition, BattlefieldPositions, BattlefieldStatus, PvpLogData,
+    PvpLogRow, BATTLEFIELD_POSITIONS_MAX,
 };
 pub use binder::{binder_activate, PlayerBound};
 pub use channel::{channel_notice, ChannelNoticeTail, ChannelNotify};
@@ -100,8 +109,8 @@ pub use client::{
     channel_set_owner, channel_unban, channel_unmoderator, channel_unmute, char_create,
     creature_query, force_speed_ack, full_guid, join_channel, knock_back_ack, leave_channel,
     messagechat, messagechat_channel, messagechat_kind, messagechat_whisper, move_flag_ack,
-    move_spline_done, movement, pet_name_query, ping, played_time, query_time, random_roll,
-    teleport_ack, text_emote,
+    move_spline_done, move_time_skipped, movement, pet_name_query, ping, played_time, query_time,
+    random_roll, teleport_ack, text_emote,
 };
 pub use combat_log::{
     DamageShield, DispelFailed, EnchantmentLog, EnvironmentalDamageLog, ExecuteLog, PartyKillLog,
@@ -109,8 +118,8 @@ pub use combat_log::{
     SpellInstaKillLog, SpellLogExecute, SpellLogMiss, SpellOutcomeLog,
 };
 pub use death::{
-    reclaim_corpse, resurrect_response, spirit_healer_activate, CorpseLocation,
-    ResurrectRequestBody,
+    area_spirit_healer, reclaim_corpse, resurrect_response, spirit_healer_activate,
+    AreaSpiritHealerTime, CorpseLocation, ResurrectRequestBody,
 };
 pub use duel::{
     duel_accepted, duel_cancelled, read_duel_complete, read_duel_countdown, read_duel_requested,
@@ -145,14 +154,14 @@ pub use guild::{
     GUILD_RANKS_MIN_COUNT, GUILD_RANK_MAX_LENGTH, GUILD_RANK_RIGHT_ORDER,
 };
 pub use instance::{
-    reset_instances, InstanceResetFailed, InstanceResetFailure, RaidInstanceMessage,
+    reset_instances, InstanceResetFailed, InstanceResetFailure, RaidGroupOnly, RaidInstanceMessage,
     RaidInstanceWarning,
 };
 pub use items::{
     auto_equip_item, auto_store_bag_item, destroy_item, item_query, open_item, set_ammo,
-    split_item, swap_inv_item, swap_item, use_item, ItemDamage, ItemInfo, ItemSpellEntry,
-    ItemUseSpell, UseItemTarget, BAG_PLAYER_INVENTORY, ITEM_DYNFLAG_UNLOCKED, ITEM_DYNFLAG_WRAPPED,
-    ITEM_FLAG_LOOTABLE, ITEM_FLAG_WRAPPER, SLOT_BAG_FIRST, SLOT_PACK_FIRST,
+    split_item, swap_inv_item, swap_item, use_item, wrap_item, ItemDamage, ItemInfo,
+    ItemSpellEntry, ItemUseSpell, UseItemTarget, BAG_PLAYER_INVENTORY, ITEM_DYNFLAG_UNLOCKED,
+    ITEM_DYNFLAG_WRAPPED, ITEM_FLAG_LOOTABLE, ITEM_FLAG_WRAPPER, SLOT_BAG_FIRST, SLOT_PACK_FIRST,
 };
 pub use loot::{
     autostore_loot_item, loot, loot_error, loot_master_give, loot_money, loot_release, loot_roll,
@@ -164,6 +173,7 @@ pub use mail::{
     mail_mark_as_read, mail_message_type, mail_return_to_sender, mail_take_item, mail_take_money,
     send_mail, MailAttachment, MailListEntry,
 };
+pub use meeting_stone::{meeting_stone_leave, MeetingStoneNotice, MeetingStoneSetQueue};
 pub use mirror_timer::{
     read_pause_mirror_timer, read_start_mirror_timer, read_stop_mirror_timer, MirrorTimerKind,
     MirrorTimerStart,
@@ -175,11 +185,12 @@ pub use page_text::page_text_query;
 pub use parse::parse_server;
 pub use pet::{
     pet_abandon, pet_action, pet_cancel_aura, pet_rename, pet_set_action, pet_spell_autocast,
-    pet_stop_attack, PetActionEntry, PetMode, PetSpellCooldown, PetSpells, PET_ACTION_SLOTS,
-    PET_ACT_COMMAND, PET_ACT_DISABLED, PET_ACT_ENABLED, PET_ACT_PASSIVE, PET_ACT_REACTION,
-    PET_AUTOCAST_ALLOWED, PET_AUTOCAST_ON, PET_COMMAND_ATTACK, PET_COMMAND_DISMISS,
-    PET_COMMAND_FOLLOW, PET_COMMAND_STAY, PET_COOLDOWN_PERMANENT, PET_REACT_AGGRESSIVE,
-    PET_REACT_DEFENSIVE, PET_REACT_PASSIVE, PET_STATE_BAR_DISABLED, PET_TYPE_SPELL_FIRST,
+    pet_stop_attack, pet_tame_failure_key, pet_unlearn, PetActionEntry, PetMode, PetSpellCooldown,
+    PetSpells, PetUnlearnConfirm, PET_ACTION_SLOTS, PET_ACT_COMMAND, PET_ACT_DISABLED,
+    PET_ACT_ENABLED, PET_ACT_PASSIVE, PET_ACT_REACTION, PET_AUTOCAST_ALLOWED, PET_AUTOCAST_ON,
+    PET_COMMAND_ATTACK, PET_COMMAND_DISMISS, PET_COMMAND_FOLLOW, PET_COMMAND_STAY,
+    PET_COOLDOWN_PERMANENT, PET_REACT_AGGRESSIVE, PET_REACT_DEFENSIVE, PET_REACT_PASSIVE,
+    PET_STATE_BAR_DISABLED, PET_TALK_ATTACK, PET_TALK_ORDER, PET_TYPE_SPELL_FIRST,
     PET_TYPE_SPELL_LAST, PET_UNUSABLE_UNIT_FLAGS,
 };
 pub use petition::{
@@ -215,9 +226,9 @@ pub use roster::{
 pub use skills::unlearn_skill;
 pub use social::{
     add_friend, add_ignore, del_friend, del_ignore, friend_list, friend_result, friend_status,
-    read_friend_list, read_friend_status, read_ignore_list, read_who, who, FriendEntry,
-    FriendOnline, FriendStatusUpdate, WhoEntry, WhoRequest, WhoResults, WHO_MAX_SEARCH_TERMS,
-    WHO_MAX_ZONES,
+    read_friend_list, read_friend_status, read_ignore_list, read_who, set_looking_for_group, who,
+    FriendEntry, FriendOnline, FriendStatusUpdate, WhoEntry, WhoRequest, WhoResults,
+    WHO_MAX_SEARCH_TERMS, WHO_MAX_ZONES,
 };
 pub use spellbook::SpellCooldown;
 pub use spells::{
@@ -229,6 +240,9 @@ pub use stable::{
     StabledPet,
 };
 pub use summon::{summon_response, SummonRequest};
+pub use tabard::{
+    battlemaster_hello, save_guild_emblem, tabard_vendor_activate, GUILD_EMBLEM_RESULT_MESSAGES,
+};
 pub use taxi::{
     activate_taxi, activate_taxi_express, taxi_node_status_query, taxi_query_available_nodes,
     taxi_reply, TaxiMask,
@@ -239,6 +253,7 @@ pub use trade::{
     TRADE_SLOT_TRADED_COUNT,
 };
 pub use trainer::{train_fail, trainer_buy_spell, trainer_list, trainer_spell_state, TrainerSpell};
+pub use tutorial::{tutorial_flag, TutorialFlags};
 pub use update_object::{
     quest_slot_state, CorpseLook, CreateSpline, MovementBlock, MoverState, Object, ObjectFields,
     ObjectType, OwnerFallback, PlayerSkillSlot, QuestLogSlot, UnitAuraSlot, AURA_FLAG_CANCELABLE,

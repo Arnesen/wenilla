@@ -16,10 +16,11 @@
 //! Keybindings redirect head; and the action bar's abbreviation law (`GetBindingText`
 //! transcribed in UIParent.xml) reads `s-2`, the ref's own Lua.
 //!
-//! Labels here are the RAW tokens (`BINDING_HEADER_MOVEMENT`, `BUTTON3`): the harness loads no
-//! GlobalStrings, exercising the page's `getglobal(...) or raw` fallback — the app's VM
-//! executes the real 1.12 GlobalStrings.lua at boot, which turns them into "Movement Keys" /
-//! "Middle Mouse". One test seeds a handful of the real strings to pin that path too.
+//! Labels are read the way the page reads them — `KeyBindings_String(token, raw)`, the
+//! GlobalStrings global with the raw token as fallback ([`label`]). The harness carries the
+//! real 1.12 GlobalStrings.lua since the dialog engine became the reference's file (1960; the
+//! stock StaticPopup.lua reads the strings at load), so a label here is the app's own
+//! "Movement Keys" / "Jump", never the raw token the strings-less harness used to show.
 
 use benilla_ui::script::keybind::{KeybindCommand, KeybindRequest};
 use benilla_ui::script::{QuadContent, UiScript};
@@ -43,15 +44,19 @@ pub(crate) fn harness() -> UiScript {
     s.register_bindings(&cmds);
     s.set_screen_size(1024.0, 768.0);
     for file in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
-        "UIParent.xml",
         "KeyBindingsPage.xml",
         "OptionsFrame.xml",
         "GameMenuFrame.xml",
@@ -72,6 +77,12 @@ pub(crate) fn harness() -> UiScript {
     }
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     s
+}
+
+/// A label as the page resolves it: the GlobalStrings global named `token`, else `raw`.
+pub(crate) fn label(s: &UiScript, token: &str, raw: &str) -> String {
+    s.eval::<String>(&format!(r#"return KeyBindings_String("{token}", "{raw}")"#))
+        .unwrap()
 }
 
 /// Open the options window on the Keybindings page.
@@ -115,7 +126,7 @@ fn the_page_is_an_options_category_with_the_collapsed_honest_tree() {
         let text = s
             .eval::<String>(&format!("return {ROW}{}HeaderText:GetText()", i + 1))
             .unwrap();
-        assert_eq!(&text, token, "section {} (raw-token fallback)", i + 1);
+        assert_eq!(text, label(&s, token, token), "section {}", i + 1);
     }
     assert!(
         !s.eval::<bool>(&format!("return {ROW}{}:IsVisible()", expected.len() + 1))
@@ -129,14 +140,14 @@ fn the_page_is_an_options_category_with_the_collapsed_honest_tree() {
     assert_eq!(
         s.eval::<String>(&format!("return {ROW}2Description:GetText()"))
             .unwrap(),
-        "MOVEANDSTEER"
+        label(&s, "BINDING_NAME_MOVEANDSTEER", "MOVEANDSTEER")
     );
     assert_eq!(
         s.eval::<String>(&format!("return {ROW}2Key1ButtonText:GetText()"))
             .unwrap(),
-        "BUTTON3"
+        label(&s, "KEY_BUTTON3", "BUTTON3")
     );
-    // With the real strings present (the app's GlobalStrings), the same rows read 1.12 text.
+    // The same rows with the strings pinned by hand, so the expectation is literal 1.12 text.
     s.run(
         r#"BINDING_HEADER_MOVEMENT = "Movement Keys"
              BINDING_NAME_MOVEANDSTEER = "Move and Steer"
@@ -164,7 +175,7 @@ fn the_page_is_an_options_category_with_the_collapsed_honest_tree() {
     assert_eq!(
         s.eval::<String>(&format!("return {ROW}2HeaderText:GetText()"))
             .unwrap(),
-        "BINDING_HEADER_CHAT"
+        label(&s, "BINDING_HEADER_CHAT", "BINDING_HEADER_CHAT")
     );
     // Leaving the page hides its body and the Unbind button.
     s.run(r#"OptionsFrame_SelectCategory("Controls")"#).unwrap();
@@ -228,10 +239,11 @@ fn the_capture_flow_binds_steals_and_refuses_like_112() {
         s.eval::<String>(r#"return GetBindingAction("T")"#).unwrap(),
         "MOVEFORWARD"
     );
+    let victim = label(&s, "BINDING_NAME_ATTACKTARGET", "ATTACKTARGET");
     assert!(
         s.eval::<String>("return OptionsFrameContainerBodyKeybindingsOutput:GetText()")
             .unwrap()
-            .contains("ATTACKTARGET"),
+            .contains(&victim),
         "the newly-bare victim is named"
     );
     // **The wheel binds like any other key** (B265, decision 1295) — including onto MOVEFORWARD,
@@ -250,7 +262,10 @@ fn the_capture_flow_binds_steals_and_refuses_like_112() {
     assert_eq!(
         s.eval::<String>("return OptionsFrameContainerBodyKeybindingsOutput:GetText()")
             .unwrap(),
-        "|cffff0000CAMERAZOOMIN Function is Now Unbound!|r"
+        format!(
+            "|cffff0000{} Function is Now Unbound!|r",
+            label(&s, "BINDING_NAME_CAMERAZOOMIN", "CAMERAZOOMIN")
+        )
     );
     // The refusal that IS there is the key-string validator, and this is the page arm that
     // reports it: a chord the engine will not take restores the slot's old key and says why
@@ -293,7 +308,7 @@ fn unbind_reset_and_the_live_commit_replace_okay_cancel() {
     assert_eq!(
         s.eval::<String>(&format!("return {ROW}9Description:GetText()"))
             .unwrap(),
-        "JUMP"
+        label(&s, "BINDING_NAME_JUMP", "JUMP")
     );
     s.run(&format!("{ROW}9Key1Button:Click()")).unwrap();
     s.run("OptionsFrameContainerUnbind:Click()").unwrap();
@@ -593,11 +608,12 @@ fn the_wheel_bubbles_from_the_rows_and_the_bar_rides_the_gutter() {
     s.resolve();
 
     // A spin over a row NAME — the dead zone when the handler lived on the sibling.
+    let steer = label(&s, "BINDING_NAME_MOVEANDSTEER", "MOVEANDSTEER");
     let quads = s.extract();
     let (wx, wy) = quads
         .iter()
         .find_map(|q| match &q.content {
-            QuadContent::Text { text: Some(t), .. } if t == "MOVEANDSTEER" => q
+            QuadContent::Text { text: Some(t), .. } if *t == steer => q
                 .rect
                 .map(|r| ((r.left + r.right) * 0.5, (r.bottom + r.top) * 0.5)),
             _ => None,
@@ -706,7 +722,10 @@ fn the_pet_lane_is_registered_under_the_action_bar_header() {
     );
 
     // Page side: search finds it and paints a live row with the capsule filled.
-    s.run(r#"OptionsFrameSearchBox:SetText("bonusactionbutton1")"#)
+    // The search tags are the DISPLAY names uppercased (era AddSearchTags), so the query is the
+    // label the app's strings give the row, not its token.
+    let query = label(&s, "BINDING_NAME_BONUSACTIONBUTTON1", "BONUSACTIONBUTTON1").to_lowercase();
+    s.run(&format!(r#"OptionsFrameSearchBox:SetText("{query}")"#))
         .unwrap();
     s.tick(0.0); // the deferred OnTextChanged drains here (decision 1831)
     assert!(s
@@ -715,8 +734,8 @@ fn the_pet_lane_is_registered_under_the_action_bar_header() {
     assert_eq!(
         s.eval::<String>("return OptionsFrameContainerBodyKeybindSearch1Description:GetText()")
             .unwrap(),
-        "BONUSACTIONBUTTON1",
-        "the raw-token fallback — the app's GlobalStrings read 'Secondary Action Button 1'"
+        label(&s, "BINDING_NAME_BONUSACTIONBUTTON1", "BONUSACTIONBUTTON1"),
+        "the row wears the app's own string"
     );
     assert_eq!(
         s.eval::<String>("return OptionsFrameContainerBodyKeybindSearch1Key1ButtonText:GetText()")

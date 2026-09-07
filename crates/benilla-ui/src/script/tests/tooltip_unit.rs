@@ -56,6 +56,133 @@ fn creature_line_law() {
     assert!(s.take_errors().is_empty());
 }
 
+/// The snapshot the app pushes for a creature the client has only just seen: the DESCRIPTOR's
+/// fields are in (level, reaction, the skinnable flag) and everything the creature record carries
+/// — name, subtitle, type word, rank, civilian/leader — is still absent, because they all arrive
+/// together in the one `SMSG_CREATURE_QUERY_RESPONSE` that fills `CGUnit+0xb30`.
+fn unqueried_wolf() -> UnitState {
+    UnitState {
+        exists: true,
+        has_object: true,
+        name: None,
+        health: 30,
+        max_health: 50,
+        level: 10,
+        reaction: 2, // hostile
+        skinnable: true,
+        guid: 0xF130_0000_0000_0001,
+        ..Default::default()
+    }
+}
+
+/// **A name still in flight titles the plate `UNKNOWNOBJECT` — never an empty line** (decision
+/// 2040, closing 2002's residue).
+///
+/// The builder's name read is `CGUnit_C::GetUnitName 0x609210` (`0x52a187`), the same resolver
+/// `UnitName 0x517020` delegates to, and every one of its misses — a null `CGUnit+0xb30`
+/// (`0x609353 je 0x609324`) among them — ends at the same `FrameScript_GetText("UNKNOWNOBJECT")`
+/// tail. So the verb and the plate answer the same string for the same instant, and because the
+/// string is read out of the VM's `_G` it translates with `GlobalStrings.lua`.
+///
+/// The builder has NO counterpart to `UnitName`'s two nils: the `"player"` fast path is the
+/// *binding's* (`0x517083`, before any resolve), so a player whose name has not arrived titles
+/// `UNKNOWNOBJECT` too; and a token resolving to nothing never reaches a builder at all — the
+/// entry gate hands back no object, `SetUnit` answers nil and no plate is drawn.
+///
+/// Failure looks like the empty first line the residue named: `TextLeft1` reads `""`, the plate
+/// measures to a blank row, and the level line reads as the tooltip's title.
+#[test]
+fn a_pending_name_titles_unknownobject_and_the_answer_replaces_it() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_unit("target", Some(unqueried_wolf()));
+    s.set_player_req_state(PlayerReqState {
+        level: 12,
+        ..Default::default()
+    });
+    s.run(
+        r#"
+        UNKNOWNOBJECT = "Unknown"   -- GlobalStrings.lua:4444, enUS
+        local a = CreateFrame("Button", "UF1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+        assert(tt:SetUnit("target") == 1, "a resolved unit shows, name or no name")
+        assert(TTTextLeft1:GetText() == UNKNOWNOBJECT,
+               "the title is the GlobalString, got '" .. tostring(TTTextLeft1:GetText()) .. "'")
+        -- The record's other lines are absent with it: no subtitle, and the level line takes the
+        -- bare TOOLTIP_UNIT_LEVEL template because both the CLASS and TYPE slots are the record's.
+        assert(TTTextLeft2:GetText() == "Level 10", "got " .. TTTextLeft2:GetText())
+        -- The descriptor's own lines are NOT the record's and show anyway.
+        assert(TTTextLeft3:GetText() == "Skinnable")
+    "#,
+    )
+    .unwrap();
+
+    // The query answers: the very next render replaces the placeholder with the real name and
+    // fills the record's lines. (Live, the hover feed re-drives this without the mouse moving —
+    // its rebuild key is the whole line-affecting snapshot, `ui_tooltip::lines_view`.)
+    let mut answered = unqueried_wolf();
+    answered.name = Some("Timber Wolf".into());
+    answered.subtitle = Some("Alpha".into());
+    answered.creature_type_name = Some("Beast".into());
+    answered.rank = 2;
+    s.set_unit("target", Some(answered));
+    s.run(
+        r#"
+        assert(TT:SetUnit("target") == 1)
+        assert(TTTextLeft1:GetText() == "Timber Wolf", "the answer replaced UNKNOWNOBJECT")
+        assert(TTTextLeft2:GetText() == "Alpha")
+        assert(TTTextLeft3:GetText() == "Level 10 Beast (Elite)", "got " .. TTTextLeft3:GetText())
+        assert(TTTextLeft4:GetText() == "Skinnable")
+    "#,
+    )
+    .unwrap();
+
+    // An EMPTY (or absent) global is the same miss as no global — `0x609324`'s own check, which
+    // falls to the binary's literal `0x860fa4`.
+    s.set_unit("target", Some(unqueried_wolf()));
+    s.run(
+        r#"
+        UNKNOWNOBJECT = ""
+        assert(TT:SetUnit("target") == 1)
+        assert(TTTextLeft1:GetText() == "Unknown Being", "got " .. TTTextLeft1:GetText())
+    "#,
+    )
+    .unwrap();
+
+    // The `"player"` fast path is the BINDING's, not the builder's: a player whose name-cache row
+    // has not answered titles the same placeholder, where `UnitName("player")` would push nil.
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            exists: true,
+            has_object: true,
+            name: None,
+            level: 12,
+            is_player: true,
+            player_controlled: true,
+            guid: 0x0000_0000_0000_0007,
+            ..Default::default()
+        }),
+    );
+    s.run(
+        r#"
+        UNKNOWNOBJECT = "Unknown"
+        assert(UnitName("player") == nil, "the binding's own fast path still pushes nil (2002)")
+        assert(TT:SetUnit("player") == 1)
+        assert(TTTextLeft1:GetText() == UNKNOWNOBJECT,
+               "the builder has no player fast path, got " .. tostring(TTTextLeft1:GetText()))
+    "#,
+    )
+    .unwrap();
+
+    // The GUID-0 counterpart: a recognised token naming nothing resolves to no object, so no
+    // builder runs — nil, and no plate. (There is no third answer; the builder never sees it.)
+    s.run(r#"assert(TT:SetUnit("party4") == nil, "an absent unit draws no plate at all")"#)
+        .unwrap();
+    assert!(s.take_errors().is_empty());
+}
+
 /// The faction-name line sits between the level line and "PvP" (the builder-tail block the §2
 /// order omitted — the director's Marshal McBride reference: Level, Stormwind, PvP); the
 /// CIVILIAN line is the dishonorable-kill warning, whole gate (`0x612550`): PvP bit + civilian

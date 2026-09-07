@@ -601,6 +601,9 @@ pub(crate) fn has_key(store: &ObjectFields, items: &mut Items, commands: &NetCom
             .is_some_and(|t| t.bag_family == BAG_FAMILY_KEYS)
     })
 }
+/// The wire's "player array" bag index — `INVENTORY_SLOT_BAG_0`. With it, [`ItemUse::slot`] IS the
+/// equipment index (0–18 worn, 19–22 the equipped bags).
+pub(crate) const PLAYER_ARRAY: u8 = 255;
 
 /// One resolved item-use click, as [`send_item_use`] needs it: the wire position, the two
 /// template scalars the fork reads, and the on-use SPELL the cast tail is keyed on.
@@ -676,48 +679,76 @@ pub(crate) enum ItemUseRoute {
     /// `ITEM_FLAG_CHARTER` (`0x2000`) opens the petition window — it sends
     /// `CMSG_PETITION_SHOW_SIGNATURES` for the instance, not `CMSG_USE_ITEM`.
     ///
-    /// **INFERRED, and this is the whole of the evidence.** wow-re has not carved `CGItem::Use`'s
-    /// charter branch, so the *position* of this arm and the opcode it sends are reasoned rather
-    /// than read:
+    /// **VERIFIED** (2026-09-03, correcting 1672's INFERRED reading — which reasoned it out and
+    /// got the opcode, the payload and the gate right, but placed the arm wrongly). wow-re HAD
+    /// carved this branch; the note simply was not found. Two records carry it:
     ///
-    /// - 1.12's shipped FrameXML special-cases a charter **nowhere** — `UseContainerItem` and
-    ///   `UseAction` are entirely generic — so whatever opens the window is engine-side.
-    /// - The charter template (entry 5863) has no ON_USE spell, no `StartQuest`, and
-    ///   `InventoryType = 0`, so *every* other arm of this fork declines it and the click currently
-    ///   reaches [`Self::Nothing`] and sends nothing at all. Right-clicking a charter in 1.12
-    ///   plainly does something, so an arm must exist.
-    /// - `CMSG_PETITION_SHOW_SIGNATURES` is the only opcode that opens the window, and vmangos's
-    ///   `HandleUseItemOpcode` has no charter branch — a `CMSG_USE_ITEM` here would be answered
-    ///   with nothing.
-    /// - The reference already keys other charter behaviour on this exact flag bit: the item
-    ///   tooltip's `ITEM_SIGNABLE` line and its enchant-line suppression both test `0x2000`
-    ///   (wow-re `system/ui/scratch/tooltip-content-law.md:485-505`).
+    /// - `ui/scratch/right-click-open.md` §3 row **#9**: gate `0x5d8f95 test ah,0x20` on the
+    ///   template's `Flags & 0x2000` (SIGNABLE / petition) → `0x5eef40`.
+    /// - `object-layer/ledger.tsv`'s row for `0x5eef40`: the **`CMSG_PETITION_SHOW_SIGNATURES`
+    ///   (`0x1BE`)** sender, `ret 8` — `Put32(0x1BE)` @ `0x5eef79`, `Put64(guid)` @ `0x5eef83`,
+    ///   send @ `0x5eef8e`, and **that is the whole packet: one uint64**. It returns immediately
+    ///   if both guid dwords are zero, and its **sole caller image-wide is `0x5d8fa6`** — this
+    ///   leg. It latches nothing and never reads the item's enchantment block.
     ///
-    /// The arm sits directly after the quest fork. Its **order relative to the quest fork is
-    /// unobservable** — no 1.12 item is both a charter and a quest starter — so nothing here rests
-    /// on it; a byte read of `0x5d8d00` settles both the position and the opcode.
+    /// **The position was wrong and is corrected here.** 1672 said "the arm sits directly after
+    /// the quest fork"; it is rung **#9**, after the requirement check (#4), the two readable
+    /// forks (#5 template PageText, #6 instance ITEM_TEXT_ID), the lost-control block (#7) and the
+    /// LOOTABLE → `CMSG_OPEN_ITEM` arm (#8). What our fork actually needs from that ordering still
+    /// holds — charter **after** quest, **before** the toggle/cast tail — so no behaviour moves;
+    /// what changes is that this is now read rather than reasoned, and a reader is not sent
+    /// looking for a byte read that already exists.
     ShowPetition { item: u64 },
+    /// **The disarmed refusal** — `CGItem::Use`'s rung **15 of 20** (decision 1903; wow-re
+    /// `disarm-followups-law.md` §2, byte-verified): using the very weapon a disarm has taken
+    /// raises `ERR_CANT_USE_DISARMED` (`0x16b` = 363) at `0x5d926d call 0x496720` and sends
+    /// **nothing**. This is the client refusing on its own — unlike `ERR_NOT_WHILE_DISARMED`
+    /// (61), which is a server `SMSG_INVENTORY_CHANGE_FAILURE` reason we only render.
+    ///
+    /// The condition is narrow, and none of it is about the clicked item's own class: the item
+    /// must be **worn in equipment slot 15 or 16**, the flag must be up, and *that hand* must be
+    /// the one the ladder hides. So right-clicking the sword in your bag is not refused, and
+    /// neither is a disarmed dual-wielder's off-hand weapon — only the hand the disarm took.
+    ///
+    /// It sits **above** the bind-confirm arm (`0x5d91d6`) and the cast tail (`0x5d9258`), so a
+    /// bind-on-use weapon does not raise its confirm dialog first.
+    CantUseDisarmed,
 }
 
 /// [`ItemUseRoute`]'s decision. `guid: None` (the instance never resolved) cannot address a
 /// questgiver, so it falls through to the ordinary path — the same fallback the equip fork makes.
 ///
 /// `aura_cancels` is the toggle predicate applied to the item's ON_USE spell id — the caller's
-/// [`crate::ui_action::toggle::active_action_toggle`], passed in so this stays a pure function of
-/// the click. The **order is the reference's**: the quest offer forks first (`0x5d8dcc`, well
-/// above), then the toggle scan (`0x5d9157`), then the cast tail (`0x5d9249`).
-pub(crate) fn item_use_route(it: ItemUse, aura_cancels: impl Fn(u32) -> bool) -> ItemUseRoute {
+/// [`crate::ui_action::toggle::active_action_toggle`], and `disarmed_hand` the equipment slot this
+/// character's disarm hides ([`crate::items::disarmed_equipment_slot`]); both are caster state,
+/// passed in so this stays a pure function of the click. The **order is the reference's**: the
+/// quest offer forks first (`0x5d8dcc`, well above), then the charter arm (#9, `0x5d8f95`), then
+/// the disarmed refusal (rung 15), then the toggle scan (`0x5d9157`), then the cast tail
+/// (`0x5d9249`).
+pub(crate) fn item_use_route(
+    it: ItemUse,
+    aura_cancels: impl Fn(u32) -> bool,
+    disarmed_hand: Option<u8>,
+) -> ItemUseRoute {
     if let Some(npc) = it.guid.filter(|_| it.start_quest != 0) {
         return ItemUseRoute::QuestOffer {
             npc,
             quest: it.start_quest,
         };
     }
-    // The charter arm (decision 1672) — see `ItemUseRoute::ShowPetition` for its evidence and for
-    // why its position here is unobservable. A charter with no resolved instance cannot be
-    // addressed, so it falls through to the ordinary path exactly as the quest fork does.
+    // The charter arm (decision 1672, its evidence upgraded to VERIFIED — see
+    // `ItemUseRoute::ShowPetition`): the reference's rung #9, after quest and before the cast
+    // tail, which is the ordering this fork needs. A charter with no resolved instance cannot be
+    // addressed, so it falls through to the ordinary path exactly as the quest fork does — and
+    // the reference agrees at the bytes, `0x5eef40` returning without sending on a zero guid.
     if let Some(item) = it.guid.filter(|_| it.is_charter) {
         return ItemUseRoute::ShowPetition { item };
+    }
+    // Rung 15 (decision 1903): the clicked item IS the weapon this disarm took. `bag_index == 255`
+    // is the player array, so `slot` is the equipment index — the reference gets there by scanning
+    // the equipment guids for the item and asking whether the index it lands on is the hidden one.
+    if disarmed_hand.is_some() && it.bag_index == PLAYER_ARRAY && Some(it.slot) == disarmed_hand {
+        return ItemUseRoute::CantUseDisarmed;
     }
     match it.use_spell {
         Some(spell) if aura_cancels(spell) => ItemUseRoute::ToggleCancel(spell),
@@ -776,6 +807,9 @@ pub(crate) fn send_item_use(
     script: &mut benilla_ui::script::UiScript,
     gate: &mut crate::ui_bind_confirm::BindGate,
     suppress: bool,
+    // The by-key local-refusal sink — passed explicitly rather than carried on `CastLadder`, so
+    // no system can reach it twice (decision 1903).
+    ui_errors: &mut crate::ui_action::UiErrorKeys,
 ) -> bool {
     // The toggle predicate, resolved once against the caster's live aura slots. Both inputs are
     // already here: the spell's ActiveIconID column and the caster's descriptor.
@@ -787,7 +821,21 @@ pub(crate) fn send_item_use(
             .self_store
             .is_some_and(|store| crate::ui_action::toggle::active_action_toggle(spell, d, store))
     };
-    match item_use_route(it, aura_cancels) {
+    // The disarm ladder, asked of the caster's own inventory (decision 1903).
+    let disarmed_hand = ctx.rel.self_store.and_then(|store| {
+        crate::items::disarmed_equipment_slot(store, &mut ladder.items, &ladder.commands)
+    });
+    match item_use_route(it, aura_cancels, disarmed_hand) {
+        ItemUseRoute::CantUseDisarmed => {
+            debug!(
+                "ui_items: item use refused — that hand is disarmed (slot {})",
+                it.slot
+            );
+            ui_errors
+                .0
+                .push(crate::ui_action::UiError::key("ERR_CANT_USE_DISARMED"));
+            false
+        }
         ItemUseRoute::ToggleCancel(spell) => {
             debug!("ui_items: item use {spell} re-pressed — its aura cancels, no cast");
             let _ = ladder
@@ -1181,6 +1229,61 @@ mod tests {
         assert_eq!(wire_pos(KEYRING_CONTAINER, 0), None);
     }
 
+    /// **The disarmed refusal, rung 15** (decision 1903). The condition is about the item's WORN
+    /// POSITION, not its class or its spell: only the weapon in the hand the ladder hides is
+    /// refused, and the refusal beats the cast tail below it.
+    #[test]
+    fn using_the_hand_a_disarm_took_is_refused_locally() {
+        let sword = 0x4000_0000_0000_0001_u64;
+        // A weapon with an ON_USE spell, worn at `slot`, clicked out of the player array.
+        let worn = |slot: u8| ItemUse {
+            entry: 7,
+            guid: Some(sword),
+            start_quest: 0,
+            bag_index: super::PLAYER_ARRAY,
+            slot,
+            spell_index: 0,
+            use_spell: Some(8690),
+            on_object: None,
+            is_charter: false,
+        };
+        let never = |_: u32| false;
+
+        // The hidden hand: refused, and the cast tail below it never runs.
+        assert_eq!(
+            item_use_route(worn(15), never, Some(15)),
+            ItemUseRoute::CantUseDisarmed
+        );
+        // The OTHER hand of a disarmed dual-wielder is not hidden — it casts as usual.
+        assert_eq!(
+            item_use_route(worn(16), never, Some(15)),
+            ItemUseRoute::Cast(8690)
+        );
+        // The same item sitting in a BAG is not worn in that hand at all: the reference's scan
+        // resolves an equipment index or nothing, so a bag click is never this refusal.
+        assert_eq!(
+            item_use_route(
+                ItemUse {
+                    bag_index: 1,
+                    ..worn(15)
+                },
+                never,
+                Some(15)
+            ),
+            ItemUseRoute::Cast(8690)
+        );
+        // Flag down: nothing is hidden.
+        assert_eq!(
+            item_use_route(worn(15), never, None),
+            ItemUseRoute::Cast(8690)
+        );
+        // The off hand as the hidden one — the empty/non-weapon main-hand rung of the ladder.
+        assert_eq!(
+            item_use_route(worn(16), never, Some(16)),
+            ItemUseRoute::CantUseDisarmed
+        );
+    }
+
     /// The pure fork ([`item_use_route`], decisions 0664/0914), all four arms: a non-zero
     /// `StartQuest` diverts to `CMSG_QUESTGIVER_QUERY_QUEST` addressed to the ITEM's guid (arm #3,
     /// `0x5d8dd2` — it returns before the cast tail); an ON_USE spell whose aura is live on the
@@ -1208,26 +1311,26 @@ mod tests {
         };
         let never = |_| false;
         assert_eq!(
-            item_use_route(it(Some(letter), 373, None), never),
+            item_use_route(it(Some(letter), 373, None), never, None),
             ItemUseRoute::QuestOffer {
                 npc: letter,
                 quest: 373
             }
         );
         assert_eq!(
-            item_use_route(it(Some(letter), 0, Some(8690)), never),
+            item_use_route(it(Some(letter), 0, Some(8690)), never, None),
             ItemUseRoute::Cast(8690),
             "a hearthstone takes the cast tail"
         );
         assert_eq!(
-            item_use_route(it(Some(letter), 0, None), never),
+            item_use_route(it(Some(letter), 0, None), never, None),
             ItemUseRoute::Nothing,
             "no ON_USE block — the ref sends nothing"
         );
         // No resolved instance (the template is still in flight): a query against guid 0 is
         // impossible, so the ordinary path runs — the equip fork's own fallback.
         assert_eq!(
-            item_use_route(it(None, 373, Some(8690)), never),
+            item_use_route(it(None, 373, Some(8690)), never, None),
             ItemUseRoute::Cast(8690)
         );
     }
@@ -1256,24 +1359,24 @@ mod tests {
         };
         let never = |_| false;
         assert_eq!(
-            item_use_route(it(Some(charter), true, None), never),
+            item_use_route(it(Some(charter), true, None), never, None),
             ItemUseRoute::ShowPetition { item: charter },
             "the charter opens its petition window"
         );
         // Without the flag, the very same item is the reference's silent no-op — which is what a
         // charter click did before this arm existed.
         assert_eq!(
-            item_use_route(it(Some(charter), false, None), never),
+            item_use_route(it(Some(charter), false, None), never, None),
             ItemUseRoute::Nothing
         );
         // No resolved instance: nothing to address the show-signatures with, so it falls through
         // exactly as the quest fork does on the same condition.
         assert_eq!(
-            item_use_route(it(None, true, None), never),
+            item_use_route(it(None, true, None), never, None),
             ItemUseRoute::Nothing
         );
         assert_eq!(
-            item_use_route(it(None, true, Some(8690)), never),
+            item_use_route(it(None, true, Some(8690)), never, None),
             ItemUseRoute::Cast(8690)
         );
     }
@@ -1300,25 +1403,28 @@ mod tests {
         };
         let mounted = |spell: u32| spell == SUMMON_HORSE;
         assert_eq!(
-            item_use_route(it(0, Some(SUMMON_HORSE)), mounted),
+            item_use_route(it(0, Some(SUMMON_HORSE)), mounted, None),
             ItemUseRoute::ToggleCancel(SUMMON_HORSE),
             "mounted: the click dismounts — CMSG_CANCEL_AURA, no CMSG_USE_ITEM",
         );
         assert_eq!(
-            item_use_route(it(0, Some(SUMMON_HORSE)), |_| false),
+            item_use_route(it(0, Some(SUMMON_HORSE)), |_| false, None),
             ItemUseRoute::Cast(SUMMON_HORSE),
             "not mounted: the very same click casts",
         );
         // Order: the quest offer forks at `0x5d8dcc`, above the toggle scan at `0x5d9157`.
         assert_eq!(
-            item_use_route(it(373, Some(SUMMON_HORSE)), mounted),
+            item_use_route(it(373, Some(SUMMON_HORSE)), mounted, None),
             ItemUseRoute::QuestOffer {
                 npc: 0x4000_0000_0000_0BAD,
                 quest: 373
             },
         );
         // …and an item with no ON_USE block has nothing to cancel, whatever the predicate says.
-        assert_eq!(item_use_route(it(0, None), |_| true), ItemUseRoute::Nothing);
+        assert_eq!(
+            item_use_route(it(0, None), |_| true, None),
+            ItemUseRoute::Nothing
+        );
     }
 
     /// A dozen representative `InventoryType`s (decision 0208 phase 1b's own ask), spanning the

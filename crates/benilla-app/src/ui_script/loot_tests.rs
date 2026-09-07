@@ -478,7 +478,8 @@ fn shipped_loot_pushed_to_center_by_merchant() {
         load_xml(&s, f);
     }
     load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
-    load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     // Loot opens onto the empty left slot.
@@ -594,11 +595,11 @@ fn the_loot_window_draws_over_the_party_frames() {
 /// previews the row's item in the dressing room (decision 1060), SHIFT posts its link into an open
 /// chat edit box (decision 1059) — and **neither loots**.
 ///
-/// That last clause is the whole point of the test, and it is ours to get right rather than the
-/// reference's: in the real client the loot itself is the C `LootButton` widget's click behaviour
-/// (l.94's `button:SetSlot(slot)`), so its Lua arms fall through harmlessly; ours owns the
-/// `LootSlot` call, so the arms had to grow a `return` the reference does not have. The unmodified
-/// click still loots — the regression that would otherwise ship silently.
+/// That last clause is the whole point of the test, and it is the WIDGET's to get right: the loot
+/// itself is the `LootButton` kind's click behaviour (`benilla-ui` `script/button.rs`, decision
+/// 1799 — `l.94`'s `button:SetSlot(slot)` is what arms it), gated on no shift/ctrl/alt, which is
+/// why the stock `LootFrameItem_OnClick` never calls a take itself and needs no `return`. The
+/// unmodified click still loots — the regression that would otherwise ship silently.
 #[test]
 fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
     const WOOL_LINK: &str = "|cffffffff|Hitem:2589:0:0:0|h[Wool Cloth]|h|r";
@@ -608,11 +609,18 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
         load_xml(&s, f);
     }
     for file in [
-        "UIParent.xml", // BenillaChatEdit_InsertLink, the shared shift-insert helper
+        r"Interface\FrameXML\UIParent.xml", // UIParent + UIParent.lua, the reference's own (1988)
         "Interface\\FrameXML\\LootFrame.xml",
-        "DressUpFrame.xml",
+        "Interface\\FrameXML\\DressUpFrame.xml",
         "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
-        "ChatFrame.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\ChatFrame.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        "Interface\\FrameXML\\UIPanelTemplates.lua",
+        "Interface\\FrameXML\\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\FloatingChatFrame.xml",
     ] {
         load_xml(&s, file);
     }

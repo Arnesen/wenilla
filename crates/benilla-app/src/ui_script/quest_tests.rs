@@ -1,7 +1,7 @@
 //! The shipped **questgiver window** open/close sound, driven engine-only (no Bevy): the real
-//! `assets/ui/QuestFrame.xml` loaded behind `UiPanels.xml` and shown/hidden through the wire events.
-//! The window-sound convention's machine check for the quest arc (decision 0090), the sibling of the
-//! merchant/gossip/bag/loot sound tests.
+//! `Interface\FrameXML\QuestFrame.xml` loaded behind `UIParent.xml` and shown/hidden through the
+//! wire events. The window-sound convention's machine check for the quest arc (decision 0090), the
+//! sibling of the merchant/gossip/bag/loot sound tests.
 
 use benilla_ui::script::{QuestPanel, QuestState, ScriptValue, SoundRequest, UiScript};
 
@@ -17,17 +17,26 @@ use super::test_ui::load_ui as load_xml;
 fn questgiver_show_hide_plays_open_and_close_kits() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     // The BenillaMoney_* purse helpers the quest reward/progress panels repaint through live in
     // MerchantFrame.xml (the same documented cross-window dep the bag tests load).
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-    load_xml(&s, "QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     // Hidden at load: no open sound (never transitions on startup).
     assert!(
@@ -79,15 +88,24 @@ fn questgiver_show_hide_plays_open_and_close_kits() {
 fn panel_events_show_exactly_one_child_panel_and_hide_the_others() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-    load_xml(&s, "QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     let panels = [
         "QuestFrameGreetingPanel",
@@ -104,10 +122,15 @@ fn panel_events_show_exactly_one_child_panel_and_hide_the_others() {
         active_titles: vec!["Report to Goldshire".into()],
         ..QuestState::default()
     }));
-    s.fire_event(
-        "QUEST_GREETING",
-        vec![ScriptValue::Str("Deputy Willem".into())],
+    s.set_unit(
+        "npc",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Deputy Willem".into()),
+            ..Default::default()
+        }),
     );
+    s.fire_event("QUEST_GREETING", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     for name in panels {
         assert_eq!(
@@ -130,10 +153,15 @@ fn panel_events_show_exactly_one_child_panel_and_hide_the_others() {
         title: "A Threat Within".into(),
         ..QuestState::default()
     }));
-    s.fire_event(
-        "QUEST_DETAIL",
-        vec![ScriptValue::Str("Deputy Willem".into())],
+    s.set_unit(
+        "npc",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Deputy Willem".into()),
+            ..Default::default()
+        }),
     );
+    s.fire_event("QUEST_DETAIL", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     for name in panels {
         assert_eq!(
@@ -159,15 +187,24 @@ fn panel_events_show_exactly_one_child_panel_and_hide_the_others() {
 fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-    load_xml(&s, "QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     let choice = |name: &str, quality: u32| benilla_ui::script::QuestItemView {
         item_id: 0,
@@ -188,10 +225,15 @@ fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
         reward_money: 150,
         ..QuestState::default()
     }));
-    s.fire_event(
-        "QUEST_DETAIL",
-        vec![ScriptValue::Str("Marshal McBride".into())],
+    s.set_unit(
+        "npc",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Marshal McBride".into()),
+            ..Default::default()
+        }),
     );
+    s.fire_event("QUEST_DETAIL", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     assert!(s.eval::<bool>("return QuestDetailItem1:IsShown()").unwrap());
@@ -205,7 +247,7 @@ fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
     assert_eq!(
         s.eval::<String>("return QuestDetailItemChooseText:GetText()")
             .unwrap(),
-        "You may choose one of these rewards:"
+        "You will be able to choose one of these rewards:"
     );
     assert_eq!(
         s.eval::<String>("return QuestDetailItemReceiveText:GetText()")
@@ -232,8 +274,11 @@ fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
     // arm at all: an unmodified click must not raise and must not set an itemChoice.
     s.run("QuestDetailItem1:Click()").ok();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    // The reward panel's `itemChoice` is set only by its own OnShow (stock QuestFrame.lua:104,
+    // `= 0`) and a reward-row click; on the detail panel it is simply unset.
     assert_eq!(
-        s.eval::<i64>("return QuestFrame.itemChoice").unwrap(),
+        s.eval::<i64>("return QuestFrameRewardPanel.itemChoice or 0")
+            .unwrap(),
         0,
         "a detail-panel row never selects a reward"
     );
@@ -245,15 +290,24 @@ fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
 fn reward_panel_choice_click_selects_and_completes_with_zero_based_index() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-    load_xml(&s, "QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     let choice = |name: &str| benilla_ui::script::QuestItemView {
         item_id: 0,
@@ -271,10 +325,15 @@ fn reward_panel_choice_click_selects_and_completes_with_zero_based_index() {
         choices: vec![choice("Worn Sword"), choice("Worn Mace")],
         ..QuestState::default()
     }));
-    s.fire_event(
-        "QUEST_COMPLETE",
-        vec![ScriptValue::Str("Marshal McBride".into())],
+    s.set_unit(
+        "npc",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Marshal McBride".into()),
+            ..Default::default()
+        }),
     );
+    s.fire_event("QUEST_COMPLETE", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     assert!(
@@ -311,25 +370,39 @@ fn reward_panel_choice_click_selects_and_completes_with_zero_based_index() {
 fn greeting_goodbye_button_closes_the_window() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-    load_xml(&s, "QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     s.set_quest(Some(QuestState {
         panel: QuestPanel::Greeting,
         greeting: "Hello".into(),
         ..QuestState::default()
     }));
-    s.fire_event(
-        "QUEST_GREETING",
-        vec![ScriptValue::Str("Deputy Willem".into())],
+    s.set_unit(
+        "npc",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Deputy Willem".into()),
+            ..Default::default()
+        }),
     );
+    s.fire_event("QUEST_GREETING", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(s.eval::<bool>("return QuestFrame:IsVisible()").unwrap());
 
@@ -355,15 +428,24 @@ fn greeting_goodbye_button_closes_the_window() {
 fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-    load_xml(&s, "QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
     // Planted, not shipped: instant text is OFF out of the box (see the doc comment).
     s.eval::<()>(r#"QUEST_FADING_DISABLE = "1""#).unwrap();
     s.set_quest(Some(QuestState {
@@ -372,10 +454,15 @@ fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
         body: "Kill kobolds.".into(),
         ..QuestState::default()
     }));
-    s.fire_event(
-        "QUEST_DETAIL",
-        vec![ScriptValue::Str("Deputy Willem".into())],
+    s.set_unit(
+        "npc",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Deputy Willem".into()),
+            ..Default::default()
+        }),
     );
+    s.fire_event("QUEST_DETAIL", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(s
         .eval::<bool>("return QuestFrameAcceptButton:IsShown()")
@@ -470,15 +557,24 @@ fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
 fn write_on_still_fades_when_instant_text_is_off() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-    load_xml(&s, "QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
     s.eval::<()>(r#"QUEST_FADING_DISABLE = "0""#).unwrap();
     s.set_quest(Some(QuestState {
         panel: QuestPanel::Detail,
@@ -486,10 +582,15 @@ fn write_on_still_fades_when_instant_text_is_off() {
         body: "Kill kobolds.".into(),
         ..QuestState::default()
     }));
-    s.fire_event(
-        "QUEST_DETAIL",
-        vec![ScriptValue::Str("Deputy Willem".into())],
+    s.set_unit(
+        "npc",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Deputy Willem".into()),
+            ..Default::default()
+        }),
     );
+    s.fire_event("QUEST_DETAIL", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     // Mid-write (reveal edge at char 4 of 13): the quill scratches, Accept stays dead.
@@ -534,15 +635,24 @@ fn write_on_still_fades_when_instant_text_is_off() {
 fn npc_name_reaches_the_title_bar_on_open_and_on_refresh() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-    load_xml(&s, "QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     s.set_quest(Some(QuestState {
         panel: QuestPanel::Detail,
@@ -550,10 +660,15 @@ fn npc_name_reaches_the_title_bar_on_open_and_on_refresh() {
         body: "Kill things.".into(),
         ..QuestState::default()
     }));
-    s.fire_event(
-        "QUEST_DETAIL",
-        vec![ScriptValue::Str("Marshal McBride".into())],
+    s.set_unit(
+        "npc",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Marshal McBride".into()),
+            ..Default::default()
+        }),
     );
+    s.fire_event("QUEST_DETAIL", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert_eq!(
         s.eval::<String>("return getglobal('QuestFrameNpcNameText'):GetText() or ''")
@@ -600,15 +715,28 @@ fn npc_name_reaches_the_title_bar_on_open_and_on_refresh() {
 fn greeting_panel_title_rows_grow_to_their_wrapped_titles() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
+    // Stock sizes each row at show time — `SetHeight(GetTextHeight() + 2)` right after SetText
+    // (QuestFrame.lua:245) — which the reference can do because its text measure is synchronous.
+    // So is the app's (measure.rs); the harness installs the same seam's stand-in.
+    s.set_text_measurer(Box::new(super::FixedWidthFont(7.0)));
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-    load_xml(&s, "QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     s.set_quest(Some(QuestState {
         panel: QuestPanel::Greeting,
@@ -620,10 +748,15 @@ fn greeting_panel_title_rows_grow_to_their_wrapped_titles() {
         ],
         ..QuestState::default()
     }));
-    s.fire_event(
-        "QUEST_GREETING",
-        vec![ScriptValue::Str("Deputy Willem".into())],
+    s.set_unit(
+        "npc",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Deputy Willem".into()),
+            ..Default::default()
+        }),
     );
+    s.fire_event("QUEST_GREETING", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     let answer_measures = |s: &mut UiScript| {
@@ -656,7 +789,7 @@ fn greeting_panel_title_rows_grow_to_their_wrapped_titles() {
     };
     let (t1, b1, h1) = row(1);
     let (t2, b2, h2) = row(2);
-    assert!(h1 >= 28.0 && h2 >= 28.0, "both titles wrap: {h1}, {h2}");
+    assert!(h1 >= 24.0 && h2 >= 24.0, "both titles wrap: {h1}, {h2}");
     assert!(
         (t1 - b1 - (h1 + 2.0)).abs() < 0.5,
         "row 1 is its wrapped title + 2: got {}, title {h1}",
@@ -687,19 +820,31 @@ fn greeting_panel_title_rows_grow_to_their_wrapped_titles() {
 fn reward_rows_preview_and_post_without_selecting_the_choice() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
-    load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "QuestFrame.xml");
-    load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink lives here
-    load_xml(&s, "DressUpFrame.xml"); // DressUpItemLink lives here
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\DressUpFrame.xml"); // DressUpItemLink lives here
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit its menus build from
-    load_xml(&s, "ChatFrame.xml"); // ChatFrameEditBox lives here
+    load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml"); // ChatFrameEditBox lives here
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
 
     const SWORD: &str = "|cffffffff|Hitem:2299:0:0:0|h[Worn Sword]|h|r";
     const MACE: &str = "|cffffffff|Hitem:2300:0:0:0|h[Worn Mace]|h|r";
@@ -727,10 +872,15 @@ fn reward_rows_preview_and_post_without_selecting_the_choice() {
         )],
         ..QuestState::default()
     }));
-    s.fire_event(
-        "QUEST_COMPLETE",
-        vec![ScriptValue::Str("Marshal McBride".into())],
+    s.set_unit(
+        "npc",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Marshal McBride".into()),
+            ..Default::default()
+        }),
     );
+    s.fire_event("QUEST_COMPLETE", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     // The regression this fork could break: a PLAIN click still picks the choice (the ref's third
@@ -738,7 +888,8 @@ fn reward_rows_preview_and_post_without_selecting_the_choice() {
     // move it if they leaked into the select arm.
     s.run("QuestRewardItem2:Click()").unwrap();
     assert_eq!(
-        s.eval::<i64>("return QuestFrame.itemChoice").unwrap(),
+        s.eval::<i64>("return QuestFrameRewardPanel.itemChoice")
+            .unwrap(),
         2,
         "a plain click still selects the reward choice"
     );
@@ -762,7 +913,8 @@ fn reward_rows_preview_and_post_without_selecting_the_choice() {
         "shift-click posted choice 1's link"
     );
     assert_eq!(
-        s.eval::<i64>("return QuestFrame.itemChoice").unwrap(),
+        s.eval::<i64>("return QuestFrameRewardPanel.itemChoice")
+            .unwrap(),
         2,
         "the shift arm returns — it must NOT also select the clicked choice"
     );
@@ -793,7 +945,8 @@ fn reward_rows_preview_and_post_without_selecting_the_choice() {
         "ctrl-click opened the room wearing choice 1"
     );
     assert_eq!(
-        s.eval::<i64>("return QuestFrame.itemChoice").unwrap(),
+        s.eval::<i64>("return QuestFrameRewardPanel.itemChoice")
+            .unwrap(),
         2,
         "the ctrl arm returns — it must NOT also select the clicked choice"
     );

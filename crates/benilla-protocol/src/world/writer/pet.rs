@@ -120,4 +120,10 @@ impl WorldWriter {
             &messages::pet_rename(pet_guid, name),
         )
     }
+
+    /// Unlearn the pet's skills at its trainer (`CMSG_PET_UNLEARN`) — `ConfirmPetUnlearn()`'s
+    /// packet, carrying the latched trainer guid (decision 1963).
+    pub fn pet_unlearn(&mut self, trainer: u64) -> Result<()> {
+        self.send(opcode::CMSG_PET_UNLEARN, &messages::pet_unlearn(trainer))
+    }
 }

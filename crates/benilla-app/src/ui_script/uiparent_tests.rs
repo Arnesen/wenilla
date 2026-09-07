@@ -1,4 +1,4 @@
-//! `assets/ui/UIParent.xml`'s addon-facing helpers, driven from Lua the way an addon drives them.
+//! Stock `Interface\FrameXML\UIParent.xml`'s addon-facing helpers, driven from Lua the way an addon drives them.
 //!
 //! The panel/ESC machinery in that file is covered by `panel_tests` and `escape_tests`; this is for
 //! the loose functions the reference's `UIParent.lua` also defines, which benilla itself may never
@@ -9,16 +9,13 @@ use benilla_ui::script::UiScript;
 /// Fonts (for any `inherits=`), then UIParent — the manifest's order.
 fn ui_parent() -> UiScript {
     let mut s = UiScript::new().unwrap();
-    for file in ["Fonts.xml", "UIParent.xml"] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
+    // Through the chain-aware reader: this list names chain files now, and a
+    // reader that joins `assets/ui` cannot resolve one (1838, 1887, 1888).
+    for file in [
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\UIParent.xml",
+    ] {
+        crate::ui_script::test_ui::load_ui(&s, file);
     }
     s.set_screen_size(1024.0, 768.0);
     s.run(
@@ -166,13 +163,8 @@ fn mouse_is_over_survives_a_frame_with_no_resolved_rect() {
 #[test]
 fn raid_class_colors_is_the_references_own_nine() {
     let mut s = UiScript::new().unwrap();
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/Fonts.xml"),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    // RAID_CLASS_COLORS comes off the chain with the font registry since 1888.
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
     s.set_screen_size(1024.0, 768.0);
 
     // PaintChips-2.0's own line, verbatim in shape — the one that was raising.
@@ -225,13 +217,8 @@ fn raid_class_colors_is_the_references_own_nine() {
 #[test]
 fn the_font_path_globals_are_the_references_own_four() {
     let mut s = UiScript::new().unwrap();
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/Fonts.xml"),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    // The four font-path globals come off the chain with the registry since 1888.
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
     s.set_screen_size(1024.0, 768.0);
 
     for name in [
@@ -298,5 +285,44 @@ fn the_font_path_globals_are_the_references_own_four() {
         s.eval::<String>("return LIGHTYELLOW_FONT_COLOR_CODE")
             .unwrap(),
         "|cffffff9a"
+    );
+}
+
+/// `MouseIsOver` divides the cursor by the frame's effective scale, as the reference does
+/// (UIParent.lua l.1389-1390): a frame scaled to 0.5 whose screen footprint holds the cursor
+/// answers 1 — with the division written out (the old "the scale is the constant 1" note) it
+/// answered nil under the very cursor that had just entered it (decision 1985).
+#[test]
+fn mouse_is_over_reads_a_scaled_frame_in_its_own_units() {
+    let mut s = ui_parent();
+    s.run(
+        r#"Scaled = CreateFrame("Frame", "Scaled", UIParent) Scaled:SetWidth(200) Scaled:SetHeight(100)
+           Scaled:SetPoint("BOTTOMLEFT", 100, 100) Scaled:SetScale(0.5)"#,
+    )
+    .unwrap();
+    s.resolve();
+    // The frame's screen footprint is its own-unit box times its effective scale (offsets and
+    // size both scale); the probe sits at its centre, then just past its right edge.
+    let (l, r, b, t, eff) = s
+        .eval::<(f64, f64, f64, f64, f64)>(
+            "return Scaled:GetLeft(), Scaled:GetRight(), Scaled:GetBottom(), Scaled:GetTop(), Scaled:GetEffectiveScale()",
+        )
+        .unwrap();
+    assert!(
+        (eff - 0.5).abs() < 1e-6 && (r - l - 200.0).abs() < 1e-3,
+        "own units: {l}..{r} at {eff}"
+    );
+    let (cx, cy) = (((l + r) * 0.5 * eff) as f32, ((b + t) * 0.5 * eff) as f32);
+    s.mouse_move(cx, cy);
+    assert_eq!(
+        s.eval::<Option<i64>>("return MouseIsOver(Scaled)").unwrap(),
+        Some(1),
+        "the cursor at the scaled footprint's centre ({cx}, {cy})"
+    );
+    s.mouse_move((r * eff) as f32 + 10.0, cy);
+    assert_eq!(
+        s.eval::<Option<i64>>("return MouseIsOver(Scaled)").unwrap(),
+        None,
+        "past the scaled footprint (inside the unscaled one) is outside"
     );
 }

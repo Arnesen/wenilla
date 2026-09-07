@@ -122,7 +122,12 @@ mod tests {
 
         let mut spawned: Vec<(Entity, Vec3, Entity)> = app
             .world_mut()
-            .query::<(Entity, &PointLight, &Transform, &ChildOf)>()
+            .query::<(
+                Entity,
+                &benilla_world::lighting::WorldPointLight,
+                &Transform,
+                &ChildOf,
+            )>()
             .iter(app.world())
             .map(|(e, _, t, c)| (e, t.translation, c.parent()))
             .collect();
@@ -145,12 +150,11 @@ mod tests {
         let pl = app
             .world()
             .entity(spawned[0].0)
-            .get::<PointLight>()
+            .get::<benilla_world::lighting::WorldPointLight>()
             .unwrap();
-        let lin = pl.color.to_linear();
         let recovered = pl.intensity / (4.0 * std::f32::consts::PI);
         assert!(
-            (lin.red * recovered - 1.4).abs() < 1e-3,
+            (pl.color[0] * recovered - 1.4).abs() < 1e-3,
             "colour × intensity survives the packing"
         );
     }

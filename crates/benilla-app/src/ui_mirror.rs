@@ -3,7 +3,7 @@
 //!
 //! The net bridge queues [`MirrorTimerEdge`]s and the drain fires the reference client's
 //! FrameScript events into the script VM — `MIRROR_TIMER_START` / `_PAUSE` / `_STOP`, the exact
-//! contract `assets/ui/MirrorTimer.xml` (the transcribed 1.12 `MirrorTimer1/2/3`) registers for.
+//! contract stock `Interface\FrameXML\MirrorTimer.xml` (`MirrorTimer1/2/3`) registers for.
 //! The bars themselves are the reference's: the frame stores the value and integrates
 //! `value + scale * elapsed` every OnUpdate, so a packet every few seconds is enough to paint a
 //! smooth countdown.
@@ -114,6 +114,7 @@ fn feed_mirror_timers(
     script: Option<NonSendMut<UiScript>>,
     mut feed: ResMut<MirrorTimerFeed>,
     spells: Option<Res<Spells>>,
+    mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
 ) {
     let Some(mut script) = script else {
         // No VM (a capture/headless run): drop the edges rather than let them pile up unbounded.
@@ -135,6 +136,26 @@ fn feed_mirror_timers(
         let Some(kind) = MirrorTimerKind::from_wire(raw) else {
             continue;
         };
+        // The handler's two tutorial arms (`0x5e7ab0` type 0, `0x5e7acd` type 1; 1976).
+        if matches!(edge, MirrorTimerEdge::Start(_)) {
+            match kind {
+                MirrorTimerKind::Fatigue => {
+                    if let Some(t) = tutorials.as_mut() {
+                        t.write(crate::tutorial::TutorialEvent::trigger(
+                            crate::tutorial::id::FATIGUE,
+                        ));
+                    }
+                }
+                MirrorTimerKind::Breath => {
+                    if let Some(t) = tutorials.as_mut() {
+                        t.write(crate::tutorial::TutorialEvent::trigger(
+                            crate::tutorial::id::BREATH,
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
         let name = ScriptValue::Str(script_name(kind).into());
         let (event, args): (&str, Vec<ScriptValue>) = match edge {
             MirrorTimerEdge::Start(start) => (

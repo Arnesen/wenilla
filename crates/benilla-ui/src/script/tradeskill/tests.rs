@@ -814,3 +814,82 @@ fn same_tier_recipes_order_by_product_item_level_before_name() {
         .collect();
     assert_eq!(names, ["Cloth", "Mmm Robe", "Zzz Robe", "Aaa Robe"]);
 }
+
+/// The link pair (wow-re `tradeskill-craft-item-links.md`, 1973): the product's link in its
+/// quality colour with zero tokens; ZERO values for a header, a missing product or an uncached
+/// template; the reagent link nil on the same misses and always exactly one value; the typo'd
+/// reagent Usage; the number gate.
+#[test]
+fn the_link_verbs_answer_the_clients_shapes() {
+    let mut s = UiScript::new().unwrap();
+    s.set_trade_skill(Some(state()));
+    // Row 1 is a header; row 2 the first VISIBLE recipe — found by the name the API answers for
+    // it, since the visible order is the grouped one, not the pushed one. Seed its product's and
+    // one reagent's templates.
+    let st = state();
+    let row2 = s.eval::<String>("return (GetTradeSkillInfo(2))").unwrap();
+    let r = st
+        .recipes
+        .iter()
+        .find(|r| r.name == row2)
+        .expect("row 2 is a pushed recipe");
+    s.set_item_template(
+        r.product_item,
+        crate::script::ItemTemplateView {
+            name: "Copper Chain Belt".into(),
+            quality: 2,
+            ..Default::default()
+        },
+    );
+    assert!(
+        s.eval::<bool>("return select('#', GetTradeSkillItemLink(1)) == 0")
+            .unwrap(),
+        "a header row answers zero values"
+    );
+    let link = s
+        .eval::<String>("return (GetTradeSkillItemLink(2))")
+        .unwrap();
+    assert_eq!(
+        link,
+        format!(
+            "|cff1eff00|Hitem:{}:0:0:0|h[Copper Chain Belt]|h|r",
+            r.product_item
+        )
+    );
+    assert!(
+        s.eval::<bool>("return GetTradeSkillReagentItemLink(2, 1) == nil")
+            .unwrap(),
+        "an uncached reagent template is nil, and nothing is queried"
+    );
+    assert!(s.take_item_stat_asks().is_empty());
+    s.set_item_template(
+        r.reagents[0].item,
+        crate::script::ItemTemplateView {
+            name: "Copper Bar".into(),
+            quality: 1,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        s.eval::<String>("return GetTradeSkillReagentItemLink(2, 1)")
+            .unwrap(),
+        format!(
+            "|cffffffff|Hitem:{}:0:0:0|h[Copper Bar]|h|r",
+            r.reagents[0].item
+        )
+    );
+    assert!(
+        s.eval::<bool>("return select('#', GetTradeSkillReagentItemLink(2, 9)) == 1 and GetTradeSkillReagentItemLink(2, 9) == nil")
+            .unwrap(),
+        "past the reagents: still exactly one value, nil"
+    );
+    let err = s
+        .run("GetTradeSkillReagentItemLink(2, nil)")
+        .expect_err("non-number")
+        .to_string();
+    assert!(
+        err.contains("Usage: GetTradeReagentSkillItemLink("),
+        "{err}"
+    );
+    assert!(s.run("GetTradeSkillItemLink('x')").is_err());
+}

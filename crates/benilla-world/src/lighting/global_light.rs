@@ -55,7 +55,7 @@ use crate::view::WorldCamera;
 /// allows. Keeping the probes out of this struct keeps it stack-cheap: the ExtractResource clone
 /// runs every frame, and a ~900 KB by-value blob overflowed a render-thread stack (measured live).
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 struct LightStd430 {
     rows: [[f32; 4]; LIGHT_HEADER_ROWS],
     points: [[f32; 4]; 2 * MAX_POINT_LIGHTS],
@@ -175,6 +175,28 @@ const POINT_PACK_RADIUS: f32 = 300.0;
 #[derive(Component)]
 pub struct LightRooms(pub(crate) crate::wmo_portal::WmoGroupVis);
 
+/// **An authored WoW point light source** — an M2 light, a WMO MOLT omni, a carried torch —
+/// as the packed light table reads it. This used to be Bevy's `PointLight`, kept purely as a
+/// data carrier: [`build_light_data`] was its only reader in the engine, every lit surface
+/// takes its lights from the shared table (0273/0285), and no shader here consumes Bevy's
+/// clustered lights at all. Bevy nonetheless ran its whole light lane over every one of them
+/// each frame — `assign_objects_to_clusters` (a `Vec` rebuilt per frame with a `RenderLayers`
+/// clone per light, even with the world camera's `ClusterConfig::None`), `extract_lights`,
+/// `prepare_lights`, the light visibility check — a city of lamps' worth of work for nothing,
+/// ~2 % of the alone frame on the crowd rig's sampled profile (decision 1945). The fields keep
+/// the `PointLight` numbers exactly (`intensity` in the same 4π-scaled units), so the packing
+/// below and every recipe are unchanged.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct WorldPointLight {
+    /// Linear RGB, hue preserved.
+    pub color: [f32; 3],
+    /// `4π × authored intensity` — the `PointLight` convention, so the packer's `/(4π)` reads
+    /// the authored product back.
+    pub intensity: f32,
+    /// The ≤3-nearest selection-candidacy radius (yd) — see `terrain_stream::point_light`.
+    pub range: f32,
+}
+
 /// Main-world resource holding the packed light for this frame; extracted into the render world where
 /// [`upload_light`] writes it. Rebuilt every frame by [`build_light_data`] (cheap — one std430 pack).
 #[derive(Resource, Clone, Copy, ExtractResource)]
@@ -271,7 +293,7 @@ fn build_light_data(
     debug: Res<DebugState>,
     view: Res<ViewDistance>,
     cam: Query<&GlobalTransform, With<WorldCamera>>,
-    lights_q: Query<(&PointLight, &GlobalTransform, Option<&LightRooms>)>,
+    lights_q: Query<(&WorldPointLight, &GlobalTransform, Option<&LightRooms>)>,
     // The per-frame portal PVS, for the room term below ([`LightRooms`]).
     portals: Query<&crate::wmo_portal::WmoPortalInstance>,
     mut data: ResMut<WowLightData>,
@@ -285,8 +307,11 @@ fn build_light_data(
     // Per-kind water swatches (shallow/deep rgb + alpha). River/lake use the non-ocean path.
     let (rs, rd, rsa, rda) = l.water_colors(LiquidKind::Still);
     let (os, od, osa, oda) = l.water_colors(LiquidKind::Ocean);
-    data.0.rows = [[0.0; 4]; LIGHT_HEADER_ROWS];
-    let rows = &mut data.0.rows;
+    // Built in a scratch copy and written through `ResMut` only when a row moved: the extract
+    // clones this 8.5 KB blob every frame it reads as changed, and a parked frame changes nothing.
+    let mut fresh = data.0;
+    fresh.rows = [[0.0; 4]; LIGHT_HEADER_ROWS];
+    let rows = &mut fresh.rows;
     rows[3] = [l.spec[0], l.spec[1], l.spec[2], 20.0]; // 3 light_spec (w=terrain shininess 20)
     rows[4] = [l.fog_color[0], l.fog_color[1], l.fog_color[2], fog_enable]; // 4 fog_color (w=enable)
     rows[5] = [l.fog_start, l.fog_end, 0.0, farclip]; // 5 fog_params (z unused; w=farclip)
@@ -337,19 +362,19 @@ fn build_light_data(
             let p = gt.translation();
             let d2 = p.distance_squared(cam_pos);
             (d2 < POINT_PACK_RADIUS * POINT_PACK_RADIUS).then(|| {
-                let c = pl.color.to_linear();
+                let c = pl.color;
                 let s = pl.intensity / (4.0 * std::f32::consts::PI);
-                let rgb = commit_raw([c.red * s, c.green * s, c.blue * s]);
+                let rgb = commit_raw([c[0] * s, c[1] * s, c[2] * s]);
                 (d2, p, pl.range, rgb)
             })
         })
         .collect();
     pts.sort_by(|a, b| a.0.total_cmp(&b.0));
     pts.truncate(MAX_POINT_LIGHTS);
-    data.0.rows[20] = [pts.len() as f32, 0.0, 0.0, 0.0];
+    fresh.rows[20] = [pts.len() as f32, 0.0, 0.0, 0.0];
     for (i, (_, p, range, rgb)) in pts.iter().enumerate() {
-        data.0.points[2 * i] = [p.x, p.y, p.z, *range];
-        data.0.points[2 * i + 1] = [rgb[0], rgb[1], rgb[2], 0.0];
+        fresh.points[2 * i] = [p.x, p.y, p.z, *range];
+        fresh.points[2 * i + 1] = [rgb[0], rgb[1], rgb[2], 0.0];
     }
     // `WOW_POINTS_DUMP=1`: print the committed point table once a second — the numeric probe for
     // "what is actually lighting this ground". A pool that reads wrong is one of a small set of
@@ -421,7 +446,7 @@ fn build_light_data(
                     (h ^ u64::from(v.to_bits())).wrapping_mul(0x1000_0000_01b3)
                 });
             eprintln!("[light] rows {hash:#018x}");
-            for (i, r) in data.0.rows.iter().enumerate() {
+            for (i, r) in fresh.rows.iter().enumerate() {
                 eprintln!(
                     "  {i:2} {:08x} {:08x} {:08x} {:08x}   {:9.5} {:9.5} {:9.5} {:9.5}",
                     r[0].to_bits(),
@@ -435,6 +460,9 @@ fn build_light_data(
                 );
             }
         }
+    }
+    if data.0 != fresh {
+        data.0 = fresh;
     }
 }
 

@@ -43,7 +43,7 @@ pub enum ModelBlend {
 ///   `TextureName[1]` keyed by skinColor (`…Skin00_NN_Extra.blp`), loaded plain (never composited —
 ///   the client's dedicated extra-texture loader is a bare TextureCreate). Only fur races author it:
 ///   the tauren body binds its head/leg fur batches to this slot instead of the body atlas.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CharSkinSlot {
     Body,
     Hair,
@@ -429,6 +429,12 @@ pub struct RenderSubmesh {
     /// while the interior drawer IGNORES the flag: lit/unlit there is dictated by the batch section
     /// alone ([`Self::wmo_batch`]). Byte law: wow-re `wmo-lit-selector` §1.2/§1.3.
     pub emissive: bool,
+    /// This batch's texture record is **type 14 — the icon slot**: no file of its own, filled at
+    /// runtime by `Model:ReplaceIconTexture` (`0x710ec0` swaps every type-14 handle on the
+    /// instance). The shipped user is `Interface\ItemAnimations\ForcedBackpackItem.m2`, the
+    /// bag buttons' item-push card, whose one batch is the pushed item's icon (decision 2008).
+    /// `false` for every other batch and all of WMO.
+    pub icon_slot: bool,
     /// The MOMT **SIDN** (`0x10` — self-illum day/night) authored colour, RGB gamma bytes: the
     /// windows-glow-at-night mechanism. The real client scales it per frame by the night fraction
     /// (1 overnight, 0 all day, ramping 20:30→21:30 and 06:00→07:00) and binds it as the GL material
@@ -487,6 +493,15 @@ pub struct RenderSubmesh {
     /// only slot the shared-material registry can read — is a dead hold). `None` for every batch
     /// whose slots agree, which is the shared lane unchanged.
     pub uv_seq: Option<SeqLoops<[f32; 2]>>,
+    /// The batch's texture-transform **rotation** loop per file sequence slot — the raw
+    /// quaternion keys ([`tex_anim::bake_uv_rot_seqs`](super::tex_anim::bake_uv_rot_seqs),
+    /// decision 2019), for the lanes that own a material per instance (the UI model tiles;
+    /// the cooldown indicator's sweep is this channel). `None` for a transform that never
+    /// rotates — every placed world doodad — and all of WMO.
+    pub uv_rot_seq: Option<SeqLoops<[f32; 4]>>,
+    /// The batch's texture-transform **scaling** loop per file sequence slot (`(x, y)`), on the
+    /// same rule as [`Self::uv_rot_seq`].
+    pub uv_scale_seq: Option<SeqLoops<[f32; 2]>>,
     /// The batch's **animated RGB tint** (the M2Color colour track, time-varying only — a spell
     /// effect's white-hot flash cooling to red): baked by [`mat_anim`](super::mat_anim). When
     /// `Some`, the static vertex-colour tint is **skipped** for this batch (the two would
@@ -598,6 +613,7 @@ impl Default for RenderSubmesh {
             vertex_colors: Vec::new(),
             interior: false,
             emissive: false,
+            icon_slot: false,
             sidn: None,
             window: false,
             additive: false,
@@ -609,6 +625,8 @@ impl Default for RenderSubmesh {
             alpha_anim: None,
             uv_anim: None,
             uv_seq: None,
+            uv_rot_seq: None,
+            uv_scale_seq: None,
             rgb_anim: None,
             rgb_seq: None,
             wmo_batch: None,

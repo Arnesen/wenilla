@@ -35,8 +35,10 @@ pub use material::{alphascan, blendscan, envmapscan, texmodescan, uvslotscan, uv
 pub use particles::{
     cellscan, fxordercensus, partcensus, partscan, partslotscan, ribbonscan, shardcensus,
 };
-pub use sequence::{fxlifescan, goanimscan, idleslotscan, seqclockscan, soundeventscan};
-pub use skeleton::{attachscan, bonescan};
+pub use sequence::{
+    fxlifescan, goanimscan, goslotscan, idleslotscan, seqclockscan, soundeventscan,
+};
+pub use skeleton::{attachscan, bonescan, eventmarkerscan};
 pub use world::{doodadscan, placescan, skyboxscan, wmodoodads};
 
 /// Every `.m2` in the chain, in listfile order, narrowed to a path `prefix` when one is given.
@@ -70,7 +72,7 @@ pub(crate) fn m2_names(chain: &mut Chain, prefix: Option<&str>) -> Result<Vec<St
 /// spell it inline had drifted into spelling it *differently* (one guarded a stem shorter than
 /// four characters, the other did not, so a hypothetical `123.wmo` was a root to one and a group
 /// to the other).
-fn wmo_roots(chain: &mut Chain, prefix: Option<&str>) -> Result<Vec<String>> {
+pub(crate) fn wmo_roots(chain: &mut Chain, prefix: Option<&str>) -> Result<Vec<String>> {
     let pfx = prefix.map(|p| p.to_ascii_lowercase().replace('/', "\\"));
     Ok(chain
         .list()

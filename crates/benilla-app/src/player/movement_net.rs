@@ -89,6 +89,19 @@ const IN_MOTION: u32 = move_flags::ANY_MOVE
     | move_flags::SWIMMING
     | move_flags::ON_TRANSPORT;
 
+/// What this frame's **skipped-time report** ([`stream_skipped_time`]) needs: how long the frame
+/// was, whether the mover integrated it, and which mover to name.
+pub(super) struct SkipClock {
+    /// This frame's length in seconds — the budget the mover either integrated or did not.
+    pub(super) dt: f32,
+    /// **The mover held instead of stepping this frame** ([`super::Player::settling`]): the world
+    /// under us has not streamed in, so nothing integrated `dt`.
+    pub(super) held: bool,
+    /// The mover's own guid — a possessed unit's while we hold its reins, else our own body's.
+    /// `None` before the server has named one, which is also before anything could be skipped.
+    pub(super) mover: Option<u64>,
+}
+
 /// This frame's **arc edges** — the airborne lifecycle as the send law reads it. One struct rather
 /// than four adjacent bools in the argument list, where a miscount is silent and the symptom is a
 /// wrong opcode on the wire.
@@ -145,6 +158,7 @@ pub(super) fn stream_self_movement(
     speed_acks: &[crate::net::SpeedChangeMessage],
     knock_ack: Option<super::state::PendingKnockback>,
     transport: Option<TransportPose>,
+    skip: SkipClock,
 ) {
     let ArcEdges {
         jumped,
@@ -153,6 +167,7 @@ pub(super) fn stream_self_movement(
         landed,
         fall_time,
     } = arc;
+    stream_skipped_time(sender, player, skip);
     let wow_pos = bevy_to_wow(player.pos);
     // Normalize the facing into [0, 2π) before it goes on the wire. `face_yaw` is an unbounded
     // accumulator (mouse-look and A/D turning keep growing it), but the real client always sends a
@@ -478,6 +493,65 @@ pub(super) fn stream_self_movement(
 /// Park our mover on the wire: flush a single `MSG_MOVE_STOP` (flags cleared) so the server — and the
 /// observers extrapolating from it — drop whatever locomotion flags we last reported, then zero our
 /// bookkeeping. Called when the controller stops driving the avatar with stale flags still live on the
+/// **`CMSG_MOVE_TIME_SKIPPED` — the milliseconds the mover advanced through without integrating**
+/// (decision 1935). Accumulate while the mover holds; report the total once, on the release edge.
+///
+/// **The law is "time the movement simulation advanced through without integrating"** — not "a
+/// long frame", which is what this packet is usually described as. wow-re's carve
+/// (`collision/scratch/move-time-skipped-law.md`, §5-verified, landed 2026-09-03) found **four**
+/// emission sites feeding one builder `0x600be0`, and the long-frame one (`0x616642 cmp esi,0xfa`
+/// → send `dt − 250`) is only one of them and not the common one. The two that dominate real
+/// traffic are the **no-geometry** pair: the resolve entry's swept query returning nothing
+/// (`0x634154`) and the fall integrator's TOI kernel finding no contact (`0x635742`), each
+/// reporting the substep budget they could not spend. Across 79 sniffs of the reference,
+/// 1277 of 1278 packets carry `lag ≤ 250` — the clamped substep budget those two draw from —
+/// and an exact-build 36-minute session sent **three**, at world entry and after a teleport.
+///
+/// **benilla's no-geometry state is the settle hold**, and that is what this reports: the frames
+/// after a login, teleport or worldport where the destination's terrain and building colliders
+/// have not streamed in, so the mover freezes rather than falling through a city that isn't there
+/// (decision 0737). Same cause, same quantity, same moments the reference's own captures show it.
+///
+/// **The coalescing is ours, deliberately.** The reference sends once per firing, which for it is
+/// once per skipped substep — and its no-geometry window is a substep or two wide, because it
+/// loads the world before it places you. Ours is a live stream that can hold for seconds, so
+/// per-frame parity would put hundreds of packets on the wire where the reference puts one. The
+/// *quantity* is what the wire means and the quantity is preserved whole; the packet count is
+/// kept at the reference's. What is NOT copied is the send's `[mgr+0x130] += lag` side effect
+/// (the 500 ms heartbeat deadline pushed out by the skipped time): that deadline is only ever read
+/// while moving, and a held body streams zeroed flags with its mover parked, so there is no
+/// heartbeat inside a settle for it to delay. Applying a multi-second delay to the first heartbeat
+/// *after* one would be our invention, not the reference's.
+///
+/// The other two sites are deliberately unbuilt. The long-frame one has no meaning here: benilla
+/// has no 250 ms substep clamp — it integrates the whole frame — so a long frame is time we
+/// *spent*, not time we skipped, and reporting it would be a lie about our own simulation. The
+/// `[CMovement+0x40] & 0x8000000` free-advance bit's own setter is not modelled at all. wow-re's
+/// own verdict on the build order says as much: a client implementing cases 1–3 matches every
+/// packet in the shipped captures.
+fn stream_skipped_time(sender: &Sender<ClientCommand>, player: &mut Player, skip: SkipClock) {
+    if skip.held {
+        player.skipped_ms += skip.dt * 1000.0;
+        return;
+    }
+    // The release edge: report the whole hold at once, then disarm. Sub-millisecond residue is
+    // dropped rather than carried — the wire field is whole milliseconds and a `0` lag is a
+    // packet that says nothing.
+    let lag_ms = player.skipped_ms as u32;
+    player.skipped_ms = 0.0;
+    if lag_ms == 0 {
+        return;
+    }
+    let Some(guid) = skip.mover else {
+        return;
+    };
+    // The reference's `0x600be0` refuses unless the named mover IS the active mover
+    // (`0x600bec`/`0x600bfb` against `[0xc4da98]`/`[0xc4da9c]`); ours is the same statement, made
+    // by naming the mover the controller is driving and nothing else.
+    super::move_trace::skipped_time(guid, lag_ms);
+    let _ = sender.send(ClientCommand::MoveTimeSkipped { guid, lag_ms });
+}
+
 /// wire — entering free-fly (`F`), where [`stream_self_movement`] no longer runs each frame, so nothing
 /// else would ever clear them and observers would extrapolate a phantom walk/spin until we re-attach.
 /// **Idempotent**: a no-op once we've already reported stopped, so it's safe to call every free-fly
@@ -509,10 +583,68 @@ pub(super) fn park_mover(sender: &Sender<ClientCommand>, player: &mut Player) {
 
 #[cfg(test)]
 mod tests {
+    /// A frame that integrated everything it was given — the skipped-time report's no-op input,
+    /// which is every frame in these tests but the one that exercises it.
+    fn no_skip() -> SkipClock {
+        SkipClock {
+            dt: 0.0,
+            held: false,
+            mover: None,
+        }
+    }
+
     use super::*;
     use std::f32::consts::TAU;
 
     /// **The gait toggle announces itself standing perfectly still** — which is the whole reason
+    /// **The skipped-time report** (decision 1935): held frames accumulate, the release edge sends
+    /// the total ONCE, and nothing is sent for a frame that actually integrated. The three
+    /// properties together are the whole contract — a per-frame send would be hundreds of packets
+    /// per settle, a lost accumulator would tell the server nothing, and a send with no hold
+    /// behind it would be a lie about our own simulation.
+    #[test]
+    fn a_settle_hold_reports_its_skipped_milliseconds_once_on_release() {
+        const MOVER: u64 = 0x0000_0000_0000_002a;
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut player = Player::default();
+        let held = |dt: f32| SkipClock {
+            dt,
+            held: true,
+            mover: Some(MOVER),
+        };
+        let released = || SkipClock {
+            dt: 0.016,
+            held: false,
+            mover: Some(MOVER),
+        };
+        // Three held frames: 0.5 s of simulation advanced through, nothing integrated, and
+        // NOTHING on the wire yet — the report is one packet, not one per frame.
+        for _ in 0..3 {
+            stream_skipped_time(&tx, &mut player, held(0.1));
+        }
+        stream_skipped_time(&tx, &mut player, held(0.2));
+        assert!(
+            rx.try_recv().is_err(),
+            "a hold in progress sends nothing — the reference's own captures show one packet per \
+             skip, not one per frame"
+        );
+        // The release: one packet, carrying the whole hold.
+        stream_skipped_time(&tx, &mut player, released());
+        match rx.try_recv().expect("the release edge reports") {
+            ClientCommand::MoveTimeSkipped { guid, lag_ms } => {
+                assert_eq!(guid, MOVER, "the packet names the mover we were driving");
+                assert_eq!(lag_ms, 500, "0.1+0.1+0.1+0.2 s of un-integrated simulation");
+            }
+            other => panic!("expected MoveTimeSkipped, got {other:?}"),
+        }
+        // …and the accumulator disarms: a second released frame reports nothing.
+        stream_skipped_time(&tx, &mut player, released());
+        assert!(
+            rx.try_recv().is_err(),
+            "the report is an edge; a running mover skips nothing and says nothing"
+        );
+    }
+
     /// the reference gives `ToggleRun` its own move-event enqueue instead of letting the
     /// move-state broadcaster find the flag change: that broadcaster gates every send on the
     /// locomotion nibble (`0x61a99d test al,0xf`), so a toggle with no direction bit set would
@@ -541,6 +673,7 @@ mod tests {
             &[],
             None,
             None,
+            no_skip(),
         );
         let ClientCommand::Move { kind, flags, .. } =
             rx.try_recv().expect("a standing walk toggle still sends")
@@ -552,7 +685,18 @@ mod tests {
         assert_eq!(flags & move_flags::WALK_MODE, move_flags::WALK_MODE);
 
         // …and leaving it is the OTHER opcode, not a repeat of the same one.
-        stream_self_movement(&tx, &mut player, 0, 0.0, arc(), 0.0, &[], None, None);
+        stream_self_movement(
+            &tx,
+            &mut player,
+            0,
+            0.0,
+            arc(),
+            0.0,
+            &[],
+            None,
+            None,
+            no_skip(),
+        );
         let ClientCommand::Move { kind, flags, .. } =
             rx.try_recv().expect("the run half sends too")
         else {
@@ -573,6 +717,7 @@ mod tests {
             &[],
             None,
             None,
+            no_skip(),
         );
         while let Ok(ClientCommand::Move { kind, .. }) = rx.try_recv() {
             assert_eq!(kind, MoveKind::SetWalkMode, "the re-entry edge only");
@@ -587,6 +732,7 @@ mod tests {
             &[],
             None,
             None,
+            no_skip(),
         );
         assert!(
             rx.try_recv().is_err(),
@@ -620,6 +766,7 @@ mod tests {
             &[],
             None,
             None,
+            no_skip(),
         );
         let kinds: Vec<_> = rx
             .try_iter()
@@ -661,6 +808,7 @@ mod tests {
             &[],
             None,
             None,
+            no_skip(),
         );
 
         let ClientCommand::Move { orientation, .. } = rx
@@ -706,6 +854,7 @@ mod tests {
             &[],
             None,
             None,
+            no_skip(),
         );
 
         let ClientCommand::Move {
@@ -749,6 +898,7 @@ mod tests {
             &[],
             None,
             None,
+            no_skip(),
         );
         assert!(rx.try_recv().is_err(), "a mid-air release sends nothing");
         assert_eq!(
@@ -773,6 +923,7 @@ mod tests {
             &[],
             None,
             None,
+            no_skip(),
         );
         let ClientCommand::Move { kind, flags, .. } = rx.try_recv().expect("the landing packet")
         else {
@@ -817,6 +968,7 @@ mod tests {
                 &[],
                 None,
                 None,
+                no_skip(),
             );
         };
 
@@ -882,6 +1034,7 @@ mod tests {
             &[],
             None,
             None,
+            no_skip(),
         );
         let ClientCommand::Move {
             kind, flags, jump, ..
@@ -922,6 +1075,7 @@ mod tests {
             &[],
             None,
             None,
+            no_skip(),
         );
         assert!(
             rx.try_recv().is_err(),
@@ -956,6 +1110,7 @@ mod tests {
             &[],
             None,
             None,
+            no_skip(),
         );
         let ClientCommand::Move { kind, flags, .. } =
             rx.try_recv().expect("a mid-air turn broadcasts")
@@ -985,6 +1140,7 @@ mod tests {
             &[],
             None,
             None,
+            no_skip(),
         );
         let kinds: Vec<_> = rx
             .try_iter()
@@ -1029,6 +1185,7 @@ mod tests {
             &[],
             None,
             None,
+            no_skip(),
         );
         let ClientCommand::Move { kind, flags, .. } = rx
             .try_recv()
@@ -1064,6 +1221,7 @@ mod tests {
             &[],
             None,
             None,
+            no_skip(),
         );
         assert!(rx.try_recv().is_err(), "an unchanged facing is silent");
     }
@@ -1097,6 +1255,7 @@ mod tests {
                 &[],
                 None,
                 None,
+                no_skip(),
             );
             assert!(
                 rx.try_recv().is_err(),
@@ -1121,6 +1280,7 @@ mod tests {
             &[],
             None,
             None,
+            no_skip(),
         );
         let ClientCommand::Move { kind, .. } = rx.try_recv().expect("the STOP_TURN") else {
             panic!("expected a Move command");
@@ -1159,6 +1319,7 @@ mod tests {
             &[],
             None,
             None,
+            no_skip(),
         );
         let kinds: Vec<_> = rx
             .try_iter()
@@ -1189,6 +1350,7 @@ mod tests {
             &[],
             None,
             None,
+            no_skip(),
         );
     }
 
@@ -1327,6 +1489,7 @@ mod tests {
                 launch,
             }),
             None,
+            no_skip(),
         );
 
         let ClientCommand::KnockBackAck {
@@ -1388,6 +1551,7 @@ mod tests {
             &[],
             None,
             None,
+            no_skip(),
         );
         let ClientCommand::Move { kind, jump, .. } =
             rx.try_recv().expect("a jump take-off is announced")

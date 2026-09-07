@@ -1,10 +1,10 @@
 //! The shipped taxi-map window driven end-to-end, engine-only (no Bevy): the real
-//! `assets/ui/TaxiFrame.xml` fed a synthetic two-node snapshot (the [`crate::ui_taxi`] feed's exact
-//! output shape). Covers what only a runtime load exercises: the Lua parses and every referenced
-//! global resolves (including the static node-button pool and the runtime-created route-line
-//! textures — TaxiFrame.xml's own header note on both), `TAXIMAP_OPENED` shows the window with the
-//! flight master's name and paints the node buttons at their pushed positions, a click on a node
-//! drains through `TakeTaxiNode`, and `TAXIMAP_CLOSED` hides it.
+//! `Interface\FrameXML\TaxiFrame.xml` fed a synthetic two-node snapshot (the [`crate::ui_taxi`]
+//! feed's exact output shape). Covers what only a runtime load exercises: the Lua parses and every
+//! referenced global resolves (including the static node-button pool and the runtime-created
+//! route-line textures — TaxiFrame.xml's own header note on both), `TAXIMAP_OPENED` shows the
+//! window with the flight master's name and paints the node buttons at their pushed positions, a
+//! click on a node drains through `TakeTaxiNode`, and `TAXIMAP_CLOSED` hides it.
 
 use benilla_ui::script::{ScriptValue, TaxiNodeType, TaxiUiNode, TaxiUiState, UiScript};
 
@@ -14,18 +14,22 @@ use super::test_ui::load_ui as load_xml;
 fn taxi_script() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml"); // TaxiNodeOnButtonEnter's tooltip + SetTooltipMoney
-    load_xml(&s, "Interface\\FrameXML\\UIErrorsFrame.xml"); // BenillaErrorsFrame_AddMessage — DrawOneHopLines' refusal
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml"); // TaxiNodeOnButtonEnter's tooltip + SetTooltipMoney
+    load_xml(&s, "Interface\\FrameXML\\UIErrorsFrame.xml"); // `UIErrorsFrame:AddMessage` — DrawOneHopLines' refusal
                                                             // Three the reference's own TaxiFrame leans on that our transcription did not:
                                                             //   · GlobalStrings — `ERR_TAXINOPATHS` is a GlobalString, and `AddMessage(nil)` draws an
                                                             //     empty line rather than raising, so its absence is silent.
                                                             //   · UIPanelTemplates (.lua then .xml) — `TaxiCloseButton` inherits `UIPanelCloseButton`,
-                                                            //     which lives there and NOT in our UiPanels.xml. Without it the close button loads as a
+                                                            //     which the chain declares there. Without it the close button loads as a
                                                             //     bare Button with no handler and a click does nothing at all.
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
     load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\TaxiFrame.xml");
@@ -124,10 +128,9 @@ fn shipped_taxi_frame_drives_end_to_end() {
 
 /// The "no single-hop destination" refusal (ref `DrawOneHopLines`, fired from `OnShow`): a map
 /// with only the `Current` node (no `Reachable` neighbor at all) hits `numSingleHops == 0` and
-/// calls `BenillaErrorsFrame_AddMessage` (TaxiFrame.xml's deviation 3 from the reference's
-/// `UIErrorsFrame:AddMessage`) then hides the window — verified end-to-end since this is the one
-/// call this engine has no precedent for outside this window (`ErrorsFrame.xml`'s own Lua seam,
-/// not yet exercised from another shipped window's script).
+/// calls `UIErrorsFrame:AddMessage(ERR_TAXINOPATHS, …)` (stock `TaxiFrame.lua:161-162`) then
+/// hides the window — driven end-to-end because the message frame's Lua seam is what the
+/// refusal is visible through.
 #[test]
 fn no_single_hop_destination_posts_the_error_and_closes() {
     let mut s = taxi_script();

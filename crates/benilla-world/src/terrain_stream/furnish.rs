@@ -15,7 +15,7 @@
 
 use bevy::platform::time::Instant;
 
-use benilla_assets::{chunk_to_mesh, AdtTile};
+use benilla_assets::{chunks_to_mesh, AdtTile};
 use bevy::camera::primitives::MeshAabb;
 use bevy::prelude::*;
 
@@ -26,6 +26,15 @@ use super::TerrainStreamer;
 /// render-side work per frame, and a whole fresh row (5 × 256 cells, two tiles out, in fog)
 /// furnishes in ~20 frames. The placement cap (`SPAWN_COUNT_CAP`) is this same idea one lane over.
 const CELL_SPAWN_CAP: usize = 64;
+
+/// A tile's 16×16 chunks furnish as 4×4 CELLS of 4×4 chunks each — one mesh, one entity, one
+/// draw per cell (decision 1945). A chunk was one draw each, and a city horizon is over a
+/// thousand of them a frame; every per-chunk fact is baked per vertex and the material is the
+/// tile's, so the cell mesh is the chunks' concatenation. `static_gx` and the merge lanes cut
+/// the world into the same 133⅓-yd cell for the same locality reason.
+const CELL_SPAN: usize = 4;
+const CELLS_PER_TILE: usize = (16 / CELL_SPAN) * (16 / CELL_SPAN);
+const CHUNKS_PER_CELL: usize = CELL_SPAN * CELL_SPAN;
 
 /// Build + spawn the cell entities of spawned-but-unfurnished tiles, [`CELL_SPAWN_CAP`] per frame
 /// while live, nearest tile to the stream focus first. Chained directly after `stream_terrain`
@@ -40,7 +49,12 @@ pub(super) fn furnish_tile_cells(
 ) {
     let t0 = Instant::now();
     let live = focus.paced;
-    let cap = if live { CELL_SPAWN_CAP } else { usize::MAX };
+    // The cap was measured in chunks; a cell is sixteen of them.
+    let cap = if live {
+        CELL_SPAWN_CAP / CHUNKS_PER_CELL
+    } else {
+        usize::MAX
+    };
     // Ablation switch (`WOW_NO_TILE_CELLS=1`): tiles stream — asset residency, collider,
     // placements, liquid, clutter — without their per-chunk cell entities, isolating the
     // render-entity lane from the asset lane when measuring a streaming cost. The B181 carve ran
@@ -75,17 +89,25 @@ pub(super) fn furnish_tile_cells(
         let Some(adt) = tiles.get(&tile.handle) else {
             continue;
         };
-        while tile.next_cell < adt.chunks.len() {
+        while tile.next_cell < CELLS_PER_TILE {
             if built >= cap {
                 break 'tiles;
             }
-            let i = tile.next_cell;
+            let cell = tile.next_cell;
             tile.next_cell += 1;
             if ablated {
                 continue;
             }
-            // A hole-emptied chunk yields no mesh (and costs nothing — it doesn't count).
-            let Some(mesh) = chunk_to_mesh(&adt.chunks[i], &adt.shading[i]) else {
+            // The cell's chunks: MCIN order is row-major, index = row·16 + column.
+            let (cy, cx) = (cell / (16 / CELL_SPAN), cell % (16 / CELL_SPAN));
+            let parts: Vec<_> = (0..CELL_SPAN)
+                .flat_map(|dy| {
+                    (0..CELL_SPAN).map(move |dx| (cy * CELL_SPAN + dy) * 16 + cx * CELL_SPAN + dx)
+                })
+                .filter_map(|i| Some((adt.chunks.get(i)?, adt.shading.get(i)?)))
+                .collect();
+            // A hole-emptied cell yields no mesh (and costs nothing — it doesn't count).
+            let Some(mesh) = chunks_to_mesh(&parts) else {
                 continue;
             };
             // The cell's Aabb, computed HERE and inserted explicitly: the mesh is

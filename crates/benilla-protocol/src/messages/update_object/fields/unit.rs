@@ -283,6 +283,19 @@ impl ObjectFields {
     pub fn unit_auras(&self) -> impl Iterator<Item = UnitAuraSlot> + '_ {
         (0..UNIT_AURA_SLOTS).filter_map(|slot| self.unit_aura(slot))
     }
+    /// Every `UNIT_FIELD_AURA` slot's **raw** spell id, unfiltered — no `AURAFLAGS` nibble test,
+    /// no zero-skip, in ascending slot order.
+    ///
+    /// This is deliberately NOT [`Self::unit_auras`], and the difference is the reference's, not
+    /// ours: the cast validator's crowd-control exemption scan (`0x6e9ca0`) reads these slots
+    /// straight and **does not consult `UNIT_FIELD_AURAFLAGS`** — it skips no "inactive" slot and
+    /// reads no duration, stack or caster state. Any non-zero, in-range id counts, husk or not.
+    /// The buff bar wants the filtered view; that scan wants this one (decision 1946).
+    pub fn unit_aura_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        (0..UNIT_AURA_SLOTS)
+            .map(|slot| self.get_u32(FIELD_UNIT_AURA + u16::from(slot)).unwrap_or(0))
+    }
+
     /// The unit's active power type (`UNIT_FIELD_BYTES_0` byte 3): `0` mana, `1` rage, `2` focus,
     /// `3` energy, `4` happiness. Absent (no bytes_0 on the wire yet) reads as mana, the descriptor's
     /// zero-initialized default.
@@ -340,6 +353,19 @@ impl ObjectFields {
     /// V-plate gates.
     pub fn unit_is_ghost_visual(&self) -> bool {
         (self.get_u32(FIELD_UNIT_BYTES_1).unwrap_or(0) >> 24) & 0x1 != 0
+    }
+
+    /// `UNIT_FIELD_BYTES_1` byte 3's **`0x4`** — the third neighbour of the ghost (`0x1`) and creep
+    /// (`0x2`) bits above. Byte-VERIFIED as the minimap object-dot classifier's own third
+    /// precondition (wow-re `questgiver-marker.md` §W15: `byte [eax+0x213] & 4`, where `eax` is the
+    /// descriptor block base — `0x210/4 = 132` = `UNIT_FIELD_BYTES_1`; the only `& 4` site on this
+    /// byte image-wide, by two independent censuses). Set ⇒ the unit draws **no minimap dot at
+    /// all**, quest or tracking.
+    ///
+    /// The *name* is INFERRED from vmangos's `UNIT_VIS_FLAGS_UNTRACKABLE`, like its two siblings —
+    /// no flag-name string exists in the image. The bit and its effect are verified.
+    pub fn unit_is_untrackable(&self) -> bool {
+        (self.get_u32(FIELD_UNIT_BYTES_1).unwrap_or(0) >> 24) & 0x4 != 0
     }
 
     /// `UNIT_FIELD_AURASTATE` ([`FIELD_UNIT_AURASTATE`]) — the aura-state bit set (defense 1,

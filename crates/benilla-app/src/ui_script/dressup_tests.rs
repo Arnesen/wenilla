@@ -34,13 +34,26 @@ const JERKY_LINK: &str = "|cffffffff|Hitem:117|h[Tough Jerky]|h|r";
 /// with these, in manifest order.
 const ROOM_UI: &[&str] = &[
     "Interface\\FrameXML\\UIDropDownMenu.xml",
-    "UnitPopup.xml",
+    "Interface\\FrameXML\\GlobalStrings.lua",
+    "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua reads at file scope
+    "Interface\\FrameXML\\UnitPopup.xml",
     "Interface\\FrameXML\\ItemRef.xml",
+    "ScrollTemplates.xml", // our scroll kit + the placeholder icon
+    "Interface\\FrameXML\\CharacterFrameTemplates.xml",
     "Interface\\FrameXML\\MerchantFrame.xml",
     "Interface\\FrameXML\\StackSplitFrame.xml",
-    "DressUpFrame.xml",
     "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
-    "ChatFrame.xml",
+    "Interface\\FrameXML\\GlobalStrings.lua",
+    "Interface\\FrameXML\\BasicControls.xml",
+    "Interface\\FrameXML\\ChatFrame.xml",
+    "Interface\\FrameXML\\UIPanelTemplates.lua",
+    "Interface\\FrameXML\\UIPanelTemplates.xml",
+    // The reference's own room (1969): its Close/Reset buttons inherit the panel kit's templates,
+    // which resolve at load — so after it, as the manifest has it.
+    "Interface\\FrameXML\\DressUpFrame.xml",
+    r"Interface\FrameXML\UIParent.xml",
+    "Interface\\FrameXML\\LocaleProperties.lua",
+    "Interface\\FrameXML\\FloatingChatFrame.xml",
 ];
 
 /// The shipped files the dressing room's click sites need, in manifest order — **with no bag
@@ -49,14 +62,18 @@ const ROOM_UI: &[&str] = &[
 /// cannot.
 fn load_room(s: &UiScript) {
     for file in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
-        "UIParent.xml",
-        "GameTooltip.xml",
-        "Cooldown.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\StaticPopup.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
     ] {
         load_xml(s, file);
     }
@@ -73,7 +90,7 @@ fn load_room(s: &UiScript) {
 /// **Needs client data**: `BAG_UI` names a chain entry, so its callers open with
 /// `wow_data_or_skip!`.
 fn load_room_with_bags(s: &UiScript) {
-    load_xml(s, "UIParent.xml");
+    load_xml(s, r"Interface\FrameXML\UIParent.xml");
     for file in BAG_UI {
         load_xml(s, file);
     }
@@ -99,7 +116,20 @@ fn shown_paper_doll() -> UiScript {
     for file in CHARACTER_UI {
         super::test_ui::load_ui_strict(&s, file);
     }
-    for file in ["DressUpFrame.xml", "ChatFrame.xml"] {
+    for file in [
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\UIMenu.xml",
+        "Interface\\FrameXML\\ChatFrame.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        "Interface\\FrameXML\\UIPanelTemplates.lua",
+        "Interface\\FrameXML\\UIPanelTemplates.xml",
+        // The reference's room (1969), after the panel kit its buttons inherit from.
+        "Interface\\FrameXML\\DressUpFrame.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\FloatingChatFrame.xml",
+    ] {
         super::test_ui::load_ui_strict(&s, file);
     }
     s.set_unit(
@@ -390,9 +420,9 @@ fn reset_re_dresses_close_empties_and_the_arrows_spin_the_pane() {
     let _ = s.take_dressup_intents();
     s.resolve();
 
-    // The pane's OnLoad seeded the ref's default facing.
+    // The pane's OnLoad (`Model_OnLoad`) seeded the ref's default facing on the widget itself.
     assert!(
-        (s.dressup_yaw() - 0.61).abs() < 1e-6,
+        (s.model_pane_facing("DressUpModel") - 0.61).abs() < 1e-6,
         "ref UIParent.lua:1422"
     );
 
@@ -405,29 +435,28 @@ fn reset_re_dresses_close_empties_and_the_arrows_spin_the_pane() {
     );
 
     // One tap of rotate-left: OnClick on press AND release, −0.03 each.
-    let before = s.dressup_yaw();
+    let before = s.model_pane_facing("DressUpModel");
     let (x, y) = s
         .eval::<(f32, f32)>(
-            "return (DressUpModelFrameRotateLeftButton:GetLeft() \
-                     + DressUpModelFrameRotateLeftButton:GetRight()) / 2, \
-                    (DressUpModelFrameRotateLeftButton:GetTop() \
-                     + DressUpModelFrameRotateLeftButton:GetBottom()) / 2",
+            "return (DressUpModelRotateLeftButton:GetLeft() \
+                     + DressUpModelRotateLeftButton:GetRight()) / 2, \
+                    (DressUpModelRotateLeftButton:GetTop() \
+                     + DressUpModelRotateLeftButton:GetBottom()) / 2",
         )
         .unwrap();
     s.mouse_button(x, y, "LeftButton", true);
     s.mouse_button(x, y, "LeftButton", false);
     assert!(
-        (s.dressup_yaw() - (before - 0.06)).abs() < 1e-5,
+        (s.model_pane_facing("DressUpModel") - (before - 0.06)).abs() < 1e-5,
         "a tap fires OnClick twice: {} → {}",
         before,
-        s.dressup_yaw()
+        s.model_pane_facing("DressUpModel")
     );
 
     s.run("HideUIPanel(DressUpFrame)").unwrap();
-    assert_eq!(
-        s.take_dressup_intents(),
-        vec![DressUpIntent::Close],
-        "closing the window empties the booth"
-    );
+    // Closing the window is what empties the booth, and the app reads it off the frame — the
+    // stock file's OnHide plays its sound and queues nothing (1969).
+    assert!(!s.frame_visible("DressUpFrame"), "the room is hidden");
+    assert!(s.take_dressup_intents().is_empty());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

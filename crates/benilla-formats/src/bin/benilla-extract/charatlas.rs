@@ -24,8 +24,8 @@
 
 use anyhow::{Context, Result};
 use benilla_formats::{
-    equip_blits, equip_tile, load_item_display_catalog, BlitSource, Chain, CharSections,
-    CharacterGeosets, EmblemLayer, EquipGeosets, GuildEmblem, ItemDisplay,
+    equip_blits, equip_tile, forearm_dressed, load_item_display_catalog, BlitSource, Chain,
+    CharSections, CharacterGeosets, EmblemLayer, EquipGeosets, GuildEmblem, ItemDisplay,
 };
 
 /// The ten atlas tiles by group, for the per-tile report — the five head/left-column ones included,
@@ -116,7 +116,7 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
     // the guild tabard's three layers come through the same list, because they land in the same
     // rows and the question ("what repainted this cell?") is the same one.
     println!("\nequipment blits (by ascending cell; later covers earlier within a tile):");
-    for step in equip_blits(&equipment, look.emblem) {
+    for step in equip_blits(&equipment, look.emblem, false) {
         let (_x, y, w, h) = equip_tile(step.layer).expect("layer < 8");
         let candidates = step.candidates(look.sex);
         let basename = |p: &str| p.rsplit('\\').next().unwrap_or(p).to_string();
@@ -184,6 +184,7 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
             look.hair_color,
             [None; 8],
             None,
+            false,
         )?
         .context("no base skin row for this appearance")?;
     let dressed = sections
@@ -198,6 +199,7 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
             look.hair_color,
             equipment,
             look.emblem,
+            false,
         )?
         .context("no base skin row for this appearance")?;
 
@@ -242,10 +244,10 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
             eq.bodyslots[i] = Some(d.geoset_groups);
         }
     }
-    let mut ids =
-        geosets.visible_geosets(look.race, look.sex, look.hair_style, look.facial_hair, &eq);
-    ids.sort_unstable();
-    ids.dedup();
+    // B3's gate is the ArmLower tile's occupancy — read off the same plan printed above (1864).
+    eq.forearm_dressed = forearm_dressed(&equipment);
+    // Sorted + deduplicated at the source (`visible_geosets`).
+    let ids = geosets.visible_geosets(look.race, look.sex, look.hair_style, look.facial_hair, &eq);
     println!("\nvisible geosets: {ids:?}");
 
     if let Some(path) = out {

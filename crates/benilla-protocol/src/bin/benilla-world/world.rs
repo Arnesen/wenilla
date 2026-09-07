@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use anyhow::Result;
 use benilla_protocol::{
-    Character, EntityKind, MoveMode, ObjectFields, ServerPacket, SessionEvent, SpeedKind,
-    WorldSession,
+    AttackSwingError, Character, EntityKind, MoveMode, ObjectFields, ServerPacket, SessionEvent,
+    SpeedKind, WorldSession,
 };
 
 /// A Kobold Vermin spawn in Northshire (mangos `creature` guid 79992) — the `--attack` teleport
@@ -85,6 +85,9 @@ pub(crate) struct World {
     pub(crate) dest_spell: Option<u32>,
     pub(crate) dest_verdict: Option<(u32, bool, Option<u8>)>,
     pub(crate) swings_seen: u32,
+    /// The refusals the server answered a swing with, by arm — `--attack`'s phase 2 verdict. The
+    /// wire has no reason byte, so the arm IS the reason.
+    pub(crate) swing_refusals: Vec<AttackSwingError>,
     pub(crate) self_moves: u32,
     pub(crate) tally: BTreeMap<String, u32>,
     pub(crate) total: u32,
@@ -126,6 +129,7 @@ impl World {
             dest_spell: None,
             dest_verdict: None,
             swings_seen: 0,
+            swing_refusals: Vec::new(),
             self_moves: 0,
             tally: BTreeMap::new(),
             total: 0,
@@ -463,6 +467,10 @@ impl World {
                     "SMSG_ATTACKERSTATEUPDATE: {:#x} → {:#x}  hitInfo {:#x}  damage {}  victimState {}",
                     s.attacker, s.victim, s.hit_info, s.damage, s.victim_state
                 );
+            }
+            SessionEvent::AttackSwingError(e) => {
+                self.swing_refusals.push(*e);
+                println!("SMSG_ATTACKSWING refusal: {e:?}");
             }
             SessionEvent::CastResult {
                 spell_id,

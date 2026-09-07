@@ -1450,18 +1450,20 @@ fn a_frames_type_chain_matches_the_roster() {
             &["GameTooltip", "Frame", "Region"],
         ),
         ("Minimap", "Minimap", &["Minimap", "Frame", "Region"]),
-        // **The roster's only 4-deep frame chain.** `PlayerModel` derives from `Model`, which is
-        // why `SetUnit` on a portrait pane finds `SetCamera` too (wow-re
-        // `ui/scratch/widget-type-identity.md` §6; the unbuilt `DressUpModel`/`TabardModel` hang
-        // off this one and make the roster's true maximum 5).
+        // `PlayerModel` derives from `Model`, which is why `SetUnit` on a portrait pane finds
+        // `SetCamera` too (wow-re `ui/scratch/widget-type-identity.md` §6) — and `DressUpModel`
+        // derives from it in turn: the roster's maximum depth, 5 (1969; `TabardModel` is the
+        // other depth-5 chain — built by 1977).
         (
             "PlayerModel",
             "PlayerModel",
             &["PlayerModel", "Model", "Frame", "Region"],
         ),
-        // **Our Era-shaped divergence reports what 1.12's cooldown IS**: a Model. 1.12.1 has no
-        // `Cooldown` type name at all (the roster is 23 and none is that).
-        ("Cooldown", "Model", &["Model", "Frame", "Region"]),
+        (
+            "DressUpModel",
+            "DressUpModel",
+            &["DressUpModel", "PlayerModel", "Model", "Frame", "Region"],
+        ),
     ];
     for (kind, leaf, chain) in cases {
         s.run(&format!(r#"TC = CreateFrame("{kind}")"#))

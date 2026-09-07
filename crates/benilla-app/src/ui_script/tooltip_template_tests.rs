@@ -1,5 +1,5 @@
-//! `GameTooltipTemplate` as an ADDON sees it — the shipped `assets/ui/GameTooltip.xml` driven the
-//! way the corpus drives it.
+//! `GameTooltipTemplate` as an ADDON sees it — the stock `Interface\FrameXML\GameTooltip.xml`
+//! driven the way the corpus drives it.
 //!
 //! **This is not a test of our tooltip window** (that is `tooltip_anchor_tests` /
 //! `tooltip_compare_tests`, and they are the regression suite this refactor had to leave
@@ -41,7 +41,13 @@ fn load_addon_xml(s: &UiScript, text: &str) -> benilla_ui::loader::LoadReport {
 fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for f in ["Fonts.xml", "UIParent.xml", "GameTooltip.xml"] {
+    for f in [
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
+    ] {
         load_xml(&s, f);
     }
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -187,11 +193,12 @@ fn an_addon_tooltip_from_the_template_gets_the_plate() {
             .any(|p| p.eq_ignore_ascii_case(r"Interface\Tooltips\UI-Tooltip-Border")),
         "…and its border: {drawn:?}"
     );
-    // The Thicken deviation rides the template too — it is the shared plate, not one window's.
+    // The template's children resolve against the CALLER's name — the status bar the reference's
+    // template declares (`$parentStatusBar`), which TipBuddy anchors to by that global.
     assert!(
-        s.eval::<bool>(r#"return getglobal("MyTipThicken") ~= nil"#)
+        s.eval::<bool>(r#"return getglobal("MyTipStatusBar") ~= nil"#)
             .unwrap(),
-        "$parentThicken resolves against the CALLER's name"
+        "$parentStatusBar resolves against the CALLER's name"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -282,9 +289,9 @@ fn createframe_with_the_template_is_the_same_tooltip() {
         "Equip: Improves your chance to hit by 1%."
     );
     assert!(
-        s.eval::<bool>(r#"return getglobal("BetterCharacterStatsTooltipThicken") ~= nil"#)
+        s.eval::<bool>(r#"return getglobal("BetterCharacterStatsTooltipStatusBar") ~= nil"#)
             .unwrap(),
-        "the plate came through CreateFrame's fourth argument too"
+        "the template's children came through CreateFrame's fourth argument too"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

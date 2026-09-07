@@ -608,6 +608,33 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // GetTrainerServiceSkillLine(index) → the skill line the service teaches into, by name — the
+    // group the tree files it under (`TrainerService::group_name`: `SkillLine.dbc`'s name at
+    // trainer types 0/1/3, 1124's builder law). The stock window's one caller is the
+    // CONFIRM_PROFESSION dialog, which formats "learn <profession>?" with it
+    // (Blizzard_TrainerUI.lua l.19-24). A header row or an out-of-range index answers nil. The
+    // binding is registered (`0x4d9160`, 399 bytes) but its return law is not carved beyond
+    // "delegates"; this is the call site's reading (1957).
+    g.set(
+        "GetTrainerServiceSkillLine",
+        lua.create_function(|lua, index: usize| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let Some(n) = index.checked_sub(1) else {
+                return Ok(Value::Nil);
+            };
+            let Some(Row::Service(si)) = rows(&model).get(n).copied() else {
+                return Ok(Value::Nil);
+            };
+            let t = model
+                .trainer
+                .as_ref()
+                .expect("a visible row ⇒ an open trainer");
+            Ok(Value::String(
+                lua.create_string(&t.services[si].group_name)?,
+            ))
+        })?,
+    )?;
+
     // GetTrainerServiceIcon(index) → texture path (nil while in flight / OOB).
     g.set(
         "GetTrainerServiceIcon",

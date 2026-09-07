@@ -169,7 +169,7 @@ pub(super) fn dump_emitter(
         .enumerate()
     {
         let center = particle_center(dframe, placement, p);
-        let half = particle_half(def, placement, p);
+        let half = particle_half(def, placement, p, dframe.size_scale);
         // The additive contribution's other factor: the over-life colour this particle's quad
         // carries (raw authored values, as `expand_quads` pushes them).
         let rgba = def.over_life.sample((p.age / p.life).clamp(0.0, 1.0)).color;

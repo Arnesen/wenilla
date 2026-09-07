@@ -1,10 +1,19 @@
-//! `SMSG_MONSTER_MOVE` — the server-dictated creature movement path.
+//! `SMSG_MONSTER_MOVE` — the server-dictated creature movement path — and its transport twin.
 //!
 //! One packet: a mover, its `start`, a spline id, a `moveType`-switched final facing, then (unless it is
 //! a `Stop`) the spline block — a flag word, a duration, and the waypoints. Decodes into the full
 //! travel-order polyline [`ServerPacket::MonsterMove::path`] the app rides at constant (arc-length) speed
 //! (decision 0097). The wire packs the waypoints two ways, keyed by the `Flying`/`Mask_CatmullRom` flag —
 //! see [`read_monster_move_spline`].
+//!
+//! **`SMSG_MONSTER_MOVE_TRANSPORT` is the same packet with one field inserted**: a second packed guid,
+//! the transport's, immediately after the mover's — and every coordinate in the body is then an
+//! **offset in that transport's frame**, not world space (decision 1936). vmangos writes exactly that
+//! (`Movement::MoveSplineInit::Launch`, `spline/MoveSplineInit.cpp:138-170`: the same builder, the
+//! opcode swapped and the transport packed guid appended, after `CalculatePassengerOffset` has moved
+//! the start into deck space), and it computes such a path against the transport's **model** navmesh
+//! rather than the map's (`PathFinder::calculate`, `Maps/PathFinder.cpp:76-84`), so the waypoints are
+//! deck-local too. One reader serves both, keyed by [`read_monster_move`]'s `on_transport`.
 
 use std::io;
 
@@ -39,8 +48,12 @@ const SPLINE_FLAG_RUNMODE: u32 = 0x100;
 /// reading a tail anyway over-ran the body, the `0x00dd: failed to fill whole buffer` skip that dropped
 /// every creature stop). Otherwise the spline block yields the full polyline `[start, …waypoints…,
 /// endpoint]`.
-pub(super) fn read_monster_move(r: &mut &[u8]) -> io::Result<ServerPacket> {
+pub(super) fn read_monster_move(r: &mut &[u8], on_transport: bool) -> io::Result<ServerPacket> {
     let guid = read_packed_guid(r)?;
+    // `SMSG_MONSTER_MOVE_TRANSPORT` only: the deck the whole body is expressed on, packed like the
+    // mover's guid and read immediately after it. Everything below is unchanged — the two opcodes
+    // share the builder server-side and differ by this one field.
+    let transport = on_transport.then(|| read_packed_guid(r)).transpose()?;
     let start = Vector3d::read(r)?;
     // The server's per-move spline counter. Discarded for a creature (nothing acks its walk), but
     // the client echoes it back in `CMSG_MOVE_SPLINE_DONE` when a spline drives its OWN player
@@ -62,6 +75,7 @@ pub(super) fn read_monster_move(r: &mut &[u8]) -> io::Result<ServerPacket> {
     Ok(if move_type == MONSTER_MOVE_STOP {
         ServerPacket::MonsterMove {
             guid,
+            transport,
             start,
             spline_id,
             path: Vec::new(),
@@ -93,6 +107,7 @@ pub(super) fn read_monster_move(r: &mut &[u8]) -> io::Result<ServerPacket> {
         };
         ServerPacket::MonsterMove {
             guid,
+            transport,
             start,
             spline_id,
             path,
@@ -201,6 +216,52 @@ mod tests {
             let off = [endpoint[0] - p[0], endpoint[1] - p[1], endpoint[2] - p[2]];
             let packed = pack(off[0], 0, 0x7FF) | pack(off[1], 11, 0x7FF) | pack(off[2], 22, 0x3FF);
             body.extend_from_slice(&packed.to_le_bytes());
+        }
+    }
+
+    /// `SMSG_MONSTER_MOVE_TRANSPORT` is `SMSG_MONSTER_MOVE` with the transport's packed guid
+    /// inserted between the mover's guid and the start position — everything after it parses
+    /// identically, and every coordinate is then a deck-local offset. Reading the *plain* opcode's
+    /// layout for it would consume the transport guid as the start's X and Y and land the creature
+    /// somewhere near the map origin; reading the transport layout for a plain packet is the same
+    /// mistake in reverse. Both directions are pinned here (decision 1936).
+    #[test]
+    fn monster_move_transport_reads_the_deck_guid_first() {
+        let mut body = Vec::new();
+        write_packed_guid(0x55, &mut body).unwrap(); // the mover
+        write_packed_guid(0x2000_0000_0000_0007, &mut body).unwrap(); // the transport
+        for f in [1.5f32, -2.5, 0.75] {
+            body.extend_from_slice(&f.to_le_bytes()); // deck-local start
+        }
+        body.extend_from_slice(&7u32.to_le_bytes()); // splineId
+        body.push(0); // moveType: a plain move
+        body.extend_from_slice(&0u32.to_le_bytes()); // spline flags: ground, walk
+        body.extend_from_slice(&2_000u32.to_le_bytes()); // duration
+        append_linear_path(&mut body, &[[1.5, -2.5, 0.75], [4.0, -2.5, 0.75]]);
+
+        match parse_server(opcode::SMSG_MONSTER_MOVE_TRANSPORT, &body).expect("parses") {
+            ServerPacket::MonsterMove {
+                guid,
+                transport,
+                start,
+                path,
+                ..
+            } => {
+                assert_eq!(guid, 0x55);
+                assert_eq!(transport, Some(0x2000_0000_0000_0007));
+                assert_eq!((start.x, start.y, start.z), (1.5, -2.5, 0.75));
+                assert_eq!(path.len(), 2, "start + endpoint, both deck-local");
+                assert_eq!((path[1].x, path[1].y, path[1].z), (4.0, -2.5, 0.75));
+            }
+            _ => panic!("expected MonsterMove"),
+        }
+
+        // The plain opcode over the SAME bytes must NOT come back with a transport — and it
+        // mis-reads the head, which is exactly why the two layouts cannot share one arm.
+        match parse_server(opcode::SMSG_MONSTER_MOVE, &body) {
+            Ok(ServerPacket::MonsterMove { transport, .. }) => assert_eq!(transport, None),
+            Ok(_) => panic!("expected MonsterMove"),
+            Err(_) => {} // an under-run is equally fine: the point is that it is not the same read
         }
     }
 

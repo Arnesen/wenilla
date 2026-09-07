@@ -8,6 +8,43 @@ pub use benilla_formats::PlayableAnim;
 use bevy::animation::graph::{AnimationGraph, AnimationNodeIndex};
 use bevy::prelude::*;
 
+/// One **event keyframe** on a clip — the baked twin of [`benilla_formats::AnimEvent`], exactly as
+/// [`super::ModelMarker`] is the baked twin of `EventMarker`, and carrying the same bone-local
+/// Bevy-space offset convention.
+///
+/// It carries **where** as well as **when**, because the reference's event kernel does: `0x719370`
+/// computes `placementMatrix · (boneMatrix[event.bone] · event.position)` and snapshots it by
+/// value into the deferred callback record every dispatcher reads (wow-re
+/// `spell/scratch/camera-shake-producers.md` §5). A consumer that plays at the model root is using
+/// the placement alone, which is the same point only where the record sits at the origin — and
+/// corpus-wide it does not: 149 of 244 `$DSL` records are off-origin, out to 67.6 yd
+/// (`Maraudon_Waterfall01.m2`), and every player model's six `$CSD` records ride the head
+/// (`benilla-extract eventmarkerscan`).
+///
+/// **Two points, because there are two cases and both are exact.** [`Self::offset`] is bone-local
+/// and wants the joint's live global ([`benilla_world::rig_anim::RigPose::posed_point`]);
+/// [`Self::point`] is the model-space rest position and wants the model's own world frame. The
+/// second is not an approximation of the first: with no keys a bone's matrix composes to the
+/// identity, so `placement · position` *is* the kernel's quantity — which is the whole placed-doodad
+/// population, where 0 of 244 `$DSL` records ride a bone any sequence keys.
+#[derive(Debug, Clone, Copy)]
+pub struct ClipEvent {
+    /// Seconds from the clip start.
+    pub time: f32,
+    /// The forward-stored 4CC (`*b"$SND"`).
+    pub ident: [u8; 4],
+    /// The payload — a SoundEntries id for `$SND`/`$DSL`/`$DSO`, else 0.
+    pub data: u32,
+    /// The bone this record rides.
+    pub bone: u16,
+    /// The authored point **relative to [`Self::bone`]'s pivot**, Bevy space — compose it with the
+    /// joint's live global.
+    pub offset: Vec3,
+    /// The authored point in the model's own space, Bevy space — compose it with the model's world
+    /// frame. Equals the kernel's quantity whenever the bone chain is unanimated.
+    pub point: Vec3,
+}
+
 /// One animation in a model's [`ModelAnimations`] graph (decision 0019): its `AnimationData.dbc` id,
 /// the graph node an `AnimationPlayer` plays to run it, and whether it loops.
 #[derive(Clone)]
@@ -56,7 +93,7 @@ pub struct AnimClip {
     /// The sequence's event keyframes (`$SND`/footsteps/`$CSS`… — decision 0070 slice 3), sorted by
     /// time, seconds on the clip clock. Shared (`Arc`) so cloning a clip stays cheap; empty for the
     /// overwhelming majority of sequences.
-    pub events: std::sync::Arc<[benilla_formats::AnimEvent]>,
+    pub events: std::sync::Arc<[ClipEvent]>,
     /// Per-arm masked variants `(right, left)` of this clip — graph nodes that animate **only** the
     /// right/left arm subtree (shoulder keybone down), for the client's per-slot one-shots played
     /// *over* the gait (the draw/stow: mainhand ceremony on the right arm, offhand on the left,

@@ -175,6 +175,8 @@ fn footstep_sounds(
                     .and_then(|d| creatures.as_deref()?.foley_material(d)),
             };
             if let Some(kit) = material.and_then(|m| materials.0.foley_kit(m)) {
+                // The unit's own origin, raised — NOT the fired key's point. Byte-confirmed at
+                // `0x45851d fadd [0x801628]` (see the terrain leg below for the split).
                 let mut at = transform.translation();
                 at.y += FOLEY_HEIGHT;
                 if let Err(e) = play_kit_ext(
@@ -243,7 +245,13 @@ fn footstep_sounds(
             &config,
             listener,
             KitRef::Id(kit),
-            Some(transform.translation()),
+            // **The terrain footstep is at the EVENT's point, the foley above is not** — one arm,
+            // two sounds, two positions (wow-re `anim-event-position-law.md` §3, §5-verified).
+            // `0x623390` hands its `pos` argument to `0x458380`, where it is *both* the
+            // audibility-radius reference and the 3D play position (`0x458434`); the foley leg
+            // `0x6233d9 call [vt+0x8c]` is argument-less and re-derives `GetPosition + 2.0 z`
+            // itself. Playing both at the same place would over-move one of them.
+            Some(ev.pos.unwrap_or_else(|| transform.translation())),
             SoundCategory::Sfx,
             PlayExtras {
                 bus: Bus::FOOTSTEP,

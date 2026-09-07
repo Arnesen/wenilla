@@ -85,24 +85,17 @@ pub enum QuadContent {
         /// `inside` flag it pushed down.
         inside_zoom: u8,
     },
-    /// A `Cooldown` widget's draw slot (decision 0137 phase 4): the engine-derived phase of the
-    /// reference machine (`Cooldown.lua`), for the app renderer's pie-wipe/flash draw. Emitted
-    /// only while the widget is shown; `tick` hides it once the flash ends.
-    Cooldown {
-        /// Sweep progress `0..1` (`(now-start)/duration`, the `Cooldown.lua` scrub); `>= 1` =
-        /// the sweep is over (the flash below runs) — no dark pie draws.
-        fraction: f32,
-        /// The finish flash's progress `0..1` over its authored 1.000 s (the model's sequence 1),
-        /// `None` while the sweep still runs. The alpha ramp is the model's own texture-weight
-        /// track — byte-read off `UI-Cooldown-Indicator.m2` (linear 0→1 over the first third,
-        /// hold to the half, 1→0 over the back half) — applied app-side.
-        flash: Option<f32>,
-    },
     /// A `Model` / `PlayerModel` widget's own draw slot: the 3D pane's content hole. The engine
     /// core carries the resolved rect and the pane's identity; the app renderer puts pixels in it
-    /// — the same division of labour [`QuadContent::Minimap`] and [`QuadContent::Cooldown`] use,
-    /// and for the same reason (the scene state is [`crate::widget::ModelState`]; the render is
-    /// not this crate's).
+    /// — the same division of labour [`QuadContent::Minimap`] uses, and for the same reason (the
+    /// scene state is [`crate::widget::ModelState`]; the render is not this crate's).
+    ///
+    /// **The clock is deliberately NOT here.** A pane's play head moves every tick, and the
+    /// host memoizes its whole quad conversion on the extracted list being unchanged — a
+    /// cursor in this variant would re-convert the entire interface every frame a cooldown or a
+    /// ping is showing. The host reads the play heads straight off the engine instead
+    /// (`UiScript::visible_model_panes`, decision 2008); this variant carries only what the
+    /// layout and the Lua setters decide.
     ///
     /// **Why the NAME travels rather than the scene.** benilla draws a body pane by sampling an
     /// off-screen bake the app already keeps per *window* (the paper doll's, the inspect window's,
@@ -112,9 +105,43 @@ pub enum QuadContent {
     /// invent a meaning for. A pane with no name, or one no window has claimed, draws nothing;
     /// that is also what a `SetModel` pane does today, and it is honest rather than a white slab.
     ModelPane {
+        /// The pane's frame handle — the renderer's key for the tile it keeps per pane (a name
+        /// is optional and shared by nothing; the handle is neither). Decision 2007.
+        handle: crate::widget::FrameHandle,
         /// The pane's global frame name (`$parent`-expanded), or `None` for an anonymous
         /// `CreateFrame("Model")` — pfUI's autocast shine is the corpus example of the latter.
         name: Option<String>,
+        /// The `SetModel` path the pane holds (`None` for a unit pane or an empty one) — what the
+        /// host's tile renderer draws (decision 2013), the map arrow's `crate::script::ARROW_MODEL`
+        /// among them since 2015.
+        model: Option<String>,
+        /// `SetFacing`'s radians (0 default).
+        facing: f32,
+        /// `SetModelScale`'s factor (1 default).
+        model_scale: f32,
+        /// `SetPosition`'s offset, in the ortho leg's layout units (render law §2: the root is
+        /// `T(pos · layoutScale) · R(facing) · S(…)`).
+        position: (f32, f32, f32),
+        /// The frame's **own** alpha — what the model instance draws at. The reference re-pushes
+        /// `[widget+0xc8]/255` into the instance on every `Frame:SetAlpha` (`0x76d120`), and
+        /// nothing folds the parent chain in: a pane under a faded parent draws at its own
+        /// alpha (render law §4.4). [`ExtractedQuad::alpha`] carries the effective one.
+        own_alpha: f32,
+        /// `ReplaceIconTexture`'s path — the type-14 texture override, or `None` for the file's
+        /// own textures.
+        icon: Option<String>,
+        /// The installed camera as a RAW index into the file's camera table, or `None` for the
+        /// NULL camera. **This is the render leg** (decision 2027): `None` is the orthographic
+        /// one — the model laid flat over the pane's rect — and `Some(n)` the perspective one,
+        /// framed by the file's own record `n`.
+        camera: Option<u32>,
+        /// The pane's embedded `CGLight`. Disabled on every shipped pane, which is why an
+        /// unlit-on-every-material UI M2 never notices; a LIT batch under a disabled light draws
+        /// black, and that is the reference's answer, not a gap.
+        light: crate::widget::ModelLight,
+        /// The pane's fog, only when armed — colour, near and far as the fill callback stages
+        /// them. Per-batch from there: a material with the UNFOGGED bit ignores it.
+        fog: Option<crate::widget::ModelFog>,
     },
     /// A `Texture` region: a BLP path *or* a solid/vertex color (or both — a tinted texture).
     Texture {

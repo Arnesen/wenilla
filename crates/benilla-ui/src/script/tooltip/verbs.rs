@@ -91,7 +91,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                             // Dropping every anchor is a retarget to the EMPTY target set, and it
                             // names its node like any other (decision 1625). It matters here more
                             // than anywhere: this arm is `GameTooltip_SetDefaultAnchor`'s, which is
-                            // the path EVERY action-bar hover takes (`ActionBar.xml:510`, the
+                            // the path EVERY action-bar hover takes (stock `ActionButton_SetTooltip`, the
                             // `UberTooltips` default; the stance, pet and bonus bars the same) —
                             // while a bag slot anchors straight to its button and never comes
                             // through here. So a conservative touch on this line was a whole-graph

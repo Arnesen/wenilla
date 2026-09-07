@@ -86,10 +86,13 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| Ok(measured_wh(lua, &this)?.1))?,
     )?;
 
-    // GetLeft/GetRight/GetTop/GetBottom — the region's RESOLVED edges (y-up UI units; frame twin
-    // in object.rs). Every drawable region carries anchors (authored or the creation-path
-    // implicit anchor, decision 1310) and reads its resolved rect; a templateless Lua region
-    // nobody anchored never resolves → nil, same as pre-resolve.
+    // GetLeft/GetRight/GetTop/GetBottom — the region's RESOLVED edges in its OWNER's units (y-up;
+    // screen ÷ the owner's effective scale, the frame twin's law in `object/layout_methods.rs` —
+    // a region shares its owner's scale, and a texture inside the scaled world map answered
+    // screen units here while its owner answered local ones, decision 1985). Every drawable
+    // region carries anchors (authored or the creation-path implicit anchor, decision 1310) and
+    // reads its resolved rect; a templateless Lua region nobody anchored never resolves → nil,
+    // same as pre-resolve.
     for (name, pick) in [
         ("GetLeft", 0u8),
         ("GetRight", 1u8),
@@ -101,11 +104,14 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             lua.create_function(move |lua, this: Table| {
                 let rh = region_handle_of(lua, &this)?;
                 let model = lua.app_data_ref::<Model>().expect("model");
-                Ok(model.region_resolved.get(&rh).map(|r| match pick {
-                    0 => r.left,
-                    1 => r.right,
-                    2 => r.top,
-                    _ => r.bottom,
+                let inv = 1.0 / owner_scale(&model, rh);
+                Ok(model.region_resolved.get(&rh).map(|r| {
+                    inv * match pick {
+                        0 => r.left,
+                        1 => r.right,
+                        2 => r.top,
+                        _ => r.bottom,
+                    }
                 }))
             })?,
         )?;
@@ -201,10 +207,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let rh = region_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
+            let inv = 1.0 / owner_scale(&model, rh);
             Ok(match model.region_resolved.get(&rh) {
                 Some(r) => (
-                    Value::Number(f64::from((r.left + r.right) * 0.5)),
-                    Value::Number(f64::from((r.bottom + r.top) * 0.5)),
+                    Value::Number(f64::from(inv * (r.left + r.right) * 0.5)),
+                    Value::Number(f64::from(inv * (r.bottom + r.top) * 0.5)),
                 ),
                 None => (Value::Nil, Value::Nil),
             })
@@ -272,4 +279,14 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
     Ok(())
+}
+
+/// The region's owner frame's effective scale (1 for an orphan) — the divisor that turns a
+/// resolved screen rect into the owner's units, the space every region getter answers in.
+fn owner_scale(model: &Model, rh: crate::widget::RegionHandle) -> f32 {
+    model
+        .arena
+        .region(rh)
+        .map(|r| crate::script::object::eff_scale(model, r.owner))
+        .unwrap_or(1.0)
 }

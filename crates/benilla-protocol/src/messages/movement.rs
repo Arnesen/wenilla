@@ -18,11 +18,25 @@ pub(super) const MOVEMENT_FLAG_SWIMMING: u32 = 0x20_0000;
 pub(super) const MOVEMENT_FLAG_SPLINE_ENABLED: u32 = 0x40_0000;
 pub(super) const MOVEMENT_FLAG_SPLINE_ELEVATION: u32 = 0x400_0000;
 
+/// Read `MSG_MOVE_TIME_SKIPPED` — one observed mover's **packed** guid and the milliseconds its
+/// own client skipped (VERIFIED: the reference's handler `0x603b40` reads a packed guid through
+/// `0x642ed0`, resolves under `TYPEMASK_UNIT`, then reads a plain `u32`; vmangos relays exactly
+/// that shape, `MovementHandler.cpp:1011-1017`).
+///
+/// Note the **asymmetry with the client's own send**, which is the same fact in the other
+/// direction and writes a *plain* 8-byte guid (see [`super::client::move_time_skipped`]).
+/// Inbound packed, outbound plain — that is the reference's own encoding, not a slip.
+pub(super) fn read_move_time_skipped(r: &mut &[u8]) -> io::Result<(u64, u32)> {
+    let guid = crate::wire::read_packed_guid(r)?;
+    let lag_ms = read_u32_le(r)?;
+    Ok((guid, lag_ms))
+}
+
 /// Read a wire `MovementInfo` — the body shared by every `MSG_MOVE_*` (and the teleport ack). Surfaces
 /// `flags`/`position`/`orientation`/`timestamp`/`fall_time`, the **transport pose** ([`TransportPose`],
 /// present iff `MOVEFLAG_ON_TRANSPORT` — this is how a boarded rider's `MSG_MOVE_*` heartbeat carries
 /// its local frame, decision 0438 "Riding is the mover's platform frame"), the **swim pitch**
-/// ([`Self::pitch`], present iff `MOVEFLAG_SWIMMING`), and the **jump tail** ([`JumpInfo`], so an
+/// (`Self::pitch`, present iff `MOVEFLAG_SWIMMING`), and the **jump tail** ([`JumpInfo`], so an
 /// observer can replay a jump arc); the spline-elevation tail is parsed to stay aligned but discarded.
 ///
 /// VERIFIED byte-for-byte against vmangos `MovementInfo::Read` (build 1.12.1): note 1.12 has **no**
@@ -265,7 +279,7 @@ pub struct TransportPose {
 /// (decision 0438 phase 2). The transport, swim-pitch, and jump tails are conditional
 /// outbound, gated on their flags. Inbound, every conditional tail is parsed (see
 /// [`read_movement_info`]) — the transport pose into [`Self::transport`], the swim pitch into
-/// [`Self::pitch`], the jump tail into [`Self::jump`], and the spline-elevation float to stay aligned
+/// `Self::pitch`, the jump tail into [`Self::jump`], and the spline-elevation float to stay aligned
 /// only (no consumer needs it).
 pub struct MovementInfo {
     pub flags: u32,

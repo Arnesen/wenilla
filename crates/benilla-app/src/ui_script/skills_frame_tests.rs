@@ -1,5 +1,5 @@
-//! The shipped **Skills tab** (`assets/ui/SkillFrame.xml`) driven end-to-end, engine-only (no
-//! Bevy) — the per-window test module the spellbook/trainer/bank files already establish, split
+//! The stock **Skills tab** (`Interface\FrameXML\SkillFrame.xml`, off the player's chain since
+//! 1956) driven end-to-end, engine-only (no Bevy) — the per-window test module the spellbook/trainer/bank files already establish, split
 //! out of `character_tests.rs` (which owns the paperdoll + the tab round-trip) so the skills-pane
 //! paint law has a home of its own.
 //!
@@ -12,10 +12,9 @@
 //! hunter's `Beast Mastery` on vmangos arrives as `300/300` and must still read gray and
 //! numberless, exactly as it does in the real client.
 //!
-//! **The window around the page is the reference's own since 1751** — `CharacterFrame.xml` and
-//! `PaperDollFrame.xml` off the player's chain — so every test that opens the page loads
-//! [`super::test_ui::CHARACTER_UI`] and opens with `wow_data_or_skip!()`. The page itself
-//! (`assets/ui/SkillFrame.xml`) is still ours.
+//! **The whole window is the reference's own** — `CharacterFrame.xml` and `PaperDollFrame.xml`
+//! since 1751, the page itself since 1956 — so every test that opens the page loads
+//! [`super::test_ui::CHARACTER_UI`] and opens with `wow_data_or_skip!()`.
 
 use benilla_ui::script::{QuadContent, SkillEntry, SkillsState, UiScript, UnitState};
 
@@ -57,8 +56,18 @@ fn skill(
 /// silently never got built (`SkillDetailScrollFrame` inherits `UIPanelScrollFrameTemplate`).
 /// [`super::test_ui::load_ui_strict`] is that lesson made into a check.
 fn shown_skills_page() -> UiScript {
+    shown_skills_page_with(None)
+}
+
+/// [`shown_skills_page`] with a text measurer seated BEFORE the files load — the state the app's
+/// VM is in at world entry (the glue screens' frames seat it), which a stock `OnLoad` that measures
+/// text relies on.
+fn shown_skills_page_with(measurer: Option<Box<dyn benilla_ui::script::TextMeasure>>) -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    if let Some(m) = measurer {
+        s.set_text_measurer(m);
+    }
     for f in super::test_ui::CHARACTER_UI {
         super::test_ui::load_ui_strict(&s, f);
     }
@@ -201,7 +210,7 @@ fn a_single_rank_line_paints_gray_with_no_rank_text() {
     );
 
     // Selecting the single-rank row paints the detail pane the same way (the shared PaintBar).
-    s.run("SetSelectedSkill(2) BenillaSkillFrame_Update()")
+    s.run("SetSelectedSkill(2) SkillFrame_UpdateSkills()")
         .unwrap();
     assert_eq!(
         s.eval::<String>("return SkillDetailStatusBarSkillRank:GetText() or \"\"")
@@ -367,10 +376,11 @@ fn the_pages_close_button_sits_where_the_reference_seats_it_and_closes_the_windo
     // **"Close", not "CLOSE".** An XML `text=` attribute is a GlobalStrings LOOKUP, not a literal
     // (`loader::Loader::resolve_text`, wow-re `rf28-typed-widget-loadxml.md` l.36 —
     // `FrameScript_GetText 0x703bf0`), and `CLOSE = "Close"` (`GlobalStrings.lua:760`). This test
-    // read "CLOSE" while the page's list carried no `GlobalStrings.lua`: it was asserting our
-    // loader's miss-fallback (the LITERAL, a deliberate divergence for benilla-authored files),
-    // not the label the reference client draws. [`super::test_ui::CHARACTER_UI`] loads the
-    // player's own strings first, as the app does, so this is the real label now.
+    // read "CLOSE" while the page's list carried no `GlobalStrings.lua`: it was asserting the
+    // miss-fallback (the raw attribute), which is the REFERENCE's own arm too (`0x778c31` /
+    // `0x771032`), not the label a client with the strings loaded draws.
+    // [`super::test_ui::CHARACTER_UI`] loads the player's own strings first, as the app does, so
+    // this is the real label now.
     let label = page_quads(&s)
         .iter()
         .find_map(|q| match &q.content {
@@ -458,30 +468,20 @@ fn the_collapse_all_fold_wears_the_row_font_and_the_references_seat() {
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
 }
 
-/// The tab's **fit law** (ref `SkillFrameExpandButtonFrame`'s OnLoad, l.312-316:
-/// `SetWidth(GetTextWidth()+45)`). benilla seats the VM's font engine at the frame boundary, so
-/// the XML-load call reads 0 — the guard leaves the declared width standing, and the first Update
-/// with a measurer fits the tab. Both states are pinned here because only the second one is the
-/// reference's, and only the first is what a cold load sees.
+/// The tab's **fit law** (ref `SkillFrameExpandButtonFrame`'s OnLoad:
+/// `SetWidth(SkillFrameCollapseAllButton:GetTextWidth()+45)`), which the reference applies ONCE,
+/// at load, with its font engine already up. The app's VM is in that state at world entry (the
+/// glue screens seat the measurer on it), so the test seats one first; the transcription used to
+/// guard a 0 measure and re-fit on the first Update, which the reference never does (1956).
 #[test]
-fn the_expand_tab_fits_its_label_once_a_measure_answers() {
+fn the_expand_tab_fits_its_label_at_load() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = shown_skills_page();
-    assert_eq!(
-        s.eval::<f64>("return SkillFrameExpandButtonFrame:GetWidth()")
-            .unwrap(),
-        54.0,
-        "unmeasured, the declared width stands — a 0 measure must not squash the tab to 45"
-    );
-
-    s.set_text_measurer(Box::new(super::FixedWidthFont(7.0)));
-    s.run("BenillaSkillFrame_Update()").unwrap();
-    s.resolve();
+    let mut s = shown_skills_page_with(Some(Box::new(super::FixedWidthFont(7.0))));
     assert_eq!(
         s.eval::<f64>("return SkillFrameExpandButtonFrame:GetWidth()")
             .unwrap(),
         7.0 * 3.0 + 45.0,
-        "then the ref's own law: the label's width + 45"
+        "the ref's own law at load: the ALL label's width + 45"
     );
     // The middle slab is the span between the two caps, so the fit reaches the art for free.
     let (mid_l, mid_r, cap_r_l) = s
@@ -496,5 +496,147 @@ fn the_expand_tab_fits_its_label_once_a_measure_answers() {
         66.0 - 16.0,
         "and carries the whole span minus the two caps"
     );
+    // An Update leaves the fit alone — the reference sizes the tab at load and never again.
+    s.run("SkillFrame_UpdateSkills()").unwrap();
+    s.resolve();
+    assert_eq!(
+        s.eval::<f64>("return SkillFrameExpandButtonFrame:GetWidth()")
+            .unwrap(),
+        66.0
+    );
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+}
+
+/// **B370 — the list reaches its last rows.** MarcusAga's Skills tab stopped three rows short of
+/// the end: the knob mid-track, Maces the last row shown. The reference's own
+/// `FauxScrollFrame_Update` sizes the bar to `(n − 12) × 15` and the scroll child to `n × 15`, and
+/// `SkillListScrollFrame` is 220 tall (stock `SkillFrame.xml` l.468) against twelve rows of
+/// fifteen — so the child's overflow past the frame, `n × 15 − 220`, is forty pixels short of
+/// where the bar goes. An engine that clamped `SetVerticalScroll` into that overflow stopped the
+/// row offset at `n − 15`; the reference stores the bar's value as given (decision 2017).
+///
+/// Drives the bar to its end and reads the twelfth row: the block's last line. The control is the
+/// pre-fix mechanism itself — the overflow really is shorter than the bar's range.
+#[test]
+fn the_list_reaches_its_last_row_at_the_bars_end() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for f in super::test_ui::CHARACTER_UI {
+        super::test_ui::load_ui_strict(&s, f);
+    }
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            exists: true,
+            level: 60,
+            race: Some("Human".into()),
+            race_file: Some("Human".into()),
+            class: Some("Warrior".into()),
+            class_file: Some("WARRIOR".into()),
+            ..UnitState::default()
+        }),
+    );
+    // A warrior's kind of block — twenty-two lines under three headers, twenty-five rows: more than
+    // twelve by more than the frame's slack, so the tail is only reachable past the overflow.
+    let mut entries = Vec::new();
+    for (i, name) in [
+        "Axes",
+        "Bows",
+        "Crossbows",
+        "Daggers",
+        "Defense",
+        "Guns",
+        "Maces",
+        "Polearms",
+        "Staves",
+        "Swords",
+        "Thrown",
+        "Two-Handed Axes",
+        "Two-Handed Maces",
+        "Two-Handed Swords",
+        "Unarmed",
+    ]
+    .iter()
+    .enumerate()
+    {
+        entries.push(skill(
+            100 + i as u32,
+            name,
+            300,
+            300,
+            false,
+            (6, "Weapon Skills", 5),
+        ));
+    }
+    for (i, name) in ["Cloth", "Leather", "Mail", "Plate", "Shield"]
+        .iter()
+        .enumerate()
+    {
+        entries.push(skill(
+            400 + i as u32,
+            name,
+            1,
+            1,
+            false,
+            (8, "Armor Proficiencies", 6),
+        ));
+    }
+    for (i, name) in ["Language: Common", "Language: Dwarven"].iter().enumerate() {
+        entries.push(skill(
+            500 + i as u32,
+            name,
+            300,
+            300,
+            false,
+            (10, "Languages", 8),
+        ));
+    }
+    s.set_skills(SkillsState { entries });
+    s.run(r#"ToggleCharacter("SkillFrame")"#).unwrap();
+    s.resolve();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    let n = s.eval::<i64>("return GetNumSkillLines()").unwrap();
+    assert_eq!(n, 25, "22 lines under 3 headers");
+    let (last_name, last_is_header) = s
+        .eval::<(String, Option<i64>)>(&format!("local n, h = GetSkillLineInfo({n}) return n, h"))
+        .unwrap();
+    assert!(
+        last_is_header.is_none(),
+        "the tail row is a line, read off SkillRankFrame12"
+    );
+
+    // The reference's own numbers: the bar runs to (n − 12) × 15, the child's overflow past the
+    // 220-tall frame is 40 px less — the control that the reported mechanism is the real one.
+    let (_, bar_max) = s
+        .eval::<(f64, f64)>("return SkillListScrollFrameScrollBar:GetMinMaxValues()")
+        .unwrap();
+    assert_eq!(bar_max, f64::from((n as i32 - 12) * 15));
+    let overflow = s
+        .eval::<f64>("return SkillListScrollFrame:GetVerticalScrollRange()")
+        .unwrap();
+    assert_eq!(overflow, f64::from(n as i32 * 15 - 220));
+    assert!(
+        overflow < bar_max,
+        "the frame is taller than its twelve rows"
+    );
+
+    // The knob dragged to the end: bar → SetVerticalScroll → <OnVerticalScroll> →
+    // FauxScrollFrame_OnVerticalScroll → SkillFrame_UpdateSkills.
+    s.run("SkillListScrollFrameScrollBar:SetValue(select(2, SkillListScrollFrameScrollBar:GetMinMaxValues()))")
+        .unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(
+        s.eval::<i64>("return FauxScrollFrame_GetOffset(SkillListScrollFrame)")
+            .unwrap(),
+        n - 12,
+        "the row offset reaches the bar's end, not the overflow's"
+    );
+    assert_eq!(
+        s.eval::<String>("return SkillRankFrame12SkillName:GetText()")
+            .unwrap(),
+        last_name,
+        "the twelfth row is the block's last line"
+    );
 }

@@ -8,7 +8,7 @@
 //! per unit:
 //!
 //! ```text
-//! UGD 0x…  z=5.02  seat=9.14  drop=+4.12  terrain=5.02  above=9.07 (+4.05)  spline=0 swim=0
+//! UGD 0x…  unit "Stormwind Guard"  z=5.02  seat=9.14  drop=+4.12  terrain=5.02  above=9.07 (+4.05)  spline=0 swim=0
 //! ```
 //!
 //! - **`seat`** is the server's own Z for this unit — the pose the create block / a move packet /
@@ -33,13 +33,23 @@
 //! The repeat form is the load-race half: a census at 30 s and again at 45 s says whether a sunk
 //! unit *stays* sunk once the world has finished arriving, which is what separates a transient from
 //! the ratchet decision 1384 removed.
+//!
+//! It lists exactly the bodies the clamp is responsible for ([`ground_derived`]) — since B357 that
+//! includes a **player the server moves along a spline**, which the `player` tag names. That is the
+//! whole readout for a Playerbots server: a bot mid-path reads `player spline=1` with a small
+//! `drop`, and the bug it closes read the wire Z with no row here at all.
 
 use benilla_assets::coords::bevy_to_wow;
 use benilla_protocol::EntityKind;
 use bevy::prelude::*;
 
 use super::ProbeClock;
-use crate::net::{CreatureSwimming, GroundClamped, Guid, NetEntity, SelfPlayer, Spline};
+use crate::names::NameCache;
+use crate::net::NetCommands;
+use crate::net::{
+    ground_derived, CreatureSwimming, Embodied, GroundClamped, Guid, NetEntity, RemoteMotion,
+    SelfPlayer, Spline,
+};
 
 /// A drop past this (yd) counts as **sunk** — the headline count. The clamp's honest corrections are
 /// the small float off a slightly-high wire Z and the little hill a straight spline cuts through;
@@ -96,13 +106,24 @@ type CensusQuery = (
     Option<&'static GroundClamped>,
     Option<&'static Spline>,
     Has<CreatureSwimming>,
+    // The subject test's other two inputs, so the listing is exactly the clamp's own population
+    // rather than a second, hand-kept guess at it.
+    Has<Embodied>,
+    Has<RemoteMotion>,
 );
 
-/// One census line per streamed `Unit` within [`GroundCensus::radius`] of the body, worst drop
+/// One census line per [`ground_derived`] body within [`GroundCensus::radius`] of ours, worst drop
 /// first, under a summary line naming the count that matters.
+#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 fn fire_ground_census(
     mut probe: ResMut<GroundCensus>,
     time: ProbeClock,
+    // The name each row belongs to. "Which NPC is sunk" is a name question — a guid sends the
+    // reader back to the server's own tables to answer it — and the cache is already warm: it is
+    // asked at first *sight* for every unit that streams in. A `None` is a name still in flight,
+    // never a missing one.
+    mut names: ResMut<NameCache>,
+    net_commands: Res<NetCommands>,
     world: benilla_world::collision::WorldCollision,
     point: benilla_world::world_point::WorldPoint,
     body: Query<&Transform, With<SelfPlayer>>,
@@ -124,9 +145,14 @@ fn fire_ground_census(
     let radius2 = probe.radius * probe.radius;
 
     let mut rows: Vec<(f32, bool, String)> = Vec::new();
-    for (guid, net, t, clamped, spline, swimming) in &units {
-        if net.kind != EntityKind::Unit
-            || t.translation.distance_squared(body.translation) > radius2
+    for (guid, net, t, clamped, spline, swimming, embodied, relayed) in &units {
+        if !ground_derived(
+            net.kind,
+            spline.is_some(),
+            clamped.is_some(),
+            embodied,
+            relayed,
+        ) || t.translation.distance_squared(body.translation) > radius2
         {
             continue;
         }
@@ -136,13 +162,24 @@ fn fire_ground_census(
         let terrain = point.terrain_height_under(t.translation);
         let above = lowest_surface_above(&world, t.translation);
         let wow = bevy_to_wow(t.translation);
+        let name = names
+            .resolve(guid.0, &net_commands)
+            .unwrap_or("?")
+            .to_string();
         rows.push((
             drop,
             swimming,
             format!(
-                "UGD {:#018x} pos=({:.2},{:.2},{:.2}) z={z:.2} seat={seat:.2} drop={drop:+.2} \
-                 terrain={} above={} spline={} swim={}",
+                "UGD {:#018x} {} {name:?} pos=({:.2},{:.2},{:.2}) z={z:.2} seat={seat:.2} \
+                 drop={drop:+.2} terrain={} above={} spline={} swim={}",
                 guid.0,
+                // Which kind this row is: since B357 the listing is not all creatures, and a
+                // player row is the one a Playerbots report is about.
+                if net.kind == EntityKind::Player {
+                    "player"
+                } else {
+                    "unit"
+                },
                 wow[0],
                 wow[1],
                 wow[2],

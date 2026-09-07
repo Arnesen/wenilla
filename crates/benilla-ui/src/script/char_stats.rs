@@ -287,6 +287,11 @@ pub struct InvSlotView {
     /// and the reference renders all 7 from it — but a 1.12 server fills only PERM and TEMP, so in
     /// practice that is what an inspect hover shows.
     pub enchants: Vec<super::EnchantView>,
+    /// **The instance's remaining LIFETIME in milliseconds** — the doll twin of
+    /// [`super::container::ContainerSlot::duration_ms`]. `None` = no timer. In practice an
+    /// equipped duration item is rare (the holiday masks are the shipped case), but the line law
+    /// is one law and the doll hover runs the same builder. Decision 1933.
+    pub duration_ms: Option<u64>,
 }
 
 /// The inventory-slot snapshot: index 0 = ammo, 1..=19 the equipment slots, 20..=23 the four

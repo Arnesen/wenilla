@@ -22,14 +22,14 @@ use benilla_protocol::messages::{
 use bevy::prelude::*;
 
 use benilla_ui::script::{
-    QuestAction, QuestItemView, QuestPanel, QuestState, ScriptValue, UiScript,
+    QuestAction, QuestItemView, QuestPanel, QuestRewardSpell, QuestState, UiScript,
 };
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_action::{show_messages, ui_error_text, MessageSink, Shown, UiError};
+use crate::ui_action::{show_messages, ui_error_text, MessageSink, Shown, Spells, UiError};
 use crate::ui_script::UiInput;
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
 
@@ -71,6 +71,22 @@ pub(crate) struct QuestGiver {
     messages: Vec<UiError>,
     /// The re-ask epoch — see [`Self::bump_reask`].
     reask: u32,
+    /// What each **refused** `SMSG_QUESTGIVER_STATUS` said, per guid, and how many we have refused
+    /// this session.
+    ///
+    /// The only trace of a packet class benilla deliberately throws on the floor. benilla asks the
+    /// server about quest-flagged GameObjects because the reference does, and vmangos — unlike the
+    /// real 1.12 service, which never answered one — replies; the reference's own handler drops
+    /// that reply at the typemask-8 lookup and so does ours (decision 1872,
+    /// [`crate::net::apply`]'s `quest_giver_status`). Without this, the *whole* GameObject half of
+    /// the feature is invisible from inside the client: a correct drop and a query that was never
+    /// sent both read as "no status", which is exactly the pair a live probe has to tell apart.
+    /// Keyed by guid, and pruned with [`Self::retain_statuses`] — **not** a single last-writer
+    /// slot, which is what this was and why it read as a regression the first time several quest
+    /// objects were in view at once: every one of them is answered in the same packet drain, so
+    /// only the last survived to be looked at, and which object that was is archetype order.
+    refused: HashMap<u64, u32>,
+    refused_count: u32,
 }
 
 impl QuestGiver {
@@ -116,6 +132,8 @@ impl QuestGiver {
     /// the fresh answer lands (decision 0647).
     pub(crate) fn retain_statuses(&mut self, live: impl Fn(u64) -> bool) {
         self.statuses.retain(|&npc, _| live(npc));
+        // The refusal readout follows the same lifetime, for the same reason and to stay bounded.
+        self.refused.retain(|&npc, _| live(npc));
     }
 
     /// Drop one guid's cached status — the NPC stopped being a questgiver, so its marker goes with
@@ -139,6 +157,22 @@ impl QuestGiver {
     /// The current re-ask epoch — see [`Self::bump_reask`].
     pub(crate) fn reask_epoch(&self) -> u32 {
         self.reask
+    }
+
+    /// Record a dialog status the typemask gate refused — see [`Self::refused`].
+    pub(crate) fn refuse_status(&mut self, npc: u64, status: u32) {
+        self.refused.insert(npc, status);
+        self.refused_count = self.refused_count.saturating_add(1);
+    }
+
+    /// What the server last answered for `npc` before we refused it, if anything.
+    pub(crate) fn refused_for(&self, npc: u64) -> Option<u32> {
+        self.refused.get(&npc).copied()
+    }
+
+    /// How many answers we have refused this session — the summary half of [`Self::refused`].
+    pub(crate) fn refused_count(&self) -> u32 {
+        self.refused_count
     }
 
     /// The stored dialog status for `npc`, if any. The store-now half of DIALOG_STATUS
@@ -363,12 +397,35 @@ fn resolve_items(
 /// Build the Lua-facing snapshot from the open view — `None` when no window is open. Every
 /// server-authored text runs the shared chat-macro substitution (`$N`/`$B`/`$G` —
 /// [`crate::npc_text`]): the wire delivers quest text un-expanded, the client substitutes.
+/// The quest's reward spell as the getters answer it: `rewSpell` off the packet, resolved to the
+/// spell's name and icon through the spell catalog (`Spell.dbc`). Zero — no spell — is `None`; an
+/// id the catalog cannot place still counts (the id is real), with nothing to paint.
+pub(crate) fn reward_spell_view(
+    spell_id: u32,
+    spells: Option<&Spells>,
+) -> Option<QuestRewardSpell> {
+    if spell_id == 0 {
+        return None;
+    }
+    let d = spells.and_then(|s| s.catalog.get(spell_id));
+    Some(QuestRewardSpell {
+        spell_id,
+        name: d.map(|d| d.name.clone()),
+        texture: d.and_then(|d| d.icon.clone()),
+        // `isTradeskillSpell` is `Spell.dbc` col 6 `Attributes` bit 5 (`0x20`) — `0x501e59`,
+        // wow-re quest-material-reward-spell-bindings.md §3 (1161 of 22357 rows set; craft-cast
+        // spells set, `Pattern:` teaching spells clear).
+        tradeskill: d.is_some_and(|d| d.attributes & 0x20 != 0),
+    })
+}
+
 fn snapshot(
     giver: &QuestGiver,
     items: &mut Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
     macros: &crate::npc_text::MacroContext,
+    spells: Option<&Spells>,
 ) -> Option<QuestState> {
     let sub = |t: &str| crate::npc_text::substitute(t, macros);
     Some(match giver.view.as_ref()? {
@@ -398,6 +455,7 @@ fn snapshot(
             choices: resolve_items(&d.choices, items, icons, commands),
             rewards: resolve_items(&d.rewards, items, icons, commands),
             reward_money: d.money.max(0) as u32,
+            reward_spell: reward_spell_view(d.reward_spell, spells),
             ..Default::default()
         },
         QuestView::Progress(p) => QuestState {
@@ -416,6 +474,7 @@ fn snapshot(
             choices: resolve_items(&o.choices, items, icons, commands),
             rewards: resolve_items(&o.rewards, items, icons, commands),
             reward_money: o.money.max(0) as u32,
+            reward_spell: reward_spell_view(o.reward_spell, spells),
             ..Default::default()
         },
     })
@@ -445,6 +504,9 @@ fn feed_quest(
     mut names: ResMut<NameCache>,
     states: Res<crate::world_state::WorldStates>,
     self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
+    spells: Option<Res<Spells>>,
+    mut go_templates: ResMut<crate::go_templates::GameObjectTemplates>,
+    materials: Option<Res<crate::ui_item_text::PageMaterials>>,
     mut sink: MessageSink,
     mut last: Local<crate::ui_script::VmMemo<Option<QuestState>>>,
     mut last_name: Local<crate::ui_script::VmMemo<Option<String>>>,
@@ -484,7 +546,24 @@ fn feed_quest(
             subject: player.as_ref(),
             states: &states,
         },
+        spells.as_deref(),
     );
+    // The panel's background material is the SOURCE object's — an item's page material, a
+    // GameObject's template data — never a creature's, and never on the wire (1946; wow-re
+    // quest-material-reward-spell-bindings.md §1). Resolved the way the reader window resolves its
+    // own, since the two bindings share a body.
+    let fresh = fresh.map(|mut st| {
+        st.background_material = giver.npc.and_then(|source| {
+            crate::ui_item_text::object_material(
+                source,
+                &mut items,
+                &mut go_templates,
+                materials.as_deref(),
+                &commands,
+            )
+        });
+        st
+    });
     let npc_name = giver
         .npc
         .and_then(|g| names.resolve(g, &commands).map(str::to_string));
@@ -497,7 +576,9 @@ fn feed_quest(
         return;
     }
     script.set_quest(fresh.clone());
-    let name_arg = || vec![ScriptValue::Str(npc_name.clone().unwrap_or_default())];
+    // The reference's QUEST_GREETING/DETAIL/PROGRESS/COMPLETE carry no argument: the window
+    // reads `UnitName("npc")` for its title (stock QuestFrame.lua:63), and the "npc" unit is
+    // the session's (ui_unit.rs). Ours used to pass the name as arg1 (1944 dropped it).
     match (&*last, &fresh) {
         (_, Some(f)) if switched => {
             // A different giver → close the old panel, open the new (both kits play). QUEST_FINISHED
@@ -505,7 +586,7 @@ fn feed_quest(
             // drain the pending actions so it does NOT clear the giver we just re-opened. Safe: a
             // switch is net-driven, so no user action is queued this frame to lose.
             script.fire_event("QUEST_FINISHED", vec![]);
-            script.fire_event(panel_event(f.panel), name_arg());
+            script.fire_event(panel_event(f.panel), vec![]);
             let _ = script.take_quest_actions();
         }
         (_, Some(f)) => {
@@ -517,7 +598,7 @@ fn feed_quest(
             } else {
                 panel_event(f.panel)
             };
-            script.fire_event(event, name_arg());
+            script.fire_event(event, vec![]);
         }
         (Some(_), None) => script.fire_event("QUEST_FINISHED", vec![]),
         (None, None) => {}
@@ -587,6 +668,7 @@ fn drain_quest(
     commands: Res<NetCommands>,
     index: Res<GuidIndex>,
     stores: Query<&ObjectStore>,
+    mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -654,6 +736,12 @@ fn drain_quest(
                     let _ = commands
                         .0
                         .send(ClientCommand::QuestgiverAccept { npc, quest });
+                    // `AcceptQuest`'s tail (`0x5013df`): the Quest Log tutorial (1976).
+                    if let Some(t) = tutorials.as_mut() {
+                        t.write(crate::tutorial::TutorialEvent::trigger(
+                            crate::tutorial::id::QUEST_LOG,
+                        ));
+                    }
                     // `Script::AcceptQuest` (`0x501380`) closes the window on the CLICK, not on any
                     // answer: send `0x189` (`0x5eac10`), then `0x501130(0,0)` — the same clear the
                     // refusal handlers call, firing `QUEST_FINISHED`. Ours used to leave the panel
@@ -804,6 +892,7 @@ mod tests {
                 subject: Some(&player),
                 states: &crate::world_state::WorldStates::default(),
             },
+            None,
         )
         .expect("open");
         assert_eq!(snap.panel, QuestPanel::Detail);
@@ -848,6 +937,7 @@ mod tests {
                 subject: None,
                 states: &crate::world_state::WorldStates::default(),
             },
+            None,
         )
         .unwrap();
         assert_eq!(snap.panel, QuestPanel::Progress);
@@ -973,15 +1063,7 @@ mod tests {
         );
         // …and the named one, filled.
         assert_eq!(
-            ui_error_text(
-                &UiError {
-                    key: questgiver_failed_key(4),
-                    fill_s: Some("A Threat Within".into()),
-                    fill_d: None,
-                },
-                &g
-            )
-            .as_deref(),
+            ui_error_text(&UiError::s(questgiver_failed_key(4), "A Threat Within"), &g).as_deref(),
             Some("A Threat Within failed: Inventory is full.")
         );
         // The log-full line is the RED one and carries no fill.

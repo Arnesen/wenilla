@@ -26,6 +26,7 @@
 
 use std::collections::HashMap;
 
+use crate::ui_action::UiError;
 use benilla_protocol::messages::{
     party_operation, party_result, GroupLootInfo, GroupMemberEntry, PartyMemberStatsInfo,
 };
@@ -112,23 +113,31 @@ pub struct GroupState {
     /// fires `READY_CHECK` on a counter edge and a second check while the first popup is still up
     /// re-arms it. A boolean could not tell the two apart.
     pub ready_check: u32,
+    /// The request GENERATION — bumped by BOTH arms of the open form (decision 1989), unlike the
+    /// ticket above, which only the non-leader arm bumps: the leader never gets the popup, because
+    /// `0x4ba360`'s leader arm never reaches the `READY_CHECK` fire. The feed turns an edge here
+    /// into the engine's `ready_check_request` and resets its answer cursor.
+    pub ready_check_requests: u32,
+    /// The answers forwarded to us as leader since the last request — `{guid, ready}` in wire
+    /// order. A log the feed replays into the engine from its own cursor, append-only within one
+    /// check so the feed never has to mutate this state; the next request clears it.
+    pub ready_check_answers: Vec<(u64, bool)>,
 }
 
 // The GlobalStrings templates, quoted verbatim from the reference client's own patch chain
 // (decision 0246 extraction; `GlobalStrings.lua` line numbers cited per constant).
 const JOINED_PARTY: &str = "%s joins the party."; // ERR_JOINED_GROUP_S (GlobalStrings:1665)
 const LEFT_PARTY: &str = "%s leaves the party."; // ERR_LEFT_GROUP_S (GlobalStrings:1670)
-const LEFT_GROUP_YOU: &str = "You leave the group."; // ERR_LEFT_GROUP_YOU (GlobalStrings:1671)
 const GROUP_DISBANDED: &str = "Your group has been disbanded."; // ERR_GROUP_DISBANDED (GlobalStrings:1582)
 const UNINVITE_YOU: &str = "You have been removed from the group."; // ERR_UNINVITE_YOU (GlobalStrings:1904)
 const INVITED_TO_GROUP: &str = "%s has invited you to join a group."; // ERR_INVITED_TO_GROUP_S (GlobalStrings:1654)
-const INVITE_PLAYER: &str = "You have invited %s to join your group."; // ERR_INVITE_PLAYER_S (GlobalStrings:1657)
 const DECLINE_GROUP: &str = "%s declines your group invitation."; // ERR_DECLINE_GROUP_S (GlobalStrings:1545)
 const NEW_LEADER: &str = "%s is now the group leader."; // ERR_NEW_LEADER_S (GlobalStrings:1724)
 const NEW_LEADER_YOU: &str = "You are now the group leader."; // ERR_NEW_LEADER_YOU (GlobalStrings:1725)
 const RAID_MEMBER_ADDED: &str = "%s has joined the raid group"; // ERR_RAID_MEMBER_ADDED_S (GlobalStrings:1824)
 const RAID_MEMBER_REMOVED: &str = "%s has left the raid group"; // ERR_RAID_MEMBER_REMOVED_S (GlobalStrings:1825)
 const RAID_YOU_JOINED: &str = "You have joined a raid group"; // ERR_RAID_YOU_JOINED (GlobalStrings:1826)
+const READY_CHECK_START_S: &str = "%s has initiated a ready check"; // ERR_RAID_LEADER_READY_CHECK_START_S (GlobalStrings:1823)
 
 /// `format!`-free "%s" substitution — the templates are quoted verbatim from GlobalStrings, so
 /// they carry printf placeholders, not Rust ones.
@@ -264,36 +273,69 @@ impl GroupState {
         }
     }
 
-    /// `SMSG_PARTY_COMMAND_RESULT` — the ack for our own invite/leave. LEAVE+ok is the ONE
-    /// source of "You leave the group." (0440: `0x5e690b`, op 2 × result 0 → msgId 0x42; the
-    /// empty roster never emits it).
+    /// `SMSG_PARTY_COMMAND_RESULT` — **the reference's own jump table, transcribed** (wow-re
+    /// `system/object-layer/scratch/party-command-result-law.md`, byte-verified §5).
+    ///
+    /// The handler `0x5e68b0` dispatches `dec eax; cmp eax,7; ja <silent>; jmp [4*eax+0x5e6a14]`,
+    /// and each arm is one `CGGameUI::DisplayError(msgId)`. Returning the **message** rather than
+    /// a sentence is what gets the text, the surface and the sound right at once, since all three
+    /// are fields of the catalog row the id names (decisions 1770, 1815, 2035).
+    ///
+    /// | `result` | msgId | key | `%s` |
+    /// |---|---|---|---|
+    /// | `0` + op `0` + non-empty name | `0x3a` | `ERR_INVITE_PLAYER_S` | name |
+    /// | `0` + op `2` | `0x42` | `ERR_LEFT_GROUP_YOU` | — |
+    /// | 1 | `0x47` | `ERR_BAD_PLAYER_NAME_S` | name |
+    /// | 2 | `0x49` | `ERR_TARGET_NOT_IN_GROUP_S` | name |
+    /// | 3 | `0x4a` | `ERR_GROUP_FULL` | — |
+    /// | 4 | `0x3d` | `ERR_ALREADY_IN_GROUP_S` | name |
+    /// | 5 | `0x48` | `ERR_NOT_IN_GROUP` | — |
+    /// | 6 | `0x4b` | `ERR_NOT_LEADER` | — |
+    /// | 7 | `0xff` | `ERR_PLAYER_WRONG_FACTION` | — |
+    /// | 8 | `0x13d` | `ERR_IGNORING_YOU_S` | name |
+    ///
+    /// **`result == 7` is the odd one and we had it wrong:** its row is kind **2**, the red
+    /// `UIErrorsFrame` line, where the other nine are kind 0 chat lines. benilla pushed all ten
+    /// into the chat log.
+    ///
+    /// **Three inputs are SILENT**, and the reference means it — the default arm is four
+    /// instructions, `mov eax,1; mov esp,ebp; pop ebp; ret 8`, with no call, no store and no
+    /// message:
+    ///
+    /// 1. `result >= 9` — benilla printed an invented `"Party command failed (N)."` here, which is
+    ///    worse than mis-wording a real string: the client deliberately says nothing.
+    /// 2. `result == 0` with `operation ∉ {0, 2}`.
+    /// 3. `result == 0`, `operation == 0`, and an **empty** name (`0x5e6923 je`) — benilla emitted
+    ///    the invite line unconditionally.
+    ///
+    /// `operation` is read **only** on the `result == 0` path; on every other it is not touched.
+    /// Takes `&self`: this arm reads the wire and names a message, and changes no state — the
+    /// roster moves on `SMSG_GROUP_LIST`, not on the ack.
     pub fn apply_command_result(
-        &mut self,
+        &self,
         operation: u32,
         member: &str,
         result: u32,
-    ) -> Vec<String> {
-        if result == party_result::OK {
-            return match operation {
-                party_operation::INVITE => vec![fmt_s(INVITE_PLAYER, member)],
-                party_operation::LEAVE => vec![LEFT_GROUP_YOU.to_string()],
-                _ => Vec::new(),
-            };
+    ) -> Option<UiError> {
+        let named = |key: &'static str| UiError::s(key, member);
+        match result {
+            party_result::OK => match operation {
+                // The empty-name guard is the reference's, not defensiveness: an invite ack that
+                // carries no name prints nothing at all.
+                party_operation::INVITE if !member.is_empty() => Some(named("ERR_INVITE_PLAYER_S")),
+                party_operation::LEAVE => Some(UiError::key("ERR_LEFT_GROUP_YOU")),
+                _ => None,
+            },
+            party_result::BAD_PLAYER_NAME => Some(named("ERR_BAD_PLAYER_NAME_S")),
+            party_result::TARGET_NOT_IN_GROUP => Some(named("ERR_TARGET_NOT_IN_GROUP_S")),
+            party_result::GROUP_FULL => Some(UiError::key("ERR_GROUP_FULL")),
+            party_result::ALREADY_IN_GROUP => Some(named("ERR_ALREADY_IN_GROUP_S")),
+            party_result::NOT_IN_GROUP => Some(UiError::key("ERR_NOT_IN_GROUP")),
+            party_result::NOT_LEADER => Some(UiError::key("ERR_NOT_LEADER")),
+            party_result::WRONG_FACTION => Some(UiError::key("ERR_PLAYER_WRONG_FACTION")),
+            party_result::IGNORING_YOU => Some(named("ERR_IGNORING_YOU_S")),
+            _ => None,
         }
-        // The error table (vmangos `PartyResult`, `WorldSession.h:100-111` → the GlobalStrings
-        // each errorId keys; templates quoted verbatim, GlobalStrings:1465-1861).
-        let line = match result {
-            party_result::BAD_PLAYER_NAME => fmt_s("Cannot find '%s'.", member),
-            party_result::TARGET_NOT_IN_GROUP => fmt_s("%s is not in your party.", member),
-            party_result::GROUP_FULL => "Your party is full.".to_string(),
-            party_result::ALREADY_IN_GROUP => fmt_s("%s is already in a group.", member),
-            party_result::NOT_IN_GROUP => "You aren't in a party.".to_string(),
-            party_result::NOT_LEADER => "You are not the party leader.".to_string(),
-            party_result::WRONG_FACTION => "Target is not part of your alliance.".to_string(),
-            party_result::IGNORING_YOU => fmt_s("%s is ignoring you.", member),
-            other => format!("Party command failed ({other})."),
-        };
-        vec![line]
     }
 
     /// `SMSG_PARTY_MEMBER_STATS(_FULL)` — merge (delta) or replace (`full`) one member's
@@ -389,10 +431,34 @@ impl GroupState {
         self.saved_instances_answers = self.saved_instances_answers.wrapping_add(1);
     }
 
-    /// `MSG_RAID_READY_CHECK` (open form) — the leader started one. Bumps the ticket the feed
-    /// turns into a `READY_CHECK` event edge.
-    pub fn apply_ready_check(&mut self) {
+    /// `MSG_RAID_READY_CHECK` (open form) — the leader started one, and the server echoes the
+    /// request to every member including the leader. The handler `0x4ba360` splits on the leader
+    /// guid (decision 1989): the **leader** takes the response-collection arm and neither prints
+    /// nor pops; everyone **else** prints `ERR_RAID_LEADER_READY_CHECK_START_S` with the leader's
+    /// name and gets the popup — the ticket the feed turns into a `READY_CHECK` event edge. Both
+    /// arms bump the request generation and start a fresh answer log.
+    pub fn apply_ready_check_request(&mut self, we_lead: bool) -> Vec<String> {
+        self.ready_check_requests = self.ready_check_requests.wrapping_add(1);
+        self.ready_check_answers.clear();
+        if we_lead {
+            return Vec::new();
+        }
         self.ready_check = self.ready_check.wrapping_add(1);
+        // The reference resolves the leader's name from its cache and prints whatever it holds;
+        // ours is the roster's name for the leader's guid, which is the same cache's content.
+        let leader = self
+            .members
+            .iter()
+            .find(|m| m.guid == self.leader)
+            .map(|m| m.name.as_str())
+            .unwrap_or("");
+        vec![fmt_s(READY_CHECK_START_S, leader)]
+    }
+
+    /// `MSG_RAID_READY_CHECK` (answer form) — one member's answer, which the server forwards to
+    /// the leader alone. Logged for the feed to replay into the engine's flags (decision 1989).
+    pub fn apply_ready_check_answer(&mut self, guid: u64, ready: bool) {
+        self.ready_check_answers.push((guid, ready));
     }
 }
 
@@ -446,6 +512,42 @@ mod tests {
 
     /// The ungated diff (0440 byte law): a FIRST roster prints joins for everyone already
     /// there; later rosters diff both ways.
+    /// The open form's two arms (decision 1989): the leader's own echo neither prints nor pops;
+    /// a member prints the leader's line and takes the popup ticket. Both bump the request
+    /// generation and restart the answer log.
+    #[test]
+    fn the_open_form_pops_for_a_member_and_stays_quiet_for_the_leader() {
+        let mut g = GroupState {
+            leader: 0xA11CE,
+            members: vec![member("Alice", 0xA11CE), member("Bob", 0xB0B)],
+            ..Default::default()
+        };
+        g.apply_ready_check_answer(0xB0B, true);
+
+        assert_eq!(
+            g.apply_ready_check_request(false),
+            vec!["Alice has initiated a ready check".to_string()]
+        );
+        assert_eq!((g.ready_check, g.ready_check_requests), (1, 1));
+        assert!(
+            g.ready_check_answers.is_empty(),
+            "a request starts a fresh log"
+        );
+
+        assert!(
+            g.apply_ready_check_request(true).is_empty(),
+            "the leader's echo"
+        );
+        assert_eq!(
+            (g.ready_check, g.ready_check_requests),
+            (1, 2),
+            "no popup for the leader"
+        );
+
+        g.apply_ready_check_answer(0xB0B, false);
+        assert_eq!(g.ready_check_answers, vec![(0xB0B, false)]);
+    }
+
     #[test]
     fn join_lines_come_from_roster_diffs() {
         let mut g = GroupState::default();
@@ -480,7 +582,7 @@ mod tests {
         g.apply_list(0, 0, vec![member("Alice", 1)], 1, None);
         assert_eq!(
             g.apply_command_result(party_operation::LEAVE, "Us", party_result::OK),
-            vec!["You leave the group."]
+            Some(UiError::key("ERR_LEFT_GROUP_YOU"))
         );
         assert_eq!(
             g.apply_list(0, 0, Vec::new(), 0, None),
@@ -541,7 +643,7 @@ mod tests {
         // wording (keyed off the departed group's type).
         assert_eq!(
             g.apply_command_result(party_operation::LEAVE, "Us", party_result::OK),
-            vec!["You leave the group."]
+            Some(UiError::key("ERR_LEFT_GROUP_YOU"))
         );
         assert_eq!(
             g.apply_list(0, 0, Vec::new(), 0, None),
@@ -573,7 +675,7 @@ mod tests {
         assert_eq!(g.pending_invite.as_deref(), Some("Bob"));
         assert_eq!(
             g.apply_command_result(party_operation::INVITE, "Carol", party_result::OK),
-            vec!["You have invited Carol to join your group."]
+            Some(UiError::s("ERR_INVITE_PLAYER_S", "Carol"))
         );
         assert_eq!(
             g.apply_command_result(
@@ -581,11 +683,11 @@ mod tests {
                 "Carol",
                 party_result::ALREADY_IN_GROUP
             ),
-            vec!["Carol is already in a group."]
+            Some(UiError::s("ERR_ALREADY_IN_GROUP_S", "Carol"))
         );
         assert_eq!(
             g.apply_command_result(party_operation::INVITE, "Xz", party_result::BAD_PLAYER_NAME),
-            vec!["Cannot find 'Xz'."]
+            Some(UiError::s("ERR_BAD_PLAYER_NAME_S", "Xz"))
         );
         assert_eq!(
             g.apply_declined("Carol"),
@@ -695,5 +797,162 @@ mod tests {
             g.raid_targets, [0; 8],
             "the raid flag clearing empties the board"
         );
+    }
+
+    /// **The refusal table is the reference's, asserted by message id.**
+    ///
+    /// Each `result` must name the catalog row whose id the binary's own jump table pushes to
+    /// `DisplayError` (wow-re `party-command-result-law.md` §3, read out of the PE at `0x5e6a14`).
+    /// Asserting the *id* rather than the sentence is the point, and this family is the reason:
+    /// nothing about the displayed English distinguishes a right key from a wrong one here, and a
+    /// plausible-looking `ERR_WRONG_FACTION` — which exists in neither `GlobalStrings.lua` nor the
+    /// catalog — would have shown **nothing at all**, silently.
+    #[test]
+    fn every_party_result_names_the_message_id_the_reference_pushes() {
+        const TABLE: &[(u32, u16, bool)] = &[
+            (party_result::BAD_PLAYER_NAME, 0x47, true),
+            (party_result::TARGET_NOT_IN_GROUP, 0x49, true),
+            (party_result::GROUP_FULL, 0x4a, false),
+            (party_result::ALREADY_IN_GROUP, 0x3d, true),
+            (party_result::NOT_IN_GROUP, 0x48, false),
+            (party_result::NOT_LEADER, 0x4b, false),
+            (party_result::WRONG_FACTION, 0xff, false),
+            (party_result::IGNORING_YOU, 0x13d, true),
+        ];
+        let g = GroupState::default();
+        for &(result, id, takes_name) in TABLE {
+            let msg = g
+                .apply_command_result(party_operation::INVITE, "Zed", result)
+                .unwrap_or_else(|| panic!("result {result} showed nothing"));
+            let row = benilla_ui::messages::by_key(msg.key)
+                .unwrap_or_else(|| panic!("result {result} named {}, not a catalog row", msg.key));
+            assert_eq!(row.id, id, "result {result} -> {} (id {})", msg.key, row.id);
+            // The `%s` arms are exactly the arms the binary passes `&name` to, which is an
+            // independent cross-check: every one of them is an `_S` key.
+            assert_eq!(
+                msg.arg_s().is_some(),
+                takes_name,
+                "result {result} name fill"
+            );
+            assert_eq!(
+                msg.key.ends_with("_S"),
+                takes_name,
+                "result {result} _S suffix"
+            );
+        }
+
+        // The OK path's two arms, where `operation` is the only thing read.
+        let ok = |op| g.apply_command_result(op, "Zed", party_result::OK);
+        assert_eq!(
+            benilla_ui::messages::by_key(ok(party_operation::INVITE).unwrap().key)
+                .unwrap()
+                .id,
+            0x3a
+        );
+        assert_eq!(
+            benilla_ui::messages::by_key(ok(party_operation::LEAVE).unwrap().key)
+                .unwrap()
+                .id,
+            0x42
+        );
+    }
+
+    /// **`result == 7` is the red line; the other nine are chat.** The one row in this family whose
+    /// `+0x04` is kind 2, and benilla pushed all ten into the chat log.
+    #[test]
+    fn the_wrong_faction_refusal_is_the_red_line_and_the_rest_are_chat() {
+        use benilla_ui::messages::MsgKind;
+        let g = GroupState::default();
+        let kind = |r| {
+            benilla_ui::messages::kind_of(
+                g.apply_command_result(party_operation::INVITE, "Zed", r)
+                    .unwrap()
+                    .key,
+            )
+        };
+        assert_eq!(kind(party_result::WRONG_FACTION), MsgKind::Error);
+        for r in [
+            party_result::BAD_PLAYER_NAME,
+            party_result::TARGET_NOT_IN_GROUP,
+            party_result::GROUP_FULL,
+            party_result::ALREADY_IN_GROUP,
+            party_result::NOT_IN_GROUP,
+            party_result::NOT_LEADER,
+            party_result::IGNORING_YOU,
+        ] {
+            assert_eq!(kind(r), MsgKind::Chat, "result {r} should be a chat line");
+        }
+    }
+
+    /// **Three inputs display NOTHING, and the reference means it.** Its default arm is four
+    /// instructions — `mov eax,1; mov esp,ebp; pop ebp; ret 8` — with no call and no store.
+    ///
+    /// benilla printed an invented `"Party command failed (N)."` for the first of these. Inventing
+    /// a sentence for a case the client is deliberately silent on is worse than mis-wording one it
+    /// has a string for: there is no wording that could be right.
+    #[test]
+    fn the_silent_inputs_show_nothing() {
+        let g = GroupState::default();
+        // 1 — every result past the table's end (`dec eax; cmp eax,7; ja`, unsigned).
+        for r in [9u32, 10, 42, u32::MAX] {
+            assert!(
+                g.apply_command_result(party_operation::INVITE, "Zed", r)
+                    .is_none(),
+                "result {r} must be silent"
+            );
+        }
+        // 2 — OK with an operation that is neither invite nor leave.
+        for op in [1u32, 3, 99] {
+            assert!(g
+                .apply_command_result(op, "Zed", party_result::OK)
+                .is_none());
+        }
+        // 3 — an invite ack carrying no name (`0x5e6923 je`).
+        assert!(g
+            .apply_command_result(party_operation::INVITE, "", party_result::OK)
+            .is_none());
+        // …but a named one still prints, so the guard is the name and not the operation.
+        assert!(g
+            .apply_command_result(party_operation::INVITE, "Zed", party_result::OK)
+            .is_some());
+    }
+
+    /// Every key this family raises resolves in the shipped 1.12 `GlobalStrings.lua` to the
+    /// sentence the real client shows — the runtime half, since a key that is a valid catalog row
+    /// can still be absent from the player's own chain. Skips without client data.
+    #[test]
+    fn party_result_keys_resolve_to_the_real_1_12_sentences() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let src = chain
+            .read_file("Interface\\FrameXML\\GlobalStrings.lua")
+            .expect("GlobalStrings.lua in the chain");
+        let s = benilla_ui::script::UiScript::new().expect("VM");
+        s.run(&String::from_utf8_lossy(&src)).expect("runs clean");
+
+        let g = GroupState::default();
+        for r in [
+            party_result::BAD_PLAYER_NAME,
+            party_result::TARGET_NOT_IN_GROUP,
+            party_result::GROUP_FULL,
+            party_result::ALREADY_IN_GROUP,
+            party_result::NOT_IN_GROUP,
+            party_result::NOT_LEADER,
+            party_result::WRONG_FACTION,
+            party_result::IGNORING_YOU,
+        ] {
+            let msg = g
+                .apply_command_result(party_operation::INVITE, "Zed", r)
+                .unwrap();
+            let text: String = s.lua().globals().get(msg.key).expect(msg.key);
+            assert!(!text.is_empty(), "{} resolves empty", msg.key);
+            // An `_S` key must actually carry the hole its fill expects.
+            assert_eq!(
+                text.contains("%s"),
+                msg.arg_s().is_some(),
+                "{} vs its fill",
+                msg.key
+            );
+        }
     }
 }

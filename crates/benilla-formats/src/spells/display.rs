@@ -39,6 +39,15 @@ pub struct SpellDisplay {
     /// [`Self::cooldown_on_event`] (bit 25), and the aura-bar display filter
     /// [`Self::hidden_from_aura_bar`] (`0x80`).
     pub attributes: u32,
+    /// **`School`** (column 1, `SpellRec+0x4`) — the spell's magic school as an INDEX, not a mask.
+    /// The crowd-control exemption's school arm shifts it (`1 << School`) before testing it against
+    /// an immunity effect's `EffectMiscValue`, which is a mask (decision 1946).
+    pub school: u32,
+    /// **`Mechanic`** (column 5, `SpellRec+0x14`) — the `SpellMechanic.dbc` id for the spell as a
+    /// whole. Read by the crowd-control ladder twice over: the mechanic-immunity arm compares it,
+    /// and it is the fallback value the scanner reports when a blocking aura's own
+    /// `EffectMechanic` is 0 — which is what names the `0x8d` "Can't do that while %s" line.
+    pub mechanic: u32,
     /// `AttributesEx` (column 7, `SpellRec+0x1c`) — only bit `0x10000000` is consumed
     /// ([`Self::hidden_from_aura_bar`]'s `SPELL_ATTR_EX_NO_AURA_ICON` half).
     pub attributes_ex: u32,
@@ -47,9 +56,23 @@ pub struct SpellDisplay {
     /// gate [`Self::form_refusal`]; the stance-bar admission bits (`0x2`/`0x10`) are read raw by
     /// `benilla::ui_shapeshift`.
     pub attributes_ex2: u32,
-    /// `AttributesEx3` (column 9, `SpellRec+0x24`) — only bit `0x8000` is consumed
-    /// ([`Self::melee_white_damage`]).
+    /// `AttributesEx3` (column 9, `SpellRec+0x24`) — bit `0x8000` is consumed
+    /// ([`Self::melee_white_damage`]), and bits `0x400` / `0x1000000` are the equipped-item
+    /// search's **hand restriction** (main-hand-only / off-hand-only), which is where
+    /// `0x5f0c50`'s slot mask comes from (decision 1903).
     pub attributes_ex3: u32,
+    /// **`PreventionType`** (column 165, `SpellRec+0x294`) — which crowd-control flag refuses this
+    /// spell **locally**, before any packet: `1` = silence, `2` = pacify, `0` = neither. The
+    /// client's CC validator `0x6094f0` (called from `TryCast 0x6e4b60`, bailing at `0x6e4f42`)
+    /// reads it per spell — so `UNIT_FLAG_SILENCED` does **not** stop everything, only the rows
+    /// that declare `1`. The STUNNED arm above it carries no such gate and refuses every spell.
+    ///
+    /// **Column pinned twice** (decision 1903): the byte offset `0x294 / 4 = 165` on a 173-field,
+    /// 692-byte record, and the shipped data itself — its neighbour 164 is `DmgClass` and takes
+    /// four values where this takes three, which **Auto Shot (75)** separates decisively at
+    /// `DmgClass = 3` (RANGED) with `PreventionType = 2`. Fireball 133 → 1, Heroic Strike 78 → 2,
+    /// Attack 6603 → 0.
+    pub prevention_type: u32,
     /// **`modalNextSpell`** (`Spell.dbc` column 38, `SpellRec + 0x98`) — the spell this one makes
     /// the client cast **by itself**, one server round-trip later, with no user input and no addon.
     /// `0` for all but 57 of the 22357 shipped rows.
@@ -254,6 +277,10 @@ pub struct SpellDisplay {
     /// `SpellAuraDefines` aura-type enum; `0` = not an apply-aura effect. Slot 0 is also read via
     /// [`Self::shapeshift_form`]'s derivation.
     pub effect_apply_aura: [u32; 3],
+    /// **`EffectMechanic[0..2]`** (columns 79–81, `SpellRec+0x13c`) — the per-effect
+    /// `SpellMechanic.dbc` id. The mechanic-immunity arm accepts a match against *either* this or
+    /// [`Self::mechanic`], and the scanner prefers this one when naming the blocking mechanic.
+    pub effect_mechanic: [u32; 3],
     /// `EffectRadiusIndex[3]` (column 88, module docs) — each effect's `SpellRadius.dbc` row (not
     /// loaded by this crate yet); `0` = no radius (a single-target effect).
     pub effect_radius_index: [u32; 3],
@@ -298,10 +325,13 @@ impl Default for SpellDisplay {
             visual: 0,
             speed: 0.0,
             attributes: 0,
+            school: 0,
+            mechanic: 0,
             attributes_ex: 0,
             attributes_ex2: 0,
             modal_next_spell: 0,
             attributes_ex3: 0,
+            prevention_type: 0,
             passive: false,
             cast_ui: 0,
             effects: [0, 0, 0],
@@ -353,6 +383,7 @@ impl Default for SpellDisplay {
             effect_real_points_per_level: [0.0; 3],
             effect_amplitude: [0; 3],
             effect_apply_aura: [0; 3],
+            effect_mechanic: [0; 3],
             effect_radius_index: [0; 3],
             effect_chain_targets: [0; 3],
             effect_multiple_value: [0.0; 3],

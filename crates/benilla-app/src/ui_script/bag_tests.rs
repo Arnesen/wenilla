@@ -133,6 +133,8 @@ fn b_opens_the_backpack_alone_and_closes_every_bag() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
@@ -214,6 +216,8 @@ fn shift_b_toggles_every_bag_at_once() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.set_container(
@@ -295,6 +299,8 @@ fn bag_bar_buttons_light_while_their_bag_is_open() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.set_container(
@@ -405,9 +411,15 @@ fn bag_tooltip_hangs_left_when_the_slot_sits_in_the_right_half() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // The stock tooltip declares no size: it sizes from its lines through the font engine, as
+    // the client's does (1968) — a harness that reads its rect needs one; the fixed-width
+    // font is that engine here.
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
@@ -415,6 +427,7 @@ fn bag_tooltip_hangs_left_when_the_slot_sits_in_the_right_half() {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -484,6 +497,8 @@ fn hovered_bag_tooltip_fills_itself_when_the_stats_land() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
@@ -491,6 +506,7 @@ fn hovered_bag_tooltip_fills_itself_when_the_stats_land() {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -587,6 +603,8 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
@@ -594,6 +612,7 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -615,6 +634,7 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     slots.insert(
         2,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -675,8 +695,8 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
     assert!(s
         .eval::<bool>(
-            "return GameTooltipMoneyCoin1:IsShown() \
-             and GameTooltipMoneyCoin1Num:GetText() == '52'",
+            "return GameTooltipMoneyFrame:IsShown() \
+             and GameTooltipMoneyFrameCopperButton:GetText() == '52'",
         )
         .unwrap());
     assert_eq!(
@@ -689,7 +709,7 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     unhover(&mut s);
     assert_eq!(s.ui_cursor(), None, "ResetCursor on leave");
     assert!(s
-        .eval::<bool>("return not GameTooltipMoneyCoin1:IsShown()")
+        .eval::<bool>("return not GameTooltipMoneyFrame:IsShown()")
         .unwrap());
 
     // The unsellable item: the ITEM_UNSELLABLE line, no coins.
@@ -704,7 +724,7 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
         .unwrap();
     assert!(has_line, "SellPrice 0 shows the ITEM_UNSELLABLE line");
     assert!(s
-        .eval::<bool>("return not GameTooltipMoneyCoin1:IsShown()")
+        .eval::<bool>("return not GameTooltipMoneyFrame:IsShown()")
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -721,6 +741,8 @@ fn readable_letter_hover_shows_the_inspect_magnifier() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
@@ -791,6 +813,8 @@ fn drag_across_two_slots_queues_the_same_move_a_click_pickup_would() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
@@ -798,6 +822,7 @@ fn drag_across_two_slots_queues_the_same_move_a_click_pickup_would() {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -874,6 +899,8 @@ fn a_second_bag_window_feeds_and_paints_via_the_bag_bar() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
@@ -881,6 +908,7 @@ fn a_second_bag_window_feeds_and_paints_via_the_bag_bar() {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -909,7 +937,8 @@ fn a_second_bag_window_feeds_and_paints_via_the_bag_bar() {
     );
 
     assert!(!open(&s, 1), "hidden by default");
-    // CharacterBag0Slot == bag id 1 (BenillaBagBarSlot_OnLoad(self, 1) in BagFrame.xml).
+    // CharacterBag0Slot == bag id 1: the stock bar's handlers carry no `bagId` field and
+    // recompute `this:GetID() - CharacterBag0Slot:GetID() + 1` (see `:2119` below).
     s.run("CharacterBag0Slot:Click()").unwrap();
     let _ = s.take_sounds();
     assert!(open(&s, 1), "the bag-bar click opened bag 1's window");
@@ -946,6 +975,8 @@ fn equipped_bag_window_snug_fits_its_row_count() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
@@ -1005,6 +1036,8 @@ fn open_backpack_with_a_five_stack(s: &mut UiScript) -> (f32, f32) {
     for file in BAG_UI {
         load_xml(s, file);
     }
+    load_xml(s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(s, "Interface\\FrameXML\\StackSplitFrame.xml");
     s.set_money(0);
@@ -1013,6 +1046,7 @@ fn open_backpack_with_a_five_stack(s: &mut UiScript) -> (f32, f32) {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -1345,6 +1379,8 @@ fn bag_slot_cooldown_sweeps_through_the_xml() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.tick(100.0); // a nonzero clock epoch, like the engine cooldown tests
@@ -1371,19 +1407,15 @@ fn bag_slot_cooldown_sweeps_through_the_xml() {
     s.set_container(0, Some(backpack(Some((52_000, 60_000, true)))));
     s.run("OpenAllBags()").unwrap();
     s.fire_event("BAG_UPDATE", vec![benilla_ui::script::ScriptValue::Int(0)]);
+    // The stock machine (decision 2019): the slot's cooldown pane, sequence 0 scrubbed by the
+    // next paint's `OnUpdateModel` to the elapsed fraction.
+    super::test_ui::cooldown_facts(&mut s);
+    s.tick(0.0);
     s.resolve();
 
-    let sweep = |s: &UiScript| {
-        s.extract().iter().find_map(|q| match q.content {
-            QuadContent::Cooldown { fraction, .. } => Some(fraction),
-            _ => None,
-        })
-    };
-    let fraction = sweep(&s).expect("the bag slot sweeps");
-    assert!(
-        (fraction - 0.8).abs() < 1e-3,
-        "48 of 60 s elapsed: fraction {fraction}"
-    );
+    let sweep = |s: &UiScript| super::test_ui::cooldown_play_any(s);
+    let play = sweep(&s).expect("the bag slot sweeps");
+    assert_eq!(play, (0, 800), "48 of 60 s elapsed: sequence 0 at 800 ms");
 
     // The cooldown clears (a CLEAR_COOLDOWN, or it simply ran out before the re-push): the
     // refresh event re-reads the now-cold triple and hides the widget.
@@ -1418,6 +1450,8 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.resolve();
 
@@ -1454,6 +1488,7 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
     // SetInventoryItem arm. Bar slot 1 is inventory slot 20 (Bag0Slot).
     let mut inv: benilla_ui::script::InventorySlots = Default::default();
     inv[20] = Some(benilla_ui::script::InvSlotView {
+        duration_ms: None,
         already_bound: false,
         bar_placeable: true,
         durability: None,
@@ -1551,6 +1586,8 @@ fn keyring_surface(s: &UiScript) {
     for file in BAG_UI {
         load_xml(s, file);
     }
+    load_xml(s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(s, "Interface\\FrameXML\\UIErrorsFrame.xml");
 }
@@ -1635,13 +1672,15 @@ fn the_first_key_puts_the_keyring_on_the_bar() {
         bar_right - perf_right
     );
 
-    // And it reverts: destroying the last key takes the keyring back off the bar (our divergence
-    // from the ref's one-way saved-variable latch — see MainMenuBar_UpdateKeyRing).
+    // And it does NOT revert: the reference's latch is one-way — `MainMenuBar_UpdateKeyRing`
+    // only ever Shows, and SHOW_KEYRING is a saved variable (stock MainMenuBar.lua:174-183,
+    // MainMenuBar.xml:323-336). Our file used to take the button away with the last key; that
+    // divergence went with the file (1938).
     s.set_has_key(false);
     s.fire_event("BAG_UPDATE", vec![benilla_ui::script::ScriptValue::Int(-2)]);
     assert!(
-        !s.eval::<bool>("return KeyRingButton:IsShown()").unwrap(),
-        "losing the last key takes the button away again"
+        s.eval::<bool>("return KeyRingButton:IsShown()").unwrap(),
+        "losing the last key leaves the button on the bar — the reference's one-way latch"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -1807,59 +1846,70 @@ fn a_key_dropped_on_the_button_files_itself() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The item-push drop animation (decision 0887): `ITEM_PUSH(container, icon)` runs the pushed item's
-/// icon down into **that** container's bag-bar button and nobody else's, along the curves read out of
-/// `ForcedBackpackItem.m2` — pop in, hang, fall, shrink away — and hides itself at the end.
-///
-/// This is the whole observable contract of `BenillaItemPushAnim_*`: the routing (which button), the
-/// motion (starts a fall above the button, lands centred on it), the fade/scale shape (the file's
-/// keys), and the CLAMP end (one play, then gone). It is also the regression net for the OnUpdate
-/// gate — an anim frame left shown would keep ticking forever.
+/// The item-push drop animation is the reference's own `<Model>` now (decisions 2013/2015):
+/// `ITEM_PUSH(container, icon)` reaches the stock `ItemAnim_OnEvent`, which puts the icon on the
+/// pane whose parent button owns that inventory slot (`ReplaceIconTexture`), arms sequence 0 at
+/// 0 and shows it; the pane's clock runs the file's 1000 ms clamp; `ItemAnim_OnAnimFinished`
+/// hides it. The pane authored no size, so its rect is the file's own bounding box in layout
+/// units — the 42.41 × 124.72 the 0887 card measured by hand at 16:9.
 #[test]
 fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
+    use benilla_ui::widget::{ModelFileFacts, SequenceFacts};
+
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1600.0, 900.0);
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
+    // `ForcedBackpackItem.m2` (`m2seq`/`m2batch`): one sequence, id 0, 1000 ms, clamp; the
+    // header box spans the card's whole travel band — 0.02707 × 0.07962 model units, which at
+    // 16:9 (a layout unit is 768·√(a²+1) = 1566.4 FrameXML units) is the 42.41 × 124.72 rect
+    // 0887's card measured.
+    const CARD: &str = r"Interface\ItemAnimations\ForcedBackpackItem.mdx";
+    s.set_model_facts(
+        CARD,
+        ModelFileFacts {
+            sequences: vec![SequenceFacts {
+                anim_id: 0,
+                duration_ms: 1000,
+                looping: false,
+            }],
+            bbox: ([0.0, 0.0, 0.0], [0.02707, 0.07962, 0.0]),
+            cameras: 0,
+        },
+    );
     s.resolve();
 
     let shown = |s: &UiScript, name: &str| {
-        s.eval::<bool>(&format!("return {name}BenillaItemPush:IsShown()"))
+        s.eval::<bool>(&format!("return {name}ItemAnim:IsShown()"))
             .unwrap()
     };
-    // The card's centre relative to its button's centre, in screen px (y-up): (dx, dy).
-    let offset = |s: &UiScript, name: &str| -> (f32, f32) {
-        s.eval::<(f32, f32)>(&format!(
-            "local a, b = {name}BenillaItemPush, {name} \
-             local ax, ay = a:GetLeft() + a:GetWidth() / 2, a:GetBottom() + a:GetHeight() / 2 \
-             local bx, by = b:GetLeft() + b:GetWidth() / 2, b:GetBottom() + b:GetHeight() / 2 \
-             return ax - bx, ay - by"
-        ))
-        .unwrap()
-    };
-    let size = |s: &UiScript, name: &str| {
-        s.eval::<f32>(&format!("return {name}BenillaItemPush:GetWidth()"))
-            .unwrap()
-    };
-    let alpha = |s: &UiScript, name: &str| {
-        s.eval::<f32>(&format!("return {name}BenillaItemPush:GetAlpha()"))
-            .unwrap()
-    };
-    // The card's centre relative to its button's BOTTOMRIGHT corner — the reference's OWN frame of
-    // reference for this widget (it anchors the `<Model>`'s BOTTOMRIGHT to the button's), and the
-    // only one the numbers are stable in: the card's placement depends on the anchor offset and
-    // the M2 bounding box, NOT on how big the button is. Measuring against the button's centre
-    // instead is what let 0887's placement look plausible.
-    let corner = |s: &UiScript, name: &str| -> (f32, f32) {
-        s.eval::<(f32, f32)>(&format!(
-            "local a, b = {name}BenillaItemPush, {name} \
-             local ax, ay = a:GetLeft() + a:GetWidth() / 2, a:GetBottom() + a:GetHeight() / 2 \
-             return ax - b:GetRight(), ay - b:GetBottom()"
-        ))
-        .unwrap()
+    // The shown card panes, as the renderer sees them: `(icon, play head)` per visible pane.
+    type Card = (Option<String>, Option<(u16, u32)>);
+    let cards = |s: &mut UiScript| -> Vec<Card> {
+        let heads = s.visible_model_panes();
+        s.extract()
+            .into_iter()
+            .filter_map(|q| match q.content {
+                QuadContent::ModelPane {
+                    handle,
+                    model: Some(m),
+                    icon,
+                    ..
+                } if m == CARD => Some((
+                    icon,
+                    heads
+                        .iter()
+                        .find(|p| p.handle == handle)
+                        .and_then(|p| p.play.map(|ph| (ph.anim_id, ph.cursor_ms))),
+                )),
+                _ => None,
+            })
+            .collect()
     };
 
     // Nothing is animating until a push arrives.
@@ -1870,11 +1920,11 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
     ] {
         assert!(!shown(&s, b), "{b}'s card starts hidden");
     }
+    assert!(cards(&mut s).is_empty());
 
     // A push into equipped bag 2. `arg1` is the reference's own vocabulary since 1751 window 3 —
     // the button's INVENTORY-slot id, which is what `ItemAnim_OnEvent` compares against — so bag 2
-    // is `CharacterBag1Slot`'s 21, not the container id 2 this used to send (`ui_loot.rs`
-    // `push_container`, the `0x491bb5` selector).
+    // is `CharacterBag1Slot`'s 21.
     s.fire_event(
         "ITEM_PUSH",
         vec![
@@ -1882,159 +1932,70 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
             benilla_ui::script::ScriptValue::Str("Interface\\Icons\\INV_Misc_Bag_08".into()),
         ],
     );
+    assert!(
+        shown(&s, "CharacterBag1Slot"),
+        "the card that took it plays"
+    );
+    assert!(
+        !shown(&s, "MainMenuBarBackpackButton") && !shown(&s, "KeyRingButton"),
+        "…and nobody else's"
+    );
     s.resolve();
-    assert!(shown(&s, "CharacterBag1Slot"), "bag 2's card plays");
-    for b in [
-        "MainMenuBarBackpackButton",
-        "CharacterBag0Slot",
-        "KeyRingButton",
-    ] {
-        assert!(!shown(&s, b), "{b} took nothing, so {b} animates nothing");
-    }
-    // The pushed icon reaches the RENDERER, not just the Lua state — exactly one quad carries it.
-    let drawn = |s: &UiScript, icon: &str| {
-        s.extract()
-            .iter()
-            .filter(
-                |q| matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p == icon),
-            )
-            .count()
-    };
+    let live = cards(&mut s);
     assert_eq!(
-        drawn(&s, "Interface\\Icons\\INV_Misc_Bag_08"),
-        1,
-        "the card wears the pushed item's icon (ITEM_PUSH's arg2)"
+        live,
+        vec![(
+            Some(r"Interface\Icons\INV_Misc_Bag_08".to_string()),
+            Some((0, 0))
+        )],
+        "one pane, the pushed icon on it, sequence 0 at 0"
+    );
+    // The implicit rect: the file's box in layout units, hung off the button's BOTTOMRIGHT
+    // (−10, 0) as the stock template anchors it.
+    let (w, h): (f32, f32) = s
+        .eval("return CharacterBag1SlotItemAnim:GetWidth(), CharacterBag1SlotItemAnim:GetHeight()")
+        .unwrap();
+    assert!(
+        (w - 42.41).abs() < 0.05 && (h - 124.72).abs() < 0.05,
+        "the card's rect is the file's box: {w} × {h}"
+    );
+    let (dx, dy): (f32, f32) = s
+        .eval(
+            "local a, b = CharacterBag1SlotItemAnim, CharacterBag1Slot \
+             return a:GetRight() - b:GetRight(), a:GetBottom() - b:GetBottom()",
+        )
+        .unwrap();
+    assert!(
+        (dx + 10.0).abs() < 0.01 && dy.abs() < 0.01,
+        "BOTTOMRIGHT (−10, 0) off the button: ({dx}, {dy})"
     );
 
-    // Every figure below is the REFERENCE's, from wow-re's §5-cross-checked
-    // `modelframe-implicit-size-law.md` §3 — not a ratio we chose. The three it publishes
-    // (t = 0, 0.133, 1.0) are asserted to a tenth of a pixel; the rest assert the SHAPE of the
-    // motion, which is where 0887's authored placement actually went wrong.
-    //
-    // What changed from 0887, and why the old numbers looked right: it measured against the
-    // button's CENTRE and drove both axes off one shared 0..1 "drop" curve, which happens to land
-    // within ~1 px of the truth in y for a 36 px button. In x it was wrong in DIRECTION — the card
-    // drifts RIGHT as it falls, and the old code had it starting left and ending centred.
-
-    // t=0: invisible, full size, parked high above the button. The .m2's alpha key (0.000, 0.0),
-    // scale key (0.000, 1.0), translation (0.000, (0,0)).
-    let (cx, cy) = corner(&s, "CharacterBag1Slot");
-    assert!(
-        (cx + 30.14).abs() < 0.1 && (cy - 68.99).abs() < 0.1,
-        "starts at the ref's (-30.14, 68.99) from the button's bottom-right: got ({cx}, {cy})"
-    );
-    assert!(
-        (size(&s, "CharacterBag1Slot") - 36.86).abs() < 0.1,
-        "the quad is 0.0288 model units, not the 0.03 that 0887 rounded it to: got {}",
-        size(&s, "CharacterBag1Slot")
-    );
-    assert!(
-        alpha(&s, "CharacterBag1Slot") < 0.01,
-        "fades in from nothing"
-    );
-
-    // t=0.133: fully faded in, at the 1.2x swell.
-    s.tick(0.133);
-    s.resolve();
-    assert!(
-        (alpha(&s, "CharacterBag1Slot") - 1.0).abs() < 0.02,
-        "opaque by the alpha track's second key"
-    );
-    assert!(
-        (size(&s, "CharacterBag1Slot") - 44.24).abs() < 0.1,
-        "swollen to the ref's 44.24 px peak: got {}",
-        size(&s, "CharacterBag1Slot")
-    );
-    // The pop moves the centre by a twentieth of a pixel, and that tiny drift is the tell that the
-    // bone's PIVOT is not the quad's centre — scaling up pushes the centre away from the pivot,
-    // scaling down pulls it in, one mechanism at both ends. Folding the pivot into the centre (the
-    // obvious simplification) loses this and misses the landing point by a fifth of a pixel.
-    let (px, py) = corner(&s, "CharacterBag1Slot");
-    assert!(
-        (px + 30.18).abs() < 0.02 && (py - 68.98).abs() < 0.02,
-        "the 1.2x pop drifts the centre off the pivot by the ref's (-0.046, -0.015): got ({px}, {py})"
-    );
-
-    // t=0.267: back to the icon's own size, still opaque, still parked.
-    s.tick(0.134);
-    s.resolve();
-    assert!(
-        (size(&s, "CharacterBag1Slot") - 36.86).abs() < 0.1,
-        "settled back at the scale track's third key"
-    );
-    let (_, cy) = corner(&s, "CharacterBag1Slot");
-    assert!(
-        (cy - 68.99).abs() < 0.1,
-        "has not started falling: got {cy}"
-    );
-
-    // t=0.5: STILL PARKED — the translation track's second key is (0,0), so the whole first half
-    // second is a hang. The other two tracks are already running down, though: the three curves
-    // keep different schedules, which is the thing a "hold everything then drop" reading would get
-    // wrong (scale/alpha are 0.687/0.682 here, on the 0.267→1.000 ramps).
-    s.tick(0.233);
-    s.resolve();
-    let (_, cy) = corner(&s, "CharacterBag1Slot");
-    assert!(
-        (cy - 69.0).abs() < 0.1,
-        "has not moved yet at the half second: got {cy}"
-    );
-    assert!(
-        (size(&s, "CharacterBag1Slot") - 25.31).abs() < 0.2,
-        "but is already dwindling: got {}",
-        size(&s, "CharacterBag1Slot")
-    );
-    assert!(
-        (alpha(&s, "CharacterBag1Slot") - 0.682).abs() < 0.02,
-        "and already fading: got {}",
-        alpha(&s, "CharacterBag1Slot")
-    );
-
-    // t=0.75: halfway through the fall — and moving RIGHT as it drops, which is the axis 0887 had
-    // backwards. The translation is per-axis (+0.0104, -0.0402 model units), not one shared curve.
-    s.tick(0.25);
-    s.resolve();
-    let (cx, cy) = corner(&s, "CharacterBag1Slot");
-    assert!(
-        (cx + 23.34).abs() < 0.2,
-        "drifted RIGHT by half the 13.3 px total: got {cx}"
-    );
-    assert!(
-        (cy - 43.33).abs() < 0.2,
-        "half of the 51.4 px fall travelled by t=0.75: got {cy}"
-    );
-
-    // Just short of the end: down on the button, shrunk to nothing, faded out.
-    s.tick(0.24);
-    s.resolve();
-    let (cx, cy) = corner(&s, "CharacterBag1Slot");
-    assert!(
-        (cx + 16.87).abs() < 0.2 && (cy - 18.68).abs() < 0.2,
-        "arrives at the ref's landing point: got ({cx}, {cy})"
-    );
-    // Which is also, within a couple of pixels, the button's own centre — the reference's card
-    // really does drop INTO the bag button, and that is the one thing 0887 got right for the wrong
-    // reason. The corner-relative assertion above is the exact one; this is the sanity check, and
-    // its tolerance is a button-size term, not slack: the landing point is fixed relative to the
-    // button's BOTTOMRIGHT, so the offset from its CENTRE moves by half of any size change. The
-    // bar's buttons are 37x37 now — `ItemButtonTemplate`'s own size, inherited through the
-    // reference's `PaperDollItemSlotButtonTemplate` — where the deleted BagFrame.xml authored 36.
-    let (dx, dy) = offset(&s, "CharacterBag1Slot");
-    assert!(
-        dx.abs() < 2.0 && dy.abs() < 2.0,
-        "lands on the button it went into: got ({dx}, {dy})"
-    );
-    assert!(
-        size(&s, "CharacterBag1Slot") < 2.0,
-        "collapsed to the scale track's 0.0144"
-    );
-    assert!(alpha(&s, "CharacterBag1Slot") < 0.05, "faded out");
-
-    // Past 1.000s the CLAMP sequence is over — the ref's OnAnimFinished → Hide.
-    s.tick(0.05);
+    // The clock runs the file's clamp: half a second in, the play head is at 500 ms…
+    s.tick(0.5);
+    assert_eq!(cards(&mut s)[0].1, Some((0, 500)));
+    // …and past 1000 ms the completion fires `ItemAnim_OnAnimFinished` → `Hide()`.
+    s.tick(0.55);
     assert!(
         !shown(&s, "CharacterBag1Slot"),
-        "one play, then gone (and no OnUpdate left running)"
+        "one play, then gone (the stock OnAnimFinished hides it)"
+    );
+    assert!(cards(&mut s).is_empty());
+
+    // A second push RESTARTS the card (SetSequenceTime(0, 0) on a fresh arm).
+    s.fire_event(
+        "ITEM_PUSH",
+        vec![
+            benilla_ui::script::ScriptValue::Int(21),
+            benilla_ui::script::ScriptValue::Str("Interface\\Icons\\INV_Misc_Bag_09".into()),
+        ],
+    );
+    s.resolve();
+    assert_eq!(
+        cards(&mut s),
+        vec![(
+            Some(r"Interface\Icons\INV_Misc_Bag_09".to_string()),
+            Some((0, 0))
+        )]
     );
 
     // The keyring is a real destination, not a rounding of the backpack.
@@ -2079,6 +2040,8 @@ fn an_addon_that_hooks_toggle_backpack_receives_the_click() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
 
@@ -2135,6 +2098,8 @@ fn the_bag_slots_carry_the_references_names_and_icon_names() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     for i in 0..4 {
@@ -2195,6 +2160,8 @@ fn the_backpack_buttons_ring_follows_its_own_window_through_real_clicks() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     // The reference's `ToggleBag` opens nothing for a container of size 0, so the backpack has to

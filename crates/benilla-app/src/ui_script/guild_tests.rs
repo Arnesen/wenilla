@@ -22,8 +22,6 @@
 
 use benilla_ui::script::{GuildState, ScriptValue, UiScript, UnitState};
 
-use super::test_ui::load_ui_strict as load_xml;
-
 /// The guild engine API, stood in for in Lua (see the module header).
 ///
 /// One mutable table, `BenillaGuildFixture`, is the whole model; every getter reads it and every
@@ -203,25 +201,7 @@ fn setup() -> UiScript {
             ..UnitState::default()
         }),
     );
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "BasicControls.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
-    load_xml(&s, "UnitPopup.xml");
-    load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "FriendsFrame.xml");
-    // The social window's fourth tab lives in its own file, and it is part of THIS window's
-    // manifest slice now: `BENILLA_FRIENDS_SUBFRAMES` names "RaidFrame", and both
-    // `FriendsFrame_ShowSubFrame` and `FriendsFrame_OnHide` resolve every name in that list
-    // through `getglobal` and call `:Hide()` on it. The reference's list names it too and never
-    // guards, because there RaidFrame.xml is FrameXML and always loaded — so the guard belongs in
-    // the harness's load order, not in shipped Lua defending against a state the client cannot be
-    // in (decision 1549).
-    load_xml(&s, "RaidFrame.xml");
+    super::test_ui::load_social_ui(&mut s);
     s
 }
 
@@ -1422,11 +1402,13 @@ fn every_list_in_the_window_takes_the_mouse_wheel() {
     let _data = benilla_formats::wow_data_or_skip!();
     let s = setup();
     open(&s);
+    // The reference's wheel lives on each list's FauxScrollFrameTemplate scroll frame, not on
+    // the pane (1959).
     for frame in [
-        "FriendsListFrame",
-        "IgnoreListFrame",
-        "WhoFrame",
-        "GuildFrame",
+        "FriendsFrameFriendsScrollFrame",
+        "FriendsFrameIgnoreScrollFrame",
+        "WhoListScrollFrame",
+        "GuildListScrollFrame",
     ] {
         assert!(
             s.eval::<bool>(&format!(

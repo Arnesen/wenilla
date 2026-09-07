@@ -3,6 +3,8 @@
 
 use mlua::{Lua, MultiValue, Value};
 
+use crate::script::binding_abi::number_arg;
+use crate::script::item_stats::item_link;
 use crate::script::Model;
 
 use super::view::{
@@ -56,6 +58,73 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(num_rows(&model) as i64)
+        })?,
+    )?;
+
+    // The two link verbs (wow-re `tradeskill/scratch/tradeskill-craft-item-links.md`, 1973).
+    //
+    // GetTradeSkillItemLink(index) — `0x4ff410`: the number gate raises its Usage; then ZERO
+    // values on every miss — an index off the list, a header row, a recipe with no product, an
+    // uncached product template (no query is ever sent; the app pre-asks when the list lands) —
+    // and otherwise ONE string, the product's `|Hitem:` link in its quality colour.
+    g.set(
+        "GetTradeSkillItemLink",
+        lua.create_function(|lua, index: Value| {
+            let index = number_arg(lua, index, "Usage: GetTradeSkillItemLink(index)")?;
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let link = usize::try_from(index)
+                .ok()
+                .and_then(|i| i.checked_sub(1))
+                .and_then(|n| rows(&model).get(n).cloned())
+                .and_then(|row| match row {
+                    Row::Header { .. } => None,
+                    Row::Entry(ei) => model.trade_skill.as_ref().map(|t| &t.recipes[ei]),
+                })
+                .filter(|r| r.product_item != 0)
+                .and_then(|r| {
+                    model
+                        .item_templates
+                        .get(&r.product_item)
+                        .map(|t| item_link(r.product_item, &t.name, t.quality))
+                });
+            Ok(match link {
+                Some(l) => MultiValue::from_vec(vec![Value::String(lua.create_string(&l)?)]),
+                None => MultiValue::new(),
+            })
+        })?,
+    )?;
+
+    // GetTradeSkillReagentItemLink(index, reagentIndex) — `0x4ff800`: both arguments through the
+    // number gate, raising `Usage: GetTradeReagentSkillItemLink(…)` — Blizzard's own typo, kept.
+    // `reagentIndex` is 1-based over the NON-EMPTY reagent slots and never range-checked in the
+    // client; ALWAYS exactly one value: the reagent's link, or nil on any miss.
+    g.set(
+        "GetTradeSkillReagentItemLink",
+        lua.create_function(|lua, (index, reagent): (Value, Value)| {
+            let usage = "Usage: GetTradeReagentSkillItemLink(index, reagentIndex)";
+            let index = number_arg(lua, index, usage)?;
+            let reagent = number_arg(lua, reagent, usage)?;
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let link = usize::try_from(index)
+                .ok()
+                .and_then(|i| i.checked_sub(1))
+                .and_then(|n| rows(&model).get(n).cloned())
+                .and_then(|row| match row {
+                    Row::Header { .. } => None,
+                    Row::Entry(ei) => model.trade_skill.as_ref().map(|t| &t.recipes[ei]),
+                })
+                .zip(usize::try_from(reagent).ok().and_then(|r| r.checked_sub(1)))
+                .and_then(|(r, ri)| r.reagents.get(ri))
+                .and_then(|re| {
+                    model
+                        .item_templates
+                        .get(&re.item)
+                        .map(|t| item_link(re.item, &t.name, t.quality))
+                });
+            Ok(match link {
+                Some(l) => Value::String(lua.create_string(&l)?),
+                None => Value::Nil,
+            })
         })?,
     )?;
 

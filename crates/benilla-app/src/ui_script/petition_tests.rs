@@ -90,26 +90,34 @@ fn setup() -> UiScript {
     // out of GlobalStrings, with no fallback of its own — `format(nil, …)` raises, and the window
     // never paints.
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "BasicControls.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     // `QuestTitleButtonTemplate`, which the reference's registrar inherits for its two service
     // rows — 1.12 declares it in QuestFrameTemplates.xml, an `<Include>` of QuestFrame.xml, and
     // ours declares it in QuestFrame.xml directly. An unknown template is a loader WARNING, so
     // without this the rows build with no art at all and nothing goes red — which is exactly the
     // failure `load_ui_strict` exists to turn into a red test.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
     // `ChatFrameEditBox`, which the reference's own purchase button indexes on every click to
     // decide where focus goes after the name box closes — a nil there raises before the charter is
     // bought. Ours guarded it; the reference does not.
-    load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrops
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrops
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml"); // ChatFrame's seven dropdowns inherit its template
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
-    load_xml(&s, "ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\GuildRegistrarFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\PetitionFrame.xml");
     s

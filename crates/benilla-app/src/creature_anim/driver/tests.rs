@@ -20,6 +20,22 @@ use super::super::{
 use super::drive_animations;
 use crate::net::NetCommands;
 
+/// A hand holding something that is **not a weapon** — a torch, a held-in-off-hand trinket.
+///
+/// Several fixtures below want a unit whose auto-attack swing is AttackUnarmed(16) *and* whose
+/// spell-kit clip is the armed Special1H(57). Since decision 1863 that combination needs a
+/// non-EMPTY hand: the reference's play-time substitution (`0x5fe2f0` @ `0x5fe3cc`, and our
+/// [`super::super::select::unarmed_special`]) keys on `GetWeapon(slot, 0)` being **NULL**, not on
+/// the item failing to be a weapon — so a held non-weapon keeps the armed special while the swing
+/// table still sends it to 16. An empty-handed unit plays SpecialUnarmed(118), which has its own
+/// test.
+fn holding_a_non_weapon() -> Wielded {
+    Wielded {
+        main: Some((15, 0)), // ItemClass 15 = miscellaneous
+        ..Default::default()
+    }
+}
+
 fn clip(anim_id: u16, node: u32, looping: bool) -> AnimClip {
     AnimClip {
         anim_id,
@@ -595,6 +611,7 @@ fn whiff_slowdown_spares_a_non_swing_oneshot() {
             AnimationPlayer::default(),
             AnimationTransitions::new(),
             AnimDriver::default(),
+            holding_a_non_weapon(),
         ))
         .id();
     let swinger = app
@@ -604,6 +621,7 @@ fn whiff_slowdown_spares_a_non_swing_oneshot() {
             AnimationPlayer::default(),
             AnimationTransitions::new(),
             AnimDriver::default(),
+            holding_a_non_weapon(),
         ))
         .id();
     app.update(); // settle: Stand holds both gait slots
@@ -681,6 +699,7 @@ fn same_frame_collision_fast_paths_the_second_combat_clip() {
                 AnimationPlayer::default(),
                 AnimationTransitions::new(),
                 AnimDriver::default(),
+                holding_a_non_weapon(),
             ))
             .id()
     };
@@ -1374,6 +1393,7 @@ fn jumper(app: &mut App) -> Entity {
             AnimationTransitions::new(),
             AnimDriver::default(),
             MovementState::default(),
+            holding_a_non_weapon(),
         ))
         .id()
 }
@@ -2203,6 +2223,7 @@ fn a_melee_to_ranged_toggle_stows_both_hands_before_it_reaches_for_the_bow() {
                 ranged_sheath: 1,
                 ranged_inv: 0x0f,
                 materials: [1, 6, 2],
+                disarmed: false,
             },
         ))
         .id();
@@ -3446,4 +3467,267 @@ fn the_interaction_face_me_shuffles_its_feet_for_the_whole_turn() {
     let (peak, held) = run(&mut app, 256, 12);
     assert!(held, "the swing back is ShuffleRight, got {:?}", gait(&app));
     assert!(peak > 0.95, "and blends the whole way in: {peak}");
+}
+
+/// **A disarmed attacker fights bare-handed** (decision 1863) — the whole of `UNIT_FLAG_DISARMED`
+/// on the animation side, run through the real driver against an armed control on the same frame.
+/// The reference gets here with no disarm case in any selector: `GetWeapon(slot, 0)` hands the
+/// swing (`0x6246a0`) and the Ready idle (`0x5fcdc0`) a NULL hand, and their existing unarmed legs
+/// do the rest. So the pass is *unarmed clips*, and the failure this pins is the sword's Attack1H
+/// coming out of a hand the server says is empty.
+#[test]
+fn a_disarmed_attacker_swings_and_stands_unarmed() {
+    fn model() -> ModelAnimations {
+        ModelAnimations {
+            graph: Handle::default(),
+            clips: vec![
+                clip(0, 1, true),    // Stand
+                clip(17, 2, false),  // Attack1H — the sword swing
+                clip(16, 3, false),  // AttackUnarmed — the fist
+                clip(26, 4, true),   // Ready1H — the sword stance
+                clip(25, 5, true),   // ReadyUnarmed — the bare-handed stance
+                clip(88, 6, false),  // AttackOffPierce — the offhand dagger
+                clip(117, 7, false), // AttackUnarmedOff — the offhand fist
+            ],
+            hand_close: [None, None],
+            playable_animation_lookup: Vec::new(),
+            animation_lookup: Vec::new(),
+            global_bones: Vec::new(),
+            first_seq: None,
+            pose: Default::default(),
+        }
+    }
+    // Sword and dagger, engaged: the same loadout twice, differing only in the descriptor bit.
+    fn fighter(app: &mut App, disarmed: bool) -> Entity {
+        app.world_mut()
+            .spawn((
+                model(),
+                AnimationPlayer::default(),
+                AnimationTransitions::new(),
+                AnimDriver::default(),
+                Engaged,
+                Wielded {
+                    main: Some((2, 0x7)), // 1H sword
+                    off: Some((2, 0xf)),  // dagger
+                    main_sheath: 3,
+                    off_sheath: 3,
+                    disarmed,
+                    ..Default::default()
+                },
+            ))
+            .id()
+    }
+    let gait = |app: &App, unit: Entity| app.world().entity(unit).get::<AnimDriver>().unwrap().gait;
+    let playing = |app: &App, unit: Entity, node: u32| {
+        app.world()
+            .entity(unit)
+            .get::<AnimationPlayer>()
+            .unwrap()
+            .animation(AnimationNodeIndex::new(node as usize))
+            .is_some()
+    };
+
+    // The engaged standing idle: `0x5fcdc0`'s weapon-class Ready, or ReadyUnarmed for the hand
+    // the disarm emptied.
+    let mut stand = app();
+    let armed = fighter(&mut stand, false);
+    let disarmed = fighter(&mut stand, true);
+    stand.update();
+    assert_eq!(gait(&stand, armed), Some(26), "the sword stands Ready1H");
+    assert_eq!(
+        gait(&stand, disarmed),
+        Some(25),
+        "the disarmed hand stands ReadyUnarmed, sword or no sword"
+    );
+
+    // One swing per hand, each on its own pair — a second swing over a live one is the combat
+    // fast-path's deferral (`0x5fcc10`), which has nothing to say about disarm.
+    let swings = |hit_info: u32| {
+        let mut app = app();
+        let armed = fighter(&mut app, false);
+        let disarmed = fighter(&mut app, true);
+        app.update();
+        for (unit, seq) in [(armed, 1u64), (disarmed, 2)] {
+            app.world_mut().write_message(SwingMessage {
+                attacker: unit,
+                victim: None,
+                hit_info,
+                victim_state: 1,
+                damage: 7,
+                seq,
+            });
+        }
+        app.update();
+        let nodes = |unit| {
+            (1..8u32)
+                .filter(|n| playing(&app, unit, *n))
+                .collect::<Vec<_>>()
+        };
+        (nodes(armed), nodes(disarmed))
+    };
+
+    // The MAINHAND swing (`0x6246a0`, HitInfo bit 0x4 clear): Attack1H(17) vs AttackUnarmed(16).
+    let (armed_nodes, disarmed_nodes) = swings(0);
+    assert!(
+        armed_nodes.contains(&2),
+        "the armed control swings Attack1H: {armed_nodes:?}"
+    );
+    assert!(
+        disarmed_nodes.contains(&3) && !disarmed_nodes.contains(&2),
+        "the disarmed attacker swings AttackUnarmed(16), never the sword's clip: {disarmed_nodes:?}"
+    );
+
+    // …and the OFFHAND swing (HitInfo bit 0x4). This is the half the ladder decides: the
+    // off-hand gate's FIRST probe asks about the MAIN hand, and a main hand holding a weapon
+    // CANCELS it (`5ec28d je 0x5ec2aa`). A disarmed dual-wielder therefore keeps stabbing with
+    // the dagger — disarm hides exactly one weapon.
+    let (armed_nodes, disarmed_nodes) = swings(0x4);
+    assert!(
+        armed_nodes.contains(&6),
+        "the armed control stabs AttackOffPierce: {armed_nodes:?}"
+    );
+    assert!(
+        disarmed_nodes.contains(&6) && !disarmed_nodes.contains(&7),
+        "the disarmed off hand KEEPS its dagger — 88, not 117: {disarmed_nodes:?}"
+    );
+}
+
+/// The other rung of the ladder: with **no weapon in the main hand** the disarm falls to the off
+/// hand, and that — not the dual-wield case — is what reaches AttackUnarmedOff(117) (decision
+/// 1863; wow-re `disarm-weapon-gate-law.md` §7's table).
+#[test]
+fn an_off_hand_only_fighter_is_the_case_that_punches_off_hand() {
+    let mut app = app();
+    let unit = app
+        .world_mut()
+        .spawn((
+            ModelAnimations {
+                graph: Handle::default(),
+                clips: vec![
+                    clip(0, 1, true),
+                    clip(16, 3, false),  // AttackUnarmed
+                    clip(88, 6, false),  // AttackOffPierce
+                    clip(117, 7, false), // AttackUnarmedOff
+                ],
+                hand_close: [None, None],
+                playable_animation_lookup: Vec::new(),
+                animation_lookup: Vec::new(),
+                global_bones: Vec::new(),
+                first_seq: None,
+                pose: Default::default(),
+            },
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+            Wielded {
+                main: None,          // nothing in the main hand to claim the disarm
+                off: Some((2, 0xf)), // …so the dagger is the weapon it hides
+                disarmed: true,
+                ..Default::default()
+            },
+        ))
+        .id();
+    app.update();
+    app.world_mut().write_message(SwingMessage {
+        attacker: unit,
+        victim: None,
+        hit_info: 0x4,
+        victim_state: 1,
+        damage: 7,
+        seq: 1,
+    });
+    app.update();
+    let playing = |node: u32| {
+        app.world()
+            .entity(unit)
+            .get::<AnimationPlayer>()
+            .unwrap()
+            .animation(AnimationNodeIndex::new(node as usize))
+            .is_some()
+    };
+    assert!(playing(7), "AttackUnarmedOff(117)");
+    assert!(!playing(6), "not the dagger's own clip");
+}
+
+/// The **play-time** substitution ([`super::super::select::unarmed_special`], `0x5fe2f0`): a
+/// spell kit's Special1H(57) becomes SpecialUnarmed(118) when both hands read empty — which a
+/// disarmed dual-wielder is NOT (it keeps its off hand), and a disarmed single-wielder is.
+#[test]
+fn a_special_goes_unarmed_only_when_both_hands_are_empty() {
+    let model = || ModelAnimations {
+        graph: Handle::default(),
+        clips: vec![
+            clip(0, 1, true),
+            clip(57, 2, false),  // Special1H — the kit's weapon spin
+            clip(118, 3, false), // SpecialUnarmed
+        ],
+        hand_close: [None, None],
+        playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
+        global_bones: Vec::new(),
+        first_seq: None,
+        pose: Default::default(),
+    };
+    let mut app = app();
+    let spin = |app: &mut App, w: Wielded| {
+        let unit = app
+            .world_mut()
+            .spawn((
+                model(),
+                AnimationPlayer::default(),
+                AnimationTransitions::new(),
+                AnimDriver::default(),
+                w,
+            ))
+            .id();
+        app.update();
+        app.world_mut().write_message(EmoteAnim {
+            entity: unit,
+            anim_id: 57,
+            seq: 1,
+        });
+        unit
+    };
+    let armed = spin(
+        &mut app,
+        Wielded {
+            main: Some((2, 0xf)),
+            ..Default::default()
+        },
+    );
+    let dual = spin(
+        &mut app,
+        Wielded {
+            main: Some((2, 0x7)),
+            off: Some((2, 0xf)),
+            disarmed: true,
+            ..Default::default()
+        },
+    );
+    let alone = spin(
+        &mut app,
+        Wielded {
+            main: Some((2, 0x7)),
+            disarmed: true,
+            ..Default::default()
+        },
+    );
+    app.update();
+    let playing = |app: &App, unit: Entity, node: u32| {
+        app.world()
+            .entity(unit)
+            .get::<AnimationPlayer>()
+            .unwrap()
+            .animation(AnimationNodeIndex::new(node as usize))
+            .is_some()
+    };
+    assert!(playing(&app, armed, 2), "control: the weapon spin");
+    assert!(
+        playing(&app, dual, 2),
+        "a disarmed dual-wielder still has a hand full — the weapon spin"
+    );
+    assert!(
+        playing(&app, alone, 3) && !playing(&app, alone, 2),
+        "both hands empty to the gate — SpecialUnarmed(118)"
+    );
 }

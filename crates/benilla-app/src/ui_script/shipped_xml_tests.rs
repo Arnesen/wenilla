@@ -30,7 +30,10 @@ fn every_shipped_ui_xml_parses() {
     // Never let the sweep pass by finding nothing — a moved assets dir would otherwise turn this
     // into a test that guards zero files while staying green.
     assert!(
-        checked >= 40,
+        // A sanity floor for the walk, not a census: `assets/ui` retires file by file (1751),
+        // so the floor sits well under the count rather than one step above it (1956). Nine
+        // files stand after 2014; the glue screens and the dev frames alone are more than six.
+        checked >= 6,
         "only {checked} xml files swept — sweep broke"
     );
 }
@@ -123,6 +126,23 @@ fn loading_the_shipped_ui_queues_no_sounds() {
 /// a white slab over its autocast ring and another under its tab row. Every gate was green.
 ///
 /// The shape half runs everywhere; the resolve half needs client data and skips without it (a
+/// The reference's pet bar, up with the hunter fixture (Claw autocasting), settled past its
+/// slide — the pet half of the two shine pins below.
+fn pet_bar_vm() -> benilla_ui::script::UiScript {
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    super::pet_bar_tests::load_pet_bar(&s);
+    super::pet_bar_tests::declare_token_strings(&s);
+    s.set_pet_actions(true, true, true, super::pet_bar_tests::hunter_slots());
+    s.fire_event("PET_BAR_UPDATE", vec![]);
+    for _ in 0..3 {
+        s.tick(0.05);
+    }
+    s.resolve();
+    assert!(s.errors().is_empty(), "pet bar errors: {:?}", s.errors());
+    s
+}
+
 /// The autocast **corner brackets** (`UI-AutoCastableOverlay`), per template — the sibling pin to
 /// the shine's, and the same invariant: not a magic size, but the **bracket square against its
 /// button**, which is the thing an eye actually reads.
@@ -192,6 +212,19 @@ fn the_autocast_brackets_reach_each_buttons_corners() {
             }
         }
     }
+    // The spell book's overlay is the reference's own template resized by SpellBookAdapters.xml's
+    // script (1952/2014), so its number is measured off a VM, not read off an XML.
+    let s = super::spellbook_tests::spellbook_ui(1024.0, 768.0);
+    let (overlay, button): (f32, f32) = s
+        .eval("return SpellButton1AutoCastable:GetWidth(), SpellButton1:GetWidth()")
+        .unwrap();
+    found.push(("SpellButton1AutoCastable".into(), overlay * ART, button));
+    // The pet button's overlay is the reference's own template (1953) — measured the same way.
+    let s = pet_bar_vm();
+    let (overlay, button): (f32, f32) = s
+        .eval("return PetActionButton1AutoCastable:GetWidth(), PetActionButton1:GetWidth()")
+        .unwrap();
+    found.push(("PetActionButton1AutoCastable".into(), overlay * ART, button));
     assert_eq!(found.len(), 2, "expected two autocast overlays: {found:?}");
     for (name, brackets, button) in &found {
         assert!(
@@ -203,80 +236,42 @@ fn the_autocast_brackets_reach_each_buttons_corners() {
     }
 }
 
-/// Every shipped autocast-shine token, and the rim/viewport ratio each one asks for — the one
-/// place the widget's geometry is decided, so the one place to pin it.
+/// The two shipped autocast-shine panes, and the rim/viewport ratio each one asks for — the one
+/// place the widget's geometry is decided, so the one place to pin it. Read off the live panes
+/// (the stock `$parentAutoCast` Models the tile renderer draws, 2013/2014), never an XML.
 ///
 /// The pet button is the REFERENCE's own numbers (`setAllPoints` on 30x30 at `scale="1.2"`), and
 /// its ratio is why that button reads as a rim: the rim square is 1.024x its viewport, so it runs
-/// ON the edge and the widget's scissor halves every star (1387/1391).
+/// ON the edge and the tile's cell — the widget's own scissor — halves every star (1387/1391).
 ///
 /// The spell book is **one deliberate deviation** (decision 1392). The reference writes
 /// `scale="1.22"` into a 36-unit viewport — a 0.87x rim that floats clear of the edge, is never
 /// clipped, and washes the icon; the real 1.12 client looks the same way (director-checked), so
-/// this is taste, not fidelity. We write 1.44 to borrow the pet button's ratio. This test is what
-/// stops that drifting, or being "corrected" back to 1.22 by someone who only read the ref.
+/// this is taste, not fidelity. We re-seat the stock Model to 1.48 on a 37-unit rim (1393's
+/// numbers, SpellBookAdapters.xml) to borrow the pet button's ratio. This test is what stops that
+/// drifting, or being "corrected" back to 1.22 by someone who only read the ref.
 #[test]
-fn the_shine_tokens_ask_for_the_rims_we_meant() {
-    use benilla_ui::framexml::{Element, TopLevel};
-
-    fn walk(el: &Element, out: &mut Vec<(String, f32, f32)>) {
-        for (key, value) in el.attrs() {
-            let scale = crate::autocast_shine::token_model_scale(value);
-            let is_token = key.eq_ignore_ascii_case("file")
-                && value.starts_with(crate::autocast_shine::SHINE_TOKEN);
-            if let (true, Some(scale)) = (is_token, scale) {
-                let view = el
-                    .children
-                    .iter()
-                    .find(|c| c.tag.eq_ignore_ascii_case("Size"))
-                    .and_then(|sz| sz.children.first())
-                    .and_then(|d| {
-                        d.attrs()
-                            .iter()
-                            .find(|(k, _)| k.eq_ignore_ascii_case("x"))
-                            .map(|(_, v)| v.to_string())
-                    })
-                    .and_then(|v| v.parse::<f32>().ok())
-                    // No <Size> means setAllPoints on the pet button, which is 30x30.
-                    .unwrap_or(30.0);
-                out.push((
-                    el.attrs()
-                        .iter()
-                        .find(|(k, _)| k.eq_ignore_ascii_case("name"))
-                        .map(|(_, v)| v.to_string())
-                        .unwrap_or_default(),
-                    0.02 * 1280.0 * scale,
-                    view,
-                ));
-            }
-        }
-        for child in &el.children {
-            walk(child, out);
-        }
-    }
-
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
-    let mut found = Vec::new();
-    for entry in std::fs::read_dir(&dir).expect("assets/ui") {
-        let path = entry.expect("entry").path();
-        if path.extension().is_none_or(|e| e != "xml") {
-            continue;
-        }
-        let src = std::fs::read_to_string(&path).expect("read");
-        for item in benilla_ui::framexml::parse(&src).expect("parse").items {
-            match item {
-                TopLevel::Font(el) | TopLevel::Template(el) | TopLevel::Instance(el) => {
-                    walk(&el, &mut found)
-                }
-                TopLevel::Include(_) | TopLevel::Script(_) => {}
-            }
-        }
-    }
-    assert_eq!(
-        found.len(),
-        2,
-        "expected exactly two shine tokens: {found:?}"
-    );
+fn the_shine_panes_ask_for_the_rims_we_meant() {
+    let mut found: Vec<(String, f32, f32)> = Vec::new();
+    let mut s = super::spellbook_tests::spellbook_ui(1024.0, 768.0);
+    s.run("ToggleSpellBook(BOOKTYPE_SPELL)").unwrap();
+    s.tick(0.05);
+    s.resolve();
+    let (scale, view): (f32, f32) = s
+        .eval("return SpellButton1AutoCast:GetModelScale(), SpellButton1AutoCast:GetWidth()")
+        .unwrap();
+    found.push(("SpellButton1AutoCast".into(), 0.02 * 1280.0 * scale, view));
+    let s = pet_bar_vm();
+    let (scale, view): (f32, f32) = s
+        .eval(
+            "return PetActionButton1AutoCast:GetModelScale(), PetActionButton1AutoCast:GetWidth()",
+        )
+        .unwrap();
+    found.push((
+        "PetActionButton1AutoCast".into(),
+        0.02 * 1280.0 * scale,
+        view,
+    ));
     for (name, rim, view) in &found {
         assert!(
             (rim / view - 1.024).abs() < 1e-3,
@@ -310,11 +305,7 @@ fn every_shipped_texture_path_resolves_in_the_client_archives() {
             let archive_path = ["file", "bgfile", "edgefile"]
                 .contains(&key.to_ascii_lowercase().as_str())
                 && !value.is_empty();
-            // The autocast-shine token (decision 1383) is a REGISTRATION, not an archive path:
-            // conversion intercepts it before the resolver and it draws nothing, so it is
-            // exempt — through the token's OWN parser, so a typo'd token (or an unparseable
-            // `scale=` suffix) still fails this sweep as the white quad it would actually be.
-            if archive_path && crate::autocast_shine::token_model_scale(value).is_none() {
+            if archive_path {
                 out.push((file.to_string(), el.tag.clone(), value.clone()));
             }
         }
@@ -342,8 +333,11 @@ fn every_shipped_texture_path_resolves_in_the_client_archives() {
             }
         }
     }
-    // Never let the sweep pass by matching nothing — the shipped UI names hundreds of textures.
-    assert!(refs.len() >= 200, "only {} texture paths swept", refs.len());
+    // Never let the sweep pass by matching nothing — the shipped UI still names over a hundred
+    // textures (173 after 1971 retired the auction transcription, fewer again after 1973 the
+    // crafting pair, 64 after 1980 the world map; the count falls with every window that
+    // migrates, and the floor follows it).
+    assert!(refs.len() >= 50, "only {} texture paths swept", refs.len());
 
     // The shape half: a doubled separator is the Lua escaping written into XML, and it resolves to
     // nothing. Checked without the client so a data-less machine still catches this exact class.
@@ -536,9 +530,10 @@ fn every_archive_path_a_shipped_lua_chunk_names_survives_its_own_escaping() {
             }
         }
     }
-    // Never let the sweep pass by matching nothing.
+    // Never let the sweep pass by matching nothing (19 after 1971, 8 after 1980, 4 after 1987;
+    // the floor follows the census down as windows migrate).
     assert!(
-        paths.len() >= 20,
+        paths.len() >= 4,
         "only {} archive paths swept out of the shipped Lua",
         paths.len()
     );
@@ -643,9 +638,11 @@ fn every_shipped_text_attribute_answers_against_the_real_global_strings() {
             }
         }
     }
-    // Never let the sweep pass by matching nothing: 23 key-shaped values across six windows is the
-    // floor as of 0991, and a regex that stops matching is exactly how this guard would retire.
-    assert!(keys >= 23, "only {keys} key-shaped text= values swept");
+    // Never let the sweep pass by matching nothing: 23 key-shaped values across six windows was
+    // the floor as of 0991; ONE is left after 1971, and a regex that stops matching is exactly how
+    // this guard would retire — so the floor is one, and the guard retires with the last file of
+    // ours that writes a key-shaped `text=`.
+    assert!(keys >= 1, "only {keys} key-shaped text= values swept");
 }
 
 /// **No shipped script hands a GlobalStrings KEY to a text sink as if it were the string.**
@@ -753,7 +750,8 @@ fn no_shipped_script_sets_a_global_string_key_as_display_text() {
     }
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
     // The sweep must never pass by finding nothing to sweep.
-    assert!(swept >= 40, "only {swept} xml files swept — sweep broke");
+    // The same walk floor as above (1956).
+    assert!(swept >= 6, "only {swept} xml files swept — sweep broke");
 }
 
 /// **The `$parentTextureFrame` idiom's contract, over the whole shipped UI**: a frame whose art is
@@ -896,17 +894,14 @@ fn every_texture_frame_outranks_its_status_bars() {
 fn the_boot_phase_materializes_no_frames() {
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/Fonts.xml");
-    let text = std::fs::read_to_string(&dir).expect("Fonts.xml");
-    let doc = benilla_ui::framexml::parse(&text).expect("parses");
-    let provider = |_: &str| -> Option<Vec<u8>> { None };
-    let report = benilla_ui::loader::load(&s, &doc, &provider);
+    // The font registry is manifest entry 0 and comes off the chain since 1888, so this reads
+    // through `test_ui::load_ui` rather than joining `assets/ui` — the file is not ours any more.
+    // `load_ui` returns the same `report.frames` this asserted on and fails on any loader error.
+    let frames = super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
     assert_eq!(
-        report.frames, 0,
-        "the boot-phase load materialized {} frame(s) — the login screen is meant to carry none",
-        report.frames
+        frames, 0,
+        "the boot-phase load materialized {frames} frame(s) — the login screen is meant to carry none"
     );
-    assert!(report.errors.is_empty(), "{:?}", report.errors);
 }
 
 /// **The font registry alone covers the WHOLE glyph-atlas bake plan** — the property that makes
@@ -1039,18 +1034,23 @@ fn every_shipped_font_object_is_published_as_a_lua_global() {
     let failures = super::load_default_ui(&s);
     assert!(failures.is_empty(), "loader errors: {failures:?}");
 
-    // Collect the declared names straight out of the shipped XML, so the sweep cannot go stale.
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
+    // Collect the declared names straight out of the MANIFEST's own entries, so the sweep cannot
+    // go stale — and so it follows a file onto the chain. It swept `assets/ui` until 1888 put the
+    // font registry on the chain and the count fell from 51 to 3, which is the failure this shape
+    // prevents: the sweep's subject is what the manifest declares, not what happens to be ours.
     let mut names: Vec<String> = Vec::new();
-    for entry in std::fs::read_dir(&dir).expect("assets/ui").flatten() {
-        let path = entry.path();
-        if path.extension().is_some_and(|e| e == "xml") {
-            let text = std::fs::read_to_string(&path).expect("read");
-            for chunk in text.split("<Font ").skip(1) {
-                if let Some(rest) = chunk.split_once("name=\"") {
-                    if let Some((name, _)) = rest.1.split_once('"') {
-                        names.push(name.to_string());
-                    }
+    for entry in &super::addons::Addon::builtin().toc.files {
+        if !entry.to_ascii_lowercase().ends_with(".xml") {
+            continue;
+        }
+        let Some(bytes) = super::test_ui::read(&entry.replace('\\', "/")) else {
+            continue;
+        };
+        let text = benilla_ui::source::decode(&bytes);
+        for chunk in text.split("<Font ").skip(1) {
+            if let Some(rest) = chunk.split_once("name=\"") {
+                if let Some((name, _)) = rest.1.split_once('"') {
+                    names.push(name.to_string());
                 }
             }
         }
@@ -1233,16 +1233,16 @@ fn the_inspect_cursor_pair_takes_both_arms() {
 /// name-for-name comparison against the reference could not see it. **Sweeping what is actually
 /// visible can**, which is why this is written against the observable and not against a list.
 ///
-/// The three survivors are each required to survive:
+/// The two survivors are each required to survive (a third, `WorldFrame`, was one while our
+/// `UIParent.xml` declared it; since decision 1983 it is the reference's own file off the chain,
+/// which this sweep over the SHIPPED tree does not walk — it stays up through a fly-by exactly as
+/// before, top-level and never hidden):
 ///
 /// - `CinematicFrame` — the frame being *shown*. The reference declares it with no parent for
 ///   exactly this reason, and `SetFullScreenFrame` shows it in the same breath as hiding UIParent.
-/// - `WorldFrame` — the 3D scene's frame. Ours renders nothing (Bevy draws the world), but it is
-///   the reference's own bottom-of-strata frame and a cinematic is a thing you watch *in* it.
-/// - `BenillaFadeDriver` — a 1x1 frame with no textures and no layers, whose only content is an
-///   `OnUpdate` running `UIFrameFadeUpdate`. It draws nothing, and it must not be hidden: a hidden
-///   frame's `OnUpdate` does not run, so parenting it would freeze every in-flight `UIFrameFade`
-///   the instant a cinematic started and leave frames stranded mid-fade.
+/// - (Until 1988 a `BenillaFadeDriver` survived beside it — our fade kit's tick frame. The stock
+///   `UIFrameFadeUpdate` runs from UIParent's own OnUpdate, which a cinematic's `UIParent:Hide()`
+///   stops exactly as the reference's does.)
 #[test]
 fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
     let mut s = benilla_ui::script::UiScript::new().unwrap();
@@ -1264,7 +1264,26 @@ fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
     assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
     s.resolve();
 
-    let names = shipped_frame_names();
+    // The sweep's subjects: the frames OUR files declare — plus the reference's own HUD, because
+    // `assets/ui` is nearly empty now (1988 retired the last of the glue) and a sweep over what is
+    // left would pass without ever looking at the interface the cascade actually hides.
+    let mut names = shipped_frame_names();
+    names.extend(
+        [
+            "MainMenuBar",
+            "ChatFrame1",
+            "PlayerFrame",
+            "MinimapCluster",
+            "BuffFrame",
+            "MainMenuBarBackpackButton",
+            "CharacterMicroButton",
+            "UIErrorsFrame",
+            // The frame being SHOWN — the sweep's one expected survivor.
+            "CinematicFrame",
+        ]
+        .into_iter()
+        .map(String::from),
+    );
     let visible = |s: &benilla_ui::script::UiScript, n: &str| -> bool {
         s.eval::<i64>(&format!(
             "local f = getglobal(\"{n}\") \
@@ -1278,7 +1297,11 @@ fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
     // The sweep is only worth anything if there was something to hide in the first place.
     let before = names.iter().filter(|n| visible(&s, n)).count();
     assert!(
-        before > 50,
+        // 50 until 1938 took the three bar files stock, 20 until 1974 took the minimap cluster
+        // (its 22 named frames were most of what this sweep counted), 12 until 1987 took the
+        // micro row and 1988 the glue. The floor is over the named HUD above now, not over our
+        // files' census, so it stops following the migration down.
+        before >= 6,
         "only {before} frames visible before the cinematic — the sweep found no interface to \
          hide, so it would pass no matter what the cascade did"
     );
@@ -1295,9 +1318,9 @@ fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
     after.sort_unstable();
     assert_eq!(
         after,
-        ["BenillaFadeDriver", "CinematicFrame", "WorldFrame"],
+        ["CinematicFrame"],
         "something is drawing over the fly-by (see this test's header for why exactly these \
-         three are allowed to survive)"
+         two are allowed to survive)"
     );
 
     // …and the player gets it all back.
@@ -1348,7 +1371,10 @@ fn every_declared_parent_really_attaches() {
 
     let declared = shipped_frame_parents();
     assert!(
-        declared.len() > 60,
+        // A sanity floor for the scan, not a census — the declarations retire with the files
+        // that carry them (1751); 67 before 1938, 30 after 1956, 14 after 1970, 2 after 1987
+        // (the micro row's eight were most of what was left).
+        declared.len() >= 2,
         "only {} parent declarations found — the scan broke",
         declared.len()
     );
@@ -1441,4 +1467,64 @@ pub(super) fn shipped_frame_names() -> Vec<String> {
     names.sort();
     names.dedup();
     names
+}
+
+/// **The icon picker opens, against the SHIPPED manifest.** Not a harness list — the manifest, the
+/// way the client loads it.
+///
+/// The distinction is the whole point. `macro_tests` stands this window up from its own file list
+/// and passed throughout, because a harness names the dependencies it needs; the manifest had not
+/// listed `ClassTrainerFrameTemplates.xml`, so in the client `MacroPopupScrollFrame` inherited a
+/// template nothing had loaded, came up bare, and `MacroPopupFrame_Update` multiplied a nil offset
+/// (decision 1862). A window is only as loaded as the manifest says.
+#[test]
+fn the_shipped_manifest_opens_the_macro_icon_picker() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefive".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
+    // One macro, so the edit path has something selected — the director's own flow was a saved
+    // macro and the "Change Name/Icon" button beside it.
+    s.set_macros(benilla_ui::script::MacroState {
+        account: vec![benilla_ui::script::MacroView {
+            name: "die".into(),
+            texture: Some(r"Interface\Icons\Ability_Ambush".into()),
+            body: ".die".into(),
+            ..Default::default()
+        }],
+        character: Vec::new(),
+    });
+    s.set_macro_icons(vec![
+        r"Interface\Icons\Ability_Ambush".into(),
+        r"Interface\Icons\Ability_Backstab".into(),
+    ]);
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    s.resolve();
+    let _ = s.errors();
+
+    // The window is a LoadOnDemand addon the app seats at setup (1957) and `ShowMacroFrame`
+    // loads through the reference's own `MacroFrame_LoadUI` (1967).
+    super::test_ui::seat_chain_addon(&mut s, "Blizzard_MacroUI");
+    s.run("ShowMacroFrame()").unwrap();
+    s.run("MacroButton1:Click()").unwrap();
+    s.run("MacroEditButton:Click()").unwrap();
+    assert!(
+        s.errors().is_empty(),
+        "opening the icon picker off the shipped manifest must not raise: {:?}",
+        s.errors()
+    );
+    assert!(
+        s.eval::<bool>("return MacroPopupFrame:IsShown() and true or false")
+            .unwrap(),
+        "the picker is up"
+    );
 }

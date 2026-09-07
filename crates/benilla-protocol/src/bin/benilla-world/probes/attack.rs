@@ -67,6 +67,22 @@ impl Probe for Attack {
             bail!("--attack: swung at {target:#x} but no SMSG_ATTACKERSTATEUPDATE decoded");
         }
         println!("✅ attack: {swings_seen} SMSG_ATTACKERSTATEUPDATE swing(s) decoded (target {target:#x}).");
+        // The refusals are REPORTED, never required: this probe lands on top of its kobold, so the
+        // server has no reason to send one. They are surfaced because before decision 2037 they
+        // were dropped silently, and a run that does provoke one should say so rather than swallow
+        // it again. Eliciting one on purpose needs a target out of melee reach whose hostility we
+        // can be sure of, which a live server does not hand us (2037's remainder 4).
+        let refusals = &cx.world.swing_refusals;
+        if refusals.is_empty() {
+            println!(
+                "   (no SMSG_ATTACKSWING refusal seen — expected, we swing from on top of it)"
+            );
+        } else {
+            println!(
+                "   {} swing refusal(s) decoded: {refusals:?}",
+                refusals.len()
+            );
+        }
         Ok(())
     }
 }

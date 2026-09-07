@@ -445,19 +445,33 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // CollapseFactionHeader(index) / ExpandFactionHeader(index) — a VISIBLE header index; `0` or a
     // non-header row acts on EVERY header (the client's own fall-through).
+    // **Both fire `UPDATE_FACTION`, and that is the engine's own doing, not a convenience.**
+    // `CollapseFactionHeader 0x4d6a50` and `ExpandFactionHeader 0x4d6aa0` both reach `0x4d6400`,
+    // which tail-jumps to `0x4d5c40` — and `0x4d5dab`, inside that function, is one of the FOUR
+    // whole-image fire sites of `UPDATE_FACTION` (wow-re `reputation-panel-law.md` §7.5 and §8,
+    // both VERIFIED). The stock pane has no other repaint path after a fold: its header `<OnClick>`
+    // calls the binding and nothing else (ReputationFrame.xml:9-15), and `ReputationFrame_OnEvent`
+    // repaints on `UPDATE_FACTION` alone. Our own retired file repainted itself, which is why this
+    // was invisible until the pane went stock (1875).
     g.set(
         "CollapseFactionHeader",
         lua.create_function(|lua, index: usize| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            set_collapsed(&mut model, index, true);
+            {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                set_collapsed(&mut model, index, true);
+            }
+            super::event::fire_global(lua, "UPDATE_FACTION", &[]);
             Ok(())
         })?,
     )?;
     g.set(
         "ExpandFactionHeader",
         lua.create_function(|lua, index: usize| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            set_collapsed(&mut model, index, false);
+            {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                set_collapsed(&mut model, index, false);
+            }
+            super::event::fire_global(lua, "UPDATE_FACTION", &[]);
             Ok(())
         })?,
     )?;

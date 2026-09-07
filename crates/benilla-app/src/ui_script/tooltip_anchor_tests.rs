@@ -20,12 +20,23 @@ use super::test_ui::load_ui as load_xml;
 fn harness(extra: &[&str]) -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
+    // `FACTION_BAR_COLORS`, which the stock `GameTooltip_UnitColor` indexes on every unit hover:
+    // the reference defines it at ReputationFrame.lua's file scope (1968).
+    load_xml(&s, r"Interface\FrameXML\ReputationFrame.lua");
     for f in extra {
         load_xml(&s, f);
     }
+    // The stock tooltip declares no size: it sizes from its lines through the font engine, as
+    // the client's does (1968) — every test here reads its rect, so the fixed-width font is
+    // that engine. And 1.12 ships detailed tips ON (`SHOW_NEWBIE_TIPS = "1"`, UIOptionsFrame_Init's;
+    // ours in OptionsFrame.xml's uvar block) — a harness without the options file says so itself.
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
+    s.run("SHOW_NEWBIE_TIPS = \"1\"").unwrap();
     s
 }
 
@@ -98,7 +109,8 @@ fn unit_frame_hover_takes_the_default_corner_and_drops_on_leave() {
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
-        "UnitPopup.xml",
+        "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua reads at file scope
+        "Interface\\FrameXML\\UnitPopup.xml",
         "Interface\\FrameXML\\BuffFrame.xml",
         "Interface\\FrameXML\\UnitFrame.xml",
         "Interface\\FrameXML\\CombatFeedback.xml",
@@ -145,6 +157,53 @@ fn unit_frame_hover_takes_the_default_corner_and_drops_on_leave() {
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
 }
 
+/// **The title a world hover paints while the creature query is still in flight**, over the
+/// shipped files: `UNKNOWNOBJECT` as `GlobalStrings.lua` defines it on the PLAYER'S OWN CHAIN.
+/// Read out of the VM at the assert rather than written as a literal, because that is the whole
+/// point of the resolver's `0x703bf0` read — a translated GlobalStrings translates the
+/// placeholder too (decision 2040, closing 2002's residue).
+///
+/// The engine half (the miss legs, the empty-global fallback, the `"player"` case) is
+/// `benilla_ui`'s own `tooltip_unit` suite; what this adds is the chain: the string really is
+/// defined, the plate really reads it, and the answer really replaces it.
+#[test]
+fn a_pending_name_hover_titles_the_chains_unknownobject() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = harness(&["Interface\\FrameXML\\GlobalStrings.lua"]);
+    // The snapshot the feed pushes before `SMSG_CREATURE_QUERY_RESPONSE` lands: the descriptor is
+    // in, and the name and the type word — which ride the same record — are not.
+    s.set_unit(
+        "mouseover",
+        Some(UnitState {
+            name: None,
+            creature_type_name: None,
+            ..wolf()
+        }),
+    );
+    assert!(s.world_tooltip_unit("mouseover"), "the hover shows");
+    let global = s.eval::<String>("return UNKNOWNOBJECT").unwrap();
+    assert!(
+        !global.is_empty(),
+        "the chain's GlobalStrings.lua defines UNKNOWNOBJECT"
+    );
+    assert_eq!(
+        s.eval::<String>("return GameTooltipTextLeft1:GetText()")
+            .unwrap(),
+        global,
+        "a name in flight titles the plate with the GlobalString, not an empty line"
+    );
+
+    // The query answers; the next paint of the same hover carries the real name.
+    s.set_unit("mouseover", Some(wolf()));
+    assert!(s.world_tooltip_unit("mouseover"));
+    assert_eq!(
+        s.eval::<String>("return GameTooltipTextLeft1:GetText()")
+            .unwrap(),
+        "Timber Wolf"
+    );
+    assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+}
+
 /// The detailed-tooltip fork (ref UnitFrame_OnEnter l.58-67, director-approved 0663): with tips on
 /// — the 1.12 default — the frame explains its RIGHT-CLICK MENU and returns BEFORE `SetUnit`, so
 /// the unit lines never render. Your own portrait always; another player's whenever they're your
@@ -164,7 +223,8 @@ fn your_own_portrait_explains_the_menu_instead_of_showing_your_health() {
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
-        "UnitPopup.xml",
+        "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua reads at file scope
+        "Interface\\FrameXML\\UnitPopup.xml",
         "Interface\\FrameXML\\BuffFrame.xml",
         "Interface\\FrameXML\\UnitFrame.xml",
         "Interface\\FrameXML\\CombatFeedback.xml",
@@ -227,9 +287,21 @@ fn your_own_portrait_explains_the_menu_instead_of_showing_your_health() {
 /// table so the pass means what it says.
 #[test]
 fn action_button_hover_takes_the_default_corner() {
-    let mut s = harness(&["Cooldown.xml", "ActionBar.xml"]);
+    let mut s = harness(&[
+        "Interface\\FrameXML\\Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
+    ]);
     s.register_cvars(crate::cvars::registered_pairs());
-    s.run("BenillaActionButton_OnEnter(ActionButton3)").unwrap();
+    s.run("this = ActionButton3 ActionButton_SetTooltip()")
+        .unwrap();
     assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
     let ok: bool = s
         .eval(
@@ -256,7 +328,29 @@ fn action_button_hover_takes_the_default_corner() {
 /// (`script/tooltip/verbs.rs`).
 #[test]
 fn ubertooltips_off_seats_action_bar_plates_beside_the_button() {
-    let mut s = harness(&["Cooldown.xml", "ActionBar.xml", "MultiBars.xml"]);
+    let mut s = harness(&[
+        "Interface\\FrameXML\\Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        "ScrollTemplates.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
+        "KeyBindingsPage.xml",
+        "OptionsFrame.xml",
+        "Interface\\FrameXML\\MultiActionBars.xml",
+    ]);
     s.register_cvars(crate::cvars::registered_pairs());
     s.set_cvar_engine("UberTooltips", "0");
 
@@ -268,7 +362,8 @@ fn ubertooltips_off_seats_action_bar_plates_beside_the_button() {
         .unwrap()
     };
 
-    s.run("BenillaActionButton_OnEnter(ActionButton3)").unwrap();
+    s.run("this = ActionButton3 ActionButton_SetTooltip()")
+        .unwrap();
     assert!(
         s.eval::<bool>("return GameTooltip.default == nil").unwrap(),
         "off: the main bar's plate is owner-anchored, not the default corner"
@@ -287,7 +382,7 @@ fn ubertooltips_off_seats_action_bar_plates_beside_the_button() {
     // All three members of the ref's LEFT set, by frame — membership is not gated on visibility,
     // and the two vertical bars are hidden until their option is ticked.
     for bar in ["MultiBarBottomRight", "MultiBarRight", "MultiBarLeft"] {
-        s.run(&format!("BenillaActionButton_OnEnter({bar}Button1)"))
+        s.run(&format!("this = {bar}Button1 ActionButton_SetTooltip()"))
             .unwrap();
         assert_eq!(
             seat(&s),
@@ -298,7 +393,7 @@ fn ubertooltips_off_seats_action_bar_plates_beside_the_button() {
 
     // And the CVar back on restores the corner — the fork is a fork, not a one-way door.
     s.set_cvar_engine("UberTooltips", "1");
-    s.run("BenillaActionButton_OnEnter(MultiBarBottomRightButton1)")
+    s.run("this = MultiBarBottomRightButton1 ActionButton_SetTooltip()")
         .unwrap();
     assert!(
         s.eval::<bool>("return GameTooltip.default ~= nil").unwrap(),
@@ -313,7 +408,20 @@ fn ubertooltips_off_seats_action_bar_plates_beside_the_button() {
 /// un-collapsed with it.
 #[test]
 fn ubertooltips_off_seats_stance_plates_beside_the_button() {
-    let mut s = harness(&["Cooldown.xml", "ActionBar.xml", "StanceBar.xml"]);
+    let mut s = harness(&[
+        "Interface\\FrameXML\\Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
+    ]);
     s.register_cvars(crate::cvars::registered_pairs());
     s.set_shapeshift_forms(vec![benilla_ui::script::ShapeshiftFormView {
         spell_id: 5487,
@@ -326,7 +434,7 @@ fn ubertooltips_off_seats_stance_plates_beside_the_button() {
     s.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
     s.resolve();
 
-    s.run("BenillaShapeshiftButton_OnEnter(ShapeshiftButton1)")
+    s.run("this = ShapeshiftButton1 ShapeshiftButton1:GetScript(\"OnEnter\")()")
         .unwrap();
     assert!(
         s.eval::<bool>("return GameTooltip.default ~= nil").unwrap(),
@@ -334,7 +442,7 @@ fn ubertooltips_off_seats_stance_plates_beside_the_button() {
     );
 
     s.set_cvar_engine("UberTooltips", "0");
-    s.run("BenillaShapeshiftButton_OnEnter(ShapeshiftButton1)")
+    s.run("this = ShapeshiftButton1 ShapeshiftButton1:GetScript(\"OnEnter\")()")
         .unwrap();
     assert_eq!(
         s.eval::<String>(
@@ -354,8 +462,16 @@ fn ubertooltips_off_seats_stance_plates_beside_the_button() {
 #[test]
 fn buff_hover_hangs_below_left_of_the_button() {
     let mut s = harness(&[
-        "Cooldown.xml",
-        "ActionBar.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
         "Interface\\FrameXML\\BuffFrame.xml",

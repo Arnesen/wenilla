@@ -106,11 +106,12 @@ cosmic-text = "0.16"
 # public-in-crate types). Pinned to the exact version `cosmic-text` 0.16 depends on so there's one
 # `fontdb` in the graph.
 fontdb = "0.23"
-# kira renders the mix. On macOS the device it plays through is OURS (`sound::output`, decision
-# 1857) and kira's own cpal backend is not enabled: cpal could neither report a lost default
-# device nor rebuild on one there, and it discarded the IO-cycle timestamp the deadline meters
-# need. Off macOS that device layer is a stub that opens nothing, so the cpal backend is added
-# back per-target below — see `MixBackend` in `sound::mixer`.
+# kira renders the mix; the device it plays through is OURS (`sound::output`, decision 1857) —
+# kira's own `cpal` backend is not enabled on any target. On macOS that took cpal out of the graph
+# entirely: it could neither report a lost default device nor rebuild on one, and it discarded the
+# IO-cycle timestamp the deadline meters need. Off macOS cpal is back (1920) but as OUR device
+# layer under the same backend, not as kira's — the ring, the render thread and the meters are the
+# same code on every platform.
 kira = { version = "0.12", default-features = false, features = ["mp3", "wav", "pcm", "adpcm"] }
 # The realtime-audio allocation tripwire (decision 1857): `assert_no_alloc(|| …)` around the output
 # IO callback and the render pass aborts a DEBUG build on any allocation inside them, so a
@@ -199,6 +200,15 @@ objc2-foundation = { version = "0.2", features = ["NSArray", "NSData", "NSGeomet
 wasm-bindgen = "=0.2.122"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
+# The browser is the one target the owned device layer below cannot reach: no threads for 1857's
+# realtime render loop, and no clock for its meters (`std::time::Instant` panics here). So wasm32
+# is cut out of that section and stays on kira's own cpal backend — Web Audio, via the
+# `wasm-bindgen` feature kira already selects for cpal on this target. `MixBackend` in
+# `sound::mixer` is the seam. Features are additive across target sections, so this only adds
+# `cpal` to the kira declared above; `CpalBackendSettings`' fields ARE cpal types, so cpal must
+# stay the exact version kira resolves — one cpal in the graph.
+cpal = "0.17"
+kira = { version = "0.12", features = ["cpal"] }
 # `Response`/`fetch` and the audio-decode surfaces are `sound::web_load`'s: the zone soundscape
 # fetches over `fetch` and decodes through `OfflineAudioContext::decodeAudioData`, both off the
 # main thread, because doing either on it froze the frame at every zone line and doorway.
@@ -212,11 +222,15 @@ web-sys = { version = "0.3", features = [
     "OfflineAudioContext",
 ] }
 
-# Off macOS, kira's own cpal backend is the mixer's device layer (`MixBackend` in `sound::mixer`):
-# decision 1857's owned output is CoreAudio and nothing else, and wenilla ships both a Linux build
-# and a browser client — ALSA here, Web Audio on wasm32. Features are additive across target
-# sections, so this only adds `cpal` to the kira declared above. `CpalBackendSettings`' fields ARE
-# cpal types, so cpal must stay the exact version kira resolves — one cpal in the graph.
-[target.'cfg(not(target_os = "macos"))'.dependencies]
+# Everywhere else: the same device layer over cpal (decision 1920, `sound::output::cpal`). 1857
+# owns the mix-ahead ring, the render thread and the meters on every platform; only the last
+# hop — find the default device, open a stream on it, hand back one buffer per cycle — is
+# platform code, and off macOS that hop is ALSA/PipeWire, WASAPI or the host's own API. cpal is
+# the layer that already speaks all of them; on macOS it is still not in the graph, because
+# there its defects (a no-op error callback on the default device, a pinned `DefaultOutput`
+# unit, the discarded IO-cycle timestamp) are exactly what 1857 went direct to escape. On an
+# unsupported target cpal compiles to its Null host, which reports no device — the same silent
+# posture `stub.rs` has, which is why that file now survives for wasm32 alone (below).
+# wasm32 is excluded: see the browser note in the wasm32 section above.
+[target.'cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))'.dependencies]
 cpal = "0.17"
-kira = { version = "0.12", features = ["cpal"] }

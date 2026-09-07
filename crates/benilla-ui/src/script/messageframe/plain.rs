@@ -192,9 +192,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // Set/GetShadowOffset` are real entries on this class's table, not a courtesy. wow-re's
     // registrar carve is explicit about the membership — *"Exposed on: FontString, Font object,
     // EditBox, MessageFrame, ScrollingMessageFrame, SimpleHTML. NOT on Button"* — and names this
-    // class's own shims calling the shared implementations (`GetShadowColor 0x794810`). We shipped the block on two
-    // of the six and this is the third and fourth; SimpleHTML is a widget kind we do not have at
-    // all.
+    // class's own shims calling the shared implementations (`GetShadowColor 0x794810`). All six
+    // carry the block now — `SimpleHTML`'s is its own copy rather than `font_block::install`'s
+    // (`script/simplehtml/mod.rs`), because that class computes its own inter-block step.
     //
     // Demand is observed, not counted: `BigWigs/Plugins/Messages.lua:212` is
     // `self.msgframe:SetFontObject(GameFontNormalLarge)` on a frame it has just given

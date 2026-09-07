@@ -603,9 +603,14 @@ pub fn seqclockscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
 }
 
 /// Sweep every `.m2` and census the **animation-driven sound emitters**: the models whose
-/// sequences carry a `$DSL` (doodad sound loop) / `$DSO` (doodad sound one-shot) / `$SND` (generic
-/// one-shot) event marker, the `SoundEntries` kit each names, and — the column this exists for —
-/// whether the carrying sequence is **rest-posed**.
+/// sequences carry a `$DSL` (doodad sound loop) / `$DSE` (its release token) / `$DSO` (doodad
+/// sound one-shot) / `$SND` (generic one-shot) event marker, the `SoundEntries` kit each names,
+/// and — the column this exists for — whether the carrying sequence is **rest-posed**.
+///
+/// `$DSE` is in the set because it is half of `$DSL`'s lifecycle and it is **lane-specific**: the
+/// placed-doodad handler `0x6951e0` has an arm for it, the GameObject dispatcher `0x5f3e20` has
+/// none at all (wow-re `doodad-sound-emitters.md` §13), so which models author it decides whether
+/// a consumer may route the token uniformly.
 ///
 /// Why that column decides everything: `benilla_assets`' render content gate
 /// (`idle_pose_differs` → [`benilla_formats::ModelAnimation::is_rest_pose`], decision 0130) skips
@@ -617,7 +622,7 @@ pub fn seqclockscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
 ///
 /// Reports the per-model rows, then a tag/kit histogram and the `REST`-gated share.
 pub fn soundeventscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
-    const SOUND_TAGS: [&[u8; 4]; 3] = [b"$DSL", b"$DSO", b"$SND"];
+    const SOUND_TAGS: [&[u8; 4]; 4] = [b"$DSL", b"$DSE", b"$DSO", b"$SND"];
     let kits = benilla_formats::load_sound_kit_catalog(chain).ok();
     let names = super::m2_names(chain, prefix)?;
     let (mut scanned, mut carriers, mut rest_gated, mut hostless) = (0u32, 0u32, 0u32, 0u32);
@@ -742,6 +747,218 @@ pub fn soundeventscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
          {hostless} of them on the Static tier (no anim-root entity exists to hang an emitter \
          on today); {rest_gated} carry the marker on a REST-posed sequence — the class benilla's rig gate \
          (decision 0130) never arms, so the marker is unreachable through an AnimationPlayer."
+    );
+    Ok(())
+}
+
+/// The ten `GameObjectDisplayInfo.Sound[n]` slots, in column order — the names the reference's
+/// own substate family gives them (`gameobject-anim-arm.md` §2c's LUT order).
+const GO_SLOT_NAMES: [&str; 10] = [
+    "Stand", "Open", "Loop", "Close", "Destroy", "Opened", "Custom0", "Custom1", "Custom2",
+    "Custom3",
+];
+
+/// The event tag that reaches each display slot (wow-re `go-display-sound-events.md` §3, the
+/// dispatcher `0x5f3e20`'s ten call sites): `$GO0..5` → slots 0..5, `$GC0..3` → slots 6..9.
+fn go_slot_tag(slot: usize) -> [u8; 4] {
+    if slot < 6 {
+        [b'$', b'G', b'O', b'0' + slot as u8]
+    } else {
+        [b'$', b'G', b'C', b'0' + (slot - 6) as u8]
+    }
+}
+
+/// The model sequence **file slots** the GameObject arm can ever put on screen: the loader seed
+/// (§1) plus every substate any client path produces — the six `GAMEOBJECT_STATE` ×
+/// `GAMEOBJECT_ANIMPROGRESS` ones ([`REACHABLE`]), the four Custom ones (opcode `0xb3`) and
+/// Despawn (`0x215`) — each through the §2c remap and op4's `playableAnimationLookup` resolve.
+///
+/// This is the reachability half of [`goslotscan`]: an authored `$GOn` on a sequence outside this
+/// set is a marker no arm can ever cross, so its display slot is dead however the DBC is filled.
+fn go_armable_slots(
+    m: &benilla_m2::M2Model,
+    seqs: &[benilla_formats::ModelAnimation],
+) -> HashSet<u16> {
+    let mut out = HashSet::new();
+    out.extend(go_loader_seed(m, seqs).map(|(_, slot)| slot));
+    let substates = REACHABLE.iter().map(|(s, _)| *s).chain(8..=12);
+    for sub in substates {
+        let (req, _) = go_remap(m, SUBSTATE_ANIM[sub]);
+        out.extend(go_resolve_slot(m, req).map(|(_, slot)| slot));
+    }
+    out
+}
+
+/// Census the **GameObject display sound slots** against the model events that are the only thing
+/// that can reach them — see the `Goslotscan` command doc for what the join proves.
+pub fn goslotscan(chain: &mut Chain) -> Result<()> {
+    let catalog =
+        benilla_formats::load_gameobject_catalog(chain).context("GameObjectDisplayInfo.dbc")?;
+    let sounds =
+        benilla_formats::load_gameobject_sounds(chain).context("GameObjectDisplayInfo.dbc")?;
+    let kits = benilla_formats::load_sound_kit_catalog(chain).ok();
+    // displayId → model path, so the same model parsed once serves every display that names it.
+    let mut per_model: BTreeMap<String, Vec<u32>> = BTreeMap::new();
+    for (id, path) in catalog.iter() {
+        if sounds.slots(id).is_some() {
+            per_model.entry(model_key(path)).or_default().push(id);
+        }
+    }
+    for ids in per_model.values_mut() {
+        ids.sort_unstable();
+    }
+    // Per slot: displays carrying a kit · of those, models authoring the tag · of those, on an
+    // armable sequence · and how many of the live ones name a LOOPING (0x200) kit — the lane
+    // select `0x458830` hands `0x5f4010`, which is the emitter-pool arm rather than a one-shot.
+    let mut filled = [0u32; 10];
+    let mut tagged = [0u32; 10];
+    let mut reachable = [0u32; 10];
+    let mut looping = [0u32; 10];
+    // Filled columns whose model authors no reaching tag at all — dead data in the reference, and
+    // exactly what a state-transition-driven consumer would play that the reference never does.
+    let mut dead = [0u32; 10];
+    // Markers authored where the display's column is 0 — the tag fires and `0x458830` fails a null
+    // id, so the reference is silent. Counted per tag so "authored but silent" is visible.
+    let mut silent_tag = [0u32; 10];
+    let mut unarmable_tag = [0u32; 10];
+    let (mut models_seen, mut wmo_or_missing) = (0u32, 0u32);
+    let mut rows: Vec<String> = Vec::new();
+    let mut loop_rows: Vec<String> = Vec::new();
+    for (path, displays) in &per_model {
+        if !path.ends_with(".m2") {
+            wmo_or_missing += displays.len() as u32;
+            continue;
+        }
+        let Ok(bytes) = chain.read_file(path) else {
+            wmo_or_missing += displays.len() as u32;
+            continue;
+        };
+        let Ok(fmt) = benilla_m2::parse_m2(&mut std::io::Cursor::new(&bytes)) else {
+            wmo_or_missing += displays.len() as u32;
+            continue;
+        };
+        let m = fmt.model();
+        let seqs = benilla_formats::parse_m2_animations(&bytes);
+        models_seen += 1;
+        let armable = go_armable_slots(m, &seqs);
+        // slot → the sequences authoring its tag, as `(seq_index, anim_id, time, armable)`.
+        let mut authored: [Vec<(usize, u16, f32, bool)>; 10] = Default::default();
+        for a in &seqs {
+            for e in &a.events {
+                for (slot, list) in authored.iter_mut().enumerate() {
+                    if e.ident == go_slot_tag(slot) {
+                        list.push((
+                            a.seq_index,
+                            a.anim_id,
+                            e.time,
+                            armable.contains(&(a.seq_index as u16)),
+                        ));
+                    }
+                }
+            }
+        }
+        for &display in displays {
+            let slots = sounds.slots(display).copied().unwrap_or([0; 10]);
+            let mut line: Vec<String> = Vec::new();
+            for slot in 0..10 {
+                let kit = slots[slot];
+                let auth = &authored[slot];
+                if kit == 0 {
+                    silent_tag[slot] += u32::from(!auth.is_empty());
+                    continue;
+                }
+                filled[slot] += 1;
+                let live = auth.iter().any(|(_, _, _, armable)| *armable);
+                if auth.is_empty() {
+                    dead[slot] += 1;
+                } else {
+                    tagged[slot] += 1;
+                    if live {
+                        reachable[slot] += 1;
+                    } else {
+                        unarmable_tag[slot] += 1;
+                    }
+                }
+                let k = kits.as_ref().and_then(|c| c.get(kit));
+                let flags = k.map_or(0, |k| k.flags);
+                let is_loop = flags & benilla_formats::sound_kit_flags::LOOPING != 0;
+                if live && is_loop {
+                    looping[slot] += 1;
+                    loop_rows.push(format!(
+                        "  display {display:>5} {path}  slot {slot} {}  kit {kit} {} flags 0x{flags:03x}",
+                        GO_SLOT_NAMES[slot],
+                        k.map_or("MISSING", |k| k.name.as_str()),
+                    ));
+                }
+                let where_ = if auth.is_empty() {
+                    "DEAD: model authors no tag".to_string()
+                } else {
+                    auth.iter()
+                        .map(|(seq, id, t, armable)| {
+                            format!(
+                                "seq{seq}/anim{id}@{t:.3}s{}",
+                                if *armable { "" } else { "!" }
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                line.push(format!(
+                    "{}={kit}/0x{flags:03x}{}[{where_}]",
+                    GO_SLOT_NAMES[slot],
+                    if is_loop { " LOOP" } else { "" },
+                ));
+            }
+            if !line.is_empty() {
+                rows.push(format!(
+                    "  display {display:>5}  {path}\n      {}",
+                    line.join("  ")
+                ));
+            }
+        }
+    }
+    println!("=== every display row with a filled sound column, and what reaches it ===");
+    for r in &rows {
+        println!("{r}");
+    }
+    println!(
+        "\n=== per-slot census ({} display rows carry any sound kit) ===",
+        sounds.len()
+    );
+    println!(
+        "  slot  name      filled  reached  DEAD(no tag)  tag-unarmable  looping-kit  \
+         tag-on-zero-slot"
+    );
+    for slot in 0..10 {
+        println!(
+            "  {slot:>4}  {:<9} {:>6}  {:>7}  {:>12}  {:>13}  {:>11}  {:>16}",
+            GO_SLOT_NAMES[slot],
+            filled[slot],
+            reachable[slot],
+            dead[slot],
+            unarmable_tag[slot],
+            looping[slot],
+            silent_tag[slot],
+        );
+    }
+    debug_assert!(filled
+        .iter()
+        .zip(&tagged)
+        .zip(&dead)
+        .all(|((f, t), d)| *f == *t + *d));
+    if !loop_rows.is_empty() {
+        println!(
+            "\n=== live slots whose kit is LOOPING (0x200) — the `0x461d80` emitter-pool lane ==="
+        );
+        for r in &loop_rows {
+            println!("{r}");
+        }
+    }
+    eprintln!(
+        "{models_seen} distinct M2 models named by a sound-carrying display scanned \
+         ({wmo_or_missing} display rows name a .wmo or an unreadable model). `filled` counts \
+         display rows with a non-zero column; `tagged` those whose model authors the reaching \
+         $GOn/$GCn tag; `reached` those where that tag sits on a sequence the GO arm can play."
     );
     Ok(())
 }

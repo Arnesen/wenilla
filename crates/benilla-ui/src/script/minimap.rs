@@ -176,22 +176,23 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     m.set(
         "GetPingPosition",
-        // The live ping's normalized offsets from the widget centre (fractions of the widget
-        // side, x right / y up — the `MINIMAP_PING` event's own arg2/arg3 space), recomputed by
-        // the app from the ping's world point every frame one is live. So a caller polling this
-        // while walking sees the value MOVE, which is the whole point: the ping is pinned to the
-        // world, not to the map.
+        // The ping's normalized offsets from the widget centre (fractions of the widget side,
+        // x right / y up — the `MINIMAP_PING` event's own arg2/arg3 space), recomputed by the app
+        // from the stored world point every frame. So a caller polling this while walking sees
+        // the value MOVE, which is the whole point: the ping is pinned to the world, not to the
+        // map.
         //
-        // Returns **nil, nil** when no ping is live, rather than `(0, 0)`: zero is a real answer
-        // meaning "the ping is under your feet", and handing it back for "there is no ping" is a
-        // lie a caller cannot tell from the truth (1203).
+        // **Two numbers, always** (`0x4eefd0`, wow-re `minimap-ping-law.md`): the reference
+        // recomputes from statics nothing ever clears, and the stock `Minimap_OnUpdate` feeds the
+        // answer straight into `x * Minimap:GetWidth()` for the whole of its 5 s timer — a nil
+        // here is a Lua error on every frame of that window (1974).
         lua.create_function(|lua, this: Table| {
             with_minimap(lua, &this, |_| ())?;
-            let ping = lua
+            let (x, y) = lua
                 .app_data_ref::<Model>()
                 .expect("model app_data")
                 .minimap_ping;
-            Ok(ping.map_or((None, None), |(x, y)| (Some(x), Some(y))))
+            Ok((x, y))
         })?,
     )?;
     lua.set_named_registry_value(REG_MINIMAP_METHODS, m)?;

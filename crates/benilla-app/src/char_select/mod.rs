@@ -1068,6 +1068,7 @@ mod tests {
         // One frame carrying both halves of the race, in the order the drain produces them.
         app.world_mut().write_message(EnteredWorldMessage {
             billing_time_rested: 0,
+            tutorial_flags: None,
         });
         app.world_mut()
             .write_message(crate::net::DisconnectedMessage {
@@ -1109,6 +1110,7 @@ mod tests {
 
         app.world_mut().write_message(EnteredWorldMessage {
             billing_time_rested: 0,
+            tutorial_flags: None,
         });
         app.world_mut()
             .write_message(crate::net::DisconnectedMessage {

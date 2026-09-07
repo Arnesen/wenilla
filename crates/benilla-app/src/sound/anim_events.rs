@@ -1,9 +1,9 @@
 //! Route M2 animation event tags (`crate::creature_anim::AnimSoundEvent`) to audio — the
 //! anim-driven trigger surface (decision 0070 slice 3).
 //!
-//! Routed here: `$SND`/`$DSO` (one-shot kit `data` at the model), `$DSL`/`$DSE` (a placed
-//! doodad's ambient loop — **registered into, and released from, the emitter pool**
-//! [`super::doodad_pool`], which owns everything about how it sounds),
+//! Routed here: `$SND`/`$DSO` (one-shot kit `data` at the model), `$DSL`/`$DSE` (an ambient loop
+//! — **registered into, and released from, the emitter pool** [`super::emitter_pool`], which owns
+//! everything about how it sounds; the two dispatchers' arms differ and both are modelled below),
 //! `$CSD` — the **character emote clips' embedded voice** (HumanMale EmoteLaugh 70 carries
 //! `$CSD 6923` = the SoundEntries kit literally named `HumanMaleEmoteLaugh`; Cry 77 → 6921,
 //! Chicken 78 → 6919, Applaud 80 → 4× `ClapSounds` 6576 — probe-verified on the real 5875 M2 +
@@ -23,10 +23,18 @@
 //!   (a chopwood camp worker's state 234 → 3202; state 233 carries a second mining kit 3782,
 //!   which no vmangos path ever sets for a player — verified at its source).
 //!
-//! `$CST`/`$CSL`/`$CSR` are deliberately NOT routed: the client's handler (`0x60c940`) only
-//! 3D-**repositions** the already-playing cast sound handle — it contains no play call — and
-//! benilla's kit player already tracks looping cast sounds to their caster
-//! (`sound/spell.rs`), so the reposition role is covered.
+//! `$CST`/`$CSL`/`$CSR` are still NOT routed, but **the reason we gave was wrong** and is
+//! corrected here (wow-re `anim-event-position-law.md` §5). The handler `0x60c940` does only
+//! 3D-**reposition** the already-playing cast handle — that part held — but it repositions it to
+//! the **event's own point** (`0x600143 mov edx,[ebx+0x10]` → `0x60c960`/`0x60c990` → `0x61ceb0`),
+//! i.e. to the casting hand, not to the caster. benilla's kit player tracks a looping cast sound
+//! to the caster's origin, so the role is *not* covered: we are a body-width out for the whole
+//! cast. Left unbuilt rather than half-built, because what the reference does when the
+//! GUID-tracked follow and this reposition disagree is not settled here — decision 1915's open.
+//!
+//! `$FD1..$FD9`/`$FDX` have no sound route at all yet (they are the CreatureSoundData fidget
+//! family). When one lands it wants the **unit origin + 2.0 z** (`0x6232c0` → `0x6230a0`), not
+//! the fired key's point — the same shape `$TRD` takes below.
 //!
 //! The footstep family and the CreatureSoundData-driven tags (`$FD*` fidgets, `$AH*` attacks,
 //! `$CSS` swings) are routed by their own consumers as those land (slice-3 tasks); unrecognized
@@ -39,10 +47,18 @@ use crate::net::ObjectStore;
 use benilla_assets::WorldAssets;
 use benilla_world::schedule::WorldStage;
 
-use super::doodad_pool::DoodadEmitterPool;
+use super::emitter_pool::AmbientEmitterPool;
 use super::emote::EmoteSounds;
 use super::kit::{play_kit, KitRef, SoundCategory, SoundKits};
 use super::{AudioListener, SoundConfig, SoundOutput};
+
+/// `$TRD`'s own z-bias — `0x62fb3f fadd [0x7ff9d8]`, the constant `1.0`. Distinct from the
+/// footstep foley's `2.0` and from the per-attachment table, and it is added to the unit's own
+/// position because this arm is handed no point at all.
+const TRD_HEIGHT: f32 = 1.0;
+
+/// The attachment the emote voice is born at — `0x623c3a push 0x11`.
+const CSD_ATTACH: u16 = 17;
 
 #[allow(clippy::too_many_arguments)] // the standard sound-route param set + the two resolvers
 pub(super) fn route_anim_events(
@@ -51,6 +67,13 @@ pub(super) fn route_anim_events(
     // whose local Transform is not a world position (0441 fold-back).
     transforms: Query<&GlobalTransform, Without<Camera3d>>,
     units: Query<(Option<&ObjectStore>, Option<&CastHold>)>,
+    // Which dispatcher this entity's events arrive on. A family-A GameObject carries
+    // [`crate::go_anim::GoAnim`] — the same population the reference registers `0x5f3e20` for —
+    // and that dispatcher's DS-family arms differ from the placed-M2 handler `0x6951e0`'s.
+    go_lane: Query<(), With<crate::go_anim::GoAnim>>,
+    // The attachment reads `$CSD` needs (`0x623b90`) — the same pure position read the overhead
+    // anchor makes, spawning nothing.
+    attach: crate::entities::AttachPoints,
     kits: Option<ResMut<SoundKits>>,
     assets: Option<Res<WorldAssets>>,
     emotes: Option<Res<EmoteSounds>>,
@@ -68,7 +91,7 @@ pub(super) fn route_anim_events(
     // real bug and silence would hide it.
     mut complained: Local<std::collections::HashSet<u32>>,
     // The ambient emitter pool — `$DSL`/`$DSE`'s whole destination.
-    mut pool: ResMut<DoodadEmitterPool>,
+    mut pool: ResMut<AmbientEmitterPool>,
 ) {
     if events.is_empty() {
         return;
@@ -80,9 +103,13 @@ pub(super) fn route_anim_events(
     let ring = |kits: &mut SoundKits,
                 out: &mut SoundOutput,
                 kit: u32,
-                entity: Entity,
+                ev: &AnimSoundEvent,
                 complained: &mut std::collections::HashSet<u32>| {
-        let pos = transforms.get(entity).map(|t| t.translation()).ok();
+        // The fired key's own point where the arm is byte-proven to pass it (below), else the
+        // model root — which is what every arm here used unconditionally before 1904.
+        let pos = ev
+            .pos
+            .or_else(|| transforms.get(ev.entity).map(|t| t.translation()).ok());
         if let Err(e) = play_kit(
             kits,
             &assets,
@@ -127,16 +154,35 @@ pub(super) fn route_anim_events(
             // registration (`0x462000`) — which is why there is no wrap retrigger, and why
             // `NightElfStreetLampLoop` (4.000 s of sample on a 3.333 s sequence) is not chopped
             // every cycle. Whether anything is audible, from where, and how many at once are the
-            // pool pump's questions, not this scanner's: see [`super::doodad_pool`].
+            // pool pump's questions, not this scanner's: see [`super::emitter_pool`].
             b"$DSL" if ev.data != 0 => {
-                if let Ok(t) = transforms.get(ev.entity) {
-                    super::doodad_pool::register(
-                        &mut pool,
-                        ev.entity,
-                        ev.data,
-                        t.translation(),
-                        listener,
-                    );
+                // **The emitter's point is the marker's, not the model's** (decision 1904). Both
+                // handlers take the kernel's `eventWorldPos` as an argument and pass it straight
+                // into the pool: the placed-M2 lane `0x6951e0` is `fn(fourcc, data, &worldPos, …)`
+                // with `[ebp+0x10]` the `C3Vector*` it hands to `0x461d80`/`0x462000`, and the
+                // GameObject lane `0x5f3fe5` does the same with its own `p3`. It is not a detail
+                // here: 149 of the 244 shipped `$DSL` records sit off their model's origin, out to
+                // **67.6 yd** on `Maraudon_Waterfall01.m2` — a waterfall whose roar was landing at
+                // the model's pivot instead of the water.
+                if let Some(at) = ev
+                    .pos
+                    .or_else(|| transforms.get(ev.entity).ok().map(|t| t.translation()))
+                {
+                    // **The two lanes' `$DSL` arms differ, and only here** (wow-re
+                    // `doodad-sound-emitters.md` §13). The placed-M2 handler `0x6951e0` compares
+                    // the id and swaps; the GameObject dispatcher's arm `0x5f3fe5` does **not
+                    // compare it at all** — a live handle is only repositioned, whatever id the
+                    // marker names. Onyxia's lava trap is the case that makes it observable:
+                    // `ONYZIASLAIRLAVATRAP.M2` (208 spawns in the lair) authors `$DSL(8681)` on
+                    // its chained Stand variation and `$DSL(8682)` on Custom0, so on the
+                    // GameObject lane the Custom0 hum never displaces the Stand one.
+                    if go_lane.contains(ev.entity) {
+                        super::emitter_pool::register_keeping_first(
+                            &mut pool, ev.entity, ev.data, at, listener,
+                        );
+                    } else {
+                        super::emitter_pool::register(&mut pool, ev.entity, ev.data, at, listener);
+                    }
                 }
             }
             // `$DSE` — the doodad sound **STOP** token (`0x45534424`), VERIFIED in the same note:
@@ -146,9 +192,46 @@ pub(super) fn route_anim_events(
             // the Undercity and Thunder Bluff lifts, the zeppelin), where the loop is authored to
             // run for one leg of the animation and stop. Releasing a record is not stopping a
             // sound: the id keeps sounding while any *other* doodad still names it.
-            b"$DSE" => super::doodad_pool::release(&mut pool, ev.entity),
-            b"$SND" | b"$DSO" | b"$CSD" if ev.data != 0 => {
-                ring(&mut kits, &mut out, ev.data, ev.entity, &mut complained);
+            // …and `$DSE` has **no arm on the GameObject dispatcher at all** — the token falls to
+            // `0x5f4004 ret`. Seven shipped GO display models author one anyway (the Maraudon
+            // corrupted plants on their Destroy clip, the Blackrock door mechanism on Closed, the
+            // Maraudon teleporter on Open); on that lane what actually drops the registration is
+            // the state-machine dispatch those very clips are armed BY
+            // ([`crate::go_anim::GoStateDispatch`]), so honouring the authored intent and
+            // honouring the bytes agree — but only one of them is the mechanism.
+            b"$DSE" if !go_lane.contains(ev.entity) => {
+                super::emitter_pool::release(&mut pool, ev.entity);
+            }
+            // `$SND`/`$DSO` positioned at the fired key: both proven lanes hand the arm the
+            // kernel's point and it reaches `0x458870(id, pos, -1, 1.0f)` unchanged — the placed-M2
+            // handler at `0x695205`, the GameObject one at `0x5f3fe0 → 0x5f3f60`.
+            //
+            // **`$CSD` is deliberately still at the model root.** It has no arm on either of those
+            // dispatchers: it is the CGUnit lane's (`0x623c10` → `0x459230`), and whether *that*
+            // dispatcher's arms take the event point or the unit's own is the one piece of this
+            // mechanism wow-re has not recorded — dispatched, not assumed. It matters: every player
+            // model authors six `$CSD` records, all on the head.
+            b"$SND" | b"$DSO" if ev.data != 0 => {
+                ring(&mut kits, &mut out, ev.data, ev, &mut complained);
+            }
+            // **`$CSD` is at ATTACHMENT 17, never the fired key's point.** The dispatcher hands
+            // `0x623c10` the *data* and no position (`0x5ffeed`); it asks `0x623b90` for
+            // attachment `0x11`, falling back to `GetPosition + zBias[17] = 2.0`. The corpus makes
+            // this the sharpest correction in the table: every player model authors **six** `$CSD`
+            // records, one per emote clip, all on the head — and not one of them decides where the
+            // voice plays. (The reference then GUID-binds the handle so it follows the unit,
+            // `0x7a57e0`/`[unit+0xb28]`; ours is a one-shot at the onset point, which is the same
+            // sound for a body that is not walking away mid-laugh — noted in 1915.)
+            b"$CSD" if ev.data != 0 => {
+                let root = transforms
+                    .get(ev.entity)
+                    .map_or(Vec3::ZERO, |t| t.translation());
+                let at = attach.point(ev.entity, CSD_ATTACH, root);
+                let voiced = AnimSoundEvent {
+                    pos: Some(at),
+                    ..*ev
+                };
+                ring(&mut kits, &mut out, ev.data, &voiced, &mut complained);
             }
             b"$ESD" => {
                 let Some(emotes) = emotes.as_deref() else {
@@ -163,7 +246,10 @@ pub(super) fn route_anim_events(
                     .then(|| emotes.state_event_sound(state))
                     .flatten()
                 {
-                    ring(&mut kits, &mut out, kit, ev.entity, &mut complained);
+                    // **EVENT POINT** — `0x5fff5a` pushes the dispatcher's point and `0x623a1e`
+                    // hands it straight to `0x458870`. (This also corrected wow-re's own
+                    // `gather-sound-anim-events.md`, which had glossed that `edx` as the payload.)
+                    ring(&mut kits, &mut out, kit, ev, &mut complained);
                 }
             }
             b"$TRD" => {
@@ -173,7 +259,16 @@ pub(super) fn route_anim_events(
                 let hold = units.get(ev.entity).ok().and_then(|(_, h)| h);
                 let kit = hold.and_then(|h| held_strike_sound(spells, &visuals.0, h.spell_id));
                 if let Some(kit) = kit {
-                    ring(&mut kits, &mut out, kit, ev.entity, &mut complained);
+                    // **UNIT ORIGIN + 1.0 z** — the dispatcher hands `0x62faa0` nothing at all
+                    // (`0x5ffedb mov ecx,esi; call`), and it re-derives: `0x62fb39 call [edx+0x14]`
+                    // GetPosition, `0x62fb3f fadd [0x7ff9d8]` = +1.0, then `0x458870`. The mining
+                    // pick's clang comes from the miner, raised, not from the pick's own keyframe.
+                    let at = transforms
+                        .get(ev.entity)
+                        .map(|t| t.translation() + Vec3::Y * TRD_HEIGHT)
+                        .ok();
+                    let unit_root = AnimSoundEvent { pos: at, ..*ev };
+                    ring(&mut kits, &mut out, kit, &unit_root, &mut complained);
                 }
             }
             other => {

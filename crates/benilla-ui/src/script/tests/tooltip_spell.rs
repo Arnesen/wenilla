@@ -992,3 +992,86 @@ fn the_remaining_line_is_gated_on_until_cancelled_not_on_the_duration() {
     );
     assert!(s.take_errors().is_empty());
 }
+
+/// `GetRewardSpell()` / `GetQuestLogRewardSpell()` answer `texture, name, isTradeskillSpell` —
+/// three nils when the quest teaches nothing (the reference's own `(nil,nil,nil)` kind) — and
+/// `GameTooltip:SetQuestRewardSpell()` / `SetQuestLogRewardSpell()` render that spell (1944).
+#[test]
+fn quest_reward_spell_getters_and_hovers() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_spell_tooltip(133, fireball());
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "Q1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        "#,
+    )
+    .unwrap();
+
+    s.set_quest(Some(QuestState::default()));
+    assert_eq!(
+        s.eval::<i64>("return select('#', GetRewardSpell())")
+            .unwrap(),
+        3,
+        "three values on the empty path"
+    );
+    assert!(s
+        .eval::<bool>(
+            "local t, n, ts = GetRewardSpell() return t == nil and n == nil and ts == nil"
+        )
+        .unwrap());
+    s.run(r#"TT:SetOwner(Q1, "ANCHOR_RIGHT"); TT:SetQuestRewardSpell()"#)
+        .unwrap();
+    assert_eq!(s.eval::<i64>("return TT:NumLines()").unwrap(), 0);
+
+    let reward = QuestRewardSpell {
+        spell_id: 133,
+        name: Some("Fireball".into()),
+        texture: Some("Interface\\Icons\\Spell_Fire_FlameBolt".into()),
+        tradeskill: false,
+    };
+    s.set_quest(Some(QuestState {
+        panel: QuestPanel::Reward,
+        reward_spell: Some(reward.clone()),
+        ..QuestState::default()
+    }));
+    assert_eq!(
+        s.eval::<(String, String, Option<i64>)>("return GetRewardSpell()")
+            .unwrap(),
+        (
+            "Interface\\Icons\\Spell_Fire_FlameBolt".to_string(),
+            "Fireball".to_string(),
+            None
+        )
+    );
+    s.run(r#"TT:SetOwner(Q1, "ANCHOR_RIGHT"); TT:SetQuestRewardSpell()"#)
+        .unwrap();
+    s.resolve();
+    assert_eq!(
+        s.eval::<String>("return TTTextLeft1:GetText()").unwrap(),
+        "Fireball"
+    );
+
+    s.set_quest_log(QuestLogState {
+        detail: Some(QuestLogDetail {
+            reward_spell: Some(reward),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    assert_eq!(
+        s.eval::<(String, String, Option<i64>)>("return GetQuestLogRewardSpell()")
+            .unwrap()
+            .1,
+        "Fireball"
+    );
+    s.run(r#"TT:SetOwner(Q1, "ANCHOR_RIGHT"); TT:SetQuestLogRewardSpell()"#)
+        .unwrap();
+    s.resolve();
+    assert_eq!(
+        s.eval::<String>("return TTTextLeft1:GetText()").unwrap(),
+        "Fireball"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

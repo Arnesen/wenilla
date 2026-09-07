@@ -102,7 +102,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "AddMessage",
         lua.create_function(
-            |lua, (this, text, r, g, b): (Table, Value, Value, Value, Value)| {
+            |lua, (this, text, r, g, b, id): (Table, Value, Value, Value, Value, Value)| {
                 let Some(text) = super::message_text(lua, &text) else {
                     return Ok(());
                 };
@@ -115,7 +115,36 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 } else {
                     (1.0, 1.0, 1.0)
                 };
-                with_smf(lua, &this, |smf| smf.add(text, r, g, b))
+                // The fifth argument is the chat-type index (`GetChatTypeIndex`) the line is
+                // printed under — `ChatFrame.lua` passes `info.id` — and is what
+                // `UpdateColorByID` keys on. Absent or non-numeric is 0: a line no recolour
+                // will ever find.
+                let id = match &id {
+                    Value::Integer(i) => u32::try_from(*i).unwrap_or(0),
+                    Value::Number(n) if n.is_finite() && *n >= 0.0 => *n as u32,
+                    _ => 0,
+                };
+                with_smf(lua, &this, |smf| smf.add_with_id(text, r, g, b, id))
+            },
+        )?,
+    )?;
+
+    // UpdateColorByID(id, r, g, b) — `0x7932b0`. `ChatFrame_OnEvent`'s UPDATE_CHAT_COLOR arm
+    // calls it with the type's index and the event's floats so the lines already in the
+    // window take the new colour; lines printed under another id are untouched.
+    m.set(
+        "UpdateColorByID",
+        lua.create_function(
+            |lua, (this, id, r, g, b): (Table, Value, Value, Value, Value)| {
+                let id = match &id {
+                    Value::Integer(i) => u32::try_from(*i).unwrap_or(0),
+                    Value::Number(n) if n.is_finite() && *n >= 0.0 => *n as u32,
+                    _ => return Ok(()),
+                };
+                let (r, g, b) = (num_f32(&r), num_f32(&g), num_f32(&b));
+                with_smf(lua, &this, |smf| {
+                    smf.update_color_by_id(id, r, g, b);
+                })
             },
         )?,
     )?;
@@ -223,9 +252,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // Set/GetShadowOffset` are real entries on this class's table, not a courtesy. wow-re's
     // registrar carve is explicit about the membership — *"Exposed on: FontString, Font object,
     // EditBox, MessageFrame, ScrollingMessageFrame, SimpleHTML. NOT on Button"* — and names this
-    // class's own shims calling the shared implementations (`GetShadowColor 0x792240`). We shipped the block on two
-    // of the six and this is the third and fourth; SimpleHTML is a widget kind we do not have at
-    // all.
+    // class's own shims calling the shared implementations (`GetShadowColor 0x792240`). All six
+    // carry the block now — `SimpleHTML`'s is its own copy rather than `font_block::install`'s
+    // (`script/simplehtml/mod.rs`), because that class computes its own inter-block step.
     //
     // Demand is observed, not counted: `BigWigs/Plugins/Messages.lua:212` is
     // `self.msgframe:SetFontObject(GameFontNormalLarge)` on a frame it has just given
@@ -770,6 +799,41 @@ mod tests {
         assert!(!s.add_chat_message("Nope", "x", 1.0, 1.0, 1.0));
         s.run("CreateFrame('Frame', 'PlainFrame')").unwrap();
         assert!(!s.add_chat_message("PlainFrame", "x", 1.0, 1.0, 1.0));
+    }
+
+    /// `UpdateColorByID` recolours exactly the lines printed under that id — the stock
+    /// `ChatFrame_OnEvent` repaints a type's history when its colour changes, and nothing else.
+    #[test]
+    fn update_color_by_id_recolours_only_that_ids_lines() {
+        let mut smf = ScrollingMessageState::default();
+        smf.add_with_id("a".into(), 1.0, 1.0, 1.0, 11);
+        smf.add_with_id("b".into(), 1.0, 1.0, 1.0, 1);
+        smf.add_with_id("c".into(), 1.0, 1.0, 1.0, 11);
+        smf.add("d".into(), 1.0, 1.0, 1.0);
+        let gen = smf.lines_gen;
+        assert_eq!(smf.update_color_by_id(11, 0.0, 0.5, 1.0), 2);
+        let colors: Vec<[u8; 3]> = smf.lines.iter().map(|l| l.color).collect();
+        assert_eq!(
+            colors,
+            vec![
+                [0, 128, 255],
+                [255, 255, 255],
+                [0, 128, 255],
+                [255, 255, 255]
+            ]
+        );
+        assert_ne!(smf.lines_gen, gen, "a recolour is a redraw");
+        assert_eq!(smf.update_color_by_id(11, 0.0, 0.5, 1.0), 0, "idempotent");
+        assert_eq!(smf.update_color_by_id(99, 0.0, 0.0, 0.0), 0, "no such id");
+
+        // And the Lua surface: the fifth argument tags, the method recolours, silently.
+        let s = UiScript::new().unwrap();
+        s.run(
+            "local f = CreateFrame('ScrollingMessageFrame') \
+             f:AddMessage('a', 1, 1, 1, 11) f:AddMessage('b') \
+             f:UpdateColorByID(11, 0, 0.5, 1) f:UpdateColorByID('x', 0, 0, 0)",
+        )
+        .unwrap();
     }
 
     #[test]

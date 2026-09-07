@@ -139,6 +139,14 @@ pub(crate) struct GoAnim {
     /// completes), and once the §2c already-playing check has refused the re-arm and the pose has
     /// settled for good.
     rest_window: Option<AnimationNodeIndex>,
+    /// The state the machine last **dispatched** — the reference's `0x5f3cb0(old, new)` entry,
+    /// distinct from [`Self::shown`] because the completion retire clears `shown` to force a
+    /// re-resolve and that re-resolve is emphatically *not* a dispatch (slot 14 routes a resting
+    /// substate through `0x5f4167` → `0x5f3930`, straight past it). Only a genuine change of
+    /// [`Self::state`] — and the completion of a Spawn/Custom substate, slot 14's `0x5f4190` leg —
+    /// re-enters the dispatch, whose first act is `0x5f3cc8 call 0x5f40c0`: drop the object's
+    /// display-sound loop registration ([`GoStateDispatch`]).
+    dispatched: Option<u32>,
     /// The **requested** animation id currently armed — the reference's `[block0+0xf8]`, written by
     /// op4 (`0x71252f`) and read back by `0x712090(model, -1)`. The §2c *remap* legs consult it
     /// (`0x5f39fa: cmp esi,eax; je 0x5f3b32`) and refuse an arm that would request what is already
@@ -146,6 +154,29 @@ pub(crate) struct GoAnim {
     /// (`0x5f3a54 jmp 0x5f3a0b`, past the check) do not. That asymmetry is the whole difference
     /// between a prop that **settles** and one that **cycles** — see [`drive_go_anim`].
     armed_id: Option<u16>,
+}
+
+/// The GameObject **state-machine dispatch** ran on this entity — the reference's `0x5f3cb0`,
+/// whose first act is `0x5f3cc8 call 0x5f40c0`: **release whatever display-sound loop the object
+/// holds** (wow-re `go-display-sound-events.md` §2/§6c). Consumed by
+/// [`crate::sound::gameobject`], which owns that registration; the animation half of the dispatch
+/// is [`drive_go_anim`]'s own work and needs no message.
+///
+/// Emitted on a genuine `SetGoState` and on the completion of a **Spawn or Custom** substate
+/// (slot 14's `0x5f4190` leg re-enters the dispatch with `old == new`) — and deliberately *not*
+/// on a resting substate's own re-arm, which slot 14 sends to `0x5f4167` instead, past the
+/// dispatch entirely. That distinction is the whole reason a brazier's `TorchLoop` hums
+/// continuously instead of restarting every band pass.
+#[derive(Message)]
+pub(crate) struct GoStateDispatch(pub(crate) Entity);
+
+/// Which completed substates re-enter the state dispatch — slot 14's table
+/// `[0]=0x5f4190 … [8..11]=0x5f4190`, i.e. **Spawn (145) and Custom0..3 (153..156)**, as
+/// `AnimationData.dbc` ids. Every other completed substate is either a transition motion (which
+/// advances to its rest pose through `0x5f413d`/`0x5f414b`/`0x5f4159`) or a rest pose re-arming
+/// itself (`0x5f4167`); neither touches the display-sound loop.
+fn completion_redispatches(id: u16) -> bool {
+    matches!(id, 145 | 153..=156)
 }
 
 /// The **armed** transient clip — its `AnimationData.dbc` id *and* the graph node the arm actually
@@ -631,8 +662,11 @@ fn close_go_lid(
 /// the destination row of whichever motion that state's change armed. Runs before
 /// [`drive_go_anim`] in the chain so the re-arm lands the same frame. Reads never deref-mut, so a
 /// quiet GO stays out of the Changed stream.
-fn retire_transient_anim(mut gos: Query<(&mut GoAnim, &AnimationPlayer)>) {
-    for (mut go, player) in &mut gos {
+fn retire_transient_anim(
+    mut gos: Query<(Entity, &mut GoAnim, &AnimationPlayer)>,
+    mut dispatch: MessageWriter<GoStateDispatch>,
+) {
+    for (entity, mut go, player) in &mut gos {
         // The ARMED node, not `find(id)`'s head variation — see [`Transient::node`].
         let done = |n| {
             player
@@ -646,6 +680,14 @@ fn retire_transient_anim(mut gos: Query<(&mut GoAnim, &AnimationPlayer)>) {
                 // re-resolves it (a silent rest snap — `resolve(None, state)`), exactly the
                 // reference's re-arm over the finished transient block.
                 go.shown = None;
+                // A Spawn/Custom completion re-enters `0x5f3cb0` with `old == new`, and that
+                // dispatch drops the object's display-sound loop — which is what ends the
+                // GnomeMachine's Custom0 hum at the end of its clip rather than leaving it
+                // droning. A transition motion's completion takes a different slot-14 row and
+                // does not.
+                if completion_redispatches(t.id) {
+                    dispatch.write(GoStateDispatch(entity));
+                }
             }
             continue;
         }
@@ -668,6 +710,7 @@ fn retire_transient_anim(mut gos: Query<(&mut GoAnim, &AnimationPlayer)>) {
 fn drive_go_anim(
     mut gos: Query<
         (
+            Entity,
             &mut GoAnim,
             &mut AnimationPlayer,
             &mut AnimationTransitions,
@@ -675,16 +718,25 @@ fn drive_go_anim(
         ),
         Changed<GoAnim>,
     >,
+    mut dispatch: MessageWriter<GoStateDispatch>,
     // The client's single `_rand` stream (wow-re `rf36-rand-stub.md`), as `creature_anim` keeps
     // one: op4's variation roll draws from it on every GameObject arm below.
     mut rng: Local<u32>,
 ) {
-    for (mut go, mut player, mut tr, anims) in &mut gos {
+    for (entity, mut go, mut player, mut tr, anims) in &mut gos {
         // ── The §243 state arm ─────────────────────────────────────────────────────────────────
         if let Some(state) = go.state {
             if go.shown != Some(state) {
                 let prev = go.shown;
                 go.shown = Some(state);
+                // `0x5f3cb0` proper — announced before anything below can refuse the arm, because
+                // the reference releases the display-sound loop at the head of the dispatch and
+                // *then* picks a substate. A re-resolve driven by [`retire_transient_anim`]
+                // leaves `dispatched` alone and so announces nothing (see [`GoAnim::dispatched`]).
+                if go.dispatched != Some(state) {
+                    go.dispatched = Some(state);
+                    dispatch.write(GoStateDispatch(entity));
+                }
                 // A fresh substate replaces whatever transient one was live — the reference keeps
                 // exactly ONE (`[handler+0x10]`), so an old motion's completion can never fire
                 // over the pose that superseded it.
@@ -911,6 +963,17 @@ fn ghost_passable(kind: benilla_protocol::EntityKind, type_id: i32) -> bool {
     kind == benilla_protocol::EntityKind::GameObject && type_id == GO_TYPE_DOOR
 }
 
+/// What the GameObject event scanner reads per object: its clock, its park state, and the frame
+/// its fired keys resolve in ([`crate::creature_anim::EventFrame`]).
+type ScannedGo = (
+    Entity,
+    &'static ModelAnimations,
+    &'static AnimationPlayer,
+    Has<benilla_world::rig_anim::AnimParked>,
+    &'static GlobalTransform,
+    Option<&'static benilla_world::rig_anim::RigPose>,
+);
+
 /// Fire the event keyframes an animated GameObject's playing clip crossed this frame — the GO
 /// half of the M2 event-kernel surface (wow-re `go-display-sound-events.md`, the 1086 fold-back
 /// record): the reference registers an event callback per **family-A** GO at create
@@ -930,19 +993,12 @@ fn ghost_passable(kind: benilla_protocol::EntityKind, type_id: i32) -> bool {
 /// head, a loop wrap fires tail-then-head — and a frozen rate-0 leg never advances, so it never
 /// fires.
 fn fire_go_anim_events(
-    gos: Query<
-        (
-            Entity,
-            &ModelAnimations,
-            &AnimationPlayer,
-            Has<benilla_world::rig_anim::AnimParked>,
-        ),
-        With<GoAnim>,
-    >,
+    gos: Query<ScannedGo, With<GoAnim>>,
+    globals: Query<&GlobalTransform>,
     mut last: Local<crate::creature_anim::TrackMemory>,
     mut out: MessageWriter<AnimSoundEvent>,
 ) {
-    for (entity, anims, player, parked) in &gos {
+    for (entity, anims, player, parked, world, pose) in &gos {
         // The election's tick half, GO twin (decision 1482): a parked GO's event track is not
         // scanned — and there is no `MORE_AUDIBLE` exception here, because the flag lives on
         // CREATURE templates only (the reference's re-link arm reads the creature query cache).
@@ -958,7 +1014,11 @@ fn fire_go_anim_events(
             .min_by(|a, b| a.1.total_cmp(&b.1));
         if let Some((clip, cur)) = playing {
             if let Some(prev) = advance_track(&mut last, entity, clip.node, cur) {
-                scan_events(clip, entity, prev, cur, &mut out);
+                let frame = crate::creature_anim::EventFrame {
+                    world,
+                    rig: pose.and_then(|p| Some((p, globals.get(p.joints_root).ok()?))),
+                };
+                scan_events(clip, entity, prev, cur, &frame, &mut out);
             }
         }
     }
@@ -971,6 +1031,7 @@ fn fire_go_anim_events(
 pub(crate) fn plugin(app: &mut App) {
     app.add_message::<GoLidOpen>()
         .add_message::<GoCustomAnim>()
+        .add_message::<GoStateDispatch>()
         .add_systems(
             Update,
             (
@@ -1132,6 +1193,10 @@ mod tests {
         ));
         app.init_resource::<Time>();
         app.init_resource::<NextStep>();
+        // The state dispatch's audio consumer lives in `sound::gameobject`; here it is recorded
+        // instead, so a test can assert *which* edges re-enter `0x5f3cb0`.
+        app.add_message::<GoStateDispatch>();
+        app.init_resource::<Dispatched>();
         app.add_systems(bevy::app::First, step_clock);
         app.add_systems(
             Update,
@@ -1139,6 +1204,7 @@ mod tests {
                 (arm_despawn_anim, retire_transient_anim),
                 drive_go_anim,
                 release_despawn_pin,
+                record_dispatches,
             )
                 .chain(),
         );
@@ -1218,6 +1284,15 @@ mod tests {
             ))
             .id();
         (app, go)
+    }
+
+    /// Every [`GoStateDispatch`] the run has produced, in order — the audio consumer's input,
+    /// stood in for.
+    #[derive(Resource, Default)]
+    struct Dispatched(Vec<Entity>);
+
+    fn record_dispatches(mut msgs: MessageReader<GoStateDispatch>, mut out: ResMut<Dispatched>) {
+        out.0.extend(msgs.read().map(|d| d.0));
     }
 
     /// What the object is actually playing: the armed `AnimationData` id and its repeat mode.
@@ -1425,6 +1500,74 @@ mod tests {
         assert!(matches!(armed(&app, go), Some((0x93, _))));
     }
 
+    /// **The state dispatch is an EDGE, and a rest pose re-arming itself is not one** (wow-re
+    /// `go-display-sound-events.md` §6c: slot 14 sends a resting substate to `0x5f4167`, which
+    /// calls `0x5f3930` directly and never re-enters `0x5f3cb0`). That is the whole reason a
+    /// brazier's `TorchLoop` — a looping display-slot kit registered by a `$GO2` on the Opened
+    /// rest pose — hums continuously instead of being released and restarted every band pass,
+    /// because the dispatch's first act is `0x5f3cc8 call 0x5f40c0`.
+    ///
+    /// What *does* dispatch: a genuine `SetGoState`, and a Custom substate's completion (slot
+    /// 14's `0x5f4190` row, `old == new`) — which is what ends a Gnome machine's Custom0 hum.
+    #[test]
+    fn only_a_state_change_and_a_custom_completion_re_enter_the_dispatch() {
+        let (mut app, go) = crate_app(&[(153, 0.667, 0)]); // Custom0 — the crate authors one
+        app.update();
+        let seen = |app: &App| app.world().resource::<Dispatched>().0.len();
+        assert_eq!(seen(&app), 1, "the spawn's own SetGoState is a dispatch");
+
+        // Fifty rest windows. The pose re-arms every one of them (the Onyxia law) and not one of
+        // those re-arms may announce a dispatch.
+        for _ in 0..50 {
+            advance(&mut app, 200);
+        }
+        assert!(matches!(armed(&app, go), Some((0x93, _))), "still Closed");
+        assert_eq!(seen(&app), 1, "a rest pose's own re-arm is not a dispatch");
+
+        // A genuine SetGoState — the lid opens.
+        app.world_mut()
+            .entity_mut(go)
+            .get_mut::<GoAnim>()
+            .unwrap()
+            .state = Some(GO_STATE_ACTIVE);
+        app.update();
+        assert_eq!(seen(&app), 2);
+        // …and the Open motion settling onto Opened is slot 14's `0x5f413d` row, not the dispatch.
+        // (Two ticks: the first runs the clip past its window, the next is where the retire sees
+        // the finished flag — the shape every completion test in this file uses.)
+        advance(&mut app, 700);
+        app.update();
+        assert_eq!(
+            seen(&app),
+            2,
+            "a transition motion advancing to its rest pose does not re-enter the dispatch"
+        );
+
+        // A Custom0 block, whose completion does.
+        app.world_mut()
+            .entity_mut(go)
+            .get_mut::<GoAnim>()
+            .unwrap()
+            .one_shot = Some(153);
+        app.update();
+        assert_eq!(seen(&app), 2, "arming a Custom is not itself a dispatch");
+        advance(&mut app, 700);
+        app.update();
+        assert_eq!(
+            seen(&app),
+            3,
+            "its completion re-runs the machine through `0x5f3cb0`"
+        );
+        assert!(
+            app.world()
+                .resource::<Dispatched>()
+                .0
+                .iter()
+                .all(|&e| e == go),
+            "every dispatch names the object it ran on"
+        );
+    }
+
     /// The Custom channel shares the ONE transient slot with the motions (the reference's
     /// `[handler+0x10]`), so 1100's bobber law has to keep holding through it: a Custom0 arms over
     /// the state pose, runs exactly one window, and the completion re-runs the machine back onto
@@ -1584,6 +1727,23 @@ mod tests {
         assert_eq!(remap_missing(&owning(&[0]), 148), (149, false));
         // 149 Opened missing with neither motion: Destroyed.
         assert_eq!(remap_missing(&owning(&[0]), 149), (151, false));
+    }
+
+    /// Slot 14's dispatch table (`0x5f41e4`): rows 0 and 8..11 land at `0x5f4190`, which re-runs
+    /// the state machine **through `0x5f3cb0`** and so drops the object's display-sound loop; the
+    /// motion rows (2/4/5/7) advance to their rest pose and the rest rows (1/3/6) re-arm
+    /// themselves, neither of which touches it. Read as `AnimationData.dbc` ids, the key this
+    /// file uses everywhere.
+    #[test]
+    fn only_spawn_and_the_custom_block_re_enter_the_state_dispatch() {
+        for id in [145, 153, 154, 155, 156] {
+            assert!(completion_redispatches(id), "substate id {id}");
+        }
+        // The four transition motions, the three rest poses — and Despawn (157), whose substate
+        // 12 is past slot 14's own `cmp 0xb` bound and dispatches nowhere at all.
+        for id in [146, 147, 148, 149, 150, 151, 152, 157] {
+            assert!(!completion_redispatches(id), "substate id {id}");
+        }
     }
 
     #[test]

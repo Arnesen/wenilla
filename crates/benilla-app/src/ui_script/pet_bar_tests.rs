@@ -1,4 +1,4 @@
-//! The pet action bar (`PetActionBar.xml`) driven end to end through the REAL shipped XML
+//! The pet action bar (the reference's `PetActionBarFrame.xml`, 1953) driven end to end through the REAL shipped XML
 //! (decision 0982) — the `multibar_stance_tests` pattern: a self-contained loader, then the
 //! whole chain from a pushed slot list to the quads it actually paints.
 
@@ -9,16 +9,43 @@ use super::test_ui::load_ui as load_xml;
 /// The pet bar's own load prerequisites, in manifest order: UiPanels (`SetDesaturation`, the
 /// disabled-bar grey), UIParent (the managed bottom stack its OnShow/OnHide re-fires), Cooldown
 /// (`CooldownFrame_SetTimer`), ActionBar (the `MainMenuBar` anchor target) — then the bar.
-fn load_pet_bar(s: &UiScript) {
+/// The reference's pet bar needs what the manifest loads before it: the action-bar chain
+/// (`ActionButton_UpdateState`, `MainMenuBar` as its parent, `CooldownFrame_SetTimer`), the
+/// options window's uvars for `MultiActionBars.lua`, `SetDesaturation` and `GetBindingText` from
+/// our UIParent.lua slices, `TEXT` — and the chat window, whose edit box `ShowPetActionBar`
+/// raises over the sliding bar (PetActionBarFrame.lua l.175). One chain, in the manifest's order,
+/// for every test here (1953).
+pub(super) fn load_pet_bar(s: &UiScript) {
     for file in [
-        "MoneyFrame.xml",
-        "UiPanels.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
-        "UIParent.xml",
-        "Cooldown.xml",
-        "ActionBar.xml",
-        "PetActionBar.xml",
+        r"Interface\FrameXML\OptionsFrameTemplates.xml",
+        r"Interface\FrameXML\ReputationFrame.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        "ScrollTemplates.xml",
+        "KeyBindingsPage.xml",
+        "OptionsFrame.xml",
+        "Interface\\FrameXML\\MultiActionBars.xml",
+        "Interface\\FrameXML\\PetActionBarFrame.xml",
+        "Interface\\FrameXML\\UIMenu.xml",
+        "Interface\\FrameXML\\ChatFrame.xml",
+        "Interface\\FrameXML\\FloatingChatFrame.xml",
     ] {
         load_xml(s, file);
     }
@@ -27,7 +54,7 @@ fn load_pet_bar(s: &UiScript) {
 /// GlobalStrings is loaded from the MPQ at runtime, not by the loader — a token slot's `name` is
 /// a KEY into it, so the tests declare the two keys they read. (That the real keys exist in the
 /// shipped file is a separate fact, asserted in `ui_pet`'s own tests by name.)
-fn declare_token_strings(s: &UiScript) {
+pub(super) fn declare_token_strings(s: &UiScript) {
     s.run(
         "PET_ACTION_ATTACK = 'Attack' \
          PET_MODE_DEFENSIVE = 'Defensive'",
@@ -42,7 +69,7 @@ const CLAW_WORD: u32 = 0xC100_0BC2;
 
 /// A hunter's bar as the server actually sends it: Attack (a lit command token), an empty spell
 /// slot, Claw (a spell with autocast running), and Defensive (a lit reaction token).
-fn hunter_slots() -> Vec<PetActionView> {
+pub(super) fn hunter_slots() -> Vec<PetActionView> {
     let mut slots = vec![PetActionView::default(); 10];
     slots[0] = PetActionView {
         name: Some("PET_ACTION_ATTACK".into()),
@@ -165,19 +192,25 @@ fn the_shipped_pet_bar_drives_end_to_end() {
         "Attack + Defensive are lit; Claw is not"
     );
 
-    // Autocast: the static ring on the one slot that allows it, and the shine MARKER on the one
-    // slot where it is running — the native lane's registration (decision 1383): the extract
-    // carries the token, never sparks, and `autocast_shine::emit_shine` draws the trails at it
-    // on the append lane while the script layer stays settled.
+    // Autocast: the static ring on the one slot that allows it, and the stock shine MODEL on the
+    // one slot where it is running — `$parentAutoCast`, `UI-AutoCastButton.mdx` over the whole
+    // button at `scale="1.2"`, rendered as a tile (decisions 2013/2014). A hidden pane is not
+    // extracted, so one pane is exactly one running shine.
     assert_eq!(
         textures(&quads, "Interface\\Buttons\\UI-AutoCastableOverlay"),
         1,
         "only Claw can autocast"
     );
+    let shines: Vec<_> = quads
+        .iter()
+        .filter(|q| q.rect.is_none_or(|r| (r.top + r.bottom) / 2.0 >= 50.0))
+        .filter(|q| matches!(&q.content, QuadContent::ModelPane { model: Some(p), model_scale, .. }
+            if p == "Interface\\Buttons\\UI-AutoCastButton.mdx" && (*model_scale - 1.2).abs() < 1e-6))
+        .collect();
     assert_eq!(
-        textures(&quads, "benilla:autocast-shine:1.2"),
+        shines.len(),
         1,
-        "the shine marker on Claw alone — enabled, not merely allowed"
+        "the shine pane on Claw alone — enabled, not merely allowed"
     );
 
     // Geometry, quoted from the ref: the bar's TOPLEFT is MainMenuBar's BOTTOMLEFT +(36,97),
@@ -191,14 +224,23 @@ fn the_shipped_pet_bar_drives_end_to_end() {
         (72.0, 56.0, 102.0, 86.0)
     );
 
-    // The pet goes: the bar hides again, shine marker and all.
+    // The pet goes: the bar slides out over the reference's PETACTIONBAR_SLIDETIME (0.09 s,
+    // `PetActionBarFrame_OnUpdate`) and hides at the end of the slide, shine marker and all.
     s.set_pet_actions(false, true, true, Vec::new());
     s.fire_event("PET_BAR_UPDATE", vec![]);
-    s.tick(0.05);
+    for _ in 0..3 {
+        s.tick(0.05);
+    }
     s.resolve();
     let gone = s.extract();
     assert_eq!(textures(&gone, "Interface\\PetActionBar\\UI-PetBar"), 0);
-    assert_eq!(textures(&gone, "benilla:autocast-shine:1.2"), 0);
+    assert!(
+        !gone.iter().any(
+            |q| matches!(&q.content, QuadContent::ModelPane { model: Some(p), .. }
+            if p == "Interface\\Buttons\\UI-AutoCastButton.mdx")
+        ),
+        "the shine pane hides with its bar"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -350,23 +392,11 @@ fn a_disabled_bar_greys_rather_than_hides() {
 fn pet_bar_row(with_multibar: bool) -> (usize, f32) {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for file in [
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        r"Interface\FrameXML\UIPanelTemplates.lua",
-        r"Interface\FrameXML\UIPanelTemplates.xml",
-        "UIParent.xml",
-        "Cooldown.xml",
-        "ActionBar.xml",
-    ] {
-        load_xml(&s, file);
-    }
-    load_xml(&s, "MultiBars.xml");
+    load_pet_bar(&s);
     if with_multibar {
         s.run("SHOW_MULTI_ACTIONBAR_1 = 1 MultiActionBar_Update()")
             .unwrap();
     }
-    load_xml(&s, "PetActionBar.xml");
     declare_token_strings(&s);
 
     s.set_pet_actions(true, true, true, hunter_slots());
@@ -625,29 +655,9 @@ fn the_keybind_pair_pushes_and_casts_without_the_clicks_forks() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-// The autocast trail's MOTION tests (the B228 corner-walk goldens, the 1321 truncating-clock
-// law, the no-seam continuity pin) live with the drawing now: `crate::autocast_shine`'s own
-// test module — the script layer no longer moves a single spark (decision 1383).
-
-/// The pet bar plus the three files its TOOLTIP needs, in the TOC's own order: Fonts.xml (the
-/// colour codes that wrap the binding), GameTooltip.xml (the plate), and UIParent.xml — already a
-/// prerequisite for the managed stack — for `GetBindingText`, which renders the key.
-fn load_pet_bar_with_tooltip(s: &UiScript) {
-    for file in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        r"Interface\FrameXML\UIPanelTemplates.lua",
-        r"Interface\FrameXML\UIPanelTemplates.xml",
-        "UIParent.xml",
-        "GameTooltip.xml",
-        "Cooldown.xml",
-        "ActionBar.xml",
-        "PetActionBar.xml",
-    ] {
-        load_xml(s, file);
-    }
-}
+// The autocast trail's MOTION is the model's own since decisions 2013/2014: the stock
+// `$parentAutoCast` Model's four bones and four emitters, rendered as a tile on the pane's clock
+// — the script layer never moves a spark, and no test here needs to.
 
 /// A hunter bar hovered through the REAL gesture, with the real binding registry and the real CVar
 /// table behind it — `mouse_move` runs the shipped `<OnEnter>` with `this` bound, which is the only
@@ -667,7 +677,7 @@ fn hovered_pet_bar() -> UiScript {
     // `GetCVar("UberTooltips")` answers "1" (its byte-read registrar value) rather than nil.
     s.register_bindings(&crate::bindings::registry_commands());
     s.register_cvars(crate::cvars::registered_pairs());
-    load_pet_bar_with_tooltip(&s);
+    load_pet_bar(&s);
     declare_token_strings(&s);
     s.set_pet_actions(true, true, true, hunter_slots());
     s.fire_event("PET_BAR_UPDATE", vec![]);
@@ -692,7 +702,7 @@ fn tooltip_line1(s: &UiScript) -> String {
 ///
 /// The exact string is pinned, colour codes and all, because the ref's concatenation puts the
 /// colour BEFORE the space (`Attack|cffffd200 (CTRL-1)|r`, not `Attack |cffffd200(CTRL-1)|r` —
-/// which is what MicroMenu.xml's different-shaped version of the same idea produces).
+/// which is what the stock `MicroButtonTooltipText` — the same idea, the other shape — produces).
 #[test]
 fn token_tooltips_name_their_binding_and_pet_spells_do_not() {
     let mut s = hovered_pet_bar();

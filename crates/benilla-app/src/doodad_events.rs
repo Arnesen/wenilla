@@ -32,6 +32,16 @@ use benilla_world::schedule::WorldStage;
 use crate::creature_anim::{advance_track, scan_events, AnimSoundEvent, TrackMemory};
 use benilla_assets::ModelAnimations;
 
+/// What the placed-doodad event scanner reads per host: its clock and the frame its fired keys
+/// resolve in ([`crate::creature_anim::EventFrame`]).
+type ScannedDoodad = (
+    Entity,
+    &'static DoodadAnimHost,
+    &'static ModelAnimations,
+    &'static GlobalTransform,
+    Option<&'static benilla_world::rig_anim::RigPose>,
+);
+
 /// Fire the event keyframes each placed doodad's armed clip crossed this frame.
 ///
 /// The arming rules are the shared [`advance_track`]/[`scan_events`] ones the other two scanners
@@ -41,12 +51,13 @@ use benilla_assets::ModelAnimations;
 /// [`advance_track`] sees a fresh arm and never scans across the seam.
 fn fire_doodad_anim_events(
     time: Res<Time>,
-    hosts: Query<(Entity, &DoodadAnimHost, &ModelAnimations)>,
+    hosts: Query<ScannedDoodad>,
+    globals: Query<&GlobalTransform>,
     mut last: Local<TrackMemory>,
     mut out: MessageWriter<AnimSoundEvent>,
 ) {
     let now = time.elapsed_secs();
-    for (entity, host, anims) in &hosts {
+    for (entity, host, anims, world, pose) in &hosts {
         let Some((node, cur)) = host.arm_clock(now) else {
             continue; // gseq-only host with no sound arm: nothing is armed, so nothing fires
         };
@@ -54,7 +65,14 @@ fn fire_doodad_anim_events(
             continue;
         };
         if let Some(prev) = advance_track(&mut last, entity, node, cur) {
-            scan_events(clip, entity, prev, cur, &mut out);
+            // The clock-only tier carries no rig at all, which is not a shortfall here: with no
+            // bone matrices the kernel's product is the placement alone, and the corpus says no
+            // `$DSL` record rides an animated bone. The lamp's hum lands on the lamp.
+            let frame = crate::creature_anim::EventFrame {
+                world,
+                rig: pose.and_then(|p| Some((p, globals.get(p.joints_root).ok()?))),
+            };
+            scan_events(clip, entity, prev, cur, &frame, &mut out);
         }
     }
     // Drop memory for hosts that no longer exist. The other two scanners leave their `Local` to

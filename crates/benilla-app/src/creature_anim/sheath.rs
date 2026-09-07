@@ -178,8 +178,10 @@ fn ranged_arm(w: &Wielded) -> Option<usize> {
 /// `None` = that arm has nothing to draw for this state, and is released to its idle.
 fn draw_leg(arm: usize, cur: u8, w: &Wielded) -> Option<ArmLeg> {
     let (item, sheath) = match (cur, arm) {
-        (1, ARM_RIGHT) => (w.main, w.main_sheath),
-        (1, ARM_LEFT) => (w.off, w.off_sheath),
+        // The drawers read `GetWeapon(slot, 0)` like the rest of the sheath machine (1863), so a
+        // disarmed hand has nothing to draw — the reference's `0x5eb480` takes its unarmed branch.
+        (1, ARM_RIGHT) => (w.armed_main(), w.main_sheath),
+        (1, ARM_LEFT) => (w.armed_off(), w.off_sheath),
         // The ranged weapon draws on exactly one arm; the other has no leg at all.
         (2, _) if ranged_arm(w) == Some(arm) => (w.ranged, w.ranged_sheath),
         _ => return None,
@@ -242,11 +244,11 @@ pub(super) fn sheath_phase1(prev: u8, cur: u8, w: &Wielded) -> [Option<ArmLeg>; 
         // and no phase 2 can follow (the drawers' `PREV == 0` refusal).
         0 => [draw_leg(ARM_RIGHT, cur, w), draw_leg(ARM_LEFT, cur, w)],
         1 => [
-            match w.main {
+            match w.armed_main() {
                 Some(_) => stow(w.main_sheath),
                 None => sheath_phase2(ARM_RIGHT, prev, cur, w),
             },
-            match w.off {
+            match w.armed_off() {
                 Some(_) => stow(w.off_sheath),
                 None => sheath_phase2(ARM_LEFT, prev, cur, w),
             },
@@ -485,6 +487,7 @@ mod tests {
             ranged_sheath: 1,
             ranged_inv: 0x0f,     // INVTYPE_RANGED — the left arm
             materials: [1, 6, 2], // metal sword, plate shield, wood bow (real 5875 values)
+            disarmed: false,
         }
     }
 

@@ -156,7 +156,12 @@ pub(super) fn feed_ui_input(
         let metering =
             *HIT_COST.get_or_init(|| std::env::var("WOW_HIT_COST").as_deref() == Ok("1"));
         let t0 = metering.then(bevy::platform::time::Instant::now);
-        hover.0 = script.mouse_move(x, y);
+        // The world frame is mouse-enabled by construction and so a legitimate hover target for
+        // an addon's handlers, but its hit is the WORLD's (decision 1983): camera look, world
+        // clicks and hover targeting stay live over it.
+        hover.0 = script
+            .mouse_move(x, y)
+            .filter(|id| !script.is_world_frame(*id));
         if let Some(t0) = t0 {
             use std::sync::atomic::{AtomicU64, Ordering};
             static ACC_US: AtomicU64 = AtomicU64::new(0);

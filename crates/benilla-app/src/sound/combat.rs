@@ -257,7 +257,15 @@ fn swing_weapon(
     offhand: bool,
     materials: Option<&benilla_formats::MaterialCatalog>,
 ) -> (u32, bool) {
-    let hand = wielded.and_then(|w| if offhand { w.off } else { w.main });
+    // `0x625400`/`0x625460` pass `visFlag = 0`, so a disarmed hand's weapon is not here to be
+    // heard either — the punch a disarmed unit throws must not clang like a sword (1863).
+    let hand = wielded.and_then(|w| {
+        if offhand {
+            w.armed_off()
+        } else {
+            w.armed_main()
+        }
+    });
     match hand {
         // class 2 = weapon; anything else in hand (held misc) swings as unarmed.
         Some((2, subclass)) => {
@@ -328,7 +336,15 @@ fn swing_weight(
     offhand: bool,
     sub_classes: &benilla_formats::ItemSubClassCatalog,
 ) -> Option<u32> {
-    match wielded.and_then(|w| if offhand { w.off } else { w.main }) {
+    // `0x623870`, `visFlag = 0` again: the disarmed hand whooshes with the small unarmed
+    // samples, by this function's own empty-hand leg (1863).
+    match wielded.and_then(|w| {
+        if offhand {
+            w.armed_off()
+        } else {
+            w.armed_main()
+        }
+    }) {
         None => Some(0),
         Some((class, subclass)) if u32::from(class) == ITEM_CLASS_WEAPON => {
             sub_classes.weapon_swing_size(ITEM_CLASS_WEAPON, u32::from(subclass))
@@ -362,12 +378,14 @@ fn defended(victim_state: u32) -> bool {
 /// (`0x623690 test eax,eax; je`), which is what an unarmed parry sounds like.
 fn defending_item(wielded: Option<&Wielded>, block: bool) -> Option<(u8, u8)> {
     let w = wielded?;
+    // Both probes are `0x625400(sel)` with `visFlag = 0` (1863): a disarmed parry finds no
+    // mainhand weapon and falls through, and an unarmed parry rings nothing at all.
     if !block {
-        if let Some((2, _)) = w.main {
+        if let Some((2, _)) = w.armed_main() {
             return Some((2, w.materials[0]));
         }
     }
-    let (class, _) = w.off?;
+    let (class, _) = w.armed_off()?;
     matches!(class, 2 | 4).then_some((class, w.materials[1]))
 }
 
@@ -422,6 +440,9 @@ type CombatUnit = (
 /// parameter ceiling — and because they are one thing: the melee sound vocabulary. Each is
 /// independently optional, like every DBC-backed resource here; absent, its own branch goes
 /// quiet rather than the system failing.
+/// The attachment a **whiffed** swing's whoosh is born at — `0x624bdd call 0x712cb0(1)`.
+const MISS_ATTACH: u16 = 1;
+
 #[derive(bevy::ecs::system::SystemParam)]
 struct MeleeTables<'w> {
     impacts: Option<Res<'w, WeaponImpacts>>,
@@ -442,6 +463,7 @@ fn combat_sounds(
     mut last: Local<LastSwing>,
     units: Query<CombatUnit>,
     tables: MeleeTables,
+    attach: crate::entities::AttachPoints,
     mut items: Option<ResMut<crate::items::Items>>,
     net_commands: Res<crate::net::NetCommands>,
     kits: Option<ResMut<SoundKits>>,
@@ -580,11 +602,16 @@ fn combat_sounds(
             } else {
                 COMBAT_MISS_1H
             };
+            // **ATTACHMENT 1, not the fired key** — the one place in the whole event-position
+            // table where a *whiff* and a *hit* of the same tag disagree (`0x624baa`:
+            // `0x624bdd call 0x712cb0(1)`, else `GetPosition`). The whoosh comes from the hand,
+            // the impact from where the weapon met something.
+            let at = attach.point(ev.entity, MISS_ATTACH, attacker_tr.translation);
             play(
                 &mut kits,
                 &mut out,
                 kit,
-                attacker_tr.translation,
+                at,
                 PlayExtras {
                     bus: Bus::DEFAULT,
                     ..default()
@@ -608,7 +635,10 @@ fn combat_sounds(
             &mut kits,
             &mut out,
             kit,
-            attacker_tr.translation,
+            // **EVENT POINT** — `0x624c6e mov ecx,[ebx+0x10]` straight into `0x457f60`, which
+            // pushes it through to `0x458890`. 353 of the 363 shipped `$CSS` records sit off
+            // their model's origin, on a moving bone; Thunderaan's is 26.4 yd out.
+            ev.pos.unwrap_or(attacker_tr.translation),
             PlayExtras {
                 bus: Bus::WEAPON_SWING,
                 // `0x457f74`/`0x457f7d`: half volume when the hit flags carry `HITINFO_MISS`,
@@ -634,10 +664,15 @@ fn combat_sounds(
         let swing = &imp.swing;
         let attacker = units.get(swing.attacker).ok();
         let victim = swing.victim.and_then(|v| units.get(v).ok());
-        // Positioned at the attacker; the receive-time fallback (unresolved attacker) emits at
-        // the victim — the only anchor the packet leaves us.
-        let Some(pos) = attacker
-            .map(|(t, ..)| t.translation)
+        // **The fired tag's own point** (`edi = [ebx+0x10]`, pushed at `0x6248ef` for the
+        // CustomAttack column and `0x624950` for the generic weapon impact — wow-re
+        // `anim-event-position-law.md` §3). A big creature's `$AH1` sits 4.7 yd out on the jaw
+        // (`trex.m2`) and Thunderaan's `$CAH` 26.4 yd out; the attacker's origin was standing in
+        // for both. The receive-time fallback carries no point — no tag fired — so it keeps the
+        // attacker, then the victim, which is the only anchor that packet leaves us.
+        let Some(pos) = imp
+            .pos
+            .or_else(|| attacker.map(|(t, ..)| t.translation))
             .or_else(|| victim.map(|(t, ..)| t.translation))
         else {
             continue;

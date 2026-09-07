@@ -8,10 +8,11 @@ use benilla_assets::{ModelEmitter, ModelLight};
 use benilla_formats::WmoLight;
 use bevy::prelude::*;
 
+use crate::lighting::WorldPointLight;
 use crate::particles;
 
-/// Bevy `PointLight` intensity (lumens) for an M2 light of unit `diffuse_intensity`. Bevy stores the GPU
-/// colour as `linear_color × intensity/(4π)` (bevy_pbr light.rs), so `4π` makes the shader read exactly
+/// Light intensity for an M2 light of unit `diffuse_intensity`, in the units Bevy's `PointLight`
+/// used when it carried this (`linear_color × intensity/(4π)`), so `4π` makes the packer read exactly
 /// `diffuse_color × diffuse_intensity` — a clean, predictable base. `wow_model.wgsl` then applies the
 /// faithful WoW falloff `1/(0.7d+0.03d²)` (decision 0016). There is no gain dial any
 /// more: the 0273 `sh_c16.w` gain is retired and the commit is the reference's raw product
@@ -21,11 +22,10 @@ const POINT_LIGHT_INTENSITY: f32 = 4.0 * std::f32::consts::PI;
 /// radius around the receiving unit's anchor, not an evaluation cutoff (a committed GL light has
 /// none; the shader evaluates the selected lights at any distance, and att(48 yd) ≈ 0.01 is already
 /// invisible). Generous so a hall-scale WMO group whose center sits ~20 yd from its wall fixtures
-/// still gathers them — erring wide only ever admits negligible candidates. Also Bevy's clustering
-/// range for the `PointLight` itself, which our shaders don't consume.
+/// still gathers them — erring wide only ever admits negligible candidates.
 const POINT_LIGHT_RANGE: f32 = 48.0;
 
-/// The one `PointLight` recipe for an authored WoW light source (M2 or WMO MOLT). The PointLight only
+/// The one [`WorldPointLight`] recipe for an authored WoW light source (M2 or WMO MOLT). The light only
 /// carries position + colour into the shared packed table; every lit surface — terrain, M2
 /// doodads/NPCs, and WMO walls/floors (decision 0273: the reference lights them all) — then selects
 /// its unit's ≤3 NEAREST from that table and applies the faithful falloff in-shader (decision 0285;
@@ -35,17 +35,15 @@ const POINT_LIGHT_RANGE: f32 = 48.0;
 /// `pub(crate)`: the terrain path spawns it at a world-baked point below; a transport prop's light
 /// ([`crate::entities`]'s `wmo_props`) spawns it as a CHILD of the moving gameobject instead, so
 /// propagation carries the source with the hull.
-pub fn point_light(color: [f32; 3], intensity_scale: f32) -> PointLight {
-    PointLight {
-        color: Color::linear_rgb(color[0], color[1], color[2]),
+pub fn point_light(color: [f32; 3], intensity_scale: f32) -> WorldPointLight {
+    WorldPointLight {
+        color,
         intensity: POINT_LIGHT_INTENSITY * intensity_scale.max(0.0),
         range: POINT_LIGHT_RANGE,
-        shadows_enabled: false,
-        ..default()
     }
 }
 
-/// Spawn one Bevy `PointLight` at `world` (Bevy space), appended to `out` so it rides the placement's
+/// Spawn one [`WorldPointLight`] at `world` (Bevy space), appended to `out` so it rides the placement's
 /// lifecycle. The light recipe is [`point_light`].
 fn spawn_point_light(
     commands: &mut Commands,
@@ -68,7 +66,7 @@ fn spawn_point_light(
     out.push(e.id());
 }
 
-/// Spawn a `PointLight` for each casting `type==1` (point) **M2** light of a prop at `transform` (the
+/// Spawn a [`WorldPointLight`] for each casting `type==1` (point) **M2** light of a prop at `transform` (the
 /// campfire/torch/brazier/lantern sources). Position is M2 model space at rest (bone matrix identity at
 /// rest), placed via the prop's transform like the emitters — a placed prop never animates its light
 /// bone, so the rest pose is exact here (the entity path, whose bones DO move, rides joints instead).
@@ -99,7 +97,7 @@ pub(super) fn spawn_lights_for(
     }
 }
 
-/// Spawn a `PointLight` for each omni (`type==0`) **WMO MOLT** light at the building's `transform` (the
+/// Spawn a [`WorldPointLight`] for each omni (`type==0`) **WMO MOLT** light at the building's `transform` (the
 /// interior fixture sources — forge fire, inn fireplaces, chapel candles/chandeliers). These radiate onto
 /// the NPCs/doodads near each fixture and onto the building's own walls/floor (decision 0273). Position
 /// is WMO model space. The MOLT curve is the same fixed WoW falloff as the M2 path — byte-verified

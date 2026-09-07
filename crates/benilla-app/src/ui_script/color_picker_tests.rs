@@ -1,5 +1,5 @@
-//! The shipped `assets/ui/ColorPickerFrame.xml` + the dropdown's colour-swatch row, driven the way
-//! the corpus drives them.
+//! The stock `Interface\FrameXML\ColorPickerFrame.xml` + the dropdown's colour-swatch row, driven
+//! the way the corpus drives them.
 //!
 //! Nothing benilla ships opens this window. Its consumers are third-party addons — 86 of the 218
 //! reach `ColorPickerFrame`, and 64 of those files are copies of `Dewdrop-2.0.lua`, THE Ace2 menu
@@ -17,15 +17,19 @@ use super::test_ui::load_ui as load_xml;
 fn picker() -> UiScript {
     let mut s = UiScript::new().unwrap();
     for file in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        "UIParent.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
         "Interface\\FrameXML\\ColorPickerFrame.xml",
     ] {
         load_xml(&s, file);
@@ -322,7 +326,7 @@ fn cancel_restores_the_previous_colour_through_cancel_func() {
 /// the rung cancel-CLICKS rather than hiding — so the colour comes back and the game menu does not
 /// open behind it.
 #[test]
-fn escape_cancels_rather_than_merely_hiding() {
+fn escape_hides_the_picker_and_cancel_is_what_reverts() {
     let _data = benilla_formats::wow_data_or_skip!();
     let s = picker();
     dewdrop_open(&s, 0.1, 0.5, 0.9, 0.25);
@@ -333,14 +337,26 @@ fn escape_cancels_rather_than_merely_hiding() {
     assert!(!s
         .eval::<bool>("return ColorPickerFrame:IsVisible()")
         .unwrap());
+    // **The reference's ESC is a bare hide, and the previewed colour stands.** `ColorPickerFrame`
+    // is a `UISpecialFrames` row (`UIParent.lua:52-55`), so the ladder's `CloseAllWindows` hides
+    // it — the stock file runs `cancelFunc` from the Cancel button's own OnClick and from nowhere
+    // else, and its OnHide has no such arm. Our retired ladder clicked Cancel for the player;
+    // that arm went with the file (1988).
     let (r, g, b): (f64, f64, f64) = s
         .eval("local t = applied[table.getn(applied)] return t.r, t.g, t.b")
         .unwrap();
     assert_eq!(
         (r, g, b),
-        (0.1, 0.5, 0.9),
-        "ESC ran cancelFunc, not a bare Hide"
+        (1.0, 0.0, 0.0),
+        "ESC hid the picker and left the previewed colour applied"
     );
+    // The Cancel button is still what reverts it, which is the reference's whole cancel path.
+    s.run("ColorPickerFrame:Show() ColorPickerCancelButton:Click()")
+        .unwrap();
+    let (r, g, b): (f64, f64, f64) = s
+        .eval("local t = applied[table.getn(applied)] return t.r, t.g, t.b")
+        .unwrap();
+    assert_eq!((r, g, b), (0.1, 0.5, 0.9), "Cancel runs cancelFunc");
 }
 
 /// `AceConsole-2.0.lua` l.1402-1406, verbatim in shape: fetch the Okay button's own handler, replace

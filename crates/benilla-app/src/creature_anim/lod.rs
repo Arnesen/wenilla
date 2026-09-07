@@ -282,10 +282,13 @@ mod tests {
                 bounds_radius: 0.0,
                 bounds_min: Vec3::ZERO,
                 bounds_max: Vec3::ZERO,
-                events: vec![benilla_formats::AnimEvent {
+                events: vec![benilla_assets::ClipEvent {
                     time: DUR * 0.5,
                     ident: *b"$TST",
                     data: 0,
+                    bone: 0,
+                    offset: Vec3::ZERO,
+                    point: Vec3::ZERO,
                 }]
                 .into(),
                 arm_nodes: None,

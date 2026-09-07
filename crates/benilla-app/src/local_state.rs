@@ -282,6 +282,12 @@ pub(crate) fn name_cache_path(realm: &str) -> Option<PathBuf> {
 /// `benilla-config/shots.txt` — the framing instrument's appended camera poses (decision 0600). A dev
 /// affordance (`/shot`, compiled out by `--no-default-features` since 1179), but it persists on a
 /// real machine, so it resolves here like everything else rather than through a private path.
+/// `Logs/` — `WoWChatLog.txt` and `WoWCombatLog.txt`, the reference's two names beside its
+/// `WTF`, kept here beside ours ([`crate::ui_chat`]'s logging).
+pub(crate) fn logs_dir() -> Option<PathBuf> {
+    home().map(|h| h.join("Logs"))
+}
+
 pub(crate) fn shots_path() -> Option<PathBuf> {
     home().map(|h| h.join("shots.txt"))
 }
@@ -304,7 +310,7 @@ pub(crate) fn screenshots_dir() -> Option<PathBuf> {
 }
 
 /// `benilla-config/Diagnostics/` — where the stuck-thread self-sampler drops its profiles
-/// ([`crate::perf::stall`]).
+/// ([`crate::perf::stall`]) and the FPS journal its rows ([`fps_journal_path`]).
 ///
 /// **This was `~/Library/Logs/benilla/` until 2026-08-27, hand-built from `$HOME`** — a platform
 /// log directory, which is the exact shape the one-folder rule names as forbidden ("never a
@@ -322,6 +328,13 @@ pub(crate) fn screenshots_dir() -> Option<PathBuf> {
 /// into someone's head, which is what the single rule exists to prevent.
 pub(crate) fn diagnostics_dir() -> Option<PathBuf> {
     home().map(|h| h.join("Diagnostics"))
+}
+
+/// `benilla-config/Diagnostics/fps-journal.csv` — the FPS journal's rows while the `fpsJournal`
+/// CVar is on (decision 2008): the file a reporter attaches. `None` on a hermetic run like
+/// everything here; the harness names its own path through `WOW_FPS_JOURNAL` instead.
+pub(crate) fn fps_journal_path() -> Option<PathBuf> {
+    diagnostics_dir().map(|d| d.join("fps-journal.csv"))
 }
 
 /// Make an arbitrary realm/character name safe as one path component: anything outside
@@ -417,7 +430,12 @@ mod web_store {
         storage()?
             .get_item(&key(path))
             .map_err(|_| Error::new(ErrorKind::Other, "localStorage read failed"))?
-            .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("{} not stored", path.display())))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::NotFound,
+                    format!("{} not stored", path.display()),
+                )
+            })
     }
 
     pub(super) fn set(path: &Path, contents: &str) -> Result<()> {

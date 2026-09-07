@@ -189,6 +189,14 @@ fn drain_logout(
                 info!("logout: force quit");
                 exit.write(AppExit::Success);
             }
+            // `CMSG_PLAYER_LOGOUT`, the forced flavour: the dispatcher's own gate is a live
+            // in-world session, and nothing happens without one (decision 1963).
+            SessionRequest::ForceLogout => {
+                if self_guid.0.is_some() {
+                    info!("logout: forced");
+                    let _ = commands.0.send(ClientCommand::ForceLogout);
+                }
+            }
             // Not this module's business beyond routing: the rebuild itself is
             // [`crate::ui_script::run_pending_reload`]'s, at the top of the next frame.
             SessionRequest::ReloadUi => reload.0 = true,

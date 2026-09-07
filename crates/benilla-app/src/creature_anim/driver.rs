@@ -911,7 +911,10 @@ pub(super) fn drive_animations(
             if dead {
                 return None;
             }
-            let id = defense_anim(vs, wielded.and_then(|w| w.main));
+            // The parry LUT `0x60ec00` reads the victim's mainhand through `GetWeapon(0, 0)`
+            // (1863), so a disarmed victim's parry finds no weapon and the client bails — no
+            // clip, which is this function's own empty-hand leg.
+            let id = defense_anim(vs, wielded.and_then(|w| w.armed_main()));
             if let Some(id) = id {
                 debug!("defense: unit {entity} anim {id} (victimState {vs})");
             }
@@ -928,10 +931,15 @@ pub(super) fn drive_animations(
                     .map(|(req, _)| match req {
                         OneShotReq::Swing(hit_info) => {
                             let w = wielded.copied().unwrap_or_default();
+                            // The COMBAT reading of the hand ([`Wielded::armed_main`]): the
+                            // reference's swing selector `0x6246a0` calls `GetWeapon(slot, 0)`,
+                            // so a disarmed attacker's weapon reads as absent and this lands on
+                            // AttackUnarmed(16) / AttackUnarmedOff(117) — with the weapon model
+                            // still in the fist (decision 1863).
                             let id = if hit_info & 0x4 != 0 {
-                                swing_anim_off(w.off)
+                                swing_anim_off(w.armed_off())
                             } else {
-                                swing_anim_main(w.main)
+                                swing_anim_main(w.armed_main())
                             };
                             debug!("swing: unit {entity} anim {id} (hitInfo {hit_info:#x})");
                             id
@@ -942,6 +950,17 @@ pub(super) fn drive_animations(
             })
             .unwrap_or_default();
         requests.extend(defense);
+        // The play-time substitution ([`select::unarmed_special`], `0x5fe2f0`): a Special1H/2H
+        // asked for by a unit whose hands both read empty comes out as SpecialUnarmed(118). It
+        // lives at the PLAY seam in the reference, so it is applied to every request here rather
+        // than inside any one selector — a disarmed Eviscerate and a weaponless one are the same
+        // case to it (decision 1863).
+        {
+            let w = wielded.copied().unwrap_or_default();
+            for id in &mut requests {
+                *id = select::unarmed_special(*id, w.armed_main(), w.armed_off());
+            }
+        }
         // The deferred-cache consumer (the client's `+0xd60` read at the base recompute,
         // decision 0406): the moment no one-shot is live, the parked combat clip plays — the
         // swing the Eviscerate spin deferred fires once the spin ends. A frame with fresh

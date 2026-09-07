@@ -475,7 +475,7 @@ pub(super) fn setup_liquid(
     let mut assets = LiquidAssets::default();
     for &(kind, dir, stem, count) in FRAME_SETS {
         let Some((frames, frame_count)) =
-            load_frame_array(&mut world_assets, &mut images, dir, stem, count)
+            load_frame_array(&mut world_assets, &mut images, kind, dir, stem, count)
         else {
             warn!("liquid: no frames for {stem} — {kind:?} water will not render");
             continue;
@@ -597,6 +597,7 @@ pub(super) fn setup_liquid(
 fn load_frame_array(
     world_assets: &mut WorldAssets,
     images: &mut Assets<Image>,
+    kind: LiquidKind,
     dir: &str,
     stem: &str,
     count: u32,
@@ -623,7 +624,12 @@ fn load_frame_array(
         return None;
     }
     let loaded = frames.len() as u32;
-    Some((images.add(liquid_frame_array(frames)), loaded))
+    // Flatten the per-frame DC for the WATER kinds only: mipping turns the shipped frames' drifting
+    // means into a whole-sheet brightness breath once per animation loop, which reads as a flicker on
+    // distant water. Magma/slime draw the sheet AS their body colour, where that swing is the intended
+    // pulse — so they keep theirs (`assets::flatten_frame_dc`).
+    let normalize_dc = !kind.is_fullbright();
+    Some((images.add(liquid_frame_array(frames, normalize_dc)), loaded))
 }
 
 #[cfg(test)]

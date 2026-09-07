@@ -4,7 +4,7 @@
 //! dispatcher. The `UiScript` events these ultimately drive are fired by [`crate::ui_mail::feed_mail`]
 //! (the feed owns the VM), so these arms only mutate resources + send the wire re-syncs.
 
-use benilla_protocol::messages::{mail_action, mail_error, MailListEntry};
+use benilla_protocol::messages::{mail_action, mail_error, mail_message_type, MailListEntry};
 
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_items::{EquipError, EquipErrors};
@@ -42,14 +42,43 @@ pub(super) fn mail_list(mails: Vec<MailListEntry>, mail: &mut MailOpen, commands
         .collect();
 }
 
+/// `MAIL_CHECK_MASK_COD_PAYMENT` — the `checked` bit (`byte[rec+0x148] & 8`) that marks a mail as
+/// the money a COD taker paid; taking that money empties the mail (wow-re, 1970).
+const CHECKED_COD_PAYMENT: u32 = 8;
+
+/// The two take legs' "this mail is now empty" decision, off the client's own bytes (wow-re
+/// `stationery-bindings.md` §8, 1970): a take that empties the mail sends `CMSG_MAIL_DELETE`
+/// itself, then `CLOSE_INBOX_ITEM(index)`, then `MAIL_INBOX_UPDATE`. The money leg (`0x4ad6b0`)
+/// purges iff the mail is a COD payment, or an auction notice with no item; the item leg
+/// (`0x4ad7b0`) purges iff the money is gone and the mail is an auction notice or carries no
+/// letter text. A plain letter you took the money from stays open, husk and all — that is the
+/// reference too (the stock `OpenMailFrame_OnHide` deletes a copied, emptied letter on close).
+///
+/// The item leg's second conjunct reads `[rec+0x114] == 0 && [rec+0x25c] == 0`; `+0x114` is the
+/// letter's text id and `+0x25c` a second no-text field the carve did not name (INFERRED to be the
+/// fetched body). This takes the text id alone, which can only purge a mail the client also would
+/// when that second field is zero whenever the first is.
+fn take_empties(entry: &MailListEntry, action: u32) -> bool {
+    let auction = entry.message_type == mail_message_type::AUCTION;
+    match action {
+        mail_action::MONEY_TAKEN => {
+            entry.checked & CHECKED_COD_PAYMENT != 0 || (auction && entry.item.is_none())
+        }
+        mail_action::ITEM_TAKEN => entry.money == 0 && (auction || entry.item_text_id == 0),
+        _ => false,
+    }
+}
+
 /// `SessionEvent::SendMailResult` (`SMSG_SEND_MAIL_RESULT`) — route per action/error (decision 0544
 /// P2). action == SEND queues a [`MailSendAck`] for the feed (MAIL_FAILED always, MAIL_SEND_SUCCESS
-/// on OK, else the red error line). A successful take/return/delete re-syncs the inbox with a fresh
-/// `CMSG_GET_MAIL_LIST` (the reference client's inbox-refresh moment); an EQUIP_ERROR routes to the
-/// existing inventory-error surface; any other failure surfaces the red error line.
+/// on OK, else the red error line). A successful take applies to the local row and, when it
+/// empties the mail, deletes it the way the client does ([`take_empties`]); every successful
+/// take/return/delete then re-syncs the inbox with a fresh `CMSG_GET_MAIL_LIST` (the reference
+/// client's inbox-refresh moment); an EQUIP_ERROR routes to the existing inventory-error surface;
+/// any other failure surfaces the red error line.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn send_mail_result(
-    _mail_id: u32,
+    mail_id: u32,
     action: u32,
     error: u32,
     equip_error: Option<u32>,
@@ -82,6 +111,25 @@ pub(super) fn send_mail_result(
     // A take/return/delete result.
     match error {
         mail_error::OK => {
+            // The take landed on the local row first (the client clears `[rec+0x140]` /
+            // `[rec+0x120]` before deciding), and an emptied mail is purged client-side:
+            // `CMSG_MAIL_DELETE`, then `CLOSE_INBOX_ITEM(index)` from the feed (1970).
+            if let Some(pos) = mail.mails.iter().position(|e| e.message_id == mail_id) {
+                match action {
+                    mail_action::MONEY_TAKEN => mail.mails[pos].money = 0,
+                    mail_action::ITEM_TAKEN => mail.mails[pos].item = None,
+                    _ => {}
+                }
+                if take_empties(&mail.mails[pos], action) {
+                    if let Some(mailbox) = mail.mailbox {
+                        let _ = commands
+                            .0
+                            .send(ClientCommand::MailDelete { mailbox, mail_id });
+                    }
+                    mail.close_inbox.push(pos as u32 + 1);
+                    mail.mails.remove(pos);
+                }
+            }
             // Re-sync the inbox: the taken money/item or removed row is gone server-side.
             if let Some(mailbox) = mail.mailbox {
                 let _ = commands.0.send(ClientCommand::GetMailList { mailbox });

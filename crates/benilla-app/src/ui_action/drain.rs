@@ -196,7 +196,10 @@ pub(super) fn drain_action_uses(
     targeting: cast_target::CastTargeting,
     mut acquire: MessageWriter<crate::target::AttackNearestRequest>,
     // The by-key local error line — the only sink here that is not the ladder's own
-    // (`ladder.cast_errors` is the reason-coded one, `ladder.ground` the targeting mode).
+    // (`ladder.cast_errors` is the reason-coded one, `ladder.ground` the targeting mode). It is
+    // deliberately NOT a `CastLadder` field: a resource reachable twice from one system is a
+    // `B0002` panic on the first live frame, which compiles and passes every unit test
+    // (decision 1903).
     mut ui_errors: ResMut<UiErrorKeys>,
     mut ladder: CastLadder,
     mut gate: crate::ui_bind_confirm::BindGate,
@@ -396,6 +399,7 @@ pub(super) fn drain_action_uses(
                         &mut script,
                         &mut gate,
                         false,
+                        &mut ui_errors,
                     );
                 }
             }

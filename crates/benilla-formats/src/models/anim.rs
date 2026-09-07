@@ -387,6 +387,18 @@ pub struct AnimEvent {
     pub ident: [u8; 4],
     /// The payload — a SoundEntries id for `$SND`/`$DSL`/`$DSO`, else 0.
     pub data: u32,
+    /// The bone the record rides (`M2Event.bone` @+8) — the same field [`EventMarker`] carries,
+    /// here on the *fired* key so a consumer never has to re-find the record by 4CC. It cannot:
+    /// 75 shipped models author some 4CC more than once at different points, and **every player
+    /// character model authors `$CSD` six times** (one per emote clip), so a first-match table
+    /// scan answers the wrong point for five of the six.
+    pub bone: u16,
+    /// The record's authored point (`M2Event.position` @+12), **raw WoW model space** — the same
+    /// convention [`EventMarker::position`] uses. The reference's event kernel (`0x719370`)
+    /// snapshots `placementMatrix · (boneMatrix[bone] · position)` by value into the callback
+    /// record every dispatcher then reads, so this is half of where the event *happens*, not just
+    /// when.
+    pub position: [f32; 3],
 }
 
 /// One animation sequence's per-bone keyframes (decision 0019): its `AnimationData.dbc` id, duration,
@@ -749,7 +761,17 @@ pub fn parse_m2_animations(b: &[u8]) -> Vec<ModelAnimation> {
     // global-timeline ms). Read once here; each sequence below selects + rebases its window,
     // exactly like the bone tracks.
     let (ev_count, ev_ofs) = (le_u32(b, 0x114) as usize, le_u32(b, 0x118) as usize);
-    let mut model_events: Vec<([u8; 4], u32, Vec<u32>)> = Vec::with_capacity(ev_count);
+    /// One `M2Event` record as the file holds it: the 4CC and payload, the bone and point the
+    /// kernel transforms (see [`AnimEvent::position`]), and the absolute global-timeline
+    /// timestamps each sequence below selects and rebases into its own band.
+    struct EventRecord {
+        ident: [u8; 4],
+        data: u32,
+        bone: u16,
+        position: [f32; 3],
+        times: Vec<u32>,
+    }
+    let mut model_events: Vec<EventRecord> = Vec::with_capacity(ev_count);
     for e in 0..ev_count {
         let erec = ev_ofs + e * 44;
         if erec + 44 > b.len() {
@@ -760,6 +782,8 @@ pub fn parse_m2_animations(b: &[u8]) -> Vec<ModelAnimation> {
             None => break,
         };
         let data = le_u32(b, erec + 4);
+        let bone = le_u32(b, erec + 8) as u16;
+        let position = vec3(b, erec + 12);
         let (nts, ots) = (le_u32(b, erec + 36) as usize, le_u32(b, erec + 40) as usize);
         let mut times = Vec::with_capacity(nts);
         for t in 0..nts {
@@ -769,7 +793,13 @@ pub fn parse_m2_animations(b: &[u8]) -> Vec<ModelAnimation> {
             }
             times.push(le_u32(b, o));
         }
-        model_events.push((ident, data, times));
+        model_events.push(EventRecord {
+            ident,
+            data,
+            bone,
+            position,
+            times,
+        });
     }
 
     // Every bone's three channel tracks, read ONCE: the key arrays are shared by every sequence,
@@ -841,13 +871,15 @@ pub fn parse_m2_animations(b: &[u8]) -> Vec<ModelAnimation> {
         }
         // This sequence's event keys: the same time-band select + rebase as the bone tracks.
         let mut events = Vec::new();
-        for (ident, data, times) in &model_events {
-            for &ts in times {
+        for r in &model_events {
+            for &ts in &r.times {
                 if ts >= start && ts <= end {
                     events.push(AnimEvent {
                         time: (ts - start) as f32 / 1000.0,
-                        ident: *ident,
-                        data: *data,
+                        ident: r.ident,
+                        data: r.data,
+                        bone: r.bone,
+                        position: r.position,
                     });
                 }
             }

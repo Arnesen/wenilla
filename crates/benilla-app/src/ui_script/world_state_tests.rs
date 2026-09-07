@@ -1,4 +1,4 @@
-//! The always-up world-state readout (`assets/ui/WorldStateFrame.xml`) against the shipped XML —
+//! The always-up world-state readout (stock `Interface\FrameXML\WorldStateFrame.xml`) —
 //! report B190's second half, driven the way the client drives it: rows pushed, then
 //! `UPDATE_WORLD_STATES` fired.
 //!
@@ -15,17 +15,25 @@ pub(crate) fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
-        "UIParent.xml",
-        "GameTooltip.xml",
-        "WorldStateFrame.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
+        "Interface\\FrameXML\\WorldStateFrame.xml", // the reference's own (1972)
     ] {
         load_xml(&s, f);
     }
+    // The outdoor readout is gated on the options uvar `HIDE_OUTDOOR_WORLD_STATE == "0"`
+    // (UIOptionsFrame.lua's default, ours in OptionsFrame.xml's uvar block); a harness without
+    // the options file says so itself.
+    s.run("HIDE_OUTDOOR_WORLD_STATE = \"0\"").unwrap();
     s
 }
 
@@ -159,7 +167,16 @@ fn the_dynamic_icon_is_a_second_slot_lit_only_by_the_taken_state() {
         ..Default::default()
     };
 
-    for quiet in [0, 1, 3] {
+    // A zero state is not a quiet row but NO row: the stock `WorldStateAlwaysUpFrame_Update`
+    // draws only `state > 0` (WorldStateFrame.lua) — our transcription had painted the shield at
+    // zero too, and the reference's file retired that (1972).
+    push(&mut s, vec![flag_row(0)]);
+    let art = textures(&mut s);
+    assert!(
+        !art.iter().any(|p| p.contains("UI-PVP-Alliance")),
+        "state 0 — the row is not drawn at all: {art:?}"
+    );
+    for quiet in [1, 3] {
         push(&mut s, vec![flag_row(quiet)]);
         let art = textures(&mut s);
         assert!(
@@ -235,12 +252,36 @@ fn a_row_without_an_icon_still_shows_its_text() {
         vec![WorldStateUiView {
             ui_state: 1,
             text: "Progress: 60".into(),
+            ..Default::default()
+        }],
+    );
+    assert!(texts(&mut s).contains(&"Progress: 60".to_string()));
+}
+
+/// An `ExtendedUI` row is not a text row at all — the stock update routes it to the extended
+/// kit (`ExtendedUI["CAPTUREPOINT"]`), which builds a capture BAR and never prints the text.
+/// Our transcription had shown the text; the reference's file draws the bar (1972).
+#[test]
+fn a_capture_point_row_is_a_bar_not_a_line_of_text() {
+    let mut s = harness();
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![ScriptValue::Str("".into())]);
+    push(
+        &mut s,
+        vec![WorldStateUiView {
+            ui_state: 1,
+            text: "Progress: 60".into(),
             extended_ui: "CAPTUREPOINT".into(),
             extended_ui_state: [60, 40, 0],
             ..Default::default()
         }],
     );
-    assert!(texts(&mut s).contains(&"Progress: 60".to_string()));
+    assert!(!texts(&mut s).contains(&"Progress: 60".to_string()));
+    assert!(
+        s.eval::<bool>("return WorldStateCaptureBar1 ~= nil and WorldStateCaptureBar1:IsShown()")
+            .unwrap(),
+        "the capture bar was built and shown"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
 /// The bindings' own edges, read from Lua the way an addon would. Two are easy to get wrong and
@@ -384,9 +425,7 @@ fn the_visible_ink_sits_beside_its_label_not_adrift_of_it() {
         let label_mid_y = (text.top + text.bottom) * 0.5;
 
         let (row_top, row_bottom) = s
-            .eval::<(f64, f64)>(
-                "local r = WorldStateAlwaysUpFrame1 return r:GetTop(), r:GetBottom()",
-            )
+            .eval::<(f64, f64)>("local r = AlwaysUpFrame1 return r:GetTop(), r:GetBottom()")
             .expect("the row resolved");
         let row_h = (row_top - row_bottom) as f32;
 

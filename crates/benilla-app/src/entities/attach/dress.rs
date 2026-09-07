@@ -175,10 +175,27 @@ pub(super) struct PartDress<'a> {
 /// at the bone pivot and its transform belongs to the billboard system, so as a plain child it would
 /// render at the model origin (the "glow on the ground" family, decision 0153). It spawns as a
 /// lightweight mirror anchor under the unit plus a world-root card following the anchor's live joint.
+/// [`spawn_part`] for a merged group (`attach::merge`): the synthetic group part, the first
+/// member's index, and the member list the redress reads back. A singleton passes `None` and
+/// is exactly [`spawn_part`].
+pub(super) fn spawn_group(
+    commands: &mut Commands,
+    part: &EntityPart,
+    group: &super::merge::BodyGroup,
+    dress: &PartDress,
+) -> bool {
+    let members =
+        (group.members.len() > 1).then(|| super::merge::DressedGroup(group.members.clone().into()));
+    spawn_part(commands, part, group.first() as usize, members, dress)
+}
+
+/// Spawn one mesh part (or billboard card) of a body under `dress.unit`; `group` is the merged
+/// member list for a group of several batches (`None` for a batch of its own).
 pub(super) fn spawn_part(
     commands: &mut Commands,
     part: &EntityPart,
     index: usize,
+    group: Option<super::merge::DressedGroup>,
     dress: &PartDress,
 ) -> bool {
     if let Some(info) = &part.billboard {
@@ -228,6 +245,9 @@ pub(super) fn spawn_part(
             card: None,
         },
     ));
+    if let Some(group) = group {
+        child.insert(group);
+    }
     insert_pick_marker(&mut child, dress.kind);
     // Every part gets a tag: the instance slot plus the live alpha field. Unconditional because the
     // slot is a per-instance identity every part needs (the tint) rather than a skinning detail —
@@ -530,7 +550,7 @@ mod tests {
         let armed = {
             let world = app.world();
             let mut commands = Commands::new(&mut queue, world);
-            spawn_part(&mut commands, &fadeable, 0, &dress)
+            spawn_part(&mut commands, &fadeable, 0, None, &dress)
         };
         queue.apply(app.world_mut());
         assert!(!armed, "steady: no ramp armed");
@@ -594,7 +614,7 @@ mod tests {
         let armed = {
             let world = app.world();
             let mut commands = Commands::new(&mut queue, world);
-            spawn_part(&mut commands, &card, 0, &dress)
+            spawn_part(&mut commands, &card, 0, None, &dress)
         };
         queue.apply(app.world_mut());
         assert!(
@@ -670,8 +690,8 @@ mod tests {
             {
                 let world = app.world();
                 let mut commands = Commands::new(&mut queue, world);
-                spawn_part(&mut commands, &part(None, false), 0, &dress);
-                spawn_part(&mut commands, &billboard, 1, &dress);
+                spawn_part(&mut commands, &part(None, false), 0, None, &dress);
+                spawn_part(&mut commands, &billboard, 1, None, &dress);
             }
             queue.apply(app.world_mut());
             let world = app.world_mut();

@@ -104,6 +104,10 @@ struct DisplayRow {
     /// 10534 shipped displays, and `0` is not a row of that table, so it falls through to the
     /// model's `BloodID` (see [`CreatureModel::blood_display`]).
     blood_level: u32,
+    /// `SizeClass` (field 9, @+0x24) — the display's **size-class override**, read signed:
+    /// `−1` (1 791 of the 10 534 shipped rows) defers to the model's own
+    /// [`ModelRow::size_class`]. See [`CreatureCatalog::size_class`].
+    size_class: i32,
     /// `CreatureModelAlpha` (field 5, @+0x14) — the display's **base render opacity**, 0..=255.
     /// This is the `baseAlpha` of the reference's per-unit alpha product (`0x60d2d0`, the CGUnit
     /// vtbl+0x6c getter: `CreatureDisplayInfo+0x14 × (1/255)`; wow-re `ghost-death-visuals.md`
@@ -120,6 +124,11 @@ struct ModelRow {
     scale: f32,
     /// `Flags` (field 1) — see [`CreatureCatalog::breathes`] for the one bit we read.
     flags: u32,
+    /// `SizeClass` (field 3, @+0x0c) — the model's own audible size, `0 Small · 1 Medium ·
+    /// 2 Large · 3 Giant · 4 Colossal`, and the fallback arm of [`CreatureCatalog::size_class`].
+    /// Reads signed for symmetry with the display override; every one of the 430 shipped rows is
+    /// in `0..=4`, so the fallback always answers.
+    size_class: i32,
     /// `BloodID` — see [`CreatureModel::blood_model`]. Reads signed: `−1` in 122 of the 430
     /// shipped rows, which the reference treats as a tier-2 miss, not as bloodlessness.
     blood: i32,
@@ -199,6 +208,26 @@ impl CreatureCatalog {
         (id != 0).then_some(id)
     }
 
+    /// A display's **audible size class** — `0 Small · 1 Medium · 2 Large · 3 Giant ·
+    /// 4 Colossal`, the axis [`crate::DeathThudCatalog`] picks the body-fall sample on.
+    ///
+    /// The reference's own two-step (`0x625500`): the **display's** `SizeClass` column wins, and
+    /// only its `−1` sentinel defers to the **model's**. That order matters — 8 743 of the 10 534
+    /// shipped displays override their model, so reading the model alone would mis-size most of
+    /// the world (every Small display sharing a Medium model, for one).
+    ///
+    /// `None` when either lookup misses, or when **both** rows read `−1`. No shipped row does, so
+    /// that arm exists to keep a broken/absent table silent rather than Small — the same thing
+    /// the reference's own unsigned `sizeClass >= 5` gate (`0x623744`) does with a `−1`.
+    pub fn size_class(&self, display_id: u32) -> Option<u32> {
+        let row = self.display.get(&display_id)?;
+        let class = match row.size_class {
+            -1 => self.models.get(&row.model_id)?.size_class,
+            c => c,
+        };
+        u32::try_from(class).ok()
+    }
+
     /// Every `CreatureModelData` row that names a camera-shake preset: `(model id, path,
     /// footstep id, death-thud id)`. The **census** view — the runtime reads
     /// [`Self::footstep_shake`] by display id instead, because that is what a unit carries.
@@ -214,6 +243,21 @@ impl CreatureCatalog {
     /// `CGUnit_C::HandleAnimEvent` at all.
     pub fn model_paths(&self) -> impl Iterator<Item = &str> + '_ {
         self.models.values().map(|m| m.path.as_str())
+    }
+
+    /// Every `CreatureModelData` row as `(model id, path, its own SizeClass)` — the **census**
+    /// view of the death-thud size axis. The runtime reads [`Self::size_class`] by *display* id
+    /// instead, because most displays override this column.
+    pub fn sized_models(&self) -> impl Iterator<Item = (u32, &str, i32)> + '_ {
+        self.models
+            .iter()
+            .map(|(id, m)| (*id, m.path.as_str(), m.size_class))
+    }
+
+    /// Every display as `(display id, its model id)` — the census hop that lets an instrument roll
+    /// a per-display answer (a resolved size class, say) up onto the model that carries the M2.
+    pub fn display_models(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.display.iter().map(|(id, r)| (*id, r.model_id))
     }
 
     /// A display's **spawned-creature render scale** — the product
@@ -391,7 +435,11 @@ pub(crate) fn creature_display_info_schema() -> Schema {
         ("TextureVariation0", FieldType::String),
         ("TextureVariation1", FieldType::String),
         ("TextureVariation2", FieldType::String),
-        ("PortraitTextureName", FieldType::String),
+        // **NOT `PortraitTextureName`** — 5875 has no such column, and reading field 9 as a
+        // string would resolve a size class into the string block. The client reads it as a
+        // signed int at `+0x24` and compares it to `-1` (`0x625509`); the shipped column takes
+        // exactly `{-1, 0, 1, 2, 3, 4}` across all 10 534 rows, `-1` on 1 791 of them.
+        ("SizeClass", FieldType::UInt32),
         ("BloodLevel", FieldType::UInt32),
         // Labeled BloodID in some third-party maps, but the 5875 values (33..188, dense) are the
         // NPC sound-kit range, not blood ids — the blood override is BloodLevel above.
@@ -443,6 +491,7 @@ pub fn load_creature_catalog(chain: &mut Chain) -> Result<CreatureCatalog> {
                         path: name,
                         scale: f32_at(r, 4).unwrap_or(1.0),
                         flags: u32_at(r, 1).unwrap_or(0),
+                        size_class: u32_at(r, 3).map_or(-1, |v| v as i32),
                         // BloodID (field 5) reads signed: −1 in 122 of the 430 shipped rows.
                         // That is a tier-2 MISS, not bloodlessness — the resolve falls through
                         // to the records base (1850). Kept signed so the miss is visible.
@@ -482,6 +531,8 @@ pub fn load_creature_catalog(chain: &mut Chain) -> Result<CreatureCatalog> {
                         scale: f32_at(r, 4).unwrap_or(1.0),
                         textures: [str_at(&rs, r, 6), str_at(&rs, r, 7), str_at(&rs, r, 8)],
                         blood_level: u32_at(r, 10).unwrap_or(0),
+                        // Signed: −1 is "no override", not a size class (see the field docs).
+                        size_class: u32_at(r, 9).map_or(-1, |v| v as i32),
                         model_alpha: u32_at(r, 5).unwrap_or(255),
                     },
                 );
@@ -804,6 +855,61 @@ mod tests {
     /// pauldron pair (slot 1), and boot/glove/tabard geosets (slots 6/8/9), with empty chest/wrist
     /// (slots 3/7). These ids are the real `CreatureDisplayInfoExtra` values read off the build-5875
     /// DBC; a shifted column or a wrong field offset would misread them. Skips without the client data.
+    /// **The size-class column, pinned against the shipped client.** The death-thud sound
+    /// (`benilla-app`'s `sound::death_thud`) picks its sample on this axis alone, so a shifted
+    /// field would re-size the whole world's body-falls silently.
+    ///
+    /// The three arms of `0x625500`, each on a row that exercises it:
+    /// - the **display override** wins — display 792 is a Gorilla (model 136, class `0` Small)
+    ///   overridden to `3` Giant, which is the whole reason the override exists;
+    /// - `−1` **defers to the model** — display 170 is a Sea Giant with no override and the
+    ///   model's `4` Colossal;
+    /// - and an ordinary agreeing row (the Ancient Protector, `3` Giant on both).
+    ///
+    /// The control is the human male at `1` Medium: a schema shift onto a neighbouring column
+    /// would have to keep *all four* of these, and the string-block column that used to be
+    /// misread here (field 9 was labelled `PortraitTextureName`) cannot.
+    #[test]
+    fn the_size_class_column_resolves_its_three_arms() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_creature_catalog(&mut chain).expect("load creature catalog");
+
+        assert_eq!(
+            cat.size_class(792),
+            Some(3),
+            "Gorilla display overrides to Giant"
+        );
+        assert_eq!(
+            cat.size_class(170),
+            Some(4),
+            "Sea Giant falls back to Colossal"
+        );
+        assert_eq!(
+            cat.size_class(1921),
+            Some(3),
+            "Ancient Protector agrees at Giant"
+        );
+        assert_eq!(cat.size_class(49), Some(1), "HumanMale is Medium");
+        assert_eq!(cat.size_class(0), None, "no such display");
+
+        // Every shipped display resolves, and inside the reference's own `0..=4` bound — so its
+        // unsigned `>= 5` gate never fires on this data, and no body-fall is silent for want of
+        // a size.
+        let mut n = 0;
+        for &id in cat.display.keys() {
+            let class = cat
+                .size_class(id)
+                .expect("every display resolves a size class");
+            assert!(
+                class <= 4,
+                "display {id} resolves to {class}, past Colossal"
+            );
+            n += 1;
+        }
+        assert_eq!(n, 10_534, "the whole shipped display table");
+    }
+
     /// **The shake columns, pinned against the shipped client** (B298, decision 1540). Fields 11
     /// and 12 are `CameraShakes.dbc` row ids, and the evidence that the map is right is not that
     /// the names look plausible — it is that the census is *semantic*: 25 of 430 rows carry a

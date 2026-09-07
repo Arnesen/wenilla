@@ -650,4 +650,8 @@ pub(super) fn exploration_xp(
 pub(super) fn level_up(l: LevelUpInfo, chat_log: &mut ChatLog) {
     let talent_points = u32::from(l.level >= 10);
     chat_log.push_level_up(&l, talent_points);
+    // ...and park the raw tuple for `ui_unit`'s `PLAYER_LEVEL_UP`, whose nine args the reference's
+    // own ChatFrame reads (1884). The Rust lines above stay until that window migrates and can
+    // take over printing them — retiring them first would simply lose the ding.
+    chat_log.push_level_up_gains(&l, talent_points);
 }

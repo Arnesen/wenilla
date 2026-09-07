@@ -10,9 +10,9 @@
 //! Coordinates stay **raw WoW** (the `benilla` boundary applies `bevy = (-y, z, -x)`).
 
 use crate::messages::{
-    ActionButton, AttackerState, AuctionBidderNotification, AuctionCommandTail, AuctionListEntry,
-    AuctionOwnerNotification, ChannelNoticeTail, Character, CreateSpline, DamageShield,
-    DispelFailed, EnchantmentLog, EnvironmentalDamageLog, ExplorationXp, FriendEntry,
+    ActionButton, AttackSwingError, AttackerState, AuctionBidderNotification, AuctionCommandTail,
+    AuctionListEntry, AuctionOwnerNotification, ChannelNoticeTail, Character, CreateSpline,
+    DamageShield, DispelFailed, EnchantmentLog, EnvironmentalDamageLog, ExplorationXp, FriendEntry,
     FriendStatusUpdate, GmTicket, GossipOption, GroupLootInfo, GroupMemberEntry,
     GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse, GuildRoster,
     InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo, LootAllPassed, LootItem,
@@ -203,6 +203,9 @@ pub enum SessionEvent {
         /// Rides the connect event because that is the only moment it ever arrives: the reference
         /// keeps it in a process-lifetime global written once by the auth parser.
         billing_time_rested: u32,
+        /// The tutorial bank, when `SMSG_TUTORIAL_FLAGS` landed during the login handshake
+        /// (decision 1976); `None` when it will arrive in the world stream instead.
+        tutorial_flags: Option<Vec<u8>>,
     },
     /// The server confirmed our logout (`SMSG_LOGOUT_COMPLETE`) — we are back at character select.
     /// The IO thread cycles the connection immediately; a fresh [`Self::CharacterList`] follows.
@@ -346,8 +349,21 @@ pub enum SessionEvent {
     /// `[start, …waypoints…, endpoint]` — at constant (arc-length) speed over `duration_ms`. Every
     /// waypoint is carried, so a curved patrol reads as its real path, not a straight `start → endpoint`
     /// shortcut. A `Stop` / zero-duration / <2-point move clears the path (`path` empty).
+    /// `MSG_MOVE_TIME_SKIPPED` — an observed mover reported that its own client skipped `lag_ms`
+    /// of movement simulation. **Not a pose**: nothing about where the unit is has changed, only
+    /// how far its clock has run. The app advances that mover's relay-chain wire stamp by it, the
+    /// reference's `[CMovement+0xac] += lag` (`0x603b40` → `0x601560` → `0x61ab90`). Ignoring it
+    /// leaves our copy of the chain permanently short, so the mover's next real packet reads as a
+    /// step `lag` too large and is scheduled that much late. Decision 1935.
+    MoveTimeSkipped { guid: u64, lag_ms: u32 },
     MonsterMove {
         guid: u64,
+        /// `SMSG_MONSTER_MOVE_TRANSPORT` only: the transport whose frame `start` and every `path`
+        /// point are expressed in — deck-local offsets, composed through the transport's live pose
+        /// rather than read as world coordinates. `None` = the ordinary absolute path. A packet
+        /// naming a transport is also the *attach* signal: the unit rides that deck from here
+        /// (decision 1936).
+        transport: Option<u64>,
         start: [f32; 3],
         /// The server's per-move spline counter — echoed in `CMSG_MOVE_SPLINE_DONE` when this spline
         /// drives our own player (Charge/knockback/taxi); ignored for a creature's walk.
@@ -361,6 +377,8 @@ pub enum SessionEvent {
         duration_ms: u32,
         /// `true` ⇒ a 3-D flight path (keep the spline's Z); `false` ⇒ a ground walk whose Z the app
         /// re-derives from the terrain under the unit (see the renderer's creature ground-clamp).
+        /// The re-derive is world-space and so does not apply to a `transport` path: there is no
+        /// terrain under a deck, and the wire Z is already the deck-local height (decision 1936).
         flying: bool,
         /// `SPLINEFLAG_RUNMODE` — the path is travelled at run speed. Its **absence** forces
         /// `MOVEFLAG_WALK_MODE` on for the unit the spline moves (decision 1758).
@@ -450,6 +468,49 @@ pub enum SessionEvent {
     /// `trainer` to answer with and the `cost` in copper its money frame shows. Answering means
     /// sending the SAME opcode back with the guid; declining sends nothing (decision 1580).
     TalentWipeConfirm { trainer: u64, cost: u32 },
+    /// A pet trainer is asking whether to unlearn the pet's skills (`SMSG_PET_UNLEARN_CONFIRM`) —
+    /// the `CONFIRM_PET_UNLEARN(cost)` dialog's question, the talent-wipe twin for a pet
+    /// (decision 1963). Answering sends `CMSG_PET_UNLEARN` with the guid; declining sends nothing.
+    PetUnlearnConfirm { trainer: u64, cost: u32 },
+    /// The instance-boot clock (`SMSG_RAID_GROUP_ONLY`): a positive delay arms it
+    /// (`INSTANCE_BOOT_START`), zero clears it (`INSTANCE_BOOT_STOP`) and names `reason` 1/2 on
+    /// screen (decision 1963).
+    RaidGroupOnly { delay_ms: u32, reason: u32 },
+    /// A battleground spirit healer's next resurrection wave (`SMSG_AREA_SPIRIT_HEALER_TIME`):
+    /// arms `GetAreaSpiritHealerTime` and fires `AREA_SPIRIT_HEALER_IN_RANGE` for the cached
+    /// healer (decision 1963).
+    AreaSpiritHealerTime { healer: u64, ms: u32 },
+    /// One battleground queue slot's state (`SMSG_BATTLEFIELD_STATUS`), the client's three-slot
+    /// queue that `AcceptBattlefieldPort` answers out of (decision 1963).
+    BattlefieldStatus(crate::messages::BattlefieldStatus),
+    /// The battleground scoreboard (`MSG_PVP_LOG_DATA`), rows in wire order — the app resolves
+    /// the names, derives each row's team and pushes the sorted board (decision 1972).
+    PvpLogData(crate::messages::PvpLogData),
+    /// The battleground instance list (`SMSG_BATTLEFIELD_LIST`): the battlemaster, the map, the
+    /// bracket and the instance ids — fires `BATTLEFIELDS_SHOW` (decision 1974).
+    BattlefieldList(crate::messages::BattlefieldList),
+    /// The battleground teammates' positions and the flag carrier
+    /// (`MSG_BATTLEGROUND_PLAYER_POSITIONS`), raw world floats (decision 1980).
+    BattlefieldPositions(crate::messages::BattlefieldPositions),
+    /// `MSG_TABARDVENDOR_ACTIVATE` — the vendor whose designer opens (decision 1977).
+    TabardVendorActivate(u64),
+    /// `MSG_SAVE_GUILD_EMBLEM` — the save's result row (decision 1977).
+    SaveGuildEmblemResult(u32),
+    /// A group join's verdict (`SMSG_GROUP_JOINED_BATTLEGROUND`): `0xFFFFFFFE` deserters, a map id
+    /// joined, anything else the generic failure — three message lines, no state (decision 1974).
+    GroupJoinedBattleground { result: u32 },
+    /// A player joined or left the battleground (`SMSG_BATTLEGROUND_PLAYER_JOINED` / `_LEFT`):
+    /// printed once the name cache resolves the guid (decision 1974).
+    BattlegroundPlayer { guid: u64, joined: bool },
+    /// The meeting-stone queue state (`SMSG 0x295`): the area queued for and a status byte
+    /// (decision 1963).
+    MeetingStoneSetQueue { area: u32, status: u8 },
+    /// One of the meeting stone's four display-only replies (`0x297/0x298/0x299/0x2BB`): a chat
+    /// line each, no state, no event (decision 1974).
+    MeetingStoneNotice(crate::messages::MeetingStoneNotice),
+    /// The account's tutorial bank (`SMSG_TUTORIAL_FLAGS`): the raw bytes, both of the client's
+    /// banks copied from them (decision 1976).
+    TutorialFlags(Vec<u8>),
     /// The bind took (`SMSG_PLAYERBOUND`): `area` is the AreaTable id we are now bound in, the
     /// same one [`Self::BindPoint`] carries in the packet beside it.
     PlayerBound { binder: u64, area: u32 },
@@ -620,6 +681,22 @@ pub enum SessionEvent {
     /// The pet's cast refusal (`SMSG_PET_CAST_FAILED`) — [`Self::CastResult`]'s vocabulary, but
     /// the caster is the pet, so it never touches OUR cast state.
     PetCastFailed { spell_id: u32, reason: Option<u8> },
+    /// A refused tame / Call Pet / Revive Pet (`SMSG_PET_TAME_FAILURE`): one
+    /// `PetTameFailureReason` byte, whose text is a `PETTAME_*` GlobalStrings key filling
+    /// `ERR_TAME_FAILED`.
+    PetTameFailure { reason: u8 },
+    /// A refused pet rename (`SMSG_PET_NAME_INVALID`) — no payload; the reference raises
+    /// `ERR_INVALID_PETNAME` on the strength of the opcode alone.
+    PetNameInvalid,
+    /// The pet's loyalty hit zero and it ran away (`SMSG_PET_BROKEN`) — no payload;
+    /// `ERR_PET_BROKEN`.
+    PetBroken,
+    /// The pet's voice (`SMSG_PET_ACTION_SOUND`) — one of two talk selectors on a named unit,
+    /// resolved against that unit's own `CreatureSoundData` row.
+    PetActionSound { pet_guid: u64, talk: u32 },
+    /// A dismissed pet's parting sound (`SMSG_PET_DISMISS_SOUND`) — a `CreatureModelData` id and
+    /// the raw WoW point to play its column-29 kit at. No guid, because the pet has gone.
+    PetDismissSound { model_id: u32, position: [f32; 3] },
     /// An item template's display head (`SMSG_ITEM_QUERY_SINGLE_RESPONSE`, answering our
     /// `CMSG_ITEM_QUERY_SINGLE`). Keyed by template entry; `None` = the server doesn't know it
     /// (undiscovered) — cached negative, like an unknown creature entry. Boxed for the same reason
@@ -703,6 +780,17 @@ pub enum SessionEvent {
     /// One completed melee swing (`SMSG_ATTACKERSTATEUPDATE`) — the attacker's swing-animation
     /// trigger (decision 0073: one packet = one swing, no client timer).
     AttackerState(AttackerState),
+    /// The server refused our melee swing — `SMSG_ATTACKSWING_NOTINRANGE`/`_BADFACING`/
+    /// `_DEADTARGET`/`_CANT_ATTACK`, in the three arms the reference wires
+    /// ([`crate::messages::AttackSwingError`]). Self-only: the server sends these to the swinging
+    /// player alone.
+    AttackSwingError(AttackSwingError),
+    /// The server forced our attack to stop (`SMSG_CANCEL_COMBAT`) — the swing family's fourth
+    /// arm, whose handler is arm 4's body verbatim: StopAttack, no message.
+    CancelCombat,
+    /// The target resisted our Feign Death (`SMSG_FEIGN_DEATH_RESISTED`) — one red line,
+    /// `ERR_FEIGN_DEATH_RESISTED` ("Resisted"), with no state behind it.
+    FeignDeathResisted,
     /// A creature flared at someone (`SMSG_AI_REACTION`): reaction 2 = HOSTILE (sent on every
     /// creature melee-attack start), 0 = ALERT (stealth pre-aggro detection); any other value is
     /// a no-op. Pure audio in the client — the aggro/alert vocals (decision 0280).
@@ -777,6 +865,13 @@ pub enum SessionEvent {
     },
     /// Put an item instance on the client's fixed 30 s use cooldown (`SMSG_ITEM_COOLDOWN`).
     ItemCooldown { item_guid: u64, spell_id: u32 },
+    /// `SMSG_ITEM_TIME_UPDATE` — the seconds left on one duration-limited item instance (a
+    /// conjured stone, a holiday gift, a timed quest item). The item's own `ITEM_FIELD_DURATION`
+    /// carries the same number and is sent to the owner, but vmangos's writer says outright that
+    /// the field is not what the client displays from (`Item::SendTimeUpdate`,
+    /// `Objects/Item.cpp:1094`) — same shape as the enchant countdown (decision 0920).
+    /// `seconds == 0` = expired / no timer. Decision 1933.
+    ItemTime { item_guid: u64, seconds: u32 },
     /// `SMSG_ITEM_ENCHANT_TIME_UPDATE` — the seconds left on one item's TEMPORARY enchant, in the
     /// named enchant slot. The **only** feed for the tooltip's countdown: the item's own
     /// `ITEM_FIELD_ENCHANTMENT` duration field is never read for it (wow-re

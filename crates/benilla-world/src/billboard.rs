@@ -548,8 +548,8 @@ pub struct BillboardPlace;
 pub(crate) fn face_billboards(
     mut commands: Commands,
     time: Res<Time>,
-    cam: Query<&GlobalTransform, With<WorldCamera>>,
-    owners: Query<&GlobalTransform, (Without<WorldCamera>, Without<BillboardCard>)>,
+    cam: Query<(Ref<GlobalTransform>, Option<Ref<Transform>>), With<WorldCamera>>,
+    owners: Query<Ref<GlobalTransform>, (Without<WorldCamera>, Without<BillboardCard>)>,
     mut cards: Query<
         (
             Entity,
@@ -562,17 +562,34 @@ pub(crate) fn face_billboards(
         Without<WorldCamera>,
     >,
 ) {
-    let Ok(cam_tf) = cam.single() else {
+    let Ok((cam_tf, cam_local)) = cam.single() else {
         return;
     };
     // The camera basis — the VIEW-MATRIX axes the byte law substitutes (one shared orientation
     // for every billboard; never a per-pivot aim).
+    // The propagated frame OR the seat's own write: a teleport frame moves the local before
+    // propagation runs (see doodad_anim's gate), and the old read carried a pre-snap placement
+    // across the snap.
+    let cam_moved = cam_tf.is_changed() || cam_local.as_ref().is_some_and(|l| l.is_changed());
     let (fwd, right, up) = (*cam_tf.forward(), *cam_tf.right(), *cam_tf.up());
     let elapsed_ms = time.elapsed().as_millis() as u32;
     for (entity, mut card, mut tf, mut global, tag) in &mut cards {
+        // A card with no track is a pure function of the camera basis and its owner's frame:
+        // when neither moved this frame, the placement below would come out bit-identical
+        // (the write guards at the end already knew that; the recompute did not — 1979's
+        // floor, every resident card re-placed on a still frame).
+        // …and a card that has never been placed (the first-pass stamp is what says so): it
+        // spawned unrotated at scale one, and a still frame must not leave it that way
+        // (review of 2026-09-04 — a tile bursting in under a parked camera).
+        let tracked = card.scale_anim.is_some()
+            || card.seq_translation.is_some()
+            || card.gseq_attach_ms.is_none();
         if let Some(owner) = card.follow {
             match owners.get(owner) {
                 Ok(gt) => {
+                    if !tracked && !cam_moved && !gt.is_changed() {
+                        continue;
+                    }
                     let pivot = card.local_pivot;
                     card.re_place(gt.compute_transform(), pivot);
                     // The card-provenance trace (`WOW_MOVE_TRACE`, ~2 Hz): where each following
@@ -602,6 +619,8 @@ pub(crate) fn face_billboards(
                     continue;
                 }
             }
+        } else if !tracked && !cam_moved {
+            continue;
         }
         // The gseq attach anchor: stamped on the card's first placement pass — the reference's
         // once-per-instance scene-clock snapshot (decision 0856).
@@ -916,6 +935,44 @@ mod tests {
     /// nails it to a fixed model-space point, so what the pad occludes changes with every camera
     /// move — the reported "way too strong and off position". Both halves are asserted: the offset's
     /// magnitude/direction at one camera, and that it FOLLOWS the camera to the next.
+    /// A card that spawns under a parked camera must still be placed on its first pass: the
+    /// still-frame skip (1979) has no view of "never placed", and a tile bursting in under a
+    /// parked camera left every glow card unrotated at scale one until the mouse moved
+    /// (review 2026-09-04).
+    #[test]
+    fn a_card_born_on_a_still_frame_is_placed() {
+        use benilla_assets::coords::wow_to_bevy;
+        let mut app = App::new();
+        app.init_resource::<Time>();
+        app.add_systems(Update, face_billboards);
+        app.world_mut()
+            .spawn((crate::view::WorldCamera, GlobalTransform::IDENTITY));
+        // Two quiet frames: the camera's change tick ages past the still-frame window.
+        app.update();
+        app.update();
+        let root = app
+            .world_mut()
+            .spawn(GlobalTransform::from_translation(Vec3::new(3.0, 1.5, 0.0)))
+            .id();
+        app.update();
+        let pivot = wow_to_bevy([-0.012, 0.162, -0.060]);
+        let frame = app
+            .world_mut()
+            .spawn((
+                BillboardCard::frame_following(BillboardKind::Spherical, pivot, root),
+                Transform::IDENTITY,
+            ))
+            .id();
+        app.update();
+        let tf = *app.world().entity(frame).get::<Transform>().unwrap();
+        let pivot_world = Vec3::new(3.0, 1.5, 0.0) + pivot;
+        assert!(
+            (tf.translation - pivot_world).length() < 1e-5,
+            "a card born on a still frame sits at its pivot, not at the origin: {:?}",
+            tf.translation
+        );
+    }
+
     #[test]
     fn an_item_emitters_billboard_frame_puts_it_behind_the_pivot() {
         use benilla_assets::coords::wow_to_bevy;

@@ -116,6 +116,7 @@ fn spawn_exile(commands: &mut Commands, f: &GxFader, alpha: f32, admitted: bool)
                 kind: crate::model_render::ModelKind::Doodad,
                 blend: b.blend_mode,
             },
+            crate::model_render::EntityPathWhy("exile"),
             crate::interact::PickMesh(b.geometry.clone()),
             bevy::mesh::MeshTag(crate::mesh_tag::alpha_bits(alpha)),
             crate::model_fade::DoodadFade {

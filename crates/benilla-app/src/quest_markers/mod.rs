@@ -12,9 +12,15 @@
 //!
 //! The render law is byte-verified (wow-re object-layer `questgiver-marker.md`):
 //! - **Attach** (`0x6074c0`): the marker is a CHILD of the unit's own body M2 at attachment slot
-//!   **18** (0x12) — slot 29 is preferred only when a mount model exists (benilla has no mounts
-//!   yet; add that branch with the mount arc). No slot ⇒ the marker is created but never parented
-//!   — invisible; we render nothing.
+//!   **18** (0x12), or **29** (`PlayerNameMounted`) when a mount model exists and the body authors
+//!   it — [`overhead_slot`], one definition shared with the overhead name/plate/FCT readers. No
+//!   slot ⇒ the marker is created but never parented — invisible; we render nothing.
+//!
+//!   **That pick is LIVE.** `0x6074c0` is a call site of `0x5ffa50`, the
+//!   `UNIT_FIELD_MOUNTDISPLAYID` field-watch handler, so the reference re-runs the whole attach —
+//!   slot included — every time a unit mounts or dismounts. Our seat is *parented* rather than
+//!   read per frame, so re-picking means rebuilding the instance: [`sync_markers`] compares the
+//!   slot the seat was built at against the live pick on every pass (decision 1871).
 //! - **Scale** (`0x607570`): `1 / |attach-bone basis|`, computed once at attach and baked into the
 //!   marker's base matrix (`marker+0xbc`). Not distance-based, not unit scale, no clamp or floor.
 //!
@@ -61,8 +67,9 @@
 //!   reference eye, decision record with this change).
 //!
 //! benilla's translation (m2bones-probed: every marker M2 is ONE bone with a 3-key translation
-//! bob): a **seat** entity parented under the unit's slot-18 joint (the held-items rail) carries
-//! the one-time `1/L` counter-scale; the `!` models (plain bone) animate through the doodad rail
+//! bob): a **seat** entity parented under the unit's overhead joint (18 or 29 — the held-items
+//! rail) carries the one-time `1/L` counter-scale; the `!` models (plain bone) animate through
+//! the doodad rail
 //! ([`benilla_world::doodad_anim::spawn_anim_host`] — skinned twin + the one-time sequence-0 arm); the `?`
 //! models (cylindrical-billboard bone) render as [`BillboardCard`]s under the identity root —
 //! cards write ABSOLUTE world transforms, so they can't sit under the moving seat; instead
@@ -96,7 +103,7 @@ use benilla_world::billboard::BillboardCard;
 use benilla_world::mesh_tag::spawn_tag;
 use bevy::mesh::MeshTag;
 
-use crate::entities::{ATTACH_OVERHEAD, ATTACH_OVERHEAD_MOUNTED};
+use crate::entities::overhead_slot;
 
 /// The marker anim ids the client arms (`0x6076c0`): the low bob, and the raised bob played while
 /// the unit shows an overhead name (`unit+0xc7c` live — [`Nameplates::shows`] here).
@@ -145,11 +152,15 @@ struct MarkerInst {
 struct QuestMarkerRoot {
     npc: u64,
     handle: Handle<M2Model>,
-    /// The seat under the unit's slot-18 joint, once built. Lives OUTSIDE this root's hierarchy —
+    /// The seat under the unit's overhead joint, once built. Lives OUTSIDE this root's hierarchy —
     /// [`sync_markers`] despawns it explicitly (guarded: a despawned unit already cascaded it).
     seat: Option<Entity>,
-    /// The unit's body model resolved but has no slot-18 attachment: the client's marker is
-    /// created but never parented — invisible. Latched so we stop retrying.
+    /// The overhead slot ([`overhead_slot`]) the live [`Self::seat`] was parented at — `None`
+    /// until it is built. A parent link bakes the slot in, so this is what [`sync_markers`]
+    /// watches against the live pick to catch a mount or dismount moving it (decision 1871).
+    slot: Option<u16>,
+    /// The unit's body model resolved but authors NEITHER overhead attachment: the client's
+    /// marker is created but never parented — invisible. Latched so we stop retrying.
     no_anchor: bool,
     /// The armed pose: `Some(true)` = the raised (anim 190) bob, `Some(false)` = the low (anim 0)
     /// bob, `None` = not yet posed (fresh build) — [`pose_markers`] arms on the first pass and
@@ -157,8 +168,8 @@ struct QuestMarkerRoot {
     raised: Option<bool>,
 }
 
-/// The attach seat: a child of the unit's slot-18 joint at the attachment offset. Carries the
-/// marker joints + plain submeshes as children; [`bake_seat_scale`] bakes the one-time `1/L`
+/// The attach seat: a child of the unit's overhead joint (18/29) at the attachment offset.
+/// Carries the marker joints + plain submeshes as children; [`bake_seat_scale`] bakes the `1/L`
 /// counter-scale into its local transform (the client's `0x607570` base matrix).
 #[derive(Component)]
 struct MarkerSeat {
@@ -199,25 +210,43 @@ fn sync_markers(
     assets: Option<Res<WorldAssets>>,
     roots: Query<&QuestMarkerRoot>,
     seats: Query<(), With<MarkerSeat>>,
+    // The live overhead-slot pick's two inputs, read per pass off the unit (a handful of markers
+    // exist at once, so this is a few map lookups a frame).
+    anchors: Query<&BoneAttach>,
+    mounts: Query<(), With<crate::entities::mount::MountChild>>,
     mut live: Local<HashMap<u64, MarkerInst>>,
 ) {
     if assets.is_none() {
         return; // no client data — nothing could build anyway
     }
-    // A dead seat — the unit's visual rebuilt out from under it (a mount transition despawns
-    // the joint tree the seat lived under; decision 0441) — despawns the whole instance: the
-    // next pass rebuilds it under the fresh joints, re-picking the overhead slot (18 ↔ 29) for
-    // the new configuration. A partial rebuild would duplicate the root's billboard cards.
-    let orphaned: Vec<u64> = live
-        .iter()
-        .filter(|(_, inst)| {
-            roots
-                .get(inst.root)
-                .is_ok_and(|m| m.seat.is_some_and(|s| !seats.contains(s)))
-        })
-        .map(|(&npc, _)| npc)
-        .collect();
-    for npc in orphaned {
+    // Rebuild the whole instance whenever the built seat has stopped describing the unit — all
+    // or nothing, because a partial rebuild would duplicate the root's billboard cards. The next
+    // pass then re-attaches under the joints and the slot that are true now. Two triggers:
+    //
+    // - **the seat entity is gone** — the unit's visual was rebuilt out from under it, taking the
+    //   joint tree the seat lived under with it (a redress, a display change);
+    // - **the overhead slot has moved** (18 ↔ 29) — the unit mounted or dismounted since the
+    //   build. Nothing else would notice, and this is the trigger benilla was missing (1871): a
+    //   mount transition deliberately leaves the rider's visual intact — `reseat_mounts`
+    //   RE-PARENTS the rig's joint anchors onto the seat frame instead of despawning them — so
+    //   the marker's seat survives the transition, riding the right bone at the WRONG slot,
+    //   permanently. The reference re-runs the whole attach here: `0x6074c0` is a call site of
+    //   `0x5ffa50`, the `UNIT_FIELD_MOUNTDISPLAYID` watch handler.
+    let rebuild: Vec<u64> =
+        live.iter()
+            .filter(|(&npc, inst)| {
+                let Ok(marker) = roots.get(inst.root) else {
+                    return false;
+                };
+                let want = index.0.get(&npc).and_then(|&unit| {
+                    overhead_slot(anchors.get(unit).ok()?, mounts.contains(unit))
+                });
+                let alive = marker.seat.is_some_and(|seat| seats.contains(seat));
+                seat_is_stale(marker, alive, want)
+            })
+            .map(|(&npc, _)| npc)
+            .collect();
+    for npc in rebuild {
         if let Some(old) = live.remove(&npc) {
             despawn_marker(&mut commands, &roots, old.root);
         }
@@ -254,6 +283,7 @@ fn sync_markers(
                     npc,
                     handle: asset_server.load::<M2Model>(m2_url(path)),
                     seat: None,
+                    slot: None,
                     no_anchor: false,
                     raised: None,
                 },
@@ -274,6 +304,22 @@ fn sync_markers(
             despawn_marker(&mut commands, &roots, old.root);
         }
     }
+}
+
+/// [`sync_markers`]' rebuild test for one live instance, split out because each of its three legs
+/// has a trap in it:
+///
+/// - **not built yet** (`seat: None`) is never stale — [`build_markers`] owns that instance, and
+///   calling it stale would despawn a root that is still waiting on its M2.
+/// - **`seat_alive == false`** is stale: the unit's visual was rebuilt out from under the seat,
+///   taking the joint tree it lived under with it.
+/// - **`want` differs from the slot the seat was built at** is stale: the unit mounted or
+///   dismounted. `want` is [`overhead_slot`]'s live pick, and `None` means *unreadable this pass*
+///   (the unit is still streaming, or gone) — which must NOT count as a move, or a marker would
+///   rebuild its whole instance every frame its unit's attachment table is out of reach. A unit
+///   that really is gone is pruned below on its own terms.
+fn seat_is_stale(marker: &QuestMarkerRoot, seat_alive: bool, want: Option<u16>) -> bool {
+    marker.seat.is_some() && (!seat_alive || (want.is_some() && want != marker.slot))
 }
 
 /// Build a marker once its M2 AND its unit's joint set ([`BoneAttach`]) have both landed: the seat
@@ -318,24 +364,20 @@ fn build_markers(
         else {
             continue;
         };
-        // Slot 29 (PlayerNameMounted) is preferred while a mount model is attached (wow-re
-        // `questgiver-marker.md`; decision 0441 — `sync_markers` re-seats on the transition),
-        // else 18. Absent ⇒ never parented ⇒ invisible, like the client.
-        let slot = if mounts.contains(unit) && anchor.points.contains_key(&ATTACH_OVERHEAD_MOUNTED)
-        {
-            ATTACH_OVERHEAD_MOUNTED
-        } else {
-            ATTACH_OVERHEAD
-        };
-        let Some((joint, offset)) = anchor.points.get(&slot).and_then(|&(bone, offset)| {
-            poses
-                .get_mut(unit)
-                .ok()
-                .and_then(|mut p| p.anchor_for(&mut commands, unit, bone))
-                .map(|joint| (joint, offset))
-        }) else {
+        // The overhead slot as it stands THIS pass — 29 while a mount model is attached and the
+        // body authors it, else 18 (`0x6074c0`'s own pick). It is recorded on the root below so
+        // `sync_markers` can rebuild the instance when a mount or dismount moves it. Neither slot
+        // ⇒ never parented ⇒ invisible, like the client.
+        let Some((slot, joint, offset)) =
+            overhead_slot(anchor, mounts.contains(unit)).and_then(|slot| {
+                let &(bone, offset) = anchor.points.get(&slot)?;
+                let mut pose = poses.get_mut(unit).ok()?;
+                let joint = pose.anchor_for(&mut commands, unit, bone)?;
+                Some((slot, joint, offset))
+            })
+        else {
             debug!(
-                "quest_markers: {:#x} has no slot-{slot} attachment — marker never parents (invisible, the client's own behavior)",
+                "quest_markers: {:#x} has no overhead attachment (18/29) — marker never parents (invisible, the client's own behavior)",
                 marker.npc
             );
             marker.no_anchor = true;
@@ -461,6 +503,7 @@ fn build_markers(
             h.finish(&mut commands);
         }
         marker.seat = Some(seat);
+        marker.slot = Some(slot);
     }
 }
 
@@ -628,6 +671,48 @@ impl Plugin for QuestMarkersPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn root(seat: Option<Entity>, slot: Option<u16>) -> QuestMarkerRoot {
+        QuestMarkerRoot {
+            npc: 0xdead,
+            handle: Handle::default(),
+            seat,
+            slot,
+            no_anchor: false,
+            raised: None,
+        }
+    }
+
+    /// The rebuild test the mounted marker turns on (1871). A seat bakes its slot into a parent
+    /// link, and a mount transition leaves the rider's visual — and therefore the seat — intact,
+    /// so this comparison is the ONLY thing that can notice 18 ↔ 29 moving.
+    #[test]
+    fn a_seat_goes_stale_when_its_slot_moves_but_never_on_a_reading_it_could_not_take() {
+        let built_at_18 = root(
+            Some(Entity::from_raw_u32(1).expect("a valid entity id")),
+            Some(18),
+        );
+        assert!(
+            seat_is_stale(&built_at_18, true, Some(29)),
+            "the unit mounted — the seat hangs at 18 and nothing else would notice"
+        );
+        assert!(!seat_is_stale(&built_at_18, true, Some(18)), "settled");
+        assert!(
+            !seat_is_stale(&built_at_18, true, None),
+            "the attachment table was unreadable this pass — not a move; churning on it would \
+             rebuild the instance every frame a unit is out of reach"
+        );
+        assert!(
+            seat_is_stale(&built_at_18, false, Some(18)),
+            "the seat entity is gone — the visual was rebuilt out from under it"
+        );
+
+        // Not built yet: `build_markers` owns the instance, and a rebuild would despawn a root
+        // still waiting on its M2. True even when the seat is reported dead — it has none.
+        let unbuilt = root(None, None);
+        assert!(!seat_is_stale(&unbuilt, false, Some(29)));
+        assert!(!seat_is_stale(&unbuilt, true, Some(29)));
+    }
 
     /// The seat's counter-scale is the client's `0x607570`: `1/L` from the attach joint's world
     /// basis, baked ONCE at attach — a later joint rescale does not re-bake (the one-time latch),

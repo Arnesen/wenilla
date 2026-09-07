@@ -586,7 +586,7 @@ pub struct PlayerSkillSlot {
 /// one of these per object and [`Self::merge`]s each `Values` delta into it; the codec itself
 /// stays stateless (decision 0006).
 ///
-/// **Absent-field semantics** hinge on [`Self::descriptor_end`]: a CREATE block is a *complete*
+/// **Absent-field semantics** hinge on `Self::descriptor_end`: a CREATE block is a *complete*
 /// snapshot — the server masks in only non-zero fields (vmangos `Object::_SetCreateBits`: bit set
 /// iff `value != 0`), and the real client reads it into a zero-initialized descriptor buffer — so
 /// on a create-seeded store an absent field reads `Some(0)`, the truth. A bare `Values` delta

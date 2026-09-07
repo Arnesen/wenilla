@@ -45,13 +45,30 @@ impl WorldWriter {
 
     /// Open an item by bag position (`CMSG_OPEN_ITEM`, layout in [`messages::open_item`]) — crack
     /// the clam, empty the picked lockbox, unwrap the gift. The right-click fork for an
-    /// [`crate::ItemInfo::openable`] item; the server answers with `SMSG_LOOT_RESPONSE` on the
+    /// `crate::ItemInfo::openable` item; the server answers with `SMSG_LOOT_RESPONSE` on the
     /// item's **own** guid (so the loot window opens over a thing in the bag), or an equip error
     /// on a refusal (still locked, dead, flying).
     pub fn open_item(&mut self, bag_index: u8, slot: u8) -> Result<()> {
         self.send(
             opcode::CMSG_OPEN_ITEM,
             &messages::open_item(bag_index, slot),
+        )
+    }
+
+    /// Wrap an item in gift paper (`CMSG_WRAP_ITEM`, layout in [`messages::wrap_item`]) — the
+    /// completion of the local wrap cursor a `ITEM_FLAG_WRAPPER` item's right-click arms. The
+    /// paper's `(bag, slot)` leads, the target's follows. Success is silent (field updates on the
+    /// target, one paper destroyed); every refusal comes back as `SMSG_INVENTORY_CHANGE_FAILURE`.
+    pub fn wrap_item(
+        &mut self,
+        gift_bag: u8,
+        gift_slot: u8,
+        item_bag: u8,
+        item_slot: u8,
+    ) -> Result<()> {
+        self.send(
+            opcode::CMSG_WRAP_ITEM,
+            &messages::wrap_item(gift_bag, gift_slot, item_bag, item_slot),
         )
     }
 

@@ -32,7 +32,7 @@ use super::framing::{
 use super::{
     aim, body_frame, new_target_image, spawn_booth_effects, spawn_booth_model, Booth,
     BoothBillboardSpec, BoothCam, BoothEffects, BoothInstance, BoothLight, BoothMotion, BoothPart,
-    BoothRider, BoothTwins, Booths, PortraitImages, PortraitSource, GLUE_LAYER,
+    BoothRider, BoothTwins, Booths, PortraitImages, PortraitSource, VariantLane, GLUE_LAYER,
 };
 
 /// The glue booth slot token (its key in [`super::PortraitImages`] / [`Booths`]).
@@ -1378,10 +1378,14 @@ pub(super) fn sync_glue_booth(
                 // The glue screens keep the old fallback deliberately: the create/select scene has
                 // its own lifecycle (no map-scope teardown under it) and no parts-key retry to
                 // ride, so waiting here would leave the pane empty instead of merely mislit.
-                (Some(buf), Some(s)) => {
-                    super::material_variant(&mut s.variants, buf, material, materials, true)
-                        .unwrap_or_else(|| material.clone())
-                }
+                (Some(buf), Some(s)) => super::material_variant(
+                    &mut s.variants,
+                    buf,
+                    material,
+                    materials,
+                    VariantLane::RigUnfogged,
+                )
+                .unwrap_or_else(|| material.clone()),
                 _ => booth_light.studio.variant(material, materials),
             }
         };
@@ -1652,8 +1656,14 @@ pub(super) fn sync_glue_pet(
         AssetId<WowModelMaterial>,
         Handle<WowModelMaterial>,
     >| {
-        super::material_variant(variants, &light, material, &mut materials, true)
-            .unwrap_or_else(|| material.clone())
+        super::material_variant(
+            variants,
+            &light,
+            material,
+            &mut materials,
+            VariantLane::RigUnfogged,
+        )
+        .unwrap_or_else(|| material.clone())
     };
     let booth_parts: Vec<BoothPart> = pet
         .parts

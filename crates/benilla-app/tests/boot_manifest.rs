@@ -7,16 +7,26 @@
 use std::path::Path;
 
 fn manifest(file: &str) -> serde_json::Value {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web").join(file);
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("reading {}: {e} — capture one with ?boottrace=1", path.display()));
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../web")
+        .join(file);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "reading {}: {e} — capture one with ?boottrace=1",
+            path.display()
+        )
+    });
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("{file} parses as JSON: {e}"))
 }
 
 /// The shape both manifests share: version 1, a non-trivial list of unique raw chain names.
 fn checked_names(file: &str, at_least: usize) -> Vec<String> {
     let m = manifest(file);
-    assert_eq!(m["version"], 1, "{file}: unknown manifest version: {}", m["version"]);
+    assert_eq!(
+        m["version"], 1,
+        "{file}: unknown manifest version: {}",
+        m["version"]
+    );
     let names: Vec<String> = m["names"]
         .as_array()
         .expect("names is an array")
@@ -30,12 +40,24 @@ fn checked_names(file: &str, at_least: usize) -> Vec<String> {
     );
     let mut seen = std::collections::HashSet::new();
     for name in &names {
-        assert!(seen.insert(name.as_str()), "{file}: duplicate entry: {name}");
+        assert!(
+            seen.insert(name.as_str()),
+            "{file}: duplicate entry: {name}"
+        );
         // Chain names are internally backslash-separated and never URL-encoded here — boot.js
         // runs encodeURIComponent at fetch time (the exact twin of web.rs::encode_name).
-        assert!(!name.contains('/'), "{file}: forward slash in {name} — store raw chain names");
-        assert!(!name.contains('%'), "{file}: pre-encoded name {name} — store raw chain names");
-        assert!(!name.starts_with("benilla:"), "{file}: {name} is a virtual name, not a chain file");
+        assert!(
+            !name.contains('/'),
+            "{file}: forward slash in {name} — store raw chain names"
+        );
+        assert!(
+            !name.contains('%'),
+            "{file}: pre-encoded name {name} — store raw chain names"
+        );
+        assert!(
+            !name.starts_with("benilla:"),
+            "{file}: {name} is a virtual name, not a chain file"
+        );
         assert!(!name.is_empty());
     }
     names
@@ -47,7 +69,9 @@ fn the_boot_manifest_is_version_1_with_chain_names() {
     // The one file every boot certainly reads: if this is missing, the capture never reached
     // the catalog pile at all.
     assert!(
-        names.iter().any(|n| n.eq_ignore_ascii_case("DBFilesClient\\Map.dbc")),
+        names
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case("DBFilesClient\\Map.dbc")),
         "Map.dbc missing — was the trace captured from a real boot?"
     );
 }
@@ -57,8 +81,9 @@ fn the_boot_manifest_is_version_1_with_chain_names() {
 /// may already be in the boot manifest, or the boot capture was stale when it was cut.
 #[test]
 fn the_world_manifest_is_the_ui_sprite_set_disjoint_from_boot() {
-    let boot: std::collections::HashSet<String> =
-        checked_names("boot-manifest.json", 50).into_iter().collect();
+    let boot: std::collections::HashSet<String> = checked_names("boot-manifest.json", 50)
+        .into_iter()
+        .collect();
     let world = checked_names("world-manifest.json", 50);
     let sprites = world
         .iter()
@@ -70,6 +95,9 @@ fn the_world_manifest_is_the_ui_sprite_set_disjoint_from_boot() {
         world.len()
     );
     for name in &world {
-        assert!(!boot.contains(name), "{name} is in both manifests — recapture both together");
+        assert!(
+            !boot.contains(name),
+            "{name} is in both manifests — recapture both together"
+        );
     }
 }

@@ -86,6 +86,60 @@ fn chr_races_schema() -> Schema {
 /// The field 8 the binding reads at `record + 0x20` (module doc).
 const CHR_RACES_BASE_LANGUAGE: usize = 8;
 
+/// `Languages.dbc` as the client walks it — **row order**, `(ID, Name_lang[8])`. Row order is the
+/// order `GetNumLaguages`/`GetLanguageByIndex` count in (`0x49fb30`/`0x49fbe0` walk the store's
+/// rows and filter, wow-re `chat-language-scramble.md` §8), so this keeps it rather than keying
+/// by id.
+#[derive(Debug, Default, Clone)]
+pub struct Languages(Vec<(u32, [Option<String>; LOCALES])>);
+
+impl Languages {
+    /// `(id, name)` per row in row order, for `locale`; a row with no name in that locale is
+    /// skipped (the binding pushes `Name_lang[locale]` verbatim and a NULL would be `""`).
+    pub fn names(&self, locale: usize) -> impl Iterator<Item = (u32, &str)> + '_ {
+        self.0
+            .iter()
+            .filter_map(move |(id, names)| Some((*id, names.get(locale)?.as_deref()?)))
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// A hand-built table for tests: `(id, enUS name)` rows.
+    pub fn from_rows(rows: &[(u32, &str)]) -> Self {
+        Self(
+            rows.iter()
+                .map(|(id, name)| {
+                    let mut names: [Option<String>; LOCALES] = Default::default();
+                    names[0] = Some((*name).to_string());
+                    (*id, names)
+                })
+                .collect(),
+        )
+    }
+}
+
+pub fn load_languages(chain: &mut Chain) -> Result<Languages> {
+    let bytes = chain
+        .read_file(LANGUAGES)
+        .with_context(|| format!("reading {LANGUAGES}"))?;
+    let langs = parse(&bytes, languages_schema(), "Languages.dbc")?;
+    let mut rows = Vec::with_capacity(langs.records().len());
+    for r in langs.records() {
+        let Some(id) = u32_at(r, 0) else { continue };
+        let mut names: [Option<String>; LOCALES] = Default::default();
+        for (locale, slot) in names.iter_mut().enumerate() {
+            *slot = str_at(&langs, r, 1 + locale);
+        }
+        rows.push((id, names));
+    }
+    Ok(Languages(rows))
+}
+
 /// Load and join both tables into the race → language-name map.
 pub fn load_default_languages(chain: &mut Chain) -> Result<DefaultLanguages> {
     let lang_bytes = chain

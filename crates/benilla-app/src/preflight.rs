@@ -71,18 +71,40 @@ use benilla_world::world_map::CurrentMap;
 const PLAYER_FLAGS_GM: u32 = 0x0000_0008;
 
 /// The `UNIT_FIELD_FLAGS` bits that mean "the server is driving, or refusing to let you drive"
-/// (vmangos `UnitDefines.h`) — each is a distinct reason the mover looks broken.
+/// (vmangos `UnitDefines.h`) — each is a distinct reason the **mover** looks broken.
+///
+/// **PACIFIED and DISARMED used to sit in here and do not belong** (decision 1903): neither
+/// touches movement, and a banner telling a session "movement is server-blocked" because the
+/// character is disarmed sends someone hunting a mover bug that is not there. They moved to
+/// [`ABILITY_BLOCKERS`]. What is left is movement, and wow-re's
+/// `object-layer/scratch/unit-flags-movement-gates.md` is where each row's mechanism lives —
+/// note they are **not one gate**: STUNNED is the only bit that reaches the local input tick
+/// (`0x5145b0` → `0x514755`, killing the turn and pitch emitters), CONFUSED and FLEEING act
+/// through the `IsSelfControlled` predicate `0x5fa550` (mask `0xc00004`, which STUNNED is *not*
+/// in), POSSESSED does not refuse at all but redirects to the charmer, and the taxi bit shares
+/// no gate with any of them.
 const MOVE_BLOCKERS: &[(u32, &str)] = &[
-    (0x0002_0000, "PACIFIED (no melee, no pacify-blocked casts)"),
-    (0x0004_0000, "STUNNED"),
+    (0x0004_0000, "STUNNED (no turning, no pitch)"),
     (
         0x0010_0000,
         "on a TAXI FLIGHT (input ignored for the whole ride)",
     ),
-    (0x0020_0000, "DISARMED (weapon abilities refuse)"),
     (0x0040_0000, "CONFUSED (the server drives the movement)"),
     (0x0080_0000, "FLEEING (the server drives the movement)"),
     (0x0100_0000, "POSSESSED (another unit holds the reins)"),
+];
+
+/// The `UNIT_FIELD_FLAGS` bits that leave the mover alone and take **abilities** away instead —
+/// the other half of the split above. A session that reads "movement is server-blocked" and finds
+/// the character walking fine has been misdirected; these say what is actually gone.
+const ABILITY_BLOCKERS: &[(u32, &str)] = &[
+    (0x0002_0000, "PACIFIED (no melee, no pacify-blocked casts)"),
+    (
+        0x0020_0000,
+        "DISARMED (one weapon — the main hand's, else the off hand's — reads as absent: unarmed \
+         swing and Ready idle, that weapon off the hand, Spell-Reset on the Attack button, and \
+         weapon-requiring abilities greyed)",
+    ),
 ];
 
 /// Worth naming on entry: an unattended probe that logs in already fighting is the exact shape of
@@ -90,7 +112,11 @@ const MOVE_BLOCKERS: &[(u32, &str)] = &[
 /// ([`crate::player`]).
 use crate::player::UNIT_FLAG_IN_COMBAT;
 
-/// `UNIT_FLAG_SILENCED` — casts silently refuse.
+/// `UNIT_FLAG_SILENCED` — the client's OWN local refusal, not just the server's: the CC validator
+/// `0x6094f0` (reached from `TryCast 0x6e4b60`, bailing at `0x6e4f42`) refuses before any packet
+/// goes out. But it is **per spell** — the arm runs only where `Spell.dbc PreventionType` (column
+/// 165) is `1`, so a silence stops the ~4800 rows that declare it and nothing else (decision
+/// 1903). The banner said "spell casts will refuse" flat, which is wrong for every other row.
 const UNIT_FLAG_SILENCED: u32 = 0x0000_2000;
 
 /// The GM faction template vmangos swaps in with GM mode (`SetFactionTemplateId(35)`).
@@ -415,16 +441,27 @@ fn findings(
         ));
     }
 
-    let blocked: Vec<&str> = MOVE_BLOCKERS
-        .iter()
-        .filter(|(bit, _)| unit_flags & bit != 0)
-        .map(|(_, label)| *label)
-        .collect();
+    let hits = |table: &[(u32, &'static str)]| -> Vec<&'static str> {
+        table
+            .iter()
+            .filter(|(bit, _)| unit_flags & bit != 0)
+            .map(|(_, label)| *label)
+            .collect()
+    };
+    let blocked = hits(MOVE_BLOCKERS);
     if !blocked.is_empty() {
         out.push(format!(
             "MOVEMENT IS SERVER-BLOCKED — {} — the controller will look broken because the server \
              is refusing (or driving) the movement, not because the mover is.",
             blocked.join(", ")
+        ));
+    }
+    let disabled = hits(ABILITY_BLOCKERS);
+    if !disabled.is_empty() {
+        out.push(format!(
+            "ABILITIES ARE SERVER-BLOCKED — {} — the mover is fine; what will not work is the \
+             action bar and the swing.",
+            disabled.join(", ")
         ));
     }
 
@@ -436,7 +473,11 @@ fn findings(
         );
     }
     if unit_flags & UNIT_FLAG_SILENCED != 0 {
-        out.push("SILENCED — spell casts will refuse for as long as the aura holds.".into());
+        out.push(
+            "SILENCED — the spells that declare `PreventionType = 1` (most casts) refuse locally \
+             for as long as the aura holds; everything else is unaffected."
+                .into(),
+        );
     }
     out
 }
@@ -599,5 +640,36 @@ mod tests {
         let out = findings(&f, ShieldReport::Armed);
         assert_eq!(out.len(), 1);
         assert!(out[0].contains("STUNNED") && out[0].contains("TAXI FLIGHT"));
+    }
+
+    /// **The two tables are separate lines, and neither claims the other's symptom** (decision
+    /// 1903). PACIFIED and DISARMED touch no movement gate — sending a session to hunt a mover
+    /// bug is the whole cost of filing them under one banner, and this is what makes that
+    /// regression loud.
+    #[test]
+    fn ability_blockers_are_their_own_line_and_never_say_movement() {
+        let disarmed = player(&[(HEALTH, 60), (MAXHEALTH, 60), (UNIT_FLAGS, 0x0020_0000)]);
+        let out = findings(&disarmed, ShieldReport::Armed);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].starts_with("ABILITIES ARE SERVER-BLOCKED"));
+        assert!(out[0].contains("DISARMED"));
+        assert!(
+            !out[0].contains("MOVEMENT"),
+            "a disarm is not a movement block: {}",
+            out[0]
+        );
+
+        // Both halves at once: two lines, each naming only its own flags.
+        let both = player(&[
+            (HEALTH, 60),
+            (MAXHEALTH, 60),
+            (UNIT_FLAGS, 0x0004_0000 | 0x0002_0000), // stunned + pacified
+        ]);
+        let out = findings(&both, ShieldReport::Armed);
+        assert_eq!(out.len(), 2);
+        let movement = out.iter().find(|l| l.starts_with("MOVEMENT")).unwrap();
+        let abilities = out.iter().find(|l| l.starts_with("ABILITIES")).unwrap();
+        assert!(movement.contains("STUNNED") && !movement.contains("PACIFIED"));
+        assert!(abilities.contains("PACIFIED") && !abilities.contains("STUNNED"));
     }
 }

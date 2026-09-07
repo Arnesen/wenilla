@@ -299,6 +299,10 @@ fn zone_audio(
     config: Res<SoundConfig>,
     clock: Res<GameClock>,
     time: Res<Time>,
+    // The stream watch's own clock — WALL, not the paced virtual one `time` carries (see
+    // `watch_glue_music`). Kept as a second param because `time` above schedules zone audio and
+    // wants the clock it already has.
+    real: Res<Time<bevy::time::Real>>,
     world: benilla_world::world_point::WorldPoint,
     interior: Res<super::interior::CurrentInterior>,
     weather: Res<super::weather::WeatherAmbience>,
@@ -506,7 +510,7 @@ fn zone_audio(
     // isn't watched — under the load bursts that starve a decoder, the *playing* slot's watch is
     // the indicator either way (every stream decoder shares the same scheduling class).
     if let Some(h) = &zone.music {
-        zone.music_watch.feed(h, f64::from(time.delta_secs()));
+        zone.music_watch.feed(h, f64::from(real.delta_secs()));
     }
     // Ambience runs the incoming leg of its 5.0 s crossfade as a per-frame fade-in envelope (the
     // per-frame feed would otherwise stomp a handle-level ramp to full); it clears itself at full.

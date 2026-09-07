@@ -156,6 +156,25 @@ impl RelayChain {
         fire_ms
     }
 
+    /// **The sender skipped time** (`MSG_MOVE_TIME_SKIPPED`, decision 1935): advance this chain's
+    /// copy of the mover's wire clock by `lag_ms`, without scheduling anything. The reference does
+    /// exactly this and nothing else — `0x603b40` resolves the unit and `0x61ab90` runs
+    /// `[CMovement+0xac] += lag`, which is this field.
+    ///
+    /// It has to be applied even though no pose moved, because [`Self::schedule`] pays the whole
+    /// chain off `last_wire_ms`: leave it short and the mover's next real packet reads as a `step`
+    /// `lag` ms larger than it was, buys that much extra `wire_delta`, and fires `lag` late — a
+    /// hitch on one unit that looks like packet loss and isn't. Wrapping, for
+    /// [`Self::schedule`]'s reason: the stamp is a `u32` ms clock that wraps every 49.7 days.
+    ///
+    /// A chain that has never seen a packet is left alone: there is no reference stamp to advance
+    /// yet, and the first real packet seeds both cells from itself.
+    pub(crate) fn skip_time(&mut self, lag_ms: u32) {
+        if self.seeded {
+            self.last_wire_ms = self.last_wire_ms.wrapping_add(lag_ms);
+        }
+    }
+
     /// Record this packet's lateness and return the window's worst (`0x618b50`): store
     /// `base + lateness` at the cursor, advance it mod 32, and return the max over all 32 slots (the
     /// entry just written included — the reference seeds its scan with it and walks the whole ring).
@@ -168,7 +187,7 @@ impl RelayChain {
 
     /// The scheduling lead this move got — `fire − arrival`, i.e. how long the dead-reckon has to
     /// cover before the pose lands. Negative means the move was already due and applies at arrival.
-    /// Trace/diagnostic only ([`super::remote::trace_schedule`]).
+    /// Trace/diagnostic only (`super::remote::trace_schedule`).
     pub(crate) fn lead_ms(&self, now_ms: f64) -> f64 {
         self.last_fire_ms - now_ms
     }

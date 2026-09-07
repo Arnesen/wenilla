@@ -15,7 +15,7 @@ use benilla_protocol::EntityKind;
 
 use crate::go_templates::GameObjectTemplates;
 use crate::names::NameCache;
-use crate::net::{GuidIndex, NetEntity};
+use crate::net::{GuidIndex, NetEntity, ObjectStore};
 use crate::ui_pass::{UiQuad, UiQuads, UvRect};
 
 use super::{party_member_pos, BlipCtx, MinimapBlipHover, TrackedCandidates, BLIP_BASIS_PX};
@@ -49,31 +49,71 @@ fn quest_dot_cell(status: u32) -> Option<[f32; 4]> {
     (status == 7).then_some([0.75, 1.0, 0.0, 0.25])
 }
 
+/// The three preconditions `0x4eaa90` applies to a **UNIT or PLAYER** before either dot category
+/// is even chosen — byte-pinned in wow-re `questgiver-marker.md` §W15 Q2, decision 1906. They sit
+/// upstream of the `cmp [edi+0xcb8],7` at `0x4eac31`, whose only predecessor is the fall-through,
+/// so they gate the gold **quest** dot (cell 3) and the red **tracking** dot (cell 1) alike. They
+/// do **not** touch the GameObject leg (cell 0) or the party dots (cell 4), which are reached by
+/// other paths entirely.
+///
+/// A candidate with no descriptor yet fails, which is the same answer the reference's own read of
+/// an un-streamed unit would give (a zeroed health field is `<= 0`) — and it lasts one drain, since
+/// `net/apply` seeds the store at the tail of the drain that spawned the entity.
+fn unit_dot_eligible(store: Option<&ObjectStore>, me: Option<u64>) -> bool {
+    let Some(f) = store.map(|s| &s.0) else {
+        return false;
+    };
+    // 1. `0x4eac19 mov ecx,[eax+0x40]; test ecx,ecx; 0x4eac1e 0f 8e jle` — a **signed** `<= 0` on
+    //    `UNIT_FIELD_HEALTH` (`0f 8e`, not `0f 86`). The dead get no dot of any kind.
+    if f.unit_health().unwrap_or(0) as i32 <= 0 {
+        return false;
+    }
+    // 2. `UNIT_FIELD_CHARMEDBY` when non-zero, else `UNIT_FIELD_SUMMONEDBY`, both halves compared
+    //    against the active player's guid (`0x468550`) — and **equality is the reject**: your own
+    //    pet, minion or charmed victim is never a blip. (This is not the classifier's self-GUID
+    //    check; there are two other, separate ones.)
+    let owner = match f.unit_charmed_by() {
+        Some(g) if g != 0 => g,
+        _ => f.unit_summoned_by().unwrap_or(0),
+    };
+    if owner != 0 && Some(owner) == me {
+        return false;
+    }
+    // 3. `byte [eax+0x213] & 4` — `UNIT_FIELD_BYTES_1` byte 3 bit 2, the only `& 4` site on that
+    //    byte image-wide. The bit is verified; its *name* is vmangos's.
+    !f.unit_is_untrackable()
+}
+
 /// Draw a gold dot per quest-giver at status 7, at the unit's live position, hard-culled at
 /// the view radius in 3-D world distance (`range² < dx²+dy²+dz²` skips — no rim ride);
 /// records a hover hit with the guid. Called AFTER the player arrow: dots draw last, on top.
+///
+/// Walks the candidate set rather than the status map — the classifier's own shape (it is a
+/// per-object callback, not a per-status one), and the only way to reach each object's descriptor,
+/// which [`unit_dot_eligible`] needs.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::minimap) fn emit_quest_dots(
     ctx: &BlipCtx,
     statuses: &HashMap<u64, u32>,
-    guids: &GuidIndex,
-    unit_pos: &Query<&GlobalTransform, With<NetEntity>>,
+    candidates: &TrackedCandidates,
+    self_guid: Option<u64>,
     icons: &Handle<Image>,
     player_indoors: bool,
     unit_indoors: impl Fn(Vec3) -> bool,
     quads: &mut UiQuads,
     hover: &mut MinimapBlipHover,
 ) {
-    for (&npc, &status) in statuses {
-        let Some(cell) = quest_dot_cell(status) else {
+    for (guid, net, tf, store) in candidates.iter() {
+        let npc = guid.0;
+        if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
+            continue; // the GameObject leg never reaches the `== 7` compare (§W14.9)
+        }
+        let Some(cell) = statuses.get(&npc).copied().and_then(quest_dot_cell) else {
             continue;
         };
-        let Some(&entity) = guids.0.get(&npc) else {
-            continue; // despawned / out of range — no live position to mark
-        };
-        let Ok(tf) = unit_pos.get(entity) else {
+        if !unit_dot_eligible(store, self_guid) {
             continue;
-        };
+        }
         let w = bevy_to_wow(tf.translation());
         let d3 =
             ((w[0] - ctx.wx).powi(2) + (w[1] - ctx.wy).powi(2) + (w[2] - ctx.wz).powi(2)).sqrt();
@@ -199,6 +239,7 @@ pub(in crate::minimap) fn emit_tracking_dots(
     tracking: SelfTracking,
     candidates: &TrackedCandidates,
     statuses: &HashMap<u64, u32>,
+    self_guid: Option<u64>,
     names: &NameCache,
     templates: &GameObjectTemplates,
     locks: Option<&LockCatalog>,
@@ -244,10 +285,19 @@ pub(in crate::minimap) fn emit_tracking_dots(
         }
     };
     // Cell 0 — tracked GameObjects (gold): template lockId through Lock.dbc.
+    //
+    // **No quest-status precedence on this leg** (decision 1872). This loop used to skip a
+    // GameObject whose status was 7, mirroring the unit loop below — but the classifier's
+    // `cmp dword ptr [edi+0xcb8],7` at `0x4eac31` is reachable **only** from the UNIT and PLAYER
+    // legs (machine-enumerated predecessors, wow-re `minimap-poi-questdot.md` via
+    // `questgiver-marker.md` §W14.9): the GameObject leg at `0x4eab43` falls straight into
+    // `0x5ed2b0`, GameObject *tracking*, and emits category 0. A GameObject never draws a quest
+    // dot in the reference, so nothing about a quest status may suppress its tracking dot — and
+    // a GameObject can no longer *hold* a status here anyway (`net/apply` drops it, §W14.1).
     if tracking.resources != 0 {
         if let Some(locks) = locks {
             for (guid, net, tf, _) in candidates.iter() {
-                if net.kind != EntityKind::GameObject || statuses.get(&guid.0).copied() == Some(7) {
+                if net.kind != EntityKind::GameObject {
                     continue;
                 }
                 let Some(t) = templates.get(guid.0) else {
@@ -262,6 +312,11 @@ pub(in crate::minimap) fn emit_tracking_dots(
     // Cell 1 — tracked units (red): the 3-way creature-type resolver + the always-show pair.
     for (guid, net, tf, store) in candidates.iter() {
         if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
+            continue;
+        }
+        // The same three preconditions the quest dot passes — they are upstream of the branch
+        // that chooses between the two categories, so neither category outruns them (§W15 Q2b).
+        if !unit_dot_eligible(store, self_guid) {
             continue;
         }
         if statuses.get(&guid.0).copied() == Some(7) {
@@ -333,6 +388,88 @@ pub(in crate::minimap) fn emit_party_dots(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The three preconditions upstream of BOTH dot categories** (decision 1906, wow-re
+    /// `questgiver-marker.md` §W15 Q2). They live in `0x4eaa90` between the type gate and the
+    /// `cmp [edi+0xcb8],7`, whose only predecessor is the fall-through — so a unit that fails any
+    /// of them draws neither the gold quest dot nor the red tracking dot. benilla had none of them.
+    ///
+    /// The control is the first row: an ordinary live creature still passes, which is what would
+    /// catch a predicate written one bit too wide and blanked the minimap.
+    #[test]
+    fn the_dead_our_own_minions_and_the_untrackable_draw_no_dot_of_either_kind() {
+        use crate::net::ObjectStore;
+        use benilla_protocol::ObjectFields;
+
+        const FIELD_HEALTH: u16 = 22; // UNIT_FIELD_HEALTH
+        const FIELD_SUMMONEDBY: u16 = 12; // UNIT_FIELD_SUMMONEDBY (2 dwords)
+        const FIELD_CHARMEDBY: u16 = 10; // UNIT_FIELD_CHARMEDBY (2 dwords)
+        const FIELD_BYTES_1: u16 = 138;
+        /// `UNIT_FIELD_BYTES_1` byte 3 bit 2 — the `& 4` the classifier tests.
+        const UNTRACKABLE: u32 = 0x4 << 24;
+        const ME: u64 = 0x0000_0000_0000_0007;
+        const SOMEONE_ELSE: u64 = 0x0000_0000_0000_0042;
+
+        let store = |pairs: &[(u16, u32)]| ObjectStore(ObjectFields::from_pairs(pairs));
+        let alive = [(FIELD_HEALTH, 100u32)];
+        let with = |extra: &[(u16, u32)]| {
+            let mut v = alive.to_vec();
+            v.extend_from_slice(extra);
+            store(&v)
+        };
+        let lo = |g: u64| (g & 0xffff_ffff) as u32;
+        let hi = |g: u64| (g >> 32) as u32;
+
+        assert!(
+            unit_dot_eligible(Some(&with(&[])), Some(ME)),
+            "the control: an ordinary live creature still takes a dot"
+        );
+        assert!(
+            !unit_dot_eligible(Some(&store(&[(FIELD_HEALTH, 0)])), Some(ME)),
+            "the dead draw nothing — a SIGNED `<= 0` at 0x4eac1e"
+        );
+        assert!(
+            !unit_dot_eligible(None, Some(ME)),
+            "…and so does a candidate whose descriptor has not landed"
+        );
+        assert!(
+            !unit_dot_eligible(
+                Some(&with(&[
+                    (FIELD_SUMMONEDBY, lo(ME)),
+                    (FIELD_SUMMONEDBY + 1, hi(ME)),
+                ])),
+                Some(ME)
+            ),
+            "our own minion is not a blip — equality on the owner guid is the REJECT"
+        );
+        assert!(
+            unit_dot_eligible(
+                Some(&with(&[
+                    (FIELD_SUMMONEDBY, lo(SOMEONE_ELSE)),
+                    (FIELD_SUMMONEDBY + 1, hi(SOMEONE_ELSE)),
+                ])),
+                Some(ME)
+            ),
+            "…but somebody ELSE's minion still is"
+        );
+        assert!(
+            !unit_dot_eligible(
+                Some(&with(&[
+                    (FIELD_CHARMEDBY, lo(ME)),
+                    (FIELD_CHARMEDBY + 1, hi(ME)),
+                    // A non-zero CHARMEDBY wins outright — SUMMONEDBY is only the fallback.
+                    (FIELD_SUMMONEDBY, lo(SOMEONE_ELSE)),
+                    (FIELD_SUMMONEDBY + 1, hi(SOMEONE_ELSE)),
+                ])),
+                Some(ME)
+            ),
+            "a unit WE charmed is not a blip, and charm outranks summon"
+        );
+        assert!(
+            !unit_dot_eligible(Some(&with(&[(FIELD_BYTES_1, UNTRACKABLE)])), Some(ME)),
+            "and the untrackable bit blanks it outright"
+        );
+    }
 
     /// Only status 7 dots (the gold cell 3). Status 6 — despite the vmangos "red dot"
     /// comment — draws nothing on the 1.12 client (byte-verified `==7` at 0x4eac31).

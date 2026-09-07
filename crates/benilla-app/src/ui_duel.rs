@@ -151,7 +151,13 @@ fn winner_line(fled: bool, winner: &str, loser: &str) -> String {
     } else {
         DUEL_WINNER_KNOCKOUT
     };
-    template.replace("%1$s", winner).replace("%2$s", loser)
+    benilla_ui::strings::fill(
+        template,
+        &[
+            benilla_ui::strings::Arg::S(winner),
+            benilla_ui::strings::Arg::S(loser),
+        ],
+    )
 }
 
 /// The net drain's `SessionEvent::Duel*` arms, factored here so the wire laws live beside the

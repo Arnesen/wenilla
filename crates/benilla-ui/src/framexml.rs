@@ -324,13 +324,31 @@ pub fn expand(
     templates: &HashMap<&str, &Element>,
     warnings: &mut Vec<String>,
 ) -> Element {
+    expand_known(element, templates, &HashSet::new(), warnings)
+}
+
+/// [`expand`], plus the names that are known to be **font objects** rather than element templates.
+///
+/// A `<FontString inherits="GameFontNormalSmall">` names a font, not a template, and the font is
+/// applied later by its own path (`apply_fontstring_font`) — so the name must be skipped here
+/// silently rather than warned as unknown. `Loader::expand_region` already made that distinction
+/// for an INSTANCE; it could not make it one level down, and stock `BuffFrame.xml` is exactly that
+/// case: `BuffButtonDurationTemplate` is a virtual `<FontString>` that inherits a font object, so
+/// every instance of it warned twenty-six times over (decision 1874).
+pub fn expand_known(
+    element: &Element,
+    templates: &HashMap<&str, &Element>,
+    fonts: &HashSet<&str>,
+    warnings: &mut Vec<String>,
+) -> Element {
     let mut active = HashSet::new();
-    expand_inner(element, templates, warnings, &mut active)
+    expand_inner(element, templates, fonts, warnings, &mut active)
 }
 
 fn expand_inner(
     element: &Element,
     templates: &HashMap<&str, &Element>,
+    fonts: &HashSet<&str>,
     warnings: &mut Vec<String>,
     active: &mut HashSet<String>,
 ) -> Element {
@@ -372,13 +390,17 @@ fn expand_inner(
                 .map(|(_, v)| *v)
         });
         let Some(template) = hit else {
-            warnings.push(format!(
-                "unknown template '{name}' referenced by inherits; skipping"
-            ));
+            // A FONT OBJECT is not an unknown template: it is a different namespace, applied by
+            // `apply_fontstring_font` after this. Skip it without a word (1874).
+            if !fonts.contains(name) {
+                warnings.push(format!(
+                    "unknown template '{name}' referenced by inherits; skipping"
+                ));
+            }
             active.remove(name);
             continue;
         };
-        let expanded_template = expand_inner(template, templates, warnings, active);
+        let expanded_template = expand_inner(template, templates, fonts, warnings, active);
         active.remove(name);
         base = Some(match base {
             None => expanded_template,

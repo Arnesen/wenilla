@@ -53,6 +53,11 @@ pub(crate) struct SwingImpact {
     /// 0525). `None` for `$CAH` (character attack-hit), the receive-time unresolved-attacker
     /// fallback, and flushes.
     pub(crate) natural: Option<u8>,
+    /// **The world point of the tag that fired this dispatch** — the reference's `edi =
+    /// [ebx+0x10]`, carried from `0x624862` through both weapon-sound legs and pushed at
+    /// `0x6248ef`/`0x624950` (wow-re `anim-event-position-law.md` §3). `None` for a flush and for
+    /// the receive-time fallback, where no tag fired at all and the reference has only the unit.
+    pub(crate) pos: Option<Vec3>,
 }
 
 /// A flush signal for an attacker's pending swing record — `SMSG_ATTACKSTOP`'s `0x624e40`
@@ -147,6 +152,7 @@ pub(super) fn route_swing_impacts(
                 swing: old.swing,
                 text_only: true,
                 natural: None,
+                pos: None, // a flush: no tag fired, so there is no point to carry
             });
         }
     }
@@ -174,6 +180,7 @@ pub(super) fn route_swing_impacts(
                     swing: p.swing,
                     text_only: false,
                     natural,
+                    pos: ev.pos,
                 });
             } else if benilla_assets::trace::enabled() {
                 benilla_assets::trace::line(
@@ -218,6 +225,7 @@ pub(super) fn route_swing_impacts(
                 swing: p.swing,
                 text_only: true,
                 natural: None,
+                pos: None,
             });
         }
     }
@@ -274,6 +282,7 @@ mod tests {
             entity,
             ident,
             data: 0,
+            pos: None,
         });
         app.update();
     }

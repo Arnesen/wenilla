@@ -18,9 +18,36 @@ use crate::ui_quest_share::QuestShare;
 use super::super::{ClientCommand, NetCommands};
 
 /// A questgiver dialog status for one NPC (`SMSG_QUESTGIVER_STATUS`) — the `!`/`?` marker's
-/// [`crate::messages::dialog_status`] value. Stored per guid now; the world marker is a later
-/// slice (decision 0088).
+/// [`crate::messages::dialog_status`] value, stored per guid for the marker layer and the minimap
+/// quest dot.
+///
+/// **A GameObject's answer is DROPPED, and that is the reference's own behaviour** (decision 1872,
+/// wow-re `questgiver-marker.md` §W14.1): the handler `0x5dc9f0` resolves the packet's GUID with
+/// `0x5dca22 mov ecx,8` — typemask `TYPEMASK_UNIT` — and `0x468460` is a bitmask AND against
+/// `OBJECT_FIELD_TYPE`, so a GameObject's `0x21` misses bit 3, returns NULL, and the handler exits
+/// at `0x5dca2f` without ever reaching the `UNIT_NPC_FLAGS` test, let alone the marker.
+///
+/// This is not a hypothetical branch here: benilla now *sends* the query for quest-flagged
+/// GameObjects, exactly as the reference does ([`crate::quest_markers`]), and **vmangos answers
+/// it** — `GetObjectByTypeMask(guid, TYPEMASK_CREATURE_OR_GAMEOBJECT)`, `QuestHandler.cpp:41` —
+/// where the real 1.12 service never did (zero GameObject GUIDs across 1292 in the sniff corpus).
+/// So the drop is what keeps a vmangos-only answer from putting a `!` over a wanted poster that
+/// the reference client leaves bare.
+///
+/// The test is the GUID's own shape rather than a live type lookup on purpose: it gives the same
+/// partition as typemask 8 for anything a server can send us, and it cannot be defeated by a status
+/// that arrives in the same drain as its object's create block (descriptors are flushed at the end
+/// of the drain, so a type test would read a not-yet-seeded store and drop a *unit's* answer that
+/// would then never be re-asked for). The reference's second conjunct — `UNIT_NPC_FLAGS & 0x2` on
+/// the resolved unit — is deliberately not modelled here for that same ordering reason;
+/// [`crate::quest_markers::query`]'s teardown leg covers the flag-clearing case from the other end.
 pub(super) fn quest_giver_status(npc: u64, status: u32, quest: &mut QuestGiver) {
+    use benilla_protocol::guid;
+    if !(guid::is_player(npc) || guid::is_creature_or_pet(npc)) {
+        debug!("net: dropping a non-unit questgiver status ({npc:#x} → {status}) — typemask 8");
+        quest.refuse_status(npc, status);
+        return;
+    }
     quest.set_status(npc, status);
 }
 
@@ -209,11 +236,10 @@ pub(super) fn quest_giver_failed(
                 .map(|t| t.title.clone())
         })
         .unwrap_or_default();
-    quest.push_message(UiError {
-        key: crate::ui_quest::questgiver_failed_key(reason),
-        fill_s: Some(title),
-        fill_d: None,
-    });
+    quest.push_message(UiError::s(
+        crate::ui_quest::questgiver_failed_key(reason),
+        title,
+    ));
     if matches!(reason, 4 | 50) {
         quest.push_message(UiError::key("ERR_INV_FULL"));
     }
@@ -247,6 +273,53 @@ pub(super) fn quest_confirm_accept(c: QuestConfirmAccept, share: &mut QuestShare
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The typemask-8 refusal** (decision 1872, wow-re `questgiver-marker.md` §W14.1). benilla
+    /// now sends `CMSG_QUESTGIVER_STATUS_QUERY` for quest-flagged GameObjects because the reference
+    /// does — and vmangos, unlike the real 1.12 service, *answers*. The reference's handler drops
+    /// that answer at the lookup (`0x5dca22 mov ecx,8`), so we must too: otherwise a wanted poster
+    /// would wear a gold `!` the reference client never puts there.
+    ///
+    /// The control is the half that must not change: a creature's answer, and a player's, still
+    /// land — typemask 8 is `TYPEMASK_UNIT`, which a creature (`0x9`) and a player (`0x19`) both
+    /// carry.
+    #[test]
+    fn a_gameobjects_dialog_status_is_dropped_and_a_creatures_is_not() {
+        use benilla_protocol::messages::dialog_status;
+
+        // The Goldshire `Wanted Poster` (HIGHGUID_GAMEOBJECT), an elevator (HIGHGUID_TRANSPORT —
+        // a GameObject in every respect but its high word), a creature, and a player.
+        const POSTER: u64 = 0xf110_0000_0044_68db;
+        const ELEVATOR: u64 = 0xf120_0000_0384_1092;
+        const CREATURE: u64 = 0xf130_0000_0060_0abc;
+        const PLAYER: u64 = 0x0000_0000_0000_0007;
+
+        let mut quest = QuestGiver::default();
+        for (guid, status) in [
+            (POSTER, dialog_status::AVAILABLE),
+            (ELEVATOR, dialog_status::AVAILABLE),
+            (CREATURE, dialog_status::AVAILABLE),
+            (PLAYER, dialog_status::REWARD2),
+        ] {
+            quest_giver_status(guid, status, &mut quest);
+        }
+        assert_eq!(
+            quest.status(POSTER),
+            None,
+            "a GameObject GUID misses typemask bit 3 and the handler exits at 0x5dca2f"
+        );
+        assert_eq!(quest.status(ELEVATOR), None, "…and so does a transport GO");
+        assert_eq!(
+            quest.status(CREATURE),
+            Some(dialog_status::AVAILABLE),
+            "the control: a creature's answer is what this packet is FOR"
+        );
+        assert_eq!(
+            quest.status(PLAYER),
+            Some(dialog_status::REWARD2),
+            "and a player passes the same typemask, as it does in the reference"
+        );
+    }
 
     fn open_detail(quest_id: u32) -> QuestGiver {
         let mut giver = QuestGiver::default();
@@ -303,11 +376,7 @@ mod tests {
         );
         assert_eq!(
             msgs[0],
-            UiError {
-                key: "ERR_QUEST_FAILED_BAG_FULL_S",
-                fill_s: Some("A Threat Within".into()),
-                fill_d: None,
-            }
+            UiError::s("ERR_QUEST_FAILED_BAG_FULL_S", "A Threat Within")
         );
         assert_eq!(
             benilla_ui::messages::kind_of(msgs[1].key),
@@ -347,7 +416,7 @@ mod tests {
         quest_giver_failed(999, 17, &mut giver, &mut log, &commands);
         let msgs = giver.take_messages();
         assert_eq!(msgs[0].key, "ERR_QUEST_FAILED_MAX_COUNT_S");
-        assert_eq!(msgs[0].fill_s.as_deref(), Some(""));
+        assert_eq!(msgs[0].arg_s(), Some(""));
     }
 
     // ── The share's BUSY refusal (decision 1738) ─────────────────────────────────────────────────

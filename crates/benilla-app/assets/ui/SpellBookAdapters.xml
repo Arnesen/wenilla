@@ -1,0 +1,40 @@
+<Ui>
+    <!--
+        BENILLA_ALLOW_OWN_UI=1 — the director's two LOOK deviations on the pet page's autocast
+        button, over the reference's own SpellBookFrame.xml (decisions 1392/1393; re-seated by 2014
+        onto the reference's own Model now that this engine renders it — 2013).
+
+        Since 2013 the `$parentAutoCast` <Model> on every SpellButton draws its own file
+        (Interface\Buttons\UI-AutoCastButton.mdx) as a tile: four bones chasing the corners of a
+        0.02-unit square, four spline emitters trailing GlowStar sparks off them, on the pane's own
+        clock. The reference declares it 36x36 at CENTER (1,1) at scale 1.22 — a 0.87x rim that
+        floats clear of the viewport edge, never clipped, washing the icon; the real 1.12 client
+        looks the same way (director-checked, 1392), so this is taste, not fidelity, and the
+        director chose the pet button's proportions instead:
+
+        · the shine pane squared on the button — 37x37 at CENTER (0,0), scale 1.48 — so the rim
+          runs ON the viewport edge (1.024x, the pet button's own ratio) and the tile's cell, the
+          widget's own scissor, halves every star; and so the glow and the brackets share a centre
+          (1393's "top and right are off" was the reference's own +1,+1);
+        · the corner brackets at 71.53 rather than the reference's 60 — the art fills 33/64 of
+          UI-AutoCastableOverlay.blp, and 71.53 = 37 x 58/30 puts the bracket square on this
+          button's corners at the pet button's 0.997x.
+
+        Reverting the widget to 1.12 exactly is: overlay 60, pane 36x36 CENTER (1,1), scale 1.22 —
+        i.e. deleting this file. Nothing else here: the reference's file is sourced unedited.
+    -->
+    <Script><![CDATA[
+        for i = 1, 12 do
+            local button = getglobal("SpellButton" .. i)
+            local overlay = getglobal("SpellButton" .. i .. "AutoCastable")
+            overlay:SetWidth(71.53)
+            overlay:SetHeight(71.53)
+            local pane = getglobal("SpellButton" .. i .. "AutoCast")
+            pane:SetWidth(37)
+            pane:SetHeight(37)
+            pane:ClearAllPoints()
+            pane:SetPoint("CENTER", button, "CENTER", 0, 0)
+            pane:SetModelScale(1.48)
+        end
+    ]]></Script>
+</Ui>

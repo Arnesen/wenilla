@@ -58,7 +58,9 @@ fn harness() -> UiScript {
 /// the other window the compare flow crosses, and `ItemRef.xml`, which declares the chat-link
 /// router's own `ItemRefTooltip`. Both were in this harness's hand-copied list before 1751; the
 /// manifest's order is the one kept (`FrameXML.toc` 63 → 77).
-const ROUTER_UI: [&str; 2] = [
+const ROUTER_UI: [&str; 4] = [
+    "ScrollTemplates.xml", // our scroll kit + the placeholder icon
+    "Interface\\FrameXML\\CharacterFrameTemplates.xml",
     "Interface\\FrameXML\\MerchantFrame.xml",
     "Interface\\FrameXML\\ItemRef.xml",
 ];
@@ -102,6 +104,7 @@ fn harness_with_bags() -> UiScript {
 fn seed_items(s: &mut UiScript) {
     let mut inv: InventorySlots = Default::default();
     inv[1] = Some(InvSlotView {
+        duration_ms: None,
         already_bound: false,
         bar_placeable: true,
         durability: None,
@@ -148,6 +151,7 @@ fn seed_items(s: &mut UiScript) {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -308,6 +312,7 @@ fn doll_hover_renders_the_live_instance_and_never_self_compares() {
     // Break the equipped helm: instance pair (0, 40); the template stays authored-full.
     let mut inv: InventorySlots = Default::default();
     inv[1] = Some(InvSlotView {
+        duration_ms: None,
         already_bound: false,
         bar_placeable: true,
         durability: Some((0, 40)),

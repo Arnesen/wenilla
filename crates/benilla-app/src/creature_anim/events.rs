@@ -27,6 +27,42 @@ pub(crate) struct AnimSoundEvent {
     pub(crate) ident: [u8; 4],
     /// The tag payload (a SoundEntries id for `$SND`/`$DSL`/`$DSO`; 0 otherwise).
     pub(crate) data: u32,
+    /// **Where the key fired** — the reference's own `placementMatrix · (boneMatrix[event.bone] ·
+    /// event.position)`, resolved here at the fire and carried by value exactly as the M2 event
+    /// kernel `0x719370` snapshots it into the deferred callback record that every dispatcher
+    /// (`0x5ffbd0` units, `0x5f3e20` GameObjects, `0x6951e0` placed models) then reads (decision
+    /// 1904; wow-re `spell/scratch/camera-shake-producers.md` §5).
+    ///
+    /// It is emphatically not the object's origin: corpus-wide 149 of 244 `$DSL` records sit off
+    /// it, out to **67.6 yd** on `Maraudon_Waterfall01.m2`, and the six `$CSD` records every
+    /// player model authors ride the head. `None` only when the model carries no rig *and* no
+    /// world frame to place it in — the consumer then falls back to the object's own transform,
+    /// which is what all of them used to do unconditionally.
+    pub(crate) pos: Option<Vec3>,
+}
+
+/// The frame a scanner resolves a fired key's world point in — the two exact cases, named.
+///
+/// A **rigged** model composes the record's bone-local offset through that bone's live joint
+/// global, which is the kernel's `boneMatrix[bone] · position` and then the placement. A model
+/// with **no rig** has no bone matrices at all, and with no keys every bone composes to the
+/// identity — so `placement · position` is not an approximation of the kernel's quantity, it *is*
+/// it. That second case is the whole placed-doodad population: 0 of 244 `$DSL` records ride a bone
+/// any sequence keys (`benilla-extract eventmarkerscan`).
+pub(crate) struct EventFrame<'a> {
+    /// The model's own world frame — the reference's placement matrix.
+    pub(crate) world: &'a GlobalTransform,
+    /// The composed pose and its joints root, for a model that has a rig.
+    pub(crate) rig: Option<(&'a benilla_world::rig_anim::RigPose, &'a GlobalTransform)>,
+}
+
+impl EventFrame<'_> {
+    /// The world point for one baked key.
+    fn point(&self, e: &benilla_assets::ClipEvent) -> Vec3 {
+        self.rig
+            .and_then(|(pose, root)| pose.posed_point(root, e.bone, e.offset))
+            .unwrap_or_else(|| self.world.transform_point(e.point))
+    }
 }
 
 /// A footfall is **two independent channels**, and a tag belongs to exactly one of them — the
@@ -147,7 +183,12 @@ pub(super) fn fire_anim_events(
         &AnimDriver,
         Has<benilla_world::rig_anim::AnimParked>,
         Option<&crate::net::Guid>,
+        &GlobalTransform,
+        Option<&benilla_world::rig_anim::RigPose>,
     )>,
+    // The joint roots the composed poses hang off — read, never spawned (decision 1355's pure
+    // position read).
+    globals: Query<&GlobalTransform>,
     mut last: Local<TrackMemory>,
     // The **masked overlay** track's own memory (decision 0087): a swing/emote routed to the
     // SpineLow overlay plays *beside* the base, so its events (a swing's `$CSS`, an emote's `$CSD`)
@@ -158,7 +199,7 @@ pub(super) fn fire_anim_events(
     names: Res<crate::names::NameCache>,
 ) {
     let catalog = anim_data.as_deref().map(|d| &d.0);
-    for (entity, anims, player, drv, parked, guid) in &units {
+    for (entity, anims, player, drv, parked, guid, world, pose) in &units {
         // The election's TICK half (decision 1482): a parked unit's event tracks are not
         // scanned — the reference's pass-2 walk never inserts the model into the tick worklist
         // (`0x683dd0` walk 2 skips `0x710b90`) — unless its cached template carries
@@ -185,6 +226,10 @@ pub(super) fn fire_anim_events(
         // variation clips, each its own node with its own event track). During a same-id cross-fade
         // (swing variation A fading under fresh variation B) the newest play — the smallest seek —
         // is the track; the node-keyed memory then treats the switch as a clip change.
+        let frame = EventFrame {
+            world,
+            rig: pose.and_then(|p| Some((p, globals.get(p.joints_root).ok()?))),
+        };
         if let Some(id) = drv.resolved_anim(anims, catalog) {
             let playing = anims
                 .clips
@@ -194,7 +239,7 @@ pub(super) fn fire_anim_events(
                 .min_by(|a, b| a.1.total_cmp(&b.1));
             if let Some((clip, cur)) = playing {
                 if let Some(prev) = advance_track(&mut last, entity, clip.node, cur) {
-                    scan_events(clip, entity, prev, cur, &mut out);
+                    scan_events(clip, entity, prev, cur, &frame, &mut out);
                 }
             }
         }
@@ -214,7 +259,7 @@ pub(super) fn fire_anim_events(
                 if let Some(active) = player.animation(ov.node) {
                     let cur = active.seek_time();
                     if let Some(prev) = advance_track(&mut last_overlay, entity, ov.node, cur) {
-                        scan_events(clip, entity, prev, cur, &mut out);
+                        scan_events(clip, entity, prev, cur, &frame, &mut out);
                     }
                 }
             }
@@ -282,6 +327,7 @@ pub(crate) fn scan_events(
     entity: Entity,
     prev: f32,
     cur: f32,
+    frame: &EventFrame<'_>,
     out: &mut MessageWriter<AnimSoundEvent>,
 ) {
     if clip.events.is_empty() || cur == prev {
@@ -291,17 +337,28 @@ pub(crate) fn scan_events(
     let mut fire = |lo: f32, hi: f32| {
         for e in clip.events.iter() {
             if e.time > lo && e.time <= hi {
+                let pos = frame.point(e);
                 if traced {
                     benilla_assets::trace::line(
                         "aev",
                         &format!(
-                            "{} unit={entity} anim={} key={:.3}s data={} clip={:.3}s{}",
+                            "{} unit={entity} anim={} key={:.3}s data={} clip={:.3}s{} \
+                             bone={} at=[{:.2},{:.2},{:.2}] off={:.2}",
                             String::from_utf8_lossy(&e.ident),
                             clip.anim_id,
                             e.time,
                             e.data,
                             clip.duration,
                             if clip.looping { " loop" } else { "" },
+                            e.bone,
+                            pos.x,
+                            pos.y,
+                            pos.z,
+                            // How far the key fired from the model's own origin — the whole
+                            // question this line was extended to answer (decision 1904). A
+                            // non-zero `off` is the marker being honoured; all-zero across a run
+                            // is the model-root fallback, which is what it used to be everywhere.
+                            pos.distance(frame.world.translation()),
                         ),
                     );
                 }
@@ -309,6 +366,7 @@ pub(crate) fn scan_events(
                     entity,
                     ident: e.ident,
                     data: e.data,
+                    pos: Some(pos),
                 });
             }
         }
@@ -506,15 +564,21 @@ mod tests {
             bounds_min: bevy::prelude::Vec3::ZERO,
             bounds_max: bevy::prelude::Vec3::ZERO,
             events: vec![
-                benilla_formats::AnimEvent {
+                benilla_assets::ClipEvent {
                     time: 0.0,
                     ident: *b"$SL0",
                     data: 0,
+                    bone: 0,
+                    offset: bevy::prelude::Vec3::ZERO,
+                    point: bevy::prelude::Vec3::ZERO,
                 },
-                benilla_formats::AnimEvent {
+                benilla_assets::ClipEvent {
                     time: 0.0,
                     ident: *b"$SR0",
                     data: 0,
+                    bone: 0,
+                    offset: bevy::prelude::Vec3::ZERO,
+                    point: bevy::prelude::Vec3::ZERO,
                 },
             ]
             .into(),
@@ -538,11 +602,80 @@ mod tests {
             .run_system_once(
                 |win: bevy::prelude::Res<Window>, mut out: MessageWriter<_>| {
                     let unit = Entity::from_raw_u32(1).expect("valid entity id");
-                    scan_events(&win.0, unit, win.1, win.2, &mut out);
+                    // Identity placement, no rig: the fired point is the key's own model-space
+                    // one, which is what this test's zero-offset keys make `Vec3::ZERO`.
+                    let world = GlobalTransform::IDENTITY;
+                    let frame = EventFrame {
+                        world: &world,
+                        rig: None,
+                    };
+                    scan_events(&win.0, unit, win.1, win.2, &frame, &mut out);
                 },
             )
             .expect("run_system_once");
         let mut msgs = world.resource_mut::<bevy::ecs::message::Messages<AnimSoundEvent>>();
         msgs.drain().map(|m| m.ident).collect()
+    }
+
+    /// **A rig-less model's event point is the placement times the key's own model-space point** —
+    /// and that is not an approximation of the kernel's `placementMatrix · (boneMatrix[bone] ·
+    /// position)`: with no keys every bone matrix composes to the identity, so the two are equal.
+    ///
+    /// This is the whole placed-doodad population, where the offsets are largest (149 of 244
+    /// shipped `$DSL` records sit off their origin, out to 67.6 yd) and **none** rides a bone any
+    /// sequence keys. A model *placed* somewhere and *scaled* must carry its marker with it, which
+    /// is what the transform below checks and what a bare `translation()` read could not do.
+    #[test]
+    fn a_rigless_models_key_fires_at_its_placed_and_scaled_point() {
+        use bevy::ecs::system::RunSystemOnce;
+        // A key 10 yd out along +x in model space, on a bone the model never animates.
+        let mut clip = shuffle_clip();
+        clip.events = vec![benilla_assets::ClipEvent {
+            time: 0.5,
+            ident: *b"$DSL",
+            data: 1,
+            bone: 3,
+            offset: Vec3::new(1.0, 2.0, 3.0), // ignored on this leg — there is no rig to compose
+            point: Vec3::new(10.0, 0.0, 0.0),
+        }]
+        .into();
+        // Placed 100 yd north, turned a quarter turn, and at half scale.
+        let placement = GlobalTransform::from(
+            Transform::from_xyz(0.0, 0.0, 100.0)
+                .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2))
+                .with_scale(Vec3::splat(0.5)),
+        );
+
+        #[derive(bevy::prelude::Resource)]
+        struct Placed(AnimClip, GlobalTransform);
+        let mut world = bevy::prelude::World::new();
+        world.init_resource::<bevy::ecs::message::Messages<AnimSoundEvent>>();
+        world.insert_resource(Placed(clip, placement));
+        world
+            .run_system_once(|p: bevy::prelude::Res<Placed>, mut out: MessageWriter<_>| {
+                let e = Entity::from_raw_u32(1).expect("valid entity id");
+                let frame = EventFrame {
+                    world: &p.1,
+                    rig: None,
+                };
+                scan_events(&p.0, e, 0.0, 1.0, &frame, &mut out);
+            })
+            .expect("run_system_once");
+        let mut msgs = world.resource_mut::<bevy::ecs::message::Messages<AnimSoundEvent>>();
+        let fired: Vec<_> = msgs.drain().collect();
+        assert_eq!(fired.len(), 1, "one key in the window");
+        let at = fired[0]
+            .pos
+            .expect("a rig-less model still resolves a point");
+        // Quarter turn about y takes +x to −z, halved by the scale, then translated.
+        let want = placement.transform_point(Vec3::new(10.0, 0.0, 0.0));
+        assert!(
+            at.distance(want) < 1e-4,
+            "fired at {at:?}, want {want:?} — the placement is not being applied"
+        );
+        assert!(
+            at.distance(placement.translation()) > 1.0,
+            "the point collapsed onto the model origin, which is the bug this exists to catch"
+        );
     }
 }

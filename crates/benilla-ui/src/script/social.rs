@@ -21,6 +21,8 @@
 
 use mlua::{Lua, Value};
 
+use super::binding_abi::string_arg;
+use super::who_sort::WhoSortChain;
 use super::Model;
 
 /// One friend row, already resolved for display — see the module doc on why the app resolves
@@ -78,6 +80,13 @@ pub struct SocialState {
     /// The last `/who` answer's *total* match count — `GetNumWhoResults`'s second return, which
     /// can exceed `who.len()` and is what drives the "(50 displayed)" suffix.
     pub who_total: u32,
+    /// The `/who` sort chain ([`WhoSortChain`]) as the app holds it. Pushed with the rows because
+    /// `SortWho` has to promote it and re-sort **inside the binding** — the reference's
+    /// `WHO_LIST_UPDATE` is synchronous, so the redraw it triggers reads the new order before the
+    /// click script returns, a tick before the app's own copy could have pushed it back.
+    /// [`super::SocialRequest::SortWho`] carries the same click to the app, whose next push then
+    /// agrees. Same shape as `SetSelectedFriend`'s (module doc).
+    pub who_sort: WhoSortChain,
 }
 
 /// Outbound social intents queued by the Era API, drained by the app
@@ -101,6 +110,9 @@ pub enum SocialRequest {
     /// `AddOrDelIgnore(name)` — `/ignore`'s toggle: ignore if not ignored, un-ignore if it is.
     /// The app decides which, because only it holds the list.
     ToggleIgnore(String),
+    /// `SetLookingForGroup(...)` committed a change: the slots as stored and the comment, for
+    /// `CMSG_SET_LOOKING_FOR_GROUP` (1961).
+    SetLookingForGroup { slots: [u32; 3], comment: String },
     /// `SetSelectedFriend(index)` — mirrored into the app so the next push agrees.
     SelectFriend(u32),
     /// `SetSelectedIgnore(index)`.
@@ -108,8 +120,10 @@ pub enum SocialRequest {
     /// `SendWho(filter)` — the raw filter string as typed; parsing it into wire fields needs the
     /// DBCs, so it happens app-side.
     Who(String),
-    /// `SortWho(sortType)` — `"name"`/`"level"`/`"class"`/`"zone"`/`"guild"`/`"race"`. Sorting
-    /// is client-side; the app re-orders its own results and pushes them back.
+    /// `SortWho(sortType)` — `"name"`/`"level"`/`"class"`/`"zone"`/`"guild"`/`"race"`, the raw
+    /// argument as the click passed it. Sorting is client-side and the binding has **already**
+    /// done it to the snapshot ([`SocialState::who_sort`]); this carries the same click to the
+    /// app so its authoritative chain promotes identically and the next push agrees.
     SortWho(String),
     /// `SetWhoToUI(flag)` — where the *next* `/who` answer goes: the Who frame (true) or the chat
     /// frame (false). The WhoFrame's own OnShow/OnHide drive it.
@@ -203,6 +217,102 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             model
                 .social_requests
                 .push(SocialRequest::SelectFriend(index));
+            Ok(())
+        })?,
+    )?;
+
+    // The LFG pair, as the bytes define it (wow-re `lfg-set-get-law.md`, 1961 — which corrects
+    // 1959's flag): the stock 1.12.1 FrameXML never calls either (FriendsFrame.xml's two call
+    // sites sit inside its l.1212-1301 XML comment), so this is an addon surface.
+    //
+    // `GetLookingForGroup()` → FOUR values: the three slot NAMES — each nil for a slot word whose
+    // id maps to nothing, and the reference's own pack (below) leaves every slot word 0, so nil
+    // is the only value a name can take here — then the comment, always a string. Never a
+    // number, never `1|nil`.
+    g.set(
+        "GetLookingForGroup",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(mlua::MultiValue::from_vec(vec![
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::String(lua.create_string(&model.lfg_comment)?),
+            ]))
+        })?,
+    )?;
+    // `SetLookingForGroup(type1, entry1, type2, entry2, type3, entry3, comment)` → nothing. Up to
+    // three pairs, read at arguments 1/3/5 and 2/4/6; the loop ENDS (it does not skip a pair) on
+    // a non-number type, a type >= 6, or an entry at or past the per-type eligible count, and the
+    // word it stores is `(type << 24) & entry` — an AND where every consumer decodes an OR
+    // (`0x4e9713`), so the stored word is 0 for every admissible input. Which is why the
+    // eligible-count table is not modelled: with the pack as it is, no admissible pair can store
+    // anything but 0, and an inadmissible one ends the loop leaving 0 — the slots never change.
+    // The comment is gated on argument 4 being a number or a string (`lua_isstring(L, 4)`) and
+    // read from argument 7 (`lua_tostring(L, 7)`, nil for an absent one); both immediates raw.
+    // The commit stores what changed and sends `CMSG_SET_LOOKING_FOR_GROUP` only then — so only a
+    // changed comment ever sends. `SStrCopy(…, 0x80)`: the comment keeps 127 bytes.
+    g.set(
+        "SetLookingForGroup",
+        lua.create_function(|lua, args: mlua::MultiValue| {
+            let args: Vec<Value> = args.into_iter().collect();
+            let arg = |i: usize| args.get(i - 1).cloned().unwrap_or(Value::Nil);
+            let number = |v: &Value| match v {
+                Value::Integer(i) => Some(*i as f64),
+                Value::Number(n) => Some(*n),
+                Value::String(s) => s.to_str().ok().and_then(|s| s.trim().parse::<f64>().ok()),
+                _ => None,
+            };
+            let mut slots = [0u32; 3];
+            for (slot, i) in slots.iter_mut().zip([1usize, 3, 5]) {
+                let Some(ty) = number(&arg(i)) else { break };
+                let ty = ty.trunc();
+                if !(0.0..6.0).contains(&ty) {
+                    break;
+                }
+                let entry = number(&arg(i + 1)).unwrap_or(0.0).trunc();
+                // `(type << 24) & entry`, the reference's own pack.
+                *slot = ((ty as u32) << 24) & (entry as i64 as u32);
+            }
+            let comment = match arg(4) {
+                Value::Integer(_) | Value::Number(_) | Value::String(_) => match arg(7) {
+                    Value::String(s) => Some(s.to_string_lossy()),
+                    Value::Integer(i) => Some(i.to_string()),
+                    Value::Number(n) => Some(n.to_string()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut changed = false;
+            if model.lfg_slots != slots {
+                model.lfg_slots = slots;
+                changed = true;
+            }
+            if let Some(comment) = comment {
+                let mut kept: String = comment
+                    .chars()
+                    .take_while({
+                        let mut n = 0usize;
+                        move |c| {
+                            n += c.len_utf8();
+                            n <= 127
+                        }
+                    })
+                    .collect();
+                kept.shrink_to_fit();
+                if model.lfg_comment != kept {
+                    model.lfg_comment = kept;
+                    changed = true;
+                }
+            }
+            if changed {
+                let slots = model.lfg_slots;
+                let comment = model.lfg_comment.clone();
+                model
+                    .social_requests
+                    .push(SocialRequest::SetLookingForGroup { slots, comment });
+            }
             Ok(())
         })?,
     )?;
@@ -377,14 +487,38 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SortWho(sortType) — the column-header and dropdown sorts.
+    // `SortWho(sortType) 0x5ad890` — the column-header and dropdown sorts, and three things at
+    // once (wow-re `who-list-sort-law.md`; decision 2030):
+    //
+    //  1. **promote** the key into the seven-slot chain, flipping its direction only if it was
+    //     already at the front — so a repeated click on the same header REVERSES;
+    //  2. **sort right here**, through the chain-walking comparator; and
+    //  3. fire `WHO_LIST_UPDATE` **synchronously**, inside the binding (`0x5ad9ed
+    //     mov ecx,0x184; call SignalEvent 0x703e50`), so `FriendsFrame_OnEvent` has already
+    //     re-read the list through `GetWhoInfo` by the time the header's OnClick plays its sound.
+    //     Queueing it would redraw a tick late — the visible half of B365.
+    //
+    // The intent still goes to the app, which owns the same chain and re-sorts the answers it
+    // receives; sorting the snapshot here is what makes the synchronous redraw show the new
+    // order, exactly as `SetSelectedFriend` mutates the snapshot it also queues (module doc).
+    //
+    // Zero return values, and a non-string/number argument RAISES with the client's own typo
+    // (`.rdata 0x85db88`) rather than answering nil — `0x5ad898`'s `0x6f3510` guard into
+    // `luaL_error`, [`super::binding_abi`]'s shape A.
     g.set(
         "SortWho",
-        lua.create_function(|lua, sort_type: String| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model
-                .social_requests
-                .push(SocialRequest::SortWho(sort_type));
+        lua.create_function(|lua, sort_type: Value| {
+            let sort_type = string_arg(lua, sort_type, "Usgae: SortWho(\"type\")")?;
+            {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let model = &mut *model;
+                model.social.who_sort.promote(&sort_type);
+                model.social.who_sort.sort(&mut model.social.who);
+                model
+                    .social_requests
+                    .push(SocialRequest::SortWho(sort_type));
+            }
+            super::tick::fire_event_into(lua, "WHO_LIST_UPDATE", Vec::new());
             Ok(())
         })?,
     )?;
@@ -421,5 +555,208 @@ fn clamp_index(index: i64, len: usize) -> u32 {
         index as u32
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SocialRequest, SocialState, WhoInfo};
+    use crate::script::UiScript;
+
+    fn who(name: &str, level: u32, zone: &str) -> WhoInfo {
+        WhoInfo {
+            name: name.to_string(),
+            guild: String::new(),
+            level,
+            race: "Human".to_string(),
+            class: "Warrior".to_string(),
+            zone: zone.to_string(),
+        }
+    }
+
+    /// A VM seeded with two hits and a watcher that records the order it can SEE from inside the
+    /// `WHO_LIST_UPDATE` handler — which is the only vantage point that can tell a synchronous
+    /// fire from a queued one.
+    fn seated() -> UiScript {
+        let mut s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            fired = 0
+            order = ""
+            local f = CreateFrame("Frame", "WhoWatcher")
+            f:RegisterEvent("WHO_LIST_UPDATE")
+            f:SetScript("OnEvent", function()
+                fired = fired + 1
+                order = ""
+                for i = 1, GetNumWhoResults() do
+                    order = order .. GetWhoInfo(i) .. ","
+                end
+            end)
+            "#,
+        )
+        .unwrap();
+        s.set_social(SocialState {
+            who: vec![
+                who("Galas", 60, "Elwynn Forest"),
+                who("Erdrin", 12, "Elwynn Forest"),
+            ],
+            who_total: 2,
+            ..Default::default()
+        });
+        s
+    }
+
+    /// **B365.** `SortWho` sorts the list it already holds, fires `WHO_LIST_UPDATE`
+    /// **synchronously** so the handler reads the NEW order (`0x5ad9ed`, `SignalEvent 0x703e50`
+    /// running every listener inline), and queues the same click for the app. A queued event
+    /// would leave `order` one click stale here — which is exactly what the bug looked like.
+    #[test]
+    fn sort_who_sorts_in_place_and_fires_the_event_synchronously() {
+        let mut s = seated();
+        assert_eq!(s.eval::<i64>("return fired").unwrap(), 0);
+
+        s.run(r#"SortWho("name")"#).unwrap();
+        assert_eq!(s.eval::<i64>("return fired").unwrap(), 1);
+        assert_eq!(
+            s.eval::<String>("return order").unwrap(),
+            "Erdrin,Galas,",
+            "the handler must already see the sorted list"
+        );
+        assert_eq!(
+            s.take_social_requests(),
+            vec![SocialRequest::SortWho("name".into())],
+            "and the app hears the same click, so its copy of the chain follows"
+        );
+        // Zero return values (`0x5ad9f8 xor eax,eax; ret`).
+        assert_eq!(
+            s.eval::<i64>(r#"return select('#', SortWho("name"))"#)
+                .unwrap(),
+            0
+        );
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
+    }
+
+    /// The visible half of the report: **clicking the same header twice reverses**, and clicking
+    /// a different one in between does not undo that — the direction is remembered per key and
+    /// flipped only when the key was already at the front of the chain.
+    #[test]
+    fn a_repeated_header_click_reverses_and_the_direction_is_remembered() {
+        let s = seated();
+        s.run(r#"SortWho("name")"#).unwrap();
+        assert_eq!(s.eval::<String>("return order").unwrap(), "Erdrin,Galas,");
+
+        s.run(r#"SortWho("name")"#).unwrap();
+        assert_eq!(
+            s.eval::<String>("return order").unwrap(),
+            "Galas,Erdrin,",
+            "the second click on the same key reverses it"
+        );
+
+        // Level ascending puts Erdrin (12) first; name is still descending behind it.
+        s.run(r#"SortWho("level")"#).unwrap();
+        assert_eq!(s.eval::<String>("return order").unwrap(), "Erdrin,Galas,");
+
+        // Back to name: promoted from slot 1, so it CARRIES its descending direction rather than
+        // flipping to ascending.
+        s.run(r#"SortWho("name")"#).unwrap();
+        assert_eq!(
+            s.eval::<String>("return order").unwrap(),
+            "Galas,Erdrin,",
+            "a key promoted from behind keeps the direction it was left in"
+        );
+        assert_eq!(
+            s.eval::<i64>("return fired").unwrap(),
+            4,
+            "one fire per click"
+        );
+    }
+
+    /// The argument ABI: a number is stringified and falls through to the name key; anything that
+    /// is neither number nor string RAISES with the client's own misspelt usage string
+    /// (`.rdata 0x85db88`), abandoning the caller's statement rather than answering nil.
+    #[test]
+    fn sort_who_takes_the_reference_argument_abi() {
+        let mut s = seated();
+        s.run("SortWho(5)").unwrap();
+        assert_eq!(
+            s.eval::<String>("return order").unwrap(),
+            "Erdrin,Galas,",
+            "an unrecognised key is the name key"
+        );
+        let _ = s.take_social_requests();
+
+        let err = s.run("SortWho({})").unwrap_err().to_string();
+        assert!(
+            err.contains(r#"Usgae: SortWho("type")"#),
+            "the reference's own typo, verbatim: {err}"
+        );
+        assert_eq!(
+            s.eval::<i64>("return fired").unwrap(),
+            1,
+            "a raised call sorts nothing and fires nothing"
+        );
+    }
+
+    /// The LFG pair as the bytes define it (1961, correcting 1959): four string-or-nil returns,
+    /// the slots zeroed by the reference's own pack, the comment from argument 7 behind the gate
+    /// on argument 4, and the wire only on a change.
+    #[test]
+    fn the_lfg_pair_stores_the_comment_and_sends_only_on_a_change() {
+        let mut s = UiScript::new().unwrap();
+        assert!(s
+            .eval::<bool>("return select('#', GetLookingForGroup()) == 4")
+            .unwrap());
+        assert!(s
+            .eval::<bool>(
+                "local a, b, c, d = GetLookingForGroup() return a == nil and b == nil and c == nil and d == \"\""
+            )
+            .unwrap());
+        // Three admissible pairs: every word packs to 0, nothing changed, nothing sent.
+        s.run("SetLookingForGroup(1, 3, 3, 12, 5, 0)").unwrap();
+        assert!(
+            s.take_social_requests().is_empty(),
+            "the AND pack stores zero"
+        );
+        // A comment behind the gate: argument 4 is a number, argument 7 the text.
+        s.run(r#"SetLookingForGroup(1, 3, 3, 12, 5, 0, "LF2M UBRS")"#)
+            .unwrap();
+        assert_eq!(
+            s.take_social_requests(),
+            vec![SocialRequest::SetLookingForGroup {
+                slots: [0; 3],
+                comment: "LF2M UBRS".into()
+            }]
+        );
+        assert_eq!(
+            s.eval::<String>("return select(4, GetLookingForGroup())")
+                .unwrap(),
+            "LF2M UBRS"
+        );
+        // The same comment again: no change, no send.
+        s.run(r#"SetLookingForGroup(1, 3, 3, 12, 5, 0, "LF2M UBRS")"#)
+            .unwrap();
+        assert!(s.take_social_requests().is_empty());
+        // Fewer than four arguments: the comment at 7 is never read.
+        s.run(r#"SetLookingForGroup(1, 3, nil, nil, nil, nil, "ignored")"#)
+            .unwrap();
+        assert!(s.take_social_requests().is_empty());
+        assert_eq!(
+            s.eval::<String>("return select(4, GetLookingForGroup())")
+                .unwrap(),
+            "LF2M UBRS"
+        );
+        // 127 bytes kept of a longer comment (`SStrCopy` into the 0x80 buffer).
+        s.run(&format!(
+            r#"SetLookingForGroup(0, 0, 0, 0, 0, 0, "{}")"#,
+            "x".repeat(200)
+        ))
+        .unwrap();
+        assert_eq!(
+            s.eval::<String>("return select(4, GetLookingForGroup())")
+                .unwrap()
+                .len(),
+            127
+        );
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
     }
 }

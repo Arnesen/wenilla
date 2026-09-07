@@ -18,11 +18,35 @@ use super::test_ui::load_ui as load_xml;
 fn load_combat_text() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "CombatText.xml");
-    s.run("SHOW_COMBAT_TEXT = \"1\"; CombatText_UpdateDisplayedMessages()")
-        .unwrap();
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua"); // ENTERING_COMBAT & co.
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml"); // TEXT()
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    // The reference's own addon, LoadOnDemand off the chain, loaded the way the options window
+    // loads it (1964).
+    super::test_ui::seat_chain_addon(&mut s, "Blizzard_CombatText");
+    // The family's saved-variable defaults are the options window's file-scope block (the
+    // reference's UIOptionsFrame.lua l.135-152, carried by our OptionsFrame.xml since 1964); a
+    // harness without that window seats the same block by hand, the master switched on.
+    s.run(
+        r#"SHOW_COMBAT_TEXT = "1"
+           COMBAT_TEXT_SHOW_LOW_HEALTH_MANA = "1"
+           COMBAT_TEXT_SHOW_AURAS = "1"
+           COMBAT_TEXT_SHOW_AURA_FADE = "0"
+           COMBAT_TEXT_SHOW_COMBAT_STATE = "1"
+           COMBAT_TEXT_SHOW_DODGE_PARRY_MISS = "0"
+           COMBAT_TEXT_SHOW_RESISTANCES = "0"
+           COMBAT_TEXT_SHOW_REPUTATION = "0"
+           COMBAT_TEXT_SHOW_REACTIVES = "0"
+           COMBAT_TEXT_SHOW_FRIENDLY_NAMES = "0"
+           COMBAT_TEXT_SHOW_COMBO_POINTS = "0"
+           COMBAT_TEXT_SHOW_MANA = "0"
+           COMBAT_TEXT_FLOAT_MODE = "1"
+           COMBAT_TEXT_SHOW_HONOR_GAINED = "1"
+           UIParentLoadAddOn("Blizzard_CombatText")
+           CombatText_UpdateDisplayedMessages()"#,
+    )
+    .unwrap();
     s.resolve();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     s
@@ -33,6 +57,7 @@ fn load_combat_text() -> UiScript {
 /// shows nothing.
 #[test]
 fn combat_text_damage_scrolls_and_expires() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = load_combat_text();
 
     // All 20 pool strings start hidden.
@@ -113,6 +138,7 @@ fn combat_text_damage_scrolls_and_expires() {
 /// scrolls away from the seat).
 #[test]
 fn combat_text_crit_pops_and_parks() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = load_combat_text();
     s.fire_event(
         "COMBAT_TEXT_UPDATE",
@@ -163,6 +189,7 @@ fn extracted_text_height(s: &mut UiScript, text: &str) -> Option<f32> {
 /// paints "Health Low" once and re-arms only after recovering above the threshold.
 #[test]
 fn combat_text_state_and_low_health_triggers() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = load_combat_text();
     s.fire_event("PLAYER_REGEN_DISABLED", vec![]);
     let ok: bool = s
@@ -231,6 +258,7 @@ fn combat_text_state_and_low_health_triggers() {
 /// so the ref constants stand verbatim.
 #[test]
 fn combat_text_crit_peak_is_uncapped() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = load_combat_text();
     let ok: bool = s
         .eval("return COMBAT_TEXT_LOCATIONS.startY == 384 and COMBAT_TEXT_LOCATIONS.endY == 609")
@@ -263,6 +291,7 @@ fn combat_text_crit_peak_is_uncapped() {
 /// something would otherwise have.
 #[test]
 fn combat_text_master_toggle_unregisters() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = load_combat_text();
     s.fire_event(
         "COMBAT_TEXT_UPDATE",
@@ -281,6 +310,10 @@ fn combat_text_master_toggle_unregisters() {
     s.run("SHOW_COMBAT_TEXT = \"0\"; CombatText_UpdateDisplayedMessages()")
         .unwrap();
     s.run("CombatText_ClearAnimationList()").unwrap();
+    // The stock `CombatText_ClearAnimationList` hides the strings and leaves the list to the
+    // ticker (our transcription had emptied it): "nothing paints" is the list not growing and no
+    // string on screen.
+    let before: i64 = s.eval("return getn(COMBAT_TEXT_TO_ANIMATE)").unwrap();
     s.fire_event(
         "COMBAT_TEXT_UPDATE",
         vec![
@@ -289,7 +322,9 @@ fn combat_text_master_toggle_unregisters() {
         ],
     );
     let none: bool = s
-        .eval("return getn(COMBAT_TEXT_TO_ANIMATE) == 0 and CombatText1:IsShown() == nil")
+        .eval(&format!(
+            "return getn(COMBAT_TEXT_TO_ANIMATE) == {before} and CombatText1:IsShown() == nil"
+        ))
         .unwrap();
     assert!(none, "disabled: nothing paints ({:?})", s.errors());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());

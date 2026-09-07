@@ -370,7 +370,53 @@ fn root_from(home: Option<PathBuf>) -> Option<PathBuf> {
 /// runs on one machine load the same interface. Real ordering constraints between addons are
 /// expressed by `## Dependencies:` and honoured by [`load_third_party`]'s recursion, which is the
 /// mechanism the reference actually uses.
+/// The reference's own LoadOnDemand addons, as its `Interface\\AddOns\\` folder names them — the
+/// twelve `Blizzard_*` folders on a 1.12 install, each a `.pub` decoy on disk with the real files
+/// inside the archive (the InspectUI header in the manifest). Probed against the chain, so a
+/// chain without one simply has no such addon.
+const BLIZZARD_ADDONS: [&str; 12] = [
+    "Blizzard_AuctionUI",
+    "Blizzard_BattlefieldMinimap",
+    "Blizzard_BindingUI",
+    "Blizzard_CombatText",
+    "Blizzard_CraftUI",
+    "Blizzard_GMSurveyUI",
+    "Blizzard_InspectUI",
+    "Blizzard_MacroUI",
+    "Blizzard_RaidUI",
+    "Blizzard_TalentUI",
+    "Blizzard_TradeSkillUI",
+    "Blizzard_TrainerUI",
+];
+
+/// The Blizzard addons the chain carries as LoadOnDemand registry rows — the ones the reference
+/// reaches through `LoadAddOn` from `UIParentLoadAddOn` (1957). `benilla.toc` lists none of them,
+/// like the reference's own `FrameXML.toc` (1967). One exclusion, by shape: an addon whose toc is
+/// not LoadOnDemand would need the startup walk to read the chain, which it does not yet — that
+/// one stays with its own file until its window migrates.
+fn chain_addons() -> Vec<Addon> {
+    BLIZZARD_ADDONS
+        .iter()
+        .filter_map(|name| {
+            let bytes = super::reference_ui::read(&format!("Interface/AddOns/{name}/{name}.toc"))?;
+            let toc = Toc::parse(&benilla_ui::source::decode(&bytes));
+            toc.load_on_demand().then(|| Addon {
+                name: (*name).to_string(),
+                toc,
+                source: Source::Chain,
+            })
+        })
+        .collect()
+}
+
 fn discover() -> Vec<Addon> {
+    let mut found = discover_folder();
+    found.extend(chain_addons());
+    found
+}
+
+/// The player's own addons — every folder under the AddOns root with a `<Name>.toc`.
+fn discover_folder() -> Vec<Addon> {
     let Some(root) = root() else {
         return Vec::new();
     };
@@ -424,7 +470,9 @@ fn manifest_in(dir: &Path, name: &str) -> Option<String> {
 /// Build the AddOn API's registry row for one discovered addon — every `.toc` directive the
 /// eleven verbs can be asked about, read once here rather than re-parsed per call.
 fn info_for(addon: &Addon) -> benilla_ui::script::AddOnInfo {
-    info_from_toc(&addon.name, &addon.toc)
+    let mut info = info_from_toc(&addon.name, &addon.toc);
+    info.chain = matches!(addon.source, Source::Chain);
+    info
 }
 
 /// [`info_for`]'s body, over the two things it actually reads.
@@ -462,6 +510,7 @@ pub(crate) fn info_from_toc(name: &str, toc: &Toc) -> benilla_ui::script::AddOnI
         // The version gate's dword (decision 1292) — the client's own parse: leading integer,
         // 0 when the manifest is silent (and 0 is out of date, not "unknown").
         interface: toc.interface_version(),
+        chain: false, // `info_for` stamps the chain rows; the harness's rows are folder addons
     }
 }
 
@@ -553,7 +602,9 @@ impl InstalledAddOn {
 /// everything as enabled.
 pub(crate) fn installed(identity: Option<&(String, String)>) -> Vec<InstalledAddOn> {
     let disabled = disabled_set(identity);
-    discover()
+    // The player's own folder only: the glue's list is what a player can toggle, and the
+    // reference's Blizzard addons are not in it.
+    discover_folder()
         .into_iter()
         .map(|addon| InstalledAddOn {
             enabled: !disabled.contains(&addon.name.to_ascii_lowercase()),
@@ -697,7 +748,11 @@ pub(super) fn load_third_party(
     // rather than answer whatever a previous session left, and an addon that asks before any
     // exist is asking a real question.
     let mut infos: Vec<_> = addons.iter().map(info_for).collect();
-    if let Some(text) = enable_state_path(identity).and_then(|p| crate::local_state::read_to_string(&p).ok()) {
+    // The chain-sourced rows read through the reference's own store (1957).
+    script.set_addon_chain_reader(Box::new(super::reference_ui::read));
+    if let Some(text) =
+        enable_state_path(identity).and_then(|p| crate::local_state::read_to_string(&p).ok())
+    {
         for (name, enabled) in parse_enable_state(&text) {
             if let Some(i) = infos
                 .iter_mut()
@@ -925,6 +980,61 @@ impl Walk {
 
 #[cfg(test)]
 mod tests {
+    /// The chain's Blizzard LoadOnDemand addons are registry rows (1957): every row is
+    /// LoadOnDemand and read off the chain, the eight windows the interface opens through them
+    /// are among the rows, and the manifest lists no addon at all — the reference's own
+    /// `FrameXML.toc` has none, every Blizzard addon loads on demand (1967).
+    #[test]
+    fn the_chain_carries_blizzards_load_on_demand_addons_as_registry_rows() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        let rows = chain_addons();
+        assert!(
+            rows.iter().any(|a| a.name == "Blizzard_TrainerUI"),
+            "the trainer addon is a row: {:?}",
+            rows.iter().map(|a| &a.name).collect::<Vec<_>>()
+        );
+        for a in &rows {
+            assert!(a.toc.load_on_demand(), "{} is LoadOnDemand", a.name);
+            assert!(
+                matches!(a.source, Source::Chain),
+                "{} comes off the chain",
+                a.name
+            );
+            assert!(
+                info_for(a).chain,
+                "{}'s registry row is marked chain-sourced",
+                a.name
+            );
+        }
+        for name in [
+            "Blizzard_AuctionUI",
+            "Blizzard_CraftUI",
+            "Blizzard_InspectUI",
+            "Blizzard_MacroUI",
+            "Blizzard_RaidUI",
+            "Blizzard_TalentUI",
+            "Blizzard_TradeSkillUI",
+            "Blizzard_TrainerUI",
+        ] {
+            assert!(
+                rows.iter().any(|a| a.name == name),
+                "{name} is a row the interface opens on demand"
+            );
+        }
+        assert!(
+            !Addon::builtin()
+                .toc
+                .files
+                .iter()
+                .any(|f| f.replace('/', "\\").starts_with("Interface\\AddOns\\")),
+            "benilla.toc lists a Blizzard addon eagerly; the reference loads every one on demand"
+        );
+        // The glue's list is the player's folder alone.
+        assert!(installed(None)
+            .iter()
+            .all(|a| !a.name.starts_with("Blizzard_")));
+    }
+
     use super::*;
 
     /// Build an addon over a temp AddOns root, so the walk can be tested without an install.
@@ -1607,7 +1717,12 @@ mod tests {
         assert!(failures.is_empty(), "load errors: {failures:?}");
 
         // Discovery saw it at all — the `.toc` decoded rather than read as absent.
-        assert_eq!(script.eval::<i64>("return GetNumAddOns()").ok(), Some(1));
+        // The one in the folder, plus the chain's Blizzard LoadOnDemand rows on a machine that
+        // has a chain (1957) — the registry is one list, as the reference's is.
+        assert_eq!(
+            script.eval::<i64>("return GetNumAddOns()").ok(),
+            Some(1 + chain_addons().len() as i64)
+        );
         assert_eq!(
             script
                 .eval::<String>("return GetAddOnMetadata('Umlaut', 'Title')")
@@ -1705,7 +1820,12 @@ mod tests {
         let mut script = UiScript::new().unwrap();
         let _ = load_third_party(&mut script, None, true);
 
-        assert_eq!(script.eval::<i64>("return GetNumAddOns()").ok(), Some(1));
+        // The one in the folder, plus the chain's Blizzard LoadOnDemand rows on a machine that
+        // has a chain (1957) — the registry is one list, as the reference's is.
+        assert_eq!(
+            script.eval::<i64>("return GetNumAddOns()").ok(),
+            Some(1 + chain_addons().len() as i64)
+        );
         assert_eq!(
             script
                 .eval::<Vec<String>>(
@@ -1861,7 +1981,12 @@ mod tests {
         let _ = load_third_party(&mut script, None, true);
 
         // Discovered and described, but NOT run.
-        assert_eq!(script.eval::<i64>("return GetNumAddOns()").ok(), Some(1));
+        // The one in the folder, plus the chain's Blizzard LoadOnDemand rows on a machine that
+        // has a chain (1957) — the registry is one list, as the reference's is.
+        assert_eq!(
+            script.eval::<i64>("return GetNumAddOns()").ok(),
+            Some(1 + chain_addons().len() as i64)
+        );
         assert_eq!(
             script
                 .eval::<bool>("return IsAddOnLoadOnDemand(1) == 1")
@@ -1986,8 +2111,14 @@ mod tests {
         save_enable_state(&script, Some(&id));
 
         let written = std::fs::read_to_string(home.join("addons/Realm-Char.txt")).unwrap();
+        // The folder's two in registry order, then the chain's Blizzard rows (1957) — every
+        // registry row has a line, the reference's own one-line-per-addon format.
+        let mut expected = String::from("Drop: disabled\nKeep: enabled\n");
+        for a in chain_addons() {
+            expected.push_str(&format!("{}: enabled\n", a.name));
+        }
         assert_eq!(
-            written, "Drop: disabled\nKeep: enabled\n",
+            written, expected,
             "the reference's own one-line-per-addon format"
         );
 

@@ -586,6 +586,80 @@ mod measure_fits_render {
         }
     }
 
+    /// **A capped quest-log row title ellipsizes on ONE line — it never wraps into the row.**
+    ///
+    /// Stock `QuestLogFrame.lua:196-203` shrinks a tagged row's title to `275 − 15 − tagWidth` so
+    /// it cannot run under the right-flush `(Elite)`. Decision 1873 declined that cap on the
+    /// reading that an explicit width is a **wrap** width here, so a long title would spill onto a
+    /// second line inside the 16-unit row; 1944 then put the reference's own file on the chain and
+    /// the cap went live with it. The reading was wrong about our own engine, and this pins why:
+    /// the title FontString carries a DECLARED height (`<ButtonText>` `y="10"`), which arms both
+    /// overflow regimes — the ellipsis gate (`boxW > 0 && boxH > 0`, wow-re
+    /// `fontstring-overflow.md`; [`measure::ellipsize_to_fit`]) and the line stack
+    /// ([`overflow::lines_allowed`]) — and each on its own holds the paint to one line. The
+    /// reference does exactly this: its gate holds on the same declared height and its display
+    /// string is `prefix + "..."`.
+    ///
+    /// The geometry is the reference's own: row `300×16`, title `GameFontNormal` (FRIZQT__ 12) in a
+    /// `y="10"` ButtonText (`QuestLogFrame.xml:5-7, 92-103`).
+    #[test]
+    fn a_capped_quest_log_title_ellipsizes_on_one_line() {
+        let Some(mut e) = test_engine(1.0) else {
+            eprintln!("skipping: no install / font chain");
+            return;
+        };
+        // GameFontNormal: FRIZQT__ at 12 (Fonts.xml l.70-75). The row's title box is 10 tall.
+        let s = spec(12.0);
+        let r = measure::resolve(&mut e, &s);
+        const BOX_H: f32 = 10.0;
+        // The longest tag `QuestInfo.dbc` ships is "World Event"; "(Dungeon)" is the longest one a
+        // quest actually carries in bulk (411 quests, decision 1873's census). Either way the cap
+        // is `275 - 15 - tagWidth`.
+        for tag in ["(Elite)", "(Dungeon)", "(World Event)"] {
+            let cap = 275.0 - 15.0 - measure_text(&mut e, tag, None, s).0;
+            for title in [
+                // A real 1.11 Dungeon-tagged quest, indented as the row indents it.
+                "  The Left Piece of Lord Valthalak's Amulet",
+                "  The Right Piece of Lord Valthalak's Amulet",
+                "  Bring Me The Head of Nekrum Gutchewer!",
+            ] {
+                e.ensure_metrics(r.face, r.ppem, title);
+                e.ensure_metrics(r.face, r.ppem, "...");
+                // The cap bites: uncapped the title is one line, capped it needs more than one.
+                assert_eq!(
+                    measure::wrapped_rows_for_test(&e, r, title, 275.0),
+                    1,
+                    "{title:?} fits the uncapped row"
+                );
+                assert!(
+                    measure::wrapped_rows_for_test(&e, r, title, cap) > 1,
+                    "{title:?} must overflow the {cap}px cap for this test to mean anything"
+                );
+                // Regime 2, the line stack: a 10-tall box emits ONE line whatever the wrap says.
+                assert_eq!(
+                    overflow::lines_allowed(BOX_H, r.size),
+                    1,
+                    "the row's 10-tall title box stacks exactly one line"
+                );
+                // Regime 3, the ellipsis: the drawn string is a prefix + "..." that fits that line.
+                let cap_rows = overflow::lines_fitting(BOX_H.max(r.size), r.size) + 1;
+                let display = overflow::ellipsize_in_box(title, BOX_H, r.size, |candidate| {
+                    measure::wrapped_rows_capped_for_test(&e, r, candidate, cap, cap_rows)
+                })
+                .unwrap_or_else(|| panic!("{title:?} at cap {cap} must ellipsize"));
+                assert!(
+                    display.ends_with("..."),
+                    "the truncation marker is three dots, got {display:?}"
+                );
+                assert_eq!(
+                    measure::wrapped_rows_for_test(&e, r, &display, cap),
+                    1,
+                    "{display:?} must fit the row's single line at cap {cap}"
+                );
+            }
+        }
+    }
+
     /// **One line is ONE baseline — at every DPI, size and seat.**
     ///
     /// The emit pass's whole claim (decision 1342) is that a line is flat *by construction*: one
@@ -744,8 +818,8 @@ mod measure_fits_render {
 mod ellipsis_cost {
     use super::*;
     use crate::ui_text::engine::test_engine;
-    use std::cell::Cell;
     use bevy::platform::time::Instant;
+    use std::cell::Cell;
 
     /// The reported page verbatim — vmangos `page_text` 2676, the *Alliance Military Ranks* plaque
     /// in Stormwind's Old Town (`GameObject` 3011, the object in Goudy's screenshots). 647 bytes.

@@ -1,7 +1,7 @@
 //! The shared StaticPopup engine (decision 0308 §3 — the ref's registry + Show + OnUpdate
-//! machinery, transcribed in UiPanels.xml): the countdown/StartDelay/cancels/ESC laws the death
-//! arc's dialogs ride. Entries here are inline test dialogs — the real entries (DELETE_ITEM,
-//! ABANDON_QUEST, the death family) are covered by their features' own tests.
+//! machinery, stock `Interface\FrameXML\StaticPopup.xml` since 1988): the
+//! countdown/StartDelay/cancels/ESC laws the death arc's dialogs ride. Entries here are inline test
+//! dialogs — the real entries (DELETE_ITEM, ABANDON_QUEST, the death family) are covered by their features' own tests.
 
 use benilla_ui::script::UiScript;
 
@@ -10,11 +10,16 @@ use super::test_ui::load_ui as load_xml;
 fn setup() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     s
 }
 
@@ -78,7 +83,7 @@ fn start_delay_gates_button1_then_swaps_the_text_in() {
     assert_eq!(
         s.eval::<String>("return StaticPopup1Text:GetText()")
             .unwrap(),
-        "2 seconds until resurrection",
+        "2 Seconds until resurrection",
         "the delayText countdown renders (ceil of 1.5s)"
     );
     s.tick(1.6);
@@ -181,14 +186,14 @@ fn the_death_countdown_text_rerenders_each_tick() {
     assert_eq!(
         s.eval::<String>("return StaticPopup1Text:GetText()")
             .unwrap(),
-        "2 minutes until release",
+        "2 Minutes until release",
         "above 60s renders ceil-minutes"
     );
     s.tick(31.0);
     assert_eq!(
         s.eval::<String>("return StaticPopup1Text:GetText()")
             .unwrap(),
-        "59 seconds until release",
+        "59 Seconds until release",
         "below 60s renders seconds"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -257,4 +262,70 @@ fn hide_and_find_address_one_instance_by_data_only_for_a_multiple_dialog() {
         .eval::<bool>(r#"return StaticPopup_FindVisible("T_NOPE") == nil"#)
         .unwrap());
     assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The dialog engine's verbs (decision 1963): the five UIParent arms the feeds behind them now
+/// reach — each verbatim from UIParent.lua, each raising a stock dialog whose Accept calls a
+/// binding this engine answers.
+#[test]
+fn the_verb_dialogs_open_from_their_events_and_call_their_verbs() {
+    use benilla_ui::script::ScriptValue;
+    let mut s = setup();
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml"); // the arms
+    s.set_money(50_000);
+    // The pet trainer's question: the dialog, its money frame at the cost, Accept → the confirm.
+    s.fire_event("CONFIRM_PET_UNLEARN", vec![ScriptValue::Int(12_345)]);
+    s.tick(0.0);
+    assert_eq!(
+        s.eval::<String>("return StaticPopup1.which").unwrap(),
+        "CONFIRM_PET_UNLEARN"
+    );
+    assert_eq!(
+        s.eval::<f64>("return StaticPopup1MoneyFrame.staticMoney")
+            .unwrap(),
+        12_345.0
+    );
+    s.run("StaticPopup1Button1:Click()").unwrap();
+    assert_eq!(s.take_pet_unlearn_confirms(), 1);
+    // The instance boot: START shows, STOP hides.
+    s.set_instance_boot_secs(30);
+    s.fire_event("INSTANCE_BOOT_START", vec![]);
+    s.tick(0.0);
+    assert!(s
+        .eval::<bool>("return StaticPopup_Visible(\"INSTANCE_BOOT\") ~= nil")
+        .unwrap());
+    s.fire_event("INSTANCE_BOOT_STOP", vec![]);
+    s.tick(0.0);
+    assert!(!s
+        .eval::<bool>("return StaticPopup_Visible(\"INSTANCE_BOOT\") ~= nil")
+        .unwrap());
+    // The area spirit healer: in range shows, out of range hides; Accept queues the heal.
+    s.set_area_spirit_healer(true, 20);
+    s.fire_event("AREA_SPIRIT_HEALER_IN_RANGE", vec![]);
+    s.tick(0.0);
+    assert!(s
+        .eval::<bool>("return StaticPopup_Visible(\"AREA_SPIRIT_HEAL\") ~= nil")
+        .unwrap());
+    // **The reference's dialog accepts on SHOW and its one button CANCELS** — the 1.12 file keeps
+    // the old two-button version commented out and ships the auto-accepting one
+    // (`StaticPopup.lua:1204-1240`): `OnShow` calls `AcceptAreaSpiritHeal()`, `button1` is CANCEL,
+    // and its `OnAccept` calls `CancelAreaSpiritHeal()`. So the accept is already in by the time
+    // the popup is on screen (1988 — our retired UIParent arm showed it without that OnShow).
+    assert!(
+        s.take_area_spirit_accepts() >= 1,
+        "showing the dialog IS the accept"
+    );
+    s.run("StaticPopup_OnClick(StaticPopup_FindVisible(\"AREA_SPIRIT_HEAL\"), 1)")
+        .unwrap();
+    assert_eq!(
+        s.take_area_spirit_accepts(),
+        0,
+        "the button cancels; it does not accept again"
+    );
+    s.fire_event("AREA_SPIRIT_HEALER_OUT_OF_RANGE", vec![]);
+    s.tick(0.0);
+    assert!(!s
+        .eval::<bool>("return StaticPopup_Visible(\"AREA_SPIRIT_HEAL\") ~= nil")
+        .unwrap());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

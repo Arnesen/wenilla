@@ -1,5 +1,5 @@
 //! The world-map data feed (decision 0203 phase 2) — the app half behind
-//! `assets/ui/WorldMapFrame.xml` and benilla-ui's `script/worldmap.rs` bindings.
+//! stock `Interface\FrameXML\WorldMapFrame.xml` and benilla-ui's `script/worldmap.rs` bindings.
 //!
 //! Two systems, the quest-log seam shape:
 //! - [`load_world_map_ui`] (once, when the chain + VM + Map.dbc catalog all exist): builds the
@@ -48,7 +48,7 @@ use benilla_world::world_map::CurrentMap;
 /// constants) per continent/zone, in the SAME order as the engine's copy (indices must agree).
 /// The AreaTable itself is the shared [`crate::area::AreaTableRes`] (decision 0287).
 #[derive(Resource)]
-struct WorldMapUiData {
+pub(crate) struct WorldMapUiData {
     continents: Vec<ContinentEntry>,
 }
 
@@ -217,6 +217,17 @@ fn load_world_map_ui(
                                 .filter(|&&aid| aid != 0)
                                 .filter_map(|&aid| areas.get(aid).map(|r| r.explore_flag))
                                 .collect(),
+                            hit_rect: (
+                                o.hit_rect_top,
+                                o.hit_rect_left,
+                                o.hit_rect_bottom,
+                                o.hit_rect_right,
+                            ),
+                            // The zone-level hover's label inside that rect: the FIRST area
+                            // slot's AreaTable name — `0x4a7fa0` reads `+0x8` only (wow-re
+                            // 15b2a8ea §1d); a slot that resolves to no row makes the overlay
+                            // invisible to the hover, never to the draw.
+                            area_name: areas.name(o.area_id[0]).map(str::to_string),
                         })
                         .collect(),
                 })
@@ -414,6 +425,37 @@ fn landmark_texture_index(poi: &benilla_formats::AreaPoi, level: MapLevel) -> u3
 }
 
 /// Per frame: selection read-back → projection → feed push (see the module doc).
+/// One projection law for every blip on the DISPLAYED map: world-sheet mode (selection
+/// `(0, _)`) projects through the POSITION's own map's continent constants; continent and zone
+/// mode through the selected rect, gated to that continent's map. Off-map — the wrong continent,
+/// an instance map, outside the rect — is `None`, the reference's `(0, 0)` hide sentinel once it
+/// reaches Lua.
+pub(crate) fn project_on_displayed(
+    data: &WorldMapUiData,
+    selection: (u32, u32),
+    pos_map: u32,
+    px: f32,
+    py: f32,
+) -> Option<(f32, f32)> {
+    match selection {
+        (0, _) => data
+            .continents
+            .iter()
+            .find(|cont| cont.map_id == pos_map)
+            .and_then(|cont| cont.proj)
+            .map(|p| map_proj::world_uv(p, px, py)),
+        (c, z) => data
+            .continents
+            .get(c as usize - 1)
+            .filter(|cont| cont.map_id == pos_map)
+            .and_then(|cont| match z {
+                0 => Some(cont.rect),
+                z => cont.zones.get(z as usize - 1).map(|zone| zone.rect),
+            })
+            .map(|rect| map_proj::zone_uv(rect, px, py)),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn feed_world_map(
     script: Option<NonSendMut<UiScript>>,
@@ -479,26 +521,10 @@ fn feed_world_map(
     // The player's UV on the DISPLAYED map. Off-map (wrong continent, outside the rect, or an
     // instance map) resolves to None/(0,0) — the reference's hide-the-blip sentinel.
     let (c, z) = script.world_map_selection();
-    // One projection law for every blip on the displayed map (the player now, the corpse below):
-    // world-sheet mode projects through the POSITION's own map's continent constants; zone mode
-    // through the selected rect, gated to that continent's map. Off-map → None → the (0,0) hide.
-    let project = |pos_map: u32, px: f32, py: f32| match (c, z) {
-        (0, _) => data
-            .continents
-            .iter()
-            .find(|cont| cont.map_id == pos_map)
-            .and_then(|cont| cont.proj)
-            .map(|p| map_proj::world_uv(p, px, py)),
-        (c, z) => data
-            .continents
-            .get(c as usize - 1)
-            .filter(|cont| cont.map_id == pos_map)
-            .and_then(|cont| match z {
-                0 => Some(cont.rect),
-                z => cont.zones.get(z as usize - 1).map(|zone| zone.rect),
-            })
-            .map(|rect| map_proj::zone_uv(rect, px, py)),
-    };
+    // One projection law for every blip on the displayed map (the player now, the corpse below,
+    // the battleground teammates in `ui_battlefield_positions`): [`project_on_displayed`].
+    let project =
+        |pos_map: u32, px: f32, py: f32| project_on_displayed(&data, (c, z), pos_map, px, py);
     let uv = project(map.0, wx, wy);
     // The corpse marker (decision 0308 §5): the query answer's DISPLAY position/map (a dungeon
     // corpse projects at its entrance — the server rewrote it). `zone_uv`'s outside-the-rect
@@ -585,26 +611,44 @@ fn feed_world_map(
     // owns it supplies the map; a zone we cannot place (an instance, a zone missing from the
     // catalog) falls back to ours, which is right for the overwhelmingly common case of a party
     // spread across one continent and merely projects off-rect — the (0,0) hide — when it is not.
-    let party_uv: Vec<Option<(f32, f32)>> = group
-        .party_slots()
-        .map(|m| {
-            let (px, py) = crate::minimap::party_member_pos(m, &group, &guids, &unit_pos)?;
-            let member_map = group
-                .stats
-                .get(&m.guid)
-                .and_then(|st| st.zone)
-                .and_then(|zone| {
-                    data.continents
-                        .iter()
-                        .find(|cont| cont.zones.iter().any(|z| z.area_id == u32::from(zone)))
-                        .map(|cont| cont.map_id)
-                })
-                .unwrap_or(map.0);
-            project(member_map, px, py).filter(|uv| *uv != (0.0, 0.0))
-        })
-        .collect();
+    let member_uv = |m: &benilla_protocol::messages::GroupMemberEntry| {
+        let (px, py) = crate::minimap::party_member_pos(m, &group, &guids, &unit_pos)?;
+        let member_map = group
+            .stats
+            .get(&m.guid)
+            .and_then(|st| st.zone)
+            .and_then(|zone| {
+                data.continents
+                    .iter()
+                    .find(|cont| cont.zones.iter().any(|z| z.area_id == u32::from(zone)))
+                    .map(|cont| cont.map_id)
+            })
+            .unwrap_or(map.0);
+        project(member_map, px, py).filter(|uv| *uv != (0.0, 0.0))
+    };
+    let party_uv: Vec<Option<(f32, f32)>> = group.party_slots().map(member_uv).collect();
 
-    script.set_world_map_feed(player_zone, uv, player.facing(), corpse_uv, party_uv);
+    // The raid roster's blips (1980, the stock map's `raid1..raid40` arm over `WorldMapRaid1..40`):
+    // the order the RaidFrame's own roster uses — ourselves first, then the members as listed
+    // (`ui_party::feed::raid_roster`) — so `raidN` here is `raidN` there. The reference skips
+    // `UnitIsUnit(unit, "player")` in Lua, so our own slot carries the player's UV rather than a
+    // hole that would shift every index after it.
+    let raid_uv: Vec<Option<(f32, f32)>> = if group.group_type == crate::ui_party::GROUPTYPE_RAID {
+        std::iter::once(uv)
+            .chain(group.members.iter().map(member_uv))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    script.set_world_map_feed(
+        player_zone,
+        uv,
+        player.facing(),
+        corpse_uv,
+        party_uv,
+        raid_uv,
+    );
 }
 
 /// **Alt+click the world map to go there** — the dev jump.

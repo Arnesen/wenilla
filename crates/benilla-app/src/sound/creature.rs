@@ -24,8 +24,8 @@ use benilla_world::schedule::WorldStage;
 
 use super::kit::{
     bark_chance_pass, object_sound_playing, play_kit, play_kit_ext, source_kit_playing,
-    stop_source_kit, unit_voice_playing, KitRef, Latch, PlayExtras, SoundCategory, SoundKits,
-    STAND_CHANCE, STAND_COOLDOWN,
+    stop_source_kit, stop_unit_voice, unit_voice_state, KitRef, Latch, PlayExtras, SoundCategory,
+    SoundKits, STAND_CHANCE, STAND_COOLDOWN,
 };
 use super::{AudioListener, SoundConfig, SoundOutput};
 
@@ -45,6 +45,108 @@ fn load_creature_voices(mut commands: Commands, assets: Option<Res<WorldAssets>>
             commands.insert_resource(CreatureVoices(cat));
         }
         Err(e) => warn!("sound: creature voices failed to load: {e:#}"),
+    }
+}
+
+/// `0x623a40`'s bark states, in the order its jump table `0x623afc` lists them — the number IS
+/// the priority (higher wins, `0x623a82`). State `3` is a real arm that plays nothing and has no
+/// known caller, so it has no constant.
+const BARK_AGGRO: u8 = 0;
+const BARK_PET_ORDER: u8 = 1;
+const BARK_PET_ATTACK: u8 = 2;
+const BARK_DEATH: u8 = 4;
+
+/// Step 3 of [`play_bark`] — `0x623a66`-`0x623a88`, the priority comparison alone.
+///
+/// `latched` is the state of the bark currently sounding on this unit, or `None` for a free slot.
+/// The reference's two `je`s skip the comparison entirely when the handle is absent or finished,
+/// so a free slot admits **every** state including `0`; a held slot admits only a *strictly*
+/// higher one (`jle` aborts on equal, which is what keeps a burst of identical barks to one).
+const fn bark_admitted(latched: Option<u8>, state: u8) -> bool {
+    match latched {
+        None => true,
+        Some(held) => state > held,
+    }
+}
+
+/// Step 5 of [`play_bark`] — the jump table at `0x623afc`, as a lookup. `0` means "this state
+/// plays nothing", which covers both the table's own silent arm (state 3, `0x623af0`) and its
+/// out-of-range default (`0x623aa0 cmp eax,4; ja`), and is also what an unpopulated column reads
+/// as. All three are the same observable in the reference and the same `0` here.
+const fn bark_kit(voice: &benilla_formats::CreatureVoice, state: u8) -> u32 {
+    match state {
+        BARK_AGGRO => voice.aggro,
+        BARK_PET_ORDER => voice.pet_order,
+        BARK_PET_ATTACK => voice.pet_attack,
+        BARK_DEATH => voice.death,
+        _ => 0,
+    }
+}
+
+/// **The creature bark dispatcher, whole** — `0x623a40(ecx = unit, state)`, the one function
+/// every one-shot creature vocal below goes through (decision 2039). Four states are live here:
+/// `0` the HOSTILE aggro flare, `1` the pet's ORDER bark, `2` the pet's ATTACK bark, `4` the
+/// death cry. (State `3` exists in the table and plays nothing — it still stops and latches.)
+///
+/// Reading it as one function is the point: it was three call sites with three different subsets
+/// of its gates before, and the pet barks could not be added correctly to any of them, because
+/// what makes a pet bark audible over a pet's near-continuous aggro flares is exactly the
+/// priority rule the aggro-only site had no reason to carry.
+///
+/// The order of operations is the reference's, and it is load-bearing:
+///
+/// 1. **No voice row, no bark** (`0x623a4a`) — the caller's `for_display` miss.
+/// 2. **A server-pushed object sound live on this unit mutes it** (`0x623a59` → `0x4591f0`): a
+///    scripted voice line is not talked over. Unlike the class route `0x623490`/`0x62f880`, this
+///    one is a direct call, not a virtual — so it has **no player exemption**.
+/// 3. **The priority latch** (`0x623a66`–`0x623a88`): while `[unit+0xb20]` holds a live handle, a
+///    state `<=` the latched one is dropped outright. A free slot skips the comparison entirely.
+/// 4. **Stop the old and latch the new** (`0x623a8d`/`0x623a95`) — *before* the column is read.
+/// 5. **Then** resolve the column and play. **A zero column still silences step 4's victim** —
+///    the handle is overwritten with the null result (`0x623aee`), so a state whose column is
+///    unpopulated cuts short whatever it superseded and sounds nothing in its place. That is the
+///    client's behaviour, not an oversight of ours. (It is not reachable through the pet barks on
+///    a vmangos server: `SendPetTalk` is gated on `SUMMON_PET`, and only those four voices carry
+///    the columns — see [`pet_talk_vocals`].)
+#[allow(clippy::too_many_arguments)]
+fn play_bark(
+    kits: &mut SoundKits,
+    assets: &WorldAssets,
+    out: &mut SoundOutput,
+    config: &SoundConfig,
+    listener: Vec3,
+    unit: Entity,
+    pos: Vec3,
+    voice: &benilla_formats::CreatureVoice,
+    state: u8,
+) {
+    if object_sound_playing(out, unit) {
+        return;
+    }
+    if !bark_admitted(unit_voice_state(out, unit), state) {
+        return;
+    }
+    stop_unit_voice(out, unit);
+    let kit = bark_kit(voice, state);
+    if kit == 0 {
+        return;
+    }
+    if let Err(e) = play_kit_ext(
+        kits,
+        assets,
+        out,
+        config,
+        listener,
+        KitRef::Id(kit),
+        Some(pos),
+        SoundCategory::Sfx,
+        PlayExtras {
+            source: Some(unit),
+            latch: Latch::Voice(state),
+            ..default()
+        },
+    ) {
+        warn!("creature bark state {state} (kit {kit}): {e:#}");
     }
 }
 
@@ -80,26 +182,20 @@ fn death_vocals(
         if !fresh_death {
             continue;
         }
-        let kit = net
-            .display_id
-            .and_then(|d| voices.0.for_display(d))
-            .map(|v| v.death)
-            .unwrap_or(0);
-        if kit == 0 {
+        let Some(voice) = net.display_id.and_then(|d| voices.0.for_display(d)) else {
             continue;
-        }
-        if let Err(e) = play_kit(
+        };
+        play_bark(
             &mut kits,
             &assets,
             &mut out,
             &config,
             listener,
-            KitRef::Id(kit),
-            Some(transform.translation),
-            SoundCategory::Sfx,
-        ) {
-            warn!("death vocal (kit {kit}): {e:#}");
-        }
+            entity,
+            transform.translation,
+            voice,
+            BARK_DEATH,
+        );
     }
 }
 
@@ -179,57 +275,172 @@ fn ai_reaction_vocals(
                 .and_then(|m| m.display_id)
                 .or(net.display_id)
         };
-        let kit = display
-            .and_then(|d| voices.0.for_display(d))
-            .map(|v| if r.hostile { v.aggro } else { v.alert })
-            .unwrap_or(0);
-        if kit == 0 {
+        let Some(voice) = display.and_then(|d| voices.0.for_display(d)) else {
             continue;
-        }
-        // The `AISOUNDDESC` gate (`0x4591f0`, from `0x6234cb` for ALERT's class route and
-        // `0x623a59` for HOSTILE's priority route): a server-pushed object sound live on this
-        // unit suppresses its own vocals, so a scripted voice line is not talked over. Applies to
-        // classes 0-3 and 8 — ALERT is 8 and HOSTILE takes the priority route, so both are in.
-        // The CGPlayer twin omits this gate entirely, hence the player exemption.
-        if net.kind != EntityKind::Player && object_sound_playing(&out, r.unit) {
-            continue;
-        }
-        // The `[unit+0xb20]` gate. Only HOSTILE latches the slot; ALERT neither tests nor stores
-        // it here (see the doc comment) and stays on the plain play.
-        if !r.hostile {
-            if let Err(e) = play_kit(
+        };
+        // HOSTILE is the priority route — `0x623a40(0)`, [`play_bark`], which owns both the
+        // `AISOUNDDESC` mute and the `[unit+0xb20]` latch.
+        if r.hostile {
+            play_bark(
                 &mut kits,
                 &assets,
                 &mut out,
                 &config,
                 listener,
-                KitRef::Id(kit),
-                Some(transform.translation),
-                SoundCategory::Sfx,
-            ) {
-                warn!("alert vocal (kit {kit}): {e:#}");
-            }
+                r.unit,
+                transform.translation,
+                voice,
+                BARK_AGGRO,
+            );
             continue;
         }
-        if unit_voice_playing(&out, r.unit) {
-            continue; // category 0 is the lowest: a live bark wins, this one is dropped
+        // ALERT is the *class* route (`vtable+0x88(8,0)` → `0x623490` → col 13) and is a
+        // different function: it neither tests nor stores the voice slot, so it stays a plain
+        // play. It does consult the same `AISOUNDDESC` pool (`0x4591f0` from `0x6234cb`) — but
+        // there through a virtual whose **CGPlayer twin `0x62f880` omits the gate**, which is why
+        // the player exemption lives on this leg and not in [`play_bark`].
+        if voice.alert == 0 {
+            continue;
         }
-        if let Err(e) = play_kit_ext(
+        if net.kind != EntityKind::Player && object_sound_playing(&out, r.unit) {
+            continue;
+        }
+        if let Err(e) = play_kit(
+            &mut kits,
+            &assets,
+            &mut out,
+            &config,
+            listener,
+            KitRef::Id(voice.alert),
+            Some(transform.translation),
+            SoundCategory::Sfx,
+        ) {
+            warn!("alert vocal (kit {}): {e:#}", voice.alert);
+        }
+    }
+}
+
+/// The pet's voice (`SMSG_PET_ACTION_SOUND` → the net bridge; decision 2039): the two talk
+/// selectors, straight onto [`play_bark`] at states 1 and 2.
+///
+/// The reference's handler `0x6040c0` is four instructions of its own once the guid is resolved:
+/// selector `0` → `0x623a40(1)`, selector `1` → `0x623a40(2)`, **anything else → nothing** (there
+/// is no default arm — `cmp eax,1; jne` falls to the epilogue). So the third value vmangos could
+/// invent would be silent here too, and that is the client's answer, not a gap in ours.
+///
+/// **This is a warlock-demon surface, and the two ends say so independently.** Only four voices
+/// in the shipped file carry these columns — the Imp, Succubus, Doomguard and Voidwalker
+/// (`benilla_formats`' `only_the_four_demon_voices_carry_pet_barks`) — and vmangos only *sends*
+/// the packet for `GetPetType() == SUMMON_PET`, i.e. those same demons, at a **10% roll** per
+/// order (`Unit.cpp:8939`, `PetHandler.cpp:522`, `PetAI.cpp:335`; the other 90% is
+/// `SendPetAIReaction`, the growl). A hunter's pet never reaches either half.
+#[allow(clippy::too_many_arguments)]
+fn pet_talk_vocals(
+    mut talks: MessageReader<crate::net::PetTalkMessage>,
+    units: Query<(&NetEntity, &Transform)>,
+    voices: Option<Res<CreatureVoices>>,
+    kits: Option<ResMut<SoundKits>>,
+    assets: Option<Res<WorldAssets>>,
+    mut out: NonSendMut<SoundOutput>,
+    config: Res<SoundConfig>,
+    listener: Res<AudioListener>,
+) {
+    if talks.is_empty() {
+        return;
+    }
+    let (Some(voices), Some(mut kits), Some(assets)) = (voices, kits, assets) else {
+        return;
+    };
+    let listener = listener.pos;
+    for t in talks.read() {
+        let state = match t.talk {
+            benilla_protocol::messages::PET_TALK_ORDER => BARK_PET_ORDER,
+            benilla_protocol::messages::PET_TALK_ATTACK => BARK_PET_ATTACK,
+            _ => continue,
+        };
+        let Ok((net, transform)) = units.get(t.unit) else {
+            continue;
+        };
+        // `0x6040c0` resolves the guid with `0x468460(ecx = 8)` — the **TYPEMASK_UNIT** bit test,
+        // which a player's cumulative mask also carries (a mind-controlled player is somebody's
+        // pet too) but a GameObject's does not.
+        if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
+            continue;
+        }
+        // The pet's OWN voice row, not a mount-preferred one: `0x6040c0` resolves the packet's
+        // guid and hands that object straight to `0x623a40`, which reads `[unit+0xb40]` — the
+        // base row (`mount-composition.md` Q4's `+0xb44` redirect belongs to `0x60c480`, which is
+        // not on this path).
+        let Some(voice) = net.display_id.and_then(|d| voices.0.for_display(d)) else {
+            continue;
+        };
+        play_bark(
+            &mut kits,
+            &assets,
+            &mut out,
+            &config,
+            listener,
+            t.unit,
+            transform.translation,
+            voice,
+            state,
+        );
+    }
+}
+
+/// A dismissed pet's parting sound (`SMSG_PET_DISMISS_SOUND` → the net bridge; decision 2039) —
+/// `CreatureSoundData` column 29, at a bare world point.
+///
+/// **Not a bark, and that is the whole shape of it.** `0x604140` never touches `0x623a40`: it
+/// resolves the row *fresh by model id* (`CreatureModelData[id].SoundID` → `CreatureSoundData`,
+/// no display step and no fallback), reads `[row+0x74]`, and plays it through the plain kit call
+/// at the packet's own point — no unit, no voice latch, no `AISOUNDDESC` mute, no attach point.
+/// It cannot be otherwise: there is no unit left to hang any of those on.
+///
+/// That fresh, inlined resolve is also why column 29 was believed dead — a census over the
+/// consumers of the *cached* `[unit+0xb40]` row can never reach it (wow-re
+/// `object-layer/scratch/pet-feedback-opcodes.md`).
+///
+/// **vmangos never sends this packet**, so nothing here fires against our server today. It is
+/// built because the reference is the spec, and because it is what makes loading column 29 a
+/// mechanism rather than a guess.
+#[allow(clippy::too_many_arguments)]
+fn pet_dismiss_sounds(
+    mut dismissals: MessageReader<crate::net::PetDismissSoundMessage>,
+    voices: Option<Res<CreatureVoices>>,
+    kits: Option<ResMut<SoundKits>>,
+    assets: Option<Res<WorldAssets>>,
+    mut out: NonSendMut<SoundOutput>,
+    config: Res<SoundConfig>,
+    listener: Res<AudioListener>,
+) {
+    if dismissals.is_empty() {
+        return;
+    }
+    let (Some(voices), Some(mut kits), Some(assets)) = (voices, kits, assets) else {
+        return;
+    };
+    let listener = listener.pos;
+    for d in dismissals.read() {
+        let kit = voices
+            .0
+            .for_model(d.model_id)
+            .map(|v| v.pet_dismiss)
+            .unwrap_or(0);
+        if kit == 0 {
+            continue;
+        }
+        if let Err(e) = play_kit(
             &mut kits,
             &assets,
             &mut out,
             &config,
             listener,
             KitRef::Id(kit),
-            Some(transform.translation),
+            Some(d.pos),
             SoundCategory::Sfx,
-            PlayExtras {
-                source: Some(r.unit),
-                latch: Latch::Voice,
-                ..default()
-            },
         ) {
-            warn!("aggro vocal (kit {kit}): {e:#}");
+            warn!("pet dismiss sound (kit {kit}): {e:#}");
         }
     }
 }
@@ -499,6 +710,8 @@ pub(super) fn plugin(app: &mut App) {
                 death_vocals,
                 creature_anim_vocals,
                 ai_reaction_vocals,
+                pet_talk_vocals,
+                pet_dismiss_sounds,
                 fall_landing_vocals,
                 creature_body_loops,
             )
@@ -546,7 +759,7 @@ mod tests {
             if slot.is_some_and(|(src, l, _)| occupies_voice_slot(src, l, bear)) {
                 continue; // category 0 is the lowest — a live bark wins, this one is dropped
             }
-            slot = Some((Some(bear), Latch::Voice, t + clip));
+            slot = Some((Some(bear), Latch::Voice(BARK_AGGRO), t + clip));
             sounded.push(t);
         }
         sounded
@@ -585,8 +798,78 @@ mod tests {
             Entity::from_raw_u32(1).expect("valid entity id"),
             Entity::from_raw_u32(2).expect("valid entity id"),
         );
-        let barking = (Some(a), Latch::Voice);
+        let barking = (Some(a), Latch::Voice(BARK_AGGRO));
         assert!(occupies_voice_slot(barking.0, barking.1, a));
         assert!(!occupies_voice_slot(barking.0, barking.1, b));
+    }
+
+    /// **The priority rule, at every boundary the reference's two jumps and one `jle` draw**
+    /// (decision 2039). The equal case is the one that matters most: it is what collapses a burst
+    /// of identical barks to one, and it is why the aggro flood of 1399 stays collapsed now that
+    /// the slot carries a state instead of a bare bool.
+    #[test]
+    fn a_held_bark_admits_only_a_strictly_higher_state() {
+        // A free slot admits everything, including the lowest state.
+        for state in [BARK_AGGRO, BARK_PET_ORDER, BARK_PET_ATTACK, BARK_DEATH] {
+            assert!(bark_admitted(None, state), "free slot, state {state}");
+        }
+        // Equal is refused — `jle`, not `jl`.
+        for state in [BARK_AGGRO, BARK_PET_ORDER, BARK_PET_ATTACK, BARK_DEATH] {
+            assert!(!bark_admitted(Some(state), state), "equal, state {state}");
+        }
+        // A pet's ATTACK bark cuts through its own aggro flare and its own order bark — the whole
+        // reason the state had to become a payload: a hunter's pet draws aggro flares in bursts
+        // (1399), and under a bare liveness gate the pet's own voice would never be heard.
+        assert!(bark_admitted(Some(BARK_AGGRO), BARK_PET_ORDER));
+        assert!(bark_admitted(Some(BARK_AGGRO), BARK_PET_ATTACK));
+        assert!(bark_admitted(Some(BARK_PET_ORDER), BARK_PET_ATTACK));
+        // ...and nothing cuts through the death cry, which is the table's maximum.
+        assert!(bark_admitted(Some(BARK_PET_ATTACK), BARK_DEATH));
+        for state in [BARK_AGGRO, BARK_PET_ORDER, BARK_PET_ATTACK] {
+            assert!(
+                !bark_admitted(Some(BARK_DEATH), state),
+                "over death: {state}"
+            );
+        }
+        // The order bark does NOT interrupt an attack bark — the two pet states are ordered, and
+        // the wire sends them close together.
+        assert!(!bark_admitted(Some(BARK_PET_ATTACK), BARK_PET_ORDER));
+    }
+
+    /// The five-arm jump table, column for column — and its two silences.
+    #[test]
+    fn the_bark_table_maps_each_state_to_its_column() {
+        let voice = benilla_formats::CreatureVoice {
+            exertion: [0; 2],
+            injury: [0; 3],
+            death: 314,
+            stun: 0,
+            stand: 0,
+            footstep_class: 0,
+            aggro: 694,
+            wing_flap: 0,
+            wing_glide: 0,
+            alert: 1107,
+            fidget: [0; 4],
+            custom_attack: [0; 4],
+            loop_sound: 0,
+            impact_type: 0,
+            jump_start: 0,
+            jump_end: 0,
+            pet_attack: 9097,
+            pet_order: 9098,
+            pet_dismiss: 9096,
+        };
+        assert_eq!(bark_kit(&voice, BARK_AGGRO), 694);
+        assert_eq!(bark_kit(&voice, BARK_PET_ORDER), 9098);
+        assert_eq!(bark_kit(&voice, BARK_PET_ATTACK), 9097);
+        assert_eq!(bark_kit(&voice, BARK_DEATH), 314);
+        // State 3 is a real arm of the table that reads no column, and everything past 4 is the
+        // range check's default. Both play nothing — and neither is `alert` (col 13) nor
+        // `pet_dismiss` (col 29): those two reach their kits through entirely different
+        // functions, off this table altogether.
+        assert_eq!(bark_kit(&voice, 3), 0);
+        assert_eq!(bark_kit(&voice, 5), 0);
+        assert_eq!(bark_kit(&voice, 255), 0);
     }
 }

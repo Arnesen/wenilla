@@ -134,6 +134,26 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // GetInputLanguage() / ToggleInputLanguage() — `0x799550` / `0x799610`, the edit box's
+    // **IME** language, not the chat language: `ChatEdit_OnInputLanguageChanged` shows
+    // `INPUT_<name>` on the box's language button, and the toggle is what a Korean client
+    // flips between its two input modes. On a client with no IME the answer is the Roman
+    // alphabet and the toggle moves nothing; benilla has no IME.
+    m.set(
+        "GetInputLanguage",
+        lua.create_function(|lua, this: Table| {
+            frame_handle_of(lua, &this)?;
+            Ok("ROMAN")
+        })?,
+    )?;
+    m.set(
+        "ToggleInputLanguage",
+        lua.create_function(|lua, this: Table| {
+            frame_handle_of(lua, &this)?;
+            Ok(())
+        })?,
+    )?;
+
     // HighlightText([start [, end]]) — defaults (0, -1) = select-all.
     m.set(
         "HighlightText",
@@ -153,12 +173,40 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         // the same field the setter below writes, which is table-level evidence rather than a
         // name that happens to be in the image.
         //
-        // Its sibling `GetMaxBytes` is in the image too and is NOT added: we do not model
-        // `maxBytes` at all (a separate field with a `-1` sentinel), and a getter for a field we
-        // do not have would answer confidently with a number that means nothing.
         "GetMaxLetters",
         lua.create_function(|lua, this: Table| {
             with_editbox(lua, &this, |eb| eb.max_letters as i64)
+        })?,
+    )?;
+    m.set(
+        // `SetMaxBytes 0x798f30` — `SetMaxLetters`'s sibling in every respect but the sentinel:
+        // the same EXACT count gate (`0x798fbc cmp eax,2`, the second of the four `lua_gettop`
+        // callers), the same raw coerce of the value, and a field of its own at `+0x33c` whose
+        // no-limit value is **-1** where `maxLetters`'s is 0 (`0x799012 jle` → `0x799022`; the
+        // ctor writes -1 at `0x7799df`) — wow-re `numeric-arg-coercion-law.md` and `ui.md`'s
+        // CSimpleEditBox layout. So a non-positive argument is unlimited, a positive one caps
+        // the buffer's BYTES. The stock StaticPopup_Show calls it for any entry carrying
+        // `maxBytes` — none of the reference's own 76 does, so the reach is an addon's (1960).
+        "SetMaxBytes",
+        lua.create_function(|lua, (this, args): (Table, mlua::MultiValue)| {
+            let args: Vec<Value> = args.into_iter().collect();
+            if args.len() != 1 {
+                return Err(mlua::Error::runtime(
+                    "Usage: <unnamed>:SetMaxBytes(maxBytes)",
+                ));
+            }
+            let n = crate::script::binding_abi::coerced_number(lua, args.first().cloned());
+            let n = n as i64;
+            with_editbox(lua, &this, |eb| {
+                eb.max_bytes = (n > 0).then_some(n as usize);
+            })
+        })?,
+    )?;
+    m.set(
+        // The read half: -1 while unlimited, the reference's own stored sentinel.
+        "GetMaxBytes",
+        lua.create_function(|lua, this: Table| {
+            with_editbox(lua, &this, |eb| eb.max_bytes.map_or(-1, |n| n as i64))
         })?,
     )?;
     m.set(

@@ -6,7 +6,7 @@ fn action_ids(s: &mut UiScript) -> Vec<u32> {
     s.take_action_uses().into_iter().map(|u| u.action).collect()
 }
 
-/// Load the real `assets/ui/ActionBar.xml` (the shipped default bar) into a bare engine and
+/// Load the stock `Interface\FrameXML\ActionBarFrame.xml` into a bare engine and
 /// drive it with a synthetic action snapshot — the slice-1 chain minus Bevy: template
 /// expansion over 12 instances, the vanilla bonus-page formula, icon paint on events, empty
 /// slots drawing no icon, and a physical click queuing the right UseAction id.
@@ -14,28 +14,43 @@ fn action_ids(s: &mut UiScript) -> Vec<u32> {
 fn shipped_action_bar_drives_end_to_end() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for file in ["Cooldown.xml", "ActionBar.xml"] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(
-            report.errors.is_empty(),
-            "{file}: loader errors: {:?}",
-            report.errors
-        );
-        if file == "ActionBar.xml" {
-            assert_eq!(
-                report.frames, 62,
-                "bar + XP StatusBar (+ its numerals overlay) + exhaustion tick + max-level rail + art frame + 12 buttons (each with a Cooldown child) + 2 page buttons + the performance meter and its hover button, \
-                 + BonusActionBarFrame and its 12 buttons with their Cooldown children (25 — hidden, as the reference's is; decision 1223), + ReputationWatchBar with its status bar and its numerals overlay (3 — hidden, ref ReputationFrame.xml:869-994)"
-            );
-        }
-    }
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Cooldown.xml");
+    // `load_ui` returns the same `report.frames` the disk reader asserted on, so this
+    // count is the one that always stood here — moved, not re-derived.
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.lua");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIParent.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\GameTooltip.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    let frames = super::test_ui::load_ui(&s, "Interface\\FrameXML\\MainMenuBar.xml")
+        + super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionBarFrame.xml")
+        + super::test_ui::load_ui(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
+    assert_eq!(
+        frames, 80,
+        "what the three stock files declare (1938): MainMenuBar.xml's 8 — the bar, the XP StatusBar, \
+         the overlay frame, the max-level rail, the art frame, the performance bar and its button, \
+         the exhaustion tick; ActionBarFrame.xml's 14 — 12 ActionButtons and the 2 page arrows; \
+         BonusActionBarFrame.xml's 24 — the bonus frame with its 12 buttons and the shapeshift frame \
+         with its 10; plus one $parentCooldown per action, bonus and shapeshift button (12 + 12 + 10). \
+         Ours built 59 for the same seats: no shapeshift bar in the file (StanceBar.xml's), no \
+         overlay frame, no performance-bar button"
+    );
+
+    // `ExhaustionTick_Update` indexes `ReputationWatchBar` UNGUARDED — the reference's own code,
+    // safe there because `ReputationFrame.xml` is always loaded and always declares the bar. Since
+    // 1875 that file is the reference's own, so a harness that drives the XP bar has to load it too
+    // or the tick raises on its first event.
+    // In manifest order: the fonts its check-box labels colour from, the panel templates those
+    // boxes inherit through, then the pane.
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\OptionsFrameTemplates.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\ReputationFrame.xml");
 
     // A warrior in battle stance: offset 1 ⇒ the bar shows actions 73..84.
     s.set_bonus_bar_offset(1);
@@ -60,13 +75,20 @@ fn shipped_action_bar_drives_end_to_end() {
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    // The app fires this on the offset's edge (ui_action/feed.rs); the stock bonus frame shows on
+    // it and slides up over the main bar for BONUSACTIONBAR_SLIDETIME (0.15 s) — one OnUpdate
+    // paints the start, the next lands it.
+    s.fire_event("UPDATE_BONUS_ACTIONBAR", vec![]);
+    s.tick(10.0);
+    s.tick(0.2);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
-    // Button 1 paints action 73's icon seated in the art frame's first well: the 1024-wide bar
-    // centers at BOTTOM of the 1024-wide screen ⇒ bar/art-frame left edge = (1024-1024)/2 = 0.
-    // Button1 anchors the art frame's BOTTOMLEFT +(8,4), 36×36 ⇒ x[8,44] y[4,40]; the icon fills
-    // the button (owner-sized) ⇒ the same rect. The chain stride is 36 + 6 = 42, so button i's left
-    // edge is 8 + (i-1)*42.
+    // The stance page is painted by BonusActionButton1/2, not by the main bar (1897/1938). The
+    // 1024-wide bar centers at BOTTOM of the 1024-wide screen ⇒ bar left edge = 0; the bonus
+    // frame lands at the bar's BOTTOMLEFT + (BONUSACTIONBAR_XPOS 4, BONUSACTIONBAR_YPOS 43), is
+    // 43 high, and its button 1 sits at its own BOTTOMLEFT + (5, 4), 36×36 ⇒ x[9,45] y[4,40] —
+    // one pixel right of the main bar's (8, 4). The reference's own geometry, off
+    // BonusActionBarFrame.xml:54-96; the chain stride is 36 + 6 = 42.
     s.resolve();
     let quads = s.extract();
     let icon = |path: &str| {
@@ -75,11 +97,12 @@ fn shipped_action_bar_drives_end_to_end() {
             .find(|q| matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p == path))
             .and_then(|q| q.rect)
     };
-    let r = icon("Interface\\Icons\\Ability_SteelMelee").expect("button 1 icon");
-    assert_eq!((r.left, r.bottom, r.right, r.top), (8.0, 4.0, 44.0, 40.0));
-    let r2 = icon("Interface\\Icons\\Ability_Rogue_Ambush").expect("button 2 icon");
-    assert_eq!(r2.left, 8.0 + 42.0); // button 2 left = 50
-                                     // Twelve quickslot rings (every button draws its NormalTexture), two icons only.
+    let r = icon("Interface\\Icons\\Ability_SteelMelee").expect("bonus button 1 icon");
+    assert_eq!((r.left, r.bottom, r.right, r.top), (9.0, 4.0, 45.0, 40.0));
+    let r2 = icon("Interface\\Icons\\Ability_Rogue_Ambush").expect("bonus button 2 icon");
+    assert_eq!(r2.left, 9.0 + 42.0); // bonus button 2 left = 51
+                                     // Only an OCCUPIED button is shown — an empty one hides while showgrid == 0
+                                     // (ActionButton.lua:69-70) — so two rings, two icons.
     let rings = quads
         .iter()
         .filter(|q| {
@@ -87,7 +110,10 @@ fn shipped_action_bar_drives_end_to_end() {
                     if p.contains("UI-Quickslot2"))
         })
         .count();
-    assert_eq!(rings, 12);
+    assert_eq!(
+        rings, 2,
+        "the two occupied bonus buttons; every empty main and bonus slot is hidden"
+    );
     let icons = quads
         .iter()
         .filter(|q| {
@@ -97,8 +123,8 @@ fn shipped_action_bar_drives_end_to_end() {
         .count();
     assert_eq!(icons, 2, "empty slots draw no icon quad");
 
-    // A physical click on button 1 queues UseAction(73) — the stance page's id, not 1. Button 1's
-    // center is (8+18, 4+18) = (26, 22).
+    // A physical click at (26, 22) lands on BonusActionButton1 (9..45 × 4..40, two frame levels
+    // above the hidden main slot) and queues UseAction(73) — the stance page's id, not 1.
     s.mouse_button(26.0, 22.0, "LeftButton", true);
     s.mouse_button(26.0, 22.0, "LeftButton", false);
     assert_eq!(action_ids(&mut s), vec![73]);
@@ -124,9 +150,10 @@ fn shipped_action_bar_drives_end_to_end() {
     s.run("ActionButtonDown(2)").unwrap();
     assert_eq!(depressed(&s), 1, "key DOWN shows the pushed texture");
     assert_eq!(
-        s.eval::<String>("return ActionButton2:GetButtonState()")
+        s.eval::<String>("return BonusActionButton2:GetButtonState()")
             .unwrap(),
-        "PUSHED"
+        "PUSHED",
+        "with the overlay up a key drives the BONUS button (ActionButton.lua:15-22)"
     );
     s.run("ActionButtonUp(2)").unwrap();
     assert_eq!(action_ids(&mut s), vec![74], "key '2' fires action 74");
@@ -135,6 +162,10 @@ fn shipped_action_bar_drives_end_to_end() {
     // Stance drops (offset 0): the bar re-pages to actions 1..12 — all empty here, icons clear.
     s.set_bonus_bar_offset(0);
     s.fire_event("UPDATE_BONUS_ACTIONBAR", vec![]);
+    // The overlay descends carrying the old form's page (`lastBonusBar`) and hides at the end
+    // of its slide — one OnUpdate more than BONUSACTIONBAR_SLIDETIME (paint, then advance).
+    s.tick(0.2);
+    s.tick(0.01);
     s.resolve();
     let icons_after = s
         .extract()
@@ -149,21 +180,42 @@ fn shipped_action_bar_drives_end_to_end() {
 }
 
 fn load_action_bar(s: &UiScript) {
-    for file in ["Cooldown.xml", "ActionBar.xml"] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(s, &doc, &|_| None);
-        assert!(
-            report.errors.is_empty(),
-            "{file}: loader errors: {:?}",
-            report.errors
-        );
-    }
+    super::test_ui::load_ui(s, "Interface\\FrameXML\\Cooldown.xml");
+    super::test_ui::load_ui(s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    super::test_ui::load_ui(s, "Interface\\FrameXML\\TextStatusBar.lua");
+    super::test_ui::load_ui(s, "Interface\\FrameXML\\TextStatusBar.xml");
+    super::test_ui::load_ui(s, "Interface\\FrameXML\\Fonts.xml");
+    super::test_ui::load_ui(s, r"Interface\FrameXML\UIParent.xml");
+    super::test_ui::load_ui(s, "Interface\\FrameXML\\GlobalStrings.lua");
+    super::test_ui::load_ui(s, "Interface\\FrameXML\\MainMenuBar.xml");
+    super::test_ui::load_ui(s, r"Interface\FrameXML\MoneyFrame.lua");
+    super::test_ui::load_ui(s, r"Interface\FrameXML\MoneyFrame.xml");
+    super::test_ui::load_ui(s, "Interface\\FrameXML\\GameTooltip.xml");
+    super::test_ui::load_ui(s, "Interface\\FrameXML\\ActionBarFrame.xml");
+    super::test_ui::load_ui(s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
+
+    // `ExhaustionTick_Update` indexes `ReputationWatchBar` UNGUARDED — the reference's own code,
+    // safe there because `ReputationFrame.xml` is always loaded and always declares the bar. Since
+    // 1875 that file is the reference's own, so a harness that drives the XP bar has to load it too
+    // or the tick raises on its first event.
+    // In manifest order: the fonts its check-box labels colour from, the panel templates those
+    // boxes inherit through, then the pane.
+    super::test_ui::load_ui(s, "Interface\\FrameXML\\Fonts.xml");
+    super::test_ui::load_ui(s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    super::test_ui::load_ui(s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    super::test_ui::load_ui(s, r"Interface\FrameXML\OptionsFrameTemplates.xml");
+    super::test_ui::load_ui(s, r"Interface\FrameXML\ReputationFrame.xml");
+    // The options window: `LOCK_ACTIONBAR` and `ALWAYS_SHOW_MULTIBARS` are declared there, as the
+    // reference declares them in UIOptionsFrame_Init (1938) — and the manifest loads it before
+    // the bars.
+    // The dialog engine — the keybindings page registers its two confirms into its table (1960).
+    super::test_ui::load_ui(s, r"Interface\FrameXML\BasicControls.xml"); // `TEXT`
+    super::test_ui::load_ui(s, r"Interface\FrameXML\LocaleProperties.lua"); // `GetText`
+    super::test_ui::load_ui(s, r"Interface\FrameXML\StaticPopup.xml");
+    super::test_ui::load_ui(s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    super::test_ui::load_ui(s, "ScrollTemplates.xml");
+    super::test_ui::load_ui(s, "KeyBindingsPage.xml");
+    super::test_ui::load_ui(s, "OptionsFrame.xml");
 }
 
 /// The state/feedback layer (decision 0137 phase 4) through the REAL shipped XML: a pushed
@@ -199,17 +251,18 @@ fn state_feedback_drives_cooldown_checked_and_usable_through_the_xml() {
         }),
     );
     s.fire_event("ACTIONBAR_UPDATE_COOLDOWN", vec![]);
+    // The stock machine (decision 2019): `CooldownFrame_SetTimer` arms sequence 0 and shows the
+    // pane; the next paint's `OnUpdateModel` scrubs it to `(GetTime() − start) / duration`.
+    super::test_ui::cooldown_facts(&mut s);
+    s.tick(0.0);
     s.resolve();
-    let sweep = s.extract().into_iter().find_map(|q| match q.content {
-        QuadContent::Cooldown { fraction, flash } => Some((fraction, flash)),
-        _ => None,
-    });
-    let (fraction, flash) = sweep.expect("the button's Cooldown widget is showing");
-    assert!(
-        (fraction - 0.4).abs() < 1e-3,
-        "6 s of 10 s left ⇒ the sweep sits at 40%, got {fraction}"
+    let play = super::test_ui::cooldown_play(&s, "ActionButton1Cooldown")
+        .expect("the button's cooldown pane is showing, sequence 0 armed");
+    assert_eq!(
+        play,
+        (0, 400),
+        "6 s of 10 s left ⇒ the sweep sits at 40 %: sequence 0 at 400 ms"
     );
-    assert_eq!(flash, None);
 
     // The checked ring on the current action (the transcribed UpdateState).
     s.set_action_state(
@@ -299,7 +352,11 @@ fn the_cooldown_sweep_paints_over_the_buttons_icon_and_ring() {
         &|c| matches!(c, QuadContent::Texture { path: Some(p), .. } if p.contains("UI-Quickslot2")),
     )
     .expect("the NormalTexture ring quad");
-    let sweep = pos(&|c| matches!(c, QuadContent::Cooldown { .. })).expect("the sweep quad");
+    let sweep = pos(&|c| {
+        matches!(c, QuadContent::ModelPane { model: Some(m), .. }
+            if m.eq_ignore_ascii_case(super::test_ui::COOLDOWN_MODEL))
+    })
+    .expect("the sweep pane's quad");
     assert!(
         icon < sweep,
         "the sweep (index {sweep}) must paint over the icon (index {icon})"
@@ -454,7 +511,7 @@ fn the_action_bar_lock_stops_the_drag_and_leaves_shift_click_alone() {
     s.resolve();
 
     s.run(r#"LOCK_ACTIONBAR = "1""#).unwrap();
-    s.run("BenillaActionButton_OnDragStart(ActionButton1)")
+    s.run("this = ActionButton1 ActionButton1:GetScript(\"OnDragStart\")()")
         .unwrap();
     assert!(
         s.cursor_payload().is_none(),
@@ -480,7 +537,7 @@ fn the_action_bar_lock_stops_the_drag_and_leaves_shift_click_alone() {
     );
 
     // The receiving end is guarded too: the held action cannot be dropped back by a drag…
-    s.run("BenillaActionButton_OnReceiveDrag(ActionButton1)")
+    s.run("this = ActionButton1 ActionButton1:GetScript(\"OnReceiveDrag\")()")
         .unwrap();
     assert!(
         s.cursor_payload().is_some(),
@@ -488,7 +545,7 @@ fn the_action_bar_lock_stops_the_drag_and_leaves_shift_click_alone() {
     );
     // …and unlocking makes both ends live again.
     s.run(r#"LOCK_ACTIONBAR = "0""#).unwrap();
-    s.run("BenillaActionButton_OnReceiveDrag(ActionButton1)")
+    s.run("this = ActionButton1 ActionButton1:GetScript(\"OnReceiveDrag\")()")
         .unwrap();
     assert!(s.cursor_payload().is_none(), "unlocked, the drop lands");
     assert_eq!(
@@ -741,19 +798,20 @@ fn macro_name_line_follows_get_action_text_through_the_xml() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The shipped **bag BAR** — `assets/ui/BagFrame.xml` — materialized frame for frame, and then
-/// driven end to end: the bar's own backpack toggle opens the backpack window, the fed stack
-/// paints in its slot's well, the slot's clicks queue the right intents, and the toggle shuts it
-/// again. It lives in this file because the bar seats on `MainMenuBarArtFrame` (ActionBar.xml) —
-/// the toggle's anchor arithmetic below is the reason.
+/// The **bag BAR** — stock `Interface\FrameXML\MainMenuBarBagButtons.xml` — materialized frame
+/// for frame, and then driven end to end: the bar's own backpack toggle opens the backpack
+/// window, the fed stack paints in its slot's well, the slot's clicks queue the right intents,
+/// and the toggle shuts it again. It lives in this file because the bar seats on
+/// `MainMenuBarArtFrame` (`ActionBarFrame.xml`) — the toggle's anchor arithmetic below is the
+/// reason.
 ///
 /// **What decision 1751 changed.** This asserted `report.frames == 259` over a breakdown that
 /// counted five bag WINDOWS and a keyring window (37 + 4×42 + 42, plus the bar's own handful).
-/// Those windows are gone from this file: the live ones are the reference's `ContainerFrame1..12`,
-/// executed off the player's own patch chain, and `BagFrame.xml` is the BAR and nothing else —
-/// this client's stand-in for the reference's `MainMenuBarBagButtons.xml`. So the count is
-/// recounted from what the file declares today, and the drive reaches the reference's window
-/// through the bar's own button rather than showing one of ours by name.
+/// Those windows are gone: the live ones are the reference's `ContainerFrame1..12`, executed off
+/// the player's own patch chain, and the bar is the reference's own
+/// `MainMenuBarBagButtons.xml` (1783). So the count is recounted from what that file declares,
+/// and the drive reaches the reference's window through the bar's own button rather than showing
+/// one of ours by name.
 #[test]
 fn shipped_bag_frame_drives_end_to_end() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -772,19 +830,28 @@ fn shipped_bag_frame_drives_end_to_end() {
     //   * StackSplit.xml and MerchantFrame.xml after the bags — the reference's
     //     `ContainerFrameItemButton_OnClick` reads `StackSplitFrame` on both arms and
     //     `MerchantFrame:IsShown()` on the right one, so a slot click raises without them. That
-    //     dependency is the reference's, not ours; MerchantFrame.xml is additionally the home of
-    //     the `BenillaMoney_*` coin rig this chain's windows call.
+    //     dependency is the reference's, not ours.
     let mut bar_frames = 0;
     for file in BAG_UI {
         let frames = load_ui(&s, file);
-        if *file == "Cooldown.xml" {
-            load_ui(&s, "ActionBar.xml");
+        if *file == "Interface\\FrameXML\\Cooldown.xml" {
+            load_ui(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+            load_ui(&s, "Interface\\FrameXML\\TextStatusBar.lua");
+            load_ui(&s, "Interface\\FrameXML\\TextStatusBar.xml");
+            load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
+            load_ui(&s, r"Interface\FrameXML\UIParent.xml");
+            load_ui(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+            load_ui(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+            load_ui(&s, "Interface\\FrameXML\\MainMenuBar.xml");
+            load_ui(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
+            load_ui(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
         }
         if *file == "Interface\\FrameXML\\MainMenuBarBagButtons.xml" {
             bar_frames = frames;
         }
     }
     load_ui(&s, "Interface\\FrameXML\\StackSplitFrame.xml");
+    load_ui(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_ui(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     assert_eq!(
@@ -802,6 +869,7 @@ fn shipped_bag_frame_drives_end_to_end() {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -844,9 +912,9 @@ fn shipped_bag_frame_drives_end_to_end() {
     // Click the toggle → the backpack window opens and slot 1 paints the jerky. The toggle seats
     // on the bar's art frame BOTTOMRIGHT +(-6,2), 37×37: art frame BOTTOMRIGHT is the bar's
     // (full-width, bottom-anchored) corner (1024,0) ⇒ toggle x[981,1018] y[2,39], center
-    // (999.5,20.5). That arithmetic is THIS file's — the button is `BagFrame.xml`'s and its seat
-    // is `ActionBar.xml`'s — so the click stays at literal coordinates rather than going through
-    // `centre_of`: hitting them is part of what is being tested.
+    // (999.5,20.5). That arithmetic is THIS file's — the button is `MainMenuBarBagButtons.xml`'s
+    // and its seat is `ActionBarFrame.xml`'s — so the click stays at literal coordinates rather
+    // than going through `centre_of`: hitting them is part of what is being tested.
     s.mouse_button(999.0, 20.0, "LeftButton", true);
     s.mouse_button(999.0, 20.0, "LeftButton", false);
     s.resolve();
@@ -1111,7 +1179,20 @@ fn the_bonus_action_bar_exists_hidden_and_takes_layout_calls() {
         .unwrap();
     }
 
-    // A hidden bar changes nothing about the visible one.
+    // A hidden bar changes nothing about the visible one. (An EMPTY main-bar button is itself
+    // hidden under the reference — `ActionButton_Update` hides a slot with no action while
+    // `showgrid == 0`, ActionButton.lua:69-70 — so slot 1 is occupied first.)
+    s.set_action(
+        1,
+        Some(ActionSlot {
+            texture: Some("Interface\\Icons\\Ability_SteelMelee".into()),
+            kind: 0x00,
+            action: 100,
+            count: 0,
+            consumable: false,
+        }),
+    );
+    s.fire_event("ACTIONBAR_SLOT_CHANGED", vec![ScriptValue::Int(1)]);
     assert!(
         s.eval::<bool>("return ActionButton1:IsShown()").unwrap(),
         "the main bar is untouched"
@@ -1192,7 +1273,7 @@ fn both_reference_action_button_templates_are_inheritable() {
     // zBar's exact shape: inherit the bar template, supply your own OnLoad.
     let doc = benilla_ui::framexml::parse(
         r#"<Ui>
-            <CheckButton name="ZLikeButton" inherits="ActionBarButtonTemplate" id="1">
+            <CheckButton name="ZLikeButton" inherits="ActionBarButtonTemplate" parent="UIParent" id="1">
                 <Anchors><Anchor point="CENTER"/></Anchors>
             </CheckButton>
             <CheckButton name="BareLikeButton" inherits="ActionButtonTemplate" id="1">
@@ -1273,20 +1354,43 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for file in [
-        "UIParent.xml",
-        "Cooldown.xml",
-        "ActionBar.xml",
-        "MultiBars.xml",
+        // Fonts first: the pane's check-box labels colour from `RED_FONT_COLOR` in their own OnLoad.
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
+        // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
+        // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
+        // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
+        // two template files its check boxes inherit through (1875).
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        r"Interface\FrameXML\OptionsFrameTemplates.xml",
+        r"Interface\FrameXML\ReputationFrame.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        "ScrollTemplates.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
+        "KeyBindingsPage.xml",
+        "OptionsFrame.xml",
+        "Interface\\FrameXML\\MultiActionBars.xml",
     ] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
+        // `test_ui::load_ui`, not a disk read: this list names chain entries now (the reputation
+        // pane and the templates it inherits through), and `assets/ui` cannot answer for those.
+        super::test_ui::load_ui(&s, file);
     }
 
     assert_eq!(s.eval::<i64>("return CURRENT_ACTIONBAR_PAGE").unwrap(), 1);
@@ -1372,14 +1476,31 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
          reference's own asymmetry with page-down, which rescans instead"
     );
 
-    // A bonus page outranks the paged one entirely: with an offset up, the page is ignored.
+    // The bonus branch is GUARDED by the page (ActionButton.lua:447: `button.isBonus and
+    // CURRENT_ACTIONBAR_PAGE == 1`) — and a MAIN-bar button has no isBonus at all, so it never
+    // takes that branch: the bonus offset is BonusActionBarFrame's own twelve buttons' business
+    // (1897, adopted with 1938). Main-bar slot 1 on page 3 is action 25 whatever the offset.
     s.run("CURRENT_ACTIONBAR_PAGE = 3").unwrap();
     s.set_bonus_bar_offset(1);
     assert_eq!(
         s.eval::<i64>("return ActionButton_GetPagedID(ActionButton1)")
             .unwrap(),
+        25,
+        "a main-bar button follows its page, never the bonus offset (ActionButton.lua:447-456)"
+    );
+    s.run("CURRENT_ACTIONBAR_PAGE = 1").unwrap();
+    assert_eq!(
+        s.eval::<i64>("return ActionButton_GetPagedID(BonusActionButton1)")
+            .unwrap(),
         73,
-        "bonus offset 1 is action 73, whatever page the main bar is on"
+        "the bonus frame's own button, on page 1 with offset 1, is 72 + 1"
+    );
+    s.run("CURRENT_ACTIONBAR_PAGE = 3").unwrap();
+    assert_eq!(
+        s.eval::<i64>("return ActionButton_GetPagedID(BonusActionButton1)")
+            .unwrap(),
+        25,
+        "and off page 1 even the bonus button follows the page: the conjunct 1897 found missing"
     );
     s.set_bonus_bar_offset(0);
     assert_eq!(
@@ -1402,17 +1523,31 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
 fn bonus_bar_slides_up_with_sound_and_down_without() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for file in ["Cooldown.xml", "ActionBar.xml"] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
-    }
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Cooldown.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.lua");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIParent.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\MainMenuBar.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\GameTooltip.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
+
+    // `ExhaustionTick_Update` indexes `ReputationWatchBar` UNGUARDED — the reference's own code,
+    // safe there because `ReputationFrame.xml` is always loaded and always declares the bar. Since
+    // 1875 that file is the reference's own, so a harness that drives the XP bar has to load it too
+    // or the tick raises on its first event.
+    // In manifest order: the fonts its check-box labels colour from, the panel templates those
+    // boxes inherit through, then the pane.
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\OptionsFrameTemplates.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\ReputationFrame.xml");
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     s.tick(10.0); // a nonzero clock epoch
     let _ = s.take_sounds();
@@ -1464,12 +1599,34 @@ fn bonus_bar_slides_up_with_sound_and_down_without() {
             .into_iter()
             .map(|u| (u.action, u.on_self))
             .collect::<Vec<_>>(),
-        vec![(73, true)],
-        "ActionButtonUp's onSelf reaches UseAction's third argument"
+        vec![(73, false)],
+        "the BONUS branch of stock ActionButtonUp passes a literal 0 for onSelf (ActionButton.lua:38) \
+         — in a stance, ALT-1 drives the bonus page without self-cast; the reference's own rule, \
+         which 1745's expectation of (73, true) had smoothed over"
     );
+    s.run("BonusActionBarFrame:Hide() ActionButtonDown(1) ActionButtonUp(1, 1)")
+        .unwrap();
+    assert_eq!(
+        s.take_action_uses()
+            .into_iter()
+            .map(|u| (u.action, u.on_self))
+            .collect::<Vec<_>>(),
+        vec![(1, true)],
+        "on the main-bar branch onSelf reaches UseAction's third argument (ActionButton.lua:51)"
+    );
+    s.run("BonusActionBarFrame:Show()").unwrap();
 
-    // Half the slide: the replica is half-risen (top = 0.5 * 43 over the bar's bottom edge at
-    // y=0), the paint suppression still holds, still silent.
+    // The slide, frame by frame. Stock `BonusActionBar_OnUpdate` paints the position the timer
+    // has REACHED and then advances it (BonusActionBarFrame.lua:37-49), so the first OnUpdate
+    // after a Show paints the start (top = 0 over the bar's bottom edge at y=0), the second the
+    // half-risen replica (0.5 * 43), and the one that finds the timer past BONUSACTIONBAR_SLIDETIME
+    // lands it. Silent until then.
+    s.tick(0.075);
+    let top = s
+        .eval::<f64>("return BonusActionBarFrame:GetTop()")
+        .unwrap();
+    assert!(top.abs() < 0.01, "first frame top = {top}, want 0");
+    assert!(s.take_sounds().is_empty());
     s.tick(0.075);
     let top = s
         .eval::<f64>("return BonusActionBarFrame:GetTop()")
@@ -1485,8 +1642,10 @@ fn bonus_bar_slides_up_with_sound_and_down_without() {
     );
     assert!(s.take_sounds().is_empty());
 
-    // The landing edge: snap to 43, THE sound, and the main bar adopts the bonus page.
-    s.tick(0.08);
+    // The landing edge: snap to 43 and THE sound. The main bar does NOT adopt the bonus page:
+    // a main-bar button has no `isBonus`, so `ActionButton_GetPagedID` keeps it on its page and the
+    // overlay IS the stance page (ActionButton.lua:447-456; 1897, adopted with 1938).
+    s.tick(0.01);
     assert_eq!(
         s.take_sounds(),
         vec![benilla_ui::script::SoundRequest::KitName(
@@ -1509,8 +1668,8 @@ fn bonus_bar_slides_up_with_sound_and_down_without() {
     assert_eq!(
         s.eval::<i64>("return ActionButton_GetPagedID(ActionButton1)")
             .unwrap(),
-        73,
-        "the main bar adopts the bonus page at landing"
+        1,
+        "the main bar keeps its page under the landed overlay"
     );
     s.tick(0.5);
     assert!(s.take_sounds().is_empty(), "a landed bar never re-sounds");
@@ -1530,7 +1689,8 @@ fn bonus_bar_slides_up_with_sound_and_down_without() {
     assert_eq!(
         s.eval::<i64>("return ActionButton_GetPagedID(ActionButton1)")
             .unwrap(),
-        97
+        1,
+        "the main bar stays on its page through a form swap"
     );
     s.tick(0.2);
     assert!(
@@ -1561,7 +1721,11 @@ fn bonus_bar_slides_up_with_sound_and_down_without() {
     // stand-in while the frame is still shown.
     s.run("ActionButtonDown(1) ActionButtonUp(1)").unwrap();
     assert_eq!(action_ids(&mut s), vec![97]);
+    // Paint-then-advance again: the frame that finds the timer past the slide time is the one
+    // that hides (BonusActionBarFrame.lua:51-66), so the descent takes one OnUpdate more than
+    // the time itself.
     s.tick(0.2);
+    s.tick(0.01);
     assert!(
         !s.eval::<bool>("return BonusActionBarFrame:IsShown()")
             .unwrap(),
@@ -1581,17 +1745,31 @@ fn bonus_bar_slides_up_with_sound_and_down_without() {
 fn bonus_bar_turnaround_continues_from_position() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for file in ["Cooldown.xml", "ActionBar.xml"] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
-    }
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Cooldown.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.lua");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIParent.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\MainMenuBar.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\GameTooltip.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
+
+    // `ExhaustionTick_Update` indexes `ReputationWatchBar` UNGUARDED — the reference's own code,
+    // safe there because `ReputationFrame.xml` is always loaded and always declares the bar. Since
+    // 1875 that file is the reference's own, so a harness that drives the XP bar has to load it too
+    // or the tick raises on its first event.
+    // In manifest order: the fonts its check-box labels colour from, the panel templates those
+    // boxes inherit through, then the pane.
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\OptionsFrameTemplates.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\ReputationFrame.xml");
     s.tick(10.0);
     let _ = s.take_sounds();
 
@@ -1606,15 +1784,28 @@ fn bonus_bar_turnaround_continues_from_position() {
         "hide"
     );
     // A third of the way back down from the turnaround point: 43 * (0.5 - 0.03/0.15).
+    // `HideBonusActionBar` keeps a running timer (it resets it only when `completed`,
+    // BonusActionBarFrame.lua:86-88), so the descent starts where the rise had got to: the rise's
+    // one OnUpdate advanced the timer to 0.075 (half), and the hide arm paints (1 − 0.075/0.15) · 43
+    // = 21.5 on its first frame, then 12.9 on the next — paint, then advance.
+    s.tick(0.03);
+    let top = s
+        .eval::<f64>("return BonusActionBarFrame:GetTop()")
+        .unwrap();
+    assert!(
+        (top - 21.5).abs() < 0.6,
+        "turnaround descends from 21.5, top = {top}"
+    );
     s.tick(0.03);
     let top = s
         .eval::<f64>("return BonusActionBarFrame:GetTop()")
         .unwrap();
     assert!(
         (top - 12.9).abs() < 0.6,
-        "turnaround descends from 21.5, top = {top}"
+        "next frame top = {top}, want ~12.9"
     );
     s.tick(0.2);
+    s.tick(0.01);
     assert!(!s
         .eval::<bool>("return BonusActionBarFrame:IsShown()")
         .unwrap());
@@ -1636,17 +1827,31 @@ fn bonus_bar_turnaround_continues_from_position() {
 fn the_page_arrows_do_not_steal_each_other_s_clicks() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for file in ["Cooldown.xml", "ActionBar.xml"] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
-    }
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Cooldown.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.lua");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIParent.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\MainMenuBar.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\GameTooltip.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
+
+    // `ExhaustionTick_Update` indexes `ReputationWatchBar` UNGUARDED — the reference's own code,
+    // safe there because `ReputationFrame.xml` is always loaded and always declares the bar. Since
+    // 1875 that file is the reference's own, so a harness that drives the XP bar has to load it too
+    // or the tick raises on its first event.
+    // In manifest order: the fonts its check-box labels colour from, the panel templates those
+    // boxes inherit through, then the pane.
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\OptionsFrameTemplates.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\ReputationFrame.xml");
     // The post-login state, which is what a player clicks into. Without it `ExhaustionTick_Update`
     // never runs, and the rested marker — DIALOG strata, declared CENTER on the XP strip, which is
     // exactly where the arrows are — sits unhidden over both and eats every click. That is the

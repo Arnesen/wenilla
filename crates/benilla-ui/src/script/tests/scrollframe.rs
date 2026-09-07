@@ -68,10 +68,12 @@ fn get_scroll_child_roundtrips_wrapper_and_name_and_clears_on_nil() {
 }
 
 /// The sign convention (verified against the design's own worked example): frame top 500, vertical
-/// 40 ⇒ child top 540. Also covers the 0 / clamped-to-range cases and that `SetScrollChild(nil)`
-/// restores the child's own authored anchor (never mutated — the override is a local map).
+/// 40 ⇒ child top 540. Also covers 0, an offset PAST the range and one below zero — both stored and
+/// applied verbatim, since the reference's `0x786db0` never reads the range (decision 2017) — and
+/// that `SetScrollChild(nil)` restores the child's own authored anchor (never mutated — the
+/// override is a local map).
 #[test]
-fn scroll_child_top_tracks_vertical_scroll_and_clamps_then_restores_on_clear() {
+fn scroll_child_top_tracks_vertical_scroll_unclamped_then_restores_on_clear() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0); // screen rect: bottom 0, left 0, top 600, right 800
 
@@ -112,18 +114,34 @@ fn scroll_child_top_tracks_vertical_scroll_and_clamps_then_restores_on_clear() {
         "vertical=40 -> child top = frame top + 40 (a positive offset lifts the child)"
     );
 
-    // range = child_h(600) - frame_h(200) = 400; asking for 9999 clamps to it.
-    s.run("SF:SetVerticalScroll(9999)").unwrap();
+    // range = child_h(600) - frame_h(200) = 400, and the offset is NOT clamped to it: 450 is
+    // stored and applied as 450. (Keeping the bar inside the range is FrameXML's job, through the
+    // Slider's [min, max] — the engine has no opinion.)
+    s.run("SF:SetVerticalScroll(450)").unwrap();
     s.resolve();
     assert_eq!(
         s.eval::<f32>("return SF:GetVerticalScroll()").unwrap(),
-        400.0
+        450.0,
+        "stored verbatim, the range of 400 notwithstanding"
     );
     let quads = s.extract();
     assert_eq!(
         marker_rect(&quads, "marker:child").map(|r| r.top),
-        Some(900.0),
-        "clamped: frame top 500 + range 400"
+        Some(950.0),
+        "applied verbatim: frame top 500 + 450"
+    );
+    // Nor at zero.
+    s.run("SF:SetVerticalScroll(-30)").unwrap();
+    s.resolve();
+    assert_eq!(
+        s.eval::<f32>("return SF:GetVerticalScroll()").unwrap(),
+        -30.0
+    );
+    let quads = s.extract();
+    assert_eq!(
+        marker_rect(&quads, "marker:child").map(|r| r.top),
+        Some(470.0),
+        "a negative offset lowers the child: frame top 500 - 30"
     );
 
     // SetScrollChild(nil): the override stops being computed — the child's own authored anchor
@@ -136,6 +154,41 @@ fn scroll_child_top_tracks_vertical_scroll_and_clamps_then_restores_on_clear() {
         Some(580.0),
         "authored anchor survives: screen top 600 - 20"
     );
+}
+
+/// The reference's `0x786db0` is gated on the offset actually CHANGING (a compare against the
+/// stored value, nothing else): a `SetVerticalScroll` to the value already held re-lays nothing out
+/// and fires no `OnVerticalScroll`. The same shape as the Slider's `SetValue` change-gate (decision
+/// 0250) — the other half of what keeps the bar ↔ frame wiring from ringing — and a value past the
+/// range is a change like any other.
+#[test]
+fn set_vertical_scroll_fires_on_vertical_scroll_only_on_a_change() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        Fires = {}
+        local frame = CreateFrame("ScrollFrame", "SF")
+        frame:SetPoint("TOPLEFT", 0, -100)
+        frame:SetSize(300, 200)
+        frame:SetScript("OnVerticalScroll", function() table.insert(Fires, arg1) end)
+        local child = CreateFrame("Frame", "Child")
+        child:SetSize(300, 600)
+        frame:SetScrollChild(child)
+        frame:SetVerticalScroll(0)      -- already 0: nothing
+        frame:SetVerticalScroll(40)     -- a change
+        frame:SetVerticalScroll(40)     -- the same again: nothing
+        frame:SetVerticalScroll(700)    -- past the range (400): a change, stored as given
+        frame:SetVerticalScroll(0)      -- back
+    "#,
+    )
+    .unwrap();
+    assert_eq!(
+        s.eval::<String>("return table.concat(Fires, \",\")")
+            .unwrap(),
+        "40,700,0"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
 #[test]
@@ -235,8 +288,11 @@ fn vertical_scroll_range_is_local_units_on_a_scaled_frame() {
     );
 }
 
+/// `OnVerticalScroll` carries the value AS STORED — past the range too (decision 2017: the
+/// reference's `0x786db0` fires with `[+0x328]`, which it never clamps) — under the RF-0025
+/// conventions, and `UpdateScrollChildRect` fires `OnScrollRangeChanged` with the live range.
 #[test]
-fn vertical_scroll_fires_clamped_and_update_rect_fires_range_changed() {
+fn vertical_scroll_fires_as_given_and_update_rect_fires_range_changed() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
     s.run(
@@ -265,8 +321,8 @@ fn vertical_scroll_fires_clamped_and_update_rect_fires_range_changed() {
     s.run("SF:SetVerticalScroll(9999)").unwrap();
     assert_eq!(
         s.eval::<f32>("return seen_v").unwrap(),
-        400.0,
-        "fires with the CLAMPED value"
+        9999.0,
+        "fires with the value as given — the range (400) is not consulted"
     );
 
     s.run("SF:UpdateScrollChildRect()").unwrap();
@@ -488,5 +544,45 @@ fn hit_test_denies_a_button_clipped_out_and_admits_it_once_scrolled_into_view() 
     assert!(
         s.hit_test(25.0, 340.0).is_some(),
         "scrolled into view, the button hits again"
+    );
+}
+
+/// `UpdateScrollChildRect` right after the SetTexts that fill a pane reads a range that already
+/// counts the wrapped text — the reference's measure is synchronous, and with a font engine
+/// installed so is ours (1944; stock `QuestLog_UpdateQuestDetails` is the caller that found it).
+#[test]
+fn update_scroll_child_rect_measures_the_childs_text_before_it_reads_the_range() {
+    struct Rows;
+    impl crate::script::TextMeasure for Rows {
+        fn measure(&mut self, req: &crate::script::MeasureRequest) -> (f32, f32, f32) {
+            let natural = req.text.chars().count() as f32 * 7.0;
+            match req.wrap_width {
+                Some(w) if w > 0.0 && natural > w => (w, (natural / w).ceil() * 14.0, natural),
+                _ => (natural, 14.0, natural),
+            }
+        }
+    }
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_text_measurer(Box::new(Rows));
+    s.run(
+        r#"
+        local sf = CreateFrame("ScrollFrame", "SF", UIParent)
+        sf:SetPoint("TOPLEFT", 0, 0); sf:SetSize(100, 50)
+        local child = CreateFrame("Frame", "SFChild", sf)
+        child:SetSize(100, 50); sf:SetScrollChild(child)
+        local fs = child:CreateFontString("SFText", "ARTWORK")
+        fs:SetPoint("TOPLEFT", 0, 0); fs:SetWidth(70)
+        sf:SetScript("OnScrollRangeChanged", function() RANGE = arg2 end)
+        fs:SetText(string.rep("x", 40))   -- 280px of ink over a 70px column: four 14px rows
+        sf:UpdateScrollChildRect()
+        "#,
+    )
+    .unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(
+        s.eval::<f64>("return RANGE").unwrap(),
+        6.0,
+        "56px of measured text under a 50px frame: the range is known at the call, not a frame later"
     );
 }

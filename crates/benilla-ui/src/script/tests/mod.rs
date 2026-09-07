@@ -23,6 +23,7 @@ mod keyboard;
 mod layout_gate;
 mod measure;
 mod minimap;
+mod model_clock;
 mod modelframe;
 mod movable;
 mod object_model;
@@ -47,6 +48,7 @@ mod tooltip_spell;
 mod tooltip_unit;
 mod toplevel;
 mod visibility;
+mod worldframe;
 mod worldmap;
 
 /// **A bounded chunk reports instead of hanging** — the guard decision 1247's hang called for.

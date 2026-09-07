@@ -154,6 +154,7 @@ pub(super) struct WornEquip {
     /// no guild column, and a display-driven body never joins one, so this stays `None` there and a
     /// tabard in an NPC's bodyslot-9 column keeps its own art.
     pub(super) emblem: Option<benilla_formats::GuildEmblem>,
+    pub(super) tabard_preview: bool,
 }
 
 pub(super) fn resolve_worn_equip(
@@ -172,6 +173,7 @@ pub(super) fn resolve_worn_equip(
                 cloak: e.cloak,
                 helm: e.helm,
                 emblem: e.emblem,
+                tabard_preview: e.tabard_preview,
             })
             .unwrap_or_default(),
         // A character-model NPC's worn gear ships in its display's CreatureDisplayInfoExtra columns
@@ -184,29 +186,44 @@ pub(super) fn resolve_worn_equip(
                 cloak: 0,
                 helm: npc.equipment[0],
                 emblem: None,
+                tabard_preview: false,
             })
             .unwrap_or_default(),
         _ => WornEquip::default(),
     }
 }
 
-/// The worn geoset selectors for a set of equipment display ids (decision 0074's B1–B8 branches +
-/// the cloak group + the helm's RF-0083 hide-mask row pair): each non-zero display resolves its
-/// ItemDisplayInfo row's geoset columns. One helper for the world attach path and the glue-preview
+/// The worn geoset selectors for a set of equipment display ids (decisions 0074/1864's B1–B8
+/// branches + the cloak group + the helm's RF-0083 hide-mask row pair): each non-zero display
+/// resolves its ItemDisplayInfo row's geoset columns, and B3's forearm gate comes off the same
+/// composite plan the atlas blits. One helper for the world attach path and the glue-preview
 /// builder — the selection law can't fork (decision 0465).
+///
+/// [`EquipGeosets::tabard_preview`](benilla_formats::EquipGeosets::tabard_preview) (B6) is the
+/// tabard designer's flag, up on the local player's body while that window is open (decision
+/// 1977) — its only setter in the reference too.
 pub(in crate::entities) fn equip_geosets(
     displays: Option<&super::super::ItemDisplays>,
     bodyslots: &[u32; 8],
     cloak: u32,
     helm: u32,
+    tabard_preview: bool,
 ) -> benilla_formats::EquipGeosets {
-    let mut eg = benilla_formats::EquipGeosets::default();
+    let mut eg = benilla_formats::EquipGeosets {
+        tabard_preview,
+        ..Default::default()
+    };
     if let Some(d) = displays {
+        let mut worn: [Option<&benilla_formats::ItemDisplay>; 8] = [None; 8];
         for (i, id) in bodyslots.iter().enumerate() {
             if *id != 0 {
-                eg.bodyslots[i] = d.catalog.get(*id).map(|row| row.geoset_groups);
+                worn[i] = d.catalog.get(*id);
+                eg.bodyslots[i] = worn[i].map(|row| row.geoset_groups);
             }
         }
+        // B3's gate is the ArmLower tile's own occupancy, not "is a chest equipped" — the same
+        // plan the composite blits (decision 1864).
+        eg.forearm_dressed = benilla_formats::forearm_dressed(&worn);
         if cloak != 0 {
             eg.cloak = d.catalog.get(cloak).map(|row| row.geoset_groups[0]);
         }
@@ -239,13 +256,19 @@ pub(super) type MatQuint = (
 /// The full character material set [`build_char_skin_materials`] returns: `(body, hair, object,
 /// skin_extra)`, the body + skin-extra each a (single-sided, two-sided) pair. Each per-slot
 /// [`MatQuint`] is `None` for an absent row (a bald style, a non-fur race) or missing tables. Named
-/// so the create-preview builder ([`super::create_preview`]) can select the steady variant per part.
+/// so the create-preview builder (`super::create_preview`) can select the steady variant per part.
 pub(super) type CharSkinMaterials = (
     Option<(MatQuint, MatQuint)>,
     Option<MatQuint>,
     Option<MatQuint>,
     (Option<MatQuint>, Option<MatQuint>),
 );
+
+/// The `WOW_PROBE_SHARED_SKIN` pricing lever (see its use in [`build_char_skin_materials`]).
+fn shared_skin_probe() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WOW_PROBE_SHARED_SKIN").is_some())
+}
 
 /// Build a character body's per-appearance materials — the **body** atlas (as a (single-sided,
 /// two-sided) pair — a body batch keeps its own M2 0x04, e.g. the robe skirt) and the **hair**-mesh
@@ -271,6 +294,7 @@ pub(super) fn build_char_skin_materials(
     // display asks for it. `None` = no guild, or its identity has not arrived; both leave the
     // tabard garment showing its own art.
     emblem: Option<benilla_formats::GuildEmblem>,
+    tabard_preview: bool,
     displays: Option<&super::super::ItemDisplays>,
     sections: Option<&SkinSections>,
     world_assets: Option<&WorldAssets>,
@@ -303,7 +327,7 @@ pub(super) fn build_char_skin_materials(
     let body_tex: Option<Handle<Image>> = match &look.body {
         BodySkin::Baked(name) => Some(asset_server.load::<Image>(baked_npc_url(name))),
         BodySkin::Composite { face } => world_assets.and_then(|world| {
-            let key = SkinKey {
+            let mut key = SkinKey {
                 race: look.race,
                 sex: look.sex,
                 skin: look.skin,
@@ -313,7 +337,26 @@ pub(super) fn build_char_skin_materials(
                 hair_color: look.hair_color,
                 equip,
                 emblem,
+                tabard_preview,
             };
+            // `WOW_PROBE_SHARED_SKIN=1` — a PRICING lever, never a look: every body composites
+            // the same key, so every body part of one mesh shares one material and bevy's
+            // batcher can instance them. What it measures is the ceiling of the shared-body-
+            // material lane (draw count → render-thread CPU) before that lane is built.
+            if shared_skin_probe() {
+                key = SkinKey {
+                    race: 1,
+                    sex: 0,
+                    skin: 0,
+                    face: 0,
+                    facial_hair: 0,
+                    hair_style: 0,
+                    hair_color: 0,
+                    equip: [0; 8],
+                    emblem: None,
+                    tabard_preview: false,
+                };
+            }
             match skin_cache.fetch(&key) {
                 Some(handle) => Some(handle),
                 None => {
@@ -342,6 +385,7 @@ pub(super) fn build_char_skin_materials(
                             key.hair_color,
                             worn,
                             key.emblem,
+                            key.tabard_preview,
                         )
                         .ok()??;
                     // Through the upload gate like every other texture: a composite is

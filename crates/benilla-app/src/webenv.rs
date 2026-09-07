@@ -51,7 +51,11 @@ const DEV_QUERY_CREDS: &str = "dev_query_creds";
 /// The pure lookup behind [`var`] — env object first, query string second, credentials gated —
 /// kept free of `web_sys` so it is unit-tested natively.
 #[allow(dead_code)]
-fn lookup(env: &std::collections::HashMap<String, String>, search: &str, key: &str) -> Option<String> {
+fn lookup(
+    env: &std::collections::HashMap<String, String>,
+    search: &str,
+    key: &str,
+) -> Option<String> {
     if let Some(v) = env.get(key) {
         return Some(v.clone());
     }
@@ -76,8 +80,12 @@ fn page_env() -> std::collections::HashMap<String, String> {
     ENV.with(|cell| {
         cell.get_or_init(|| {
             let mut map = std::collections::HashMap::new();
-            let Some(window) = web_sys::window() else { return map };
-            let Ok(obj) = js_sys::Reflect::get(&window, &"__wenilla_env".into()) else { return map };
+            let Some(window) = web_sys::window() else {
+                return map;
+            };
+            let Ok(obj) = js_sys::Reflect::get(&window, &"__wenilla_env".into()) else {
+                return map;
+            };
             if !obj.is_object() {
                 return map;
             }
@@ -127,13 +135,19 @@ mod tests {
     use std::collections::HashMap;
 
     fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
     fn env_object_wins_over_query() {
         let e = env(&[("user", "fromenv")]);
-        assert_eq!(lookup(&e, "?user=fromquery", "user").as_deref(), Some("fromenv"));
+        assert_eq!(
+            lookup(&e, "?user=fromquery", "user").as_deref(),
+            Some("fromenv")
+        );
     }
 
     #[test]
@@ -143,22 +157,37 @@ mod tests {
         assert_eq!(lookup(&e, "?user=alice&pass=pw&char=Al", "pass"), None);
         assert_eq!(lookup(&e, "?user=alice&pass=pw&char=Al", "char"), None);
         let e = env(&[("dev_query_creds", "1")]);
-        assert_eq!(lookup(&e, "?user=alice&pass=pw", "user").as_deref(), Some("alice"));
-        assert_eq!(lookup(&e, "?user=alice&pass=pw", "pass").as_deref(), Some("pw"));
+        assert_eq!(
+            lookup(&e, "?user=alice&pass=pw", "user").as_deref(),
+            Some("alice")
+        );
+        assert_eq!(
+            lookup(&e, "?user=alice&pass=pw", "pass").as_deref(),
+            Some("pw")
+        );
     }
 
     #[test]
     fn non_credential_keys_always_read_the_query() {
         let e = env(&[]);
-        assert_eq!(lookup(&e, "?host=realm.example&renderscale=0.5", "host").as_deref(), Some("realm.example"));
-        assert_eq!(lookup(&e, "?renderscale=0.5", "renderscale").as_deref(), Some("0.5"));
+        assert_eq!(
+            lookup(&e, "?host=realm.example&renderscale=0.5", "host").as_deref(),
+            Some("realm.example")
+        );
+        assert_eq!(
+            lookup(&e, "?renderscale=0.5", "renderscale").as_deref(),
+            Some("0.5")
+        );
         assert_eq!(lookup(&e, "", "host"), None);
     }
 
     #[test]
     fn query_values_are_percent_decoded_and_malformed_pairs_skipped() {
         let e = env(&[]);
-        assert_eq!(lookup(&e, "?host=a%20b&junk&host2=%zz", "host").as_deref(), Some("a b"));
+        assert_eq!(
+            lookup(&e, "?host=a%20b&junk&host2=%zz", "host").as_deref(),
+            Some("a b")
+        );
         assert_eq!(lookup(&e, "?host=%zz", "host"), None);
     }
 }

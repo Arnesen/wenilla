@@ -100,8 +100,10 @@ pub(crate) struct SocialState {
     /// The last `/who` answer, and the server's true match total.
     who: Vec<benilla_protocol::messages::WhoEntry>,
     who_total: u32,
-    /// The current who-list sort key (`SortWho`), `"zone"` being the frame's own default column.
-    who_sort: String,
+    /// The `/who` sort chain (`SortWho`'s seven `{key, dir}` slots at `0xc2817c`) — the app's
+    /// authoritative copy, pushed to the VM with the rows so the binding can promote and re-sort
+    /// synchronously. **Survives a logout** ([`SocialState::clear_session`]).
+    who_sort: benilla_ui::script::WhoSortChain,
     /// `SetWhoToUI` — does the *next* `/who` answer belong to the Who frame (true) or the chat
     /// frame (false)? The WhoFrame's OnShow/OnHide drive it; a `/who` typed with the frame closed
     /// prints its results as chat lines.
@@ -111,11 +113,29 @@ pub(crate) struct SocialState {
     pending_lines: Vec<FriendStatusUpdate>,
     /// Set whenever a list changed, so the feed knows to fire the Era update event.
     friends_dirty: bool,
+    /// An explicit `ShowFriends()` is out: the next list answers it with `FRIENDLIST_SHOW`
+    /// rather than `FRIENDLIST_UPDATE` (the reference's two arms, 1959).
+    pub(crate) friends_show_pending: bool,
     ignores_dirty: bool,
     who_dirty: bool,
 }
 
 impl SocialState {
+    /// Drop everything the socket owned, keeping what the *process* owns.
+    ///
+    /// Only [`Self::who_sort`] survives, and it survives because the reference's chain is
+    /// per-process: its initialiser `0x5adc50` is reached once from the process-start run at
+    /// `0x401666`, never from a login, so a player who left the who list sorted by level
+    /// descending finds it that way after a relog (wow-re `who-list-sort-law.md` §3). Everything
+    /// else is login-scoped for the reasons decision 0668 gives — the server re-pushes both lists
+    /// at the next login, and a stale ignore list would silence the wrong guids.
+    pub(crate) fn clear_session(&mut self) {
+        *self = Self {
+            who_sort: std::mem::take(&mut self.who_sort),
+            ..Self::default()
+        };
+    }
+
     /// Is `guid` on the ignore list? The reference's `FriendList::IsIgnored 0x5ae5a0` — the
     /// predicate inbound chat, text emotes and duel challenges all gate on (module doc).
     pub(crate) fn is_ignored(&self, guid: u64) -> bool {
@@ -445,6 +465,35 @@ mod tests {
             Some(ERR_FRIEND_ERROR)
         );
         assert_eq!(result_template(0x77), None, "an unknown code shows nothing");
+    }
+
+    /// A logout drops the lists and the last `/who`, and keeps the **sort chain** — which is
+    /// per-process in the reference, not per-login, so a player who left the who list sorted by
+    /// level descending finds it that way after a relog.
+    #[test]
+    fn a_logout_keeps_the_sort_chain_and_drops_everything_else() {
+        let mut social = SocialState::default();
+        social.apply_friend_list(vec![FriendEntry {
+            guid: 7,
+            ..Default::default()
+        }]);
+        social.apply_ignore_list(vec![9]);
+        social.who_to_ui = true;
+        social.who_sort.promote("level");
+        social.who_sort.promote("level"); // descending
+        let chain = social.who_sort.clone();
+
+        social.clear_session();
+        assert!(social.friends.is_empty());
+        assert!(social.ignores.is_empty());
+        assert!(social.who.is_empty());
+        assert!(!social.who_to_ui, "the frame is closed after a logout");
+        assert_eq!(social.who_sort, chain, "the sort chain is process state");
+        assert_ne!(
+            social.who_sort,
+            benilla_ui::script::WhoSortChain::default(),
+            "and the assertion above only means something if it is not the seeded chain"
+        );
     }
 
     /// The online line takes the name twice (the player link); the rest take it once.

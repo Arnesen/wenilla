@@ -305,6 +305,146 @@ pub fn model_render_alpha(
     (appear * despawn * self_fade * declared).clamp(0.0, 1.0)
 }
 
+/// **One streamed unit's live render alpha, asked of the unit** — the same product
+/// [`publish_model_alpha`] publishes as [`ModelAlpha`], answered on demand from the root's own
+/// presentation state.
+///
+/// [`ModelAlphas`] is the read side for a consumer that can wait for the publish: it looks up a
+/// number written in `PostUpdate` and composed down the [`ParentModel`] chain. This is the read
+/// side for a consumer that **cannot** — one that runs in `Update`, or on the very frame a unit's
+/// presentation begins, where the published component does not exist yet (`publish_model_alpha`
+/// inserts it through `Commands`). Both answer the same question from the same law
+/// ([`model_render_alpha`]); they differ only in where the inputs come from.
+///
+/// It exists because a consumer that reconstructs the answer for itself gets it wrong in the same
+/// way every time. The blob shadow gathered the live [`RenderFade`]s off a unit's *part* entities
+/// and read "no part is fading" as opaque — which is true of a settled unit and false of a
+/// **pending** one, whose parts are deliberately invisible and carry no `RenderFade` at all. The
+/// unit root is where the answer is unambiguous, because [`UnitAppearFade`] distinguishes the two
+/// states that a part-side walk cannot tell apart.
+#[derive(bevy::ecs::system::SystemParam)]
+#[allow(clippy::type_complexity)] // one query, the four facets of a unit's presentation
+pub struct UnitRenderAlpha<'w, 's> {
+    time: Res<'w, Time>,
+    viewer: Res<'w, crate::view::Viewer>,
+    units: Query<
+        'w,
+        's,
+        (
+            Option<&'static UnitAppearFade>,
+            Option<&'static DespawnFade>,
+            Option<&'static ModelFade>,
+            Has<crate::world_unit::ViewerUnit>,
+        ),
+    >,
+}
+
+impl UnitRenderAlpha<'_, '_> {
+    /// `unit`'s render alpha this frame. A unit with nothing in flight — and an entity this query
+    /// cannot read at all — is `1.0`, so a settled world costs one lookup and no arithmetic.
+    ///
+    /// The viewer's own body carries the zoom feather here exactly as the publisher applies it,
+    /// so a caller never folds it in itself.
+    pub fn get(&self, unit: Entity) -> f32 {
+        let Ok((appear, despawn, declared, is_self)) = self.units.get(unit) else {
+            return 1.0;
+        };
+        model_render_alpha(
+            self.time.elapsed_secs(),
+            appear.copied(),
+            despawn.and_then(DespawnFade::armed),
+            if is_self { self.viewer.self_fade } else { 1.0 },
+            declared.map_or(1.0, |d| d.0),
+        )
+    }
+}
+
+/// The door's own tests — the states a consumer that reconstructs this number gets wrong.
+#[cfg(test)]
+mod unit_render_alpha_tests {
+    use super::*;
+    use bevy::ecs::system::SystemState;
+
+    /// A world at `now`, holding one unit root built by `build`.
+    fn unit_at(now: f32, build: impl FnOnce(&mut bevy::ecs::world::EntityWorldMut)) -> f32 {
+        let mut world = World::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_secs_f32(now));
+        world.insert_resource(time);
+        world.insert_resource(crate::view::Viewer::default());
+        let mut unit = world.spawn_empty();
+        build(&mut unit);
+        let unit = unit.id();
+        let mut state = SystemState::<UnitRenderAlpha>::new(&mut world);
+        let alpha = state.get(&world).get(unit);
+        alpha
+    }
+
+    /// **The blob shadow's bug, as the door now answers it.** A streamed unit waiting on the
+    /// world to be shown carries `UnitAppearFade::Pending` and no live `RenderFade` anywhere in
+    /// its tree; a consumer that asks "is any part of this unit fading" hears no and draws itself
+    /// opaque over an invisible creature. Asking the ROOT distinguishes the two.
+    #[test]
+    fn a_pending_unit_is_zero_and_a_settled_one_is_opaque() {
+        assert_eq!(
+            unit_at(10.0, |u| {
+                u.insert(UnitAppearFade::Pending { since: 9.0 });
+            }),
+            0.0,
+            "pending: not shown yet, so nothing that rides this number may show either"
+        );
+        assert_eq!(
+            unit_at(11.0, |u| {
+                u.insert(UnitAppearFade::Live { started: 10.0 });
+            }),
+            fade_alpha(0.0, 1.0, 0.5),
+            "live: the same cubic the body's parts run"
+        );
+        assert_eq!(
+            unit_at(10.0, |_| {}),
+            1.0,
+            "nothing in flight: opaque, and no arithmetic paid for it"
+        );
+    }
+
+    /// The unarmed `DespawnFade` sentinel is the component's business, not each caller's — the
+    /// negative `started` a stream-out stamps before it arms would otherwise read as a fade that
+    /// began long ago and finished, i.e. a unit that vanishes the moment it is marked.
+    #[test]
+    fn an_unarmed_despawn_stamp_is_not_a_fade() {
+        assert_eq!(DespawnFade::default().armed(), None);
+        assert_eq!(DespawnFade { started: 4.0 }.armed(), Some(4.0));
+        assert_eq!(
+            unit_at(10.0, |u| {
+                u.insert(DespawnFade::default());
+            }),
+            1.0,
+            "marked but not armed: still fully there"
+        );
+        assert_eq!(
+            unit_at(11.0, |u| {
+                u.insert(DespawnFade { started: 10.0 });
+            }),
+            fade_alpha(1.0, 0.0, 0.5),
+            "armed: the ramp down"
+        );
+    }
+
+    /// An entity the query cannot read at all — a shadow whose owner was despawned this frame,
+    /// a booth part with no presentation — is opaque, never an accidental 0 that blinks the
+    /// thing out on its last frame.
+    #[test]
+    fn an_unreadable_owner_is_opaque() {
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(crate::view::Viewer::default());
+        let gone = world.spawn_empty().id();
+        world.despawn(gone);
+        let mut state = SystemState::<UnitRenderAlpha>::new(&mut world);
+        assert_eq!(state.get(&world).get(gone), 1.0);
+    }
+}
+
 /// Publish [`ModelAlpha`] on every streamed object each frame. Runs in `PostUpdate`, after every
 /// Update-side fade writer and the camera controller that computes the self feather, and before the
 /// effect sims that consume it ([`crate::particles`], [`crate::ribbons`]).
@@ -322,18 +462,38 @@ pub(crate) fn publish_model_alpha(
             Option<&UnitAppearFade>,
             Option<&DespawnFade>,
             Has<crate::world_unit::ViewerUnit>,
-            Option<&ModelFade>,
+            Option<Ref<ModelFade>>,
             Option<&mut ModelAlpha>,
         ),
         With<crate::world_unit::WorldUnit>,
     >,
+    // A declaration that went away is a change the `Ref` cannot see: those units are due.
+    mut undeclared: RemovedComponents<ModelFade>,
+    // The appear ramp's RETIREMENT is a removal too — the frame it goes, the alpha must land
+    // on its final value, not hold the ramp's last sample (review 2026-09-04).
+    mut ramp_done: RemovedComponents<UnitAppearFade>,
 ) {
     let now = time.elapsed_secs();
+    let mut undeclared: bevy::platform::collections::HashSet<Entity> = undeclared.read().collect();
+    undeclared.extend(ramp_done.read());
     for (entity, appear, despawn, is_self, declared, current) in &mut units {
+        // With no ramp in flight and not the self body, the alpha is the declared fade alone —
+        // a published value that cannot have moved unless the declaration did. Every resident
+        // unit was recomputed and compared each frame (decision 1979's floor).
+        if appear.is_none()
+            && despawn.is_none()
+            && !is_self
+            && current.is_some()
+            && !declared.as_ref().is_some_and(|d| d.is_changed())
+            && !undeclared.contains(&entity)
+        {
+            continue;
+        }
+        let declared = declared.as_deref();
         let alpha = model_render_alpha(
             now,
             appear.copied(),
-            despawn.map(|d| d.started).filter(|s| *s >= 0.0),
+            despawn.and_then(DespawnFade::armed),
             if is_self { viewer.self_fade } else { 1.0 },
             // The game's declared fade — the aura ramp ticks it in Update (`apply_aura_alpha`)
             // and this runs PostUpdate, so it is fresh. `self_fade` above is the bare zoom
@@ -763,6 +923,17 @@ pub struct DespawnFade {
 impl Default for DespawnFade {
     fn default() -> Self {
         Self { started: -1.0 }
+    }
+}
+
+impl DespawnFade {
+    /// The instant this fade-out was armed, or `None` while the stamp is still the unarmed
+    /// sentinel — the shape [`model_render_alpha`] takes its `despawn_started` in.
+    ///
+    /// The sentinel is a negative `started`, and every caller that read the field had to know
+    /// that; asking here instead keeps the encoding inside the component that chose it.
+    pub fn armed(&self) -> Option<f32> {
+        (self.started >= 0.0).then_some(self.started)
     }
 }
 

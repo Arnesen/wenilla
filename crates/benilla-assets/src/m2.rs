@@ -17,6 +17,8 @@
 //! References use `.mdx`/`.mdl`, but the physical archive file is `.m2`; callers map the extension when
 //! forming the `mpq://…m2` load path (the loader registers for `m2`).
 
+use std::sync::Arc;
+
 use benilla_formats::{
     hand_grip_finger_poses, parse_m2_animations, parse_m2_attachments, parse_m2_bounds,
     parse_m2_collision_hull, parse_m2_global_sequence_bones, parse_m2_lights,
@@ -84,6 +86,13 @@ pub struct M2Model {
     /// file-order-first one; they coincide on every effect model probed (single-sequence models).
     /// `None` for a model with no sequences at all.
     pub first_seq_span: Option<f32>,
+    /// **Every sequence the file owns, in file order** — id, slot, length, loop — whatever
+    /// [`Self::animations`] kept a clip for. The UI model pane's clock needs exactly this
+    /// (decision 2008): which `AnimationData` ids the file answers to, how long each runs and
+    /// whether it clamps — for sequences that key no bone too, which `ModelAnimations` drops
+    /// (the cooldown indicator's sweep keys a constant on its one bone; its texture transforms
+    /// and colour tracks are what move). Empty for a file with no sequences.
+    pub sequences: Vec<M2SequenceInfo>,
     /// The model's attachment points (decision 0072 — held items): weapon/shield hand slots, sheath
     /// points, etc. Each carries the bone it rides + its bind-pose-relative offset (see
     /// [`ModelAttachment`]). Empty for a model with no attachment table (most doodads/WMO props).
@@ -111,6 +120,13 @@ pub struct M2Model {
     /// model with fewer than two cameras, where the client synthesizes a *fixed* camera instead
     /// (transcribed at the framing site). Same Bevy-space conversion as `portrait_camera`.
     pub pane_camera: Option<PortraitCamera>,
+    /// The **whole camera table**, in file order — the raw index space a `<Model>` widget's
+    /// `SetCamera(n)` walks (decision 2027). `camera0` and `pane_camera` above are the two fixed
+    /// indices two other paths take; this is the general one, and it is the only one that can
+    /// answer "how many cameras does this file have", which is the question that decides whether
+    /// a pane renders through the perspective leg at all (an index past the count installs a NULL
+    /// camera and the pane falls back to the orthographic leg).
+    pub cameras: Vec<PaneCamera>,
     /// A bow's `$WTT`/`$WTB` bowstring anchors (wow-re `nocked-ammo-cancel.md` §G2), baked to Bevy
     /// space: `[top, bottom]` as `(bone index, model-local position)` — the two limb-tip points the
     /// engine-drawn string spans. `None` for every non-bow model.
@@ -124,6 +140,25 @@ pub struct M2Model {
     /// mount + most quadrupeds), `3` = pitch **and** roll (kodo/crab/spider), `0`/`2` = level.
     /// The entity layer reads it to conform a standing model to the terrain under it.
     pub global_flags: u32,
+}
+
+/// One sequence of an M2, as the file table has it — see [`M2Model::sequences`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct M2SequenceInfo {
+    /// The `AnimationData.dbc` id (`M2Sequence+0x00`).
+    pub anim_id: u16,
+    /// The sequence's file slot — the axis the per-sequence material bakes are keyed on
+    /// ([`benilla_formats::ModelAnimation::seq_index`]).
+    pub seq_index: usize,
+    /// `end − start` on the file's timeline, ms.
+    pub duration_ms: u32,
+    /// The band's **start** on the file's global timeline, ms (`M2Sequence+0x04`) — what a
+    /// per-sequence cursor is added to before an absolute-timeline track is sampled. The camera
+    /// tracks are the one consumer: their keys are absolute like every other M2 track's, while a
+    /// pane's play head is a cursor inside the armed band.
+    pub start_ms: u32,
+    /// Loops (flag bit 0 clear); a clamped sequence holds its last frame.
+    pub looping: bool,
 }
 
 /// An M2's authored portrait-camera rig in Bevy space (see [`M2Model::portrait_camera`]): eye/target
@@ -143,6 +178,49 @@ pub struct PortraitCamera {
     pub fov: f32,
     pub near: f32,
     pub far: f32,
+}
+
+/// One record of the file's camera table, by **raw index** — see [`M2Model::cameras`].
+///
+/// The rest rig ([`Self::still`]) is Bevy space like every other camera on this asset; the
+/// authored tracks stay raw WoW space behind [`Self::at`], which does the conversion, so there is
+/// no mixed-convention field to misread.
+#[derive(Clone)]
+pub struct PaneCamera {
+    /// The record's `type` word — `0` portrait, `1` "characterinfo", `-1` on the fly-bys and the
+    /// six glue scenes. Carried, never selected on: the widget's index is raw.
+    pub camera_type: i32,
+    /// The rig at rest (bases + each track's first key), Bevy space. The whole answer for every
+    /// model a `<Model>` pane can name — wow-re's census over the composite's 9691 `.m2` found
+    /// every one of those cameras keying a single `(0,0,0)` on all three tracks.
+    pub still: PortraitCamera,
+    /// The authored tracks, raw WoW space, kept only when one of them actually moves — the
+    /// `Cameras\*.m2` fly-bys. Read through [`Self::at`].
+    tracks: Option<Arc<benilla_formats::M2CameraTracks>>,
+}
+
+impl PaneCamera {
+    /// The rig at absolute file-timeline `ms`, Bevy space — [`Self::still`] for a static camera,
+    /// the cubically sampled tracks for a moving one (`benilla_m2::M2Track::sample_ms`, the
+    /// reference's own four-way `interp` dispatch).
+    ///
+    /// `wow_to_bevy` is linear, so converting the summed `base + track(t)` is the same as
+    /// converting each — which is why the tracks can stay raw behind this one door.
+    pub fn at(&self, ms: u32) -> PortraitCamera {
+        let Some(t) = self.tracks.as_deref() else {
+            return self.still;
+        };
+        let add = |b: [f32; 3], v: Option<[f32; 3]>| {
+            let v = v.unwrap_or([0.0; 3]);
+            wow_to_bevy([b[0] + v[0], b[1] + v[1], b[2] + v[2]])
+        };
+        PortraitCamera {
+            eye: add(t.position_base, t.positions.sample_ms(ms)),
+            target: add(t.target_base, t.target.sample_ms(ms)),
+            roll: t.roll.sample_ms(ms).unwrap_or(self.still.roll),
+            ..self.still
+        }
+    }
 }
 
 /// The **billboard frame** an emitter's bone chain reaches — the host bone's arm, its pivot in raw
@@ -358,6 +436,7 @@ impl AssetLoader for M2ModelLoader {
                 skin_slot: sub.skin_slot,
                 geoset_id: sub.geoset_id,
                 char_slot: sub.char_slot,
+                icon_slot: sub.icon_slot,
                 blend: sub.blend,
                 two_sided: sub.two_sided,
                 interior: false,        // M2 has no interior/exterior group concept
@@ -373,6 +452,8 @@ impl AssetLoader for M2ModelLoader {
                 alpha_anim: sub.alpha_anim.clone().map(std::sync::Arc::new),
                 uv_anim: sub.uv_anim.clone().map(std::sync::Arc::new),
                 uv_seq: sub.uv_seq.clone().map(std::sync::Arc::new),
+                uv_rot_seq: sub.uv_rot_seq.clone().map(std::sync::Arc::new),
+                uv_scale_seq: sub.uv_scale_seq.clone().map(std::sync::Arc::new),
                 rgb_anim: sub.rgb_anim.clone().map(std::sync::Arc::new),
                 rgb_seq: sub.rgb_seq.clone().map(std::sync::Arc::new),
                 wmo_batch: None,                // M2 batches have no MOBA section
@@ -496,12 +577,25 @@ impl AssetLoader for M2ModelLoader {
             &benilla_formats::parse_m2_event_markers(&bytes).unwrap_or_default(),
             &skeleton_pivots(&skeleton_raw),
         );
+        // …and the same pivots again for the per-clip event keys below ([`crate::ClipEvent`]),
+        // so a fired key's point is bake-consistent with the joint it composes through.
+        let pivots = skeleton_pivots(&skeleton_raw);
 
         // The animations (decision 0019): build each sequence's clip into one shared `AnimationGraph`
         // (the bench scrubs them; gameplay plays Stand). All as labeled sub-assets. `None` unless at
         // least one sequence produced an animated clip.
         let sequences = parse_m2_animations(&bytes);
         let first_seq_span = sequences.first().map(|a| a.duration).filter(|d| *d > 0.0);
+        let sequence_infos: Vec<M2SequenceInfo> = sequences
+            .iter()
+            .map(|a| M2SequenceInfo {
+                anim_id: a.anim_id,
+                seq_index: a.seq_index,
+                duration_ms: a.end_ms.saturating_sub(a.start_ms),
+                start_ms: a.start_ms,
+                looping: a.looping,
+            })
+            .collect();
         let animations = {
             let mut graph = AnimationGraph::new();
             let root = graph.root;
@@ -644,7 +738,24 @@ impl AssetLoader for M2ModelLoader {
                         // The axis mapping flips signs, so min/max are re-derived componentwise.
                         bounds_min: wow_to_bevy(anim.bounds_min).min(wow_to_bevy(anim.bounds_max)),
                         bounds_max: wow_to_bevy(anim.bounds_min).max(wow_to_bevy(anim.bounds_max)),
-                        events: anim.events.clone().into(),
+                        // The kernel's own quantity, baked (see [`ClipEvent`]): the bone-local
+                        // offset for a rigged model and the model-space point for one whose bone
+                        // chain never moves — both from the record's OWN bone, never a by-4CC
+                        // re-find, because a model may author the tag more than once.
+                        events: anim
+                            .events
+                            .iter()
+                            .map(|e| crate::ClipEvent {
+                                time: e.time,
+                                ident: e.ident,
+                                data: e.data,
+                                bone: e.bone,
+                                offset: wow_to_bevy(e.position)
+                                    - pivots.get(e.bone as usize).copied().unwrap_or(Vec3::ZERO),
+                                point: wow_to_bevy(e.position),
+                            })
+                            .collect::<Vec<_>>()
+                            .into(),
                         arm_nodes,
                         upper_node,
                         frequency: anim.frequency,
@@ -752,6 +863,15 @@ impl AssetLoader for M2ModelLoader {
         let portrait_camera = parse_m2_portrait_camera(&bytes).map(to_bevy);
         let camera0 = benilla_formats::parse_m2_camera(&bytes, 0).map(to_bevy);
         let pane_camera = benilla_formats::parse_m2_camera(&bytes, 1).map(to_bevy);
+        // The whole table, raw index — the `<Model>` widget's `SetCamera(n)` space (2027).
+        let cameras: Vec<PaneCamera> = benilla_formats::parse_m2_pane_cameras(&bytes)
+            .into_iter()
+            .map(|c| PaneCamera {
+                camera_type: c.camera_type,
+                still: to_bevy(c.still),
+                tracks: c.tracks.map(|t| Arc::new(*t)),
+            })
+            .collect();
 
         // The bowstring anchors (bows only): raw WoW positions → Bevy, the meshes' frame.
         let string_anchors = benilla_formats::parse_m2_string_anchors(&bytes).map(|a| {
@@ -781,11 +901,13 @@ impl AssetLoader for M2ModelLoader {
             inverse_bindposes,
             animations,
             first_seq_span,
+            sequences: sequence_infos,
             attachments,
             markers,
             portrait_camera,
             camera0,
             pane_camera,
+            cameras,
             string_anchors,
             cch_marker,
             global_flags,

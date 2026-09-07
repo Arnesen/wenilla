@@ -187,6 +187,8 @@ pub(super) fn cast_result(
                     spell_id,
                     reason,
                     arg,
+                    // `SMSG_CAST_FAILED` is addressed to the caster, and this handler is ours.
+                    caster: crate::ui_action::Caster::Player,
                 });
             }
         }
@@ -338,7 +340,8 @@ pub(super) fn spell_start(
                 // `Instant` this file otherwise imports — spelled out fully so it stays that type
                 // regardless.
                 until: Some(
-                    bevy::platform::time::Instant::now() + Duration::from_millis(u64::from(cast_time_ms)),
+                    bevy::platform::time::Instant::now()
+                        + Duration::from_millis(u64::from(cast_time_ms)),
                 ),
             });
         }
@@ -1496,6 +1499,7 @@ mod tests {
             .init_resource::<GuidIndex>()
             .init_resource::<SelfGuid>()
             .init_resource::<CastErrors>()
+            .init_resource::<crate::ui_action::UiErrorKeys>()
             .init_resource::<CastBarFeed>()
             .init_resource::<PendingCast>()
             .init_resource::<QueuedMeleeSpell>()
@@ -1862,6 +1866,8 @@ mod tests {
                 .init_resource::<GuidIndex>()
                 .init_resource::<SelfGuid>()
                 .init_resource::<CastErrors>()
+                .init_resource::<crate::ui_action::UiErrorKeys>()
+                .init_resource::<crate::ui_action::UiErrorKeys>()
                 .init_resource::<CastBarFeed>()
                 .init_resource::<PendingCast>()
                 .init_resource::<QueuedMeleeSpell>()

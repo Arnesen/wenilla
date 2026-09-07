@@ -377,7 +377,10 @@ pub(super) fn run(
                 // the flags still agree and cross-fades normally when they changed mid-air.
                 // Normal gait: select, cross-fade on change, keep the rate synced each frame.
                 // The engaged standing idle: the weapon-class Ready pick (decision 0073).
-                let ready = (engaged && !moving).then(|| ready_anim(wielded.and_then(|w| w.main)));
+                // `GetWeapon(0, 0)` again ([`Wielded::armed_main`]) — `0x5fcdc0` passes
+                // visFlag 0, so a disarmed unit stands in ReadyUnarmed(25) (decision 1863).
+                let ready =
+                    (engaged && !moving).then(|| ready_anim(wielded.and_then(|w| w.armed_main())));
                 // The ranged standing idle (0099 phase 5): the byte-verified entry gate
                 // ([`select::ranged_idle_gate`]) → the ranged weapon's Load clip, played
                 // ONCE, then promoted to the Hold by its own completion. ENTRY is the local

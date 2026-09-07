@@ -2,7 +2,13 @@
 //! the player mover's frame lines (`benilla::player`'s `move_trace`), its outbound wire lines
 //! (`snd`), the anim driver's event lines (`benilla::creature_anim`), and the remote-replay lines
 //! (`rly`/`run`, `benilla::net::motion`) — so the layers interleave on a common timeline and a feel
-//! report ("it snaps when I land") can be read across all of them. Each file opens with a
+//! report ("it snaps when I land") can be read across all of them.
+//!
+//! **The two wire tags are `in` and `out`, and between them every packet is accounted for by
+//! name.** `in` is the full inbound opcode stream (decision 0624); `out` is the full outbound one
+//! (decision 1901), written by the write thread from the writer's own post-write log — so an `out`
+//! line is a *transmission*, where the mover's `snd` line is a decision taken before the command is
+//! even queued and `wire` carries only failures. Each file opens with a
 //! `# t0=<unix epoch>` header so **two clients' traces align with each other**, which is what a
 //! sender-vs-observer question needs. Costs one `OnceLock` read per call when the env var is unset.
 //!

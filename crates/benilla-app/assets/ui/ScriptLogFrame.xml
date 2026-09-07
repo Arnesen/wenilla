@@ -26,7 +26,8 @@
         attached, so the detail is genuinely variable-height content, which is what the real kit is
         for; `GossipFrame.xml`'s greeting pane is the same wiring).
 
-        The window is registered in `UIPanelWindows` (`UiPanels.xml`), which is what seats it in the
+        The window registers itself in `UIPanelWindows` (below; the table is the stock UIParent.lua's
+        since 1988), which is what seats it in the
         left slot and gets it closed by `CloseAllWindows()` — i.e. by ESC — with no code here. Our
         own toplevels deliberately stay OUT of `UISpecialFrames`: that table is the addons' (0544's
         note, 1206).
@@ -40,6 +41,10 @@
         feed and nothing to keep in step — the window polls the log it is a view of.
     -->
     <Script><![CDATA[
+        -- The slot-manager row (decision 1495): a left-area window one tier above every stock
+        -- panel's pushable, so opening a game window pushes the log aside rather than the reverse.
+        UIPanelWindows["BenillaScriptLogFrame"] = { area = "left", pushable = 9, whileDead = 1 }
+
         BENILLA_SCRIPTLOG_ROWS = 13
         BENILLA_SCRIPTLOG_ROW_HEIGHT = 16
         -- How much of a message a ROW shows. The full text is the detail pane's job; a row is an
@@ -90,6 +95,7 @@
 
             local scrollFrame = getglobal("BenillaScriptLogListScrollFrame")
             FauxScrollFrame_Update(scrollFrame, shown, BENILLA_SCRIPTLOG_ROWS, BENILLA_SCRIPTLOG_ROW_HEIGHT)
+            BenillaScrollTrough_Follow("BenillaScriptLogListScrollFrame")
             local offset = FauxScrollFrame_GetOffset(scrollFrame)
 
             local selectedRow = nil
@@ -172,7 +178,6 @@
         end
 
         function BenillaScriptLogFrame_OnLoad(self)
-            getglobal("BenillaScriptLogListScrollFrame").updateFunc = BenillaScriptLog_Update
             -- The ring's icon, through the portrait verb rather than left at its `file=` — see the
             -- texture's own note. MailFrame.xml's open-letter icon is the same fix.
             SetPortraitToTexture("BenillaScriptLogFramePortrait",
@@ -211,9 +216,9 @@
         end
     ]]></Script>
 
-    <!-- One list row: the `#N xCount` index column, then the message head. Same shape as
-         BenillaCraftSkillButtonTemplate (fixed columns — this engine has no FontString-width-based
-         dynamic anchor). -->
+    <!-- One list row: the `#N xCount` index column, then the message head. Fixed columns, 1.12's
+         own list idiom — not a width limitation: a FontString with a zero-authored axis takes its
+         measured box into the resolve (`benilla-ui` `script/layout.rs`, decision 1664). -->
     <Button name="BenillaScriptLogRowTemplate" virtual="true" hidden="true">
         <Size><AbsDimension x="293" y="16"/></Size>
         <Layers>
@@ -270,15 +275,12 @@
             </Layer>
         </Layers>
         <Frames>
-            <!-- The top-right X. This engine ships no UIPanelCloseButton; the minimize-button art
-                 stands in, MacroFrame/TrainerFrame's precedent. -->
-            <Button name="BenillaScriptLogCloseButton">
-                <Size><AbsDimension x="32" y="32"/></Size>
+            <!-- The top-right X: the chain's own `UIPanelCloseButton` (seated at benilla.toc's
+                 `Interface\FrameXML\UIPanelTemplates.xml`, 757 lines above this file). Its
+                 32x32, its three minimize-button state textures and its
+                 `HideUIPanel(this:GetParent())` are byte-for-byte what stood here authored. -->
+            <Button name="BenillaScriptLogCloseButton" inherits="UIPanelCloseButton">
                 <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-29" y="-8"/></Offset></Anchor></Anchors>
-                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
-                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
-                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
-                <Scripts><OnClick>HideUIPanel(getglobal("BenillaScriptLogFrame"))</OnClick></Scripts>
             </Button>
 
             <!-- Declared BEFORE the rows so row text paints over the glow (the house z-tiebreak). -->
@@ -312,7 +314,13 @@
             <ScrollFrame name="BenillaScriptLogListScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="293" y="208"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-94"/></Offset></Anchor></Anchors>
-            </ScrollFrame>
+                            <Scripts>
+                    <!-- The reference's kit writes `frame.offset` ONLY from here; its
+                         `updateFunc` field does not exist, so without this the bar moves and
+                         the list does not follow (1868). -->
+                    <OnVerticalScroll>FauxScrollFrame_OnVerticalScroll(BENILLA_SCRIPTLOG_ROW_HEIGHT, BenillaScriptLog_Update)</OnVerticalScroll>
+                </Scripts>
+</ScrollFrame>
 
             <!-- The detail pane: the REAL scroll kit, because a message carries its `stack
                  traceback:` tail and is genuinely variable-height. GossipFrame's greeting pane is
@@ -371,4 +379,31 @@
             <OnUpdate>BenillaScriptLogFrame_OnUpdate()</OnUpdate>
         </Scripts>
     </Frame>
+    <!-- benilla's own commands over the reference's SlashCmdList (decision 1948). The stock
+         ChatEdit_ParseText walks SlashCmdList after its own built-ins, so each of benilla's commands
+         (ui_chat::commands — the dev instruments and the three additions) hands its line to
+         SubmitChatInput, where ui_chat::input's parser still owns it. This file loads after the
+         reference's ChatFrame.xml, which is what declares the table. -->
+    <Script><![CDATA[
+        local BENILLA_COMMANDS = {
+            { "CHATTEST", "/chattest" },
+            { "SHOT", "/shot" },
+            { "LIQUID", "/liquid" },
+            { "CASTVIS", "/castvis" },
+            { "PARTYTEST", "/partytest" },
+            { "REACTION", "/reaction", "/react" },
+            { "RELOAD", "/reload" },
+            { "ERRORS", "/errors", "/err" },
+            { "CONVERTRAID", "/convertraid" },
+        }
+        for _, row in ipairs(BENILLA_COMMANDS) do
+            local key = "BENILLA_" .. row[1]
+            for i = 2, table.getn(row) do
+                setglobal("SLASH_" .. key .. (i - 1), row[i])
+            end
+            SlashCmdList[key] = function(msg)
+                SubmitChatInput(row[2] .. " " .. (msg or ""))
+            end
+        end
+    ]]></Script>
 </Ui>

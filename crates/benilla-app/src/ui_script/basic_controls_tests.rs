@@ -1,5 +1,5 @@
-//! The shipped `assets/ui/BasicControls.xml` — the reference's second file, driven the way an
-//! addon drives it.
+//! The stock `Interface\FrameXML\BasicControls.xml` — the reference's second file, driven the way
+//! an addon drives it.
 //!
 //! Nothing benilla ships calls `message`, `TEXT` or `_ERRORMESSAGE`; their only consumers are
 //! third-party addons (26 call `TEXT`, ~10 genuinely call `message`, two replace `_ERRORMESSAGE`).
@@ -12,8 +12,8 @@ use super::test_ui::load_ui as load_xml;
 /// Fonts then BasicControls — the manifest's own order, and the whole dependency this file has.
 fn basic_controls() -> UiScript {
     let mut s = UiScript::new().unwrap();
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     s.set_screen_size(1024.0, 768.0);
     s.resolve();
     s

@@ -539,6 +539,7 @@ fn drain_death(
     net: Res<NetCommands>,
     targeting: crate::ui_action::cast_target::CastTargeting,
     mut ladder: crate::ui_action::CastLadder,
+    mut ui_errors: ResMut<crate::ui_action::UiErrorKeys>,
     // The soulstone leg is a real arm-290 caller in the reference's own census (wow-re
     // `bind-confirm-law.md`: 290 ← UseSoulstone · UseInventoryItem · UseAction · UseContainerItem),
     // so it goes through the shared send carrying the same bind gate every other item use does.
@@ -622,6 +623,7 @@ fn drain_death(
                             &mut script,
                             &mut gate,
                             false,
+                            &mut ui_errors,
                         );
                         Ok(())
                     }

@@ -22,6 +22,7 @@ fn one_item_backpack(item_id: u32, name: &str, quality: u32) -> ContainerState {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -55,11 +56,22 @@ fn one_item_backpack(item_id: u32, name: &str, quality: u32) -> ContainerState {
 fn setup() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    // The stock DELETE_GOOD_ITEM's OnHide hands focus back to `ChatFrameEditBox` (1960).
+    load_xml(&s, r"Interface\FrameXML\UIMenu.xml");
+    load_xml(&s, r"Interface\FrameXML\ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrop
+    load_xml(&s, r"Interface\FrameXML\UIDropDownMenu.xml");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, r"Interface\FrameXML\FloatingChatFrame.xml"); // declares ChatFrameEditBox
     s.set_money(0);
     s
 }
@@ -73,8 +85,11 @@ fn bag_setup() -> UiScript {
     for file in BAG_UI {
         load_xml(&s, file);
     }
-    // `ContainerFrame_Update` reads `MerchantFrame:IsShown()` on any slot the tooltip owns, and
-    // `BankFrame` (BAG_UI's last entry) fills its purse through `BenillaMoney_Set`.
+    // `ContainerFrame_Update` reads `MerchantFrame:IsShown()` on any slot the tooltip owns.
+    // `BankFrame`'s purse is an ordinary `SmallMoneyFrameTemplate` off the chain's own
+    // `MoneyFrame.xml` (1937/1962), so it is not a merchant dependency.
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s
@@ -436,13 +451,14 @@ fn no_on_the_typed_confirm_clears_and_leaves_the_box_empty_for_next_time() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// ESC out of the focused box: 1743's named divergence. The reference's `DELETE_GOOD_ITEM` names
-/// no `EditBoxOnEscapePressed`, so in 1.12 the focused box swallows the key and the destroy
-/// confirm cannot be dismissed with ESC at all. benilla's engine falls back to the ordinary
-/// hideOnEscape leg — the entry's `OnCancel` (`ClearCursor()`), then hide — so the item is
-/// released rather than left held under a dialog that will not close.
+/// ESC inside the typed confirm's focused box is SWALLOWED, the reference's own behaviour (1960):
+/// the stock `DELETE_GOOD_ITEM` entry defines no `EditBoxOnEscapePressed`, so the box's
+/// `StaticPopup_EditBoxOnEscapePressed` finds nothing to call and the dialog stays up with the
+/// item still on the cursor — the player answers with No. (ADD_FRIEND and its kin hide on ESC
+/// because their entries say so; this one does not.) Our engine used to fall through to a
+/// cancel here, which the earlier form of this test pinned.
 #[test]
-fn escape_out_of_the_typed_confirm_cancels_the_way_every_other_popup_does() {
+fn escape_in_the_typed_confirms_box_is_swallowed_as_the_reference_leaves_it() {
     let mut s = setup();
     drop_in_world(&mut s, 871, "Flurry Axe", 4);
     assert!(s
@@ -451,10 +467,15 @@ fn escape_out_of_the_typed_confirm_cancels_the_way_every_other_popup_does() {
 
     assert!(s.key_input("ESCAPE"), "the focused box consumes ESCAPE");
     assert!(
-        !s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
-        "ESC closes it"
+        s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
+        "the dialog stays: the entry names no escape handler"
     );
-    assert!(s.cursor_item().is_none(), "and runs OnCancel's ClearCursor");
+    assert!(
+        s.eval::<bool>("return StaticPopup1EditBox:HasFocus()")
+            .unwrap(),
+        "and the box keeps focus"
+    );
+    assert!(s.cursor_item().is_some(), "the item is still on the cursor");
     assert!(s.take_container_destroys().is_empty(), "ESC never destroys");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

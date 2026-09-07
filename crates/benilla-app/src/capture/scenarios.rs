@@ -33,6 +33,15 @@ pub(super) struct Scenario {
 /// uses), so the capture exercises the real feed → VM → extract → render chain end to end.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum UiFixture {
+    /// **The player UI, with no window opened.** `ui-unitframes`, `ui-combopoints` and
+    /// `ui-actionbar` photograph chrome that is simply *there* once the UI loads and the synthetic
+    /// unit snapshot lands (`ui_script::demo_unit_feed`) — there is nothing to seed and nothing to
+    /// click. They used to say `ui: None`, which made the field mean two things at once ("seed
+    /// this window" *and* "does this capture include the UI at all") and left the second
+    /// unstateable: they were UI captures that the table said were world captures, kept working
+    /// only by `WOW_CAPTURE_UI=1` on the command line. One field, one meaning — so
+    /// [`ui_opted_in`] can just ask `ui.is_some()`.
+    Bare,
     Merchant,
     Gossip,
     Quest,
@@ -875,7 +884,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: Some(UiFixture::Bag),
     },
     // The GameTooltip forced open over a seeded bag slot (a green-quality item). Run with
-    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-tooltip`.
+    // `WOW_CAPTURE=ui-tooltip`.
     Scenario {
         name: "ui-tooltip",
         map: Some(MAP_AZEROTH),
@@ -885,7 +894,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: Some(UiFixture::Tooltip),
     },
     // The world-mouseover tooltip at the DEFAULT corner (screen bottom-right, −13/+70) over a
-    // seeded hostile wolf. Run with `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-tooltip-world`.
+    // seeded hostile wolf. Run with `WOW_CAPTURE=ui-tooltip-world`.
     Scenario {
         name: "ui-tooltip-world",
         map: Some(MAP_AZEROTH),
@@ -895,7 +904,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: Some(UiFixture::TooltipWorld),
     },
     // The character window's paper doll over a fully-seeded synthetic self player. Run with
-    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-char`.
+    // `WOW_CAPTURE=ui-char`.
     Scenario {
         name: "ui-char",
         map: Some(MAP_AZEROTH),
@@ -906,29 +915,29 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     // The player + target unit frames (no window fixture — the frames come from `demo_unit_feed`,
     // which seeds synthetic "player"/"target" snapshots whenever WOW_CAPTURE_UI=1). Run with
-    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-unitframes`.
+    // `WOW_CAPTURE=ui-unitframes`.
     Scenario {
         name: "ui-unitframes",
         map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
-        ui: None,
+        ui: Some(UiFixture::Bare),
     },
     // The combo-point dots at the target frame's top-right (decisions 0869/0875). `demo_unit_feed`
     // seeds a ROGUE with four points banked on the selected wolf for this scenario only — the demo
     // player is a warrior everywhere else, and a warrior authentically lights no dot. Run with
-    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-combopoints`.
+    // `WOW_CAPTURE=ui-combopoints`.
     Scenario {
         name: "ui-combopoints",
         map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
-        ui: None,
+        ui: Some(UiFixture::Bare),
     },
     // The group-invite dialog over open world — the shared StaticPopup plate's only look-pass.
-    // Run with `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-partyinvite`.
+    // Run with `WOW_CAPTURE=ui-partyinvite`.
     Scenario {
         name: "ui-partyinvite",
         map: Some(MAP_AZEROTH),
@@ -941,14 +950,14 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // WOW_CAPTURE_UI=1, and `demo_unit_feed` seeds the action slots + player XP). The bar is 1024
     // wide + 128px end caps, so this fixture takes a WIDER, shorter window (see main.rs's per-capture
     // sizing) — the default 640px UI window would crop it. Run with
-    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-actionbar`.
+    // `WOW_CAPTURE=ui-actionbar`.
     Scenario {
         name: "ui-actionbar",
         map: Some(MAP_AZEROTH),
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
-        ui: None,
+        ui: Some(UiFixture::Bare),
     },
     // The V-key nameplate over a synthetic Timber Wolf, framed like the reference screenshot
     // (an eye-height look at a wolf ~8 yd off, Northshire ground). Plates draw through the
@@ -964,7 +973,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     // The fullscreen world map (decision 0203 phase 2), forced open at the world sheet. The frame's
     // 1024×768 chrome needs the taller window main.rs gives the 1:1 gx captures. Run with
-    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-worldmap`.
+    // `WOW_CAPTURE=ui-worldmap`.
     Scenario {
         name: "ui-worldmap",
         map: Some(MAP_AZEROTH),
@@ -973,7 +982,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         minute: 720,
         ui: Some(UiFixture::WorldMap),
     },
-    // The spellbook over a seeded mage book. Run with `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-spellbook`.
+    // The spellbook over a seeded mage book. Run with `WOW_CAPTURE=ui-spellbook`.
     Scenario {
         name: "ui-spellbook",
         map: Some(MAP_AZEROTH),
@@ -983,7 +992,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: Some(UiFixture::SpellBook),
     },
     // The macro window over a seeded macro set. Run with
-    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-macro`.
+    // `WOW_CAPTURE=ui-macro`.
     Scenario {
         name: "ui-macro",
         map: Some(MAP_AZEROTH),
@@ -993,7 +1002,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: Some(UiFixture::Macro),
     },
     // The same window with the name/icon popup open. Run with
-    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-macro-popup`.
+    // `WOW_CAPTURE=ui-macro-popup`.
     Scenario {
         name: "ui-macro-popup",
         map: Some(MAP_AZEROTH),
@@ -1003,7 +1012,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: Some(UiFixture::MacroPopup),
     },
     // The chat edit box open with a typed draft over seeded lines. Run with
-    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-chatedit`.
+    // `WOW_CAPTURE=ui-chatedit`.
     Scenario {
         name: "ui-chatedit",
         map: Some(MAP_AZEROTH),
@@ -1014,7 +1023,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     // The hovered chat dock — the tab plate + its ADD highlight over the world, which is the
     // pair the UI-over-world composite space decides. Run with
-    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-chat-tabhover`.
+    // `WOW_CAPTURE=ui-chat-tabhover`.
     Scenario {
         name: "ui-chat-tabhover",
         map: Some(MAP_AZEROTH),
@@ -1024,7 +1033,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: Some(UiFixture::ChatTabHover),
     },
     // The social pane, for the stray-dropdown regression (B264, decision 1298). Run with
-    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-social`.
+    // `WOW_CAPTURE=ui-social`.
     Scenario {
         name: "ui-social",
         map: Some(MAP_AZEROTH),
@@ -1034,7 +1043,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: Some(UiFixture::Social),
     },
     // The era Options window over the ground scene. Run with
-    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options`.
+    // `WOW_CAPTURE=ui-options`.
     Scenario {
         name: "ui-options",
         map: Some(MAP_AZEROTH),
@@ -1044,7 +1053,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: Some(UiFixture::Options),
     },
     // The same window on the AUDIO page (0957). Run with
-    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options-audio`.
+    // `WOW_CAPTURE=ui-options-audio`.
     Scenario {
         name: "ui-options-audio",
         map: Some(MAP_AZEROTH),
@@ -1054,7 +1063,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: Some(UiFixture::OptionsAudio),
     },
     // The same window on the GRAPHICS page (0959). Run with
-    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options-graphics`.
+    // `WOW_CAPTURE=ui-options-graphics`.
     Scenario {
         name: "ui-options-graphics",
         map: Some(MAP_AZEROTH),
@@ -1064,7 +1073,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: Some(UiFixture::OptionsGraphics),
     },
     // The same window on the CHAT page (1589). Run with
-    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options-chat`.
+    // `WOW_CAPTURE=ui-options-chat`.
     Scenario {
         name: "ui-options-chat",
         map: Some(MAP_AZEROTH),
@@ -1074,7 +1083,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: Some(UiFixture::OptionsChat),
     },
     // The colour picker, wheel and all (1592). Run with
-    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-color-picker`.
+    // `WOW_CAPTURE=ui-color-picker`.
     Scenario {
         name: "ui-color-picker",
         map: Some(MAP_AZEROTH),
@@ -1084,7 +1093,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: Some(UiFixture::ColorPicker),
     },
     // The Controls page with the Camera Following Style dropdown OPEN (0992, re-seated 1649). Run
-    // with `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options-dropdown`.
+    // with `WOW_CAPTURE=ui-options-dropdown`.
     Scenario {
         name: "ui-options-dropdown",
         map: Some(MAP_AZEROTH),
@@ -1094,7 +1103,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: Some(UiFixture::OptionsDropdownList),
     },
     // The options window's Keybindings page, Movement expanded (1008). Run with
-    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-keybindings`.
+    // `WOW_CAPTURE=ui-keybindings`.
     Scenario {
         name: "ui-keybindings",
         map: Some(MAP_AZEROTH),
@@ -1104,7 +1113,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: Some(UiFixture::KeyBindings),
     },
     // The same window MID-SEARCH (0984): the "volume" results view. Run with
-    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options-search`.
+    // `WOW_CAPTURE=ui-options-search`.
     Scenario {
         name: "ui-options-search",
         map: Some(MAP_AZEROTH),
@@ -1140,3 +1149,121 @@ pub(super) const TRAM_LOOK: [f32; 3] = [-2.44, -1400.0, -118.0];
 /// are sky.
 pub(super) const SCAR_EYE: [f32; 3] = [-11892.7, -2647.1, 20.0];
 pub(super) const SCAR_LOOK: [f32; 3] = [-11792.7, -2647.1, 66.6];
+
+/// **Does the scenario named by `$WOW_CAPTURE` declare a UI fixture?** — i.e. is this a capture
+/// whose *subject* is a window.
+///
+/// `WOW_CAPTURE_UI=1` exists so that world baselines stay UI-free: a capture regression-tests the
+/// world render, and the player UI painted over it would make every diff a UI diff. That default
+/// is right. What was wrong is that it also gated the scenarios that ARE the UI — a `ui-*`
+/// scenario declares `ui: Some(..)` in the table above, which is the harness's own statement that
+/// the window is the point, and then needed the env var repeated on the command line to mean it.
+///
+/// **Forgetting it did not fail.** The run brought up the world with no in-game UI, the fixture's
+/// seed hit a nil global (`ToggleQuestLog`), logged ONE `warn!` into ~100 lines of pipeline
+/// chatter, wrote a perfectly valid PNG of a UI-less world, and exited **0**. That is an
+/// instrument that manufactures a confident false negative — the shape `method.md` §6 spends a
+/// paragraph on — and it cost a session a wasted build and nearly a wrong conclusion about a fix
+/// that was in fact working.
+///
+/// So a `ui:` fixture now opts the UI in on its own account. World scenarios (`ui: None`) are
+/// untouched and stay pristine; `WOW_CAPTURE_UI=1` still works and still means what it meant, for
+/// the case it was actually for — opting the UI into a WORLD scenario's shot.
+/// Find a scenario by name across **both** tables — the blessed sweep [`SCENARIOS`] and
+/// [`ON_DEMAND`], exactly as the harness's own `WOW_CAPTURE=` resolution does (decision 0632: only
+/// the sweep is narrowed, every viewpoint stays capturable by name). Every `ui-*` fixture lives in
+/// `ON_DEMAND`, so a lookup that searched only `SCENARIOS` would answer "not a UI scenario" for
+/// precisely the scenarios this predicate exists to serve — which is what the test below caught
+/// on the first run of it.
+pub(super) fn by_name(name: &str) -> Option<&'static Scenario> {
+    SCENARIOS
+        .iter()
+        .chain(ON_DEMAND.iter())
+        .find(|s| s.name == name)
+}
+
+fn scenario_declares_ui() -> bool {
+    std::env::var("WOW_CAPTURE")
+        .ok()
+        .and_then(|name| by_name(&name))
+        .is_some_and(|s| s.ui.is_some())
+}
+
+/// **The one predicate**: is the player UI opted into this capture? Either the scenario declares a
+/// `ui:` fixture, or `WOW_CAPTURE_UI=1` asks for it over a world scene.
+///
+/// It is one function because it has three consumers that MUST agree, and the cost of them
+/// disagreeing is a capture that looks plausible and isn't: the UI load itself
+/// (`ui_script::lifecycle::ui_wanted`), the synthetic `"player"`/`"target"` snapshot that
+/// populates the frames in a server-less run (`ui_script::capture_ui_active` →
+/// `demo_unit_feed`), and the window SIZE the scenario is denominated in (`lib.rs`). Load the UI
+/// without the demo feed and `ui-unitframes` photographs empty frames; load it without the size
+/// and every UI baseline is denominated in the world window. Neither failure looks like a failure.
+pub(crate) fn ui_opted_in() -> bool {
+    std::env::var("WOW_CAPTURE_UI").as_deref() == Ok("1") || scenario_declares_ui()
+}
+
+#[cfg(test)]
+mod ui_opt_in_tests {
+    use super::*;
+    use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+
+    /// The footgun this predicate exists to remove: a scenario whose subject is a window opts the
+    /// UI in **without** `WOW_CAPTURE_UI=1`, while a world scenario still does not. Before this,
+    /// `WOW_CAPTURE=ui-questlog` alone brought up a UI-less world, failed its seed on a nil
+    /// global, wrote a valid PNG and exited 0.
+    #[test]
+    fn a_ui_scenario_opts_the_ui_in_and_a_world_scenario_does_not() {
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ui = EnvGuard::unset("WOW_CAPTURE_UI");
+
+        let _c = EnvGuard::set("WOW_CAPTURE", "ui-questlog");
+        assert!(
+            ui_opted_in(),
+            "a `ui:` scenario is a UI capture by construction"
+        );
+
+        // The one that made the concept honest: it opens no window, so it used to say
+        // `ui: None` and was a UI capture the table called a world capture.
+        let _c = EnvGuard::set("WOW_CAPTURE", "ui-unitframes");
+        assert!(ui_opted_in(), "…including the fixtureless `Bare` ones");
+
+        // A world scenario's baseline regression-tests the WORLD render and must stay UI-free.
+        let world = SCENARIOS
+            .iter()
+            .chain(ON_DEMAND.iter())
+            .find(|s| s.ui.is_none())
+            .expect("the tables have world scenarios");
+        let _c = EnvGuard::set("WOW_CAPTURE", world.name);
+        assert!(
+            !ui_opted_in(),
+            "world scenario {} must stay pristine",
+            world.name
+        );
+
+        // …unless the env var asks for it over a world scene, which is what it was always for.
+        let _on = EnvGuard::set("WOW_CAPTURE_UI", "1");
+        assert!(ui_opted_in(), "the env var still opts a world scene in");
+    }
+
+    /// Every `ui-*`-named scenario really does declare a fixture — otherwise it would silently be
+    /// a world capture wearing a UI name, and the predicate above would not save it.
+    #[test]
+    fn every_ui_named_scenario_declares_a_fixture() {
+        for s in SCENARIOS
+            .iter()
+            .chain(ON_DEMAND.iter())
+            .filter(|s| s.name.starts_with("ui-"))
+        {
+            assert!(
+                s.ui.is_some(),
+                "scenario {} is named ui-* but declares no `ui:` fixture — it would be treated as \
+                 a world capture and photographed with no player UI. If it opens no window, that \
+                 is what `UiFixture::Bare` is for.",
+                s.name
+            );
+        }
+    }
+}

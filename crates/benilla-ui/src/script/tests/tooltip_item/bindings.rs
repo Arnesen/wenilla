@@ -64,6 +64,7 @@ fn shift_compare_fires_seats_and_renders_the_compare_shape() {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,

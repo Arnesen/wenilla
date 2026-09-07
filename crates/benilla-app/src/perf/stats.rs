@@ -16,7 +16,7 @@ use std::collections::VecDeque;
 use bevy::prelude::*;
 use bevy::time::Real;
 
-use super::clock::process_cpu_secs;
+use super::clock::{main_thread_cpu_secs, process_cpu_secs};
 
 /// Recent frames kept for the pill's windowed means (~5 s at 60 fps, ~2.5 s at 120).
 pub(super) const SAMPLE_WINDOW: usize = 300;
@@ -70,6 +70,10 @@ pub(super) struct FrameStats {
     /// currency (0736) and the meter the rail cannot fool (0717).
     pub(super) cpu: Series,
     prev_cpu_secs: Option<f64>,
+    /// The MAIN thread's CPU per frame — the part of the frame the player can feel: the wall
+    /// the schedule runs on. Sampled pinned (`sample_frame_time`'s `NonSendMarker`).
+    pub(super) main: Series,
+    prev_main_secs: Option<f64>,
 }
 
 impl Default for FrameStats {
@@ -77,7 +81,9 @@ impl Default for FrameStats {
         Self {
             wall: Series::new(SAMPLE_WINDOW),
             cpu: Series::new(SAMPLE_WINDOW),
+            main: Series::new(SAMPLE_WINDOW),
             prev_cpu_secs: None,
+            prev_main_secs: None,
         }
     }
 }
@@ -102,6 +108,9 @@ impl FrameStats {
         for &(wall, cpu) in frames {
             self.wall.push(wall);
             self.cpu.push(cpu);
+            // The fixture's main-thread share: a fixed fraction of the sum, so a test can tell
+            // the two apart without a second column.
+            self.main.push(cpu * 0.5);
             t += dt;
         }
         t
@@ -109,7 +118,12 @@ impl FrameStats {
 }
 
 /// Sample both meters for this frame.
-pub(super) fn sample_frame_time(time: Res<Time<Real>>, mut stats: ResMut<FrameStats>) {
+pub(super) fn sample_frame_time(
+    // Pinned to the main thread: `main_thread_cpu_secs` reads the CALLING thread's clock.
+    _pin: bevy::ecs::system::NonSendMarker,
+    time: Res<Time<Real>>,
+    mut stats: ResMut<FrameStats>,
+) {
     let wall_ms = time.delta_secs() * 1000.0;
     stats.wall.push(wall_ms);
 
@@ -118,6 +132,11 @@ pub(super) fn sample_frame_time(time: Res<Time<Real>>, mut stats: ResMut<FrameSt
         stats.cpu.push(((n - prev) * 1000.0) as f32);
     }
     stats.prev_cpu_secs = cpu;
+    let main = main_thread_cpu_secs();
+    if let (Some(prev), Some(n)) = (stats.prev_main_secs, main) {
+        stats.main.push(((n - prev) * 1000.0) as f32);
+    }
+    stats.prev_main_secs = main;
 
     // Log hard hitches so a load freeze is attributable from the log alone (one big stall vs many
     // medium ones, and roughly when). The first frame's delta is the startup gap, not a hitch.

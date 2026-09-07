@@ -1,45 +1,59 @@
-//! The **dressing room** surface (decision 1060) — the intent queue behind the ref's
-//! `DressUpModel:SetUnit`/`:TryOn`/`:Dress`, plus the pane's bake yaw.
+//! The **dressing room** surface (decisions 1060, 1969) — the `DressUpModel` widget's own three
+//! verbs (table `0x84f190`: `Undress 0x504c00` · `Dress 0x504cd0` · `TryOn 0x504d90`) and the
+//! ordered intent queue behind them and behind `PlayerModel`'s `SetUnit`/`RefreshUnit` when the
+//! pane is a dressing room.
 //!
-//! ## Why these are benilla-named, not the live API's
+//! ## Why a queue, and why the state is the app's
 //!
-//! In 1.12 the dressing room's model is a `<DressUpModel>` **widget** and the verbs are *methods on
-//! it* (`DressUpFrame.lua:2-16`: `DressUpModel:SetUnit("player")` then `DressUpModel:TryOn(item)`;
-//! the Reset button calls `DressUpModel:Dress()`). benilla has no live 3D model widget — every
-//! model pane is a booth bake sampled by a plain `<Frame>` (the settled doctrine, 0105/0118, and
-//! what `BenillaSetBoothTexture` exists for) — so the *widget methods* have no home. They become
-//! four benilla globals over this queue, exactly as the paper doll's rotation did
-//! (`BenillaPaperDollModel_SetFacing`). The window's own Lua keeps the reference's `DressUpItem` /
-//! `DressUpItemLink` entry points, which is what every ctrl-click site actually calls.
+//! In the client the widget clones the unit's live model on `SetUnit`/`Dress` (`0x5059a0`, the
+//! attachment tree deep-copied) and `TryOn` overwrites one bodyslot or one of two hand lanes of
+//! that clone (wow-re `ui/scratch/dressup-model-equipment.md`). benilla renders no FrameXML model:
+//! every model pane is a booth bake the app composes from a look — the player's own visible items
+//! with the tried-on ones substituted in — and the VM holds neither item templates nor the
+//! player's equipment. So the verbs record *intents*, in order, and the app applies them
+//! (`take_dressup_intents`): `DressUpItem` resets *then* tries on in one breath when the window
+//! was closed (ref `DressUpFrame.lua:3-7`), and applying those two out of order would show the
+//! player's own gear instead of the item they clicked.
 //!
-//! ## The seam
+//! ## What each verb means, off the bytes
 //!
-//! - **Intents:** an ordered queue, not a set of flags — `DressUpItem` resets *then* tries on in
-//!   one breath when the window was closed (ref `DressUpFrame.lua:3-7`), and applying those two out
-//!   of order would show the player's own gear instead of the item they clicked.
-//! - **State lives app-side:** the VM holds no item ids and no equipment. The app owns the
-//!   substitution set, resolves each item id to a display through the ask-once template cache, and
-//!   composes the booth's look ([`crate::script::UiScript::take_dressup_intents`]).
-//! - **Yaw:** [`UiScript::dressup_yaw`], the exact twin of `paperdoll_yaw` / `inspect_yaw`.
+//! - `SetUnit(unit)` / `RefreshUnit()` / `Dress()` all funnel into the same rebuild-from-the-unit
+//!   worker (§1 of the note): every substitution is gone and the model is what the player shows in
+//!   the world. One intent, [`DressUpIntent::Dress`].
+//! - `Undress()` → `0x504490`: clears components bodyslots `0..0xb` — every worn piece, base and
+//!   tried-on alike — and touches no hand lane, so a held weapon stays (§5). [`DressUpIntent::Undress`].
+//! - `TryOn(item)`: the argument is `trunc(tonumber(arg))` (`__ftol 0x40a2b0`) handed to the item
+//!   cache, so a numeric string is an id and anything else is item 0, which previews nothing. The
+//!   stock `DressUpItemLink` hands it the digits it `gsub`bed out of the `|Hitem:` link. It gates
+//!   on nothing — no class, level or proficiency check anywhere in the path (`DressUpFrame.lua:2-16`).
 
-use mlua::Lua;
+use mlua::{Lua, Table, Value};
 
+use super::object::frame_handle_of;
 use super::Model;
+use crate::widget::FrameKind;
+
+/// Registry key of the `DressUpModel` method table — its **own three** entries. `PlayerModel`'s
+/// three and `Model`'s 23 come through the dispatcher's chain (`object.rs`).
+pub(super) const REG_DRESSUPMODEL_METHODS: &str = "__benilla_dressupmodel_methods";
 
 /// One queued dressing-room intent (see the module doc on ordering).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DressUpIntent {
-    /// `DressUpModel:SetUnit("player")` (the open) and `DressUpModel:Dress()` (the Reset button) —
-    /// both mean "wear what the player is actually wearing", dropping every substitution. One verb
-    /// because they are one effect here: our model is always the player's.
+    /// `DressUpModel:SetUnit("player")` (the open), `RefreshUnit()` and `Dress()` (the Reset
+    /// button) — "wear what the player is actually wearing", dropping every substitution.
     Dress,
+    /// `DressUpModel:Undress()` — every worn piece off, base and tried-on; the hands keep what
+    /// they hold.
+    Undress,
     /// `DressUpModel:TryOn(item)` — substitute this item id into whichever slot its
     /// `InventoryType` belongs to.
     TryOn(u32),
-    /// The window was hidden — there is nothing to show, so the booth empties (and stops
+    /// The window was hidden — the app's own intent, derived from the frame going invisible
+    /// (`UiScript::frame_visible`): there is nothing to show, so the booth empties (and stops
     /// rendering). The reference's widget keeps its state while hidden, but its next `DressUpItem`
     /// re-issues `SetUnit("player")` precisely *because* the frame was not visible, so the state it
-    /// kept is never observable — dropping it here is behaviour-identical and saves the bake.
+    /// kept is never observable — dropping it is behaviour-identical and saves the bake.
     Close,
 }
 
@@ -48,66 +62,182 @@ impl super::UiScript {
     pub fn take_dressup_intents(&mut self) -> Vec<DressUpIntent> {
         std::mem::take(&mut self.model_mut().dressup_intents)
     }
+}
 
-    /// The dressing-room pane's bake yaw in radians (the ref's `Model:SetRotation`), read by the
-    /// app onto the `"dressup"` booth slot each frame — the twin of [`Self::paperdoll_yaw`].
-    pub fn dressup_yaw(&self) -> f32 {
-        self.model_ref().dressup_yaw
+fn queue(lua: &Lua, intent: DressUpIntent) {
+    lua.app_data_mut::<Model>()
+        .expect("model app_data")
+        .dressup_intents
+        .push(intent);
+}
+
+/// `PlayerModel`'s `SetUnit`/`RefreshUnit` on a pane that is a `DressUpModel`: the rebuild that
+/// drops every substitution (the module doc). A no-op on any other pane.
+pub(super) fn redress_if_dressup(lua: &Lua, this: &Table) -> mlua::Result<()> {
+    let h = frame_handle_of(lua, this)?;
+    let is_dressup = lua
+        .app_data_ref::<Model>()
+        .expect("model app_data")
+        .arena
+        .frame(h)
+        .is_some_and(|f| f.kind == FrameKind::DressUpModel);
+    if is_dressup {
+        queue(lua, DressUpIntent::Dress);
+    }
+    Ok(())
+}
+
+/// `trunc(tonumber(arg))` — `__ftol 0x40a2b0` over `lua_tonumber`: a number or numeric string
+/// truncates toward zero; anything else is 0.
+fn item_arg(v: &Value) -> i64 {
+    match v {
+        Value::Integer(i) => *i,
+        Value::Number(n) => n.trunc() as i64,
+        Value::String(s) => s
+            .to_str()
+            .ok()
+            .and_then(|t| t.trim().parse::<f64>().ok())
+            .map_or(0, |n| n.trunc() as i64),
+        _ => 0,
     }
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
-    let g = lua.globals();
+    let m = lua.create_table()?;
 
-    let queue = |lua: &Lua, intent: DressUpIntent| {
-        lua.app_data_mut::<Model>()
-            .expect("model app_data")
-            .dressup_intents
-            .push(intent);
-    };
+    // `Undress()` — `0x84f190` -> `0x504c00` -> `0x504490`.
+    m.set(
+        "Undress",
+        lua.create_function(|lua, this: Table| {
+            frame_handle_of(lua, &this)?;
+            queue(lua, DressUpIntent::Undress);
+            Ok(())
+        })?,
+    )?;
 
-    // BenillaDressUpModel_Dress() — the ref's `DressUpModel:SetUnit("player")` (DressUpFrame.lua:5)
-    // and `:Dress()` (the Reset button, DressUpFrame.xml:180).
-    g.set(
-        "BenillaDressUpModel_Dress",
-        lua.create_function(move |lua, ()| {
+    // `Dress()` — `0x504cd0`, the Reset button (`DressUpFrame.xml:182`).
+    m.set(
+        "Dress",
+        lua.create_function(|lua, this: Table| {
+            frame_handle_of(lua, &this)?;
             queue(lua, DressUpIntent::Dress);
             Ok(())
         })?,
     )?;
 
-    // BenillaDressUpModel_TryOn(itemId) — the ref's `DressUpModel:TryOn(item)` (DressUpFrame.lua:8),
-    // whose argument is the bare item id `DressUpItemLink` pulled out of the `|Hitem:<id>:…` link.
-    g.set(
-        "BenillaDressUpModel_TryOn",
-        lua.create_function(move |lua, item: Option<u32>| {
-            if let Some(item) = item.filter(|i| *i != 0) {
-                queue(lua, DressUpIntent::TryOn(item));
+    // `TryOn(item)` — `0x504d90` -> `0x504540(itemId)`. Item 0 (a non-number, a link string) looks
+    // up nothing in the client's cache and previews nothing; so does a negative one here.
+    m.set(
+        "TryOn",
+        lua.create_function(|lua, (this, item): (Table, Value)| {
+            frame_handle_of(lua, &this)?;
+            if let Ok(id) = u32::try_from(item_arg(&item)) {
+                if id != 0 {
+                    queue(lua, DressUpIntent::TryOn(id));
+                }
             }
             Ok(())
         })?,
     )?;
 
-    // BenillaDressUpModel_Close() — the window's OnHide (see [`DressUpIntent::Close`]).
-    g.set(
-        "BenillaDressUpModel_Close",
-        lua.create_function(move |lua, ()| {
-            queue(lua, DressUpIntent::Close);
-            Ok(())
-        })?,
-    )?;
+    lua.set_named_registry_value(REG_DRESSUPMODEL_METHODS, m)
+}
 
-    // BenillaDressUpModel_SetFacing(radians) — the pane's bake yaw, the exact twin of
-    // `BenillaPaperDollModel_SetFacing` (the inspect pane's twin went with 1832's migration).
-    g.set(
-        "BenillaDressUpModel_SetFacing",
-        lua.create_function(|lua, radians: f32| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .dressup_yaw = radians;
-            Ok(())
-        })?,
-    )?;
+#[cfg(test)]
+mod tests {
+    use super::DressUpIntent;
+    use crate::script::UiScript;
 
-    Ok(())
+    fn room() -> UiScript {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        s.run(r#"dm = CreateFrame("DressUpModel", "DM", UIParent)"#)
+            .unwrap();
+        s
+    }
+
+    /// The widget answers its own three, PlayerModel's three and Model's, in a chain five deep —
+    /// and a plain PlayerModel does not answer the three (the chain runs derived → base only).
+    #[test]
+    fn a_dress_up_model_is_a_player_model_plus_three_and_the_chain_runs_one_way() {
+        let s = room();
+        s.run(r#"pm = CreateFrame("PlayerModel", "PMOnly", UIParent)"#)
+            .unwrap();
+        for verb in [
+            "TryOn",
+            "Dress",
+            "Undress",
+            "SetUnit",
+            "RefreshUnit",
+            "SetRotation",
+            "SetCamera",
+        ] {
+            assert_eq!(
+                s.eval::<String>(&format!("return type(DM.{verb})"))
+                    .unwrap(),
+                "function",
+                "DressUpModel answers {verb}"
+            );
+        }
+        for verb in ["TryOn", "Dress", "Undress"] {
+            assert_eq!(
+                s.eval::<String>(&format!("return type(PMOnly.{verb})"))
+                    .unwrap(),
+                "nil",
+                "a PlayerModel must NOT answer {verb}"
+            );
+        }
+        assert_eq!(
+            s.eval::<String>("return DM:GetObjectType()").unwrap(),
+            "DressUpModel"
+        );
+        for t in ["DressUpModel", "PlayerModel", "Model", "Frame", "Region"] {
+            assert!(
+                s.eval::<bool>(&format!("return DM:IsObjectType(\"{t}\") == 1"))
+                    .unwrap(),
+                "IsObjectType({t})"
+            );
+        }
+    }
+
+    /// The verbs queue intents in call order; `SetUnit`/`RefreshUnit` re-dress on THIS kind only;
+    /// `TryOn`'s argument is `trunc(tonumber(arg))`, so the stock file's digit string is an id and
+    /// a link string is item 0, which queues nothing.
+    #[test]
+    fn the_verbs_queue_intents_in_order_and_try_on_reads_its_argument_like_the_client() {
+        let mut s = room();
+        s.run(
+            r#"
+            DM:SetUnit("player")
+            DM:TryOn("117")
+            DM:TryOn(1234.7)
+            DM:Undress()
+            DM:RefreshUnit()
+            DM:Dress()
+            DM:TryOn("|cffffffff|Hitem:117|h[Tough Jerky]|h|r")
+            DM:TryOn(0)
+            DM:TryOn(nil)
+            DM:TryOn(-5)
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.take_dressup_intents(),
+            vec![
+                DressUpIntent::Dress,
+                DressUpIntent::TryOn(117),
+                DressUpIntent::TryOn(1234),
+                DressUpIntent::Undress,
+                DressUpIntent::Dress,
+                DressUpIntent::Dress,
+            ]
+        );
+        // The same two PlayerModel verbs on a paper-doll pane queue nothing.
+        s.run(r#"pm = CreateFrame("PlayerModel", "PMOnly", UIParent) pm:SetUnit("player") pm:RefreshUnit()"#)
+            .unwrap();
+        assert!(s.take_dressup_intents().is_empty());
+        // Its yaw is its own facing, read by name like every other pane's.
+        s.run("DM:SetRotation(0.61)").unwrap();
+        assert!((s.model_pane_facing("DM") - 0.61).abs() < 1e-6);
+    }
 }

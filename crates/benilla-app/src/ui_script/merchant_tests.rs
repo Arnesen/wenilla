@@ -1,6 +1,6 @@
-//! The shipped **merchant window** driven end-to-end, engine-only (no Bevy): the real
-//! `assets/ui/MerchantFrame.xml` (+ `GameTooltip.xml` for the hover chain) loaded behind
-//! `UiPanels.xml` and fed synthetic stock — the phase-4 vendor arc's machine checks (decision
+//! The **merchant window** driven end-to-end, engine-only (no Bevy): the stock
+//! `Interface\FrameXML\MerchantFrame.xml` (+ `GameTooltip.xml` for the hover chain) loaded behind
+//! `UIParent.xml` and fed synthetic stock — the phase-4 vendor arc's machine checks (decision
 //! 0081/0084). Split from `panel_tests` (which keeps gossip + the slot manager itself) along the
 //! folder's one-file-per-window convention.
 
@@ -40,7 +40,7 @@ fn frame_rect(quads: &[ExtractedQuad], w: f32, h: f32) -> benilla_ui::layout::Re
         .unwrap_or_else(|| panic!("no bare-frame quad sized {w}x{h}"))
 }
 
-/// Load the real `assets/ui/MerchantFrame.xml` (the shipped vendor window) behind `UiPanels.xml`
+/// Load the stock `Interface\FrameXML\MerchantFrame.xml` behind `UIParent.xml`
 /// into a bare engine and drive it with a synthetic 2-item stock + a purse — the whole phase-4
 /// chain minus Bevy (decision 0081), now over the UIPanel slot manager (decision 0084): the
 /// hidden→shown lifecycle on MERCHANT_SHOW goes through ShowUIPanel (landing at the left slot),
@@ -343,6 +343,7 @@ fn merchant_show_hide_plays_open_and_close_kits() {
     for f in super::test_ui::MERCHANT_UI {
         load_xml(&s, f);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     // Hidden at load: no open sound (never transitions on startup).
@@ -392,6 +393,8 @@ fn vendor_open_opens_the_backpack_and_layers_the_sound() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     equip_bag(&mut s, 0, "Backpack", 16);
@@ -442,6 +445,8 @@ fn vendor_leaves_an_already_open_backpack_alone() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     equip_bag(&mut s, 0, "Backpack", 16);
@@ -490,6 +495,8 @@ fn vendor_opens_and_closes_all_equipped_bags() {
     for file in BAG_UI {
         load_xml(&s, file);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     equip_bag(&mut s, 0, "Backpack", 16);
@@ -526,6 +533,7 @@ fn merchant_switch_plays_close_then_open_and_queues_the_consumable_close() {
     for f in super::test_ui::MERCHANT_UI {
         load_xml(&s, f);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     // Vendor A open.
@@ -565,6 +573,10 @@ fn merchant_switch_plays_close_then_open_and_queues_the_consumable_close() {
 fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // The stock tooltip declares no size: it sizes from its lines through the font engine, as
+    // the client's does (1968) — a harness that reads its rect needs one; the fixed-width
+    // font is that engine here.
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     for f in super::test_ui::MERCHANT_UI {
         load_xml(&s, f);
     }
@@ -575,6 +587,7 @@ fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
     // every FrameXML file loads before any hover fires, so load it here too — with the dropdown
     // kit its GroupLootDropDown initializes against at load (benilla.toc l.64 vs 383).
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     s.set_merchant(Some(MerchantState {
@@ -814,6 +827,7 @@ fn merchant_tabs_drive_buyback_page_and_repair_pair() {
     for f in super::test_ui::MERCHANT_UI {
         load_xml(&s, f);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(500);
 
@@ -924,14 +938,25 @@ fn merchant_tabs_drive_buyback_page_and_repair_pair() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The tabs fit their labels — the ref's OnShow text-fit (PanelTemplates_TabResize(0): tab width
-/// = text + the two 20px end slices, middle slices stretched to the text), run from the
-/// template's OnUpdate once the async text measure lands. Fixed 115px tabs looked wrong against
-/// the ref (director pass 2026-07-05): too wide, and the −16 overlap lost its nestle gap.
+/// The two tabs fit their labels, from the reference's own `<OnShow>` — `PanelTemplates_TabResize(0)`
+/// on `CharacterFrameTabButtonTemplate`: tab width = text + the two 20px end slices, middle slices
+/// stretched to the text. Fixed 115px tabs looked wrong against the ref (director pass 2026-07-05):
+/// too wide, and the −16 overlap lost its nestle gap.
+///
+/// **Driven through a SYNCHRONOUS measurer, with no round trip to pump** — the same correction 1848
+/// made to the macro harness, arriving here with the template (decision 1993). This used to feed
+/// two widths through `set_measured_text_unwrapped` and then tick, because our own template re-fit
+/// from `OnUpdate` until the measure settled. The reference's file fits once, in `OnShow`; a client
+/// whose measure is still pending at that moment could never size its tabs at all, and the app is
+/// not such a client — it installs `AtlasMeasurer`. Modelling the async path here was modelling a
+/// configuration the app does not have.
 #[test]
 fn merchant_tabs_fit_their_labels() {
+    /// `2 * $parentLeft:GetWidth()` — the template's two 20-unit end slices.
+    const SIDES: f64 = 40.0;
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     for f in super::test_ui::MERCHANT_UI {
         load_xml(&s, f);
     }
@@ -941,33 +966,21 @@ fn merchant_tabs_fit_their_labels() {
     s.fire_event("MERCHANT_SHOW", vec![ScriptValue::Str("Vendor".into())]);
     s.resolve();
 
-    // Answer the measure round-trip for the two labels (the app's font-atlas job in-game).
-    let measures: Vec<(u32, f32, f32, u64)> = s
-        .fontstrings_needing_measure()
-        .into_iter()
-        .filter(|r| r.text == "Merchant" || r.text == "Buyback")
-        .map(|r| {
-            let w = if r.text == "Merchant" { 58.0 } else { 52.0 };
-            (r.id, w, 10.0, r.key)
-        })
-        .collect();
-    assert!(measures.len() >= 2, "both tab labels request a measure");
-    s.set_measured_text_unwrapped(&measures);
-    s.tick(0.016); // the template OnUpdate sees the settled width and runs the fit
-    s.resolve();
-
     // Tab width = text + 2×20 end slices; the middle slices carry exactly the text width.
-    let (w1, w2): (f64, f64) = s
-        .eval("return MerchantFrameTab1:GetWidth(), MerchantFrameTab2:GetWidth()")
-        .unwrap();
-    assert_eq!((w1, w2), (98.0, 92.0), "text + 40, not the fixed 115");
-    let (m1, m2): (f64, f64) = s
+    let (l1, l2, w1, w2, m1, m2): (f64, f64, f64, f64, f64, f64) = s
         .eval(
-            "return MerchantFrameTab1MiddleDisabled:GetWidth(), \
-             MerchantFrameTab2Middle:GetWidth()",
+            "return MerchantFrameTab1Text:GetStringWidth(), MerchantFrameTab2Text:GetStringWidth(), \
+             MerchantFrameTab1:GetWidth(), MerchantFrameTab2:GetWidth(), \
+             MerchantFrameTab1MiddleDisabled:GetWidth(), MerchantFrameTab2Middle:GetWidth()",
         )
         .unwrap();
-    assert_eq!((m1, m2), (58.0, 52.0), "middle slices stretch to the text");
+    assert!(l1 > 0.0 && l2 > 0.0, "both labels measured synchronously");
+    assert_eq!(
+        (w1, w2),
+        (l1 + SIDES, l2 + SIDES),
+        "text + 40, not the fixed 115"
+    );
+    assert_eq!((m1, m2), (l1, l2), "middle slices stretch to the text");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -984,6 +997,7 @@ fn shipped_merchant_frame_arms_the_buy_cursor_on_hover() {
     for f in super::test_ui::MERCHANT_UI {
         load_xml(&s, f);
     }
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     // A purse of 50c: row 1 (25c) is affordable, row 2 (100c) is not.
@@ -1077,8 +1091,12 @@ fn trade_recipient_money_renders_the_digit_not_ellipsis() {
     for f in super::test_ui::MERCHANT_UI {
         load_xml(&s, f);
     }
-    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // the BenillaMoney_* helpers
-    load_xml(&s, "TradeFrame.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // MerchantFrame:IsShown(), read on the slot click
+                                                            // TradeFrame's money entry is the chain's own since 1882 — its OnLoad calls MoneyInputFrame_*.
+    load_xml(&s, "Interface\\FrameXML\\MoneyInputFrame.lua");
+    load_xml(&s, "Interface\\FrameXML\\MoneyInputFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\TradeFrame.xml");
     s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
 
     let target = benilla_ui::script::TradeSideState {
@@ -1133,11 +1151,18 @@ fn ctrl_and_shift_on_a_vendor_row_preview_and_post_without_buying() {
         load_xml(&s, f);
     }
     for file in [
-        "UIParent.xml", // BenillaChatEdit_InsertLink, the shared shift-insert helper
+        r"Interface\FrameXML\UIParent.xml", // UIParent + UIParent.lua, the reference's own (1988)
+        "ScrollTemplates.xml",              // our scroll kit + the placeholder icon
         "Interface\\FrameXML\\MerchantFrame.xml",
-        "DressUpFrame.xml",
+        "Interface\\FrameXML\\DressUpFrame.xml",
         "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
-        "ChatFrame.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\ChatFrame.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        // (the panel templates, UiPanels and the dialog engine are MERCHANT_UI's already — a
+        // second load of the stock money kit's frames trips its own global-named update)
+        "Interface\\FrameXML\\FloatingChatFrame.xml",
     ] {
         load_xml(&s, file);
     }

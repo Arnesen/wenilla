@@ -318,7 +318,28 @@ pub(super) fn set_spell_with_talent(
 
 /// Shared entry: clear, render (or record the ask and show nothing but the name if the caller
 /// knows one), show.
-fn set_spell_by_id(
+/// The reward-spell hover: the spell by id with the quest's own name as the fallback, or an
+/// empty tooltip.
+fn set_reward_spell(
+    lua: &Lua,
+    this: &Table,
+    spell: Option<(u32, Option<String>)>,
+) -> mlua::Result<()> {
+    match spell {
+        Some((id, name)) => set_spell_by_id(lua, this, id, name, SpellRenderOpts::default(), None),
+        None => {
+            let h = frame_handle_of(lua, this)?;
+            {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                clear_content(&mut model, h);
+            }
+            super::tooltip::show_or_hide_empty(lua, h);
+            Ok(())
+        }
+    }
+}
+
+pub(super) fn set_spell_by_id(
     lua: &Lua,
     this: &Table,
     spell_id: u32,
@@ -614,6 +635,39 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // table). Not the spell title's gold, and nothing about the bound spell: 1.12 has no
     // `#showtooltip`. This arm was a `_ => Ok(())` left from before 0983 shipped macros, which is
     // why a macro on the bar hovered to nothing (the director, 2026-08-27, after 1636).
+    // GameTooltip:SetQuestRewardSpell() / SetQuestLogRewardSpell() — the hover of the reward
+    // slot stock marks `rewardType = "spell"` (QuestFrameTemplates.xml:150, QuestLogFrame.xml:115;
+    // bindings 0x535bb0 / 0x535c60, self only, 0 returns): the quest's reward spell by id through
+    // the spell renderer, an empty tooltip when the quest rewards none.
+    m.set(
+        "SetQuestRewardSpell",
+        lua.create_function(|lua, this: Table| {
+            let id = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model
+                    .quest
+                    .as_ref()
+                    .and_then(|q| q.reward_spell.as_ref())
+                    .map(|s| (s.spell_id, s.name.clone()))
+            };
+            set_reward_spell(lua, &this, id)
+        })?,
+    )?;
+    m.set(
+        "SetQuestLogRewardSpell",
+        lua.create_function(|lua, this: Table| {
+            let id = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model
+                    .quest_log
+                    .detail
+                    .as_ref()
+                    .and_then(|d| d.reward_spell.as_ref())
+                    .map(|s| (s.spell_id, s.name.clone()))
+            };
+            set_reward_spell(lua, &this, id)
+        })?,
+    )?;
     m.set(
         "SetAction",
         lua.create_function(|lua, (this, slot): (Table, u32)| {

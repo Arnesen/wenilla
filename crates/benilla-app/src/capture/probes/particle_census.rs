@@ -138,7 +138,11 @@ fn fire_particle_census(
                 let lane = if world_layer { "world" } else { "booth" };
                 let c = fade.map_or_else(|| e.anchor_world(), |f| f.center);
                 format!(
-                    " depth={d:.1} drawn={drawn} lane={lane} gated={} at=({:.0},{:.0},{:.0})",
+                    // `has_fade`, not `gated`: this column prints whether the emitter carries an
+                    // `EmitterFade`, and calling it `gated` made it read as the draw-set verdict —
+                    // which is `drawn` (its inverse), right beside it. A tile-emitter reading was
+                    // taken backwards off the old label before it was renamed (decision 2046).
+                    " depth={d:.1} drawn={drawn} lane={lane} has_fade={} at=({:.0},{:.0},{:.0})",
                     fade.is_some(),
                     c.x,
                     c.y,

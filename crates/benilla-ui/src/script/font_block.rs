@@ -285,11 +285,20 @@ pub(super) fn install(
     // ── the text colour ─────────────────────────────────────────────────────────────────────
     // SetTextColor(r, g, b [, a]) → 0 values; alpha defaults to 1.0 (`lua_isnumber(L,5)`-gated,
     // `0x3f800000`). A FontString has no texel of its own, so its vertex colour IS the colour it
-    // draws — the same `+0xb8` slot `SetVertexColor` writes.
+    // draws — the same `+0xb8` slot `SetVertexColor` writes. The three channels are SHAPE C
+    // (`FontString:SetTextColor 0x79d9c0`, `2=C 3=C 4=C 5=B`, wow-re `numeric-arg-coercion-law.md`):
+    // a bare `lua_tonumber`, so a nil or a non-number is 0.0 and the call never raises — the stock
+    // trainer/trade-skill rows' OnLeave hands it `this.r, this.g, this.b` before anything set them
+    // (1973).
     m.set(
         "SetTextColor",
         lua.create_function(
-            move |lua, (this, r, g, b, a): (Table, f32, f32, f32, Option<f32>)| {
+            move |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
+                let (r, g, b) = (
+                    super::object::as_f32(&r),
+                    super::object::as_f32(&g),
+                    super::object::as_f32(&b),
+                );
                 let rh = resolve(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let d = model.region_data.entry(rh).or_default();

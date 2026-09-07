@@ -339,6 +339,7 @@ pub(super) fn unit_move(
             pitch: mv.pitch,
             fall_time: mv.fall_time,
             jump: mv.jump,
+            transport: mv.transport,
         });
         return;
     }
@@ -488,11 +489,20 @@ pub(super) fn objects_removed(guids: Vec<u64>, commands: &mut Commands, index: &
     }
 }
 
-/// A creature path packet (`SMSG_MONSTER_MOVE`): apply the dictated facing snap, then attach or
-/// clear the travel spline.
+/// A creature path packet (`SMSG_MONSTER_MOVE`, or its deck twin `SMSG_MONSTER_MOVE_TRANSPORT`):
+/// settle the unit's transport membership, apply the dictated facing snap, then attach or clear
+/// the travel spline.
+///
+/// **`transport` changes the frame of everything else in the packet** (decision 1936). When it is
+/// `Some`, `start`, every `path` point and an `Angle` facing are offsets in that transport's frame,
+/// the unit becomes (or stays) a [`TransportRider`] on it, and the spline is sampled into the
+/// rider's local pose for `transport::compose_riders` to carry out to the world. When it is `None`
+/// on a unit we had riding, the unit has *left* the deck — vmangos drops it from the transport on
+/// exactly this edge (`MoveSplineInit::Launch`, `spline/MoveSplineInit.cpp:156-159`).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn monster_move(
     guid: u64,
+    transport: Option<u64>,
     start: [f32; 3],
     spline_id: u32,
     path: Vec<[f32; 3]>,
@@ -505,6 +515,7 @@ pub(super) fn monster_move(
     commands: &mut Commands,
     index: &GuidIndex,
     transforms: &mut Query<&mut Transform>,
+    riders: &mut Query<&mut crate::transport::TransportRider>,
 ) {
     if let Some(&e) = index.0.get(&guid) {
         // The DESYNC readout (decision 0708): how far this packet is about to teleport the unit — the
@@ -512,11 +523,78 @@ pub(super) fn monster_move(
         // correctly-followed creature reads ~0; a frozen one reads the whole walk it slept through.
         trace_move_snap(
             guid,
-            transforms.get(e).ok().map(|t| bevy_to_wow(t.translation)),
+            // Both sides of the readout have to be in ONE frame. A deck packet's `start` is a
+            // transport-local offset, so it is compared against the rider's own local pose, not
+            // against the composed world position (which would read as the whole boat's travel).
+            match transport {
+                Some(_) => riders.get(e).ok().map(|r| r.local_pos),
+                None => transforms.get(e).ok().map(|t| bevy_to_wow(t.translation)),
+            },
             start,
             stop,
             duration_ms,
         );
+        // **Transport membership, settled before anything reads a pose.** A packet naming a
+        // transport attaches the unit to it (and re-seeds its deck-local pose from the packet's
+        // own `start`, so the stop form places a body too); a packet naming none detaches a unit
+        // we had riding. The facing that goes with it is deck-local for an `Angle` — vmangos runs
+        // `CalculatePassengerOffset(…, &args.facing.angle)` on it (`MoveSplineInit.cpp:88`) — but
+        // a `Spot`/`Target` facing is **not** converted server-side, so those resolve to a world
+        // bearing and are rebased here by the deck's own yaw.
+        //
+        // **Above the root gate deliberately.** The gate below refuses the *path*, which is what
+        // wow-re establishes; membership is not a path. A rooted body on a deck that was left
+        // unattached would be abandoned in the sea as the boat sails out from under it, which is
+        // a worse failure than carrying a pinned body along with the deck it is standing on.
+        let deck_yaw = |t: u64| {
+            index
+                .0
+                .get(&t)
+                .and_then(|&te| transforms.get(te).ok())
+                .map(|tf| tf.rotation.to_euler(EulerRot::YXZ).0)
+        };
+        if let Some(t) = transport {
+            let local_facing = match facing {
+                MonsterMoveFacing::None => None,
+                MonsterMoveFacing::Angle(a) => Some(a),
+                other => {
+                    let target_pos = |g: u64| {
+                        index
+                            .0
+                            .get(&g)
+                            .and_then(|&te| transforms.get(te).ok())
+                            .map(|tf| bevy_to_wow(tf.translation))
+                    };
+                    // The unit's own WORLD position anchors the bearing (the wire's `start` is
+                    // deck-local and would put the unit near the map origin).
+                    let world_pos = transforms.get(e).ok().map(|tf| bevy_to_wow(tf.translation));
+                    world_pos
+                        .and_then(|p| resolve_facing(other, p, target_pos))
+                        .zip(deck_yaw(t))
+                        .map(|(world, yaw)| world - yaw)
+                }
+            };
+            match riders.get_mut(e) {
+                Ok(mut rider) => {
+                    rider.transport_guid = t;
+                    rider.local_pos = start;
+                    if let Some(o) = local_facing {
+                        rider.local_orientation = o;
+                    }
+                }
+                Err(_) => {
+                    commands.entity(e).insert(crate::transport::TransportRider {
+                        transport_guid: t,
+                        local_pos: start,
+                        local_orientation: local_facing.unwrap_or_default(),
+                    });
+                }
+            }
+        } else if riders.get(e).is_ok() {
+            commands
+                .entity(e)
+                .remove::<crate::transport::TransportRider>();
+        }
         // Apply the dictated final facing (moveType 2/3/4) as a **snap** — faithful to the
         // client, which stores it straight into the unit's **raw** movement facing (`0x7c6f30`).
         // This is the *packet*-driven re-face — a scripted/emote/aggro `SetFacingTo` the
@@ -529,7 +607,9 @@ pub(super) fn monster_move(
         // frame (faithful — the client's spline-follow snaps the mesh yaw to the path tangent;
         // wow-re body-facing §4). The receipt snap thus only sticks for a path-less move (a
         // `Stop`/in-place re-face); a moving unit ends on its last tangent.
-        if !matches!(facing, MonsterMoveFacing::None) {
+        // The world-space facing snap — for a deck packet the rider's `local_orientation` above is
+        // the one that counts, and `compose_riders` writes the rotation from it.
+        if transport.is_none() && !matches!(facing, MonsterMoveFacing::None) {
             let target_pos = |g: u64| {
                 index
                     .0
@@ -585,7 +665,15 @@ pub(super) fn monster_move(
         // root gate because it is the *install's* own consequence: with no path taken there is no
         // new authority to hand the pose to.
         commands.entity(e).remove::<RemoteMotion>();
-        match monster_move_spline(path, spline_id, stop, duration_ms, flying, run_mode) {
+        match monster_move_spline(
+            path,
+            spline_id,
+            stop,
+            duration_ms,
+            flying,
+            run_mode,
+            transport,
+        ) {
             // A moving path: sample_splines drives the transform along every waypoint.
             Some(spline) => {
                 commands.entity(e).insert(spline).remove::<SplineStopped>();
@@ -1074,9 +1162,11 @@ mod tests {
                 w.run_system_once(
                     move |mut commands: Commands,
                           index: Res<GuidIndex>,
-                          mut transforms: Query<&mut Transform>| {
+                          mut transforms: Query<&mut Transform>,
+                          mut riders: Query<&mut crate::transport::TransportRider>| {
                         monster_move(
                             MOB,
+                            None,
                             [0.0, 0.0, 0.0],
                             7,
                             path.clone(),
@@ -1089,6 +1179,7 @@ mod tests {
                             &mut commands,
                             &index,
                             &mut transforms,
+                            &mut riders,
                         );
                     },
                 )
@@ -1099,6 +1190,115 @@ mod tests {
                     "rooted={rooted}: a pinned body takes no path, an unpinned one does"
                 );
             }
+        }
+
+        /// **`SMSG_MONSTER_MOVE_TRANSPORT` attaches, and its plain twin detaches** (decision
+        /// 1936). A packet naming a transport makes the unit a [`TransportRider`] on it, seeds the
+        /// rider pose from the packet's own deck-local `start`, and hands the spline the deck so
+        /// the sampler writes the local pose instead of the world transform. A packet naming none
+        /// takes the unit off the deck, which is the edge vmangos itself drops the passenger on
+        /// (`MoveSplineInit::Launch`, `spline/MoveSplineInit.cpp:156-159`).
+        #[test]
+        fn a_transport_path_attaches_the_rider_and_a_plain_one_lets_it_go() {
+            const BOAT: u64 = 0x2000_0000_0000_0007;
+            let mut w = World::new();
+            let e = w
+                .spawn((
+                    Transform::default(),
+                    NetEntity {
+                        kind: EntityKind::Unit,
+                        display_id: None,
+                        scale: 1.0,
+                    },
+                ))
+                .id();
+            let boat = w.spawn(Transform::default()).id();
+            let mut index = GuidIndex::default();
+            index.0.insert(MOB, e);
+            index.0.insert(BOAT, boat);
+            w.insert_resource(index);
+
+            let deck_path = vec![[1.5, -2.5, 0.75], [4.0, -2.5, 0.75]];
+            w.run_system_once(
+                move |mut commands: Commands,
+                      index: Res<GuidIndex>,
+                      mut transforms: Query<&mut Transform>,
+                      mut riders: Query<&mut crate::transport::TransportRider>| {
+                    monster_move(
+                        MOB,
+                        Some(BOAT),
+                        [1.5, -2.5, 0.75],
+                        7,
+                        deck_path.clone(),
+                        MonsterMoveFacing::Angle(1.25),
+                        false,
+                        3000,
+                        false,
+                        true,
+                        false,
+                        &mut commands,
+                        &index,
+                        &mut transforms,
+                        &mut riders,
+                    );
+                },
+            )
+            .unwrap();
+            let rider = w
+                .entity(e)
+                .get::<crate::transport::TransportRider>()
+                .expect("a transport path attaches its rider");
+            assert_eq!(rider.transport_guid, BOAT);
+            assert_eq!(rider.local_pos, [1.5, -2.5, 0.75], "seeded deck-local");
+            assert!(
+                (rider.local_orientation - 1.25).abs() < 1e-6,
+                "Angle is deck-local"
+            );
+            assert_eq!(
+                w.entity(e).get::<Spline>().expect("a path").deck,
+                Some(BOAT),
+                "the spline rides the deck frame, not the world"
+            );
+            // The rider's world transform is `compose_riders`' to write, not this apply's — the
+            // deck-local start must never have been mistaken for a world position.
+            assert_eq!(
+                w.entity(e).get::<Transform>().unwrap().translation,
+                Vec3::ZERO
+            );
+
+            let world_path = vec![[100.0, 200.0, 30.0], [110.0, 200.0, 30.0]];
+            w.run_system_once(
+                move |mut commands: Commands,
+                      index: Res<GuidIndex>,
+                      mut transforms: Query<&mut Transform>,
+                      mut riders: Query<&mut crate::transport::TransportRider>| {
+                    monster_move(
+                        MOB,
+                        None,
+                        [100.0, 200.0, 30.0],
+                        8,
+                        world_path.clone(),
+                        MonsterMoveFacing::None,
+                        false,
+                        3000,
+                        false,
+                        true,
+                        false,
+                        &mut commands,
+                        &index,
+                        &mut transforms,
+                        &mut riders,
+                    );
+                },
+            )
+            .unwrap();
+            assert!(
+                w.entity(e)
+                    .get::<crate::transport::TransportRider>()
+                    .is_none(),
+                "a plain path takes the unit off the deck"
+            );
+            assert_eq!(w.entity(e).get::<Spline>().expect("a path").deck, None);
         }
     }
 

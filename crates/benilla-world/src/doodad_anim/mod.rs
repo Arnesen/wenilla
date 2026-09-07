@@ -474,12 +474,22 @@ fn gate_doodad_anim(
     vis: Query<&Visibility>,
     cam: Query<
         (
-            &GlobalTransform,
+            Ref<GlobalTransform>,
             &bevy::camera::primitives::Frustum,
-            &bevy::camera::Projection,
+            Ref<bevy::camera::Projection>,
+            // The seat's own write, visible THIS frame: `GlobalTransform` only changes after
+            // propagation, which runs after this system — so on a teleport frame the global
+            // reads still while the camera has already moved. Reading the local too is what
+            // keeps the verdict reuse below from carrying a pre-snap verdict across a snap
+            // (the over-bright lamppost glow after a .tele, 2026-09-04).
+            Option<Ref<Transform>>,
         ),
         With<crate::view::WorldCamera>,
     >,
+    // A meshed host's verdict is its meshes' `Visibility`; when none moved this frame and the
+    // camera stood still, every host's verdict is last frame's (decision 1979's floor: ~1.5 k
+    // hosts × their submesh lookups on every still frame).
+    changed_vis: Query<(), (Changed<Visibility>, With<crate::model_render::ModelPart>)>,
     // The far-clip wall — the meshless host's draw-set gate needs the same depth bound the
     // emitters and the doodad meshes use…
     view: Res<crate::view::ViewDistance>,
@@ -506,11 +516,23 @@ fn gate_doodad_anim(
     let world_cam = cam.single().ok();
     let exterior_gate = crate::exterior_cull::ExteriorGate::build(
         &exterior_windows,
-        world_cam.map(|(tf, _, proj)| (tf, proj)),
+        world_cam.as_ref().map(|(tf, _, proj, _)| (&**tf, &**proj)),
     );
     let camera_instance = camera_claim.0.map(|c| c.room.instance);
+    let verdicts_still = world_cam.as_ref().is_some_and(|(tf, _, proj, local)| {
+        !tf.is_changed() && !proj.is_changed() && !local.as_ref().is_some_and(|l| l.is_changed())
+    }) && !exterior_windows.is_changed()
+        && !camera_claim.is_changed()
+        && !view.is_changed()
+        && changed_vis.is_empty();
     for (entity, mut host, lazy, pose, has_rig, player, drive) in &mut hosts {
-        let drawn = if host.meshes.is_empty() {
+        // A host born this frame has no verdict to reuse (`active` starts false): a meshless one
+        // spawned under a parked camera stayed parked until the camera moved (review
+        // 2026-09-04). Read off the host's own tick — a second query on the component would
+        // conflict with this one's `&mut`.
+        let drawn = if verdicts_still && !host.is_added() {
+            host.active
+        } else if host.meshes.is_empty() {
             // Meshless (particles-only) host: the emitters' own draw-set law (see the `fade`
             // field doc) — the reference ticks animation for any model in the draw set, and a
             // 0-batch model is admitted on its fade sphere exactly like its emitters are.
@@ -519,7 +541,7 @@ fn gate_doodad_anim(
             // term went missing here as well as in the emitters (decision 0678 / bug B39) — a
             // meshless fire prop kept animating its bones at any distance past the wall.
             let (radius, center) = host.fade;
-            world_cam.is_some_and(|(cam_tf, frustum, _)| {
+            world_cam.as_ref().is_some_and(|(cam_tf, frustum, _, _)| {
                 let cam_pos = cam_tf.translation();
                 // A meshless host is a placement's own particles-only model; it carries no building
                 // instance of its own, so the honest answer here is "test my sphere".
@@ -649,6 +671,9 @@ impl Plugin for DoodadAnimPlugin {
             (
                 sample_mat_anim.before(crate::model_render::ModelVisSet),
                 tick_anim_materials.after(crate::model_render::ModelVisSet),
+                // The readout of everything that lane just decided (`WOW_MATANIM_PROBE`), after
+                // it, so the `row` column is this frame's write and not the previous one's.
+                mat_anim::matanim_probe.after(tick_anim_materials),
             ),
         );
     }
@@ -1193,6 +1218,110 @@ mod tests {
     /// [`DoodadAnimHost::arm_clock`] — the sound lane's phase, which must be the SHARED clock's,
     /// never the (draw-gated) player's. Three claims: it wraps with the clip, it is unaffected by
     /// the host being parked, and an unarmed host has no phase at all.
+    /// The teleport frame (2026-09-04): this system runs before transform propagation, so the
+    /// camera's `GlobalTransform` still reads still on the frame its `Transform` was re-seated,
+    /// and the verdict reuse carried every host's pre-snap verdict across the snap — a lamppost
+    /// glow that should have parked kept its clock, a host that should have woken stayed parked.
+    /// The gate must read the seat's own write.
+    #[test]
+    fn a_reseated_camera_is_not_a_still_scene() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()));
+        app.init_resource::<crate::view::ViewDistance>();
+        app.init_resource::<crate::wmo_portal::ExteriorWindows>();
+        app.init_resource::<crate::wmo_portal::CameraInteriorClaim>();
+        app.init_resource::<crate::rig_palette::RigPalettes>();
+        app.init_asset::<SkinnedMeshInverseBindposes>();
+        app.add_systems(Update, gate_doodad_anim);
+
+        // A camera 1000 yd from the host, looking away: the host's frustum verdict is "not
+        // drawn". No propagation plugin, so `GlobalTransform` never follows `Transform` —
+        // exactly the ordering the gate sees on the real snap frame.
+        let far =
+            Transform::from_xyz(1000.0, 0.0, 0.0).looking_at(Vec3::new(2000.0, 0.0, 0.0), Vec3::Y);
+        let projection = bevy::camera::Projection::from(bevy::camera::PerspectiveProjection {
+            far: 5000.0,
+            ..default()
+        });
+        let frustum = bevy::camera::primitives::Frustum::from_clip_from_world(
+            &(projection.get_clip_from_view() * GlobalTransform::from(far).affine().inverse()),
+        );
+        let cam = app
+            .world_mut()
+            .spawn((
+                crate::view::WorldCamera,
+                GlobalTransform::from(far),
+                far,
+                frustum,
+                projection,
+            ))
+            .id();
+        let node = AnimationNodeIndex::new(1);
+        let mut player = AnimationPlayer::default();
+        player.play(node).repeat();
+        let joint = app.world_mut().spawn(Transform::default()).id();
+        let drive = GlobalSeqDrive::new(
+            &anims(Vec::new(), None, true).global_bones,
+            &[Entity::PLACEHOLDER, joint],
+        )
+        .expect("one gseq bone maps");
+        let host = app
+            .world_mut()
+            .spawn((
+                DoodadAnimHost {
+                    meshes: Vec::new(),
+                    fade: (1.0, Vec3::ZERO),
+                    clip: Some((node, 2.0)),
+                    armed_at: 0.0,
+                    window_hi: f32::INFINITY,
+                    anim_id: Some(0),
+                    active: true,
+                    parked_at: 0.0,
+                },
+                player,
+                drive,
+            ))
+            .id();
+        let active = |app: &App| {
+            app.world()
+                .entity(host)
+                .get::<DoodadAnimHost>()
+                .unwrap()
+                .active
+        };
+        app.update();
+        assert!(!active(&app), "far and facing away ⇒ parked");
+        app.update();
+        app.update();
+        assert!(!active(&app), "still ⇒ the verdict is reused, still parked");
+
+        // The snap: the seat writes the camera's local next to the host, facing it. The global
+        // (and the frustum built from it) stay stale this frame — and the host must still be
+        // re-judged rather than reused.
+        let near = Transform::from_xyz(0.0, 0.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y);
+        let near_frustum = bevy::camera::primitives::Frustum::from_clip_from_world(
+            &(bevy::camera::Projection::from(bevy::camera::PerspectiveProjection {
+                far: 5000.0,
+                ..default()
+            })
+            .get_clip_from_view()
+                * GlobalTransform::from(near).affine().inverse()),
+        );
+        {
+            let mut e = app.world_mut().entity_mut(cam);
+            *e.get_mut::<Transform>().unwrap() = near;
+            *e.get_mut::<bevy::camera::primitives::Frustum>().unwrap() = near_frustum;
+            // The propagated frame, written WITHOUT a change tick: on the real snap frame it is
+            // last frame's value (propagation has not run), and this is the closest a test can
+            // stand to that — the only "moved" signal on this frame is the local.
+            *e.get_mut::<GlobalTransform>()
+                .unwrap()
+                .bypass_change_detection() = GlobalTransform::from(near);
+        }
+        app.update();
+        assert!(active(&app), "the snap frame re-judges the host: drawn");
+    }
+
     #[test]
     fn arm_clock_wraps_on_the_shared_clock() {
         let mut host = DoodadAnimHost {

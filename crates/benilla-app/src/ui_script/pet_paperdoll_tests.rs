@@ -398,8 +398,10 @@ fn the_level_line_names_the_family_and_is_untouched_without_one() {
     // level line at all", because our deleted `assets/ui/PetPaperDollFrame.xml` declared
     // `PetLevelText` with no `text=` and it started empty. The reference declares it
     // `text="Level level race class"` (stock `PetPaperDollFrame.xml:70`) — a design-time
-    // placeholder, and not a GlobalStrings key, so the loader's `text=` lookup falls through to the
-    // literal and that literal is what a player sees in this state, un-replaced. Both spellings say
+    // placeholder, and not a GlobalStrings key. **A real 1.12 client draws that literal too**:
+    // `CSimpleFontString::LoadXML` substitutes the raw attribute when `FrameScript_GetText` comes
+    // back empty (`771029`-`771032 mov eax,esi`), exactly as `Button::LoadXML 0x778c31` does — so
+    // this is fidelity, not the loader divergence this comment used to call it. Both spellings say
     // the same thing about the guard; this one says it about the file that ships.
     let drawn = with_family(None);
     assert!(
@@ -468,7 +470,7 @@ fn hovering_the_diet_icon_lists_what_the_pet_eats() {
     let pane = quads
         .iter()
         .find(|q| {
-            matches!(&q.content, QuadContent::ModelPane { name: Some(n) } if n == "PetModelFrame")
+            matches!(&q.content, QuadContent::ModelPane { name: Some(n), .. } if n == "PetModelFrame")
         })
         .expect("the pet model pane is in the render list");
     let pane_rect = pane.rect.expect("…with a resolved rect");
@@ -479,9 +481,18 @@ fn hovering_the_diet_icon_lists_what_the_pet_eats() {
             && pane_rect.top >= rect.top,
         "the icon sits wholly inside the pane, which is what makes the z-order matter"
     );
+    // **The pane's scene draws AFTER the icon, and that is the reference's own order.**
+    // `PetPaperDollPetInfo` is a sibling frame of `PetModelFrame` (same parent, so the same
+    // `(strata, level)` bucket) and its happiness art is a BACKGROUND texture on it; a model's
+    // scene drains out of that bucket's ARTWORK batch, last (wow-re
+    // `ui/scratch/model-frame-draw-order.md`: `0x76d160` registers the render callback only for
+    // layer 2, and `0x76fb00` drains quads, then text, then callbacks). The icon stays visible
+    // because a model pane is not an opaque quad — the bake is transparent everywhere the pet
+    // is not, here as in the client. This assertion is the ordering, not the pixels.
     assert!(
-        icon.z > pane.z,
-        "the diet icon must paint over the pane it sits in (icon z={:#x}, pane z={:#x})",
+        pane.z > icon.z,
+        "the pane's scene draws out of the ARTWORK batch, after a sibling's BACKGROUND art \
+         (icon z={:#x}, pane z={:#x})",
         icon.z,
         pane.z
     );

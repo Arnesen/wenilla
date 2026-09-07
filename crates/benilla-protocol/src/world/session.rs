@@ -93,6 +93,9 @@ pub struct WorldSession {
     /// was too short for the billing group. Read by [`Self::billing_time_rested`]; see decision
     /// 1820 for why `0` rather than the client's own uninitialised-global behaviour.
     billing_time_rested: u32,
+    /// `SMSG_TUTORIAL_FLAGS` if it landed during the login handshake rather than in the world
+    /// stream (decision 1976) — handed to the world entry the way the billing minutes are.
+    tutorial_flags: Option<Vec<u8>>,
 }
 
 impl WorldSession {
@@ -210,6 +213,7 @@ impl WorldSession {
             roster_races: Default::default(),
             chat_language: messages::LANGUAGE_COMMON,
             billing_time_rested: 0,
+            tutorial_flags: None,
         };
 
         // 4. Wait for SMSG_AUTH_RESPONSE. Usually the first encrypted packet, but not always first
@@ -284,6 +288,11 @@ impl WorldSession {
         self.billing_time_rested
     }
 
+    /// The tutorial bank captured during the login handshake, if any (decision 1976).
+    pub fn take_tutorial_flags(&mut self) -> Option<Vec<u8>> {
+        self.tutorial_flags.take()
+    }
+
     /// Set a read timeout on the underlying socket (e.g. so a debug read-loop can stop when the
     /// world goes quiet). `None` clears it (blocking reads).
     pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> Result<()> {
@@ -331,7 +340,13 @@ impl WorldSession {
                 ServerPacket::Other {
                     opcode: opcode::SMSG_WARDEN_DATA,
                 } => return Err(WardenRequired.into()),
-                // The server interleaves account-data / tutorial / cache packets here; skip them.
+                // The tutorial bank, if the server sends it this early (1976): kept for the world
+                // entry — skipped here it would be lost to the roster loop.
+                ServerPacket::TutorialFlags(flags) => {
+                    self.tutorial_flags = Some(flags.bytes);
+                    continue;
+                }
+                // The server interleaves account-data / cache packets here; skip them.
                 _ => continue,
             }
         }
@@ -988,6 +1003,7 @@ impl WorldSession {
                 writer,
                 encrypter,
                 chat_language: self.chat_language,
+                sent: None,
             },
         ))
     }

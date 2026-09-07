@@ -454,6 +454,15 @@ type RunKey = (
     u32,
 );
 
+/// The last frame's effect-draw census, `[items, merged draws]` — what `FPS_PROBE` prints as
+/// `fx=`: how many effect items the transparent phase carried and how many draws the
+/// adjacency merge left. Decision 1955 read it to refute the additive-window regroup: the
+/// merge already folds about half, and a commutative regroup added two folds in ninety.
+pub static EFFECT_DRAW_STATS: [std::sync::atomic::AtomicU32; 2] = [
+    std::sync::atomic::AtomicU32::new(0),
+    std::sync::atomic::AtomicU32::new(0),
+];
+
 /// After `PhaseSort`: rebase each draw's vertices against its target view's camera position
 /// (0733 §2; decal draws are exempt — 0781), upload them, build the frame's index stream in
 /// sorted-item order while merging sort-adjacent compatible items into single draws, and write
@@ -530,6 +539,7 @@ fn prepare_effects(
     let mut trace_lines: Vec<String> = Vec::new();
     meta.indices.clear();
     meta.merged.clear();
+    let mut n_items = 0u32;
     let mut walked: Vec<bevy::render::view::RetainedViewEntity> = Vec::new();
     for view in &views {
         // Prepass/shadow views share a camera; only the first walk of a phase counts.
@@ -567,6 +577,7 @@ fn prepare_effects(
                 phase.items[i].batch_range = 0..0;
                 continue;
             };
+            n_items += 1;
             let index_start = meta.indices.len() as u32;
             match draw.topology {
                 EffectTopology::Quads => {
@@ -624,6 +635,11 @@ fn prepare_effects(
         }
         close(&mut phase.items, &mut open, meta.merged.len());
     }
+    EFFECT_DRAW_STATS[0].store(n_items, std::sync::atomic::Ordering::Relaxed);
+    EFFECT_DRAW_STATS[1].store(
+        meta.merged.len() as u32,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     if trace {
         info!(
             "effect trace: {} draws, {} merged, {} indices; shadow items:\n{}",

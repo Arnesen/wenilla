@@ -622,93 +622,8 @@ pub(crate) fn notice_token(byte: u8) -> Option<&'static str> {
     })
 }
 
-/// The message groups a window registers — `ChatTypeGroup`'s keys (transcribed; the chat-cache
-/// WINDOW blocks list these names). Only the groups the current kind set can carry.
-///
-/// **Most of `ChatTypeGroup` is 1:1 with a chat type**, and the whole combat-log block is: ref
-/// `ChatFrame.lua` l.181-330 is thirty-odd `ChatTypeGroup["X"] = { "CHAT_MSG_X" }` one-liners.
-/// [`Self::Own`] is that shape, so those groups cost one variant between them instead of one each —
-/// the enum below carries only the genuinely *multi*-kind groups, which is the information a reader
-/// wants from it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum ChatGroup {
-    /// A group whose `ChatTypeGroup` list is exactly the one kind it is named for — every
-    /// `COMBAT_*`/`SPELL_*` group, and the two `COMBAT_*_GAIN` ones that used to be spelled out.
-    Own(ChatEventKind),
-    System,
-    Say,
-    Yell,
-    Whisper,
-    Party,
-    Guild,
-    Creature,
-    Channel,
-    Skill,
-    Loot,
-    Money,
-}
-
-/// Does this group registration subscribe a window to `kind`? The one predicate the router asks,
-/// so that [`ChatGroup::Own`] — whose "list" is its own kind and needs no slice to live in — reads
-/// the same as every multi-kind group.
-pub(crate) fn group_wants(group: ChatGroup, kind: ChatEventKind) -> bool {
-    match group {
-        ChatGroup::Own(k) => k == kind,
-        multi => group_kinds(multi).contains(&kind),
-    }
-}
-
-/// `ChatTypeGroup` transcribed (ref ChatFrame.lua l.116-174): which kinds a group registration
-/// subscribes a window to. `MONEY` rides both the LOOT group (l.171-174) and window 2's explicit
-/// MONEY registration (chat-cache), hence its own group here.
-pub(crate) fn group_kinds(group: ChatGroup) -> &'static [ChatEventKind] {
-    use ChatEventKind as K;
-    match group {
-        // Answered by [`group_wants`] without a slice — the kind is the group.
-        ChatGroup::Own(_) => &[],
-        ChatGroup::System => &[
-            K::System,
-            K::Afk,
-            K::Dnd,
-            K::Ignored,
-            K::ChannelList,
-            K::BgSystemNeutral,
-            K::BgSystemAlliance,
-            K::BgSystemHorde,
-        ],
-        ChatGroup::Say => &[K::Say, K::Emote, K::TextEmote],
-        ChatGroup::Yell => &[K::Yell],
-        ChatGroup::Whisper => &[K::Whisper, K::WhisperInform],
-        ChatGroup::Party => &[
-            K::Party,
-            K::Raid,
-            K::RaidLeader,
-            K::RaidWarning,
-            K::Battleground,
-            K::BattlegroundLeader,
-        ],
-        ChatGroup::Guild => &[K::Guild, K::Officer],
-        ChatGroup::Creature => &[
-            K::MonsterSay,
-            K::MonsterYell,
-            K::MonsterEmote,
-            K::MonsterWhisper,
-            K::RaidBossEmote,
-        ],
-        ChatGroup::Channel => &[
-            K::ChannelJoin,
-            K::ChannelLeave,
-            K::ChannelNotice,
-            K::ChannelNoticeUser,
-        ],
-        ChatGroup::Skill => &[K::Skill],
-        ChatGroup::Loot => &[K::Loot, K::Money],
-        ChatGroup::Money => &[K::Money],
-    }
-}
-
-/// The kind's row in the color table — NOT necessarily the color a line renders in. The channel
-/// family's row is looked up and then *replaced*; [`resolved_color`] is the law that renders.
+/// The kind's row in the shipped colour table — what the chat bubble and the edit box's header
+/// tint with. The window's own line colour is `ChatTypeInfo`'s, in the reference's Lua (1948).
 ///
 /// The complete shipped table (chat-cache COLORS ≡ wow-re `chat-color-table.md`, both quoted in
 /// 0288's pin; entries this kind set carries).
@@ -809,48 +724,6 @@ pub(crate) fn default_color(kind: ChatEventKind) -> [u8; 3] {
     }
 }
 
-/// `ChatTypeInfo["CHANNEL"..n]` — the color of the numbered channel in slot `n` (arg8).
-///
-/// These are not part of the 94-entry static table: the boot seed creates ten *extra* registry
-/// entries named `CHANNEL1`…`CHANNEL10` and colors every one of them from the **live CHANNEL
-/// entry**, so they all start at CHANNEL's FFC0C0 (wow-re `chat-color-table.md`, "Seeding" —
-/// `0x4982c0`, and `ResetChatColors 0x4a09e0` re-does exactly that). Per-number recolor is a
-/// `ChangeChatColor` away, so this stays a function of `n` even though nothing varies by it yet.
-fn channel_row_color(_number: u32) -> [u8; 3] {
-    [255, 192, 192]
-}
-
-/// The color a line actually renders in — `ChatFrame_OnEvent`'s `info` resolution, which is not
-/// simply [`default_color`] of the kind (ref ChatFrame.lua l.1371-1386).
-///
-/// The handler looks up `ChatTypeInfo[type]` and then, for every `CHANNEL*` type, **replaces** it
-/// with the numbered channel's own row — `info = ChatTypeInfo["CHANNEL"..arg8]` (l.1381). Its
-/// guard is `strsub(type,1,7) == "CHANNEL" and type ~= "CHANNEL_LIST" and (arg1 ~= "INVITE" or
-/// type ~= "CHANNEL_NOTICE_USER")`, transcribed below. So the grey CHANNEL_NOTICE row (C0C0C0) is
-/// looked up and then thrown away: a join/leave notice renders in the channel's FFC0C0, which is
-/// what makes those lines read warm rather than white in the real client (1275).
-///
-/// **KNOWN DIVERGENCE — arg8 == 0.** The reference reaches its override only after finding the
-/// channel in `ChatFrame1.channelList`; a miss `return`s and the line never renders at all. That
-/// list is FrameXML's own (`ChatFrame_AddChannel`), which we do not model — our channel list is
-/// the *client-side* one ([`super::edit::ChannelState`]) — so implementing the drop would gate on
-/// the wrong list and silently eat notices about channels we are not in ("Not on channel %s."
-/// being the sharpest case). We render those, in the row the extras are seeded from. 1275.
-pub(crate) fn resolved_color(event: &ChatEvent, kind: ChatEventKind) -> [u8; 3] {
-    use ChatEventKind as K;
-    let invite_notice = kind == K::ChannelNoticeUser
-        && event.notice_byte() == Some(benilla_protocol::messages::channel_notice::INVITE);
-    match kind {
-        K::Channel | K::ChannelJoin | K::ChannelLeave | K::ChannelNotice | K::ChannelNoticeUser
-            if !invite_notice =>
-        {
-            channel_row_color(event.channel_number)
-        }
-        // CHANNEL_LIST and the INVITE notice keep the row they were looked up in.
-        _ => default_color(kind),
-    }
-}
-
 /// Map a wire `ChatMsg` byte (`SMSG_MESSAGECHAT.chat_type`) to its event kind. `None` = a type
 /// vmangos never emits as wire chat (the combat-log block) or one we don't model — the router
 /// drops it loudly.
@@ -881,6 +754,9 @@ pub(crate) fn kind_of_wire(chat_type: u8) -> Option<ChatEventKind> {
         m::CHAT_MSG_RAID_BOSS_EMOTE => K::RaidBossEmote,
         m::CHAT_MSG_BATTLEGROUND => K::Battleground,
         m::CHAT_MSG_BATTLEGROUND_LEADER => K::BattlegroundLeader,
+        m::CHAT_MSG_BG_SYSTEM_NEUTRAL => K::BgSystemNeutral,
+        m::CHAT_MSG_BG_SYSTEM_ALLIANCE => K::BgSystemAlliance,
+        m::CHAT_MSG_BG_SYSTEM_HORDE => K::BgSystemHorde,
         _ => return None,
     })
 }

@@ -56,6 +56,10 @@ pub(super) struct FedParty {
     saved_answers: u32,
     /// The ready-check ticket last seen ([`GroupState::ready_check`]).
     ready_check: u32,
+    /// The request generation last seen ([`GroupState::ready_check_requests`]) and how far into
+    /// that request's answer log the engine has been fed (decision 1989).
+    ready_check_requests: u32,
+    answers_forwarded: usize,
     /// The raid-target icon board last pushed — what `RAID_TARGET_UPDATE` fires on. Eight guids,
     /// so a plain copy rather than the `Vec` diffs above.
     raid_targets: [u64; 8],
@@ -124,11 +128,21 @@ pub(super) fn feed_party(
     // harness has none, and a lockout then shows its map id, never a blank row.
     map_catalog: Option<Res<benilla_assets::MapCatalogRes>>,
     mut fed: Local<crate::ui_script::VmMemo<FedParty>>,
+    mut chat: ResMut<crate::ui_chat::ChatLog>,
 ) {
     let Some(mut script) = script else {
         return;
     };
     let (fed, vm_reset) = fed.get_reset(&script);
+    // The ready-check summary the timeout tick composed (decision 1989) — a client-composed
+    // `CHAT_MSG_SYSTEM` line, pushed the way every other one is. Ahead of the gate: the tick
+    // runs on the frame clock, not on anything the gate watches.
+    for line in script.take_ready_check_lines() {
+        chat.push_event(crate::ui_chat::ChatEvent::text_only(
+            crate::ui_chat::ChatEventKind::System,
+            line,
+        ));
+    }
     let chr = classes.as_deref().map(|t| &t.0);
     // The gate (1439): the group state, any member/self descriptor change or DESPAWN (a removed
     // store is invisible to `Changed`), the streamed-guid index the merged view resolves
@@ -277,6 +291,7 @@ pub(super) fn feed_party(
         // descriptor, and the compare must still answer). Zero when ungrouped, and deliberately
         // not guarded against zero at the comparison — see `PartyState::leader_guid`.
         leader_guid: group.leader,
+        own_guid: self_guid.unwrap_or(0),
         raid,
         loot_method,
         master_looter,
@@ -468,6 +483,20 @@ pub(super) fn feed_party(
             script.fire_event("READY_CHECK", vec![]);
         }
     }
+    // The request generation — both arms — is the engine's state half (decision 1989): the leader
+    // arm's close-if-nobody-pending, the member arm's 30 s deadline. Then the answer log, replayed
+    // from where this memo left off; a new request restarts the cursor with the log.
+    if group.ready_check_requests != fed.ready_check_requests {
+        fed.ready_check_requests = group.ready_check_requests;
+        fed.answers_forwarded = 0;
+        if !vm_reset {
+            script.ready_check_request(Some(group.leader) == self_guid);
+        }
+    }
+    for &(guid, ready) in group.ready_check_answers.iter().skip(fed.answers_forwarded) {
+        script.ready_check_answered(guid, ready);
+    }
+    fed.answers_forwarded = group.ready_check_answers.len();
 
     // ── UPDATE_INSTANCE_INFO (decision 1549) ────────────────────────────────────────────────
     //
@@ -833,6 +862,7 @@ pub(super) fn drain_party(
     mut names: ResMut<NameCache>,
     self_q: Query<&Guid, With<SelfPlayer>>,
     commands: Res<NetCommands>,
+    mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -859,6 +889,11 @@ pub(super) fn drain_party(
                 let _ = commands.0.send(ClientCommand::GroupLeave);
             }
             PartyRequest::InviteName(name) => {
+                if let Some(t) = tutorials.as_mut() {
+                    t.write(crate::tutorial::TutorialEvent::Acknowledge {
+                        id: crate::tutorial::id::GROUPING,
+                    });
+                }
                 let _ = commands.0.send(ClientCommand::GroupInvite { name });
             }
             PartyRequest::InviteUnit(token) => {
@@ -873,6 +908,11 @@ pub(super) fn drain_party(
                     member_for_token(&group, &token).map(|m| m.name.clone())
                 };
                 if let Some(name) = name {
+                    if let Some(t) = tutorials.as_mut() {
+                        t.write(crate::tutorial::TutorialEvent::Acknowledge {
+                            id: crate::tutorial::id::GROUPING,
+                        });
+                    }
                     let _ = commands.0.send(ClientCommand::GroupInvite { name });
                 }
             }
@@ -1206,9 +1246,11 @@ fn test_apply_local(
             true
         }
         PartyRequest::ReadyCheckStart => {
-            // The echo a real server sends back to the whole raid, us included — which is what
-            // makes the popup appear for the person who pressed the button.
-            group.apply_ready_check();
+            // The echo a real server sends back to the whole raid, us included. The presser is the
+            // leader (the stock Raid tab offers the button to no one else), and the leader's own
+            // echo takes the response-collection arm: no popup for the person who pressed it,
+            // which is the reference's behaviour (decision 1989) — the summary line is theirs.
+            group.apply_ready_check_request(true);
             true
         }
         PartyRequest::RequestRaidInfo => {
@@ -1898,15 +1940,19 @@ mod tests {
             "9 is not a subgroup"
         );
 
-        // Ready Check echoes back to us, which is what puts the popup on the asker's screen.
-        let before = group.ready_check;
+        // Ready Check echoes back to us as the leader: the response-collection arm, which bumps
+        // the request generation and never the popup ticket (decision 1989).
+        let (ticket, requests) = (group.ready_check, group.ready_check_requests);
         assert!(test_apply_local(
             &mut group,
             &PartyRequest::ReadyCheckStart,
             me,
             None
         ));
-        assert_eq!(group.ready_check, before + 1);
+        assert_eq!(
+            (group.ready_check, group.ready_check_requests),
+            (ticket, requests + 1)
+        );
 
         // And the kick empties a seat — but never our own row.
         let n = group.members.len();

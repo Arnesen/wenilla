@@ -69,10 +69,16 @@ pub(super) fn drain_pet_actions(
         return;
     };
     let pressed = script.take_pet_actions();
+    let orders = script.take_pet_orders();
     let toggles = script.take_pet_autocast_toggles();
     let stops = script.take_pet_stop_attacks();
     let writes = script.take_pet_set_actions();
-    if pressed.is_empty() && toggles.is_empty() && stops == 0 && writes.is_empty() {
+    if pressed.is_empty()
+        && orders.is_empty()
+        && toggles.is_empty()
+        && stops == 0
+        && writes.is_empty()
+    {
         return;
     }
     let pet_guid = bar.spells.pet_guid;
@@ -96,10 +102,19 @@ pub(super) fn drain_pet_actions(
     // an ATTACK press latch (see [`possessing`]) — which for an ordinary pet is never.
     let possessing = possessing(pet_store, pet.self_guid.0);
 
-    for slot in pressed {
-        let Some(entry) = slot_entry(&bar, slot) else {
-            continue;
-        };
+    // A pressed slot and a one-shot order (`PetAttack` & co., 1958) are the same press: the
+    // slot's own packed word, or the word the verb synthesized — both re-enter the reference's
+    // one dispatcher (`0x4bd1d0`), so they share one loop. The slot number only ever labelled logs.
+    let presses: Vec<(u32, PetActionEntry)> = pressed
+        .into_iter()
+        .filter_map(|slot| slot_entry(&bar, slot).map(|e| (slot, e)))
+        .chain(
+            orders
+                .into_iter()
+                .map(|packed| (0, PetActionEntry::from(packed))),
+        )
+        .collect();
+    for (slot, entry) in presses {
         // The spell arm's early exit (wow-re §10.1, `0x4bd240`–`0x4bd2ad`): a press on a spell the
         // pet is already running takes the aura OFF and **returns** — `CMSG_PET_ACTION` never
         // leaves, so it is a cancel, not a re-cast. Nothing is latched locally either: the icon

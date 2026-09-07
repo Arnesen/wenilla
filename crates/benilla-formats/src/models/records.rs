@@ -429,3 +429,125 @@ mod tests {
         assert_eq!(bone_z_axis(&vec![0u8; 0x400], 0), [0.0, 0.0, 1.0]);
     }
 }
+
+/// One record of the file's **camera table**, by RAW table index — what `Model:SetCamera(n)`
+/// selects on a `<Model>` widget.
+///
+/// The selection is **raw**: `0x76cec0` reads the count off `MD20+0x124` and the record at
+/// `[model+0x3c4] + idx·0x84 + 0x80`, and **`cameraLookup` is not consulted** on that path (wow-re
+/// `ui/scratch/modelframe-camera-law.md` §2.1 — the sibling pair that *does* consult it,
+/// `0x713500`/`0x713540`, has its one call site at the portrait bake). So the index decides and
+/// [`Self::camera_type`] never does; it is carried because a reader will otherwise assume the
+/// opposite.
+///
+/// [`Self::still`] is the rest rig — the record's bases plus each track's first key. That is the
+/// whole answer for every model a `<Model>` pane can name: wow-re's census over all 9691 `.m2` of
+/// the composite found every character/creature/interface camera's position/target/roll track
+/// carrying exactly one key of `(0,0,0)`/`0` (§7). [`Self::at`] is the general case — the
+/// `Cameras\*.m2` fly-bys, whose Bézier paths a widget would sample like any other track.
+#[derive(Debug, Clone)]
+pub struct M2PaneCamera {
+    /// The record's `type` word (`+0x00`): `0` = portrait, `1` = "characterinfo", `-1` on every
+    /// shipped fly-by and on the six glue scenes. Never selected on — see the type docs.
+    pub camera_type: i32,
+    /// The rig at rest: bases + each track's first key, raw WoW model space.
+    pub still: M2PortraitCamera,
+    /// The authored tracks, kept **only when one of them actually moves** (more than one distinct
+    /// key) — otherwise `still` is the camera at every instant and there is nothing to sample.
+    pub tracks: Option<Box<M2CameraTracks>>,
+}
+
+/// A moving camera's three authored tracks plus their bases — the publish pass's inputs
+/// (`0x718960` `[0x718b60, 0x718c3a)`): `eye = position_base + positions(t)`,
+/// `target = target_position_base + target(t)`, `roll = roll(t)`.
+#[derive(Debug, Clone)]
+pub struct M2CameraTracks {
+    pub positions: benilla_m2::M2Vec3SplineTrack,
+    pub position_base: [f32; 3],
+    pub target: benilla_m2::M2Vec3SplineTrack,
+    pub target_base: [f32; 3],
+    pub roll: benilla_m2::M2ScalarSplineTrack,
+}
+
+impl M2PaneCamera {
+    /// The rig at absolute file-timeline `ms` — [`Self::still`] for a static camera, the sampled
+    /// tracks for a moving one. Raw WoW model space, radians.
+    ///
+    /// The sampler is [`benilla_m2::M2Track::sample_ms`], the reference's own four-way cubic
+    /// `interp` dispatch (STEP/LINEAR/BÉZIER/HERMITE) with both ends clamped — the fly-bys author
+    /// BÉZIER. `ms` is the model's animation clock, which for a widget pane is its private scene
+    /// clock resolved through the armed sequence's band (the pane's play head plus the band start).
+    pub fn at(&self, ms: u32) -> M2PortraitCamera {
+        let Some(t) = self.tracks.as_deref() else {
+            return self.still;
+        };
+        let add = |b: [f32; 3], v: Option<[f32; 3]>| {
+            let v = v.unwrap_or([0.0; 3]);
+            [b[0] + v[0], b[1] + v[1], b[2] + v[2]]
+        };
+        M2PortraitCamera {
+            position: add(t.position_base, t.positions.sample_ms(ms)),
+            target: add(t.target_base, t.target.sample_ms(ms)),
+            roll: t.roll.sample_ms(ms).unwrap_or(self.still.roll),
+            ..self.still
+        }
+    }
+}
+
+/// Parse the whole camera table, in file order — the raw index space `Model:SetCamera(n)` walks.
+/// Empty for the overwhelming majority of models (9225 of the composite's 9691).
+///
+/// This is the table read of [`parse_m2_camera`]'s single-record reduction; both go through
+/// [`benilla_m2::parse_cameras`], which is the one place the `0x7c` record layout is written down.
+pub fn parse_m2_pane_cameras(bytes: &[u8]) -> Vec<M2PaneCamera> {
+    benilla_m2::parse_cameras(bytes)
+        .into_iter()
+        .map(|cam| {
+            let key0 = |t: &benilla_m2::M2Vec3SplineTrack| {
+                t.keys.first().map_or([0.0; 3], |(_, k)| k.value)
+            };
+            let base_plus = |b: [f32; 3], t: &benilla_m2::M2Vec3SplineTrack| {
+                let k = key0(t);
+                [b[0] + k[0], b[1] + k[1], b[2] + k[2]]
+            };
+            let still = M2PortraitCamera {
+                fov: cam.fov,
+                far_clip: cam.far_clip,
+                near_clip: cam.near_clip,
+                position: base_plus(cam.position_base, &cam.positions),
+                target: base_plus(cam.target_base, &cam.target),
+                roll: cam.roll.keys.first().map_or(0.0, |(_, k)| k.value),
+            };
+            // A track that never leaves its first key is the still rig at every instant; keeping
+            // it would cost a sample per frame to reproduce a constant. Every shipped
+            // character/creature/interface camera lands here (wow-re camera-law §7).
+            let moves = |n: usize, same: bool| n > 1 && !same;
+            let v3_moves = |t: &benilla_m2::M2Vec3SplineTrack| {
+                let first = key0(t);
+                moves(t.keys.len(), t.keys.iter().all(|(_, k)| k.value == first))
+            };
+            let roll_moves = {
+                let first = cam.roll.keys.first().map_or(0.0, |(_, k)| k.value);
+                moves(
+                    cam.roll.keys.len(),
+                    cam.roll.keys.iter().all(|(_, k)| k.value == first),
+                )
+            };
+            let tracks =
+                (v3_moves(&cam.positions) || v3_moves(&cam.target) || roll_moves).then(|| {
+                    Box::new(M2CameraTracks {
+                        positions: cam.positions,
+                        position_base: cam.position_base,
+                        target: cam.target,
+                        target_base: cam.target_base,
+                        roll: cam.roll,
+                    })
+                });
+            M2PaneCamera {
+                camera_type: cam.camera_type,
+                still,
+                tracks,
+            }
+        })
+        .collect()
+}

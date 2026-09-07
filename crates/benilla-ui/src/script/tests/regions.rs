@@ -1043,11 +1043,10 @@ fn the_size_getters_take_the_author_first_then_the_natural_width_and_wrapped_hei
 
 /// The floor, and the state the reference does not have. `0x772930`/`0x772a60` end in a one-unit
 /// clamp, so a genuinely empty string reads back **1**, never `0.0`. But a measure that has not
-/// LANDED is not an extent at all — it is our async round-trip, which the reference has no
-/// equivalent of — and our own convergence drivers (`BenillaGossipRow_Resize` and the tab fit,
-/// which guard `if h <= 0 then return end` and re-run from `OnUpdate`) read that zero as
-/// "not yet". Flooring it would tell them to stop waiting. So: floor a known extent, not the
-/// absence of one.
+/// LANDED is not an extent at all — it is the host round-trip a VM with **no measurer installed**
+/// still takes, which the reference has no equivalent of. A caller that guards
+/// `if h <= 0 then return end` reads that zero as "not yet"; flooring it would tell them to stop
+/// waiting. So: floor a known extent, not the absence of one.
 #[test]
 fn an_empty_string_reads_back_one_unit_and_a_pending_measure_reads_back_zero() {
     let mut s = script();
@@ -1199,4 +1198,38 @@ fn the_constructors_string_arguments_are_four_shapes_not_one() {
          and not BACKGROUND: `0x6f18b0` returns 0 with its out-param unwritten and neither \
          constructor reads the result"
     );
+}
+
+/// The token is CANONICAL on the way out — `"NPC"`, which the stock merchant, guild registrar
+/// and trade windows all write (`MerchantFrame.lua:68`, `GuildRegistrarFrame.lua:4`,
+/// `TradeFrame.lua:41`), binds as `"npc"`. The reference resolves every unit token
+/// case-insensitively (`0x515970`'s ten compares are all `_strnicmp`), and the app samples the
+/// booth by this exact string — a raw `"NPC"` matched no slot and left the ring empty on all
+/// three windows (decision 2022).
+#[test]
+fn set_portrait_texture_folds_the_token_to_lowercase() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local f = CreateFrame("Frame", "NFrame")
+        f:SetPoint("TOPLEFT", 0, 0)
+        f:SetSize(100, 100)
+        local p = f:CreateTexture("NFramePortrait", "BACKGROUND")
+        p:SetSize(64, 64)
+        p:SetPoint("TOPLEFT", 0, 0)
+        SetPortraitTexture(p, "NPC")
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let bound = s.extract().into_iter().find_map(|q| match q.content {
+        QuadContent::Texture {
+            portrait_unit: Some(u),
+            ..
+        } => Some(u),
+        _ => None,
+    });
+    assert_eq!(bound.as_deref(), Some("npc"));
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
 }

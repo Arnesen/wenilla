@@ -1,5 +1,5 @@
 //! The always-up world-state readout (`WorldStateFrame`) — the app half behind
-//! `assets/ui/WorldStateFrame.xml` and benilla-ui's `script/worldstate.rs` bindings.
+//! stock `Interface\FrameXML\WorldStateFrame.xml` and benilla-ui's `script/worldstate.rs` bindings.
 //!
 //! This is report **B190**'s second half: the alliance↔horde progress UI. `WorldStateUI.dbc` says
 //! which world states are *displayed*, where, and with what label; [`crate::world_state`] holds

@@ -194,6 +194,28 @@ impl ChunkMesh {
         if !(0.0..=1.0).contains(&south) || !(0.0..=1.0).contains(&east) {
             return None;
         }
+        // The covering cell, then only its four fan triangles — the same corners, centre,
+        // order and hole rule the index buffer was built from (`adt_to_tile_mesh`), so the
+        // answer is the walk's answer without the walk: a column used to test up to 256
+        // triangles, and the sun-flare march asks ~96 columns a frame (decision 1979).
+        if self.positions.len() == 145 {
+            let row = ((south * 8.0) as u32).min(7);
+            let col = ((east * 8.0) as u32).min(7);
+            if self.holes & (1u16 << ((row >> 1) * 4 + (col >> 1))) != 0 {
+                return None;
+            }
+            let tl = (row * 17 + col) as usize;
+            let (tr, bl, br, ctr) = (tl + 1, tl + 17, tl + 18, (row * 17 + 9 + col) as usize);
+            let p = |i: usize| self.positions[i];
+            return [
+                [p(ctr), p(tl), p(bl)],
+                [p(ctr), p(bl), p(br)],
+                [p(ctr), p(br), p(tr)],
+                [p(ctr), p(tr), p(tl)],
+            ]
+            .iter()
+            .find_map(|tri| triangle_z_at(tri, wow[0], wow[1]));
+        }
         self.indices.chunks_exact(3).find_map(|t| {
             let tri = [
                 *self.positions.get(t[0] as usize)?,
@@ -253,7 +275,30 @@ pub fn ground_effect_at(chunks: &[ChunkMesh], wow: [f32; 3]) -> Option<u32> {
 /// `None` when the column lies outside every chunk (a different tile) or falls in an MCNK hole.
 /// The terrain leg of the client's down-ray arbitration (see [`ChunkMesh::height_at`]).
 pub fn terrain_height_at(chunks: &[ChunkMesh], wow: [f32; 3]) -> Option<f32> {
-    chunks.iter().find_map(|c| c.height_at(wow))
+    match chunk_at(chunks, wow) {
+        Some(c) => c.height_at(wow),
+        None => chunks.iter().find_map(|c| c.height_at(wow)),
+    }
+}
+
+/// The one MCNK of a full 16×16 tile that covers `wow`'s column — arithmetic on the tile's
+/// north-west corner, not a walk. A tile's chunks are in MCIN order (row-major: row = the
+/// south step along WoW x, column = the east step along y), and every chunk's first vertex is
+/// its own north-west corner, so chunk 0's is the tile's. `None` when the slice is not a full
+/// tile or its first chunk carries no geometry — the callers fall back to the linear walk,
+/// which is what every column lookup used to be: 256 bounds tests per call, and the flare
+/// oracle alone asks ~96 times a frame (decision 1979's floor).
+fn chunk_at(chunks: &[ChunkMesh], wow: [f32; 3]) -> Option<&ChunkMesh> {
+    if chunks.len() != 256 {
+        return None;
+    }
+    let nw = *chunks[0].positions.first()?;
+    let row = (nw[0] - wow[0]) / CHUNK_SIZE;
+    let col = (nw[1] - wow[1]) / CHUNK_SIZE;
+    if !(0.0..16.0).contains(&row) || !(0.0..16.0).contains(&col) {
+        return None;
+    }
+    chunks.get(row as usize * 16 + col as usize)
 }
 
 /// Is a raw WoW-space position in MCSH terrain shadow, given **one tile's** chunks? `Some(true)` when the
@@ -266,7 +311,10 @@ pub fn terrain_height_at(chunks: &[ChunkMesh], wow: [f32; 3]) -> Option<f32> {
 /// — `models/scratch/m2-interior-doodad-base-light.md §6`.) Feeds the model lobe's `sun_scale` (the
 /// faithful per-instance terrain-shade, 2.5 sunlit / 0.5 shaded — wow-re byte-verified).
 pub fn mcsh_shadowed_at(chunks: &[ChunkMesh], wow: [f32; 3]) -> Option<bool> {
-    chunks.iter().find_map(|c| c.mcsh_shadowed_at(wow))
+    match chunk_at(chunks, wow) {
+        Some(c) => c.mcsh_shadowed_at(wow),
+        None => chunks.iter().find_map(|c| c.mcsh_shadowed_at(wow)),
+    }
 }
 
 /// A placed M2 doodad (tree/bush/prop): which model, and where, in **raw WoW world coords**.
@@ -890,5 +938,60 @@ mod tests {
             "Azeroth_33_44 authors 48 impassable chunks"
         );
         assert_eq!(here.chunks.iter().filter(|c| c.impassable).count(), 0);
+    }
+    /// The cell lookup must answer exactly like the raw triangle walk it replaced, height and
+    /// MCSH alike — sampled off-border across four real tiles (Elwynn and Stormwind), so a
+    /// wrong row/column convention, an off-by-one at an edge or a mishandled hole fails here,
+    /// not under a foot.
+    #[test]
+    fn the_chunk_index_answers_exactly_like_the_walk() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        // The raw walk the cell lookup replaced: every triangle of every chunk, in index order.
+        let walk = |chunks: &[ChunkMesh], wow: [f32; 3]| {
+            chunks.iter().find_map(|c| {
+                c.indices.chunks_exact(3).find_map(|t| {
+                    let tri = [
+                        c.positions[t[0] as usize],
+                        c.positions[t[1] as usize],
+                        c.positions[t[2] as usize],
+                    ];
+                    triangle_z_at(&tri, wow[0], wow[1])
+                })
+            })
+        };
+        let mut hits = 0;
+        for (x, y) in [(32u32, 48u32), (31, 48), (30, 48), (31, 47)] {
+            let tile = load_tile_mesh(&mut chain, "Azeroth", x, y).expect("Elwynn/Stormwind tile");
+            assert_eq!(tile.chunks.len(), 256);
+            let nw = tile.chunks[0].positions[0];
+            let step = TILE_SIZE / 64.0;
+            for i in 0..64 {
+                for j in 0..64 {
+                    let wow = [
+                        nw[0] - (i as f32 + 0.37) * step,
+                        nw[1] - (j as f32 + 0.61) * step,
+                        0.0,
+                    ];
+                    let walk_h = walk(&tile.chunks, wow);
+                    assert_eq!(
+                        terrain_height_at(&tile.chunks, wow),
+                        walk_h,
+                        "height at {wow:?}"
+                    );
+                    let walk_s = tile.chunks.iter().find_map(|c| c.mcsh_shadowed_at(wow));
+                    assert_eq!(
+                        mcsh_shadowed_at(&tile.chunks, wow),
+                        walk_s,
+                        "shadow at {wow:?}"
+                    );
+                    hits += usize::from(walk_h.is_some());
+                }
+            }
+        }
+        assert!(
+            hits > 12000,
+            "the sample grid should land on terrain almost everywhere: {hits}"
+        );
     }
 }

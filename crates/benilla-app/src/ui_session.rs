@@ -32,12 +32,23 @@ pub(crate) struct UiSessionPlugin;
 
 impl Plugin for UiSessionPlugin {
     fn build(&self, app: &mut App) {
-        // In `WorldStage::Net` so the facing chain can order itself against it. Deliberately
-        // unordered w.r.t. the apply pass: the sessions it reads are open for *seconds*, so
-        // whether a window's first frame is seen now or next frame is invisible against an
-        // ~8-frame facing ease.
-        app.init_resource::<InteractNpc>()
-            .add_systems(Update, feed_interact_npc.in_set(WorldStage::Net));
+        // Seated INSIDE the net chain: after the apply pass that opens and swaps the sessions
+        // it reads, before the facing chain that reads its answer. **Same frame, not next
+        // frame** — this used to be "deliberately unordered w.r.t. the apply pass", on the
+        // reasoning that a window is open for seconds and one frame is invisible against an
+        // ~8-frame facing ease. That was true for the facing and false for the token: the unit
+        // feed runs after this set and the window feeds run after the unit feed, so the frame a
+        // `SMSG_LIST_INVENTORY` opened or swapped the merchant window was the frame its own
+        // `MERCHANT_SHOW` handler read `UnitName("NPC")` — and this had not yet been told. The
+        // title read the PREVIOUS NPC's name over the new vendor's stock, and a second vendor
+        // opened over an open window never swapped the name at all (decision 2022).
+        app.init_resource::<InteractNpc>().add_systems(
+            Update,
+            feed_interact_npc
+                .in_set(WorldStage::Net)
+                .after(crate::net::apply_net_updates)
+                .before(crate::net::drive_display_facing),
+        );
     }
 }
 
@@ -150,7 +161,7 @@ pub(crate) fn close_npc_session_out_of_range<T: NpcSession>(
 /// decision-0105 face bake, wired to the interaction arc's NPC (decision 0081). `None` = no NPC
 /// window open, so the booth empties; the ring is hidden with its window then, so the dark disc
 /// never shows.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, PartialEq, Eq)]
 pub(crate) struct InteractNpc(pub(crate) Option<Entity>, pub(crate) Option<u64>);
 
 /// Collapse the portrait-bound sessions into [`InteractNpc`] each frame: the open one's guid,
@@ -187,6 +198,8 @@ pub(crate) fn feed_interact_npc(
     // client's own `0x5f05bc` path), so there is no gossip session behind it at all. The registrar
     // arm above is the same shape for the same reason.
     stable: Option<Res<crate::ui_stable::StableOpen>>,
+    // The tabard designer's vendor (decision 1977) — its portrait and name banner, the same way.
+    tabard: Option<Res<crate::ui_tabard::TabardOpen>>,
     index: Option<Res<GuidIndex>>,
     mut out: ResMut<InteractNpc>,
 ) {
@@ -200,14 +213,22 @@ pub(crate) fn feed_interact_npc(
         .or_else(|| bank.and_then(|s| s.npc()))
         .or_else(|| auction.and_then(|s| s.npc()))
         .or_else(|| registrar.and_then(|s| s.npc()))
-        .or_else(|| stable.and_then(|s| s.npc()));
+        .or_else(|| stable.and_then(|s| s.npc()))
+        .or_else(|| tabard.and_then(|s| s.npc()));
     // Field 0 is the entity the portrait booth bakes and the facing chain steers by; field 1 is
     // the same NPC's **guid**, which `crate::ui_unit`'s feed needs to resolve the `"npc"` unit
     // token's name (a name lives in the `NameCache`, keyed by guid — there is no way back to one
     // from an entity). Both are set together and cleared together; a guid whose entity is not
     // streamed still names the unit, which is why they are two fields rather than one lookup.
-    out.0 = guid.and_then(|g| index.and_then(|i| i.0.get(&g).copied()));
-    out.1 = guid;
+    //
+    // Written only on a change, so `is_changed()` means it: the unit feed's dirty gate lists
+    // this resource among its inputs (decision 2022), and an unconditional write every frame
+    // would hold that gate open for the whole session.
+    let next = InteractNpc(
+        guid.and_then(|g| index.and_then(|i| i.0.get(&g).copied())),
+        guid,
+    );
+    out.set_if_neq(next);
 }
 
 #[cfg(test)]
@@ -488,6 +509,8 @@ mod tests {
             // the registrar's case, the server does not close the menu first.
             ("TalentWipeState", "rides the still-open gossip session"),
             ("BinderState", "rides the still-open gossip session"),
+            // The pet trainer's question (1963): the talent wipe's twin, reached the same way.
+            ("PetUnlearnState", "rides the still-open gossip session"),
         ];
 
         // The chain's own source is the authority on what is wired — not a hand-copied list here,
@@ -548,5 +571,81 @@ mod tests {
              list, so each renders a BLACK DISC where the NPC's face goes — wire them into \
              `feed_interact_npc`'s chain, or add them to EXCLUDED with a reason: {missing:#?}"
         );
+    }
+
+    /// The seam's ORDER, pinned in the BUILT schedule graph rather than in the source (decision
+    /// 2022): `feed_interact_npc` runs after the net apply that opens and swaps the sessions it
+    /// reads, and before the facing chain that reads its answer. Mounted for real — a `.after()`
+    /// against a system that is not in the schedule is silently nothing, so a source grep could
+    /// not tell a live edge from a dead one — and asked by system identity, not by name (the
+    /// debug names are a feature that may be off).
+    ///
+    /// Why it is worth a graph walk: the writer used to sit ahead of the whole chain, which is
+    /// invisible for an 8-frame facing ease and exactly the frame the `"npc"` unit token was
+    /// stale on when a window's own `MERCHANT_SHOW` handler read it.
+    #[test]
+    fn the_interact_npc_writer_is_seated_between_the_net_apply_and_the_facing_chain() {
+        use bevy::ecs::schedule::graph::Direction::{Incoming, Outgoing};
+        use bevy::ecs::schedule::{NodeId, Schedule};
+        use bevy::ecs::system::{IntoSystem, System};
+        use std::any::TypeId;
+        use std::collections::HashSet;
+
+        /// `a` runs before `b` in the built graph: the dependency DAG walked with the hierarchy
+        /// DAG unfolded — a set `a` sits in precedes whatever that set precedes, and a set
+        /// reached as a successor carries every member with it.
+        fn runs_before(schedule: &Schedule, a: NodeId, b: NodeId) -> bool {
+            let dep = schedule.graph().dependency().graph();
+            let hier = schedule.graph().hierarchy().graph();
+            let (mut after, mut containers) = (HashSet::new(), HashSet::new());
+            let mut work = vec![(a, false)];
+            while let Some((n, is_after)) = work.pop() {
+                let fresh = if is_after {
+                    after.insert(n)
+                } else {
+                    containers.insert(n)
+                };
+                if !fresh {
+                    continue;
+                }
+                work.extend(dep.neighbors_directed(n, Outgoing).map(|m| (m, true)));
+                work.extend(hier.neighbors_directed(n, Incoming).map(|p| (p, false)));
+                if is_after {
+                    work.extend(hier.neighbors_directed(n, Outgoing).map(|c| (c, true)));
+                }
+            }
+            after.contains(&b)
+        }
+
+        let apply = System::type_id(&IntoSystem::into_system(crate::net::apply_net_updates));
+        let writer = System::type_id(&IntoSystem::into_system(feed_interact_npc));
+        let facing = System::type_id(&IntoSystem::into_system(crate::net::drive_display_facing));
+
+        let mut app = App::new();
+        app.add_plugins((crate::net::NetPlugin { connect: false }, UiSessionPlugin));
+        // `schedule_scope`, not `resource_scope::<Schedules>`: initializing the schedule
+        // registers things that insert `Schedules` themselves, which a resource scope refuses.
+        app.world_mut().schedule_scope(Update, |world, schedule| {
+            schedule
+                .initialize(world)
+                .expect("the Update schedule builds");
+            let key = |id: TypeId| -> NodeId {
+                schedule
+                    .systems()
+                    .expect("initialized")
+                    .find(|&(_, s)| System::type_id(&**s) == id)
+                    .map(|(k, _)| NodeId::System(k))
+                    .expect("the system is in Update")
+            };
+            let (apply, writer, facing) = (key(apply), key(writer), key(facing));
+            assert!(
+                runs_before(schedule, apply, writer),
+                "feed_interact_npc must run after apply_net_updates"
+            );
+            assert!(
+                runs_before(schedule, writer, facing),
+                "drive_display_facing must run after feed_interact_npc"
+            );
+        });
     }
 }

@@ -35,7 +35,6 @@ use bevy::window::{CursorOptions, PrimaryWindow};
 use crate::creature_anim::{move_flags, wrap_pi, BodyTwist, MovementState};
 use crate::net::{ClientCommand, Embodied, NetCommands, TeleportMessage, WorldportMessage};
 use crate::ui_script::InspectMode;
-use crate::ui_script::PointerOverUi;
 use benilla_assets::coords::wow_to_bevy;
 use benilla_assets::AssetSet;
 use benilla_world::interact::{WorldClick, WorldRightClick, WorldRightPress};
@@ -116,17 +115,17 @@ pub(crate) use follow::{FollowRequest, FollowState};
 use state::{
     MoveSpeed, PlayerRide, AIR_NUDGE_SPEED, FALL_FAR_DROP, FALL_FAR_TIME, FOOT_CONE_HEIGHT,
     GROUND_COS, GROUND_PROBE, JUMP_SPEED, LAND_PROBE, MOUSELOOK_PITCH_CLAMP, RUN_BACK_RATIO,
-    SKIN_WIDTH, STATIONARY_CHASE_RATE, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_ADVANCE,
-    STEP_UP_HEIGHT, TURN_RATE, TURN_RATE_MOVING, WALK_RATIO, WATER_WALK_PITCH_FLOOR,
-    WEDGE_MIN_FALL, WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
+    SKIN_WIDTH, STATIONARY_CHASE_RATE, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_ADVANCE_PER_YARD,
+    TURN_RATE, TURN_RATE_MOVING, WALK_RATIO, WATER_WALK_PITCH_FLOOR, WEDGE_MIN_FALL,
+    WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
 };
 // `SETTLE_TIMEOUT` is `pub(crate)`: the settle release lives in the terrain streamer (decision
 // 0737 — residency releases the hold, not ground contact), which owns the deadline push while the
 // resident world is still the departed map's (0710).
 pub(crate) use state::{
-    Player, PlayerCapsule, CAPSULE_HEIGHT, CAPSULE_RADIUS, DEFAULT_COLLISION_HEIGHT,
-    FEATHER_TERMINAL_VELOCITY, GRAVITY, HOVER_CLIMB_RATE, HOVER_HEIGHT, SETTLE_TIMEOUT,
-    TERMINAL_VELOCITY,
+    Player, PlayerCapsule, CAPSULE_HEIGHT, CAPSULE_RADIUS, CREATURE_STEP_UP_HEIGHT,
+    DEFAULT_COLLISION_HEIGHT, FEATHER_TERMINAL_VELOCITY, GRAVITY, HOVER_CLIMB_RATE, HOVER_HEIGHT,
+    SETTLE_TIMEOUT, STEP_UP_HEIGHT, TERMINAL_VELOCITY,
 };
 /// The swim boundary `0.75·h` — and therefore the **wade ceiling**, since wading is the implicit
 /// in-liquid-but-not-swimming state and the two cannot be different numbers. Read by the creature
@@ -147,10 +146,43 @@ pub(crate) use view_subject::ViewSubject;
 /// pivot. A pure root (Frost Nova, Entangling Roots) sets only the first — which is why a rooted
 /// player can still turn and a stunned one cannot, the distinction B179 was reporting.
 ///
-/// It has a second consumer beyond the turn: the idle/fidget selectors bail on it
-/// (`0x5eb4f2`/`0x5ec219`), which is what stops even the idle twitch — see
-/// [`crate::creature_anim::MovementState::stunned`] (decision 0880).
+/// **It has no second consumer — the "idle/fidget" one was a misread, and this doc outlived the
+/// correction.** It used to say the idle/fidget selectors bail on the bit at `0x5eb4f2`/`0x5ec219`
+/// and pointed at a `MovementState::stunned` that decision **0889** had already deleted along with
+/// the gate: re-read at the bytes, those two addresses are inside **`ToggleSheath 0x5eb480`** and
+/// **`CanLootNow 0x5ec110`**, and **no site in the whole `0x40000` census touches animation
+/// selection**. What stops the idle twitch under a stun is the animation clock being stopped
+/// (0889's proc-11 freeze), not this flag. The claim came in quoted verbatim from wow-re
+/// `object-layer/scratch/unit-flags-movement-gates.md` §2/§3, which is being corrected there too —
+/// a stale line in one repo re-entering the other is exactly the failure mode both contracts warn
+/// about, and it survived here for a fortnight because a doc comment is not a gate.
+///
+/// The census's other movement-relevant consumers are real and stay: the two relayed
+/// `MSG_MOVE_*` wrappers that refuse outright (`0x602b20` StartTurn, `0x602b80` StartPitch — the
+/// only two of twelve carrying a stun test), and the auto-face-target smoothing suppression at
+/// `0x600dd7`.
 pub(crate) const UNIT_FLAG_STUNNED: u32 = 0x0004_0000;
+
+/// **`IsSelfControlled`** — the reference's `0x5fa550` (`5fa566 a9 04 00 c0 00 test eax, 0xc00004`):
+/// is this unit acting under its *own* control? False while `DISABLE_MOVE` (`0x4`), `CONFUSED`
+/// (`0x400000`) or `FLEEING` (`0x800000`) — and note what is **absent**: `UNIT_FLAG_STUNNED` is
+/// not in the mask (it has its own, separate gate), and neither is the taxi bit. wow-re
+/// `object-layer/scratch/unit-flags-movement-gates.md` §4.
+///
+/// Its consumers in the reference are the movement/collision layer and `DoEmote` — and the
+/// polarity is the trap: it returns **1 for an ordinary player**, so a gate written on it fires
+/// in the *normal* case and is suppressed while feared, not the other way round.
+///
+/// **One leg is deliberately unmodelled.** `POSSESSED` (`0x1000000`) does not refuse here: the
+/// reference redirects at `0x5fa582` to the charmer's GUID and **recurses** into itself, so the
+/// answer is the charmer's. Reproducing that needs the charmer's descriptor, and the only
+/// consumer that would notice is whether a red toast appears while mind-controlled. Named rather
+/// than invented (decision 1904).
+pub(crate) fn self_controlled(unit_flags: u32) -> bool {
+    /// `DISABLE_MOVE | CONFUSED | FLEEING` — the reference's literal `0xc00004`.
+    const NOT_SELF_CONTROLLED: u32 = 0x0000_0004 | 0x0040_0000 | 0x0080_0000;
+    unit_flags & NOT_SELF_CONTROLLED == 0
+}
 
 /// `UNIT_FLAG_IN_COMBAT` — the same `UNIT_FIELD_FLAGS` word, **bit 19** (vmangos
 /// `UnitDefines.h`; the client reads it as `shr reg,0x13; test rl,1`).
@@ -399,6 +431,18 @@ impl Plugin for PlayerPlugin {
                 // capture keeps the doodad rail static: a pinned camera that a passing kodo
                 // could nudge is not a regression baseline any more.
                 .run_if(not(resource_exists::<crate::run_mode::CaptureMode>)),
+        )
+        // **Which mouse buttons the world owns** (ledger B364) — decoded once, ahead of all
+        // three readers: `/follow`'s both-button cancel below, the look session, and the camera's
+        // input command word. `control` cannot own it, because `steer_follow` runs before
+        // `control` and would then read it a frame late.
+        .add_systems(
+            Update,
+            camera::latch_world_mouse
+                .in_set(WorldStage::Input)
+                .before(control)
+                .before(follow::steer_follow)
+                .run_if(in_state(crate::char_select::ClientState::InWorld)),
         )
         // `/follow` (decision 0890): steer the facing and decide this tick's synthesized forward
         // input immediately BEFORE the controller, which folds the flag into its forward axis.

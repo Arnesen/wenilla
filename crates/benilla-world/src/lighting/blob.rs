@@ -63,9 +63,20 @@ impl LightBlob {
     /// Fog: colour, far distance, and whether the shader applies it. Near is always 0 and the
     /// farclip wall stays inert — the reference's off-world fog rows (`CharModelFogInfo` and
     /// `AccountLogin.xml`) carry a far and nothing else.
-    pub fn fog(mut self, rgb: [f32; 3], far: f32, on: bool) -> Self {
+    pub fn fog(self, rgb: [f32; 3], far: f32, on: bool) -> Self {
+        self.fog_span(rgb, 0.0, far, on)
+    }
+
+    /// Fog with an explicit **near**, the ramp's low end (`fog_params.x`): the factor is
+    /// `(far − eye_z)/(far − near)` clamped, so near is where the fog first bites and not a
+    /// cosmetic. The one producer that can state one is the `<Model>` widget's `SetFogNear`
+    /// (decision 2027) — every other off-world blob leaves it at 0, which is what
+    /// [`Self::fog`] passes and what `CharModelFogInfo`'s own `SetFogNear(0)` says.
+    /// The farclip wall (`.w`) stays inert at `10_000`: it is a per-pixel *discard*, not a fade,
+    /// and an off-world scene has no clip distance to enforce.
+    pub fn fog_span(mut self, rgb: [f32; 3], near: f32, far: f32, on: bool) -> Self {
         self.rows[4] = [rgb[0], rgb[1], rgb[2], if on { 1.0 } else { 0.0 }];
-        self.rows[5] = [0.0, far, 0.0, 10_000.0];
+        self.rows[5] = [near, far, 0.0, 10_000.0];
         self
     }
 

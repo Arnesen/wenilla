@@ -444,9 +444,11 @@ impl Plugin for UiScriptPlugin {
 
 /// Should this CAPTURE include the player UI (+ the synthetic unit snapshot)? The visual harness's
 /// baselines must stay UI-free (they regression-test the WORLD render), so captures skip the UI
-/// unless `WOW_CAPTURE_UI=1` opts in. Normal runs always load the UI and never take synthetic data.
+/// unless it is opted in — [`crate::run_mode::capture_ui_opted_in`], the SAME predicate the UI load and the
+/// window sizing use, because the three disagreeing is how `ui-unitframes` ends up photographing
+/// empty frames. Normal runs always load the UI and never take synthetic data.
 fn capture_ui_active(capture: Option<Res<crate::run_mode::CaptureMode>>) -> bool {
-    capture.is_some() && std::env::var("WOW_CAPTURE_UI").as_deref() == Ok("1")
+    capture.is_some() && crate::run_mode::capture_ui_opted_in()
 }
 
 /// The pointer arbiter (decision 0026): `PointerOverUi = egui dev overlay ∨ player-UI hover`. Runs
@@ -654,7 +656,7 @@ fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<VmMemo<
             ),
             (80, "Interface\\Icons\\INV_Misc_Food_16", 0x80, 117, 5),
             (84, "Interface\\Icons\\Spell_Holy_SealOfMight", 0x00, 103, 0),
-            // The always-on multibars (MultiBars.xml): BottomLeft = actions 61..72, BottomRight
+            // The always-on multibars (stock MultiActionBars.xml): BottomLeft = actions 61..72, BottomRight
             // = 49..60. A few occupied wells on each so the capture shows both rows seated
             // (empty multibar wells hide — the ref's own default — so without these the rows
             // would be invisible).
@@ -699,7 +701,7 @@ fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<VmMemo<
                 }),
             );
         }
-        // The stance bar (StanceBar.xml): the synthetic warrior's three stances, battle active —
+        // The stance bar (stock BonusActionBarFrame.xml): the synthetic warrior's three stances, battle active —
         // matches the bonus offset 1 above (battle stance page). Defensive shows the not-castable
         // grey; berserker a running cooldown swipe.
         script.set_shapeshift_forms(vec![
@@ -740,10 +742,16 @@ fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<VmMemo<
         // choice about what to photograph, not a default: `MultiActionBar_Update` is the same
         // function the row calls, so nothing here is a private door into the bars. Guarded because
         // this feed also runs with `WOW_CAPTURE_UI` unset, where no interface has been loaded.
-        let _ = script.run(
-            "SHOW_MULTI_ACTIONBAR_1 = 1 SHOW_MULTI_ACTIONBAR_2 = 1 \
-             if MultiActionBar_Update then MultiActionBar_Update() end",
-        );
+        // `WOW_DEMO_BOTTOM_BARS=0` leaves them down — the shipped default a player logs in to
+        // (1500), and the only state in which the stance SHELF draws at all: the manage pass
+        // hides the shelf art whenever the bottom-left bar is up, so a capture of the shelf
+        // (decision 2000's hairline lived on it) needs the bars where the player has them.
+        if std::env::var("WOW_DEMO_BOTTOM_BARS").as_deref() != Ok("0") {
+            let _ = script.run(
+                "SHOW_MULTI_ACTIONBAR_1 = 1 SHOW_MULTI_ACTIONBAR_2 = 1 \
+                 if MultiActionBar_Update then MultiActionBar_Update() end",
+            );
+        }
         script.fire_event("PLAYER_XP_UPDATE", vec![]);
         for token in ["player", "target"] {
             script.fire_event("UNIT_HEALTH", vec![ScriptValue::Str(token.into())]);
@@ -772,7 +780,34 @@ impl benilla_ui::script::TextMeasure for FixedWidthFont {
 }
 
 #[cfg(test)]
-mod test_ui;
+pub(crate) mod test_ui;
+
+/// The chat loader's two login events (wow-re chat-cache-grammar.md §8; `ui_chat::settings`):
+/// `UPDATE_CHAT_WINDOWS` once, then `UPDATE_CHAT_COLOR` for every registry entry. The reference's
+/// `FloatingChatFrame_Update` docks, hides and colours the windows on the first and
+/// `ChatFrame_OnEvent` fills `ChatTypeInfo` from the second, so a test VM that loads the
+/// reference's chat files needs both before the windows look or route like a client's.
+#[cfg(test)]
+pub(crate) fn fire_chat_login(s: &mut benilla_ui::script::UiScript) {
+    // `FCF_OnUpdate` reads `UIOptionsFrame:IsShown()` every frame — the reference's options
+    // window, which OptionsFrame.xml aliases and a chat test VM does not load. A hidden stand-in
+    // is what a closed options window answers.
+    s.run("if not UIOptionsFrame then UIOptionsFrame = CreateFrame('Frame') UIOptionsFrame:Hide() end")
+        .expect("the options stand-in");
+    s.fire_event("UPDATE_CHAT_WINDOWS", vec![]);
+    let renorm = |b: u8| f64::from(b as f32 * (1.0f32 / 255.0f32));
+    for entry in s.chat_colors() {
+        s.fire_event(
+            "UPDATE_CHAT_COLOR",
+            vec![
+                benilla_ui::script::ScriptValue::Str(entry.name),
+                benilla_ui::script::ScriptValue::Number(renorm(entry.rgb[0])),
+                benilla_ui::script::ScriptValue::Number(renorm(entry.rgb[1])),
+                benilla_ui::script::ScriptValue::Number(renorm(entry.rgb[2])),
+            ],
+        );
+    }
+}
 
 /// [`test_ui::load_ui`] for a test module OUTSIDE `ui_script` — `ui_action::feed_tests` drives the
 /// real `UIErrorsFrame` end to end and needs the same both-stores reader everything else uses.
@@ -822,6 +857,9 @@ mod pet_bar_tests;
 
 #[cfg(test)]
 mod pet_frame_tests;
+
+#[cfg(test)]
+mod pet_stable_tests;
 
 #[cfg(test)]
 mod tot_frame_tests;
@@ -888,6 +926,11 @@ mod group_loot_tests;
 
 #[cfg(test)]
 mod chat_tests;
+
+/// The chat bubble's `UIMenu` kit driven as a menu — the rows' label/shortcut anchoring
+/// (decision 1996), kept apart from `chat_tests` because it is the kit under test, not the window.
+#[cfg(test)]
+mod ui_menu_tests;
 
 /// The chat tab's options menu, end to end (decision 1589 / B246) — its own file because it needs
 /// the whole dropdown + colour-picker stack under `ChatFrame.xml`, where `chat_tests` deliberately
@@ -1000,6 +1043,12 @@ mod quest_tests;
 mod quest_timer_tests;
 
 #[cfg(test)]
+mod battlefield_tests;
+
+#[cfg(test)]
+mod tutorial_tests;
+
+#[cfg(test)]
 mod durability_tests;
 // `pub(crate)` for its `harness`/`push`/`row` helpers: `perf::hud`'s own test drives the readout
 // through them rather than keeping a second copy of the XML-loading boilerplate.
@@ -1070,6 +1119,9 @@ mod quiver_tests;
 #[cfg(test)]
 mod world_entry_tests;
 
+/// The guild tabard designer — the stock `TabardFrame.xml` off the chain (decision 1977).
+#[cfg(test)]
+mod tabard_tests;
 /// The world map's POI pool — the guard's directions marker today, the AreaPOI landmarks later.
 #[cfg(test)]
 mod world_map_tests;

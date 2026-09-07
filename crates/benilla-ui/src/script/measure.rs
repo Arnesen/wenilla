@@ -20,7 +20,7 @@
 //!
 //! With the answer 0, that dropdown sized itself to 40px and seven character names drew outside
 //! their own frame. The reference's own `SmallMoneyFrame` does the same thing (`MoneyFrame.lua`
-//! l.202), which is why [`UiScript::set_digit_advances`](super::UiScript::set_digit_advances)
+//! l.202), which is why `UiScript::set_digit_advances`
 //! existed: a digits-only stand-in for exactly this, built because the general answer was missing.
 //! This is the general answer, and it retires that special case.
 //!
@@ -106,7 +106,7 @@ impl super::UiScript {
     ///
     /// Call again to replace it — which the host must do whenever its **raster environment**
     /// changes (window resize, `uiScale`), for the same reason
-    /// [`UiScript::forget_text_metrics`](super::UiScript::forget_text_metrics) exists: glyph
+    /// `UiScript::forget_text_metrics` exists: glyph
     /// advances step to whole *physical* pixels, so a measurer built under one seam does not
     /// answer for another.
     pub fn set_text_measurer(&mut self, measurer: Box<dyn TextMeasure>) {

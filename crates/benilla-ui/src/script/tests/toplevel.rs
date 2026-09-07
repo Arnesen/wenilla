@@ -93,9 +93,9 @@ fn the_flag_round_trips_and_defaults_off() {
 ///
 /// `enableKeyboard` used to be warned here on the same principle — implementing one clause is not
 /// a licence to go quiet about the other. It now lands on a real `EnableKeyboard`, so the warning
-/// is gone and this asserts the flag instead. What is still NOT built is key *delivery*, which the
-/// method's own doc states; the flag and the delivery are separable in the reference too
-/// (`frame-key-script-delivery.md` §3.2).
+/// is gone and this asserts the flag instead. Key *delivery* reads the same flag
+/// (`script::keyboard`'s walk, 1319); the flag and a handler stay separable in the reference too
+/// (`frame-key-script-delivery.md` §3.2), which is why this asserts the flag alone.
 #[test]
 fn the_xml_toplevel_and_enable_keyboard_attributes_both_reach_their_methods() {
     let s = script();

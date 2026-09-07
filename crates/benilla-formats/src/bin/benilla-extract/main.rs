@@ -23,6 +23,7 @@ mod m2dump;
 mod scan;
 mod shakecensus;
 mod spellvis;
+mod thudcensus;
 
 /// Read WoW 1.12.1 asset archives (MPQ).
 #[derive(Parser)]
@@ -56,6 +57,12 @@ enum Command {
         internal_path: String,
         /// Output `.png` file.
         output: PathBuf,
+        /// Also write every authored mip level (`<stem>.mip<N>.png`) and print a per-level
+        /// texel census: how many texels the author left transparent vs not, the luma range of
+        /// each class, and how many sit below 128 — the set that DARKENS under a Mod2x lane,
+        /// which reads no alpha. The "what does the far sampler see" instrument (B358).
+        #[arg(long)]
+        mips: bool,
     },
     /// Composite ONE character's body atlas off the chain and report what painted what: the
     /// equipment blits in blit order (with the file each region name resolved to, or `MISSING`),
@@ -137,6 +144,13 @@ enum Command {
     /// shakes no screen"), and the check that fields 11/12 really are `CameraShakes` keys — every
     /// live value must land on a real row.
     Shakecensus,
+    /// Census the **death thud** — the body-fall sound a corpse makes on landing (`$DTH` →
+    /// `0x6236e0`, the sibling of the camera shake above). Two halves: the `DeathThudLookups.dbc`
+    /// matrix in full (`SizeClass × TerrainTypeSoundID` → the named land/water `SoundEntries`
+    /// kits), and the population sweep of which creature M2s key a `$DTH` at all, with the size
+    /// class their displays resolve to. The scope instrument for "a big corpse hits the ground
+    /// silently": it separates authored silence (an empty water column) from a real gap.
+    Thudcensus,
     /// Census the `SpellVisualKit` **CharProc** columns (a kit's effect on the BODY — its alpha,
     /// its tint): which proc types the shipped table carries, which lifecycle stage reaches each
     /// from a live spell, and every state-stage (aura-lifetime) proc in full. The scope instrument
@@ -155,6 +169,15 @@ enum Command {
     /// the variation/replay instrument (decisions 0114/0117; sequences sharing an id are its
     /// variation chain).
     M2seq {
+        /// Internal path to the `.m2` (forward or back slashes accepted).
+        internal_path: String,
+    },
+    /// Dump an M2's **camera table** by raw file index — the index space a `<Model>` widget's
+    /// `Model:SetCamera(n)` walks (decision 2027): type, rest eye/target, diagonal fov, near/far,
+    /// roll, and each track's key count (which says still rig vs authored path). The
+    /// `cameraLookup` table is printed beside it — the portrait bake selects through that, the
+    /// pane does not.
+    M2cam {
         /// Internal path to the `.m2` (forward or back slashes accepted).
         internal_path: String,
     },
@@ -322,6 +345,26 @@ enum Command {
     /// Also counts the models whose pose depends on the §2c remap (benilla plays nothing there today,
     /// i.e. bind pose) and the ones reaching a rate-0 freeze leg.
     Goanimscan,
+    /// Sweep every `.m2` and census the **event table's positional half**: the `bone` and
+    /// `position` every `M2Event` record carries beside its 4CC. The reference's event dispatchers
+    /// hand their arms the event's own world point (the authored `position` through its bone's live
+    /// matrix and the model's placement), while a consumer that plays at the model root uses the
+    /// placement alone — so this reports, per 4CC, how many records sit off the origin and how many
+    /// ride a bone any sequence keys. Where both are zero the two are the same point.
+    Eventmarkerscan {
+        /// Internal-path prefix filter (e.g. `creature`), case-insensitive; all models if omitted.
+        prefix: Option<String>,
+    },
+    /// Census the **GameObject display sound slots** (`GameObjectDisplayInfo.Sound[0..9]`) against
+    /// the only thing that can reach them. Exactly one function in the reference reads those
+    /// columns (`0x5f4010`) and it is called only from the GO M2 anim-event dispatcher
+    /// (`0x5f3e20`): `$GO0..5` -> slots 0..5, `$GC0..3` -> slots 6..9 (wow-re
+    /// `go-display-sound-events.md` §1/§3). So a filled column is audible only when the display's
+    /// own model authors the matching event tag AND that tag sits on a sequence the GameObject
+    /// animation arm can actually play. Reports, per slot: columns filled, of those how many are
+    /// tagged, how many of those are on an armable sequence, and how many name a LOOPING (0x200)
+    /// kit — the flag that selects `0x5f4010`'s emitter-pool lane over its one-shot lane.
+    Goslotscan,
     /// Sweep every `.m2` (optionally under a path prefix) and census the models whose batch
     /// visibility is PER SEQUENCE — geometry the reference draws in one animation and skips in
     /// another (the verified `A <= 0` alpha cull). The population instrument for "a single-sequence
@@ -487,8 +530,8 @@ enum Command {
         prefix: Option<String>,
     },
     /// Sweep every `.m2` and census the **animation-driven sound emitters**: the models whose
-    /// sequences carry a `$DSL` (doodad sound loop) / `$DSO` (doodad sound one-shot) / `$SND`
-    /// (generic one-shot) marker, the `SoundEntries` kit each names with its 3D parameters, and —
+    /// sequences carry a `$DSL` (doodad sound loop) / `$DSE` (its release token) / `$DSO` (doodad
+    /// sound one-shot) / `$SND` (generic one-shot) marker, the `SoundEntries` kit each names with its 3D parameters, and —
     /// the column this exists for — whether the carrying sequence is REST-posed, i.e. one the
     /// render content gate (decision 0130) never builds a rig for. A placed lamp's hum is a single
     /// `$DSL` on a sequence that keys no bone at all, so the whole class is unreachable through an
@@ -806,14 +849,41 @@ fn main() -> Result<()> {
         Command::Blp {
             internal_path,
             output,
+            mips,
         } => {
             let name = normalize(&internal_path);
             let data = chain
                 .read_file(&name)
                 .with_context(|| format!("reading '{name}' from chain"))?;
-            let (w, h) = benilla_formats::blp_to_png(&data, &output)
-                .with_context(|| format!("decoding BLP '{name}'"))?;
-            eprintln!("decoded {w}x{h} -> {}", output.display());
+            if mips {
+                let stats = benilla_formats::blp_mips_to_png(&data, &output)
+                    .with_context(|| format!("decoding BLP '{name}'"))?;
+                let luma = |l: Option<(u8, f32, u8)>| match l {
+                    Some((lo, mean, hi)) => format!("{lo:>3}/{mean:>6.1}/{hi:>3}"),
+                    None => "      —       ".to_string(),
+                };
+                println!(
+                    "level  size      outside(a=0)  luma lo/mean/hi   inside(a>0)  luma lo/mean/hi   below128"
+                );
+                for s in &stats {
+                    println!(
+                        "{:>5}  {:>4}x{:<4}  {:>12}  {:>14}  {:>11}  {:>14}  {:>8}",
+                        s.level,
+                        s.width,
+                        s.height,
+                        s.outside,
+                        luma(s.outside_luma),
+                        s.inside,
+                        luma(s.inside_luma),
+                        s.below_128,
+                    );
+                }
+                eprintln!("wrote {} level(s) beside {}", stats.len(), output.display());
+            } else {
+                let (w, h) = benilla_formats::blp_to_png(&data, &output)
+                    .with_context(|| format!("decoding BLP '{name}'"))?;
+                eprintln!("decoded {w}x{h} -> {}", output.display());
+            }
         }
         Command::Dbc {
             internal_path,
@@ -831,6 +901,7 @@ fn main() -> Result<()> {
         }
         Command::Glueextent { batches } => glueextent::glueextent(&mut chain, batches)?,
         Command::M2coll { internal_path } => m2dump::m2coll(&mut chain, &internal_path)?,
+        Command::M2cam { internal_path } => m2dump::m2cam(&mut chain, &internal_path)?,
         Command::M2seq { internal_path } => m2dump::m2seq(&mut chain, &internal_path)?,
         Command::M2events { internal_path } => m2dump::m2events(&mut chain, &internal_path)?,
         Command::M2attach { internal_path } => m2dump::m2attach(&mut chain, &internal_path)?,
@@ -852,6 +923,10 @@ fn main() -> Result<()> {
         Command::Alphascan { prefix } => scan::alphascan(&mut chain, prefix.as_deref())?,
         Command::Fxlifescan { prefix } => scan::fxlifescan(&mut chain, prefix.as_deref())?,
         Command::Goanimscan => scan::goanimscan(&mut chain)?,
+        Command::Eventmarkerscan { prefix } => {
+            scan::eventmarkerscan(&mut chain, prefix.as_deref())?
+        }
+        Command::Goslotscan => scan::goslotscan(&mut chain)?,
         Command::Bonescan { prefix } => scan::bonescan(&mut chain, prefix.as_deref())?,
         Command::Partcensus { prefix } => scan::partcensus(&mut chain, prefix.as_deref())?,
         Command::Partslotscan { prefix } => scan::partslotscan(&mut chain, prefix.as_deref())?,
@@ -928,6 +1003,7 @@ fn main() -> Result<()> {
         Command::Spellvis { spell_id } => spellvis::run(&mut chain, spell_id)?,
         Command::Chaincensus => chaincensus::run(&mut chain)?,
         Command::Shakecensus => shakecensus::shakecensus(&mut chain)?,
+        Command::Thudcensus => thudcensus::thudcensus(&mut chain)?,
         Command::Charprocs => charprocs::run(&mut chain)?,
     }
 

@@ -77,7 +77,9 @@ fn shipped_xml() -> Vec<(String, String)> {
         })
         .collect();
     out.sort();
-    assert!(out.len() >= 40, "only {} xml files swept", out.len());
+    // A sanity floor for the walk, not a census: `assets/ui` retires file by file (1751), so
+    // the floor sits well under the count rather than one step above it (1956).
+    assert!(out.len() >= 6, "only {} xml files swept", out.len());
     out
 }
 
@@ -98,7 +100,7 @@ fn shipped_xml() -> Vec<(String, String)> {
 fn no_shipped_file_declares_its_own_copy_of_a_managed_offset() {
     let mut offences = Vec::new();
     for (name, text) in shipped_xml() {
-        if name == "UIParent.xml" {
+        if name == r"Interface\FrameXML\UIParent.xml" {
             continue; // the owner: its var rows are where these numbers are defined
         }
         for (n, line) in without_xml_comments(&text).lines().enumerate() {
@@ -156,11 +158,6 @@ const BOTTOM_EXEMPT: &[(&str, &str)] = &[
         "the base itself — the bar everything else measures its clearance FROM, so it has no \
          clearance of its own to compute",
     ),
-    (
-        "WorldFrame",
-        "a full-screen named handle, not a HUD frame (UIParent.xml) — setAllPoints, renders \
-         nothing",
-    ),
     ("UIParent", "the full-screen root itself"),
     (
         "ZoneTextFrame",
@@ -211,11 +208,17 @@ const BOTTOM_EXEMPT: &[(&str, &str)] = &[
 /// not need to. Failing here is not a bug report; it is a prompt to pick one.
 #[test]
 fn every_bottom_anchored_top_level_frame_is_accounted_for() {
-    let pass = std::fs::read_to_string(ui_dir().join("UIParent.xml")).expect("UIParent.xml");
+    // The pass is the stock `UIParent.lua`'s since 1988 — read off the player's chain.
+    let _data = benilla_formats::wow_data_or_skip!();
+    let pass = String::from_utf8_lossy(
+        &super::reference_ui::read(r"Interface\FrameXML\UIParent.lua")
+            .expect("the stock UIParent.lua off the chain"),
+    )
+    .into_owned();
     for f in MANAGED_FRAMES {
         assert!(
             pass.contains(f),
-            "{f} is listed here as managed but does not appear in UIParent.xml's pass — this \
+            "{f} is listed here as managed but does not appear in UIParent.lua's pass — this \
              list has drifted from the file it mirrors"
         );
     }
@@ -225,8 +228,7 @@ fn every_bottom_anchored_top_level_frame_is_accounted_for() {
         let doc = benilla_ui::framexml::parse(&text).unwrap_or_else(|e| panic!("{file}: {e}"));
         for (name, anchors) in bottom_anchored_top_level(&doc) {
             let known = MANAGED_FRAMES.contains(&name.as_str())
-                || BOTTOM_EXEMPT.iter().any(|(n, _)| *n == name)
-                || registers_a_listener(&text, &name);
+                || BOTTOM_EXEMPT.iter().any(|(n, _)| *n == name);
             if !known {
                 unaccounted.push(format!("{file}: {name} ({anchors})"));
             }
@@ -236,19 +238,10 @@ fn every_bottom_anchored_top_level_frame_is_accounted_for() {
         unaccounted.is_empty(),
         "these top-level frames anchor to the screen's bottom edge but nothing decides their \
          clearance over the action bars. Give each one a row in \
-         UIPARENT_MANAGED_FRAME_POSITIONS (UIParent.xml), or seat it from a managed global and \
-         register UIParent_RegisterManagedPositionListener, or add it to BOTTOM_EXEMPT here with \
-         the reason it needs neither (decision 1499):\n{}",
+         UIPARENT_MANAGED_FRAME_POSITIONS (the stock UIParent.lua's table, since 1988), or add \
+         it to BOTTOM_EXEMPT here with the reason it needs no row (decision 1499):\n{}",
         unaccounted.join("\n")
     );
-}
-
-/// A file that registers a managed-position listener is seating something itself; the frames it
-/// declares are covered by that registration. Coarse on purpose — the listener seats a whole
-/// family (the bag stack is five windows), and naming each one here would be the same drift trap
-/// `MANAGED_FRAMES` guards against.
-fn registers_a_listener(text: &str, _frame: &str) -> bool {
-    text.contains("UIParent_RegisterManagedPositionListener")
 }
 
 /// Every top-level INSTANCE (a `<Frame>`/`<Button>`/… that is not `virtual` and carries no
@@ -361,6 +354,20 @@ fn no_bottom_band_frame_overlaps_a_raised_bar() {
         let mut raised = Vec::new();
         for (i, bar) in RAISABLE_BARS.iter().enumerate() {
             let on = mask & (1 << i) != 0;
+            // **Through the saved globals, not a bare Show.** The stock pass reads
+            // `SHOW_MULTI_ACTIONBAR_1`/`_2` for its bottom-bar flags (`UIParent.lua:1598-1606`),
+            // never the frames' shown state, so raising a bar by hand and running the pass is a
+            // state the client never reaches — and it clears nothing (1988; our retired copy of
+            // the pass read `IsShown`, which is what let this drive work before).
+            let global = match *bar {
+                "MultiBarBottomLeft" => Some("SHOW_MULTI_ACTIONBAR_1"),
+                "MultiBarBottomRight" => Some("SHOW_MULTI_ACTIONBAR_2"),
+                _ => None,
+            };
+            if let Some(g) = global {
+                s.run(&format!("{g} = {}", if on { "1" } else { "nil" }))
+                    .unwrap();
+            }
             s.run(&format!(
                 "if {bar} then {bar}:{}() end",
                 if on { "Show" } else { "Hide" }
@@ -467,6 +474,20 @@ fn the_item_push_card_shares_the_band_with_a_raised_bar_exactly_as_the_reference
     );
     let failures = super::load_default_ui(&s);
     assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    // The card is the stock `<Model>` since 2015, sized by its file's box once the facts land
+    // (`ForcedBackpackItem.m2`: one 1000 ms clamp; the box 0.02707 × 0.07962 model units).
+    s.set_model_facts(
+        r"Interface\ItemAnimations\ForcedBackpackItem.mdx",
+        benilla_ui::widget::ModelFileFacts {
+            sequences: vec![benilla_ui::widget::SequenceFacts {
+                anim_id: 0,
+                duration_ms: 1000,
+                looping: false,
+            }],
+            bbox: ([0.0, 0.0, 0.0], [0.02707, 0.07962, 0.0]),
+            cameras: 0,
+        },
+    );
     s.run("MultiBarBottomLeft:Show() MultiBarBottomRight:Show() UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();
@@ -481,15 +502,23 @@ fn the_item_push_card_shares_the_band_with_a_raised_bar_exactly_as_the_reference
     s.tick(0.133); // the opaque peak — the instant the card is most visible
     s.resolve();
     assert!(
-        shown(&s, "MainMenuBarBackpackButtonBenillaItemPush"),
+        shown(&s, "MainMenuBarBackpackButtonItemAnim"),
         "the card plays"
     );
 
-    let card = rect(&s, "MainMenuBarBackpackButtonBenillaItemPush");
+    // The pane's rect is the file's box in layout units at 16:9 — the card's whole travel band,
+    // 42.41 × 124.72 hung off the button's BOTTOMRIGHT (−10, 0) — and the card the file's keys
+    // put inside it at its opaque peak is the reference's 48.9..93.1 above the screen floor
+    // (0887 measured that quad by hand; it sits inside this band).
+    let card = rect(&s, "MainMenuBarBackpackButtonItemAnim");
     let bar = rect(&s, "MultiBarBottomRight");
     assert!(
-        (card.1 - 48.9).abs() < 0.5 && (card.3 - 93.1).abs() < 0.5,
-        "the card's band is the reference's 48.9..93.1 above the screen floor: got {card:?}"
+        (card.2 - card.0 - 42.41).abs() < 0.05 && (card.3 - card.1 - 124.72).abs() < 0.05,
+        "the pane's rect is the file's box: {card:?}"
+    );
+    assert!(
+        card.1 <= 48.9 && card.3 >= 93.1,
+        "the reference's card peak 48.9..93.1 lies inside the pane's band: {card:?}"
     );
     assert!(
         overlaps(bar, card),

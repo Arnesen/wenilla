@@ -13,9 +13,13 @@
 //!   row `0x6812b1`–`0x6812ca` inside `0x681070`, which the driver `0x483460` calls at
 //!   `0x48361d` (wow-re `water-frame-straddle.md` §1 + `unit-blob-shadow.md` Q1). `0x683dd0` is
 //!   the **M2 node drain**, and the same loop body ticks each node's object first
-//!   (`0x48160c call [obj vt+0x38]` → the selection ring) and gates its shadow second
+//!   (`0x48160c call [obj vt+0x38]` → the selection ring) and draws its shadow second
 //!   (`0x683ec3`) — so per unit the additive ring goes down and this modulate darkens it, never
-//!   the other way round (wow-re `decal-frame-slot.md`). So the shadow
+//!   the other way round (wow-re `decal-frame-slot.md`). That second step is **not** a gate:
+//!   both exits of the tick `0x481540` return 1, so `0x683ea5`'s `je` is dead — an earlier
+//!   reading of it as "the callback suppresses a hidden object's shadow" was wrong at the bytes
+//!   and is corrected in wow-re (2026-09-06). What the tick DOES do is write the alpha this draw
+//!   is about to read, 30 bytes later — which is the whole of §"Appearance" below. So the shadow
 //!   lands after terrain and WMO and **before** everything else: the footprint decals
 //!   (`0x483654`), the M2 opaque pass (`0x4836a6`), the water surfaces (phase 3, drawn *between*
 //!   the two M2 transparent passes) and both of those passes. Every transparent in the world
@@ -40,16 +44,46 @@
 //!   never appear). Full extents, no missing half/scale factor — the standing size IS the law.
 //! - **Appearance**: multiplicative darken — `GL_DST_COLOR/GL_ZERO` with the fade riding the
 //!   combine, which is exactly the lane's `EffectBlend::Multiply` (`dst × lerp(1, src, α)`).
-//!   Vertex diffuse is **white** with α = the model's fade alpha (`[model+0x180]` — spawn/despawn
-//!   fades + the self first-person fade ride into the shadow); the darkness lives in the texture
-//!   RGB. Unlit, no fog, no depth write. The texture loads as the default `WorldArt`
+//!   Vertex diffuse is **white** with α = the model's **base** alpha — `CM2Model+0x180`, read
+//!   through the accessor `0x710ca0` (`fld [ecx+0x180]`) at `0x6d7fd6`, then clamped to `[0,1]`,
+//!   ×255, `__ftol`, packed `(a<<24)|0x00FFFFFF`. VERIFIED, and it is `+0x180` and not `+0x19c`:
+//!   over the whole draw every `0x19c` operand is the stack local `[ebp-0x19c]`, and `this` is
+//!   touched at exactly three `mov ecx,ebx; call` sites (box `0x711a20`, matrix `0x710600`,
+//!   alpha `0x710ca0`), which makes that list the complete field census.
+//!
+//!   **What rides in, at the bytes** (wow-re, 2026-09-06): the 2 s appear ramp and the despawn
+//!   ramp (`obj+0xf4`, `0x613b1e`'s `0x7d0`), the self first-person fade, **and the CharProc-14
+//!   aura transition** — stealth's `0.3`, ghost/invisibility's `0.5`. The aura is not a second
+//!   channel: `0x60d180` drives the SAME `StartAlphaFade` (`0x614f80`) the appear fade uses, and
+//!   `0x614a90` writes `model+0x180 = obj+0x100 · obj+0xf4` unconditionally given a model handle.
+//!   A stealthed unit's blob shadow dims with its body, on the same 1000 ms cubic.
+//!
+//!   **What does not**: the M2 animated colour / texture-weight tracks. The body's per-batch
+//!   alpha is `+0x19c · M2Color[i].alpha · M2TextureWeight[j].value` (`0x707aea`–`0x707b33`);
+//!   this draw reads `+0x180` raw, so an asset-authored transparency track fades the body and
+//!   leaves its shadow at full strength. [`benilla_world::model_fade::UnitRenderAlpha`] is that
+//!   same product and stops at the same place.
+//!
+//!   The darkness lives in the texture RGB. Unlit, no fog, no depth write. The texture loads as the default `WorldArt`
 //!   `Rgba8Unorm`, so the modulate multiplies raw bytes in the gamma lane — the reference's own
 //!   arithmetic (0161).
 //! - **Gating**: the reference's `shadowLOD` cvar {0,1} is the master toggle (default on) — we are
 //!   always-on; `shadowBias` (default 0.1) is its depth-bias knob — [`SHADOW_DEPTH_BIAS`] plays
-//!   that role here. No dead/mount/kind test exists on the draw path; **which** objects register
-//!   for shadows is an open RE item (`HANDOFF(-> object-layer)`) — v1 policy: every Player/Unit
-//!   entity with a built animated model (GameObjects/doodads excluded).
+//!   that role here. No dead/mount/kind test exists on the draw path, and **which** objects
+//!   register is now settled (wow-re, 2026-09-06 — the old `HANDOFF(-> object-layer)` is closed):
+//!   `[node+0x90]` bit `0x400` is `NOT(arg bit1)` (`0x670e94`), and `0x613e10` takes that arg off
+//!   `OBJECT_FIELD_TYPE` — `0xb` GAMEOBJECT, `2` DYNAMICOBJECT, `0` otherwise. **GameObjects and
+//!   DynamicObjects never cast a blob shadow; units, players and corpses always do.** Which is
+//!   the v1 policy this lane already ran (every Player/Unit with a built animated model), now a
+//!   byte-fact rather than a guess.
+//!
+//!   **One benilla divergence, deliberate.** `0x6d78f0`/`0x6d7920` read no visibility state at
+//!   all — the body's draw flag `[CM2Model+0x50]` comes from `ShouldRender` at `0x48174e`, which
+//!   is consumed at `0x48161d`, *after* the tick — so the reference can and does draw a shadow
+//!   under an undrawn body (a unit whose skin composite is still unbaked, `0x477860`). We gate on
+//!   `InheritedVisibility` anyway, because benilla's exterior-scene election is not a mechanism
+//!   the reference has and left Tanaris mobs' shadows on the Caverns of Time floor (decision
+//!   1277). Keeping that gate is the 1277 call; it is named here so it reads as a choice.
 //!
 //! One shadow record per unit, its projected triangles rebuilt only when the inputs move
 //! ([`ShadowKey`]) and pushed onto the effect stream every shown frame — an idle unit costs a
@@ -59,14 +93,12 @@
 
 use benilla_assets::ModelAnimations;
 use benilla_protocol::EntityKind;
-use bevy::ecs::entity::{EntityHashMap, EntityHashSet};
+use bevy::ecs::entity::EntityHashSet;
 use bevy::prelude::*;
 
 use crate::creature_anim::AnimData;
 use crate::net::{Embodied, NetEntity};
-use crate::player::CameraControl;
 use benilla_world::decal::{DecalFrame, WorldDecal};
-use benilla_world::model_fade::{fade_alpha, RenderFade};
 use benilla_world::particles::buffer::{begin_effect_frame, EffectVertex};
 use benilla_world::schedule::WorldStage;
 use benilla_world::view::WorldCamera;
@@ -184,15 +216,11 @@ fn sync_shadows(
 fn update_shadows(
     time: Res<Time>,
     catalog: Option<Res<AnimData>>,
-    rig: Option<Res<CameraControl>>,
     shadow_assets: Option<Res<ShadowAssets>>,
     images: Res<Assets<Image>>,
     decals: WorldDecal,
-    // Spawn/despawn fades live on the model *part* entities; attribute each to its unit root so
-    // the shadow can ride the same alpha the body renders with (O(#currently-fading parts) — zero
-    // in the steady state).
-    fades: Query<(Entity, &RenderFade)>,
-    parents: Query<&ChildOf>,
+    // The unit's render alpha, asked of the unit — see the alpha block below.
+    unit_alpha: benilla_world::model_fade::UnitRenderAlpha,
     owners: Query<
         (
             &Transform,
@@ -230,16 +258,6 @@ fn update_shadows(
     // and folding the two would make the census answer "why did it hide" with a lie. This is the
     // instrument's whole job (decision 1283).
     let mut n_undrawn = 0u32;
-    let mut root_fade: EntityHashMap<f32> = EntityHashMap::default();
-    for (part, fade) in &fades {
-        let alpha = fade_alpha(fade.from, fade.to, (now - fade.started) / fade.duration);
-        let mut root = part;
-        while let Ok(child_of) = parents.get(root) {
-            root = child_of.parent();
-        }
-        let slot = root_fade.entry(root).or_insert(1.0);
-        *slot = slot.min(alpha);
-    }
     let surface_count = decals.receiver_count();
     for (shadow, mut key, mut verts) in &mut shadows {
         n_total += 1;
@@ -293,11 +311,22 @@ fn update_shadows(
             n_degen += 1;
             continue;
         }
-        let mut alpha = root_fade.get(&shadow.owner).copied().unwrap_or(1.0);
-        if is_self {
-            // The self first-person fade rides the same model-fade slot in the reference.
-            alpha *= rig.as_deref().map_or(1.0, CameraControl::self_fade);
-        }
+        // **The unit's render alpha, asked of the unit** — the shadow rides the model's fade slot
+        // (module docs), so it takes the engine's answer rather than reconstructing one.
+        //
+        // It used to gather the live `RenderFade`s off this unit's *part* entities and read "no
+        // part is fading" as `1.0`. That is true of a settled unit and exactly backwards for the
+        // state a unit spends its whole arrival in: a streamed unit holds `PendingAppearFade` —
+        // no `RenderFade` anywhere yet — until the world is actually shown, so its parts are
+        // deliberately invisible while this walk found nothing to attribute and drew the shadow
+        // **fully opaque**. A dark oval on the ground under no creature for the length of the
+        // load (2.9 s on a probe login), snapping to zero the instant the ramp armed, then easing
+        // back in with the body. `UnitRenderAlpha` asks the root, where `UnitAppearFade` tells
+        // pending from settled — the distinction a part-side walk cannot make.
+        //
+        // The self first-person fade comes with it (the reference rides the same slot), which is
+        // why there is no `is_self` term here any more.
+        let alpha = unit_alpha.get(shadow.owner);
         if alpha <= 0.0 {
             hide(&mut key, &mut verts);
             continue;

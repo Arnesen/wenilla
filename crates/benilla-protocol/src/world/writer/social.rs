@@ -26,6 +26,15 @@ impl WorldWriter {
         self.send(opcode::CMSG_ADD_FRIEND, &messages::add_friend(name))
     }
 
+    /// The client's LFG slots and comment (`CMSG_SET_LOOKING_FOR_GROUP`). Nothing answers it —
+    /// the reference has no handler for the opcode, and the readback is purely local (1961).
+    pub fn set_looking_for_group(&mut self, slots: [u32; 3], comment: &str) -> Result<()> {
+        self.send(
+            opcode::CMSG_SET_LOOKING_FOR_GROUP,
+            &messages::set_looking_for_group(slots, comment),
+        )
+    }
+
     /// Drop a friend by guid (`CMSG_DEL_FRIEND`); acked with `FRIEND_REMOVED`.
     pub fn del_friend(&mut self, guid: u64) -> Result<()> {
         self.send(opcode::CMSG_DEL_FRIEND, &messages::del_friend(guid))

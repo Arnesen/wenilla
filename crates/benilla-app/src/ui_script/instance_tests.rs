@@ -15,6 +15,7 @@ use super::test_ui::load_ui as load_xml;
 /// `ResetInstances` a queue.
 #[test]
 fn the_three_bindings_have_the_reference_shapes() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
 
     // Nothing pushed yet: the app has not said where we are.
@@ -66,13 +67,17 @@ fn the_three_bindings_have_the_reference_shapes() {
 /// and Yes is the only thing that sends.
 #[test]
 fn the_self_menu_row_gates_on_the_binding_and_confirms_before_sending() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The row labels a bare harness has no GlobalStrings.lua for. Verbatim 1.12 values
-    // (`RESET_INSTANCES` l.3342, `CONFIRM_RESET_INSTANCES` l.851, `YES` l.5463, `NO` l.2794) —
-    // production runs the player's own string table at boot.
+    // (`RESET_INSTANCES` l.3342, `CONFIRM_RESET_INSTANCES` l.851, `YES` l.5463, `NO` l.2794,
+    // `GROUP` l.2029) — production runs the player's own string table at boot.
     s.run(
         r#"
+        -- The stock raid pane concatenates this into each of its eight group headers inside
+        -- their own OnLoad, so it has to exist before the addon loads (1874).
+        GROUP = "Group"
         RESET_INSTANCES = "Reset all instances"
         CONFIRM_RESET_INSTANCES = "Do you really want to reset all of your instances?"
         YES = "Yes"
@@ -82,15 +87,19 @@ fn the_self_menu_row_gates_on_the_binding_and_confirms_before_sending() {
     )
     .unwrap();
     for file in [
-        "Fonts.xml",
-        "UIParent.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua", // `TEXT`, which StaticPopup.lua and UnitPopup.lua read at file scope
+        "Interface\\FrameXML\\StaticPopup.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
-        "UnitPopup.xml",
+        "Interface\\FrameXML\\UnitPopup.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
         "Interface\\FrameXML\\BuffFrame.xml",
@@ -100,10 +109,15 @@ fn the_self_menu_row_gates_on_the_binding_and_confirms_before_sending() {
         "Interface\\FrameXML\\PartyFrame.xml",
         "Interface\\FrameXML\\TargetFrame.xml",
         "Interface\\FrameXML\\PetFrame.xml",
-        "RaidFrame.xml",
+        r"Interface\FrameXML\RaidFrame.xml",
     ] {
         load_xml(&s, file);
     }
+    // The window is a LoadOnDemand addon, reached the way the app reaches it: seated off the
+    // chain as a registry row (1957) and loaded by the reference's own `RaidFrame_LoadUI`
+    // (UIParent.xml; 1967).
+    super::test_ui::seat_chain_addon(&mut s, "Blizzard_RaidUI");
+    s.run("RaidFrame_LoadUI()").unwrap();
     s.resolve();
     assert!(s.errors().is_empty(), "load errors: {:?}", s.errors());
 

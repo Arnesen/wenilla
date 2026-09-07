@@ -805,6 +805,7 @@ mod tests {
             entity: caster,
             ident: *b"$CSL",
             data: 0,
+            pos: None,
         });
         step(&mut app, 0.05);
         let launched = missiles(&mut app);
@@ -837,6 +838,7 @@ mod tests {
             entity: caster,
             ident: *b"$CSL",
             data: 0,
+            pos: None,
         });
         step(&mut app, 0.016);
         assert!(missiles(&mut app).is_empty(), "no flight entity");
@@ -922,6 +924,7 @@ mod tests {
             entity: caster,
             ident: *b"$CSL",
             data: 0,
+            pos: None,
         });
         step(&mut app, 0.016);
         assert!(missiles(&mut app).is_empty(), "no flight entity");
@@ -987,6 +990,7 @@ mod tests {
                 entity: caster,
                 ident: *b"$CSL",
                 data: 0,
+                pos: None,
             });
             step(&mut app, 0.016);
             assert!(

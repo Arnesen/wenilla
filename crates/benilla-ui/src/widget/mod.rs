@@ -173,10 +173,11 @@ impl<T> Arena<T> {
 
 mod kinds;
 pub use kinds::{
-    slider_fraction, slider_grab, ButtonFont, ButtonState, ColorSelectState, CooldownState,
-    EditAction, EditBoxState, EditOutcome, EditUnit, FrameKind, InsertMode, KindState,
-    MessageFrameState, MessageLine, MinimapState, ModelState, RegionKind, ScrollFrameState,
-    ScrollingMessageState, SliderState, StatusBarState, TooltipState, COOLDOWN_FLASH_SECS,
+    model_key, slider_fraction, slider_grab, ArmedSequence, ButtonFont, ButtonState,
+    ButtonVisualState, ColorSelectState, EditAction, EditBoxState, EditOutcome, EditUnit,
+    FrameKind, InsertMode, KindState, MessageFrameState, MessageLine, MinimapState, ModelFileFacts,
+    ModelFog, ModelLight, ModelPlayHead, ModelState, RegionKind, ScrollFrameState,
+    ScrollingMessageState, SequenceFacts, SliderState, StatusBarState, TooltipState,
     MINIMAP_DEFAULT_ARROW_MODEL, MINIMAP_DEFAULT_MASK, MINIMAP_DEFAULT_PLAYER_MODEL,
     MINIMAP_DEFAULT_ZOOM, MINIMAP_ENGINE_CHILDREN, MINIMAP_ZOOM_LEVELS, TOOLTIP_DOUBLE_GAP,
     TOOLTIP_FADE_SECS, TOOLTIP_LINE_GAP, TOOLTIP_PAD, TOOLTIP_WRAP_WIDTH,
@@ -262,15 +263,14 @@ pub struct Frame {
     /// `enableKeyboard`) — the kind-0/kind-1 bucket membership `0x76af00` writes as
     /// `[frame+0xcc] |= 1<<kind`.
     ///
-    /// Default **false**, the client's own default. **The flag round-trips; key DELIVERY is not
-    /// gated on it yet** — the same shape [`Self::mouse_wheel_enabled`] shipped in (1198), and for
-    /// the same reason: the machinery it gates (the strata 8→0 walk, the kind buckets, the
-    /// `OnKeyDown`/`OnKeyUp`/`OnChar` script kinds) does not exist here, so gating on the flag
-    /// would change nothing while pretending otherwise. wow-re's
-    /// `scratch/frame-key-script-delivery.md` §3.2 is explicit that the two are separable:
-    /// `EnableKeyboard(true)` on a script-less frame "puts it in the walk where it is called and
-    /// declines — transparent to everything downstream", so **being enabled is not being a
-    /// handler**, and storing the flag alone is the faithful half rather than a stub of the whole.
+    /// Default **false**, the client's own default. **This is the field key delivery gates on**:
+    /// [`crate::script::keyboard`]'s walk builds its candidate set from
+    /// `effective_visible && keyboard_enabled`, then orders it strata 8→0 / level high→low /
+    /// oldest-registration-first (built 2026-08-14, decision 1319). wow-re's
+    /// `scratch/frame-key-script-delivery.md` §3.2 is explicit that the flag and a handler are
+    /// separable: `EnableKeyboard(true)` on a script-less frame "puts it in the walk where it is
+    /// called and declines — transparent to everything downstream", so **being enabled is not
+    /// being a handler**.
     pub keyboard_enabled: bool,
     /// Clamp-to-screen (`SetClampedToScreen` / XML `clampedToScreen` — the client's geometry
     /// flags **bit4**, applied inside rect assembly `0x767a20`, wow-re `layout.md`): the layout
@@ -420,6 +420,8 @@ pub struct WidgetArena {
     regions: Arena<Region>,
     names: HashMap<String, FrameHandle>,
     next_insertion: u32,
+    /// The draw list's fingerprint cache ([`crate::order::traversal`]).
+    pub(crate) order_cache: crate::order::OrderCache,
     /// Monotonic count of Minimap-kind frames ever created — an O(1) "a new Minimap widget
     /// exists" signal, so the per-frame state feed (`set_minimap_inside`'s caller) re-pushes
     /// exactly when one appears instead of walking every frame to find out.
@@ -484,6 +486,9 @@ pub fn mouse_enabled_by_ctor(kind: FrameKind) -> bool {
         FrameKind::Button
             | FrameKind::CheckButton
             | FrameKind::EditBox
+            // `CGWorldFrame`'s ctor enables key + mouse + wheel (`0x481b09`/`0x481b14`/`0x481b1f`,
+            // wow-re `mouse-enable-law.md`); the hit is the world's, not the UI's (decision 1983).
+            | FrameKind::WorldFrame
             // A Slider's thumb must be draggable: every scrollbar is a UIPanelScrollBarTemplate
             // Slider that declares no `enableMouse` yet is draggable in-game (decision 0250).
             | FrameKind::Slider
@@ -503,6 +508,7 @@ impl WidgetArena {
             names: HashMap::new(),
             next_insertion: 0,
             minimap_created: 0,
+            order_cache: Default::default(),
             ticked_kinds: Vec::new(),
             tooltip_kinds: Vec::new(),
             minimap_kinds: Vec::new(),
@@ -575,7 +581,7 @@ impl WidgetArena {
     /// `set_frame_level 0x76a4f0` remove-then-add a visible frame — an intrusive-list add appends.
     /// Called by the [`propagation`] mutators on exactly those transitions (module doc).
     pub(crate) fn resequence_to_tail(&mut self, h: FrameHandle) {
-        // The seq lives in a 19-bit field of the packed `ZKey`; unbounded show-bumping could
+        // The seq lives in an 18-bit field of the packed `ZKey`; unbounded show-bumping could
         // exhaust it over a marathon session, so at the cap renumber every frame in its current
         // order (order-preserving, so no visible change) instead of tripping ZKey's assert.
         if self.next_insertion >= (1 << crate::order::INSERTION_BITS) {
@@ -643,7 +649,13 @@ impl WidgetArena {
             children: Vec::new(),
             regions: Vec::new(),
             title_region: None,
-            strata: Strata::default(),
+            // The WorldFrame's constructor is the one writer of stratum 0 (`WORLD`, below
+            // `BACKGROUND`); every other kind starts at the base ctor's MEDIUM (1984).
+            strata: if kind == FrameKind::WorldFrame {
+                Strata::World
+            } else {
+                Strata::default()
+            },
             level: 0,
             alpha,
             effective_alpha,
@@ -656,7 +668,7 @@ impl WidgetArena {
             // with no attribute, and nothing else is.
             mouse_wheel_enabled: matches!(
                 kind,
-                FrameKind::ScrollingMessageFrame | FrameKind::ScrollFrame
+                FrameKind::ScrollingMessageFrame | FrameKind::ScrollFrame | FrameKind::WorldFrame
             ),
             // Nothing is keyboard-enabled by construction: `0x76af00` is only ever reached from the
             // XML attribute or an explicit call, never a ctor (`scripts-auto-enable.md` §1-2).
@@ -705,11 +717,11 @@ impl WidgetArena {
                 // Both model panes share one state: `CGCharacterModelBase` EXTENDS `CSimpleModel`,
                 // so a `<PlayerModel>` carries every `CSimpleModel` member and adds only the
                 // turn-animation pair we do not model (`ModelState`'s doc).
-                FrameKind::Model | FrameKind::PlayerModel => {
-                    KindState::Model(kinds::ModelState::default())
-                }
+                FrameKind::Model
+                | FrameKind::PlayerModel
+                | FrameKind::DressUpModel
+                | FrameKind::TabardModel => KindState::Model(kinds::ModelState::default()),
                 FrameKind::Minimap => KindState::Minimap(kinds::MinimapState::default()),
-                FrameKind::Cooldown => KindState::Cooldown(kinds::CooldownState::default()),
                 FrameKind::GameTooltip => KindState::Tooltip(kinds::TooltipState::default()),
                 _ => KindState::None,
             },
@@ -719,9 +731,16 @@ impl WidgetArena {
         if matches!(kind, FrameKind::Minimap) {
             self.minimap_created += 1;
         }
+        // The model panes ride the same registry: their scene clock advances per tick and their
+        // completion edge is read there (decision 2007).
         let ticked = matches!(
             kind,
-            FrameKind::ScrollingMessageFrame | FrameKind::MessageFrame | FrameKind::Cooldown
+            FrameKind::ScrollingMessageFrame
+                | FrameKind::MessageFrame
+                | FrameKind::Model
+                | FrameKind::PlayerModel
+                | FrameKind::DressUpModel
+                | FrameKind::TabardModel
         );
         let (index, generation) = self.frames.insert(frame);
         let handle = FrameHandle { index, generation };

@@ -17,7 +17,11 @@ our carries, and the intent is to stay current while our own work keeps living a
   proportional to how many upstream lines our carries touch, so touch few.
 - Upstream cannot fix a wasm-only problem for us, because it does not build wasm. Such fixes are
   permanent carries: the zone soundscape loading off the frame, the AudioContext resume on the
-  pages, the mixer's per-target backend. Drop one only when upstream ships an equivalent.
+  pages, the mixer's per-target backend. Drop one only when upstream ships an equivalent — as the
+  2026-09-07 sync did to half of one: decision 1920 gave upstream's owned device layer a cpal
+  half, so Linux and Windows now run it and the backend split narrowed from macOS-vs-rest to
+  native-vs-wasm32. Narrowing a carry onto upstream's new code is the goal; keeping the old shape
+  because it still compiles is how a carry rots.
 
 ## Procedure
 
@@ -62,7 +66,7 @@ The recurring ones and the rule for each:
 | `benilla-app/src/net/io.rs` | `dispatch()` extracted; native/wasm split around the spawn | keep the split, take upstream's arms |
 | `benilla-app/src/net.rs` | `bevy::platform::time::Instant` (std's panics on wasm) | keep ours |
 | `benilla-protocol/…/world/session.rs` | `recv_async().await` | keep ours, take upstream's new fields |
-| `benilla-app/src/sound/mixer.rs`, `sound/mod.rs` | kira backend per target: upstream's `OutputBackend` on macOS, cpal elsewhere (Web Audio on wasm) | keep the split |
+| `benilla-app/src/sound/mixer.rs`, `sound/mod.rs` | kira backend per target: upstream's `OutputBackend` natively, kira's own cpal backend (Web Audio) on wasm32 | keep the split |
 | `benilla-app/src/sound/zone.rs`, `sound/web_load.rs` | soundscape loading off the frame on wasm | keep ours |
 | `benilla-app/src/cvars.rs` | `apply_query_overrides` (wasm-only) | follow upstream's `REGISTERED` shape |
 | `benilla-app/src/bindings.rs` | `BindKey::Synth`, the bridge's synthetic latch | keep ours |

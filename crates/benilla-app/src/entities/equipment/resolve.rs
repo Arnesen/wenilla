@@ -8,15 +8,17 @@
 use benilla_protocol::EntityKind;
 use bevy::prelude::*;
 
-use crate::creature_anim::{HandGrip, NockLatch, NockedAmmo, VisualSheath, Wielded};
+use crate::creature_anim::{
+    HandGrip, NockLatch, NockedAmmo, VisualSheath, Wielded, UNIT_FLAG_DISARMED,
+};
 use crate::items::Items;
 use crate::net::{NetCommands, NetEntity, ObjectStore};
 
 use super::super::item_glow::{self, ItemGlows};
 use super::super::Creatures;
 use super::{
-    attach_id, ensure_item_model, Equipment, HeldItems, HeldSlot, ItemDisplays, ItemModelKind,
-    ATTACH_SLOTS, COMPOSITE_SLOTS, HELD_SLOTS, NO_GLOW, PLAYER_HELD_SLOTS,
+    attach_id, ensure_item_model, DisarmFreeze, Equipment, HeldItems, HeldSlot, ItemDisplays,
+    ItemModelKind, ATTACH_SLOTS, COMPOSITE_SLOTS, HELD_SLOTS, NO_GLOW, PLAYER_HELD_SLOTS,
 };
 
 /// The drawn/stowed attachment point for one held slot, or `None` when the item shows nothing (empty
@@ -186,6 +188,8 @@ pub(in crate::entities) fn resolve_equipment(
         Has<NockLatch>,
         Option<&ResolveKey>,
         Option<&DressKey>,
+        Option<&DisarmFreeze>,
+        Has<crate::net::SelfPlayer>,
     )>,
     held: Option<ResMut<ItemDisplays>>,
     mut templates: ResMut<Items>,
@@ -208,6 +212,8 @@ pub(in crate::entities) fn resolve_equipment(
     // what sends the `CMSG_GUILD_QUERY` whose answer paints the tabard. `Option` for the same
     // reason `creatures` is: a harness without the UI plugins still resolves equipment.
     mut guilds: Option<ResMut<crate::ui_guild::GuildState>>,
+    // The tabard designer's five under preview (decision 1977) — a change re-dresses our body.
+    tabard_design: Option<Res<crate::ui_tabard::TabardDesign>>,
 ) {
     let Some(mut held) = held else {
         return;
@@ -222,7 +228,8 @@ pub(in crate::entities) fn resolve_equipment(
     );
     let caches_moved = last_epochs.replace(epochs) != Some(epochs)
         || creatures.as_ref().is_some_and(|c| c.is_changed())
-        || enchants.as_ref().is_some_and(|e| e.is_changed());
+        || enchants.as_ref().is_some_and(|e| e.is_changed())
+        || tabard_design.as_ref().is_some_and(|d| d.is_changed());
     let mut glows = glows;
     let enchant_rows = enchants.as_deref().map(|e| &e.0);
     for (
@@ -238,6 +245,8 @@ pub(in crate::entities) fn resolve_equipment(
         nock_latched,
         current_key,
         current_dress,
+        freeze,
+        is_self,
     ) in &units
     {
         if !matches!(net_entity.kind, EntityKind::Unit | EntityKind::Player) {
@@ -329,6 +338,16 @@ pub(in crate::entities) fn resolve_equipment(
             eq.emblem = guilds
                 .as_deref_mut()
                 .and_then(|g| crate::ui_guild::unit_guild_emblem(s, g, &net));
+            // The tabard designer's preview (decision 1977): while it is open on OUR body the
+            // five under design replace the guild's emblem and the tabard geoset is forced on
+            // over the empty slot — the reference's `[cc+0xc]` flag and its `0x47a610` install,
+            // both on the local player's character component and nobody else's.
+            if is_self {
+                if let Some(design) = tabard_design.as_deref().and_then(|d| d.preview()) {
+                    eq.emblem = Some(design);
+                    eq.tabard_preview = true;
+                }
+            }
             if current_equipment != Some(&eq) {
                 commands.entity(entity).insert(eq);
             }
@@ -358,14 +377,25 @@ pub(in crate::entities) fn resolve_equipment(
                 .and_then(|d| creatures.as_deref()?.models.get(&d))
                 .is_none_or(|dm| dm.is_character_body);
         let mut slots: [Option<HeldSlot>; ATTACH_SLOTS] = [None; ATTACH_SLOTS];
-        let mut wielded = Wielded::default();
+        let mut wielded = Wielded {
+            // The disarm bit, read off this unit's own descriptor exactly where the reference
+            // reads it — inside `GetWeapon` (`[[unit+0x110]+0xa0] & 0x200000`, `0x5ec2b8`). It
+            // decides the COMBAT reading of the hands ([`Wielded::armed_main`]) and, through
+            // [`DisarmFreeze`] below, what the hidden hand still shows (decision 1863).
+            disarmed: s.unit_flags() & UNIT_FLAG_DISARMED != 0,
+            ..Wielded::default()
+        };
         let mut ranged_inv_type = None;
         // The DRESS, gathered as we go: what the unit *wears* in the three weapon slots, recorded
         // before `placement` decides whether any of it is currently rendered ([`DressKey`]).
         let mut worn: [Option<(u32, ItemModelKind, i32)>; HELD_SLOTS] = [None; HELD_SLOTS];
+        // **Pass 1 — what each hand HOLDS** (`GetWeapon(slot, 1)`). All three slots first, because
+        // the disarm ladder is a question about BOTH hands at once (`Wielded::disarmed_hand`) and
+        // cannot be asked while they are still being filled in.
+        let mut resolved: [Option<(u32, u32, u8, u8, u8, u8)>; HELD_SLOTS] = [None; HELD_SLOTS];
         for slot in 0..HELD_SLOTS {
             // (display id, inventory type, item sheath type, class, subclass, material) per slot.
-            let resolved: Option<(u32, u32, u8, u8, u8, u8)> = match net_entity.kind {
+            resolved[slot] = match net_entity.kind {
                 EntityKind::Unit => {
                     let display = s.unit_virtual_item_display(slot as u8).filter(|d| *d != 0);
                     display.map(|d| {
@@ -392,7 +422,7 @@ pub(in crate::entities) fn resolve_equipment(
                     }),
                 _ => None,
             };
-            let Some((display, inv_type, item_sheath, class, subclass, material)) = resolved else {
+            let Some((_, inv_type, item_sheath, class, subclass, material)) = resolved[slot] else {
                 continue;
             };
             // The item's Material — the draw/stow sound's only key (decision 0882). Both wire
@@ -422,6 +452,29 @@ pub(in crate::entities) fn resolve_equipment(
                 }
                 _ => {}
             }
+        }
+        // **The ladder** (decision 1863) — which single hand `UNIT_FLAG_DISARMED` hides, now that
+        // both are known. `None` while the flag is down, or when neither hand holds a weapon.
+        let hidden = wielded.disarmed_hand();
+        // The rising edge, as SEEN HERE: the reference's reflex `0x5ff580` fires on the bit
+        // *changing*, so a unit that streamed in already disarmed never had its weapon attached at
+        // all, and one whose edge we watched keeps whatever the reflex left (see [`DisarmFreeze`]).
+        let disarm_edge = hidden.is_some() && current_wielded.is_some_and(|w| !w.disarmed);
+        let mut next_freeze = match hidden {
+            // Flag down, or neither hand holds a weapon: no freeze at all, and the falling edge
+            // therefore clears it — `0x5ff67d`'s re-attach, which puts the weapon back wherever
+            // the live sheath state says it belongs.
+            None => None,
+            // The edge itself writes it below, from the placement the weapon had at that moment.
+            Some(_) if disarm_edge => None,
+            // Steady state: keep what the reflex left.
+            Some(_) => freeze.copied(),
+        };
+        // **Pass 2 — the models.**
+        for slot in 0..HELD_SLOTS {
+            let Some((display, inv_type, item_sheath, _, _, _)) = resolved[slot] else {
+                continue;
+            };
             if !char_component {
                 continue; // wielded resolved; the model never attaches on a non-character body
             }
@@ -436,8 +489,25 @@ pub(in crate::entities) fn resolve_equipment(
             // because that one is only computed for a slot that is actually placed — and an
             // enchant change is a model-event producer whether or not the weapon is drawn.
             worn[slot] = Some((display, kind, enchant_fold(s, net_entity.kind, slot)));
-            let Some(attach) = placement(slot, inv_type, item_sheath, sheath_of(slot, inv_type))
-            else {
+            let live = placement(slot, inv_type, item_sheath, sheath_of(slot, inv_type));
+            // The disarm reflex (`0x5ff580`, decision 1863). The hidden hand's weapon is NOT
+            // placed from the live sheath state — while the flag is up nothing may attach it or
+            // move it, so it is wherever the reflex left it at the edge: gone if it was in the
+            // hand (`0x5ff676`'s detach), still at its body point if it was stowed, and gone if
+            // we never saw the edge because nothing ever attached it.
+            let attach = if hidden == Some(slot) {
+                if disarm_edge {
+                    let kept = live
+                        .filter(|a| !matches!(*a, attach_id::HAND_RIGHT | attach_id::HAND_LEFT));
+                    next_freeze = Some(DisarmFreeze::new(slot as u8, display, kept));
+                    kept
+                } else {
+                    next_freeze.and_then(|f| f.attach_for(slot as u8, display))
+                }
+            } else {
+                live
+            };
+            let Some(attach) = attach else {
                 continue;
             };
             ensure_item_model(&mut held, display, kind, &asset_server);
@@ -636,6 +706,17 @@ pub(in crate::entities) fn resolve_equipment(
         }
         if current_wielded != Some(&wielded) {
             commands.entity(entity).insert(wielded);
+        }
+        // The freeze rides the same diff as the hands. Absent is a real state — "nothing is
+        // attached to that hand" — so the falling edge REMOVES it rather than storing an empty.
+        match next_freeze {
+            Some(f) if freeze != Some(&f) => {
+                commands.entity(entity).insert(f);
+            }
+            None if freeze.is_some() => {
+                commands.entity(entity).remove::<DisarmFreeze>();
+            }
+            _ => {}
         }
     }
 }
@@ -1084,5 +1165,204 @@ mod tests {
             "a marked store rebuilds — the gate opens"
         );
         drop(rx);
+    }
+
+    /// **What a disarm does to the weapon MODEL** (decision 1863; wow-re
+    /// `disarm-weapon-gate-law.md` §6). The reference's attachment state is built by events, and
+    /// `UNIT_FIELD_FLAGS`' change reflex `0x5ff580` is one of them: when the DISARM bit goes up it
+    /// calls `0x47a310(model, 0xf, 0, 0)` — an unlink of the main-hand attachment — **but only
+    /// while the weapon is drawn**, and afterwards every attach site declines because its
+    /// `GetWeapon(slot, 0)` reads NULL. So the weapon does NOT stay in the fist (the older note
+    /// said it did, from a partial read of `0x60b590`), and it does NOT vanish off the back
+    /// either. Three cases, one body each.
+    #[test]
+    fn a_disarm_takes_a_drawn_weapon_off_the_hand_and_leaves_a_stowed_one() {
+        use crate::creature_anim::Wielded;
+
+        /// `UNIT_FIELD_FLAGS`, `UNIT_FIELD_BYTES_2` (byte 0 = the sheath state) and the
+        /// mainhand's public entry — raw wire indices, spelled out like every other descriptor
+        /// fixture in this file.
+        const UNIT_FLAGS: u16 = 46;
+        const UNIT_BYTES_2: u16 = 164;
+        const VISIBLE_ITEM_MAINHAND_ENTRY: u16 = 258 + 2 + 12 * 15;
+        /// `UNIT_FLAG_DISARMED`.
+        const DISARMED: u32 = 0x0020_0000;
+
+        // A one-handed sword worn on the hip: class 2 subclass 7, INVTYPE_WEAPONMAINHAND, sheath
+        // type 3 — so the stowed placement has a real body point to land on and the drawn one is
+        // the right hand.
+        let store = |flags: u32, sheath: u8| {
+            ObjectStore(ObjectFields::from_pairs(&[
+                (BYTES_0, 1 | 1 << 8), // race 1 (human), class 1, male
+                (UNIT_FLAGS, flags),
+                (UNIT_BYTES_2, u32::from(sheath)),
+                (VISIBLE_ITEM_MAINHAND_ENTRY, 500),
+            ]))
+        };
+        let spawn = |flags: u32, sheath: u8| {
+            let mut app = App::new();
+            app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+            let mut items = Items::default();
+            items.insert_template(
+                500,
+                Some(ItemInfo {
+                    class: 2,
+                    subclass: 7,
+                    display_info_id: 950,
+                    inventory_type: 21,
+                    sheath: 3,
+                    ..crate::items::test_template("Worn Shortsword")
+                }),
+            );
+            let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
+            app.insert_resource(items);
+            app.insert_resource(NetCommands(tx));
+            app.insert_resource(ItemDisplays::icons_for_tests(
+                benilla_formats::ItemDisplayCatalog::from_displays(
+                    std::collections::HashMap::new(),
+                ),
+            ));
+            let player = app
+                .world_mut()
+                .spawn((
+                    NetEntity {
+                        kind: EntityKind::Player,
+                        display_id: Some(49),
+                        scale: 1.0,
+                    },
+                    store(flags, sheath),
+                ))
+                .id();
+            app.add_systems(Update, resolve_equipment);
+            app.update();
+            (app, player, rx)
+        };
+        /// Where the mainhand's model hangs this frame, or `None` for "not on screen at all".
+        fn mainhand(app: &App, player: Entity) -> Option<u16> {
+            app.world()
+                .get::<HeldItems>(player)
+                .and_then(|h| h.slots[0].as_ref())
+                .map(|slot| slot.attach)
+        }
+
+        // (1) DRAWN when the flag goes up — the reflex detaches it. It is not in the hand, and it
+        //     does not fall back to the hip either: nothing re-attaches while the flag is up.
+        let (mut app, player, rx) = spawn(0, 1);
+        assert_eq!(
+            mainhand(&app, player),
+            Some(attach_id::HAND_RIGHT),
+            "control: drawn, in the right hand"
+        );
+        *app.world_mut().get_mut::<ObjectStore>(player).unwrap() = store(DISARMED, 1);
+        app.update();
+        assert!(
+            app.world().get::<Wielded>(player).unwrap().disarmed,
+            "the flag reached the hands"
+        );
+        assert_eq!(
+            mainhand(&app, player),
+            None,
+            "a drawn weapon leaves the hand on the disarm edge"
+        );
+        // …and comes back when the flag clears (`0x5ff67d` → `0x60b770(0)`).
+        *app.world_mut().get_mut::<ObjectStore>(player).unwrap() = store(0, 1);
+        app.update();
+        assert_eq!(
+            mainhand(&app, player),
+            Some(attach_id::HAND_RIGHT),
+            "re-armed: the weapon is put back"
+        );
+        drop(rx);
+
+        // (2) STOWED when the flag goes up — the reflex's detach is gated on the sheath state
+        //     being non-zero, so nothing happens and the sword stays on the hip. It stays there
+        //     even once the unit draws: while disarmed the transition moves nothing.
+        let (mut app, player, rx) = spawn(0, 0);
+        assert_eq!(mainhand(&app, player), Some(attach_id::HIP_MAIN));
+        *app.world_mut().get_mut::<ObjectStore>(player).unwrap() = store(DISARMED, 0);
+        app.update();
+        assert_eq!(
+            mainhand(&app, player),
+            Some(attach_id::HIP_MAIN),
+            "a stowed weapon is left exactly where it is"
+        );
+        *app.world_mut().get_mut::<ObjectStore>(player).unwrap() = store(DISARMED, 1);
+        app.update();
+        assert_eq!(
+            mainhand(&app, player),
+            Some(attach_id::HIP_MAIN),
+            "and stays there — a disarmed hand cannot draw"
+        );
+        drop(rx);
+
+        // (3) Already disarmed when we first see the unit — the edge happened elsewhere, so
+        //     nothing was ever attached to that hand and the attach sites all decline.
+        let (app, player, rx) = spawn(DISARMED, 1);
+        assert_eq!(
+            mainhand(&app, player),
+            None,
+            "a unit that streams in disarmed shows no mainhand weapon"
+        );
+        drop(rx);
+    }
+
+    /// The COMBAT reading is separate from the display one, and only the display one is frozen:
+    /// the hands still report what is worn (`GetWeapon(slot, 1)` — what the paperdoll shows),
+    /// while `armed_main` reports what the unit can fight with.
+    #[test]
+    fn the_hands_keep_the_worn_reading_through_a_disarm() {
+        use crate::creature_anim::Wielded;
+
+        const UNIT_FLAGS: u16 = 46;
+        const VISIBLE_ITEM_MAINHAND_ENTRY: u16 = 258 + 2 + 12 * 15;
+        const DISARMED: u32 = 0x0020_0000;
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        let mut items = Items::default();
+        items.insert_template(
+            500,
+            Some(ItemInfo {
+                class: 2,
+                subclass: 7,
+                display_info_id: 950,
+                inventory_type: 21,
+                sheath: 3,
+                ..crate::items::test_template("Worn Shortsword")
+            }),
+        );
+        let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
+        app.insert_resource(items);
+        app.insert_resource(NetCommands(tx));
+        app.insert_resource(ItemDisplays::icons_for_tests(
+            benilla_formats::ItemDisplayCatalog::from_displays(std::collections::HashMap::new()),
+        ));
+        let player = app
+            .world_mut()
+            .spawn((
+                NetEntity {
+                    kind: EntityKind::Player,
+                    display_id: Some(49),
+                    scale: 1.0,
+                },
+                ObjectStore(ObjectFields::from_pairs(&[
+                    (BYTES_0, 1 | 1 << 8),
+                    (UNIT_FLAGS, DISARMED),
+                    (VISIBLE_ITEM_MAINHAND_ENTRY, 500),
+                ])),
+            ))
+            .id();
+        app.add_systems(Update, resolve_equipment);
+        app.update();
+        drop(rx);
+        let w = *app.world().get::<Wielded>(player).expect("hands resolved");
+        assert!(w.disarmed);
+        assert_eq!(w.main, Some((2, 7)), "GetWeapon(0, 1) still sees the sword");
+        assert_eq!(w.armed_main(), None, "GetWeapon(0, 0) is NULL");
+        assert_eq!(
+            w.disarmed_hand(),
+            Some(0),
+            "the main hand is the one hidden"
+        );
     }
 }

@@ -31,6 +31,13 @@ impl WorldWriter {
         self.send(opcode::CMSG_LOGOUT_REQUEST, &[])
     }
 
+    /// The FORCED logout (`CMSG_PLAYER_LOGOUT`, empty) — `ForceLogout()`'s packet, the same
+    /// dispatcher as [`Self::logout_request`] with the pending-logout latch bypassed
+    /// (decision 1963).
+    pub fn player_logout(&mut self) -> Result<()> {
+        self.send(opcode::CMSG_PLAYER_LOGOUT, &[])
+    }
+
     /// Call off a pending logout (`CMSG_LOGOUT_CANCEL`, empty body) — the CAMP/QUIT dialog's Cancel
     /// (decision 0674). Only meaningful while the server's 20-second timer is running (a non-instant
     /// [`logout_request`](Self::logout_request)); the server drops the timer, unroots the character

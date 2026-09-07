@@ -1,6 +1,7 @@
 use mlua::{ObjectLike, Table};
 
 use crate::framexml::{self, Element};
+use crate::script::LabelFont;
 
 use super::{
     abs_dim, abs_value, children_named, children_named_any, color_of, tex_coords_of, Loader,
@@ -69,7 +70,8 @@ impl Loader<'_> {
     /// plus the generic region layout — `<Size>`/`<Anchors>`/`setAllPoints` — so a state texture can
     /// cover less than its button (the merchant row's icon-scoped highlight); `$parent` in a state
     /// texture's anchors resolves against this button's own name, like a `<Layers>` region's.
-    /// Not modeled (stated): per-state fonts/colors, `<PushedTextOffset>`.
+    /// The per-state fonts (`<NormalFont>` and kin) are modeled below — object and local justify
+    /// (decision 1996); not modeled (stated): `<PushedTextOffset>`.
     pub(super) fn apply_button(
         &mut self,
         el: &Element,
@@ -150,6 +152,11 @@ impl Loader<'_> {
                     // exactly like a named `<Layers>` region or the ButtonText.
                     if let Some(rname) = t.name().map(|raw| framexml::resolve_name(raw, self_name))
                     {
+                        // …and into the region-name registry, which is what a sibling's
+                        // `relativeTo` resolves through — the stock trainer row hangs its label
+                        // off `$parentHighlight`'s RIGHT, and a name that lives only in `_G`
+                        // sent that label to the button's edge instead (1957).
+                        crate::script::region::publish_region_name(this.lua(), &rname, &region);
                         if let Err(e) = this.lua().globals().set(rname.clone(), region) {
                             this.report
                                 .warnings
@@ -236,6 +243,8 @@ impl Loader<'_> {
                 // the ref kit addresses tab/button labels by exactly this global
                 // (PanelTemplates_TabResize's `getglobal(tabName.."Text")`).
                 if let Some(rname) = bt_name {
+                    // The registry too, for the same reason as the state textures below (1957).
+                    crate::script::region::publish_region_name(self.lua(), &rname, &region);
                     if let Err(e) = self.lua().globals().set(rname.clone(), region) {
                         self.report
                             .warnings
@@ -265,10 +274,22 @@ impl Loader<'_> {
         // The per-state label fonts (`<NormalFont inherits=>` etc. — UIPanelButtonTemplate's
         // gold/white/gray label trio) → the 1.12 setter trio; every occurrence applies in
         // document order (same last-wins rule as `apply_size`).
-        for (children, method) in [
-            (["NormalFont", "NormalText"], "SetTextFontObject"),
-            (["HighlightFont", "HighlightText"], "SetHighlightFontObject"),
-            (["DisabledFont", "DisabledText"], "SetDisabledFontObject"),
+        for (children, method, which) in [
+            (
+                ["NormalFont", "NormalText"],
+                "SetTextFontObject",
+                LabelFont::Normal,
+            ),
+            (
+                ["HighlightFont", "HighlightText"],
+                "SetHighlightFontObject",
+                LabelFont::Highlight,
+            ),
+            (
+                ["DisabledFont", "DisabledText"],
+                "SetDisabledFontObject",
+                LabelFont::Disabled,
+            ),
         ] {
             for f in children_named_any(el, &children) {
                 // These three are `<Font>`-TYPED elements — `CSimpleButton::LoadXML 0x7788c0`
@@ -293,17 +314,32 @@ impl Loader<'_> {
                     }
                 }
                 // An element-level justify (`<NormalFont inherits="QuestFont" justifyH="LEFT"/>`)
-                // lands on the label region itself — v1: one region-level set (the ref declares
-                // the same justify on all three state elements; a per-state justify would need
-                // per-state font-object clones).
+                // is a LOCAL write on that state's embedded font — the same `0x783c30` the
+                // `inherits=` above goes through, on `+0x33c`/`+0x3b8`/`+0x434` — never on the
+                // label. It is what the adopter reads to ANCHOR a label the button later makes
+                // for itself (`UIMenuButtonTemplate`'s rows: Lua `SetText` → `0x778d20` →
+                // `[button+0x390]`), and it reaches an existing label only through the live
+                // link. The v1 form wrote it onto the label directly, which forced a label into
+                // being here with a CENTER anchor already decided — the chat menu's rows drew
+                // centred and "Macro" ran into "/macro" (decision 1996).
                 if let Some(j) = f.attr("justifyH") {
-                    // Ensure the slot exists WITHOUT clobbering a label the `<ButtonText>`/`text=`
-                    // handling above already set: only a missing slot gets the creating SetText("").
-                    if wrapper.call_method::<Table>("GetFontString", ()).is_err() {
-                        self.call(wrapper, "SetText", String::new(), dbg);
-                    }
-                    if let Ok(region) = wrapper.call_method::<Table>("GetFontString", ()) {
-                        self.call_region(&region, "SetJustifyH", j.to_string(), dbg);
+                    match crate::justify::parse_h(j) {
+                        crate::justify::Set::To(jh) => {
+                            if let Err(e) = crate::script::set_label_font_justify_h_lua(
+                                self.lua, wrapper, which, jh,
+                            ) {
+                                self.report
+                                    .errors
+                                    .push(format!("{dbg}: <{}> justifyH: {e}", f.tag));
+                            }
+                        }
+                        // The reference's parser clears the axis on a cross-axis token and
+                        // raises on a non-token; no 1.12 FrameXML writes either on these
+                        // elements, so both are reported rather than modelled.
+                        _ => self.report.warnings.push(format!(
+                            "{dbg}: <{}> justifyH=\"{j}\" is not a horizontal token — ignored",
+                            f.tag
+                        )),
                     }
                 }
             }

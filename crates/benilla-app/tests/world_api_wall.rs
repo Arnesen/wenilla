@@ -345,7 +345,52 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// a ceiling — and it is the ratchet's own instruction: a count that cannot see the whole file
 /// cannot report a widening either, which is the one thing this test exists to do. The six are
 /// **not** hereby blessed as PUBLISH: they are un-sorted 1164 work, now visible enough to sort.
-const CEILING: usize = 172;
+/// And 172 → 173: `model_render::lazy::realize`, a PUBLISH. A built `WowModelMaterial` is no
+/// longer an asset the moment a spawner builds it — the engine parks the value behind a
+/// reserved handle and inserts the asset the first frame something visible is bound to it
+/// (decision 1940: 9.9k materials, 20.7k buffers and 10.2k bind groups were alive at the
+/// Stormwind auction house for 36 drawn entity batches, the variant set every spawner is handed
+/// and never switches to). A game lane that CLONES a material before anything binds it — the
+/// portrait booth relighting a part's twins onto its own light buffer, a spell kit deriving its
+/// per-instance tinted copy from the shared steady — asks the engine to realize it first. That
+/// is the whole of the crossing: one function, "make this handle's asset exist now", the
+/// doorway's own rule about when a material is real. The alternative — eager materials for
+/// the two lanes that read early — would put the store's law in the caller's hands.
+/// And 173 → 174: `particles::render::EFFECT_DRAW_STATS`, an instrument PUBLISH — the effect
+/// lane's own per-frame draw census (items in the transparent phase, draws after the merge),
+/// the number the `FPS_PROBE` line prints as `fx=`. It is the reading that refuted the
+/// additive-window regroup on the crowd rig (decision 1955): a lane whose merge walk is the
+/// only place the count exists has to publish it or stay unmeasurable.
+/// And 174 → 175: `dev_state::STILL_INPUTS_CHANGED`, an instrument PUBLISH — how many frames
+/// each whole-scene input of the still-frame skips (1979) read as changed. Counted in the
+/// world crate so the probe names ONE static instead of the four resources the skips read; the
+/// reading is what says whether a gate ever engages.
+/// And 175 → 176: `mat_anim_table::affine_row`, a PUBLISH. The mat-anim table's second row
+/// kind (decision 2019): a texture transform's rotation and scale as deltas from the identity,
+/// `[cos − 1, sin, sx − 1, sy − 1]`, so that row 0 — the pinned zero every static material
+/// reads — IS the identity. That encoding is the table's own law (the same zero-is-identity
+/// rule its translation rows and the tint table run under), and the shader's fold is written
+/// against it; a lane that owns rows in the table — the UI model tiles, sampling the cooldown's
+/// quadrant rotations off the pane's play head — has to write them in the table's encoding,
+/// not one of its own. One function, "encode this affine the way the table reads it".
+/// And 176 → 177: `mat_anim_table::MatAnimMirrors`, a PUBLISH — the mat-anim table's twin of
+/// `instance_tint::InstanceTintMirrors` (decision 2023). A lane whose materials bind a light
+/// buffer of their own reads the table out of THAT buffer, so the UI model tiles' rows — the
+/// cooldown sweep's rotations, written every frame off the pane's play head — reached a region
+/// nothing in a tile ever sampled until the tile's buffer was on a mirror list. Registered once
+/// at the tile renderer's startup, the same shape and the same reason as the palette mirror
+/// beside it.
+/// And 177 → 178: `model_fade::UnitRenderAlpha`, a PUBLISH — one streamed unit's live render
+/// alpha, composed from the unit ROOT's own presentation state. `ModelAlphas` beside it is the
+/// read side for a consumer that can wait for `PostUpdate`'s publish; this is the read side for
+/// one that cannot — the blob shadow runs in `Update`, and on the frame a unit's presentation
+/// begins the published component does not exist yet. Published as a door rather than as its
+/// three inputs (`UnitAppearFade`, `DespawnFade`, `model_render_alpha`) precisely because the
+/// lane that reconstructed the answer from parts got it wrong the same way every time: it read
+/// "no part is fading" as opaque, which is false of a *pending* unit, and put a full-strength
+/// shadow on the ground under an invisible creature for the length of a load. A caller asking
+/// one question cannot make that mistake; a caller handed the inputs can.
+const CEILING: usize = 178;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

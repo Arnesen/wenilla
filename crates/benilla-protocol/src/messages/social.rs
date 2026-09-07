@@ -384,6 +384,19 @@ pub fn del_ignore(guid: u64) -> Vec<u8> {
     guid.to_le_bytes().to_vec()
 }
 
+/// Body of `CMSG_SET_LOOKING_FOR_GROUP` (VERIFIED at the bytes, wow-re `lfg-set-get-law.md` §5,
+/// `0x4e88c0`): the three slot words as stored (`u32` LE each), then the comment as a
+/// NUL-terminated string, appended unconditionally — a packet, once sent, always carries it. The
+/// reference sends only when the commit changed something, which the caller decides.
+pub fn set_looking_for_group(slots: [u32; 3], comment: &str) -> Vec<u8> {
+    let mut body = Vec::with_capacity(12 + comment.len() + 1);
+    for slot in slots {
+        body.extend_from_slice(&slot.to_le_bytes());
+    }
+    push_cstring(&mut body, comment);
+    body
+}
+
 /// A body that is exactly one NUL-terminated string.
 fn cstring_body(s: &str) -> Vec<u8> {
     let mut body = Vec::with_capacity(s.len() + 1);
@@ -400,6 +413,19 @@ fn push_cstring(body: &mut Vec<u8>, s: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `CMSG_SET_LOOKING_FOR_GROUP`: three slot words then the comment, NUL-terminated (1961).
+    #[test]
+    fn set_looking_for_group_is_three_words_and_a_cstring() {
+        let body = set_looking_for_group([0, 0, 0], "LF2M UBRS");
+        assert_eq!(&body[..12], &[0u8; 12]);
+        assert_eq!(&body[12..], b"LF2M UBRS\0");
+        assert_eq!(set_looking_for_group([1, 2, 3], ""), {
+            let mut v = vec![1u8, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0];
+            v.push(0);
+            v
+        });
+    }
 
     /// `SMSG_FRIEND_LIST`: the area/level/class tail rides on the status byte, so an offline and
     /// an online entry have different widths in the same packet — the parse has to follow it or

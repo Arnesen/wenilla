@@ -16,18 +16,17 @@
 //! CSimpleFrame 0x778590
 //! └─ CSimpleModel          0x76f870   table 0x878948 (23)   <Model>          ← built here
 //!    └─ CGCharacterModelBase 0x506260  table 0x84f1fc (3)   <PlayerModel>    ← built here
-//!       ├─ DressUpModelFrame 0x5050d0  table 0x84f190 (3)   <DressUpModel>   ← not built
-//!       └─ TabardModel       0x503bd0  table 0x84ee40 (10)  <TabardModel>    ← not built
+//!       ├─ DressUpModelFrame 0x5050d0  table 0x84f190 (3)   <DressUpModel>   ← `dressup` (1969)
+//!       └─ TabardModel       0x503bd0  table 0x84ee40 (10)  <TabardModel>    ← `tabard` (1977)
 //! ```
 //!
 //! Our `__index` dispatcher already walks a *slice* of registry keys per kind, so the chain is
 //! `&[REG_PLAYERMODEL_METHODS, REG_MODEL_METHODS]` and neither table duplicates the other. The
 //! direction is derived → base **only**: a plain `<Model>` does not acquire `SetUnit`.
 //!
-//! `DressUpModel` (`Undress`/`Dress`/`TryOn`) and `TabardModel` (10 tabard verbs) are deliberately
-//! **not built**: zero callers in the corpus, and our dress-up window already models the intents
-//! host-side (`super::dressup`), so wiring them is a design change to that subsystem rather than a
-//! missing verb. Named, not stubbed (decision 1134 §4).
+//! `DressUpModel` (`Undress`/`Dress`/`TryOn`) is `super::dressup` (1969) and `TabardModel` (the ten
+//! tabard verbs) `super::tabard` (1977) — each built the day its stock window came onto the chain,
+//! as 1134 §4 said they would be.
 //!
 //! ## Why this surface, in this order
 //!
@@ -60,15 +59,27 @@
 //! `base + 8*i`, and settle "which table owns method M" by counting image-wide dword references to
 //! M's name VA.
 //!
+//! ## The clock is the engine's; the pixels are the host's (decision 2007)
+//!
+//! A pane's animation state is not "a sequence index the host interprets": the reference widget
+//! owns a private `CM2Scene` whose clock its own `OnUpdate` advances, arms sequences through
+//! `0x7121a0` with an anchor the sampler re-reads, fires `OnUpdateModel` at the top of every
+//! paint and `OnAnimFinished` from the completion callback (wow-re
+//! `ui/scratch/modelframe-render-law.md` §4). All of that is Lua-observable — the shipped
+//! cooldown is nothing but those two handlers scrubbing `SetSequenceTime` — so it lives here:
+//! [`ModelState::clock_ms`] / [`ModelState::armed`], the tick's model pass, and the bindings
+//! below. What the engine does NOT have is the file: which ids it owns, how long each sequence
+//! runs, whether it loops. Those are the file's **facts** ([`crate::widget::ModelFileFacts`]),
+//! handed over by the host once the asset is resident ([`crate::script::UiScript::set_model_facts`])
+//! — the reference's own "asset ready" edge, on which the loader's Stand seed runs.
+//!
 //! ## What is deliberately NOT here
 //!
-//! Seven of `Model`'s own 23 — `AdvanceTime 0x76eca0`, `ReplaceIconTexture 0x76ed70`,
-//! `SetFogNear 0x76f1e0`, `GetFogNear 0x76f2d0`, `SetFogFar 0x76f390`, `GetFogFar 0x76f480`,
-//! `ClearFog 0x76f540`. No corpus caller, and their bodies are uncarved: `ClearFog`'s exact effect
-//! on the colour/near/far triple is a guess until someone reads it, and a guessed clear reads as
-//! knowledge. Named, not stubbed.
+//! Nothing of `Model`'s own 23 — the fog near/far/clear set was the last hold-out and 2027 carved
+//! it (`ClearFog 0x76f540` is `76f5c5 and [edi+0x3a4],-2`, bit 0 and nothing else, so the guess
+//! that kept it out is gone; see the install below).
 //!
-//! Also absent, and correctly so: `SetCreature` and `SetCustomRace`. Neither string exists in
+//! Absent, and correctly so: `SetCreature` and `SetCustomRace`. Neither string exists in
 //! 5875 in any form (substring scan of the whole mapped image returns 0, against a positive
 //! control of 27 hits for `Creature`) — they are later-expansion names, and publishing one would
 //! be decision 1189's error.
@@ -76,11 +87,102 @@
 //! And any interpretation of `SetLight`'s numbers — the engine core has no lighting model, so the
 //! tuple is stored verbatim rather than typed into a scene semantics nobody has verified.
 
+use std::sync::Arc;
+
 use mlua::{Lua, MultiValue, Table, Value};
 
 use super::object::frame_handle_of;
 use super::Model;
-use crate::widget::{KindState, ModelState};
+use crate::widget::{model_key, FrameHandle, KindState, ModelFileFacts, ModelLight, ModelState};
+
+impl Model {
+    /// FrameXML units per **layout unit** — `768 · √(a²+1)` for the screen's aspect `a`
+    /// (render law §3; the `G48 = 1/√(a²+1)` root scale against the `768`-tall FrameXML
+    /// space). `SetPosition`'s space, and the unit a size-less pane's implicit rect is measured
+    /// in. `4/3` before a screen exists.
+    pub(crate) fn layout_unit(&self) -> f32 {
+        let (w, h) = (self.screen.width(), self.screen.height());
+        let a = if h > 0.0 && w > 0.0 { w / h } else { 4.0 / 3.0 };
+        768.0 * (a * a + 1.0).sqrt()
+    }
+
+    /// The **implicit rect** (decision 2015): a model pane that authored no size takes its
+    /// file's bounding-box extent, in layout units, as its size — the reference's geometry
+    /// overrides (`0x76d080`/`0x76d0d0`) answer the bbox whenever no size is authored, and its
+    /// layout consumes them like any size. Written into the layout input when the facts are
+    /// known; a pane with an authored size, or no file, or no facts yet, is left alone.
+    pub(crate) fn apply_implicit_rect(&mut self, h: FrameHandle) {
+        let unit = self.layout_unit();
+        let extent = {
+            let Some(f) = self.arena.frame(h) else { return };
+            let KindState::Model(m) = &f.kind_state else {
+                return;
+            };
+            let Some(path) = m.path.as_deref() else {
+                return;
+            };
+            let Some(facts) = self.model_facts.get(&model_key(path)) else {
+                return;
+            };
+            let authored = !m.implicit_size
+                && self
+                    .layout_inputs
+                    .get(&h)
+                    .is_some_and(|i| i.width != 0.0 || i.height != 0.0);
+            if authored {
+                return;
+            }
+            facts.extent()
+        };
+        let (w, ht) = (extent.0 * unit, extent.1 * unit);
+        let input = self.layout_inputs.entry(h).or_default();
+        let changed =
+            input.width.to_bits() != w.to_bits() || input.height.to_bits() != ht.to_bits();
+        input.width = w;
+        input.height = ht;
+        if changed {
+            self.touch_layout_frame(h);
+        }
+        if let Some(KindState::Model(m)) = self.arena.frame_mut(h).map(|f| &mut f.kind_state) {
+            m.implicit_size = true;
+        }
+    }
+
+    /// A size was AUTHORED on `h` (`SetWidth`/`SetHeight`/`SetSize`, the XML `<Size>` through
+    /// them): an implicit rect no longer applies to it, for good — the reference's override
+    /// yields to any authored size.
+    pub(crate) fn note_authored_size(&mut self, h: FrameHandle) {
+        if let Some(KindState::Model(m)) = self.arena.frame_mut(h).map(|f| &mut f.kind_state) {
+            m.implicit_size = false;
+        }
+    }
+
+    /// The facts the host has handed over for `path`, or `None` — in which case the path is
+    /// queued for the host to load ([`crate::script::UiScript::model_facts_wanted`]), once.
+    pub(crate) fn model_facts_for(&mut self, path: &str) -> Option<Arc<ModelFileFacts>> {
+        let key = model_key(path);
+        match self.model_facts.get(&key) {
+            Some(facts) => Some(facts.clone()),
+            None => {
+                if !self.model_facts_wanted.contains(&key) {
+                    self.model_facts_wanted.push(key);
+                }
+                None
+            }
+        }
+    }
+}
+
+/// The facts of the file `this` pane currently holds (`None` for an empty pane or a file the
+/// host has not loaded yet).
+fn facts_of_pane(lua: &Lua, this: &Table) -> mlua::Result<Option<Arc<ModelFileFacts>>> {
+    let path = with_model(lua, this, |m| m.path.clone())?;
+    Ok(path.and_then(|p| {
+        lua.app_data_mut::<Model>()
+            .expect("model app_data")
+            .model_facts_for(&p)
+    }))
+}
 
 /// Registry key of the `Model` method table (the MAXCSTACK discipline: Lua-side root, named key).
 pub(super) const REG_MODEL_METHODS: &str = "__benilla_model_methods";
@@ -93,7 +195,11 @@ pub(super) const REG_PLAYERMODEL_METHODS: &str = "__benilla_playermodel_methods"
 /// Run `f` over a frame's Model state under one short write borrow. Errors if `this` is not a live
 /// Model (unreachable through the kind dispatcher, but the method table is a plain Lua value — a
 /// caller can fish it out and misapply it).
-fn with_model<T>(lua: &Lua, this: &Table, f: impl FnOnce(&mut ModelState) -> T) -> mlua::Result<T> {
+pub(super) fn with_model<T>(
+    lua: &Lua,
+    this: &Table,
+    f: impl FnOnce(&mut ModelState) -> T,
+) -> mlua::Result<T> {
     let h = frame_handle_of(lua, this)?;
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
     let frame = model
@@ -123,6 +229,103 @@ fn num(v: &Value) -> f32 {
 /// Same, as an integer (sequence and camera indices).
 fn int(v: &Value) -> i32 {
     num(v) as i32
+}
+
+/// `lua_isnumber` — a number, or a string that converts, and **nothing else**. Distinct from
+/// [`num`] on purpose: `SetLight` *raises* on a non-number where the coordinate setters coerce,
+/// so the two questions cannot share one helper.
+fn number(v: &Value) -> Option<f32> {
+    match v {
+        Value::Number(n) => Some(*n as f32),
+        Value::Integer(i) => Some(*i as f32),
+        Value::String(s) => s.to_str().ok().and_then(|t| t.trim().parse().ok()),
+        _ => None,
+    }
+}
+
+/// `[0x8029d4]` — the client's "is this float zero" epsilon, shared by `SetLight`'s intensity
+/// gate, `0x71b6a0`'s direction normalise and the paint's degenerate-rect test.
+const FLOAT_EPS: f32 = 2.384_185_8e-7;
+
+/// `Model:SetLight`'s usage string (`0x878c00`), which the binding raises verbatim.
+const SET_LIGHT_USAGE: &str = "Usage: Model:SetLight(enabled[, omni, dirX, dirY, dirZ, \
+     ambIntensity[, ambR, ambG, ambB], dirIntensity[, dirR, dirG, dirB]]";
+
+/// What [`parse_set_light`] decided.
+enum SetLight {
+    /// A non-number where the binding requires one — `luaL_error(SET_LIGHT_USAGE)`.
+    Raise,
+    /// **Trap 1.** `enabled == 0` returns at `76e2cb` *before* the local light is copied into the
+    /// widget, so the call writes nothing at all: it neither disables a light nor edits one.
+    NoOp,
+    /// The light to copy wholesale over the widget's (`76e777 0x76cf30`, `rep movsd 0x1b`).
+    Set(ModelLight),
+}
+
+/// `Model:SetLight` `0x76e1e0`'s argument walk (render law §5.3), over the arguments **after
+/// `self`** — so `a[0]` is the reference's Lua index 2.
+///
+/// The binding builds a **local** `CGLight` from `0x71b4a0` — type 1, every colour ZERO, which is
+/// not the widget ctor's white — fills it, and copies the whole thing over the widget's at the
+/// end. So an omitted colour block lands the *binding's* black, never the ctor's white.
+///
+/// **Trap 2** is the walking cursor: the ambient colour triple is read only when its intensity is
+/// nonzero **and** all three components are numbers; when either fails, the colour stays white
+/// and the cursor does *not* advance past it — so the second intensity is read at index 8 rather
+/// than 11, and `SetLight(1, 0, x, y, z, ambI, dirI)` is a legal seven-argument form.
+fn parse_set_light(a: &[Value]) -> SetLight {
+    let Some(enabled) = a.first().and_then(number) else {
+        return SetLight::Raise;
+    };
+    if enabled as i32 == 0 {
+        return SetLight::NoOp;
+    }
+    // Indices 3..=7 — omni, x, y, z, ambIntensity — are all mandatory once the light is enabled.
+    let mut head = [0.0f32; 5];
+    for (i, slot) in head.iter_mut().enumerate() {
+        match a.get(i + 1).and_then(number) {
+            Some(v) => *slot = v,
+            None => return SetLight::Raise,
+        }
+    }
+    let omni = head[0] as i32 != 0;
+    let mut vector = [head[1], head[2], head[3]];
+    if !omni {
+        // `0x71b6a0` normalises a DIRECTION on write (`71b6c5`-`71b705`); the position setter
+        // `0x71b650` stores raw.
+        let len = (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt();
+        if len > FLOAT_EPS {
+            vector = vector.map(|v| v / len);
+        }
+    }
+    // The colour blocks: each packed to 8 bits per channel and unpacked again (`0x76f900`), so a
+    // Set→Get round trip is lossy exactly the way `SetFogColor`'s is.
+    let quantize = |v: f32| ((v.clamp(0.0, 1.0) * 255.0).round()) / 255.0;
+    let block = |at: usize| -> Option<[f32; 3]> {
+        let c: Vec<f32> = (at..at + 3)
+            .filter_map(|k| a.get(k).and_then(number))
+            .collect();
+        (c.len() == 3).then(|| [quantize(c[0]), quantize(c[1]), quantize(c[2])])
+    };
+    let ambient_i = head[4];
+    let (ambient_rgb, next) = match block(6).filter(|_| ambient_i.abs() > FLOAT_EPS) {
+        Some(rgb) => (rgb, 9), // the cursor advanced: Lua index 11
+        None => ([1.0; 3], 6), // white, and the cursor stayed: Lua index 8
+    };
+    let mut light = ModelLight {
+        enabled: true,
+        omni,
+        vector,
+        ambient: ambient_rgb.map(|c| c * ambient_i),
+        diffuse: [0.0; 3],
+    };
+    if let Some(diffuse_i) = a.get(next).and_then(number) {
+        let rgb = block(next + 1)
+            .filter(|_| diffuse_i.abs() > FLOAT_EPS)
+            .unwrap_or([1.0; 3]);
+        light.diffuse = rgb.map(|c| c * diffuse_i);
+    }
+    SetLight::Set(light)
 }
 
 /// **Shape A's gate** (decision 1717's taxonomy, for a *string* position): the client's
@@ -183,10 +386,20 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let path = string_arg(&path)
                 .ok_or_else(|| usage(lua, &this, "SetModel(\"file\")"))?
                 .to_string();
-            with_model(lua, &this, |m| {
-                m.path = Some(path);
-                m.unit = None;
-            })
+            // The file's facts, if the host has handed them over — the reference's "asset
+            // resident" test (`71d5a3`), which decides whether the loader's Stand seed runs
+            // now or when the file lands ([`ModelState::set_file`]).
+            let facts = lua
+                .app_data_mut::<Model>()
+                .expect("model app_data")
+                .model_facts_for(&path);
+            with_model(lua, &this, |m| m.set_file(path, facts.as_deref()))?;
+            // A size-less pane takes the file's rect the moment the file is known (2015).
+            let h = frame_handle_of(lua, &this)?;
+            lua.app_data_mut::<Model>()
+                .expect("model app_data")
+                .apply_implicit_rect(h);
+            Ok(())
         })?,
     )?;
     m.set(
@@ -195,37 +408,30 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     m.set(
         "ClearModel",
-        lua.create_function(|lua, this: Table| {
-            with_model(lua, &this, |m| {
-                m.path = None;
-                m.unit = None;
-                m.sequence_time = None;
-            })
-        })?,
+        lua.create_function(|lua, this: Table| with_model(lua, &this, ModelState::clear_file))?,
     )?;
-    // ── Animation ───────────────────────────────────────────────────────────────────────────
+    // ── Animation (decision 2007) ───────────────────────────────────────────────────────────
+    //
+    // Both verbs are the same arm, `0x7121a0(model, -1, id, 0, ms, 1.0f, 0, 1)` — `SetSequence`
+    // with `ms = 0` (`0x76dec0` → `0x76cf50`), `SetSequenceTime` with the caller's `ms`
+    // (`0x76dfc0` → `0x76cf80`). The arm interrupts whatever plays, resolves the id through the
+    // file's `animationLookup`, and bakes the anchor `cursor_lo = sceneClock − trunc(ms)` that
+    // the sampler re-reads every frame (render law §4.2). The id is an `AnimationData` id, not a
+    // file slot; one the file does not own stops the playing track and arms nothing.
     m.set(
         "SetSequence",
         lua.create_function(|lua, (this, seq): (Table, Value)| {
             let seq = int(&seq);
-            with_model(lua, &this, |m| {
-                m.sequence = seq;
-                // A fresh sequence starts unscrubbed: `SetSequenceTime` is a scrub INTO the
-                // current sequence, so carrying the old pair across a change would park the new
-                // animation at a time that belongs to the previous one. The cooldown indicator
-                // drives exactly this pair every frame and is the reason to get it right.
-                m.sequence_time = None;
-            })
+            let facts = facts_of_pane(lua, &this)?;
+            with_model(lua, &this, |m| m.arm(seq, 0, facts.as_deref()))
         })?,
     )?;
     m.set(
         "SetSequenceTime",
         lua.create_function(|lua, (this, seq, ms): (Table, Value, Value)| {
-            let pair = (int(&seq), int(&ms));
-            with_model(lua, &this, |m| {
-                m.sequence = pair.0;
-                m.sequence_time = Some(pair);
-            })
+            let (seq, ms) = (int(&seq), int(&ms));
+            let facts = facts_of_pane(lua, &this)?;
+            with_model(lua, &this, |m| m.arm(seq, i64::from(ms), facts.as_deref()))
         })?,
     )?;
 
@@ -256,11 +462,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetModelScale",
         lua.create_function(|lua, this: Table| with_model(lua, &this, |m| m.scale))?,
     )?;
+    // `SetCamera(n)` = `0x76e0e0` -> `0x76cec0`: select the file's camera by **RAW table index**
+    // (`cameraLookup` is not on this path). With the file's facts in hand the index is resolved
+    // now — an index past the table's count installs the NULL camera, which is the orthographic
+    // leg; without them it is deferred, and the pane draws nothing until it resolves.
     m.set(
         "SetCamera",
         lua.create_function(|lua, (this, c): (Table, Value)| {
             let c = int(&c);
-            with_model(lua, &this, |m| m.camera = c)
+            let facts = facts_of_pane(lua, &this)?;
+            with_model(lua, &this, |m| m.install_camera(c, facts.as_deref()))
         })?,
     )?;
     m.set(
@@ -280,9 +491,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // ── The scene: light and fog ────────────────────────────────────────────────────────────
     //
-    // `SetLight`'s numbers are stored VERBATIM and handed back verbatim. The engine core has no
-    // lighting model, so typing this tuple would be asserting a scene semantics nobody has
-    // verified — and a wrong typing is worse than an opaque one, because it reads as knowledge.
+    // Typed since decision 2027, off the render law's §5.1-§5.4: the widget's embedded `CGLight`
+    // and the four fog fields, with `SetLight`'s argument walk and both of its traps.
     m.set(
         "SetLight",
         lua.create_function(|lua, args: MultiValue| {
@@ -291,19 +501,36 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(Value::Table(t)) => t,
                 _ => return Err(mlua::Error::runtime("expected a Model")),
             };
-            let nums: Vec<f32> = it.map(|v| num(&v)).collect();
-            with_model(lua, &this, |m| m.light = Some(nums))
+            let a: Vec<Value> = it.collect();
+            match parse_set_light(&a) {
+                SetLight::Raise => Err(mlua::Error::runtime(SET_LIGHT_USAGE)),
+                SetLight::NoOp => with_model(lua, &this, |_| ()),
+                SetLight::Set(l) => with_model(lua, &this, |m| m.light = l),
+            }
         })?,
     )?;
     m.set(
         "GetLight",
         lua.create_function(|lua, this: Table| {
-            let light = with_model(lua, &this, |m| m.light.clone())?;
-            let out = light
-                .unwrap_or_default()
-                .into_iter()
-                .map(|n| Value::Number(f64::from(n)))
-                .collect::<Vec<_>>();
+            let l = with_model(lua, &this, |m| m.light)?;
+            let mut out: Vec<Value> = vec![
+                Value::Number(f64::from(u8::from(l.enabled))),
+                Value::Number(f64::from(u8::from(l.omni))),
+                Value::Number(f64::from(l.vector[0])),
+                Value::Number(f64::from(l.vector[1])),
+                Value::Number(f64::from(l.vector[2])),
+            ];
+            // Each colour block comes back as `1.0, r, g, b` when ANY component is `> 0`, and as
+            // a lone `0` otherwise (`76e91f`/`76e92f`/`76e93f je 0x76e953` -> `push 1.0`) — which
+            // is what makes the arity 7 | 10 | 13 rather than a fixed 13.
+            for c in [l.ambient, l.diffuse] {
+                if c.iter().any(|&v| v > 0.0) {
+                    out.push(Value::Number(1.0));
+                    out.extend(c.iter().map(|&v| Value::Number(f64::from(v))));
+                } else {
+                    out.push(Value::Number(0.0));
+                }
+            }
             Ok(MultiValue::from_vec(out))
         })?,
     )?;
@@ -319,7 +546,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
                 let a = a.as_ref().map_or(1.0, num);
                 let packed = (q(a) << 24) | (q(num(&r)) << 16) | (q(num(&g)) << 8) | q(num(&b));
-                with_model(lua, &this, |m| m.fog_color = packed)
+                // `76f059 or [edi+0x3a4],1` — setting the colour ARMS the fog. That is the only
+                // arming verb (with the XML `<FogColor>` child); there is no `SetFogEnabled`.
+                with_model(lua, &this, |m| {
+                    m.fog_color = packed;
+                    m.fog = true;
+                })
             },
         )?,
     )?;
@@ -332,6 +564,39 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let ch = |shift: u32| f64::from((packed >> shift) & 0xff) / 255.0;
             Ok((ch(16), ch(8), ch(0), ch(24)))
         })?,
+    )?;
+
+    // `SetFogNear 0x76f1e0` / `SetFogFar 0x76f390` store the number RAW — no clamp, no ordering
+    // check (`76f282`/`76f432 fstp`); the `≥ 0` clamp exists only on the XML attribute path. The
+    // getters read the same fields back. Nothing here arms the fog.
+    m.set(
+        "SetFogNear",
+        lua.create_function(|lua, (this, v): (Table, Value)| {
+            let v = num(&v);
+            with_model(lua, &this, |m| m.fog_near = v)
+        })?,
+    )?;
+    m.set(
+        "GetFogNear",
+        lua.create_function(|lua, this: Table| with_model(lua, &this, |m| m.fog_near))?,
+    )?;
+    m.set(
+        "SetFogFar",
+        lua.create_function(|lua, (this, v): (Table, Value)| {
+            let v = num(&v);
+            with_model(lua, &this, |m| m.fog_far = v)
+        })?,
+    )?;
+    m.set(
+        "GetFogFar",
+        lua.create_function(|lua, this: Table| with_model(lua, &this, |m| m.fog_far))?,
+    )?;
+    // `ClearFog 0x76f540`: `76f5c5 and [edi+0x3a4],-2` — **bit 0 and nothing else**. The colour,
+    // the near and the far all survive, so a later `SetFogColor` re-arms the same ramp. A clear
+    // that also reset them would read as knowledge and be wrong.
+    m.set(
+        "ClearFog",
+        lua.create_function(|lua, this: Table| with_model(lua, &this, |m| m.fog = false))?,
     )?;
 
     // ── The two verbs that touch no pane state ──────────────────────────────────────────────
@@ -358,23 +623,29 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // no unit, and stores nothing on the `0x3dc`-byte widget — the override lives on the CM2Model
     // and dies with it when `SetModel`/`ClearModel` releases the instance.
     //
-    // **Which is why storing nothing here is faithful rather than lazy.** The reference's two
-    // "not ready" cases behave OPPOSITELY: with a `CM2Model` present but its data not resident the
-    // call is queued on `[cm2+0x3c]` and replayed; with **no CM2Model at all**
-    // (`[widget+0x318] == 0`) it is **dropped and never replayed**. This engine renders no
-    // FrameXML models, so our panes are permanently the second case — dropping it is what the
-    // client does in exactly our state.
+    // The reference's two "not ready" cases behave OPPOSITELY: with a `CM2Model` present but its
+    // data not resident the call is queued on `[cm2+0x3c]` and replayed; with **no CM2Model at
+    // all** (`[widget+0x318] == 0`) it is **dropped and never replayed**. Since decision 2007 a
+    // pane with a file has an instance the host renders, so the override is STORED on the pane
+    // (`ModelState::icon`, the queued-and-replayed case — the host applies it whenever the file
+    // is resident) and a pane with no file drops it, as the client does. The stock
+    // `MainMenuBarBagButtons.lua` is the caller: `ItemAnim_OnEvent` puts the pushed item's icon
+    // on `ForcedBackpackItem.mdx`, whose one batch carries no texture of its own.
     //
-    // The argument gate is real and is shape A: `lua_isstring` (tags 3|4) then `lua_tostring`,
-    // raising `Usage: %s:ReplaceIconTexture("texture")` on anything else. It is kept because it is
-    // the whole observable behaviour left.
+    // The argument gate is shape A: `lua_isstring` (tags 3|4) then `lua_tostring`, raising
+    // `Usage: %s:ReplaceIconTexture("texture")` on anything else.
     m.set(
         "ReplaceIconTexture",
         lua.create_function(|lua, (this, path): (Table, Value)| {
-            if string_arg(&path).is_none() {
+            let Some(path) = string_arg(&path) else {
                 return Err(usage(lua, &this, "ReplaceIconTexture(\"texture\")"));
-            }
-            with_model(lua, &this, |_| ())
+            };
+            let path = path.to_string();
+            with_model(lua, &this, |m| {
+                if m.path.is_some() {
+                    m.icon = Some(path);
+                }
+            })
         })?,
     )?;
 
@@ -400,7 +671,11 @@ fn playermodel_install(lua: &Lua) -> mlua::Result<()> {
             with_model(lua, &this, |m| {
                 m.unit = unit;
                 m.path = None;
-            })
+            })?;
+            // On the dressing room's pane the same call rebuilds the model from the unit — the
+            // reference's `0x5059a0` duplicates the live model, substitutions and all gone — which
+            // is app state here (`super::dressup`, 1969).
+            super::dressup::redress_if_dressup(lua, &this)
         })?,
     )?;
 
@@ -410,7 +685,10 @@ fn playermodel_install(lua: &Lua) -> mlua::Result<()> {
     // own `DressUpFrame`/`PaperDollFrame` call it (3 sites) and addons that hook them will too.
     m.set(
         "RefreshUnit",
-        lua.create_function(|lua, this: Table| with_model(lua, &this, |_| ()))?,
+        lua.create_function(|lua, this: Table| {
+            with_model(lua, &this, |_| ())?;
+            super::dressup::redress_if_dressup(lua, &this) // the same worker as SetUnit's (§1)
+        })?,
     )?;
 
     // `SetRotation(rad)` — `0x84f1fc[2]` -> the Lua glue `0x505f00` -> the worker `0x505bb0`, whose
@@ -425,8 +703,9 @@ fn playermodel_install(lua: &Lua) -> mlua::Result<()> {
     // it inverted), plays it unless that id is already armed on bone slot 0, and then
     // UNCONDITIONALLY sets `[+0x3e8] = 1` and `[+0x3ec] = now_ms + 100` — a 100 ms turn hold that
     // the per-paint `0x505c50` expires. Every one of those is invisible to Lua (no getter reads
-    // them) and lands on a model renderer we have not built, so storing them here would be state
-    // nobody writes and nobody reads. The addresses are the pin for the day the renderer exists.
+    // them). The app's `<Model>` renderer (`benilla-app` `ui_models`, 2013/2019/2027) draws its
+    // pane off the file's own clock and does not model a turn hold, so storing the pair here
+    // would be state nobody writes and nobody reads. The addresses are the pin if it ever does.
     m.set(
         "SetRotation",
         lua.create_function(|lua, (this, rad): (Table, Value)| {
@@ -475,4 +754,117 @@ impl crate::script::UiScript {
     pub fn model_pane_facing(&self, name: &str) -> f32 {
         self.model_pane(name).map_or(0.0, |m| m.facing)
     }
+
+    /// The host hands over what it knows about a model **file** (decision 2007): its sequences
+    /// and bounds, read off the loaded asset. Every pane holding that file then runs the
+    /// reference's residency completion — the loader's Stand seed for a pane that was waiting,
+    /// the ownership check for an arm that was queued ([`ModelState::seed_from_facts`]) — and
+    /// its clock starts answering ([`ModelState::play_head`]).
+    pub fn set_model_facts(&mut self, path: &str, facts: ModelFileFacts) {
+        let key = model_key(path);
+        let facts = Arc::new(facts);
+        let mut model = self.model_mut();
+        model.model_facts.insert(key.clone(), facts.clone());
+        model.model_facts_wanted.retain(|k| *k != key);
+        // A one-off walk per file, not per frame: the panes that named this file are the
+        // waiters the reference links on the streaming drain (`0x71d640`).
+        let handles: Vec<_> = model
+            .arena
+            .iter_frames()
+            .filter_map(|(h, f)| match &f.kind_state {
+                KindState::Model(m) if m.path.as_deref().is_some_and(|p| model_key(p) == key) => {
+                    Some(h)
+                }
+                _ => None,
+            })
+            .collect();
+        for h in handles {
+            if let Some(KindState::Model(m)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
+                m.seed_from_facts(&facts);
+            }
+            model.apply_implicit_rect(h);
+        }
+    }
+
+    /// The screen's aspect moved: every implicit rect is measured in layout units, which scale
+    /// with `√(a²+1)`, so each one is re-derived (decision 2015). An authored size is untouched.
+    pub(crate) fn reapply_implicit_rects(&mut self) {
+        let mut model = self.model_mut();
+        let panes: Vec<FrameHandle> = model
+            .arena
+            .ticked_kinds()
+            .iter()
+            .copied()
+            .filter(|&h| {
+                model.arena.frame(h).is_some_and(
+                    |f| matches!(&f.kind_state, KindState::Model(m) if m.implicit_size),
+                )
+            })
+            .collect();
+        for h in panes {
+            model.apply_implicit_rect(h);
+        }
+    }
+
+    /// The model files panes have named that no facts have arrived for — drained: the host
+    /// loads each once and answers through [`Self::set_model_facts`]. Keys are
+    /// [`crate::widget::model_key`]s (case-folded, `/`-separated, no extension).
+    pub fn model_facts_wanted(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.model_mut().model_facts_wanted)
+    }
+
+    /// Does the engine hold facts for `path`'s file — the host's "already answered" test.
+    pub fn has_model_facts(&self, path: &str) -> bool {
+        self.model_ref().model_facts.contains_key(&model_key(path))
+    }
+
+    /// **The paint list**: every effectively-visible model pane holding a file whose facts the
+    /// engine has — with its scene clock and, when something is armed, its play head. The host's
+    /// renderer reads this once per frame (decision 2008) instead of the extract carrying a
+    /// cursor that moves every tick (`QuadContent::ModelPane`'s doc says why). Handle order —
+    /// the arena's registry order, stable across frames.
+    pub fn visible_model_panes(&self) -> Vec<ModelPaneFrame> {
+        let model = self.model_ref();
+        model
+            .arena
+            .ticked_kinds()
+            .iter()
+            .filter_map(|&h| {
+                let f = model.arena.frame(h)?;
+                if !f.effective_visible {
+                    return None;
+                }
+                let KindState::Model(m) = &f.kind_state else {
+                    return None;
+                };
+                let path = m.path.as_deref()?;
+                let facts = model.model_facts.get(&model_key(path))?;
+                // The reference's draw gate (`76d5f0 cmp [this+0x320],-1 ; jne`): a pane whose
+                // camera question is still open paints NOTHING — not the model, not its
+                // `OnUpdateModel`. Reachable from Lua by `SetCamera(n)` on a pane whose file has
+                // not landed yet (decision 2027).
+                if m.camera_pending.is_some() {
+                    return None;
+                }
+                Some(ModelPaneFrame {
+                    handle: h,
+                    clock_ms: m.clock_ms,
+                    play: m.play_head(facts),
+                })
+            })
+            .collect()
+    }
+}
+
+/// One visible model pane as the host's renderer sees it this frame —
+/// [`UiScript::visible_model_panes`]'s row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelPaneFrame {
+    pub handle: crate::widget::FrameHandle,
+    /// The pane's private scene clock, ms ([`ModelState::clock_ms`]) — the global-sequence
+    /// clock of everything the pane draws.
+    pub clock_ms: u64,
+    /// Where the armed sequence stands, or `None` while nothing is armed (the file draws at its
+    /// rest pose).
+    pub play: Option<crate::widget::ModelPlayHead>,
 }

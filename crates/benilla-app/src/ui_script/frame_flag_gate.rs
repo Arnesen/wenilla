@@ -23,10 +23,10 @@
 //! answers the same whichever way it came.
 //!
 //! **Divergences are an explicit list with a reason each, never a pattern.** [`KNOWN`] carries
-//! them, in both directions; a new one cannot hide inside a tolerance. The list is where the
-//! seven frames the reference makes interactive through *handlers we do not carry* are recorded —
-//! those want the handler (and its tooltip), never a bare `enableMouse="true"` that would swallow
-//! the click and give nothing back.
+//! them, in both directions; a new one cannot hide inside a tolerance. **It is empty today** —
+//! 1751's window migrations, 1795, 1970 and 1980 each retired a group, and the in-body notes are
+//! the record of what each one was. The array stays because an empty list is the thing that
+//! notices a divergence arriving.
 //!
 //! ## Four flags, and only four
 //!
@@ -68,8 +68,8 @@
 //!
 //! The reference side is **XML only**: a `SetID` or `EnableMouse` the reference makes from Lua at
 //! `OnLoad` is invisible here and reads as absent. That blind spot only ever under-reports — it
-//! can hide a divergence, never invent one — so nothing it misses turns into a false failure; the
-//! handful of frames it does hide are in `KNOWN` with that reason.
+//! can hide a divergence, never invent one — so nothing it misses turns into a false failure. It
+//! would be a `KNOWN` entry's reason if any frame still needed one.
 //!
 //! The whole module skips cleanly with no install — `_extracted_framexml/` is a gitignored
 //! Blizzard asset, like every other client-data test here.
@@ -101,7 +101,6 @@ const FRAME_TAGS: &[&str] = &[
     "Minimap",
     "MovieFrame",
     "WorldFrame",
-    "Cooldown",
 ];
 
 /// The five `<Scripts>` handler names that auto-enable the MOUSE kind, and only those five
@@ -158,16 +157,18 @@ impl std::fmt::Display for Flag {
     }
 }
 
-/// The accepted differences, in four groups: **seven frames the reference makes mouse-interactive
-/// through HANDLERS we do not carry**, the merchant rows whose mouse we take where it does not,
-/// the faux scroll panes we build from a different widget kind, and the ids the reference sets
-/// from Lua. Every entry is a judgement someone made; none of them is a tolerance.
+/// The accepted differences — **none, today**. The four groups this list once carried (the frames
+/// the reference made mouse-interactive through handlers we did not carry, the merchant rows, the
+/// faux scroll panes, the Lua-set ids) each retired with the window that owned them; the in-body
+/// notes below name the record for each. An empty array is not an oversight: it is what fails the
+/// gate the moment a new divergence appears, and every entry it ever holds is a judgement someone
+/// made, never a tolerance.
 const KNOWN: &[Known] = &[
-    // ── The reference has it, we do not: all seven are handler gaps, not flag gaps ─────────────
+    // ── The reference had it and we did not: seven handler gaps, not flag gaps (all retired) ───
     //
-    // In each of these the reference's mouse comes from an `<OnEnter>`/`<OnLeave>` pair whose body
-    // we have not built, and the interaction the player would notice is the TOOLTIP those handlers
-    // show — not the click-blocking the flag gives. Declaring `enableMouse="true"` here would make
+    // In each of these the reference's mouse came from an `<OnEnter>`/`<OnLeave>` pair whose body
+    // we had not built, and the interaction the player would notice was the TOOLTIP those handlers
+    // show — not the click-blocking the flag gives. Declaring `enableMouse="true"` would have made
     // the frame swallow the click and hand back nothing, which is worse than the gap.
     // `PetPaperDollFrameExpBar` RETIRED here (decision 1751's character-sheet window). It read
     // "the reference bar inherits TextStatusBar, whose OnEnter/OnLeave show the value text; ours is
@@ -180,122 +181,11 @@ const KNOWN: &[Known] = &[
     // because OUR `ScrollFrame` ctor took the mouse and the reference's does not. Correcting the
     // ctor list to the client's made both sides agree, and an accepted divergence that has been
     // fixed is documentation claiming a defect we do not have.
-    Known {
-        frame: "ChatFrame1",
-        flag: Flag::Mouse,
-        why: "our chat window takes the mouse and the reference's does not. It was believed a \
-              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
-              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
-              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
-              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
-              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
-              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
-              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
-              that is the chat window's own piece of work, not this flag's.",
-    },
-    Known {
-        frame: "ChatFrame2",
-        flag: Flag::Mouse,
-        why: "our chat window takes the mouse and the reference's does not. It was believed a \
-              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
-              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
-              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
-              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
-              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
-              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
-              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
-              that is the chat window's own piece of work, not this flag's.",
-    },
-    Known {
-        frame: "ChatFrame3",
-        flag: Flag::Mouse,
-        why: "our chat window takes the mouse and the reference's does not. It was believed a \
-              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
-              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
-              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
-              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
-              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
-              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
-              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
-              that is the chat window's own piece of work, not this flag's.",
-    },
-    Known {
-        frame: "ChatFrame4",
-        flag: Flag::Mouse,
-        why: "our chat window takes the mouse and the reference's does not. It was believed a \
-              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
-              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
-              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
-              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
-              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
-              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
-              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
-              that is the chat window's own piece of work, not this flag's.",
-    },
-    Known {
-        frame: "ChatFrame5",
-        flag: Flag::Mouse,
-        why: "our chat window takes the mouse and the reference's does not. It was believed a \
-              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
-              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
-              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
-              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
-              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
-              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
-              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
-              that is the chat window's own piece of work, not this flag's.",
-    },
-    Known {
-        frame: "ChatFrame6",
-        flag: Flag::Mouse,
-        why: "our chat window takes the mouse and the reference's does not. It was believed a \
-              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
-              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
-              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
-              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
-              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
-              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
-              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
-              that is the chat window's own piece of work, not this flag's.",
-    },
-    Known {
-        frame: "ChatFrame7",
-        flag: Flag::Mouse,
-        why: "our chat window takes the mouse and the reference's does not. It was believed a \
-              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
-              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
-              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
-              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
-              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
-              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
-              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
-              that is the chat window's own piece of work, not this flag's.",
-    },
     // The two `TargetofTarget*Bar` entries RETIRED here (the unit-frame migration), for the same
     // reason their twin the pet page's XP bar went: they said our bars were plain StatusBars where
     // the reference inherits `TextStatusBar` — true of our transcription, and no longer true of
     // anything. `TargetFrame.xml` is the reference's own now and its ToT bars inherit
     // `TextStatusBar` like every other unit bar. The gate found them itself, which is its job.
-    Known {
-        frame: "TradePlayerItem7",
-        flag: Flag::Mouse,
-        why:
-            "the enchant slot: ours inherits BenillaTradeEnchantItemTemplate, the reference's the \
-              ordinary PlayerTradeItemTemplate. A structural difference in our own trade window.",
-    },
-    Known {
-        frame: "WhoFrameDropDown",
-        flag: Flag::Mouse,
-        why: "the reference's /who sort dropdown carries its own handlers over the shared \
-              UIDropDownMenuTemplate; ours takes the template alone.",
-    },
-    Known {
-        frame: "WorldStateAlwaysUpFrame",
-        flag: Flag::Mouse,
-        why:
-            "the reference's PvP objective banner has OnEnter/OnLeave for its tooltip. Wants that \
-              handler, not the flag.",
-    },
     // ── We take the mouse where the reference does not ─────────────────────────────────────────
     //
     // The merchant rows' divergence RETIRED (1751): our `MerchantFrame.xml` is gone and the
@@ -303,12 +193,9 @@ const KNOWN: &[Known] = &[
     // entries here — twelve `MerchantItem<N>` plus `MerchantBuyBackItem` — saying ours took the
     // mouse on the row itself where the reference splits each row into an inert container plus a
     // `$parentItemButton`. That is exactly what this gate exists to notice going away.
-    Known {
-        frame: "WorldMapFrame",
-        flag: Flag::Mouse,
-        why: "our map body takes the mouse so a click on it cannot reach the world behind a \
-              FULLSCREEN_DIALOG window; the reference relies on WorldMapButton alone",
-    },
+    // The `WorldMapFrame` mouse entry RETIRED (1980): it said our map body took the mouse where
+    // the reference relies on `WorldMapButton` alone — true of our transcription, and the map is
+    // the reference's own file now.
     // ── The faux scroll panes: a different WIDGET KIND, not a missing flag ─────────────────────
     //
     // The reference declares each of these `<ScrollFrame …inherits="FauxScrollFrameTemplate">` and
@@ -336,24 +223,13 @@ const KNOWN: &[Known] = &[
     // frame it was built to report (1751 §5: the drift instruments retire with the copies).
     // ── parent ─────────────────────────────────────────────────────────────────────────────────
     //
-    // Three, and each is a seat inside the SAME tree the reference seats it in — which is the
-    // question this flag exists to ask (decision 1757). A frame whose seat crosses the boundary
-    // between UIParent's tree and the top level is a defect, because `SetFullScreenFrame` hides
-    // `UIParent` and everything below it; a frame seated one rung along inside that tree is not.
-    Known {
-        frame: "SendMailBodyEditBox",
-        flag: Flag::Parent,
-        why: "the reference interposes SendMailScrollChildFrame between the pane and its content; \
-              our mail panes are the render approximation MailFrame.xml names at the site (flat \
-              art, no live scrollbar), so the body hangs off SendMailScrollFrame directly. Wants \
-              the real scroll child, not a re-seat.",
-    },
-    Known {
-        frame: "OpenMailInvoiceFrame",
-        flag: Flag::Parent,
-        why: "as SendMailBodyEditBox — OpenMailScrollChildFrame is the scroll child we do not \
-              build",
-    },
+    // Empty since 1970. The rows that lived here were seats inside the SAME tree the reference
+    // seats them in — the question this flag exists to ask (decision 1757): a frame whose seat
+    // crosses the boundary between UIParent's tree and the top level is a defect, because
+    // `SetFullScreenFrame` hides `UIParent` and everything below it; a frame seated one rung
+    // along inside that tree is not. The last two were our mail transcription's flat body panes,
+    // which hung their content off the scroll frame with no scroll child between; the mail
+    // window is the reference's own now, scroll children and all.
 ];
 
 /// The extracted reference FrameXML directory, or `None` when the install isn't there.
@@ -694,7 +570,15 @@ fn the_shipped_frames_carry_the_references_flags() {
     }
 
     assert!(
-        compared > 400,
+        // 1948 retired our ChatFrame.xml, 1952 our SpellBookFrame.xml, 1953 our PetActionBar.xml,
+        // 1956 our SkillFrame.xml, 1958 our UnitPopup.xml and 1959 our FriendsFrame.xml (their
+        // frames are the reference's own now), which took the paired count from the low 400s to
+        // the high 150s; 1966 (TradeFrame), 1968 (GameTooltip), 1969 (DressUpFrame) and 1970
+        // (MailFrame) to the high 80s, and 1980 (WorldMapFrame, whose 50-odd blip frames were
+        // most of what was left) to the high teens, and 1987 (the micro row) to nine. The floor
+        // guards the pairing, not the census — it comes down with every window that migrates,
+        // and reaches zero with the last file of ours that declares a reference-named frame.
+        compared > 5,
         "only {compared} frames compared — the pairing broke, and the sweep guards nothing"
     );
     assert!(

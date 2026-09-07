@@ -299,6 +299,19 @@ impl super::UiScript {
     }
 
     /// Drain the ids the renderer asked for that the store didn't have.
+    /// Ask the app for the templates of `ids` the store does not hold yet — the trade-skill and
+    /// craft feeds' pre-ask (1973): the client has every product's and reagent's template cached
+    /// by the time its list shows, and the link verbs never query, so the feeds ask on the app's
+    /// behalf when the list lands and the verbs read the answers.
+    pub fn ask_item_templates(&mut self, ids: impl IntoIterator<Item = u32>) {
+        let mut model = self.model_mut();
+        for id in ids {
+            if id != 0 && !model.item_templates.contains_key(&id) {
+                model.item_stat_asks.insert(id);
+            }
+        }
+    }
+
     pub fn take_item_stat_asks(&mut self) -> Vec<u32> {
         self.model_mut().item_stat_asks.drain().collect()
     }
@@ -350,6 +363,19 @@ const QUALITY_COLORS: [(u8, u8, u8, &str); 7] = [
     (0xff, 0x80, 0x00, "|cffff8000"), // 5 Legendary
     (0xe6, 0xcc, 0x80, "|cffe6cc80"), // 6 Artifact
 ];
+
+/// The client's item-link builder `0x52adb0` as the trade-skill and craft link verbs call it
+/// (wow-re `tradeskill/scratch/tradeskill-craft-item-links.md`, 1973): `|c<rrggbb>|Hitem:<id>:0:0:0|h[<name>]|h|r`
+/// — the three tokens literal zeros at those call sites, the colour from `0x52ad90`'s table where
+/// `cmp ecx,7; jb` is UNSIGNED, so a quality of 7 or more, or a negative one, selects index 1
+/// (white): a fixed fallback, not a clamp. The `""`-suffix arm is dead, so every link ends `|h|r`.
+pub(super) fn item_link(item_id: u32, name: &str, quality: u32) -> String {
+    let hex = QUALITY_COLORS
+        .get(quality as usize)
+        .unwrap_or(&QUALITY_COLORS[1])
+        .3;
+    format!("{hex}|Hitem:{item_id}:0:0:0|h[{name}]|h|r")
+}
 
 /// `InventoryType` → the `INVTYPE_*` token `GetItemInfo` returns as `itemEquipLoc`.
 ///

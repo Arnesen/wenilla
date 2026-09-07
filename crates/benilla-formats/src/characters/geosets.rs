@@ -30,24 +30,40 @@ pub struct CharacterGeosets {
     helmet_vis: HashMap<u32, [u32; 5]>,
 }
 
-/// The worn geoset selectors the RF-0038 equipment branches read (decision 0074): per bodyslot 2–9
-/// (shirt, chest, belt, pants, boots, wrist, gloves, tabard) the item's `geosetGroup[0..2]` (`None`
-/// = the slot is empty), plus the cloak's `geosetGroup[0]`, plus the worn helm's
-/// `HelmetGeosetVisData` row pair (`[male, female]` — ItemDisplayInfo cols 12/13). Default = naked.
+/// The worn geoset selectors the RF-0038 equipment branches read (decisions 0074, 1864): per
+/// bodyslot 2–9 (shirt, chest, belt, pants, boots, wrist, gloves, tabard) the item's
+/// `geosetGroup[0..2]` (`None` = the slot is empty), plus the cloak's `geosetGroup[0]`, plus the
+/// worn helm's `HelmetGeosetVisData` row pair (`[male, female]` — ItemDisplayInfo cols 12/13).
+/// Default = naked.
+///
+/// **Two of the eight branches are not fed by an ItemDisplayInfo column at all** and take their own
+/// field here (decision 1864): B3 reads the ArmLower *composite grid*, and B6 reads a client flag.
 #[derive(Default, Clone, Copy)]
 pub struct EquipGeosets {
     pub bodyslots: [Option<[u32; 3]>; 8],
     pub cloak: Option<u32>,
     pub helm_vis: Option<[u32; 2]>,
+    /// B3's gate: does anything **other than the shirt** dress the forearm? — the six dwords
+    /// `cc+0x26c..cc+0x280` (ArmLower cells 1..6). Fill it from
+    /// [`forearm_dressed`](crate::forearm_dressed), which reads the one composite plan.
+    pub forearm_dressed: bool,
+    /// B6's gate: `[cc+0xc]`, "the guild registrar's tabard designer is open on this character"
+    /// (wow-re RF-0089 §7c). Set while that window is up so the body wears a previewable tabard
+    /// with an **empty** tabard slot; nothing else in the client ever sets it.
+    pub tabard_preview: bool,
 }
 
 impl CharacterGeosets {
     /// The geoset IDs a character of this appearance renders — RF-0038's opening block (the naked
-    /// set) plus the equipment branches B1–B8 (decision 0074 — implemented from the transcription's
-    /// *arithmetic*; its prose labels are known-mislabeled). A body submesh whose `skinSectionId` is
-    /// in this set is drawn; all others hidden. A branch's gate is its `geosetGroup` field being
-    /// non-zero ("section present"); the recorded disables are the ranges shown — the boot/kneepad
-    /// enables deliberately leave their naked defaults on, as the client does.
+    /// set) plus **all eight** equipment branches B1–B8 of `0x477520` (decisions 0074, 1864 —
+    /// implemented from the transcription's *arithmetic*; its prose labels were mislabels wow-re
+    /// corrected in RF-0088/RF-0089, and the branch comments below name each one at its address).
+    /// A body submesh whose `skinSectionId` is in this set is drawn; all others hidden. Most
+    /// branches gate on an ItemDisplayInfo `geosetGroup` field being non-zero ("section present");
+    /// B3 and B6 do not, and read [`EquipGeosets::forearm_dressed`] / [`EquipGeosets::tabard_preview`].
+    ///
+    /// Returned **sorted and deduplicated**: the client toggles a per-submesh flag, where several
+    /// branches re-enable a base the opening loop already set, so a list needs normalising once.
     pub fn visible_geosets(
         &self,
         race: u8,
@@ -97,24 +113,31 @@ impl CharacterGeosets {
                 .filter(|v| *v != 0)
         };
         let disable = |set: &mut Vec<u16>, lo: u16, hi: u16| set.retain(|id| *id < lo || *id > hi);
-        // The robe bit: chest or pants geosetGroup[2] (B4's guard) — it also suppresses the tabard
-        // and pant-leg branches below.
+        // The robe bit: chest or pants geosetGroup[2] (B4's guard) — it also suppresses B5's tabard
+        // flap and B6's preview. B7 is NOT gated on it: that branch reads the chest's bit alone.
         let robe = g(1, 2).or_else(|| g(3, 2));
-        // B1: gloves replace the glove group (401+v, own range disabled); else the chest's sleeves.
+        // B1/B2 (`0x477564`): gloves replace the glove group (401+v, own range disabled); else the
+        // chest's sleeves (the `else` arm wow-re numbers B2).
         if let Some(v) = g(6, 0) {
             disable(&mut set, 401, 499);
             set.push(401 + v as u16);
         } else if let Some(v) = g(1, 0) {
             set.push(801 + v as u16);
         }
-        // B3: shirt sleeves, only with no chest item over them.
-        if equip.bodyslots[1].is_none() {
+        // B3 (`0x4775bd`): the shirt's sleeve cuff — only when nothing ELSE dresses the forearm.
+        // The reference's gate is the ArmLower equip row's cells 1..6, not "is a chest equipped":
+        // most chest pieces leave that tile empty and the cuff survives them, while a bracer or a
+        // glove takes it and the cuff goes (decision 1864; [`EquipGeosets::forearm_dressed`]).
+        if !equip.forearm_dressed {
             if let Some(v) = g(0, 0) {
                 set.push(801 + v as u16);
             }
         }
-        // B4: a robe hides boots/kneepads/pant-legs/trousers and shows its skirt (1301+v); else
-        // boots enable kneepad base + their boot geoset; else the pants' kneepads.
+        // B4 (`0x4775fb`): a robe hides boots/kneepads/pant-legs/trousers and shows its skirt
+        // (1301+v); else the boots replace the boot group; else the pants' kneepads. The bare `901`
+        // enables are the reference's own (`0x477648`, `0x477685`) and are no-ops here — the 16-base
+        // loop already carries 901 and nothing on this path disables group 9 — kept so the sequence
+        // stays the reference's rather than resting on that invariant.
         if let Some(v) = robe {
             disable(&mut set, 501, 599);
             disable(&mut set, 902, 999);
@@ -122,30 +145,60 @@ impl CharacterGeosets {
             disable(&mut set, 1300, 1399);
             set.push(1301 + v as u16);
         } else if let Some(v) = g(4, 0) {
-            set.push(501 + v as u16); // the naked 501 stays on, as recorded
+            // `0x477639` disables the WHOLE boot group before enabling the boot's own geoset — the
+            // naked foot comes off with the boot on. 501 is a real submesh on 11 of the 18 character
+            // models (64 vertices on Human male), so leaving it on — as benilla did until decision
+            // 1864, on a misread of this same note — put a bare ankle inside every boot.
+            disable(&mut set, 501, 599);
+            set.push(901);
+            set.push(501 + v as u16);
         } else if let Some(v) = g(3, 1) {
             set.push(901 + v as u16);
+        } else {
+            set.push(901);
         }
-        // B5: the tabard flap (robes hide it).
+        // B5 (`0x477706`): the tabard flap (robes hide it).
         if robe.is_none() {
             if let Some(v) = g(7, 0) {
                 set.push(1201 + v as u16);
             }
         }
-        // B7: the shirt's doublet + the pants' leg geoset (the recorded 1102 base — not 1101).
-        if let Some(v) = g(0, 1) {
-            set.push(1001 + v as u16);
+        // B6 (`0x477752`): the tabard-designer preview. **No ItemDisplayInfo column feeds this
+        // branch** — its gate is the flag `[cc+0xc]`, set only while the guild registrar's tabard
+        // designer is open (wow-re RF-0089 §7c; the branch's old "helm-skirt" label was a mislabel,
+        // and no shipped head display carries a geoset group at all). It forces the tabard group on
+        // with an EMPTY tabard slot: 1201, plus 1202 when neither the chest nor the legs carries the
+        // robe bit. On shipped character models 1201 has no submesh (it is the group's "no tabard"
+        // base) and 1202 is the flap — so the observable effect is exactly "wear the tabard so the
+        // design can be previewed" (decision 1864).
+        if equip.tabard_preview {
+            set.push(1201); // already on from the opening loop; the reference enables it anyway
+            if robe.is_none() {
+                set.push(1202);
+            }
         }
-        if robe.is_none() {
+        // B7 (`0x477799`): the shirt's doublet + the pants' leg geoset (the recorded 1102 base — not
+        // 1101). Skipped ENTIRELY when the CHEST is a robe (`0x4777a4` — the legs' own robe bit does
+        // NOT gate here, unlike B4/B5/B6) or when a TABARD is worn (`0x4777b8`, bodyslot 9 sub 0;
+        // RF-0088 corrected this guard from "glove" to "tabard"). Decision 1864.
+        if g(1, 2).is_none() && g(7, 0).is_none() {
+            if let Some(v) = g(0, 1) {
+                set.push(1001 + v as u16);
+            }
             if let Some(v) = g(3, 0) {
                 set.push(1102 + v as u16);
             }
         }
-        // B8: a cloak replaces the cloak group (1501+v, range disabled).
+        // B8 (`0x47780a`): a cloak replaces the cloak group (1501+v, range disabled).
         if let Some(v) = equip.cloak.filter(|v| *v != 0) {
             disable(&mut set, 1500, 1599);
             set.push(1501 + v as u16);
         }
+        // The client's `0x7110d0` writes a flag per submesh, so enabling an already-enabled geoset
+        // is idempotent there; ours is a list, and several branches re-enable a base the opening
+        // loop already added. Normalise once at the end so the result is a canonical set.
+        set.sort_unstable();
+        set.dedup();
         set
     }
 
@@ -290,9 +343,8 @@ pub(crate) fn char_facial_hair_schema() -> Schema {
 mod tests {
     use super::*;
 
-    /// The equipment geoset branches (decision 0074, from the RF-0038 arithmetic): gloves/robe/cloak
-    /// replace their groups, boots stack over the naked default, and a robe suppresses the tabard +
-    /// pant-leg branches.
+    /// The equipment geoset branches (decisions 0074/1864, from the RF-0038 arithmetic):
+    /// gloves/boots/robe/cloak **replace** their groups, and a robe suppresses the tabard branch.
     #[test]
     fn equipment_geoset_branches() {
         let cg = CharacterGeosets {
@@ -309,11 +361,12 @@ mod tests {
         let set = cg.visible_geosets(1, 0, 0, 0, &eq);
         assert!(set.contains(&402) && !set.contains(&401));
 
-        // Boots v=2: 503 stacks; the naked 501 deliberately stays (the recorded no-disable).
+        // Boots v=2: the boot group is replaced — 503 in, the naked foot 501 OUT (`0x477639`
+        // disables [501,599] first). benilla stacked them until decision 1864.
         let mut eq = EquipGeosets::default();
         eq.bodyslots[4] = Some([2, 0, 0]);
         let set = cg.visible_geosets(1, 0, 0, 0, &eq);
-        assert!(set.contains(&503) && set.contains(&501));
+        assert!(set.contains(&503) && !set.contains(&501));
 
         // A robe (chest group[2]=1) shows its skirt (1302) and hides boots/pant-legs/trousers —
         // including a worn tabard's flap and the pants' own branches.
@@ -339,6 +392,135 @@ mod tests {
         };
         let set = cg.visible_geosets(1, 0, 0, 0, &eq);
         assert!(set.contains(&1505) && !set.contains(&1501));
+    }
+
+    /// **B3's real gate** (`0x4775bd`, decision 1864): the shirt's sleeve cuff survives or dies by
+    /// what dresses the *forearm tile*, not by whether a chest is equipped. Both directions matter —
+    /// 533 of the 637 shipped chest displays leave `ArmLowerTexture` empty, and 566 of 570 wrist
+    /// displays fill it — and benilla had both backwards until this record.
+    #[test]
+    fn b3_shirt_sleeve_follows_the_forearm_tile_not_the_chest_slot() {
+        let cg = CharacterGeosets {
+            hair: HashMap::new(),
+            facial: HashMap::new(),
+            helmet_vis: HashMap::new(),
+        };
+        let shirt = |dressed: bool| EquipGeosets {
+            bodyslots: [Some([1, 0, 0]), None, None, None, None, None, None, None],
+            forearm_dressed: dressed,
+            ..Default::default()
+        };
+        assert!(
+            cg.visible_geosets(1, 0, 0, 0, &shirt(false)).contains(&802),
+            "bare forearm: the shirt's cuff shows"
+        );
+        assert!(
+            !cg.visible_geosets(1, 0, 0, 0, &shirt(true)).contains(&802),
+            "something else paints the forearm: the cuff goes"
+        );
+        // And a chest in the slot is NOT the gate: a chest whose ArmLower art is empty leaves the
+        // tile free, and the cuff stays. (The chest's own sleeve geoset is B1's `else`, group 8 too,
+        // so give this one none.)
+        let mut eq = shirt(false);
+        eq.bodyslots[1] = Some([0, 0, 0]);
+        assert!(
+            cg.visible_geosets(1, 0, 0, 0, &eq).contains(&802),
+            "an equipped chest alone does not hide the shirt's cuff"
+        );
+    }
+
+    /// **B6 — the tabard-designer preview** (`0x477752`, wow-re RF-0089 §7c; decision 1864). The one
+    /// branch of the eight with no ItemDisplayInfo column behind it: its gate is `[cc+0xc]`, "the
+    /// guild registrar's tabard designer is open", and it wears the tabard flap (1202) with an
+    /// **empty** tabard slot — unless a robe is on, which suppresses it exactly as it suppresses B5.
+    #[test]
+    fn b6_tabard_preview_wears_the_flap_with_an_empty_slot() {
+        let cg = CharacterGeosets {
+            hair: HashMap::new(),
+            facial: HashMap::new(),
+            helmet_vis: HashMap::new(),
+        };
+        // Off: an empty tabard slot shows no flap.
+        let set = cg.visible_geosets(1, 0, 0, 0, &EquipGeosets::default());
+        assert!(!set.contains(&1202), "no tabard, no designer: no flap");
+        // On: the flap appears with nothing in the slot.
+        let preview = EquipGeosets {
+            tabard_preview: true,
+            ..Default::default()
+        };
+        let set = cg.visible_geosets(1, 0, 0, 0, &preview);
+        assert!(set.contains(&1202), "the designer forces the flap on");
+        assert!(set.contains(&1201), "and the group base with it");
+        // A robe suppresses it, from either the chest's or the legs' robe bit.
+        for slot in [1usize, 3] {
+            let mut eq = preview;
+            eq.bodyslots[slot] = Some([0, 0, 1]);
+            assert!(
+                !cg.visible_geosets(1, 0, 0, 0, &eq).contains(&1202),
+                "a robe (slot {slot}) hides the previewed flap"
+            );
+        }
+    }
+
+    /// **B7's two guards** (`0x4777a4` / `0x4777b8`, decision 1864): the shirt-doublet + pant-leg arm
+    /// is skipped whole when the CHEST is a robe or when a TABARD is worn — and, unlike B4/B5/B6,
+    /// the *legs'* own robe bit does not gate it.
+    #[test]
+    fn b7_is_gated_by_the_chest_robe_and_the_tabard() {
+        let cg = CharacterGeosets {
+            hair: HashMap::new(),
+            facial: HashMap::new(),
+            helmet_vis: HashMap::new(),
+        };
+        // Shirt doublet g1=1 → 1002; pants g0=1 → 1103.
+        let base = EquipGeosets {
+            bodyslots: [
+                Some([0, 1, 0]),
+                None,
+                None,
+                Some([1, 0, 0]),
+                None,
+                None,
+                None,
+                None,
+            ],
+            ..Default::default()
+        };
+        let set = cg.visible_geosets(1, 0, 0, 0, &base);
+        assert!(
+            set.contains(&1002) && set.contains(&1103),
+            "ungated: both on"
+        );
+
+        // A worn tabard skips the whole branch (RF-0088 corrected this guard from "glove").
+        let mut eq = base;
+        eq.bodyslots[7] = Some([1, 0, 0]);
+        let set = cg.visible_geosets(1, 0, 0, 0, &eq);
+        assert!(set.contains(&1202), "the tabard's own flap is on");
+        assert!(
+            !set.contains(&1002) && !set.contains(&1103),
+            "a tabard skips B7 whole"
+        );
+
+        // A chest robe skips it too — and takes the doublet with it, which the pre-1864 code left on.
+        let mut eq = base;
+        eq.bodyslots[1] = Some([0, 0, 1]);
+        let set = cg.visible_geosets(1, 0, 0, 0, &eq);
+        assert!(
+            !set.contains(&1002) && !set.contains(&1103),
+            "a chest robe skips B7 whole"
+        );
+
+        // The LEGS' robe bit does not: B4-long still hides the pant-leg group, but the doublet —
+        // enabled after that disable — stays on. This is the asymmetry the old `robe` shortcut lost.
+        let mut eq = base;
+        eq.bodyslots[3] = Some([1, 0, 1]);
+        let set = cg.visible_geosets(1, 0, 0, 0, &eq);
+        assert!(set.contains(&1002), "leg robes do not gate B7");
+        assert!(
+            set.contains(&1103),
+            "and B7 re-enables the pant leg after B4-long"
+        );
     }
 
     /// The helm-vis force (VERIFIED wow-re RF-0083): each vis column is a **race** bitmask; a set

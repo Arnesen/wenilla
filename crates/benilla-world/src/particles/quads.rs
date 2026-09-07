@@ -70,6 +70,14 @@ pub(super) struct DrawFrame {
     /// The owning MODEL's render alpha, folded into every particle's alpha channel — the
     /// reference's `emitter+0x1a8` (decision 0827). 1.0 for a model that isn't fading.
     pub(crate) alpha: f32,
+    /// The lane's **size unit** — what one model unit of a particle's half-extent is in this
+    /// cloud's stored frame. `1.0` everywhere in the world (a yard is a yard). A UI model tile
+    /// (decision 2008) stores its particles in device pixels, and the reference maps a
+    /// widget's particle half-extent through the screen — `768·√(a²+1)` FrameXML units per
+    /// unit, the instance scale NOT included (wow-re `modelframe-clip-and-scale.md` §6) — so
+    /// the tile sets this to that many pixels per unit; an emitter flagged to scale with its
+    /// instance already reads the instance through `placement.scale` and takes 1.0 here.
+    pub(crate) size_scale: f32,
 }
 
 /// One particle's world-space quad centre — THE point [`expand_quads`] rasterizes around, factored
@@ -99,13 +107,18 @@ pub(super) fn draw_gated(def: &ParticleEmitterDef, p: &Particle) -> bool {
 /// One particle's rendered half-extent — mirrors the `half` term inside [`expand_quads`] (over-life
 /// size × gated twinkle × instance scale), which computes it inline because it needs the noise and
 /// over-life samples for other attributes too. **If that expression changes, change this.**
-pub(super) fn particle_half(def: &ParticleEmitterDef, placement: &Transform, p: &Particle) -> f32 {
+pub(super) fn particle_half(
+    def: &ParticleEmitterDef,
+    placement: &Transform,
+    p: &Particle,
+    size_scale: f32,
+) -> f32 {
     let noise = twinkle_noise(def.twinkle_speed, p.age, p.phase);
     let u_age = (p.age / p.life).clamp(0.0, 1.0);
     let scale = if def.scale_size_by_instance() {
         placement.scale.x.max(1e-4)
     } else {
-        1.0
+        size_scale
     };
     def.over_life.sample(u_age).size * def.twinkle(noise) * scale
 }
@@ -124,11 +137,13 @@ pub(super) fn expand_quads(
     let anchored = frame.anchored;
     let (cam_right, cam_up) = (cam.right, cam.up);
     // Size scales with the instance transform only when the emitter flags it (0x200) — an
-    // instance-scaled prop otherwise scales its particle *positions* only (wow-re B2).
+    // instance-scaled prop otherwise scales its particle *positions* only (wow-re B2). The
+    // unflagged size is in the lane's size unit ([`DrawFrame::size_scale`] — a yard, or a UI
+    // tile's pixels per model unit).
     let scale = if def.scale_size_by_instance() {
         placement.scale.x.max(1e-4)
     } else {
-        1.0
+        frame.size_scale
     };
     // The XY-quad head basis (file flag 0x1000, wow-re `part-tiled-corner-builder.md`,
     // VERIFIED): the quad lies flat in the emitter's model-space XY plane carried by the
@@ -349,6 +364,7 @@ mod tests {
                 anchored: true,
                 ride: crate::ride_frame::StoredFrame::default(),
                 alpha,
+                size_scale: 1.0,
             };
             let mut out = Vec::new();
             expand_quads(&def, &pool, &frame, &Transform::IDENTITY, &cam, &mut out);

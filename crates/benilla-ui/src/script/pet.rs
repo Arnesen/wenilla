@@ -25,6 +25,24 @@ use mlua::{Lua, MultiValue, Value};
 
 use super::Model;
 
+// The slot-word bytes the one-shot orders synthesize — the same values
+// `benilla_protocol::messages::pet` names for the wire (the engine stays protocol-free, 0068 §3,
+// so they are restated here rather than imported): the type byte, then the command / reaction.
+const PET_ACT_COMMAND: u8 = 0x07;
+const PET_ACT_REACTION: u8 = 0x06;
+const PET_COMMAND_STAY: u32 = 0;
+const PET_COMMAND_FOLLOW: u32 = 1;
+const PET_COMMAND_ATTACK: u32 = 2;
+const PET_REACT_PASSIVE: u32 = 0;
+const PET_REACT_DEFENSIVE: u32 = 1;
+const PET_REACT_AGGRESSIVE: u32 = 2;
+
+/// A synthesized slot word: the type byte in the top byte, the action in the low bits — the
+/// server's own packing (`PetActionEntry`).
+const fn order(kind: u8, action: u32) -> u32 {
+    (kind as u32) << 24 | action
+}
+
 /// One pet bar slot, fully resolved by the app before pushing.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PetActionView {
@@ -263,6 +281,16 @@ impl super::UiScript {
     /// Drain the `PetStopAttack()` calls queued (a count — the verb carries no argument).
     pub fn take_pet_stop_attacks(&mut self) -> u32 {
         std::mem::replace(&mut self.model_mut().pet_stop_attacks, 0)
+    }
+
+    /// Drain the pet one-shot orders (`PetAttack` & co.), each a packed slot word (1958).
+    pub fn take_pet_orders(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.model_mut().pet_orders)
+    }
+
+    /// `HasFullControl`'s flag, from the host's control edge (`ui_unit::feed_player_control`).
+    pub fn set_player_control(&mut self, in_control: bool) {
+        self.model_mut().player_control = in_control;
     }
 
     /// Drain the pet bar writes the drag queued (decision 1010) — **one `Vec` per
@@ -567,6 +595,41 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // PetStopAttack() — queue the call-off. No argument: the wire carries only the pet's guid.
+    // The six one-shot orders (`0x4be450`…`0x4be4a0`, wow-re `pet-action-bar-api.md` §10.9,
+    // carved 2026-09-03): each writes the literal slot word the bar's own reaction or command
+    // slot carries — `0x06000000`/1/2 PASSIVE/DEFENSIVE/AGGRESSIVE, `0x07000000`/1/2
+    // WAIT/FOLLOW/ATTACK — and re-enters `0x4bd1d0`, the identical call a `CastPetAction` press
+    // makes, PetAttack with the current selection's guid as a bar ATTACK click would. No
+    // arguments, no returns; the no-pet gate is silent, so a session without a pet bar has
+    // nothing to order and drops it, as the bar's own press would (1958; §10.9 confirmed the
+    // reading, including that a target-less PetAttack raises the bar press's own `ERR_ATTACK_*`
+    // after its auto-acquire — that leg is the drain's, shared with the press).
+    for (name, packed) in [
+        ("PetPassiveMode", order(PET_ACT_REACTION, PET_REACT_PASSIVE)),
+        (
+            "PetDefensiveMode",
+            order(PET_ACT_REACTION, PET_REACT_DEFENSIVE),
+        ),
+        (
+            "PetAggressiveMode",
+            order(PET_ACT_REACTION, PET_REACT_AGGRESSIVE),
+        ),
+        ("PetWait", order(PET_ACT_COMMAND, PET_COMMAND_STAY)),
+        ("PetFollow", order(PET_ACT_COMMAND, PET_COMMAND_FOLLOW)),
+        ("PetAttack", order(PET_ACT_COMMAND, PET_COMMAND_ATTACK)),
+    ] {
+        g.set(
+            name,
+            lua.create_function(move |lua, ()| {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                if model.pet_bar.has_bar {
+                    model.pet_orders.push(packed);
+                }
+                Ok(())
+            })?,
+        )?;
+    }
+
     g.set(
         "PetStopAttack",
         lua.create_function(|lua, ()| {
@@ -899,6 +962,48 @@ mod tests {
     /// as a predicate and as the texture it passes to `SetItemButtonTexture`, so an empty string
     /// standing in for the nil would draw a white square rather than the empty-slot art
     /// (decision 1046's law, decision 1676's consumer).
+    /// The six one-shot orders synthesize the bar's own slot words (1958): the three reactions
+    /// as type 6 with the react byte, the three commands as type 7 with the command byte — the
+    /// same words `CastPetAction` on those slots would send. Without a bar there is nothing to
+    /// order, and none is queued.
+    #[test]
+    fn the_pet_one_shots_synthesize_the_bars_slot_words() {
+        let mut s = UiScript::new().unwrap();
+        s.run("PetAttack(); PetFollow(); PetWait(); PetPassiveMode()")
+            .unwrap();
+        assert!(s.take_pet_orders().is_empty(), "no bar, no order");
+        s.set_pet_actions(true, true, true, slots());
+        s.run(
+            "PetPassiveMode(); PetDefensiveMode(); PetAggressiveMode(); PetWait(); PetFollow(); \
+             PetAttack()",
+        )
+        .unwrap();
+        assert_eq!(
+            s.take_pet_orders(),
+            vec![
+                0x0600_0000,
+                0x0600_0001,
+                0x0600_0002,
+                0x0700_0000,
+                0x0700_0001,
+                0x0700_0002
+            ]
+        );
+        assert!(s.take_pet_orders().is_empty(), "drained");
+    }
+
+    /// `HasFullControl()` is the host's control flag — 1 at boot, nil while a possession or fear
+    /// holds the body, 1 again after (1958).
+    #[test]
+    fn has_full_control_follows_the_hosts_flag() {
+        let mut s = UiScript::new().unwrap();
+        assert_eq!(s.eval::<i64>("return HasFullControl()").unwrap(), 1);
+        s.set_player_control(false);
+        assert!(s.eval::<bool>("return HasFullControl() == nil").unwrap());
+        s.set_player_control(true);
+        assert_eq!(s.eval::<i64>("return HasFullControl()").unwrap(), 1);
+    }
+
     #[test]
     fn the_pet_icon_answers_a_path_or_a_real_nil() {
         let mut s = UiScript::new().unwrap();

@@ -588,3 +588,34 @@ fn a_title_region_drag_swallows_the_press_and_ends_on_release() {
     // that tells it apart from `StartMoving`, which raises "Frame %s is not movable".
     assert!(!s.eval::<bool>("return TP:IsMovable()").unwrap());
 }
+
+/// A region's rect getters answer in its OWNER's units — screen ÷ the owner's effective scale —
+/// exactly as the frame getters do (decision 1985): a texture inside a frame scaled to 0.5 that
+/// covers the frame answers the frame's own width, not half of it.
+#[test]
+fn region_getters_answer_in_the_owners_units_under_scale() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run(
+        r#"f = CreateFrame("Frame", "ScaledOwner") f:SetWidth(200) f:SetHeight(100)
+           f:SetPoint("BOTTOMLEFT", 100, 50) f:SetScale(0.5)
+           t = f:CreateTexture("ScaledTex") t:SetAllPoints(f)"#,
+    )
+    .unwrap();
+    s.resolve();
+    let (fl, fr, tl, tr, cx) = s
+        .eval::<(f64, f64, f64, f64, f64)>(
+            "local cx = t:GetCenter() return f:GetLeft(), f:GetRight(), t:GetLeft(), t:GetRight(), cx",
+        )
+        .unwrap();
+    assert!(
+        (fl - tl).abs() < 1e-3 && (fr - tr).abs() < 1e-3,
+        "frame {fl}..{fr} vs region {tl}..{tr}"
+    );
+    assert!(
+        (fr - fl - 200.0).abs() < 1e-3,
+        "the owner's own width, {}",
+        fr - fl
+    );
+    assert!((cx - (fl + fr) * 0.5).abs() < 1e-3);
+}

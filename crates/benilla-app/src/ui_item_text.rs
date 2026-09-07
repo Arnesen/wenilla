@@ -207,6 +207,33 @@ struct Readable {
     page_head: u32,
 }
 
+/// The material a quest sourced from `guid` paints on — `GetQuestBackgroundMaterial 0x502230`,
+/// whose body is `ItemTextGetMaterial`'s: the source object by guid, an item's template
+/// `PageMaterial` or a GameObject's template data by type, the id named through
+/// `PageTextMaterial.dbc`; a creature, an uncached template or an id with no row is `None`, which
+/// is FrameXML's "Parchment". A GameObject whose template is not cached yet is asked for.
+pub(crate) fn object_material(
+    guid: u64,
+    items: &mut Items,
+    go_templates: &mut GameObjectTemplates,
+    materials: Option<&PageMaterials>,
+    commands: &NetCommands,
+) -> Option<String> {
+    let name = |id: u32| materials.and_then(|m| m.0.name(id)).map(str::to_string);
+    if benilla_protocol::guid::is_gameobject(guid) {
+        return match go_templates.get(guid) {
+            Some(go) => go.quest_material.and_then(name),
+            None => {
+                go_templates.request(guid, commands);
+                None
+            }
+        };
+    }
+    let entry = items.object(guid)?.object_entry()?;
+    let t = items.template(entry, guid, commands)?;
+    name(t.page_material)
+}
+
 /// Resolve the object's title + material + page head, whether it is an item or a GameObject. The
 /// reference does exactly this — one guid lookup with typemask 1, then virtual getters — so a
 /// single resolve serves both sources.
@@ -496,5 +523,80 @@ mod tests {
         open.open_pages(0xF110_0000_0000_0001);
         let sess = open.pending.as_ref().expect("open");
         assert!(matches!(&sess.source, ReadSource::Pages { visited } if visited.is_empty()));
+    }
+}
+
+#[cfg(test)]
+mod quest_material_tests {
+    use super::*;
+
+    fn go_guid(entry: u64) -> u64 {
+        (u64::from(benilla_protocol::guid::HIGH_GAMEOBJECT) << 48) | (entry << 24) | 1
+    }
+
+    /// `GetQuestBackgroundMaterial`'s resolve, the reader's twin: a GameObject source answers its
+    /// template data by type through `PageTextMaterial.dbc`; a creature source answers nothing
+    /// (FrameXML's Parchment); an uncached GameObject is asked for and answers nothing meanwhile.
+    #[test]
+    fn a_quest_sourced_from_an_object_paints_the_objects_material() {
+        let mut items = Items::default();
+        let mut gos = GameObjectTemplates::default();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let commands = NetCommands(tx);
+        let catalog = PageMaterials(benilla_formats::PageTextMaterialCatalog::from_rows(&[
+            (1, "Parchment"),
+            (2, "Stone"),
+            (3, "Marble"),
+        ]));
+        let mut data = [0i32; 24];
+        data[2] = 2;
+        data[9] = 3;
+        gos.insert(100, 2, "Wanted Poster".into(), &data);
+        gos.insert(102, 10, "Chest".into(), &data);
+        assert_eq!(
+            object_material(
+                go_guid(100),
+                &mut items,
+                &mut gos,
+                Some(&catalog),
+                &commands
+            )
+            .as_deref(),
+            Some("Stone")
+        );
+        assert_eq!(
+            object_material(
+                go_guid(102),
+                &mut items,
+                &mut gos,
+                Some(&catalog),
+                &commands
+            )
+            .as_deref(),
+            Some("Marble"),
+            "a chest reads data[9]"
+        );
+        // A creature quest-giver: neither template, nothing asked.
+        let creature = (u64::from(benilla_protocol::guid::HIGH_UNIT) << 48) | (6 << 24) | 1;
+        assert_eq!(
+            object_material(creature, &mut items, &mut gos, Some(&catalog), &commands),
+            None
+        );
+        assert!(rx.try_recv().is_err(), "a creature source asks for nothing");
+        // An uncached object: nothing yet, and the template is asked for.
+        assert_eq!(
+            object_material(
+                go_guid(777),
+                &mut items,
+                &mut gos,
+                Some(&catalog),
+                &commands
+            ),
+            None
+        );
+        assert!(
+            rx.try_recv().is_ok(),
+            "an uncached object's template is asked for"
+        );
     }
 }

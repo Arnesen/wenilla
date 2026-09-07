@@ -45,6 +45,7 @@ pub(super) use spline::{
     create_spline, ground_clamp_creatures, mark_swimming_creatures, monster_move_spline,
     sample_splines, trace_create_spline, trace_move_snap,
 };
+pub(crate) use spline::{ground_derived, grounded_y};
 pub(crate) use spline::{CreatureSwimming, GroundClamped, Spline, SplineStopped};
 
 /// The Bevy rotation of a wire **yaw** — a mover's orientation, in radians about WoW +Z. It maps

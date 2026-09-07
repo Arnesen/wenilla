@@ -56,6 +56,22 @@ pub(crate) fn region_bytes() -> u64 {
     (MAX_MAT_ANIM_SLOTS * 16) as u64
 }
 
+/// Off-world `wow_light`-layout buffers that also carry the mat-anim region — registered by key,
+/// the shape of [`crate::instance_tint::InstanceTintMirrors`] and, like it, deliberately its own
+/// list.
+///
+/// A lane whose materials bind a light buffer of their own — the UI model tiles, whose twins
+/// carry the widget's black light — reads `matanim[slot]` out of THAT buffer, so rows it writes
+/// into the table reach it only if the table is uploaded there too (decision 2023: the cooldown
+/// sweep's rotation rows were written every frame into a region only the world's materials ever
+/// sampled, and the tile read the zero-initialised identity). The portrait booths are not on it:
+/// a bake stands in for a world instance whose animated materials keep the world's rows, and the
+/// studio buffers' zeroed region is the seed pose those bakes were built to show.
+#[derive(Resource, Clone, Default, ExtractResource)]
+pub struct MatAnimMirrors(
+    pub std::collections::HashMap<&'static str, bevy::render::render_resource::Buffer>,
+);
+
 /// The live delta table. `Arc`-shared so the render-world extract is a pointer bump, and
 /// generation-stamped so a scene with nothing animated in view uploads nothing at all
 /// ([`crate::instance_tint`]'s pattern, verbatim).
@@ -82,8 +98,8 @@ impl Default for MatAnimTable {
 impl MatAnimTable {
     /// Allocate a slot (1-based; 0 is the identity row). `None` when the table is full — the
     /// caller then simply doesn't register, and the batch stays frozen at its built seed: a
-    /// degraded look only a >511-material session could see, never a wrong pixel.
-    pub(crate) fn alloc(&mut self) -> Option<u16> {
+    /// degraded look only a >2047-material session could see, never a wrong pixel.
+    pub fn alloc(&mut self) -> Option<u16> {
         if let Some(slot) = self.free.pop() {
             return Some(slot);
         }
@@ -96,9 +112,15 @@ impl MatAnimTable {
         }
     }
 
+    /// Read slot `slot`'s row as last written (the identity row for an out-of-range slot) — the
+    /// tile probe's view of what a lane wrote.
+    pub fn row(&self, slot: u16) -> [f32; 4] {
+        self.rows.get(slot as usize).copied().unwrap_or([0.0; 4])
+    }
+
     /// Free a slot when its registry entry dies (the material was unloaded): the row zeroes —
     /// back to identity — so the next allocation can never inherit a dead batch's delta.
-    pub(crate) fn free(&mut self, slot: u16) {
+    pub fn free(&mut self, slot: u16) {
         self.set(slot, [0.0; 4]);
         self.free.push(slot);
     }
@@ -106,7 +128,7 @@ impl MatAnimTable {
     /// Write slot `slot`'s delta row; a same-value write costs nothing (the tick's quantized
     /// samples make equality the common case on slow loops). Slot 0 — the shared identity — is
     /// refused: writing it would scroll every static batch in the world at once.
-    pub(crate) fn set(&mut self, slot: u16, row: [f32; 4]) {
+    pub fn set(&mut self, slot: u16, row: [f32; 4]) {
         let i = slot as usize;
         if i == 0 || i >= MAX_MAT_ANIM_SLOTS || self.rows[i] == row {
             return;
@@ -122,6 +144,15 @@ impl MatAnimTable {
     }
 }
 
+/// The **affine row** (decision 2019): a texture transform's rotation and scale as the deltas
+/// from the identity the shader adds back — `[cos − 1, sin, sx − 1, sy − 1]`, with `cos`/`sin`
+/// the raw quaternion's `1 − 2z²` / `2zw` ([`benilla_formats::rotation_2x2`]). The identity
+/// encodes as the zero row, which is what lets slot 0 serve every material with no transform.
+pub fn affine_row(q: [f32; 4], scale: [f32; 2]) -> [f32; 4] {
+    let (c, s) = benilla_formats::rotation_2x2(q);
+    [c - 1.0, s, scale[0] - 1.0, scale[1] - 1.0]
+}
+
 /// Render world (`PrepareResources`): write the whole 8 KB region when anything changed, gated on
 /// the generation — a scene with no drawn animated material (most of the world) never touches the
 /// queue. Whole-region writes for the same reason `instance_tint` chose them: the table is small
@@ -129,26 +160,33 @@ impl MatAnimTable {
 fn upload_mat_anim(
     queue: Res<RenderQueue>,
     shared: Option<Res<crate::lighting::SharedLightBuffer>>,
+    mirrors: Option<Res<MatAnimMirrors>>,
     table: Option<Res<MatAnimTable>>,
     mut last: Local<Option<u64>>,
 ) {
-    let (Some(shared), Some(table)) = (shared, table) else {
-        return;
-    };
-    if *last == Some(table.generation) {
+    let Some(table) = table else { return };
+    // The generation gate covers the mirror list too (the tint table's rule): a mirror
+    // registered after the last write would otherwise hold the zero region until the next
+    // animated frame. One comparison closes the hole by construction.
+    let mirrors = mirrors
+        .map(|m| m.0.values().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let gate = table.generation ^ ((mirrors.len() as u64) << 40);
+    if *last == Some(gate) {
         return;
     }
-    *last = Some(table.generation);
-    queue.write_buffer(
-        &shared.0,
-        region_offset(),
-        bytemuck::cast_slice(table.rows.as_slice()),
-    );
+    *last = Some(gate);
+    let rows = bytemuck::cast_slice(table.rows.as_slice());
+    for buffer in shared.iter().map(|s| &s.0).chain(mirrors.iter()) {
+        queue.write_buffer(buffer, region_offset(), rows);
+    }
 }
 
 pub fn plugin(app: &mut App) {
     app.init_resource::<MatAnimTable>()
-        .add_plugins(ExtractResourcePlugin::<MatAnimTable>::default());
+        .init_resource::<MatAnimMirrors>()
+        .add_plugins(ExtractResourcePlugin::<MatAnimTable>::default())
+        .add_plugins(ExtractResourcePlugin::<MatAnimMirrors>::default());
     if let Some(render) = app.get_sub_app_mut(RenderApp) {
         render.add_systems(
             Render,
@@ -160,6 +198,22 @@ pub fn plugin(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The affine row's identity is the zero row — the whole reason the encoding is deltas.
+    #[test]
+    fn the_affine_identity_is_the_zero_row() {
+        assert_eq!(affine_row([0.0, 0.0, 0.0, 1.0], [1.0, 1.0]), [0.0; 4]);
+        let r = std::f32::consts::FRAC_1_SQRT_2;
+        let row = affine_row([0.0, 0.0, r, r], [2.0, 0.5]);
+        assert!(
+            (row[0] + 1.0).abs() < 1e-6 && (row[1] - 1.0).abs() < 1e-6,
+            "{row:?}"
+        );
+        assert!(
+            (row[2] - 1.0).abs() < 1e-6 && (row[3] + 0.5).abs() < 1e-6,
+            "{row:?}"
+        );
+    }
 
     /// Slot 0 is the identity row every static material in the world reads — the setter refuses
     /// it, and freeing can never zero it "again" into a generation bump.

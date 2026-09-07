@@ -111,6 +111,8 @@ pub(crate) fn palette_regions_bytes() -> u64 {
 pub struct RigPalettes {
     /// `3 × MAX_PALETTE_BONES` vec4 rows — the CPU mirror (the mouseover picker reads it).
     rows: Arc<Vec<[f32; 4]>>,
+    /// The row buffer retired by the last clone (`rows_make_mut`), reused once unshared.
+    spare: Option<Arc<Vec<[f32; 4]>>>,
     /// Slot → base bone index. Slot 0 is the tag's "no rig" sentinel and never allocated.
     table: Arc<Vec<u32>>,
     /// Slot → the world position this rig's rows are measured from (decision 0974); `w` unused.
@@ -154,6 +156,7 @@ impl Default for RigPalettes {
     fn default() -> Self {
         Self {
             rows: Arc::new(vec![[0.0; 4]; 3 * MAX_PALETTE_BONES]),
+            spare: None,
             table: Arc::new(vec![0; MAX_RIG_SLOTS]),
             origins: Arc::new(vec![[0.0; 4]; MAX_RIG_SLOTS]),
             origin_generation: 0,
@@ -196,6 +199,7 @@ pub fn rig_cost_enabled() -> bool {
 /// invariant (see [`RigPalettes::bone_watermark`]), so the prefix IS the whole content.
 fn rows_make_mut<'a>(
     rows: &'a mut Arc<Vec<[f32; 4]>>,
+    spare: &mut Option<Arc<Vec<[f32; 4]>>>,
     watermark_bones: u32,
     copies: &mut u32,
     copy_us: &mut f32,
@@ -203,19 +207,24 @@ fn rows_make_mut<'a>(
     if Arc::strong_count(rows) > 1 || Arc::weak_count(rows) > 0 {
         let t = bevy::platform::time::Instant::now();
         let live = 3 * watermark_bones as usize;
-        let mut new = vec![[0.0f32; 4]; rows.len()];
+        // The retired buffer from two publishes ago, once the render world has let go of it:
+        // copy the live prefix in and take it back. Its tail is stale — and never read: the GPU
+        // only ever receives dirty ranges, so what the CPU vector holds past the watermark
+        // reaches nothing (the calloc'd zeros it replaced were never uploaded either). A fresh
+        // allocation only while the render world still holds both.
+        let mut new = match spare.take().and_then(|a| Arc::try_unwrap(a).ok()) {
+            Some(v) if v.len() == rows.len() => v,
+            _ => vec![[0.0f32; 4]; rows.len()],
+        };
         new[..live].copy_from_slice(&rows[..live]);
-        *rows = Arc::new(new);
+        *spare = Some(std::mem::replace(rows, Arc::new(new)));
         *copy_us += t.elapsed().as_secs_f32() * 1e6;
         *copies += 1;
     }
-    // Sole owner here either way: no clone left to happen.
+    // Uniquely owned now — `make_mut` is a plain borrow.
     Arc::make_mut(rows)
 }
 
-/// Move a world affine into the rig's own frame (decision 0974): same 3×3, translation measured
-/// from `origin`. The subtraction is where the ~9 k-yard magnitude leaves the number — everything
-/// downstream of it is a rig-sized quantity.
 fn rebase(mut world: Affine3A, origin: Vec3) -> Affine3A {
     world.translation -= bevy::math::Vec3A::from(origin);
     world
@@ -287,6 +296,21 @@ impl RigPalettes {
         } else {
             self.free_ranges[i] = (base + bones, len - bones);
         }
+        // A fresh range starts at zero rows: the spare-buffer reuse (`rows_make_mut`) means the
+        // CPU mirror above the watermark is a previous occupant's pose, and three readers
+        // (`write_rig`'s torn-joint keep, `write_rider`'s unchanged compare, the computed-rig
+        // readbacks) assume an unallocated row is zero (review 2026-09-04).
+        let (r0, r1) = (3 * base as usize, 3 * (base + bones) as usize);
+        let wm = self.bone_watermark();
+        let rows = rows_make_mut(
+            &mut self.rows,
+            &mut self.spare,
+            wm,
+            &mut self.cost_copies,
+            &mut self.cost_copy_us,
+        );
+        let r1 = r1.min(rows.len());
+        rows[r0..r1].fill([0.0; 4]);
         Arc::make_mut(&mut self.table)[slot as usize] = base;
         self.slot_len[slot as usize] = bones;
         self.mirrored[slot as usize] = false;
@@ -317,6 +341,7 @@ impl RigPalettes {
         let wm = self.bone_watermark();
         let rows = rows_make_mut(
             &mut self.rows,
+            &mut self.spare,
             wm,
             &mut self.cost_copies,
             &mut self.cost_copy_us,
@@ -385,6 +410,7 @@ impl RigPalettes {
         let wm = self.bone_watermark();
         let rows = rows_make_mut(
             &mut self.rows,
+            &mut self.spare,
             wm,
             &mut self.cost_copies,
             &mut self.cost_copy_us,
@@ -429,6 +455,7 @@ impl RigPalettes {
         let wm = self.bone_watermark();
         let rows = rows_make_mut(
             &mut self.rows,
+            &mut self.spare,
             wm,
             &mut self.cost_copies,
             &mut self.cost_copy_us,
@@ -487,6 +514,7 @@ impl RigPalettes {
         let wm = self.bone_watermark();
         let rows = rows_make_mut(
             &mut self.rows,
+            &mut self.spare,
             wm,
             &mut self.cost_copies,
             &mut self.cost_copy_us,
@@ -874,6 +902,8 @@ fn upload_rig_palettes(
     // Coalesce the per-rig dirty ranges before touching the queue: rigs allocate contiguously,
     // so a steady frame's ~750 one-rig ranges merge into a handful of runs — the 0724 ledger
     // measured the per-range `write_buffer` loop at 2.7 ms/frame, almost all call overhead.
+    // Small gaps (a parked body between two live ones) are bridged for the same reason
+    // (`COALESCE_GAP_BONES`).
     let all = coalesce_ranges(data.dirty.iter().map(|&(b, l, _)| (b, l)).collect());
     let mirrored_only = coalesce_ranges(
         data.dirty
@@ -932,13 +962,30 @@ fn upload_rig_palettes(
     }
 }
 
-/// Sort + merge overlapping/adjacent `(base, len)` bone ranges into maximal runs.
-fn coalesce_ranges(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+/// The gap (in bones) two dirty runs may leave between them and still upload as ONE
+/// `write_buffer`. A `queue.write_buffer` is not a memcpy: wgpu allocates a staging buffer per
+/// call, registers it, records the copy and releases it — a few microseconds of fixed cost
+/// against ~10 GB/s of copying, so re-sending up to this many *unchanged* rows (they are the
+/// live rows, straight out of `rows`; nothing stale can be written) is cheaper than a second
+/// call. Sized so the whole tolerance costs about what one call does. The case that needed it:
+/// a 40-man raid at the Stormwind auction house uploaded ~310 KB of rows in ~93 calls a frame
+/// (1929's `[rig-upload]` census), because parked bodies and idle props sit between the live
+/// rigs in the slab and a strictly-adjacent merge stops at every one of them.
+const COALESCE_GAP_BONES: u32 = 256;
+
+/// Sort + merge overlapping, adjacent, and *nearly* adjacent (gap ≤ [`COALESCE_GAP_BONES`])
+/// `(base, len)` bone ranges into maximal runs. Rows inside a bridged gap are written with their
+/// current contents.
+fn coalesce_ranges(ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    coalesce_ranges_with_gap(ranges, COALESCE_GAP_BONES)
+}
+
+fn coalesce_ranges_with_gap(mut ranges: Vec<(u32, u32)>, gap: u32) -> Vec<(u32, u32)> {
     ranges.sort_unstable_by_key(|r| r.0);
     let mut out: Vec<(u32, u32)> = Vec::with_capacity(ranges.len());
     for (base, len) in ranges {
         if let Some(last) = out.last_mut() {
-            if base <= last.0 + last.1 {
+            if base <= last.0 + last.1 + gap {
                 last.1 = (base + len).max(last.0 + last.1) - last.0;
                 continue;
             }
@@ -1169,7 +1216,13 @@ mod tests {
         // The extract's held reference — the shared state every first-write-of-a-frame sees.
         let held = p.rows.clone();
         let wm = p.bone_watermark();
-        let rows = rows_make_mut(&mut p.rows, wm, &mut p.cost_copies, &mut p.cost_copy_us);
+        let rows = rows_make_mut(
+            &mut p.rows,
+            &mut p.spare,
+            wm,
+            &mut p.cost_copies,
+            &mut p.cost_copy_us,
+        );
         rows[0] = [9.0; 4];
         assert_eq!(p.cost_copies, 1, "the shared write copied");
         assert_eq!(
@@ -1199,7 +1252,13 @@ mod tests {
         // A fresh shared write after the shrink still carries the survivor whole.
         let _held3 = p.rows.clone();
         let wm = p.bone_watermark();
-        let rows = rows_make_mut(&mut p.rows, wm, &mut p.cost_copies, &mut p.cost_copy_us);
+        let rows = rows_make_mut(
+            &mut p.rows,
+            &mut p.spare,
+            wm,
+            &mut p.cost_copies,
+            &mut p.cost_copy_us,
+        );
         rows[1] = [7.0; 4];
         assert_eq!(
             p.rows[0], [9.0; 4],
@@ -1326,10 +1385,30 @@ mod tests {
     fn dirty_ranges_coalesce_into_runs() {
         // Adjacent + overlapping merge; a hole splits. Order-independent (upload sorts).
         assert_eq!(
-            coalesce_ranges(vec![(70, 5), (0, 10), (10, 20), (25, 10), (40, 5)]),
+            coalesce_ranges_with_gap(vec![(70, 5), (0, 10), (10, 20), (25, 10), (40, 5)], 0),
             vec![(0, 35), (40, 5), (70, 5)]
         );
         assert_eq!(coalesce_ranges(Vec::new()), Vec::new());
+    }
+
+    #[test]
+    fn dirty_ranges_bridge_small_gaps_but_not_large_ones() {
+        // A parked rig's rows between two live ones (the raid's ~93-call frame): bridged, so
+        // the run is one call. A gap wider than the tolerance still splits.
+        assert_eq!(
+            coalesce_ranges_with_gap(vec![(0, 10), (14, 6), (30, 5)], 4),
+            vec![(0, 20), (30, 5)]
+        );
+        // The shipped tolerance bridges a gap of exactly its size and no more.
+        let g = COALESCE_GAP_BONES;
+        assert_eq!(
+            coalesce_ranges(vec![(0, 10), (10 + g, 5)]),
+            vec![(0, 15 + g)]
+        );
+        assert_eq!(
+            coalesce_ranges(vec![(0, 10), (11 + g, 5)]),
+            vec![(0, 10), (11 + g, 5)]
+        );
     }
 
     #[test]

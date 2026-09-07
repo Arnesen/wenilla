@@ -247,10 +247,23 @@ impl ItemInfo {
     ///
     /// It is a separate predicate from [`Self::opens_loot`] because it sits at a different point
     /// in the dispatcher's order — *before* the quest-starter and readable arms, where the loot
-    /// arm sits after them. A wrapper template whose instance is no longer wrapped takes the
-    /// begin-wrap cursor path instead (local, no packet; not built yet).
+    /// arm sits after them. A wrapper template whose instance is *not* wrapped takes the
+    /// begin-wrap cursor path instead ([`Self::begins_gift_wrap`]) — local, no packet.
     pub fn unwraps_gift(&self, instance_flags: u32) -> bool {
         self.flags & ITEM_FLAG_WRAPPER != 0 && instance_flags & ITEM_DYNFLAG_WRAPPED != 0
+    }
+
+    /// Does a right-click on this instance **arm the gift-wrap cursor**? The *other* side of the
+    /// same fork [`Self::unwraps_gift`] tests (`0x5d8d00` arm 2): template [`ITEM_FLAG_WRAPPER`]
+    /// with the instance's [`ITEM_DYNFLAG_WRAPPED`] **clear** — a piece of wrapping paper rather
+    /// than a wrapped present.
+    ///
+    /// **Nothing is sent on this click.** `0x5d8dba` calls `0x5edea0`, whose only three acts are
+    /// `LockItem 0x4953e0` on the paper, `SetCursorBaseMode(2)` and `CursorSetMode(2)` — a purely
+    /// local arm (wow-re `object-layer/scratch/gift-wrap-law.md`, §5-carved). What completes it is
+    /// the next **left**-click on a container slot, which sends [`wrap_item`]. Decision 1934.
+    pub fn begins_gift_wrap(&self, instance_flags: u32) -> bool {
+        self.flags & ITEM_FLAG_WRAPPER != 0 && instance_flags & ITEM_DYNFLAG_WRAPPED == 0
     }
 
     /// Does a right-click on this template send `CMSG_OPEN_ITEM` to **loot it open**? The
@@ -573,7 +586,7 @@ const TARGET_FLAG_UNIT: u16 = 0x0002;
 /// a ground-targeted `CMSG_CAST_SPELL` writes ([`super::spells::cast_spell_at_dest`]).
 const TARGET_FLAG_DEST_LOCATION: u16 = 0x0040;
 /// `TARGET_FLAG_ITEM` — a bound *item* target, the same bit and the same packed guid an
-/// item-targeted `CMSG_CAST_SPELL` writes ([`super::spells::cast_spell_on_item`]). One block
+/// item-targeted `CMSG_CAST_SPELL` writes (`super::spells::cast_spell_on_item`). One block
 /// builder, two opcodes (decision 0923).
 const TARGET_FLAG_ITEM: u16 = 0x0010;
 
@@ -661,6 +674,21 @@ pub fn use_item(bag_index: u8, slot: u8, spell_slot: u8, target: UseItemTarget) 
 /// and no window at all.
 pub fn open_item(bag_index: u8, slot: u8) -> Vec<u8> {
     vec![bag_index, slot]
+}
+
+/// Body of `CMSG_WRAP_ITEM` (VERIFIED vmangos `WrapItem::ReadFromWorldPacket`,
+/// `Server/Packets/Item.cpp:121-127` + `.h:191-201`; opcode 467 `Opcodes_1_12_1.h:468`):
+/// `giftBag`, `giftSlot`, `itemBag`, `itemSlot` — all `uint8`, the **paper's** position first and
+/// the target's second, the same bag addressing as [`use_item`].
+///
+/// The server refuses every ineligible target with an `EQUIP_ERR_*` of its own
+/// (`HandleWrapItemOpcode`: equipped, a bag, soulbound, stackable, unique, already wrapped, or
+/// mid-cast) — so a refusal reaches the player as an `SMSG_INVENTORY_CHANGE_FAILURE` line, not as
+/// a silently eaten click. On success the *target* item keeps its guid and takes the paper's
+/// `WrappedGift` entry, gains `ITEM_FIELD_GIFTCREATOR` and `ITEM_DYNFLAG_WRAPPED`, and one paper
+/// is destroyed — all as ordinary field updates, no answering packet of its own.
+pub fn wrap_item(gift_bag: u8, gift_slot: u8, item_bag: u8, item_slot: u8) -> Vec<u8> {
+    vec![gift_bag, gift_slot, item_bag, item_slot]
 }
 
 /// Body of `CMSG_AUTOEQUIP_ITEM` (VERIFIED vmangos `AutoEquipItem::ReadFromWorldPacket`,
@@ -760,6 +788,21 @@ pub(super) fn read_inventory_change_failure(
     Ok((reason, required_level, item_guid, bag_slot))
 }
 
+/// Read `SMSG_ITEM_TIME_UPDATE` (VERIFIED vmangos `Item::SendTimeUpdate`,
+/// `Objects/Item.cpp:1096-1106`): the item guid, then the remaining **seconds**
+/// (`ITEM_FIELD_DURATION`, which vmangos counts down in seconds — `Item::UpdateDuration`,
+/// `Item.cpp:243-257`). No trailing player guid on this one, unlike its enchant sibling: the
+/// packet is `(8 + 4)` bytes and vmangos sizes it exactly so.
+///
+/// Sent on world enter for every carried duration item (`Player::SendItemDurations`,
+/// `Player.cpp:12007`) and again whenever one is created or its duration changes
+/// (`Player.cpp:19782-19785`).
+pub(super) fn read_item_time(r: &mut &[u8]) -> io::Result<(u64, u32)> {
+    let item_guid = read_u64_le(r)?;
+    let seconds = read_u32_le(r)?;
+    Ok((item_guid, seconds))
+}
+
 /// Read `SMSG_ITEM_ENCHANT_TIME_UPDATE` (VERIFIED vmangos
 /// `WorldPackets::Item::ItemEnchantTimeUpdate::AppendBodyTo`, `Server/Packets/Item.cpp:161-169`):
 /// item guid, enchant **slot**, remaining **seconds**, then the owning player's guid (present from
@@ -790,6 +833,12 @@ mod tests {
     fn auto_equip_item_body() {
         // 266: srcbag, srcslot (Item.cpp:17-21).
         assert_eq!(auto_equip_item(255, 30), vec![255, 30]);
+    }
+
+    #[test]
+    fn wrap_item_body_paper_first() {
+        // 467: giftbag, giftslot, itembag, itemslot (Item.cpp:121-127) — the PAPER's pair leads.
+        assert_eq!(wrap_item(255, 23, 255, 24), vec![255, 23, 255, 24]);
     }
 
     #[test]
@@ -876,6 +925,22 @@ mod tests {
         );
         // The trailing player guid stays unread — the reader consumes exactly its three fields.
         assert_eq!(r.len(), 8);
+    }
+
+    /// `SMSG_ITEM_TIME_UPDATE`'s body: guid then seconds, and **nothing after** — the enchant
+    /// twin's trailing player guid is not on this packet (vmangos sizes it `8 + 4`). Pinned
+    /// because the two share a handler and it would be easy to copy the wrong tail.
+    #[test]
+    fn item_time_reads_guid_then_seconds() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0x4000_0000_0000_00f7u64.to_le_bytes()); // itemGuid
+        buf.extend_from_slice(&1800u32.to_le_bytes()); // seconds
+        let mut r = &buf[..];
+        assert_eq!(
+            read_item_time(&mut r).unwrap(),
+            (0x4000_0000_0000_00f7, 1800)
+        );
+        assert!(r.is_empty(), "the body is exactly 12 bytes");
     }
 
     #[test]

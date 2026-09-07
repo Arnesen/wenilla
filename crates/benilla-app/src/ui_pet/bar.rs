@@ -52,6 +52,8 @@ pub(super) fn actions_usable(bar: &PetBar, pet_flags: Option<u32>) -> bool {
 #[derive(Default)]
 pub(super) struct PetBarMemory {
     pushed: Option<(u32, bool, bool, bool, Vec<PetActionView>)>,
+    /// The ten slots' cooldown triples as last pushed — `PET_BAR_UPDATE_COOLDOWN`'s own edge.
+    cooldowns: Vec<Option<(i64, u32, bool)>>,
 }
 
 /// The command tokens' `(GlobalStrings key, texture-global name)` pair.
@@ -255,12 +257,14 @@ pub(super) fn active_aura_press(
     crate::ui_action::toggle::active_action_toggle(spell_id, spell?, pet?).then_some(spell_id)
 }
 
-/// Rebuild the ten slot views each frame and diff-push them, firing `PET_BAR_UPDATE` on a change.
+/// Rebuild the ten slot views each frame and diff-push them, firing `PET_BAR_UPDATE` on a change
+/// of the bar and `PET_BAR_UPDATE_COOLDOWN` on a change of its cooldowns alone.
 ///
-/// One event where the reference has four (`PET_BAR_UPDATE`, `PET_BAR_UPDATE_COOLDOWN`,
-/// `UNIT_PET`, and the `UNIT_FLAGS`/`UNIT_AURA` pair its bar filters for `arg1 == "pet"`) — the
-/// deliberate collapse `crate::ui_shapeshift` already makes for the stance bar, and for the same
-/// reason: we diff the whole pushed state, so one event carries every change there can be.
+/// The reference fires `PET_BAR_UPDATE` from nine sites, each right after a state change, and
+/// `PET_BAR_UPDATE_COOLDOWN` from the cooldown subsystem when the PET bank mutates (wow-re
+/// `pet-action-bar-api.md` §9). Diffing the pushed state is the same edge from the other side:
+/// the slots' content and usability are the bar's, the ten triples are the bank's. `UNIT_PET` is
+/// `feed_pet_unit`'s; `UNIT_FLAGS`/`UNIT_AURA` for `"pet"` are the unit feed's.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn feed_pet_bar(
     script: Option<NonSendMut<UiScript>>,
@@ -323,9 +327,25 @@ pub(super) fn feed_pet_bar(
     };
 
     // `bar.bar_signals` rides the key so a press the state does not move still repaints — the
-    // `0x4bc940`/`0x4bc960` signal, which the button's own `SetChecked(0)` makes mandatory.
-    let key = (bar.bar_signals, has_bar, usable, pickup_allowed, fresh);
-    if memory.pushed.as_ref() != Some(&key) {
+    // `0x4bc940`/`0x4bc960` signal, which the button's own `SetChecked(0)` makes mandatory. The
+    // cooldown triples are keyed apart: their edge is the bank's, not the bar's.
+    let cooldowns: Vec<Option<(i64, u32, bool)>> = fresh.iter().map(|s| s.cooldown).collect();
+    let content: Vec<PetActionView> = fresh
+        .iter()
+        .cloned()
+        .map(|mut s| {
+            s.cooldown = None;
+            s
+        })
+        .collect();
+    let key = (bar.bar_signals, has_bar, usable, pickup_allowed, content);
+    let bar_changed = memory.pushed.as_ref() != Some(&key);
+    let cooldowns_changed = memory.cooldowns != cooldowns;
+    if bar_changed || cooldowns_changed {
+        script.set_pet_actions(has_bar, usable, pickup_allowed, fresh);
+        memory.cooldowns = cooldowns;
+    }
+    if bar_changed {
         debug!(
             "ui_pet: bar {} ({} occupied slot(s), {}{})",
             if key.1 { "shown" } else { "hidden" },
@@ -333,8 +353,9 @@ pub(super) fn feed_pet_bar(
             if key.2 { "usable" } else { "disabled" },
             if key.3 { "" } else { ", possessed" },
         );
-        memory.pushed = Some(key.clone());
-        script.set_pet_actions(key.1, key.2, key.3, key.4);
+        memory.pushed = Some(key);
         script.fire_event("PET_BAR_UPDATE", vec![]);
+    } else if cooldowns_changed {
+        script.fire_event("PET_BAR_UPDATE_COOLDOWN", vec![]);
     }
 }

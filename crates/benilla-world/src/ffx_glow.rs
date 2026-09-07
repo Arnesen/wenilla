@@ -24,6 +24,7 @@ use bevy::core_pipeline::FullscreenShader;
 use bevy::ecs::query::QueryItem;
 use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
+use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_graph::{
@@ -847,7 +848,10 @@ impl ViewNode for FfxGlowNode {
         );
 
         // The filter passes (byte-pinned chain): source→¼ (one Box4), ¼a→¼b (H), ¼b→¼a (V).
-        let filter_passes: [(&str, &RenderPipeline, &BindGroup, &TextureView); 3] = [
+        // Each pass opens its own diagnostic span (`render/ffx_glow_*/elapsed_gpu` on a device
+        // that times passes): the journal's `gpu_glow` column is their sum (2008).
+        let diagnostics = render_context.diagnostic_recorder();
+        let filter_passes: [(&'static str, &RenderPipeline, &BindGroup, &TextureView); 3] = [
             (
                 "ffx_glow_down_quarter",
                 downsample,
@@ -883,9 +887,11 @@ impl ViewNode for FfxGlowNode {
                         timestamp_writes: None,
                         occlusion_query_set: None,
                     });
+            let span = diagnostics.pass_span(&mut pass, label);
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind, &[]);
             pass.draw(0..3, 0..1);
+            span.end(&mut pass);
         }
 
         // Combine: screen + w·blur² (gamma-space byte math in the shader) → the post destination.
@@ -916,9 +922,11 @@ impl ViewNode for FfxGlowNode {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+        let span = diagnostics.pass_span(&mut pass, "ffx_glow_combine");
         pass.set_pipeline(combine);
         pass.set_bind_group(0, &bind, &[]);
         pass.draw(0..3, 0..1);
+        span.end(&mut pass);
         Ok(())
     }
 }
@@ -940,7 +948,19 @@ impl Plugin for FfxGlowPlugin {
                 ExtractResourcePlugin::<FfxHazeMix>::default(),
                 ExtractResourcePlugin::<FfxWave>::default(),
             ))
-            .add_systems(Update, (sync_gain, sync_haze, sync_wave, ensure_ffx_glow));
+            .add_systems(
+                Update,
+                (
+                    // The gain is the zone's `LightParams.glow`, so the sync is on the resolve's
+                    // read side; the haze floor and the wave's arm are the camera-eye submersion
+                    // verdict, so they are after the slot that writes it. Unordered, both flipped
+                    // a frame late — the underwater blur and warp outlived the surfacing frame
+                    // they belong to, exactly like the sky dome's stops (decision 2032).
+                    sync_gain.in_set(crate::lighting::LightingConsumeSet),
+                    (sync_haze, sync_wave).after(crate::liquid::SubmersionVerdict),
+                    ensure_ffx_glow,
+                ),
+            );
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };

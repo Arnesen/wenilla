@@ -61,6 +61,7 @@ mod area_trigger;
 mod attack;
 mod auction;
 mod bank;
+mod battlefield;
 mod binder;
 mod channel;
 mod chat;
@@ -76,6 +77,7 @@ mod items;
 mod lifecycle;
 mod loot;
 mod mail;
+mod meeting_stone;
 mod names;
 mod pet;
 mod petition;
@@ -92,9 +94,11 @@ mod social;
 mod spells;
 mod stable;
 mod summon;
+mod tabard;
 mod taxi;
 mod trade;
 mod trainer;
+mod tutorial;
 mod vendor;
 
 /// Write half of a split [`WorldSession`](super::WorldSession) — owns the write half of the
@@ -104,6 +108,21 @@ mod vendor;
 pub struct WorldWriter {
     pub(super) writer: ConnWriter,
     pub(super) encrypter: EncrypterHalf,
+    /// Every packet that has actually reached the socket since the last drain, as
+    /// `(opcode, body length)` — armed by [`Self::watch_sends`], `None` (and free) otherwise.
+    ///
+    /// The **outbound twin of the app's inbound `in` trace**. Inbound, every packet is accounted
+    /// for by name the moment it arrives; outbound there was nothing of the kind — the mover's
+    /// `snd` lines record a *decision* taken before the command is even queued, and the `wire` tag
+    /// records only failures, so "did we actually send X?" could be answered only by inference
+    /// from a silence. That is a poor instrument for a client whose fidelity is partly *what it
+    /// puts on the wire*: decision 1872 landed a whole feature — the GameObject questgiver query —
+    /// whose entire observable effect is a send, and the only way to see it from inside was to add
+    /// state to a game resource.
+    ///
+    /// Recorded **after** a successful write, never before, so a line here means a transmission
+    /// and not an intention.
+    pub(super) sent: Option<Vec<(u16, usize)>>,
     /// The language every chat send carries — the logged-in character's faction tongue,
     /// inherited from the session at split (set by `WorldSession::player_login` off the roster's
     /// race). Load-bearing: vmangos drops the whole message (dot-commands included) when the
@@ -117,6 +136,28 @@ impl WorldWriter {
     /// family modules goes through here, so there is exactly one place framing/encryption happens.
     /// Visible to them because a private item is in scope throughout its module's descendants.
     fn send(&mut self, opcode: u16, body: &[u8]) -> Result<()> {
-        send_packet(&mut self.writer, Some(&mut self.encrypter), opcode, body)
+        let sent = send_packet(&mut self.writer, Some(&mut self.encrypter), opcode, body);
+        if sent.is_ok() {
+            if let Some(log) = &mut self.sent {
+                log.push((opcode, body.len()));
+            }
+        }
+        sent
+    }
+
+    /// Start recording what reaches the socket — see [`Self::sent`]. Idempotent; a writer that is
+    /// already watching keeps whatever it has not yet handed over.
+    pub fn watch_sends(&mut self) {
+        self.sent.get_or_insert_with(Vec::new);
+    }
+
+    /// Hand over (and clear) everything recorded since the last call — `(opcode, body length)` per
+    /// packet, in send order. A no-op on a writer that is not watching.
+    pub fn drain_sent(&mut self, mut each: impl FnMut(u16, usize)) {
+        if let Some(log) = &mut self.sent {
+            for (opcode, len) in log.drain(..) {
+                each(opcode, len);
+            }
+        }
     }
 }

@@ -10,11 +10,10 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Result};
-use benilla_dbc::{FieldType, Schema, SchemaField};
+use anyhow::Result;
 
 use crate::chain::Chain;
-use crate::dbc::{parse, str_at, u32_at};
+use crate::dbc::load_id_name_table;
 
 /// The resolved `ZoneOrSort → name` lookup ([`load_quest_header_names`]).
 #[derive(Debug, Default)]
@@ -41,41 +40,10 @@ impl QuestHeaderNames {
     }
 }
 
-/// A minimal `ID(0) … name(name_col) …` schema of `cols` u32-wide columns (strings are one u32
-/// ref) — enough for the two id→name reads this module does.
-fn id_name_schema(what: &str, name_col: usize, cols: usize) -> Schema {
-    let mut s = Schema::new(what);
-    for i in 0..cols {
-        if i == name_col {
-            s.add_field(SchemaField::new("Name", FieldType::String));
-        } else {
-            s.add_field(SchemaField::new(format!("c{i}"), FieldType::UInt32));
-        }
-    }
-    s
-}
-
 /// Load both name tables through the patch chain.
 pub fn load_quest_header_names(chain: &mut Chain) -> Result<QuestHeaderNames> {
-    let mut read =
-        |file: &str, name_col: usize, cols: usize, what: &str| -> Result<HashMap<u32, String>> {
-            let bytes = chain
-                .read_file(file)
-                .with_context(|| format!("reading {file}"))?;
-            let rs = parse(&bytes, id_name_schema(what, name_col, cols), what)?;
-            let mut out = HashMap::with_capacity(rs.records().len());
-            for r in rs.records() {
-                let (Some(id), Some(name)) = (u32_at(r, 0), str_at(&rs, r, name_col)) else {
-                    continue;
-                };
-                if !name.is_empty() {
-                    out.insert(id, name);
-                }
-            }
-            Ok(out)
-        };
     Ok(QuestHeaderNames {
-        zones: read("DBFilesClient\\AreaTable.dbc", 11, 25, "AreaTable")?,
-        sorts: read("DBFilesClient\\QuestSort.dbc", 1, 10, "QuestSort")?,
+        zones: load_id_name_table(chain, "DBFilesClient\\AreaTable.dbc", 11, 25, "AreaTable")?,
+        sorts: load_id_name_table(chain, "DBFilesClient\\QuestSort.dbc", 1, 10, "QuestSort")?,
     })
 }

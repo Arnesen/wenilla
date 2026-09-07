@@ -120,6 +120,19 @@ impl super::UiScript {
         std::mem::take(&mut self.model_mut().trade_close)
     }
 
+    /// Whether `BeginTrade()` was called since the last drain — `CMSG_BEGIN_TRADE`, empty
+    /// (decision 1963; the TRADE dialog that calls it can never show in 1.12.1, so this is an
+    /// addon's reach).
+    pub fn take_trade_begin(&mut self) -> bool {
+        std::mem::take(&mut self.model_mut().trade_begin)
+    }
+
+    /// Whether `CancelTrade()` was called since the last drain — the BARE `CMSG_CANCEL_TRADE`,
+    /// where `CloseTrade` wraps the same opcode in the window's teardown (decision 1963).
+    pub fn take_trade_cancel(&mut self) -> bool {
+        std::mem::take(&mut self.model_mut().trade_cancel)
+    }
+
     /// The copper amount `SetTradeMoney` last offered since the last drain (and clear it) — the app
     /// maps it to `CMSG_SET_TRADE_GOLD` (decision 0592 P2).
     pub fn take_trade_money(&mut self) -> Option<u32> {
@@ -177,6 +190,12 @@ fn gold(model: &Model, pick: impl Fn(&TradeState) -> &TradeSideState) -> u32 {
 /// empty cursor on a filled slot queues a clear (`CMSG_CLEAR_TRADE_ITEM`; the item never left the bag,
 /// the server just un-references it). A spell/action payload is refused, put back untouched.
 fn click_trade_button(model: &mut Model, id: u32) {
+    // The money arm runs first and never reads the index (`0x4bfe34`, decision 1965): coins on
+    // the cursor go into the offer as `AddTradeMoney` puts them, and that is the whole click.
+    if matches!(model.cursor, Some(CursorPayload::Money(_))) {
+        cursor::money::add_trade_money(model);
+        return;
+    }
     match model.cursor.take() {
         Some(CursorPayload::Item(item)) => {
             let (bag, slot) = (item.bag, item.slot);
@@ -380,16 +399,47 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    // BeginTrade() / CancelTrade() — the TRADE dialog's pair (wow-re `staticpopup-dialog-bindings.md`
+    // §2: 0 args, 0 returns, no gate; `0x117` and `0x11C`, both empty). The dialog itself can never
+    // show in 1.12.1 (TRADE_REQUEST is signalled by nothing), so both are an addon's reach;
+    // CancelTrade is the bare packet, CloseTrade above the same opcode wrapped in the teardown.
+    g.set(
+        "BeginTrade",
+        lua.create_function(|lua, ()| {
+            lua.app_data_mut::<Model>()
+                .expect("model app_data")
+                .trade_begin = true;
+            Ok(())
+        })?,
+    )?;
+    g.set(
+        "CancelTrade",
+        lua.create_function(|lua, ()| {
+            lua.app_data_mut::<Model>()
+                .expect("model app_data")
+                .trade_cancel = true;
+            Ok(())
+        })?,
+    )?;
 
     // SetTradeMoney(copper) — offer this many copper on our side (the money input's value-changed
     // callback); the app maps it to CMSG_SET_TRADE_GOLD (decision 0592 P2). `i64` in, clamped, so a
     // fractional/negative Lua number can never panic the coercion.
     g.set(
         "SetTradeMoney",
-        lua.create_function(|lua, copper: i64| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .trade_set_money = Some(copper.clamp(0, i64::from(u32::MAX)) as u32);
+        lua.create_function(|lua, copper: Value| {
+            // `0x4c0820` (decision 1965): a non-number RAISES; the low dword goes on the wire as an
+            // absolute offer, gated on the purse covering it — a refusal is silent at every level.
+            let n = crate::script::binding_abi::number_arg(
+                lua,
+                copper,
+                "Usage: SetTradeMoney(amount)",
+            )? as u32;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            if u64::from(n) > model.money {
+                return Ok(());
+            }
+            model.trade_set_money = Some(n);
             Ok(())
         })?,
     )?;
@@ -410,7 +460,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // handler can call it for the recipient side without erroring.
     g.set(
         "ClickTargetTradeButton",
-        lua.create_function(|_, _id: u32| Ok(()))?,
+        lua.create_function(|lua, _id: u32| {
+            // The same money arm as `ClickTradeButton` (`0x4c00a3`, decision 1965): coins on the
+            // cursor go into OUR offer whichever side's slot was clicked, the index unread.
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            cursor::money::add_trade_money(&mut model);
+            Ok(())
+        })?,
     )?;
 
     Ok(())
@@ -595,13 +651,18 @@ mod tests {
         assert!(s.take_trade_close());
         assert!(!s.take_trade_close(), "drained");
 
-        // SetTradeMoney folds gold/silver/copper into a copper total the app ships as SET_TRADE_GOLD.
+        // SetTradeMoney folds gold/silver/copper into a copper total the app ships as SET_TRADE_GOLD,
+        // gated on the purse covering it (1965).
+        s.set_money(20_000);
         s.run("SetTradeMoney(1 * 10000 + 23 * 100 + 45)").unwrap();
         assert_eq!(s.take_trade_money(), Some(12_345));
         assert_eq!(s.take_trade_money(), None, "drained");
-        // A fractional/negative number can never panic the coercion (clamped).
+        // The low dword of -5 is an unsigned 0xFFFFFFFB, past any purse: refused silently (1965).
         s.run("SetTradeMoney(-5)").unwrap();
-        assert_eq!(s.take_trade_money(), Some(0));
+        assert_eq!(s.take_trade_money(), None);
+        s.run("SetTradeMoney(30000)").unwrap();
+        assert_eq!(s.take_trade_money(), None, "more than the purse: silent");
+        assert!(s.run("SetTradeMoney(nil)").is_err(), "a non-number raises");
     }
 
     #[test]

@@ -11,12 +11,12 @@ use crate::wire::{
 };
 
 use super::{
-    action_bar, area_trigger, attack, auction, bank, binder, broadcast, channel, chat, combat_log,
-    death, duel, gameobject, gm_ticket, gossip, group, guild, instance, items, loot, mail,
-    mirror_timer, monster_move, movement, opcode, page_text, pet, petition, progression, pvp,
-    quest, social, spellbook, spells, stable, summon, taxi, trade, trainer, update_object, vendor,
-    world_state, Character, CreatureQueryInfo, JumpInfo, MoveMode, ServerPacket, SpeedKind,
-    SplineMode,
+    action_bar, area_trigger, attack, auction, bank, battlefield, binder, broadcast, channel, chat,
+    combat_log, death, duel, gameobject, gm_ticket, gossip, group, guild, instance, items, loot,
+    mail, meeting_stone, mirror_timer, monster_move, movement, opcode, page_text, pet, petition,
+    progression, pvp, quest, social, spellbook, spells, stable, summon, tabard, taxi, trade,
+    trainer, tutorial, update_object, vendor, world_state, AttackSwingError, Character,
+    CreatureQueryInfo, JumpInfo, MoveMode, ServerPacket, SpeedKind, SplineMode,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -244,7 +244,12 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_COMPRESSED_MOVES => ServerPacket::CompressedMoves {
             packets: read_compressed_moves(&mut r)?,
         },
-        opcode::SMSG_MONSTER_MOVE => monster_move::read_monster_move(&mut r)?,
+        opcode::MSG_MOVE_TIME_SKIPPED => {
+            let (guid, lag_ms) = movement::read_move_time_skipped(&mut r)?;
+            ServerPacket::MoveTimeSkipped { guid, lag_ms }
+        }
+        opcode::SMSG_MONSTER_MOVE => monster_move::read_monster_move(&mut r, false)?,
+        opcode::SMSG_MONSTER_MOVE_TRANSPORT => monster_move::read_monster_move(&mut r, true)?,
         opcode::MSG_MOVE_TELEPORT_ACK => {
             let guid = read_packed_guid(&mut r)?;
             let counter = read_u32_le(&mut r)?;
@@ -374,6 +379,78 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                 trainer: ask.trainer,
                 cost: ask.cost,
             }
+        }
+        opcode::SMSG_PET_UNLEARN_CONFIRM => {
+            let ask = pet::read_pet_unlearn_confirm(&mut r)?;
+            ServerPacket::PetUnlearnConfirm {
+                trainer: ask.trainer,
+                cost: ask.cost,
+            }
+        }
+        opcode::SMSG_RAID_GROUP_ONLY => {
+            let boot = instance::read_raid_group_only(&mut r)?;
+            ServerPacket::RaidGroupOnly {
+                delay_ms: boot.delay_ms,
+                reason: boot.reason,
+            }
+        }
+        opcode::SMSG_AREA_SPIRIT_HEALER_TIME => {
+            let t = death::read_area_spirit_healer_time(&mut r)?;
+            ServerPacket::AreaSpiritHealerTime {
+                healer: t.healer,
+                ms: t.ms,
+            }
+        }
+        opcode::SMSG_BATTLEFIELD_STATUS => {
+            ServerPacket::BattlefieldStatus(battlefield::read_battlefield_status(&mut r)?)
+        }
+        opcode::MSG_PVP_LOG_DATA => {
+            ServerPacket::PvpLogData(battlefield::read_pvp_log_data(&mut r)?)
+        }
+        opcode::SMSG_BATTLEFIELD_LIST => {
+            ServerPacket::BattlefieldList(battlefield::read_battlefield_list(&mut r)?)
+        }
+        opcode::MSG_BATTLEGROUND_PLAYER_POSITIONS => {
+            ServerPacket::BattlefieldPositions(battlefield::read_battlefield_positions(&mut r)?)
+        }
+        opcode::MSG_TABARDVENDOR_ACTIVATE => {
+            ServerPacket::TabardVendorActivate(tabard::read_tabard_vendor_activate(&mut r)?)
+        }
+        opcode::MSG_SAVE_GUILD_EMBLEM => {
+            ServerPacket::SaveGuildEmblemResult(tabard::read_save_guild_emblem_result(&mut r)?)
+        }
+        opcode::SMSG_GROUP_JOINED_BATTLEGROUND => ServerPacket::GroupJoinedBattleground {
+            result: crate::wire::read_u32_le(&mut r)?,
+        },
+        opcode::SMSG_BATTLEGROUND_PLAYER_JOINED => ServerPacket::BattlegroundPlayer {
+            guid: crate::wire::read_u64_le(&mut r)?,
+            joined: true,
+        },
+        opcode::SMSG_BATTLEGROUND_PLAYER_LEFT => ServerPacket::BattlegroundPlayer {
+            guid: crate::wire::read_u64_le(&mut r)?,
+            joined: false,
+        },
+        opcode::SMSG_MEETINGSTONE_SETQUEUE => {
+            let q = meeting_stone::read_meeting_stone_set_queue(&mut r)?;
+            ServerPacket::MeetingStoneSetQueue {
+                area: q.area,
+                status: q.status,
+            }
+        }
+        opcode::SMSG_MEETINGSTONE_SUCCESS => {
+            ServerPacket::MeetingStoneNotice(crate::messages::MeetingStoneNotice::Success)
+        }
+        opcode::SMSG_MEETINGSTONE_IN_PROGRESS => {
+            ServerPacket::MeetingStoneNotice(crate::messages::MeetingStoneNotice::InProgress)
+        }
+        opcode::SMSG_MEETINGSTONE_MEMBER_ADDED => ServerPacket::MeetingStoneNotice(
+            meeting_stone::read_meeting_stone_member_added(&mut r)?,
+        ),
+        opcode::SMSG_MEETINGSTONE_JOIN_FAILED => {
+            ServerPacket::MeetingStoneNotice(meeting_stone::read_meeting_stone_join_failed(&mut r)?)
+        }
+        opcode::SMSG_TUTORIAL_FLAGS => {
+            ServerPacket::TutorialFlags(tutorial::read_tutorial_flags(&mut r)?)
         }
         opcode::SMSG_PLAYERBOUND => {
             let bound = binder::read_player_bound(&mut r)?;
@@ -535,6 +612,21 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             let (spell_id, outcome) = pet::read_pet_cast_failed(&mut r)?;
             ServerPacket::PetCastFailed { spell_id, outcome }
         }
+        opcode::SMSG_PET_TAME_FAILURE => ServerPacket::PetTameFailure {
+            reason: pet::read_pet_tame_failure(&mut r)?,
+        },
+        // Both bodies really are empty — the opcode is the whole message on either (vmangos's
+        // `AppendBodyTo` writes nothing, and the reference's handlers read nothing).
+        opcode::SMSG_PET_NAME_INVALID => ServerPacket::PetNameInvalid,
+        opcode::SMSG_PET_BROKEN => ServerPacket::PetBroken,
+        opcode::SMSG_PET_ACTION_SOUND => {
+            let (pet_guid, talk) = pet::read_pet_action_sound(&mut r)?;
+            ServerPacket::PetActionSound { pet_guid, talk }
+        }
+        opcode::SMSG_PET_DISMISS_SOUND => {
+            let (model_id, position) = pet::read_pet_dismiss_sound(&mut r)?;
+            ServerPacket::PetDismissSound { model_id, position }
+        }
         opcode::SMSG_ATTACKSTART => {
             let (attacker, victim) = attack::read_attack_start(&mut r)?;
             ServerPacket::AttackStart { attacker, victim }
@@ -546,6 +638,21 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_ATTACKERSTATEUPDATE => {
             ServerPacket::AttackerState(attack::read_attacker_state(&mut r)?)
         }
+        // The swing refusals — empty bodies, nothing read. `SMSG_ATTACKSWING_NOTSTANDING` (`0x147`)
+        // is deliberately absent: the reference never registers it and vmangos never sends it, so
+        // it falls to the unknown-opcode arm exactly as it does in the real client's dispatcher.
+        opcode::SMSG_ATTACKSWING_NOTINRANGE => {
+            ServerPacket::AttackSwingError(AttackSwingError::NotInRange)
+        }
+        opcode::SMSG_ATTACKSWING_BADFACING => {
+            ServerPacket::AttackSwingError(AttackSwingError::BadFacing)
+        }
+        opcode::SMSG_ATTACKSWING_DEADTARGET | opcode::SMSG_ATTACKSWING_CANT_ATTACK => {
+            ServerPacket::AttackSwingError(AttackSwingError::DeadOrUnattackable)
+        }
+        // The family's fourth arm, from the spell TU's registration — same empty body, same act.
+        opcode::SMSG_CANCEL_COMBAT => ServerPacket::CancelCombat,
+        opcode::SMSG_FEIGN_DEATH_RESISTED => ServerPacket::FeignDeathResisted,
         opcode::SMSG_AI_REACTION => {
             let (unit, reaction) = attack::read_ai_reaction(&mut r)?;
             ServerPacket::AiReaction { unit, reaction }
@@ -574,6 +681,10 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                 item_guid,
                 spell_id,
             }
+        }
+        opcode::SMSG_ITEM_TIME_UPDATE => {
+            let (item_guid, seconds) = items::read_item_time(&mut r)?;
+            ServerPacket::ItemTime { item_guid, seconds }
         }
         opcode::SMSG_ITEM_ENCHANT_TIME_UPDATE => {
             let (item_guid, slot, seconds) = items::read_item_enchant_time(&mut r)?;

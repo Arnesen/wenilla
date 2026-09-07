@@ -166,3 +166,21 @@ pub(super) fn read_u32_body(r: &mut &[u8]) -> io::Result<u32> {
 pub fn reset_instances() -> Vec<u8> {
     Vec::new()
 }
+
+/// `SMSG_RAID_GROUP_ONLY` (VERIFIED, wow-re `staticpopup-dialog-bindings.md` §5.2, arm
+/// `0x5e48f1`): the instance-boot clock and its reason. `delay_ms > 0` arms the boot deadline
+/// (`INSTANCE_BOOT_START`); `0` clears it (`INSTANCE_BOOT_STOP`), and then `reason` 1 / 2 is
+/// `ERR_RAID_GROUP_ONLY` / `ERR_RAID_GROUP_FULL` on screen. Decision 1963.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RaidGroupOnly {
+    pub delay_ms: u32,
+    pub reason: u32,
+}
+
+/// Parse `SMSG_RAID_GROUP_ONLY`: `u32 delayMs`, `u32 reason` — both 32-bit reads.
+pub(super) fn read_raid_group_only(r: &mut impl std::io::Read) -> std::io::Result<RaidGroupOnly> {
+    Ok(RaidGroupOnly {
+        delay_ms: crate::wire::read_u32_le(r)?,
+        reason: crate::wire::read_u32_le(r)?,
+    })
+}

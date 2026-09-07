@@ -662,7 +662,7 @@ fn a_hover_sweep_across_owners_costs_no_graph_derivation() {
 ///
 /// The two guards above drive `SetOwner(button, "ANCHOR_RIGHT")` — the bag slot's idiom. The bars
 /// do not use it. With `UberTooltips` at its shipped default of `"1"`, every action button routes
-/// through `GameTooltip_SetDefaultAnchor` (`ActionBar.xml:510`, and the stance/pet/bonus bars the
+/// through `GameTooltip_SetDefaultAnchor` (stock `ActionButton_SetTooltip`, and the stance/pet/bonus bars the
 /// same), which is `SetOwner(owner, "ANCHOR_NONE")` followed by an explicit `SetPoint` — a
 /// completely different arm of the same verb, and the one that DROPS the tooltip's anchors.
 ///

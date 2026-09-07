@@ -315,6 +315,24 @@ fn send_spell_cast(
     if reagent_totem_refusal(spell_id, def, ctx.rel.self_store, items, cast_errors) {
         return;
     }
+    // **TryCast rung 7** (`0x6e4e03`, decision 1925) — the equipped-item requirement, which the
+    // cast path did not have at all: the greying ladder correctly greyed the button and pressing
+    // it still sent. The search is the same one the greying leg and the tooltip requirement line
+    // use, so all three now agree, and the reason it refuses with is `AttributesEx3`'s own pick
+    // ([`super::usable::equipped_item_reason`]).
+    //
+    // Position is the reference's: four rungs above the crowd-control validator below, so a
+    // player who is both stunned and missing the required weapon is told about **the weapon**.
+    if let Some(d) = def {
+        if let Some(store) = ctx.rel.self_store {
+            if !super::usable::equipped_item_fits_cached(d, store, items) {
+                let reason = super::usable::equipped_item_reason(d);
+                debug!("ui_action: cast {spell_id} refused locally — equipped item ({reason:#x})");
+                cast_errors.push_local(spell_id, reason);
+                return;
+            }
+        }
+    }
     // ArmCast (`0x6e5250`): resolve the wire target from the spell's targeting constraints —
     // never the raw selection ([`cast_target`] module docs). A refusal is local and pre-commit,
     // like the ref's residual flag_word: no send, no GCD, no pending arm, no autorepeat key.
@@ -472,6 +490,50 @@ fn send_spell_cast(
                 return;
             }
         }
+    }
+    // The CROWD-CONTROL leg of the requirement validator `0x6094f0` (decision 1903, widened from
+    // three arms to the reference's six by 1925), which sits ABOVE its mounted block below — so a
+    // stunned mounted caster reads the stun.
+    let self_fields = ctx.rel.self_store.map(|s| &s.0);
+    if let Some(reason) = state::cast_cc_refusal(
+        self_fields.map_or(0, |f| f.unit_flags()),
+        self_fields.and_then(|f| f.unit_health()),
+        // The charm arm asks whether somebody ELSE holds the reins (`60994d`'s active-player
+        // compare) — a self-charm is not something the reference refuses on.
+        self_fields
+            .and_then(|f| f.unit_charmed_by())
+            .is_some_and(|charmer| Some(charmer) != ctx.self_guid),
+        def,
+        // The per-arm exemption scan (decision 1946): the caster's RAW aura slot ids — the
+        // reference reads them unfiltered — joined to the spell catalog.
+        &mut |aura_types: &[u32]| {
+            let Some((d, fields)) = def.zip(self_fields) else {
+                return benilla_formats::CcExemption::default();
+            };
+            let catalog = spells.as_ref().map(|s| &s.catalog);
+            aura_types
+                .iter()
+                .map(|&ty| {
+                    benilla_formats::cc_exemption(d, fields.unit_aura_ids(), ty, |id| {
+                        catalog.and_then(|c| c.get(id))
+                    })
+                })
+                // The arms scan several types; the reference's loop takes the FIRST rejection it
+                // meets and stops, and reports exempt only if a match was found and accepted.
+                .reduce(|a, b| if a.mechanic != 0 || a.exempt { a } else { b })
+                .unwrap_or_default()
+        },
+    ) {
+        let (reason, mechanic) = reason;
+        debug!(
+            "ui_action: cast {spell_id} refused locally — crowd control ({reason:#x}, \
+             mechanic {mechanic:?})"
+        );
+        match mechanic {
+            Some(m) => cast_errors.push_local_arg(spell_id, reason, m),
+            None => cast_errors.push_local(spell_id, reason),
+        }
+        return;
     }
     // The client-side mounted gate (decision 0481; wow-re `mounted-action-gate.md` §5:
     // TryCast's requirement validator `0x6094f0`, mounted block `0x609c6c` — a live

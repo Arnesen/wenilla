@@ -98,6 +98,28 @@ pub(super) fn read_attacker_state(r: &mut impl Read) -> io::Result<AttackerState
     })
 }
 
+/// The server's refusal of a `CMSG_ATTACKSWING` — the melee auto-attack answer that is not
+/// `SMSG_ATTACKSTART`. **Three variants for four opcodes, because that is what the client can
+/// distinguish**: the reference dispatches `0x145`/`0x146`/`0x148`/`0x149` through `0x6255b0`'s
+/// jump table `0x625aec`, and `0x148` DEADTARGET and `0x149` CANT_ATTACK land on **arm 4
+/// (`0x625ab8`) verbatim** — one shared body, no reason byte, nothing to tell them apart with.
+/// Collapsing them here is the fidelity fact in the type: a consumer cannot key on a difference
+/// the real client never had.
+///
+/// Every body is empty; the arms read nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttackSwingError {
+    /// `SMSG_ATTACKSWING_NOTINRANGE` (`0x145`) — arm 2 `0x625a8a`: latch code **1**.
+    NotInRange,
+    /// `SMSG_ATTACKSWING_BADFACING` (`0x146`) — arm 3 `0x625aa1`: latch code **2**.
+    BadFacing,
+    /// `SMSG_ATTACKSWING_DEADTARGET` (`0x148`) **or** `SMSG_ATTACKSWING_CANT_ATTACK` (`0x149`) —
+    /// both arm 4 `0x625ab8`, which raises **no message at all**: it resolves the active player
+    /// and calls StopAttack (`0x5ecac0`) on it, full stop. The name is deliberately the union of
+    /// the two: naming one of them would claim a distinction the client does not have.
+    DeadOrUnattackable,
+}
+
 /// Read `SMSG_ATTACKSTOP` (vmangos `AttackStop::AppendBodyTo`): two **packed** guids + a `u32`
 /// "victim is dead" word (dropped — death arrives through the descriptor seam).
 pub(super) fn read_attack_stop(r: &mut impl Read) -> io::Result<(u64, u64)> {

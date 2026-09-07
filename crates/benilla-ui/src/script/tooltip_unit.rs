@@ -3,7 +3,9 @@
 //!
 //! - NAME (gold — FrameXML recolors `TextLeft1` by reaction on `UPDATE_MOUSEOVER_UNIT`, exactly
 //!   like the reference's `GameTooltip_UnitColor`; the guild line is likewise FrameXML's and
-//!   joins when guild data streams);
+//!   joins when guild data streams). A name still in flight reads `UNKNOWNOBJECT`, never an
+//!   empty line — the builder's name read is `0x609210`, the same resolver `UnitName` uses, and
+//!   its miss tail is the same string (decisions 2002/2040);
 //! - the creature SUBTITLE ("Stable Master") — white;
 //! - the LEVEL line, composed from three slots over the four `TOOLTIP_UNIT_LEVEL*` templates:
 //!   level text (`"??"` for a world boss, a much-higher hostile, or level ≤ 0 — the hostile
@@ -31,7 +33,7 @@ use super::tooltip::{append_line, clear_content, fire_cleared, show_or_hide_empt
 // The grey band + trivial/GREY check (`0x5f0700`, the CIVILIAN line's last gate: a green-or-
 // better con never warns of a dishonorable kill) and the "??" gate live in one shared home
 // (`unit.rs`), alongside `UnitLevel`'s −1 return and the `GetQuestGreenRange` binding.
-use super::unit::{is_civilian_kill, level_reads_unknown};
+use super::unit::{is_civilian_kill, level_reads_unknown, unknownobject};
 use super::{KindState, Model, UnitState};
 use crate::layout::{Anchor, Point};
 use crate::widget::FrameHandle;
@@ -138,13 +140,23 @@ fn render_unit(lua: &Lua, this: &Table, token: &str) -> mlua::Result<bool> {
         show_or_hide_empty(lua, h);
         return Ok(false);
     };
-    append_line(
-        lua,
-        this,
-        (u.name.clone().unwrap_or_default(), GOLD),
-        None,
-        false,
-    )?;
+    // The NAME line. A unit whose name query has not answered yet does NOT title an empty plate:
+    // the builder resolves the name through `CGUnit_C::GetUnitName 0x609210` (`0x52a187`), and
+    // every one of that function's misses — a creature whose `creaturecache.wdb` record
+    // (`CGUnit+0xb30`) is still null, a pet whose `petnamecache.wdb` row is absent or stale, a
+    // player row `namecache.wdb` has not answered — falls to the SAME
+    // `FrameScript_GetText("UNKNOWNOBJECT")` tail `UnitName` falls to. One seam, one resolver
+    // ([`unknownobject`], decisions 2002/2040), so the verb and the plate can never disagree.
+    //
+    // The builder has no counterpart to `UnitName`'s two nils: the `"player"` fast path is the
+    // *binding's* (`0x517083`, before any resolve), and a token resolving to GUID 0 never reaches
+    // a builder at all — the entry gate `0x468460(typemask 8)` hands back no object, `SetUnit`
+    // answers nil and no plate is drawn (the `unit` early-return above).
+    let title = match &u.name {
+        Some(n) => n.clone(),
+        None => unknownobject(lua)?.to_str()?.to_string(),
+    };
+    append_line(lua, this, (title, GOLD), None, false)?;
     if let Some(sub) = &u.subtitle {
         append_line(lua, this, (sub.clone(), WHITE), None, false)?;
     }
@@ -448,7 +460,7 @@ impl super::UiScript {
     /// one GOLD line (the reference's engine SetText gold; a cross-interior dot renders FAINT
     /// gold — the byte law's `|cffb0b0b0` wrap modulating the gold base, director-matched),
     /// seated centred ABOVE the cursor: the tooltip's BOTTOM at the given UI-space point. The
-    /// plate FOLLOWS the pointer — [`Self::minimap_tooltip_move`] re-seats it as the cursor
+    /// plate FOLLOWS the pointer — `Self::minimap_tooltip_move` re-seats it as the cursor
     /// drifts within one blip. Same world-owned fade lifecycle as the mouseover tooltip:
     /// hover loss arms [`Self::world_tooltip_fade`].
     pub fn minimap_tooltip(&mut self, text: &str, ui_x: f32, ui_y: f32, grey: bool) -> bool {

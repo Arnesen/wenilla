@@ -37,16 +37,26 @@
 //! attachments from the owner's node; independent sampling would flicker at shadow edges mid-swing).
 //!
 //! Interplay: the interior classifier ([`crate::interior`]) owns a part's tag while it stands in a WMO
-//! room (packed floor colour — no sun indoors, so no shade either); this system skips those parts and
+//! room (an SH-probe slot — no sun indoors, so no shade either); this system skips those parts and
 //! runs after the classifier to re-assert the byte over its exterior reclaim. Fades own the alpha field
 //! only (they write through `with_alpha`), so shade rides through appear/despawn/zoom feathering.
+//!
+//! **The descendant tree is a TRANSFORM relation, not a light one, and the difference is a bug we
+//! shipped** (B373). A WMO-display GameObject's doodad props — a transport's cabin furniture — are
+//! parented under the net entity so they sail with the deck (decision 0474), but their light is
+//! their own baked MODD colour folded into an SH probe, the reference's `CMapDoodadDef` provider
+//! (`0x6a8050`) rather than the WENTITY node this file models. They were nonetheless in the walk,
+//! and since the shade byte overlaps the probe slot in bits 6..=13, every one of them was pushed
+//! onto a *different* probe: a neighbouring prop's light where the renamed index happened to be
+//! live, and an unallocated — zeroed — row where it was not, which draws solid black. Both write
+//! sites now ask [`probe_payload`], the payload question rather than the classifier question.
 
 use benilla_assets::AdtTile;
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 
 use crate::interior::{classify_entity_interior, InteriorLit};
-use crate::mesh_tag::{shade_of, with_shade};
+use crate::mesh_tag::{exterior_payload, shade_of, with_shade, InteriorProbePayload};
 use crate::terrain_stream::{doodad_ground_shade, ShadeResolve, TerrainStreamer};
 
 // Decision 0354 generalized this file from "the MCSH ground-shade byte" to the entity light
@@ -204,6 +214,29 @@ impl GroundShade {
     }
 }
 
+/// **This part's light is its own `CMapDoodadDef`'s, not any ancestor entity's light node** — a
+/// WMO doodad prop spawned onto a streamed GameObject (a transport's deck cargo and its cabin
+/// furniture, `entities::wmo_props`). This file's walk must pass it by whichever payload it is on.
+///
+/// **The reference proves the node cannot reach it** (wow-re
+/// `models/scratch/transport-wmo-doodad-light.md`, 2026-09-06, VERIFIED at the bytes): a
+/// transport's WMO is linked into the SAME global `TSExplicitList<CMapObjDef>` (`0xca7d98`) the
+/// WMO scene walk iterates — there is no separate GameObject WMO band — so its MODD entries are
+/// ordinary doodad defs. And `[def+0xa4]`, the sun scale this file's byte models, has exactly
+/// FOUR writers image-wide: the ctor `0x6a7d73` (0.0), the WMO doodad-set commit `0x695bb3`
+/// (1.0), the ADT MDDF commit `0x6b01bb` (1.0), and the MCSH refresh `0x698cb4` (0.5). None of
+/// them is the light node: the 2.5-producer `0x69e280` is entered only from `0x671a73`/`0x69e913`
+/// and the ramp `0x69e770` only through the thunk `0x671a90`, whose callers all load `[obj+0xe0]`
+/// — a path a doodad def never takes. A transport has no M2 for a node to light at all
+/// (`0x5f80e0` returns 0 for the transport types).
+///
+/// So the faithful value is **1.0**, or 0.5 from a SINGLE MCSH sample at the doodad's own
+/// footprint — `0x698c50` is a one-shot queue drain that unlinks each entry, so the verdict
+/// freezes at the pose the prop became resident at, and never ramps. Pushing the host's ramped,
+/// re-sampled byte onto these parts was a divergence (decision 2047, the other half of 2031).
+#[derive(Component)]
+pub struct DoodadDefLit;
+
 /// Roots owed a shade re-assert this frame even at an unchanged byte: some OTHER lane rewrote a
 /// descendant part's `MeshTag` since [`detect_shade_reclaims`] last ran — the interior
 /// classifier's exterior reclaim (1358), a late-attached part (`Added` counts as changed).
@@ -240,6 +273,57 @@ pub(crate) fn detect_shade_reclaims(
     }
 }
 
+/// `WOW_SHADE_CENSUS=<secs>` (any unparseable value = 5): a periodic one-line count of the two
+/// populations this pass has to keep apart — every part carrying the doodad-def marker, and the
+/// tagged parts *under* a shade root with the marked subset called out. B373 (2031/2041/2047) is
+/// what made the pair worth counting: a transport's cabin prop sits under the boat's shade root
+/// and must NOT take the boat's light, so "under a root" and "marked" diverging is the whole
+/// diagnosis, and the two numbers moving together again is how a regression shows up. Zero-cost
+/// when off: one env read, once.
+fn shade_census_every() -> Option<f32> {
+    static EVERY: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *EVERY.get_or_init(|| {
+        std::env::var("WOW_SHADE_CENSUS")
+            .ok()
+            .map(|v| v.parse().unwrap_or(5.0))
+    })
+}
+
+/// The `shade-census` printer (`WOW_SHADE_CENSUS=<secs>`) — see [`shade_census_every`].
+fn census_shade_marks(
+    marked: Query<(), With<DoodadDefLit>>,
+    roots: Query<Entity, With<GroundShade>>,
+    children: Query<&Children>,
+    tagged: Query<(), With<MeshTag>>,
+    time: Res<Time>,
+    mut next: Local<f32>,
+) {
+    let Some(every) = shade_census_every() else {
+        return;
+    };
+    let now = time.elapsed_secs();
+    if now < *next {
+        return;
+    }
+    *next = now + every;
+    let mut under_roots = 0usize;
+    let mut marked_under_roots = 0usize;
+    for r in &roots {
+        for e in children.iter_descendants(r) {
+            if tagged.get(e).is_ok() {
+                under_roots += 1;
+                if marked.get(e).is_ok() {
+                    marked_under_roots += 1;
+                }
+            }
+        }
+    }
+    info!(
+        "shade-census: DoodadDefLit total {} | tagged parts under a shade root {under_roots}, of which marked {marked_under_roots}",
+        marked.iter().count(),
+    );
+}
+
 pub(crate) struct EntityShadePlugin;
 
 impl Plugin for EntityShadePlugin {
@@ -249,7 +333,11 @@ impl Plugin for EntityShadePlugin {
         // detector sits between the two so the reclaim is observed the frame it happens.
         app.init_resource::<ShadeDirtyRoots>().add_systems(
             Update,
-            (detect_shade_reclaims, update_ground_shade)
+            (
+                detect_shade_reclaims,
+                update_ground_shade,
+                census_shade_marks,
+            )
                 .chain()
                 .after(classify_entity_interior),
         );
@@ -276,15 +364,29 @@ pub(crate) fn update_ground_shade(
         Option<&Visibility>,
     )>,
     children: Query<&Children>,
-    // Parts are matched by carrying a `MeshTag`; interior-classified ones are skipped (their payload
-    // is the packed floor colour). Fading parts are NOT skipped — shade and fade own disjoint fields.
+    // Parts are matched by carrying a `MeshTag`; a part whose payload is a PROBE SLOT is skipped,
+    // because the shade byte lives in the same bits (see [`probe_payload`]). Fading parts are NOT
+    // skipped — shade and fade own disjoint fields.
     mut parts: Query<
-        (&mut MeshTag, Option<&InteriorLit>),
+        (
+            &mut MeshTag,
+            Option<&InteriorLit>,
+            Has<InteriorProbePayload>,
+            Has<DoodadDefLit>,
+        ),
         Without<crate::billboard::BillboardCard>,
     >,
     // A card is a world ROOT (the facing system owns its transform), so the descendant walk below
     // cannot reach one — it carries its owner instead. Disjoint from `parts` by the filter above.
-    mut cards: Query<(&crate::billboard::BillboardCard, &mut MeshTag)>,
+    // It asks the same payload question: an interior prop's glow card carries its doodad's probe
+    // slot, and this pass reaches it by walking UP from the card's owner (B373).
+    mut cards: Query<(
+        &crate::billboard::BillboardCard,
+        &mut MeshTag,
+        Option<&InteriorLit>,
+        Has<InteriorProbePayload>,
+        Has<DoodadDefLit>,
+    )>,
     // Reused across frames: each shaded ROOT → its shade byte this frame (a few hundred entries).
     // The card pass walks `ChildOf` up to the nearest such root — this map used to record every
     // descendant too (~10-20k inserts/frame) so that walk could be a single lookup.
@@ -297,7 +399,9 @@ pub(crate) fn update_ground_shade(
     dirty_roots: Res<ShadeDirtyRoots>,
     mut self_log: Local<f32>,
 ) {
-    root_shade.clear();
+    // The map persists across frames (decision 1979): a settled root's byte is already in it,
+    // and re-inserting ~1.3 k entries a frame was the walk's cost. A despawned root's entry is
+    // dead weight nothing reads — entity ids are generational, so a reuse never aliases it.
     let Some(streamer) = streamer else {
         return;
     };
@@ -383,7 +487,9 @@ pub(crate) fn update_ground_shade(
         // Every root enters the card map, hidden or not — the insert is one hash write, and a
         // hidden body's card used to walk its whole parent chain to a `None` precisely because
         // its root was left out.
-        root_shade.insert(root, byte);
+        if root_shade.get(&root) != Some(&byte) {
+            root_shade.insert(root, byte);
+        }
         // A root the election hid (1270/1475) draws nothing, so the re-assert walk below is
         // skipped whole — 1473's audit found it running over every part of every off-view body.
         // The ramps above kept stepping, so the byte is current the frame the body wakes; the
@@ -406,14 +512,23 @@ pub(crate) fn update_ground_shade(
         // joint entities deeper down — same full-tree walk as the self-fade). Change-gated per part on
         // the byte, so a settled entity writes nothing and never re-triggers render extraction.
         for part in children.iter_descendants(root) {
-            let Ok((mut tag, lit)) = parts.get_mut(part) else {
+            let Ok((mut tag, lit, own_probe, own_def)) = parts.get_mut(part) else {
                 continue;
             };
-            if lit.is_some_and(InteriorLit::is_bake) {
-                continue; // the footprint-bake lane: the classifier owns the payload (probe slot)
+            // Two reasons this walk passes a part by, and they are different questions.
+            // OWNERSHIP: a WMO doodad prop is lit by its own def, never by the node above it
+            // (`DoodadDefLit`) — it is only in this tree so it rides a moving transport.
+            if own_def {
+                continue;
             }
-            if shade_of(tag.0) != byte {
-                tag.0 = with_shade(tag.0, byte);
+            // PAYLOAD: asked the only way the shade accessors can be reached
+            // (`mesh_tag::exterior_payload`); `None` = this part's bits 6..=18 are a probe slot.
+            let Some(ext) = exterior_payload(lit.is_some_and(InteriorLit::is_bake), own_probe)
+            else {
+                continue;
+            };
+            if shade_of(tag.0, ext) != byte {
+                tag.0 = with_shade(tag.0, byte, ext);
             }
         }
     }
@@ -425,12 +540,21 @@ pub(crate) fn update_ground_shade(
     // anchor or a deep joint) resolves to the NEAREST shaded root above it: with nested roots (a
     // mounted unit — rider and mount each carry a node) that is the mount's, matching the
     // one-node-per-object structure above; the old whole-tree map made this pick last-writer-wins.
-    for (card, mut tag) in &mut cards {
+    for (card, mut tag, lit, own_probe, own_def) in &mut cards {
+        // Both questions again, and a card needs them at least as much: it is a world ROOT, so
+        // this pass finds its owner by walking UP — which is how a deck lantern's glow card and a
+        // cabin prop's alike reached the host GameObject that does not light them (B373, 2047).
+        if own_def {
+            continue;
+        }
+        let Some(ext) = exterior_payload(lit.is_some_and(InteriorLit::is_bake), own_probe) else {
+            continue;
+        };
         let Some(byte) = card_root_shade(&root_shade, &child_of, card.follows()) else {
             continue; // a fixed terrain doodad's card — its shade rides the material selector
         };
-        if shade_of(tag.0) != byte {
-            tag.0 = with_shade(tag.0, byte);
+        if shade_of(tag.0, ext) != byte {
+            tag.0 = with_shade(tag.0, byte, ext);
         }
     }
 }
@@ -547,6 +671,35 @@ mod tests {
             resolve(&mut world, &map, Some(stray)),
             None,
             "no shaded ancestor"
+        );
+    }
+
+    /// **The payload question, both populations** (B373). The guard used to ask "is this part on
+    /// the classifier's Bake law", which is only one of the two ways a `MeshTag` comes to hold a
+    /// probe slot; a WMO doodad prop holds one from spawn and carries no `InteriorLit` at all.
+    /// A transport's cabin furniture is where the second population lands inside an entity's
+    /// descendant walk, and every one of those props drew under a foreign probe.
+    ///
+    /// The question now lives in `mesh_tag` beside the bits it is about, and the shade accessors
+    /// take its answer as a witness — so this test is about the two populations, not about a
+    /// caller remembering to ask, which the type system now handles.
+    #[test]
+    fn either_probe_population_denies_the_shade_writer_its_witness() {
+        assert!(
+            exterior_payload(false, false).is_some(),
+            "an ordinary exterior part takes the shade byte"
+        );
+        assert!(
+            exterior_payload(true, false).is_none(),
+            "the classifier's Bake law owns the payload"
+        );
+        assert!(
+            exterior_payload(false, true).is_none(),
+            "a spawn-time MODD prop owns it too, with no InteriorLit to say so"
+        );
+        assert!(
+            exterior_payload(true, true).is_none(),
+            "and either alone is enough — the question is an OR, not a tie-break"
         );
     }
 

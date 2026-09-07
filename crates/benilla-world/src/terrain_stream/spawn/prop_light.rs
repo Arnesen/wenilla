@@ -53,10 +53,7 @@ impl PropLight {
     /// as long as it did (decision 0969). `sky-lit` is the exterior lane; the interior lane prints
     /// the MODD-colour words it actually commits, so a base of `#000000` names itself on hover.
     pub(crate) fn inspector_label(&self) -> String {
-        let hex = |c: &[f32; 3]| {
-            let b = c.map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8);
-            format!("#{:02x}{:02x}{:02x}", b[0], b[1], b[2])
-        };
+        let hex = |c: &[f32; 3]| hex_word(*c);
         match self {
             PropLight::Exterior => "sky-lit".into(),
             PropLight::Interior {
@@ -71,6 +68,14 @@ impl PropLight {
             ),
         }
     }
+}
+
+/// A committed light word (0–1 RGB) as `#rrggbb` — the reading every prop inspector prints, here
+/// once so the terrain lane's label and the WMO-gameobject lane's (`entities::wmo_props`) cannot
+/// drift into two different renderings of the same number.
+pub fn hex_word(c: [f32; 3]) -> String {
+    let b = c.map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8);
+    format!("#{:02x}{:02x}{:02x}", b[0], b[1], b[2])
 }
 
 /// One MOLR-referenced light as the interior fold consumes it (world Bevy space, colour

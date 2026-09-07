@@ -108,10 +108,30 @@ pub fn terrain_height_under(
     adt_tiles: &Assets<AdtTile>,
     bevy_pos: Vec3,
 ) -> Option<f32> {
+    terrain_height_under_cached(streamer, adt_tiles, bevy_pos, &mut None)
+}
+
+/// [`terrain_height_under`] for a caller that asks many columns of the same tile in one go —
+/// the sun-flare march asks ~96 a frame along two rays (decision 1979): the tile resolution
+/// (a streamer map lookup and an asset lookup) is done once per tile change, not per column.
+pub fn terrain_height_under_cached<'a>(
+    streamer: &TerrainStreamer,
+    adt_tiles: &'a Assets<AdtTile>,
+    bevy_pos: Vec3,
+    cache: &mut Option<((i32, i32), &'a AdtTile)>,
+) -> Option<f32> {
     let wow = bevy_to_wow(bevy_pos);
     let (tx, ty) = world_to_tile(wow[0], wow[1]);
-    let ts = streamer.tiles.get(&(tx as i32, ty as i32))?;
-    let adt = adt_tiles.get(&ts.handle)?;
+    let key = (tx as i32, ty as i32);
+    let adt = match cache {
+        Some((k, adt)) if *k == key => *adt,
+        _ => {
+            let ts = streamer.tiles.get(&key)?;
+            let adt = adt_tiles.get(&ts.handle)?;
+            *cache = Some((key, adt));
+            adt
+        }
+    };
     benilla_formats::terrain_height_at(&adt.chunks, wow)
 }
 

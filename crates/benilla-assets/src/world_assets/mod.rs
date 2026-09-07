@@ -57,11 +57,13 @@ pub struct WorldAssets {
     /// re-walks the chain per frame). Separate from `textures`: sprites are sRGB/clamped, world
     /// art is Unorm/repeat — the same BLP can legitimately live in both.
     sprites: HashMap<String, Option<Handle<Image>>>,
-    /// Decoded UI sprite textures sampled with **repeat** addressing (frame `Backdrop` pieces —
-    /// tiled edges/bg). Separate cache from `sprites`: the *same* BLP can be wanted clamp-sampled as
-    /// a plain sprite and repeat-sampled as a backdrop piece, and the two need distinct GPU images
-    /// (the sampler is baked into the `Image`). See [`Self::sprite_texture_tiled`].
-    tiled_sprites: HashMap<String, Option<Handle<Image>>>,
+    /// Decoded UI sprite textures sampled with **repeat** addressing on one or both axes (frame
+    /// `Backdrop` pieces — tiled edges/bg — and the reference's `SetTexCoord(0, n, 0, 1)` strips).
+    /// Keyed by resolved path **and** the per-axis wrap, separate from `sprites`: the *same* BLP
+    /// can be wanted clamp-sampled as a plain sprite and repeat-sampled as a backdrop piece, and
+    /// each address-mode pair needs its own GPU image (the sampler is baked into the `Image`).
+    /// See [`Self::sprite_texture_wrapped`].
+    tiled_sprites: HashMap<(String, bool, bool), Option<Handle<Image>>>,
     /// Decoded **portrait** sprites — [`Self::sprite_texture`]'s clamp/sRGB sprite with a circular
     /// alpha mask baked in ([`portrait_image`]). Its own cache, like `tiled_sprites`: the mask bakes
     /// into the GPU image, so the same BLP wanted as a plain icon and as a portrait needs two images.
@@ -435,22 +437,37 @@ impl WorldAssets {
         decode_sprite(&self.chain, self.loose_root.as_deref(), path)
     }
 
-    /// A UI sprite decoded with **repeat** (wrap) addressing — the frame `Backdrop` tiled pieces
-    /// (`backdrop-mechanism.md`): a border edge strip samples UVs `[0..N]` and a tiled bg `[0..w/period]`,
-    /// so the texture must wrap, not clamp. Same sRGB/no-mip decode + extensionless→`.blp` resolve
-    /// as [`Self::sprite_texture`], but its own cache (the sampler is baked into the `Image`, so a
-    /// path wanted both clamp and repeat needs two GPU images). Cached hits **and** misses.
+    /// A UI sprite decoded with **repeat** (wrap) addressing on both axes — the frame `Backdrop`
+    /// tiled pieces (`backdrop-mechanism.md`): a border edge strip samples UVs `[0..N]` and a tiled
+    /// bg `[0..w/period]`, so the texture must wrap, not clamp. [`Self::sprite_texture_wrapped`]
+    /// with both axes on; see there for the cache and the decode.
     pub fn sprite_texture_tiled(
         &mut self,
         path: &str,
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
-        let key = sprite_key(path);
+        self.sprite_texture_wrapped(path, (true, true), images)
+    }
+
+    /// A UI sprite decoded with **repeat** addressing on the axes `wrap` names and clamp on the
+    /// rest — the reference's one-axis tiling idiom (`SetTexCoord(0, n, 0, 1)` on the stance
+    /// shelf's middle strip) wraps along its length and must clamp across it, or the strip's
+    /// bottom row bleeds into its top edge (decision 2000; [`sprite_image_wrapped`]). Same
+    /// sRGB/no-mip decode + extensionless→`.blp` resolve as [`Self::sprite_texture`], but its
+    /// own cache keyed by the wrap pair (the sampler is baked into the `Image`, so a path wanted
+    /// under two address modes needs two GPU images). Cached hits **and** misses.
+    pub fn sprite_texture_wrapped(
+        &mut self,
+        path: &str,
+        wrap: (bool, bool),
+        images: &mut Assets<Image>,
+    ) -> Option<Handle<Image>> {
+        let key = (sprite_key(path), wrap.0, wrap.1);
         if let Some(cached) = self.tiled_sprites.get(&key) {
             return cached.clone();
         }
         let loaded = decode_sprite(&self.chain, self.loose_root.as_deref(), path)
-            .map(|(w, h, rgba)| images.add(sprite_image_tiled(w, h, rgba)));
+            .map(|(w, h, rgba)| images.add(sprite_image_wrapped(w, h, rgba, wrap)));
         self.tiled_sprites.insert(key, loaded.clone());
         loaded
     }
@@ -497,6 +514,33 @@ impl WorldAssets {
         let loaded = decode_sprite(&self.chain, self.loose_root.as_deref(), path)
             .map(|(w, h, rgba)| images.add(portrait_image(w, h, rgba)));
         self.portraits.insert(key, loaded.clone());
+        loaded
+    }
+
+    /// The tabard designer's emblem cell (decision 1977): the emblem BLP decoded and rewritten to
+    /// **white carrying its own alpha** — `(a << 24) | 0x00FFFFFF` per texel, the reference's
+    /// `0x503431` loop — as an ordinary clamped sprite the caller tints. Cached per path like a
+    /// sprite; a file that fails to open yields `None` (the reference installs its static array's
+    /// stale contents instead; nothing here has a previous emblem to show).
+    pub fn emblem_mask_texture(
+        &mut self,
+        path: &str,
+        images: &mut Assets<Image>,
+    ) -> Option<Handle<Image>> {
+        let key = format!("emblem-mask:{}", sprite_key(path));
+        if let Some(cached) = self.sprites.get(&key) {
+            return cached.clone();
+        }
+        let loaded =
+            decode_sprite(&self.chain, self.loose_root.as_deref(), path).map(|(w, h, mut rgba)| {
+                for px in rgba.chunks_exact_mut(4) {
+                    px[0] = 0xFF;
+                    px[1] = 0xFF;
+                    px[2] = 0xFF;
+                }
+                images.add(sprite_image(w, h, rgba))
+            });
+        self.sprites.insert(key, loaded.clone());
         loaded
     }
 

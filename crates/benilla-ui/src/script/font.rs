@@ -382,10 +382,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // ── colour, and the alpha that is its fourth channel ────────────────────────────────────
+    // Shape C on the three channels (`SetTextColor 0x79f4d0`, `2=C 3=C 4=C 5=B`, wow-re
+    // `numeric-arg-coercion-law.md`): a nil or non-number is 0.0, never a raise (1973).
     m.set(
         "SetTextColor",
         lua.create_function(
-            |lua, (this, r, g, b, a): (Table, f32, f32, f32, Option<f32>)| {
+            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
+                let (r, g, b) = (
+                    super::object::as_f32(&r),
+                    super::object::as_f32(&g),
+                    super::object::as_f32(&b),
+                );
                 edit(lua, &this, |fo| {
                     let keep = fo.color.map_or(1.0, |c| c[3]);
                     fo.color = Some([r, g, b, a.unwrap_or(keep)]);

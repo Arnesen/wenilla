@@ -7,12 +7,15 @@
 //!
 //! The 5875 schema was read byte-level from the real `patch.MPQ` file (VERIFIED at decision time):
 //! WDBC header `record_count = 5`, `field_count = 4`, `record_size = 16`, string block 62 bytes —
-//! four 4-byte fields, the third a string ref. Only fields 0 (`ID`) and 2 (`Texture`) are consumed
-//! here; fields 1 and 3 are unsigned columns whose *meaning* is unconfirmed (field 1 reads like a
-//! linked item id, field 3 a small enum) and which the reader never needs — declared as filler so
-//! the field indices align. The verified rows: `1/41 → STATIONERYTEST`, `61 → GMSTATIONERY`,
-//! `62 → AUCTIONSTATIONERY`, `64 → STATIONERY_VAL` (both target BLPs exist in the archive;
-//! MPQ path lookup is case-insensitive, so the uppercase DBC string resolves the mixed-case file).
+//! four 4-byte fields, the third a string ref: `{ID, ItemID, Texture, Flags}`. Fields 1 and 3
+//! were filler until wow-re carved the send side (`ui/scratch/stationery-bindings.md`, 1970):
+//! `ItemID` is the stationery ITEM the player buys or carries to use the paper, and `Flags & 1`
+//! marks the one always available (`41 Default Stationery`, BuyPrice 0). The client's usable list
+//! is `(Flags & 1 || the player carries ItemID) && the item's template is cached`, sorted by
+//! BuyPrice ascending — the `GetNumStationeries`/`GetStationeryInfo` surface. The verified rows:
+//! `1/41 → STATIONERYTEST`, `61 → GMSTATIONERY`, `62 → AUCTIONSTATIONERY`, `64 → STATIONERY_VAL`
+//! (both target BLPs exist in the archive; MPQ path lookup is case-insensitive, so the uppercase
+//! DBC string resolves the mixed-case file).
 
 use std::collections::HashMap;
 
@@ -29,8 +32,23 @@ const STATIONERY: &str = "DBFilesClient\\Stationery.dbc";
 /// [`StationeryCatalog::DEFAULT_TEXTURE`] fallback.
 pub const STATIONERY_DEFAULT: u32 = 41;
 
-/// `Stationery.dbc`: stationery id → texture basename (the `Interface\Stationery\<basename>N` stem).
+/// One `Stationery.dbc` row (the module doc's four columns).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StationeryRow {
+    /// The stationery id a mail carries on the wire and `SelectStationery` stores.
+    pub id: u32,
+    /// The stationery item — bought or carried to use this paper.
+    pub item: u32,
+    /// The texture basename (the `Interface\Stationery\<basename>N` stem).
+    pub texture: String,
+    /// `& 1`: always available, carried or not.
+    pub flags: u32,
+}
+
+/// `Stationery.dbc`: stationery id → texture basename (the `Interface\Stationery\<basename>N` stem),
+/// and the rows whole for the send side's usable list.
 pub struct StationeryCatalog {
+    rows: Vec<StationeryRow>,
     by_id: HashMap<u32, String>,
 }
 
@@ -48,6 +66,17 @@ impl StationeryCatalog {
             .map(String::as_str)
             .unwrap_or(Self::DEFAULT_TEXTURE)
     }
+
+    /// The texture basename for a stationery id the table carries — `None` for an id gap, which
+    /// is what `GetSelectedStationeryTexture` answers with (no default there).
+    pub fn texture_of(&self, id: u32) -> Option<&str> {
+        self.by_id.get(&id).map(String::as_str)
+    }
+
+    /// Every row, in DBC order.
+    pub fn rows(&self) -> &[StationeryRow] {
+        &self.rows
+    }
 }
 
 /// Load `Stationery.dbc` into an id → basename map (see the module doc for the verified schema).
@@ -57,17 +86,24 @@ pub fn load_stationery_catalog(chain: &mut Chain) -> Result<StationeryCatalog> {
         .context("reading Stationery.dbc")?;
     let mut schema = Schema::new("Stationery");
     schema.add_field(SchemaField::new("ID", FieldType::UInt32));
-    // Field 1: an unsigned column (reads like a linked item id) — unconsumed filler.
     schema.add_field(SchemaField::new("Item", FieldType::UInt32));
     schema.add_field(SchemaField::new("Texture", FieldType::String));
-    // Field 3: a small unsigned enum — unconsumed filler.
     schema.add_field(SchemaField::new("Flags", FieldType::UInt32));
     let set = parse(&bytes, schema, "Stationery.dbc")?;
+    let mut rows = Vec::new();
     let mut by_id = HashMap::new();
     for r in set.records() {
-        if let (Some(id), Some(tex)) = (u32_at(r, 0), str_at(&set, r, 2)) {
-            by_id.insert(id, tex);
+        if let (Some(id), Some(item), Some(tex), Some(flags)) =
+            (u32_at(r, 0), u32_at(r, 1), str_at(&set, r, 2), u32_at(r, 3))
+        {
+            by_id.insert(id, tex.clone());
+            rows.push(StationeryRow {
+                id,
+                item,
+                texture: tex,
+                flags,
+            });
         }
     }
-    Ok(StationeryCatalog { by_id })
+    Ok(StationeryCatalog { rows, by_id })
 }

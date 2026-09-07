@@ -42,6 +42,25 @@ const BUILD_DATE: &str = "Sep 19 2006";
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
+    // `GetLocale()` -> one string, and `IsMacClient()` -> nil, both ARITY-EXACT in the reference's
+    // own shape table (`re/audit/binding-shapes.tsv`: `GetLocale 0x46ce40`/`0x48d8b0` is
+    // `0 -> 1 (string?)`, `IsMacClient 0x48c980` is `0 -> 1 (nil)`, both `exact`/`agree`).
+    //
+    // **`IsMacClient` answering nil is the whole verb, not a placeholder.** The table records the
+    // return KIND as `(nil)` — this binding pushes nil on the PC build the reference was carved
+    // from, and there is nothing else for it to say. FrameXML branches on it for Mac-only key
+    // labels; nil takes the PC arm, which is the arm this client wants.
+    //
+    // `GetLocale` is the two-registration case the shape gate warns about (1843): a glue copy and
+    // an in-game copy, same shape. Ours answers the one locale this client ships against — the
+    // enUS `GlobalStrings.lua` the manifest loads and 1804's reference defaults are read from.
+    // Decision 1880.
+    g.set(
+        "GetLocale",
+        lua.create_function(|lua, ()| lua.create_string("enUS"))?,
+    )?;
+    g.set("IsMacClient", lua.create_function(|_, ()| Ok(Value::Nil))?)?;
+
     // version, build, date — three, and no fourth (decision 1842)
     g.set(
         "GetBuildInfo",
@@ -284,6 +303,28 @@ mod tests {
         assert!(
             s.run(r#"RunScript("this is not lua")"#).is_err(),
             "a malformed script must raise, not vanish"
+        );
+    }
+
+    /// `GetLocale` answers one string and `IsMacClient` answers nil — the reference's own shapes
+    /// (`binding-shapes.tsv`, both `exact`/`agree`), and the arity is the half a caller branches on.
+    #[test]
+    fn the_client_identity_pair_answers_its_reference_arity() {
+        let s = UiScript::new().unwrap();
+        assert_eq!(
+            s.eval::<i64>("return select('#', GetLocale())").unwrap(),
+            1,
+            "GetLocale pushes exactly one value"
+        );
+        assert_eq!(s.eval::<String>("return GetLocale()").unwrap(), "enUS");
+        assert_eq!(
+            s.eval::<i64>("return select('#', IsMacClient())").unwrap(),
+            1,
+            "IsMacClient pushes one value, and it is nil"
+        );
+        assert!(
+            s.eval::<bool>("return IsMacClient() == nil").unwrap(),
+            "nil is the PC arm, which is the arm this client wants"
         );
     }
 }
