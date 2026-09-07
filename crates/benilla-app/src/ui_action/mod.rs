@@ -53,10 +53,10 @@ mod weapon_icon;
 /// The cooldown-event cut: [`state::feed_action_state`] fires the store-change flush trio
 /// (`ACTIONBAR_UPDATE_COOLDOWN`/`SPELL_UPDATE_COOLDOWN`/`BAG_UPDATE_COOLDOWN`) **synchronously**
 /// (`UiScript::fire_event` walks the handlers inline), so every feed that pushes cooldown
-/// triples the handlers re-read (the container feed's slot cooldowns, the spellbook feed's) must
-/// run `.before(CooldownEvents)` — or a handler reads last frame's triples and the pie stays
-/// missing until the next store change. The action states themselves are safe by construction
-/// (pushed by the same system, before it fires).
+/// triples the handlers re-read (the container feed's slot cooldowns, the spellbook feed's, the
+/// stance feed's — decision 2009) must run `.before(CooldownEvents)` — or a handler reads last
+/// frame's triples and the pie stays missing until the next store change. The action states
+/// themselves are safe by construction (pushed by the same system, before it fires).
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct CooldownEvents;
 
@@ -66,9 +66,9 @@ pub(crate) struct CooldownEvents;
 pub(crate) use cast_send::{CastCommit, CastLadder};
 pub(crate) use cast_target::AutoSelfCast;
 pub(crate) use errors::{
-    attack_actor_blocked, attack_actor_refusal, keyed_line, reagent_totem_refusal, show_messages,
-    ui_error_text, CastErrors, CastFail, MessageSink, MountErrors, Shown, UiError, UiErrorKeys,
-    UiErrorTexts,
+    attack_actor_blocked, attack_actor_refusal, keyed_line, keyed_line_s, reagent_totem_refusal,
+    show_messages, ui_error_text, CastErrors, CastFail, Caster, FillArg, MessageSink, MountErrors,
+    PetTameFailures, Shown, UiError, UiErrorKeys, UiErrorTexts,
 };
 // `pub(crate)`: the requirement validator's mounted block is ONE gate in the reference
 // (`0x6094f0` @ `0x609c6c`) sitting under the ONE cast entry `TryCast 0x6e4b60` — but benilla still
@@ -291,6 +291,34 @@ fn track_learned_abilities(
     }
 }
 
+/// `SpellMechanic.dbc` — the vocabulary that fills `SPELL_FAILED_PREVENTED_BY_MECHANIC`'s `%s`
+/// ([`benilla_formats::SpellMechanicCatalog`], decision 1948). Its one reader is the cast-failure
+/// resolver's `0x8d` arm.
+#[derive(Resource)]
+pub(crate) struct SpellMechanics {
+    pub(crate) catalog: benilla_formats::SpellMechanicCatalog,
+}
+
+fn load_spell_mechanics(mut commands: Commands, assets: Option<Res<benilla_assets::WorldAssets>>) {
+    let Some(assets) = assets else { return };
+    let loaded = {
+        let mut chain = benilla_assets::LockRecover::lock_recover(&*assets.chain);
+        benilla_formats::load_spell_mechanic_catalog(&mut chain)
+    };
+    match loaded {
+        Ok(catalog) => {
+            debug!("ui_action: {} spell-mechanic name(s)", catalog.len());
+            commands.insert_resource(SpellMechanics { catalog });
+        }
+        // Absent data is the strip fallback, not a failure: the refusal still appears, it just
+        // shows its bare stem instead of naming what is holding you.
+        Err(e) => warn!(
+            "ui_action: SpellMechanic.dbc failed to load — the crowd-control refusal drops the \
+             mechanic name: {e:#}"
+        ),
+    }
+}
+
 pub(crate) struct UiActionPlugin;
 
 impl Plugin for UiActionPlugin {
@@ -299,6 +327,7 @@ impl Plugin for UiActionPlugin {
             .init_resource::<LearnedAbilities>()
             .init_resource::<CastErrors>()
             .init_resource::<MountErrors>()
+            .init_resource::<PetTameFailures>()
             .init_resource::<UiErrorKeys>()
             .init_resource::<UiErrorTexts>()
             .init_resource::<crate::cooldowns::Cooldowns>()
@@ -308,6 +337,7 @@ impl Plugin for UiActionPlugin {
             .init_resource::<targeting::SpellTargeting>()
             .init_resource::<targeting::EnchantConfirmItem>()
             .add_systems(Startup, load_spells.after(AssetSet::Open))
+            .add_systems(Startup, load_spell_mechanics.after(AssetSet::Open))
             .add_systems(
                 Update,
                 (

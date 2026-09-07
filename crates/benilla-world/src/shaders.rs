@@ -30,6 +30,7 @@ use bevy::prelude::*;
 /// closes. `Plugin::build` runs at `add_plugins` time, and both binaries add `DefaultPlugins`
 /// (which creates the registry these calls fill) before `WorldPlugins`.
 pub(crate) fn plugin(app: &mut App) {
+    bevy::asset::embedded_asset!(app, "shaders/sky_vertex.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/sky.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/star.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/cloud.wgsl");
@@ -79,7 +80,8 @@ mod tests {
         }
         // 6 since decision 1264 retired `skybox.wgsl` (a WMO skybox draws on the shared
         // model lane, whose forced-far-depth branch lives in `benilla_assets`'
-        // `wow_model.wgsl`); 7 since 1429 added `static_gx.wgsl` (the B1 retained pass).
-        assert_eq!(found, 7, "the engine's shader set changed size");
+        // `wow_model.wgsl`); 7 since 1429 added `static_gx.wgsl` (the B1 retained pass);
+        // 8 since 2016 added `sky_vertex.wgsl` (the sky's shared far-depth vertex stage).
+        assert_eq!(found, 8, "the engine's shader set changed size");
     }
 }

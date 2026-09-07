@@ -39,22 +39,24 @@ use kira::{AudioManager, AudioManagerSettings, Decibels, Mix, Tween};
 use super::limiter;
 use super::meter::{self, LevelReading, MixLevel};
 use super::output::Window;
-#[cfg(target_os = "macos")]
+#[cfg(not(target_arch = "wasm32"))]
 use super::output::{self, Event, OutputBackend, OutputSettings};
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_arch = "wasm32")]
 use cpal::traits::{DeviceTrait, HostTrait};
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_arch = "wasm32")]
 use kira::backend::cpal::CpalBackendSettings;
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_arch = "wasm32")]
 use kira::DefaultBackend;
 
-/// **The mixer's kira backend.** Upstream's owned device layer (decision 1857) is CoreAudio and
-/// nothing else — `sound::output::stub` opens no device at all. wenilla ships a Linux build and
-/// a browser client, and the browser has no threads for 1857's realtime render loop besides, so
-/// off macOS the mixer stays on kira's own cpal backend: ALSA on Linux, Web Audio on wasm32.
-#[cfg(target_os = "macos")]
+/// **The mixer's kira backend.** Upstream's owned device layer (decision 1857) now reaches every
+/// native target — CoreAudio on macOS, cpal elsewhere (1920) — so the mixer runs on it there, and
+/// wenilla's Linux build gets the ring, the render thread and the meters like any other. The
+/// browser is the one target it cannot reach: no threads for that render loop, and no clock for
+/// its meters (`std::time::Instant` panics on wasm32). wasm32 therefore stays on kira's own cpal
+/// backend, which is Web Audio under the hood. This alias is that seam, and the only one.
+#[cfg(not(target_arch = "wasm32"))]
 type MixBackend = OutputBackend;
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_arch = "wasm32")]
 type MixBackend = DefaultBackend;
 
 /// The output backend's per-window meters, re-exported for the report in `sound::poll_mix_health`.
@@ -234,7 +236,7 @@ impl Mixer {
         // The device's rate is needed before the manager exists: the mix tap's WAV header and
         // the limiter's delay line are sized at build time, and a kira main track is
         // build-time-only.
-        #[cfg(target_os = "macos")]
+        #[cfg(not(target_arch = "wasm32"))]
         let (backend_settings, sample_rate) = (
             OutputSettings {
                 mix_ahead_ms: mix_ahead_ms(),
@@ -242,7 +244,7 @@ impl Mixer {
             },
             output::probe_sample_rate(),
         );
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_arch = "wasm32")]
         let (backend_settings, sample_rate) = backend_settings();
         let level = Arc::new(MixLevel::default());
         let limiter_on = Arc::new(AtomicBool::new(true));
@@ -264,8 +266,8 @@ impl Mixer {
         let mut manager = AudioManager::<MixBackend>::new(settings)
             .map_err(|e| anyhow::anyhow!("audio device init: {e:#}"))?;
         // The owned backend negotiates its own rate and reports it; kira's cpal backend takes the
-        // one `backend_settings` probed, so off macOS that probe is already the answer.
-        #[cfg(target_os = "macos")]
+        // one `backend_settings` probed, so on wasm32 that probe is already the answer.
+        #[cfg(not(target_arch = "wasm32"))]
         let sample_rate = Some(manager.backend_mut().sample_rate());
         // The zone-reverb send: wet-only (the dry path stays on the source tracks), silent until
         // a zone preset raises it. Effects are build-time-only; parameters retune at runtime.
@@ -602,9 +604,10 @@ struct MainChain {
     audio_pos: Option<Arc<AtomicU64>>,
 }
 
-/// The device IO buffer we ask cpal for off macOS, in frames (decision 1026). 2048 at 48 kHz is
-/// ~43 ms — long enough that a world-entry compile burst does not starve the callback.
-#[cfg(not(target_os = "macos"))]
+/// The device IO buffer we ask kira's own cpal backend for on wasm32, in frames (decision 1026).
+/// 2048 at 48 kHz is ~43 ms — long enough that a world-entry compile burst does not starve the
+/// callback.
+#[cfg(target_arch = "wasm32")]
 const TARGET_BUFFER_FRAMES: u32 = 2048;
 
 /// Build the cpal backend settings: kira's default device, our explicit buffer size. Also
@@ -614,8 +617,9 @@ const TARGET_BUFFER_FRAMES: u32 = 2048;
 /// `device` stays `None` on purpose — that keeps kira's own default-device selection *and* its
 /// disconnect/restart handling (`custom_device = false`). We override only the config. Every
 /// failure path falls back to kira's defaults, so a machine we can't probe still opens the device
-/// exactly as before; [`Mixer::new`]'s caller already tolerates no-device.
-#[cfg(not(target_os = "macos"))]
+/// exactly as before; [`Mixer::new`]'s caller already tolerates no-device. wasm32 only — every
+/// native target builds [`OutputSettings`] for the owned backend instead.
+#[cfg(target_arch = "wasm32")]
 fn backend_settings() -> (CpalBackendSettings, Option<u32>) {
     let fallback = CpalBackendSettings::default();
     let Some(device) = cpal::default_host().default_output_device() else {
@@ -654,7 +658,7 @@ fn backend_settings() -> (CpalBackendSettings, Option<u32>) {
 /// the way the reference reads it once at sound-system init — before the `App` exists, so
 /// straight from the stored config (`boot_cvar`), the registered default when unset. Clamped
 /// to what a ring can sensibly hold; a value outside it is a typo, not a request.
-#[cfg(target_os = "macos")]
+#[cfg(not(target_arch = "wasm32"))]
 fn mix_ahead_ms() -> u32 {
     crate::cvars::boot_cvar("SoundBufferSize")
         .and_then(|v| v.trim().parse::<f64>().ok())
@@ -668,7 +672,7 @@ fn mix_ahead_ms() -> u32 {
 /// busier IO thread (512, the shipping-engine norm) or a longer cycle budget (1115's 2048)
 /// rides a Space switch better is a question this machine's next crackle answers, and both
 /// arms have to be one env var apart to answer it. Unset is the default in `sound::output`.
-#[cfg(target_os = "macos")]
+#[cfg(not(target_arch = "wasm32"))]
 fn io_buffer_frames() -> u32 {
     std::env::var("WOW_IO_BUFFER")
         .ok()
@@ -704,11 +708,9 @@ impl Mixer {
     /// Service the output backend — device notices, stream rebuilds, the meters — and fold the
     /// window into the health counters. Cheap and non-blocking; call every frame.
     pub(crate) fn poll_health(&mut self) -> MixHealth {
-        // **The device layer is CoreAudio-only upstream** (decision 1857): its `stub.rs` opens
-        // nothing on every other target. benilla-realm ships a Linux server build and a browser
-        // client, so off macOS the mixer stays on kira's own cpal backend — Web Audio under the
-        // hood on wasm32 — and this reads whatever diagnostics that backend exposes.
-        #[cfg(target_os = "macos")]
+        // The owned device layer reports all of this itself; on wasm32 (`MixBackend`) there is
+        // no such backend to ask, so that arm reports nothing at all.
+        #[cfg(not(target_arch = "wasm32"))]
         {
             let backend = self.manager.backend_mut();
             let (window, events) = backend.service();
@@ -729,7 +731,9 @@ impl Mixer {
                         f64::from(realtime_latency_frames) / f64::from(sample_rate) * 1000.0,
                     ),
                     Event::Lost(why) => warn!("audio: output stream dropped — {why}; reopening"),
-                    Event::OpenFailed(what) => warn!("audio: output device refused — {what}; retrying"),
+                    Event::OpenFailed(what) => {
+                        warn!("audio: output device refused — {what}; retrying")
+                    }
                     Event::Dead(what) => error!("audio: output is gone for good — {what}"),
                 }
             }
@@ -740,27 +744,12 @@ impl Mixer {
             self.health.overruns += window.underruns;
             self.window.merge(window);
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_arch = "wasm32")]
         {
             // kira's wasm32 `CpalBackend` has no `pop_cpu_usage`/`pop_error` — its cpal backend there
-            // is Web Audio under the hood and doesn't expose the diagnostics API these read. Rather
+            // is Web Audio under the hood and doesn't expose the diagnostics API those read. Rather
             // than fabricate a load/error count kira never gives it, the meter just reports nothing
             // on web (`health` starts and stays at its `Default`).
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                let backend = self.manager.backend_mut();
-                while let Some(load) = backend.pop_cpu_usage() {
-                    self.health.load = load;
-                    self.health.peak_load = self.health.peak_load.max(load);
-                    if load >= 1.0 {
-                        self.health.overruns += 1;
-                    }
-                }
-                while let Some(err) = backend.pop_error() {
-                    self.health.stream_errors += 1;
-                    warn!("audio: stream error — {err}");
-                }
-            }
         }
         self.health
     }
@@ -938,6 +927,18 @@ pub(crate) struct StreamWatch {
     last_pos: Option<f64>,
     expected: f64,
     advanced: f64,
+    /// When the open window began, in WALL time — carried so the report can state the span it
+    /// actually covered beside the time it counted.
+    ///
+    /// **Because the two disagreed and nothing could say why.** A 2026-09-06 login closed a 1.0 s
+    /// window 0.756 s of wall after the stream started, which is arithmetically impossible if the
+    /// fed `dt` is the real frame delta — and the fix that put this watch on `Time<Real>` did not
+    /// change it. Rather than reason further from log timestamps, the line now carries both
+    /// numbers: if they disagree the caller's clock is still wrong, and if they agree the
+    /// starvation is real and the timestamps were the misreading.
+    window_start: Option<bevy::platform::time::Instant>,
+    /// The closing window's counted totals, kept for the report (`observe` zeroes them).
+    closed: (f64, f64),
 }
 
 impl StreamWatch {
@@ -947,6 +948,8 @@ impl StreamWatch {
             last_pos: None,
             expected: 0.0,
             advanced: 0.0,
+            window_start: None,
+            closed: (0.0, 0.0),
         }
     }
 
@@ -954,11 +957,24 @@ impl StreamWatch {
     pub(crate) fn feed(&mut self, handle: &StreamingSoundHandle<FromFileError>, dt: f64) {
         use kira::sound::PlaybackState as S;
         let audible = matches!(handle.state(), S::Playing | S::Stopping);
+        if audible && self.expected == 0.0 {
+            self.window_start = Some(bevy::platform::time::Instant::now());
+        }
         if let Some(lost) = self.observe(audible, handle.position(), dt) {
+            let span = self
+                .window_start
+                .take()
+                .map_or(f64::NAN, |t| t.elapsed().as_secs_f64());
+            let (counted, advanced) = self.closed;
+            // **No cause is named.** This used to say "(decode thread outrun)", which is one of
+            // three mechanisms that freeze a stream's position identically — a starved decoder, a
+            // render thread that did not run, or a closed/rebuilding device — and the meter cannot
+            // tell them apart. Asserting one of the three in the line is how a log hands a reader
+            // a conclusion the instrument never reached.
             warn!(
-                "audio: {} stream starved — ~{:.0} ms of injected silence in the last \
-                 {STREAM_WATCH_WINDOW_SECS:.0} s (decode thread outrun) — this is what a \
-                 crackle sounds like",
+                "audio: {} stream starved — ~{:.0} ms of injected silence over a {span:.2} s \
+                 window (counted {counted:.2} s, position advanced {advanced:.2} s) — this is \
+                 what a crackle sounds like",
                 self.label,
                 lost * 1000.0,
             );
@@ -971,6 +987,7 @@ impl StreamWatch {
         self.last_pos = None;
         self.expected = 0.0;
         self.advanced = 0.0;
+        self.window_start = None;
     }
 
     /// The accounting core, pure so the tests below can drive it without a device. Returns
@@ -992,6 +1009,7 @@ impl StreamWatch {
             return None;
         }
         let lost = self.expected - self.advanced;
+        self.closed = (self.expected, self.advanced);
         self.expected = 0.0;
         self.advanced = 0.0;
         (lost > STREAM_STARVED_MIN_SECS).then_some(lost)

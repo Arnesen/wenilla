@@ -94,27 +94,39 @@ fn ui() -> UiScript {
 }
 
 /// The runner delivers every body line through the reference's own door — one
-/// `EXECUTE_CHAT_LINE` event per non-empty line, in order, landing in the chat-input queue via
-/// ChatFrame1's handler (0996, wow-re `macro-execution-law.md` §4). That is what makes `/cast`,
-/// `/target`, `/script`, the chat types and the 225 emotes all work in a macro without the runner
-/// knowing any of them.
+/// `EXECUTE_CHAT_LINE` event per non-empty line, in order (0996, wow-re `macro-execution-law.md`
+/// §4) — and the reference's own `ChatFrame_OnEvent` arm does the rest: `SetText(arg1)`,
+/// `ChatEdit_SendText`, `ChatEdit_OnEscapePressed` (ChatFrame.lua l.1343-1347). So a macro line
+/// lands wherever a typed line lands — a chat type in the send queue, an emote in the emote
+/// queue, a roll in the roll queue — without the runner knowing any of them.
 #[test]
-fn running_a_macro_queues_its_lines_as_chat_input() {
+fn running_a_macro_runs_its_lines_through_the_references_edit_box() {
     let mut s = ui();
     s.set_macros(MacroState {
-        account: vec![macro_view(
-            "Ambush",
-            "/cast Ambush\n\n  /say pew  \n/target Bob",
-        )],
+        account: vec![macro_view("Greet", "/wave\n\n  /say pew  \n/roll 1 100")],
         character: Vec::new(),
     });
 
     assert!(super::run_macro(&mut s, 1));
+    let sends = s.take_chat_sends();
     assert_eq!(
-        s.take_chat_input(),
-        vec!["/cast Ambush", "/say pew", "/target Bob"],
-        "blank lines dropped, each line trimmed, order kept"
+        sends
+            .iter()
+            .map(|c| (c.text.as_str(), c.chat_type.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("pew", "SAY")],
+        "the line was trimmed before the parse, and sent as the type its slash named"
     );
+    assert_eq!(
+        s.take_emote_requests()
+            .iter()
+            .map(|e| e.token.as_str())
+            .collect::<Vec<_>>(),
+        vec!["WAVE"],
+        "the emote line reached DoEmote through the reference's emote table"
+    );
+    assert_eq!(s.take_roll_requests(), vec![(1, 100)]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     // An empty macro and an empty slot both run nothing and queue nothing.
     s.set_macros(MacroState {
@@ -123,7 +135,7 @@ fn running_a_macro_queues_its_lines_as_chat_input() {
     });
     assert!(!super::run_macro(&mut s, 1));
     assert!(!super::run_macro(&mut s, 7));
-    assert!(s.take_chat_input().is_empty());
+    assert!(s.take_chat_sends().is_empty());
 }
 
 /// A CHARACTER-range macro runs by its own index — the second half of the space is not a special
@@ -133,10 +145,16 @@ fn a_character_macro_runs_by_its_own_index() {
     let mut s = ui();
     s.set_macros(MacroState {
         account: Vec::new(),
-        character: vec![macro_view("Charge", "/cast Charge")],
+        character: vec![macro_view("Charge", "/say Charge")],
     });
     assert!(super::run_macro(&mut s, 19));
-    assert_eq!(s.take_chat_input(), vec!["/cast Charge"]);
+    assert_eq!(
+        s.take_chat_sends()
+            .iter()
+            .map(|c| c.text.clone())
+            .collect::<Vec<_>>(),
+        vec!["Charge".to_string()]
+    );
 }
 
 /// The seed→dirty→save contract the plugin's two systems rest on: the app's own load must not look
@@ -195,7 +213,7 @@ fn a_registered_frame_sees_every_macro_line_as_an_event() {
     )
     .unwrap();
     s.set_macros(MacroState {
-        account: vec![macro_view("Pull", "/cast Charge\n/say Incoming!")],
+        account: vec![macro_view("Pull", "/wave\n/say Incoming!")],
         character: Vec::new(),
     });
 
@@ -205,11 +223,18 @@ fn a_registered_frame_sees_every_macro_line_as_an_event() {
             "return MacroSpy.seen[1], MacroSpy.seen[2], table.getn(MacroSpy.seen)"
         )
         .unwrap(),
-        ("/cast Charge".into(), "/say Incoming!".into(), 2),
+        ("/wave".into(), "/say Incoming!".into(), 2),
         "each line arrives as arg1 of its own event, in body order"
     );
     // …and the same lines still reach the chat grammar: the spy is an observer, not a diversion.
-    assert_eq!(s.take_chat_input(), vec!["/cast Charge", "/say Incoming!"]);
+    assert_eq!(
+        s.take_chat_sends()
+            .iter()
+            .map(|c| c.text.clone())
+            .collect::<Vec<_>>(),
+        vec!["Incoming!".to_string()]
+    );
+    assert_eq!(s.take_emote_requests().len(), 1);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -220,14 +245,17 @@ fn a_registered_frame_sees_every_macro_line_as_an_event() {
 fn either_line_ending_splits_a_body() {
     let mut s = ui();
     s.set_macros(MacroState {
-        account: vec![macro_view("Mixed", "/cast Charge\r/say a\r\n/say b")],
+        account: vec![macro_view("Mixed", "/say Charge\r/say a\r\n/say b")],
         character: Vec::new(),
     });
     assert!(super::run_macro(&mut s, 1));
     assert_eq!(
-        s.take_chat_input(),
-        vec!["/cast Charge", "/say a", "/say b"],
-        "\\r alone splits; \\r\\n does not leave an empty token"
+        s.take_chat_sends()
+            .iter()
+            .map(|c| c.text.clone())
+            .collect::<Vec<_>>(),
+        vec!["Charge".to_string(), "a".to_string(), "b".to_string()],
+        "\r alone splits; \r\n does not leave an empty token"
     );
 }
 

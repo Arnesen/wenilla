@@ -508,6 +508,60 @@ mod loader_tests {
         );
     }
 
+    /// A named state texture and a named `<ButtonText>` are anchor targets by NAME, not only
+    /// globals: the stock trainer row hangs its label off `$parentHighlight`'s RIGHT, and a name
+    /// published only into `_G` sent the label to the button's own edge (1957).
+    #[test]
+    fn a_named_state_texture_is_an_anchor_target_for_its_sibling_label() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Button name="Row">
+                    <Size><AbsDimension x="293" y="16"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="22" y="-50"/></Offset></Anchor>
+                    </Anchors>
+                    <HighlightTexture name="$parentHighlight" file="Interface\Buttons\UI-PlusButton-Hilight">
+                        <Size><AbsDimension x="16" y="16"/></Size>
+                        <Anchors>
+                            <Anchor point="LEFT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor>
+                        </Anchors>
+                    </HighlightTexture>
+                    <ButtonText name="$parentText">
+                        <Size><AbsDimension x="0" y="13"/></Size>
+                        <Anchors>
+                            <Anchor point="LEFT" relativeTo="$parentHighlight" relativePoint="RIGHT">
+                                <Offset><AbsDimension x="2" y="1"/></Offset>
+                            </Anchor>
+                        </Anchors>
+                    </ButtonText>
+                    <NormalFont inherits="GameFontNormal" justifyH="LEFT"/>
+                </Button>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        s.resolve();
+        let (hl_right, text_left): (f64, f64) = s
+            .eval("return RowHighlight:GetRight(), RowText:GetLeft()")
+            .unwrap();
+        assert_eq!(hl_right, 22.0 + 3.0 + 16.0);
+        assert_eq!(
+            text_left,
+            hl_right + 2.0,
+            "the label hangs off the highlight, not the button"
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .all(|w| !w.contains("does not resolve")),
+            "no unresolved relativeTo: {:?}",
+            report.warnings
+        );
+    }
+
     /// A handler with a syntax error yields an `errors[]` entry, the load continues, and the other
     /// frame is still built with a working handler.
     #[test]
@@ -1252,6 +1306,76 @@ mod loader_tests {
             typed.rect,
             Some(crate::layout::Rect::new(100.0, 147.0, 132.0, 687.0)),
             "the text region is anchored by the insets"
+        );
+    }
+
+    /// `<TitleRegion setAllPoints="true"/>` builds the frame's drag handle over its whole rect —
+    /// the stock `TutorialFrame.xml`'s (1976): a press inside it moves the frame with the cursor,
+    /// exactly as `frame:CreateTitleRegion():SetAllPoints()` from Lua does
+    /// (`script::tests::movable::a_title_region_drag_swallows_the_press_and_ends_on_release`);
+    /// the same frame without the element does not move.
+    #[test]
+    fn title_region_element_builds_the_drag_handle_over_the_frame() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Frame name="Tut" enableMouse="true">
+                    <Size><AbsDimension x="200" y="80"/></Size>
+                    <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="100" y="100"/></Offset></Anchor></Anchors>
+                    <TitleRegion setAllPoints="true"/>
+                </Frame>
+                <Frame name="Plain" enableMouse="true">
+                    <Size><AbsDimension x="200" y="80"/></Size>
+                    <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="400" y="100"/></Offset></Anchor></Anchors>
+                </Frame>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        let left = |s: &mut UiScript, f: &str| {
+            s.resolve();
+            s.eval::<f64>(&format!("return {f}:GetLeft()")).unwrap()
+        };
+        assert_eq!(left(&mut s, "Tut"), 100.0);
+        s.mouse_button(150.0, 150.0, "LeftButton", true);
+        s.mouse_move(250.0, 150.0);
+        assert_eq!(
+            left(&mut s, "Tut"),
+            200.0,
+            "the element's title region drags the frame"
+        );
+        s.mouse_button(250.0, 150.0, "LeftButton", false);
+
+        assert_eq!(left(&mut s, "Plain"), 400.0);
+        s.mouse_button(450.0, 150.0, "LeftButton", true);
+        s.mouse_move(550.0, 150.0);
+        assert_eq!(left(&mut s, "Plain"), 400.0, "no element, no handle");
+        s.mouse_button(550.0, 150.0, "LeftButton", false);
+    }
+
+    #[test]
+    fn a_loader_built_title_region_emits_no_quad() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Frame name="Tut" enableMouse="true">
+                    <Size><AbsDimension x="200" y="80"/></Size>
+                    <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="100" y="100"/></Offset></Anchor></Anchors>
+                    <TitleRegion setAllPoints="true"/>
+                </Frame>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        s.resolve();
+        let quads = s.extract();
+        assert!(
+            quads
+                .iter()
+                .all(|q| matches!(q.target, crate::order::ZTarget::Frame(_))),
+            "a title region is a hit rectangle, never a quad: {quads:#?}"
         );
     }
 

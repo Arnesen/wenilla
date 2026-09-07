@@ -1,12 +1,11 @@
-//! The shipped `assets/ui/MoneyFrame.xml` — the reference's `MoneyFrameTemplate` /
+//! The stock `Interface\FrameXML\MoneyFrame.xml` — the reference's `MoneyFrameTemplate` /
 //! `SmallMoneyFrameTemplate` kit and the `MoneyTypeInfo` table behind it (decision 1190: a name the
 //! shipped 1.12 UI defines is a name we publish too — under our own implementation of it, 1260).
 //!
-//! Nothing benilla ships consumes this file yet — our own eight coin displays run on
-//! MerchantFrame.xml's `BenillaMoney_*` slot kit, and MoneyFrame.xml's header is where the two are
-//! reconciled — so these tests ARE its only driver. That makes them the contract: they exercise it
-//! the way an addon does (declare a frame on the template, point it at a type, change the type,
-//! read the coins back), because that is who calls it.
+//! Eight shipped windows consume this file (1937 converged the coin cluster onto it; 1962 put the
+//! file itself on the chain). These tests exercise it the way an addon does — declare a frame on
+//! the template, point it at a type, change the type, read the coins back — because that is who
+//! calls it.
 //!
 //! What they guard: the type switch actually rewiring where the number comes from and whether the
 //! coins take the mouse; the collapse rule per type (`collapse`, `showSmallerCoins`, `fixedWidth`);
@@ -26,8 +25,10 @@ fn harness(money: u64) -> UiScript {
     // below is deliberate rather than an artefact of an unfed VM — a flat 8px per digit makes
     // every expected number readable as `digits x 8 + icon`.
     s.set_text_measurer(Box::new(super::FixedWidthFont(8.0)));
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml"); // `message`, the kit's own error path
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
 
     let doc = benilla_ui::framexml::parse(
         r#"<Ui>
@@ -201,8 +202,9 @@ fn update_paints_a_static_frame_by_name_and_resizes_it() {
     //
     // **The digits used to contribute 0 here and this test asserted the bare 13s that came of it.**
     // That was the director's cramped gold on a first open: `ShowCoin` sized each coin from a text
-    // measure that lands a frame later, so it read 0 every first time. It sums the engine's
-    // `BenillaNumberWidth` feed now, which answers in the same tick.
+    // measure that lands a frame later, so it read 0 every first time. The engine's font
+    // measurer answers inside the Lua call that asked now (`script/measure.rs`), so the width
+    // is real on the first pass.
     assert_eq!(
         s.eval::<f64>("return TestPurseGoldButton:GetWidth()")
             .unwrap(),
@@ -321,8 +323,8 @@ fn set_money_frame_color_recolours_the_digits_and_not_the_icons() {
 }
 
 /// `MoneyTypeInfo` is read directly by addons, so its shape is part of the contract — all seven
-/// reference types, each with an `UpdateFunc`, and the two we cannot source yet answering 0 rather
-/// than erroring (the header's `GetSendMailMoney`/`GetSendMailCOD` gap).
+/// reference types, each with an `UpdateFunc`, and the two send-mail rows reading the amounts
+/// their engine getters hold (`GetSendMailMoney`/`GetSendMailCOD`, built by 1962).
 #[test]
 fn the_money_type_table_carries_all_seven_reference_types() {
     let s = harness(12_345);
@@ -343,7 +345,7 @@ fn the_money_type_table_carries_all_seven_reference_types() {
             "MoneyTypeInfo[\"{t}\"] with an UpdateFunc"
         );
     }
-    // The two whose engine getters we have not built answer 0 instead of nil-calling.
+    // The two send-mail rows: with no send-mail amount set, their getters answer 0.
     for t in ["SEND_MAIL", "SEND_MAIL_COD"] {
         s.run(&format!(
             "this = TestPurse MoneyFrame_SetType(\"{t}\") this = nil"
@@ -357,7 +359,7 @@ fn the_money_type_table_carries_all_seven_reference_types() {
         assert_eq!(
             s.eval::<i64>("return TestPurse.staticMoney").unwrap(),
             0,
-            "{t} reads 0 while its engine getter is missing"
+            "{t} reads its engine getter, which is 0 with no send-mail amount set"
         );
     }
 }
@@ -374,9 +376,10 @@ fn the_money_type_table_carries_all_seven_reference_types() {
 fn the_chains_money_input_frame_splits_an_amount_across_its_three_boxes() {
     let _data = benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml"); // COPPER_PER_GOLD / COPPER_PER_SILVER live here
-                                    // The manifest's own order: the `.lua` brings the ten verbs, the `.xml` the template.
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua"); // COPPER_PER_GOLD / COPPER_PER_SILVER live here
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    // The manifest's own order: the `.lua` brings the ten verbs, the `.xml` the template.
     load_xml(&s, r"Interface\FrameXML\MoneyInputFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyInputFrame.xml");
 

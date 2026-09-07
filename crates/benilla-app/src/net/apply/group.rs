@@ -26,6 +26,18 @@ fn push_group_lines(chat_log: &mut ChatLog, lines: Vec<String>) {
     }
 }
 
+/// `MSG_RAID_READY_CHECK`, the open form (decision 1989): our own echo as leader takes the
+/// response-collection arm and prints nothing; as anyone else we print the leader's line and take
+/// the popup ticket. The leader test is the reference's guid compare (`0x4ba3a0`).
+pub(super) fn ready_check_request(
+    group: &mut GroupState,
+    chat_log: &mut ChatLog,
+    self_guid: &SelfGuid,
+) {
+    let we_lead = self_guid.0 == Some(group.leader);
+    push_group_lines(chat_log, group.apply_ready_check_request(we_lead));
+}
+
 /// `SMSG_GROUP_INVITE` — someone asked us into their group.
 pub(super) fn invited(group: &mut GroupState, chat_log: &mut ChatLog, inviter: &str) {
     push_group_lines(chat_log, group.apply_invited(inviter));
@@ -202,15 +214,18 @@ pub(super) fn roster_deactivated(
 /// `SMSG_PARTY_COMMAND_RESULT` — the verdict on an invite/kick/leave we asked for.
 pub(super) fn command_result(
     group: &mut GroupState,
-    chat_log: &mut ChatLog,
+    errors: &mut crate::ui_action::UiErrorKeys,
     operation: u32,
     member: &str,
     result: u32,
 ) {
-    push_group_lines(
-        chat_log,
-        group.apply_command_result(operation, member, result),
-    );
+    // By KEY, not by sentence, and into the shared queue rather than straight into chat: the
+    // catalog row decides the surface, so `result == 7` reaches the red `UIErrorsFrame` line while
+    // the other nine stay chat lines (wow-re `party-command-result-law.md`; decision 2035's
+    // shape). `None` is the reference's own silence — three inputs display nothing at all.
+    errors
+        .0
+        .extend(group.apply_command_result(operation, member, result));
 }
 
 #[cfg(test)]

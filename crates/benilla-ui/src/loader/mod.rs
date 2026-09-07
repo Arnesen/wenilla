@@ -139,6 +139,7 @@ pub fn load_into(
         path: path.to_string(),
         report: LoadReport::default(),
         warned: HashSet::new(),
+        deferred_anchors: Vec::new(),
     };
     // Fold the document layer's own parse warnings in (decision 0068: reuse framexml's warnings).
     loader.report.warnings.extend(doc.warnings.iter().cloned());
@@ -192,6 +193,7 @@ pub fn apply_template(lua: &mlua::Lua, wrapper: &Table, kind: &str, template: &s
         path: String::new(),
         report: LoadReport::default(),
         warned: HashSet::new(),
+        deferred_anchors: Vec::new(),
     };
 
     let (own_name, parent_name) = loader.frame_names(wrapper);
@@ -295,34 +297,13 @@ pub fn join_ref(base: &str, path: &str) -> String {
     out.join("/")
 }
 
-/// The frame KIND an element materializes as — its tag, with one substitution.
-///
-/// **A `<Model>` playing the cooldown indicator IS this engine's `<Cooldown>` widget.** The
-/// reference draws a cooldown sweep as a `Model` running
-/// `Interface\Cooldown\UI-Cooldown-Indicator.mdx` — that is what `CooldownFrameTemplate` is, and
-/// every consumer writes `<Model … inherits="CooldownFrameTemplate"/>`: the reference's own
-/// `ContainerFrameItemButtonTemplate` (ContainerFrame.xml l.13), its action buttons, and three
-/// corpus addons. benilla renders no FrameXML models at all, and it does not need to for this one:
-/// decision 0263 put the whole scrub/finish-flash machine inside a NATIVE `Cooldown` widget, which
-/// is the same picture by a different route.
-///
-/// So the mapping is on the MODEL FILE, not on the template name — the file is the thing's
-/// identity, an addon may reach the same art without inheriting the template, and a template name
-/// is a string anyone can shadow. Anything else keeps its tag and stays an inert `Model`.
-///
-/// Without this, decision 1751's bag swap silently loses the bag-slot cooldown sweep: our own
-/// `BenillaBagSlotTemplate` carried a real `<Cooldown>` child, the reference's carries a `<Model>`,
-/// and `CooldownFrame_SetTimer`'s Model branch shows and hides the frame and nothing more.
-fn frame_kind_of(el: &Element) -> String {
-    const COOLDOWN_MODEL: &str = "ui-cooldown-indicator.mdx";
-    if el.tag.eq_ignore_ascii_case("Model")
-        && el
-            .attr("file")
-            .is_some_and(|f| f.to_ascii_lowercase().ends_with(COOLDOWN_MODEL))
-    {
-        return "Cooldown".to_string();
-    }
-    el.tag.clone()
+/// Is `tag` one of the four model-pane kinds — the `CSimpleModel` family, whose own `LoadXML`
+/// (`0x76cac0`) reads the `scale=` attribute into the MODEL scale (`geometry.rs`'s
+/// `apply_attrs`, decision 2007).
+pub(super) fn model_kind_tag(tag: &str) -> bool {
+    ["Model", "PlayerModel", "DressUpModel", "TabardModel"]
+        .iter()
+        .any(|k| k.eq_ignore_ascii_case(tag))
 }
 
 /// The `.lua` test `0x6ede10` opens with: `strrchr(path, '.')` on the **whole resolved path**,
@@ -368,6 +349,24 @@ struct Loader<'a> {
     pub(super) report: LoadReport,
     /// Warn-once keys (so a document with 200 `OnClick` handlers doesn't emit 200 identical warnings).
     pub(super) warned: HashSet<String>,
+    /// Anchors whose named `relativeTo` did not resolve when its element was read, applied once
+    /// the enclosing frame's subtree exists ([`Loader::drain_deferred_anchors`]). The real
+    /// client is order-free here because it resolves anchors at layout, after every child of
+    /// the frame is built; this loader resolves a name at `SetPoint` time, so a `<ButtonText>`
+    /// hung off a `<HighlightTexture>` declared after it (the stock trainer row) — or a state
+    /// texture hung off the label declared after IT (the sort-header arrow) — needs the same
+    /// grace. Each entry belongs to the `decorate` that pushed it and drains there, so a nested
+    /// frame's anchors never wait for its parent (1957).
+    pub(super) deferred_anchors: Vec<DeferredAnchor>,
+}
+
+/// One `SetPoint` the loader holds until its target can exist — see `Loader::deferred_anchors`.
+pub(super) struct DeferredAnchor {
+    pub(super) wrapper: Table,
+    /// A region wrapper (`call_region`) rather than a frame's (`call`).
+    pub(super) region: bool,
+    pub(super) args: (String, Option<String>, String, f32, f32),
+    pub(super) dbg: String,
 }
 
 impl Loader<'_> {
@@ -429,18 +428,28 @@ impl Loader<'_> {
     ///
     /// wow-re `system/ui/scratch/rf28-typed-widget-loadxml.md`: `<Button text=>` (l.36) and
     /// `<FontString text=>` (l.115) BOTH resolve through `FrameScript_GetText 0x703bf0`, which
-    /// `scratch/inventory-change-failure-display.md` l.119 carves VERIFIED — it resolves the value as
-    /// a Lua global and, **when that global is not a string, returns a pre-seeded EMPTY string**
-    /// (`0x882748`), never the key name. That is why the reference's `text="LOGOUT"` renders "Logout",
-    /// and why `GlobalStrings.lua` runs before any XML (`ui_script::load_global_strings`).
+    /// `scratch/framescript.md` carves VERIFIED — it resolves the value as a Lua global and,
+    /// **when that global is not a string, returns a pre-seeded EMPTY string** (`0x882748`), never
+    /// the key name. That is why the reference's `text="LOGOUT"` renders "Logout", and why
+    /// `GlobalStrings.lua` runs before any XML (`ui_script::load_global_strings`).
     ///
-    /// **One deliberate divergence: a miss falls back to the LITERAL** rather than the reference's
-    /// empty string. benilla authors its own FrameXML (0068) and writes plain English in it —
-    /// `text="Send Mail"`, `text="No results found."` — which the reference's rule would blank. The
-    /// fallback is a strict superset for transcriptions (every real key resolves identically) and it
-    /// fails LOUDER than the reference: a **key-shaped** value that misses keeps its key on screen
-    /// *and* warns here — exactly the signal that was missing when the macro window shipped with
-    /// "CREATE_MACROS" across its title bar (0983 → 0991).
+    /// **The MISS falls back to the raw attribute, and that is the reference's own behaviour — not
+    /// a benilla divergence, which is what this comment used to claim.** `0x703bf0`'s empty return
+    /// never reaches a label: all three `text=` readers image-wide test it and substitute the raw
+    /// attribute string. `Button::LoadXML` at `0x778c07` — recorded in wow-re
+    /// `scratch/template-onload-replacement-law.md` §5, "a fallback to the raw attribute when the
+    /// lookup comes back empty (`0x778c31 mov eax,esi`)" — and byte-identically
+    /// `CSimpleFontString::LoadXML` at `0x771006` (`771012 mov esi,eax` … `771029 test eax,eax` /
+    /// `77102b je 0x771032` / `77102d cmp BYTE [eax],0` / `771030 jne` / `771032 mov eax,esi`), and
+    /// the third reader at `0x7292a6`, which expresses the same law through a copy
+    /// (`7292db mov al,[ebp-0x424]` / `7292e1 test al,al`, empty arm pushes `edi` = the raw).
+    ///
+    /// So the reference's `PetPaperDollFrame.xml:70` `text="Level level race class"` really does
+    /// draw that placeholder until Lua overwrites it, and benilla's plain-English `text="Send
+    /// Mail"` renders for the same reason the reference's would. What IS ours is the extra signal:
+    /// a **key-shaped** value that misses warns here as well as keeping its key on screen — the
+    /// signal that was missing when the macro window shipped with "CREATE_MACROS" across its title
+    /// bar (0983 → 0991).
     pub(super) fn resolve_text(&mut self, raw: &str, dbg: &str) -> String {
         if let Ok(s) = self.lua().globals().get::<String>(raw) {
             return s;
@@ -593,8 +602,15 @@ impl Loader<'_> {
         let templates = model.framexml_templates.borrow();
         let view: HashMap<&str, &Element> =
             templates.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        // The font namespace, so a font object inside an inherit chain is skipped rather than
+        // warned as an unknown template (1874).
+        let fonts = model.framexml_fonts.borrow();
+        let font_names: std::collections::HashSet<&str> =
+            fonts.keys().map(|k| k.as_str()).collect();
         let mut warns = Vec::new();
-        let out = framexml::expand(el, &view, &mut warns);
+        let out = framexml::expand_known(el, &view, &font_names, &mut warns);
+        drop(font_names);
+        drop(fonts);
         drop(view);
         drop(templates);
         drop(model);
@@ -756,7 +772,7 @@ impl Loader<'_> {
             }
         };
         let wrapper: Table =
-            match create.call((frame_kind_of(el), resolved_name.clone(), parent.cloned())) {
+            match create.call((el.tag.clone(), resolved_name.clone(), parent.cloned())) {
                 Ok(w) => w,
                 Err(e) => {
                     self.report.errors.push(format!(
@@ -806,6 +822,9 @@ impl Loader<'_> {
         parent_name: &str,
         dbg_name: &str,
     ) {
+        // Everything this frame defers drains before its OnLoad (step 8 below); a nested frame's
+        // own deferrals drain inside ITS decorate, so the mark is this frame's alone.
+        let deferred_mark = self.deferred_anchors.len();
         // 2 · LoadXML attributes (rf24 `0x769820`).
         self.apply_attrs(el, wrapper, dbg_name);
         // 3 · <Size> and 4 · <Anchors> (the CLayoutFrame geometry base, rf24 `0x767800`).
@@ -820,6 +839,8 @@ impl Loader<'_> {
         self.apply_special_fontstrings(el, wrapper, self_name, dbg_name);
         // 5a · <Backdrop> plate (rf24 LoadXML `0x77e6c0`): the tiled bg + 8-piece border.
         self.apply_backdrop(el, wrapper, dbg_name);
+        // 5a' · <TitleRegion>: the drag handle, through the API's own CreateTitleRegion.
+        self.apply_title_region(el, wrapper, self_name, dbg_name);
         // 5b · per-kind LoadXML extras (RF-28's typed tables) — StatusBar + Button/CheckButton;
         //      the EditBox flags/caps (RF-0082). Every one of these gates on the element's own tag,
         //      which is why `apply_template` builds its synthetic node with the kind CreateFrame was
@@ -876,6 +897,10 @@ impl Loader<'_> {
             }
         }
 
+        // 7c · the anchors this frame's own elements could not resolve while their targets were
+        //      still unbuilt — every child exists now, which is when the client's own layout
+        //      pass would have read them.
+        self.drain_deferred_anchors(deferred_mark);
         // 8 · this frame's OnLoad, now that its subtree is complete (bottom-up).
         if let Some(func) = onload {
             self.fire_onload(wrapper, &func, dbg_name);
@@ -890,6 +915,25 @@ impl Loader<'_> {
     /// Returns the frame's own name (`None` if it is anonymous) and the name of its nearest
     /// **named** ancestor — rf27 rule 3's walk, with [`framexml::DEFAULT_PARENT_NAME`] when there
     /// is none.
+    /// Can a `relativeTo` name resolve right now — a frame in the arena or a named region?
+    pub(super) fn anchor_target_exists(&self, name: &str) -> bool {
+        let model = self.model();
+        model.arena.lookup(name).is_some() || model.region_names.contains_key(name)
+    }
+
+    /// Apply the anchors deferred since `mark` (the enclosing `decorate`'s entry), in order. A
+    /// target still missing now is a real miss and warns through the resolver like any other.
+    pub(super) fn drain_deferred_anchors(&mut self, mark: usize) {
+        let pending: Vec<DeferredAnchor> = self.deferred_anchors.drain(mark..).collect();
+        for d in pending {
+            if d.region {
+                self.call_region(&d.wrapper, "SetPoint", d.args, &d.dbg);
+            } else {
+                self.call(&d.wrapper, "SetPoint", d.args, &d.dbg);
+            }
+        }
+    }
+
     fn frame_names(&self, wrapper: &Table) -> (Option<String>, String) {
         let own = wrapper
             .call_method::<Option<String>>("GetName", ())

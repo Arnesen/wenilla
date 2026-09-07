@@ -283,3 +283,28 @@ mod tests {
         assert_eq!(resurrect_response(0x2A, false), expect);
     }
 }
+
+/// `SMSG_AREA_SPIRIT_HEALER_TIME` (VERIFIED, wow-re `staticpopup-dialog-bindings.md` §6, arm
+/// `0x48fa29`): the battleground spirit healer's guid and the milliseconds to its next
+/// resurrection wave. Decision 1963.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AreaSpiritHealerTime {
+    pub healer: u64,
+    pub ms: u32,
+}
+
+/// Parse `SMSG_AREA_SPIRIT_HEALER_TIME`: `u64 guid`, `u32 ms`.
+pub(super) fn read_area_spirit_healer_time(
+    r: &mut impl std::io::Read,
+) -> std::io::Result<AreaSpiritHealerTime> {
+    Ok(AreaSpiritHealerTime {
+        healer: crate::wire::read_u64_le(r)?,
+        ms: crate::wire::read_u32_le(r)?,
+    })
+}
+
+/// Body of `CMSG_AREA_SPIRIT_HEALER_QUERY` / `CMSG_AREA_SPIRIT_HEALER_QUEUE` (VERIFIED, §6): one
+/// `u64`, the healer's guid — the query when the client adopts a healer, the queue on Accept.
+pub fn area_spirit_healer(healer: u64) -> Vec<u8> {
+    healer.to_le_bytes().to_vec()
+}

@@ -29,7 +29,7 @@
 
 use bevy::prelude::*;
 
-use benilla_ui::script::{PetStats, UiScript};
+use benilla_ui::script::{PetStats, ScriptValue, UiScript};
 
 use crate::names::NameCache;
 use crate::net::{NetCommands, ObjectStore};
@@ -317,7 +317,10 @@ fn feed_pet_stats(
     script.set_pet_stats(fresh.0, fresh.1);
     // Push before firing — dispatch runs the Lua handlers synchronously (the `ui_unit` rule).
     if happiness_moved {
-        script.fire_event("UNIT_HAPPINESS", vec![]);
+        // `%s` — the unit token, per the reference's own fire site (SignalEvent2, decision 1884).
+        // Every 1.12 `UNIT_*` event carries it, and its consumers gate on it: a handler's first
+        // line is `if ( arg1 == this.unit )`, so an argless fire reaches nobody.
+        script.fire_event("UNIT_HAPPINESS", vec![ScriptValue::Str("pet".into())]);
     }
     if xp_moved {
         script.fire_event("UNIT_PET_EXPERIENCE", vec![]);

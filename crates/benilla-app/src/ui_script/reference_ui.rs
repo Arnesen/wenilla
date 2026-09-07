@@ -221,19 +221,7 @@ mod tests {
 
         let mut s = UiScript::new().expect("VM");
         s.set_screen_size(1024.0, 768.0);
-        // The in-game UI materializes on world entry (1051), so a player always exists by the time the
-        // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
-        // into its label inside its own OnLoad. A manifest load with no player is a state the client
-        // never reaches (decision 1848).
-        s.set_unit(
-            "player",
-            Some(benilla_ui::script::UnitState {
-                exists: true,
-                name: Some("Probefour".into()),
-                level: 60,
-                ..Default::default()
-            }),
-        );
+        seat_a_player(&mut s);
         let failures = super::super::manifest::load_default_ui(&s);
         assert!(failures.is_empty(), "the default UI: {failures:#?}");
 
@@ -280,6 +268,47 @@ mod tests {
     /// block), Lua `--[[ … ]]` blocks, and XML `<!-- … -->` blocks. It does not track string
     /// literals, so a `"--"` inside a string truncates that line — which can only ever cause an
     /// UNDER-report, the safe direction for every reader of it.
+    /// Blank the contents of every Lua string literal (`"…"`, `'…'`, `[[…]]`), keeping the quotes,
+    /// so a pattern like `"/([^%s]+)%s(.*)"` cannot read as a call to `s`.
+    fn strip_strings(text: &str) -> String {
+        let b: Vec<char> = text.chars().collect();
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+        while i < b.len() {
+            let c = b[i];
+            if c == '"' || c == '\'' {
+                out.push(c);
+                i += 1;
+                while i < b.len() && b[i] != c && b[i] != '\n' {
+                    if b[i] == '\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                if i < b.len() && b[i] == c {
+                    out.push(c);
+                    i += 1;
+                }
+                continue;
+            }
+            if c == '[' && i + 1 < b.len() && b[i + 1] == '[' {
+                out.push_str("[[");
+                i += 2;
+                while i + 1 < b.len() && !(b[i] == ']' && b[i + 1] == ']') {
+                    i += 1;
+                }
+                if i + 1 < b.len() {
+                    out.push_str("]]");
+                    i += 2;
+                }
+                continue;
+            }
+            out.push(c);
+            i += 1;
+        }
+        out
+    }
+
     fn strip_comments(text: &str) -> String {
         let mut out = String::with_capacity(text.len());
         let mut in_xml = false;
@@ -356,19 +385,7 @@ mod tests {
         let mut s = UiScript::new().expect("VM");
         s.set_screen_size(1024.0, 768.0);
 
-        // The in-game UI materializes on world entry (1051), so a player always exists by the time the
-        // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
-        // into its label inside its own OnLoad. A manifest load with no player is a state the client
-        // never reaches (decision 1848).
-        s.set_unit(
-            "player",
-            Some(benilla_ui::script::UnitState {
-                exists: true,
-                name: Some("Probefour".into()),
-                level: 60,
-                ..Default::default()
-            }),
-        );
+        seat_a_player(&mut s);
         let failures = super::super::manifest::load_default_ui(&s);
         assert!(failures.is_empty(), "the default UI: {failures:#?}");
 
@@ -532,19 +549,7 @@ mod tests {
             }
             let mut s = UiScript::new().expect("VM");
             s.set_screen_size(1024.0, 768.0);
-            // The in-game UI materializes on world entry (1051), so a player always exists by the time the
-            // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
-            // into its label inside its own OnLoad. A manifest load with no player is a state the client
-            // never reaches (decision 1848).
-            s.set_unit(
-                "player",
-                Some(benilla_ui::script::UnitState {
-                    exists: true,
-                    name: Some("Probefour".into()),
-                    level: 60,
-                    ..Default::default()
-                }),
-            );
+            seat_a_player(&mut s);
             let base = super::super::manifest::load_default_ui(&s);
             assert!(base.is_empty(), "the shipped manifest itself: {base:#?}");
             s.resolve();
@@ -643,9 +648,10 @@ mod tests {
     /// reasoning that widget methods are not in `_G`. True, and it meant the report could not see
     /// a widget method we had *not built*. `MerchantFrame.xml` read `0 engine` and
     /// [`chain_readiness_report`] read CLEAN while the stock row's `<OnEnter>` called
-    /// `ShoppingTooltip1:SetMerchantCompareItem(...)`, which this engine does not have — so the
-    /// file loaded, every check passed, and hovering a vendor row would have raised in play. Both
-    /// instruments were right about what they measure. Neither measured the window.
+    /// `ShoppingTooltip1:SetMerchantCompareItem(...)`, which this engine did not have then (1802
+    /// built it) — so the file loaded, every check passed, and hovering a vendor row would have
+    /// raised in play. Both instruments were right about what they measure. Neither measured the
+    /// window.
     ///
     /// **A remaining `<?>` in the `fx=` column is usually a LoadOnDemand addon**, not something to
     /// build. `ClassTrainerFrame_Show`, `CraftFrame_Show`, `MacroFrame_SaveMacro`,
@@ -697,19 +703,7 @@ mod tests {
         // global our own FrameXML defines.
         let mut s = UiScript::new().expect("VM");
         s.set_screen_size(1024.0, 768.0);
-        // The in-game UI materializes on world entry (1051), so a player always exists by the time the
-        // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
-        // into its label inside its own OnLoad. A manifest load with no player is a state the client
-        // never reaches (decision 1848).
-        s.set_unit(
-            "player",
-            Some(benilla_ui::script::UnitState {
-                exists: true,
-                name: Some("Probefour".into()),
-                level: 60,
-                ..Default::default()
-            }),
-        );
+        seat_a_player(&mut s);
         let failures = super::super::manifest::load_default_ui(&s);
         assert!(failures.is_empty(), "the shipped manifest: {failures:#?}");
         let have: std::collections::HashSet<String> = s
@@ -767,7 +761,7 @@ mod tests {
                     "ScrollFrame",
                     "Slider", "ColorSelect", "MessageFrame", "ScrollingMessageFrame",
                     "SimpleHTML", "Model", "PlayerModel", "DressUpModel", "TabardModel",
-                    "Minimap", "MovieFrame", "Cooldown",
+                    "Minimap", "MovieFrame",
                 }}
                 for i = 1, table.getn(types) do
                     local ok, w = pcall(function()
@@ -1028,6 +1022,7 @@ mod tests {
             let loads = {
                 let mut probe = UiScript::new().expect("VM");
                 probe.set_screen_size(1024.0, 768.0);
+                seat_a_player(&mut probe);
                 let base = super::super::manifest::load_default_ui(&probe);
                 assert!(base.is_empty(), "the shipped manifest itself: {base:#?}");
                 probe.resolve();
@@ -1122,13 +1117,13 @@ mod tests {
     /// do not ship under its own name usually has a counterpart of ours under a different one, and
     /// both would declare the same frames.
     ///
-    /// That half doubles as the map nothing else holds: `ActionBarFrame.xml` is our
-    /// `ActionBar.xml`, `FloatingChatFrame.xml` is our `ChatFrame.xml`,
-    /// `MainMenuBarMicroButtons.xml` is our `MicroMenu.xml`, `StaticPopup.xml` is our
-    /// `UiPanels.xml`. (The row this map used to lead with — `PlayerFrame.xml`/`TargetFrame.xml`/
-    /// `PetFrame.xml` all being our one `UnitFrames.xml` — is retired: those four are the
-    /// reference's own files now, 1751.) `chain_gap_report` calls several of those unblocked, and they are —
-    /// individually. They just cannot load beside the file of ours already holding their names.
+    /// That half used to double as the map nothing else held — `FloatingChatFrame.xml` was our
+    /// `ChatFrame.xml`, `MainMenuBarMicroButtons.xml` our `MicroMenu.xml`, `StaticPopup.xml` our
+    /// `UiPanels.xml`'s dialog half, `PlayerFrame.xml`/`TargetFrame.xml`/`PetFrame.xml` our one
+    /// `UnitFrames.xml`. Every one of those is the reference's own file now (1751; the micro row
+    /// last, 1987), so the frame half names nothing today. It stays because a stock window
+    /// declaring a frame one of ours still holds is the first thing a swap has to rule out —
+    /// such a pair can load individually and cannot load side by side.
     ///
     /// Run it before attempting a swap. It predicts which ones will fail without attempting them.
     #[test]
@@ -1231,13 +1226,18 @@ mod tests {
         // Everything the manifest pulls OFF THE CHAIN, and every name each of those defines —
         // including the `.lua` a chain `.xml` sources, which is where most of them live.
         let toc = &super::super::addons::Addon::builtin().toc.files;
-        let pos: std::collections::HashMap<&String, usize> =
-            toc.iter().enumerate().map(|(i, f)| (f, i)).collect();
+        // Load order: a manifest entry at its line, a reached addon's file after everything.
+        let chain = gated_chain_entries();
+        let pos: std::collections::HashMap<&String, usize> = chain
+            .iter()
+            .enumerate()
+            .map(|(k, f)| (f, toc.iter().position(|t| t == f).unwrap_or(toc.len() + k)))
+            .collect();
         let mut chain_home: std::collections::HashMap<String, (String, usize)> =
             std::collections::HashMap::new();
         let mut chain_frames: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        for entry in toc.iter().filter(|f| super::is_chain_entry(f)) {
+        for entry in &chain {
             let leaf = entry.rsplit(['\\', '/']).next().unwrap_or(entry);
             let mut cands = vec![entry.clone()];
             if let Some(stem) = entry.strip_suffix(".xml") {
@@ -1421,8 +1421,8 @@ mod tests {
     /// FrameXML function is invisible to both, because loading a file never runs the body that
     /// calls it: `LootFrame.xml` shipped load-clean and raised at `LootFrame.lua:85` the first
     /// time it met real data, and stock `CharacterFrame.xml` would have raised on the first tab
-    /// HOVER, because `MicroButtonTooltipText` did not exist here (it does now — `MicroMenu.xml`,
-    /// our `MainMenuBarMicroButtons.xml` counterpart, is where the reference declares it).
+    /// HOVER, because `MicroButtonTooltipText` did not exist here (it does now — the stock
+    /// `MainMenuBarMicroButtons.xml` declares it, off the chain since 1987).
     ///
     /// So: for every chain `.xml` in the manifest, census the bare `Name(` call sites across it
     /// and its `.lua`, subtract what those two define themselves, keep the names the reference's
@@ -1457,21 +1457,22 @@ mod tests {
 
         let mut s = UiScript::new().expect("VM");
         s.set_screen_size(1024.0, 768.0);
-        // The in-game UI materializes on world entry (1051), so a player always exists by the time the
-        // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
-        // into its label inside its own OnLoad. A manifest load with no player is a state the client
-        // never reaches (decision 1848).
-        s.set_unit(
-            "player",
-            Some(benilla_ui::script::UnitState {
-                exists: true,
-                name: Some("Probefour".into()),
-                level: 60,
-                ..Default::default()
-            }),
-        );
+        seat_a_player(&mut s);
         let failures = super::super::manifest::load_default_ui(&s);
         assert!(failures.is_empty(), "the shipped manifest: {failures:#?}");
+        // The whole interface is the manifest AND every LoadOnDemand addon it reaches (1967):
+        // what `MacroFrame_SaveMacro` answers to is `Blizzard_MacroUI.lua`, loaded on the first
+        // `ShowMacroFrame`, and a call into it from ActionBarFrame.lua is answered exactly then.
+        for name in reached_addons() {
+            super::super::test_ui::seat_chain_addon(&mut s, &name);
+            s.run(&format!("UIParentLoadAddOn(\"{name}\")")).unwrap();
+            assert!(
+                s.eval::<bool>(&format!("return IsAddOnLoaded(\"{name}\") == 1"))
+                    .unwrap(),
+                "{name}: reached, seated, and did not load: {:?}",
+                s.errors()
+            );
+        }
         let have: std::collections::HashSet<String> = s
             .eval::<Vec<String>>(
                 "local t = {} for k in pairs(_G) do table.insert(t, k) end return t",
@@ -1499,17 +1500,85 @@ mod tests {
                  why nothing has hit it — the wrapper answers first for our own rows.",
             ),
             (
+                "SkillFrame.xml",
+                "BuySkillTier",
+                "a 5875 binding (wow-re `bindings.md`: marshals and delegates to a C++ \
+                 method/net-send) of the pre-1.12 skill-point purchase UI. the detail bar's LearnSkillButton calls it, and \
+                 that button shows only while `UnitCharacterPoints`'s second value or a row's \
+                 step/rank cost is non-zero — which no 1.12 server sends. Unreachable until the \
+                 skill-point wire exists; not built (1956).",
+            ),
+            (
+                "SkillFrame.xml",
+                "AddSkillUp",
+                "a 5875 binding (wow-re `bindings.md`: marshals and delegates to a C++ \
+                 method/net-send) of the pre-1.12 skill-point purchase UI. the detail bar's RightArrow calls it, and \
+                 that button shows only while `UnitCharacterPoints`'s second value or a row's \
+                 step/rank cost is non-zero — which no 1.12 server sends. Unreachable until the \
+                 skill-point wire exists; not built (1956).",
+            ),
+            (
+                "SkillFrame.xml",
+                "RemoveSkillUp",
+                "a 5875 binding (wow-re `bindings.md`: marshals and delegates to a C++ \
+                 method/net-send) of the pre-1.12 skill-point purchase UI. the detail bar's LeftArrow calls it, and \
+                 that button shows only while `UnitCharacterPoints`'s second value or a row's \
+                 step/rank cost is non-zero — which no 1.12 server sends. Unreachable until the \
+                 skill-point wire exists; not built (1956).",
+            ),
+            (
                 "DurabilityFrame.xml",
                 "UpdateInventoryAlertStatus",
                 "an engine binding. `DurabilityFrame.lua:81` calls it from the armor guy's own \
                  update; our `inventory_alerts` snapshot is recomputed on every inventory push \
                  instead, so the recompute exists and only the Lua verb that forces one does not.",
             ),
+            (
+                "Blizzard_GMSurveyUI.xml",
+                "GMSurveyAnswerSubmit",
+                "one of the GM survey's four engine verbs, none built: the survey window opens on \
+                 GMSURVEY_DISPLAY, which the stock HelpFrame.lua registers and nothing fires — the \
+                 trigger is ticket status 3 on SMSG_GMTICKET_GETTICKET, which vmangos never sends \
+                 (1889; the producer gate carries the event). Gated since the addon became a reached \
+                 LoadOnDemand row (1967).",
+            ),
+            (
+                "Blizzard_GMSurveyUI.xml",
+                "GMSurveyCommentSubmit",
+                "one of the GM survey's four engine verbs, none built: the survey window opens on \
+                 GMSURVEY_DISPLAY, which the stock HelpFrame.lua registers and nothing fires — the \
+                 trigger is ticket status 3 on SMSG_GMTICKET_GETTICKET, which vmangos never sends \
+                 (1889; the producer gate carries the event). Gated since the addon became a reached \
+                 LoadOnDemand row (1967).",
+            ),
+            (
+                "Blizzard_GMSurveyUI.xml",
+                "GMSurveyQuestion",
+                "one of the GM survey's four engine verbs, none built: the survey window opens on \
+                 GMSURVEY_DISPLAY, which the stock HelpFrame.lua registers and nothing fires — the \
+                 trigger is ticket status 3 on SMSG_GMTICKET_GETTICKET, which vmangos never sends \
+                 (1889; the producer gate carries the event). Gated since the addon became a reached \
+                 LoadOnDemand row (1967).",
+            ),
+            (
+                "Blizzard_GMSurveyUI.xml",
+                "GMSurveySubmit",
+                "one of the GM survey's four engine verbs, none built: the survey window opens on \
+                 GMSURVEY_DISPLAY, which the stock HelpFrame.lua registers and nothing fires — the \
+                 trigger is ticket status 3 on SMSG_GMTICKET_GETTICKET, which vmangos never sends \
+                 (1889; the producer gate carries the event). Gated since the addon became a reached \
+                 LoadOnDemand row (1967).",
+            ),
+            (
+                "StaticPopup.xml",
+                "ReplaceTradeEnchant",
+                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
+                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by TRADE_REPLACE_ENCHANT's Accept, an event this engine does not fire yet.",
+            ),
         ];
 
-        let toc = &super::super::addons::Addon::builtin().toc.files;
         let mut missing: Vec<(String, String)> = Vec::new();
-        for entry in toc.iter().filter(|f| super::is_chain_entry(f)) {
+        for entry in &gated_chain_entries() {
             // `GlobalStrings.lua` is 4000 lines of `NAME = "…";` and nothing else — it calls no
             // global at all. What it DOES contain is every format specifier and every English
             // sentence in the interface, and this scanner's `name(` shape reads `%d (`, `%s (` and
@@ -1531,7 +1600,7 @@ mod tests {
                     text.push('\n');
                 }
             }
-            let text = strip_comments(&text);
+            let text = strip_strings(&strip_comments(&text));
             let defines: std::collections::HashSet<String> = text
                 .lines()
                 .filter_map(|l| l.trim_start().strip_prefix("function "))
@@ -1546,6 +1615,37 @@ mod tests {
             // are not are the ones a stat tooltip is built out of: `strupper`, `strsub`, `abs`,
             // `max`, `floor`, `format`, `getglobal`. `reference/1.12-globals.tsv` is the filter
             // that actually belongs here, and it does not care about case.
+            // Names the file binds LOCALLY — `local X`, `local function X`, a `for` loop's
+            // variables — are not globals however they are called: the stock StaticPopup.lua
+            // reads a dialog's handlers into locals (`local OnAccept = …; OnAccept(…)`) and
+            // ChatFrame.lua walks `SlashCmdList` with `for index, value in …; value(msg)`.
+            let mut locals: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for line in text.lines() {
+                let l = line.trim_start();
+                let rest = if let Some(r) = l.strip_prefix("local function ") {
+                    Some(r)
+                } else if let Some(r) = l.strip_prefix("local ") {
+                    Some(r)
+                } else {
+                    l.strip_prefix("for ")
+                };
+                if let Some(rest) = rest {
+                    for name in rest
+                        .split(['=', ' ', '\t'])
+                        .take_while(|w| *w != "in" && *w != "=" && !w.starts_with('('))
+                        .flat_map(|w| w.split(','))
+                        .map(|w| w.trim())
+                        .filter(|w| !w.is_empty())
+                    {
+                        let name: String =
+                            name.chars().take_while(|c| super::is_word(*c)).collect();
+                        if !name.is_empty() {
+                            locals.insert(name);
+                        }
+                    }
+                }
+            }
+
             let b: Vec<char> = text.chars().collect();
             let mut called: std::collections::HashSet<String> = std::collections::HashSet::new();
             let mut i = 0;
@@ -1574,6 +1674,7 @@ mod tests {
             let mut gaps: Vec<&String> = called
                 .iter()
                 .filter(|n| !defines.contains(*n))
+                .filter(|n| !locals.contains(*n))
                 .filter(|n| reference.contains(n.as_str()))
                 .filter(|n| !have.contains(*n))
                 .collect();
@@ -1638,7 +1739,7 @@ mod tests {
             .collect();
 
         let mut orphans = Vec::new();
-        for entry in toc.iter().filter(|f| super::is_chain_entry(f)) {
+        for entry in &gated_chain_entries() {
             let leaf = entry.rsplit(['\\', '/']).next().unwrap_or(entry);
             let Some(stem) = leaf.strip_suffix(".xml") else {
                 continue;
@@ -1677,7 +1778,7 @@ mod tests {
             "Interface/FrameXML/ContainerFrame.xml"
         ));
         assert!(!super::is_chain_entry("BagFrame.xml"));
-        assert!(!super::is_chain_entry("Fonts.xml"));
+        assert!(!super::is_chain_entry("ScrollTemplates.xml"));
     }
     /// Every global function and virtual template name a manifest entry declares.
     ///
@@ -1781,8 +1882,9 @@ mod tests {
     /// read by the next session as if it were live.
     ///
     /// That is not a tidiness problem. Our copies DIVERGE from the reference deliberately, and the
-    /// divergence is what dies: `UiPanels.xml`'s `PanelTemplates_TabResize` carried a benilla-only
-    /// `return tabWidth` that the tab settle reads, and the reference's returns nothing.
+    /// divergence is what dies: our retired `UiPanels.xml` carried a `PanelTemplates_TabResize`
+    /// with a benilla-only `return tabWidth` that our tab settle read, and the reference's
+    /// returns nothing (both are gone — 1988, 1993).
     ///
     /// The reverse direction — ours seated BELOW the chain's, so we silently override the
     /// reference — is a real category too, and a wider audit than this gate.
@@ -1811,6 +1913,746 @@ mod tests {
             shadowed.is_empty(),
             "dead copies — declared by one of ours, then overwritten by a later chain entry:\n  {}",
             shadowed.join("\n  ")
+        );
+    }
+
+    /// **A frame that inherits a template the manifest never loads is a WARNING, and warnings are
+    /// invisible.** The frame is still built — bare. It gets none of the template's regions, none
+    /// of its children, and none of its `<Scripts>`, so whatever that `<OnLoad>` was going to
+    /// initialise silently stays nil.
+    ///
+    /// This shipped. `Blizzard_MacroUI.xml`'s `MacroPopupScrollFrame` inherits FrameXML's
+    /// `ClassTrainerListScrollFrameTemplate`; the manifest's own header for that window NAMES that
+    /// dependency and then never lists the file declaring it. So the icon picker's scroll frame
+    /// came up with no `<OnLoad>`, `ScrollFrame_OnLoad` never ran, `this.offset` was never seeded,
+    /// and the reference's `FauxScrollFrame_GetOffset` — `return frame.offset`, with no `or 0`
+    /// fallback of the kind our deleted copy had — handed `MacroPopupFrame_Update` a nil to
+    /// multiply. Clicking "Change Name/Icon" raised. Decision 1862.
+    ///
+    /// Static rather than a load probe: it needs no VM, no client state and no player, so it
+    /// answers for every entry including the ones a running load would never reach.
+    #[test]
+    fn every_template_the_manifest_inherits_is_declared_by_the_manifest() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        let toc = &super::super::addons::Addon::builtin().toc.files;
+
+        let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut wanted: Vec<(String, String)> = Vec::new();
+        for entry in toc.iter() {
+            // **`<Include>` counts.** The reference's own `FrameXML.toc` lists only two of its
+            // `*Templates.xml` files; the rest are pulled in by the window that needs them
+            // (`HonorFrame.xml` -> `HonorFrameTemplates.xml`, and so on), and the loader follows
+            // that against the including document's own directory (1186). A walk that reads only
+            // the manifest's own lines reports thirteen templates missing that are not — which is
+            // exactly what the first run of this gate did.
+            let mut text = String::new();
+            for src in entry_sources(entry) {
+                text.push_str(&src);
+                text.push('\n');
+            }
+            if text.is_empty() {
+                continue;
+            }
+            for chunk in text.split('<').skip(1) {
+                let Some(end) = chunk.find('>') else { continue };
+                let tag = &chunk[..end];
+                if tag.contains("virtual=\"true\"") {
+                    if let Some(n) = tag_attr(tag, "name") {
+                        declared.insert(n);
+                    }
+                }
+                if let Some(list) = tag_attr(tag, "inherits") {
+                    for name in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                        wanted.push((name.to_string(), entry.clone()));
+                    }
+                }
+            }
+        }
+
+        let mut missing: Vec<String> = wanted
+            .into_iter()
+            .filter(|(n, _)| !declared.contains(n))
+            .map(|(n, e)| format!("{n}  (inherited in {e})"))
+            .collect();
+        missing.sort();
+        missing.dedup();
+        assert!(
+            missing.is_empty(),
+            "the manifest inherits templates it never loads — the frames are built BARE, with no \
+             scripts, and nothing errors:\n  {}",
+            missing.join("\n  ")
+        );
+    }
+
+    /// One `name="…"`-style attribute out of a raw tag, matched only at a token boundary.
+    fn tag_attr(tag: &str, key: &str) -> Option<String> {
+        let pat = format!("{key}=\"");
+        let mut from = 0;
+        while let Some(i) = tag[from..].find(&pat) {
+            let at = from + i;
+            let boundary = at == 0
+                || tag[..at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_whitespace());
+            let rest = &tag[at + pat.len()..];
+            if boundary {
+                return rest.find('"').map(|j| rest[..j].to_string());
+            }
+            from = at + pat.len();
+        }
+        None
+    }
+
+    /// A manifest entry's source text and everything it `<Include>`s, transitively.
+    ///
+    /// The chain for a path, `assets/ui` for a bare name — and an include resolves against the
+    /// INCLUDING document's own directory in its own source's path space, which is the rule the
+    /// loader follows (1186).
+    /// The reference's LoadOnDemand Blizzard addons this interface REACHES — every `Blizzard_*`
+    /// name a `UIParentLoadAddOn("…")` literal names in our own files or in a manifest chain
+    /// entry's sources (the reference's `*_LoadUI` loaders in UIParent.xml, the options window's
+    /// combat-text load). They have no manifest row, exactly as the reference's `FrameXML.toc`
+    /// has none, so this is how the gates know which addon files are part of the shipped
+    /// interface (1967). An addon nothing loads is an unbuilt window, not a migrated one.
+    fn reached_addons() -> Vec<String> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
+        let mut out: Vec<String> = Vec::new();
+        for entry in &super::super::addons::Addon::builtin().toc.files {
+            let texts = if super::is_chain_entry(entry) {
+                entry_sources(entry)
+            } else {
+                std::fs::read_to_string(dir.join(entry))
+                    .into_iter()
+                    .collect()
+            };
+            for text in texts {
+                let text = strip_comments(&text);
+                for (i, _) in text.match_indices("UIParentLoadAddOn(\"Blizzard_") {
+                    let rest = &text[i + "UIParentLoadAddOn(\"".len()..];
+                    if let Some(end) = rest.find('"') {
+                        let name = rest[..end].to_string();
+                        if !out.contains(&name) {
+                            out.push(name);
+                        }
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Every chain file the shipped interface loads, in load order: the manifest's chain entries,
+    /// then each reached addon's files (`Interface\AddOns\<name>\<file>`, the addon's own toc
+    /// order) — LoadOnDemand loads after everything. The set every gate over chain files walks
+    /// (1967); an addon an opener names that the chain does not carry is a finding, not a skip.
+    fn gated_chain_entries() -> Vec<String> {
+        let mut out: Vec<String> = super::super::addons::Addon::builtin()
+            .toc
+            .files
+            .iter()
+            .filter(|f| super::is_chain_entry(f))
+            .cloned()
+            .collect();
+        for name in reached_addons() {
+            let bytes =
+                super::read(&format!("Interface/AddOns/{name}/{name}.toc")).unwrap_or_else(|| {
+                    panic!("{name}: reached by UIParentLoadAddOn, not on the chain")
+                });
+            let toc = benilla_ui::toc::Toc::parse(&benilla_ui::source::decode(&bytes));
+            for file in &toc.files {
+                out.push(format!(
+                    "Interface\\AddOns\\{name}\\{}",
+                    file.replace('/', "\\")
+                ));
+            }
+        }
+        out
+    }
+
+    fn entry_sources(entry: &str) -> Vec<String> {
+        fn read_one(path: &str, chain: bool) -> Option<String> {
+            if chain {
+                let bytes = super::read(&path.replace('\\', "/"))?;
+                return Some(String::from_utf8_lossy(&bytes).into_owned());
+            }
+            std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("assets/ui")
+                    .join(path),
+            )
+            .ok()
+        }
+        let chain = super::is_chain_entry(entry);
+        let dir = {
+            let p = entry.replace('\\', "/");
+            p.rsplit_once('/').map(|(d, _)| d.to_string())
+        };
+        let mut out = Vec::new();
+        let mut queue = vec![entry.to_string()];
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while let Some(path) = queue.pop() {
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            let Some(text) = read_one(&path, chain) else {
+                continue;
+            };
+            for chunk in text.split('<').skip(1) {
+                let Some(end) = chunk.find('>') else { continue };
+                let tag = &chunk[..end];
+                // `<Include>` brings a sibling document; `<Script file=>` brings the code, and
+                // that is where nearly every `RegisterEvent` lives — a reader that follows only
+                // the first sees a window's frames without its handlers.
+                let kind = tag.trim_start();
+                if !kind.starts_with("Include") && !kind.starts_with("Script") {
+                    continue;
+                }
+                if let Some(file) = tag_attr(tag, "file") {
+                    let next = match &dir {
+                        Some(d) => format!("{d}/{}", file.replace('\\', "/")),
+                        None => file.replace('\\', "/"),
+                    };
+                    queue.push(next);
+                }
+            }
+            out.push(text);
+        }
+        out
+    }
+
+    /// **Every faux list must declare its own `<OnVerticalScroll>`, and no file may still write
+    /// `frame.updateFunc`.**
+    ///
+    /// `FauxScrollFrame_OnVerticalScroll` is the ONLY thing that writes `frame.offset`, and it runs
+    /// from a handler the OWNER declares — the reference has no `updateFunc` field, which is what
+    /// our retired kit used. A window that inherits `FauxScrollFrameTemplate` without that handler
+    /// loads clean, shows its bar, moves its thumb, and never scrolls its list. Nothing errors.
+    ///
+    /// A gate rather than a test per window, because what makes it silent is structural: a list
+    /// only scrolls when something drives it, and most window tests never do. Decision 1868.
+    #[test]
+    fn every_faux_scroll_frame_declares_its_own_on_vertical_scroll() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
+        let mut unwired: Vec<String> = Vec::new();
+        let mut stale: Vec<String> = Vec::new();
+        for file in std::fs::read_dir(&dir).expect("assets/ui").flatten() {
+            let path = file.path();
+            if path.extension().is_none_or(|e| e != "xml") {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+
+            for line in text.lines() {
+                let code = line.trim_start();
+                if code.starts_with("--") || code.starts_with("<!--") {
+                    continue;
+                }
+                if code.contains(".updateFunc") && code.contains('=') && !code.contains("==") {
+                    stale.push(format!("{name}: {}", code.trim()));
+                }
+            }
+
+            // Each `<ScrollFrame … inherits="…FauxScrollFrameTemplate">` up to its close.
+            let mut from = 0;
+            while let Some(i) = text[from..].find("<ScrollFrame ") {
+                let start = from + i;
+                let Some(gt) = text[start..].find('>') else {
+                    break;
+                };
+                let tag = &text[start..start + gt];
+                from = start + gt;
+                if !tag.contains("FauxScrollFrameTemplate") {
+                    continue;
+                }
+                // A VIRTUAL template is not a list. `BenillaAuctionScrollTemplate` is the auction
+                // window's shared shape and legitimately carries no handler: its four instances
+                // each repaint a different pane, so each declares its own. What must be wired is
+                // the instance.
+                if tag.contains("virtual=\"true\"") {
+                    continue;
+                }
+                let Some(end) = text[start..].find("</ScrollFrame>") else {
+                    continue;
+                };
+                let body = &text[start..start + end];
+                if !body.contains("OnVerticalScroll") {
+                    let who = tag_attr(tag, "name").unwrap_or_else(|| "?".into());
+                    unwired.push(format!("{name}: {who}"));
+                }
+            }
+        }
+        assert!(
+            unwired.is_empty(),
+            "a faux list with no <OnVerticalScroll> — its bar moves and the list never follows:\n  {}",
+            unwired.join("\n  ")
+        );
+        assert!(
+            stale.is_empty(),
+            "`frame.updateFunc` is our retired kit's field; the reference has none:\n  {}",
+            stale.join("\n  ")
+        );
+    }
+    /// `text` with every whitespace run that precedes a `.` removed — a method chain rustfmt
+    /// broke across lines reads as one call again.
+    fn glue_chains(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut pending = String::new();
+        for c in text.chars() {
+            if c.is_whitespace() {
+                pending.push(c);
+            } else {
+                if c != '.' {
+                    out.push_str(&pending);
+                }
+                pending.clear();
+                out.push(c);
+            }
+        }
+        out.push_str(&pending);
+        out
+    }
+
+    /// **A stock file listening for an event nothing produces is silent on both sides.**
+    ///
+    /// This is 1819's shape: `ui_unit.rs` fired the Classic Era power pair while the reference's
+    /// frames registered the 1.12 per-resource names, so no mana bar could live-update — and
+    /// nothing anywhere said so, because an event name is a plain string at both ends. 1818 is the
+    /// same seam one API over. The *arity* half of that class already has an instrument (the shape
+    /// gate, 1842/1843/1845); this is the event half, which had none.
+    ///
+    /// A CENSUS with a declared set, not a hard zero: most of these are features we have not built,
+    /// and listing them is the point. What must not happen is a NEW one appearing — that means a
+    /// window migration just brought a listener nothing feeds, which is exactly how 1819 arrived.
+    ///
+    /// **Constructed names have to be declared**, because a literal scan cannot see them:
+    /// `ui_unit.rs` builds the power events with `format!("UNIT_{}", power_token(...))`, and a gate
+    /// blind to that reports nine false positives — which is what its first run did.
+    #[test]
+    fn every_event_a_chain_file_registers_has_a_producer() {
+        let _data = benilla_formats::wow_data_or_skip!();
+
+        // Names benilla builds at runtime rather than writing as literals. Each is a family, with
+        // the site that constructs it — an entry here is a promise that something fires it.
+        const CONSTRUCTED: &[&str] = &[
+            // `ui_unit.rs`: `format!("UNIT_{}", power_token(ty))` and its `UNIT_MAX…` twin, over
+            // `power_token`'s five resources (`unit/mod.rs`). Decision 1819.
+            "UNIT_MANA",
+            "UNIT_RAGE",
+            "UNIT_FOCUS",
+            "UNIT_ENERGY",
+            "UNIT_HAPPINESS",
+            "UNIT_MAXMANA",
+            "UNIT_MAXRAGE",
+            "UNIT_MAXFOCUS",
+            "UNIT_MAXENERGY",
+            "UNIT_MAXHAPPINESS",
+        ];
+
+        // Registered by a chain file we load, produced by nothing. Each is a feature we have not
+        // built; none is 1819-shaped, because no PAIR is split (a half-fired pair is the tell).
+        const UNPRODUCED: &[(&str, &str)] = &[
+            // ── The stock `UIParent.lua`'s own listeners (1988) — every one is a dialog or a
+            // notice the reference's engine raises for a condition benilla's session does not
+            // reach yet. Each names the arm that would fire.
+            (
+                "ADDON_ACTION_FORBIDDEN",
+                "UIParent.lua — the protected-action refusal; benilla has no protected-call \
+                 taint model, so nothing can raise it",
+            ),
+            (
+                "MACRO_ACTION_FORBIDDEN",
+                "UIParent.lua — the macro half of ADDON_ACTION_FORBIDDEN, same reason",
+            ),
+            (
+                "AUTOEQUIP_BIND_CONFIRM",
+                "UIParent.lua — the bind-on-equip confirm for an AUTOEQUIP (right-click) path; \
+                 benilla's equip path fires the EQUIP_BIND_CONFIRM sibling only",
+            ),
+            (
+                "EQUIP_BIND_CONFIRM",
+                "UIParent.lua — the bind-on-equip confirm; benilla's inventory feed does not \
+                 derive the server's confirm ask yet",
+            ),
+            (
+                "USE_BIND_CONFIRM",
+                "UIParent.lua — the bind-on-use confirm, the same gap from the use path",
+            ),
+            (
+                "BILLING_NAG_DIALOG",
+                "UIParent.lua — the subscription-time nag; vmangos never sends it",
+            ),
+            (
+                "IGR_BILLING_NAG_DIALOG",
+                "UIParent.lua — the internet-cafe billing nag, likewise never sent",
+            ),
+            (
+                "GOSSIP_ENTER_CODE",
+                "UIParent.lua — the code-entry gossip option (a door with a combination); \
+                 benilla's gossip feed carries no code-entry option kind yet",
+            ),
+            (
+                "MEMORY_EXHAUSTED",
+                "UIParent.lua — the client's own out-of-memory dialog; benilla's allocator \
+                 failure is a Rust abort, not a Lua event",
+            ),
+            (
+                "MEMORY_RECOVERED",
+                "UIParent.lua — the other half of MEMORY_EXHAUSTED",
+            ),
+            (
+                "PLAYER_SKINNED",
+                "UIParent.lua — the corpse-skinned notice; benilla's loot feed does not derive it",
+            ),
+            (
+                "TRADE_REQUEST",
+                "UIParent.lua — the trade ASK dialog, and the one entry on this list that is \
+                 UNPRODUCEABLE rather than unbuilt: the 5875 client registers the event and \
+                 signals it from NOWHERE (a whole-image census, wow-re \
+                 ui/scratch/incoming-trade-request-law.md §3), so StaticPopupDialogs[\"TRADE\"] is \
+                 dead code THERE too. benilla wired the dialog up once and took it back out — \
+                 decision 1764. Producing this would be a divergence, not a fix",
+            ),
+            (
+                "TRADE_REPLACE_ENCHANT",
+                "UIParent.lua — the enchant-replacement confirm inside a trade; benilla's trade \
+                 feed does not derive it",
+            ),
+            ("BAG_OPEN", "ContainerFrame.lua"),
+            (
+                "CLOSE_WORLD_MAP",
+                "WorldMapFrame.lua — the engine-side close the reference fires when the map is \
+                 shut from outside its own frame; benilla closes the map through the frame's own \
+                 hide path only (1980)",
+            ),
+            ("DISPLAY_SIZE_CHANGED", "the four paperdoll files"),
+            (
+                "GMSURVEY_DISPLAY",
+                "HelpFrame.lua — the post-ticket survey. A real 1.12 event (fired at \
+                 `0x5e797b`, id 538) whose whole UI is the LoadOnDemand `Blizzard_GMSurveyUI`; \
+                 we have neither the producer nor the addon on the chain, and the ticket \
+                 flow works without it",
+            ),
+            ("ITEM_TEXT_TRANSLATION", "ItemTextFrame.lua"),
+            (
+                "LEARNED_SPELL_IN_TAB",
+                "SpellBookFrame.lua — the tab flash when a new spell lands in it; the reference \
+                 fires it with the tab index on spell add, which benilla's spellbook feed does not \
+                 derive yet (1952)",
+            ),
+            ("PET_UI_CLOSE", "PetPaperDollFrame.lua"),
+            ("PET_UI_UPDATE", "PetPaperDollFrame.lua"),
+            ("PLAYER_DAMAGE_DONE_MODS", "PaperDollFrame.lua"),
+            (
+                "PLAYER_FLAGS_CHANGED",
+                "TargetFrame.lua — the AFK/DND badge",
+            ),
+            ("PLAYTIME_CHANGED", "PlayerFrame.lua"),
+            ("SHOW_COMPARE_TOOLTIP", "PaperDollFrame.lua"),
+            ("SYSMSG", "UIErrorsFrame.lua"),
+            ("UNIT_DEFENSE", "PetPaperDollFrame.lua"),
+            (
+                "UNIT_QUEST_LOG_CHANGED",
+                "QuestLogFrame.lua — a party member's quest-log fields changing (the reference \
+                 fires it off the unit's PLAYER_QUEST_LOG_* descriptor updates); benilla's unit \
+                 feed does not derive it yet (1944)",
+            ),
+            (
+                "UNIT_MODEL_CHANGED",
+                "four files — the paperdoll model refresh",
+            ),
+            ("UNIT_PORTRAIT_UPDATE", "three files — the portrait refresh"),
+            (
+                "ZONE_UNDER_ATTACK",
+                "ChatFrame.lua — the reference's `SMSG_ZONE_UNDER_ATTACK` line (\"%s is under \
+                 attack!\"); the wire handler is not built (1948)",
+            ),
+        ];
+
+        let mut fired: std::collections::HashSet<String> =
+            CONSTRUCTED.iter().map(|s| (*s).to_string()).collect();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .join("crates");
+        let caps = |lit: &str| {
+            !lit.is_empty()
+                && lit
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+        };
+        // The two literal shapes an indirect fire's file can carry: `"EVENT", vec!` and a match
+        // arm `=> "EVENT",` — the event-name table a `fire_event(name_of(kind), …)` reads.
+        let scan_arms = |text: &str, fired: &mut std::collections::HashSet<String>| {
+            const SHAPE: &str = "\", vec!";
+            for (i, _) in text.match_indices(SHAPE) {
+                let before = &text[..i];
+                let Some(q) = before.rfind('"') else { continue };
+                let lit = &before[q + 1..];
+                if caps(lit) {
+                    fired.insert(lit.to_string());
+                }
+            }
+            let lines: Vec<&str> = text.lines().map(str::trim).collect();
+            for (i, t) in lines.iter().enumerate() {
+                let (t, arm_value) = match t.find("=> \"") {
+                    Some(k) => (t[k + 3..].trim_end_matches(','), true),
+                    None => (*t, false),
+                };
+                let Some(lit) = t.strip_prefix('"').and_then(|x| x.strip_suffix('"')) else {
+                    continue;
+                };
+                if arm_value && caps(lit) {
+                    fired.insert(lit.to_string());
+                    continue;
+                }
+                let arm = i > 0
+                    && lines[i - 1].ends_with('{')
+                    && lines.get(i + 1).is_some_and(|n| n.starts_with('}'));
+                if arm && caps(lit) {
+                    fired.insert(lit.to_string());
+                }
+            }
+        };
+        // An indirect fire — `fire_event(EXECUTE_CHAT_LINE, …)`, `fire_event(event_name(kind), …)`
+        // — names a const or a function; the literal lives where THAT is defined, which may be
+        // another file (1948: `ui_chat::event::event_name` answers for `frames::route`'s fire).
+        let mut indirect: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut texts: Vec<String> = Vec::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    let text = std::fs::read_to_string(&p).unwrap_or_default();
+                    // rustfmt splits a long chain at its dots (`model\n.pending_events\n.push((`), so
+                    // the three shapes are matched with the whitespace before each `.` removed.
+                    let text = glue_chains(&text);
+                    // The engine's deferred lane (`pending_events.push((name, args))`,
+                    // `cursor.rs`) is a fire too — the pet grid pair rides it (1953).
+                    const CALLS: [&str; 3] = [
+                        concat!("fire_event", "("),
+                        concat!("fire_event_into", "("),
+                        concat!("pending_events.push", "(("),
+                    ];
+                    let mut fires_indirectly = false;
+                    for call in CALLS {
+                        let mut from = 0;
+                        while let Some(i) = text[from..].find(call) {
+                            let at = from + i + call.len();
+                            from = at;
+                            let rest = text[at..].trim_start();
+                            let rest = rest.strip_prefix("lua,").map_or(rest, str::trim_start);
+                            if let Some(body) = rest.strip_prefix('"') {
+                                if let Some(end) = body.find('"') {
+                                    fired.insert(body[..end].to_string());
+                                }
+                            } else {
+                                fires_indirectly = true;
+                                let ident: String = rest
+                                    .chars()
+                                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                                    .collect();
+                                if !ident.is_empty() {
+                                    indirect.insert(ident);
+                                }
+                            }
+                        }
+                    }
+                    if fires_indirectly {
+                        scan_arms(&text, &mut fired);
+                    }
+                    texts.push(text);
+                }
+            }
+        }
+        for text in &texts {
+            for ident in &indirect {
+                let decl = format!("const {ident}: &str = \"");
+                if let Some(k) = text.find(&decl) {
+                    let body = &text[k + decl.len()..];
+                    if let Some(end) = body.find('"') {
+                        fired.insert(body[..end].to_string());
+                    }
+                }
+                if text.contains(&format!("fn {ident}(")) {
+                    scan_arms(text, &mut fired);
+                }
+            }
+        }
+
+        let mut dead: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        for entry in &gated_chain_entries() {
+            for text in entry_sources(entry) {
+                let mut from = 0;
+                while let Some(i) = text[from..].find("RegisterEvent(") {
+                    let at = from + i + "RegisterEvent(".len();
+                    from = at;
+                    let rest = text[at..].trim_start();
+                    if let Some(body) = rest.strip_prefix('"') {
+                        if let Some(end) = body.find('"') {
+                            let ev = &body[..end];
+                            if !fired.contains(ev) {
+                                dead.entry(ev.to_string()).or_insert_with(|| entry.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let expected: std::collections::HashSet<&str> =
+            UNPRODUCED.iter().map(|(e, _)| *e).collect();
+        let surprises: Vec<String> = dead
+            .iter()
+            .filter(|(e, _)| !expected.contains(e.as_str()))
+            .map(|(e, f)| format!("{e}  (registered in {f})"))
+            .collect();
+        assert!(
+            surprises.is_empty(),
+            "a chain file listens for an event NOTHING fires, and it is not one of the known gaps \
+             — this is 1819 arriving: a window migration brought a listener with no producer:\n  {}",
+            surprises.join("\n  ")
+        );
+
+        let fixed: Vec<&str> = UNPRODUCED
+            .iter()
+            .map(|(e, _)| *e)
+            .filter(|e| !dead.contains_key(*e))
+            .collect();
+        assert!(
+            fixed.is_empty(),
+            "these now HAVE a producer — take them out of UNPRODUCED so the list keeps meaning \
+             what it says:\n  {fixed:?}"
+        );
+    }
+
+    /// Seat a player before a probe loads the manifest — **what the live client always does.**
+    ///
+    /// The in-game UI materializes on world entry (1051), so a player always exists by the time
+    /// the manifest loads, and the stock macro window's character tab formats `UnitName("player")`
+    /// into its label inside its own `OnLoad`. A manifest load with no player is a state the
+    /// client never reaches (decision 1848) — and one a probe reaches by default, where it raises
+    /// `bad argument #2 to 'format'` and looks exactly like a load failure.
+    ///
+    /// This was five identical copies of the same six-line comment and the same seven-line seed,
+    /// inlined at every probe in this file — and the sixth, `chain_gap_report`'s, did not have it,
+    /// which is why that instrument could not run at all. One function is harder to forget.
+    fn seat_a_player(s: &mut UiScript) {
+        s.set_unit(
+            "player",
+            Some(benilla_ui::script::UnitState {
+                exists: true,
+                name: Some("Probefour".into()),
+                level: 60,
+                ..Default::default()
+            }),
+        );
+    }
+
+    /// **Every event benilla fires must be an event the 1.12 client HAS** — the 1818/1819 seam,
+    /// in the one direction nothing was checking.
+    ///
+    /// [`every_event_a_chain_file_registers_has_a_producer`] runs the other way: a stock file
+    /// listens, does anything fire it. This asks whether a name we fire is a 1.12 name at all.
+    /// Firing a Classic Era event is invisible to every other gate — our own halves agree with
+    /// each other, the name is spelled correctly, and Lua that never registers it never notices.
+    /// That is exactly how `UNIT_POWER_UPDATE` (1819) survived, and how the three this test found
+    /// on its first run did: `BAG_UPDATE_DELAYED` (Era-only; 1.12 has `BAG_UPDATE` alone),
+    /// `LOOT_UPDATE` and `UPDATE_LOOT_ROLL` (both invented here), each fired into a room with
+    /// nobody in it. Decision 1883.
+    ///
+    /// **The oracle is the reference binary's own string table.** An event the client can
+    /// dispatch is a NUL-terminated string in `WoW.exe`; a name that is not there is a name the
+    /// client cannot dispatch. That is a stronger oracle than the FrameXML corpus, which only
+    /// shows what the stock UI happens to consume — and which this repo has only four of the
+    /// LoadOnDemand addons of, so a corpus grep alone flags real events like `CRAFT_UPDATE`.
+    ///
+    /// Test files are skipped: `script/tests/events.rs` fires synthetic names (`E3`) at the
+    /// dispatcher on purpose, and a test's own scaffolding is not a product surface.
+    #[test]
+    fn every_event_we_fire_is_an_event_the_reference_has() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let exe = data.parent().expect("install root").join("WoW.exe");
+        let Ok(bytes) = std::fs::read(&exe) else {
+            eprintln!("skipping: no WoW.exe at {exe:?}");
+            return;
+        };
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .join("crates");
+        let mut fired: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                if p.extension().is_none_or(|x| x != "rs") {
+                    continue;
+                }
+                // A test's own synthetic events are not a surface we ship.
+                if p.to_string_lossy().contains("test") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&p).unwrap_or_default();
+                // Split so this file cannot match its OWN walker — it did on the first run, and
+                // reported four fragments of this function as ghost events.
+                const CALL: &str = concat!("fire_event", "(");
+                let mut from = 0;
+                while let Some(i) = text[from..].find(CALL) {
+                    let at = from + i + CALL.len();
+                    from = at;
+                    let rest = text[at..].trim_start();
+                    if let Some(body) = rest.strip_prefix('"') {
+                        if let Some(end) = body.find('"') {
+                            fired
+                                .entry(body[..end].to_string())
+                                .or_insert_with(|| p.display().to_string());
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            fired.len() > 100,
+            "the walker found only {} fired events — it stopped matching, which would make this \
+             gate silently vacuous",
+            fired.len()
+        );
+
+        let ghosts: Vec<String> = fired
+            .iter()
+            // A `BENILLA_`-prefixed name declares itself ours and cannot be mistaken for a 1.12
+            // one — the same discipline `BENILLA_ALLOW_OWN_UI` uses. `BENILLA_QUEST_PROGRESS` is
+            // the live example: an engine event our quest log registers, which exists because the
+            // shipped 1.12 auto-watch chain is broken at the `QUEST_WATCH_UPDATE` arg seam. The
+            // prefix is what makes an invented event honest instead of a mistake.
+            .filter(|(ev, _)| !ev.starts_with("BENILLA_"))
+            .filter(|(ev, _)| {
+                let needle: Vec<u8> = ev.bytes().chain(std::iter::once(0)).collect();
+                !bytes.windows(needle.len()).any(|w| w == needle)
+            })
+            .map(|(ev, at)| format!("{ev}  (fired from {at})"))
+            .collect();
+        assert!(
+            ghosts.is_empty(),
+            "benilla fires {} event(s) the 1.12 client does not have — a Classic Era name, or one \
+             invented here. Nothing in the stock UI can ever listen for these:\n  {}",
+            ghosts.len(),
+            ghosts.join("\n  ")
         );
     }
 }

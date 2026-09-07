@@ -140,10 +140,17 @@ fn shading_of(mat: Option<&WowModelMaterial>) -> String {
     let e = &m.extension;
     let c = m.base.base_color.to_srgba();
     format!(
-        "wmo {:.0} fade {:.0}  class {:.1}  tint {:.3},{:.3},{:.3}  \
+        "wmo {:.0} int {:.0} fade {:.0}  class {:.1}  tint {:.3},{:.3},{:.3}  \
          sidn {:.3},{:.3},{:.3} win {:.0}  sunsel {:.2} bias {:.0} uv {:.4},{:.4}  \
          clutter {:.1},{:.1},{:.1},{:.1}  base {:.3},{:.3},{:.3},{:.3} {:?}",
         e.model_flags.x,
+        // `int` is `model_flags.z` — the LIGHT-LANE flag, and it was the one row of the packed
+        // uniforms this line did not print. Without `is_wmo` it selects the interior-prop lane,
+        // i.e. "this batch is lit by the SH probe its MeshTag names" rather than by the sky; with
+        // it, the WMO interior batch-class lanes `class` then splits. A hit that reads
+        // `wmo 0 int 1` is asking about a probe slot, and the `slot` reading of the tag beside it
+        // is the one that matters — which is the whole diagnosis of B373.
+        e.model_flags.z,
         e.model_flags.y,
         e.tint.w,
         e.tint.x,

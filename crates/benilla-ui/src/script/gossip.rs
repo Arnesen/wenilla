@@ -16,9 +16,11 @@
 //! predicate the XML uses to grey password-gated options (decision 0081 v1: coded options are
 //! parsed and greyed, never selected; the real client pops a password box, out of scope here).
 //! `GetGossipText()` returns the greeting body (`SMSG_NPC_TEXT_UPDATE`), `nil` when no menu is
-//! open. There is no "menu open, text pending" state: the app holds the menu closed until the
-//! greeting resolves, as the reference does (its greeting write and `GOSSIP_SHOW` are adjacent and
-//! unconditional on one success path — wow-re `gossip-npctext-law.md` §4; B292), which is why
+//! open. There is no "menu open, text pending" state: while a greeting is in flight the app
+//! pushes nothing and fires nothing — the VM keeps its last menu (or none), exactly as the
+//! reference's frame keeps its last paint (its handler returns on a cache miss without an event,
+//! and its greeting write and `GOSSIP_SHOW` are adjacent and unconditional on one success path —
+//! wow-re `gossip-npctext-law.md` §1/§4; B292, benilla decisions 1508/1994), which is why
 //! [`GossipMenu::greeting`] is a plain `String`.
 
 use mlua::{Lua, MultiValue, Value};

@@ -21,14 +21,13 @@
         ScrollFrame + Slider + Lua). The real `FauxScrollFrameTemplate` routes the scrollbar's value
         through its parent `ScrollFrame` (`OnValueChanged → parent:SetVerticalScroll(v)`; the
         ScrollFrame's `OnVerticalScroll` then derives `offset = floor(v/itemHeight + 0.5)`). That
-        ScrollFrame adds exactly one thing over the Slider: a *scroll-range clamp* on the value. We
-        don't need it — the offset comes straight off the Slider value here — and in benilla it would be
-        a liability: the clamp reads the scroll child's RESOLVED height, which lags a tick behind the
-        `SetHeight` the faux update does, so a content resize + scroll in one tick could clamp against a
-        stale range. So benilla's faux frame is a plain `<Frame>` + a `Slider`: fewer moving parts, no
-        dependency on within-tick resolved rects, and the identical on-screen result (a smooth,
-        pixel-granularity thumb whose position maps 1:1 to the scroll offset). See 0251 for the full
-        rationale + the divergence from 0250's described (real-client) shape.
+        ScrollFrame adds nothing to the value on its way through: 0251 believed it clamped to the
+        scroll range and called the clamp a liability, and decision 2017 read the bytes — the
+        reference's `SetVerticalScroll` stores what the bar hands it. So the relay is a pure
+        pass-through, and benilla's faux frame is a plain `<Frame>` + a `Slider`: fewer moving parts
+        and the identical on-screen result (a smooth, pixel-granularity thumb whose position maps
+        1:1 to the scroll offset). See 0251 for the full rationale + the divergence from 0250's
+        described (real-client) shape.
 
         VALUE MODEL. The scrollbar's value is in PIXELS: `[0, (numItems − numToDisplay) * itemHeight]`,
         `valueStep = itemHeight`. The row offset is `floor(value / itemHeight + 0.5)` — sub-pixel
@@ -76,13 +75,12 @@
         -- over the template's on inherit (framexml.rs `merge`), so it really is one. Duck-typed for
         -- exactly that reason.
         --
-        -- GAP, stated where it bites: `SetVerticalScroll` clamps into `[0, GetVerticalScrollRange()]`
-        -- (scrollframe.rs), and that range comes from the frame's SCROLL CHILD — which the ref's
-        -- `FauxScrollFrameTemplate` declares as `<ScrollChild><Frame name="$parentScrollChildFrame">`
-        -- and our XML loader has no `<ScrollChild>` element for. Until it does, an addon frame's
-        -- range reads 0, so the handler fires with arg1 = 0 and its list stays at the top. The
-        -- offset our own kit computes above is unaffected — it comes straight off the Slider, which
-        -- is the whole point of 0251.
+        -- The engine's SetVerticalScroll takes the bar's value as given (decision 2017 — the
+        -- reference's never reads the scroll range), so an addon frame's `<OnVerticalScroll>`
+        -- fires with this very value and its `FauxScrollFrame_OnVerticalScroll` derives the offset
+        -- from it, the reference's path end to end. The offset our own kit computes above is the
+        -- same number by construction — it comes straight off the Slider, which is the whole point
+        -- of 0251.
         function BenillaFauxScrollBar_OnValueChanged(scrollBar, value)
             local frame = scrollBar:GetParent()
             local step = scrollBar:GetValueStep()
@@ -222,9 +220,16 @@
             BenillaScrollBar_SetShown(bar, range > 0)
         end
 
-        -- Pan by `delta` px; the engine clamps to [0, range].
+        -- Pan by `delta` px, clamped to [0, range] HERE: the engine's SetVerticalScroll stores
+        -- what it is given (decision 2017 — the reference's never reads the range), and the
+        -- reference's own wheel handler bounds itself the same way, through its bar's [min, max]
+        -- (ScrollFrameTemplate_OnMouseWheel → scrollBar:SetValue).
         function BenillaScroll_Step(sf, delta)
-            sf:SetVerticalScroll(sf:GetVerticalScroll() + delta)
+            local target = sf:GetVerticalScroll() + delta
+            local range = sf:GetVerticalScrollRange()
+            if target > range then target = range end
+            if target < 0 then target = 0 end
+            sf:SetVerticalScroll(target)
             BenillaScroll_SyncBar(sf)
         end
 
@@ -393,6 +398,18 @@
             </Layer>
         </Layers>
     </Frame>
+
+    <!-- ══ Carried here from UiPanels.xml when that file went stock (decision 1988) ══
+         The placeholder icon our UIParent.lua counterpart held and the reference's does not,
+         seated in the earliest file of ours every consumer loads after. The window tab template
+         and its settle stood here too until 1993 put them on the chain. -->
+    <Script><![CDATA[
+        -- The placeholder icon for an item/spell whose texture has not arrived yet (Craft, Quest,
+        -- QuestLog, Trainer and TradeSkill read it). Was ActionBar.xml's (stock since 1938), then
+        -- UiPanels.xml's (stock since 1988); this file is the earliest of ours every reader loads
+        -- after. A benilla name, so nothing stock reads it.
+        BENILLA_FALLBACK_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
+    ]]></Script>
 
     <!-- `FauxScrollFrameTemplate` and the `FauxScrollFrame_*`/`ScrollFrame_*`/`ScrollingEdit_*`
          API are the REFERENCE's, off the player's chain (`Interface\FrameXML\UIPanelTemplates`,

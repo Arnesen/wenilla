@@ -40,9 +40,18 @@ enum SeqTarget {
 pub struct GlobalSeqDrive {
     /// `(write target, its baked global-sequence channels)`.
     bones: Vec<(SeqTarget, GlobalBone)>,
-    /// The attach snapshot of the shared clock (secs): `None` until the first animate tick stamps
-    /// it (the instance's attach — the ref writes `+0x68` once, at attach).
+    /// The attach snapshot of this instance's SCENE clock (secs): `None` until the first animate
+    /// tick stamps it (the instance's attach — the ref writes `+0x68` once, at attach).
     anchor: Option<f64>,
+    /// **This instance's scene clock**, when it is not the world's (secs). The kernel's Phase B
+    /// reads `[[model+0x2c]+0xc]` — the clock of the scene that OWNS the instance — and a
+    /// `<Model>` widget owns a private `CM2Scene` at `CSimpleModel+0x314`, advanced by the
+    /// widget's own `OnUpdate` and by nothing else (wow-re `gseq-anchor.md` §1/§2 +
+    /// `modelframe-animation-clock.md` §1.1/§3, both byte-verified). So a UI model tile writes
+    /// its pane's clock here every frame it draws and the phase rides the pane, not the world:
+    /// a pane whose frame is hidden stops its clock, and the spin resumes where it stopped.
+    /// `None` — every world lane — is the world scene's free-running clock (decision 2046).
+    clock: Option<f64>,
     /// Paused: skip the joint writes (the doodad host gates animation to drawn instances — wow-re
     /// `doodad-anim-host.md`: the ref's kernel ticks at draw time, so a culled model isn't
     /// evaluated). Creatures never pause. Resuming needs no re-seek: the cursor is a pure
@@ -67,6 +76,7 @@ impl GlobalSeqDrive {
         (!bones.is_empty()).then_some(Self {
             bones,
             anchor: None,
+            clock: None,
             paused: false,
         })
     }
@@ -82,19 +92,29 @@ impl GlobalSeqDrive {
         (!bones.is_empty()).then_some(Self {
             bones,
             anchor: None,
+            clock: None,
             paused: false,
         })
     }
 
-    /// Pause/resume the joint writes (the doodad draw gate, and the booth park — a sleeping
-    /// booth camera renders nothing, so its scene's channels hold). While paused the joints
-    /// hold their last pose; resume lands on the anchored cursor with nothing to catch up.
+    /// Pause/resume the joint writes — the doodad draw gate's lever, and its only caller. (The
+    /// booth and UI-tile lanes park instead, with [`super::AnimParked`] on the root, which holds
+    /// the pose evaluation and the compose as well as these writes; this pause holds only the
+    /// writes, which is what the doodad lane wants for a host whose player it also stops.) While
+    /// paused the joints hold their last pose; resume lands on the anchored cursor with nothing
+    /// to catch up.
     pub fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
     }
+
+    /// Point this instance's channels at its own scene clock (secs) — see [`Self::clock`]. Written
+    /// per frame by the owner of a scene that is not the world's; never called by a world lane.
+    pub fn set_clock(&mut self, secs: f64) {
+        self.clock = Some(secs);
+    }
 }
 
-/// Sample every drive's channels at its anchored cursor (`sharedNow − anchor`, stamping the
+/// Sample every drive's channels at its anchored cursor (`sceneNow − anchor`, stamping the
 /// anchor on the first tick — the attach) and write the driven bone — in the pose post-pass
 /// window ([`super::PosePost`], the same as the body twist), so the model compose folds it. A
 /// channel overwrites only its own component; a bone the playing animation never keyed (the
@@ -109,9 +129,12 @@ fn apply_global_sequences(
 ) {
     let now = time.elapsed_secs_f64();
     for (host, mut drive, parked) in &mut drives {
+        // The clock is the instance's SCENE's — the world's for every world lane, and a `<Model>`
+        // widget's private one where the tile renderer wrote it ([`GlobalSeqDrive::clock`]).
+        let scene_now = drive.clock.unwrap_or(now);
         // The attach stamp happens even while parked/paused — the ref stamps +0x68 at attach,
         // not at first draw.
-        let t = now - *drive.anchor.get_or_insert(now);
+        let t = scene_now - *drive.anchor.get_or_insert(scene_now);
         // A parked or paused instance skips only the WRITES — the cursor is absolute
         // (decision 0448's absolute-clock ruling, now literal: nothing per-instance advances).
         if drive.paused || parked {

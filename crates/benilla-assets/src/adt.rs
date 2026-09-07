@@ -110,38 +110,62 @@ impl Default for ChunkShading {
 ///
 /// Returns `None` for a chunk the hole mask emptied (it draws nothing: no mesh, no entity).
 pub fn chunk_to_mesh(chunk: &ChunkMesh, shading: &ChunkShading) -> Option<Mesh> {
-    if chunk.indices.len() < 3 {
+    chunks_to_mesh(&[(chunk, shading)])
+}
+
+/// [`chunk_to_mesh`] over several chunks of ONE tile as one mesh — the terrain CELL (decision
+/// 1944): every per-chunk fact the shader reads (the layer indices, the alpha/shadow slot) is
+/// already baked per vertex, and a tile's chunks share its material, so concatenating them
+/// changes nothing a pixel can see and turns sixteen draws into one. Positions are absolute,
+/// so no per-chunk transform is folded. A hole-emptied chunk contributes nothing; a cell of
+/// nothing but holes is `None`.
+pub fn chunks_to_mesh(parts: &[(&ChunkMesh, &ChunkShading)]) -> Option<Mesh> {
+    let live: Vec<&(&ChunkMesh, &ChunkShading)> =
+        parts.iter().filter(|(c, _)| c.indices.len() >= 3).collect();
+    if live.is_empty() {
         return None;
     }
-    let positions: Vec<[f32; 3]> = chunk
-        .positions
-        .iter()
-        .map(|p| wow_to_bevy(*p).to_array())
-        .collect();
-    // Prefer authored MCNR normals (continuous across MCNK borders — no seams); else flat.
-    let normals: Vec<[f32; 3]> = if chunk.normals.len() == chunk.positions.len() {
-        chunk
-            .normals
+    let total: usize = live.iter().map(|(c, _)| c.positions.len()).sum();
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(total);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(total);
+    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(total);
+    let mut uv1: Vec<[f32; 2]> = Vec::with_capacity(total);
+    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(total);
+    let mut indices: Vec<u32> = Vec::with_capacity(live.iter().map(|(c, _)| c.indices.len()).sum());
+    for (chunk, shading) in live {
+        let base = u32::try_from(positions.len()).expect("a cell's vertex count fits u32");
+        let chunk_positions: Vec<[f32; 3]> = chunk
+            .positions
             .iter()
-            .map(|n| wow_to_bevy(*n).to_array())
-            .collect()
-    } else {
-        computed_normals(&positions, &chunk.indices)
-    };
-    let li = shading.layers;
-    let col = [li[0] as f32, li[1] as f32, li[2] as f32, li[3] as f32];
-    let uv1 = [shading.alpha as f32, shading.shadow];
-    let n = positions.len();
+            .map(|p| wow_to_bevy(*p).to_array())
+            .collect();
+        if chunk.normals.len() == chunk.positions.len() {
+            normals.extend(chunk.normals.iter().map(|n| wow_to_bevy(*n).to_array()));
+        } else {
+            normals.extend(computed_normals(&chunk_positions, &chunk.indices));
+        }
+        let li = shading.layers;
+        let col = [li[0] as f32, li[1] as f32, li[2] as f32, li[3] as f32];
+        let n = chunk_positions.len();
+        uv1.extend(std::iter::repeat_n(
+            [shading.alpha as f32, shading.shadow],
+            n,
+        ));
+        colors.extend(std::iter::repeat_n(col, n));
+        uvs.extend_from_slice(&chunk.uvs);
+        indices.extend(chunk.indices.iter().map(|i| i + base));
+        positions.extend(chunk_positions);
+    }
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD,
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, chunk.uvs.clone());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, vec![uv1; n]);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![col; n]);
-    mesh.insert_indices(Indices::U32(chunk.indices.clone()));
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_indices(Indices::U32(indices));
     Some(mesh)
 }
 

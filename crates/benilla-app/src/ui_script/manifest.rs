@@ -55,7 +55,7 @@ pub(super) fn shipped_manifest_files() -> Vec<String> {
 /// Run decision 0272's load-time `UIParent_ManageFramePositions()` pass.
 ///
 /// Only meaningful once the frames that table names exist, so the font-registry-only load
-/// ([`load_font_registry`]) skips it. It is defined in `UIParent.xml`, which is in the deferred
+/// ([`load_font_registry`]) skips it. It is defined in the stock `UIParent.lua`, which is in the deferred
 /// half; calling it after `Fonts.xml` alone is a nil-global error, not a no-op.
 ///
 /// The ref applies `UIPARENT_MANAGED_FRAME_POSITIONS` once at load, then re-fires from the bottom
@@ -74,8 +74,61 @@ pub(super) fn bootstrap_positions(script: &UiScript) -> Vec<String> {
         error!("ui_script: buff-duration layout: {e}");
         return vec![format!("buff-duration layout: {e}")];
     }
+    if let Err(e) = install_chat_plate_guard(script) {
+        error!("ui_script: chat plate guard: {e}");
+        return vec![format!("chat plate guard: {e}")];
+    }
     Vec::new()
 }
+
+/// **A stated repair of a reference defect, installed rather than edited in** (decision 1998):
+/// the chat plate's hover fade must survive a quick exit and re-entry.
+///
+/// The stock `FCF_OnUpdate` (FloatingChatFrame.lua l.809-987) keeps per-window state across
+/// ticks: `hover` (the mouse is over the window), `oldAlpha` (the alpha the plate returns to, and
+/// the gate the fade-in needs — `oldAlpha < DEFAULT_CHATFRAME_ALPHA`), and `hasBeenFaded`. Two of
+/// its arms disagree about who owns them. The leave arm clears `hover` only inside the textures'
+/// fade-out condition (l.913-918); the tabs' fade-out is queued with `FCF_ChatTabFadeFinished`
+/// as its `finishedFunc` (l.931/973), which fires `CHAT_FRAME_FADE_TIME` (0.15 s) later and sets
+/// `oldAlpha = nil` (l.991) — unconditionally. Re-enter the window inside that 0.15 s and the
+/// re-entry's hover-start arm has already run (it keeps `oldAlpha`, still valid); then the tab's
+/// fade completes, `oldAlpha` goes nil under a live hover, the plate arm (`chatFrame.oldAlpha
+/// and chatFrame.oldAlpha < DEFAULT_CHATFRAME_ALPHA`, l.873) never passes again, and every later
+/// leave skips the arm that would clear `hover` — so the hover-start re-read of `oldAlpha` (l.907)
+/// never runs either. The tab keeps fading in; the plate never does, for the rest of the session.
+/// `FCF_SetWindowAlpha` (the tab menu's opacity slider) reseats `oldAlpha` and is the one way
+/// out, which is the shape the director reported: an existing window shows no plate on hover, a
+/// new window (opened at `DEFAULT_CHATFRAME_ALPHA`, no fade needed) shows one, and "setting the
+/// background to zero once" makes the hover work from then on. The gesture that arms it is
+/// ordinary: the scroll buttons sit 32 units outside the window's left edge
+/// (`FCF_SetButtonSide`, l.1038) and the hover box reaches only 5 (`MouseIsOver(chatFrame, 45,
+/// -10, -5, 5)`), so a flick from the text to a scroll button and back does it.
+///
+/// The repair is the smallest one: the tab's finished callback leaves `oldAlpha` alone while the
+/// window is hovered (`hover` set), and behaves as the reference's when it is not. The Lua is the
+/// reference's own and the engine verbs it uses (`GetCursorPosition`, a texture's `GetAlpha`, the
+/// OnUpdate `elapsed`) are settled, so the trap is inferred to be 1.12's as well — a client-side
+/// A/B is the director's to run (`./run-ref-client.sh`; the record has the script). Installed from
+/// Rust for the durability hook's reasons above: `assets/ui` does not grow (1779), and a repair of
+/// a reference defect is not a `ContainerFrameAdapters`-class engine-difference shim (1751 §2).
+///
+/// Re-stated rather than wrapped (the reference body is two lines), so re-running it after a
+/// `ReloadUI` re-defines the same function instead of stacking. Guarded on the function's
+/// presence: the font-registry-only load has no chat files.
+pub(super) fn install_chat_plate_guard(script: &UiScript) -> Result<(), String> {
+    script.run(CHAT_PLATE_GUARD).map_err(|e| e.to_string())
+}
+
+const CHAT_PLATE_GUARD: &str = r#"
+if FCF_ChatTabFadeFinished then
+    function FCF_ChatTabFadeFinished(chatTab, chatFrame)
+        chatTab:Hide()
+        if not chatFrame.hover then
+            chatFrame.oldAlpha = nil
+        end
+    end
+end
+"#;
 
 /// **Apply `SHOW_BUFF_DURATIONS` to the buff bar once, at load** (1751 window 18).
 ///
@@ -112,8 +165,8 @@ pub(super) fn apply_buff_durations(script: &UiScript) -> Result<(), String> {
 /// that home rather than a FrameXML one: `assets/ui` does not grow (1779), and this is the wrong
 /// side of the line for a `ContainerFrameAdapters`-class shim anyway — that clause is for a genuine
 /// engine difference (1751 §2), and this is a deliberate repair of a reference defect. Rust is also
-/// the durable home: our `UIParent.xml` is itself a transcription awaiting its own window, and a
-/// hook parked there would be homeless again the day it migrates.
+/// the durable home: our `UIParent.xml` was a transcription awaiting its own window (it migrated
+/// with 1988), and a hook parked there would have been homeless that day.
 ///
 /// Idempotent by its own latch, so a `ReloadUI` cannot stack wrappers. The reference's handler
 /// still runs first and unchanged: `this`, `event` and `arg1` are globals the engine has already
@@ -168,6 +221,19 @@ pub(crate) fn load_default_ui(script: &UiScript) -> Vec<String> {
     let mut failures = load_manifest(script, &Addon::builtin().toc.files);
     failures.extend(bootstrap_positions(script));
     script.pop_sound_suppression();
+    // **A handler that raised DURING the walk is a load failure.** The loader's own report holds
+    // the raises it dispatched itself (a `<Script file=>` chunk, an OnLoad); a raise one call
+    // deeper — an OnLoad that `Show()`s a frame whose OnShow indexes a global its file has not
+    // loaded yet — lands in the VM's error list instead, and until 2001 nothing read that list
+    // here: the stance bar's load-order defect shipped with the manifest reporting clean and a
+    // WARN line the smoke does not fail on. The errors stay in the VM (the player's dialog and
+    // the retained log still get them); this is the walk's own verdict growing the row.
+    failures.extend(
+        script
+            .errors()
+            .into_iter()
+            .map(|e| format!("a handler raised during the load walk: {e}")),
+    );
     failures
 }
 
@@ -279,7 +345,7 @@ mod tests {
         assert_eq!(toc.directive("Title"), Some("benilla"));
         assert_eq!(
             toc.files.first().map(String::as_str),
-            Some("Fonts.xml"),
+            Some("Interface\\FrameXML\\Fonts.xml"),
             "the font registry is the manifest's first entry — the loader splits there"
         );
     }
@@ -345,16 +411,91 @@ mod tests {
     /// not fail, it *half-works* — the frame keeps drawing, keeps answering `IsShown`, and simply
     /// never joins the cascade `UIParent:Hide()` walks. That is precisely how it would be missed.
     ///
-    /// It nearly was: `UIParent.xml` sat below `UiPanels.xml` until decision 1734, so restoring
+    /// It nearly was: our `UIParent.xml` sat below `UiPanels.xml` until decision 1734, so restoring
     /// `StaticPopup1`/`StaticPopup2`'s parents there would have written two declarations that did
     /// nothing at all. The reference's own order is the fix (FrameXML.toc: BasicControls.xml l.6,
     /// UIParent.xml l.8), and this keeps it.
+    /// **Every load-time runner of `UIParent_ManageFramePositions` follows every frame the pass
+    /// reads.** The stock pass (`UIParent.lua:1592-1775`) indexes a dozen HUD frames unguarded —
+    /// `ReputationWatchBar`, `QuestTimerFrame`, `QuestWatchFrame`, `MinimapCluster`,
+    /// `DurabilityFrame`, the bars — and several stock files run it from an OnLoad or the OnShow
+    /// of a frame their OnLoad shows. In the reference's toc the readers all precede the runners;
+    /// ours had the stance bar (a runner, through `ShapeshiftBar_OnLoad` → `Show` → `OnShow`)
+    /// three hundred lines above `ReputationFrame.xml` (a read), so every login raised at
+    /// `UIParent.lua:1618` and the shelf was never seated — the director's sliver above Defensive
+    /// Stance (decision 2001). The pairs below are the reference's own dependency, read off the
+    /// pass's body; a new runner or a new read joins the table, not a comment.
+    #[test]
+    fn every_load_time_runner_of_the_managed_pass_follows_what_it_reads() {
+        let files = manifest_files();
+        let at = |leaf: &str| {
+            files
+                .iter()
+                .position(|f| f.ends_with(&format!("\\{leaf}")))
+                .unwrap_or_else(|| panic!("the manifest lists {leaf}"))
+        };
+        // What the pass reads by name (`UIParent.lua:1598-1775`), and the file that declares it.
+        const READS: &[(&str, &str)] = &[
+            (
+                "MultiBarLeft / MultiBarRight / MultiBarBottomLeft",
+                "MultiActionBars.xml",
+            ),
+            (
+                "PetActionBarFrame + SlidingActionBarTexture0/1",
+                "PetActionBarFrame.xml",
+            ),
+            ("ReputationWatchBar", "ReputationFrame.xml"),
+            (
+                "MainMenuExpBar / MainMenuBarMaxLevelBar / MainMenuBar",
+                "MainMenuBar.xml",
+            ),
+            ("CastingBarFrame", "CastingBarFrame.xml"),
+            ("QuestTimerFrame", "QuestTimerFrame.xml"),
+            ("QuestWatchFrame", "QuestLogFrame.xml"),
+            ("DurabilityFrame + its three glyphs", "DurabilityFrame.xml"),
+            ("MinimapCluster", "Minimap.xml"),
+            (
+                "ChatFrame1 / ChatFrame2 (+ FCF_DockUpdate)",
+                "FloatingChatFrame.xml",
+            ),
+            // The shapeshift-appearance arm (l.1705-1732): a runner's file can be a READ too —
+            // the stance bar declares these and runs the pass, so it precedes the other runner.
+            (
+                "ShapeshiftBarLeft / Middle / Right",
+                "BonusActionBarFrame.xml",
+            ),
+        ];
+        // Who runs it at LOAD: an OnLoad, or the OnShow of a frame its OnLoad shows.
+        const RUNNERS: &[(&str, &str)] = &[
+            (
+                "ShapeshiftBar_OnLoad → Show → OnShow",
+                "BonusActionBarFrame.xml",
+            ),
+            ("WorldStateAlwaysUpFrame OnLoad", "WorldStateFrame.xml"),
+        ];
+        for (what, runner) in RUNNERS {
+            for (name, read) in READS {
+                if read == runner {
+                    continue; // its own declarations precede its own OnLoad
+                }
+                assert!(
+                    at(read) < at(runner),
+                    "{runner} ({what}) loads at {} but reads {name}, declared by {read} at {} — \
+                     the pass raises at load and never seats the frame it was run for. Move the \
+                     runner below the read, as the reference's toc has it.",
+                    at(runner),
+                    at(read)
+                );
+            }
+        }
+    }
+
     #[test]
     fn nothing_declares_a_uiparent_child_before_uiparent_itself_loads() {
         let files = manifest_files();
         let at = files
             .iter()
-            .position(|f| f == "UIParent.xml")
+            .position(|f| f == r"Interface\FrameXML\UIParent.xml")
             .expect("the manifest lists UIParent.xml");
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
         for early in &files[..at] {

@@ -34,8 +34,18 @@ use bevy::prelude::*;
 /// The held cursor payload's icon path (`Interface\Icons\…`, extensionless — the DBC/FrameXML
 /// convention), any arm — `None` if nothing is held or that arm's icon hasn't resolved yet
 /// (either way, the caller falls back to the mode cursor).
-fn payload_icon(script: &benilla_ui::script::UiScript) -> Option<String> {
+///
+/// **`covered` — the loading cover drops the overlay** (decision 1990, VERIFIED). The reference's
+/// world transition ends `0x401900 → 0x495920 → 0x6e4940` with `0x523d20(1)` + `0x523c20(1)`:
+/// cursor index **1**, the plain arrow, with any item/spell overlay dropped, set *before* the
+/// screen goes up. Without this a portal taken with an item on the cursor showed the item's icon
+/// over the loading art for the whole load — the mode half of the same rule is
+/// [`drive_displayed_cursor`]'s.
+fn payload_icon(script: &benilla_ui::script::UiScript, covered: bool) -> Option<String> {
     use benilla_ui::script::CursorPayload;
+    if covered {
+        return None;
+    }
     match script.cursor_payload()? {
         CursorPayload::Item(i) => i.texture,
         CursorPayload::Spell(s) => s.texture,
@@ -45,6 +55,10 @@ fn payload_icon(script: &benilla_ui::script::UiScript) -> Option<String> {
         // Mode 10 — the stabled pet's family icon (decision 1677). Always present: a non-empty
         // icon path is the grab's own gate.
         CursorPayload::StablePet(p) => Some(p.texture),
+        // Mode 2 (1965) — the coin bitmap by magnitude, `GetCoinIcon`'s own table.
+        CursorPayload::Money(m) => {
+            Some(benilla_ui::script::coin_icon(i64::from(m.copper)).to_string())
+        }
         // Mode 5 — the vendor row's icon. The reference stores the row's `ItemDisplayInfo` id
         // (`0xb4d8ec`) and resolves the art from it; we carry the resolved path, so this is the
         // same picture one hop later.
@@ -189,6 +203,8 @@ fn drive_displayed_cursor(
     // world, so re-entering the UI always restores once.
     mut last: Local<crate::ui_script::VmMemo<Option<crate::target::WorldCursor>>>,
     mut displayed: ResMut<DisplayedCursor>,
+    // The loading cover parks the mode at Point — see the arm at the top of the body.
+    screen: Res<crate::loading_screen::LoadingScreen>,
 ) {
     use crate::target::{CursorKind, WorldCursor};
     use benilla_ui::script::UiCursorMode;
@@ -199,6 +215,19 @@ fn drive_displayed_cursor(
     // no VM is a session in its own right, so the base restore re-arms once on each side of the
     // glue phase instead of every frame inside it.
     let last = last.get_for(script.as_deref());
+
+    // **Under the loading cover the cursor is the plain arrow** (decision 1990, VERIFIED). The
+    // reference's transition parks cursor index **1** at `0x6e49f5`/`0x6e49ff` before raising the
+    // screen; ours is parked here every covered frame instead of once, which reads the same because
+    // the cover has already taken the input plane and nothing can write the mode under it. Ahead of
+    // every other arm — a FrameXML write, the repair/targeting base, the sticky UI mode — because
+    // the reference's park is likewise unconditional. `last` is cleared like the over-world arm, so
+    // the first crossing back into the UI after the reveal restores the base once.
+    if screen.covering() {
+        displayed.0 = WorldCursor::default();
+        *last = None;
+        return;
+    }
 
     // **The BASE mode is not a constant** (`0xbe2c4c`, wow-re cursor-system.md §7: *"it is
     // independently mutable — e.g. a spell-cancel flow parks it at Cast(2)"*), and that is the
@@ -227,7 +256,17 @@ fn drive_displayed_cursor(
             kind: CursorKind::Repair,
             unable: false,
         }
-    } else if targeting.active() {
+    } else if targeting.active()
+        || script
+            .as_ref()
+            .is_some_and(|s| s.gift_wrap_armed().is_some())
+    {
+        // An armed **gift wrap** parks the base at Cast(2) for the same reason a targeting spell
+        // does, and by the same act: `0x5edea0`'s three calls are `LockItem`, **`SetCursorBaseMode(2)`**
+        // and `CursorSetMode(2)` (decision 1934). Both cells, deliberately — the displayed one so the
+        // cursor changes at the click, the BASE one so it survives the pointer crossing the world,
+        // where the classifier would otherwise write its own verdict over it. Setting only the
+        // displayed mode would lose the wrap cursor the moment the mouse left the bag.
         WorldCursor {
             kind: CursorKind::Cast,
             unable: false,
@@ -358,6 +397,8 @@ mod other {
         world_assets: Option<ResMut<WorldAssets>>,
         mut images: ResMut<Assets<Image>>,
         mut payload_cursors: ResMut<PayloadCursorImages>,
+        // The loading cover drops the payload overlay — see [`payload_icon`].
+        screen: Res<crate::loading_screen::LoadingScreen>,
         window: Option<Single<Entity, With<PrimaryWindow>>>,
         // The key of the cursor we last handed the window — the macOS arm's `last_set` under the
         // same name, because it is the same fact: OS state, not memory about the VM, so it is not a
@@ -368,7 +409,9 @@ mod other {
         let Some(window) = window else {
             return;
         };
-        let held_icon = script.as_ref().and_then(|s| payload_icon(s));
+        let held_icon = script
+            .as_ref()
+            .and_then(|s| payload_icon(s, screen.covering()));
         if let Some(icon) = held_icon {
             if last_set.as_deref() == Some(icon.as_str()) {
                 return; // already showing this icon
@@ -507,6 +550,8 @@ mod macos {
         script: Option<NonSend<benilla_ui::script::UiScript>>,
         world_assets: Option<ResMut<WorldAssets>>,
         mode: Res<super::DisplayedCursor>,
+        // The loading cover drops the payload overlay — see [`super::payload_icon`].
+        screen: Res<crate::loading_screen::LoadingScreen>,
         rig: Res<CameraControl>,
         cinematic: Option<Res<crate::cinematic::Cinematic>>,
         mut focus: MessageReader<bevy::window::WindowFocused>,
@@ -538,7 +583,9 @@ mod macos {
                 *last_set = None;
             }
         }
-        let held_icon = script.as_ref().and_then(|s| payload_icon(s));
+        let held_icon = script
+            .as_ref()
+            .and_then(|s| payload_icon(s, screen.covering()));
         if let Some(icon) = &held_icon {
             if !payload_cursors.0.contains_key(icon) && !decode_failed.contains(icon) {
                 let built = world_assets.and_then(|mut a| {
@@ -691,10 +738,28 @@ mod tests {
         lua: &str,
         armed: bool,
     ) -> WorldCursor {
+        frame_covered(standing, world, over_ui, lua, armed, false)
+    }
+
+    /// One frame, with `covered` deciding whether the loading cover is up — the arm that parks the
+    /// plain arrow ahead of every other rule.
+    fn frame_covered(
+        standing: WorldCursor,
+        world: WorldCursor,
+        over_ui: bool,
+        lua: &str,
+        armed: bool,
+        covered: bool,
+    ) -> WorldCursor {
         let mut app = App::new();
         let script = benilla_ui::script::UiScript::new().unwrap();
         script.run(lua).unwrap();
         app.insert_non_send_resource(script);
+        app.insert_resource(if covered {
+            crate::loading_screen::LoadingScreen::test_covering()
+        } else {
+            crate::loading_screen::LoadingScreen::default()
+        });
         app.insert_resource(world);
         app.insert_resource(crate::ui_script::PointerOverUi(over_ui));
         app.insert_resource(DisplayedCursor(standing));
@@ -708,6 +773,35 @@ mod tests {
             .run_system_once(drive_displayed_cursor)
             .expect("the displayed cursor drives");
         app.world().resource::<DisplayedCursor>().0
+    }
+
+    /// **Under the loading cover the cursor is the plain arrow, whatever else is true** (decision
+    /// 1990). The reference's world transition parks cursor index 1 (`0x6e49f5`/`0x6e49ff`) and
+    /// drops any item/spell overlay *before* the screen goes up, so a portal taken with a spell
+    /// armed — or with an item on the cursor — arrives showing the arrow, not the payload.
+    ///
+    /// Both of the arms that would otherwise win are exercised here: an armed spell (which parks
+    /// the BASE at Cast, so even the UI restore reads blue) and a FrameXML write in the same frame.
+    #[test]
+    fn the_loading_cover_parks_the_plain_arrow_over_every_other_rule() {
+        for (over_ui, lua, armed) in [
+            (false, "", false),
+            (true, "", true),
+            (true, "SetCursor(\"CAST_CURSOR\")", true),
+            (false, "", true),
+        ] {
+            assert_eq!(
+                frame_covered(SWORD, SWORD, over_ui, lua, armed, true),
+                WorldCursor::default(),
+                "covered: the arrow wins (over_ui={over_ui}, armed={armed}, lua={lua:?})"
+            );
+        }
+        // …and the cover is the only reason: the same frame uncovered keeps the world's verdict.
+        assert_eq!(
+            frame_covered(SWORD, SWORD, false, "", false, false),
+            SWORD,
+            "no cover, no park"
+        );
     }
 
     /// **The base mode is Cast while a spell awaits its click** (wow-re cursor-system.md §7: the
@@ -805,6 +899,7 @@ mod tests {
         );
         script.run("ShowContainerSellCursor(0, 1)").unwrap();
         app.insert_non_send_resource(script);
+        app.insert_resource(crate::loading_screen::LoadingScreen::default());
         app.insert_resource(CAST_GREY);
         app.insert_resource(crate::ui_script::PointerOverUi(true));
         app.insert_resource(DisplayedCursor(CAST_GREY));

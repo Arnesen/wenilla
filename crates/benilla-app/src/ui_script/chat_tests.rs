@@ -1,9 +1,9 @@
 //! Shipped end-to-end tests for the chat window + input (decision 0084, the chat arc): the real
-//! `assets/ui/ChatFrame.xml` loaded through the engine loader, driven exactly as the app drives it —
-//! `add_chat_message` → `resolve`/`extract` (lines render in the pinned colors), the wheel → the Lua
-//! `OnMouseWheel` handler → `ScrollUp` (which freezes the fade), and the input EditBox's ENTER →
-//! `OnEnterPressed` → `SubmitChatInput` → `take_chat_input` (the app then parses it — see
-//! `crate::ui_chat`'s `parse_line` tests for the `/say`//`/yell`//`/w` mapping).
+//! `Interface\FrameXML\ChatFrame.xml` loaded through the engine loader, driven exactly as the app
+//! drives it — `add_chat_message` → `resolve`/`extract` (lines render in the pinned colors), the
+//! wheel → the Lua `OnMouseWheel` handler → `ScrollUp` (which freezes the fade), and the input
+//! EditBox's ENTER → `OnEnterPressed` → `SubmitChatInput` → `take_chat_input` (the app then parses
+//! it — see `crate::ui_chat`'s `parse_line` tests for the `/say`//`/yell`//`/w` mapping).
 
 use benilla_ui::script::{ExtractedQuad, QuadContent, UiScript};
 
@@ -12,17 +12,38 @@ use super::test_ui::load_ui as load_xml;
 /// The full ChatFrame stack (fonts first, so the FontString's `inherits="ChatFontNormal"` resolves).
 fn chat_frame() -> UiScript {
     let mut s = UiScript::new().unwrap();
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     // GameTooltip.xml + UIDropDownMenu.xml are real RUNTIME dependencies of the chat tabs since
     // decision 1589: a left click closes any open menu (`CloseDropDownMenus`, the reference's own
     // first move in `FCF_Tab_OnClick`) and a right click opens the window's options menu.
     // `benilla.toc` already orders both ahead of ChatFrame.xml (l.60/64 vs l.399); the harness
     // says so too, rather than a guard that would hide a real ordering fault. (The tooltip file is
     // the dropdown kit's own dependency — its MenuBackdrop reads `TOOLTIP_DEFAULT_COLOR`.)
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
-    load_xml(&s, "ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    // The UIParent slice (RaiseFrameLevel, MouseIsOver, the fade and flash kits) ahead of the
+    // bar and the chat files; `FCF_OnUpdate` — the dock's hover, fade and drag driver — runs
+    // from UIParent's OnUpdate, as in the reference.
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    // `FCF_ValidateChatFramePosition` (a tab-drag stop) reads `MainMenuBar:GetHeight()`; the bar's
+    // own load-time chain precedes it, as in the action-bar harness.
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\MainMenuBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
+    super::fire_chat_login(&mut s);
     s.set_screen_size(1600.0, 900.0);
     s.resolve();
     s
@@ -109,24 +130,19 @@ fn newest_line_sits_at_the_bottom() {
 #[test]
 fn wheel_scroll_re_arms_the_fade_then_freezes_it() {
     let mut s = chat_frame();
-    // Short fade so a tick visibly ramps: straight into phase 2 (timeVisible 0), 4s ramp.
     s.run("ChatFrame1:SetTimeVisible(0); ChatFrame1:SetFadeDuration(4)")
         .unwrap();
     for t in ["L0", "L1", "L2"] {
         s.add_chat_message("ChatFrame1", t, 1.0, 1.0, 1.0);
     }
     s.resolve();
-
-    // One tick at the bottom ramps every line's alpha down.
     s.tick(1.0);
     s.resolve();
     let a1 = text_color(&s.extract(), "L1").expect("L1 visible")[3];
     assert!(a1 < 1.0 && a1 > 0.0, "the line faded partway: {a1}");
-
-    // Scroll up via the wheel (a point inside the docked frame: BOTTOMLEFT (32,85), 430x160). The
-    // Lua OnMouseWheel handler calls ScrollUp, which re-arms every displayed line to full alpha —
-    // and, no longer AtBottom, the tick then holds it there.
-    s.mouse_wheel(100.0, 150.0, 1.0);
+    // The scroll verb is what the reference's scroll buttons call; the 1.12 chat frame takes
+    // no wheel of its own (`enableMouse="false"`, no OnMouseWheel).
+    s.run("ChatFrame1:ScrollUp()").unwrap();
     s.resolve();
     let a2 = text_color(&s.extract(), "L1").expect("L1 still visible")[3];
     assert!(close(a2, 1.0), "the scroll brought the line back: {a2}");
@@ -134,9 +150,7 @@ fn wheel_scroll_re_arms_the_fade_then_freezes_it() {
     s.resolve();
     let a3 = text_color(&s.extract(), "L1").expect("L1 still visible")[3];
     assert!(close(a3, 1.0), "frozen while scrolled up: {a3}");
-
-    // Wheel back down to the bottom — that scroll re-arms too, so the ramp restarts from full.
-    s.mouse_wheel(100.0, 150.0, -1.0);
+    s.run("ChatFrame1:ScrollToBottom()").unwrap();
     s.tick(1.0);
     s.resolve();
     let a4 = text_color(&s.extract(), "L1").expect("L1 visible")[3];
@@ -147,18 +161,25 @@ fn wheel_scroll_re_arms_the_fade_then_freezes_it() {
 #[test]
 fn input_editbox_enter_drains_the_typed_line() {
     let mut s = chat_frame();
-    // ENTER opens (the app calls focus_editbox); typing goes to the focused box.
     assert!(s.focus_editbox("ChatFrameEditBox"), "the edit box focuses");
     assert!(s.has_keyboard_focus(), "focus gates the world's keys");
     s.char_input("/yell hi");
-    // ENTER → OnEnterPressed → SubmitChatInput(GetText()) + SetText('') + ClearFocus + Hide.
     assert!(s.key_input("ENTER"), "the box consumes ENTER");
-    assert_eq!(s.take_chat_input(), vec!["/yell hi".to_string()]);
+    // The reference's own path: `ChatEdit_OnEnterPressed` → `ChatEdit_SendText` →
+    // `ChatEdit_ParseText` → `SendChatMessage("hi", "YELL", …)`.
+    let sends = s.take_chat_sends();
+    assert_eq!(
+        sends
+            .iter()
+            .map(|c| (c.text.as_str(), c.chat_type.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("hi", "YELL")]
+    );
     assert!(
         !s.has_keyboard_focus(),
-        "submit closes the box (ClearFocus + Hide)"
+        "submit closes the box (ChatEdit_OnEscapePressed: ClearFocus + Hide)"
     );
-    assert!(s.take_chat_input().is_empty(), "drained");
+    assert!(s.take_chat_sends().is_empty(), "drained");
 }
 
 #[test]
@@ -181,12 +202,13 @@ fn chat_box_arrows_edit_and_history_recalls() {
     let mut s = chat_frame();
     assert!(s.focus_editbox("ChatFrameEditBox"));
     s.char_input("ab");
-    // Plain LEFT must MOVE the caret (not be swallowed): a backspace after it deletes 'a', not 'b'.
-    s.editbox_action(EditAction::Move {
-        unit: EditUnit::Char,
-        back: true,
-        extend: false,
-    });
+    // The reference's ChatFrameEditBoxTemplate is `ignoreArrows="true"` — the engine's
+    // AltArrowKeyMode, which the app's key routing reads to hand a plain arrow to the bindings
+    // (the character turns while you type) rather than to the box. The box itself still edits.
+    assert!(
+        s.editbox_alt_arrow_mode(),
+        "the stock template's ignoreArrows landed as AltArrowKeyMode on the focused box"
+    );
     s.editbox_action(EditAction::Delete {
         unit: EditUnit::Char,
         back: true,
@@ -194,30 +216,38 @@ fn chat_box_arrows_edit_and_history_recalls() {
     assert_eq!(
         s.eval::<String>("return ChatFrameEditBox:GetText()")
             .unwrap(),
-        "b",
-        "plain arrows move the caret in the shipped chat box"
+        "a"
     );
-
-    // Submit, then push the canonical line the router would (ui_chat::input::history_line) — the
-    // asynchronous ChatEdit_AddHistory slot.
     s.run("ChatFrameEditBox:SetText('')").unwrap();
     s.char_input("/yell hi");
     assert!(s.key_input("ENTER"));
-    assert_eq!(s.take_chat_input(), vec!["/yell hi".to_string()]);
-    assert!(
-        s.editbox_add_history("ChatFrameEditBox", "/yell hi"),
-        "the seam finds the shipped box by name after it closed"
+    // `ChatEdit_SendText` → `ChatEdit_ParseText` → the YELL type's send, and the reference's
+    // `AddHistoryLine` on the way.
+    let sends = s.take_chat_sends();
+    assert_eq!(
+        sends
+            .iter()
+            .map(|c| (c.text.as_str(), c.chat_type.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("hi", "YELL")]
     );
-
-    // Reopen (the app refocuses on the next Enter): Up recalls, Down restores the draft.
     assert!(s.focus_editbox("ChatFrameEditBox"));
     s.char_input("dra");
     s.editbox_action(EditAction::HistoryPrev);
-    assert_eq!(
-        s.eval::<String>("return ChatFrameEditBox:GetText()")
+    // `ChatEdit_AddHistory` filed `SLASH_YELL1 .. " " .. text` = "/y hi" (ChatFrame.lua
+    // l.1913-1937); the recall lands it in the box, and the box's own `OnTextChanged` live parse
+    // (`ChatEdit_ParseText(this, 0)`) turns it straight into the YELL type with "hi" — which is
+    // what the player sees: a "Yell:" header and the text.
+    assert!(
+        s.eval::<bool>(
+            "return ChatFrameEditBox.chatType == 'YELL' and ChatFrameEditBox:GetText() == 'hi'"
+        )
+        .unwrap(),
+        "Up recalls the filed line, live-parsed: {:?} {:?}",
+        s.eval::<String>("return ChatFrameEditBox.chatType")
             .unwrap(),
-        "/yell hi",
-        "Up recalls the submitted line"
+        s.eval::<String>("return ChatFrameEditBox:GetText()")
+            .unwrap()
     );
     s.editbox_action(EditAction::HistoryNext);
     assert_eq!(
@@ -238,19 +268,13 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
     use benilla_ui::script::{
         ContainerSlot, ContainerState, SpellBookState, SpellSlotView, SpellTabView,
     };
-    let mut s = UiScript::new().unwrap();
-    s.set_screen_size(1024.0, 768.0);
+    // The reference's spellbook wants the action-bar chain beneath it (1952); the chat window
+    // loads after it, as in the manifest.
+    let mut s = super::spellbook_tests::spellbook_ui(1024.0, 768.0);
     for f in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        r"Interface\FrameXML\UIPanelTemplates.lua",
-        r"Interface\FrameXML\UIPanelTemplates.xml",
-        "GameTooltip.xml",
-        "Cooldown.xml",
         "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
-        "ChatFrame.xml",
-        "SpellBookFrame.xml",
+        "Interface\\FrameXML\\ChatFrame.xml",
+        "Interface\\FrameXML\\FloatingChatFrame.xml",
     ] {
         load_xml(&s, f);
     }
@@ -314,6 +338,7 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -353,11 +378,11 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
 
 // ── ChatTypeInfo: the addon-facing color table ────────────────────────────────────────────────
 
-/// `ChatTypeInfo` carries the shipped default chat colors twice: once in `assets/ui/ChatFrame.xml`
-/// for addons to read, and once in [`crate::ui_chat::default_color`] for our own feed to render.
-/// Both are the same wow-re byte table (`chat-color-table.md`, the static registry at
-/// `.rdata 0x804710`) — so this is the gate that makes the duplication safe: every kind we model
-/// must agree to the byte, and the table's shape (`sticky`/`id`) must be the reference's.
+/// `ChatTypeInfo` carries the shipped default chat colors twice: once in
+/// `Interface\FrameXML\ChatFrame.xml` for addons to read, and once in
+/// [`crate::ui_chat::default_color`] for our own feed to render. Both are the same wow-re byte
+/// table (`chat-color-table.md`, the static registry at `.rdata 0x804710`) — so this is the gate
+/// that makes the duplication safe: every kind we model must agree to the byte, and the table's shape (`sticky`/`id`) must be the reference's.
 #[test]
 fn chat_type_info_matches_the_host_color_table() {
     use crate::ui_chat::{default_color, ChatEventKind as K};
@@ -740,11 +765,9 @@ fn hovering_the_dock_still_reveals_the_tabs() {
         s.resolve();
     }
     assert!(
-        s.eval::<f64>("return ChatFrame1Tab:GetAlpha()").unwrap() < 1e-6,
-        "the dock starts concealed"
+        !s.eval::<bool>("return ChatFrame1Tab:IsVisible()").unwrap(),
+        "the dock starts concealed — the tab template ships hidden"
     );
-
-    // The dock's own centre, asked of the layout rather than hardcoded.
     let (x, y): (f32, f32) = s
         .eval(
             "return (ChatFrame1:GetLeft() + ChatFrame1:GetRight()) / 2, \
@@ -752,17 +775,15 @@ fn hovering_the_dock_still_reveals_the_tabs() {
         )
         .unwrap();
     s.mouse_move(x, y);
-    // 0.2 s stationary to arm the reveal, then the 0.15 s ramp — 25 frames covers both with room.
-    for _ in 0..25 {
+    for _ in 0..45 {
         s.tick(0.016);
         s.resolve();
     }
     assert!(s.errors().is_empty(), "{:?}", s.errors());
-
     let alpha: f64 = s.eval("return ChatFrame1Tab:GetAlpha()").unwrap();
     assert!(
-        (alpha - 1.0).abs() < 1e-6,
-        "a stationary hover reveals the selected tab at full alpha — got {alpha}"
+        s.eval::<bool>("return ChatFrame1Tab:IsVisible()").unwrap() && (alpha - 1.0).abs() < 1e-6,
+        "a stationary hover past CHAT_TAB_SHOW_DELAY reveals the selected tab at full alpha — got {alpha}"
     );
 }
 
@@ -785,8 +806,6 @@ fn a_chat_view_at_the_bottom_stops_rewriting_the_flash() {
         s.tick(0.016);
         s.resolve();
     }
-
-    // At the bottom, flash hidden: the sentinel must survive.
     s.run("ChatFrame1.flashTimer = 0.42").unwrap();
     for _ in 0..10 {
         s.tick(0.016);
@@ -803,20 +822,17 @@ fn a_chat_view_at_the_bottom_stops_rewriting_the_flash() {
             .unwrap(),
         "the flash stays hidden at rest"
     );
-
-    // Control 1: scrolled up, the blink still runs — the timer accumulates past 0.5 and shows
-    // the flash (a point inside the docked frame, as the wheel test uses).
-    s.mouse_wheel(100.0, 150.0, 1.0);
-    s.tick(0.3); // 0.42 + 0.3 = 0.72 >= 0.5 -> toggle on
+    // The reference's ChatFrameTemplate takes no mouse and has no wheel script (1.12 scrolls its
+    // chat by the buttons), so the scroll is the frame's own verb.
+    s.run("ChatFrame1:ScrollUp()").unwrap();
+    s.tick(0.3); // 0.42 + 0.3 = 0.72 >= CHAT_BUTTON_FLASH_TIME -> toggle on
     s.resolve();
     assert!(
         s.eval::<bool>("return ChatFrame1BottomButtonFlash:IsVisible()")
             .unwrap(),
-        "scrolled up, the bottom-button blink still lights"
+        "scrolled up, the bottom-button blink lights"
     );
-
-    // Control 2: back to the bottom while the flash is LIT — the transition still writes.
-    s.mouse_wheel(100.0, 150.0, -1.0);
+    s.run("ChatFrame1:ScrollToBottom()").unwrap();
     s.tick(0.016);
     s.resolve();
     assert!(
@@ -824,10 +840,12 @@ fn a_chat_view_at_the_bottom_stops_rewriting_the_flash() {
             .unwrap(),
         "returning to the bottom hides a lit flash"
     );
-    assert_eq!(
-        s.eval::<f64>("return ChatFrame1.flashTimer").unwrap(),
-        0.0,
-        "and zeroes the timer with it (our reset rides inside the reference's gate)"
+    // …and leaves the residual phase where it was: the reference's at-bottom arm hides the flash
+    // and returns, it never zeroes the timer (ChatFrame.lua `ChatFrame_OnUpdate`).
+    let timer: f64 = s.eval("return ChatFrame1.flashTimer").unwrap();
+    assert!(
+        (timer - 0.22).abs() < 1e-6,
+        "the residual phase stands: {timer}"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -849,7 +867,6 @@ fn a_chat_view_at_the_bottom_stops_rewriting_the_flash() {
 #[test]
 fn selecting_the_combat_log_keeps_the_dock_driver_running() {
     let mut s = chat_frame();
-    // Hover the dock and let the reveal settle: General at full, Combat Log at half.
     let (x, y): (f32, f32) = s
         .eval(
             "return (ChatFrame1:GetLeft() + ChatFrame1:GetRight()) / 2, \
@@ -857,7 +874,7 @@ fn selecting_the_combat_log_keeps_the_dock_driver_running() {
         )
         .unwrap();
     s.mouse_move(x, y);
-    for _ in 0..25 {
+    for _ in 0..45 {
         s.tick(0.016);
         s.resolve();
     }
@@ -871,19 +888,16 @@ fn selecting_the_combat_log_keeps_the_dock_driver_running() {
         ),
         "the hovered dock starts with General selected — this test must not pass vacuously"
     );
-
-    // Click the Combat Log tab, then advance the clock WITHOUT touching FCF_OnUpdate.
-    s.run("BenillaFCF_TabClick(2)").unwrap();
+    s.run("FCF_SelectDockFrame(ChatFrame2)").unwrap();
     for _ in 0..10 {
         s.tick(0.016);
         s.resolve();
     }
     assert!(s.errors().is_empty(), "{:?}", s.errors());
-
     assert!(
         s.eval::<bool>("return ChatFrame2:IsShown() and not ChatFrame1:IsShown()")
             .unwrap(),
-        "the click swapped the windows"
+        "the selection swapped the windows"
     );
     let (a1, a2): (f32, f32) = s
         .eval("return ChatFrame1Tab:GetAlpha(), ChatFrame2Tab:GetAlpha()")
@@ -906,11 +920,11 @@ fn the_dock_still_fades_out_with_the_combat_log_selected() {
         )
         .unwrap();
     s.mouse_move(x, y);
-    for _ in 0..25 {
+    for _ in 0..45 {
         s.tick(0.016);
         s.resolve();
     }
-    s.run("BenillaFCF_TabClick(2)").unwrap();
+    s.run("FCF_SelectDockFrame(ChatFrame2)").unwrap();
     for _ in 0..10 {
         s.tick(0.016);
         s.resolve();
@@ -922,17 +936,16 @@ fn the_dock_still_fades_out_with_the_combat_log_selected() {
         ),
         "revealed before the cursor leaves"
     );
-
     s.mouse_move(1500.0, 850.0); // away from the dock
-    for _ in 0..20 {
+    for _ in 0..45 {
         s.tick(0.016);
         s.resolve();
     }
     assert!(s.errors().is_empty(), "{:?}", s.errors());
-    let a2: f32 = s.eval("return ChatFrame2Tab:GetAlpha()").unwrap();
+    // The reference fades the tab out and `FCF_ChatTabFadeFinished` hides it.
     assert!(
-        a2 < 1e-6,
-        "the dock conceals itself again on leave — got Combat Log tab alpha {a2}"
+        !s.eval::<bool>("return ChatFrame2Tab:IsVisible()").unwrap(),
+        "the dock conceals itself again on leave"
     );
 }
 
@@ -943,7 +956,7 @@ fn the_dock_still_fades_out_with_the_combat_log_selected() {
 #[test]
 fn the_combat_log_window_runs_its_own_bottom_button_blink() {
     let mut s = chat_frame();
-    s.run("BenillaFCF_TabClick(2)").unwrap();
+    s.run("FCF_SelectDockFrame(ChatFrame2)").unwrap();
     for i in 0..40 {
         s.add_chat_message("ChatFrame2", &format!("line {i}"), 1.0, 1.0, 1.0);
     }
@@ -963,5 +976,318 @@ fn the_combat_log_window_runs_its_own_bottom_button_blink() {
         s.eval::<bool>("return ChatFrame2BottomButtonFlash:IsVisible()")
             .unwrap(),
         "window 2's bottom-button flash blinks while it is scrolled up"
+    );
+}
+
+/// **The chat menu runs on the REFERENCE's UIMenu kit** — `Interface\FrameXML\UIMenu.xml` and its
+/// own `UIMenu.lua`, not a transcription of them.
+///
+/// Ours kept the reference's ten names in `ChatFrame.xml`, which loads at manifest 939 against the
+/// chain's 194, so our copies overwrote the chain's from the day that entry landed — the reverse of
+/// 1855's direction, and nothing drove this menu in a test, so nothing said so. Decision 1869.
+#[test]
+fn the_chat_menu_builds_its_rows_on_the_references_kit() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for f in [
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
+        r"Interface\FrameXML\UIMenu.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\UIMenu.xml",
+        "Interface\\FrameXML\\ChatFrame.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        "Interface\\FrameXML\\UIPanelTemplates.lua",
+        "Interface\\FrameXML\\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\FloatingChatFrame.xml",
+    ] {
+        load_xml(&s, f);
+    }
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    let _ = s.errors();
+
+    // `ChatMenu_OnLoad` calls `UIMenu_Initialize()` bare, relying on `this` — the reference's own
+    // idiom — then `UIMenu_AddButton` per row. If the kit were missing, the rows would not exist.
+    s.run("ChatMenu:Show()").unwrap();
+    assert!(s.errors().is_empty(), "opening it raises: {:?}", s.errors());
+    assert!(
+        s.eval::<i64>("return ChatMenu.numButtons or 0").unwrap() >= 7,
+        "the reference's `UIMenu_AddButton` counted the rows this window adds"
+    );
+    assert_eq!(
+        s.eval::<String>("return ChatMenuButton1:GetText()")
+            .unwrap(),
+        "Say",
+        // The reference labels a row with `button:SetText(text)` — the Button's own text, not a
+        // named FontString, so there is no `…Button1Text` to read.
+        "row 1 is the Say row, built by the chain's kit"
+    );
+
+    // A row click runs the owner's func and closes the menu — `UIMenuButton_OnClick`'s contract.
+    s.run("ChatMenuButton1:Click()").unwrap();
+    assert!(
+        s.errors().is_empty(),
+        "a row click raises: {:?}",
+        s.errors()
+    );
+    assert!(
+        !s.eval::<bool>("return ChatMenu:IsShown() and true or false")
+            .unwrap(),
+        "the reference's row click hides the menu"
+    );
+    // `ChatMenu_Say` → `ChatMenu_SetChatType(chatFrame, "SAY")`: the box opens and its type is
+    // set directly — no slash is typed into it (ChatFrame.lua l.2245-2255).
+    assert!(
+        s.eval::<bool>(
+            "return ChatFrameEditBox:IsVisible() and ChatFrameEditBox.chatType == 'SAY'"
+        )
+        .unwrap(),
+        "and it opened the edit box as SAY"
+    );
+}
+
+/// **A glass window's plate fades in on every hover, not only the first.** A restored window
+/// (the cache's `COLOR 0 0 0 0`, the stock row) keeps its nine plate textures at alpha 0 and
+/// relies on `FCF_OnUpdate`'s hover arm to lift them to `DEFAULT_CHATFRAME_ALPHA` and drop them
+/// back (FloatingChatFrame.lua l.873-877, l.913-916). The director's report (2026-09-05): hovering
+/// the chat window shows the tabs and the buttons but no plate.
+#[test]
+fn a_glass_windows_plate_fades_in_on_every_hover() {
+    let mut s = chat_frame();
+    s.mouse_move(1500.0, 850.0);
+    for _ in 0..4 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    let bg =
+        |s: &mut UiScript| -> f64 { s.eval("return ChatFrame1Background:GetAlpha()").unwrap() };
+    assert_eq!(bg(&mut s), 0.0, "a glass window rests at alpha 0");
+    let (x, y): (f32, f32) = s
+        .eval(
+            "return (ChatFrame1:GetLeft() + ChatFrame1:GetRight()) / 2, \
+             (ChatFrame1:GetBottom() + ChatFrame1:GetTop()) / 2",
+        )
+        .unwrap();
+    for round in 1..=3 {
+        s.mouse_move(x, y);
+        for _ in 0..45 {
+            s.tick(0.016);
+            s.resolve();
+        }
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
+        let a = bg(&mut s);
+        assert!(
+            (a - 0.25).abs() < 1e-6,
+            "hover {round}: the plate fades to DEFAULT_CHATFRAME_ALPHA — got {a} (oldAlpha={:?})",
+            s.eval::<Option<f64>>("return ChatFrame1.oldAlpha").unwrap()
+        );
+        s.mouse_move(1500.0, 850.0);
+        for _ in 0..45 {
+            s.tick(0.016);
+            s.resolve();
+        }
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
+        let a = bg(&mut s);
+        assert!(
+            a.abs() < 1e-6,
+            "leave {round}: the plate fades back to its saved alpha — got {a}"
+        );
+    }
+}
+
+/// The same law under the WHOLE shipped manifest, driven the way the app drives it.
+#[test]
+fn a_glass_windows_plate_fades_in_on_every_hover_under_the_full_manifest() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1600.0, 900.0);
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "{failures:?}");
+    s.resolve();
+    s.mouse_move(1500.0, 850.0);
+    for _ in 0..4 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    super::fire_chat_login(&mut s);
+    s.resolve();
+    let bg =
+        |s: &mut UiScript| -> f64 { s.eval("return ChatFrame1Background:GetAlpha()").unwrap() };
+    assert_eq!(bg(&mut s), 0.0, "a glass window rests at alpha 0");
+    let (x, y): (f32, f32) = s
+        .eval(
+            "return (ChatFrame1:GetLeft() + ChatFrame1:GetRight()) / 2, \
+             (ChatFrame1:GetBottom() + ChatFrame1:GetTop()) / 2",
+        )
+        .unwrap();
+    for round in 1..=3 {
+        s.mouse_move(x, y);
+        for _ in 0..45 {
+            s.tick(0.016);
+            s.resolve();
+        }
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
+        // The plate as the renderer receives it: one Background quad over ChatFrame1's rect at
+        // the faded alpha, black.
+        let plates: Vec<(Option<benilla_ui::layout::Rect>, f32, Option<[f32; 4]>)> = s
+            .extract()
+            .iter()
+            .filter_map(|q| match &q.content {
+                QuadContent::Texture {
+                    path: Some(p),
+                    color,
+                    ..
+                } if p.to_ascii_lowercase().contains("chatframebackground") => {
+                    Some((q.rect, q.alpha, *color))
+                }
+                _ => None,
+            })
+            .collect();
+        let (left, bottom): (f32, f32) = s
+            .eval("return ChatFrame1:GetLeft(), ChatFrame1:GetBottom()")
+            .unwrap();
+        // The texture's own anchors: TOPLEFT (-2, 3) and BOTTOMLEFT (-2, -6) off the frame.
+        let over_frame1 = plates.iter().find(|(r, _, _)| {
+            r.is_some_and(|r| {
+                (r.left - (left - 2.0)).abs() < 1.0 && (r.bottom - (bottom - 6.0)).abs() < 1.0
+            })
+        });
+        assert!(
+            over_frame1.is_some_and(|(_, a, c)| {
+                (a - 0.25).abs() < 1e-3 && c.is_some_and(|c| c[0] == 0.0 && c[1] == 0.0 && c[2] == 0.0)
+            }),
+            "hover {round}: the extracted plate quad over ChatFrame1 ({left}, {bottom}) — {plates:?}"
+        );
+        let a = bg(&mut s);
+        assert!(
+            (a - 0.25).abs() < 1e-6,
+            "hover {round}: the plate fades to DEFAULT_CHATFRAME_ALPHA — got {a} (oldAlpha={:?}, hover={:?}, hasBeenFaded={:?}, init={:?})",
+            s.eval::<Option<f64>>("return ChatFrame1.oldAlpha").unwrap(),
+            s.eval::<Option<f64>>("return ChatFrame1.hover").unwrap(),
+            s.eval::<Option<f64>>("return ChatFrame1.hasBeenFaded").unwrap(),
+            s.eval::<Option<f64>>("return ChatFrame1.init").unwrap(),
+        );
+        s.mouse_move(1500.0, 850.0);
+        for _ in 0..45 {
+            s.tick(0.016);
+            s.resolve();
+        }
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
+        let a = bg(&mut s);
+        assert!(
+            a.abs() < 1e-6,
+            "leave {round}: the plate fades back to its saved alpha — got {a}"
+        );
+    }
+}
+
+/// **The plate comes back after a quick exit and re-entry** (decision 1998 — the director's
+/// report: an existing window shows tabs but no plate on hover; a new one shows the plate; the
+/// tab menu's opacity slider, used once, makes the hover work again).
+///
+/// The stock `FCF_OnUpdate` traps itself: leave the window (the tabs' fade-out is queued with
+/// `FCF_ChatTabFadeFinished` as its finished callback), re-enter inside `CHAT_FRAME_FADE_TIME`,
+/// and the callback fires `chatFrame.oldAlpha = nil` under the live hover — after which the
+/// plate arm (`oldAlpha < DEFAULT_CHATFRAME_ALPHA`) never passes and no leave clears `hover`, so
+/// the hover-start re-read never runs either. Two VMs prove the guard is what makes the
+/// difference: the bare chat stack (the reference's Lua alone) traps, the shipped manifest (the
+/// guard installed by `bootstrap_positions`) does not. The control keeps this from passing
+/// vacuously — if the stock Lua or the engine ever stop trapping, it says so, and the guard is
+/// then a repair of nothing.
+#[test]
+fn a_quick_exit_and_reentry_keeps_the_plates_hover_fade() {
+    fn drive(s: &mut UiScript) -> (f64, f64, f64) {
+        let (x, y): (f32, f32) = s
+            .eval(
+                "return (ChatFrame1:GetLeft() + ChatFrame1:GetRight()) / 2, \
+                 (ChatFrame1:GetBottom() + ChatFrame1:GetTop()) / 2",
+            )
+            .unwrap();
+        let bg =
+            |s: &mut UiScript| -> f64 { s.eval("return ChatFrame1Background:GetAlpha()").unwrap() };
+        s.mouse_move(1500.0, 850.0);
+        for _ in 0..4 {
+            s.tick(0.016);
+            s.resolve();
+        }
+        // A stationary hover past CHAT_TAB_SHOW_DELAY and the ramp: the plate is up.
+        s.mouse_move(x, y);
+        for _ in 0..45 {
+            s.tick(0.016);
+            s.resolve();
+        }
+        let first = bg(s);
+        // Out for ~50 ms — inside the 0.15 s fade-out — and back, then stationary.
+        s.mouse_move(1500.0, 850.0);
+        for _ in 0..3 {
+            s.tick(0.016);
+            s.resolve();
+        }
+        s.mouse_move(x, y);
+        for _ in 0..45 {
+            s.tick(0.016);
+            s.resolve();
+        }
+        let reentry = bg(s);
+        // Away for a full second, then a fresh hover: whatever the re-entry left behind stays.
+        s.mouse_move(1500.0, 850.0);
+        for _ in 0..60 {
+            s.tick(0.016);
+            s.resolve();
+        }
+        s.mouse_move(x, y);
+        for _ in 0..45 {
+            s.tick(0.016);
+            s.resolve();
+        }
+        let later = bg(s);
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
+        (first, reentry, later)
+    }
+
+    // The control: the reference's Lua alone.
+    let mut bare = chat_frame();
+    let (first, reentry, later) = drive(&mut bare);
+    assert!((first - 0.25).abs() < 1e-6, "control, first hover: {first}");
+    assert!(
+        reentry.abs() < 1e-6 && later.abs() < 1e-6,
+        "the control must trap — the reference's Lua nils oldAlpha under a live hover \
+         (re-entry {reentry}, later {later}); if it no longer does, the guard is a repair of nothing"
+    );
+    assert!(
+        bare.eval::<bool>("return ChatFrame1Tab:IsVisible() and ChatFrame1.oldAlpha == nil and ChatFrame1.hover == 1")
+            .unwrap(),
+        "the trapped state the director described: tab up, oldAlpha nil, hover stuck"
+    );
+
+    // The shipped interface, with the guard the manifest load installs.
+    let mut shipped = UiScript::new().unwrap();
+    shipped.set_screen_size(1600.0, 900.0);
+    super::test_ui::load_ui(&shipped, "Interface\\FrameXML\\GlobalStrings.lua");
+    let failures = super::load_default_ui(&shipped);
+    assert!(failures.is_empty(), "{failures:?}");
+    shipped.resolve();
+    super::fire_chat_login(&mut shipped);
+    shipped.resolve();
+    let (first, reentry, later) = drive(&mut shipped);
+    assert!((first - 0.25).abs() < 1e-6, "shipped, first hover: {first}");
+    assert!(
+        (reentry - 0.25).abs() < 1e-6,
+        "shipped: the plate comes back on the quick re-entry — got {reentry}"
+    );
+    assert!(
+        (later - 0.25).abs() < 1e-6,
+        "shipped: and on every hover after — got {later}"
     );
 }

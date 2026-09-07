@@ -56,6 +56,11 @@ pub(crate) struct GoTemplate {
     /// `Some` with a nonzero `page_id` is what makes a right-click *read* it; a type-9 template
     /// with no page (vanilla ships a handful) opens nothing at all, exactly like the reference.
     pub(crate) text_page: Option<TextPage>,
+    /// The `PageTextMaterial.dbc` id `GetQuestBackgroundMaterial` answers for a quest sourced from
+    /// this object — by `GAMEOBJECT_TYPE_ID`: QUESTGIVER (2) and GOOBER (9) read `data[2]`, CHEST
+    /// (10) reads `data[9]`, every other type answers none (`0x5f5950`, wow-re
+    /// quest-material-reward-spell-bindings.md §1).
+    pub(crate) quest_material: Option<u32>,
 }
 
 /// A MO_TRANSPORT template's path tuple (`gameobject_template.data0..2`, decision 0438).
@@ -134,6 +139,11 @@ impl GameObjectTemplates {
             page_id: data[0].max(0) as u32,
             material: data[2].max(0) as u32,
         });
+        let quest_material = match type_id {
+            2 | 9 => Some(data[2].max(0) as u32),
+            10 => Some(data[9].max(0) as u32),
+            _ => None,
+        };
         self.templates.insert(
             entry,
             GoTemplate {
@@ -143,6 +153,7 @@ impl GameObjectTemplates {
                 meeting_stone_area,
                 mo_transport,
                 text_page,
+                quest_material,
             },
         );
     }
@@ -181,6 +192,29 @@ mod tests {
         assert_eq!(go_lock_slot(25), Some(4)); // FISHINGHOLE
         assert_eq!(go_lock_slot(5), None); // GENERIC — never a lock
         assert_eq!(go_lock_slot(19), None); // MAILBOX — no lock (opens by USE)
+    }
+
+    /// The quest-giver material arm — by type: QUESTGIVER (2) and GOOBER (9) read `data[2]`,
+    /// CHEST (10) reads `data[9]`, anything else none (`0x5f5950`, wow-re
+    /// quest-material-reward-spell-bindings.md §1).
+    #[test]
+    fn insert_captures_the_quest_material_by_type() {
+        let mut t = GameObjectTemplates::default();
+        let mut data = [0i32; 24];
+        data[2] = 2;
+        data[9] = 3;
+        t.insert(100, 2, "Wanted Poster".into(), &data);
+        t.insert(101, 9, "Book".into(), &data);
+        t.insert(102, 10, "Chest".into(), &data);
+        t.insert(103, 15, "Boat".into(), &data);
+        assert_eq!(t.templates[&100].quest_material, Some(2));
+        assert_eq!(t.templates[&101].quest_material, Some(2));
+        assert_eq!(
+            t.templates[&102].quest_material,
+            Some(3),
+            "a chest reads data[9]"
+        );
+        assert_eq!(t.templates[&103].quest_material, None);
     }
 
     #[test]

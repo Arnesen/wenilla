@@ -60,8 +60,9 @@ use benilla_world::lighting::{PropProbeSlot, PropProbes};
 use benilla_world::model_render::ShadeSel;
 use benilla_world::particles;
 use benilla_world::terrain_stream::{
-    build_collider_task, fold_interior_probe, m2_anim_bound, m2_fade, placement_collider_data,
-    point_light, spawn_model_entities, PendingCollider, PropLobeLight, SpawnedModel,
+    build_collider_task, doodad_ground_shade, fold_interior_probe, hex_word, m2_anim_bound,
+    m2_fade, placement_collider_data, point_light, spawn_model_entities, PendingCollider,
+    PropLobeLight, ShadeResolve, SpawnedModel, TerrainStreamer,
 };
 
 use super::{GameObjects, ModelHandle, VisualAttached};
@@ -167,8 +168,13 @@ pub(super) fn resolve_wmo_gameobject_props(
             })
             .collect();
         if !props.is_empty() {
+            // Named by the ENTITY as well as the display: the resolver visits each entity once
+            // (`WmoPropsResolved` is inserted before any `continue`), so two identical lines mean
+            // two instances of one display — two ships of the same model — not a repeat of the
+            // work. Without the instance in the message that is unreadable, and it read as a
+            // caching bug on 2026-09-06.
             info!(
-                "wmo props: {} set-0 doodads resolved for display {}",
+                "wmo props: {} set-0 doodads resolved for display {} on {entity}",
                 props.len(),
                 net.display_id.unwrap_or_default()
             );
@@ -190,6 +196,10 @@ pub(super) fn spawn_wmo_gameobject_props(
     mut tint_reg: ResMut<benilla_world::doodad_anim::TintAnimMaterials>,
     mut anim_table: ResMut<benilla_world::mat_anim_table::MatAnimTable>,
     mut probes: ResMut<PropProbes>,
+    // The EXTERIOR prop's one-shot MCSH sample (2047) — the same resolver the terrain lane's
+    // placed props use, at the same one-shot cadence the reference's `0x698c50` queue drain has.
+    streamer: Option<Res<TerrainStreamer>>,
+    adt_tiles: Res<Assets<benilla_assets::AdtTile>>,
     time: Res<Time>,
     mut hosts: Query<(Entity, &GlobalTransform, &mut WmoProps)>,
 ) {
@@ -228,6 +238,28 @@ pub(super) fn spawn_wmo_gameobject_props(
                 commands.entity(entity).add_child(anchor);
                 anchor
             });
+            // **An EXTERIOR prop's sun scale is the doodad law, not its host's** (2047). The
+            // reference samples MCSH once, at the doodad's OWN footprint, on the frame the
+            // pending-doodad queue drains it (`0x698c50` unlinks each entry), and freezes the
+            // verdict: 1.0 lit / 0.5 shadowed, never the host node's ramp. `doodad_ground_shade`
+            // already answers *lit* for a tile that is not resident — which is what the
+            // reference's own null-tile legs return, so a boat at sea needs no special case.
+            // An INTERIOR prop ignores the selector entirely (the probe lane reads it not at all).
+            let shade = if prop.interior.is_some() {
+                ShadeSel::Matte
+            } else {
+                let world = host_world.mul_transform(prop.local).translation;
+                match streamer
+                    .as_deref()
+                    .map(|st| doodad_ground_shade(st, &adt_tiles, world))
+                {
+                    Some(ShadeResolve::Ready(true)) => ShadeSel::Shaded,
+                    Some(ShadeResolve::Ready(false)) | None => ShadeSel::Matte,
+                    // The tile is resident but still decoding — defer this prop a frame, exactly
+                    // as the terrain lane does. Not reachable at sea (no tile ⇒ `Ready(false)`).
+                    Some(ShadeResolve::Pending) => return true,
+                }
+            };
             let (radius, center) = m2_fade(&m.bounds, prop.local.scale.x);
             let anim_bound = m2_anim_bound(&m.bounds);
             // The interior lane (0474): fold the cabin prop's committed light ONCE, composed
@@ -271,7 +303,23 @@ pub(super) fn spawn_wmo_gameobject_props(
                     .map(|p| p.path().to_string_lossy().into_owned())
                     .unwrap_or_default(),
                 id: 0,
-                detail: "WMO gameobject prop".into(),
+                // The prop's LANE, the way a terrain-placed prop's identity names it
+                // (`PropLight::inspector_label`): a prop that looks wrong is almost always on the
+                // wrong lane or reading the wrong probe, and neither is visible from the model
+                // path. This lane's props were the ones the entity shade writer renamed out from
+                // under (B373), and a hover said nothing at all.
+                detail: match (&prop.interior, interior_slot) {
+                    (Some(lane), Some(slot)) => format!(
+                        "WMO gameobject prop · interior amb {} dif {} · {} MOLR · probe slot {slot}",
+                        hex_word(lane.ambient),
+                        hex_word(lane.diffuse),
+                        lane.lights.len(),
+                    ),
+                    (Some(_), None) => {
+                        "WMO gameobject prop · interior, NO PROBE SLOT (table full — sky-lit)".into()
+                    }
+                    (None, _) => "WMO gameobject prop · sky-lit".into(),
+                },
             });
             let SpawnedModel {
                 entities: ents,
@@ -286,9 +334,7 @@ pub(super) fn spawn_wmo_gameobject_props(
                 forms.slices(&prop.handle),
                 prop.local, // doodad-LOCAL — the parent composes the world pose
                 &object,
-                // Deck props: plain matte, like a terrain exterior prop on lit ground (a boat is
-                // never MCSH-shadowed). Interior props: the selector is unread — the probe lane.
-                ShadeSel::Matte,
+                shade,
                 interior_slot,
                 radius,
                 center,
@@ -297,6 +343,7 @@ pub(super) fn spawn_wmo_gameobject_props(
                 &mut uv_reg,
                 &mut tint_reg,
                 &mut anim_table,
+                true, // the entity-hosted lane: these props are lit by their own def (2047)
                 card_owner,
                 // Never diverted into 1417's production merge nor 1429's static-gx: these
                 // props parent under a MOVING gameobject, and every divert lane bakes world
@@ -439,9 +486,12 @@ pub(super) fn spawn_wmo_gameobject_props(
         if hulls + emitters + ribbons + lights + interior > 0 {
             // The instrument line the probe greps: what this host's props actually authored
             // (zero anywhere is legal — collide-iff-hull, emit-iff-authored, indoor-iff-owned).
+            // The host is in the message for the same reason as above — and doubly here, because
+            // this line fires once per host per frame in which anything spawned, so ONE host's
+            // 134 props land over several batches and emit several honest lines.
             info!(
                 "wmo props: {hulls} cargo hulls, {emitters} emitters, {ribbons} ribbons, \
-                 {lights} lights, {interior} interior-lane props (riding the host)"
+                 {lights} lights, {interior} interior-lane props (riding host {entity})"
             );
         }
         if props.0.is_empty() {

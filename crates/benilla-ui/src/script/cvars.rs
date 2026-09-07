@@ -182,6 +182,38 @@ pub(super) fn set_from_engine(model: &mut Model, name: &str, value: String) {
 }
 
 /// Push the warn-once for an unknown CVar name into the model's warning stream.
+/// The `SetCVar` write, shared with `ConsoleExec` (which is `/console name value`): the slot
+/// matched case-insensitively, the change queued for the host only when the value moved, and
+/// `CVAR_UPDATE` fired only when a token was passed. `false` = no such CVar (warned once).
+pub(super) fn write_cvar(
+    model: &mut Model,
+    name: &str,
+    value: String,
+    token: Option<String>,
+) -> bool {
+    let key = name.to_ascii_lowercase();
+    match model.cvars.get_mut(&key) {
+        Some(slot) => {
+            if slot.value != value {
+                slot.value = value.clone();
+                let reg_name = slot.name.clone();
+                model.cvar_changes.push((reg_name, value.clone()));
+                if let Some(token) = token {
+                    model.pending_events.push((
+                        "CVAR_UPDATE".to_string(),
+                        vec![ScriptValue::Str(token), ScriptValue::Str(value)],
+                    ));
+                }
+            }
+            true
+        }
+        None => {
+            warn_unknown(model, name);
+            false
+        }
+    }
+}
+
 fn warn_unknown(model: &mut Model, name: &str) {
     let key = name.to_ascii_lowercase();
     if model.cvars_warned.insert(key) {
@@ -371,23 +403,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // CVar's own name as the token. Transcribed as found, not repaired.)
             let token = it.next().and_then(value_to_string);
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let key = name.to_ascii_lowercase();
-            match model.cvars.get_mut(&key) {
-                Some(slot) => {
-                    if slot.value != value {
-                        slot.value = value.clone();
-                        let reg_name = slot.name.clone();
-                        model.cvar_changes.push((reg_name, value.clone()));
-                        if let Some(token) = token {
-                            model.pending_events.push((
-                                "CVAR_UPDATE".to_string(),
-                                vec![ScriptValue::Str(token), ScriptValue::Str(value)],
-                            ));
-                        }
-                    }
-                }
-                None => warn_unknown(&mut model, &name),
-            }
+            write_cvar(&mut model, &name, value, token);
             Ok(())
         })?,
     )?;

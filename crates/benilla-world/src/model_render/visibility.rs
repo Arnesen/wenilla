@@ -30,7 +30,23 @@ use benilla_assets::materials::WowModelMaterial;
 pub(super) fn apply_model_visibility(
     debug: Res<DebugState>,
     view: Res<ViewDistance>,
-    cam: Query<(&GlobalTransform, &Projection), With<WorldCamera>>,
+    cam: Query<
+        (
+            Ref<GlobalTransform>,
+            Ref<Projection>,
+            Option<Ref<Transform>>,
+        ),
+        With<WorldCamera>,
+    >,
+    // The two edges the per-part skip below cannot read off its own row: a building streaming
+    // in (its portal set is new), and any owner's inherited verdict flipping (a card follows it).
+    // `Changed`, not `Added`: the PVS writer sets the tick only on a real change of the
+    // visible set, and that set moves when a building's asset lands frames after its spawn.
+    new_portals: Query<(), Changed<WmoPortalInstance>>,
+    owner_flips: Query<(), Changed<InheritedVisibility>>,
+    // A part whose far-side mark was REMOVED reads as never marked; the classifier's full walk
+    // can strip it under a still camera (review 2026-09-04), and the strip must un-skip it.
+    mut unmarked: RemovedComponents<super::FarSideOfWater>,
     // The per-frame WMO portal PVS (computed by `crate::wmo_portal`), read here so the cull composes
     // with the toggles + far-clip in this single Visibility authority rather than fighting it.
     instances: Query<&WmoPortalInstance>,
@@ -56,17 +72,18 @@ pub(super) fn apply_model_visibility(
     // late to survive (decision 1409).
     card_owners: Query<&InheritedVisibility>,
     mut q: Query<(
+        Entity,
         &ModelPart,
-        &GlobalTransform,
+        Ref<GlobalTransform>,
         &mut Visibility,
         Option<&DoodadFade>,
         Option<&mut MeshTag>,
         Option<&mut MeshMaterial3d<WowModelMaterial>>,
         Option<&Aabb>,
-        Option<&WmoGroupVis>,
-        Option<&crate::doodad_anim::MatAnim>,
+        Option<Ref<WmoGroupVis>>,
+        Option<Ref<crate::doodad_anim::MatAnim>>,
         Has<crate::exterior_cull::ExteriorScene>,
-        Has<super::FarSideOfWater>,
+        Option<Ref<super::FarSideOfWater>>,
         Option<&crate::billboard::BillboardCard>,
     )>,
     // The building's own MLIQ surfaces (canals, dungeon pools, Ragefire's lava). They carry a
@@ -90,19 +107,40 @@ pub(super) fn apply_model_visibility(
     // The (single) world Camera3d; the egui overlay is a Camera2d. None before it spawns → no distance
     // cull that frame (toggles still apply).
     let cam_view = cam.iter().next();
-    let cam_t = cam_view.map(|(t, _)| t);
+    let cam_t = cam_view.as_ref().map(|(t, _, _)| t);
+    // Every whole-scene input of a part's verdict, still since last frame. With those still, a
+    // part whose own row is still too would come out of the walk below with the same
+    // `Visibility`, tag and material it already carries — so it skips the walk (decision 1979's
+    // floor: ~8.7 k resident parts re-verdicted on every still frame at the Stormwind pin).
+    // Both the propagated frame and the seat's own write: this system runs before propagation,
+    // so a teleport frame's move is only visible on the local `Transform` (see doodad_anim).
+    let scene_still = cam_view.as_ref().is_some_and(|(t, p, l)| {
+        !t.is_changed() && !p.is_changed() && !l.as_ref().is_some_and(|l| l.is_changed())
+    }) && !debug.is_changed()
+        && !view.is_changed()
+        && !windows.is_changed()
+        && !claim.is_changed()
+        && !far_twins.is_changed()
+        && new_portals.is_empty()
+        && owner_flips.is_empty();
     let cam_pos = cam_t.map(|t| t.translation());
     let cam_fwd = cam_t.map(|t| Vec3::from(t.forward()));
     // The exterior gate, built ONCE for the whole walk (it is a handful of 6-plane frusta) and then
     // asked per submesh below — the same value `crate::exterior_cull` asks for the objects it owns.
-    let gate = crate::exterior_cull::ExteriorGate::build(&windows, cam_view);
+    let gate = crate::exterior_cull::ExteriorGate::build(
+        &windows,
+        cam_view.as_ref().map(|(t, p, _)| (&**t, &**p)),
+    );
     // The placement the camera is standing in, exempt from its own window gate (see the param).
     let own_instance = claim.0.map(|c| c.room.instance);
     // Parallel: this walks EVERY model submesh in residency — ~100k in a city — and at that N a
     // serial walk alone blew half the 16.7 ms budget (the Stormwind fps hunt). Every write below
     // is change-gated, so the steady state is a pure read fan-out.
+    let unmarked: bevy::platform::collections::HashSet<Entity> = unmarked.read().collect();
+    let unmarked = &unmarked;
     q.par_iter_mut().for_each(
         |(
+            entity,
             part,
             xf,
             mut vis,
@@ -116,6 +154,17 @@ pub(super) fn apply_model_visibility(
             far_side,
             card,
         )| {
+            if scene_still
+                && !unmarked.contains(&entity)
+                && !xf.is_changed()
+                && !group_vis.as_ref().is_some_and(|g| g.is_changed())
+                && !mat_anim.as_ref().is_some_and(|a| a.is_changed())
+                && !far_side.as_ref().is_some_and(|f| f.is_changed())
+            {
+                return;
+            }
+            let far_side = far_side.is_some();
+            let (group_vis, mat_anim) = (group_vis.as_deref(), mat_anim.as_deref());
             let toggled_on =
                 m.kind_visible[kind_index(part.kind)] && m.blend_visible[blend_index(part.blend)];
             // `farclip` is the *world-doodad/WMO* draw distance only. Creatures/GameObjects come from the
@@ -201,7 +250,7 @@ pub(super) fn apply_model_visibility(
             // instead of overwriting it. Untagged content (units, GameObjects) is exempt by the
             // carved law; the camera's own building is exempt because it is not exterior to itself.
             let own_building = group_vis.is_some_and(|gv| Some(gv.instance) == own_instance);
-            let exterior_ok = !exterior || own_building || gate.admits(xf, aabb);
+            let exterior_ok = !exterior || own_building || gate.admits(&xf, aabb);
 
             // **A billboard card draws only while the model it is a batch OF draws** (decision
             // 1409). A card is split out to a world root because its transform belongs to the

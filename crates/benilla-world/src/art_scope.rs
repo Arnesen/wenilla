@@ -178,7 +178,7 @@ pub struct ArtScopeState {
     /// Eviction radius in yards; `0` ⇒ never evict. Zero until [`configure_art_scope`] runs, so
     /// nothing can be dropped before the streamer's reach is known.
     radius: f32,
-    /// The view focus, wow coords ([`crate::terrain_stream::view_focus`] — the same ladder the
+    /// The view focus, wow coords (`crate::terrain_stream::view_focus` — the same ladder the
     /// streamer and the WDL ring use). `None` when there is no focus at all (no avatar, no camera),
     /// which suspends both stamping and sweeping.
     focus: Option<[f32; 3]>,

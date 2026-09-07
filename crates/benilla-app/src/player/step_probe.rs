@@ -196,7 +196,7 @@ pub(super) fn watch(
     let rungs: Vec<String> = std::iter::once(wanted)
         .chain(LADDER)
         .map(|adv| {
-            let v = step_up(&cast, from, dir_h, adv.max(wanted), adv).verdict;
+            let v = step_up(&cast, from, dir_h, adv.max(wanted), adv, STEP_UP_HEIGHT).verdict;
             // `fwd` — how far the elevated sweep ACTUALLY got — is on every rung, because without
             // it a failing far rung is two different stories: "we advanced that far and the floor
             // there is steep" and "something at head height stopped us short of it".

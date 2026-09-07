@@ -20,16 +20,21 @@
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
+use bevy::core_pipeline::core_2d::{Opaque2d, Transparent2d};
+use bevy::core_pipeline::core_3d::{AlphaMask3d, Opaque3d, Transparent3d};
+use bevy::pbr::Shadow;
 use bevy::prelude::*;
 use bevy::render::graph::CameraDriverLabel;
 use bevy::render::render_graph::{
     Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel,
 };
+use bevy::render::render_phase::{ViewBinnedRenderPhases, ViewSortedRenderPhases};
 use bevy::render::render_resource::{
     Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, MapMode,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::{Render, RenderApp, RenderSystems};
+use bevy::ui_render::TransparentUi;
 use wgpu::{PollType, QuerySet, QuerySetDescriptor, QueryType};
 
 /// Is the meter armed? One read; everything registers behind it.
@@ -42,6 +47,117 @@ pub(crate) fn enabled() -> bool {
 /// read by `FPS_PROBE`/whoever in the main world. 0 = no reading yet.
 #[derive(Resource, Clone)]
 pub(crate) struct GpuMsShared(pub Arc<AtomicU64>);
+
+/// **The wgpu resource census** — live buffers, textures and bind groups, off wgpu-core's own
+/// registry report, refreshed once a frame by the render app and read by `FPS_PROBE` under the
+/// same env (`wgpu_bufs=… wgpu_texs=… wgpu_bgs=…`). It is on the GPU meter because it prices
+/// the GPU *lane's* CPU: every render pass wgpu encodes allocates and clears usage trackers
+/// sized to the device's live buffer and texture counts (`wgpu_core::track::UsageScope`), so a
+/// scene's pass-encode CPU carries a term that scales with residency, not with what is drawn —
+/// a sampled profile of the crowd rig (1929's follow-on) put that term at roughly half of
+/// `encode_render_pass`. The count is the number that lever moves.
+#[derive(Resource, Clone)]
+pub(crate) struct WgpuCensusShared(pub Arc<WgpuCensus>);
+
+#[derive(Default)]
+pub(crate) struct WgpuCensus {
+    pub buffers: AtomicU64,
+    pub textures: AtomicU64,
+    pub bind_groups: AtomicU64,
+    /// Draw calls the render phases will issue this frame, per family — see [`count_draws`].
+    pub draws_opaque: AtomicU64,
+    pub draws_transparent: AtomicU64,
+    pub draws_shadow: AtomicU64,
+    pub draws_ui: AtomicU64,
+}
+
+/// Render world, `Cleanup`: refresh the census. wgpu-core's report takes each registry's read
+/// lock and counts live ids — microseconds, and only under the meter's env.
+fn census(instance: Res<bevy::render::renderer::RenderInstance>, shared: Res<WgpuCensusShared>) {
+    let Some(report) = instance.generate_report() else {
+        return;
+    };
+    let hub = &report.hub;
+    let c = &shared.0;
+    c.buffers
+        .store(hub.buffers.num_allocated as u64, Ordering::Relaxed);
+    c.textures
+        .store(hub.textures.num_allocated as u64, Ordering::Relaxed);
+    c.bind_groups
+        .store(hub.bind_groups.num_allocated as u64, Ordering::Relaxed);
+}
+
+/// Render world, `Cleanup`: the frame's draw-call count per phase family, off the phases bevy
+/// just rendered — the number the pass-encode CPU on the render thread scales with (wgpu-core
+/// validates and wgpu-hal encodes per draw, and on Metal a draw is also what the driver's
+/// kernel-side work is measured in). A binned phase issues one draw per bin (Metal has no
+/// multi-draw indirect, so a multidrawable batch set still draws bin by bin) plus one per
+/// unbatchable entity and per non-mesh item; a sorted phase issues one per item whose batch
+/// range survived batching (a merged item's range is emptied into its predecessor's).
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn count_draws(
+    shared: Res<WgpuCensusShared>,
+    opaque: Option<Res<ViewBinnedRenderPhases<Opaque3d>>>,
+    mask: Option<Res<ViewBinnedRenderPhases<AlphaMask3d>>>,
+    transparent: Option<Res<ViewSortedRenderPhases<Transparent3d>>>,
+    shadow: Option<Res<ViewBinnedRenderPhases<Shadow>>>,
+    ui: Option<Res<ViewSortedRenderPhases<TransparentUi>>>,
+    two_d: Option<Res<ViewSortedRenderPhases<Transparent2d>>>,
+    opaque_2d: Option<Res<ViewBinnedRenderPhases<Opaque2d>>>,
+) {
+    fn binned<BPI: bevy::render::render_phase::BinnedPhaseItem>(
+        phases: Option<Res<ViewBinnedRenderPhases<BPI>>>,
+    ) -> u64 {
+        phases
+            .map(|p| {
+                p.0.values()
+                    .map(|phase| {
+                        let multi: usize =
+                            phase.multidrawable_meshes.values().map(|b| b.len()).sum();
+                        let unbatchable: usize = phase
+                            .unbatchable_meshes
+                            .values()
+                            .map(|u| u.entities.len())
+                            .sum();
+                        let non_mesh: usize = phase
+                            .non_mesh_items
+                            .values()
+                            .map(|n| n.entities.len())
+                            .sum();
+                        multi + phase.batchable_meshes.len() + unbatchable + non_mesh
+                    })
+                    .sum::<usize>() as u64
+            })
+            .unwrap_or(0)
+    }
+    fn sorted<SPI: bevy::render::render_phase::SortedPhaseItem>(
+        phases: Option<Res<ViewSortedRenderPhases<SPI>>>,
+    ) -> u64 {
+        phases
+            .map(|p| {
+                p.0.values()
+                    .map(|phase| {
+                        phase
+                            .items
+                            .iter()
+                            .filter(|i| !i.batch_range().is_empty())
+                            .count()
+                    })
+                    .sum::<usize>() as u64
+            })
+            .unwrap_or(0)
+    }
+    let c = &shared.0;
+    c.draws_opaque
+        .store(binned(opaque) + binned(mask), Ordering::Relaxed);
+    c.draws_transparent
+        .store(sorted(transparent), Ordering::Relaxed);
+    c.draws_shadow.store(binned(shadow), Ordering::Relaxed);
+    c.draws_ui.store(
+        sorted(ui) + sorted(two_d) + binned(opaque_2d),
+        Ordering::Relaxed,
+    );
+}
 
 const RING: usize = 4;
 
@@ -231,14 +347,17 @@ pub(crate) fn plugin(app: &mut App) {
         return;
     }
     let shared = Arc::new(AtomicU64::new(0));
+    let counts = Arc::new(WgpuCensus::default());
     app.insert_resource(GpuMsShared(shared.clone()));
+    app.insert_resource(WgpuCensusShared(counts.clone()));
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
     };
     render_app.insert_resource(GpuMsShared(shared));
+    render_app.insert_resource(WgpuCensusShared(counts));
     render_app.add_systems(
         Render,
-        (init_stamp, readback)
+        (init_stamp, readback, census, count_draws)
             .chain()
             .in_set(RenderSystems::Cleanup),
     );

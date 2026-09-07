@@ -6,19 +6,20 @@
 //! at its fixed position ([`LootState::remove_slot`] — the layout never compacts while open);
 //! `SMSG_LOOT_CLEAR_MONEY` → the coin row becomes the same kind of gap
 //! ([`LootState::clear_money`]); `SMSG_LOOT_RELEASE_RESPONSE` → the window closes
-//! ([`LootState::clear`]); the error shape → [`LootErrors`]; `SMSG_ITEM_PUSH_RESULT` → a queued
-//! "You receive loot" line ([`LootState::receives`]). A removal that empties the window arms the
-//! client-authoritative **auto-close** ([`LootState::auto_release`] — the real engine's
-//! close-on-last-slot), released by [`drain_loot`].
+//! ([`LootState::clear`]); the error shape → a red line by GlobalStrings key, raised straight from
+//! the bridge ([`crate::net::apply::loot::loot_error`] — it needs no queue on this side);
+//! `SMSG_ITEM_PUSH_RESULT` → a queued "You receive loot" line ([`LootState::receives`]). A removal
+//! that empties the window arms the client-authoritative **auto-close**
+//! ([`LootState::auto_release`] — the real engine's close-on-last-slot), released by
+//! [`drain_loot`].
 //!
-//! Each frame [`feed_loot`] surfaces the errors + receive lines on the red UI error line (the
-//! equip-error path's exact shape — an ErrorsFrame-style v1 stopgap that migrates to the chat frame
-//! next arc), resolves each wire [`LootItem`] to a Lua-facing [`LootRow`] (icon straight from the
-//! wire `display_info_id` through the same `ItemDisplayInfo.dbc` catalog the bags use — no template
-//! wait; name + quality via the ask-once item-template cache, `None`/re-fed while in flight),
-//! prepends the synthesized coin row when the loot carries gold, pushes the snapshot
-//! ([`benilla_ui::script::UiScript::set_loot`]), and fires `LOOT_OPENED` on open / `LOOT_UPDATE` on a
-//! content change / `LOOT_CLOSED` on clear. [`drain_loot`] pulls the Lua intents back out: `LootSlot`
+//! Each frame [`feed_loot`] surfaces the receive lines, resolves each wire [`LootItem`] to a
+//! Lua-facing [`LootRow`] (icon straight from the wire `display_info_id` through the same
+//! `ItemDisplayInfo.dbc` catalog the bags use — no template wait; name + quality via the ask-once
+//! item-template cache, `None`/re-fed while in flight), prepends the synthesized coin row when the
+//! loot carries gold, pushes the snapshot ([`benilla_ui::script::UiScript::set_loot`]), and fires
+//! `LOOT_OPENED` on open / `LOOT_UPDATE` on a content change / `LOOT_CLOSED` on clear.
+//! [`drain_loot`] pulls the Lua intents back out: `LootSlot`
 //! → coin ? [`ClientCommand::LootMoney`] : [`ClientCommand::AutostoreLootItem`] (the clicked 1-based
 //! row mapped to the item's **wire** loot slot); `CloseLoot` → [`ClientCommand::LootRelease`].
 
@@ -49,14 +50,6 @@ use crate::ui_script::UiInput;
 /// The icon *order* is the client's own and it is not the numeric one — `_05, _06, _03, _04, _01,
 /// _02` as the amount climbs. What each of the six pieces of art depicts is not claimed here; the
 /// ladder is byte-derived and the art is whatever the reference picks at that step.
-const COIN_ICONS: [(u32, &str); 6] = [
-    (10, "Interface\\Icons\\INV_Misc_Coin_05"),
-    (100, "Interface\\Icons\\INV_Misc_Coin_06"),
-    (1_000, "Interface\\Icons\\INV_Misc_Coin_03"),
-    (10_000, "Interface\\Icons\\INV_Misc_Coin_04"),
-    (100_000, "Interface\\Icons\\INV_Misc_Coin_01"),
-    (u32::MAX, "Interface\\Icons\\INV_Misc_Coin_02"),
-];
 /// `item_template.bonding == BIND_WHEN_PICKED_UP` — the first of the two conjuncts that defer a
 /// loot take behind the LOOT_BIND confirm (VERIFIED vmangos `ItemPrototype.h`'s `ItemBondingType`:
 /// `NO_BIND` 0, `BIND_WHEN_PICKED_UP` 1, `BIND_WHEN_EQUIPPED` 2, `BIND_WHEN_USE` 3, `QUEST_ITEM` 4;
@@ -456,11 +449,6 @@ impl LootState {
     }
 }
 
-/// A loot refusal (`SMSG_LOOT_RESPONSE`'s error shape) queued by the net bridge for the UI error line
-/// — the loot twin of [`crate::ui_merchant::MerchantErrors`]. Carries the wire `u8` `LootError` code.
-#[derive(Resource, Default)]
-pub(crate) struct LootErrors(pub Vec<u8>);
-
 /// The loot player knob (decision 0961): `autoLootDefault` — era's Controls-page checkbox (no
 /// 1.12 CVar exists; vanilla only had the shift-click), settable from the Options window
 /// through the CVar store (0954). The reference implements auto-loot ENGINE-side (era's own
@@ -606,7 +594,6 @@ pub(crate) struct UiLootPlugin;
 impl Plugin for UiLootPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LootState>()
-            .init_resource::<LootErrors>()
             .init_resource::<LootConfig>()
             .init_resource::<LootLatch>()
             .init_resource::<LootKneel>()
@@ -623,32 +610,6 @@ impl Plugin for UiLootPlugin {
                     resolve_loot_kneel.after(benilla_world::schedule::WorldStage::Net),
                 ),
             );
-    }
-}
-
-/// The client's message string for a `LootError` refusal (`SMSG_LOOT_RESPONSE`'s error shape); values
-/// from [`benilla_protocol::messages::loot_error`] (VERIFIED vmangos `LootMgr.h`). Only the
-/// subset a plain `CMSG_LOOT` can surface is spelled out; the rest print their code.
-fn loot_error_text(reason: u8) -> String {
-    use benilla_protocol::messages::loot_error as e;
-    match reason {
-        e::DIDNT_KILL => "You don't have permission to loot that corpse.".into(),
-        e::TOO_FAR => "You are too far away to loot that.".into(),
-        e::BAD_FACING => "You can't loot that from there.".into(),
-        e::LOCKED => "Someone is already looting that corpse.".into(),
-        e::NOTSTANDING => "You need to be standing up to loot.".into(),
-        e::STUNNED => "You can't do that while stunned.".into(),
-        e::PLAYER_NOT_FOUND => "You can't loot that right now.".into(),
-        e::ALREADY_PICKPOCKETED => "Those pockets are already empty.".into(),
-        // The master looter's three refusals (decision 1675). These reach only the master looter,
-        // in answer to a `CMSG_LOOT_MASTER_GIVE` the server would not honour
-        // (`LootHandler.cpp:718-729`), and unlike the lines above they are QUOTED from 1.12's own
-        // GlobalStrings (l.1679-1681) rather than composed — the reference has real strings for
-        // exactly this trio.
-        e::MASTER_INV_FULL => "That player's inventory is full".into(),
-        e::MASTER_UNIQUE_ITEM => "Player has too many of that item already".into(),
-        e::MASTER_OTHER => "Can't assign item to that player".into(),
-        other => format!("You can't loot that ({other})."),
     }
 }
 
@@ -677,14 +638,10 @@ fn format_money(copper: u32) -> String {
     parts.join(" ")
 }
 
-/// The coin-pile icon for a copper amount — the reference's six-step ladder, see [`COIN_ICONS`].
-/// `u32::MAX` is the last step's bound, so the `map_or` fallback is unreachable and is there only
-/// because the table is data rather than a match.
+/// The coin-pile icon for a copper amount — the reference's six-step ladder, one table for the
+/// loot slot, `GetCoinIcon` and the money cursor's bitmap (`benilla_ui::script::coin_icon`, 1965).
 fn coin_icon(copper: u32) -> &'static str {
-    COIN_ICONS
-        .iter()
-        .find(|(below, _)| copper < *below)
-        .map_or(COIN_ICONS[5].1, |(_, icon)| icon)
+    benilla_ui::script::coin_icon(i64::from(copper))
 }
 
 /// Resolve one wire [`LootItem`] into the Lua-facing [`LootRow`]: the icon comes straight from the
@@ -965,7 +922,6 @@ fn feed_loot(
     mut items: ResMut<Items>,
     icons: Option<Res<ItemDisplays>>,
     commands: Res<NetCommands>,
-    mut errors: ResMut<LootErrors>,
     mut chat: ResMut<crate::ui_chat::ChatLog>,
     mut last: Local<crate::ui_script::VmMemo<Option<LootSnapshot>>>,
     cfg: Res<LootConfig>,
@@ -988,15 +944,6 @@ fn feed_loot(
         props: props.as_deref(),
         enchants: enchants.as_deref(),
     };
-    // Loot refusals + "You receive …" lines migrate to the chat window (decision 0084's chat arc):
-    // refusals as informational SYSTEM-yellow lines, receive lines as LOOT-green. The ErrorsFrame
-    // keeps only the cast/equip red toasts.
-    for reason in errors.0.drain(..) {
-        chat.push_event(crate::ui_chat::ChatEvent::text_only(
-            crate::ui_chat::ChatEventKind::System,
-            loot_error_text(reason),
-        ));
-    }
     drain_receives(
         &mut loot,
         &mut items,
@@ -1111,11 +1058,10 @@ fn feed_loot(
                     script.fire_event("LOOT_SLOT_CLEARED", vec![ScriptValue::Int(i as i64 + 1)]);
                 }
             }
-            script.fire_event("LOOT_UPDATE", vec![]);
-            // The reference keeps the two apart: `LOOT_UPDATE` repaints the rows, while a changed
-            // candidate list refreshes the open dropdown in place without re-toggling it
-            // (`LootFrame_OnEvent`'s `UIDropDownMenu_Refresh(GroupLootDropDown)`,
-            // `LootFrame.lua:63`). Firing it only on a real change keeps a closed menu untouched.
+            // A changed candidate list refreshes the open dropdown in place without re-toggling
+            // it — `LootFrame_OnEvent`'s `UIDropDownMenu_Refresh(GroupLootDropDown)`, which the
+            // reference hangs off `UPDATE_MASTER_LOOT_LIST` (`LootFrame.lua:62-64`). Firing it
+            // only on a real change keeps a closed menu untouched.
             if before.master_candidates != after.master_candidates {
                 script.fire_event("UPDATE_MASTER_LOOT_LIST", vec![]);
             }
@@ -1499,7 +1445,6 @@ mod tests {
             let mut app = App::new();
             app.add_message::<crate::sound::LootPickupSound>()
                 .init_resource::<LootState>()
-                .init_resource::<LootErrors>()
                 .init_resource::<crate::ui_chat::ChatLog>()
                 .init_resource::<GroupState>()
                 .init_resource::<NameCache>()
@@ -1765,7 +1710,6 @@ mod tests {
         let mut app = App::new();
         app.add_message::<crate::sound::LootPickupSound>()
             .init_resource::<LootState>()
-            .init_resource::<LootErrors>()
             .init_resource::<crate::ui_chat::ChatLog>()
             .init_resource::<GroupState>()
             .init_resource::<NameCache>()

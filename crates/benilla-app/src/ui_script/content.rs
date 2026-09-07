@@ -44,7 +44,7 @@ static UI: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR
 /// The text of one shipped UI file, by path relative to `assets/ui` — `None` if we do not ship it.
 ///
 /// `req` may arrive in Blizzard's backslash form and may name a directory it does not have; the
-/// basename fallback is [`super::load_ui_files`]'s and lives at the call site, not here, because
+/// basename fallback is `super::load_ui_files`'s and lives at the call site, not here, because
 /// it is a property of FrameXML references rather than of the content store.
 pub(super) fn read(req: &str) -> Option<String> {
     // 1 · the source tree, dev builds only — so editing a FrameXML file needs no recompile.

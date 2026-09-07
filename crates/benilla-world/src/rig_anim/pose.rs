@@ -261,60 +261,74 @@ struct Active {
 fn evaluate_rig_poses(
     mut rigs: Query<(&AnimationPlayer, &ModelAnimations, &mut RigPose), Without<AnimParked>>,
 ) {
-    for (player, anims, mut rig) in &mut rigs {
+    // Parallel over rigs (decision 1945): a rig reads its shared clips and writes only its own
+    // pose, and a raid stands ~400 live rigs / ~12k bones — 0.4 ms of one thread's frame when
+    // walked serially, and this system sits on the main thread's critical path.
+    rigs.par_iter_mut().for_each(|(player, anims, mut rig)| {
         let src = &anims.pose;
         // This rig's contributing animations, ascending by node index (Bevy's effective blend
-        // order — sorted children folded through a LIFO stack, see the module doc).
-        let mut active: Vec<Active> = Vec::new();
-        for (&node, anim) in player.playing_animations() {
-            // Bevy's exact gate: a weight of literal 0.0 skips the node (paused does not).
-            if anim.weight() == 0.0 {
-                continue;
-            }
-            let Some(pn) = src.node(node) else { continue };
-            if src.clips.get(pn.clip as usize).is_none() {
-                continue;
-            }
-            active.push(Active {
-                node: node.index(),
-                clip: pn.clip as usize,
-                mask: pn.mask,
-                weight: anim.weight(),
-                seek: anim.seek_time(),
-                cursor: 0,
-            });
+        // order — sorted children folded through a LIFO stack, see the module doc). One scratch
+        // per worker thread, reused across rigs: a `Vec` per rig per frame was an allocation
+        // and a free for every live rig on every frame (decision 1979's floor).
+        thread_local! {
+            static ACTIVE: std::cell::RefCell<Vec<Active>> =
+                const { std::cell::RefCell::new(Vec::new()) };
         }
-        active.sort_unstable_by_key(|a| a.node);
-        match active.as_mut_slice() {
-            [] => {}
-            [one] => {
-                // The steady state: one looping gait. A single contribution commits at full
-                // value whatever its weight (Bevy's register initializes unnormalized).
-                rig.pose_dirty = true;
-                for pb in &src.clips[one.clip].bones {
-                    if src.bone_masks.get(pb.bone as usize).copied().unwrap_or(0) & one.mask != 0 {
-                        continue;
-                    }
-                    let Some(tf) = rig.locals.get_mut(pb.bone as usize) else {
-                        continue;
-                    };
-                    if let Some(v) = pb.translation.sample(one.seek) {
-                        tf.translation = v;
-                    }
-                    if let Some(v) = pb.rotation.sample(one.seek) {
-                        tf.rotation = v;
-                    }
-                    if let Some(v) = pb.scale.sample(one.seek) {
-                        tf.scale = v;
+        ACTIVE.with(|cell| {
+            let mut active = cell.borrow_mut();
+            active.clear();
+            for (&node, anim) in player.playing_animations() {
+                // Bevy's exact gate: a weight of literal 0.0 skips the node (paused does not).
+                if anim.weight() == 0.0 {
+                    continue;
+                }
+                let Some(pn) = src.node(node) else { continue };
+                if src.clips.get(pn.clip as usize).is_none() {
+                    continue;
+                }
+                active.push(Active {
+                    node: node.index(),
+                    clip: pn.clip as usize,
+                    mask: pn.mask,
+                    weight: anim.weight(),
+                    seek: anim.seek_time(),
+                    cursor: 0,
+                });
+            }
+            active.sort_unstable_by_key(|a| a.node);
+            match active.as_mut_slice() {
+                [] => {}
+                [one] => {
+                    // The steady state: one looping gait. A single contribution commits at full
+                    // value whatever its weight (Bevy's register initializes unnormalized).
+                    rig.pose_dirty = true;
+                    for pb in &src.clips[one.clip].bones {
+                        if src.bone_masks.get(pb.bone as usize).copied().unwrap_or(0) & one.mask
+                            != 0
+                        {
+                            continue;
+                        }
+                        let Some(tf) = rig.locals.get_mut(pb.bone as usize) else {
+                            continue;
+                        };
+                        if let Some(v) = pb.translation.sample(one.seek) {
+                            tf.translation = v;
+                        }
+                        if let Some(v) = pb.rotation.sample(one.seek) {
+                            tf.rotation = v;
+                        }
+                        if let Some(v) = pb.scale.sample(one.seek) {
+                            tf.scale = v;
+                        }
                     }
                 }
+                many => {
+                    rig.pose_dirty = true;
+                    blend_rig(src, many, &mut rig);
+                }
             }
-            many => {
-                rig.pose_dirty = true;
-                blend_rig(src, many, &mut rig);
-            }
-        }
-    }
+        });
+    });
 }
 
 /// The multi-animation path (a cross-fade, a masked overlay, the grip): merge-walk the

@@ -39,28 +39,44 @@ fn bake_strings(s: &UiScript) {
 fn chat_with_menu() -> UiScript {
     let mut s = UiScript::new().unwrap();
     for file in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        "UIParent.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
         "Interface\\FrameXML\\ColorPickerFrame.xml",
         "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
-        "ChatFrame.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\ChatFrame.xml",
+        "Interface\\FrameXML\\UIPanelTemplates.lua",
+        "Interface\\FrameXML\\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\FloatingChatFrame.xml",
     ] {
         load_xml(&s, file);
     }
     bake_strings(&s);
+    super::fire_chat_login(&mut s);
     s.set_screen_size(1600.0, 900.0);
     s.resolve();
     s
 }
 
 /// Right-click a frame's centre through the real hit path.
+/// The tabs ship hidden and the dock reveals them on a stationary hover (`FCF_OnUpdate`); a
+/// click on a tab needs that reveal first.
+fn reveal_then(s: &mut UiScript) {
+    reveal_dock(s);
+}
+
 fn right_click(s: &mut UiScript, frame: &str) {
     let (x, y) = s
         .eval::<(f64, f64)>(&format!("return {frame}:GetCenter()"))
@@ -89,7 +105,7 @@ fn reveal_dock(s: &mut UiScript) {
         )
         .unwrap();
     s.mouse_move(x, y);
-    for _ in 0..25 {
+    for _ in 0..45 {
         s.tick(0.016);
         s.resolve();
     }
@@ -119,41 +135,29 @@ fn right_clicking_a_chat_tab_opens_its_options_menu() {
             .unwrap(),
         "no menu before any click"
     );
-
+    reveal_then(&mut s);
     right_click(&mut s, "ChatFrame1Tab");
     assert!(
         s.eval::<bool>("return DropDownList1:IsVisible()").unwrap(),
         "the tab's right-click opens the options menu"
     );
-    // The window verb, then the DISPLAY block, in the reference's own order
-    // (FloatingChatFrame.lua l.236-307).
-    assert_eq!(
-        s.eval::<i64>("return DropDownList1.numButtons").unwrap(),
-        4,
-        "Lock Window + Display title + Font Size + Background"
-    );
-    // **Unlock**, not Lock: both dock windows ship LOCKED (the stock chat-cache `LOCKED 1`), so
-    // the row offers the way out of it. `chat_resize_tests` drives the toggle itself.
-    assert_eq!(
-        s.eval::<String>("return DropDownList1Button1:GetText()")
-            .unwrap(),
-        "Unlock Window"
-    );
-    assert_eq!(
-        s.eval::<String>("return DropDownList1Button2:GetText()")
-            .unwrap(),
-        "Display"
-    );
-    assert_eq!(
-        s.eval::<String>("return DropDownList1Button3:GetText()")
-            .unwrap(),
-        "Font Size"
-    );
-    assert_eq!(
-        s.eval::<String>("return DropDownList1Button4:GetText()")
-            .unwrap(),
-        "Background"
-    );
+    // The reference's first six rows for the default window (FloatingChatFrame.lua
+    // `FCFOptionsDropDown_Initialize`, level 1): the lock verb, Rename, New Window, the Display
+    // title, Font Size and Background — a docked non-default window gets Close before Display.
+    for (n, key) in [
+        (1, "UNLOCK_WINDOW"),
+        (2, "RENAME_CHAT_WINDOW"),
+        (3, "NEW_CHAT_WINDOW"),
+        (4, "DISPLAY"),
+        (5, "FONT_SIZE"),
+        (6, "BACKGROUND"),
+    ] {
+        assert!(
+            s.eval::<bool>(&format!("return DropDownList1Button{n}:GetText() == {key}"))
+                .unwrap(),
+            "row {n} is {key}"
+        );
+    }
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -163,9 +167,10 @@ fn right_clicking_a_chat_tab_opens_its_options_menu() {
 fn a_left_click_still_selects_the_tab_and_opens_no_menu() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_with_menu();
+    reveal_then(&mut s);
     left_click(&mut s, "ChatFrame2Tab");
     assert_eq!(
-        s.eval::<i64>("return BenillaFCF.selected").unwrap(),
+        s.eval::<i64>("return SELECTED_DOCK_FRAME:GetID()").unwrap(),
         2,
         "left-click selects"
     );
@@ -174,7 +179,6 @@ fn a_left_click_still_selects_the_tab_and_opens_no_menu() {
             .unwrap(),
         "a left click opens no menu"
     );
-    // …and it closes one that is open (ref FCF_Tab_OnClick's `CloseDropDownMenus()`).
     right_click(&mut s, "ChatFrame1Tab");
     assert!(s.eval::<bool>("return DropDownList1:IsVisible()").unwrap());
     left_click(&mut s, "ChatFrame1Tab");
@@ -197,28 +201,32 @@ fn a_left_click_still_selects_the_tab_and_opens_no_menu() {
 fn the_background_row_opens_the_picker_and_its_opacity_slider_drives_the_window() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_with_menu();
+    reveal_then(&mut s);
     right_click(&mut s, "ChatFrame1Tab");
-
-    // The shipped window is fully transparent at rest — the classic "text over the world".
     assert_eq!(
         s.eval::<f64>("local _,_,_,_,_,a = GetChatWindowInfo(1) return a")
             .unwrap(),
         0.0
     );
-    // …so the reversed slider is seeded at its far end.
     assert_eq!(
-        s.eval::<f64>("return DropDownList1Button4.opacity")
+        s.eval::<f64>("return DropDownList1Button6.opacity")
             .unwrap(),
         1.0,
         "info.opacity is 1 - a (the ref's own 'the slider is reversed')"
     );
-
-    left_click(&mut s, "DropDownList1Button4ColorSwatch");
+    left_click(&mut s, "DropDownList1Button6ColorSwatch");
     assert!(
         s.eval::<bool>("return ColorPickerFrame:IsVisible()")
             .unwrap(),
         "the Background swatch opens the colour picker"
     );
+    // The player's hand is on the picker now, off the chat frame: the hover's fade-out runs to
+    // its end before the slider is touched, exactly as it does in real time.
+    s.mouse_move(1500.0, 850.0);
+    for _ in 0..45 {
+        s.tick(0.016);
+        s.resolve();
+    }
     assert!(
         s.eval::<bool>("return OpacitySliderFrame:IsVisible()")
             .unwrap(),
@@ -230,11 +238,7 @@ fn the_background_row_opens_the_picker_and_its_opacity_slider_drives_the_window(
         1.0,
         "the slider opens seeded from the window"
     );
-
-    // Drag the thumb to 80% opaque. The slider's OnValueChanged is the live-preview hop.
     s.run("OpacitySliderFrame:SetValue(1 - 0.8)").unwrap();
-    // **203, not 204** — and that is the reference, not a rounding bug of ours. Its setter is
-    // `__ftol(x · 255.0)`, which TRUNCATES, and `0.8 × 255` is `203.99999999999997` in binary.
     let stored: f64 = s
         .eval("local _,_,_,_,_,a = GetChatWindowInfo(1) return a")
         .unwrap();
@@ -242,15 +246,11 @@ fn the_background_row_opens_the_picker_and_its_opacity_slider_drives_the_window(
         (stored - 203.0 / 255.0).abs() < 1e-9,
         "the drag reached the engine store, quantized to its byte: {stored}"
     );
-
-    // And the pixels follow: one FCF_OnUpdate tick with the cursor nowhere near the dock, and the
-    // background wears the new base rather than fading back to nothing.
-    //
-    // **The paint takes the FLOAT the slider produced, not the byte the store kept** — that split
-    // is the reference's, not ours: its `FCF_SetWindowAlpha` calls `SetAlpha(alpha)` with the raw
-    // value and `SetChatWindowAlpha(id, alpha)` with the same one, and only the second quantizes.
-    // The two reconcile at the next `FloatingChatFrame_Update`, i.e. the next login.
-    s.run("FCF_OnUpdate(1.0)").unwrap();
+    s.mouse_move(1500.0, 850.0);
+    for _ in 0..45 {
+        s.tick(0.016);
+        s.resolve();
+    }
     let painted: f64 = s.eval("return ChatFrame1Background:GetAlpha()").unwrap();
     assert!(
         (painted - 0.8).abs() < 1e-6,
@@ -278,11 +278,10 @@ fn the_shipped_window_still_fades_zero_to_a_quarter() {
         "at rest: invisible"
     );
     reveal_dock(&mut s);
-    assert_eq!(
-        s.eval::<f64>("return ChatFrame1Background:GetAlpha()")
-            .unwrap(),
-        0.25,
-        "hovered: DEFAULT_CHATFRAME_ALPHA, exactly as before 1589"
+    let alpha: f64 = s.eval("return ChatFrame1Background:GetAlpha()").unwrap();
+    assert!(
+        (alpha - 0.25).abs() < 1e-6,
+        "hovered: DEFAULT_CHATFRAME_ALPHA — got {alpha}"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -294,29 +293,40 @@ fn the_shipped_window_still_fades_zero_to_a_quarter() {
 fn the_font_size_submenu_resizes_the_window_and_stores_the_pick() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_with_menu();
+    reveal_then(&mut s);
     right_click(&mut s, "ChatFrame1Tab");
-
-    // Open the submenu the way a player does — hover the `hasArrow` row (UIDropDownMenu.xml's
-    // row OnEnter → `UIDropDownMenuRow_OpenSubmenu`).
-    hover(&mut s, "DropDownList1Button3");
+    hover(&mut s, "DropDownList1Button5");
     assert_eq!(
         s.eval::<i64>("return DropDownList2.numButtons").unwrap(),
         4,
         "CHAT_FONT_HEIGHTS is 12, 14, 16, 18"
     );
+    // The rows come from `for index, value in CHAT_FONT_HEIGHTS` — a `next` walk over a table
+    // built with explicit `[n] =` keys, whose order is the VM's hash order and not necessarily
+    // ascending; the test reads the rows by their values rather than assuming one.
+    let row_with = |s: &UiScript, pt: i64| -> String {
+        s.eval::<String>(&format!(
+            "for i = 1, DropDownList2.numButtons do \
+                 local b = getglobal('DropDownList2Button'..i) \
+                 if b.value == {pt} then return b:GetName() end \
+             end return ''"
+        ))
+        .unwrap()
+    };
     assert_eq!(
-        s.eval::<String>("return DropDownList2Button1:GetText()")
+        s.eval::<String>(&format!("return {}:GetText()", row_with(&s, 12)))
             .unwrap(),
-        "12 pt"
+        "12 pt",
+        "FONT_SIZE_TEMPLATE over the value"
     );
-    // ChatFontNormal is 14 px, so the second row is the one already ticked.
+    let ticked = row_with(&s, 14);
     assert!(
-        s.eval::<bool>("return DropDownList2Button2Check:IsVisible()")
+        s.eval::<bool>(&format!("return {ticked}Check:IsVisible()"))
             .unwrap(),
-        "the tick follows the font the frame is actually wearing"
+        "the tick follows the font the frame is actually wearing (ChatFontNormal, 14)"
     );
-
-    left_click(&mut s, "DropDownList2Button3"); // 16 pt
+    let sixteen = row_with(&s, 16);
+    left_click(&mut s, &sixteen);
     let (_, height): (String, f64) = s
         .eval("local f, h = ChatFrame1:GetFont() return f, h")
         .unwrap();
@@ -337,12 +347,17 @@ fn the_font_size_submenu_resizes_the_window_and_stores_the_pick() {
 fn each_tabs_menu_writes_its_own_window() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_with_menu();
+    reveal_then(&mut s);
     right_click(&mut s, "ChatFrame2Tab");
     assert_eq!(
         s.eval::<i64>("return FCF_GetCurrentChatFrameID()").unwrap(),
         2
     );
-    left_click(&mut s, "DropDownList1Button4ColorSwatch");
+    // A docked non-default window's menu carries Close before Display, so Background is row 7.
+    assert!(s
+        .eval::<bool>("return DropDownList1Button7:GetText() == BACKGROUND")
+        .unwrap());
+    left_click(&mut s, "DropDownList1Button7ColorSwatch");
     s.run("OpacitySliderFrame:SetValue(0)").unwrap(); // reversed: 0 = fully opaque
     assert_eq!(
         s.eval::<f64>("local _,_,_,_,_,a = GetChatWindowInfo(2) return a")
@@ -365,15 +380,14 @@ fn each_tabs_menu_writes_its_own_window() {
 fn cancelling_the_picker_puts_the_window_back() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_with_menu();
-    // Start from a non-default look so "restored" is distinguishable from "reset".
     s.run("FCF_SetWindowAlpha(ChatFrame1, 0.4) FCF_SetWindowColor(ChatFrame1, 0.2, 0.4, 0.6)")
         .unwrap();
     let before: f64 = s
         .eval("local _,_,_,_,_,a = GetChatWindowInfo(1) return a")
         .unwrap();
-
+    reveal_then(&mut s);
     right_click(&mut s, "ChatFrame1Tab");
-    left_click(&mut s, "DropDownList1Button4ColorSwatch");
+    left_click(&mut s, "DropDownList1Button6ColorSwatch");
     s.run("OpacitySliderFrame:SetValue(0)").unwrap();
     assert_eq!(
         s.eval::<f64>("local _,_,_,_,_,a = GetChatWindowInfo(1) return a")
@@ -381,7 +395,6 @@ fn cancelling_the_picker_puts_the_window_back() {
         1.0,
         "the drag previewed live"
     );
-
     left_click(&mut s, "ColorPickerCancelButton");
     let after: f64 = s
         .eval("local _,_,_,_,_,a = GetChatWindowInfo(1) return a")
@@ -411,10 +424,20 @@ fn the_restore_event_repaints_the_window_from_the_store() {
             font_size: 18,
             locked: true,
             docked: Some(1),
+            ..Default::default()
         },
     )]);
+    // The reference paints colour, alpha and lock from the record on the FIRST
+    // `UPDATE_CHAT_WINDOWS` a frame sees (`FloatingChatFrame_Update`'s `not isInitialized`
+    // gate) — a login, which is when the app restores the file. The helper already fired that
+    // one, so this is the frame meeting the event fresh, as at the next login.
+    s.run("ChatFrame1.isInitialized = nil").unwrap();
     s.fire_event("UPDATE_CHAT_WINDOWS", vec![]);
-    s.run("BenillaFCF.hover = false FCF_OnUpdate(1.0)").unwrap();
+    s.mouse_move(1500.0, 850.0);
+    for _ in 0..45 {
+        s.tick(0.016);
+        s.resolve();
+    }
     assert_eq!(
         s.eval::<f64>("return ChatFrame1Background:GetAlpha()")
             .unwrap(),
@@ -425,14 +448,9 @@ fn the_restore_event_repaints_the_window_from_the_store() {
         .eval("return ChatFrame1Background:GetVertexColor()")
         .unwrap();
     assert_eq!((r, g, b), (1.0, 0.0, 0.0), "and the restored tint");
-    let (_, height): (String, f64) = s
-        .eval("local f, h = ChatFrame1:GetFont() return f, h")
-        .unwrap();
-    assert_eq!(height, 18.0, "and the restored font size");
-    // Restoring is not a player edit: nothing was queued back at the host.
-    assert!(
-        s.take_chat_window_changes().is_empty(),
-        "the restore path does not dirty the file it came from"
-    );
+    // The restore paints through the `doNotSave` arms, but the reference's dock pass that follows
+    // (`FCF_DockFrame` → `FCF_SaveDock` → `SetChatWindowDocked`) is a real write — the DOCKED 1 /
+    // DOCKED 2 every stock file carries are FrameXML's, not the loader's.
+    assert_eq!(s.take_chat_window_changes(), vec![0, 1]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

@@ -40,14 +40,16 @@ fn harness() -> UiScript {
     // GlobalStrings. Our deleted copy carried `X = X or "…"` fallbacks for a harness with no
     // chain; the reference's file has none, and it should not.
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     // `TEXT()`, which AutoFollowStatus_OnEvent puts its message through.
-    load_xml(&s, "BasicControls.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "UIParent.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     // The fading kit, its own manifest entry since window 8 — as it is in the reference's TOC.
     load_xml(&s, "Interface\\FrameXML\\FadingFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\ZoneText.xml");

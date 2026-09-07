@@ -17,25 +17,55 @@
 //! announcement lines into the chat window once their names resolve. [`drain_loot_rolls`] pulls the
 //! `RollOnLoot` votes back out as [`ClientCommand::LootRoll`].
 //!
-//! ## `UPDATE_LOOT_ROLL` — why a snapshot seam needs an event the real client doesn't have
+//! ## The late item template, and the hold that answers it
 //!
-//! The reference's `GetLootRollItemInfo` reads live C state off the roll node, so its
-//! `GroupLootFrame_OnShow` can paint once and be done. Ours reads a **pushed snapshot**, and a
-//! snapshot is always at least one step behind the thing that made it change — twice over:
+//! A `GroupLootFrame` paints **once**, from its `OnShow`, off whatever `GetLootRollItemInfo`
+//! answers at that instant. Ours answers out of a **pushed snapshot**, and a snapshot is at least
+//! one step behind the thing that changed it — twice over:
 //!
-//! 1. A roll is added to [`LootRolls::active`] and to `opened` in the same [`LootRolls::start`]
-//!    call, so the *first* snapshot that contains a roll is built in the same pass that announces
-//!    it. Push before the announce and the OnShow sees it; announce first and it paints a blank.
+//! 1. A roll is added to [`LootRolls::active`] by [`LootRolls::start`], so the *first* snapshot
+//!    that contains a roll is built in the same pass that would announce it. Push before the
+//!    announce and the OnShow sees it; announce first and it paints a blank.
 //! 2. `name`/`texture`/`quality`/`bindOnPickUp` come from the ask-once item-template cache and are
 //!    `None` until the query lands, which is typically several frames after the roll opens.
 //!
 //! (1) is fixed by ordering — the push precedes the events here, as it does in [`crate::ui_loot`].
-//! (2) cannot be, so `UPDATE_LOOT_ROLL(rollID)` fires whenever an open roll's *display identity*
-//! ([`display_identity`]) changes underneath a frame, and the frame repaints. Ordering alone would
-//! be a guarantee resting on system order in a file far from the Lua that depends on it; with the
-//! repair in place the paint is correct either way, and ordering only decides whether there is a
-//! visible blank first. Both halves ship: (1) for the frame you actually see, (2) because it is what
-//! makes the documented in-flight fallback resolve instead of staying a `?` forever.
+//!
+//! (2) is **bug B371**: a reported roll frame came up with an empty icon slot and no name, and
+//! kept both for the roll's full minute. The fix is decision 2010's, and it is not a seam of ours — **it is the gate the
+//! reference already has**, which decision 1805 named in one line while looking at the window next
+//! door and which the disassembly settles:
+//!
+//! > `0x61b310`, the `SMSG_LOOT_START_ROLL` handler, allocates and lists the roll node and then
+//! > ends in the item-template cache lookup `0x55ba30(node+0x1c, node+0x10, 0x61b460, node, 0)`.
+//! > A **hit** (non-zero return) calls `0x61b430`, which fires `START_LOOT_ROLL (0x1f9, "%d%d")`.
+//! > A **miss** issues the query and leaves the callback `0x61b460` armed — a trampoline whose
+//! > worker is that same `0x61b430` — so on a cold cache the event fires from the cache *arrival*,
+//! > not from the packet. (wow-re `system/object-layer/scratch/lootroll-chat-and-lifecycle.md` §5
+//! > and `scratch/w2e-decomp.c`'s `FUN_0061b310`/`FUN_0061b430`.)
+//!
+//! So `GetLootRollItemInfo`'s cache-miss tail is nearly unreachable in the real client, and was our
+//! common case. There is no repaint to fall back on — the same finding 1805 landed for
+//! `LOOT_OPENED` one window over. Our retired `GroupLootFrame` re-entered its paint from a
+//! benilla-only `UPDATE_LOOT_ROLL(rollID)`; 1838 migrated the frame to the stock one, which has no
+//! such seam, and 1883 removed the event once nothing was listening for it.
+//!
+//! [`feed_loot_rolls`] therefore **holds a fresh roll's `START_LOOT_ROLL` until its template
+//! answers**. Two releases are ours rather than the reference's, and both are the ones 1805 already
+//! reasoned through for the loot window:
+//!
+//! - a **negative** answer — the server does not know the entry — fires the event anyway. The
+//!   reference's callback is success-gated, but a roll frame that never opens is a roll we cannot
+//!   even *pass* on, and the cache-miss tail is exactly what the reference paints in the
+//!   neighbouring case.
+//! - a **deadline** ([`TEMPLATE_HOLD_MAX_MS`]) fires it if no answer arrives at all, because unlike
+//!   a pending chat line this wait is paid out of the roll's own minute.
+//!
+//! `arg2` stays the **wire's** countdown on a held roll, because that is what `0x61b430` pushes
+//! (`node+0x3c`, the packet field). Only the bar moves: `GetLootRollTimeLeft` is
+//! `node+0x28 - now()` off a deadline stamped when the *packet* arrived, so a roll announced late
+//! opens with its bar already a sliver down — which is [`ActiveRoll::remaining_ms`] ticking from
+//! [`LootRolls::start`], unchanged.
 //!
 //! ## Two client-side behaviours, and why
 //!
@@ -70,6 +100,15 @@ use crate::ui_script::UiInput;
 /// reasoning as [`crate::ui_loot`]'s receive lines (a negative-cached entry never resolves).
 const LINE_MAX_TRIES: u16 = 120;
 
+/// How long a fresh roll may wait for its item-template answer before `START_LOOT_ROLL` fires
+/// anyway, with the frame unresolved (decision 2010 — see the module docs' hold).
+///
+/// This is [`LINE_MAX_TRIES`]' budget in the unit that actually matters here. That one counts
+/// *frames*, because a pending chat line costs nothing but frames; a held roll is paid out of the
+/// roll's own minute, so its bound has to be wall clock or a stuttering machine turns 120 frames
+/// into eight seconds of a sixty-second bar. 2 s is the same budget at 60 fps, and 3.3% of a roll.
+const TEMPLATE_HOLD_MAX_MS: u32 = 2_000;
+
 /// `item_template.bonding` = *bind on pickup* (VERIFIED vmangos `ItemPrototype.h`'s `ItemBondingType`:
 /// `NO_BIND` 0, `BIND_WHEN_PICKED_UP` 1, `BIND_WHEN_EQUIPPED` 2, `BIND_WHEN_USE` 3, `QUEST_ITEM` 4).
 /// Only `1` drives `GroupLootFrame_OnShow`'s gold BoP backdrop — a BoE roll shows the plain plate.
@@ -88,10 +127,23 @@ struct ActiveRoll {
     /// tooltip's `+0x424` and passes no item object, so — like a loot slot — the roll is the only
     /// enchant source the roll window's hover can have.
     random_property_id: u32,
+    /// `SMSG_LOOT_START_ROLL`'s `countdownTime` — the roll's **duration**, kept verbatim because it
+    /// is what `START_LOOT_ROLL` carries as `arg2` (`0x61b430` pushes `node+0x3c`, the packet
+    /// field) and what `GroupLootFrame_OpenNewFrame` makes the Timer bar's maximum. A roll held for
+    /// its template still declares its full duration; only [`Self::remaining_ms`] is short.
+    countdown_ms: u32,
     /// Milliseconds left; ticked down by [`feed_loot_rolls`], saturating at `0`. The roll is *not*
     /// dropped at zero — the server closes it with `SMSG_LOOT_ROLL_WON`/`SMSG_LOOT_ALL_PASSED` when
     /// its own timer fires, and the frame stays up (bar empty) until that lands.
     remaining_ms: u32,
+    /// How long this roll has been waiting for its item template, ticked alongside
+    /// [`Self::remaining_ms`] and frozen once [`Self::announced`] flips. Bounded by
+    /// [`TEMPLATE_HOLD_MAX_MS`].
+    held_ms: u32,
+    /// Whether `START_LOOT_ROLL` has gone out for this roll yet — the hold in the module docs. A
+    /// roll that resolves while still held simply never announces: it leaves [`LootRolls::active`]
+    /// with the rest of its state.
+    announced: bool,
 }
 
 /// One queued chat announcement, awaiting the item/player names it needs to render.
@@ -120,15 +172,16 @@ pub(crate) struct LootRolls {
     next_id: u32,
     /// Announcement lines awaiting their names.
     pending: Vec<PendingLine>,
-    /// Newly opened rolls → one `START_LOOT_ROLL(rollID, rollTime)` each, drained by the feed.
-    opened: Vec<(u32, u32)>,
     /// Newly closed rolls → one `CANCEL_LOOT_ROLL(rollID)` each, drained by the feed.
     cancelled: Vec<u32>,
 }
 
 impl LootRolls {
-    /// A roll opened (`SMSG_LOOT_START_ROLL`): allocate its client-internal id and queue the
-    /// `START_LOOT_ROLL` the `GroupLootFrame` machinery listens for.
+    /// A roll opened (`SMSG_LOOT_START_ROLL`): allocate its client-internal id and list the roll.
+    /// The `START_LOOT_ROLL` the `GroupLootFrame` machinery listens for is **not** queued here —
+    /// [`feed_loot_rolls`] fires it once the roll's item template is in hand, which is the
+    /// reference's own gate (module docs). The node exists from this call either way, so
+    /// `GetLootRollItemInfo`/`GetLootRollTimeLeft` answer for a roll whose frame has not opened.
     ///
     /// A **duplicate** start for a `(looted_target, item_slot)` we already hold is ignored rather
     /// than opening a second frame for the same item: the server re-sends every active roll on
@@ -154,9 +207,11 @@ impl LootRolls {
             item_slot: p.item_slot,
             item_id: p.item_id,
             random_property_id: p.random_property_id,
+            countdown_ms: p.countdown_ms,
             remaining_ms: p.countdown_ms,
+            held_ms: 0,
+            announced: false,
         });
-        self.opened.push((roll_id, p.countdown_ms));
     }
 
     /// One roller's vote or dice result (`SMSG_LOOT_ROLL`) — queue its chat line.
@@ -188,6 +243,11 @@ impl LootRolls {
 
     /// Drop the roll on `(looted_target, item_slot)` if we still hold it, queueing its
     /// `CANCEL_LOOT_ROLL`. Idempotent — a resolution for a roll we already closed is a no-op.
+    ///
+    /// The cancel is queued whether or not the roll ever announced, which is the reference's own
+    /// shape (`0x61b9e0`/`0x61b640` guard only on the node's already-closed byte `+0x3a`) and is
+    /// harmless either way: stock `GroupLootFrame_OnEvent` compares `arg1` against each frame's
+    /// `rollID`, and no frame holds one that never opened.
     fn close(&mut self, looted_target: u64, item_slot: u32) {
         if let Some(i) = self
             .active
@@ -209,10 +269,14 @@ impl LootRolls {
     }
 
     /// Tick every open roll's bar down by `delta_ms`, saturating at zero (see
-    /// [`ActiveRoll::remaining_ms`] for why a spent roll is not dropped here).
+    /// [`ActiveRoll::remaining_ms`] for why a spent roll is not dropped here), and age the template
+    /// hold of every roll whose `START_LOOT_ROLL` has not gone out yet.
     fn tick(&mut self, delta_ms: u32) {
         for r in &mut self.active {
             r.remaining_ms = r.remaining_ms.saturating_sub(delta_ms);
+            if !r.announced {
+                r.held_ms = r.held_ms.saturating_add(delta_ms);
+            }
         }
     }
 
@@ -221,7 +285,6 @@ impl LootRolls {
     pub(crate) fn clear(&mut self) {
         self.active.clear();
         self.pending.clear();
-        self.opened.clear();
         self.cancelled.clear();
     }
 }
@@ -510,29 +573,6 @@ fn snapshot(
     LootRollsState { rolls: entries }
 }
 
-/// Everything about a roll a `GroupLootFrame` actually *paints* — deliberately **not**
-/// `time_left_ms`, which ticks every frame and would make "the snapshot changed" mean nothing.
-fn display_identity(e: &LootRollEntry) -> (&Option<String>, &Option<String>, Option<u32>, bool) {
-    (&e.name, &e.texture, e.quality, e.bind_on_pickup)
-}
-
-/// The rolls open in *both* snapshots whose display identity changed — i.e. the ones with a frame
-/// already up that is now painting the wrong thing. A roll only in `fresh` is newly opened and gets
-/// its `START_LOOT_ROLL`; one only in `last` is closed and gets its `CANCEL_LOOT_ROLL`.
-fn repainted(last: &LootRollsState, fresh: &LootRollsState) -> Vec<u32> {
-    fresh
-        .rolls
-        .iter()
-        .filter(|f| {
-            last.rolls
-                .iter()
-                .find(|l| l.roll_id == f.roll_id)
-                .is_some_and(|l| display_identity(l) != display_identity(f))
-        })
-        .map(|f| f.roll_id)
-        .collect()
-}
-
 /// Tick the open rolls, push them into the VM, fire the open/close events, and drain the queued
 /// announcement lines into chat.
 #[allow(clippy::too_many_arguments)]
@@ -580,30 +620,53 @@ fn feed_loot_rolls(
     // same `start()` call that queued `opened`, so pushing after would hand every fresh roll an
     // empty lookup. Same order as ui_loot's window feed, for the same reason.
     let fresh = snapshot(&rolls, &mut items, icons.as_deref(), &commands, catalogs);
-    let changed = repainted(last, &fresh);
     if fresh != *last {
         script.set_loot_rolls(fresh.clone());
         *last = fresh;
     }
 
-    for (roll_id, roll_time) in std::mem::take(&mut rolls.opened) {
-        debug!("ui_loot_roll: roll {roll_id} opened ({roll_time} ms)");
+    // **A fresh roll's `START_LOOT_ROLL` waits for its item template** — the reference's own gate
+    // (`0x61b310`'s cache lookup fires the event from the arrival callback `0x61b460` on a miss;
+    // module docs, decision 2010, bug B371). The snapshot above already asked for every open roll's
+    // template and, crucially, already went into the VM — so a roll released here is one the
+    // `OnShow` below it can actually paint.
+    for r in &mut rolls.active {
+        if r.announced {
+            continue;
+        }
+        if items.template(r.item_id, 0, &commands).is_none() {
+            // The two releases that are ours rather than the reference's, both 1805's reasoning:
+            // an entry the server cannot describe, and an answer that never comes at all.
+            let unknown = items.template_answered_unknown(r.item_id);
+            if !unknown && r.held_ms < TEMPLATE_HOLD_MAX_MS {
+                continue;
+            }
+            debug!(
+                "ui_loot_roll: roll {} opening unresolved ({})",
+                r.roll_id,
+                if unknown {
+                    "the server does not know the entry"
+                } else {
+                    "template hold expired"
+                }
+            );
+        }
+        r.announced = true;
+        debug!(
+            "ui_loot_roll: roll {} opened ({} ms, held {} ms)",
+            r.roll_id, r.countdown_ms, r.held_ms
+        );
         script.fire_event(
             "START_LOOT_ROLL",
             vec![
-                ScriptValue::Int(roll_id as i64),
-                ScriptValue::Int(roll_time as i64),
+                ScriptValue::Int(r.roll_id as i64),
+                ScriptValue::Int(r.countdown_ms as i64),
             ],
         );
     }
     for roll_id in std::mem::take(&mut rolls.cancelled) {
         debug!("ui_loot_roll: roll {roll_id} cancelled");
         script.fire_event("CANCEL_LOOT_ROLL", vec![ScriptValue::Int(roll_id as i64)]);
-    }
-    // The late item template landing under a frame that is already up (see the module docs).
-    for roll_id in changed {
-        debug!("ui_loot_roll: roll {roll_id} display identity resolved");
-        script.fire_event("UPDATE_LOOT_ROLL", vec![ScriptValue::Int(roll_id as i64)]);
     }
 }
 
@@ -900,15 +963,24 @@ mod tests {
     }
 
     #[test]
-    fn start_allocates_ids_and_queues_the_open() {
+    fn start_lists_the_roll_with_monotonic_ids_and_announces_nothing() {
         let mut r = LootRolls::default();
         r.start(start(0xAA, 0, 17182));
         r.start(start(0xAA, 1, 4306));
         assert_eq!(r.active.len(), 2);
-        // Distinct, monotonic ids; each queued a START_LOOT_ROLL with the wire's countdown.
-        assert_eq!(r.opened, vec![(1, 60_000), (2, 60_000)]);
         assert_eq!(r.active[0].roll_id, 1);
         assert_eq!(r.active[1].roll_id, 2);
+        // The wire's countdown is kept whole (it is `START_LOOT_ROLL`'s `arg2`) and the bar starts
+        // there; the announce itself waits for the item template (`feed_loot_rolls`).
+        for roll in &r.active {
+            assert_eq!(roll.countdown_ms, 60_000);
+            assert_eq!(roll.remaining_ms, 60_000);
+            assert!(
+                !roll.announced,
+                "the packet does not announce — the template does"
+            );
+            assert_eq!(roll.held_ms, 0);
+        }
     }
 
     /// vmangos re-sends every active roll on reconnect (`SendLootStartRollsForPlayer`) — a repeat
@@ -919,7 +991,7 @@ mod tests {
         r.start(start(0xAA, 0, 17182));
         r.start(start(0xAA, 0, 17182));
         assert_eq!(r.active.len(), 1);
-        assert_eq!(r.opened, vec![(1, 60_000)]);
+        assert_eq!(r.next_id, 1, "and the duplicate burns no id");
     }
 
     #[test]
@@ -927,7 +999,6 @@ mod tests {
         let mut r = LootRolls::default();
         r.start(start(0xAA, 0, 17182));
         r.start(start(0xAA, 1, 4306));
-        r.opened.clear();
 
         r.won(LootRollWon {
             looted_target: 0xAA,
@@ -999,6 +1070,21 @@ mod tests {
         assert_eq!(r.active.len(), 1, "the server closes it, not the tick");
     }
 
+    /// The template hold ages with the bar, and **stops** at the announce — otherwise a roll that
+    /// opened cleanly would keep accruing a wait nothing is waiting for.
+    #[test]
+    fn tick_ages_the_hold_only_while_the_roll_is_unannounced() {
+        let mut r = LootRolls::default();
+        r.start(start(0xAA, 0, 17182));
+        r.tick(500);
+        r.tick(250);
+        assert_eq!(r.active[0].held_ms, 750);
+        r.active[0].announced = true;
+        r.tick(1_000);
+        assert_eq!(r.active[0].held_ms, 750, "the hold is over");
+        assert_eq!(r.active[0].remaining_ms, 60_000 - 1_750, "the bar is not");
+    }
+
     /// Ids are never reused, so a late packet for a closed roll cannot address a fresh one.
     #[test]
     fn ids_are_never_reused() {
@@ -1009,54 +1095,196 @@ mod tests {
         assert_eq!(r.active[0].roll_id, 2);
     }
 
-    fn entry(roll_id: u32, name: Option<&str>, time_left_ms: u32) -> LootRollEntry {
-        LootRollEntry {
-            roll_id,
-            name: name.map(Into::into),
-            texture: name.map(|_| "Interface\\Icons\\INV_Staff_12".into()),
-            quantity: 1,
-            quality: name.map(|_| 4),
-            bind_on_pickup: name.is_some(),
-            time_left_ms,
-            item_id: 17182,
-            // Lands with the name — one template answer fills both (decision 1059).
-            link: name.map(|n| crate::ui_items::item_link(17182, n, 4)),
-            random_property_id: 0,
-        }
+    // ── The template hold (decision 2010, bug B371) ──────────────────────────────────────────
+    //
+    // Driven through the real system in a real schedule, because the whole question is what
+    // happens ACROSS frames and `feed_loot_rolls`' snapshot memo is a `Local`: `run_system_once`
+    // builds a new system each call and hands it a fresh memo, which reads every pass as a first
+    // push. Same reason, same shape, as `ui_loot`'s `the_window_waits_for_every_item_template`.
+
+    const ROLLED: u32 = 17182;
+
+    /// A `feed_loot_rolls` app with a listener that records, **at the instant the event fires**,
+    /// what `GetLootRollItemInfo` answers for the roll — the exact call stock
+    /// `GroupLootFrame_OnShow` makes, so a blank here is the director's blank.
+    fn hold_app() -> (App, crossbeam_channel::Receiver<ClientCommand>) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.init_resource::<LootRolls>()
+            .init_resource::<Items>()
+            .init_resource::<NameCache>()
+            .init_resource::<SelfGuid>()
+            .init_resource::<ChatLog>()
+            .init_resource::<crate::ui_loot::LootConfig>()
+            // `Time::default()` has a zero delta, so the hold only ages where a test says it does.
+            .init_resource::<Time>()
+            .insert_resource(NetCommands(tx))
+            .add_systems(Update, feed_loot_rolls);
+
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                "STARTS = {}\n\
+                 local f = CreateFrame(\"Frame\")\n\
+                 f:RegisterEvent(\"START_LOOT_ROLL\")\n\
+                 f:SetScript(\"OnEvent\", function()\n\
+                   local _, name = GetLootRollItemInfo(arg1)\n\
+                   tinsert(STARTS, arg1 .. \":\" .. arg2 .. \":\" .. (name or \"<blank>\"))\n\
+                 end)",
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+        (app, rx)
     }
 
-    fn state(entries: &[LootRollEntry]) -> LootRollsState {
-        LootRollsState {
-            rolls: entries.to_vec(),
-        }
+    /// `rollID:rollTime:name` for each `START_LOOT_ROLL` seen so far, in order.
+    fn starts(app: &mut App) -> Vec<String> {
+        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let n = script.eval::<i64>("return getn(STARTS)").unwrap();
+        (1..=n)
+            .map(|i| {
+                script
+                    .eval::<String>(&format!("return STARTS[{i}]"))
+                    .unwrap()
+            })
+            .collect()
     }
 
-    /// `UPDATE_LOOT_ROLL` fires only when what a frame *paints* changed. The load-bearing half is
-    /// the negative: `time_left_ms` ticks every single frame, so counting it would fire the repaint
-    /// 60x a second and make the signal worthless (and the timer bar reads the model directly — it
-    /// has never needed an event).
+    fn advance(app: &mut App, ms: u64) {
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(ms));
+    }
+
+    fn sent(rx: &crossbeam_channel::Receiver<ClientCommand>) -> Vec<ClientCommand> {
+        rx.try_iter().collect()
+    }
+
+    /// **The roll waits for its item template** — the reference's own gate, and B371's fix.
+    ///
+    /// `0x61b310` ends in `0x55ba30(node+0x1c, node+0x10, callback 0x61b460, node, 0)`: a cache
+    /// **hit** calls `0x61b430` and fires `START_LOOT_ROLL` there and then; a **miss** issues the
+    /// query and fires from the arrival callback instead. So a roll on an entry we have never seen
+    /// must announce nothing on the first pass — and must ask the server — then announce exactly
+    /// once when the answer lands, with the item already readable by the `OnShow`.
+    ///
+    /// Both answers are pinned: the real template, and the **negative** one, which releases the
+    /// roll here where the reference's success-gated callback would hold it (1805's divergence — a
+    /// frame that never opens is a roll we cannot even pass on).
     #[test]
-    fn only_a_display_change_asks_for_a_repaint() {
-        let flight = state(&[entry(7, None, 60_000)]);
-        let landed = state(&[entry(7, Some("Staff of Jordan"), 59_000)]);
+    fn the_roll_waits_for_its_item_template() {
+        for (answer, painted) in [
+            (Some(crate::items::test_template("Sulfuras")), "Sulfuras"),
+            (None, "<blank>"),
+        ] {
+            let (mut app, rx) = hold_app();
+            app.world_mut()
+                .resource_mut::<LootRolls>()
+                .start(start(0xAA, 0, ROLLED));
 
-        assert_eq!(repainted(&flight, &landed), vec![7], "the template landed");
-        assert_eq!(repainted(&landed, &landed), Vec::<u32>::new(), "unchanged");
+            // Pass one: the template is unknown, so nothing announces — and the ask goes out.
+            app.update();
+            assert!(
+                starts(&mut app).is_empty(),
+                "no START_LOOT_ROLL while the template is pending"
+            );
+            assert!(
+                sent(&rx).iter().any(
+                    |c| matches!(c, ClientCommand::ItemQuery { entry, .. } if *entry == ROLLED)
+                ),
+                "and the template was asked for"
+            );
+            // A second pass with nothing new changes nothing — the hold is not a one-shot.
+            app.update();
+            assert!(starts(&mut app).is_empty());
 
-        // The timer alone, which is what changes on almost every frame.
-        let ticked = state(&[entry(7, Some("Staff of Jordan"), 58_000)]);
-        assert_eq!(
-            repainted(&landed, &ticked),
-            Vec::<u32>::new(),
-            "a ticking bar is not a repaint"
+            // The answer lands. The roll announces, once, carrying the WIRE's countdown as `arg2`
+            // (`0x61b430` pushes `node+0x3c`) — and the name is already there for the OnShow.
+            app.world_mut()
+                .resource_mut::<Items>()
+                .insert_template(ROLLED, answer.clone());
+            app.update();
+            assert_eq!(starts(&mut app), vec![format!("1:60000:{painted}")]);
+            app.update();
+            assert_eq!(starts(&mut app).len(), 1, "and only once");
+        }
+    }
+
+    /// A repeat drop costs nothing: the template is already cached, so `0x61b310`'s hit path is
+    /// ours too and the roll announces on the very pass the packet lands.
+    #[test]
+    fn a_cached_template_announces_the_same_pass() {
+        let (mut app, _rx) = hold_app();
+        app.world_mut()
+            .resource_mut::<Items>()
+            .insert_template(ROLLED, Some(crate::items::test_template("Sulfuras")));
+        app.world_mut()
+            .resource_mut::<LootRolls>()
+            .start(start(0xAA, 0, ROLLED));
+        app.update();
+        assert_eq!(starts(&mut app), vec!["1:60000:Sulfuras".to_string()]);
+    }
+
+    /// The deadline, which is ours and not the reference's: an entry the server never answers at
+    /// all must not hold the frame shut for the roll's whole minute — we would have no way to
+    /// Need, Greed or even Pass on it. It opens unresolved instead, which is what the reference's
+    /// own cache-miss tail paints in the neighbouring case.
+    #[test]
+    fn an_unanswered_template_opens_the_roll_at_the_deadline() {
+        let (mut app, _rx) = hold_app();
+        app.world_mut()
+            .resource_mut::<LootRolls>()
+            .start(start(0xAA, 0, ROLLED));
+
+        // Two steps to one millisecond short of the budget: still holding.
+        for _ in 0..2 {
+            advance(&mut app, (TEMPLATE_HOLD_MAX_MS / 2 - 1) as u64);
+            app.update();
+        }
+        assert!(
+            starts(&mut app).is_empty(),
+            "still holding at {} ms",
+            TEMPLATE_HOLD_MAX_MS - 2
         );
 
-        // Opened and closed rolls are the START/CANCEL events' business, not this one's.
-        let two = state(&[
-            entry(7, Some("Staff of Jordan"), 59_000),
-            entry(8, None, 60_000),
-        ]);
-        assert_eq!(repainted(&landed, &two), Vec::<u32>::new(), "8 is new");
-        assert_eq!(repainted(&two, &landed), Vec::<u32>::new(), "8 closed");
+        // The step that crosses it opens the frame — blank, but votable.
+        advance(&mut app, 2);
+        app.update();
+        assert_eq!(starts(&mut app), vec!["1:60000:<blank>".to_string()]);
+        advance(&mut app, TEMPLATE_HOLD_MAX_MS as u64);
+        app.update();
+        assert_eq!(starts(&mut app).len(), 1, "and only once");
+    }
+
+    /// A roll resolved while it is still held never announces at all — there is no frame to open
+    /// and none to leave up. Its `CANCEL_LOOT_ROLL` still goes out, which is the reference's shape
+    /// (`0x61b9e0` guards only on the node's already-closed byte) and is a no-op in the stock Lua.
+    #[test]
+    fn a_roll_resolved_while_held_never_announces() {
+        let (mut app, _rx) = hold_app();
+        app.world_mut()
+            .resource_mut::<LootRolls>()
+            .start(start(0xAA, 0, ROLLED));
+        app.update();
+        assert!(starts(&mut app).is_empty());
+
+        app.world_mut()
+            .resource_mut::<LootRolls>()
+            .all_passed(LootAllPassed {
+                looted_target: 0xAA,
+                item_slot: 0,
+                item_id: ROLLED,
+                random_property_id: 0,
+            });
+        // Even once the template lands, the roll it belonged to is gone.
+        app.world_mut()
+            .resource_mut::<Items>()
+            .insert_template(ROLLED, Some(crate::items::test_template("Sulfuras")));
+        app.update();
+        app.update();
+        assert!(
+            starts(&mut app).is_empty(),
+            "a roll that closed while held opens no frame"
+        );
     }
 }

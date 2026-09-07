@@ -14,6 +14,9 @@ fn push_catalog(s: &mut UiScript) {
     // Cell 8801 = the child (0.5, 0.5) resolves to through Elwynn's OWN loc rect — a "Stormwind
     // City" peer child. Clicking it from the Elwynn zone map drills into the city (the §3 path).
     ek_grid[8801] = 2;
+    // Cell 9060 = the child (0.82, 0.82) resolves to through Elwynn's own rect — Elwynn itself,
+    // the case the zone-level hover must stay silent on (the displayed zone never names itself).
+    ek_grid[9060] = 1;
     s.set_world_map_catalog(vec![
         WorldMapContinentView {
             name: "Kalimdor".into(),
@@ -52,9 +55,23 @@ fn push_catalog(s: &mut UiScript) {
                     // A clean synthetic loc rect inside the EK continent rect: w=2000, h=1500 → the
                     // continent-highlight formula lands on round-ish expected coords (asserted below).
                     loc_rect: (-8000.0, -10000.0, -400.0, -1900.0),
-                    // Two overlays shaped like real Elwynn rows: Northshire reveals on explore bit
-                    // 125, Goldshire on bit 124 (the real AreaTable exploreFlags).
+                    // Three overlays. Two are shaped like real Elwynn rows: Northshire reveals
+                    // on explore bit 125, Goldshire on bit 124 (the real AreaTable exploreFlags);
+                    // their hit rects (top, left, bottom, right; px of 1002×668) sit apart so a
+                    // point is in at most one. The first is a row whose first area slot resolves
+                    // to nothing (bit 126; its rect overlaps Northshire's) — the zone-level hover
+                    // must walk past it, not stop at it.
                     overlays: vec![
+                        WorldMapOverlayView {
+                            texture: "Interface\\WorldMap\\Elwynn\\STONECAIRNLAKE".into(),
+                            width: 128,
+                            height: 128,
+                            offset_x: 450,
+                            offset_y: 300,
+                            explore_bits: vec![126],
+                            hit_rect: (300, 450, 400, 560),
+                            area_name: None,
+                        },
                         WorldMapOverlayView {
                             texture: "Interface\\WorldMap\\Elwynn\\NORTHSHIREVALLEY".into(),
                             width: 200,
@@ -62,6 +79,8 @@ fn push_catalog(s: &mut UiScript) {
                             offset_x: 490,
                             offset_y: 200,
                             explore_bits: vec![125],
+                            hit_rect: (200, 490, 376, 690),
+                            area_name: Some("Northshire Valley".into()),
                         },
                         WorldMapOverlayView {
                             texture: "Interface\\WorldMap\\Elwynn\\GOLDSHIRE".into(),
@@ -70,6 +89,8 @@ fn push_catalog(s: &mut UiScript) {
                             offset_x: 380,
                             offset_y: 320,
                             explore_bits: vec![124],
+                            hit_rect: (400, 300, 520, 460),
+                            area_name: Some("Goldshire".into()),
                         },
                     ],
                 },
@@ -163,6 +184,7 @@ fn worldmap_current_zone_and_player_feed() {
         1.5,
         None,
         vec![Some((0.1, 0.2)), None],
+        Vec::new(),
     );
     s.run("SetMapToCurrentZone()").unwrap();
     assert_eq!(
@@ -192,7 +214,7 @@ fn worldmap_current_zone_and_player_feed() {
     }
 
     // No feed → the world sheet (never an error).
-    s.set_world_map_feed(None, None, 0.0, None, Vec::new());
+    s.set_world_map_feed(None, None, 0.0, None, Vec::new(), Vec::new());
     s.run("SetMapToCurrentZone()").unwrap();
     assert_eq!(s.eval::<i64>("return GetCurrentMapContinent()").unwrap(), 0);
 }
@@ -289,6 +311,73 @@ fn worldmap_click_containment_and_zone_grid() {
     s.run("SetMapZoom(0)").unwrap();
     s.run("ProcessMapClick(0.01, 0.99)").unwrap();
     assert_eq!(s.eval::<i64>("return GetCurrentMapContinent()").unwrap(), 0);
+}
+
+/// At ZONE level `UpdateMapHighlight` answers a NAME only (report B360; wow-re 15b2a8ea §1a/1b/1d):
+/// a revealed overlay's sub-area when the cursor is inside its hit rect, else the neighbouring
+/// zone or city whose grid cell the cursor is in through the DISPLAYED zone's rect window — never
+/// the displayed zone itself — and always a nil fileName + six zeros, so the stock frame hides the
+/// highlight quad. Fogged sub-areas have no name; an overlay with no resolvable first area is
+/// walked past. The reference's own Duskwood shot: "Deadwind Pass" in the label, no highlight.
+#[test]
+fn worldmap_zone_level_hover_names_without_highlight() {
+    let mut s = script();
+    push_catalog(&mut s);
+    s.run("SetMapZoom(2, 1)").unwrap(); // the Elwynn zone map
+
+    type Answer = (Option<String>, Option<String>, f64, f64, f64, f64, f64, f64);
+    let hover = |s: &mut UiScript, x: f32, y: f32| {
+        s.eval::<Answer>(&format!("return UpdateMapHighlight({x}, {y})"))
+            .unwrap()
+    };
+    let name_only =
+        |name: &str| -> Answer { (Some(name.into()), None, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) };
+    let miss: Answer = (None, None, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+
+    // Nothing explored. (0.5, 0.5) through Elwynn's rect is cell 8801 = the Stormwind City peer:
+    // the neighbouring child is NAMED, and nothing else — the B360 answer, Deadwind Pass from
+    // Duskwood in the report.
+    assert_eq!(hover(&mut s, 0.5, 0.5), name_only("Stormwind City"));
+    // Cell 9060 = Elwynn itself: the displayed zone never names itself.
+    assert_eq!(hover(&mut s, 0.82, 0.82), miss);
+    // An empty cell, no overlay: the tail.
+    assert_eq!(hover(&mut s, 0.2, 0.2), miss);
+    // Inside Goldshire's hit rect but fogged (bit 124 clear): no name — the pre-search walks the
+    // REVEALED list, and cell 8929 under it is empty.
+    assert_eq!(hover(&mut s, 0.42, 0.7), miss);
+
+    // Reveal Northshire (bit 125 = word 3, bit 29). Its rect contains (0.5, 0.5): the overlay
+    // pre-search runs BEFORE the grid, so the sub-area wins over the city under the same point.
+    let mut explored = vec![0u32; 64];
+    explored[3] = 1 << 29;
+    s.set_world_map_explored(explored.clone());
+    assert_eq!(hover(&mut s, 0.5, 0.5), name_only("Northshire Valley"));
+    assert_eq!(hover(&mut s, 0.42, 0.7), miss, "Goldshire is still fogged");
+    // Reveal Goldshire too (bit 124).
+    explored[3] |= 1 << 28;
+    s.set_world_map_explored(explored.clone());
+    assert_eq!(hover(&mut s, 0.42, 0.7), name_only("Goldshire"));
+
+    // Only the nameless overlay revealed (bit 126 = word 3, bit 30): its rect contains (0.5, 0.5)
+    // but its first area resolves to nothing, so the walk passes it and the grid answers.
+    let mut explored = vec![0u32; 64];
+    explored[3] = 1 << 30;
+    s.set_world_map_explored(explored.clone());
+    assert_eq!(hover(&mut s, 0.5, 0.5), name_only("Stormwind City"));
+    // Nameless first, Northshire second, both revealed: the walk continues to Northshire.
+    explored[3] |= 1 << 29;
+    s.set_world_map_explored(explored);
+    assert_eq!(hover(&mut s, 0.5, 0.5), name_only("Northshire Valley"));
+
+    // Control: back at the continent level the hovered zone still lights up — fileName is the art
+    // folder and the quad geometry is non-zero.
+    s.run("SetMapZoom(2)").unwrap();
+    let (name, file, tpx, _, tx, ty, _, _) = hover(&mut s, 0.452843, 0.720880);
+    assert_eq!(
+        (name.as_deref(), file.as_deref(), tpx),
+        (Some("Elwynn Forest"), Some("Elwynn"), 1.0)
+    );
+    assert!(tx > 0.0 && ty > 0.0);
 }
 
 /// SetMapZoom queues WORLD_MAP_UPDATE through the pending-event queue: nothing fires inside the

@@ -677,7 +677,7 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
 
     // The dressed geoset set: the worn armor's geoset groups + the cloak + the helm's hide-masks
     // (RF-0083), exactly the world path's selection (the shared helper).
-    let eg = equip_geosets(ctx.displays.as_deref(), &bodyslots, cloak, helm);
+    let eg = equip_geosets(ctx.displays.as_deref(), &bodyslots, cloak, helm, false);
     let visible = ctx.characters.map(|c| {
         c.0.visible_geosets(race, sex, char_look.hair_style, char_look.facial_hair, &eg)
     });
@@ -686,6 +686,7 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
         bodyslots,
         cloak,
         spec.emblem,
+        false,
         ctx.displays.as_deref(),
         ctx.sections,
         ctx.world_assets,

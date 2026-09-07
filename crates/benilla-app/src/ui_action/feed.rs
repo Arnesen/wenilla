@@ -39,8 +39,8 @@ use crate::net::{NetCommands, ObjectStore, SelfPlayer};
 use super::errors::{first_missing_totem, first_short_reagent, mount_result_key};
 use super::weapon_icon::{auto_attack_icon, substitutes_weapon_icon};
 use super::{
-    cast_fail, show_messages, ui_error_text, CastErrors, MessageSink, MountErrors, PlayerActions,
-    Shown, Spells, UiError, UiErrorKeys, UiErrorTexts,
+    cast_fail, show_messages, ui_error_text, CastErrors, MessageSink, MountErrors, PetTameFailures,
+    PlayerActions, Shown, Spells, UiError, UiErrorKeys, UiErrorTexts,
 };
 
 /// What an ITEM action shows when its icon cannot be resolved — the reference's own hardcoded
@@ -75,12 +75,38 @@ pub(super) struct FeedMemory {
     macro_generation: u64,
 }
 
+/// The DBC name tables the cast-fail **argument arms** read (`FailArgs`), as one parameter — three
+/// `Option<Res<…>>` that are one concept and were pushing this system past Bevy's parameter arity
+/// (decision 1948). Each is `Option` for the same reason `FailArgs`' fields are: a client with no
+/// game data has none, and the arm then declines and the template strips.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct FailNameTables<'w> {
+    /// `SpellFocusObject.dbc` — the crafting book's catalog, for `0x5e`.
+    focus: Option<Res<'w, crate::ui_tradeskill::SpellFocus>>,
+    /// `AreaTable.dbc` — the map arc's, for `0x5d`.
+    areas: Option<Res<'w, crate::area::AreaTableRes>>,
+    /// `SpellMechanic.dbc` — for `0x8d`, the one arm whose word is produced locally.
+    mechanics: Option<Res<'w, super::SpellMechanics>>,
+}
+
+impl FailNameTables<'_> {
+    fn args(&self) -> cast_fail::FailArgs<'_> {
+        cast_fail::FailArgs {
+            arg: None,
+            focus: self.focus.as_deref().map(|f| &f.catalog),
+            areas: self.areas.as_deref().map(|a| &a.0),
+            mechanics: self.mechanics.as_deref().map(|m| &m.catalog),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // a Bevy system's full input set
 pub(super) fn feed_actions(
     script: Option<NonSendMut<UiScript>>,
     mut actions: ResMut<PlayerActions>,
     mut cast_errors: ResMut<CastErrors>,
     mut mount_errors: ResMut<MountErrors>,
+    mut pet_tame_failures: ResMut<PetTameFailures>,
     mut ui_error_keys: ResMut<UiErrorKeys>,
     mut ui_error_texts: ResMut<UiErrorTexts>,
     spells: Option<Res<Spells>>,
@@ -88,10 +114,7 @@ pub(super) fn feed_actions(
     mut items: ResMut<Items>,
     icons: Option<Res<ItemDisplays>>,
     sub_classes: Option<Res<crate::ui_items::ItemSubClasses>>,
-    // The two DBC name tables the cast-fail argument arms read (`FailArgs`): the crafting book's
-    // SpellFocusObject catalog and the map arc's AreaTable one, both already loaded.
-    spell_focus: Option<Res<crate::ui_tradeskill::SpellFocus>>,
-    areas: Option<Res<crate::area::AreaTableRes>>,
+    name_tables: FailNameTables,
     commands: Res<NetCommands>,
     mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
     // Where a displayed message lands: the chat window (the combat log's own record of a failed
@@ -122,18 +145,18 @@ pub(super) fn feed_actions(
     // things — "Not enough mana." on the screen, "You fail to cast Frostbolt: Not enough mana."
     // in the log.
     let mut fail_lines: Vec<crate::ui_chat::combat::PendingCombat> = Vec::new();
-    let fail_args = cast_fail::FailArgs {
-        arg: None,
-        focus: spell_focus.as_deref().map(|f| &f.catalog),
-        areas: areas.as_deref().map(|a| &a.0),
-    };
+    let fail_args = name_tables.args();
     let texts: Vec<cast_fail::CastFailLine> = cast_errors
         .0
         .drain(..)
         .filter_map(|fail| {
             let crate::ui_action::CastFail {
-                spell_id, reason, ..
+                spell_id,
+                reason,
+                caster,
+                ..
             } = fail;
+            let pet = caster == crate::ui_action::Caster::Pet;
             let d = spells.as_ref().and_then(|s| s.catalog.get(spell_id));
             let get = |key: &str| script.lua().globals().get::<String>(key).ok();
             // 0x19/0x1a/0x1b EQUIPPED_ITEM_CLASS* — the other argument-formatted family whose
@@ -159,7 +182,11 @@ pub(super) fn feed_actions(
                         .map(|t| cast_fail::CastFailLine::passthrough(t.replace("%s", &name)));
                 }
             }
-            if reason == 0x78 || reason == 0x5c {
+            // `0x78` TOTEMS / `0x5c` REAGENTS — **the player's arms only**. The pet handler's
+            // index table (`0x6e93d0`) sends both to its generic arm, so a pet's refusal takes the
+            // shared passthrough below and never runs the bag walk or the item query (decision
+            // 2033).
+            if !pet && (reason == 0x78 || reason == 0x5c) {
                 let d = d?;
                 let failing = if reason == 0x78 {
                     self_store
@@ -202,7 +229,12 @@ pub(super) fn feed_actions(
             // is what `0x6e1a00` holds when it calls the formatter — not the errorId-substituted
             // message the red line shows. An empty one drops the line rather than printing a
             // sentence with a hole, the same rule every other family here follows.
-            if let Some(display) = d {
+            // **The pet's refusal is not logged.** `0x6e1a00` calls the log formatter `0x62c360`
+            // beside its `DisplayError`; `Spell_C::HandlePetCastFailed 0x6e8eb0` calls neither it
+            // nor the error sound — its entire call set is the two packet readers, `0x496720` and
+            // the string plumbing. Before decision 2033 a pet's refused Growl printed "You fail to
+            // cast Growl: ..." in the combat log, attributed to the player.
+            if let (Some(display), false) = (d, pet) {
                 // `0x62aff0`: `Attributes` bit 4 marks an ABILITY, which "performs" rather than
                 // "casts".
                 const ATTR_IS_ABILITY: u32 = 0x10;
@@ -233,6 +265,7 @@ pub(super) fn feed_actions(
                 }
             }
             let text = cast_fail::cast_fail_text(
+                caster,
                 reason,
                 d,
                 cast_fail::FailArgs {
@@ -247,7 +280,8 @@ pub(super) fn feed_actions(
             // Logging the reason, its wire argument and the resolved text makes an argument arm
             // that silently declined (a missing word, an unnamed id) legible from a probe run.
             debug!(
-                "ui_action: cast fail — spell {spell_id} reason {reason:#04x} arg {:?} → {:?}",
+                "ui_action: cast fail — {caster:?} spell {spell_id} reason {reason:#04x} \
+                 arg {:?} → {:?}",
                 fail.arg, text
             );
             text
@@ -282,6 +316,22 @@ pub(super) fn feed_actions(
             .into_iter()
             .map(|(key, text)| Shown::keyed(key, text)),
     );
+
+    // Taming refusals ([`PetTameFailures`]) — the one message whose argText is itself a
+    // GlobalStrings lookup. The reference resolves the reason's `PETTAME_*` key first
+    // (`0x6e6a20`'s `0x703bf0` call) and passes the resulting STRING as `DisplayError(0xee)`'s
+    // argument, so `ERR_TAME_FAILED` ("%s.") renders "Creature is too high level for you to
+    // tame." — two lookups, in this order, and neither can be folded into the other.
+    let tame_texts: Vec<Shown> = pet_tame_failures
+        .0
+        .drain(..)
+        .filter_map(|reason| {
+            let reason_key = benilla_protocol::messages::pet_tame_failure_key(reason);
+            let reason_text = script.lua().globals().get::<String>(reason_key).ok()?;
+            super::keyed_line_s(&script, "ERR_TAME_FAILED", &[&reason_text])
+        })
+        .collect();
+    show_messages(&mut script, &mut sink, "ui_action", tame_texts);
 
     // Client-local by-key refusals (the `DisplayError` route — [`UiErrorKeys`]); the key IS the
     // GlobalStrings lookup, no code table between, and the key is also what names the surface:

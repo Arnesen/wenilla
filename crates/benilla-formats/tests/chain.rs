@@ -213,7 +213,11 @@ fn decodes_a_blp_icon_to_png() {
         .read_file("Interface/Icons/Spell_Holy_ArcaneIntellect.blp")
         .expect("read spell icon BLP");
 
-    let out = std::env::temp_dir().join("benilla_formats_test_icon.png");
+    // Keyed by pid, like every other temp path in the workspace: eight pool slots run
+    // `cargo test --workspace` concurrently, and a FIXED shared name means one run's
+    // cleanup deletes the file another is about to read. That is not hypothetical — the
+    // taxi twin below reddened a land gate exactly that way (decision 1918).
+    let out = std::env::temp_dir().join(format!("benilla-fmt-icon-{}.png", std::process::id()));
     let (w, h) = benilla_formats::blp_to_png(&bytes, &out).expect("decode BLP -> PNG");
 
     assert_eq!((w, h), (64, 64), "spell icons are 64x64");
@@ -231,7 +235,7 @@ fn dumps_taxinodes_to_csv() {
         .read_file("DBFilesClient/TaxiNodes.dbc")
         .expect("read TaxiNodes.dbc");
 
-    let out = std::env::temp_dir().join("benilla_formats_test_taxi.csv");
+    let out = std::env::temp_dir().join(format!("benilla-fmt-taxi-{}.csv", std::process::id()));
     let (records, fields) =
         benilla_formats::dbc_to_csv(&bytes, "TaxiNodes.dbc", &out).expect("dbc->csv");
 

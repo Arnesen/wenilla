@@ -19,15 +19,20 @@ fn load_unit_frames(s: &UiScript) {
     // drawing an empty plate. Hand-setting the union of those is a second copy of the reference's
     // own file; naming the file is the only version that cannot drift. (`DEAD` is l.898 of it.)
     load_xml(s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(s, "Fonts.xml");
-    load_xml(s, "UIParent.xml");
+    load_xml(s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(s, r"Interface\FrameXML\UIParent.xml");
     // The bars' numerals machinery (decision 1082), which the manifest loads immediately ahead of
     // UnitFrames.xml and which every bar's OnLoad wires into since 1143.
     load_xml(s, "Interface\\FrameXML\\TextStatusBar.lua");
     load_xml(s, "Interface\\FrameXML\\TextStatusBar.xml");
-    load_xml(s, "GameTooltip.xml");
+    load_xml(s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(s, "Interface\\FrameXML\\GameTooltip.xml");
+    // `FACTION_BAR_COLORS` for the stock `GameTooltip_UnitColor` — ReputationFrame.lua's (1968).
+    load_xml(s, r"Interface\FrameXML\ReputationFrame.lua");
     load_xml(s, "Interface\\FrameXML\\UIDropDownMenu.xml");
-    load_xml(s, "UnitPopup.xml");
+    load_xml(s, "Interface\\FrameXML\\BasicControls.xml"); // `TEXT`, which UnitPopup.lua reads at file scope
+    load_xml(s, "Interface\\FrameXML\\UnitPopup.xml");
     load_xml(s, "Interface\\FrameXML\\BuffFrame.xml");
     load_xml(s, "Interface\\FrameXML\\UnitFrame.xml");
     load_xml(s, "Interface\\FrameXML\\CombatFeedback.xml");
@@ -464,6 +469,7 @@ fn left_clicking_the_player_frame_targets_self() {
         // The player's own guid, which this fixture leaves unset — spelled out because a bare 0
         // is also the reference's "ungrouped" sentinel and this party has a member.
         leader_guid: 0,
+        own_guid: 0,
         raid: Vec::new(),
         loot_method: "group".into(),
         master_looter: None,
@@ -546,6 +552,7 @@ fn raid_mark_clicks_through_the_nested_level() {
         }],
         leader_index: 0, // we lead — the mark rows are leader-gated
         leader_guid: 0,  // the player's own guid; this fixture leaves it unset
+        own_guid: 0,
         raid: Vec::new(),
         loot_method: "group".into(),
         master_looter: None,
@@ -596,13 +603,11 @@ fn raid_mark_clicks_through_the_nested_level() {
         .unwrap();
     s.mouse_button(sx as f32, sy as f32, "LeftButton", true);
     s.mouse_button(sx as f32, sy as f32, "LeftButton", false);
-    // RED while the `SetRaidTarget` engine binding is absent, and deliberately left that way.
     // `UnitPopup.xml`'s row calls `SetRaidTargetIcon(menu.unit, mark)`; the definition of that
     // used to be ours, and since the migration it is the reference's own — `TargetFrame.lua`
-    // l.486-492 — whose whole body is `SetRaidTarget(unit, 0 or index)`. `SetRaidTarget` is an
-    // engine verb this house does not have yet, so the click raises
-    // "attempt to call global 'SetRaidTarget' (a nil value)" and no intent is queued. 1203: it
-    // gets built, never stubbed.
+    // l.486-492 — whose whole body is `SetRaidTarget(unit, 0 or index)`. That is the ENGINE
+    // verb, built by 1820 (`benilla-ui` `script/party.rs`), never the wrapper's name on our
+    // body: this asserts the intent it queues, and `:638` asserts nothing raised.
     assert_eq!(
         s.take_party_requests(),
         vec![benilla_ui::script::PartyRequest::SetRaidTarget {
@@ -644,12 +649,23 @@ fn shipped_target_frame_runs_the_level_law() {
     s.set_screen_size(1024.0, 768.0);
     load_unit_frames(&s);
     // GetDifficultyColor's own load chain (the quest log window, its ref home).
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\CharacterFrameTemplates.xml"); // the window tab (1993)
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MainMenuBarMicroButtons.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
     // The player at level 3, both feeds (the snapshot UnitLevel("player") reads; the req state
     // the −1 gate and GetQuestGreenRange read) — the app keeps the two in step.
     s.set_player_req_state(PlayerReqState {
@@ -1193,23 +1209,30 @@ fn the_party_art_paints_over_the_bars() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The loot test's prefix (`loot_tests.rs`): PartyFrame's inline <Script> reads
-    // StaticPopupDialogs, which UiPanels.xml defines, and its per-member dropdown OnLoad walks the
-    // whole popup kit.
+    // StaticPopupDialogs, which the chain's `StaticPopup.xml` defines, and its per-member dropdown
+    // OnLoad walks the whole popup kit.
     // GlobalStrings first, for the same reason `load_unit_frames` names it — the stock unit-frame
     // files resolve it at LOAD (`CombatFeedback.lua` l.7-17, `UnitFrame.lua` l.1-6).
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
+    load_xml(&s, r"Interface\FrameXML\ReputationFrame.lua"); // FACTION_BAR_COLORS (1968)
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
-    load_xml(&s, "UnitPopup.xml");
+    // Before UnitPopup: that file reads ITEM_QUALITY_COLORS at FILE SCOPE and its
+    // declarer is UIParent (ref UIParent.lua:65) since 1888.
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\UnitPopup.xml");
     // The reference's own kit, in the manifest's order. `UIParent.xml` is not decoration here:
     // `RaiseFrameLevel`/`LowerFrameLevel` live in it (ref UIParent.lua l.1890-1896) and stock
     // `TargetofTargetTextureFrame`'s OnLoad calls one of them.
-    load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
     load_xml(&s, "Interface\\FrameXML\\BuffFrame.xml");
@@ -1247,6 +1270,7 @@ fn the_party_art_paints_over_the_bars() {
         }],
         leader_index: 0,
         leader_guid: 0,
+        own_guid: 0,
         raid: Vec::new(),
         loot_method: "group".into(),
         master_looter: None,
@@ -1391,9 +1415,10 @@ fn a_feigning_target_paints_empty_bars_and_the_dead_text() {
         "the WORD is the GlobalString `DEAD` (l.898), never the key: a literal \"DEAD\" here \
          is the caps bug the director caught on Onyxia"
     );
-    assert!(
-        s.eval::<bool>(r#"return UnitIsDead("target")"#).unwrap(),
-        "UnitIsDead 0x517ac0's dynflag leg reaches the API too"
+    assert_eq!(
+        s.eval::<i64>(r#"return UnitIsDead("target")"#).unwrap(),
+        1,
+        "UnitIsDead 0x517ac0's dynflag leg reaches the API too — as the number 1 (2043)"
     );
 
     // He stands back up: the flag clears, and nothing about the body needed restoring.
@@ -1838,10 +1863,9 @@ fn no_two_numeral_strings_overlap_on_any_frame() {
 /// function UnitFrame_OnEnter() originalUnitFrame_OnEnter() … end
 /// ```
 ///
-/// Against a missing global that captured nil and raised on the first hover. Note these are
-/// ADAPTERS, not renames: the reference's contract takes no arguments and reads `this`, ours takes
-/// the frame explicitly, so a rename would have reached our body with a nil frame — reachable but
-/// broken, which is worse than inert.
+/// Against a missing global that captured nil and raised on the first hover. Our own adapter
+/// (`BenillaUnitFrame_OnEnter(frame)`, which took the frame explicitly) went with the file 1751's
+/// twenty-second window deleted: what runs here is the reference's own `this`-shaped body.
 ///
 /// The same class as the Bagnon bag bug, and equally invisible to the corpus survey: it loads
 /// addons and fires events, but never hovers anything.
@@ -1976,6 +2000,7 @@ fn the_player_frame_wears_the_leader_and_master_looter_icons() {
         leader_index,
         // Follows `leader_index`: 0 = the player (unset here), else the member who leads.
         leader_guid: if leader_index == 0 { 0 } else { 0x7A17 },
+        own_guid: 0,
         raid: Vec::new(),
         loot_method: method.into(),
         master_looter,

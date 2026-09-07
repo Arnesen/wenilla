@@ -11,8 +11,9 @@
 //!
 //! Division of labour each frame while riding:
 //! - [`crate::net`]'s `sample_splines` (Net stage) advances the [`Spline`] into the entity
-//!   `Transform` — the sole position authority for the ride. A player owns its Z (no creature
-//!   terrain-reground), and the spline's ground path already carries a walkable Z.
+//!   `Transform` — the horizontal authority for the ride. **Its Z is not authoritative** and never
+//!   was (decision 1927): the reference discards a grounded spline's vertical exactly as it does a
+//!   creature's, and [`ride_z`] re-derives it from the ground under us.
 //! - [`drive_self_ride`] (Input stage, *before* `control`) owns the *whole* pose while the ride
 //!   lasts: it mirrors that transform into [`Player`] (`pos`/`face_yaw`/`model_yaw`), drives a
 //!   forward-run animation via [`MovementState`], unwinds the strafe counter-twist ([`BodyTwist`]),
@@ -28,6 +29,66 @@ use crate::creature_anim::{move_flags, BodyTwist, MovementState};
 use crate::net::{ClientCommand, Embodied, NetCommands, Spline, SplineStopped};
 
 use super::Player;
+
+/// The walkable surface under a ride's pose, measured the way every other mover's ground is —
+/// a one-sided down-ray through the same window `net::motion::spline`'s clamp uses, from the
+/// server's own Z rather than from any answer of ours. `None` = nothing in reach.
+fn ride_ground(world: &benilla_world::collision::WorldCollision, pos: Vec3) -> Option<f32> {
+    const UP: f32 = 2.5;
+    const DOWN: f32 = 4.0;
+    let origin = Vec3::new(pos.x, pos.y + UP, pos.z);
+    world
+        .ray_body(origin, Dir3::NEG_Y, UP + DOWN)
+        .map(|h| origin.y - h.distance)
+}
+
+/// **The Z the body we are attached to rides at** — the ground under the spline's XZ, not the
+/// spline's own vertical (decision 1927).
+///
+/// The reference's integrate loop makes no distinction between the body it steers and any other
+/// mover here: `0x616de0`'s path-select produces a displacement from *either* the physics path or
+/// the spline path and hands **both** to `0x616cb0` (wow-re `collision/scratch/spec-driver-B.md`
+/// K5/K3), which zeroes the vertical component and lets `0x634040`'s swept resolve read Z off the
+/// surface. Keeping the chord instead is what B357 fixed for a Playerbot; this is the same wire Z,
+/// on the one body that had it left.
+///
+/// **The keeps are the reference's own fork**, `0x616cec`-`0x616d03`:
+/// - a **flying spline** (`MI.flags & 0x200`) — the taxi owns its altitude, and its sampled Z is
+///   the flight path;
+/// - **`SWIMMING`** (`[CMovement+0x40] & 0x200000`, one of the two bits at `0x616cfa`) — in liquid
+///   the wire Z *is* the depth, the same exemption the creature clamp takes;
+/// - a probe **miss** — nothing walkable in reach, so the body stays where the server put it.
+///
+/// The other bit at `0x616cfa` (`0x800`) has no expression here: our ride carries no live
+/// CMovement flag word of its own, and a knockback — the airborne case that would want it — is not
+/// a spline at all on this build (`SMSG_MOVE_KNOCK_BACK` is a ballistic launch through
+/// [`super::mover`], decision 1702), so it never reaches this function.
+///
+/// The arithmetic itself is [`crate::net::grounded_y`], shared with the creature clamp so the two
+/// cannot drift; hover and water-walking come from **our** state, not the granted-mode word — the
+/// avatar's modes live on [`super::state::MoveModes`], and the wire family the clamp reads is inert
+/// on us.
+fn ride_z(
+    player: &Player,
+    points: &benilla_world::world_point::WorldPoint,
+    grounded: bool,
+    pos: Vec3,
+    floor: Option<f32>,
+) -> f32 {
+    if !grounded || player.swimming {
+        return pos.y;
+    }
+    let wow = bevy_to_wow(pos);
+    let water = super::mover::water_floor(
+        player.modes.water_walking,
+        player.swimming,
+        player.mover_pitch,
+        points
+            .liquid_at(benilla_world::world_point::Subject::Player, wow)
+            .map(|l| pos.y + (l.surface_z - wow[2])),
+    );
+    crate::net::grounded_y(pos.y, floor, water, player.modes.hover)
+}
 
 /// Extract the Bevy Y-yaw of a facing quaternion. The net bridge and `sample_splines` both write
 /// the self entity's rotation as `Quat::from_rotation_y(facing)` (a pure Y turn), and benilla's
@@ -46,10 +107,18 @@ pub(super) fn drive_self_ride(
     net: Res<NetCommands>,
     mut commands: Commands,
     mut player: ResMut<Player>,
+    // The world under the ride: the surface it stands on ([`ride_z`]) and the liquid a
+    // water-walker stands on instead.
+    world: benilla_world::collision::WorldCollision,
+    points: benilla_world::world_point::WorldPoint,
     mut q: Query<
         (
             Entity,
-            &Transform,
+            // **Written, not just read**: the ride's Z is re-derived here ([`ride_z`]) and the
+            // entity transform is where it has to land. `control`'s ride guard returns before
+            // `body_pose::drive`, so nothing downstream would carry a correction made only to
+            // `Player` — the camera and the wire would move and the rendered body would not.
+            &mut Transform,
             Option<&Spline>,
             Option<&SplineStopped>,
             Option<&mut MovementState>,
@@ -64,7 +133,7 @@ pub(super) fn drive_self_ride(
         player.server_riding = false;
         return;
     }
-    let Ok((entity, transform, spline, stopped, motion, twist)) = q.single_mut() else {
+    let Ok((entity, mut transform, spline, stopped, motion, twist)) = q.single_mut() else {
         return;
     };
     // A teleport landed since last frame: the server relocated us, voiding any in-progress ride
@@ -116,11 +185,44 @@ pub(super) fn drive_self_ride(
                 super::move_trace::gait("spline", player.walking, false, player.modes.rooted, true);
             }
             let yaw = yaw_of(transform.rotation);
+            let wire_y = transform.translation.y;
+            // One probe, one meaning: the floor found from the SERVER's own pose feeds both the
+            // law and the line that reports it. Measuring again from the corrected pose would be a
+            // different question, and would report the correction as if it were the ground.
+            let floor = ride_ground(&world, transform.translation);
+            let y = ride_z(
+                &player,
+                &points,
+                // **A deck path re-derives its Z exactly like any other** (decision 1936's
+                // correction). The tempting exemption — "there is no terrain under a boat" — is
+                // refuted: the transport guid appears in neither `0x616cb0`'s predicate nor
+                // `0x634040`'s dispatch, so a grounded deck spline takes the same fork, and the
+                // probe does not miss because it runs at the **composed world position** against
+                // a class mask that admits GameObject meshes. This system is in `WorldStage::Input`
+                // and `transport::compose_riders` in the stage before it, so the translation read
+                // here is already composed — nothing else is needed for the deck case.
+                spline.grounded,
+                transform.translation,
+                floor,
+            );
+            if y != wire_y {
+                transform.translation.y = y;
+            }
+            // Traced with the answer in hand, not the question: a line logged before the correction
+            // measures the wire and reads identically whether the law above runs or not.
+            super::move_trace::ride(
+                spline.id,
+                spline.grounded,
+                transform.translation,
+                wire_y,
+                floor,
+            );
             player.pos = transform.translation;
             player.face_yaw = yaw;
             player.model_yaw = yaw;
             player.server_riding = true;
             player.ride_spline_id = spline.id;
+            player.ride_grounded = spline.grounded;
             // A forward run — the charge reads as a fast run (the gait selector keys on the FORWARD
             // flag + speed). It also gives a sane baseline for the resume and for observers.
             player.move_flags = move_flags::FORWARD;
@@ -145,6 +247,21 @@ pub(super) fn drive_self_ride(
         // spline-pending until this arrives, then relocates us and broadcasts a stop to observers —
         // and clear the ride so `control` resumes its own stream from rest.
         None if player.server_riding => {
+            // The endpoint is grounded by the same law as every frame before it: this pose is what
+            // `CMSG_MOVE_SPLINE_DONE` reports and what `control` resumes from, and a ride that ends
+            // a hair off our terrain is exactly what decision 0501's settle-probe hunt was about.
+            // `grounded` is read off the path that just finished — the last spline seen this ride.
+            let floor = ride_ground(&world, transform.translation);
+            let y = ride_z(
+                &player,
+                &points,
+                player.ride_grounded,
+                transform.translation,
+                floor,
+            );
+            if y != transform.translation.y {
+                transform.translation.y = y;
+            }
             player.pos = transform.translation;
             player.face_yaw = yaw_of(transform.rotation);
             player.model_yaw = player.face_yaw;
@@ -192,9 +309,9 @@ pub(super) fn drive_self_ride(
 
 #[cfg(test)]
 mod tests {
+    use bevy::platform::time::Instant;
     use std::f32::consts::FRAC_PI_2;
     use std::time::Duration;
-use bevy::platform::time::Instant;
 
     use super::*;
 
@@ -210,6 +327,21 @@ use bevy::platform::time::Instant;
         walking: bool,
     ) -> (App, Entity, crossbeam_channel::Receiver<ClientCommand>) {
         let mut app = App::new();
+        // The ride reads the world under it (the `rid` probe, and the ground the Z law stands on),
+        // so the harness has to be a world — an empty one, which answers "no ground in reach" and
+        // leaves every assertion below about the ride's own bookkeeping, as they were.
+        app.init_resource::<benilla_world::collision::MoverTraceExclusions>();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            bevy::asset::AssetPlugin::default(),
+            bevy::scene::ScenePlugin,
+            avian3d::prelude::PhysicsPlugins::new(bevy::app::PostUpdate),
+        ));
+        app.init_asset::<Mesh>();
+        benilla_world::world_point::init_world_point_resources(app.world_mut());
+        app.finish();
+        app.cleanup();
         app.add_systems(Update, drive_self_ride);
         let (tx, rx) = crossbeam_channel::unbounded();
         app.insert_resource(NetCommands(tx));
@@ -229,6 +361,7 @@ use bevy::platform::time::Instant;
             .spawn((
                 Transform::default(),
                 Spline {
+                    deck: None,
                     points: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
                     start: Instant::now(),
                     duration: Duration::from_secs(600), // far from ending during the test
@@ -241,6 +374,160 @@ use bevy::platform::time::Instant;
             ))
             .id();
         (app, entity, rx)
+    }
+
+    /// **The ride's Z law** (decision 1927) — the local half of B357, measured live at +0.47 yd on
+    /// a 16-yd Elwynn charge before it landed, and 0.000 after.
+    ///
+    /// The world is one flat floor and the ride is seated a chord's height above it, which is the
+    /// whole of the defect: a two-point server path holds its endpoints' Z across everything
+    /// between them, so on any concave ground the body flies. The reference does not: `0x616de0`
+    /// hands the spline path's displacement to the same `0x616cb0` the physics path uses, which
+    /// zeroes the vertical and lets the swept resolve read Z off the surface.
+    mod ground {
+        use super::*;
+        use avian3d::prelude::{Collider, RigidBody};
+
+        const FLOOR_Y: f32 = 7.5;
+        /// Where the server's chord holds the body — a body-height over the floor, inside the
+        /// probe's own reach so what is measured is the law and not the window.
+        const CHORD_Y: f32 = 9.4;
+
+        /// A 20×20 up-wound floor at [`FLOOR_Y`] — the one-sided down-ray stands only on those.
+        fn floor(app: &mut App) {
+            let v = vec![
+                Vec3::new(-10.0, FLOOR_Y, -10.0),
+                Vec3::new(10.0, FLOOR_Y, -10.0),
+                Vec3::new(10.0, FLOOR_Y, 10.0),
+                Vec3::new(-10.0, FLOOR_Y, 10.0),
+            ];
+            app.world_mut().spawn((
+                RigidBody::Static,
+                Collider::trimesh(v, vec![[0u32, 2, 1], [0, 3, 2]]),
+                Transform::default(),
+            ));
+        }
+
+        /// Seat the body on the chord, with the collider trees built. The seating `update` runs a
+        /// ride frame too — harmlessly, from `Transform::default()`, where the probe cannot reach a
+        /// floor 7.5 yd overhead — so each test below sets its own condition and then takes
+        /// **exactly one** frame, which is the frame it asserts about.
+        fn seat(app: &mut App, entity: Entity) {
+            app.update();
+            app.world_mut()
+                .entity_mut(entity)
+                .get_mut::<Transform>()
+                .unwrap()
+                .translation
+                .y = CHORD_Y;
+        }
+
+        /// The ride app with ground under it (or deliberately without) and the body on the chord.
+        fn world(with_floor: bool) -> (App, Entity) {
+            let (mut app, entity, _rx) = ride_app();
+            if with_floor {
+                floor(&mut app);
+            }
+            seat(&mut app, entity);
+            (app, entity)
+        }
+
+        fn y_of(app: &App, e: Entity) -> f32 {
+            app.world().get::<Transform>(e).unwrap().translation.y
+        }
+
+        #[track_caller]
+        fn assert_grounded(app: &App, e: Entity, why: &str) {
+            let y = y_of(app, e);
+            assert!(
+                (y - FLOOR_Y).abs() < 1e-3,
+                "{why}: expected the floor {FLOOR_Y}, got {y}"
+            );
+        }
+
+        /// **The report's shape, on our own body.** The chord is discarded; the ground is the Z —
+        /// and `Player::pos` carries the same answer, because the camera and the outbound position
+        /// report read it, not the transform.
+        #[test]
+        fn a_grounded_ride_stands_on_the_world_not_the_chord() {
+            let (mut app, entity) = world(true);
+            app.update();
+            assert_grounded(&app, entity, "a grounded path's Z is the terrain's");
+            assert!(
+                (app.world().resource::<Player>().pos.y - FLOOR_Y).abs() < 1e-3,
+                "the pose the camera and the wire read is the same one"
+            );
+        }
+
+        /// **A flying path owns its own altitude** — the reference keeps the vertical when the
+        /// spline carries FLYING (`0x616cec` reads the MI flag word). A taxi must not be walked
+        /// into the hillside it passes over.
+        #[test]
+        fn a_flying_ride_keeps_its_altitude() {
+            let (mut app, entity) = world(true);
+            app.world_mut()
+                .entity_mut(entity)
+                .get_mut::<Spline>()
+                .unwrap()
+                .grounded = false;
+            app.update();
+            assert_eq!(y_of(&app, entity), CHORD_Y, "a flight is not grounded");
+        }
+
+        /// **In liquid the wire Z IS the depth** — the same exemption the creature clamp takes, and
+        /// the reference's own: `[CMovement+0x40] & 0x200000` SWIMMING keeps the vertical at
+        /// `0x616cfa`. A feared swimmer must not be dragged to the lakebed.
+        #[test]
+        fn a_swimming_ride_keeps_its_depth() {
+            let (mut app, entity) = world(true);
+            app.world_mut().resource_mut::<Player>().swimming = true;
+            app.update();
+            assert_eq!(y_of(&app, entity), CHORD_Y, "swimming keeps the wire Z");
+        }
+
+        /// **A probe miss leaves the body where the server put it** — nothing walkable in reach is
+        /// a genuinely airborne pose or ground that has not streamed in, and an unclamped body
+        /// belongs at its seat. Same answer the creature clamp gives.
+        #[test]
+        fn a_ride_with_no_ground_in_reach_keeps_the_servers_pose() {
+            let (mut app, entity) = world(false);
+            app.update();
+            assert_eq!(y_of(&app, entity), CHORD_Y, "no floor, no correction");
+        }
+
+        /// **The endpoint is grounded too, and it is the pose the ack carries.** The frame a ride
+        /// ends has already lost its `Spline` (`sample_splines` drops a finished path), so the law
+        /// reads `Player::ride_grounded` there — without it the last frame of every charge would
+        /// hand the server the chord's Z and resume the controller from mid-air.
+        #[test]
+        fn the_endpoint_the_ack_reports_is_grounded() {
+            let (mut app, entity, rx) = ride_app();
+            floor(&mut app);
+            seat(&mut app, entity);
+            app.update(); // one riding frame — arms `server_riding` + `ride_grounded`
+            app.world_mut().entity_mut(entity).remove::<Spline>();
+            // Put it back on the chord, as the finished path's last sample leaves it.
+            app.world_mut()
+                .entity_mut(entity)
+                .get_mut::<Transform>()
+                .unwrap()
+                .translation
+                .y = CHORD_Y;
+            app.update();
+
+            assert_grounded(&app, entity, "the ride's last pose");
+            let ack = rx
+                .try_iter()
+                .find_map(|c| match c {
+                    ClientCommand::MoveSplineDone { pos, .. } => Some(pos),
+                    _ => None,
+                })
+                .expect("the ride acks when it ends");
+            assert!(
+                (ack[2] - FLOOR_Y).abs() < 1e-3,
+                "the ack reports where we actually are, got {ack:?}"
+            );
+        }
     }
 
     /// **A spline re-authors the walk gait, inverted from its own RUNMODE bit** (decision 1758).

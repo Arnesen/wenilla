@@ -33,9 +33,9 @@ pub use install::{candidates, wow_data};
 pub mod web;
 mod characters;
 pub use characters::{
-    equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, BlitSource,
-    CharCreateCatalog, CharSections, CharacterGeosets, DialRanges, EmblemLayer, EquipBlit,
-    EquipGeosets, GuildEmblem, StartOutfitItem,
+    equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, forearm_dressed,
+    BlitSource, CharCreateCatalog, CharSections, CharacterGeosets, DialRanges, EmblemLayer,
+    EquipBlit, EquipGeosets, GuildEmblem, StartOutfitItem,
 };
 mod camera_shakes;
 mod cinematics;
@@ -79,7 +79,8 @@ mod garble;
 pub use garble::{garble, garble_chat, Garble, FLUENT_SKILL};
 mod languages;
 pub use languages::{
-    load_default_languages, load_language_words, DefaultLanguages, LanguagePool, LanguageWords,
+    load_default_languages, load_language_words, load_languages, DefaultLanguages, LanguagePool,
+    LanguageWords, Languages,
 };
 mod creature_families;
 pub use creature_families::{
@@ -101,7 +102,9 @@ pub use stable_slot_prices::{load_stable_slot_prices, StableSlotPrices};
 mod page_text_material;
 pub use page_text_material::{load_page_text_material_catalog, PageTextMaterialCatalog};
 mod stationery;
-pub use stationery::{load_stationery_catalog, StationeryCatalog, STATIONERY_DEFAULT};
+pub use stationery::{
+    load_stationery_catalog, StationeryCatalog, StationeryRow, STATIONERY_DEFAULT,
+};
 mod lock;
 pub use lock::{
     load_lock_catalog, LockCatalog, LockSlot, GO_STATE_ACTIVE, GO_STATE_ACTIVE_ALTERNATIVE,
@@ -142,11 +145,13 @@ pub use loading_screen::{load_loading_screens, LoadingScreenCatalog};
 mod liquid;
 pub use liquid::{LiquidKind, LiquidMesh};
 mod maps;
-pub use maps::{load_map_catalog, MapCatalog};
+pub use maps::{load_map_catalog, MapBattlegroundColumns, MapCatalog};
 mod anim_data;
 pub use anim_data::{load_anim_data_catalog, AnimDataCatalog, AnimEntry};
 mod quest_headers;
 pub use quest_headers::{load_quest_header_names, QuestHeaderNames};
+mod quest_info;
+pub use quest_info::{load_quest_tag_names, QuestTagNames};
 mod area_trigger;
 pub use area_trigger::{load_area_trigger_catalog, AreaTriggerCatalog, AreaTriggerRow};
 mod area_sound;
@@ -167,6 +172,8 @@ mod environmental_damage;
 pub use environmental_damage::{load_environmental_damage, EnvironmentalDamageTable};
 mod footsteps;
 pub use footsteps::{load_footprint_textures, load_footstep_catalog, FootstepCatalog};
+mod death_thud;
+pub use death_thud::{load_death_thud_catalog, DeathThudCatalog};
 mod sound_entries;
 pub use sound_entries::{load_sound_kit_catalog, sound_kit_flags, SoundKit, SoundKitCatalog};
 mod sound_provider;
@@ -191,10 +198,11 @@ mod wmo_area;
 pub use wmo_area::{load_wmo_area_catalog, WmoArea, WmoAreaCatalog};
 mod spells;
 pub use spells::{
-    load_shapeshift_forms, load_spell_cast_times, load_spell_catalog, load_spell_dispel_types,
-    load_spell_durations, load_spell_radii, load_spell_ranges, substitute, FormRefusal, OpenLock,
-    ShapeshiftForm, SpellCastTime, SpellCastTimeCatalog, SpellCatalog, SpellDispelTypes,
-    SpellDisplay, SpellDuration, SpellDurationCatalog, SpellRadius, SpellRadiusCatalog, SpellRange,
+    cc_exemption, grants_immunity, load_shapeshift_forms, load_spell_cast_times,
+    load_spell_catalog, load_spell_dispel_types, load_spell_durations, load_spell_radii,
+    load_spell_ranges, substitute, CcExemption, FormRefusal, OpenLock, ShapeshiftForm,
+    SpellCastTime, SpellCastTimeCatalog, SpellCatalog, SpellDispelTypes, SpellDisplay,
+    SpellDuration, SpellDurationCatalog, SpellRadius, SpellRadiusCatalog, SpellRange,
     SpellRangeCatalog, TokenContext, ATTR_CASTABLE_WHILE_DEAD, ATTR_NOT_IN_COMBAT,
     ATTR_ONLY_STEALTHED, SPELL_ATTR_IS_TRADESKILL, SPELL_EFFECT_CREATE_ITEM,
     SPELL_EFFECT_ENCHANT_ITEM, SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, SPELL_EFFECT_LEARN_PET_SPELL,
@@ -206,7 +214,9 @@ pub use skill_lines::{
     load_skill_line_catalog, SkillLineCatalog, SkillLineInfo, SkillRaceClass, SlaInfo,
 };
 mod spell_focus;
+mod spell_mechanic;
 pub use spell_focus::{load_spell_focus_catalog, SpellFocusCatalog};
+pub use spell_mechanic::{load_spell_mechanic_catalog, SpellMechanicCatalog};
 mod talents;
 pub use talents::{load_talent_catalog, Talent, TalentCatalog, TalentTabInfo, MAX_TALENT_RANK};
 mod spell_visual;
@@ -237,18 +247,19 @@ pub use models::{
     owner_last_rung, owner_last_rung_bucket, parse_m2_animation_lookup, parse_m2_animation_summary,
     parse_m2_animations, parse_m2_attachments, parse_m2_bounds, parse_m2_camera,
     parse_m2_cch_marker, parse_m2_collision_hull, parse_m2_event_markers,
-    parse_m2_global_sequence_bones, parse_m2_lights, parse_m2_playable_animation_lookup,
-    parse_m2_portrait_camera, parse_m2_render_submeshes, parse_m2_skeleton,
-    parse_m2_string_anchors, parse_wmo_fogs, parse_wmo_lights, parse_wmo_portals, parse_wmo_root,
-    shipped_glue_art_extent, wmo_group_doodad_refs, wmo_group_fixed_colors,
-    wmo_group_footprint_tris, wmo_group_header, wmo_group_light_refs, wmo_group_liquid_mesh,
-    wmo_group_raw_colors, wmo_group_submeshes, wmo_root_id, AlphaAnim, AlphaMap, AlphaSeq,
-    AnimEvent, ArtExtent, BatchFootprint, Billboard, BillboardKind, BoneKeys, BoneScaleAnim,
-    BoneSpin, CharSkinSlot, CollisionMesh, Coverage, CoverageReader, EmitterBoneLink, EventMarker,
-    FogPolicy, FootprintTris, GlobalSeqBone, GlobalSeqChannel, GroundQuad, KeyAnim, M2AnimSummary,
-    M2Attachment, M2Bounds, M2Light, M2PortraitCamera, ModelAnimation, ModelBlend, ParentArm,
-    ParentBasis, PlayableAnim, RenderSubmesh, RgbAnim, ScalarAnim, SeqLoops, Skeleton,
-    SkeletonBone, StringAnchors, UvAnim, WmoBatchClass, WmoDoodad, WmoDoodadSet, WmoFog,
+    parse_m2_global_sequence_bones, parse_m2_lights, parse_m2_pane_cameras,
+    parse_m2_playable_animation_lookup, parse_m2_portrait_camera, parse_m2_render_submeshes,
+    parse_m2_skeleton, parse_m2_string_anchors, parse_wmo_fogs, parse_wmo_lights,
+    parse_wmo_portals, parse_wmo_root, rotation_2x2, shipped_glue_art_extent, uv_transform,
+    wmo_group_doodad_refs, wmo_group_fixed_colors, wmo_group_footprint_tris, wmo_group_header,
+    wmo_group_light_refs, wmo_group_liquid_mesh, wmo_group_raw_colors, wmo_group_submeshes,
+    wmo_root_id, AlphaAnim, AlphaMap, AlphaSeq, AnimEvent, ArtExtent, BatchFootprint, Billboard,
+    BillboardKind, BoneKeys, BoneScaleAnim, BoneSpin, CharSkinSlot, CollisionMesh, Coverage,
+    CoverageReader, EmitterBoneLink, EventMarker, FogPolicy, FootprintTris, GlobalSeqBone,
+    GlobalSeqChannel, GroundQuad, KeyAnim, M2AnimSummary, M2Attachment, M2Bounds, M2CameraTracks,
+    M2Light, M2PaneCamera, M2PortraitCamera, ModelAnimation, ModelBlend, ParentArm, ParentBasis,
+    PlayableAnim, RenderSubmesh, RgbAnim, ScalarAnim, SeqLoops, Skeleton, SkeletonBone,
+    StringAnchors, UvAnim, UvRotAnim, WmoBatchClass, WmoDoodad, WmoDoodadSet, WmoFog,
     WmoGroupHeader, WmoGroupInfo, WmoLight, WmoPortalInfo, WmoPortalRef, WmoPortals, WmoRoot,
     ALPHA_KEY_REF, DEGENERATE_RING_FOOTPRINT, GLUE_AUTHORED_ASPECT, NO_GROUP_LIQUID,
     OWNER_RUNG_BUCKETS,
@@ -363,6 +374,95 @@ pub fn blp_to_png(blp_bytes: &[u8], out: &Path) -> Result<(u32, u32)> {
         .save(out)
         .with_context(|| format!("writing PNG {}", out.display()))?;
     Ok((w, h))
+}
+
+/// One authored mip level's texel census — what a sampler minifying onto this level actually
+/// reads. Split by the alpha byte because the renderer's multiply lanes (Mod2x, `2·src·dst`) read
+/// **no alpha**: a texel the author left transparent still modulates the scene by its colour, so
+/// the "outside" colour of a cut-out is a look-bearing fact, not padding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlpMipStats {
+    pub level: u32,
+    pub width: u32,
+    pub height: u32,
+    /// Texels with alpha 0 (the authored "outside") and with alpha > 0 (the "inside").
+    pub outside: usize,
+    pub inside: usize,
+    /// `(min, mean, max)` of the RGB **luma** (`(r+g+b)/3`) over the outside / inside texels;
+    /// `None` when that class is empty.
+    pub outside_luma: Option<(u8, f32, u8)>,
+    pub inside_luma: Option<(u8, f32, u8)>,
+    /// Texels whose luma is below 128 — under Mod2x each of these DARKENS the scene.
+    pub below_128: usize,
+}
+
+/// Census every authored mip level of an in-memory BLP (see [`BlpMipStats`]), decoding through the
+/// same [`benilla_blp::decode`] every CPU consumer uses. The "what does the far sampler see"
+/// instrument: a texture whose mip 0 reads neutral can still carry dark tail levels, and the tail
+/// is all a minified streak or sprite ever samples.
+pub fn blp_mip_stats(blp_bytes: &[u8]) -> Result<Vec<BlpMipStats>> {
+    let decoded =
+        benilla_blp::decode(blp_bytes).map_err(|e| anyhow::anyhow!("decoding BLP: {e}"))?;
+    Ok(decoded
+        .mips
+        .iter()
+        .enumerate()
+        .map(|(level, m)| {
+            let mut outside = (0usize, u8::MAX, 0u64, u8::MIN);
+            let mut inside = (0usize, u8::MAX, 0u64, u8::MIN);
+            let mut below_128 = 0usize;
+            for px in m.rgba.chunks_exact(4) {
+                let luma = ((px[0] as u32 + px[1] as u32 + px[2] as u32) / 3) as u8;
+                if luma < 128 {
+                    below_128 += 1;
+                }
+                let acc = if px[3] == 0 {
+                    &mut outside
+                } else {
+                    &mut inside
+                };
+                acc.0 += 1;
+                acc.1 = acc.1.min(luma);
+                acc.2 += luma as u64;
+                acc.3 = acc.3.max(luma);
+            }
+            let fold = |(n, lo, sum, hi): (usize, u8, u64, u8)| {
+                (n > 0).then(|| (lo, sum as f32 / n as f32, hi))
+            };
+            BlpMipStats {
+                level: level as u32,
+                width: m.width,
+                height: m.height,
+                outside: outside.0,
+                inside: inside.0,
+                outside_luma: fold(outside),
+                inside_luma: fold(inside),
+                below_128,
+            }
+        })
+        .collect())
+}
+
+/// Write **every** authored mip level of a BLP as `<stem>.mip<N>.png` beside `out` (whose own
+/// path receives level 0, exactly as [`blp_to_png`] does), and return the per-level census.
+pub fn blp_mips_to_png(blp_bytes: &[u8], out: &Path) -> Result<Vec<BlpMipStats>> {
+    let decoded =
+        benilla_blp::decode(blp_bytes).map_err(|e| anyhow::anyhow!("decoding BLP: {e}"))?;
+    let stem = out.with_extension("");
+    for (level, m) in decoded.mips.iter().enumerate() {
+        let path = if level == 0 {
+            out.to_path_buf()
+        } else {
+            let mut p = stem.as_os_str().to_owned();
+            p.push(format!(".mip{level}.png"));
+            std::path::PathBuf::from(p)
+        };
+        image::RgbaImage::from_raw(m.width, m.height, m.rgba.clone())
+            .ok_or_else(|| anyhow::anyhow!("BLP RGBA buffer size mismatch at level {level}"))?
+            .save(&path)
+            .with_context(|| format!("writing PNG {}", path.display()))?;
+    }
+    blp_mip_stats(blp_bytes)
 }
 
 /// Decode a BLP texture (raw bytes) to RGBA8: `(width, height, pixels)`.
@@ -809,6 +909,62 @@ mod tests {
         assert_eq!(chain.mips[0].len(), 2 * 2 * 4);
     }
 
+    /// **B358 / B225, "black rain", pinned on the shipped asset.** `RainDrop01.blp` (16×128
+    /// DXT3) under-stores its sub-block levels — 16 bytes for the 2×16 level where the block grid
+    /// needs 64, 16 for the 1×8 where it needs 32 — and a decoder that zero-fills the difference
+    /// makes those levels three-quarters and half BLACK (an all-zero BC2 block is colour 0 at
+    /// alpha 0). The rain streak draws that texture under Mod2x, which reads no alpha, so a far
+    /// streak minifying onto levels 3–4 multiplied the scene toward black. The reference completes
+    /// a short level from the bytes that follow it in the file (`0x5a5780`), which for this asset
+    /// are the next levels' own grey blocks. This is the census the fix was judged by: every level
+    /// the sampler can reach stays inside the texture's authored neutral band, and level 3's second
+    /// block IS level 4's first — the reference's copy, byte for byte. Skips without the client data.
+    #[test]
+    fn the_rain_streak_texture_is_neutral_on_every_level_the_sampler_reaches() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = open_chain(&data).expect("open chain");
+        let path = "textures\\Weather\\RainDrop01.blp";
+        let bytes = chain
+            .read_file(path)
+            .unwrap_or_else(|e| panic!("{path}: {e}"));
+        let native = blp_bytes_to_native_chain(&bytes).expect("decodes natively");
+        assert_eq!((native.width, native.height), (16, 128));
+        assert_eq!(native.texels, benilla_blp::BlpTexels::Bc2);
+        assert!(
+            native.mips.len() >= 5,
+            "the tail levels are what this is about"
+        );
+        // Level 3 (2×16) is four blocks wide-grid; the file stores one. Blocks 2–4 are the
+        // following levels' — block 2 is level 4's own first block.
+        assert_eq!(native.mips[3].len(), 64);
+        assert_eq!(
+            &native.mips[3][16..32],
+            &native.mips[4][..16],
+            "level 3's second block must be the file's next 16 bytes — level 4's block"
+        );
+        assert!(
+            native.mips[3][16..].iter().any(|&x| x != 0),
+            "level 3's completion is never zero-filled"
+        );
+        // And the look-bearing fact, as the Mod2x lane reads it: no texel on any level darkens
+        // the scene by more than the authored grey does (luma ≥ 120; the authored band is 125–164).
+        let stats = blp_mip_stats(&bytes).expect("census");
+        for s in &stats {
+            for (class, luma) in [("outside", s.outside_luma), ("inside", s.inside_luma)] {
+                if let Some((lo, _, _)) = luma {
+                    assert!(
+                        lo >= 120,
+                        "level {} ({}x{}) {class} texels reach luma {lo} — a Mod2x streak sampling \
+                         this level darkens the scene (B358)",
+                        s.level,
+                        s.width,
+                        s.height
+                    );
+                }
+            }
+        }
+    }
+
     /// Every table the CSV dumper claims in its error hint really has a schema, and each dumps
     /// against the **shipped** file — which is the only check that matters, because `with_schema`
     /// rejects a field-count mismatch and `dbc_to_csv` would otherwise fail only when a session
@@ -817,7 +973,8 @@ mod tests {
     fn registered_dbc_schemas_dump_the_shipped_tables() {
         let data = crate::wow_data_or_skip!();
         let mut chain = open_chain(&data).expect("open chain");
-        let out = std::env::temp_dir().join("benilla-schema-registry-test.csv");
+        let out =
+            std::env::temp_dir().join(format!("benilla-schema-reg-{}.csv", std::process::id()));
         for table in [
             "CreatureDisplayInfo",
             "CreatureDisplayInfoExtra",

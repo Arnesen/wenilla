@@ -59,6 +59,13 @@ pub enum Subject {
 #[derive(SystemParam)]
 pub struct WorldPoint<'w, 's> {
     liquids: Query<'w, 's, &'static WaterChunkInfo>,
+    /// The XY grid over the loaded surfaces ([`crate::liquid::WaterIndex`]): a point query walks
+    /// the handful of surfaces over that cell, not every loaded one. The verdict is identical to
+    /// the full walk by construction (a surface is registered in every cell its box overlaps —
+    /// spatial.rs), and it is what keeps the per-unit askers — the swim mark, the splash line,
+    /// the ground clamp, one each per moving creature per frame — off a 650-surface walk apiece
+    /// (decision 1979: ~0.35 ms of a raid's main thread was those three walks).
+    index: Res<'w, crate::liquid::WaterIndex>,
     /// Liquid surfaces that also carry a sound class — the ambient-loop scan's population.
     sound_sources: Query<'w, 's, (&'static LiquidSoundSource, &'static WaterChunkInfo)>,
     /// The placed buildings a room's whole-group submersion override resolves against (1000).
@@ -93,6 +100,7 @@ pub struct WorldPoint<'w, 's> {
 /// area — which is what a geometry harness wants: it supplies the geometry it is about and nothing
 /// else answers.
 pub fn init_world_point_resources(world: &mut bevy::prelude::World) {
+    world.init_resource::<crate::liquid::WaterIndex>();
     world.init_resource::<Underwater>();
     world.init_resource::<crate::liquid::SubmergedEye>();
     world.init_resource::<PlayerWmoRoom>();
@@ -130,6 +138,16 @@ impl WorldPoint<'_, '_> {
     /// `false` only on a unit's very first frame. It matters because an unsettled claim admits
     /// *both* liquid sources — the exact false positive 0696 removed — so a state a subject can
     /// only ENTER (swimming) must wait for it, while a state it can LEAVE must not.
+    /// The loaded surfaces whose footprint box covers `wow`'s XY — the index's candidates,
+    /// resolved to their chunk infos (a surface despawned since the index's last maintenance
+    /// simply resolves to nothing).
+    fn over(&self, wow: [f32; 3]) -> impl Iterator<Item = &WaterChunkInfo> {
+        self.index
+            .over(wow[0], wow[1])
+            .iter()
+            .filter_map(|&e| self.liquids.get(e).ok())
+    }
+
     pub fn room_settled(&self, who: Subject) -> bool {
         self.claim(who) != LiquidClaim::Unknown
     }
@@ -138,21 +156,21 @@ impl WorldPoint<'_, '_> {
     ///
     /// Every liquid, not only water: **you swim in lava and slime too** (0634).
     pub fn liquid_at(&self, who: Subject, wow: [f32; 3]) -> Option<LiquidHit> {
-        liquid_at(self.liquids.iter(), wow, self.claim(who))
+        liquid_at(self.over(wow), wow, self.claim(who))
     }
 
     /// The **water** surface height at `wow` for this subject — [`Self::liquid_at`] with the
     /// fullbright kinds (magma, slime) filtered out, for the consumers that are specifically about
     /// water: the splash, the wake foam, footstep depth.
     pub fn water_surface_at(&self, who: Subject, wow: [f32; 3]) -> Option<f32> {
-        water_surface_at(self.liquids.iter(), wow, self.claim(who))
+        water_surface_at(self.over(wow), wow, self.claim(who))
     }
 
     /// Every loaded liquid footprint covering this XY, one human-readable line each — the body of
     /// the `/liquid` chat instrument. Prints every candidate, not just the winner, so a surface
     /// that should not be claiming is visible next to the one that should.
     pub fn describe_liquid_at(&self, who: Subject, wow: [f32; 3]) -> Vec<String> {
-        describe_at(self.liquids.iter(), wow, self.claim(who))
+        describe_at(self.over(wow), wow, self.claim(who))
     }
 
     /// What the camera eye is currently submerged in — **which liquid, not merely whether**. The

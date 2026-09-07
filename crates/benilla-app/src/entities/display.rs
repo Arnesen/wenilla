@@ -31,6 +31,7 @@ pub(crate) enum ModelHandle {
 /// `ModelPart` toggle). Built once the model asset loads **and** the model-forms furnisher has
 /// built its render forms (decision 0834 — the handles here come from the app-side cache, not the
 /// loader).
+#[derive(Clone)]
 pub(super) struct EntityPart {
     pub(super) mesh: Handle<Mesh>,
     /// The batch's decoded geometry — the model's resident CPU copy (`ModelSubmesh::geometry`),

@@ -371,11 +371,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Option<f64>| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
 
-            // The sell fork, and it comes FIRST — before the argument is even looked at.
-            if let Some(CursorPayload::Item(item)) = &model.cursor {
-                let pair = (item.bag, item.slot);
-                model.cursor = None;
-                model.merchant_cursor_sells.push(pair);
+            // The sell fork, and it comes FIRST — before the argument is even looked at. The
+            // clear is the SELL clear, not `ClearCursor`: it fires `CURSOR_UPDATE` and leaves the
+            // source slot greyed until the server's inventory update
+            // (`cursor::take_cursor_item_for_sale`, shared with the interact ladder's vendor arm,
+            // which is the same `0x494b60` call — decision 1914).
+            if let Some(item) = crate::script::cursor::take_cursor_item_for_sale(&mut model) {
+                model.merchant_cursor_sells.push((item.bag, item.slot));
                 return Ok(());
             }
 

@@ -150,6 +150,20 @@ impl UiScript {
     /// can be checked against is a handle set snapshotted earlier ([`Self::live_targets`]'s). The
     /// addon harness's use probe asks exactly that — a pointer event is only an addon's to be
     /// judged by when the frame under the cursor is one the addon itself created.
+    /// Whether a frame id names a [`FrameKind::WorldFrame`] — the reference's world frame, whose
+    /// mouse hits belong to the 3D world (decisions 1983/1984). The hit test still answers it (it
+    /// is mouse-enabled by construction, so an addon's `OnEnter`/`OnMouseDown` on it fire — the
+    /// reference runs those, then the click's `BUTTON1`/`BUTTON2` binding, which IS the world
+    /// click), but the app's pointer arbiter does not count it as being over the UI.
+    pub fn is_world_frame(&self, id: u32) -> bool {
+        let model = self.model_ref();
+        model
+            .id_to_frame
+            .get(&id)
+            .and_then(|h| model.arena.frame(*h))
+            .is_some_and(|f| f.kind == crate::widget::FrameKind::WorldFrame)
+    }
+
     pub fn hit_test_frame(&self, x: f32, y: f32) -> Option<FrameHandle> {
         let model = self.model_ref();
         let sorted = order::traversal(&model.arena);
@@ -274,7 +288,16 @@ impl UiScript {
                         .then(|| model.frame_to_id.get(&h).copied())
                         .flatten()
                 });
+                let old_handle = model.mouseover;
                 model.mouseover = new_handle;
+                // The client's `0x7793f0` (leave) and `0x7791ed` (enter) both call `SetState`:
+                // a press held over a button and then walked off it drops back to NORMAL, and
+                // walking back on picks PUSHED up again. Ours latches the same transition from
+                // the moved hover — both sides of the boundary, since each one's `hovered`
+                // changed.
+                for h in [old_handle, new_handle].into_iter().flatten() {
+                    button::settle(&mut model, h);
+                }
                 (old_id, drag_start, true, slider_change, color_change)
             }
         };
@@ -493,13 +516,15 @@ impl UiScript {
             let mut model = self.model_mut();
             let hit_handle = hit_id.and_then(|id| model.id_to_frame.get(&id).copied());
             if down {
-                match hit_handle {
-                    Some(h) => {
-                        model.mouse_down_on.insert(button.to_string(), h);
-                    }
-                    None => {
-                        model.mouse_down_on.remove(button);
-                    }
+                let displaced = match hit_handle {
+                    Some(h) => model.mouse_down_on.insert(button.to_string(), h),
+                    None => model.mouse_down_on.remove(button),
+                };
+                // `0x7792ad`: the press SetState(PUSHED), unconditional past the registration
+                // and hit gates. The displaced entry is settled too — a second press of the same
+                // button elsewhere releases whatever it was holding.
+                for h in [displaced, hit_handle].into_iter().flatten() {
+                    button::settle(&mut model, h);
                 }
                 // `0x7663e6` writes the resolved target into `root+0x80` — capture-else-hover, so
                 // this is an `or`, not an assignment: an existing capture is not displaced by a
@@ -537,6 +562,10 @@ impl UiScript {
                 (click, None, false, jump, None, abandoned, color_jump)
             } else {
                 let pressed = model.mouse_down_on.remove(button);
+                // `0x7793c2`: the release SetState(NORMAL) on the frame the press captured.
+                if let Some(h) = pressed {
+                    button::settle(&mut model, h);
+                }
                 // `root+0x80` is cleared at `0x7664bb` **only when the post-event button mask is
                 // zero** — a chorded release keeps the capture for the button still held. With the
                 // per-button map already drained above, "mask is zero" is "the map is empty".

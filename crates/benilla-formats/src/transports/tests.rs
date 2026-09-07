@@ -259,3 +259,67 @@ fn touches_map_matches_the_paths_map_set() {
         "no golden path crosses continents — the 0455 spare predicate has nothing to spare"
     );
 }
+
+/// [`TransportTimetable::first_cycle_on_map`] — the seam's re-anchor target (decision 2026).
+///
+/// Two properties, on every cross-continent path in the fleet, because the fleet's seams are not
+/// alike: one path changes map mid-cycle, another only at the cycle wrap (path 241's map-1 legs are
+/// frames 0..22 and its map-0 legs are the tail, so "cross to Kalimdor" *is* the wrap), and a
+/// re-anchor that only handled the interior case would leave exactly the reported ferry broken.
+///
+/// 1. From anywhere in the cycle, the answer is an instant that really does sample on the asked-for
+///    map — that is the whole contract, and it is what the rider's world pose is composed through.
+/// 2. Asking from an instant already on that map returns an instant on it too (the caller's
+///    already-there short-circuit rests on the map agreeing, not on the number).
+#[test]
+fn first_cycle_on_map_lands_on_that_map() {
+    let data = crate::wow_data_or_skip!();
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = load_taxi_path_nodes(&mut chain).expect("load TaxiPathNode");
+
+    let mut crossed = 0usize;
+    for g in GOLDENS {
+        let nodes = cat
+            .path(g.path_id)
+            .unwrap_or_else(|| panic!("path {} exists in TaxiPathNode.dbc", g.path_id));
+        let tt = TransportTimetable::build(nodes, g.move_speed, g.accel_rate)
+            .unwrap_or_else(|| panic!("path {} builds", g.path_id));
+        let maps: std::collections::HashSet<u32> = nodes.iter().map(|n| n.map_id).collect();
+        if maps.len() < 2 {
+            continue;
+        }
+        crossed += 1;
+        // Probe from 64 instants spread across the whole cycle — every leg, both continents, and
+        // the frames either side of the wrap.
+        for k in 0..64u32 {
+            let from = (u64::from(tt.period_ms) * u64::from(k) / 64) as u32;
+            for &m in &maps {
+                let at = tt.first_cycle_on_map(from, m).unwrap_or_else(|| {
+                    panic!(
+                        "path {} touches map {m} but found no cycle on it",
+                        g.path_id
+                    )
+                });
+                assert!(
+                    at < tt.period_ms,
+                    "path {} map {m}: {at} ms is outside the {} ms cycle",
+                    g.path_id,
+                    tt.period_ms
+                );
+                assert_eq!(
+                    tt.sample(at).map,
+                    m,
+                    "path {} from {from} ms: first_cycle_on_map({m}) = {at} ms samples map {}",
+                    g.path_id,
+                    tt.sample(at).map
+                );
+            }
+        }
+        // A map the path never visits has no answer at all.
+        assert_eq!(tt.first_cycle_on_map(0, 9999), None);
+    }
+    assert!(
+        crossed > 0,
+        "no golden path crosses continents — this test proves nothing"
+    );
+}

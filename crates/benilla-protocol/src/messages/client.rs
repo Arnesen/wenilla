@@ -283,6 +283,19 @@ pub fn movement(info: &MovementInfo) -> Vec<u8> {
     body
 }
 
+/// Body of `CMSG_MOVE_TIME_SKIPPED` (client): the mover's **full 8-byte** guid then the skipped
+/// milliseconds (vmangos `MoveTimeSkipped::ReadFromWorldPacket`, `Server/Packets/Movement.cpp:10-14`
+/// — `recv_data >> guid` is `ObjectGuid`'s plain `read<uint64>`, `ObjectGuid.cpp:180`, not the
+/// packed reader `PackedGuidReader` takes). Note the asymmetry with the server's own relay of the
+/// same fact, `MSG_MOVE_TIME_SKIPPED`, which writes `GetPackGUID()` (`MovementHandler.cpp:1014`):
+/// inbound is full, outbound is packed.
+pub fn move_time_skipped(guid: u64, lag_ms: u32) -> Vec<u8> {
+    let mut body = Vec::with_capacity(12);
+    body.extend_from_slice(&guid.to_le_bytes());
+    body.extend_from_slice(&lag_ms.to_le_bytes());
+    body
+}
+
 /// Body of `CMSG_MOVE_SPLINE_DONE` (client): the `MovementInfo` at the ride's endpoint, the
 /// `spline_id` being acknowledged (matched against the server's newest spline for our mover), and a
 /// trailing float the server reads-and-discards (`MoveSplineDone::ReadFromWorldPacket` does an

@@ -98,11 +98,11 @@ pub fn tuned_default_plugins(mut primary_window: Window) -> PluginGroupBuilder {
                 ..default()
             },
         })
-        // Sound is kira behind our own mixer seam (decision 0070); Bevy's AudioPlugin would only
-        // open a second, never-used OS output stream at startup. Off (0530). Its rodio/cpal stack
-        // still compiles in via bevy's default feature — trimming the feature set is a separate,
-        // wider call.
-        .disable::<bevy::audio::AudioPlugin>()
+        // Sound is kira behind our own mixer seam (decision 0070). Bevy's `AudioPlugin` used to be
+        // disabled here (0530) so it would not open a second, never-used OS output stream — but
+        // the crate behind it was still compiled and linked. Since 1932 `bevy_audio` is off at the
+        // feature level, so there is no plugin to disable and no rodio/cpal/vorbis stack in the
+        // binary; the feature list that keeps it out is in the workspace `Cargo.toml`.
         // The dead registrations (decision 1438): DefaultPlugins members whose only runtime
         // trace here was per-frame machinery for types nothing instantiates — every registered
         // asset/material type costs an `Assets<T>` event system in PostUpdate plus

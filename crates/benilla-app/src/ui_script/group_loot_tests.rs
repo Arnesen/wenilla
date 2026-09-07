@@ -1,5 +1,5 @@
-//! The group-loot roll popups (decision 0591, `assets/ui/GroupLootFrame.xml`): the four stacked
-//! `GroupLootFrame`s that answer `START_LOOT_ROLL`/`CANCEL_LOOT_ROLL` off a pushed
+//! The group-loot roll popups (decision 0591, stock `Interface\FrameXML\GroupLootFrame.xml`): the
+//! four stacked `GroupLootFrame`s that answer `START_LOOT_ROLL`/`CANCEL_LOOT_ROLL` off a pushed
 //! [`LootRollsState`] snapshot (the `loot_roll.rs` seam's own harness idiom, mirrored here the way
 //! `loot_tests.rs` mirrors it for `set_loot`/`LootState`).
 
@@ -49,7 +49,7 @@ fn text_color(quads: &[ExtractedQuad], t: &str) -> Option<[f32; 4]> {
 /// `UIParent.xml` comes with it because the `START_LOOT_ROLL` router lives there now — the
 /// reference's own slot for it — where our file used to carry a dedicated hidden driver frame.
 fn load_group_loot(s: &UiScript) {
-    load_xml(s, "UIParent.xml");
+    // `UIParent.xml` is loaded by `setup()` above — the stock main bar needs it first (1938).
     // `LootFrame.xml` brings the whole loot window, and its `GroupLootDropDown` calls
     // `UIDropDownMenu_Initialize` from its own OnLoad — the dropdown kit is on the chain too.
     load_xml(s, r"Interface\FrameXML\UIDropDownMenu.xml");
@@ -70,18 +70,28 @@ fn setup() -> UiScript {
     // loader warns on a key with no global behind it rather than failing — which is exactly the
     // kind of warning `load_ui_no_warnings` is here to catch (decision 1838).
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
-    load_xml(&s, "Fonts.xml"); // ITEM_QUALITY_COLORS + GameFontNormalSmall
-                               // The loot window's slots inherit it — the same dependency the inspect window needed (1832).
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml"); // ITEM_QUALITY_COLORS + GameFontNormalSmall
+                                                    // The loot window's slots inherit it — the same dependency the inspect window needed (1832).
     load_xml(&s, r"Interface\FrameXML\ItemButtonTemplate.xml");
     // `UIPanelCloseButton`, which the loot window's four close buttons inherit.
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml"); // PASS/NEED/GREED + item hovers
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "ActionBar.xml"); // BENILLA_FALLBACK_ICON (the in-flight icon fallback) —
-                                   // buff_tests.rs's own load-order precedent for this same global.
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml"); // PASS/NEED/GREED + item hovers
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\MainMenuBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml"); // BENILLA_FALLBACK_ICON (the in-flight icon fallback) —
+                                                                  // buff_tests.rs's own load-order precedent for this same global.
     s
 }
 
@@ -144,7 +154,7 @@ fn rolls() -> LootRollsState {
 fn shipped_group_loot_frame_loads_clean_and_starts_hidden() {
     let _data = benilla_formats::wow_data_or_skip!();
     let s = setup();
-    load_xml(&s, "UIParent.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\UIDropDownMenu.xml");
     load_xml(&s, r"Interface\FrameXML\PartyMemberFrame.lua");
     // The four roll popups arrive INSIDE the chain's loot window, so there is no exact frame count
@@ -435,25 +445,29 @@ fn in_flight_roll_does_not_error_and_falls_back() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// **The production ordering** — the one every other test in this file quietly assumes away.
+/// **The chain frame paints once and never again — which is exactly why the app holds the event.**
 ///
-/// `feed_loot_rolls` drains `rolls.opened` in the *same pass* that builds the snapshot, so the model
-/// a `START_LOOT_ROLL` OnShow reads can never already contain the roll that just opened: the entry
-/// is added to `LootRolls::active` and to `opened` in one call. Every other test here calls
-/// `set_loot_rolls` **first** and so paints from a model the app would not have had yet — which is
-/// exactly how a roll dialog that shipped "green" reached the director showing a `?` icon and a
-/// blank name.
+/// This is the Lua half of decision 2010's fix (bug B371). It drives the sequence the app used to
+/// produce — `START_LOOT_ROLL` first, against a model that does not carry the roll yet — and pins
+/// that *nothing repairs it*: the snapshot landing afterwards paints no name, no icon and no
+/// decoration, for the life of the dialog. Our retired frame did repair it, from a benilla-only
+/// `UPDATE_LOOT_ROLL(rollID)`; 1838 migrated to the stock frame, which has no such seam and never
+/// listened, and 1883 removed the event.
 ///
-/// The guarantee this pins is therefore not an ordering but a *repair*: whenever a roll's display
-/// identity changes under an open frame — the snapshot finally arriving, or a late item template —
-/// `UPDATE_LOOT_ROLL(rollID)` repaints it.
+/// The reference is in the same position and answers it upstream, in C: `0x61b310` fires
+/// `START_LOOT_ROLL` from the item-template cache's *arrival callback* (`0x61b460`) when the record
+/// is not resident. So `feed_loot_rolls` holds the event until the template is in — pinned
+/// app-side in `ui_loot_roll.rs`'s `the_roll_waits_for_its_item_template`, which is the test that
+/// fails if the hold is lost. This one is its premise: it says what that hold is protecting
+/// against, and it must keep reading blank — a repaint appearing here would mean a seam the 1.12
+/// client does not have had grown back.
 #[test]
-fn a_roll_that_opens_before_its_snapshot_stays_blank() {
+fn nothing_repaints_a_frame_that_opened_before_its_snapshot() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     load_group_loot(&s);
 
-    // The app's order: the event first, against a model that has no such roll at all.
+    // The order the app must never produce: the event first, against a model with no such roll.
     s.fire_event(
         "START_LOOT_ROLL",
         vec![ScriptValue::Int(7), ScriptValue::Int(42_000)],
@@ -468,24 +482,23 @@ fn a_roll_that_opens_before_its_snapshot_stays_blank() {
         s.eval::<Option<String>>("return GroupLootFrame1Name:GetText()")
             .unwrap(),
         None,
-        "nothing to paint yet — this is the state the director saw"
+        "nothing to paint yet — this is the state B371 reported"
     );
 
     // ...and then the snapshot carrying it lands.
     s.set_loot_rolls(rolls());
-    s.fire_event("UPDATE_LOOT_ROLL", vec![ScriptValue::Int(7)]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
-    // **The repaint does not happen, and this is the migration's one real loss.** Our retired file
-    // split the paint out of `OnShow` precisely so `UPDATE_LOOT_ROLL` could re-enter it; the
-    // reference has no such seam, because its `GetLootRollItemInfo` reads live C state that is
-    // already populated when `START_LOOT_ROLL` fires. Ours reads a pushed snapshot, and while
-    // `feed_loot_rolls` does push it BEFORE firing, the item template can still be in flight.
+    // **The repaint does not happen — there is no path for it.** Our retired file split the paint
+    // out of `OnShow` precisely so an `UPDATE_LOOT_ROLL` could re-enter it; that is an event the
+    // 1.12 client does not have, and 1883 stopped firing it once the stock frame proved nothing
+    // listened. An adapter was tried before the hold and does not work either (1838): calling
+    // `GroupLootFrame_OnShow()` from inside a handler repaints nothing, and the `Hide()`/`Show()`
+    // round trip that does repaint only does so from a plain chunk.
     //
-    // The fix is app-side ordering, not a Lua shim: hold the roll until its template resolves.
-    // Decision 1838 carries that, and the engine question an adapter ran into on the way — a
-    // `Hide()`/`Show()` round trip re-fires `OnShow` from a plain chunk but not from inside an
-    // event handler.
+    // So the ordering is the app's to get right, and it now is: `feed_loot_rolls` holds
+    // `START_LOOT_ROLL` until `Items::template` answers, which is the reference's own gate
+    // (decision 2010).
     assert_eq!(
         s.eval::<Option<String>>("return GroupLootFrame1Name:GetText()")
             .unwrap(),
@@ -506,9 +519,8 @@ fn a_roll_that_opens_before_its_snapshot_stays_blank() {
         }),
         "and no icon arrives either — same missing repaint, same one cause"
     );
-    // An update for a roll this frame does not hold still leaves it alone and still does not
+    // A snapshot naming a roll this frame does not hold still leaves it alone and still does not
     // error — the half of this test that survives the migration intact.
-    s.fire_event("UPDATE_LOOT_ROLL", vec![ScriptValue::Int(999)]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert_eq!(
         s.eval::<Option<String>>("return GroupLootFrame1Name:GetText()")
@@ -532,19 +544,23 @@ fn managed_positions_engage_for_the_bare_frame_name() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     // UiPanels.xml before GroupLootFrame.xml, mirroring the shipped manifest order
     // (`ui_script::load_default_ui`): the roll file's CONFIRM_LOOT_ROLL entry indexes
     // `StaticPopupDialogs`, and indexing a nil there aborts the WHOLE inline <Script> chunk —
     // taking every BenillaGroupLootFrame_* function down with it, not just the popup.
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     // `TOOLTIP_DEFAULT_COLOR`, which the chain's dropdown backdrops read in their OnLoad — the
     // dropdown kit rides in with the loot window now (1838), so this bespoke setup needs it too.
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_group_loot(&s);
 
     let bottom = |s: &UiScript| s.eval::<f64>("return GroupLootFrame1:GetBottom()").unwrap();
@@ -559,19 +575,35 @@ fn managed_positions_engage_for_the_bare_frame_name() {
     // The bar stubs carry a no-op SetPoint: `MultiBarBottomLeft` and `ShapeshiftBarFrame` are
     // themselves rows in UIPARENT_MANAGED_FRAME_POSITIONS, so since those frames wear their
     // reference names the pass positions them as well as reading their visibility.
-    s.run("MultiBarBottomLeft = { IsShown = function() return true end, SetPoint = function() end, ClearAllPoints = function() end }; MultiBarBottomRight = MultiBarBottomLeft; UIParent_ManageFramePositions()")
+    // **The bottom-bar flags come from the SAVED GLOBALS, not from the frames.** The stock pass
+    // reads `SHOW_MULTI_ACTIONBAR_1`/`_2` (`UIParent.lua:1598-1606`) and never asks the bars
+    // whether they are shown — our retired copy asked, which is why this drive used to fake a
+    // frame with an `IsShown`. The fake also had no `IsObjectType`, which the pass calls on every
+    // row it seats (1988).
+    s.run("SHOW_MULTI_ACTIONBAR_1 = 1 SHOW_MULTI_ACTIONBAR_2 = 1 UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();
     assert_eq!(bottom(&s), 102.0, "60 + bottomEither 42 — the row engaged");
 
     // The stance bar shows on top of them.
-    s.run("ShapeshiftBarFrame = { IsShown = function() return true end, SetPoint = function() end, ClearAllPoints = function() end }; UIParent_ManageFramePositions()")
+    // The pass's shapeshift-appearance arm (the reference's own, UIParent.lua:1705-1732 — in ours
+    // since 1938) touches the bar's three shelf textures by name, unguarded as the reference has
+    // it; a stand-in frame needs stand-in textures.
+    s.run(
+        "local t = { Show = function() end, Hide = function() end } \
+         ShapeshiftBarLeft, ShapeshiftBarMiddle, ShapeshiftBarRight = t, t, t",
+    )
+    .unwrap();
+    s.run(
+        "ShapeshiftBarFrame = ShapeshiftBarFrame or CreateFrame(\"Frame\", \"ShapeshiftBarFrame\") \
+         ShapeshiftBarFrame:Show() UIParent_ManageFramePositions()",
+    )
         .unwrap();
     s.resolve();
     assert_eq!(bottom(&s), 144.0, "60 + 42 + pet 42");
 
     // And it settles back when the stance bar hides.
-    s.run("ShapeshiftBarFrame = { IsShown = function() return false end, SetPoint = function() end, ClearAllPoints = function() end }; UIParent_ManageFramePositions()")
+    s.run("ShapeshiftBarFrame:Hide() UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();
     assert_eq!(bottom(&s), 102.0, "back to the multibar-only stack");
@@ -590,10 +622,17 @@ fn ctrl_and_shift_on_the_roll_icon_preview_and_post_its_link() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     load_group_loot(&s);
-    load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink, the shared shift-insert helper
-    load_xml(&s, "DressUpFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml"); // UIParent + UIParent.lua, the reference's own (1988)
+    load_xml(&s, "Interface\\FrameXML\\DressUpFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
-    load_xml(&s, "ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
     s.set_loot_rolls(rolls());
 
     // Roll 8 (BoE Worn Shortsword) claims frame 1 — a non-BoP roll, so the dice below can land a

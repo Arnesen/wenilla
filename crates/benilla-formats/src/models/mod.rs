@@ -40,7 +40,7 @@ pub use key_anim::{KeyAnim, SeqLoops};
 pub use m2_batches::*;
 pub use mat_anim::{AlphaAnim, AlphaSeq, RgbAnim, ScalarAnim};
 pub use records::*;
-pub use tex_anim::UvAnim;
+pub use tex_anim::{rotation_2x2, uv_transform, UvAnim, UvRotAnim};
 pub use types::*;
 pub use wmo::*;
 
@@ -84,6 +84,7 @@ fn remap_submesh(
             skin_slot: None,
             geoset_id: 0, // set by the caller per batch (the M2 path; WMO leaves it 0)
             char_slot: None, // set by the caller per batch (M2 only)
+            icon_slot: false, // set by the caller per batch (M2 texture type 14)
             blend,
             // Repeat is the pre-0763 behaviour and stays WMO's; the M2 batch loop overrides both
             // from the texture record's own flags.
@@ -106,11 +107,13 @@ fn remap_submesh(
             alpha_anim: None, // set by the M2 path from the batch's colour/weight tracks
             uv_anim: None,    // set by the M2 path from the batch's texture transform
             uv_seq: None,     // …and its per-sequence set, when the slots disagree (1408)
-            rgb_anim: None,   // set by the M2 path from the batch's colour RGB track
-            rgb_seq: None,    // …ditto (1408)
-            wmo_batch: None,  // set by the WMO path from the MOGP batch-section counts
-            env_map: false,   // set by the M2 path from texture_unit_lookup[texCoordSet] > 2
-            section: None,    // set by the M2 path from the batch's skin_section_index
+            uv_rot_seq: None,
+            uv_scale_seq: None,
+            rgb_anim: None,  // set by the M2 path from the batch's colour RGB track
+            rgb_seq: None,   // …ditto (1408)
+            wmo_batch: None, // set by the WMO path from the MOGP batch-section counts
+            env_map: false,  // set by the M2 path from texture_unit_lookup[texCoordSet] > 2
+            section: None,   // set by the M2 path from the batch's skin_section_index
         },
         globals,
     )

@@ -65,7 +65,57 @@ pub struct ChatSend {
     pub target: Option<String>,
 }
 
+impl super::UiScript {
+    /// The languages this character **knows**, in `Languages.dbc` row order — what
+    /// `GetNumLaguages`/`GetLanguageByIndex` walk. The app folds it the reference's way:
+    /// `0x4b25b0` stores `[languageId] = spellId` for every known spell whose `Effect_1 == 39`,
+    /// and `0x5ec720` answers non-zero only when that spell's skill line is in the player's
+    /// skill block (wow-re `chat-language-scramble.md` §8, C6). Fires `LANGUAGE_LIST_CHANGED`
+    /// (`0x49b970`, event 0x102) when the list moves.
+    pub fn set_known_languages(&mut self, names: Vec<String>) {
+        let changed = {
+            let mut model = self.model_mut();
+            if model.known_languages == names {
+                false
+            } else {
+                model.known_languages = names;
+                true
+            }
+        };
+        if changed {
+            self.fire_event("LANGUAGE_LIST_CHANGED", vec![]);
+        }
+    }
+}
+
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
+    // GetNumLaguages() — `0x49fb30`, the binary's own spelling (wow-re
+    // `bag-language-combat-action-bindings.md` §2). Walks `Languages.dbc` and counts the rows
+    // `0x5ec720` answers non-zero for; **one number**.
+    lua.globals().set(
+        "GetNumLaguages",
+        lua.create_function(|lua, _ignored: MultiValue| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(model.known_languages.len() as i64)
+        })?,
+    )?;
+    // GetLanguageByIndex(i) — `0x49fbe0`: the same walk, pushing **one string** — the
+    // `Name_lang` of the i-th (1-based) *known* language. Positional among the known rows,
+    // never a row number or a language id; past the end it pushes nothing.
+    lua.globals().set(
+        "GetLanguageByIndex",
+        lua.create_function(|lua, index: Option<i64>| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let name = index
+                .and_then(|i| usize::try_from(i).ok())
+                .and_then(|i| i.checked_sub(1))
+                .and_then(|i| model.known_languages.get(i));
+            Ok(match name {
+                Some(n) => MultiValue::from_vec(vec![Value::String(lua.create_string(n)?)]),
+                None => MultiValue::new(),
+            })
+        })?,
+    )?;
     // GetDefaultLanguage() → **exactly ONE value, a string** — or **zero values**, which is not
     // the same thing (`0x49fcd0`, wow-re `bag-language-combat-action-bindings.md` §2).
     //
@@ -239,6 +289,40 @@ mod tests {
             s.eval::<String>(r#"return GetDefaultLanguage("player")"#)
                 .unwrap(),
             "Common"
+        );
+    }
+}
+
+#[cfg(test)]
+mod language_tests {
+    use crate::script::UiScript;
+
+    #[test]
+    fn the_language_walk_is_positional_over_the_known_rows() {
+        let mut s = UiScript::new().unwrap();
+        assert_eq!(s.eval::<i64>("return GetNumLaguages()").unwrap(), 0);
+        assert_eq!(
+            s.eval::<i64>("return select('#', GetLanguageByIndex(1))")
+                .unwrap(),
+            0,
+            "past the end pushes nothing, not nil"
+        );
+        s.run(
+            "local f = CreateFrame('Frame') f:RegisterEvent('LANGUAGE_LIST_CHANGED') \
+             f:SetScript('OnEvent', function() FIRED = (FIRED or 0) + 1 end)",
+        )
+        .unwrap();
+        s.set_known_languages(vec!["Orcish".into(), "Common".into()]);
+        s.set_known_languages(vec!["Orcish".into(), "Common".into()]);
+        assert_eq!(s.eval::<i64>("return GetNumLaguages()").unwrap(), 2);
+        assert_eq!(
+            s.eval::<String>("return GetLanguageByIndex(2)").unwrap(),
+            "Common"
+        );
+        assert_eq!(
+            s.eval::<i64>("return FIRED").unwrap(),
+            1,
+            "the list changing fires once; the same list again is silent"
         );
     }
 }

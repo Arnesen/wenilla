@@ -152,6 +152,40 @@ pub(crate) struct ServiceArms<'w> {
     /// The spirit healer's XP-loss question (bit 5): `0x5df730` does the same, firing
     /// `CONFIRM_XP_LOSS`.
     pub(crate) death: ResMut<'w, crate::death::DeathNet>,
+    /// `[0xb4e2d0]/[0xb4e2d4]`'s mirror — the NPC whose window is open, which the dispatcher
+    /// compares the clicked guid against *before* the ladder ([`interaction_already_open_on`]).
+    pub(crate) interact: Res<'w, crate::ui_session::InteractNpc>,
+    /// The cursor, for the vendor arm's fork (`0x5df5d7`) — peeked to choose the arm's leg, then
+    /// taken through the **sell** clear once the sale actually goes out. `Option` because a
+    /// headless net-only build mounts no VM.
+    pub(crate) script: Option<NonSendMut<'w, benilla_ui::script::UiScript>>,
+}
+
+/// **The re-click gate** — `0x5f0130`'s own, at `0x5f0251`/`0x5f025c`, sitting between the range
+/// test and the ladder:
+///
+/// ```text
+/// 5f024c  8b 46 08            mov edx,[esi+8] → [eax]   ; the CLICKED unit's guid
+/// 5f0251  3b 15 d0 e2 b4 00   cmp edx,[0xb4e2d0]        ; the interaction NPC, low
+/// 5f0257  75 0f               jne 0x5f0268              ; different → on to the ladder
+/// 5f025c  3b 05 d4 e2 b4 00   cmp eax,[0xb4e2d4]        ; high
+/// 5f0262  0f 84 62 03 00 00   je  0x5f05ca              ; SAME → the silent return
+/// ```
+///
+/// So **right-clicking the NPC whose window is already open does nothing at all**: no packet, no
+/// error, and no talk gesture — the gesture lives at the tail of each arm, and no arm runs.
+///
+/// `[0xb4e2d0]` is the `"npc"` UnitID token (wow-re `ui/scratch/unit-token-grammar.md` §4.1 row 9),
+/// and the timing is what makes this safe to transcribe: an image-wide census of the two write
+/// sites — the arm at `0x493114` inside `SetInteractionNPC 0x4930d0`, and `0x49334b`'s clear inside
+/// `0x493310` — finds **fourteen callers of the setter, none of them on the click path**. Every one
+/// is a window *opener*, armed when the server's reply lands. The first click therefore always gets
+/// through (nothing is open yet); only a re-click while the window stands is eaten. That is exactly
+/// the set [`crate::ui_session::feed_interact_npc`] collapses, which is why this reads that
+/// resource rather than growing a second latch — the mailbox and the item-text reader are the two
+/// arming sites it leaves out, and neither is a unit a right-click can land on.
+fn interaction_already_open_on(target: u64, interact: &crate::ui_session::InteractNpc) -> bool {
+    interact.1 == Some(target)
 }
 
 /// On a clean right-*click* (vanilla's context action — [`WorldRightClick`], never a turn-drag):
@@ -161,11 +195,12 @@ pub(crate) struct ServiceArms<'w> {
 ///   action-bar attack's path (decision 0073's verified attack-start: SETSHEATHED then ATTACKSWING).
 /// - **Loot** (dead + `UNIT_DYNFLAG_LOOTABLE` — the state, not the Pickup cursor kind, which a
 ///   live vendor shares): open the corpse's loot (`CMSG_LOOT`), decision 0084.
-/// - **Interact** on an in-range friendly service NPC: a vendor-only NPC opens the vendor list
-///   directly (`CMSG_LIST_INVENTORY`); any other service NPC — gossip, and the out-of-scope
-///   banker/trainer/innkeeper/flightmaster — opens via the universal `CMSG_GOSSIP_HELLO`, whose
-///   returned menu the gossip window shows (their specialized windows are their own arcs). On the
-///   send, our avatar plays EmoteTalk (id 60), which stows the weapon via the anim→sheath reconcile.
+/// - **Interact** on an in-range friendly service NPC: the reference's own first-match-wins ladder
+///   over `UNIT_NPC_FLAGS` ([`service_arm`] → [`service_action`], decision 1861) — bit 0 GOSSIP
+///   first, so a trainer or questgiver that also carries the bit still opens a menu and only a
+///   flagless one opens its own window (1865). A click that lands on the NPC whose window is
+///   already open is eaten before any of it ([`interaction_already_open_on`], 1905). On a taken
+///   arm our avatar plays EmoteTalk (id 60), which stows the weapon via the anim→sheath reconcile.
 ///
 /// The cursor's own gate grays a service beyond `SERVICE_RANGE` (`unable`); we don't send then (no
 /// auto-approach yet) — the selection still lands. Attack, by contrast, is never range-gated
@@ -760,10 +795,38 @@ pub(super) fn act_on_right_click(
             // projection of the winning bit: eight arms collapse to Speak(6) and two to Buy(3),
             // so a kind-keyed dispatch cannot tell a banker from an auctioneer, nor a trainer
             // from an innkeeper from a spirit healer. It sent `CMSG_GOSSIP_HELLO` for all eight.
+            // `0x5f0251` — the click that lands on the NPC we are already talking to is eaten
+            // whole, before the ladder and before the gesture (decision 1905).
+            if interaction_already_open_on(guid, &service.interact) {
+                debug!(
+                    "right-click interact: {guid:#x} — its window is already open, nothing sent"
+                );
+                return;
+            }
             let npc_flags = stores
                 .get(entity)
                 .map(|(s, _)| s.0.unit_npc_flags())
                 .unwrap_or(0);
+            // The vendor fork's input, resolved before the arm is known because it is cheap and
+            // because `service_action` must stay pure. **Peeked, not taken**: the cursor is only
+            // cleared once the sale is actually chosen, so a click on a trainer while holding an
+            // item leaves the item where it is.
+            //
+            // The reference addresses the packet with the cursor's own stored guid; we carry
+            // `(bag, slot)` and resolve it, exactly as the merchant window's sell route does. A
+            // pickup LOCKS the source slot rather than emptying it, so the guid is there in every
+            // ordinary case; if it ever is not, the fork simply does not arm and the click opens
+            // the list instead — the benign side of a divergence we cannot avoid.
+            let cursor_sale = service
+                .script
+                .as_deref()
+                .and_then(|s| s.cursor_item())
+                .and_then(|item| {
+                    let slot0 = u8::try_from(item.slot.saturating_sub(1)).unwrap_or(0);
+                    self_store.and_then(|s| {
+                        crate::ui_items::slot_guid(&s.0, item.bag, slot0, &go_inputs.items)
+                    })
+                });
             let Some(arm) = service_arm(npc_flags, service.quest.status(guid)) else {
                 // `0x5f05ca` — a unit that reaches the ladder and matches no consulted bit
                 // (repair-only, or a questgiver with nothing on offer) does nothing at all, and
@@ -771,10 +834,24 @@ pub(super) fn act_on_right_click(
                 debug!("right-click interact: {guid:#x} matches no service bit — nothing sent");
                 return;
             };
-            match service_action(arm, guid, self_store.is_some_and(|s| s.0.player_is_ghost())) {
+            match service_action(
+                arm,
+                guid,
+                self_store.is_some_and(|s| s.0.player_is_ghost()),
+                cursor_sale,
+            ) {
                 ServiceAction::Send(cmd) => {
                     debug!("right-click interact: {guid:#x} ({arm:?})");
                     let _ = seam.net.0.send(cmd);
+                }
+                ServiceAction::SellFromCursor(cmd) => {
+                    debug!("right-click interact: {guid:#x} (vendor — selling the held item)");
+                    let _ = seam.net.0.send(cmd);
+                    // Now the cursor goes, through the SELL clear: `CURSOR_UPDATE` fires and the
+                    // source slot stays greyed until the server's inventory update takes it away.
+                    if let Some(script) = service.script.as_deref_mut() {
+                        script.take_cursor_item_for_sale();
+                    }
                 }
                 ServiceAction::AskBinder => {
                     debug!(
@@ -983,7 +1060,7 @@ fn route_lock_refusal(
     lock_type_name: Option<&str>,
     key: KeyFact,
 ) -> Option<crate::ui_action::UiError> {
-    use crate::ui_action::UiError;
+    use crate::ui_action::{FillArg, UiError};
     if flag_locked {
         return Some(UiError::key(match go_type {
             0 => "ERR_DOOR_LOCKED",
@@ -994,27 +1071,19 @@ fn route_lock_refusal(
     match slot0.key_type {
         benilla_formats::LOCK_KEY_ITEM => match key {
             KeyFact::Unknown => None,
-            KeyFact::Named(name) => Some(UiError {
-                key: "ERR_USE_LOCKED_WITH_ITEM_S",
-                fill_s: Some(name),
-                fill_d: None,
-            }),
+            KeyFact::Named(name) => Some(UiError::s("ERR_USE_LOCKED_WITH_ITEM_S", name)),
         },
         benilla_formats::LOCK_KEY_SKILL => {
             let name = lock_type_name.unwrap_or("UNKNOWN").to_string();
             if opener_known {
                 let required = super::lock::required_skill(slot0, go_level).max(0) as u32;
-                Some(UiError {
-                    key: "ERR_USE_LOCKED_WITH_SPELL_KNOWN_SI",
-                    fill_s: Some(name),
-                    fill_d: Some(required),
-                })
+                // String-then-Integer, the template's own order (cursor-system.md §8.8).
+                Some(UiError::args(
+                    "ERR_USE_LOCKED_WITH_SPELL_KNOWN_SI",
+                    vec![FillArg::S(name), FillArg::D(i64::from(required))],
+                ))
             } else {
-                Some(UiError {
-                    key: "ERR_USE_LOCKED_WITH_SPELL_S",
-                    fill_s: Some(name),
-                    fill_d: None,
-                })
+                Some(UiError::s("ERR_USE_LOCKED_WITH_SPELL_S", name))
             }
         }
         _ => Some(UiError::key("ERR_USE_CANT_OPEN")),
@@ -1174,7 +1243,7 @@ pub(crate) enum ServiceArm {
 /// The reference re-reads the flags field for a redundant `bits 9 AND 10` block before the plain
 /// bit-9 test; it routes to the same handler bit 9 alone reaches, so it is dead in effect and is
 /// not transcribed (recording it would be a distinction with no outcome).
-fn service_arm(npc_flags: u32, quest_status: Option<u32>) -> Option<ServiceArm> {
+pub(crate) fn service_arm(npc_flags: u32, quest_status: Option<u32>) -> Option<ServiceArm> {
     use cursor_mode::npc_flags as f;
     let bit = |m: u32| npc_flags & m != 0;
     Some(if bit(f::GOSSIP) {
@@ -1216,6 +1285,10 @@ fn service_arm(npc_flags: u32, quest_status: Option<u32>) -> Option<ServiceArm> 
 pub(crate) enum ServiceAction {
     /// The arm's own opcode.
     Send(ClientCommand),
+    /// The vendor arm's **cursor fork** (`0x5df5d7`): an item is on the cursor, so this click
+    /// sells it rather than opening the list — send, then take the cursor through the sell clear
+    /// ([`benilla_ui::script::UiScript::take_cursor_item_for_sale`]).
+    SellFromCursor(ClientCommand),
     /// Raise `CONFIRM_BINDER` locally and send nothing (`0x5dfdc0`).
     AskBinder,
     /// Raise `CONFIRM_XP_LOSS` locally and send nothing (`0x5df730`).
@@ -1226,22 +1299,46 @@ pub(crate) enum ServiceAction {
 
 /// One taken arm → what benilla does about it.
 ///
+/// `cursor_sale` is the vendor fork's input: the guid of the **mode-1 item on the cursor**, or
+/// `None` for an empty cursor or any other payload — benilla's resolution of the reference's
+/// `GetCursorItem 0x494c60`, which returns `[0xb4e248]/[0xb4e24c]` only while `[0xb4d900] == 1`.
+///
 /// **The two "spirit" arms are ghost-gated at entry** (`0x5df74a` / `0x5df962`, the byte-identical
 /// `PLAYER_FLAGS` bit 4 test): a LIVING player who right-clicks a spirit healer or spirit guide
 /// carrying no gossip bit gets nothing at all — no packet, no event, no error. That is not an
 /// omission here, it is the reference's own answer.
 ///
-/// **Two arms deviate deliberately, and here is the whole of it**: `TabardDesigner` should send
-/// `MSG_TABARDVENDOR_ACTIVATE` and `Battlemaster` `CMSG_BATTLEMASTER_HELLO`, and benilla has
-/// neither window to open with the reply. They keep the universal gossip greeting, which against
-/// vmangos still puts a usable menu on screen; sending the faithful opcode into a reply we drop
-/// would trade a working affordance for a wire detail nobody can see. Each retires the moment its
-/// window exists — that is the condition, written down (decision 1861).
-fn service_action(arm: ServiceArm, guid: u64, ghost: bool) -> ServiceAction {
+/// The `TabardDesigner` and `Battlemaster` arms send their own opcodes (`0x5f051a`'s
+/// `MSG_TABARDVENDOR_ACTIVATE`, `0x5f0551`'s `CMSG_BATTLEMASTER_HELLO`) since decision 1977 —
+/// 1861 had them on the universal gossip greeting while neither window existed; the battleground
+/// list (1974) and the tabard designer (1977) answer the replies now. The tabard arm's one gate
+/// — the shapeshift refusal `ERR_EMBLEMERROR_NOTABARDGEOSET` when the player's displayed model is
+/// not the native one, and the same-vendor no-op — is named, not built (1977's record).
+pub(crate) fn service_action(
+    arm: ServiceArm,
+    guid: u64,
+    ghost: bool,
+    cursor_sale: Option<u64>,
+) -> ServiceAction {
     match arm {
         ServiceArm::Gossip => ServiceAction::Send(ClientCommand::GossipHello { guid }),
         ServiceArm::Questgiver => ServiceAction::Send(ClientCommand::QuestgiverHello { npc: guid }),
-        ServiceArm::Vendor => ServiceAction::Send(ClientCommand::ListInventory { guid }),
+        // **The vendor arm is a fork, not a send** (`0x5df5d0`). `0x5df5d7 call 0x494c60` is
+        // `GetCursorItem` — the cursor's own payload guid, answered for **mode 1 only** — and a
+        // non-zero answer takes the arm to `CMSG_SELL_ITEM 0x1a0` instead of the list. Nothing on
+        // either leg tests the merchant window, so this sells to a vendor whose window was never
+        // opened; the re-click gate above is what keeps it from firing when it IS open.
+        ServiceArm::Vendor => match cursor_sale {
+            Some(item_guid) => ServiceAction::SellFromCursor(ClientCommand::SellItem {
+                vendor: guid,
+                item_guid,
+                // `xor ecx,ecx` at `0x5df5ee` — the body's `u8 count`, and the client only ever
+                // writes the zero here. Whole stack (vmangos `HandleSellItemOpcode` corroborates
+                // the meaning; the byte is the fact).
+                count: 0,
+            }),
+            None => ServiceAction::Send(ClientCommand::ListInventory { guid }),
+        },
         ServiceArm::FlightMaster => ServiceAction::Send(ClientCommand::TaxiQueryNodes { guid }),
         ServiceArm::Trainer => ServiceAction::Send(ClientCommand::TrainerList { trainer: guid }),
         ServiceArm::SpiritHealer if ghost => ServiceAction::AskSpiritHealer,
@@ -1259,9 +1356,11 @@ fn service_action(arm: ServiceArm, guid: u64, ghost: bool) -> ServiceAction {
         ServiceArm::Petitioner => {
             ServiceAction::Send(ClientCommand::PetitionShowList { npc: guid })
         }
-        // The two documented deviations — see this function's doc.
-        ServiceArm::TabardDesigner | ServiceArm::Battlemaster => {
-            ServiceAction::Send(ClientCommand::GossipHello { guid })
+        ServiceArm::TabardDesigner => {
+            ServiceAction::Send(ClientCommand::TabardVendorActivate { npc: guid })
+        }
+        ServiceArm::Battlemaster => {
+            ServiceAction::Send(ClientCommand::BattlemasterHello { npc: guid })
         }
         ServiceArm::Auctioneer => {
             ServiceAction::Send(ClientCommand::AuctionHello { auctioneer: guid })
@@ -1331,6 +1430,7 @@ pub(super) fn selection_requests(
     // the classification too, which is why this drain no longer states one: hand-stating it here
     // is exactly how a `false` that the binary refutes got written down.
     mut commit: super::by_name::SelectCommit,
+    mut assist_by_name: MessageWriter<super::by_name::AssistRequest>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -1356,6 +1456,11 @@ pub(super) fn selection_requests(
                 Some((basis, _)) => commit.assist(basis, "AssistUnit"),
                 None => info!("assist (AssistUnit): \"{token}\" names nothing; silent no-op"),
             },
+            // `0x489c40` — the `/assist Bob` handler's verb: a player NAME, resolved by the
+            // app's name scan (prefix-ok, players only) the way the slash line always was.
+            SelectionRequest::AssistByName(name) => {
+                assist_by_name.write(super::by_name::AssistRequest { name: Some(name) });
+            }
             // `0x489b45` reads the last-attackable pair and hands it to the same `0x489a40`.
             // **Empty memory is a no-op, and that is derived now**: the shim `0x489b40` is
             // thirteen bytes with no emptiness test at all, where `TargetLastTarget 0x489b00`
@@ -1428,7 +1533,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            (e.key, e.fill_s.as_deref(), e.fill_d),
+            (e.key, e.arg_s(), e.arg_d()),
             ("ERR_USE_LOCKED_WITH_SPELL_S", Some("Herbalism"), None)
         );
         // Vein, Mining known but rank < 155 → 0xe0 "Requires %s %d" with the slot's Skill[0].
@@ -1443,7 +1548,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            (e.key, e.fill_s.as_deref(), e.fill_d),
+            (e.key, e.arg_s(), e.arg_d()),
             (
                 "ERR_USE_LOCKED_WITH_SPELL_KNOWN_SI",
                 Some("Mining"),
@@ -1461,7 +1566,7 @@ mod tests {
             KeyFact::Unknown,
         )
         .unwrap();
-        assert_eq!(e.fill_d, Some(100));
+        assert_eq!(e.arg_d(), Some(100));
         // A missing LockType row fills the ref's literal fallback (`0x838044`).
         let e = route_lock_refusal(
             &skill_slot(9999, 0),
@@ -1473,7 +1578,7 @@ mod tests {
             KeyFact::Unknown,
         )
         .unwrap();
-        assert_eq!(e.fill_s.as_deref(), Some("UNKNOWN"));
+        assert_eq!(e.arg_s(), Some("UNKNOWN"));
         // Key lock, key absent + named → 0xde "Requires %s" with the item name; the template
         // miss is silent, like the ref (a key we DO hold never reaches the toast at all — the
         // resolver returns `OpenByKey` and the click casts it, decision 0752).
@@ -1494,7 +1599,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            (e.key, e.fill_s.as_deref()),
+            (e.key, e.arg_s()),
             ("ERR_USE_LOCKED_WITH_ITEM_S", Some("Shadowforge Key"))
         );
         assert!(
@@ -1518,7 +1623,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(e.key, key);
-            assert_eq!(e.fill_s, None);
+            assert_eq!(e.arg_s(), None);
         }
         // Slot-0 type neither key nor skill → 0xda "You can't open that."
         let odd = LockSlot {
@@ -1707,42 +1812,43 @@ mod tests {
     /// The eight arms that used to collapse into `CMSG_GOSSIP_HELLO` are the point of this test.
     #[test]
     fn the_service_arms_send_what_the_reference_sends() {
-        let sent = |arm, ghost| match service_action(arm, 0x42, ghost) {
+        let sent = |arm, ghost| match service_action(arm, 0x42, ghost, None) {
             ServiceAction::Send(cmd) => format!("{cmd:?}"),
+            ServiceAction::SellFromCursor(cmd) => format!("sell {cmd:?}"),
             ServiceAction::AskBinder => "ask-binder".to_string(),
             ServiceAction::AskSpiritHealer => "ask-spirit-healer".to_string(),
             ServiceAction::Silent(_) => "silent".to_string(),
         };
         assert!(matches!(
-            service_action(ServiceArm::Questgiver, 0x42, false),
+            service_action(ServiceArm::Questgiver, 0x42, false, None),
             ServiceAction::Send(ClientCommand::QuestgiverHello { npc: 0x42 })
         ));
         assert!(matches!(
-            service_action(ServiceArm::Trainer, 0x42, false),
+            service_action(ServiceArm::Trainer, 0x42, false, None),
             ServiceAction::Send(ClientCommand::TrainerList { trainer: 0x42 })
         ));
         assert!(matches!(
-            service_action(ServiceArm::Petitioner, 0x42, false),
+            service_action(ServiceArm::Petitioner, 0x42, false, None),
             ServiceAction::Send(ClientCommand::PetitionShowList { npc: 0x42 })
         ));
         assert!(matches!(
-            service_action(ServiceArm::Vendor, 0x42, false),
+            service_action(ServiceArm::Vendor, 0x42, false, None),
             ServiceAction::Send(ClientCommand::ListInventory { guid: 0x42 })
         ));
         assert!(matches!(
-            service_action(ServiceArm::FlightMaster, 0x42, false),
+            service_action(ServiceArm::FlightMaster, 0x42, false, None),
             ServiceAction::Send(ClientCommand::TaxiQueryNodes { guid: 0x42 })
         ));
         assert!(matches!(
-            service_action(ServiceArm::Banker, 0x42, false),
+            service_action(ServiceArm::Banker, 0x42, false, None),
             ServiceAction::Send(ClientCommand::BankerActivate { guid: 0x42 })
         ));
         assert!(matches!(
-            service_action(ServiceArm::Auctioneer, 0x42, false),
+            service_action(ServiceArm::Auctioneer, 0x42, false, None),
             ServiceAction::Send(ClientCommand::AuctionHello { auctioneer: 0x42 })
         ));
         assert!(matches!(
-            service_action(ServiceArm::StableMaster, 0x42, false),
+            service_action(ServiceArm::StableMaster, 0x42, false, None),
             ServiceAction::Send(ClientCommand::ListStabledPets { npc: 0x42 })
         ));
         // The innkeeper asks, mounted or not, alive or not — and sends nothing.
@@ -1752,13 +1858,164 @@ mod tests {
         assert_eq!(sent(ServiceArm::SpiritHealer, false), "silent");
         assert_eq!(sent(ServiceArm::SpiritGuide, false), "silent");
         assert_eq!(sent(ServiceArm::SpiritHealer, true), "ask-spirit-healer");
-        // The two documented deviations keep the greeting until their windows exist.
-        for arm in [ServiceArm::TabardDesigner, ServiceArm::Battlemaster] {
-            assert!(matches!(
-                service_action(arm, 0x42, false),
-                ServiceAction::Send(ClientCommand::GossipHello { guid: 0x42 })
-            ));
+        // The two arms 1861 had on the greeting send their own opcodes since 1977.
+        assert!(matches!(
+            service_action(ServiceArm::TabardDesigner, 0x42, false, None),
+            ServiceAction::Send(ClientCommand::TabardVendorActivate { npc: 0x42 })
+        ));
+        assert!(matches!(
+            service_action(ServiceArm::Battlemaster, 0x42, false, None),
+            ServiceAction::Send(ClientCommand::BattlemasterHello { npc: 0x42 })
+        ));
+    }
+
+    /// **The vendor arm is a fork, and only the vendor arm** — decision 1914.
+    ///
+    /// `0x5df5d0` asks `GetCursorItem 0x494c60` before anything else, and a mode-1 item on the
+    /// cursor sends `CMSG_SELL_ITEM` instead of `CMSG_LIST_INVENTORY`. What this pins is the
+    /// blast radius: the held item must change the **vendor** arm and **nothing else**, because
+    /// the fork lives inside that one handler and every other arm is reached without ever
+    /// consulting the cursor. A cursor read that leaked into the ladder would sell an item at a
+    /// trainer.
+    #[test]
+    fn only_the_vendor_arm_reads_the_cursor() {
+        const VENDOR: u64 = 0xF130_0000_0000_0042;
+        const ITEM: u64 = 0x4000_0000_0000_0099;
+
+        // Empty cursor: the plain list open, exactly as before.
+        assert!(matches!(
+            service_action(ServiceArm::Vendor, VENDOR, false, None),
+            ServiceAction::Send(ClientCommand::ListInventory { guid: VENDOR })
+        ));
+        // An item held: the sale, addressed to the CLICKED npc, count 0 = whole stack — and the
+        // variant that carries the cursor clear with it.
+        assert!(matches!(
+            service_action(ServiceArm::Vendor, VENDOR, false, Some(ITEM)),
+            ServiceAction::SellFromCursor(ClientCommand::SellItem {
+                vendor: VENDOR,
+                item_guid: ITEM,
+                count: 0,
+            })
+        ));
+        // Every other arm answers the same held or not. `SellFromCursor` may not appear anywhere
+        // but the vendor arm — that is the property, asserted over the whole enum rather than
+        // over the arms someone remembered to list.
+        for arm in [
+            ServiceArm::Gossip,
+            ServiceArm::Questgiver,
+            ServiceArm::FlightMaster,
+            ServiceArm::Trainer,
+            ServiceArm::SpiritHealer,
+            ServiceArm::SpiritGuide,
+            ServiceArm::Innkeeper,
+            ServiceArm::Banker,
+            ServiceArm::Petitioner,
+            ServiceArm::TabardDesigner,
+            ServiceArm::Battlemaster,
+            ServiceArm::Auctioneer,
+            ServiceArm::StableMaster,
+        ] {
+            for ghost in [false, true] {
+                let describe = |a: ServiceAction| match a {
+                    ServiceAction::Send(cmd) => format!("{cmd:?}"),
+                    ServiceAction::SellFromCursor(cmd) => format!("SELL {cmd:?}"),
+                    ServiceAction::AskBinder => "ask-binder".into(),
+                    ServiceAction::AskSpiritHealer => "ask-xp-loss".into(),
+                    ServiceAction::Silent(w) => format!("silent {w}"),
+                };
+                let empty = describe(service_action(arm, VENDOR, ghost, None));
+                let held = describe(service_action(arm, VENDOR, ghost, Some(ITEM)));
+                assert_eq!(
+                    empty, held,
+                    "{arm:?} (ghost={ghost}) changed its answer because an item was on the cursor"
+                );
+                assert!(
+                    !held.starts_with("SELL"),
+                    "{arm:?} (ghost={ghost}) reached the vendor arm's sale"
+                );
+            }
         }
+    }
+
+    /// **The re-click gate, and the wiring it rests on** — decision 1905.
+    ///
+    /// The comparison itself is one `==`; what could actually be wrong is the *latch*. The
+    /// reference arms `[0xb4e2d0]` from fourteen window openers and from nothing on the click
+    /// path, so the gate is only ever "a window is open on this NPC" — and benilla reads that
+    /// state off [`crate::ui_session::feed_interact_npc`]'s collapse rather than a latch of its
+    /// own. So this drives the real feed and asserts the property that makes the transcription
+    /// sound: **nothing arms it until a window opens, every NPC window arms it, and the arm names
+    /// the window's own NPC.**
+    ///
+    /// The first click must always get through — that is the half a wrong latch would break, and
+    /// it is asserted first.
+    #[test]
+    fn the_reclick_gate_fires_only_while_that_npc_s_window_is_open() {
+        use crate::ui_session::{feed_interact_npc, InteractNpc};
+        use bevy::ecs::system::RunSystemOnce;
+
+        const NPC: u64 = 0xF130_0000_0000_0042;
+        const OTHER: u64 = 0xF130_0000_0000_0043;
+
+        let armed = |seed: &dyn Fn(&mut World)| {
+            let mut world = World::new();
+            world.init_resource::<InteractNpc>();
+            seed(&mut world);
+            world.run_system_once(feed_interact_npc).unwrap();
+            world.remove_resource::<InteractNpc>().unwrap()
+        };
+
+        // Nothing open: the FIRST click on any NPC reaches the ladder.
+        let idle = armed(&|_| {});
+        assert!(!interaction_already_open_on(NPC, &idle));
+        assert!(!interaction_already_open_on(OTHER, &idle));
+
+        // Each NPC window arms the token with its own NPC — one representative per opener family
+        // (a menu, a quest panel, a specialized window), which is the shape the gate depends on.
+        let with_gossip = armed(&|w| {
+            let mut g = crate::ui_gossip::GossipState::default();
+            g.npc = Some(NPC);
+            w.insert_resource(g);
+        });
+        let with_quest = armed(&|w| {
+            let mut q = crate::ui_quest::QuestGiver::default();
+            q.npc = Some(NPC);
+            w.insert_resource(q);
+        });
+        let with_trainer = armed(&|w| {
+            let mut t = crate::ui_trainer::TrainerOpen::default();
+            t.open(NPC, 0, Vec::new(), String::new());
+            w.insert_resource(t);
+        });
+        for (what, armed) in [
+            ("gossip", &with_gossip),
+            ("quest", &with_quest),
+            ("trainer", &with_trainer),
+        ] {
+            assert_eq!(armed.1, Some(NPC), "{what} did not arm the npc token");
+            // The re-click on THAT npc is eaten…
+            assert!(
+                interaction_already_open_on(NPC, armed),
+                "{what}: the re-click was not suppressed"
+            );
+            // …and a click on the NPC beside him is not. A gate that swallowed this would make
+            // every neighbouring vendor unclickable while a window stood.
+            assert!(
+                !interaction_already_open_on(OTHER, armed),
+                "{what}: the gate ate a click on a different NPC"
+            );
+        }
+
+        // Closing the window disarms it — the reference's `0x493310` zeroes the pair, and ours is
+        // a collapse, so a cleared session must read through as "clickable again".
+        let closed = armed(&|w| {
+            let mut t = crate::ui_trainer::TrainerOpen::default();
+            t.open(NPC, 0, Vec::new(), String::new());
+            t.clear();
+            w.insert_resource(t);
+        });
+        assert_eq!(closed.1, None);
+        assert!(!interaction_already_open_on(NPC, &closed));
     }
 
     /// **The selection queue, end to end** — Lua in, `Selection` out — over the four ways it is
@@ -1798,6 +2055,7 @@ mod tests {
         world.init_resource::<crate::net::Reputations>();
         world.init_resource::<Selection>();
         world.init_resource::<scan::LastEnemy>();
+        world.init_resource::<Messages<super::by_name::AssistRequest>>();
         world.insert_non_send_resource(UiScript::new().expect("a bare VM"));
 
         world.spawn((SelfPlayer, Guid(ME), store(&[(22, 100), (28, 100)])));

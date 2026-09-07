@@ -124,6 +124,14 @@ impl Factions {
     pub(crate) fn catalog(&self) -> &FactionCatalog {
         &self.0
     }
+
+    /// Wrap a catalog — **tests only**. A sibling module exercising a reaction gate needs a real
+    /// `Factions` in its world, and the field stays private otherwise: in a running client the
+    /// resource is built exactly once, from the DBC, by the loader below.
+    #[cfg(test)]
+    pub(crate) fn from_catalog(catalog: FactionCatalog) -> Self {
+        Self(catalog)
+    }
 }
 
 /// The colour `GetSelectionCircleColor` resolves — the pure classification half of the

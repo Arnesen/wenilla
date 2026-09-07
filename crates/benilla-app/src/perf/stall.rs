@@ -31,10 +31,10 @@
 //! `WOW_TEARDOWN_INJECT=<ms>` wedges World drop via a resource whose `Drop` sleeps — the
 //! director's beachball, synthetically.
 
+use bevy::platform::time::Instant;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
-use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 use bevy::time::Real;

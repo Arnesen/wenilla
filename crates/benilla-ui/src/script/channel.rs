@@ -31,6 +31,118 @@ use mlua::{Lua, MultiValue, Value};
 use super::Model;
 
 /// The 1-based slot of `name`, case-insensitively — `GetChannelName`'s first return.
+/// One `ChatChannels.dbc` row as the VM needs it for `JoinChannelByName` (decision 1908),
+/// `Add/RemoveChatWindowChannel` and `EnumerateServerChannels` (wow-re chat-cache-grammar.md
+/// §5-6): the id, the **Shortcut** (`General`, `Trade`, … — what every one of those verbs compares
+/// a typed name against, whole and case-folded), the name composed for the zone the player is in
+/// (`General - Elwynn Forest`; `None` while the zone text is empty, which is the verbs' nil leg),
+/// and whether the row is listed here at all (a `flags & 0x10` city row is, only in a city).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ZoneChannelRow {
+    pub id: u32,
+    pub shortcut: String,
+    pub resolved: Option<String>,
+    pub listed: bool,
+}
+
+/// A channel verb's ask, drained by the app into its `CMSG_*` (all of which
+/// `benilla-protocol::messages::client` already builds). The verbs are the stock
+/// `ChatFrame.lua` slash handlers' calls, one variant each.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChannelCommand {
+    /// `JoinChannelByName(name, password)` — sent on both of 1908's non-nil legs.
+    Join {
+        name: String,
+        password: String,
+    },
+    /// `LeaveChannelByName(name)`.
+    Leave {
+        name: String,
+    },
+    /// `ListChannelByName(name)` — `CMSG_CHANNEL_LIST`.
+    List {
+        name: String,
+    },
+    /// `ListChannels()` — the roster of every joined channel.
+    ListAll,
+    /// `DisplayChannelOwner(name)` — `CMSG_CHANNEL_OWNER`.
+    DisplayOwner {
+        name: String,
+    },
+    /// `SetChannelOwner(name, player)`.
+    SetOwner {
+        name: String,
+        player: String,
+    },
+    /// `SetChannelPassword(name, password)`.
+    SetPassword {
+        name: String,
+        password: String,
+    },
+    Ban {
+        name: String,
+        player: String,
+    },
+    Invite {
+        name: String,
+        player: String,
+    },
+    Kick {
+        name: String,
+        player: String,
+    },
+    Moderator {
+        name: String,
+        player: String,
+    },
+    Unmoderator {
+        name: String,
+        player: String,
+    },
+    Mute {
+        name: String,
+        player: String,
+    },
+    Unmute {
+        name: String,
+        player: String,
+    },
+    Unban {
+        name: String,
+        player: String,
+    },
+    /// `ChannelModerate(name)` — toggles moderation.
+    Moderate {
+        name: String,
+    },
+    /// `ChannelToggleAnnouncements(name)`.
+    ToggleAnnouncements {
+        name: String,
+    },
+}
+
+impl super::UiScript {
+    /// The zone-channel catalog for the player's current zone — fed whenever the zone (and so
+    /// every resolved name) changes.
+    pub fn set_zone_channel_catalog(&mut self, rows: Vec<ZoneChannelRow>) {
+        self.model_mut().zone_channel_catalog = rows;
+    }
+
+    /// Channel verbs called since the last drain, in call order.
+    pub fn take_channel_commands(&mut self) -> Vec<ChannelCommand> {
+        std::mem::take(&mut self.model_mut().channel_commands)
+    }
+}
+
+fn push(lua: &Lua, cmd: ChannelCommand) {
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    model.channel_commands.push(cmd);
+}
+
+fn non_empty(s: Option<String>) -> Option<String> {
+    s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 fn slot_of(model: &Model, name: &str) -> Option<usize> {
     model
         .joined_channels
@@ -167,6 +279,169 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // JoinChannelByName(name [, password [, frameId]]) — `0x49ff00` → `0x49eb70`, the contract
+    // decision 1908 carved:
+    //
+    //   matched DBC row                        → (ChannelID, resolvedName)
+    //   custom channel (no row)                → (0, nil)      — and 0 is truthy in Lua
+    //   a space in the name, or a matched row  → nil           — no send
+    //     whose zone substitution is empty
+    //
+    // `CMSG_JOIN_CHANNEL` goes out on both non-nil legs. The third argument is the window the
+    // stock handler wants the channel in; that bookkeeping is `ChatFrame_AddChannel`'s (Lua), so
+    // the verb ignores it — exactly as the reference does.
+    g.set(
+        "JoinChannelByName",
+        lua.create_function(
+            |lua, (name, password, _frame): (Option<String>, Option<String>, Value)| {
+                let Some(name) = non_empty(name) else {
+                    return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                };
+                if name.contains(' ') {
+                    return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                }
+                let row = {
+                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    model
+                        .zone_channel_catalog
+                        .iter()
+                        .find(|r| r.shortcut.eq_ignore_ascii_case(&name))
+                        .cloned()
+                };
+                let (id, resolved) = match row {
+                    None => (0, None),
+                    Some(ZoneChannelRow { resolved: None, .. }) => {
+                        return Ok(MultiValue::from_vec(vec![Value::Nil]))
+                    }
+                    Some(ZoneChannelRow { id, resolved, .. }) => (id, resolved),
+                };
+                push(
+                    lua,
+                    ChannelCommand::Join {
+                        name: resolved.clone().unwrap_or_else(|| name.clone()),
+                        password: password.unwrap_or_default(),
+                    },
+                );
+                Ok(MultiValue::from_vec(vec![
+                    Value::Integer(i64::from(id)),
+                    match resolved {
+                        Some(r) => Value::String(lua.create_string(&r)?),
+                        None => Value::Nil,
+                    },
+                ]))
+            },
+        )?,
+    )?;
+
+    // EnumerateServerChannels() — `0x4a1790` (chat-cache-grammar.md §6): the `ChatChannels.dbc`
+    // **shortcuts** in row order, a `flags & 0x10` row only when the zone is a city
+    // (`AreaTable.Flags & 0x8`); 0 values while the zone is unresolvable (an empty catalog here).
+    // Never the composed `<name> - <zone>`: `FCFDropDown_LoadServerChannels` shows these bare.
+    g.set(
+        "EnumerateServerChannels",
+        lua.create_function(|lua, _ignored: MultiValue| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let mut out = Vec::new();
+            for row in model.zone_channel_catalog.iter().filter(|r| r.listed) {
+                out.push(Value::String(lua.create_string(&row.shortcut)?));
+            }
+            Ok(MultiValue::from_vec(out))
+        })?,
+    )?;
+
+    // The one-name verbs: each queues its `CMSG_*` and returns nothing.
+    for (verb, make) in [
+        (
+            "LeaveChannelByName",
+            (|name| ChannelCommand::Leave { name }) as fn(String) -> ChannelCommand,
+        ),
+        ("ListChannelByName", |name| ChannelCommand::List { name }),
+        ("DisplayChannelOwner", |name| ChannelCommand::DisplayOwner {
+            name,
+        }),
+        ("ChannelModerate", |name| ChannelCommand::Moderate { name }),
+        ("ChannelToggleAnnouncements", |name| {
+            ChannelCommand::ToggleAnnouncements { name }
+        }),
+    ] {
+        g.set(
+            verb,
+            lua.create_function(move |lua, name: Option<String>| {
+                if let Some(name) = non_empty(name) {
+                    push(lua, make(name));
+                }
+                Ok(())
+            })?,
+        )?;
+    }
+
+    g.set(
+        "ListChannels",
+        lua.create_function(|lua, _ignored: MultiValue| {
+            push(lua, ChannelCommand::ListAll);
+            Ok(())
+        })?,
+    )?;
+
+    // The two-name verbs: (channel, player) — or (channel, password) for the password.
+    for (verb, make) in [
+        (
+            "SetChannelOwner",
+            (|name, player| ChannelCommand::SetOwner { name, player })
+                as fn(String, String) -> ChannelCommand,
+        ),
+        ("SetChannelPassword", |name, password| {
+            ChannelCommand::SetPassword { name, password }
+        }),
+        ("ChannelBan", |name, player| ChannelCommand::Ban {
+            name,
+            player,
+        }),
+        ("ChannelInvite", |name, player| ChannelCommand::Invite {
+            name,
+            player,
+        }),
+        ("ChannelKick", |name, player| ChannelCommand::Kick {
+            name,
+            player,
+        }),
+        ("ChannelModerator", |name, player| {
+            ChannelCommand::Moderator { name, player }
+        }),
+        ("ChannelUnmoderator", |name, player| {
+            ChannelCommand::Unmoderator { name, player }
+        }),
+        ("ChannelMute", |name, player| ChannelCommand::Mute {
+            name,
+            player,
+        }),
+        ("ChannelUnmute", |name, player| ChannelCommand::Unmute {
+            name,
+            player,
+        }),
+        ("ChannelUnban", |name, player| ChannelCommand::Unban {
+            name,
+            player,
+        }),
+    ] {
+        g.set(
+            verb,
+            lua.create_function(
+                move |lua, (name, second): (Option<String>, Option<String>)| {
+                    if let Some(name) = non_empty(name) {
+                        // A password may legitimately be empty (`/password General` clears it); a
+                        // player name may not.
+                        let second = second.unwrap_or_default();
+                        if verb == "SetChannelPassword" || !second.trim().is_empty() {
+                            push(lua, make(name, second.trim().to_string()));
+                        }
+                    }
+                    Ok(())
+                },
+            )?,
+        )?;
+    }
+
     Ok(())
 }
 
@@ -179,5 +454,125 @@ impl super::UiScript {
     /// change it — the server's YOU_JOINED and YOU_LEFT notices — so it pushes here from one place.
     pub fn set_joined_channels(&mut self, joined: Vec<Option<String>>) {
         self.model_mut().joined_channels = joined;
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::{ChannelCommand, ZoneChannelRow};
+    use crate::script::UiScript;
+
+    fn catalog() -> Vec<ZoneChannelRow> {
+        vec![
+            ZoneChannelRow {
+                id: 1,
+                shortcut: "General".into(),
+                resolved: Some("General - Elwynn Forest".into()),
+                listed: true,
+            },
+            ZoneChannelRow {
+                id: 2,
+                shortcut: "Trade".into(),
+                resolved: None,
+                listed: false,
+            },
+        ]
+    }
+
+    /// Decision 1908's three legs, and that 0 is truthy.
+    #[test]
+    fn join_channel_by_name_answers_the_three_legs_of_1908() {
+        let mut s = UiScript::new().unwrap();
+        s.set_zone_channel_catalog(catalog());
+        s.run(
+            "A = {JoinChannelByName('General', 'pw', 1)} \
+             B = {JoinChannelByName('MyChan', nil, 1)} \
+             C = {JoinChannelByName('Trade', nil, 1)} \
+             D = {JoinChannelByName('two words', nil, 1)}",
+        )
+        .unwrap();
+        assert_eq!(
+            s.eval::<(i64, String)>("return A[1], A[2]").unwrap(),
+            (1, "General - Elwynn Forest".to_string())
+        );
+        assert!(s
+            .eval::<bool>("return B[1] == 0 and B[2] == nil and table.getn(B) == 1")
+            .unwrap());
+        assert!(
+            s.eval::<bool>("return C[1] == nil").unwrap(),
+            "empty substitution"
+        );
+        assert!(s.eval::<bool>("return D[1] == nil").unwrap(), "a space");
+        assert_eq!(
+            s.take_channel_commands(),
+            vec![
+                ChannelCommand::Join {
+                    name: "General - Elwynn Forest".into(),
+                    password: "pw".into()
+                },
+                ChannelCommand::Join {
+                    name: "MyChan".into(),
+                    password: String::new()
+                },
+            ],
+            "sent on both non-nil legs, the resolved name for a row"
+        );
+    }
+
+    #[test]
+    fn enumerate_server_channels_lists_the_shortcuts_the_zone_admits() {
+        let mut s = UiScript::new().unwrap();
+        assert_eq!(
+            s.eval::<i64>("return select('#', EnumerateServerChannels())")
+                .unwrap(),
+            0,
+            "no zone yet — 0 values"
+        );
+        s.set_zone_channel_catalog(catalog());
+        assert_eq!(
+            s.eval::<Vec<String>>("return {EnumerateServerChannels()}")
+                .unwrap(),
+            vec!["General".to_string()],
+            "the shortcut, never the composed name; a city row only in a city"
+        );
+    }
+
+    #[test]
+    fn the_management_verbs_queue_in_call_order_and_drop_empty_names() {
+        let mut s = UiScript::new().unwrap();
+        s.run(
+            "LeaveChannelByName('General') ListChannelByName('') ListChannels() \
+             SetChannelPassword('General', '') ChannelKick('General', 'Bob') \
+             ChannelKick('General', '') ChannelModerate('General') \
+             ChannelToggleAnnouncements('General') SetChannelOwner('General', 'Ann')",
+        )
+        .unwrap();
+        assert_eq!(
+            s.take_channel_commands(),
+            vec![
+                ChannelCommand::Leave {
+                    name: "General".into()
+                },
+                ChannelCommand::ListAll,
+                ChannelCommand::SetPassword {
+                    name: "General".into(),
+                    password: String::new()
+                },
+                ChannelCommand::Kick {
+                    name: "General".into(),
+                    player: "Bob".into()
+                },
+                ChannelCommand::Moderate {
+                    name: "General".into()
+                },
+                ChannelCommand::ToggleAnnouncements {
+                    name: "General".into()
+                },
+                ChannelCommand::SetOwner {
+                    name: "General".into(),
+                    player: "Ann".into()
+                },
+            ]
+        );
     }
 }

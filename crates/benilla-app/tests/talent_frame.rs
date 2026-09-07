@@ -1,4 +1,4 @@
-//! Drives the REAL `assets/ui/TalentFrame.xml` through the engine — the first test that
+//! Drives the reference's own `Blizzard_TalentUI` addon through the engine — the first test that
 //! executes the transcribed talent Lua at all (before this, the window's machinery only ever
 //! ran inside a live client session; both of the director's day-one reports — no prereq branch
 //! lines, no tooltip on first hover — slipped through that gap).
@@ -20,30 +20,35 @@ use benilla_ui::script::{
 /// `ItemButtonTemplate.xml` is the `SetItemButton*` family the talent buttons grey through (the
 /// reference's own verb; see TalentFrame.xml's header) — it sits at .toc line 32, above every
 /// other entry here bar `Fonts.xml`.
-const FILES: [&str; 13] = [
+const FILES: &[&str] = &[
     // `PLAYER_LEVEL` and the rest of the strings the stock file formats through.
     "Interface\\FrameXML\\GlobalStrings.lua",
-    "Fonts.xml",
+    "Interface\\FrameXML\\Fonts.xml",
     // `TEXT`.
-    "BasicControls.xml",
+    "Interface\\FrameXML\\BasicControls.xml",
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
-    "MoneyFrame.xml",
-    "UiPanels.xml",
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
+    r"Interface\FrameXML\UIParent.xml",
     // `ToggleTalentFrame` lives here now, not in the window's own file (decision 1833).
-    "UIParent.xml",
-    "GameTooltip.xml",
+    "Interface\\FrameXML\\GameTooltip.xml",
     // `UIPanelScrollFrameTemplate` — the stock scroll frame's whole substance: its `$parentScrollBar`
     // Slider AND its `<OnMouseWheel>`. Nothing else in the tree declares it, and a missing template
     // is a loader WARNING, not an error, so without this the window still built — just with no
     // scrollbar and no wheel (decision 1833). `load_ui_strict` below is what makes that loud.
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
+    "Interface\\FrameXML\\LocaleProperties.lua",
+    "Interface\\FrameXML\\StaticPopup.xml", // the dialog engine (1960)
+    // `TalentTabTemplate` inherits `CharacterFrameTabButtonTemplate`, and `inherits=`
+    // resolves at LOAD (1993).
+    r"Interface\FrameXML\CharacterFrameTemplates.xml",
     "ScrollTemplates.xml",
     // Stock `TalentFrame_OnShow` opens with `SetButtonPulse(TalentMicroButton, 0, 1)` and then
     // `UpdateMicroButtons()` — both live here, and a nil `TalentMicroButton` throws out of OnShow
     // BEFORE `TalentFrame_Update()`, so the whole window comes up empty (decision 1833). Our
     // retired file's OnShow called neither, which is why this was never a dependency before.
-    "MicroMenu.xml",
+    r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
     // Five files behind one line: the `.xml` sources its own `.lua` and `<Include>`s the
     // templates file that declares TalentButton/Branch/Arrow/TabTemplate.
     "Interface\\AddOns\\Blizzard_TalentUI\\Blizzard_TalentUI.xml",

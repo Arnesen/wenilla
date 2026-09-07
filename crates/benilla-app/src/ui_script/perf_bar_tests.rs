@@ -1,5 +1,5 @@
-//! The shipped `assets/ui/ActionBar.xml`'s performance ("ping") meter — the tinted bar in the
-//! main bar's last empty recess — over the real files, never a stub.
+//! The stock `Interface\FrameXML\ActionBarFrame.xml`'s performance ("ping") meter — the tinted bar
+//! in the main bar's last empty recess — over the real files, never a stub.
 //!
 //! What these guard, in order: the ref geometry that puts the bar IN the recess (the whole point of
 //! the slice); the LOW-strata draw order that makes it show *through* the bar art instead of over
@@ -14,9 +14,19 @@ use super::test_ui::load_ui as load_xml;
 fn harness(extra: &[&str]) -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "ActionBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\MainMenuBar.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
     for f in extra {
         load_xml(&s, f);
     }
@@ -219,8 +229,12 @@ fn get_net_stats_reports_the_pushed_latency() {
 /// tooltip that is quietly one line short.
 #[test]
 fn hovering_the_meter_shows_the_live_latency() {
-    let mut s = harness(&["UIParent.xml", "GameTooltip.xml"]);
+    let mut s = harness(&[r"Interface\FrameXML\UIParent.xml"]);
     s.set_latency_ms(Some(42));
+    // 1.12 ships detailed tips ON — `SHOW_NEWBIE_TIPS = "1"` is UIOptionsFrame_Init's (ref
+    // UIOptionsFrame.lua l.100; ours sits in OptionsFrame.xml's uvar block, 1968), and a harness
+    // without the options file says so itself, the way the reference's tooltip would read it.
+    s.run("SHOW_NEWBIE_TIPS = \"1\"").unwrap();
     s.resolve();
 
     assert_eq!(
@@ -229,7 +243,7 @@ fn hovering_the_meter_shows_the_live_latency() {
         "the button over the meter takes the mouse"
     );
 
-    s.run("BenillaPerformanceBar_OnEnter(MainMenuBarPerformanceBarFrameButton)")
+    s.run("this = MainMenuBarPerformanceBarFrameButton MainMenuBarPerformanceBarFrameButton:GetScript(\"OnEnter\")()")
         .unwrap();
     assert_eq!(
         s.eval::<String>("return GameTooltipTextLeft1:GetText()")
@@ -276,7 +290,7 @@ fn hovering_the_meter_shows_the_live_latency() {
         "the refresh rebuilds BOTH lines — a held-open plate never decays to one"
     );
 
-    s.run("BenillaPerformanceBar_OnLeave()").unwrap();
+    s.run("this = MainMenuBarPerformanceBarFrameButton MainMenuBarPerformanceBarFrameButton:GetScript(\"OnLeave\")()").unwrap();
     assert!(
         !s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
         "leaving hides the plate"

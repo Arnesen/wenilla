@@ -248,6 +248,17 @@ pub struct ParticleEmitter {
     /// owner is out of the frame's draw set — the edge on which model-instance entities are
     /// hidden. Quads need no flag: a gated pool simply pushes nothing into the shared stream.
     gated: bool,
+    /// **The owner's own freeze** — the scene-level "this cloud is not being drawn" answer for a
+    /// scene whose CAMERA cannot give it (decision 2046). [`sim::booth_frozen`] reads a
+    /// booth-layered emitter's freeze off its camera's `is_active` bit, which is exact while one
+    /// camera means one scene — and the `<Model>` tile atlas broke that: EVERY orthographic pane
+    /// on the sheet shares one camera, and that camera is deliberately kept active whenever any
+    /// cell is packed, so a pane that leaves the paint list still has a camera saying "drawn".
+    /// The owner sets this instead, on the frame its own scene stops being drawn. The freeze it buys is exactly the
+    /// booth's — pool + age HELD, one frame's dt on re-entry, no catch-up, no quads — and, like
+    /// the booth's, it never applies to a [`Self::draining`] emitter, which has to run its pool
+    /// out or leak for the session.
+    frozen: bool,
     /// The pending recursion model (wow-re `part-child-recursion.md`): once the asset resolves,
     /// [`wire_child_emitters`] turns its own emitters (cap 4, the reference's `0x7b5dfe`) into
     /// [`Self::children`] and clears this.
@@ -262,6 +273,10 @@ pub struct ParticleEmitter {
     /// The live instance pool (one slot per drawn particle, grown on demand, hidden past the
     /// live count). Each slot's mesh entities carry per-instance tint-clone materials.
     model_instances: Vec<model::ModelInstance>,
+    /// The lane's size unit for this cloud's unflagged particle half-extents —
+    /// [`quads::DrawFrame::size_scale`]. `1.0` (a yard) for every world lane; a UI model tile
+    /// sets its pixels-per-unit through [`Self::set_size_scale`].
+    size_scale: f32,
 }
 
 /// One wired CHILD emitter (see [`ParticleEmitter::children`]): the recursion model's own
@@ -350,6 +365,33 @@ impl ParticleEmitter {
     /// Live particle count — read by the perf probe ([`crate::capture`]).
     pub fn live(&self) -> usize {
         self.particles.len()
+    }
+
+    /// Set the lane's size unit for this cloud — see [`quads::DrawFrame::size_scale`]. A UI
+    /// model tile (decision 2008) stores its cloud in device pixels and passes the reference's
+    /// pixels-per-model-unit for a particle's half-extent; every world lane leaves the default.
+    pub fn set_size_scale(&mut self, size_scale: f32) {
+        self.size_scale = size_scale;
+    }
+
+    /// Freeze or thaw this cloud from the OWNER's side — see [`Self::frozen`]. A draining emitter
+    /// ignores it.
+    ///
+    /// **Thawing clears [`Self::gated`]**, because the draw-set arm's cheap early-out
+    /// (`gated && gate_inputs_still && !fade.is_changed()`, decision 1979's floor) reads none of
+    /// the owner's inputs: a world-lane cloud left gated here on a still camera could never
+    /// re-enter its own draw set. One full gate evaluation on the thaw edge is the price.
+    pub fn set_frozen(&mut self, frozen: bool) {
+        self.frozen = frozen;
+        if !frozen {
+            self.gated = false;
+        }
+    }
+
+    /// Is this cloud owner-frozen? ([`Self::set_frozen`]) — so an owner writing the same value
+    /// every frame need not touch the component and trip change detection.
+    pub fn is_frozen(&self) -> bool {
+        self.frozen
     }
 
     /// The authored def — read by the particle census probe ([`crate::capture`]), which prints
@@ -683,12 +725,17 @@ pub fn spawn_emitter(
             water_bound: emitter.water_bound,
             texture,
             gated: false,
+            frozen: false,
             recursion: emitter.recursion.clone(),
             children: Vec::new(),
             geometry: emitter.geometry.clone(),
             model_instances: Vec::new(),
+            size_scale: 1.0,
         },
     ));
+    if emitter.recursion.is_some() {
+        spawned.insert(PendingChildren);
+    }
     if let Some(node) = lit_node {
         spawned.insert(crate::interior::EmitterLitBy(node));
     }
@@ -737,14 +784,23 @@ pub(crate) fn owner_last_bias(reach: f32) -> f32 {
 /// parent's anchor and rung). The reference wires at the child model's async-load completion
 /// (`0x7b5dd0`); this system is that completion hook. A child never self-emits ambiently — its
 /// only particle source is the per-parent-particle drive in the sim.
+/// An emitter whose child-emitter model (`ParticleEmitter::recursion`) has not been resolved
+/// yet — the only emitters [`wire_child_emitters`] visits. Without it the wiring walked every
+/// resident emitter every frame to find the handful still waiting on a model (decision 1979).
+#[derive(Component)]
+pub(crate) struct PendingChildren;
+
 pub(crate) fn wire_child_emitters(
     mut commands: Commands,
     models: Res<Assets<benilla_assets::M2Model>>,
-    mut emitters: Query<(
-        Entity,
-        &mut ParticleEmitter,
-        Has<crate::interior::EmitterLitBy>,
-    )>,
+    mut emitters: Query<
+        (
+            Entity,
+            &mut ParticleEmitter,
+            Has<crate::interior::EmitterLitBy>,
+        ),
+        With<PendingChildren>,
+    >,
 ) {
     for (entity, mut emitter, registered) in &mut emitters {
         let Some(model) = emitter.recursion.as_ref().and_then(|h| models.get(h)) else {
@@ -775,6 +831,7 @@ pub(crate) fn wire_child_emitters(
             .collect();
         emitter.recursion = None;
         emitter.children = children;
+        commands.entity(entity).remove::<PendingChildren>();
         // A child emitter is a whole emitter record of the recursion model with its own flag word,
         // so it takes its own lighting verdict (the same rule its texture/blend/fog identity
         // follows). A LIT child under an UNLIT parent is therefore a light-node consumer whose

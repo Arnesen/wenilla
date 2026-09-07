@@ -319,7 +319,11 @@ fn read_diff(path: &Option<std::path::PathBuf>) -> Option<Vec<(String, Vec<Strin
     match crate::local_state::read_to_string(path) {
         Ok(text) => {
             let diff = store::from_diff(&text);
-            info!("bindings: {} overrides read from {}", diff.len(), path.display());
+            info!(
+                "bindings: {} overrides read from {}",
+                diff.len(),
+                path.display()
+            );
             Some(diff)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -1240,7 +1244,7 @@ mod tests {
         assert_eq!(
             s.eval::<String>(&format!("return {ROW}9Description:GetText()"))
                 .unwrap(),
-            "JUMP"
+            crate::ui_script::keybindings_tests::label(&s, "BINDING_NAME_JUMP", "JUMP")
         );
         assert!(s.bind_capture_armed());
         let mut app = vm_harness(s);

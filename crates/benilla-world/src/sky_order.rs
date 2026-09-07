@@ -49,7 +49,7 @@
 //! depth, below) but it perturbs the depth TEST of anything depth-tested, so the world-side rungs
 //! stay as small as their ordering job allows.
 //!
-//! ## The depth law — every sky fragment forces the far depth
+//! ## The depth law — every sky vertex pins the far depth
 //!
 //! The biases above order the sky *against itself*. What orders it against the **world** is depth,
 //! and there the reference gives one rule for the whole pass: the sky draws FIRST, in a squashed
@@ -65,11 +65,42 @@
 //! passed the depth test in front of terrain the reference would have occluded them with (the
 //! sighting: stars showing *through* a fogged mountain range at night, decision 0588).
 //!
-//! So every sky fragment now writes `SKY_FAR_DEPTH = 0.0` — reverse-Z "infinitely far" — under
-//! Bevy's `GreaterEqual` test (`sky.wgsl`, `star.wgsl`, `cloud.wgsl`, `celestial.wgsl`, which
-//! already did it for the glare). A sky element survives only where the depth buffer still holds
-//! the clear value: exactly "the world paints over the sky", independent of any shell radius. The
-//! shells now decide only *screen size and sky-internal parallax*, never occlusion.
+//! So every sky VERTEX pins its clip z to `SKY_FAR_CLIP_Z = 0.0` — reverse-Z "infinitely far" —
+//! under Bevy's `GreaterEqual` test, in the one vertex stage every sky material shares
+//! (`sky_vertex.wgsl`, [`SKY_VERTEX_SHADER`]; `sky.wgsl`, `star.wgsl`, `cloud.wgsl` and
+//! `celestial.wgsl` are fragment stages that write colour only). Clip z = 0 interpolates to NDC
+//! depth 0 for every fragment whatever w is, so a sky element survives only where the depth
+//! buffer still holds the clear value: exactly "the world paints over the sky", independent of
+//! any shell radius. The shells now decide only *screen size and sky-internal parallax*, never
+//! occlusion.
+//!
+//! It was a `@builtin(frag_depth)` write in each fragment shader until decision 2016. Same number,
+//! wrong stage: a pipeline whose fragment decides its own depth cannot be early-Z rejected, so
+//! every dome fragment under a hill, a wall or a leaf was shaded in full and discarded late — a
+//! full-screen gradient (and the cloud dome, and the star patches) paid for the covered fraction
+//! of the screen on every frame. Pinned at the vertex the rasterizer rejects them first. The
+//! rasterizer's `DepthBiasState` constant then has to be zero on these pipelines
+//! ([`sky_pipeline_state`]): the rung each sky material carries in `depth_bias` is a SORT key,
+//! and the base `StandardMaterial` packs the same f32 into the bias constant — harmless while
+//! the fragment overwrote its depth, a perturbation of the pinned zero once it doesn't.
+
+use bevy::render::render_resource::RenderPipelineDescriptor;
+
+/// The one vertex stage every sky material draws through — the far-depth pin (module doc, "The
+/// depth law"). A sky `MaterialExtension` returns this from `vertex_shader()`; the test below
+/// holds each of them to it.
+pub(crate) const SKY_VERTEX_SHADER: &str = "embedded://benilla_world/shaders/sky_vertex.wgsl";
+
+/// The pipeline state every sky material's `specialize` applies (module doc, "The depth law"):
+/// the rasterizer depth-bias constant back to zero, so the sort rung the material carries in
+/// `StandardMaterial::depth_bias` stays sort-only and the vertex stage's pinned far depth reaches
+/// the depth test untouched. Same split the model lane makes for its far-side and skybox twins
+/// (`benilla_assets::materials`, `WowModelExt::specialize`).
+pub(crate) fn sky_pipeline_state(descriptor: &mut RenderPipelineDescriptor) {
+    if let Some(ds) = descriptor.depth_stencil.as_mut() {
+        ds.bias.constant = 0;
+    }
+}
 
 /// Stars — the first celestial draw (`0x6d4a3f`): everything else in the sky paints over them, so
 /// theirs is the ladder's LOWEST rung (see the sign law above).
@@ -140,7 +171,7 @@ pub(crate) const WATER_BIAS: f32 = -2.0e4;
 /// window and is not claimed (the decal band's precedent).
 pub(crate) const FOAM_BIAS: f32 = -1.0e4;
 /// The sun/moon glare quads — the frame's last render (`0x483740` tail): over the clouds and the
-/// rain, under the nameplates; the z-buffer (their forced far depth, `celestial.wgsl`) is what
+/// rain, under the nameplates; the z-buffer (their pinned far depth, `sky_vertex.wgsl`) is what
 /// occludes them. Only ~6× the far plane, not ~10⁵: a rung this far up is also a rasterizer bias
 /// (the sign law above), and nothing is gained by making it bigger than the ordering needs.
 pub(crate) const GLARE_BIAS: f32 = 2.0e4;
@@ -423,12 +454,24 @@ const _: () = {
     assert!(Rung::RING + WORLD_VIEW_Z_FLOOR - WMO_SKYBOX_BIAS > 1.0e3);
 };
 
-/// The depth law (module doc) is a property of the **shaders**, so it is checked there: every sky
-/// fragment shader must force `SKY_FAR_DEPTH`. Without this, a shell radius silently becomes
+/// The depth law (module doc) is a property of the **shaders**, so it is checked there: the shared
+/// vertex stage must pin the far depth, every sky material must draw through it, and no sky
+/// fragment shader may take the depth back (a `frag_depth` write is the same number at the cost of
+/// the pipeline's early-Z — decision 2016). Without this, a shell radius silently becomes
 /// load-bearing again the moment someone edits one of them — the exact regression 0588 fixed, and
 /// one that only shows up at night, on a mountainous horizon, past 2.6 km.
 #[test]
-fn every_sky_shader_forces_the_far_depth() {
+fn the_sky_depth_is_pinned_at_the_vertex_and_nowhere_else() {
+    use bevy::pbr::Material;
+    use bevy::shader::ShaderRef;
+
+    let vertex = include_str!("shaders/sky_vertex.wgsl");
+    assert!(
+        vertex.contains("const SKY_FAR_CLIP_Z: f32 = 0.0;")
+            && vertex.contains("out.position.z = SKY_FAR_CLIP_Z;"),
+        "sky_vertex.wgsl no longer pins the far depth — every shell radius is deciding occlusion \
+         again (sky_order.rs, \"The depth law\")"
+    );
     for (name, src) in [
         ("sky.wgsl", include_str!("shaders/sky.wgsl")),
         ("star.wgsl", include_str!("shaders/star.wgsl")),
@@ -436,16 +479,38 @@ fn every_sky_shader_forces_the_far_depth() {
         ("celestial.wgsl", include_str!("shaders/celestial.wgsl")),
         // The WMO skybox is no longer a shader of its own: it draws on the shared model lane, whose
         // `WOW_SKY_DEPTH` branch obeys the same law and is asserted beside it
-        // (`benilla_assets::materials`, `the_sky_lane_forces_the_far_depth`).
+        // (`benilla_assets::materials`, `the_sky_lane_pins_the_far_depth_at_the_vertex`).
     ] {
         assert!(
-            src.contains("const SKY_FAR_DEPTH: f32 = 0.0;"),
-            "{name}: the sky pass's forced-far-depth constant is gone"
-        );
-        assert!(
-            src.contains("out.depth = SKY_FAR_DEPTH;"),
-            "{name}: a sky fragment no longer forces the far depth — its shell radius is deciding \
-             occlusion again (sky_order.rs, \"The depth law\")"
+            !src.contains("@builtin(frag_depth)"),
+            "{name}: a sky fragment writes its depth again — the pin is the vertex stage's, and a \
+             fragment write costs the pipeline its early-Z (sky_order.rs, \"The depth law\")"
         );
     }
+    fn shared(name: &str, shader: ShaderRef) {
+        match shader {
+            ShaderRef::Path(p) => assert_eq!(
+                p.to_string(),
+                SKY_VERTEX_SHADER,
+                "{name}: not drawing through the shared sky vertex stage"
+            ),
+            _ => panic!("{name}: vertex shader is not a path — not the shared sky vertex stage"),
+        }
+    }
+    shared(
+        "SkyMaterial",
+        <crate::sky::SkyMaterial as Material>::vertex_shader(),
+    );
+    shared(
+        "CloudMaterial",
+        <crate::clouds::CloudMaterial as Material>::vertex_shader(),
+    );
+    shared(
+        "StarMaterial",
+        <crate::sun::StarMaterial as Material>::vertex_shader(),
+    );
+    shared(
+        "CelestialMaterial",
+        <crate::sun::CelestialMaterial as Material>::vertex_shader(),
+    );
 }

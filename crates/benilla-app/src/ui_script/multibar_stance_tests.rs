@@ -18,11 +18,37 @@ use super::test_ui::load_ui as load_xml;
 /// `ActionBar.xml` (the anchor target + shared globals both new bars need).
 fn load_action_bar(s: &UiScript) {
     for file in [
-        "Fonts.xml",
-        "UIParent.xml",
-        "GameTooltip.xml",
-        "Cooldown.xml",
-        "ActionBar.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
+        // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
+        // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
+        // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
+        // two template files its check boxes inherit through (1875).
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        r"Interface\FrameXML\OptionsFrameTemplates.xml",
+        r"Interface\FrameXML\ReputationFrame.xml",
+        // The stock multibar file's OnLoad writes `UIOptionsFrameCheckButtons`, which our options
+        // window publishes — the reference's own load order (UIOptionsFrame.xml l.21 before
+        // MultiActionBars.xml l.39), and the manifest's since 1938.
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
+        "ScrollTemplates.xml",
+        "KeyBindingsPage.xml",
+        "OptionsFrame.xml",
     ] {
         load_xml(s, file);
     }
@@ -37,7 +63,9 @@ fn show_bars(s: &UiScript, bars: &[u32]) {
             if bars.contains(&bar) { "1" } else { "nil" }
         ));
     }
-    lua.push_str("MultiActionBar_Update()");
+    // …then the manage pass, which the options window runs after a toggle (stock
+    // UIOptionsFrame.xml:1192, and our rows the same); stock MultiActionBar_Update does not.
+    lua.push_str("MultiActionBar_Update() UIParent_ManageFramePositions()");
     s.run(&lua).unwrap();
 }
 
@@ -55,21 +83,11 @@ fn shipped_multibars_drive_end_to_end() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/MultiBars.xml"),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "loader errors: {:?}",
-        report.errors
-    );
+    let frames = super::test_ui::load_ui(&s, "Interface\\FrameXML\\MultiActionBars.xml");
     assert_eq!(
-        report.frames, 100,
-        "4 bar frames + 48 buttons, each with a Cooldown child — the two VERTICAL bars joined \
-         (hidden, as the reference's VerticalMultiBar3/4 are), which doubled this count"
+        frames, 100,
+        "what stock MultiActionBars.xml declares (1938): the four bar frames and their 48 buttons, \
+         each with a $parentCooldown — the same 100 ours built for the same seats"
     );
 
     // Occupy main slot 1, BottomLeft slot 1 (action 61), BottomRight slot 1 (action 49).
@@ -142,8 +160,9 @@ fn shipped_multibars_drive_end_to_end() {
     };
     assert_eq!(
         rings(&quads, "Interface\\Buttons\\UI-Quickslot2"),
-        14,
-        "12 main wells + 2 occupied multibar buttons; 22 empty multibar wells hidden"
+        3,
+        "the occupied main slot + the 2 occupied multibar buttons; every empty well is hidden, \
+         the main bar's included (ActionButton.lua:69-70)"
     );
 
     // A click on BottomLeft button 1 (center (26,75)) queues the FIXED id 61 — and stays 61 when
@@ -173,8 +192,10 @@ fn shipped_multibars_drive_end_to_end() {
     s.fire_event("UPDATE_BONUS_ACTIONBAR", vec![]);
     // The offset edges above showed the bonus overlay (1524) and its descent takes 0.15s of
     // frame time this event-only test never used to pass; without it the 12 overlay wells are
-    // still on screen and correctly answer the SHOWGRID below as 12 extra drop targets.
+    // still on screen and correctly answer the SHOWGRID below as 12 extra drop targets. The
+    // stock slide paints, THEN advances, so the frame that hides it is one OnUpdate past the time.
     s.tick(0.2);
+    s.tick(0.01);
 
     // While a payload is held (SHOWGRID), the hidden empty wells appear as drop-target rings
     // (UI-Quickslot, the "no action" ring): 11 empty main wells swap texture + 22 multibar wells
@@ -189,10 +210,19 @@ fn shipped_multibars_drive_end_to_end() {
     s.fire_event("ACTIONBAR_HIDEGRID", vec![]);
     s.resolve();
     assert_eq!(rings(&s.extract(), "Interface\\Buttons\\UI-Quickslot"), 0);
-    assert_eq!(rings(&s.extract(), "Interface\\Buttons\\UI-Quickslot2"), 14);
+    assert_eq!(
+        rings(&s.extract(), "Interface\\Buttons\\UI-Quickslot2"),
+        3,
+        "letting go hides every empty well again, the main bar's included; the three occupied \
+         buttons keep their rings"
+    );
 
     // The unbound multibar hotkey corner carries the ref's RANGE_INDICATOR dot: out of range paints
-    // the red dot, back in range clears it (the main bar's labels tint instead).
+    // the red dot, back in range clears it (the main bar's labels tint instead). Two stock
+    // mechanisms, in order: `ActionButton_UpdateHotkeys` decides whether the corner's TEXT is the
+    // dot at all — only while `IsActionInRange` answers non-nil, i.e. with a target — and it runs
+    // on PLAYER_TARGET_CHANGED (ActionButton.lua:121-145, 333-334); every `ActionButton_OnUpdate`
+    // then shows or hides that text by range (l.389-395) and tints it red past the 0.2 s recheck.
     use benilla_ui::script::ActionState;
     s.set_action_state(
         61,
@@ -203,6 +233,7 @@ fn shipped_multibars_drive_end_to_end() {
             ..Default::default()
         }),
     );
+    s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
     s.tick(0.5); // past the 0.2 s range recheck
     s.resolve();
     let dot_shown = |quads: &[benilla_ui::script::ExtractedQuad]| {
@@ -245,22 +276,27 @@ fn shipped_stance_bar_drives_end_to_end() {
     // bottom multibar is UP to raise the flag. Since 1500 that is a player option rather than a
     // given, so this test raises it; `the_stance_bar_sits_where_the_pass_puts_it` below owns the
     // other state.
-    load_xml(&s, "MultiBars.xml");
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, "KeyBindingsPage.xml");
+    load_xml(&s, "OptionsFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
     show_bars(&s, &[1]);
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/StanceBar.xml"),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(&s, &doc, &|_| None);
+    // The shapeshift bar is declared by stock BonusActionBarFrame.xml (ShapeshiftBarFrame and
+    // ShapeshiftButton1..10 beside the bonus bar), which load_action_bar loaded above (1938).
     assert!(
-        report.errors.is_empty(),
-        "loader errors: {:?}",
-        report.errors
-    );
-    assert_eq!(
-        report.frames, 21,
-        "the bar frame + 10 buttons, each with a Cooldown child"
+        s.eval::<bool>("return ShapeshiftBarFrame ~= nil and ShapeshiftButton10 ~= nil")
+            .unwrap(),
+        "the stance bar's frames come with the stock bonus-bar file"
     );
 
     // No forms pushed (a mage): the frame is hidden.
@@ -424,12 +460,38 @@ fn multibar_hover_renders_the_buttons_own_action() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for file in [
-        "Fonts.xml",
-        "UIParent.xml",
-        "GameTooltip.xml",
-        "Cooldown.xml",
-        "ActionBar.xml",
-        "MultiBars.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
+        // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
+        // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
+        // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
+        // two template files its check boxes inherit through (1875).
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        r"Interface\FrameXML\OptionsFrameTemplates.xml",
+        r"Interface\FrameXML\ReputationFrame.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        "ScrollTemplates.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
+        "KeyBindingsPage.xml",
+        "OptionsFrame.xml",
+        "Interface\\FrameXML\\MultiActionBars.xml",
     ] {
         load_xml(&s, file);
     }
@@ -463,7 +525,7 @@ fn multibar_hover_renders_the_buttons_own_action() {
 
     let hover_name = |s: &UiScript, button: &str| -> Option<String> {
         s.run(&format!(
-            "GameTooltip:Hide() BenillaActionButton_OnEnter({button})"
+            "GameTooltip:Hide() this = {button} ActionButton_SetTooltip()"
         ))
         .unwrap();
         s.eval::<Option<String>>(
@@ -517,7 +579,20 @@ fn multibar_hover_renders_the_buttons_own_action() {
 fn the_vertical_multibars_exist_hidden_on_the_reference_pages() {
     let s = UiScript::new().unwrap();
     load_action_bar(&s);
-    load_xml(&s, "MultiBars.xml");
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, "KeyBindingsPage.xml");
+    load_xml(&s, "OptionsFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
 
     for bar in ["MultiBarRight", "MultiBarLeft"] {
         assert!(
@@ -536,13 +611,13 @@ fn the_vertical_multibars_exist_hidden_on_the_reference_pages() {
     // ref ActionButton.lua:8-9 — RIGHT_ACTIONBAR_PAGE = 3 (actions 25..36), LEFT = 4 (37..48).
     for (bar, first, last) in [("MultiBarRight", 25, 36), ("MultiBarLeft", 37, 48)] {
         assert_eq!(
-            s.eval::<i64>(&format!("return {bar}Button1.base + {bar}Button1.index"))
+            s.eval::<i64>(&format!("return ActionButton_GetPagedID({bar}Button1)"))
                 .unwrap(),
             first,
             "{bar}'s first slot"
         );
         assert_eq!(
-            s.eval::<i64>(&format!("return {bar}Button12.base + {bar}Button12.index"))
+            s.eval::<i64>(&format!("return ActionButton_GetPagedID({bar}Button12)"))
                 .unwrap(),
             last,
             "{bar}'s last slot"
@@ -566,7 +641,20 @@ fn every_extra_bar_stays_down_until_its_own_toggle_is_set() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
-    load_xml(&s, "MultiBars.xml");
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, "KeyBindingsPage.xml");
+    load_xml(&s, "OptionsFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
 
     const BARS: [&str; 4] = [
         "MultiBarBottomLeft",
@@ -640,8 +728,21 @@ fn raising_a_bottom_bar_moves_the_managed_bottom_stack() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
-    load_xml(&s, "MultiBars.xml");
-    load_xml(&s, "CastingBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, "KeyBindingsPage.xml");
+    load_xml(&s, "OptionsFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
+    load_xml(&s, "Interface\\FrameXML\\CastingBarFrame.xml");
 
     // The pass writes the y of a frame row into its anchor; read it back off the anchor rather
     // than off a resolved rect, so a hidden cast bar answers the same as a visible one.
@@ -691,7 +792,20 @@ fn viewable_action_bar_pages_follow_the_bar_toggles() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
-    load_xml(&s, "MultiBars.xml");
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, "KeyBindingsPage.xml");
+    load_xml(&s, "OptionsFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
 
     let viewable = |s: &UiScript| {
         s.eval::<String>(
@@ -744,7 +858,20 @@ fn the_grid_option_holds_the_extra_bars_empty_wells_open() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
-    load_xml(&s, "MultiBars.xml");
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, "KeyBindingsPage.xml");
+    load_xml(&s, "OptionsFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
     show_bars(&s, &[1]);
 
     let well = |s: &UiScript| {
@@ -778,12 +905,36 @@ fn the_grid_option_holds_the_extra_bars_empty_wells_open() {
 
     // Re-applying an "off" that is already off must not owe anything: with a payload in hand the
     // wells stay open through it (the reference's own idempotence bug, closed by the latch).
+    // The reference's hide is a COUNTED decrement on every well (`ActionButton_HideGrid`), never
+    // a no-op: with the option off, one more apply closes a payload-held well. That is why our
+    // row runs `MultiActionBar_UpdateGridVisibility` only on a CLICK (stock UIOptionsFrame.xml:683)
+    // and its load arm only ever SHOWS (UIOptionsFrame.lua:218-220) — a load-time hide would push
+    // counts nobody raised below zero. (Ours used to guard the no-op; the guard went with the
+    // file, 1938.)
+    // The load arm, both ways: off touches no count, on opens the wells.
+    s.run("ALWAYS_SHOW_MULTIBARS = \"0\" OptionsFrame_ApplySavedSettings()")
+        .unwrap();
     s.fire_event("ACTIONBAR_SHOWGRID", vec![]);
-    s.run("MultiActionBar_UpdateGridVisibility()").unwrap();
-    s.run("MultiActionBar_UpdateGridVisibility()").unwrap();
-    assert!(well(&s), "a no-op apply may not decrement");
+    assert!(well(&s));
     s.fire_event("ACTIONBAR_HIDEGRID", vec![]);
+    assert!(!well(&s), "a load with the option off left the count alone");
+    s.run("ALWAYS_SHOW_MULTIBARS = \"1\" OptionsFrame_ApplySavedSettings()")
+        .unwrap();
+    assert!(well(&s), "a load with the option on opens the wells");
+    s.run("ALWAYS_SHOW_MULTIBARS = \"0\" MultiActionBar_UpdateGridVisibility()")
+        .unwrap();
     assert!(!well(&s));
+
+    // …and the click arm against a held payload: one apply closes the well the payload opened.
+    // (The payload's own HIDEGRID that follows takes the count to −1 in the reference too — its
+    // quirk, not modelled here.)
+    s.fire_event("ACTIONBAR_SHOWGRID", vec![]);
+    assert!(well(&s));
+    s.run("MultiActionBar_UpdateGridVisibility()").unwrap();
+    assert!(
+        !well(&s),
+        "the option's hide counts against the payload's open"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -810,7 +961,20 @@ fn a_held_payload_ghosts_the_empty_wells_it_opens() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
-    load_xml(&s, "MultiBars.xml");
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, "KeyBindingsPage.xml");
+    load_xml(&s, "OptionsFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
     s.set_action(
         1,
         Some(ActionSlot {
@@ -849,8 +1013,9 @@ fn a_held_payload_ghosts_the_empty_wells_it_opens() {
     let resting = ring_alphas(&s, quickslot2);
     assert_eq!(
         resting.len(),
-        12,
-        "the 12 main wells; the multibar's are hidden"
+        1,
+        "only the occupied main slot draws a ring: every empty well, main bar included, is \
+         hidden while nothing is held (ActionButton.lua:69-70)"
     );
     assert!(
         resting.iter().all(|a| *a == 1.0),
@@ -871,9 +1036,14 @@ fn a_held_payload_ghosts_the_empty_wells_it_opens() {
         "every grid ring is the ref's half-alpha ghost, not an opaque plate: {ghosts:?}"
     );
 
-    // …and the one OCCUPIED button is untouched by it.
+    // …and the one OCCUPIED button ghosts with it: `ActionButton_ShowGrid` sets the half alpha
+    // (ActionButton.lua:246) before anything asks whether the slot holds an action, and
+    // `HideGrid` touches no colour at all. What restores an occupied ring is its next
+    // `ActionButton_UpdateUsable` (l.271-283), whose `SetVertexColor(1, 1, 1)` carries the default
+    // alpha — from Update, and on SPELL_UPDATE_USABLE. Ours skipped occupied rings; the stock
+    // file does not (1938).
     let occupied = ring_alphas(&s, quickslot2);
-    assert_eq!(occupied, vec![1.0], "the occupied ring does not ghost");
+    assert_eq!(occupied, vec![0.5], "the occupied ring ghosts too");
 
     // A well that was ghosted and is then FILLED comes back opaque. This is the assertion that
     // outlives the engine's own `SetVertexColor` divergence (1782): the day an absent alpha stops
@@ -894,21 +1064,28 @@ fn a_held_payload_ghosts_the_empty_wells_it_opens() {
     s.resolve();
     assert_eq!(
         ring_alphas(&s, quickslot2),
-        vec![1.0, 1.0],
-        "a ghosted well that gets an action is opaque again, payload still held"
+        vec![0.5, 1.0],
+        "the well that got an action is opaque again (its Update ran UpdateUsable); the other \
+         occupied ring keeps its ghost, payload still held"
     );
 
-    // Letting go restores both halves — art and tint, which is why they share one setter.
+    // Letting go takes the empty wells away; the colour it leaves alone.
     s.fire_event("ACTIONBAR_HIDEGRID", vec![]);
     s.resolve();
     assert_eq!(ring_alphas(&s, quickslot), Vec::<f32>::new());
     let after = ring_alphas(&s, quickslot2);
-    assert_eq!(after.len(), 12);
-    // (10 empty main wells back to the hollow ring + the 2 occupied ones.)
-    assert!(
-        after.iter().all(|a| *a == 1.0),
-        "the dim does not outlive the payload (the ref's own stuck-dim bug): {after:?}"
+    assert_eq!(
+        after,
+        vec![0.5, 1.0],
+        "HideGrid touches no colour: a ring the grid ghosted stays dim past the payload — the \
+         reference's own rule (ours used to clear it here)"
     );
+    // What happens to that ring NEXT is decision 1782's open question, deliberately not asserted:
+    // the reference's `SetVertexColor(1, 1, 1)` in `ActionButton_UpdateUsable` keeps the alpha
+    // already on the region (byte-pinned, wow-re button-state-texture-path-setter.md §7 — the
+    // "stuck dim" a 1.12 player sees after a drag), while this engine's three-argument call still
+    // resets it to 1.0 until the director calls 1782. A test that pinned either outcome would be
+    // enshrining a divergence as fidelity.
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -927,25 +1104,42 @@ fn a_bar_toggle_sends_the_byte_its_globals_pack_to() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
-    load_xml(&s, "MultiBars.xml");
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, "KeyBindingsPage.xml");
+    load_xml(&s, "OptionsFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
     let _ = s.take_action_bar_toggle_sends();
 
     // The row's own setter, with the row's own "1"/"0" strings.
-    s.run("BenillaMultiBar_SetShown(1, \"1\")").unwrap();
+    s.run("SHOW_MULTI_ACTIONBAR_1 = 1 MultiActionBar_Update() SetActionBarToggles(SHOW_MULTI_ACTIONBAR_1, SHOW_MULTI_ACTIONBAR_2, SHOW_MULTI_ACTIONBAR_3, SHOW_MULTI_ACTIONBAR_4)")
+        .unwrap();
     assert_eq!(s.take_action_bar_toggle_sends(), vec![0x01]);
-    s.run("BenillaMultiBar_SetShown(3, \"1\")").unwrap();
+    s.run("SHOW_MULTI_ACTIONBAR_3 = 1 MultiActionBar_Update() SetActionBarToggles(SHOW_MULTI_ACTIONBAR_1, SHOW_MULTI_ACTIONBAR_2, SHOW_MULTI_ACTIONBAR_3, SHOW_MULTI_ACTIONBAR_4)")
+        .unwrap();
     assert_eq!(
         s.take_action_bar_toggle_sends(),
         vec![0x05],
         "the WHOLE byte re-sent, not a delta"
     );
-    s.run("BenillaMultiBar_SetShown(4, \"1\")").unwrap();
+    s.run("SHOW_MULTI_ACTIONBAR_4 = 1 MultiActionBar_Update() SetActionBarToggles(SHOW_MULTI_ACTIONBAR_1, SHOW_MULTI_ACTIONBAR_2, SHOW_MULTI_ACTIONBAR_3, SHOW_MULTI_ACTIONBAR_4)")
+        .unwrap();
     assert_eq!(s.take_action_bar_toggle_sends(), vec![0x0d]);
-    s.run("BenillaMultiBar_SetShown(1, \"0\")").unwrap();
+    s.run("SHOW_MULTI_ACTIONBAR_1 = nil MultiActionBar_Update() SetActionBarToggles(SHOW_MULTI_ACTIONBAR_1, SHOW_MULTI_ACTIONBAR_2, SHOW_MULTI_ACTIONBAR_3, SHOW_MULTI_ACTIONBAR_4)")
+        .unwrap();
     assert_eq!(
         s.take_action_bar_toggle_sends(),
         vec![0x0c],
-        "the row hands the setter a STRING, and \"0\" is off"
+        "the row turns its \"0\" into nil before the send, and nil is off"
     );
 
     // What is stored is 1 or nil and nothing else — GetActionBarToggles' own shape, and what the
@@ -997,7 +1191,20 @@ fn the_shipped_setter_passes_exactly_four_arguments() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
-    load_xml(&s, "MultiBars.xml");
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, "KeyBindingsPage.xml");
+    load_xml(&s, "OptionsFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
 
     // `r##`: the Lua contains `select("#", ...)`, and `"#` would close a single-hash raw string.
     s.run(
@@ -1009,7 +1216,11 @@ fn the_shipped_setter_passes_exactly_four_arguments() {
         "##,
     )
     .unwrap();
-    s.run("BenillaMultiBar_SetShown(2, \"1\")").unwrap();
+    // The shipped setter is the Action Bars row's own closure (OptionsFrame.xml), which is
+    // stock's three lines — assign the global, MultiActionBar_Update(), SetActionBarToggles(…) —
+    // plus the manage pass.
+    s.run("OptionsFrameContainerBodyActionBarsRowMultiBar2Check:Click()")
+        .unwrap();
     assert_eq!(
         s.eval::<i64>("return BENILLA_TEST_TOGGLE_ARGC").unwrap(),
         4,
@@ -1032,8 +1243,22 @@ fn the_stance_bar_sits_where_the_pass_puts_it() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
-    load_xml(&s, "MultiBars.xml");
-    load_xml(&s, "StanceBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, "KeyBindingsPage.xml");
+    load_xml(&s, "OptionsFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     s.set_shapeshift_forms(vec![ShapeshiftFormView {
         spell_id: 2457,
         texture: Some("Interface\\Icons\\Stance_A".into()),
@@ -1081,8 +1306,8 @@ fn the_stance_bar_sits_where_the_pass_puts_it() {
 /// the missing border the DEFAULT look rather than an edge case.
 ///
 /// The last block is the point of the whole test: one `MultiActionBar_Update()` flips the seat AND
-/// the art, which is what proves the art rides `UIParent_RegisterManagedPositionListener` rather
-/// than having been set once at load.
+/// the art, which is what proves the art rides the managed-position pass rather than having been
+/// set once at load.
 #[test]
 fn the_stance_shelf_follows_the_bottom_left_bar() {
     use benilla_ui::script::ShapeshiftFormView;
@@ -1090,8 +1315,22 @@ fn the_stance_shelf_follows_the_bottom_left_bar() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
-    load_xml(&s, "MultiBars.xml");
-    load_xml(&s, "StanceBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, "KeyBindingsPage.xml");
+    load_xml(&s, "OptionsFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
 
     let form = |id: u32| ShapeshiftFormView {
         spell_id: id,
@@ -1155,8 +1394,17 @@ fn the_stance_shelf_follows_the_bottom_left_bar() {
 
     // Even at three forms, raised keeps the middle strip down — the fork is on the BAR, not the
     // form count; the count only decides the middle strip within the unraised branch.
+    // A third form learned while the bar is up: the reference's `ShapeshiftBar_Update` shows the
+    // middle strip for three forms regardless of the bar (BonusActionBarFrame.lua:198-206), and
+    // nothing runs the pass on that event — the strip draws across the row until something
+    // moves. The pass, not Update, owns the raised look (UIParent.lua:1705-1720).
     s.set_shapeshift_forms(vec![form(2457), form(71), form(2458)]);
     s.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
+    assert!(
+        shown(&s, "ShapeshiftBarMiddle"),
+        "Update shows the strip; only the pass takes it down"
+    );
+    s.run("UIParent_ManageFramePositions()").unwrap();
     assert!(!shown(&s, "ShapeshiftBarMiddle"));
     assert_eq!(ring(&s), 50.0);
 
@@ -1188,8 +1436,22 @@ fn the_stance_shelf_is_as_long_as_the_form_count() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
-    load_xml(&s, "MultiBars.xml");
-    load_xml(&s, "StanceBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, "KeyBindingsPage.xml");
+    load_xml(&s, "OptionsFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     show_bars(&s, &[]); // unraised: the shelf art is the state under test
 
     let form = |id: u32| ShapeshiftFormView {
@@ -1291,7 +1553,20 @@ fn an_extra_bars_empty_well_keeps_its_bound_hotkey_label() {
     // the player binds it, as the reporter had).
     s.register_bindings(&crate::bindings::registry_commands());
     load_action_bar(&s);
-    load_xml(&s, "MultiBars.xml");
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, "KeyBindingsPage.xml");
+    load_xml(&s, "OptionsFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
     show_bars(&s, &[1]);
     s.set_action(
         61,
@@ -1361,5 +1636,291 @@ fn an_extra_bars_empty_well_keeps_its_bound_hotkey_label() {
     assert_eq!(label(&s, "MultiBarBottomLeftButton2"), "");
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     assert_eq!(label(&s, "MultiBarBottomLeftButton2"), "");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **Decision 2000 — the shelf's middle strip tiles along its LENGTH only.**
+///
+/// Past two forms `ShapeshiftBar_Update` maps the middle strip `SetTexCoord(0, n-2, 0, 1)`
+/// (BonusActionBarFrame.lua l.198-206): one slot of art per extra form, repeated along u — the
+/// reference's tiling idiom — while v spans exactly the texture. The renderer serves such a strip
+/// from a repeat-sampled image, and until 2000 that image wrapped BOTH axes: bilinear filtering
+/// at the strip's top edge weighed in the texture's LAST row (`ShapeshiftBarMiddle.blp` row 31 —
+/// opaque grey; rows 0-7 transparent), so every four-form bar wore a one-device-px grey hairline
+/// along the top of its middle piece, over the world: 0.81-0.84× the world's luma over the strip
+/// against 1.00 over the clamp-sampled end caps, in a live four-form shot.
+///
+/// The seam this pins is the ask itself: the wrap the shelf's three pieces request of the
+/// renderer, derived from the UV mapping the VM extracts — u alone for the middle strip past two
+/// forms, nothing at three forms (`SetTexCoord(0, 1, 0, 1)` is the whole texture), and never for
+/// the end caps (atlas crops of `ShapeshiftBarEnds`).
+#[test]
+fn the_middle_strip_tiles_along_its_length_only() {
+    use super::extract::tiling_axes;
+    use crate::ui_pass::UvRect;
+    use benilla_ui::script::{ShapeshiftFormView, TexCoords};
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
+    show_bars(&s, &[]); // bars down: the shelf is the state under test
+
+    let form = |id: u32| ShapeshiftFormView {
+        spell_id: id,
+        texture: Some(format!("Interface\\Icons\\Stance_{id}")),
+        name: format!("Form {id}"),
+        active: id == 2457,
+        castable: true,
+        cooldown: None,
+    };
+    // Every drawn piece whose texture path ends in `piece`, as the wrap it asks the renderer for.
+    let wraps_of = |s: &UiScript, piece: &str| -> Vec<(bool, bool)> {
+        s.extract()
+            .into_iter()
+            .filter_map(|q| match q.content {
+                QuadContent::Texture {
+                    path: Some(p),
+                    tex_coords,
+                    ..
+                } if p.ends_with(piece) => Some(tiling_axes(&match tex_coords {
+                    Some(TexCoords::Rect(e)) => UvRect::from_tex_coords(e),
+                    Some(TexCoords::Corners(c)) => UvRect::from_corners(c),
+                    None => UvRect::FULL,
+                })),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // Four forms (a druid; a GM-learned warrior): the middle strip carries two slots and wraps
+    // along u ONLY. Both end caps stay clamped on both axes.
+    s.set_shapeshift_forms(vec![form(2457), form(71), form(768), form(2458)]);
+    s.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
+    s.resolve();
+    assert_eq!(
+        wraps_of(&s, "ShapeshiftBarMiddle"),
+        vec![(true, false)],
+        "four forms: the strip tiles along its length and clamps across it"
+    );
+    assert_eq!(
+        wraps_of(&s, "ShapeshiftBarEnds"),
+        vec![(false, false), (false, false)],
+        "the end caps are atlas crops and never tile"
+    );
+
+    // Three forms (the plain warrior): one slot, the whole texture — nothing tiles.
+    s.set_shapeshift_forms(vec![form(2457), form(71), form(2458)]);
+    s.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
+    s.resolve();
+    assert_eq!(wraps_of(&s, "ShapeshiftBarMiddle"), vec![(false, false)]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The director's picture (2026-09-05, decision 2009)**: a three-stance warrior with the
+/// bottom-left bar up, and a silver plate around Defensive Stance — `ShapeshiftBarMiddle` drawn
+/// alone, both end caps down.
+///
+/// The reference fires `UPDATE_SHAPESHIFT_FORMS` for exactly one thing: the form LIST changed
+/// (learn / unlearn / rank — wow-re `shapeshift-bar-api.md`, the fires at `0x4b28ff`/`0x4b2e43`).
+/// Our feed fired it for any change in the pushed view — a stance switch, a castable flip, the
+/// shared 1 s category cooldown arming and then EXPIRING. Every fire runs the stock
+/// `ShapeshiftBar_Update` (BonusActionBarFrame.lua l.170): `ShapeshiftBarMiddle:Show()`
+/// unconditionally past two forms, then `ShapeshiftBarFrame:Show()` on a frame already shown —
+/// no OnShow, so no manage pass, and the strip stays up over the raised bar (UIParent.lua
+/// l.1706-1712 is the only thing that takes it down). 2000 and 2001 each fixed a real thing in
+/// this band and neither touched this, which is the director's "no change from before".
+///
+/// Driven through the feed's own diff ([`crate::ui_shapeshift::push_forms`]), so what fails here
+/// is the feed's rule, not a hand-fired event. A form's STATE rides the reference's state events,
+/// which the feeds owning those transitions fire (`PLAYER_AURAS_CHANGED` for the form aura's
+/// slot, `SPELL_UPDATE_COOLDOWN` for the store's generation edge) — checked below by firing the
+/// one the switch really carries and reading the checked ring.
+#[test]
+fn a_forms_state_change_leaves_the_shelf_down_over_the_raised_bar() {
+    use crate::ui_shapeshift::{push_forms, FormsEdge, StanceMemory};
+    use benilla_ui::script::ShapeshiftFormView;
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
+    // A recorder for the two events a push may announce.
+    s.run(
+        "STANCE_LOG = {} local f = CreateFrame('Frame') \
+         f:RegisterEvent('UPDATE_SHAPESHIFT_FORMS') f:RegisterEvent('SPELL_UPDATE_USABLE') \
+         f:SetScript('OnEvent', function() table.insert(STANCE_LOG, event) end)",
+    )
+    .unwrap();
+    let log = |s: &UiScript| {
+        s.eval::<String>("local l = table.concat(STANCE_LOG, ',') STANCE_LOG = {} return l")
+            .unwrap()
+    };
+    let shown = |s: &UiScript, region: &str| {
+        s.eval::<bool>(&format!("return {region}:IsShown()"))
+            .unwrap()
+    };
+    let shelf = [
+        "ShapeshiftBarLeft",
+        "ShapeshiftBarMiddle",
+        "ShapeshiftBarRight",
+    ];
+    let ring = |s: &UiScript| {
+        s.eval::<f64>("return ShapeshiftButton1NormalTexture:GetWidth()")
+            .unwrap()
+    };
+    let checked = |s: &UiScript, i: u32| {
+        s.eval::<bool>(&format!("return ShapeshiftButton{i}:GetChecked() == 1"))
+            .unwrap()
+    };
+    let stance = |id: u32, active: bool, castable: bool, cooldown| ShapeshiftFormView {
+        spell_id: id,
+        texture: Some(format!("Interface\\Icons\\Stance_{id}")),
+        name: format!("Stance {id}"),
+        active,
+        castable,
+        cooldown,
+    };
+    let mut memory = StanceMemory::default();
+
+    // Login: the list arrives — the reference's learn edge — with Battle Stance active.
+    assert_eq!(
+        push_forms(
+            &mut s,
+            &mut memory,
+            vec![
+                stance(2457, true, true, None),
+                stance(71, false, true, None),
+                stance(2458, false, true, None),
+            ],
+        ),
+        FormsEdge::List
+    );
+    assert_eq!(log(&s), "UPDATE_SHAPESHIFT_FORMS");
+    assert!(checked(&s, 1) && !checked(&s, 2));
+    // The bottom-left bar up, the way the Options row raises it: the pass seats the stance bar a
+    // row higher and takes the whole shelf down (UIParent.lua l.1706-1716).
+    show_bars(&s, &[1]);
+    for region in shelf {
+        assert!(!shown(&s, region), "{region} is down under a raised bar");
+    }
+    assert_eq!(ring(&s), 50.0);
+
+    // A stance switch: the form byte flips to Defensive and category 47 arms for a second on all
+    // three. State, not list — the reference announces it through the aura and cooldown events.
+    let cd = Some((0, 1000, true));
+    let edge = push_forms(
+        &mut s,
+        &mut memory,
+        vec![
+            stance(2457, false, true, cd),
+            stance(71, true, true, cd),
+            stance(2458, false, true, cd),
+        ],
+    );
+    for region in shelf {
+        assert!(
+            !shown(&s, region),
+            "{region}: the director's plate — the shelf re-shown over the raised bar"
+        );
+    }
+    assert_eq!(ring(&s), 50.0);
+    assert_eq!(edge, FormsEdge::Silent);
+    assert_eq!(log(&s), "", "a state move fires no list edge");
+    // …and the checked ring follows on the event the switch really carries.
+    assert!(
+        checked(&s, 1) && !checked(&s, 2),
+        "no repaint before the state event"
+    );
+    s.fire_event("PLAYER_AURAS_CHANGED", vec![]);
+    assert!(
+        !checked(&s, 1) && checked(&s, 2),
+        "the aura event repaints the ring"
+    );
+    for region in shelf {
+        assert!(
+            !shown(&s, region),
+            "{region}: a state repaint never touches the shelf"
+        );
+    }
+
+    // The cooldown running out is the same silent edge — the widget hides itself, the reference's
+    // store fires nothing at expiry, and neither do we.
+    assert_eq!(
+        push_forms(
+            &mut s,
+            &mut memory,
+            vec![
+                stance(2457, false, true, None),
+                stance(71, true, true, None),
+                stance(2458, false, true, None),
+            ],
+        ),
+        FormsEdge::Silent
+    );
+    assert_eq!(log(&s), "");
+    assert!(!shown(&s, "ShapeshiftBarMiddle"));
+
+    // A castable flip is a usability move — the reference's own SPELL_UPDATE_USABLE — and the
+    // stock bar greys the icon on it without touching the shelf.
+    assert_eq!(
+        push_forms(
+            &mut s,
+            &mut memory,
+            vec![
+                stance(2457, false, false, None),
+                stance(71, true, true, None),
+                stance(2458, false, true, None),
+            ],
+        ),
+        FormsEdge::Usable
+    );
+    assert_eq!(log(&s), "SPELL_UPDATE_USABLE");
+    let grey = s
+        .eval::<f64>("local r = ShapeshiftButton1Icon:GetVertexColor() return r")
+        .unwrap();
+    assert!(
+        (grey - 0.4).abs() < 1e-6,
+        "not castable: the 0.4 grey, got {grey}"
+    );
+    assert!(!shown(&s, "ShapeshiftBarMiddle"));
+
+    // Nothing moved: nothing pushed, nothing fired.
+    assert_eq!(
+        push_forms(
+            &mut s,
+            &mut memory,
+            vec![
+                stance(2457, false, false, None),
+                stance(71, true, true, None),
+                stance(2458, false, true, None),
+            ],
+        ),
+        FormsEdge::Unchanged
+    );
+    assert_eq!(log(&s), "");
+
+    // The control — a fourth stance LEARNED is the list edge, and the reference's own Update
+    // shows the strip across the raised bar until the next pass (the sibling test pins that).
+    assert_eq!(
+        push_forms(
+            &mut s,
+            &mut memory,
+            vec![
+                stance(2457, false, false, None),
+                stance(71, true, true, None),
+                stance(2458, false, true, None),
+                stance(768, false, true, None),
+            ],
+        ),
+        FormsEdge::List
+    );
+    assert_eq!(log(&s), "UPDATE_SHAPESHIFT_FORMS");
+    assert!(
+        shown(&s, "ShapeshiftBarMiddle"),
+        "the learn edge: Update shows the strip"
+    );
+    s.run("UIParent_ManageFramePositions()").unwrap();
+    assert!(!shown(&s, "ShapeshiftBarMiddle"));
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

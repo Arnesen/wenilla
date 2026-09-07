@@ -129,10 +129,6 @@ pub(crate) mod cmd {
     pub(crate) const TOGGLE_SHEATH: Cmd = by_name("TOGGLESHEATH");
     pub(crate) const TOGGLE_AUTORUN: Cmd = by_name("TOGGLEAUTORUN");
     pub(crate) const TOGGLE_RUN: Cmd = by_name("TOGGLERUN");
-    pub(crate) const OPEN_CHAT: Cmd = by_name("OPENCHAT");
-    pub(crate) const OPEN_CHAT_SLASH: Cmd = by_name("OPENCHATSLASH");
-    pub(crate) const REPLY: Cmd = by_name("REPLY");
-    pub(crate) const REPLY2: Cmd = by_name("REPLY2");
     pub(crate) const TARGET_NEAREST_ENEMY: Cmd = by_name("TARGETNEARESTENEMY");
     pub(crate) const TARGET_PREVIOUS_ENEMY: Cmd = by_name("TARGETPREVIOUSENEMY");
     pub(crate) const NAMEPLATES: Cmd = by_name("NAMEPLATES");
@@ -191,34 +187,89 @@ const TABLE: &[Spec] = &[
         None
     ),
     // ── Chat (BINDING_HEADER_CHAT) ──────────────────────────────────────────────────────
-    spec!("OPENCHAT", CHAT, Kind::Host, Some("ENTER"), None),
-    spec!("OPENCHATSLASH", CHAT, Kind::Host, Some("/"), None),
+    spec!(
+        "OPENCHAT",
+        CHAT,
+        Kind::Edge("ChatFrame_OpenChat(\"\")"),
+        Some("ENTER"),
+        None
+    ),
+    spec!(
+        "OPENCHATSLASH",
+        CHAT,
+        Kind::Edge("ChatFrame_OpenChat(\"/\")"),
+        Some("/"),
+        None
+    ),
     spec!(
         "CHATPAGEUP",
         CHAT,
-        Kind::Edge(r#"getglobal("ChatFrame" .. BenillaFCF.selected):PageUp()"#),
+        Kind::Edge("ChatFrame_ChatPageUp()"),
         Some("PAGEUP"),
         None
     ),
     spec!(
         "CHATPAGEDOWN",
         CHAT,
-        Kind::Edge(r#"getglobal("ChatFrame" .. BenillaFCF.selected):PageDown()"#),
+        Kind::Edge("ChatFrame_ChatPageDown()"),
         Some("PAGEDOWN"),
         None
     ),
     spec!(
         "CHATBOTTOM",
         CHAT,
-        Kind::Edge(r#"getglobal("ChatFrame" .. BenillaFCF.selected):ScrollToBottom()"#),
+        Kind::Edge("ChatFrame_ScrollToBottom()"),
         Some("SHIFT-PAGEDOWN"),
         None
     ),
-    spec!("REPLY", CHAT, Kind::Host, Some("R"), None),
+    spec!(
+        "REPLY",
+        CHAT,
+        Kind::Edge("ChatFrame_ReplyTell()"),
+        Some("R"),
+        None
+    ),
     // The other reply: the last person YOU told, not the last who told you
     // (`ChatEdit_GetLastToldTarget`, ChatFrame.lua l.1650). The memory was already being kept by
     // the send path and read by nothing — 1745.
-    spec!("REPLY2", CHAT, Kind::Host, Some("SHIFT-R"), None),
+    spec!(
+        "REPLY2",
+        CHAT,
+        Kind::Edge("ChatFrame_ReplyTell2()"),
+        Some("SHIFT-R"),
+        None
+    ),
+    // The combat-log four (Bindings.xml l.108-119): ChatFrame2's own paging and the reference's
+    // `ToggleCombatLog`, both FloatingChatFrame.lua's since the chat window became the
+    // reference's (1948). Chords from `bindings-cache.wtf`, account ONE.
+    spec!(
+        "COMBATLOGPAGEUP",
+        CHAT,
+        Kind::Edge("ChatFrame2:PageUp()"),
+        Some("CTRL-PAGEUP"),
+        None
+    ),
+    spec!(
+        "COMBATLOGPAGEDOWN",
+        CHAT,
+        Kind::Edge("ChatFrame2:PageDown()"),
+        Some("CTRL-PAGEDOWN"),
+        None
+    ),
+    spec!(
+        "COMBATLOGBOTTOM",
+        CHAT,
+        Kind::Edge("ChatFrame2:ScrollToBottom()"),
+        Some("CTRL-SHIFT-PAGEDOWN"),
+        None
+    ),
+    spec!(
+        "TOGGLECOMBATLOG",
+        CHAT,
+        Kind::Edge("ToggleCombatLog()"),
+        Some("SHIFT-C"),
+        None
+    ),
     // ── Action bar (BINDING_HEADER_ACTIONBAR) ───────────────────────────────────────────
     // The ref's runOnUp pair (Bindings.xml:121: DOWN shows the pushed visual, UP fires) —
     // exactly what the old hardcoded number-row table sent.
@@ -307,10 +358,10 @@ const TABLE: &[Spec] = &[
         None
     ),
     // The stance/shapeshift row (ref ShapeshiftBar_ChangeForm(n)) — ours clicks the bar's own
-    // buttons, which carry the full form-switch law (StanceBar.xml).
+    // buttons, which carry the full form-switch law (stock BonusActionBarFrame.xml, 1938).
     // ── The self-cast dozen (1.12 `Bindings.xml`:257-293) ───────────────────────────────
     // The same two halves as ACTIONBUTTON, with `ActionButtonUp`'s second argument set: the
-    // reference's own `onSelf`, which `ActionBar.xml` has always forwarded to `UseAction`'s third
+    // reference's own `onSelf`, which stock `ActionButtonUp` forwards to `UseAction`'s third
     // and the host used to drop (1745). `ALT-1`…`ALT-=` are byte-real from DefaultBindings.wtf,
     // and they sit one modifier off the plain bar exactly as the reference lays them out.
     spec!(
@@ -567,8 +618,9 @@ const TABLE: &[Spec] = &[
     ),
     // ── The action-bar PAGES (1.12 `Bindings.xml`:395-431) ──────────────────────────────
     // The bar is six pages of twelve (action slots 1..72) and it has been since 1500 shipped the
-    // multibars; `ChangeActionBarPage` and the `ActionBar_Page{Up,Down}` wrap are ActionBar.xml's
-    // own, quoted 1:1 from the reference. `SHIFT-1..6` and the SHIFT-arrow / SHIFT-wheel steps are
+    // multibars; `ChangeActionBarPage` is the engine's (it fires ACTIONBAR_PAGE_CHANGED and nothing
+    // else — 1938) and the `ActionBar_Page{Up,Down}` wrap is stock ActionButton.lua's. `SHIFT-1..6`
+    // and the SHIFT-arrow / SHIFT-wheel steps are
     // byte-real from `WTF\\DefaultBindings.wtf`.
     spec!(
         "ACTIONPAGE1",
@@ -645,7 +697,7 @@ const TABLE: &[Spec] = &[
         Some("SHIFT-MOUSEWHEELDOWN")
     ),
     // The action-bar lock (decision 1136), the ref's own binding body verbatim (Bindings.xml:433-
-    // 439) — it flips the `LOCK_ACTIONBAR` uvar `ActionBar.xml` declares, the same global the
+    // 439) — it flips the `LOCK_ACTIONBAR` uvar OptionsFrame.xml declares (1938), the same global the
     // Options window's Action Bars row writes. It sits here because the reference files it under
     // this header (l.433 carries no `header=`, so it inherits l.121's ACTIONBAR), and it ships
     // **unbound**: no `TOGGLEACTIONBARLOCK` line in any of the install's three
@@ -1017,6 +1069,24 @@ const TABLE: &[Spec] = &[
         None,
         None
     ),
+    // The battleground scoreboard and the battlefield minimap — the Interface block's last two
+    // (Bindings.xml l.630-635), both Lua-bodied: `ToggleWorldStateScoreFrame` is the stock
+    // WorldStateFrame.lua's since 1972 and `ToggleBattlefieldMinimap` UIParent.xml's (ref
+    // UIParent.lua l.216-221). Defaults byte-real from `WTF\DefaultBindings.wtf`.
+    spec!(
+        "TOGGLEWORLDSTATESCORES",
+        INTERFACE,
+        Kind::Edge("ToggleWorldStateScoreFrame()"),
+        Some("SHIFT-SPACE"),
+        None
+    ),
+    spec!(
+        "TOGGLEBATTLEFIELDMINIMAP",
+        INTERFACE,
+        Kind::Edge("ToggleBattlefieldMinimap()"),
+        Some("SHIFT-M"),
+        None
+    ),
     // ── Miscellaneous (BINDING_HEADER_MISC) ─────────────────────────────────────────────
     spec!(
         "MINIMAPZOOMIN",
@@ -1086,6 +1156,16 @@ const TABLE: &[Spec] = &[
     //
     // On a Mac keyboard the token arrives as F13, which is the reference's own Mac mapping rather
     // than an accommodation (`KEY_PRINTSCREEN_MAC = "F13"`); `super::chord` does the translation.
+    // The stock WorldFrame.lua's framerate readout (decision 1983): `FramerateLabel`/`FramerateText`
+    // toggled by `ToggleFramerate()`, refreshed off `GetFramerate()` every quarter second by
+    // `WorldFrame_OnUpdate`. CTRL-R is the install's own DefaultBindings.wtf chord (1804).
+    spec!(
+        "TOGGLEFPS",
+        MISC,
+        Kind::Edge("ToggleFramerate();"),
+        Some("CTRL-R"),
+        None
+    ),
     spec!(
         "SCREENSHOT",
         MISC,
@@ -1148,10 +1228,10 @@ const TABLE: &[Spec] = &[
         None
     ),
     // ── MultiActionBar (BINDING_HEADER_MULTIACTIONBAR) ──────────────────────────────────
-    // The two bottom bars' buttons (MultiBars.xml renders exactly these; 1.12's right bars
+    // The two bottom bars' buttons (stock MultiActionBars.xml renders exactly these; 1.12's right bars
     // and their MULTIACTIONBAR3/4 commands stay out — honest tree). Ref bodies are the
-    // MultiActionButtonDown/Up runOnUp pair (Bindings.xml:799-966), transcribed in
-    // MultiBars.xml; shipped UNBOUND like the ref (no MULTIACTIONBAR* line in any of the
+    // MultiActionButtonDown/Up runOnUp pair (Bindings.xml:799-966), defined in stock
+    // MultiActionBars.lua; shipped UNBOUND like the ref (no MULTIACTIONBAR* line in any of the
     // install's bindings-cache.wtf files). 1.12 files bar 2 under a BLANK spacer-header;
     // both bars sit under the one MULTIACTIONBAR header here (1008, recorded).
     spec!(
@@ -1775,49 +1855,9 @@ pub(crate) static ABSENT: &[Absent] = &[
         ["PitchDownStart", "PitchDownStop"],
         "no keyboard pitch — see PITCHUP"
     ),
-    // ── Chat ────────────────────────────────────────────────────────────────────────────
-    absent!(
-        "COMBATLOGPAGEUP",
-        ["ToggleCombatLog"],
-        "ChatFrame2 is a real frame that nothing writes into — the combat-log line pipeline does \
-         not exist, which is why 1.12's own ToggleCombatLog has no home here"
-    ),
-    absent!(
-        "COMBATLOGPAGEDOWN",
-        ["ToggleCombatLog"],
-        "nothing writes the combat log — see COMBATLOGPAGEUP"
-    ),
-    absent!(
-        "COMBATLOGBOTTOM",
-        ["ToggleCombatLog"],
-        "nothing writes the combat log — see COMBATLOGPAGEUP"
-    ),
-    absent!(
-        "TOGGLECOMBATLOG",
-        ["ToggleCombatLog"],
-        "nothing writes the combat log — see COMBATLOGPAGEUP"
-    ),
     // ── Action bar ──────────────────────────────────────────────────────────────────────
     // ── Interface ───────────────────────────────────────────────────────────────────────
-    absent!(
-        "TOGGLEWORLDSTATESCORES",
-        ["ToggleWorldStateScoreFrame"],
-        "no battlegrounds"
-    ),
-    absent!(
-        "TOGGLEBATTLEFIELDMINIMAP",
-        ["ToggleBattlefieldMinimap"],
-        "no battlegrounds"
-    ),
     // ── Misc ────────────────────────────────────────────────────────────────────────────
-    absent!(
-        "TOGGLEFPS",
-        ["ToggleFramerate"],
-        "the only framerate readout here is the dev HUD's cost pill, which is behind \
-         `#[cfg(feature = \"dev\")]` and is an instrument, not a player display (perf/hud.rs) — \
-         there is no player-facing framerate to toggle. (0997 recorded this as \"the perf pill is \
-         always-on by design\"; the pill is not the thing TOGGLEFPS toggles.)"
-    ),
     // The nine `hidden="true" debug="true"` rows. Every one of them names an instrument benilla
     // really has (the tri counter, the collision display, the portal draw, the perf pill) — they
     // are absent because those instruments answer to the dev plane's chords (0702/1043), not to a

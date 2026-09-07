@@ -273,7 +273,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // UseAction(action [, checkCursor [, onSelf]]). **`onSelf` is the self-cast modifier** — the
-    // third argument `ActionBar.xml`'s `ActionButtonUp(id, onSelf)` has always forwarded and this
+    // third argument stock `ActionButtonUp(id, onSelf)` forwards on its main-bar branch and this
     // host used to drop on the floor, which is why 1.12's twelve `SELFACTIONBUTTON` bindings
     // (`ALT-1`…`ALT-=`) had no home. It rides out on [`ActionUse::on_self`] and the app's cast
     // resolver reads it. `checkCursor` TRUTHY (numeric nonzero — the
@@ -324,6 +324,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(i64::from(model.bonus_bar_offset))
+        })?,
+    )?;
+
+    // `ChangeActionBarPage()` — four instructions in the reference (`0x4e7650`: `mov ecx,0xd4;
+    // call FrameScript_SignalEvent; xor eax,eax; ret` — wow-re `action-bar-toggles.md` §6, `ui.md`):
+    // it fires `ACTIONBAR_PAGE_CHANGED` and does NOTHING else. The page is FrameXML state
+    // (`CURRENT_ACTIONBAR_PAGE`, which `ActionBar_PageUp/Down` and the SHIFT-n bindings write before
+    // calling this), the buttons repaint from `ActionButton_OnEvent`, and the up-arrow's OnEvent
+    // restamps the numeral. Synchronous, like the reference's `SignalEvent` (1938; the pattern is
+    // `UpdateSpells` → `SPELLS_CHANGED`, 1924). Zero return values on every path.
+    g.set(
+        "ChangeActionBarPage",
+        lua.create_function(|lua, ()| {
+            super::tick::fire_event_into(lua, "ACTIONBAR_PAGE_CHANGED", Vec::new());
+            Ok(())
         })?,
     )?;
 
@@ -463,6 +478,24 @@ mod tests {
             vec![(1, false), (2, false), (3, false), (4, true), (5, true)],
             "only a numeric-nonzero third argument is the modifier"
         );
+    }
+
+    #[test]
+    fn change_action_bar_page_fires_the_event_and_nothing_else() {
+        let s = UiScript::new().unwrap();
+        s.run(
+            "CURRENT_ACTIONBAR_PAGE = 3 \
+             local f = CreateFrame('Frame') f:RegisterEvent('ACTIONBAR_PAGE_CHANGED') \
+             f:SetScript('OnEvent', function() SEEN = event .. ':' .. CURRENT_ACTIONBAR_PAGE end) \
+             N = table.getn({ChangeActionBarPage()})",
+        )
+        .unwrap();
+        assert_eq!(
+            s.eval::<String>("return SEEN").unwrap(),
+            "ACTIONBAR_PAGE_CHANGED:3",
+            "the event fires synchronously, and the page is whatever FrameXML wrote"
+        );
+        assert_eq!(s.eval::<i64>("return N").unwrap(), 0, "zero return values");
     }
 
     #[test]

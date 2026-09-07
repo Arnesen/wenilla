@@ -200,6 +200,14 @@ pub(super) fn text_emote_event(
 pub(crate) struct ChatLog {
     pending: Vec<Pending>,
     broadcasts: Vec<super::broadcast::Broadcast>,
+    /// The ding's gain tuple, parked for `ui_unit`'s `PLAYER_LEVEL_UP` fire (decision 1884).
+    ///
+    /// The net layer has no `UiScript` — deliberately — so the gains arrive here, on the same
+    /// net-to-UI channel `broadcasts` uses, and the feed that owns the level edge picks them up.
+    /// They are matched BY LEVEL rather than just drained, because the trigger is a descriptor
+    /// diff and the gains are packet-borne: the two land together today, and matching means a
+    /// stale entry can never attach itself to a later ding if they ever stop doing so.
+    level_up_gains: Vec<(LevelUpInfo, u32)>,
 }
 
 impl ChatLog {
@@ -216,6 +224,22 @@ impl ChatLog {
     /// Take the parked broadcasts, leaving the queue empty.
     pub(crate) fn take_broadcasts(&mut self) -> Vec<super::broadcast::Broadcast> {
         std::mem::take(&mut self.broadcasts)
+    }
+
+    /// Park the ding's gains for the `PLAYER_LEVEL_UP` fire (see [`ChatLog::level_up_gains`]).
+    pub(crate) fn push_level_up_gains(&mut self, info: &LevelUpInfo, talent_points: u32) {
+        self.level_up_gains.push((*info, talent_points));
+    }
+
+    /// The parked gains for `level`, removed from the queue. `None` when the level edge came from
+    /// somewhere the packet did not — a GM demotion's descriptor write, or a first observation —
+    /// in which case the caller fires zeros, which is what those gains actually are.
+    pub(crate) fn take_level_up_gains(&mut self, level: u32) -> Option<(LevelUpInfo, u32)> {
+        let i = self
+            .level_up_gains
+            .iter()
+            .position(|(l, _)| l.level == level)?;
+        Some(self.level_up_gains.remove(i))
     }
 }
 
@@ -263,12 +287,9 @@ impl ChatLog {
                 tries: 0,
             });
         } else {
-            self.pending.push(Pending::Event(notice_event(
-                notice_byte,
-                channel,
-                name,
-                None,
-            )));
+            if let Some(event) = notice_event(notice_byte, channel, name, None) {
+                self.pending.push(Pending::Event(event));
+            }
         }
     }
 
@@ -425,21 +446,6 @@ impl ChatLog {
             .collect()
     }
 
-    /// The text of every parked line headed for a chat window, in order — test-only, the
-    /// text-shaped twin of [`Self::pending_len`]. A count proves a line was queued; only the text
-    /// proves it is the *right* line, which is the whole question for a composed one (decision
-    /// 1764's `ERR_TRADE_BLOCKED_S`, whose `%s` has to name the right player).
-    #[cfg(test)]
-    pub(crate) fn pending_texts(&self) -> Vec<String> {
-        self.pending
-            .iter()
-            .filter_map(|p| match p {
-                Pending::Event(e) => Some(e.text.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
     /// How many parked items are headed for a CHAT WINDOW.
     ///
     /// Addon lines are excluded on purpose. They park in the same queue for the same ask-once name
@@ -554,20 +560,55 @@ fn notice_event(
     channel: String,
     a: Option<String>,
     b: Option<String>,
-) -> ChatEvent {
+) -> Option<ChatEvent> {
+    // The display type per notice byte — wow-re `chat-msg-event-args.md`'s notice table, read
+    // off each arm's `mov edi`: 0x00/0x01 are the join/leave lines, MODE_CHANGE (0x0c) fires no
+    // chat event at all, a byte past THROTTLED fires SYSTEM with an empty token, and the rest
+    // split between CHANNEL_NOTICE (0x12) and CHANNEL_NOTICE_USER (0x13) exactly as listed.
+    use channel_notice as n;
     let kind = match notice_byte {
-        channel_notice::JOINED => ChatEventKind::ChannelJoin,
-        channel_notice::LEFT => ChatEventKind::ChannelLeave,
-        _ => ChatEventKind::ChannelNotice,
+        n::JOINED => ChatEventKind::ChannelJoin,
+        n::LEFT => ChatEventKind::ChannelLeave,
+        n::MODE_CHANGE => return None,
+        n::YOU_JOINED
+        | n::YOU_LEFT
+        | n::WRONG_PASSWORD
+        | n::NOT_MEMBER
+        | n::NOT_MODERATOR
+        | n::NOT_OWNER
+        | n::MUTED
+        | n::BANNED
+        | n::THROTTLED => ChatEventKind::ChannelNotice,
+        n::PASSWORD_CHANGED
+        | n::OWNER_CHANGED
+        | n::PLAYER_NOT_FOUND
+        | n::CHANNEL_OWNER
+        | n::ANNOUNCEMENTS_ON
+        | n::ANNOUNCEMENTS_OFF
+        | n::MODERATION_ON
+        | n::MODERATION_OFF
+        | n::PLAYER_KICKED
+        | n::PLAYER_BANNED
+        | n::PLAYER_UNBANNED
+        | n::PLAYER_NOT_BANNED
+        | n::PLAYER_ALREADY_MEMBER
+        | n::INVITE
+        | n::INVITE_WRONG_FACTION
+        | n::WRONG_FACTION
+        | n::INVALID_NAME
+        | n::NOT_MODERATED
+        | n::PLAYER_INVITED
+        | n::PLAYER_INVITE_BANNED => ChatEventKind::ChannelNoticeUser,
+        _ => ChatEventKind::System,
     };
-    ChatEvent {
+    Some(ChatEvent {
         kind: Some(kind),
         sender: a.unwrap_or_default(),
         target: b.unwrap_or_default(),
         channel,
         notice: notice_byte.to_string(),
         ..Default::default()
-    }
+    })
 }
 
 /// Deliver one built event: the joined-list upkeep on **both sides** of the render, with the
@@ -577,7 +618,8 @@ fn notice_event(
 /// **YOU_JOINED lands before, YOU_LEFT lands after.** The notice's arg4/arg7/arg8/arg9 are read off
 /// the client's channel record ([`ChannelState::stamp_channel`] is our leg of that), so a record
 /// torn down before the line is composed costs it the slot number — and, since the color resolves
-/// through `ChatTypeInfo["CHANNEL"..arg8]` ([`super::event::resolved_color`]), its color with it.
+/// through `ChatTypeInfo["CHANNEL"..arg8]` — the stock window's own Lua since 1948 — its color
+/// with it.
 /// The reference's YOU_LEFT arm only *flags* the teardown (`0x49c115 mov dword [ebp-0xc],1`); the
 /// event fires first (`0x49c5b0 call 0x49a870`) and only then does `0x49c5b5 test` /
 /// `0x49c5c2 call 0x49bbd0` destroy the record — VERIFIED by disassembly at those addresses (1275).
@@ -659,12 +701,10 @@ pub(super) fn feed_chat(
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     mut log: ResMut<ChatLog>,
     mut windows: ResMut<ChatWindows>,
-    mut edit: ResMut<super::edit::ChatEditState>,
     mut channels: ResMut<ChannelState>,
     mut names: ResMut<NameCache>,
     mut speaker: SpeakerEffects,
     commands: Res<NetCommands>,
-    time: Res<Time>,
     // The text-emote sentence seam (decision 1274): the tables, plus the guid the composer's
     // "are you the performer?" test compares against.
     emote_texts: Option<Res<EmoteTexts>>,
@@ -684,7 +724,6 @@ pub(super) fn feed_chat(
     let Some(mut script) = script else {
         return;
     };
-    windows.tell_alert_left = (windows.tell_alert_left - time.delta_secs()).max(0.0);
     if log.pending.is_empty() {
         return;
     }
@@ -815,11 +854,6 @@ pub(super) fn feed_chat(
                     ..Default::default()
                 };
                 channels.stamp_channel(&mut event);
-                // A received whisper remembers its sender (`ChatEdit_SetLastTellTarget`,
-                // ChatFrame_OnEvent l.1471) — the `/r` + Tab-cycle ring.
-                if event.kind == Some(ChatEventKind::Whisper) && !event.sender.is_empty() {
-                    edit.remember_tell(&event.sender);
-                }
                 route(&mut script, &mut windows, &event);
                 // The speech bubble spawns the moment the line routes — the reference's
                 // `0x49acd9` sits in the same SMSG display path ([`crate::chat_bubble`]).
@@ -895,13 +929,14 @@ pub(super) fn feed_chat(
                 // changes what the player sees, which this pass is not allowed to do. Left for the
                 // director's call; the cost of leaving it is that arg7/arg8/arg9 are 0/0/empty on
                 // these events alone.
-                let event = notice_event(
+                if let Some(event) = notice_event(
                     notice,
                     channel,
                     Some(a.unwrap_or_else(|| "Unknown".into())),
                     b,
-                );
-                route(&mut script, &mut windows, &event);
+                ) {
+                    route(&mut script, &mut windows, &event);
+                }
             }
             Pending::Addon {
                 prefix,

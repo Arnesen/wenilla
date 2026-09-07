@@ -726,6 +726,25 @@ pub(super) fn defense_anim(victim_state: u32, main: Option<(u8, u8)>) -> Option<
     }
 }
 
+/// The **play-time unarmed-special substitution** — the third weapon substitution in the client,
+/// and the only one that lives inside `PlayAnimation` itself rather than in a selector
+/// (`0x5fe2f0` @ `0x5fe3cc`–`0x5fe3e9`, byte-verified: wow-re `disarm-weapon-gate-law.md` §7).
+/// A requested **Special1H(57) / Special2H(58)** — the weapon-remapped spin a spell kit asks for,
+/// Eviscerate's among them — becomes **SpecialUnarmed(118)** when `GetWeapon(0, 0)` *and*
+/// `GetWeapon(1, 0)` are both NULL, i.e. both hands are empty to the combat reading.
+/// `SpecialUnarmed`'s own `AnimationData.dbc` fallback column is 57, closing the ring.
+///
+/// The test is emptiness, not weapon-ness: a hand holding a non-weapon is non-NULL and keeps the
+/// armed clip. Because it sits at the play seam it covers every requester — a genuinely
+/// weaponless rogue and a disarmed one reach it by the same route (decision 1863).
+pub(super) fn unarmed_special(id: u16, main: Option<(u8, u8)>, off: Option<(u8, u8)>) -> u16 {
+    if matches!(id, 57 | 58) && main.is_none() && off.is_none() {
+        118
+    } else {
+        id
+    }
+}
+
 /// The per-packet melee swing one-shot ids (decision 0073's tables) — what the whiff slow-down
 /// (decision 0279) is allowed to touch when it finds them on the masked overlay.
 pub(super) fn is_swing_id(id: u16) -> bool {

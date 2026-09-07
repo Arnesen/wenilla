@@ -69,6 +69,15 @@ mod lod;
 /// (or non-item) hand. Written by the held-item resolution ([`crate::entities`], decision 0072) from
 /// the same descriptor data that places the weapon models; read by the swing/ready animation
 /// selectors (decision 0073 — the byte-verified `GetWeapon` byte pair `0x605e30`).
+///
+/// **The two readings of a hand** (decision 1863). The reference's accessor takes a `visFlag`:
+/// `GetWeapon(slot, 1)` is what is *worn* there, `GetWeapon(slot, 0)` is what the unit can
+/// *fight* with — and the two differ by exactly one live descriptor bit, [`UNIT_FLAG_DISARMED`].
+/// The fields below are the `visFlag == 1` reading — what the paperdoll and the dress-up model
+/// show, the two surfaces that keep the weapon while disarmed because they read the flag nowhere.
+/// Everything that decides how the unit *behaves* — swing, Ready idle, parry, the sheath machine,
+/// the swing sound, the attached model — goes through [`Wielded::armed_main`] /
+/// [`Wielded::armed_off`], which apply the ladder.
 #[derive(Component, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Wielded {
     pub(crate) main: Option<(u8, u8)>,
@@ -99,6 +108,87 @@ pub(crate) struct Wielded {
     /// for players, the `UNIT_VIRTUAL_ITEM_INFO` byte triple for creatures — so nothing here is a
     /// guess. Indexed by held slot: 0 mainhand · 1 offhand · 2 ranged.
     pub(crate) materials: [u8; 3],
+    /// `UNIT_FIELD_FLAGS & `[`UNIT_FLAG_DISARMED`] — a rogue's Disarm, up on the unit's own
+    /// descriptor and therefore replicated for **every** unit, not just ours (CGUnit's ladder is
+    /// byte-identical to CGPlayer's, so a disarmed creature behaves exactly like a disarmed
+    /// player). Resolved beside the hands because that is where the reference reads it: inside
+    /// `GetWeapon` itself (`[[unit+0x110]+0xa0] & 0x200000`), off the same descriptor these pairs
+    /// come from.
+    pub(crate) disarmed: bool,
+}
+
+/// `UNIT_FIELD_FLAGS` bit 21 — **`UNIT_FLAG_DISARMED`** (vmangos `UnitDefines.h`), read by the
+/// reference inside `GetWeapon` at `0x5ec2b8` (CGPlayer) and `0x605e58`/`0x605e98` (CGUnit):
+/// `test dword ptr [ecx+0xa0], 0x200000`. `0xa0 = 4 × 0x28` pins it to field `UNIT_FIELD_FLAGS`
+/// off the descriptor base `[unit+0x110]`.
+pub(crate) const UNIT_FLAG_DISARMED: u32 = 0x0020_0000;
+
+/// `ItemClass` 2 — **WEAPON**. The class byte the reference's disarm ladder tests, and the whole
+/// of its test: no subclass, no inventory type, nothing else. Disarm takes weapons, so a shield or
+/// a held-in-off-hand trinket is never the hand it hides.
+pub(crate) const ITEM_CLASS_WEAPON: u8 = 2;
+
+/// **The disarm ladder** — which single held slot `UNIT_FLAG_DISARMED` hides, given what each
+/// melee hand holds (decision 1863; wow-re `disarm-weapon-gate-law.md` §2, byte-verified by a
+/// trio including a cold decoder-first read, both class bodies identical).
+///
+/// The reference does not "empty a disarmed unit's hands". `GetWeapon(slot, visFlag = 0)` runs a
+/// **two-probe ladder with main-hand precedence**, and the off-hand probe's polarity is the
+/// opposite of the main hand's:
+///
+/// ```text
+/// ; slot 0 (MAIN HAND) — one probe, 0x5ec2ae
+/// 5ec2b8: test dword ptr [ecx+0xa0],0x200000  ; disarmed?
+/// 5ec2cc: call [edx+0x98]                     ; GetWeapon(0, 1) — vis=1 skips the gate
+/// 5ec2d6: cmp byte ptr [eax],2 ; je 0x5ec346  ; class 2 -> RETURN NULL
+///
+/// ; slot 1 (OFF HAND) — two probes, 0x5ec262, MAIN HAND asked FIRST
+/// 5ec280: call [edx+0x98]                     ; GetWeapon(0, 1)   <<< slot 0, not 1
+/// 5ec28a: cmp byte ptr [eax],2 ; je 0x5ec2aa  ; main hand IS a weapon -> PROCEED (keep the off hand)
+/// 5ec297: call [eax+0x98]                     ; GetWeapon(1, 1)
+/// 5ec2a1: cmp byte ptr [eax],2 ; je 0x5ec346  ; off hand IS a weapon -> RETURN NULL
+/// ```
+///
+/// So **exactly one weapon is hidden — the first one found scanning main hand → off hand** — and
+/// a disarmed dual-wielder keeps swinging their off-hand weapon, model and all. vmangos agrees
+/// from the other side: `Unit::CanUseEquippedWeapon` returns `!DISARMED` for `BASE_ATTACK` and an
+/// unconditional `true` for `OFF_ATTACK` and `RANGED_ATTACK`. The **ranged slot is never gated**
+/// (`0x5ec25e` pushes equip index `0x11` and jumps past both tests).
+///
+/// Stated over classes rather than over [`Wielded`] because two layers need the same law from two
+/// different data sources — the animation layer off the resolved hands, the action bar's
+/// equipped-item test off the raw inventory (`0x5ea5d0`'s slot 0/1/2 loop).
+pub(crate) fn disarmed_hand(main_class: Option<u8>, off_class: Option<u8>) -> Option<usize> {
+    if main_class == Some(ITEM_CLASS_WEAPON) {
+        return Some(0);
+    }
+    if off_class == Some(ITEM_CLASS_WEAPON) {
+        return Some(1);
+    }
+    None
+}
+
+impl Wielded {
+    /// The held slot this unit's disarm hides right now — [`disarmed_hand`] over its own hands,
+    /// `None` while the flag is down. The equipment layer reads it to know which weapon the
+    /// reference's flag reflex takes off the hand ([`crate::entities`]).
+    pub(crate) fn disarmed_hand(&self) -> Option<usize> {
+        self.disarmed
+            .then(|| disarmed_hand(self.main.map(|(c, _)| c), self.off.map(|(c, _)| c)))
+            .flatten()
+    }
+
+    /// The **mainhand** as `GetWeapon(0, 0)` sees it — the reading the swing (`0x6246a0`), the
+    /// Ready idle (`0x5fcdc0`), the parry LUT, the sheath machine and the swing sound all take.
+    pub(crate) fn armed_main(&self) -> Option<(u8, u8)> {
+        self.main.filter(|_| self.disarmed_hand() != Some(0))
+    }
+
+    /// The **offhand** as `GetWeapon(1, 0)` sees it. Nulled only when the main hand did *not*
+    /// claim the disarm — see [`disarmed_hand`].
+    pub(crate) fn armed_off(&self) -> Option<(u8, u8)> {
+        self.off.filter(|_| self.disarmed_hand() != Some(1))
+    }
 }
 
 /// The unit is engaged in melee auto-attack (`SMSG_ATTACKSTART` .. `ATTACKSTOP`, decision 0073):
@@ -696,7 +786,7 @@ mod events;
 use events::fire_anim_events;
 pub(crate) use events::{
     advance_track, footfall_culls, footfall_side, is_footstep_sound, scan_events, AnimSoundEvent,
-    TrackMemory,
+    EventFrame, TrackMemory,
 };
 
 /// The `$BTH` breath puffs — a unit's visible cold vapour in a snow zone (B233, decision 1149).
@@ -713,7 +803,7 @@ pub(crate) use impact::{DefenseAnim, PendingImpacts, SwingFlush, SwingImpact, Sw
 /// one-shots ([`EmoteAnim`]) and kit sounds ([`spell_visual::SpellKitSound`]).
 mod blood;
 mod env_damage;
-mod spell_visual;
+pub(crate) mod spell_visual;
 use blood::{blood_spurts, load_blood_tables};
 use env_damage::{hard_landing_dust, load_env_damage_table};
 pub(crate) use env_damage::{EnvDamageTable, HardLanding, HARD_LANDING_DESCENT};
@@ -1216,6 +1306,7 @@ mod nock_latch_tests {
             entity: unit,
             ident: *b"$BWP",
             data: 0,
+            pos: None,
         });
         app.update();
         assert!(
@@ -1226,6 +1317,7 @@ mod nock_latch_tests {
             entity: unit,
             ident: *b"$BWR",
             data: 0,
+            pos: None,
         });
         app.update();
         assert!(
@@ -1239,11 +1331,114 @@ mod nock_latch_tests {
             entity: bare,
             ident: *b"$BWP",
             data: 0,
+            pos: None,
         });
         app.update();
         assert!(
             !app.world().entity(bare).contains::<NockLatch>(),
             "no ammo display, no latch"
         );
+    }
+}
+
+#[cfg(test)]
+mod disarm_tests {
+    use super::*;
+
+    /// **The ladder, hand by hand** (decision 1863; wow-re `disarm-weapon-gate-law.md` §2c). The
+    /// reference hides **exactly one weapon**, main hand first — so a disarmed dual-wielder
+    /// punches with the main hand and still swings its off-hand weapon. Every selector downstream
+    /// reaches its own unarmed leg by its own table; there is no disarm case in any of them.
+    #[test]
+    fn disarm_hides_one_weapon_main_hand_first() {
+        let worn = Wielded {
+            main: Some((2, 0x7)),   // 1H sword
+            off: Some((2, 0xf)),    // dagger
+            ranged: Some((2, 0x2)), // bow
+            ..Default::default()
+        };
+        let disarmed = Wielded {
+            disarmed: true,
+            ..worn
+        };
+
+        // CONTROL — the weapon tables, untouched while the flag is down.
+        assert_eq!(worn.disarmed_hand(), None);
+        assert_eq!(select::swing_anim_main(worn.armed_main()), 17); // Attack1H
+        assert_eq!(select::swing_anim_off(worn.armed_off()), 88); // AttackOffPierce
+        assert_eq!(select::ready_anim(worn.armed_main()), 26); // Ready1H
+
+        // Disarmed, both hands full: the MAIN HAND is the one hidden, and its claim CANCELS the
+        // off-hand probe (`5ec28d je 0x5ec2aa`) — the dagger keeps swinging as a dagger.
+        assert_eq!(disarmed.disarmed_hand(), Some(0));
+        assert_eq!(disarmed.armed_main(), None);
+        assert_eq!(disarmed.armed_off(), Some((2, 0xf)), "the off hand is KEPT");
+        assert_eq!(select::swing_anim_main(disarmed.armed_main()), 16); // AttackUnarmed
+        assert_eq!(select::swing_anim_off(disarmed.armed_off()), 88); // still the dagger
+        assert_eq!(select::ready_anim(disarmed.armed_main()), 25); // ReadyUnarmed
+
+        // The RANGED slot has no gate at all: `0x5ec25e` pushes equip index `0x11` and jumps
+        // straight past both probes, so a disarmed hunter still nocks.
+        assert_eq!(disarmed.ranged, Some((2, 0x2)));
+        assert_eq!(select::ranged_load_anim(disarmed.ranged), 105); // LoadBow
+
+        // …and the WORN reading is untouched throughout — it is what the paperdoll shows.
+        assert_eq!(disarmed.main, worn.main);
+    }
+
+    /// The off hand is hidden only when the main hand does **not** claim the disarm — an empty or
+    /// non-weapon main hand. That is the one case that reaches AttackUnarmedOff(117), whose
+    /// `AnimationData.dbc` row (id 117, fallback 87) is a clip distinct from AttackUnarmed(16).
+    #[test]
+    fn an_empty_main_hand_hands_the_disarm_to_the_off_hand() {
+        let off_only = Wielded {
+            main: None,
+            off: Some((2, 0xf)),
+            disarmed: true,
+            ..Default::default()
+        };
+        assert_eq!(off_only.disarmed_hand(), Some(1));
+        assert_eq!(off_only.armed_off(), None);
+        assert_eq!(select::swing_anim_off(off_only.armed_off()), 117);
+
+        // A NON-WEAPON main hand does not claim it either — the test is `ItemClass == 2` only.
+        let torch = Wielded {
+            main: Some((15, 0)), // class 15 = miscellaneous
+            off: Some((2, 0xf)),
+            disarmed: true,
+            ..Default::default()
+        };
+        assert_eq!(torch.disarmed_hand(), Some(1));
+        assert_eq!(
+            torch.armed_main(),
+            Some((15, 0)),
+            "a non-weapon is not taken"
+        );
+        assert_eq!(torch.armed_off(), None);
+    }
+
+    /// Neither hand holds a weapon: the flag hides nothing at all, and a shield stays a shield.
+    #[test]
+    fn the_ladder_takes_weapons_and_leaves_the_rest() {
+        let shielded = Wielded {
+            main: None,
+            off: Some((4, 6)), // class 4 = ARMOR, subclass 6 = shield
+            disarmed: true,
+            ..Default::default()
+        };
+        assert_eq!(shielded.disarmed_hand(), None);
+        assert_eq!(shielded.armed_off(), Some((4, 6)));
+    }
+
+    /// The pure ladder, over the classes alone — the form the action bar's equipped-item test
+    /// (`0x5ea5d0`'s slot 0/1/2 loop) reads off the raw inventory.
+    #[test]
+    fn the_ladder_over_classes() {
+        assert_eq!(disarmed_hand(Some(2), Some(2)), Some(0));
+        assert_eq!(disarmed_hand(Some(2), None), Some(0));
+        assert_eq!(disarmed_hand(None, Some(2)), Some(1));
+        assert_eq!(disarmed_hand(Some(4), Some(2)), Some(1));
+        assert_eq!(disarmed_hand(None, None), None);
+        assert_eq!(disarmed_hand(Some(4), Some(4)), None);
     }
 }

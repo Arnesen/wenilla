@@ -43,20 +43,27 @@ mod auction;
 mod aura;
 mod backdrop;
 mod bank;
+mod battlefield_positions;
+mod battlefield_queue;
+mod battlefield_score;
 mod bind_confirm;
 mod binder;
 mod binding_abi;
+mod dialog_verbs;
+mod tutorial;
+mod worldmap_arrow;
 // The five camera views + FlipCameraYaw — the reference's `UIUtil\Camera.cpp` Lua surface.
 mod button;
 mod camera_view;
 mod channel;
 mod char_stats;
+mod chat_misc;
 mod chat_send;
+mod chat_types;
 mod chat_window;
 mod clip;
 mod colorselect;
 mod container;
-mod cooldown;
 mod craft;
 mod cursor;
 mod death;
@@ -80,6 +87,7 @@ mod gossip;
 mod guild;
 mod handler_prof;
 mod screenshot;
+mod tabard;
 pub use handler_prof::HandlerRow;
 mod inspect;
 mod item_stats;
@@ -145,6 +153,9 @@ mod trainer;
 mod types;
 mod unit;
 mod weapon_enchant;
+/// The `/who` list's seven-key sort chain and its comparator — its header is the whole
+/// mechanism, including why a repeated header click reverses (decision 2030).
+mod who_sort;
 mod worldmap;
 mod worldstate;
 mod worn_display;
@@ -159,22 +170,29 @@ pub use auction::{
 pub use aura::{AuraState, TrackingState};
 pub use backdrop::{inset_atlas_bleed, pieces, Backdrop, BackdropPiece, Insets};
 pub use bank::BankState;
+pub use battlefield_positions::{BattlefieldFlagView, BattlefieldPositionView};
+pub use battlefield_queue::{BattlefieldListView, BattlefieldMapInfo, BattlefieldQueueSlot};
+pub use battlefield_score::{BattlefieldScoreRow, BattlefieldScores, BattlefieldStatColumn};
 pub use bind_confirm::PendingEquipAnswer;
 pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
+pub use channel::{ChannelCommand, ZoneChannelRow};
 pub use char_stats::{
     weapon_subclass_skill, BankBagSlots, InvSlotView, InventorySlots, UnitCombatStats,
     BANK_BAG_SLOT_COUNT, INVENTORY_SLOT_COUNT, SKILL_DEFENSE, SKILL_UNARMED,
 };
+pub use chat_misc::EmoteRequest;
 pub use chat_send::ChatSend;
-pub use chat_window::ChatWindowLook;
+pub use chat_types::ChatTypeColor;
+pub use chat_window::{message_group_index, ChatWindowLook, MESSAGE_GROUPS};
 pub use container::{
-    BagAutoStore, ContainerMove, ContainerSlot, ContainerState, EnchantView, PetitionSlotView,
-    RandomPropertyView, UiCursorMode,
+    BagAutoStore, ContainerMove, ContainerSlot, ContainerState, EnchantView, PendingWrap,
+    PetitionSlotView, RandomPropertyView, UiCursorMode,
 };
 pub use craft::{CraftReagent, CraftRecipe, CraftState, CraftTooltip};
+pub use cursor::money::coin_icon;
 pub use cursor::{
-    CursorAction, CursorItem, CursorMacro, CursorMerchantItem, CursorPayload, CursorPetAction,
-    CursorSpell, CursorStablePet, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
+    CursorAction, CursorItem, CursorMacro, CursorMerchantItem, CursorMoney, CursorPayload,
+    CursorPetAction, CursorSpell, CursorStablePet, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
 };
 pub use cvars::{MultisampleFormat, CVAR_NAMEPLATE_ENEMIES, CVAR_NAMEPLATE_FRIENDS};
 pub use death::{DeathAction, DeathUiState};
@@ -187,11 +205,18 @@ pub use guild::{
     GuildMemberInfo, GuildRankEdit, GuildRankInfo, GuildRequest, GuildState, LastOnline, UnitGuild,
     MAX_RANKS, MIN_RANKS, RANK_RIGHT_BITS,
 };
+pub use modelframe::ModelPaneFrame;
 pub use petition::{
     validate_guild_name, PetitionRecordView, PetitionRequest, PetitionState, PETITION_TYPE_CHARTER,
     PETITION_TYPE_PETITION,
 };
+pub use tabard::{
+    emblem_mask_path, TabardHost, TabardIntent, EMBLEM_MASK_TOKEN, TABARD_COUNTS,
+    TABARD_CREATION_COST,
+};
+pub use worldmap_arrow::ARROW_MODEL;
 
+pub(crate) use button::{set_label_font_justify_h_lua, LabelFont};
 pub use inspect::{InspectView, UnitReach};
 pub use item_stats::{item_usable, ItemSetView, ItemTemplateView, PlayerReqState};
 pub use item_text::ItemTextState;
@@ -199,7 +224,7 @@ pub use layout_cache::{FrameLayout, LayoutPoint};
 pub use loot::{LootRow, LootState};
 pub use loot_roll::{LootRollEntry, LootRollsState};
 pub use macros::{MacroState, MacroView, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NAME};
-pub use mail::{MailInboxRow, MailInvoice, MailSendRequest, MailState};
+pub use mail::{MailInboxRow, MailInvoice, MailSendRequest, MailState, StationeryView};
 pub use measure::TextMeasure;
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState};
 pub(crate) use minimap::apply_model_attrs as apply_minimap_model_attrs;
@@ -208,7 +233,9 @@ pub use model::{TextureProbe, TextureSizeProbe};
 pub use party::{PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo};
 pub use pet::{PetActionView, PetStats};
 pub use pvp::{HonorState, InspectHonorData};
-pub use quest::{QuestAction, QuestItemView, QuestPanel, QuestSelect, QuestState};
+pub use quest::{
+    QuestAction, QuestItemView, QuestPanel, QuestRewardSpell, QuestSelect, QuestState,
+};
 pub use quest_log::{QuestLogDetail, QuestLogEntryView, QuestLogObjectiveView, QuestLogState};
 pub(crate) use region::{apply_font_parts, implicit_creation_anchor_lua};
 pub use reputation::{FactionEntry, ReputationSend, ReputationState};
@@ -245,6 +272,7 @@ pub use unit::{
     grey_band, level_reads_unknown, power_token, unit_is_grey, SelectionRequest, UnitState,
 };
 pub use weapon_enchant::WeaponEnchant;
+pub use who_sort::{WhoSortChain, WhoSortKey};
 pub use worldmap::{
     WorldMapContinentView, WorldMapLandmarkView, WorldMapOverlayView, WorldMapState,
     WorldMapZoneView,
@@ -424,10 +452,15 @@ pub const SCREEN: crate::layout::Handle = 0;
 /// corpus call sites across 91 addons); it removes working behaviour from the 23 sites that remain,
 /// so it is still a change to make deliberately rather than as a side effect of widening this list
 /// — but the FrameXML half of "with FrameXML fixed first" is most of the way there now.
-const SCRIPT_KINDS: [&str; 35] = [
+const SCRIPT_KINDS: [&str; 37] = [
     "OnLoad",
     "OnEvent",
     "OnUpdate",
+    // The model pane's two: fired by the tick's model pass — `OnUpdateModel` at the top of every
+    // paint of a visible pane, `OnAnimFinished` when a clamped sequence completes (decision 2007;
+    // `object::events_regions::set_script`'s doc has the sites).
+    "OnUpdateModel",
+    "OnAnimFinished",
     "OnShow",
     "OnHide",
     "OnClick",
@@ -554,6 +587,8 @@ impl UiScript {
         addon::install(&lua)?;
         addon_message::install(&lua)?;
         chat_send::install(&lua)?;
+        chat_types::install(&lua)?;
+        chat_misc::install(&lua)?;
         channel::install(&lua)?;
         chat_window::install(&lua)?;
         client::install(&lua)?;
@@ -597,6 +632,12 @@ impl UiScript {
         spellbook::install(&lua)?;
         macros::install(&lua)?;
         talent::install(&lua)?;
+        dialog_verbs::install(&lua)?;
+        battlefield_score::install(&lua)?;
+        battlefield_queue::install(&lua)?;
+        battlefield_positions::install(&lua)?;
+        tutorial::install(&lua)?;
+        worldmap_arrow::install(&lua)?;
         shapeshift::install(&lua)?;
         pet::install(&lua)?;
         gossip::install(&lua)?;
@@ -611,6 +652,7 @@ impl UiScript {
         trade::install(&lua)?;
         inspect::install(&lua)?;
         dressup::install(&lua)?;
+        tabard::install(&lua)?;
         tradeskill::install(&lua)?;
         craft::install(&lua)?;
         reputation::install(&lua)?;
@@ -629,7 +671,6 @@ impl UiScript {
         colorselect::install(&lua)?;
         minimap::install(&lua)?;
         modelframe::install(&lua)?;
-        cooldown::install(&lua)?;
         tooltip::install(&lua)?;
         worldmap::install(&lua)?;
         worldstate::install(&lua)?;
@@ -752,6 +793,9 @@ impl UiScript {
         }
         model.screen = new;
         model.touch_layout();
+        drop(model);
+        // The implicit rects are measured in layout units, which follow the aspect (2015).
+        self.reapply_implicit_rects();
         true
     }
 
@@ -839,7 +883,7 @@ impl UiScript {
     ///
     /// One field, not one per widget: there is exactly one ping (decision 1596), and the old
     /// per-widget push walked the whole ~3k-frame arena every frame a ping was live.
-    pub fn set_minimap_ping(&mut self, ping: Option<(f32, f32)>) {
+    pub fn set_minimap_ping(&mut self, ping: (f32, f32)) {
         self.model_mut().minimap_ping = ping;
     }
 
@@ -1024,6 +1068,32 @@ impl UiScript {
     /// holds the `OnLoad` `Function` directly (to fire it bottom-up) rather than through the registry:
     /// this keeps the convention in one home instead of duplicating it. Errors are returned so the
     /// caller routes them (the loader records them in its own report).
+    /// Whether the frame with this global name is effectively visible — shown, with every ancestor
+    /// shown (`IsVisible()`'s answer, read host-side). `false` for a name no live frame carries.
+    /// The read side of a window for a host that keeps state per window: the dressing-room feed
+    /// empties its booth when `DressUpFrame` hides, and the stock file has no hook of ours in its
+    /// OnHide to say so (1969). A linear scan, like [`Self::model_pane`], for the same reason.
+    pub fn frame_visible(&self, name: &str) -> bool {
+        self.model_ref()
+            .arena
+            .iter_frames()
+            .any(|(_, f)| f.name.as_deref() == Some(name) && f.effective_visible)
+    }
+
+    /// The effective alpha of the frame with this global name while it is effectively visible,
+    /// `None` when it is hidden or no live frame carries the name. The read side of a frame whose
+    /// pixels a host draws for the engine: the stock `MiniMapPing` is a `<Model>` this engine
+    /// renders nothing for, so the app's ping sprite follows the frame's own show/hide and alpha
+    /// — the lifetime the reference's `Minimap.lua` owns — instead of keeping a clock of its own
+    /// (1974). A linear scan, like [`Self::frame_visible`].
+    pub fn frame_effective_alpha(&self, name: &str) -> Option<f32> {
+        self.model_ref()
+            .arena
+            .iter_frames()
+            .find(|(_, f)| f.name.as_deref() == Some(name) && f.effective_visible)
+            .map(|(_, f)| f.effective_alpha)
+    }
+
     /// Resolve every frame's rect: sync each frame's effective scale from the arena into its layout
     /// input, run the [`crate::layout`] graph (screen root as the external base), and cache the
     /// resolved rects. `GetWidth`/`GetHeight`/`extract` read this cache.
@@ -1184,7 +1254,14 @@ impl UiScript {
             self.fire_drag_stop(source);
         }
         let mut model = self.model_mut();
+        let held: Vec<crate::widget::FrameHandle> = model.mouse_down_on.values().copied().collect();
         model.mouse_down_on.clear();
+        // Every button that capture was holding down goes back to NORMAL — the release the OS
+        // never fed us (`0x7793c2`'s transition), without which a button walked off the window
+        // edge mid-press keeps its pushed art for the rest of the session.
+        for h in held {
+            button::settle(&mut model, h);
+        }
         // …and its one-slot twin `root+0x80`, which the mouse-down raise reads: a capture left
         // behind would aim the next press's raise at whatever the pointer was last holding.
         model.mouse_capture = None;
@@ -1381,6 +1458,8 @@ impl UiScript {
         if let Some(h) = model.arena.lookup(name) {
             return model.arena.frame(h).map(|f| match f.kind {
                 crate::widget::FrameKind::Frame => "Frame",
+                // A `Frame` to Lua (1984): the registered name never becomes a class identity.
+                crate::widget::FrameKind::WorldFrame => "Frame",
                 crate::widget::FrameKind::Button => "Button",
                 crate::widget::FrameKind::CheckButton => "CheckButton",
                 // `GetObjectType 0x495b60` is two instructions and returns `"LootButton"`
@@ -1392,6 +1471,8 @@ impl UiScript {
                 crate::widget::FrameKind::ScrollFrame => "ScrollFrame",
                 crate::widget::FrameKind::Model => "Model",
                 crate::widget::FrameKind::PlayerModel => "PlayerModel",
+                crate::widget::FrameKind::DressUpModel => "DressUpModel",
+                crate::widget::FrameKind::TabardModel => "TabardModel",
                 crate::widget::FrameKind::MessageFrame => "MessageFrame",
                 crate::widget::FrameKind::ScrollingMessageFrame => "ScrollingMessageFrame",
                 crate::widget::FrameKind::ColorSelect => "ColorSelect",
@@ -1399,7 +1480,6 @@ impl UiScript {
                 crate::widget::FrameKind::MovieFrame => "MovieFrame",
                 crate::widget::FrameKind::GameTooltip => "GameTooltip",
                 crate::widget::FrameKind::Minimap => "Minimap",
-                crate::widget::FrameKind::Cooldown => "Cooldown",
             });
         }
         // The region leaves publish into their own name table (`region_names`), not the arena's —

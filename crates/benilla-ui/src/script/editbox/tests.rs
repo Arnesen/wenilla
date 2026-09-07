@@ -20,12 +20,17 @@ fn text_quad(s: &UiScript) -> Option<String> {
 
 // ── §1/§2 focus acquisition + routing ───────────────────────────────────────────────────────
 
+/// **The self-acquire path**, path 2 of the two: a box that has had no show TRANSITION (created
+/// already visible, so `visibility_focus` never runs for it) still takes the keyboard on the first
+/// key or char event, and processes that same event. Path 1, focus-on-show, is
+/// [`an_autofocus_box_takes_the_keyboard_when_it_is_shown`] below — this test's name used to assert
+/// its absence, which stopped being true at decision 1686.
 #[test]
-fn autofocus_does_not_focus_on_show_but_self_acquires_first_event() {
+fn an_autofocus_box_self_acquires_on_the_first_event() {
     let mut s = script();
     s.run(r#"E = CreateFrame("EditBox", "E"); E:SetAutoFocus(true)"#)
         .unwrap();
-    // autoFocus does NOT focus on show — nothing owns the keyboard yet.
+    // No show transition has run for this box, so nothing owns the keyboard yet.
     assert!(!s.has_keyboard_focus());
     assert!(!s.eval::<bool>("return E:HasFocus()").unwrap());
 
@@ -1550,4 +1555,33 @@ fn set_number_on_a_numeric_box_empties_it_when_the_text_is_not_all_digits() {
         "",
         "a sign empties a numeric box rather than partly filling it"
     );
+}
+
+/// `SetMaxBytes` (1960): the exact count gate and raw coerce of its sibling, a BYTE cap on the
+/// buffer, and -1 as the no-limit sentinel where `SetMaxLetters` reads 0.
+#[test]
+fn set_max_bytes_caps_the_buffer_in_bytes_with_minus_one_unlimited() {
+    let s = script();
+    s.run(r#"E = CreateFrame("EditBox", "E") E:SetFocus()"#)
+        .unwrap();
+    let max = |s: &UiScript| s.eval::<i64>("return E:GetMaxBytes()").unwrap();
+    assert_eq!(max(&s), -1, "unlimited from the ctor");
+    s.run("E:SetMaxBytes(4)").unwrap();
+    assert_eq!(max(&s), 4);
+    // Four bytes hold two two-byte letters and not a third.
+    s.run(r#"E:SetText("ééé")"#).unwrap();
+    assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "éé");
+    s.run(r#"E:SetMaxBytes(0) E:SetText("ééé")"#).unwrap();
+    assert_eq!(max(&s), -1, "a non-positive value is unlimited");
+    assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "ééé");
+    s.run(r#"E:SetMaxBytes("3") E:SetText("abcd")"#).unwrap();
+    assert_eq!(
+        s.eval::<String>("return E:GetText()").unwrap(),
+        "abc",
+        "a numeric string coerces"
+    );
+    s.run("E:SetMaxBytes(nil)").unwrap();
+    assert_eq!(max(&s), -1, "nil coerces to 0, which is unlimited");
+    assert!(s.run("E:SetMaxBytes()").is_err(), "too few raises");
+    assert!(s.run("E:SetMaxBytes(1, 2)").is_err(), "too many raises");
 }

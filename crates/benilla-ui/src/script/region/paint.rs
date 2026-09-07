@@ -51,9 +51,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // call in FrameXML and in the addon corpus, and it only bites where a region already carries
     // alpha < 1 — where it would surface as art going permanently translucent, which is a LOOK and
     // therefore the director's call, not a quiet correction to fold into an unrelated slice. The
-    // known live case is the action bar's grid ring, and `ActionBar.xml`'s
-    // BenillaActionButton_SetRing is already written to be correct under BOTH readings (it passes
-    // the fourth argument explicitly), so closing this cannot silently change that file.
+    // known live case is the action bar's grid ring: stock `ActionButton_ShowGrid` passes the
+    // fourth argument explicitly (`SetVertexColor(1.0, 1.0, 1.0, 0.5)`), so closing this cannot
+    // silently change that file.
     m.set(
         "SetVertexColor",
         lua.create_function(

@@ -1,4 +1,4 @@
-//! Print screen's UI half (`assets/ui/ScreenshotStatus.xml`) against the shipped XML — and above
+//! Print screen's UI half — the stock `WorldFrame.xml`'s `ScreenshotStatus` (decision 1983) — and above
 //! all **B261's third clause: the "Screen Captured" line must not be in the file it announces.**
 //!
 //! That contract is an ORDERING, so it is tested as one. Two paths could put text in a picture and
@@ -14,13 +14,17 @@ fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
-        "UIParent.xml",
-        "ScreenshotStatus.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
+        r"Interface\FrameXML\WorldFrame.xml",
     ] {
         load_xml(&s, f);
     }

@@ -15,16 +15,34 @@ fn exp_bar_harness() -> UiScript {
     // is the reference's own since 1751, and a hand-rolled reader here would look for it in the
     // wrong store — and would leave its `<Script file="TextStatusBar.lua"/>` unresolved besides.
     for file in [
-        "Fonts.xml",
-        "UIParent.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
-        "Cooldown.xml",
-        "ActionBar.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
+        // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
+        // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
+        // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
+        // two template files its check boxes inherit through (1875).
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        r"Interface\FrameXML\OptionsFrameTemplates.xml",
+        r"Interface\FrameXML\ReputationFrame.xml",
     ] {
         super::test_ui::load_ui(&s, file);
     }
+    // 1.12 ships detailed tips ON — `SHOW_NEWBIE_TIPS = "1"` is UIOptionsFrame_Init's (ref
+    // UIOptionsFrame.lua l.100; ours sits in OptionsFrame.xml's uvar block, 1968), and a harness
+    // without the options file says so itself, the way the reference's tooltip would read it.
+    s.run("SHOW_NEWBIE_TIPS = \"1\"").unwrap();
     s
 }
 
@@ -53,7 +71,8 @@ fn the_xp_bar_takes_the_mouse_and_explains_itself() {
         "the XP strip must be mouse-enabled or the hover never fires"
     );
 
-    s.run("BenillaExpBar_OnEnter(MainMenuExpBar)").unwrap();
+    s.run("this = MainMenuExpBar MainMenuExpBar:GetScript(\"OnEnter\")()")
+        .unwrap();
     assert_eq!(
         s.eval::<String>("return GameTooltipTextLeft1:GetText()")
             .unwrap(),
@@ -71,7 +90,8 @@ fn the_xp_bar_takes_the_mouse_and_explains_itself() {
         "the default-corner anchor"
     );
 
-    s.run("BenillaExpBar_OnLeave()").unwrap();
+    s.run("this = MainMenuExpBar MainMenuExpBar:GetScript(\"OnLeave\")()")
+        .unwrap();
     assert!(
         !s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
         "leaving hides the plate"
@@ -291,7 +311,8 @@ fn the_xp_bar_numerals_show_on_hover() {
     s.set_player_xp(1234, 5678);
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
 
-    s.run("BenillaExpBar_OnEnter(MainMenuExpBar)").unwrap();
+    s.run("this = MainMenuExpBar MainMenuExpBar:GetScript(\"OnEnter\")()")
+        .unwrap();
     assert_eq!(
         s.eval::<String>("return MainMenuBarExpText:GetText()")
             .unwrap(),
@@ -305,7 +326,7 @@ fn the_xp_bar_numerals_show_on_hover() {
     // `this.isZero` on one line where every other line reads `bar` (TextStatusBar.lua:95 — the
     // reference's own slip, benign there because `this` is always SOME frame during dispatch, and
     // a nil index only from bare Lua). Called from the bar's own `<OnLeave>` in play.
-    s.run("this = MainMenuExpBar BenillaExpBar_OnLeave(MainMenuExpBar) this = nil")
+    s.run("this = MainMenuExpBar MainMenuExpBar:GetScript(\"OnLeave\")() this = nil")
         .unwrap();
     assert!(
         !s.eval::<bool>("return MainMenuBarExpText:IsShown()")
@@ -328,7 +349,8 @@ fn the_rest_state_line_joins_the_held_open_tooltip() {
 
     // 1.12's default posture (0661): detailed newbie tips ON.
     s.run("SHOW_NEWBIE_TIPS = \"1\"").unwrap();
-    s.run("BenillaExpBar_OnEnter(MainMenuExpBar)").unwrap();
+    s.run("this = MainMenuExpBar MainMenuExpBar:GetScript(\"OnEnter\")()")
+        .unwrap();
     assert_eq!(
         s.eval::<f64>("return ExhaustionTick.timer").unwrap(),
         1.0,

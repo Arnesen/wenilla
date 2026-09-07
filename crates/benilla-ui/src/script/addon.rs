@@ -43,6 +43,14 @@ use mlua::{Lua, MultiValue, Value};
 use super::addon_gate::{can_load, GateRow, Verdict};
 use super::Model;
 
+/// A reader for a chain-sourced addon's files, by chain-internal path — what the host seats
+/// through [`super::UiScript::set_addon_chain_reader`] (1957).
+pub type AddonChainReader = Box<dyn Fn(&str) -> Option<Vec<u8>>>;
+
+/// [`AddonChainReader`] as the model holds it: shared, so a load can borrow it without holding
+/// the model.
+pub(crate) type SharedChainReader = std::rc::Rc<dyn Fn(&str) -> Option<Vec<u8>>>;
+
 /// One addon, as the AddOn API sees it — the host fills this at discovery
 /// ([`super::UiScript::register_addons`]).
 #[derive(Clone, Debug, Default)]
@@ -82,6 +90,12 @@ pub struct AddOnInfo {
     /// `## Interface` as the client parses it (`Toc::interface_version` — the leading integer,
     /// `0` when the line is absent). What the version gate compares (decision 1292).
     pub interface: u32,
+    /// The addon's files sit in the player's patch chain, not the AddOns folder — Blizzard's own
+    /// LoadOnDemand addons (`Blizzard_TrainerUI` and its eleven siblings), which the reference
+    /// loads through the same `LoadAddOn` path as a player's (1957). Read through the host's
+    /// chain reader ([`super::UiScript::set_addon_chain_reader`]) at
+    /// `Interface/AddOns/<Name>/<file>`; no folder root is needed for them.
+    pub chain: bool,
 }
 
 /// Resolve a Lua index-or-name argument to a position in the registry.
@@ -406,7 +420,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 ///
 /// `Err` carries the reference's own reason token.
 fn load_addon(lua: &Lua, i: usize) -> Result<(), String> {
-    let (name, root, files, deps, already) = {
+    let (name, root, files, deps, already, chain, chain_reader) = {
         let model = lua.app_data_ref::<Model>().expect("model");
         let a = &model.addons[i];
         (
@@ -415,6 +429,8 @@ fn load_addon(lua: &Lua, i: usize) -> Result<(), String> {
             a.files.clone(),
             a.dependencies.clone(),
             a.loaded,
+            a.chain,
+            model.addons_chain_reader.clone(),
         )
     };
     if already {
@@ -430,8 +446,19 @@ fn load_addon(lua: &Lua, i: usize) -> Result<(), String> {
             return Err(refused.token().expect("a refusal always carries a token"));
         }
     }
-    let Some(root) = root else {
-        return Err("MISSING".into()); // no addon root: a hermetic capture has nothing to load
+    // Where this addon's bytes come from: the AddOns folder for a player's addon, the patch chain
+    // for Blizzard's own LoadOnDemand addons (`AddOnInfo::chain`). Either absent is `MISSING` —
+    // a hermetic capture has no folder, a bare VM has no chain.
+    let read: Reader = if chain {
+        let Some(reader) = chain_reader else {
+            return Err("MISSING".into());
+        };
+        Box::new(move |req: &str| reader(&format!("Interface/AddOns/{req}")))
+    } else {
+        let Some(root) = root else {
+            return Err("MISSING".into());
+        };
+        Box::new(move |req: &str| read_under(&root, req))
     };
 
     // The gate said yes, so a dependency failing HERE is a load-time failure (its files errored,
@@ -464,9 +491,9 @@ fn load_addon(lua: &Lua, i: usize) -> Result<(), String> {
         }
     }
 
-    run_files(lua, &name, &root, &files);
+    run_files(lua, &name, &read, &files);
     // `Bindings.xml` (1188 phase 4) attaches here, between the files and the saved variables.
-    load_bindings(lua, &name, &root);
+    load_bindings(lua, &name, &read);
     load_saved_variables(lua, i);
 
     {
@@ -489,9 +516,9 @@ fn load_addon(lua: &Lua, i: usize) -> Result<(), String> {
 /// A missing file is the normal case and silent — most addons declare no bindings. `Bindings.xml`
 /// is the reference's own spelling and the only one probed; the sandbox is [`read_under`]'s, so
 /// this reads exactly what the addon's other files may read and nothing else.
-fn load_bindings(lua: &Lua, name: &str, root: &std::path::Path) {
+fn load_bindings(lua: &Lua, name: &str, read: &Reader) {
     let path = crate::loader::join_ref(name, "Bindings.xml");
-    let Some(bytes) = read_under(root, &path) else {
+    let Some(bytes) = read(&path) else {
         return;
     };
     match crate::bindings_xml::parse(&crate::source::decode(&bytes)) {
@@ -551,11 +578,15 @@ fn load_saved_variables(lua: &Lua, i: usize) {
 /// `Addon::load_files`, and deliberately the same rules: `.lua` is a chunk, anything else is
 /// FrameXML, and every reference resolves against the *including file's* directory (1186) inside
 /// the AddOns root as the sandbox.
-fn run_files(lua: &Lua, name: &str, root: &std::path::Path, files: &[String]) {
-    let provider = |req: &str| -> Option<Vec<u8>> { read_under(root, req) };
+/// One addon's byte source, by a path relative to the AddOns root (`<Name>/<file>`) — the folder
+/// reader for a player's addon, the chain reader for a Blizzard LoadOnDemand one.
+type Reader = Box<dyn Fn(&str) -> Option<Vec<u8>>>;
+
+fn run_files(lua: &Lua, name: &str, read: &Reader, files: &[String]) {
+    let provider = |req: &str| -> Option<Vec<u8>> { read(req) };
     for file in files {
         let path = crate::loader::join_ref(name, file);
-        let Some(bytes) = read_under(root, &path) else {
+        let Some(bytes) = read(&path) else {
             log_error(lua, &format!("{name}/{file}: not found"));
             continue;
         };
@@ -617,6 +648,11 @@ fn log_error(lua: &Lua, msg: &str) {
 
 /// The host's push: the discovered registry and the root its files live under.
 impl super::UiScript {
+    /// Seat the host's chain reader — what a chain-sourced addon (`AddOnInfo::chain`) is read
+    /// through, by chain-internal path (1957).
+    pub fn set_addon_chain_reader(&self, reader: AddonChainReader) {
+        self.model_mut().addons_chain_reader = Some(std::rc::Rc::from(reader));
+    }
     /// Replace the AddOn registry — called once at world entry, after discovery
     /// ([`crate::script`]'s `register_bindings` is the same shape: the host owns the facts, the
     /// engine owns the verbs).

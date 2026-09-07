@@ -261,6 +261,7 @@ impl Plugin for WorldFoundation {
             // read, whose defaults ARE the player behaviour. The debug panel is only its editor
             // and may not be installed at all.
             .init_resource::<crate::dev_state::DebugState>()
+            .add_systems(Last, crate::dev_state::count_still_inputs)
             // The collider-set stamp every cached collision answer is dated against
             // (`collision::ColliderEpoch`). Tracked in `First` so a removal is stamped before any
             // consumer runs; the attach half is stamped by the streamer's own attach loop.

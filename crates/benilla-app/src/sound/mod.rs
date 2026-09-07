@@ -18,7 +18,8 @@ mod anim_events;
 mod cinematic;
 mod combat;
 mod creature;
-mod doodad_pool;
+mod death_thud;
+mod emitter_pool;
 mod emote;
 pub(crate) mod footsteps;
 mod gameobject;
@@ -38,10 +39,10 @@ mod money;
 mod mount;
 // Crate-visible for one reader: the dev-only stall watchdog asks `output::device_open` before
 // it suspends the process (decision 1857). Dev may see anything; nothing here knows dev exists.
-// Off macOS the mixer runs on kira's own cpal backend (`mixer::MixBackend`), so everything here
-// below `Window` and `device_open` goes unreferenced. It stays compiled rather than cfg'd out, so
-// the CoreAudio path cannot rot behind a feature gate while we are off it.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// On wasm32 the mixer runs on kira's own cpal backend (`mixer::MixBackend`), so everything here
+// below `Window` and `device_open` goes unreferenced there. It stays compiled rather than cfg'd
+// out, so the device layer cannot rot behind a target gate while the browser is off it.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) mod output;
 mod probe;
 mod reverb;
@@ -55,6 +56,10 @@ mod weather;
 mod web_load;
 mod zone;
 pub(crate) use emote::EmoteSounds;
+/// First-play kit decodes so far (`kit::DECODES`) — the probe's tail annotation.
+pub(crate) fn kit_decodes() -> u32 {
+    kit::DECODES.load(std::sync::atomic::Ordering::Relaxed)
+}
 pub(crate) use glue::GlueSound;
 pub(crate) use greeting::NpcGreetingRequest;
 pub(crate) use message::MessageSounds;
@@ -551,12 +556,13 @@ impl Plugin for SoundPlugin {
         cinematic::plugin(app);
         gameobject::plugin(app);
         anim_events::plugin(app);
-        doodad_pool::plugin(app);
+        emitter_pool::plugin(app);
         spell::plugin(app);
         missile::plugin(app);
         creature::plugin(app);
         combat::plugin(app);
         footsteps::plugin(app);
+        death_thud::plugin(app);
         mount::plugin(app);
         water::plugin(app);
         weather::plugin(app);

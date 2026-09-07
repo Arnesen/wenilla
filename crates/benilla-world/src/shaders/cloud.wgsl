@@ -14,31 +14,22 @@
 //
 // SKY-PASS DEPTH (see `sky_order.rs`, "The depth law"): the dome's radius does not decide occlusion —
 // the reference draws the whole sky first, in a squashed back depth slice, and the opaque world paints
-// over it. Forcing the far depth reproduces that: clouds survive only where no world geometry drew.
+// over it. The far depth reproduces that: clouds survive only where no world geometry drew. It is
+// pinned in the VERTEX stage (`sky_vertex.wgsl`, shared by every sky shader); this fragment writes
+// colour only and keeps its early-Z (2016).
 
 #import bevy_pbr::forward_io::VertexOutput
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var cloud_tex: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var cloud_samp: sampler;
 
-/// Reverse-Z "infinitely far" — the sky pass's forced depth (`sky_order.rs`).
-const SKY_FAR_DEPTH: f32 = 0.0;
-
-struct CloudOutput {
-    @location(0) color: vec4<f32>,
-    @builtin(frag_depth) depth: f32,
-}
-
 @fragment
-fn fragment(in: VertexOutput) -> CloudOutput {
+fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let texel = textureSample(cloud_tex, cloud_samp, in.uv);
     var a = texel.a;
 #ifdef VERTEX_COLORS
     a *= in.color.a; // the dome's rim fade (ring alphas)
 #endif
-    var out: CloudOutput;
     // Premultiplied gamma blend; the RGB is already the reference's byte math.
-    out.color = vec4<f32>(texel.rgb * a, a);
-    out.depth = SKY_FAR_DEPTH;
-    return out;
+    return vec4<f32>(texel.rgb * a, a);
 }

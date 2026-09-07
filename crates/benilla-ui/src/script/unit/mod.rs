@@ -7,16 +7,20 @@
 //! `UnitHealth("player")` therefore resolves against a [`UnitState`] the Bevy side deposited that
 //! frame — the same shape a real addon sees, with none of the coupling.
 //!
-//! Return shapes follow the live API (warcraft.wiki.gg): `UnitName` returns the name *or nil*;
+//! Return shapes follow the reference: `UnitName` returns the name *or nil*;
 //! `UnitHealth`/`UnitHealthMax`/`UnitLevel` return numbers (`UnitLevel` returns **−1** for a
 //! unit whose level "can't be told" — [`level_reads_unknown`], the target frame's skull gate);
-//! a unit that doesn't exist reports `UnitExists` false and the numbers `0` (nil for the name),
+//! a unit that doesn't exist reports `UnitExists` nil and the numbers `0` (nil for the name),
 //! exactly as the client does for an absent unit token. Tokens (`"player"`, `"target"`, …) are opaque strings the host never
 //! interprets — the app decides what each maps to.
 //!
+//! **Every predicate in this family answers the number `1` or `nil`, never a Lua boolean**, and it
+//! answers it through the one helper — [`unit_predicate`], over
+//! [`super::binding_abi::predicate`]. Decision 2043; the law is 1830's, which settled the same
+//! question for the widget predicates a family earlier.
+//!
 //! v1 gaps, stated not hidden: the snapshot carries only the *active* power slot (see the
-//! `UnitMana` note below); `UnitIsDead` returns a Lua boolean rather than the client's `1`/nil
-//! (truthy either way — the shape a caller branches on is identical); `UnitIsConnected`'s backing
+//! `UnitMana` note below); `UnitIsConnected`'s backing
 //! field defaults `false`, and no app-side feed sets it `true` for live units yet (decision 0434
 //! §2's party-frame predicates land the binding first, the feed follows — see the field doc).
 
@@ -41,6 +45,10 @@ pub enum SelectionRequest {
     /// `AssistUnit(unit)` — select the token's own `UNIT_FIELD_TARGET`; a basis with no target is
     /// a silent no-op (the reference's shared assist tail bails before any send).
     Assist(String),
+    /// `AssistByName(name)` (`0x489c40`) — the `/assist Bob` handler's verb: select what the
+    /// *named player* is targeting. A name, not a unit token, so it is the app's name→unit
+    /// resolution (`AssistRequest`) rather than `Assist`'s token walk.
+    AssistByName(String),
     /// `TargetLastEnemy()` — select the last *attackable* unit that was committed.
     LastEnemy,
 }
@@ -191,6 +199,12 @@ pub struct UnitState {
     /// player-options newbie tip. `UnitIsPlayer`'s note used to call this reach a gap we did not
     /// carry; the unit-frame migration is what closed it.
     pub player_controlled: bool,
+    /// `UNIT_FIELD_FLAGS`, raw — what `UNIT_FLAGS` fires on (the app's `fire_transitions`); the
+    /// three readings above are bits of it.
+    pub flags: u32,
+    /// The unit's owner — `UNIT_FIELD_SUMMONEDBY`, else its charmer, else its creator; `0` for
+    /// nobody's. What `UnitPlayerOrPetInParty`/`InRaid` read for the "or pet" half (1958).
+    pub owner: u64,
     /// The unit's guild membership (`GetGuildInfo(unit)`, decision 1257). `None` = guildless, or
     /// a creature, or a player whose `PLAYER_GUILDID` has not streamed yet. Filled from the
     /// PUBLIC descriptor fields 191/192 joined against the app's guild-identity cache — see
@@ -326,6 +340,34 @@ pub struct UnitState {
     /// identical bit. One wire flag answers this for every token, which is what this one field
     /// is; `benilla::ui_action::usable` already reads the same bit off the same descriptor.
     pub in_combat: bool,
+}
+
+/// `FrameScript_GetText("UNKNOWNOBJECT")` as the client's name resolvers call it — the VM's own
+/// GlobalString, read out of `_G` exactly as `0x703bf0` reads it (so a translated
+/// `GlobalStrings.lua` translates this too; enUS `"Unknown"`, `GlobalStrings.lua:4444`), falling
+/// back to the binary's own literal `"Unknown Being"` (`0x860fa4`) when the global is missing or
+/// empty. Always a string — this is the "name not yet known" state, never a nil.
+///
+/// **ONE home, two callers**, the same reason [`is_civilian_kill`] is a function. `UnitName`
+/// `0x517020` reaches it at `0x517220`, and `CGUnit_C::GetUnitName 0x609210` — which the UNIT
+/// TOOLTIP builder `0x529fe0` calls for its title line (`0x52a187`) — reaches the *same* tail at
+/// `0x609324`, from every one of its misses:
+///
+/// ```text
+/// 609353  je 0x609324        ; creature: [CGUnit+0xb30] (creaturecache.wdb) still null
+/// 6092ce  je 0x609324        ; pet: petnamecache.wdb row absent, or its stamp stale
+/// 609265  je 0x609324        ; player: namecache.wdb has not answered
+/// 609324  push 0x0 / or edx,-1 / mov ecx,0x850ed0 ("UNKNOWNOBJECT") / call 0x703bf0
+/// 60933c  mov eax,0x860fa4   ; the global missing or empty -> "Unknown Being"
+/// ```
+///
+/// One resolver, so the verb and the plate can never disagree about what a unit whose name is
+/// still in flight is called (decisions 2002, 2040).
+pub fn unknownobject(lua: &Lua) -> mlua::Result<mlua::String> {
+    match lua.globals().get::<mlua::Value>("UNKNOWNOBJECT") {
+        Ok(mlua::Value::String(s)) if !s.as_bytes().is_empty() => Ok(s),
+        _ => lua.create_string("Unknown Being"),
+    }
 }
 
 /// The grey-band table `0x80ae98` (a byte-identical twin at `0x81dda8` drives the nameplate's
@@ -679,6 +721,31 @@ fn with_unit<T>(
         Some(u) => f(u),
         None => default,
     })
+}
+
+/// A unit **predicate** binding's whole body: resolve the token, map its snapshot to a bool, and
+/// push the family's one return shape — the number `1` or `nil`, never a Lua boolean.
+///
+/// [`with_unit`] answers whatever `f` answers, so a predicate written on it *directly* hands mlua a
+/// Rust `bool`, and mlua pushes tag 1. That is the one shape 1.12 cannot produce: `UnitExists`
+/// (`0x515fb0`) pushes `lua_pushnumber` (`0x6f3810`, tag 3, the double `1.0`) or `lua_pushnil`
+/// (`0x6f37f0`, tag 0) and nothing else, and so does every other predicate in the family. So the
+/// whole family goes through [`super::binding_abi::predicate`] — 1830's widget law, which is the
+/// *same* law, finally applied to the unit surface (decision 2043). A predicate that hand-computes
+/// its own bool calls that helper directly; one that reads a snapshot field calls this. Both end at
+/// the one push site, which is what stops the family drifting apart again.
+///
+/// **Not every unit binding is a predicate.** `UnitReaction` answers the reaction *number*,
+/// `UnitLevel` a level (with `-1` for "can't be told"), `UnitPowerType` a power index whose miss is
+/// the number `0` and never nil. Those keep their own shapes and must not be routed here.
+fn unit_predicate(
+    lua: &Lua,
+    token: &Option<String>,
+    f: impl FnOnce(&UnitState) -> bool,
+) -> mlua::Result<mlua::Value> {
+    Ok(super::binding_abi::predicate(with_unit(
+        lua, token, false, f,
+    )?))
 }
 
 /// The `Unit*`/`GetQuestGreenRange` Lua binding registrations — split from this module's

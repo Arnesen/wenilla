@@ -576,6 +576,7 @@ fn feed_auction(
     mut last_open: Local<crate::ui_script::VmMemo<Option<u64>>>,
     mut last_can_query: Local<crate::ui_script::VmMemo<bool>>,
     mut last_sell: Local<crate::ui_script::VmMemo<Option<(i64, u32)>>>,
+    mut last_classes: Local<crate::ui_script::VmMemo<Vec<AuctionCategory>>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -584,6 +585,17 @@ fn feed_auction(
     let last_open = last_open.get(&script);
     let last_can_query = last_can_query.get(&script);
     let last_sell = last_sell.get(&script);
+
+    // The Browse tab's class tree is login-scoped: the stock `AuctionFrameBrowse_OnLoad` reads
+    // `GetAuctionItemClasses()` at the addon's LOAD — the first auctioneer, before the session's
+    // snapshot lands — and the client answers off `ItemClass.dbc` with no session at all (1971).
+    // Pushed once the two catalogs exist and whenever they change (a diff, like the inbox's).
+    let classes_now = categories(catalogs.0.as_deref(), catalogs.1.as_deref());
+    let last_classes = last_classes.get(&script);
+    if *last_classes != classes_now {
+        *last_classes = classes_now.clone();
+        script.set_auction_item_classes(classes_now);
+    }
 
     // The queued client messages (decision 1523). Resolved against the VM's own GlobalStrings and
     // shown on the surface the message's catalog row names — the `ui_quest` shape (0669).
@@ -608,10 +620,9 @@ fn feed_auction(
                 },
             };
             let get = |key: &str| script.lua().globals().get::<String>(key).ok();
-            let err = UiError {
-                key: msg.key,
-                fill_s: fill,
-                fill_d: None,
+            let err = match fill {
+                Some(s) => UiError::s(msg.key, s),
+                None => UiError::key(msg.key),
             };
             if let Some(text) = ui_error_text(&err, &get) {
                 lines.push(Shown::keyed(msg.key, text));
@@ -622,7 +633,6 @@ fn feed_auction(
     }
 
     let self_guid = self_q.iter().next().map(|g| g.0);
-    let (classes, subclasses) = (&catalogs.0, &catalogs.1);
     let rolls = crate::items::RollCatalogs {
         props: catalogs.2.as_deref(),
         enchants: catalogs.3.as_deref(),
@@ -647,7 +657,6 @@ fn feed_auction(
         });
         AuctionState {
             lists,
-            categories: categories(classes.as_deref(), subclasses.as_deref()),
             // The rate this house charges, keyed by the id the hello reply carried.
             deposit_percent: houses
                 .as_deref()
@@ -681,13 +690,12 @@ fn feed_auction(
             // One routine invalidates all three lists in the reference too — the three events fire
             // together rather than being diffed apart, and each tab's handler repaints only if it
             // is the visible one.
-            for event in [
-                "AUCTION_ITEM_LIST_UPDATE",
-                "AUCTION_BIDDER_LIST_UPDATE",
-                "AUCTION_OWNED_LIST_UPDATE",
-            ] {
-                script.fire_event(event, vec![]);
-            }
+            // Three literal fires, not a loop over names: the producer tripwire
+            // (`reference_ui::every_event_a_chain_file_registers_has_a_producer`) reads fire
+            // sites by their literal, and the stock addon registers all three (1971).
+            script.fire_event("AUCTION_ITEM_LIST_UPDATE", vec![]);
+            script.fire_event("AUCTION_BIDDER_LIST_UPDATE", vec![]);
+            script.fire_event("AUCTION_OWNED_LIST_UPDATE", vec![]);
         }
     }
     *last = fresh;

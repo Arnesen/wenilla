@@ -23,13 +23,19 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::Projection;
 use bevy::image::Image;
-use bevy::mesh::{Indices, PrimitiveTopology};
-use bevy::pbr::{ExtendedMaterial, MaterialExtension};
+use bevy::mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology};
+use bevy::pbr::{
+    ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline,
+};
 use bevy::prelude::*;
-use bevy::render::render_resource::{AsBindGroup, Extent3d, TextureDimension, TextureFormat};
+use bevy::render::render_resource::{
+    AsBindGroup, Extent3d, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+    TextureDimension, TextureFormat,
+};
 use bevy::shader::ShaderRef;
 
 use crate::dev_state::DebugState;
+use crate::sky_order::{sky_pipeline_state, SKY_VERTEX_SHADER};
 use crate::view::WorldCamera;
 
 use super::kernel::COLS;
@@ -52,8 +58,23 @@ pub struct CloudExt {
 }
 
 impl MaterialExtension for CloudExt {
+    /// The shared sky vertex stage — the far-depth pin ([`crate::sky_order`], "The depth law").
+    fn vertex_shader() -> ShaderRef {
+        SKY_VERTEX_SHADER.into()
+    }
+
     fn fragment_shader() -> ShaderRef {
         "embedded://benilla_world/shaders/cloud.wgsl".into()
+    }
+
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        sky_pipeline_state(descriptor);
+        Ok(())
     }
 }
 
@@ -208,7 +229,7 @@ pub(super) fn apply_cloud_visibility(
 /// Pin the dome to the camera at `far·0.87` — inside the opaque sky dome (`far·0.9`), sorted after
 /// the disc shells so the transparent pass draws the clouds over a setting sun, the reference's
 /// depth-band layering. The radius sets the dome's *screen* geometry only: occlusion against the
-/// world is the forced far depth in `cloud.wgsl` (`sky_order`, "The depth law"), not this shell —
+/// world is the far depth `sky_vertex.wgsl` pins (`sky_order`, "The depth law"), not this shell —
 /// the WDL horizon reaches past it (0588).
 #[allow(clippy::type_complexity)]
 pub(super) fn follow_cloud_dome(

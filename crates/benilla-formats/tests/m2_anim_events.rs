@@ -48,3 +48,74 @@ fn creature_anim_events_parse_within_sequences() {
         );
     }
 }
+
+/// **A fired key carries its OWN record's `(bone, position)`, not the tag's first match**
+/// (decision 1904). The reference's M2 event kernel `0x719370` snapshots
+/// `placementMatrix · (boneMatrix[event.bone] · event.position)` by value into the callback record
+/// every dispatcher reads, so *where* a key fires is a property of the record, and a consumer that
+/// re-finds the tag in the marker table by 4CC answers the wrong point wherever a model authors
+/// that tag twice.
+///
+/// It authors it twice a lot: **every player character model carries six `$CSD` records**, one per
+/// emote clip, each on its own bone. Pinned against `HumanMale.m2` — if the parse ever collapsed
+/// the records (or dropped the two new fields back to zero), the emote voices would all speak from
+/// the first one's bone.
+#[test]
+fn a_fired_key_carries_its_own_records_bone_and_point() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let chain = open_chain(&data).expect("open chain");
+    let model = "Character\\Human\\Male\\HumanMale.m2";
+    let bytes = chain.read(model).expect("model bytes");
+
+    // The table's own records, and the per-sequence keys that fire them.
+    let markers = benilla_formats::parse_m2_event_markers(&bytes).expect("event markers");
+    let csd_records: Vec<_> = markers.iter().filter(|m| &m.ident == b"$CSD").collect();
+    assert_eq!(
+        csd_records.len(),
+        6,
+        "{model}: the six emote-voice records are what makes this test worth having"
+    );
+    let distinct: std::collections::BTreeSet<_> =
+        csd_records.iter().map(|m| (m.bone, m.data_key())).collect();
+    assert_eq!(
+        distinct.len(),
+        6,
+        "{model}: the six records are distinct — a first-match lookup cannot stand in for them"
+    );
+
+    // Every fired `$CSD` key must name one of those records, and across the model's sequences the
+    // keys must reach MORE THAN ONE of them — which is exactly what a by-4CC resolve could not do.
+    let anims = parse_m2_animations(&bytes);
+    let mut fired: std::collections::BTreeSet<(u16, [u32; 3])> = Default::default();
+    for a in &anims {
+        for e in a.events.iter().filter(|e| &e.ident == b"$CSD") {
+            let key = (e.bone, bits(e.position));
+            assert!(
+                distinct.contains(&key),
+                "{model}: fired $CSD at bone {} is not one of the authored records",
+                e.bone
+            );
+            fired.insert(key);
+        }
+    }
+    assert!(
+        fired.len() > 1,
+        "{model}: only {} distinct $CSD point(s) ever fire — the record identity is being lost \
+         somewhere between the table and the key",
+        fired.len()
+    );
+}
+
+/// Exact bit patterns, so a float compare never decides record identity.
+fn bits(p: [f32; 3]) -> [u32; 3] {
+    [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()]
+}
+
+trait MarkerKey {
+    fn data_key(&self) -> [u32; 3];
+}
+impl MarkerKey for benilla_formats::EventMarker {
+    fn data_key(&self) -> [u32; 3] {
+        bits(self.position)
+    }
+}

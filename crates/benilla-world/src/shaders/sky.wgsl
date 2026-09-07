@@ -7,20 +7,14 @@
 // So SkyColor0 dominates the whole upper sky; the gradient is crushed into the bottom ~17° and
 // converges into the distance fog at the horizon. Linear interp in elevation ≈ WoW's ring Gouraud.
 // SKY-PASS DEPTH (see `sky_order.rs`, "The depth law"): the dome's radius does not decide occlusion —
-// the reference draws the sky FIRST and the opaque world paints over it. Forcing the far depth makes
-// the dome a true backdrop: it fills only pixels no world geometry claimed, so a WDL hill drawn beyond
-// the dome's shell can never be over-painted by the gradient.
+// the reference draws the sky FIRST and the opaque world paints over it. The far depth makes the
+// dome a true backdrop: it fills only pixels no world geometry claimed, so a WDL hill drawn beyond
+// the dome's shell can never be over-painted by the gradient. That depth is pinned in the VERTEX
+// stage (`sky_vertex.wgsl`, shared by every sky shader) — this fragment writes colour only, so the
+// rasterizer's early-Z rejects the covered fraction of the screen before the gradient runs (2016).
 #import bevy_pbr::{
     forward_io::VertexOutput,
     mesh_view_bindings::view,
-}
-
-/// Reverse-Z "infinitely far" — the sky pass's forced depth (`sky_order.rs`).
-const SKY_FAR_DEPTH: f32 = 0.0;
-
-struct SkyOutput {
-    @location(0) color: vec4<f32>,
-    @builtin(frag_depth) depth: f32,
 }
 
 struct SkyColors {
@@ -66,7 +60,7 @@ fn warp_one(base: vec3<f32>, g: f32, s: f32) -> vec3<f32> {
 }
 
 @fragment
-fn fragment(in: VertexOutput) -> SkyOutput {
+fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // Direction from the camera to this dome fragment; elevation above the world horizon.
     let dir = normalize(in.world_position.xyz - view.world_position.xyz);
     let elev = degrees(asin(clamp(dir.y, -1.0, 1.0))); // −90..90, 0 = horizon
@@ -125,8 +119,5 @@ fn fragment(in: VertexOutput) -> SkyOutput {
     // Raw gamma out (GAMMA LANE, 0161): the reference draws the sky with GL_FRAMEBUFFER_SRGB OFF
     // (CSky::Render @0x6d4940) — raw DBC bytes — which is now the whole pipeline's convention.
     let rgb = col;
-    var out: SkyOutput;
-    out.color = vec4<f32>(rgb, 1.0);
-    out.depth = SKY_FAR_DEPTH;
-    return out;
+    return vec4<f32>(rgb, 1.0);
 }

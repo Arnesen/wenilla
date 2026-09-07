@@ -21,6 +21,7 @@ use bevy::image::Image;
 use bevy::mesh::VertexBufferLayout;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
+use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::mesh::allocator::MeshAllocator;
@@ -115,7 +116,7 @@ fn mark_world_camera(
 /// regions are the SAME drain phase in the 1.12 order (both are the M2 scene, after the WMO
 /// phase), so the cull sorts them near-first TOGETHER — a far cell must not shade before a
 /// near building's furniture.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(crate) enum GxDoodadVis {
     Cell((i32, i32)),
     /// A prop region + this frame's per-referrer-SET verdicts.
@@ -124,7 +125,7 @@ pub(crate) enum GxDoodadVis {
 
 /// One region's per-selection-grain verdicts for this frame — a WMO region's grain is the GROUP,
 /// a prop region's the referrer-SET index, and both index these vectors the same way.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub(crate) struct GxSel {
     /// Drawn this frame: PVS ∧ frustum ∧ farclip ∧ the exterior window gate.
     pub drawn: Vec<bool>,
@@ -811,6 +812,9 @@ impl ViewNode for StaticGxNode {
         }
         let depth_attachment = depth.get_attachment(StoreOp::Store);
         let color_attachment = target.get_color_attachment();
+        // The pass's diagnostic span — `render/static_gx/elapsed_gpu` where the device times
+        // passes (Vulkan/DX12), the CPU span everywhere: the journal's `gpu_static` column (2008).
+        let diagnostics = render_context.diagnostic_recorder();
         let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("static_gx"),
             color_attachments: &[Some(color_attachment)],
@@ -818,6 +822,7 @@ impl ViewNode for StaticGxNode {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+        let span = diagnostics.pass_span(&mut pass, "static_gx");
         pass.set_bind_group(0, &view_bind.0, &[view_offset.offset]);
         for (gpu, draw, sel) in &resolved {
             let Some(mesh) = meshes.get(draw.mesh.id()) else {
@@ -855,6 +860,7 @@ impl ViewNode for StaticGxNode {
                 );
             }
         }
+        span.end(&mut pass);
         Ok(())
     }
 }
@@ -887,24 +893,59 @@ pub(super) fn build(app: &mut App) {
             ),
         )
         .add_render_graph_node::<ViewNodeRunner<StaticGxNode>>(Core3d, StaticGxLabel)
+        // BEFORE bevy's opaque pass (decision 2016): the retained statics — every building and
+        // every steady doodad — are the frame's best early-Z occluders, and terrain's fragment is
+        // the frame's dearest (four splat layers, the alpha map, the baked shadow: six samples a
+        // pixel). Drawn first, the walls and trunks fill the depth buffer with early writes and
+        // the terrain behind them is rejected before it samples anything; drawn after (the order
+        // 1429 inherited from "bevy's pass, then ours"), every terrain fragment under a building
+        // was shaded in full and then overwritten. The same holds against the entity lane's
+        // creatures and animated doodads, which stand in front of nothing static as a rule. The
+        // pass takes the depth and colour CLEAR with it (bevy's attachments clear on first use,
+        // `DepthAttachment::get_attachment`); when nothing is visible it returns before touching
+        // either and the opaque pass clears as before. An immediate-mode GPU (the Steam Deck,
+        // every Windows part) is where this counts; a tile-based one (Apple) resolves opaque
+        // order in hardware and reads the same frame either way — which is why no measurement
+        // of this exists on the rig, and the player journal's `gpu_opaque`/`gpu_static` columns
+        // (2008) are where the number lands.
         .add_render_graph_edges(
             Core3d,
-            (
-                Node3d::MainOpaquePass,
-                StaticGxLabel,
-                Node3d::MainTransparentPass,
-            ),
+            (Node3d::StartMainPass, StaticGxLabel, Node3d::MainOpaquePass),
         );
 }
 
 /// Copy the collector's published half into the extractable resource.
 pub(super) fn publish_gx_world(gx: Res<super::StaticGx>, mut out: ResMut<GxWorld>) {
     let _t = super::gx_perf_guard(2);
-    out.cells.clone_from(&gx.world.cells);
-    out.visible.clone_from(&gx.world.visible);
-    out.wmos.clone_from(&gx.world.wmos);
-    out.props.clone_from(&gx.world.props);
-    out.visible_wmos.clone_from(&gx.world.visible_wmos);
+    // Compare before writing: a parked frame's collector walk produces the same five
+    // structures it produced last frame, and an unconditional `clone_from` through `ResMut`
+    // both re-cloned them here and marked the resource changed, so the render world cloned
+    // the whole set again at extract — 1435's two 0.2 ms rows, paid on every frame that
+    // changed nothing (decision 1979). The maps hold `Arc`s, so identity is pointer identity.
+    fn same_arcs<K: std::hash::Hash + Eq>(
+        a: &HashMap<K, std::sync::Arc<GxCellDraw>>,
+        b: &HashMap<K, std::sync::Arc<GxCellDraw>>,
+    ) -> bool {
+        a.len() == b.len()
+            && a.iter()
+                .all(|(k, v)| b.get(k).is_some_and(|w| std::sync::Arc::ptr_eq(v, w)))
+    }
+    let w = &gx.world;
+    if !same_arcs(&out.cells, &w.cells) {
+        out.cells.clone_from(&w.cells);
+    }
+    if out.visible != w.visible {
+        out.visible.clone_from(&w.visible);
+    }
+    if !same_arcs(&out.wmos, &w.wmos) {
+        out.wmos.clone_from(&w.wmos);
+    }
+    if !same_arcs(&out.props, &w.props) {
+        out.props.clone_from(&w.props);
+    }
+    if out.visible_wmos != w.visible_wmos {
+        out.visible_wmos.clone_from(&w.visible_wmos);
+    }
 }
 
 #[cfg(test)]

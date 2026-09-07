@@ -46,7 +46,12 @@ use super::{AudioListener, SoundConfig, SoundOutput};
 /// the frame its line appears. Rows, not resolved sounds: the *reading* of `+0x08`/`+0x0c` belongs
 /// here beside the players, not scattered across the windows that raise messages.
 #[derive(Resource, Default)]
-pub(crate) struct MessageSounds(Vec<&'static MessageRecord>);
+pub(crate) struct MessageSounds {
+    records: Vec<&'static MessageRecord>,
+    /// Cues by `PlaySoundByName` name with no catalog row behind them — the tutorial popup
+    /// (`0x4b5390`'s `"TutorialPopup"`, 1976): played on the same 2D SFX path as a row's cue.
+    cues: Vec<&'static str>,
+}
 
 impl MessageSounds {
     /// Queue one displayed message's sound.
@@ -65,14 +70,19 @@ impl MessageSounds {
     /// off the display. It is written down because the *ordering* is the surprising part, and a
     /// future locale or a patched table could give it a tenant.
     pub(crate) fn push(&mut self, record: &'static MessageRecord) {
-        self.0.push(record);
+        self.records.push(record);
+    }
+
+    /// Queue a named cue with no message behind it.
+    pub(crate) fn push_cue(&mut self, name: &'static str) {
+        self.cues.push(name);
     }
 
     /// What is queued — for the tests that drive the producer
     /// (`crate::ui_action::show_messages`) and read back what the drain would be handed.
     #[cfg(test)]
     pub(crate) fn queued(&self) -> &[&'static MessageRecord] {
-        &self.0
+        &self.records
     }
 }
 
@@ -88,10 +98,11 @@ fn play_message_sounds(
     config: Res<SoundConfig>,
     listener: Res<AudioListener>,
 ) {
-    if queue.0.is_empty() {
+    if queue.records.is_empty() && queue.cues.is_empty() {
         return;
     }
-    let records = std::mem::take(&mut queue.0);
+    let records = std::mem::take(&mut queue.records);
+    let cues = std::mem::take(&mut queue.cues);
     // Drained even when there is nothing to play it with (headless, no client data), so the queue
     // can never grow unbounded — `super::ui`'s posture exactly.
     let (Some(mut kits), Some(assets)) = (kits, assets) else {
@@ -100,6 +111,20 @@ fn play_message_sounds(
     // The reference reads the player's sex per play (`0x49676f` → `0x5ed5b0`), not at table-build
     // time; a descriptor that has not arrived yet means no voice, not a guessed one.
     let sex = self_q.iter().next().and_then(|s| s.0.unit_gender());
+    for name in cues {
+        if let Err(e) = kit::play_kit(
+            &mut kits,
+            &assets,
+            &mut out,
+            &config,
+            listener.pos,
+            KitRef::Name(name),
+            None,
+            SoundCategory::Sfx,
+        ) {
+            warn!("sound(message): cue {name:?}: {e:#}");
+        }
+    }
     for record in records {
         if record.type_tag == NO_SPEECH_TAG {
             let Some(name) = record.sound else {

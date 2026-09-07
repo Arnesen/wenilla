@@ -39,8 +39,15 @@
 //! in, then `max` forced to `1` on a **single-rank** line whatever the server said
 //! ([`SkillEntry::mono`]; the pane's proficiency gate is `skillMaxRank == 1`).
 //!
-//! `numTempPoints` is always `0`: its only writer in the real client is `AddSkillUp`, wired solely
-//! to the training-up arrow this pane doesn't ship. `stepCost`/`rankCost` are always **nil** —
+//! `numTempPoints` is a **REAL FIELD** (`entry->+0x10`) that this client answers as `0`. The
+//! distinction matters and this comment used to blur it (decision 1919): the field has four writers
+//! in the real client — zeroed per list rebuild (`0x4d2e2e`), incremented by `AddSkillUp`'s worker
+//! (`0x4d345b`), decremented at `0x4d358a`, reset by `CancelSkillUps` (`0x4d35c9`) — and
+//! `SkillFrame.xml:697` wires `AddSkillUp` for real. What is true is a **data-reachability** verdict
+//! about the shipped tables, not a property of the field: the `rankCost or numTempPoints > 0` guard
+//! never opens on 1.12's data, so nothing a player can hold moves it off `0`. Say `0` because the
+//! model carries no temp points, never because the field is fictional — the day we model training
+//! points this is a value to push, not a constant to keep. `stepCost`/`rankCost` are always **nil** —
 //! for DATA reasons, not code ones (`SkillLine.skillCostsID` is 0 in all 123 rows, and the
 //! step-cost gate's flag bits are set on no line a player can hold) — and nil, not `0`, is what
 //! the ref's `if (stepCost)` / `elseif (rankCost or …)` branches read, since `0` is truthy in Lua.
@@ -58,6 +65,9 @@
 //! survives a re-push that reorders or regroups; selecting a header (or an out-of-range index)
 //! clears it. `GetAdjustedSkillPoints()` is a vestigial 1.12 leftover the ref reads; it always
 //! returns `0` — there is no training-point economy behind a skill line in this client.
+//!
+//! `CancelSkillUps()` is bound (the page's Close button calls it, 1956): the temp-point reset
+//! over a table this model keeps empty.
 //!
 //! The ref Lua's other globals (`SkillBar_OnClick`'s `RemoveSkillUp`/`AddSkillUp`/`BuySkillTier`,
 //! `UnitCharacterPoints`) back the training-up machinery this pane doesn't ship (0437's named
@@ -296,6 +306,35 @@ fn set_collapsed(model: &mut Model, id: usize, collapse: bool) {
 
 /// `SetSelectedSkill(index)` — resolve the 1-based VISIBLE index to a skill id and hold THAT (the
 /// module doc's by-id persistence); a header row or an out-of-range index clears the selection.
+/// `GetSkillLineInfo`'s **out-of-range tuple** — thirteen values, four of them numeric zeros.
+///
+/// Byte-verified in wow-re's `system/tradeskill/scratch/skillframe-selection-and-oob.md` (pushes
+/// `0x4d3a2c`…`0x4d3a98`, `mov eax,0xd` at `0x4d3a9f`); decision 1919. One shape serves five
+/// distinct conditions — index 0, a negative index, an index past the end, no active player, and an
+/// in-range row whose DBC record is missing — because the reference's bounds test (`0x4d3675`) is a
+/// single UNSIGNED compare that funnels them all to the same exit.
+///
+/// The numeric slots are 4 (`skillRank`), 5 (`numTempPoints`), 6 (`skillModifier`), 7
+/// (`skillMaxRank`), 11 (`minLevel`) and 12 (`skillCostType`). Slots 4 and 5 must be numbers or the
+/// reference's own unguarded `skillRank + numTempPoints` raises.
+fn out_of_range_tuple(_lua: &Lua) -> mlua::Result<MultiValue> {
+    Ok(MultiValue::from_vec(vec![
+        Value::Nil,        // 1  skillName
+        Value::Nil,        // 2  header
+        Value::Nil,        // 3  isExpanded
+        Value::Integer(0), // 4  skillRank
+        Value::Integer(0), // 5  numTempPoints
+        Value::Integer(0), // 6  skillModifier
+        Value::Integer(0), // 7  skillMaxRank
+        Value::Nil,        // 8  isAbandonable
+        Value::Nil,        // 9  stepCost
+        Value::Nil,        // 10 rankCost
+        Value::Integer(0), // 11 minLevel
+        Value::Integer(0), // 12 skillCostType
+        Value::Nil,        // 13 skillDescription
+    ]))
+}
+
 fn set_selected(model: &mut Model, index: u32) {
     model.skills_selected = entry_at(model, index as usize).map(|e| e.skill_id);
 }
@@ -364,18 +403,33 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetSkillLineInfo(index) → the ref's own tuple (module doc): 13 values on a skill row
-    // (`0x4d3a20`), 12 on a header (`0x4d3768`). `index` 1-based into the visible tree; out of
-    // range → a single nil.
+    // GetSkillLineInfo(index) → the ref's own tuple: 13 values on a skill row (`0x4d3a20`), 12 on
+    // a header (`0x4d3768`). `index` 1-based.
+    //
+    // **OUT OF RANGE IS THE 13-VALUE FALLBACK, NOT A SINGLE NIL.** This comment used to say the
+    // opposite and it was wrong; the correction is decision 1919, from a wow-re trio cross-check
+    // (`system/tradeskill/scratch/skillframe-selection-and-oob.md`). `0x4d3675`'s bounds test is
+    // UNSIGNED against the total row count, so index 0, a negative index, an index past the end, no
+    // active player, and an in-range row whose DBC record is missing all fall to `0x4d3a2a` and push
+    // the same thirteen: `nil, nil, nil, 0, 0, 0, 0, nil, nil, nil, 0, 0, nil` (`0x4d3a2c`…
+    // `0x4d3a98`, then `mov eax,0xd`).
+    //
+    // **Slots 4 and 5 being NUMBERS is the whole point.** The reference's own
+    // `SkillDetailFrame_SetStatusBar` does `skillRank = skillRank + numTempPoints`
+    // (`SkillFrame.lua:193-194`) with NO guard, straight off `SkillFrame_OnLoad`'s
+    // `SetSelectedSkill(0)` — so a single nil here raises "attempt to perform arithmetic on a nil
+    // value" the moment the stock file drives us. Slot 1 being nil is what drives its
+    // `if (not skillName …) then … return` at l.211. The selection verbs are NOT the divergence:
+    // `GetSelectedSkill 0x4d4090` always pushes exactly one number and legitimately answers 0.
     g.set(
         "GetSkillLineInfo",
         lua.create_function(|lua, index: usize| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(n) = index.checked_sub(1) else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                return out_of_range_tuple(lua);
             };
             let Some(row) = rows(&model).get(n).copied() else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                return out_of_range_tuple(lua);
             };
             match row {
                 Row::Header(gi) => {
@@ -386,7 +440,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                         Value::Integer(1), // isHeader
                         era_bool(expanded),
                         Value::Integer(0), // skillRank
-                        Value::Integer(0), // numTempPoints — always 0 (module doc)
+                        Value::Integer(0), // numTempPoints — a real field; 0 because we model no temp points (1919)
                         Value::Integer(0), // skillModifier
                         Value::Integer(0), // skillMaxRank
                         Value::Nil,        // isAbandonable
@@ -404,7 +458,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                         Value::Nil, // isHeader
                         Value::Nil, // isExpanded
                         Value::Integer(rank),
-                        Value::Integer(0), // numTempPoints — always 0 (module doc)
+                        Value::Integer(0), // numTempPoints — a real field; 0 because we model no temp points (1919)
                         Value::Integer(i64::from(e.temp_bonus)), // skillModifier — TEMP only
                         Value::Integer(max),
                         era_bool(e.abandonable), // isAbandonable
@@ -483,6 +537,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+
+    // CancelSkillUps() — `0x4d3e30` → `0x4d35c9` (reference `1.12-shapes.tsv`: no arguments, no
+    // returns): the reset leg of the temp-point table, zeroing every entry's `numTempPoints` and
+    // giving the points back to the pool. The stock page's LIVE Close button calls it before
+    // hiding (`SkillFrame.xml`'s SkillFrameCancelButton, decision 1496), so it is reached on
+    // every close. This model carries no temp points (module docs, 1919): the table it resets is
+    // empty by construction, so the reset moves nothing — the binding's whole effect on this
+    // client's data, not a stand-in for it. The day temp points are modelled, this is where
+    // they are cleared.
+    g.set("CancelSkillUps", lua.create_function(|_, ()| Ok(()))?)?;
 
     Ok(())
 }
@@ -826,11 +890,52 @@ mod tests {
         );
     }
 
+    /// **Out of range answers the reference's THIRTEEN-value tuple, not a bare nil** — decision
+    /// 1919, byte-verified in wow-re's `skillframe-selection-and-oob.md`.
+    ///
+    /// The COUNT is the whole assertion. `GetSkillLineInfo(0) == nil` reads true either way,
+    /// because Lua compares only the first returned value — which is precisely how the old
+    /// one-nil shape passed for as long as it did. What breaks a caller is slots 4 and 5: the
+    /// reference's own `SkillDetailFrame_SetStatusBar` does `skillRank = skillRank + numTempPoints`
+    /// with NO guard, straight off `SkillFrame_OnLoad`'s `SetSelectedSkill(0)`, so those two must be
+    /// NUMBERS or the stock file raises the moment it loads. One shape serves index 0, a negative
+    /// index, past-the-end, no active player and a DBC miss — the reference funnels all five
+    /// through one unsigned bounds test (`0x4d3675`).
+    #[test]
+    fn out_of_range_answers_the_thirteen_value_tuple() {
+        let s = UiScript::new().unwrap();
+        for idx in ["0", "1", "99"] {
+            assert_eq!(
+                s.eval::<i64>(&format!("return select('#', GetSkillLineInfo({idx}))"))
+                    .unwrap(),
+                13,
+                "GetSkillLineInfo({idx}) must answer 13 values"
+            );
+            assert_eq!(
+                s.eval::<i64>(&format!(
+                    "local _,_,_,r,t = GetSkillLineInfo({idx}) return r + t"
+                ))
+                .unwrap(),
+                0,
+                "GetSkillLineInfo({idx}) slots 4+5 must be NUMBERS — the reference adds them unguarded"
+            );
+            assert!(
+                s.eval::<bool>(&format!("return (GetSkillLineInfo({idx})) == nil"))
+                    .unwrap(),
+                "slot 1 must stay nil — it drives the stock file's own `if (not skillName)` early-out"
+            );
+        }
+    }
+
     #[test]
     fn no_push_reports_zero_rows() {
         let s = UiScript::new().unwrap();
         assert_eq!(s.eval::<i64>("return GetNumSkillLines()").unwrap(), 0);
-        assert!(s.eval::<bool>("return GetSkillLineInfo(1) == nil").unwrap());
+        // The empty pane answers the out-of-range tuple; the test above holds its ARITY, which is
+        // the load-bearing half. This line only pins slot 1.
+        assert!(s
+            .eval::<bool>("return (GetSkillLineInfo(1)) == nil")
+            .unwrap());
         assert_eq!(s.eval::<i64>("return GetSelectedSkill()").unwrap(), 0);
         assert_eq!(s.eval::<i64>("return GetAdjustedSkillPoints()").unwrap(), 0);
         // Collapse/expand/select on an empty pane are harmless no-ops.

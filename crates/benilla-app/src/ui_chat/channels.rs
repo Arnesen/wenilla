@@ -125,12 +125,9 @@ fn end_channel_session(
     script: Option<&mut benilla_ui::script::UiScript>,
     channels: &mut ChannelState,
     walk: &mut ZoneChannelWalk,
-    edit: &mut super::edit::ChatEditState,
 ) {
     walk.clear_session();
     channels.joined.clear();
-    edit.channel_target.clear();
-    edit.channel_number = 0;
     if let Some(script) = script {
         script.set_joined_channels(Vec::new());
     }
@@ -162,14 +159,8 @@ pub(super) fn end_session_channels(
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     mut channels: ResMut<ChannelState>,
     mut walk: ResMut<ZoneChannelWalk>,
-    mut edit: ResMut<super::edit::ChatEditState>,
 ) {
-    end_channel_session(
-        script.map(NonSendMut::into_inner),
-        &mut channels,
-        &mut walk,
-        &mut edit,
-    );
+    end_channel_session(script.map(NonSendMut::into_inner), &mut channels, &mut walk);
 }
 
 /// The other end: a socket that died. A **recoverable** drop never leaves `InWorld` (0065 keeps the
@@ -181,18 +172,12 @@ pub(super) fn end_session_channels_on_disconnect(
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     mut channels: ResMut<ChannelState>,
     mut walk: ResMut<ZoneChannelWalk>,
-    mut edit: ResMut<super::edit::ChatEditState>,
     mut disconnects: MessageReader<crate::net::DisconnectedMessage>,
 ) {
     if disconnects.read().next().is_none() {
         return;
     }
-    end_channel_session(
-        script.map(NonSendMut::into_inner),
-        &mut channels,
-        &mut walk,
-        &mut edit,
-    );
+    end_channel_session(script.map(NonSendMut::into_inner), &mut channels, &mut walk);
 }
 
 /// Startup: read `ChatChannels.dbc` into [`ChannelState`], which owns it because the two things
@@ -285,6 +270,35 @@ fn zone_is_settled(player: Option<&crate::player::Player>) -> bool {
 /// file** (`0x4997fc`, gated `0x4997e8`). We persist no chat cache, so every session is that
 /// fresh-character path and reading the DBC bit directly is exactly right. It stops being right
 /// the day per-window channel settings are persisted.
+/// Every `ChatChannels.dbc` row as the VM needs it (decision 1908; wow-re chat-cache-grammar.md
+/// §5-6): the id, the Shortcut the verbs compare a typed name against, the name composed for
+/// `zone_name` — `None` when the composition has nothing to substitute (a zone-dependent row with
+/// no zone, a city row with no city word), which is the verbs' nil leg — and whether
+/// `EnumerateServerChannels` lists it here (a city-only row, `flags & 0x10`, only in a city).
+pub(crate) fn zone_channel_catalog(
+    catalog: &ChatChannelsCatalog,
+    zone_name: &str,
+    in_city: bool,
+    city_word: Option<&str>,
+) -> Vec<benilla_ui::script::ZoneChannelRow> {
+    catalog
+        .rows()
+        .iter()
+        .map(|r| {
+            let resolvable = (!r.is_zone_dependent() || !zone_name.is_empty())
+                && (!r.takes_city_name() || city_word.is_some());
+            benilla_ui::script::ZoneChannelRow {
+                id: r.id,
+                shortcut: r.shortcut.clone(),
+                resolved: resolvable
+                    .then(|| r.joinable_name(zone_name, city_word.unwrap_or_default())),
+                listed: !r.is_city_only() || in_city,
+            }
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 pub(super) fn auto_join_zone_channels(
     commands: Res<NetCommands>,
     channels: Res<ChannelState>,
@@ -299,6 +313,8 @@ pub(super) fn auto_join_zone_channels(
     ),
     mut walk: ResMut<ZoneChannelWalk>,
     mut entered: MessageReader<crate::net::EnteredWorldMessage>,
+    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    mut catalog_fed: Local<crate::ui_script::VmMemo<Option<(String, bool)>>>,
 ) {
     let (player, cinematic) = (&body.0, &body.1);
     // World entry arms the walk; the session-end clears disarm it ([`end_session_channels`] and its
@@ -343,6 +359,21 @@ pub(super) fn auto_join_zone_channels(
         zone_row.name.clone(),
         zone_row.flags & AREA_FLAG_TRADE_CHANNEL != 0,
     );
+    // The VM's zone-channel catalog — what `JoinChannelByName` resolves a typed name against and
+    // `EnumerateServerChannels` lists — is a function of the same zone; refed on a zone change
+    // and on a fresh VM, keyed like every other feed (1290).
+    if let Some(mut script) = script {
+        let fed = catalog_fed.get(&script);
+        if fed.as_ref() != Some(&at) {
+            script.set_zone_channel_catalog(zone_channel_catalog(
+                &channels.channels,
+                &at.0,
+                at.1,
+                city_word(&areas.0),
+            ));
+            *fed = Some(at.clone());
+        }
+    }
     if walk.at.as_ref() == Some(&at) {
         return; // same zone as last frame — the common case, and free
     }
@@ -496,19 +527,17 @@ mod tests {
     #[test]
     fn leaving_the_world_ends_the_channel_session() {
         let mut channels = ChannelState::default();
-        let mut walk = ZoneChannelWalk::default();
-        let mut edit = super::super::edit::ChatEditState::default();
-
-        // A live session: two zone channels asked for, both confirmed, `/2` targeted.
-        walk.held = vec!["General - Tanaris".into(), "LocalDefense - Tanaris".into()];
-        walk.at = Some(("Tanaris".into(), false));
+        // A live session: two zone channels asked for, both confirmed.
+        let mut walk = ZoneChannelWalk {
+            held: vec!["General - Tanaris".into(), "LocalDefense - Tanaris".into()],
+            at: Some(("Tanaris".into(), false)),
+            ..Default::default()
+        };
         channels.joined = walk.held.iter().cloned().map(Some).collect();
-        edit.channel_target = "LocalDefense - Tanaris".into();
-        edit.channel_number = 2;
 
         // No VM in a unit test; the mirror leg is the one line this cannot reach, and
         // `end_session_channels` is a two-line wrapper over exactly this call.
-        end_channel_session(None, &mut channels, &mut walk, &mut edit);
+        end_channel_session(None, &mut channels, &mut walk);
 
         assert!(walk.held.is_empty(), "nothing is held");
         assert_eq!(walk.at, None, "and the next entry re-walks from scratch");
@@ -517,8 +546,6 @@ mod tests {
             "the confirmed list is the server's, and the server just destroyed it — a survivor \
              here is what renumbers the next character's channels"
         );
-        assert_eq!(edit.channel_target, "");
-        assert_eq!(edit.channel_number, 0, "a `/2` now targets nothing");
     }
 
     /// No city word (a locale whose sentinel row ships blank) ⇒ the city-named rows are skipped,

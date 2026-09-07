@@ -533,8 +533,15 @@ pub struct GuildEventNotice {
     /// A [`guild_event`] id. The reference client's `switch` covers `0x00`–`0x0D` and treats
     /// anything above as its default arm, so an unknown id is a display question, not a parse one.
     pub event: u8,
-    /// The event's string arguments, in order — at most **three** (the reference handler has
-    /// exactly three stack buffers and its `strCount` is capped at 3).
+    /// The event's string arguments, in order, exactly as many as `strCount` said.
+    ///
+    /// **Not capped at three, and the reference is not either** — this doc used to claim it was.
+    /// `0x5e7180`'s read loop has no bound: a `strCount >= 4` writes past its three `0x100` stack
+    /// buffers into the live locals (wow-re `system/ui/scratch/guild-api-carve.md` §5). What *is*
+    /// bounded is the **display**: the shared emitter tail `0x5e745f` passes 1, 2 or 3 strings to
+    /// `DisplayError` and passes **none** for `strCount == 0` or `>= 4`. Reading into a `Vec` has
+    /// no overflow to reproduce, so that rule lives on the display side
+    /// (`ui_guild::lines::event_line`, decision 2054) and this field carries what arrived.
     pub params: Vec<String>,
     /// The guildmate the event is about — present for [`guild_event::SIGNED_ON`] and
     /// [`guild_event::SIGNED_OFF`] only. See [`read_guild_event`] for why that is narrower than

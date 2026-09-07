@@ -3,12 +3,14 @@
 //! full-block synthesis. Each `pub(super)` fn here is exactly one arm's body; the match at the
 //! call site stays the dispatcher, one call per arm.
 
-use benilla_protocol::messages::AttackerState;
+use benilla_protocol::messages::{AttackSwingError, AttackerState};
 use bevy::prelude::*;
 
 use crate::creature_anim::{
     Engaged, RangedHold, SheathRequest, SwingFlush, SwingImpact, SwingMessage,
 };
+use crate::swing_refusal::SwingRefusalEdge;
+use crate::ui_action::{UiError, UiErrorKeys};
 use crate::ui_unit::CombatTextEvent;
 
 use super::super::{AiReactionMessage, GuidIndex, SelfGuid};
@@ -42,6 +44,39 @@ pub(super) fn attack_stop(
         // swing record flushes text-only and clears.
         flushes.write(SwingFlush(e));
     }
+}
+
+/// The server refused our melee swing (`SMSG_ATTACKSWING_NOTINRANGE`/`_BADFACING`/`_DEADTARGET`/
+/// `_CANT_ATTACK`) — forwarded verbatim to [`crate::swing_refusal`], which owns the latch, the 4 s
+/// repeat, and arm 4's silent StopAttack. Nothing is decided here: the arms differ only in what
+/// that module does with them, and it holds the write set for all three.
+pub(super) fn attack_swing_error(
+    error: AttackSwingError,
+    edges: &mut MessageWriter<SwingRefusalEdge>,
+) {
+    edges.write(SwingRefusalEdge::Refused(error));
+}
+
+/// `SMSG_CANCEL_COMBAT` — the server forced our attack to stop. The swing family's fourth arm,
+/// and the same act as `0x148`/`0x149`: the reference's handler `0x5e7dd0` is arm 4's body
+/// verbatim.
+pub(super) fn cancel_combat(edges: &mut MessageWriter<SwingRefusalEdge>) {
+    edges.write(SwingRefusalEdge::CombatCancelled);
+}
+
+/// `SMSG_FEIGN_DEATH_RESISTED` — the target shrugged off our Feign Death.
+///
+/// One red line and nothing else: the reference's handler `0x6e9800` is `push 0x1a5; call
+/// 0x496720`, a bare `DisplayError(421)` with no latch, no cooldown and no state — the opposite of
+/// its sibling above, and the reason the two do not share a path. Catalog row 421 is
+/// `ERR_FEIGN_DEATH_RESISTED`, whose 1.12 string is the single word "Resisted".
+///
+/// It lives beside the swing arms because vmangos sends it in the same breath as
+/// `SMSG_CANCEL_COMBAT` (`Objects/Unit.cpp:9445-9451`: a resisted feign death cancels the attack
+/// and says so), and finding one without the other is how this family stayed half-built.
+pub(super) fn feign_death_resisted(errors: &mut UiErrorKeys) {
+    debug!("net: feign death resisted");
+    errors.0.push(UiError::key("ERR_FEIGN_DEATH_RESISTED"));
 }
 
 /// A creature flared aggro or a stealth pre-aggro alert (`SMSG_AI_REACTION`).
@@ -80,9 +115,18 @@ pub(super) fn attacker_state(
     impacts: &mut MessageWriter<SwingImpact>,
     center: &mut MessageWriter<CombatTextEvent>,
     sheaths: &mut MessageWriter<SheathRequest>,
+    edges: &mut MessageWriter<SwingRefusalEdge>,
     seq: u64,
 ) {
     let victim = index.0.get(&s.victim).copied();
+    // Arm 5's `0x6259b6 call 0x5ea800`, whose first act is the swing-refusal latch clear
+    // (`0x5ecdb0(0)`) — gated exactly as the reference gates it: the attacker IS the active player
+    // (`0x5fa6d0`, a guid compare) and the victim resolves as a streamed unit. Written from here
+    // rather than computed downstream because this is the only place holding both guids, and it
+    // keeps the clear in packet order with the refusals (`crate::swing_refusal`).
+    if self_guid.0 == Some(s.attacker) && victim.is_some() {
+        edges.write(SwingRefusalEdge::Landed);
+    }
     if benilla_assets::trace::enabled() {
         benilla_assets::trace::line(
             "fct",
@@ -156,6 +200,9 @@ pub(super) fn attacker_state(
             swing,
             text_only: false,
             natural: None,
+            // The receive-time arm: no tag fired, so the reference has no event point either —
+            // the consumer falls back to the victim, the only anchor the packet leaves us.
+            pos: None,
         });
     }
 }

@@ -137,6 +137,10 @@ pub(crate) struct Equipment {
     /// wears*: the composite key includes it, so the re-dress diff below is the one place a change
     /// of guild, of tabard, and a late-arriving identity all converge — no second latch.
     pub(crate) emblem: Option<benilla_formats::GuildEmblem>,
+    /// The tabard designer's preview (decision 1977, wow-re RF-0089 §7c `[cc+0xc]`): set on the
+    /// LOCAL player's body while the designer is open, so the body wears the tabard geoset over an
+    /// empty slot and the composite paints `emblem` (the design under preview) onto it.
+    pub(crate) tabard_preview: bool,
     pub(crate) settled: bool,
 }
 
@@ -181,6 +185,57 @@ pub(super) struct HeldItems {
 /// Total attach sub-model slots: the 3 held + helm + shoulder L/R + the nocked ammo + the
 /// worn quiver (self-only, ranged-drawn — wow-re `nocked-ammo-cancel.md` §H).
 pub(super) const ATTACH_SLOTS: usize = 8;
+
+/// **What the disarm reflex left attached** (decision 1863; wow-re `disarm-weapon-gate-law.md`
+/// §6, byte-verified). The reference's attachment state is built by *events*, not recomputed from
+/// the descriptor, and disarm is where that difference becomes visible — so this is the one piece
+/// of latched attachment state the equipment layer keeps.
+///
+/// `UNIT_FIELD_FLAGS`' change reflex `0x5ff580` runs when the DISARM bit **changes**
+/// (`0x5ff619 test edi,eax`), for observed remote units as well as our own body, and when the bit
+/// goes up it takes the hidden hand's weapon **off the hand** — `0x5ff676 call
+/// 0x47a310(model, 0xf, 0, 0)`, an unlink of every child at that attachment plus an `OpenHand` —
+/// but only while the sheath state `[unit+0xd40]` is non-zero, i.e. while the weapon is drawn.
+/// Then nothing puts it back: every attach site (`0x60b770`, `0x605da0`, `0x60b590`) is dominated
+/// by a `GetWeapon(slot, 0)` that now reads NULL, so the weapon can be neither re-attached nor
+/// moved until the flag clears.
+///
+/// The observable shape, and why a plain "hide it while disarmed" is wrong in both directions:
+///
+/// | when the flag went up | what stays on screen |
+/// |---|---|
+/// | weapon **drawn** | nothing — it leaves the hand |
+/// | weapon **stowed** | it stays on the back/hip, and stays there even if the unit then engages |
+/// | we never saw the edge (the unit streamed in already disarmed) | nothing was ever attached |
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DisarmFreeze {
+    /// The held slot the ladder hid at the edge — 0 mainhand, 1 offhand.
+    slot: u8,
+    /// The display id that was in that hand. A *different* item has no edge of its own and so was
+    /// never attached (the reference's attach sites all decline while the flag is up).
+    display: u32,
+    /// Where the reflex left it, or `None` when it was in the hand and got detached.
+    attach: Option<u16>,
+}
+
+impl DisarmFreeze {
+    /// Record what the reflex left, at the edge.
+    pub(super) fn new(slot: u8, display: u32, attach: Option<u16>) -> Self {
+        DisarmFreeze {
+            slot,
+            display,
+            attach,
+        }
+    }
+
+    /// Where `display` still hangs in `slot`, or `None` — including when this freeze is about a
+    /// different hand or a different item, neither of which the reflex ever attached.
+    pub(super) fn attach_for(&self, slot: u8, display: u32) -> Option<u16> {
+        (self.slot == slot && self.display == display)
+            .then_some(self.attach)
+            .flatten()
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct HeldSlot {

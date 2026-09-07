@@ -33,26 +33,28 @@ use benilla_ui::script::{UiScript, UnitCombatStats, UnitState};
 /// `X = X or "…"` fallbacks, and every row here formats a real string — `SPELL_STAT0_NAME`..`4`
 /// through `TEXT()` (`PaperDollFrame.lua:143`), `RESISTANCE<n>_NAME` and
 /// `RESISTANCE_TOOLTIP_SUBTEXT` (`:184`/`:224`), `ARMOR` and `ARMOR_TOOLTIP` (`:236`/`:249`).
-const FILES: [&str; 12] = [
+const FILES: &[&str] = &[
     "Interface\\FrameXML\\GlobalStrings.lua",
-    "Fonts.xml",
-    "BasicControls.xml",
+    "Interface\\FrameXML\\Fonts.xml",
+    "Interface\\FrameXML\\BasicControls.xml",
     // The reference's own since 1751 window 24 — `common::load_ui` speaks both stores.
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
-    "MoneyFrame.xml",
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
     // `Model_OnLoad` — the model pane's `<OnLoad>` calls it, so this is a LOAD-time dependency of
     // the paper doll, not of the window. The reference declares it in `UIParent.lua`; ours lives
     // in our counterpart of that file.
-    "UIParent.xml",
-    "UiPanels.xml",
+    r"Interface\FrameXML\UIParent.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
-    "GameTooltip.xml",
+    "Interface\\FrameXML\\LocaleProperties.lua",
+    "Interface\\FrameXML\\StaticPopup.xml", // the dialog engine (1960)
+    "Interface\\FrameXML\\GameTooltip.xml",
     // `CooldownFrameTemplate` and `CooldownFrame_SetTimer`. Not scenery: every one of the 20 slot
     // buttons runs `PaperDollItemSlotButton_Update` from its own OnLoad, which calls
     // `CooldownFrame_SetTimer` on `$parentCooldown` unconditionally (`PaperDollFrame.lua:692`) —
     // so leaving this out is 20 loader errors before the first assertion.
-    "Cooldown.xml",
+    "Interface\\FrameXML\\Cooldown.xml",
     "Interface\\FrameXML\\PaperDollFrame.xml",
 ];
 

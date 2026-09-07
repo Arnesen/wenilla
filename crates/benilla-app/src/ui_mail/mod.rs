@@ -50,7 +50,7 @@ use std::collections::{HashMap, HashSet};
 use benilla_protocol::messages::{mail_error, mail_message_type, MailListEntry};
 use bevy::prelude::*;
 
-use benilla_ui::script::{MailInboxRow, MailState, UiScript};
+use benilla_ui::script::{MailInboxRow, MailState, ScriptValue, StationeryView, UiScript};
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
@@ -124,6 +124,9 @@ pub(crate) struct MailOpen {
     last_list_query: Option<f64>,
     /// SEND-action results the net bridge queued for the feed to fire ([`MailSendAck`]).
     pub(crate) send_acks: Vec<MailSendAck>,
+    /// 1-based inbox rows a take just emptied and purged (`net::apply::mail`) — the feed fires
+    /// `CLOSE_INBOX_ITEM(index)` for each, ahead of the `MAIL_INBOX_UPDATE` the purge causes.
+    pub(crate) close_inbox: Vec<u32>,
     /// Refusals (a take/return/delete failure) the feed shows, as message keys — resolved at the
     /// feed, which is where the VM's `GlobalStrings` can be read
     /// ([`crate::ui_action::keyed_line`]).
@@ -434,6 +437,51 @@ fn resolve_row(
 }
 
 /// Build the Lua-facing snapshot from [`MailOpen`] — `None` when no mailbox is open.
+/// The usable stationery list (wow-re `stationery-bindings.md` §`0x4ad970`, 1970): every
+/// `Stationery.dbc` row that is always available (`Flags & 1`) or whose item the player carries
+/// (bags, not the bank — the client's `0x622270`), and whose item template is cached — the name,
+/// icon and price come off the template — sorted by BuyPrice ascending, the client's comparator
+/// (`0x4ada90`). A carried paper costs nothing to use (`cost` nil). Templates are asked once here
+/// so the list fills from the second frame after world enter, mailbox or no mailbox.
+fn stationeries(
+    catalog: &Stationery,
+    self_q: &Query<(&ObjectStore, &crate::net::Guid), With<SelfPlayer>>,
+    items: &mut Items,
+    icons: Option<&ItemDisplays>,
+    commands: &NetCommands,
+) -> Vec<StationeryView> {
+    let store = self_q.iter().next().map(|(s, _)| s);
+    let mut out: Vec<(u32, StationeryView)> = Vec::new();
+    for row in catalog.0.rows() {
+        let Some(t) = items.template(row.item, 0, commands).cloned() else {
+            continue;
+        };
+        let carried = store.is_some_and(|s| {
+            crate::ui_items::count_of(
+                &s.0,
+                items,
+                row.item,
+                crate::ui_items::InventoryScope::CARRIED,
+            ) > 0
+        });
+        if row.flags & 1 == 0 && !carried {
+            continue;
+        }
+        out.push((
+            t.buy_price,
+            StationeryView {
+                id: row.id,
+                name: t.name.clone(),
+                icon: crate::ui_items::item_icon(icons, t.display_info_id).unwrap_or_default(),
+                cost: (!carried).then_some(t.buy_price),
+                texture: row.texture.clone(),
+            },
+        ));
+    }
+    out.sort_by_key(|(price, v)| (*price, v.id));
+    out.into_iter().map(|(_, v)| v).collect()
+}
+
 #[allow(clippy::too_many_arguments)] // mirrors `resolve_row`'s cache set
 fn snapshot(
     mail: &MailOpen,
@@ -472,6 +520,17 @@ fn snapshot(
 /// Push the current mail into the VM and fire the show/update/close + send-result events on a
 /// transition or content change (an async sender/item/body landing, a mark-read flip, a fresh
 /// list). Diffed against a `Local` memory, exactly like the merchant/gossip feeds.
+/// The feed's tail, bundled — the signature sits at the 16-SystemParam ceiling: the random-suffix
+/// roll's catalogs (1547), where a refusal lands (1815), and the usable stationery list's memo
+/// (1970), pushed on change like the inbox.
+#[derive(bevy::ecs::system::SystemParam)]
+struct MailFeedExtras<'w, 's> {
+    props: Option<Res<'w, crate::items::RandomProperties>>,
+    enchants: Option<Res<'w, crate::items::Enchants>>,
+    sink: crate::ui_action::MessageSink<'w>,
+    stationeries: Local<'s, crate::ui_script::VmMemo<Vec<StationeryView>>>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn feed_mail(
     script: Option<NonSendMut<UiScript>>,
@@ -490,18 +549,17 @@ fn feed_mail(
     self_q: Query<(&crate::net::ObjectStore, &crate::net::Guid), With<crate::net::SelfPlayer>>,
     states: Res<crate::world_state::WorldStates>,
     // The random-suffix roll's catalogs (1547): an enclosed item's rolled name.
-    // The roll catalogs and the message sink, paired (the 16-SystemParam ceiling this signature
-    // sits at): the random-suffix roll (1547), and where a refusal lands (1815).
-    rolls_and_sink: (
-        Option<Res<crate::items::RandomProperties>>,
-        Option<Res<crate::items::Enchants>>,
-        crate::ui_action::MessageSink,
-    ),
+    extras: MailFeedExtras,
 ) {
     let Some(mut script) = script else {
         return;
     };
-    let (props, enchants, mut sink) = rolls_and_sink;
+    let MailFeedExtras {
+        props,
+        enchants,
+        mut sink,
+        stationeries: mut last_stationeries,
+    } = extras;
     let rolls = crate::items::RollCatalogs {
         props: props.as_deref(),
         enchants: enchants.as_deref(),
@@ -520,6 +578,12 @@ fn feed_mail(
     // MAIL_SEND_SUCCESS on OK (resets the form) or the refusal's own line on a failure. The
     // success also SAYS so — `ERR_MAIL_SENT`, the yellow info line `0x4ad0b1` shows before it
     // resets the form (decision 1821).
+    // A take emptied and purged a row: `CLOSE_INBOX_ITEM(index)` — the stock handler hides the
+    // open letter when it is that row — ahead of the `MAIL_INBOX_UPDATE` the changed list fires
+    // below, the client's own order (wow-re `stationery-bindings.md` §8, 1970).
+    for index in std::mem::take(&mut mail.close_inbox) {
+        script.fire_event("CLOSE_INBOX_ITEM", vec![ScriptValue::Int(i64::from(index))]);
+    }
     for ack in std::mem::take(&mut mail.send_acks) {
         script.fire_event("MAIL_FAILED", vec![]);
         let key = if ack.ok {
@@ -565,7 +629,34 @@ fn feed_mail(
     if changed {
         script.set_mail(fresh.clone());
     }
+    // The send tab's usable stationery (1970): `Stationery.dbc` rows the player may use — the
+    // always-available one, or one whose item they carry — whose item template is cached, priced
+    // by BuyPrice ascending. The templates are asked ahead of any mailbox (the catalog is five
+    // rows) so the list is whole the frame the window opens: the stock `SendMailFrame_Reset`
+    // selects row 1 on show, and an empty list then would leave every send silently unsent.
+    //
+    // **Only once there is a player.** `feed_mail` carries no run condition, so it runs from the
+    // first frame of the process — the login screen, before the socket exists. The five asks went
+    // out there, the io thread dropped them ("not connected"), and `Items::template` had already
+    // latched all five in its ask-once `pending` set, which is cleared on DISCONNECT and never on
+    // connect. The templates were therefore never re-asked, the list stayed empty for the whole
+    // session, and the failure this very comment describes — every send silently unsent — is what
+    // it caused. Gating on the self player is also what the list means: "what may I use", which is
+    // not a question until there is a me.
+    let usable = stationery
+        .as_deref()
+        .filter(|_| !self_q.is_empty())
+        .map(|catalog| stationeries(catalog, &self_q, &mut items, icons.as_deref(), &commands))
+        .unwrap_or_default();
+    let memo = last_stationeries.get(&script);
+    if *memo != usable {
+        *memo = usable.clone();
+        script.set_mail_stationeries(usable);
+    }
     if opened {
+        // The selection is cleared on open AND close (`0x4ace07`, 1970); the stock tab's reset
+        // on MAIL_SHOW re-selects row 1.
+        script.clear_stationery();
         script.fire_event("MAIL_SHOW", vec![]);
         // The compose tab resets on open — a fresh window carries no stale attachment/money.
         script.clear_send_mail_item();
@@ -573,6 +664,7 @@ fn feed_mail(
         // MAIL_SEND_SUCCESS on open too, so the page-turn sound on open is faithful, not a bug.
         script.fire_event("MAIL_SEND_SUCCESS", vec![]);
     } else if closed {
+        script.clear_stationery();
         script.fire_event("MAIL_CLOSED", vec![]);
         // The close core's tail (wow-re `0x4acdad`/`0x4acdb1`, decision 0913): a session where a
         // mail was read — or one arrived while the window was open — re-asks the server, and the
@@ -728,23 +820,28 @@ fn drain_mail(
     // SendMail: resolve the attachment's (bag, slot) to the wire item guid at send time (the
     // reference re-reads the slot when the send fires — a lazy resolve, decision 0216/0544).
     if let Some(req) = script.take_mail_send() {
-        let item_guid = req
-            .item
-            .and_then(|(bag, slot)| {
-                self_q.iter().next().and_then(|s| {
-                    crate::ui_items::slot_guid(&s.0, bag, (slot.max(1) - 1) as u8, &items)
-                })
+        let item_guid = req.item.and_then(|(bag, slot)| {
+            self_q.iter().next().and_then(|s| {
+                crate::ui_items::slot_guid(&s.0, bag, (slot.max(1) - 1) as u8, &items)
             })
-            .unwrap_or(0);
-        let _ = commands.0.send(ClientCommand::SendMail {
-            mailbox,
-            receiver: req.target,
-            subject: req.subject,
-            body: req.body,
-            item_guid,
-            money: req.money,
-            cod: req.cod,
         });
+        if req.item.is_some() && item_guid.is_none() {
+            // The attached item is gone from its slot: `ERR_ITEM_NOT_FOUND`, no packet, the
+            // attachment dropped and `MAIL_SEND_INFO_UPDATE` fired (`0x4ae98d`, 1970).
+            mail.errors.push("ERR_ITEM_NOT_FOUND");
+            script.drop_send_mail_item();
+        } else {
+            let _ = commands.0.send(ClientCommand::SendMail {
+                mailbox,
+                receiver: req.target,
+                subject: req.subject,
+                body: req.body,
+                stationery: req.stationery,
+                item_guid: item_guid.unwrap_or(0),
+                money: req.money,
+                cod: req.cod,
+            });
+        }
     }
 
     if script.take_mail_close() {

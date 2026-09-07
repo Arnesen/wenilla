@@ -57,6 +57,10 @@ pub struct PropProbes {
     /// Peak concurrent DISTINCT occupancy (diagnostics: logged by the spawner on overflow; a peak
     /// near capacity is the signal to grow the table).
     peak: usize,
+    /// Slots written since the last publish, as a `[lo, hi)` span — what the upload writes,
+    /// instead of every allocated row: a walk streams props in and out most frames and each
+    /// change re-sent the whole span (hundreds of KB) for one row.
+    dirty: Option<(usize, usize)>,
 }
 
 impl Default for PropProbes {
@@ -69,6 +73,7 @@ impl Default for PropProbes {
             slots: vec![None; MAX_PROP_PROBES],
             generation: 0,
             peak: 0,
+            dirty: None,
         }
     }
 }
@@ -90,7 +95,7 @@ impl PropProbes {
         Arc::make_mut(&mut self.rows)[slot as usize] = coeffs.map(|v| v.to_array());
         self.by_key.insert(key.clone(), slot);
         self.slots[slot as usize] = Some((1, Some(key)));
-        self.generation += 1;
+        self.touch(slot);
         self.peak = self.peak.max(self.high - self.free.len());
         Some(slot)
     }
@@ -103,7 +108,7 @@ impl PropProbes {
         let slot = self.take_free_slot()?;
         Arc::make_mut(&mut self.rows)[slot as usize] = coeffs.map(|v| v.to_array());
         self.slots[slot as usize] = Some((1, None));
-        self.generation += 1;
+        self.touch(slot);
         self.peak = self.peak.max(self.high - self.free.len());
         Some(slot)
     }
@@ -118,6 +123,16 @@ impl PropProbes {
             return;
         }
         Arc::make_mut(&mut self.rows)[slot as usize] = coeffs.map(|v| v.to_array());
+        self.touch(slot);
+    }
+
+    /// A row changed: widen the dirty span and bump the generation.
+    fn touch(&mut self, slot: u16) {
+        let s = slot as usize;
+        self.dirty = Some(match self.dirty {
+            Some((lo, hi)) => (lo.min(s), hi.max(s + 1)),
+            None => (s, s + 1),
+        });
         self.generation += 1;
     }
 
@@ -161,7 +176,7 @@ impl PropProbes {
         // Zero the freed probe so a stale MeshTag (a frame of despawn skew) reads black, not the
         // previous occupant's light.
         Arc::make_mut(&mut self.rows)[slot as usize] = [[0.0; 4]; 7];
-        self.generation += 1;
+        self.touch(slot);
         self.free.push(slot);
     }
 }
@@ -174,6 +189,9 @@ pub(crate) struct PropProbeExtract {
     rows: Arc<Vec<[[f32; 4]; 7]>>,
     high: usize,
     generation: u64,
+    /// The rows this generation changed, `[lo, hi)`; `None` = everything up to `high` (the
+    /// first publish, and a render world that missed a generation).
+    dirty: Option<(usize, usize)>,
 }
 
 impl Default for PropProbeExtract {
@@ -183,13 +201,25 @@ impl Default for PropProbeExtract {
             high: 0,
             // != PropProbes' initial 0, so the first refresh publishes even an empty table.
             generation: u64::MAX,
+            dirty: None,
         }
     }
 }
 
 /// Main world, after the spawners: publish the table for extraction when it changed.
-pub(super) fn publish_prop_probes(probes: Res<PropProbes>, mut out: ResMut<PropProbeExtract>) {
+pub(super) fn publish_prop_probes(
+    mut probes: ResMut<PropProbes>,
+    mut out: ResMut<PropProbeExtract>,
+) {
     if out.generation != probes.generation {
+        // Consecutive generations carry their own span; a publish that skipped one (the
+        // change-gated system did not run in between) sends the whole allocated span once.
+        let consecutive = out.generation.wrapping_add(1) == probes.generation
+            || out
+                .dirty
+                .is_some_and(|_| out.generation != u64::MAX && probes.generation > out.generation);
+        let dirty = probes.dirty.take();
+        out.dirty = if consecutive { dirty } else { None };
         out.rows = Arc::clone(&probes.rows);
         out.high = probes.high;
         out.generation = probes.generation;
@@ -215,29 +245,42 @@ pub(super) fn upload_prop_probes(
     if *last == Some(data.generation) {
         return;
     }
+    // The changed span when this render frame follows the last one it uploaded; the whole
+    // allocated span (freed slots inside it are zeroed rows) on the first upload and whenever a
+    // generation went by unseen, so the GPU never keeps a row the CPU has since rewritten.
+    let high = data.high.min(data.rows.len());
+    let (lo, hi) = match (data.dirty, *last) {
+        (Some((lo, hi)), Some(seen)) if seen.wrapping_add(1) == data.generation => {
+            (lo.min(high), hi.min(high))
+        }
+        _ => (0, high),
+    };
     *last = Some(data.generation);
-    // Upload the whole allocated span (high slots). Freed slots inside it are zeroed rows.
-    let rows = &data.rows[..data.high.min(data.rows.len())];
+    let rows = &data.rows[lo..hi];
     if !rows.is_empty() {
         queue.write_buffer(
             &buffer.0,
-            prop_probe_region_offset(),
+            prop_probe_region_offset() + (lo * std::mem::size_of::<[[f32; 4]; 7]>()) as u64,
             bytemuck::cast_slice(rows),
         );
     }
 }
 
 /// Attached to ONE entity of each lit interior prop instance (they despawn together with the
-/// placement); the on-remove hook returns the slot to the table whoever despawns it.
+/// placement); the hook returns the slot to the table whoever despawns it — and `on_replace`,
+/// not `on_remove` (the `RigSkin` shape, decision 2005): `on_remove` never fires on an
+/// insert-overwrite, so a re-seat that wrote a fresh slot over the old one leaked the old slot
+/// for the life of the session, and only a remove-then-insert discipline at the one re-seat
+/// site kept that from happening. `on_replace` fires once per transition on both edges.
 #[derive(Component)]
-#[component(on_remove = free_prop_probe_slot)]
+#[component(on_replace = free_prop_probe_slot)]
 pub struct PropProbeSlot(pub u16);
 
 fn free_prop_probe_slot(mut world: DeferredWorld, ctx: HookContext) {
     let slot = world
         .get::<PropProbeSlot>(ctx.entity)
         .map(|s| s.0)
-        .expect("on_remove runs with the component still present");
+        .expect("on_replace runs with the outgoing component still present");
     world.resource_mut::<PropProbes>().release(slot);
 }
 
@@ -263,6 +306,28 @@ mod tests {
         let c2 = t.alloc(c).unwrap();
         assert_eq!(c2, a);
         assert_eq!(t.high, 2);
+    }
+
+    /// The hook is `on_replace`, so an insert over a live slot frees the old one — the leak
+    /// `on_remove` would have let through (it never fires on an overwrite).
+    #[test]
+    fn overwriting_a_probe_slot_frees_the_old_one() {
+        let mut w = World::new();
+        let mut t = PropProbes::default();
+        let a = t.alloc([Vec4::splat(0.5); 7]).unwrap();
+        let b = t.alloc([Vec4::splat(0.25); 7]).unwrap();
+        w.insert_resource(t);
+        let e = w.spawn(PropProbeSlot(a)).id();
+        w.entity_mut(e).insert(PropProbeSlot(b));
+        let t = w.resource::<PropProbes>();
+        assert_eq!(
+            t.rows[a as usize], [[0.0; 4]; 7],
+            "the overwritten slot is freed"
+        );
+        assert_ne!(t.rows[b as usize], [[0.0; 4]; 7], "the new slot is live");
+        w.entity_mut(e).despawn();
+        let t = w.resource::<PropProbes>();
+        assert_eq!(t.rows[b as usize], [[0.0; 4]; 7], "despawn still frees");
     }
 
     #[test]

@@ -45,6 +45,10 @@ pub struct WorldCensus<'w, 's> {
     /// Every spawned model submesh, with the facts that make a visible one accountable.
     parts: Query<'w, 's, CensusData>,
     emitters: Query<'w, 's, &'static ParticleEmitter>,
+    /// The placement registry, for the duplicate census (`orphan_parts=`): a placed part alive
+    /// that no registered placement owns. Optional for a viewer with no streamer.
+    placements: Option<Res<'w, crate::terrain_stream::Placements>>,
+    streamer: Option<Res<'w, crate::terrain_stream::TerrainStreamer>>,
     /// The exterior-scene gate's two terms (decision 0774) and what the cull actually did with
     /// them. Optional so the census works in a viewer that has not installed the portal system.
     claim: Option<Res<'w, CameraInteriorClaim>>,
@@ -74,11 +78,29 @@ pub struct WorldCensus<'w, 's> {
 pub struct CensusReport {
     /// Every model submesh that exists.
     pub submeshes: usize,
+    /// Placed (doodad/WMO) parts alive that no registered placement owns — the duplicate
+    /// census. Zero in a healthy world; a doubled prop is exactly one of these per part.
+    pub orphan_parts: usize,
+    /// Parts whose `VisibilityClass` holds a duplicate entry — each is queued and drawn once
+    /// per entry (`model_render::park`'s dedup is the fix; this is the census that names a
+    /// regression).
+    pub stacked_parts: usize,
+    /// The orphans by `(placement id, model label, parts)`, most parts first.
+    pub orphans: Vec<(u32, String, usize)>,
+    /// Resident tiles `(furnished, in window)`, off the streamer.
+    pub tiles: Option<(usize, usize)>,
     /// …and how many of them the render world will actually draw (`ViewVisibility`).
     pub drawn: usize,
     /// Visible submeshes per model subsystem — `(column name, visible, of-those-gated)` — in a
     /// fixed column order, because a census whose columns move cannot be diffed across runs.
     pub kinds: [(&'static str, usize, usize); 4],
+    /// Resident submeshes per model subsystem, same column order as `kinds` — hidden or not.
+    /// A city's hidden twins (the retained pass draws them) ride every per-`Mesh3d` sweep
+    /// whether they draw or not, and this is the count that prices them.
+    pub resident: [usize; 4],
+    /// Resident submeshes per `EntityPathWhy` label (the streamer's reason a batch is an
+    /// entity), most first; `"-"` for the untagged (units, GameObjects, the app lane).
+    pub why: Vec<(&'static str, usize)>,
     /// Of every [`ExteriorScene`]-tagged submesh: how many exist, how many the cull wrote `Hidden`
     /// on, how many were exempt (the camera's own placement — decision 0784), and how many carry
     /// **no `Aabb`**, which is the cull's fail-open arm admitting them unconditionally.
@@ -125,6 +147,9 @@ pub struct CensusReport {
     /// Resident asset counts — the leak meter. A tour probe reading the same counts as a fresh
     /// control is what "torn down" means, machine-checked.
     pub mats: usize,
+    /// Built materials parked by `model_render::lazy`, not yet assets — the variants nothing
+    /// visible has bound. `mats` counts realized ones only.
+    pub mats_parked: usize,
     pub meshes: usize,
     pub images: usize,
     pub uv_anims: usize,
@@ -188,6 +213,12 @@ impl WorldCensus<'_, '_> {
     }
 
     /// Snapshot this frame.
+    /// Live particles this instant — the one census number cheap enough to sample per frame
+    /// (a fold over the emitters, no part walk): a spell burst's signature on a tail frame.
+    pub fn live_particles(&self) -> usize {
+        self.emitters.iter().map(|p| p.live()).sum()
+    }
+
     pub fn take(&self) -> CensusReport {
         let own_instance = self
             .claim
@@ -196,13 +227,37 @@ impl WorldCensus<'_, '_> {
             .map(|c| c.room.instance);
 
         let mut kinds = [(0usize, 0usize); 4];
+        let mut resident = [0usize; 4];
+        let mut why: HashMap<&'static str, usize> = HashMap::new();
         let mut labels: HashMap<(String, bool), usize> = HashMap::new();
         let mut escaped: HashMap<(String, bool), usize> = HashMap::new();
         let (mut tagged, mut hidden, mut exempt_n, mut no_aabb) = (0, 0, 0, 0);
         let (mut submeshes, mut drawn) = (0usize, 0usize);
 
-        for (vis, part, gated, object, want, aabb, card, group) in self.parts.iter() {
+        let owned = self.placements.as_ref().map(|p| p.owned());
+        let mut orphans: HashMap<(u32, String), usize> = HashMap::new();
+        let mut stacked_parts = 0usize;
+        for (entity, vis, part, gated, object, want, aabb, card, group, path_why, class) in
+            self.parts.iter()
+        {
             submeshes += 1;
+            // A part whose `VisibilityClass` lists its mesh class more than once is queued
+            // that many times a frame — drawn stacked on itself (`model_render::park`).
+            stacked_parts += usize::from(class.is_some_and(|c| c.len() > 1));
+            // The duplicate census: a doodad/WMO part is spawned by exactly one placement and
+            // recorded on it; one alive outside every placement's list outlived a respawn. The
+            // one population that lives outside the registry by design is the retained pass's
+            // fader EXILES (`static_gx::cull`, decision 1431): the feather-band respawns are
+            // recorded on their fader seed, not on the placement, and they name themselves.
+            let exile = path_why.is_some_and(|w| w.0 == "exile");
+            if let (Some(owned), Some(o), false) = (owned.as_ref(), object, exile) {
+                if matches!(o.kind, ModelKind::Doodad | ModelKind::Wmo) && !owned.contains(&entity)
+                {
+                    *orphans.entry((o.id, o.label.clone())).or_default() += 1;
+                }
+            }
+            resident[kind_index(part.kind)] += 1;
+            *why.entry(path_why.map_or("-", |w| w.0)).or_default() += 1;
             drawn += usize::from(vis.get());
             if gated {
                 // The camera's own placement is not exterior scene to itself (decision 0784) and
@@ -229,6 +284,9 @@ impl WorldCensus<'_, '_> {
             }
         }
 
+        let orphan_parts = orphans.values().sum();
+        let mut orphans: Vec<_> = orphans.into_iter().map(|((i, l), n)| (i, l, n)).collect();
+        orphans.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
         let mut escaped: Vec<_> = escaped.into_iter().map(|((l, c), n)| (l, c, n)).collect();
         escaped.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
         let mut labels: Vec<_> = labels.into_iter().map(|((l, g), n)| (l, g, n)).collect();
@@ -263,6 +321,16 @@ impl WorldCensus<'_, '_> {
         CensusReport {
             submeshes,
             drawn,
+            stacked_parts,
+            orphan_parts,
+            orphans,
+            tiles: self.streamer.as_ref().map(|s| s.residency()),
+            why: {
+                let mut v: Vec<_> = why.into_iter().collect();
+                v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+                v
+            },
+            resident,
             kinds: std::array::from_fn(|i| (KIND_COLUMNS[i], kinds[i].0, kinds[i].1)),
             tagged,
             hidden,
@@ -292,6 +360,7 @@ impl WorldCensus<'_, '_> {
                 liquid_hidden: v.liquid_hidden,
             }),
             mats: self.mats.len(),
+            mats_parked: crate::model_render::lazy::pending_len(),
             meshes: self.meshes.len(),
             images: self.images.len(),
             uv_anims: self.uv_reg.0.len(),
@@ -340,6 +409,7 @@ impl WorldCensus<'_, '_> {
 
 /// What the census reads off every model submesh — the query shape.
 type CensusData = (
+    Entity,
     &'static ViewVisibility,
     &'static ModelPart,
     Has<ExteriorScene>,
@@ -348,6 +418,8 @@ type CensusData = (
     Option<&'static Aabb>,
     Has<crate::billboard::BillboardCard>,
     Option<&'static WmoGroupVis>,
+    Option<&'static crate::model_render::EntityPathWhy>,
+    Option<&'static bevy::camera::visibility::VisibilityClass>,
 );
 
 /// The census column order, pinned: entry `i` names [`kind_index`]'s slot `i`. Column positions

@@ -23,7 +23,7 @@ mod pose;
 // names them yet), so rustc can't see this re-export escape — allow silences the resulting
 // unused-import false positive on an otherwise-live facade re-export.
 #[allow(unused_imports)]
-pub use anims::{AnimClip, ModelAnimations, PlayableAnim, ResolvedAnim};
+pub use anims::{AnimClip, ClipEvent, ModelAnimations, PlayableAnim, ResolvedAnim};
 pub use pose::{PoseBone, PoseClip, PoseNode, PoseSource, PoseTrack};
 
 /// A billboarded submesh's render data (Bevy space): the bone pivot the card rotates about (model-local
@@ -84,6 +84,10 @@ pub struct ModelSubmesh {
     /// This batch is unlit (see [`benilla_formats::RenderSubmesh::emissive`]) — rendered fullbright:
     /// M2 `UNLIT (0x01)` glass/glow, or WMO `UNLIT` on an exterior-group batch. `false` otherwise.
     pub emissive: bool,
+    /// This batch's texture is the **icon slot** (M2 texture type 14, see
+    /// [`benilla_formats::RenderSubmesh::icon_slot`]): the spawn site fills it from
+    /// `Model:ReplaceIconTexture`'s path. `false` for every other batch and all of WMO.
+    pub icon_slot: bool,
     /// The WMO MOMT **SIDN** night-glow colour (see [`benilla_formats::RenderSubmesh::sidn`]) — the
     /// authored emissive RGB the shader ramps by the night fraction on lit lanes. `None` for M2.
     pub sidn: Option<[u8; 3]>,
@@ -128,6 +132,12 @@ pub struct ModelSubmesh {
     /// because which loop applies depends on the sequence the *instance* is playing (decision
     /// 1408). Like [`Self::uv_anim`], the `Arc` doubles as a material-dedup identity.
     pub uv_seq: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 2]>>>,
+    /// The batch's texture-transform **rotation** loop per file sequence slot (decision 2019)
+    /// — the UI model tiles sample it off the pane's play head into the material's affine row;
+    /// no world lane reads it (no placed doodad authors one). `None` for the rest.
+    pub uv_rot_seq: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 4]>>>,
+    /// The scaling twin of [`Self::uv_rot_seq`].
+    pub uv_scale_seq: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 2]>>>,
     /// The batch's **animated RGB tint** (the M2Color colour track, time-varying only — a spell
     /// effect's white-hot flash cooling to red). When `Some`, the static vertex tint was skipped
     /// at parse (`benilla-formats`): the render side seeds the material's tint at the first key —

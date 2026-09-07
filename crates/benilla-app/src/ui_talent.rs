@@ -33,7 +33,9 @@ use std::collections::BTreeSet;
 use bevy::prelude::*;
 
 use benilla_formats::{Talent, TalentCatalog};
-use benilla_ui::script::{TalentPrereqView, TalentTabView, TalentUiState, TalentView, UiScript};
+use benilla_ui::script::{
+    ScriptValue, TalentPrereqView, TalentTabView, TalentUiState, TalentView, UiScript,
+};
 
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_action::{PlayerActions, Spells};
@@ -157,7 +159,26 @@ fn feed_talents(
         );
         script.set_talents(fresh.clone());
         memory.pushed = fresh;
-        script.fire_event("CHARACTER_POINTS_CHANGED", vec![]);
+        // `%d%d` — the talent-point and profession-point DELTAS, per the reference's own fire
+        // site (SignalEvent2, decision 1884). `ChatFrame.lua:1326` opens its branch with
+        // `if ( arg2 > 0 )`, unguarded, so an argless fire is not merely ignored there: it
+        // compares nil with a number and raises. `memory.points` still holds the previous pair
+        // here — it is updated at the end of this function — and a first observation seeds at
+        // zero, the same rule the professions line below uses.
+        let (talent_delta, profession_delta) = match memory.points {
+            Some((old_talent, old_professions)) => (
+                i64::from(points.0) - i64::from(old_talent),
+                i64::from(points.1) - i64::from(old_professions),
+            ),
+            None => (0, 0),
+        };
+        script.fire_event(
+            "CHARACTER_POINTS_CHANGED",
+            vec![
+                ScriptValue::Int(talent_delta),
+                ScriptValue::Int(profession_delta),
+            ],
+        );
     }
     // The professions line rides the cp2 RISE only (a spend consumes, a rise frees — the
     // reference prints on arg2 > 0); the first observation seeds silently.

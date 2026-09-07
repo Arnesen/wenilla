@@ -161,13 +161,29 @@ pub(super) fn spawn_loaded_placements(
                         continue;
                     }
                     // Resolve the MCSH ground-shade the reference way: a GLOBAL world→tile→chunk lookup at
-                    // the doodad's origin, independent of which tile registered it or in what order. An ADT
-                    // map doodad on lit ground takes the boosted ADT sun level (`ShadeSel::Lit` — the
-                    // binary's 2.5, wow-re m2-interior-doodad-base-light §6).
+                    // the doodad's origin, independent of which tile registered it or in what order.
+                    //
+                    // **An ADT map doodad is the FIXED-1.0 family, not the boosted one** (2050).
+                    // This site read `ShadeSel::Lit` (the 2.5 target) on the strength of wow-re
+                    // `m2-interior-doodad-base-light` §6, and §6 was wrong: a `CMapDoodadDef`'s
+                    // `[+0xa4]` is only ever {0.0, 0.5, 1.0}, and the class does not merely fail to
+                    // ramp — at `+0xf8`, where the ramp `0x69e770` reads its target, the doodad
+                    // class holds `m[2][3]` of its own world matrix. The 2.5 and the 3.3333/s chase
+                    // belong to the WENTITY light node (vtable `0x810810`, hung off `[obj+0xe0]`),
+                    // which a doodad has none of. Measured as well as read: 111 identified MDDF
+                    // placements over six trace frames, 356 draws, gains only ∈ {0.5, 1.0}, none
+                    // changing — while an entity walking out of shadow climbed 0.5 → 0.81 → 1.09 →
+                    // 1.3367 in the same frames. wow-re `models/scratch/
+                    // adt-doodad-sun-scale-vs-entity-node.md`.
+                    //
+                    // So this is the same family the exterior WMO MODD prop takes, and for the same
+                    // reason: they are one C++ class. Nothing renders differently today — the
+                    // shader's `min(I, 1)` already flattened the two — but the scale being
+                    // per-class is what has to be true BEFORE that cap can come off.
                     let shade =
                         match doodad_ground_shade(&streamer, &adt_tiles, p.transform.translation) {
                             ShadeResolve::Ready(true) => ShadeSel::Shaded,
-                            ShadeResolve::Ready(false) => ShadeSel::Lit,
+                            ShadeResolve::Ready(false) => ShadeSel::Matte,
                             // The doodad's own ground tile is requested but still decoding — wait, so we don't
                             // bake the lit fallback into a straddling tree whose true tile lands a frame later.
                             ShadeResolve::Pending => continue,
@@ -208,7 +224,8 @@ pub(super) fn spawn_loaded_placements(
                         &mut uv_reg,
                         &mut tint_reg,
                         &mut anim_table,
-                        None, // world-static placement: cards bake their world pivot
+                        false, // world-static: not the entity-hosted lane
+                        None,  // world-static placement: cards bake their world pivot
                         Some((&mut *merge, MergeSite::Doodad { owner: p.owner })),
                         // The retained-pass collector (1429/1431) — ADT doodads are its lane.
                         staticgx
@@ -388,7 +405,8 @@ pub(super) fn spawn_loaded_placements(
                         &mut uv_reg,
                         &mut tint_reg,
                         &mut anim_table,
-                        None, // world-static placement: cards bake their world pivot
+                        false, // world-static: not the entity-hosted lane
+                        None,  // world-static placement: cards bake their world pivot
                         Some((
                             &mut *merge,
                             MergeSite::Wmo {
@@ -732,7 +750,8 @@ pub(super) fn spawn_loaded_placements(
                 &mut uv_reg,
                 &mut tint_reg,
                 &mut anim_table,
-                None, // world-static placement: cards bake their world pivot
+                false, // world-static: not the entity-hosted lane
+                None,  // world-static placement: cards bake their world pivot
                 // The prop merge site (1418 lane 3): keyed by the rooms that name the prop,
                 // slot baked per vertex for the interior lane.
                 Some((

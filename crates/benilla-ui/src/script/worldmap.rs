@@ -21,9 +21,13 @@
 //! bitmap (`Interface\WorldMap\<Continent>.zmp`, remapped app-side to 1-based zone indices; the
 //! source + cell law are wow-re-verified, `0x4a6ec0` / the Q1 §5 verdict 2026-07-07). The cell
 //! law itself is transcribed here ([`area_grid_cell`]) rather than in the app's `map_proj`
-//! because its only callers are these bindings. `UpdateMapHighlight` returns the hovered zone's
-//! NAME only for now — the highlight-texture halves (fileName + the `0x4a7fa0` POT extents) land
-//! with phase 3's overlay machinery, which shares them.
+//! because its only callers are these bindings. `UpdateMapHighlight` answers per level exactly
+//! as `0x4a7fa0` does (wow-re 15b2a8ea): at continent level the hovered zone's name **and** its
+//! highlight quad; at zone level a **name only** — a revealed overlay's sub-area when the cursor
+//! is inside its `WorldMapOverlay` hit rect, else the neighbouring zone or city whose grid cell
+//! the cursor is in through the displayed zone's rect window, never the displayed zone itself —
+//! with a nil fileName, so the frame hides the quad (report B360). The world sheet's continent
+//! highlight is not built: hovering a continent there answers the nil/zero tail.
 //!
 //! Zone maps carry **exploration fog**: the base tiles are the unexplored parchment, and each
 //! discovered sub-area's overlay art (`GetNumMapOverlays`/`GetMapOverlayInfo`, filtered by the
@@ -95,6 +99,15 @@ pub struct WorldMapOverlayView {
     /// The AreaTable `exploreFlag` bit indices that reveal this overlay (any set bit shows it;
     /// empty = never shown — an overlay whose areas are unknown).
     pub explore_bits: Vec<u32>,
+    /// The hover hit rect `(top, left, bottom, right)`, px of the 1002×668 detail frame — the
+    /// DBC's own `HitRect*` fields. The zone-level `UpdateMapHighlight` scales it by 1/1002 and
+    /// 1/668 and tests the normalized cursor against it, both edges inclusive (wow-re 15b2a8ea
+    /// §1d, `0x4a7ffc..0x4a80ea`).
+    pub hit_rect: (u32, u32, u32, u32),
+    /// The name that hover shows inside the rect: the localized AreaTable name of the overlay's
+    /// FIRST area slot (`0x4a7fa0` reads `+0x8` only). `None` when that slot resolves to no row —
+    /// the client then walks past the overlay exactly as if the cursor were outside it.
+    pub area_name: Option<String>,
 }
 
 /// One continent. Its 1-based position IS the continent index Lua sees.
@@ -211,6 +224,11 @@ pub struct WorldMapState {
     /// `GetPlayerMapPosition("player")` for the CURRENT selection — projected app-side each frame
     /// (`map_proj`), `None`/(0,0) = off this map (the reference hides the blip).
     pub player_uv: Option<(f32, f32)>,
+    /// The world map's arrow frame and the battlefield minimap's — the two per-session
+    /// singletons `CreateWorldMapArrowFrame`/`CreateMiniWorldMapArrowFrame` build, by wrapper id
+    /// (`worldmap_arrow`, 1980). `None` until the first create.
+    pub arrow_world: Option<u32>,
+    pub arrow_mini: Option<u32>,
     /// `GetPlayerMapPosition("party1".."party4")` for the CURRENT selection, in `party_slots`
     /// order — projected app-side through the same law as [`Self::player_uv`] (report B320).
     /// A slot is `None` when there is no member there, when we hold no position for them, or when
@@ -219,6 +237,8 @@ pub struct WorldMapState {
     ///
     /// Shorter than 4 whenever the party is: a missing index is a `None`.
     pub party_uv: Vec<Option<(f32, f32)>>,
+    /// `raid1..raid40` in roster order — the stock map's raid arm (1980), fed like `party_uv`.
+    pub raid_uv: Vec<Option<(f32, f32)>>,
     /// `GetPlayerFacing()` — wow orientation radians (0 = north, counterclockwise-positive). Our
     /// transcribed frame spins its arrow texture with it (`SetRotation`); the reference rotates
     /// an engine-rendered arrow model instead (0203 flags the stand-in).
@@ -240,6 +260,121 @@ fn explored_bit(explored: &[u32], n: u32) -> bool {
     explored
         .get((n / 32) as usize)
         .is_some_and(|w| w & (1 << (n % 32)) != 0)
+}
+
+/// The reciprocals `0x4a7fa0` scales a `WorldMapOverlay` hit rect by: the rect is authored in
+/// pixels of the 1002×668 detail frame, the cursor arrives normalized, and the client brings the
+/// rect to the cursor (`fild` → `fmul` a f32 constant → `fstp dword`), so the edges are f32.
+const OVERLAY_RECIP_X: f32 = 1.0 / 1002.0;
+const OVERLAY_RECIP_Y: f32 = 1.0 / 668.0;
+
+/// The zone-level **overlay pre-search** (`0x4a7ffc..0x4a80ea`, wow-re 15b2a8ea §1d): the first
+/// REVEALED overlay whose hit rect contains the cursor names its first area. Both edges are
+/// inclusive; a rect with a zero-width edge never hits; a NaN cursor never hits; an overlay whose
+/// first area resolves to no AreaTable row is walked past, not stopped at. The list is the one
+/// `GetNumMapOverlays` counts — the exploration-gated one (`[0xb6e630]`, built by `0x4a6ad9`
+/// under the explored-byte read at `0x4a6bfa`), so a fogged sub-area has no name.
+fn overlay_hover(state: &WorldMapState, x: f32, y: f32) -> Option<String> {
+    revealed_overlays(state).into_iter().find_map(|o| {
+        let (top, left, bottom, right) = o.hit_rect;
+        let (xlo, xhi) = (
+            left as f32 * OVERLAY_RECIP_X,
+            right as f32 * OVERLAY_RECIP_X,
+        );
+        let (ylo, yhi) = (
+            top as f32 * OVERLAY_RECIP_Y,
+            bottom as f32 * OVERLAY_RECIP_Y,
+        );
+        let inside = xhi - xlo != 0.0
+            && yhi - ylo != 0.0
+            && (xlo..=xhi).contains(&x)
+            && (ylo..=yhi).contains(&y);
+        if inside {
+            o.area_name.clone()
+        } else {
+            None
+        }
+    })
+}
+
+/// What `UpdateMapHighlight` answers for a cursor at map UV `(x, y)` under the current selection.
+enum Hover {
+    /// Continent level, over a zone: its name and the highlight quad — fileName, texPercentageY,
+    /// textureX/Y, scrollChildX/Y (texPercentageX is that branch's constant 1.0).
+    Highlight {
+        name: String,
+        file: String,
+        tex_pct_y: f64,
+        texture: (f64, f64),
+        scroll: (f64, f64),
+    },
+    /// Zone level: a name only — fileName nil, six zeros, the frame hides the quad.
+    Name(String),
+    /// Off every area: the nil/zero tail.
+    Miss,
+}
+
+/// The continent-level answer for the hovered zone (the `0x4a81de → 0x4a822a` highlight-compute
+/// path, zone-search branch): fileName = its art folder (the frame draws `<file>\<file>Highlight`),
+/// the six coords seat/size/crop that texture over the zone's rect within the continent, keeping
+/// the client's f32/f64 asymmetric narrowing.
+fn continent_hover(cont: &WorldMapContinentView, zone: &WorldMapZoneView) -> Option<Hover> {
+    let (cl, cr, ct, cb) = cont.loc_rect;
+    let (zl, zr, zt, zb) = zone.loc_rect;
+    let (w, h) = (zl - zr, zt - zb);
+    let (cont_w, cont_h) = (cl - cr, ct - cb);
+    if w == 0.0 || h == 0.0 || cont_w == 0.0 || cont_h == 0.0 {
+        return None;
+    }
+    let recip_x = 1.0f32 / cont_w;
+    let recip_y_f32 = 1.0f32 / cont_h;
+    let texture_x = f64::from(recip_x * w);
+    let texture_y = (1.0f64 / f64::from(cont_h)) * f64::from(h);
+    let scroll_x = f64::from(recip_x * (cl - zl));
+    let scroll_y = f64::from(recip_y_f32 * (ct - zt));
+    // texPctY = dim/potdim, dim = __ftol((h·128)/w) (rect-form K = 128).
+    let dim = ((h * 128.0) / w) as i64;
+    let potdim = next_pow2(dim);
+    let tex_pct_y = if potdim > 0 {
+        dim as f64 / potdim as f64
+    } else {
+        0.0
+    };
+    Some(Hover::Highlight {
+        name: zone.name.clone(),
+        file: zone.map_file.clone(),
+        tex_pct_y,
+        texture: (texture_x, texture_y),
+        scroll: (scroll_x, scroll_y),
+    })
+}
+
+/// `0x4a7fa0`'s level dispatch (wow-re 15b2a8ea §1a). Continent level: the grid cell's zone lights
+/// up. Zone level: the overlay pre-search first, then the same grid re-windowed by the displayed
+/// zone's own rect (`0x4a7620`), which returns nothing for the displayed zone itself — and only the
+/// name-only tail is reachable from there (`0x4a812e`). World level: the continent highlight is
+/// not built, so the tail.
+fn hover(wm: &WorldMapState, x: f32, y: f32) -> Hover {
+    let (c, z) = wm.selection;
+    let Some(cont) = c.checked_sub(1).and_then(|i| wm.continents.get(i as usize)) else {
+        return Hover::Miss;
+    };
+    if z != 0 {
+        if let Some(name) = overlay_hover(wm, x, y) {
+            return Hover::Name(name);
+        }
+        return match grid_area(wm, x, y) {
+            Some(zi) if u32::from(zi) != z => cont
+                .zones
+                .get(zi as usize - 1)
+                .map_or(Hover::Miss, |zone| Hover::Name(zone.name.clone())),
+            _ => Hover::Miss,
+        };
+    }
+    grid_area(wm, x, y)
+        .and_then(|zi| cont.zones.get(zi as usize - 1))
+        .and_then(|zone| continent_hover(cont, zone))
+        .unwrap_or(Hover::Miss)
 }
 
 /// The current selection's zone view, if a zone map is displayed.
@@ -317,6 +452,7 @@ impl super::UiScript {
         player_facing: f32,
         corpse_uv: Option<(f32, f32)>,
         party_uv: Vec<Option<(f32, f32)>>,
+        raid_uv: Vec<Option<(f32, f32)>>,
     ) {
         let mut model = self.model_mut();
         model.worldmap.player_zone = player_zone;
@@ -324,6 +460,7 @@ impl super::UiScript {
         model.worldmap.player_facing = player_facing;
         model.worldmap.corpse_uv = corpse_uv;
         model.worldmap.party_uv = party_uv;
+        model.worldmap.raid_uv = raid_uv;
     }
 
     /// The engine-owned selection `(continent, zone)` — the app reads it each frame to project
@@ -345,9 +482,17 @@ impl super::UiScript {
     pub fn world_map_uv_at(&self, x: f32, y: f32) -> Option<(f32, f32)> {
         let id = self.hit_test(x, y)?;
         let model = self.model_ref();
-        let fh = model.id_to_frame.get(&id).copied()?;
-        if model.arena.frame(fh)?.name.as_deref() != Some("WorldMapButton") {
-            return None;
+        let hit = model.id_to_frame.get(&id).copied()?;
+        // The map button, or **anything sitting on it**: the stock file makes every POI icon a
+        // child of `WorldMapButton` (`WorldMapFrame.lua:178`), and so are the player arrow's clear
+        // button and the party/raid blips, so the topmost frame over a town or a teammate is one
+        // of those and not the button. Requiring the button itself made the click deaf exactly
+        // where the map has something to show — the director's report on the stock map. Walking
+        // up rather than widening the name test keeps everything else out: a click on the
+        // continent dropdown or the close button is over neither the button nor its subtree.
+        let mut fh = hit;
+        while model.arena.frame(fh)?.name.as_deref() != Some("WorldMapButton") {
+            fh = model.arena.frame(fh)?.parent?;
         }
         let r = model.resolved.get(&fh)?;
         let (w, h) = (r.right - r.left, r.top - r.bottom);
@@ -491,22 +636,25 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // GetPlayerMapPosition(unit) → x, y in [0,1] map UV; (0,0) = not on this map (hide the
-    // blip). `"player"` and `"party1".."party4"` resolve (report B320); `"raid1".."raid40"` do
-    // not yet — the reference's raid arm draws a 25-frame pool this map has no children for, and
-    // its party arm is the one a five-man actually takes.
+    // blip). `"player"`, `"party1".."party4"` (report B320) and `"raid1".."raid40"` (1980, the
+    // stock map's raid arm over its `WorldMapRaid1..40` pool) resolve; anything else is (0,0).
     g.set(
         "GetPlayerMapPosition",
         lua.create_function(|lua, unit: String| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let (x, y) = match unit.as_str() {
-                "player" => model.worldmap.player_uv.unwrap_or((0.0, 0.0)),
-                u => u
-                    .strip_prefix("party")
+            let slot = |prefix: &str, list: &[Option<(f32, f32)>]| {
+                unit.strip_prefix(prefix)
                     .and_then(|n| n.parse::<usize>().ok())
                     .filter(|n| *n >= 1)
-                    .and_then(|n| model.worldmap.party_uv.get(n - 1).copied().flatten())
-                    .unwrap_or((0.0, 0.0)),
+                    .and_then(|n| list.get(n - 1).copied().flatten())
             };
+            let (x, y) = match unit.as_str() {
+                "player" => model.worldmap.player_uv,
+                u if u.starts_with("party") => slot("party", &model.worldmap.party_uv),
+                u if u.starts_with("raid") => slot("raid", &model.worldmap.raid_uv),
+                _ => None,
+            }
+            .unwrap_or((0.0, 0.0));
             Ok((f64::from(x), f64::from(y)))
         })?,
     )?;
@@ -550,82 +698,37 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // UpdateMapHighlight(x, y) → name, fileName, texPctX, texPctY, textureX, textureY,
-    // scrollChildX, scrollChildY (wow-re 15b2a8ea, 0x4a7fa0). Continent level: the hovered zone
-    // lights up — fileName = its art folder (the frame draws `<file>\<file>Highlight`), the six
-    // coords seat/size/crop that texture over the zone's rect within the continent, keeping the
-    // client's f32/f64 asymmetric narrowing. World-level continent highlight and zone-level
-    // overlay-name are deferred: those exits return the nil/zero tail (the frame hides the quad).
+    // scrollChildX, scrollChildY (wow-re 15b2a8ea, 0x4a7fa0) — the per-level law is [`hover`].
+    // Eight values always: the frame reads `fileName` to decide whether a quad is drawn at all,
+    // so a name-only answer carries a nil there and six zeros behind it.
     g.set(
         "UpdateMapHighlight",
         lua.create_function(|lua, (x, y): (f32, f32)| {
-            // (name, fileName, texPctY, textureX, textureY, scrollChildX, scrollChildY); texPctX
-            // is the constant 1.0 the continent branch always returns.
-            let hit: Option<(String, String, f64, f64, f64, f64, f64)> = {
+            let hit = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                let wm = &model.worldmap;
-                let (c, z) = wm.selection;
-                if c == 0 || z != 0 {
-                    None
-                } else {
-                    grid_area(wm, x, y)
-                        .and_then(|zi| wm.continents.get(c as usize - 1).zip(Some(zi)))
-                        .and_then(|(cont, zi)| cont.zones.get(zi as usize - 1).zip(Some(cont)))
-                        .and_then(|(zone, cont)| {
-                            let (cl, cr, ct, cb) = cont.loc_rect;
-                            let (zl, zr, zt, zb) = zone.loc_rect;
-                            let (w, h) = (zl - zr, zt - zb);
-                            let (cont_w, cont_h) = (cl - cr, ct - cb);
-                            if w == 0.0 || h == 0.0 || cont_w == 0.0 || cont_h == 0.0 {
-                                return None;
-                            }
-                            let recip_x = 1.0f32 / cont_w;
-                            let recip_y_f32 = 1.0f32 / cont_h;
-                            let texture_x = f64::from(recip_x * w);
-                            let texture_y = (1.0f64 / f64::from(cont_h)) * f64::from(h);
-                            let scroll_x = f64::from(recip_x * (cl - zl));
-                            let scroll_y = f64::from(recip_y_f32 * (ct - zt));
-                            // texPctY = dim/potdim, dim = __ftol((h·128)/w) (rect-form K = 128).
-                            let dim = ((h * 128.0) / w) as i64;
-                            let potdim = next_pow2(dim);
-                            let tex_pct_y = if potdim > 0 {
-                                dim as f64 / potdim as f64
-                            } else {
-                                0.0
-                            };
-                            Some((
-                                zone.name.clone(),
-                                zone.map_file.clone(),
-                                tex_pct_y,
-                                texture_x,
-                                texture_y,
-                                scroll_x,
-                                scroll_y,
-                            ))
-                        })
-                }
+                hover(&model.worldmap, x, y)
             };
-            match hit {
-                Some((name, file, tex_pct_y, tx, ty, sx, sy)) => Ok((
-                    Value::String(lua.create_string(&name)?),
-                    Value::String(lua.create_string(&file)?),
+            let string = |s: &str| Ok::<_, mlua::Error>(Value::String(lua.create_string(s)?));
+            Ok(match hit {
+                Hover::Highlight {
+                    name,
+                    file,
+                    tex_pct_y,
+                    texture,
+                    scroll,
+                } => (
+                    string(&name)?,
+                    string(&file)?,
                     1.0f64,
                     tex_pct_y,
-                    tx,
-                    ty,
-                    sx,
-                    sy,
-                )),
-                None => Ok((
-                    Value::Nil,
-                    Value::Nil,
-                    0.0f64,
-                    0.0f64,
-                    0.0f64,
-                    0.0f64,
-                    0.0f64,
-                    0.0f64,
-                )),
-            }
+                    texture.0,
+                    texture.1,
+                    scroll.0,
+                    scroll.1,
+                ),
+                Hover::Name(name) => (string(&name)?, Value::Nil, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                Hover::Miss => (Value::Nil, Value::Nil, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            })
         })?,
     )?;
 

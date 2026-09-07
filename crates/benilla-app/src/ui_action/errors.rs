@@ -8,8 +8,8 @@
 //! - [`UiErrorKeys`] — client-LOCAL refusals straight by GlobalStrings key, the
 //!   `CGGameUI::DisplayError` route for errors with no wire code and no spell record:
 //!   `ERR_ATTACK_MOUNTED` (decision 0481) and the GameObject lock-refusal toasts
-//!   ("Requires Herbalism", decision 0545) — the latter carry [`UiError`]'s `%s`/`%d`
-//!   argText fills, resolved by [`ui_error_text`].
+//!   ("Requires Herbalism", decision 0545) and the guild lines (decision 2054) — the latter
+//!   carry [`UiError`]'s ordered argText list, resolved by [`ui_error_text`].
 //!
 //! - [`UiErrorTexts`] — the same route for lines that arrive already resolved (the server's own
 //!   `SMSG_NOTIFICATION` / `SMSG_AREA_TRIGGER_MESSAGE` text, the death durability notice), so
@@ -42,24 +42,58 @@ pub(crate) struct CastErrors(pub Vec<CastFail>);
 /// word that fills the message's `%s` (the arm table at `0x6e1d8e` — a `SpellFocusObject.dbc` id
 /// for 0x5e, an `AreaTable.dbc` id for 0x5d).
 ///
-/// `arg` is `None` for every **client-local** refusal, and that is faithful rather than a gap: the
-/// local refusals the reference raises itself go through `DisplayError` with no argText, and the
-/// two client-generated argument messages it *does* build (the lock toasts, MIN_SKILL) are
+/// `arg` is `None` for **almost** every client-local refusal, and that is faithful rather than a
+/// gap: the local refusals the reference raises itself go through `DisplayError` with no argText,
+/// and the two client-generated argument messages it *does* build (the lock toasts, MIN_SKILL) are
 /// [`UiError`]'s tenants, not this queue's.
+///
+/// The **one** exception is the crowd-control ladder's `0x8d` (decision 1948). That refusal is
+/// local — `0x6094f0` bails before any packet — yet it carries an argument all the same, because
+/// its own exemption scan produced one: the blocking aura's `SpellMechanic.dbc` id. It is the
+/// only place a locally-generated word reaches this queue, which is why `push_local` still cannot
+/// set one and [`CastErrors::push_local_arg`] exists beside it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CastFail {
     pub spell_id: u32,
     pub reason: u8,
     pub arg: Option<u32>,
+    /// **Whose** refusal this is — which decides which of the reference's two message tables
+    /// resolves it. See [`Caster`].
+    pub caster: Caster,
+}
+
+/// Who failed to cast — the one input that picks between the reference's **two** cast-failure
+/// message tables (decision 2033).
+///
+/// It is not a flag on one handler: `SMSG_CAST_FAILED` and `SMSG_PET_CAST_FAILED` land in two
+/// separate functions, `0x6e1a00` and `0x6e8eb0`, each with its own reason -> errorId map. Ten of
+/// the pet's reasons resolve to something the player's never says, six of them to the
+/// `ERR_PET_SPELL_*` catalog rows that exist for no other purpose. Everything else about the two
+/// — the first-layer `SPELL_FAILED_*` vocabulary, the argument arms, the strip fallback — is
+/// literally the same code, which is why this rides the shared queue instead of forking it.
+///
+/// [`super::cast_fail::cast_fail_text`] is the reader; nothing downstream of it asks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Caster {
+    /// Ours — `SMSG_CAST_FAILED` and every client-local refusal we raise for ourselves.
+    #[default]
+    Player,
+    /// The pet's or the charm's — `SMSG_PET_CAST_FAILED` only.
+    Pet,
 }
 
 impl CastFail {
     /// A **client-local** refusal — no wire argument (see [`Self::arg`]).
+    ///
+    /// Always the player's: every local refusal benilla raises is raised on its own cast, and the
+    /// reference has no client-side path that refuses on the pet's behalf — a pet's refusals are
+    /// all decided server-side and arrive as `SMSG_PET_CAST_FAILED`.
     pub(crate) const fn local(spell_id: u32, reason: u8) -> Self {
         Self {
             spell_id,
             reason,
             arg: None,
+            caster: Caster::Player,
         }
     }
 }
@@ -69,6 +103,31 @@ impl CastErrors {
     pub(crate) fn push_local(&mut self, spell_id: u32, reason: u8) {
         self.0.push(CastFail::local(spell_id, reason));
     }
+
+    /// Queue a client-local refusal that carries its own argument word — see [`CastFail::arg`]
+    /// for why there is exactly one such tenant.
+    pub(crate) fn push_local_arg(&mut self, spell_id: u32, reason: u8, arg: u32) {
+        self.0.push(CastFail {
+            spell_id,
+            reason,
+            arg: Some(arg),
+            caster: Caster::Player,
+        });
+    }
+
+    /// Queue the **pet's** wire refusal (`SMSG_PET_CAST_FAILED`). Same queue, same drain, same
+    /// sink — [`Caster::Pet`] is the whole difference, and it is read once, at the table pick.
+    ///
+    /// No argument word: `PetCastFailed::AppendBodyTo` writes none, so the reference's own
+    /// argument arms on this path have nothing to read.
+    pub(crate) fn push_pet(&mut self, spell_id: u32, reason: u8) {
+        self.0.push(CastFail {
+            spell_id,
+            reason,
+            arg: None,
+            caster: Caster::Pet,
+        });
+    }
 }
 
 /// (Dis)mount refusals queued for the UI error line, as the wire pair `(mount, code)` from
@@ -76,6 +135,18 @@ impl CastErrors {
 /// VM's own GlobalStrings by key ([`mount_result_key`]), the [`CastErrors`] shape exactly.
 #[derive(Resource, Default)]
 pub(crate) struct MountErrors(pub Vec<(bool, u32)>);
+
+/// Taming refusals queued for the UI error line, as the raw `SMSG_PET_TAME_FAILURE` reason byte
+/// (decision 2039) — [`MountErrors`]' shape, and here for the same reason: it is a **wire code
+/// family**, resolved by a code table, not a client-local key.
+///
+/// It cannot ride [`UiErrorKeys`] because its message is a *nested* lookup, which is exactly what
+/// the reference does: `0x6e6a20` resolves the reason's `PETTAME_*` key through the script VM
+/// (`0x703bf0`) and then passes that **string** as `DisplayError(0xee)`'s argText, filling
+/// `ERR_TAME_FAILED`'s lone `%s`. [`UiError`]'s arguments are text the raise site already has;
+/// here the raise site has only a byte, and the VM is only reachable at the drain.
+#[derive(Resource, Default)]
+pub(crate) struct PetTameFailures(pub Vec<u8>);
 
 /// Where a client message is SHOWN is **not a decision this crate makes** — it is the `kind` field
 /// (`+0x04`) of the reference's message record, and it now arrives from the catalog
@@ -87,28 +158,86 @@ pub(crate) struct MountErrors(pub Vec<(bool, u32)>);
 /// quest-share (1733) all ask the same table the same question.
 pub(crate) use benilla_ui::messages::MsgKind;
 
-/// One `DisplayError` message: a GlobalStrings key plus the argText fills. The 1.12 error
-/// formats use at most one `%s` and one `%d` ("Requires %s", "Requires %s %d" — wow-re
-/// cursor-system.md §8.8's lock-refusal toasts, decision 0545); a key whose string carries no
-/// token ignores its fills. Not red-line-only: this is the payload of the reference's ONE
-/// `CGGameUI::DisplayError` (`0x496720`) whatever surface the message's record names — the
-/// quest refusals carry their chat lines in it too (decision 0669).
+/// One argument in a message's **argText list**.
+///
+/// Heterogeneous and ordered because the template's specifiers are: the lock-refusal toast
+/// `ERR_USE_LOCKED_WITH_SPELL_KNOWN_SI` is String-then-Integer (wow-re cursor-system.md §8.8,
+/// decision 0545), and a list of strings beside a separate number cannot express that.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FillArg {
+    S(String),
+    D(i64),
+}
+
+/// One `DisplayError` message: a GlobalStrings key plus the **ordered argText list** the
+/// reference pushes with it. Not red-line-only: this is the payload of the reference's ONE
+/// `CGGameUI::DisplayError` (`0x496720`) whatever surface the message's record names — the quest
+/// refusals carry their chat lines in it too (decision 0669).
+///
+/// **`0x496720` is variadic** — cdecl, the catalog id first and the argText after it, `add esp,4`
+/// at a bare call site and `add esp,8` at a one-string one (wow-re
+/// `system/ui/scratch/staticpopup-dialog-bindings.md`; `guild-api-carve.md` §5's "22 of 22" arity
+/// control). Three strings is the most any call site pushes: `SMSG_GUILD_EVENT`'s shared emitter
+/// tail `0x5e745f` passes **1, 2 or 3** of them off the packet's `strCount`, feeding
+/// `ERR_GUILD_PROMOTE_SSS`. This field was a single `fill_s` until decision 2054, which is why
+/// the guild lines could not use this route at all and composed their own English instead.
+///
+/// A key whose string carries fewer specifiers than there are arguments ignores the rest; one
+/// that carries more shows the starved specifier verbatim, which is `SStrPrintf`'s own behaviour
+/// and the reason a short `strCount` is passed short rather than padded with empties.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct UiError {
     pub key: &'static str,
-    pub fill_s: Option<String>,
-    pub fill_d: Option<u32>,
+    pub args: Vec<FillArg>,
 }
 
 impl UiError {
     /// A fill-less message — the plain-key tenants (`ERR_ATTACK_MOUNTED`, the flag-locked
-    /// strategy defaults).
+    /// strategy defaults). The reference's `push <id>; call 0x496720; add esp,4`.
     pub(crate) fn key(key: &'static str) -> Self {
         Self {
             key,
-            fill_s: None,
-            fill_d: None,
+            args: Vec::new(),
         }
+    }
+
+    /// One string — the `_S` family, and the reference's `add esp,8`.
+    pub(crate) fn s(key: &'static str, s: impl Into<String>) -> Self {
+        Self {
+            key,
+            args: vec![FillArg::S(s.into())],
+        }
+    }
+
+    /// Several strings, in the order they are pushed — the `_SS`/`_SSS` family.
+    pub(crate) fn strings(key: &'static str, args: &[&str]) -> Self {
+        Self {
+            key,
+            args: args.iter().map(|s| FillArg::S((*s).to_string())).collect(),
+        }
+    }
+
+    /// A mixed list, for a template whose specifiers are not all `%s`.
+    pub(crate) fn args(key: &'static str, args: Vec<FillArg>) -> Self {
+        Self { key, args }
+    }
+
+    /// The first string argument — what a test asking "was the name filled in?" means.
+    #[cfg(test)]
+    pub(crate) fn arg_s(&self) -> Option<&str> {
+        self.args.iter().find_map(|a| match a {
+            FillArg::S(s) => Some(s.as_str()),
+            FillArg::D(_) => None,
+        })
+    }
+
+    /// The first integer argument.
+    #[cfg(test)]
+    pub(crate) fn arg_d(&self) -> Option<i64> {
+        self.args.iter().find_map(|a| match a {
+            FillArg::D(d) => Some(*d),
+            FillArg::S(_) => None,
+        })
     }
 }
 
@@ -152,13 +281,20 @@ impl UiErrorTexts {
 /// `None` (absent or empty key) = show nothing: GlobalStrings data-suppression, faithfully
 /// (the ref's own `[record+0x00]` null/empty guard at `0x4967bd`/`0x4967c5`).
 pub(crate) fn ui_error_text(e: &UiError, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
-    let mut text = get(e.key)?;
-    if let Some(s) = &e.fill_s {
-        text = text.replace("%s", s);
-    }
-    if let Some(d) = e.fill_d {
-        text = text.replace("%d", &d.to_string());
-    }
+    // Through the one shared filler (2045). This used `str::replace`, which fills EVERY `%s`
+    // with the same argument — latent only because no message on this queue carried two yet.
+    // The list's order is the reference's own push order, and a specifier with no argument left
+    // is copied through rather than blanked, which is `SStrPrintf`'s behaviour and the whole
+    // reason a short guild `strCount` is passed short (2054).
+    let args: Vec<benilla_ui::strings::Arg<'_>> = e
+        .args
+        .iter()
+        .map(|a| match a {
+            FillArg::S(s) => benilla_ui::strings::Arg::S(s),
+            FillArg::D(d) => benilla_ui::strings::Arg::D(*d),
+        })
+        .collect();
+    let text = benilla_ui::strings::fill(&get(e.key)?, &args);
     (!text.is_empty()).then_some(text)
 }
 
@@ -176,16 +312,33 @@ pub(crate) struct Shown {
 }
 
 impl Shown {
+    /// The resolved text — what the surface will show.
+    #[cfg(test)]
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
     /// A **catalog** message, named by its GlobalStrings key — the reference's `DisplayError(id)`,
     /// which is nearly every line benilla shows. One lookup answers both "where does it go" and
     /// "what does it sound like".
     ///
     /// A key with no row falls back to [`MsgKind::Error`] and no sound. That cannot arise in the
     /// reference (a message is an *index*, so an unknown key is not expressible), so it only ever
-    /// means benilla named a key the client does not have — and
-    /// `every_error_key_in_the_source_is_a_catalog_row` is what keeps it unreachable.
+    /// means benilla named a key the client does not have.
+    ///
+    /// `every_error_key_in_the_source_is_a_catalog_row` was supposed to keep that unreachable and
+    /// **could not**: all 465 catalog keys begin `ERR_`, so that walk collects `"ERR_…"` literals
+    /// — which makes it blind to exactly the mistake it is guarding against, a raise site that
+    /// named something else. `PET_SPELL_NOPATH` and `SPELL_FAILED_OUT_OF_RANGE` sat on the pet's
+    /// feedback line for months, took this fallback every time, and no gate could see them
+    /// (decision 2033). Widening the walk is not possible from the text — `SPELL_FAILED_*` keys
+    /// are legitimate GlobalStrings lookups elsewhere in this very module — so the tripwire moves
+    /// to the funnel: this is where a non-row key becomes observable, so it says so.
     pub(crate) fn keyed(key: &str, text: String) -> Self {
         let record = benilla_ui::messages::by_key(key);
+        if record.is_none() {
+            warn!("message {key:?} is not a catalog row — surface and sound are a guess");
+        }
         Self {
             record,
             kind: record.map_or(MsgKind::Error, |r| r.kind),
@@ -213,6 +366,20 @@ impl Shown {
 /// four of them had grown their own copy (decision 1821).
 pub(crate) fn keyed_line(script: &UiScript, key: &'static str) -> Option<Shown> {
     let text = script.lua().globals().get::<String>(key).ok()?;
+    (!text.is_empty()).then(|| Shown::keyed(key, text))
+}
+
+/// [`keyed_line`] for a `%s`-shaped string: each argument fills the next `%s`, in order — the
+/// reference's `format`-with-pushed-arguments face of the same catalog rows (the battleground
+/// join verdict's map name, the joined-or-left player's name, 1974).
+pub(crate) fn keyed_line_s(script: &UiScript, key: &'static str, args: &[&str]) -> Option<Shown> {
+    let template = script.lua().globals().get::<String>(key).ok()?;
+    let args: Vec<benilla_ui::strings::Arg<'_>> = args
+        .iter()
+        .copied()
+        .map(benilla_ui::strings::Arg::S)
+        .collect();
+    let text = benilla_ui::strings::fill(&template, &args);
     (!text.is_empty()).then(|| Shown::keyed(key, text))
 }
 
@@ -573,14 +740,13 @@ mod mount_error_tests {
 
 #[cfg(test)]
 mod ui_error_tests {
-    use super::{ui_error_text, UiError};
+    use super::{ui_error_text, FillArg, UiError};
 
     fn filled(key: &'static str, s: Option<&str>, d: Option<u32>) -> UiError {
-        UiError {
-            key,
-            fill_s: s.map(String::from),
-            fill_d: d,
-        }
+        let mut args = Vec::new();
+        args.extend(s.map(|s| FillArg::S(s.to_string())));
+        args.extend(d.map(|d| FillArg::D(i64::from(d))));
+        UiError::args(key, args)
     }
 
     /// The DisplayError argText substitution against a fake getter: `%s` then `%d`, key-absent

@@ -14,79 +14,58 @@
 //! FrameXML above it, a font registry, an anchor graph — not a four-line fixture. Every assertion
 //! below is a global an addon would reach for.
 
-use benilla_ui::script::UiScript;
+mod common;
 
-const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
+use benilla_ui::script::UiScript;
 
 /// The prefix of `benilla.toc`'s load order these templates need: the font registry, the panel kit,
 /// UIParent (the parent every addon passes), and the faux-scroll kit.
 ///
 /// **Two of the templates under test are the REFERENCE's since 1860** — `FauxScrollFrameTemplate`
 /// and `TabButtonTemplate` were ours until the dead-copy sweep, and both now come off the player's
-/// chain from `Interface\FrameXML\UIPanelTemplates.xml`, seated below `UiPanels.xml` exactly as
+/// chain from `Interface\FrameXML\UIPanelTemplates.xml`, seated below `UIParent.xml` exactly as
 /// the manifest seats it. So this list carries the chain pair and the loader below has to be able
 /// to READ a chain entry, which a disk-only provider under `assets/ui` cannot.
-const FILES: [&str; 7] = [
-    "Fonts.xml",
-    "MoneyFrame.xml",
-    "UiPanels.xml",
+const FILES: &[&str] = &[
+    "Interface\\FrameXML\\Fonts.xml",
+    // A REGRESSION GUARD, not a dependency (1923). FadingFrame.xml's entire body is a single
+    // `<Script file="FadingFrame.lua"/>`, so it loads correctly ONLY if that relative reference
+    // resolves against the document's own directory. Load it through the path-less `loader::load`
+    // and the base is "", the ref stays bare, the provider misses, and the assert below fires —
+    // which is exactly what it did before this file passed the path.
+    //
+    // It is self-contained on BOTH axes, and both had to be checked: zero `inherits=`, AND its Lua
+    // has no file-scope statements at all — only function definitions. The first guard tried here
+    // was CombatFeedback.xml, which also has zero `inherits=` but whose Lua calls `TEXT()` at file
+    // scope (l.7); that global is BasicControls.xml's, so it needed a dependency after all.
+    // `UnitFrame.lua` fails the same way (`TEXT(MANA)`). Structural dependencies are not the only
+    // kind.
+    "Interface\\FrameXML\\FadingFrame.xml",
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
+    r"Interface\FrameXML\UIParent.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
-    "UIParent.xml",
+    "Interface\\FrameXML\\GlobalStrings.lua",
+    "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which StaticPopup.lua reads at file scope
+    "Interface\\FrameXML\\LocaleProperties.lua",
+    "Interface\\FrameXML\\StaticPopup.xml", // the dialog engine (1960)
     "ScrollTemplates.xml",
 ];
 
 fn load_ui(script: &UiScript) {
-    let dir = std::path::Path::new(UI_DIR);
-    // A manifest entry carrying a path separator is the PLAYER's own file and has to come off the
-    // patch chain; a bare name is ours, under `assets/ui`. The shipped loader draws the same line
-    // (`reference_ui::is_chain_entry`), and this test grew the chain half when 1860 moved two of
-    // the templates it exercises onto it.
-    let chain = benilla_formats::wow_data().and_then(|d| benilla_formats::open_chain(&d).ok());
-    let read = |req: &str| -> Option<Vec<u8>> {
-        let norm = req.replace('\\', "/");
-        if norm.contains('/') {
-            if let Some(c) = chain.as_ref() {
-                if let Ok(b) = c.read(&norm) {
-                    return Some(b);
-                }
-            }
-        }
-        let base = norm.rsplit('/').next().unwrap_or(&norm);
-        std::fs::read(dir.join(&norm))
-            .or_else(|_| std::fs::read(dir.join(base)))
-            .ok()
-    };
-    let provider = |req: &str| -> Option<Vec<u8>> { read(req) };
     for file in FILES {
-        let bytes = read(file).unwrap_or_else(|| panic!("reading {file}"));
-        // A `.lua` manifest entry is a CHUNK, not a document — the shipped loader draws the same
-        // line, and `UIPanelTemplates` is split that way because the reference splits it that way.
-        if file.to_ascii_lowercase().ends_with(".lua") {
-            script
-                .run_chunk_named(&bytes, &format!("@{file}"))
-                .unwrap_or_else(|e| panic!("{file}: {e}"));
-            continue;
-        }
-        let text = benilla_ui::source::decode(&bytes);
-        let doc =
-            benilla_ui::framexml::parse(&text).unwrap_or_else(|e| panic!("parsing {file}: {e}"));
-        let report = benilla_ui::loader::load(script, &doc, &provider);
-        assert!(
-            report.errors.is_empty(),
-            "{file} loaded with errors: {:#?}",
-            report.errors
-        );
+        common::load_ui(script, file);
     }
 }
 
 /// The line an addon writes, and the globals it reads on the next one.
 ///
-/// `TabButtonTemplate` (UiPanels.xml) is a `<Button>` carrying a `<Size>`, six `<Layers>` slices,
-/// a `<ButtonText name="$parentText">`, a `<HighlightTexture name="$parentHighlightTexture">`, the
-/// three state fonts and an `<OnUpdate>` — i.e. every decoration pass at once. Instantiating it as
-/// `BenillaTemplateProbeTab` must publish `BenillaTemplateProbeTab*`, and must publish nothing
-/// named after the template.
+/// `TabButtonTemplate` (`UIPanelTemplates.xml`) is a `<Button>` carrying a `<Size>`, six `<Layers>`
+/// slices, a `<ButtonText name="$parentText">`, a `<HighlightTexture
+/// name="$parentHighlightTexture">`, the three state fonts and an `<OnUpdate>` — i.e. every
+/// decoration pass at once. Instantiating it as `BenillaTemplateProbeTab` must publish
+/// `BenillaTemplateProbeTab*`, and must publish nothing named after the template.
 #[test]
 fn a_real_template_reaches_an_addon_through_create_frame() {
     let _data = benilla_formats::wow_data_or_skip!();

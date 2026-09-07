@@ -92,8 +92,6 @@ pub(super) fn refresh_list(
             t.0 = new;
         }
     }
-    // The realm banner: "<name> (PVP)" per the realm type; "(Server down)" while unreachable
-    // (the ref's SERVER_DOWN suffix); a plain connecting note before the first roster.
     if let Ok(mut t) = banner.single_mut() {
         let new = match &roster.realm {
             Some(realm) => {
@@ -103,14 +101,9 @@ pub(super) fn refresh_list(
                     8 => strings.text("RPPVP_PARENTHESES", "(RPPVP)"),
                     _ => "",
                 };
-                let down = if status.last_reason.is_some() && roster.pending_pick.is_none() {
-                    format!("\n({})", strings.text("SERVER_DOWN", "Server down"))
-                } else {
-                    String::new()
-                };
-                format!("{} {}{down}", realm.name, suffix)
-                    .trim_end()
-                    .to_string()
+                let down = (status.last_reason.is_some() && roster.pending_pick.is_none())
+                    .then(|| strings.text("SERVER_DOWN", "Server down"));
+                realm_banner(&realm.name, suffix, down)
             }
             None => match &status.last_reason {
                 Some(_) => strings.text("SERVER_DOWN", "Server down").to_string(),
@@ -121,6 +114,29 @@ pub(super) fn refresh_list(
             t.0 = new;
         }
     }
+}
+
+/// The realm banner, composed the way `CharacterSelect_OnShow` composes it (`CharacterSelect.lua`
+/// l.48-62): the down note is appended to the **name**, and the realm-type suffix goes after that
+/// whole thing.
+///
+/// ```text
+/// serverName = serverName.."\n("..TEXT(SERVER_DOWN)..")";   -- only while disconnected
+/// CharSelectRealmName:SetText(serverName.." "..serverType);
+/// ```
+///
+/// A separate function because the order is exactly what drifted: ours put the suffix first and the
+/// down note last, under a comment claiming the reference's shape. Nothing showed while the suffix
+/// was `"(PVP)"` — parentheses read plausibly at either end. Decision 2052 made the suffix the enGB
+/// patch's `"PVP"`, a bare word, and the order became legible. A comment could not fail; this can.
+fn realm_banner(name: &str, suffix: &str, down: Option<&str>) -> String {
+    let name = match down {
+        Some(reason) => format!("{name}\n({reason})"),
+        None => name.to_string(),
+    };
+    // The reference appends `" "..serverType` unconditionally, leaving a trailing space on a realm
+    // with no type; we trim it, since ours is a laid-out node rather than a Lua string.
+    format!("{name} {suffix}").trim_end().to_string()
 }
 
 /// Per-frame interaction visuals + button states: the row highlight (hover ∪ selected — the ref's
@@ -209,5 +225,28 @@ pub(super) fn feed_glue_preview(
     }
     if preview.look != look {
         preview.look = look;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The composition order, pinned against `CharacterSelect.lua` l.48-62.
+    #[test]
+    fn the_down_note_hangs_off_the_name_and_the_type_suffix_follows_it() {
+        assert_eq!(realm_banner("Kalimdor", "PVP", None), "Kalimdor PVP");
+        assert_eq!(
+            realm_banner("Kalimdor", "PVP", Some("Server down")),
+            "Kalimdor\n(Server down) PVP",
+            "the suffix follows the whole name+note, not the name alone"
+        );
+        // No realm type: the reference's unconditional " " is all that would be left, and a banner
+        // does not end in whitespace.
+        assert_eq!(realm_banner("Kalimdor", "", None), "Kalimdor");
+        assert_eq!(
+            realm_banner("Kalimdor", "", Some("Server down")),
+            "Kalimdor\n(Server down)"
+        );
     }
 }

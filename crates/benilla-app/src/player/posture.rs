@@ -166,7 +166,13 @@ pub(super) fn update(
                 // melee → ranged → stowed, gated on what is actually worn — never a
                 // two-state flip. `None` = the ref makes no call at all (nothing equipped).
                 let w = wielded.copied().unwrap_or_default();
-                let worn = (w.main.is_some() || w.off.is_some(), w.ranged.is_some());
+                // `0x5eb5f0`/`0x600`/`0x610` are `GetWeapon(slot, 0)` (1863): a disarmed hand
+                // is not "worn" to the cycle, so the press walks past melee — and with nothing
+                // else equipped makes no call at all, exactly like the ref's unarmed branch.
+                let worn = (
+                    w.armed_main().is_some() || w.armed_off().is_some(),
+                    w.ranged.is_some(),
+                );
                 let next =
                     crate::creature_anim::toggle_sheath_next(drv.sheath_state().unwrap_or(0), worn);
                 if let Some(state) = next {

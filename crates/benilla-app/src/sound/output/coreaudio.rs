@@ -264,15 +264,31 @@ pub(super) struct Cycle<'a> {
 /// callback synchronously — nothing runs on the IO thread after the drop returns.
 pub(super) struct Stream {
     unit: AudioUnit,
-    /// The IO buffer actually granted, frames.
-    pub buffer_frames: u32,
+    /// The IO buffer the HAL actually granted, frames.
+    buffer_frames: u32,
 }
 
 impl Stream {
+    /// The cycle size the device is actually running, frames — read back after the open,
+    /// because the HAL may quietly hand back a different size than asked (Chromium documents
+    /// the silent clamp).
+    pub(super) fn buffer_frames(&self) -> u32 {
+        self.buffer_frames
+    }
+
     /// Open `device` at its nominal rate with a per-client IO buffer of `buffer_frames` (clamped
     /// to the device's range) and start it. `on_cycle` runs on the HAL's realtime IO thread —
     /// it must never block, allocate, or log.
-    pub(super) fn open<F>(device: Device, buffer_frames: u32, mut on_cycle: F) -> Result<Self>
+    ///
+    /// `_notices` is what a stream raises on its own where the platform has no listener API
+    /// (`cpal.rs` wires it to cpal's error callback); here every notice comes from
+    /// [`Listeners`], so the stream needs none of it.
+    pub(super) fn open<F>(
+        device: &Device,
+        buffer_frames: u32,
+        _notices: &Arc<Notices>,
+        mut on_cycle: F,
+    ) -> Result<Self>
     where
         F: FnMut(Cycle<'_>) + Send + 'static,
     {
@@ -336,8 +352,6 @@ impl Stream {
         })
         .context("render callback")?;
         unit.start().context("starting the unit")?;
-        // The HAL may quietly hand back a different size than asked (Chromium documents the
-        // silent clamp); the report prints the one that is actually running.
         let buffer_frames = get::<u32>(
             device.id,
             kAudioDevicePropertyBufferFrameSize,
@@ -419,7 +433,8 @@ pub(super) struct Listeners {
 }
 
 impl Listeners {
-    pub(super) fn arm(device: AudioObjectID, notices: Arc<Notices>) -> Self {
+    pub(super) fn arm(device: &Device, notices: Arc<Notices>) -> Self {
+        let device = device.id;
         let client = Arc::as_ptr(&notices) as *mut c_void;
         let wanted = [
             (
@@ -522,9 +537,9 @@ pub(super) struct Workgroup(OsWorkgroup);
 unsafe impl Send for Workgroup {}
 
 impl Workgroup {
-    pub(super) fn of_device(device: AudioObjectID) -> Option<Self> {
+    pub(super) fn of_device(device: &Device) -> Option<Self> {
         let wg: OsWorkgroup = get(
-            device,
+            device.id,
             kAudioDevicePropertyIOThreadOSWorkgroup,
             kAudioObjectPropertyScopeGlobal,
         )
@@ -571,10 +586,15 @@ impl Drop for Joined {
     }
 }
 
+/// The render thread's realtime standing. A time-constraint policy lasts as long as the thread
+/// does and needs no unwinding, so this carries nothing; it exists because the Windows half of
+/// the same surface (`cpal.rs`) has an MMCSS registration to hand back.
+pub(super) struct Realtime;
+
 /// Give the calling thread a time-constraint (realtime) policy: it produces `period_ns` worth
 /// of audio per wake and must be done well inside that. The scheduler then treats it like the
 /// HAL's own IO thread — above every QoS band, on a performance core.
-pub(super) fn set_realtime(period_ns: u64) -> Result<()> {
+pub(super) fn set_realtime(period_ns: u64) -> Result<Realtime> {
     let period = ns_to_host_ticks(period_ns) as u32;
     // A render chunk costs a fraction of a millisecond; the constraint is the deadline from
     // period start by which that computation must be done. Half the period leaves the other
@@ -597,5 +617,5 @@ pub(super) fn set_realtime(period_ns: u64) -> Result<()> {
     if rc != 0 {
         return Err(anyhow!("thread_policy_set(TIME_CONSTRAINT) failed ({rc})"));
     }
-    Ok(())
+    Ok(Realtime)
 }

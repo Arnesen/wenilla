@@ -71,13 +71,15 @@ pub(super) fn control(
         // A knockback the server aimed at our mover (decision 1702) — `wire_in` latches it, the
         // take-off site below flies it, and the movement stream acks it with the post-launch pose.
         MessageReader<crate::net::KnockBackMessage>,
+        // The tutorial system's world-input sites (1976): Movement acknowledged + the 10 s
+        // Targeting popup on a movement input, Cameras acknowledged on a mouse-look.
+        crate::tutorial::InputHooks,
     ),
     // Nested into one param to stay within Bevy's 16-element system-param tuple limit (see `mouse`).
     speed_capsule: (
         Res<MoveSpeed>,
         Res<PlayerCapsule>,
         Res<CameraProbe>,
-        Res<PointerOverUi>,
         Res<InspectMode>,
         Res<crate::ui_script::UiKeyboardCapture>,
         Res<crate::ui_script::PlayerUiClickConsumed>,
@@ -95,13 +97,17 @@ pub(super) fn control(
         // The spyglass scope ([`scoped_view`]): while held, the rig is pinned to first person and
         // the wheel cannot leave it.
         Res<scoped_view::ScopedView>,
+        // Is the loading cover up? The cover takes the whole input plane at the source
+        // (`loading_screen::input`), so nothing new arrives here — but a mouse gesture already in
+        // flight is retained state, and only its owner can unwind it. See the cancel below.
+        Res<crate::loading_screen::LoadingScreen>,
     ),
     mut commands: Commands,
     mut player: ResMut<Player>,
     mut rig: ResMut<CameraControl>,
     // Avian's kinematic move-and-slide: sweeps the capsule against the streamed colliders (decision 0009).
     collide: benilla_world::collision::WorldCollision,
-    mut cameras: Query<(&mut Transform, &mut FlyCam, &Camera)>,
+    mut cameras: Query<(&mut Transform, &mut FlyCam), With<Camera>>,
     // **The body in our hands** — see [`BodyQuery`] for what rides on it and why a possessed
     // creature needs nothing special here.
     mut body: BodyQuery,
@@ -133,26 +139,26 @@ pub(super) fn control(
 ) {
     let (world, transports, child_of) = (&world_q.0, &world_q.1, &world_q.2);
     let (left_click, right_click) = (&mut *click_test.0, &mut *click_test.1);
-    let Ok((mut cam_t, mut cam, camera)) = cameras.single_mut() else {
+    let Ok((mut cam_t, mut cam)) = cameras.single_mut() else {
         return;
     };
     let (mut window, mut cursor_opts) = window.into_inner();
     let mouse_motion = &pointer.0;
     let look_cfg = *pointer.1;
     let zoom_max = pointer.2.max;
-    let (move_speed, capsule, cam_probe, pointer_over_ui, inspect, ui_capture, click_consumed) = (
+    let (move_speed, capsule, cam_probe, inspect, ui_capture, click_consumed) = (
         &speed_capsule.0,
         &speed_capsule.1 .0,
         &speed_capsule.2 .0,
         &speed_capsule.3,
         &speed_capsule.4,
         &speed_capsule.5,
-        &speed_capsule.6,
     );
-    let binds = &speed_capsule.7;
-    let view_subject = &speed_capsule.8;
-    let self_guid = speed_capsule.9 .0;
-    let scoped = &speed_capsule.10;
+    let binds = &speed_capsule.6;
+    let view_subject = &speed_capsule.7;
+    let self_guid = speed_capsule.8 .0;
+    let scoped = &speed_capsule.9;
+    let covered = speed_capsule.10.covering();
     // The auto-follow knobs (decisions 1493/1502), with far sight's one exception folded in here so
     // both camera seats below agree: while the rig orbits somebody ELSE's body (Mind Vision, Sentry
     // Totem), our own facing is not what "behind" means, so the return is forced off rather than
@@ -182,13 +188,18 @@ pub(super) fn control(
     // anymore. Nothing here reads a bare key any more (decision 1043) — the free-fly toggle is on
     // the dev chord, and the Ctrl run boost is gone.
 
+    // Which mouse buttons the world owns this frame is [`camera::latch_world_mouse`]'s, decided
+    // in a system ahead of this one (ledger B364). Every *press* below is taken from that latch —
+    // the look session's engage, the camera's command word, the both-button run — so a press the
+    // UI ate reaches none of them. The raw buttons are still read below, but only for the hold and
+    // release of a gesture the world already owns.
     // The both-button state and the camera's input command word ([`input::look_input`]) — read
     // here, before the look session, because the not-driving path below seats its camera from the
     // same word and returns without ever reaching the movement axes.
     let input::LookInput {
         both_buttons,
         follow_command,
-    } = input::look_input(&buttons, binds, &player);
+    } = input::look_input(binds, &player, &rig);
 
     // The look session gets a SHADOW copy of `CursorOptions`, written back only on a real change:
     // handing it the component's `Mut` directly reborrowed mutably every frame, which marks it
@@ -213,7 +224,12 @@ pub(super) fn control(
     // let you spin your own body on the ground (decision 1753). Off the MOVER's descriptor, not
     // ours — `esi` in `0x5144e0` is whatever we are driving (1277) — and a ghost is not dead by it,
     // because the server puts a released player's health at 1 (0308).
-    let (stunned, dead) = body
+    // **The stand state** is read in the same pass for the mouse alone (decision 2025): the
+    // reference's camera→body hand-off predicate `0x5145e0` ends on `GetStandState() == 0`
+    // (`0x51460c`, the CGPlayer override `0x5ed570` = the client-predicted cache), so a seated
+    // body — sitting, in a chair, asleep — is never re-faced by a right-drag, and never stood up
+    // by one either. Predicted, not merely echoed: `stand_pending` is our `[player+0x1d68]`.
+    let (stunned, dead, stand_byte) = body
         .single()
         .ok()
         .and_then(|(.., store, _, _, _, _, _)| {
@@ -221,10 +237,12 @@ pub(super) fn control(
                 (
                     s.0.unit_flags() & UNIT_FLAG_STUNNED != 0,
                     s.0.unit_is_dead(),
+                    s.0.unit_stand_state(),
                 )
             })
         })
-        .unwrap_or((false, false));
+        .unwrap_or((false, false, 0));
+    let stand_state = player.stand_pending.unwrap_or(stand_byte);
     // The shared precondition `0x5144e0`, assembled once for this tick the way the reference
     // evaluates it once for the mover — health above, and the far-sight conjunct here.
     //
@@ -244,6 +262,9 @@ pub(super) fn control(
     // `0x5145b0`, evaluated here because the first thing it suppresses is the mouse turn below. Its
     // translate sibling waits until after `apply_server_moves`, where the root edge it reads lands.
     let may_turn = mover.may_turn(stunned);
+    // `0x5145e0`, the mouse's own hand-off gate — `may_turn` plus the stand-state conjunct the
+    // keyboard path does not have (it stands you up instead; the mouse is refused).
+    let mouse_turns_body = mover.mouse_may_turn_body(stunned, stand_state);
     // Drunkenness (B210): this frame's wobble angle, computed once — the facing veer and the
     // swim-pitch porpoise ([`swim::drive_step`]) both read it. Zero while sober (`wobble` early-outs on a 0.0
     // fraction), and zero whenever the turn predicate is down — the reference's wobble sits behind
@@ -261,6 +282,20 @@ pub(super) fn control(
             drunk::wobble(time.elapsed().as_millis() as u32, f)
         }
     };
+    // **A cover cancels a gesture; it never completes one.** The cover emptied the button planes
+    // in `PreUpdate`, so the look session below ends on its own this frame — and ending it also
+    // *settles* the click test the press armed, against `PressGesture::is_click`'s free window. A
+    // right-press 0.1 s before a portal would therefore have dispatched a `WorldRightClick` under
+    // the loading screen, acting on the pick latched in the world we just left. Dropping both
+    // tests first leaves the session to end with nothing to fire. This is the one place the cover
+    // has to be named by hand: taking the input away cannot rewind a state machine that is already
+    // mid-gesture, and this system owns the only such state the world side has (the UI's own armed
+    // press/drag is unwound by `UiScript::pointer_left_window`, which the blanked cursor already
+    // triggers).
+    if covered {
+        *left_click = None;
+        *right_click = None;
+    }
     run_look_session(
         &buttons,
         mouse_motion,
@@ -270,8 +305,6 @@ pub(super) fn control(
         &mut player.face_yaw,
         &mut window,
         &mut opts_shadow,
-        camera,
-        pointer_over_ui.0,
         inspect.enabled,
         click_consumed.0,
         &mut world_clicks.0,
@@ -316,7 +349,14 @@ pub(super) fn control(
     // all, because `0x50fee0` (the camera rotate at `0x514446`) runs before any object lookup and
     // the hand-off simply does not run. Ours writes and puts back, which is indistinguishable
     // downstream and keeps the approved camera path intact — a shape difference, not a copy.
-    if !may_turn || player.control_lost || player.reseat {
+    //
+    // **A seated body enters through the same door too** (decision 2025). `0x5145e0`'s last
+    // conjunct is `GetStandState() == 0` — the right-drag orbits the camera round a body that keeps
+    // facing its chair, sends nothing, and does not stand it up (1766 had already taken the stand
+    // off this gesture; this takes the turn off it). Stand up — X, a turn key, a flick — and the
+    // next motion sample hands the camera's yaw to the body again, which is the snap the reference
+    // shows too: `0x5103e0` commits the camera's own facing, not a delta.
+    if !mouse_turns_body || player.control_lost || player.reseat {
         player.face_yaw = yaw_before_look;
     }
     {
@@ -483,6 +523,13 @@ pub(super) fn control(
             turn_right,
             ..
         } = axes;
+        // The world-input tutorial sites (1976): a movement input, a mouse-look.
+        if fwd_axis != 0 || side_axis != 0 {
+            net.13.moved();
+        }
+        if mouselook {
+            net.13.mouselooked();
+        }
         // **The mover's own** six speeds, read once here for the whole frame — the turn below and
         // the run/backpedal selection further down. All six live on the driven unit's `CMovement`
         // and nothing in the reference's applied-input path ever reads *our* speeds when the mover
@@ -1063,6 +1110,15 @@ pub(super) fn control(
                 orientation: (player.face_yaw - r.boat_yaw).rem_euclid(std::f32::consts::TAU),
             }
         });
+        // The skipped-time clock (decision 1935): a held frame is a frame of movement simulation
+        // we advanced through without integrating, and the mover we name is the one we are
+        // actually driving — a possessed unit while we hold its reins. Read out before the call
+        // takes `player` mutably.
+        let skip = movement_net::SkipClock {
+            dt,
+            held: player.settling,
+            mover: player.foreign_mover.or(self_guid),
+        };
         movement_net::stream_self_movement(
             &net.0 .0,
             &mut player,
@@ -1090,6 +1146,7 @@ pub(super) fn control(
             // byte is 0 → `0x615c80 je 0x616539`: no apply, and no ack).
             knockback.filter(|_| knocked),
             wire_transport,
+            skip,
         );
     } else {
         // Free fly (pre-connect or detached): aim from the look angles, move the camera directly

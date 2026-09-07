@@ -54,7 +54,7 @@ use bevy::prelude::*;
 use crate::creature_anim::{
     footfall_culls, footfall_side, move_flags, AnimSoundEvent, MovementState,
 };
-use crate::entities::{BoneAttach, Creatures};
+use crate::entities::Creatures;
 use crate::net::{Embodied, NetEntity, ObjectStore};
 use crate::sound::footsteps::Footsteps;
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
@@ -165,18 +165,12 @@ fn spawn_footprints(
     time: Res<Time>,
     // GlobalTransform for the same reason as the footstep sounds (0441): a mounted unit's steps
     // are the MOUNT child's tags, whose local Transform is the seat-relative ~origin.
-    units: Query<(
-        &NetEntity,
-        &GlobalTransform,
-        Option<&BoneAttach>,
-        Option<&benilla_world::rig_anim::RigPose>,
-    )>,
+    units: Query<(&NetEntity, &GlobalTransform)>,
     // The spawner's ROOT (the rider for a mount child): the pool select, the print scale (the
     // rider's SCALE_X — RE-corrected), and the state gates all read the root.
     parents: Query<&ChildOf>,
     roots: Query<RootState>,
     camera: Query<&GlobalTransform, With<WorldCamera>>,
-    joints: Query<&GlobalTransform>,
     footsteps: Option<Res<Footsteps>>,
     creatures: Option<Res<Creatures>>,
     ink: Option<Res<FootprintInk>>,
@@ -203,7 +197,7 @@ fn spawn_footprints(
         let Some(side) = footfall_side(&ev.ident) else {
             continue;
         };
-        let Ok((net, transform, attach, pose)) = units.get(ev.entity) else {
+        let Ok((net, transform)) = units.get(ev.entity) else {
             continue;
         };
         // The ink + dims come from the EVENT's model (the mount for a mounted composite); the
@@ -231,15 +225,11 @@ fn spawn_footprints(
                 continue;
             }
         }
-        // The planted foot: the event's own marker (bone + offset) through the live joint —
-        // exactly the shape the missile launch points use. No marker/joint = the unit origin.
-        let foot = attach
-            .zip(pose)
-            .and_then(|(a, p)| {
-                let (bone, offset) = a.markers.get(&ev.ident).copied()?;
-                p.posed_point(joints.get(p.joints_root).ok()?, bone, offset)
-            })
-            .unwrap_or_else(|| transform.translation());
+        // The planted foot: the FIRED key's own point, resolved once by the scanner as the kernel
+        // snapshots it (decision 1904). It used to be a by-4CC re-find of the marker table, which
+        // is the *launch-point* mechanism (`0x7130e0`, first match) and not this one — a model that
+        // authors a side tag twice would have printed both feet at the first record's bone.
+        let foot = ev.pos.unwrap_or_else(|| transform.translation());
         // The handler's own 50 yd radius about the CAMERA EYE — every unit's feet, the
         // player's included ([`footfall_culls`]).
         if footfall_culls(eye, foot) {

@@ -55,6 +55,25 @@ const LEVEL_UP_EFFECT: &str = "HARDCODED Unit Level Up";
 /// 1185 → `Spells\DruidMorph_Impact_Base.mdx`, i.e. literally the druid-morph puff (wow-re
 /// `mount-composition.md` Q4b, decision 0927).
 const MOUNT_POOF_EFFECT: &str = "HARDCODED Mount Poof";
+/// The meeting-stone join — hardcoded index **0xc** (`0x861808`), spawned on the local player by
+/// the `SMSG 0x295` status-1 arm with the same `Effect_C` shape as the mount poof (wow-re
+/// `meeting-stone-status.md` §8; decision 1974).
+const MEETING_STONE_JOIN_EFFECT: &str = "HARDCODED Meeting Stone Join";
+
+/// The meeting-stone join visual for `entity`, or `None` without client data or the row —
+/// `0x61fae0(kind = 0xc, &guid, completion = 0x5fbf50)`: one-shot, non-persistent, the
+/// end-of-clip terminator, attached at `0x13` like every `HARDCODED` effect.
+pub(crate) fn meeting_stone_join_fx(visuals: &SpellVisuals, entity: Entity) -> Option<SpellKitFx> {
+    let path = visuals.0.hardcoded_effect(MEETING_STONE_JOIN_EFFECT)?;
+    Some(SpellKitFx::Begin {
+        entity,
+        spell_id: 0,
+        persistent: false,
+        class: FxClass::Hold,
+        stage: FxStage::OneShot,
+        effects: vec![(HARDCODED_FX_ATTACH, path.to_string())],
+    })
+}
 
 /// `SpellVisual.dbc` × `SpellVisualKit.dbc` — the stage-kit chain + each kit's anim/sound
 /// (`crate::creature_anim::spell_visual` module docs). Optional like every other DBC-backed
@@ -1296,6 +1315,7 @@ pub(super) fn arm_loot_fx(
     visuals: Option<Res<SpellVisuals>>,
     mut fx: MessageWriter<SpellKitFx>,
     mut armed: Local<EntityHashSet>,
+    mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
 ) {
     let full_sweep = visuals.as_ref().is_some_and(|v| v.is_changed());
     let Some(path) = visuals.as_ref().and_then(|v| v.0.loot_art_path()) else {
@@ -1317,6 +1337,12 @@ pub(super) fn arm_loot_fx(
             store.0.unit_is_dead() && store.0.unit_lootable()
         };
         if lootable && armed.insert(entity) {
+            // `OnDynamicFlagsChanged`'s rise (`0x60049b`): the Looting tutorial (1976).
+            if let Some(t) = tutorials.as_mut() {
+                t.write(crate::tutorial::TutorialEvent::trigger(
+                    crate::tutorial::id::LOOTING,
+                ));
+            }
             fx.write(SpellKitFx::Begin {
                 entity,
                 spell_id: LOOT_FX_KEY,

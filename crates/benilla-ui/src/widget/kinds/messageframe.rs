@@ -12,6 +12,10 @@ pub struct MessageLine {
     /// The RGB the line draws at, **byte-quantized** at insert (`AddMessage` `trunc(x*255+0.5)`,
     /// round-half-up; alpha is never stored — it is forced opaque and then driven by the fade).
     pub color: [u8; 3],
+    /// `AddMessage`'s fifth argument — the chat-type index the line was printed under
+    /// (`GetChatTypeIndex`), so `UpdateColorByID` can find every line of a type when
+    /// `UPDATE_CHAT_COLOR` lands. 0 for a line printed without one.
+    pub id: u32,
     /// Remaining phase-1 countdown (the `timeVisible` snapshot ticking down); while `> 0` the line
     /// holds full alpha.
     pub time_left: f32,
@@ -120,10 +124,36 @@ impl ScrollingMessageState {
     /// `timeVisible`/`fadeDuration` onto the new line, and push it at the ring's newest slot,
     /// dropping the oldest when over `max_lines`. A view scrolled up stays anchored on the same
     /// content (the ring cursor is a slot, not an offset — msgframe-runtime.md).
+    /// `ScrollingMessageFrame:UpdateColorByID(id, r, g, b)` (`0x7932b0`) — every line tagged
+    /// `id` takes the new colour, quantised the way `AddMessage` quantised the old one.
+    /// Returns how many lines moved; a recolour bumps the generation so a settled frame
+    /// redraws.
+    pub fn update_color_by_id(&mut self, id: u32, r: f32, g: f32, b: f32) -> usize {
+        let rgb = [quantize_u8(r), quantize_u8(g), quantize_u8(b)];
+        let mut moved = 0;
+        for line in self.lines.iter_mut().filter(|l| l.id == id) {
+            if line.color != rgb {
+                line.color = rgb;
+                moved += 1;
+            }
+        }
+        if moved > 0 {
+            self.lines_gen = self.lines_gen.wrapping_add(1);
+        }
+        moved
+    }
+
     pub fn add(&mut self, text: String, r: f32, g: f32, b: f32) {
+        self.add_with_id(text, r, g, b, 0);
+    }
+
+    /// `AddMessage(text, r, g, b, id)` — the line, tagged with the chat-type index it was
+    /// printed under so a later `UpdateColorByID(id, …)` can recolour it.
+    pub fn add_with_id(&mut self, text: String, r: f32, g: f32, b: f32, id: u32) {
         self.lines_gen = self.lines_gen.wrapping_add(1);
         let line = MessageLine {
             text,
+            id,
             color: [quantize_u8(r), quantize_u8(g), quantize_u8(b)],
             time_left: self.time_visible,
             fade_left: self.fade_duration,
@@ -466,6 +496,7 @@ impl MessageFrameState {
         self.lines_gen = self.lines_gen.wrapping_add(1);
         self.lines.push_back(MessageLine {
             text,
+            id: 0,
             color: [quantize_u8(r), quantize_u8(g), quantize_u8(b)],
             time_left: self.time_visible,
             fade_left: self.fade_duration,

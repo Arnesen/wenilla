@@ -383,10 +383,10 @@ fn display_session() -> String {
             ""
         };
         let deck = if set("SteamDeck") { ", steamdeck" } else { "" };
-        return format!(
+        format!(
             " [{backend}{nested}{deck}, XDG_SESSION_TYPE={}]",
             std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unset".into()),
-        );
+        )
     }
     #[cfg(not(all(unix, not(any(target_os = "macos", target_os = "android")))))]
     String::new()

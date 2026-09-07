@@ -68,6 +68,20 @@ pub struct QuestItemView {
 
 /// One open questgiver panel: the active sub-panel plus every field the four panels might read.
 /// Pushed whole by the app; `None` means no quest window is open.
+/// The quest's reward spell — `rewSpell` on `SMSG_QUESTGIVER_QUEST_DETAILS` /
+/// `SMSG_QUESTGIVER_OFFER_REWARD` and on `SMSG_QUEST_QUERY_RESPONSE` — resolved by the app to
+/// the name and icon `GetRewardSpell` / `GetQuestLogRewardSpell` answer (stock
+/// `QuestFrameItems_Update` counts it as one more reward slot, `rewardType = "spell"`, and the
+/// slot's hover is `GameTooltip:SetQuestRewardSpell()`). `tradeskill` is the third return the
+/// reference derives from the spell itself (1944 — the derivation is wow-re's to pin).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QuestRewardSpell {
+    pub spell_id: u32,
+    pub name: Option<String>,
+    pub texture: Option<String>,
+    pub tradeskill: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuestState {
     pub panel: QuestPanel,
@@ -95,6 +109,12 @@ pub struct QuestState {
     pub required_money: u32,
     /// Whether the turn-in is completable (`IsQuestCompletable`, progress panel).
     pub completable: bool,
+    /// The reward spell, if the quest teaches one (`GetRewardSpell`; detail/reward panels).
+    pub reward_spell: Option<QuestRewardSpell>,
+    /// The panel's background material (`GetQuestBackgroundMaterial` — nil is the reference's own
+    /// "Parchment" fallback in `QuestFrame_GetMaterial`). What fills it on the wire is 1944's
+    /// wow-re question; until the binary says, nothing does, and the verb answers nil honestly.
+    pub background_material: Option<String>,
 }
 
 impl Default for QuestState {
@@ -113,6 +133,8 @@ impl Default for QuestState {
             reward_money: 0,
             required_money: 0,
             completable: false,
+            reward_spell: None,
+            background_material: None,
         }
     }
 }
@@ -170,7 +192,36 @@ impl super::UiScript {
 }
 
 /// `GetQuestItemInfo(type, index)` reads from this vector by `type`; unknown types → `None`.
-fn item_vec<'a>(state: &'a QuestState, kind: &str) -> Option<&'a Vec<QuestItemView>> {
+/// The three returns of `GetRewardSpell` / `GetQuestLogRewardSpell`: `texture, name,
+/// isTradeskillSpell` — the third a 1/nil boolean in the reference's convention.
+pub(super) fn reward_spell_returns(
+    lua: &Lua,
+    spell: Option<QuestRewardSpell>,
+) -> mlua::Result<MultiValue> {
+    let Some(sp) = spell else {
+        return Ok(MultiValue::from_vec(vec![
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+        ]));
+    };
+    let texture = match &sp.texture {
+        Some(t) => Value::String(lua.create_string(t)?),
+        None => Value::Nil,
+    };
+    let name = match &sp.name {
+        Some(n) => Value::String(lua.create_string(n)?),
+        None => Value::Nil,
+    };
+    let tradeskill = if sp.tradeskill {
+        Value::Integer(1)
+    } else {
+        Value::Nil
+    };
+    Ok(MultiValue::from_vec(vec![texture, name, tradeskill]))
+}
+
+pub(super) fn item_vec<'a>(state: &'a QuestState, kind: &str) -> Option<&'a Vec<QuestItemView>> {
     match kind {
         "choice" => Some(&state.choices),
         "reward" => Some(&state.rewards),
@@ -315,12 +366,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetRewardSpell() → nil (spell-reward rows out of scope in v1, decision 0088).
+    // GetRewardSpell() → texture, name, isTradeskillSpell (three returns, 0x501df0; three nils on
+    // every empty path, the reference's own `(nil,nil,nil)` kind — 1842). Real since 1944: the
+    // app resolves `rewSpell` off the giver packets; stock's `if ( GetRewardSpell() ) then` counts
+    // the slot.
     g.set(
         "GetRewardSpell",
-        // THREE values on every reachable path, and the reference's own kinds include
-        // `(nil,nil,nil)` — so the empty answer is three nils, not one (decision 1842).
-        lua.create_function(|_, ()| Ok((Value::Nil, Value::Nil, Value::Nil)))?,
+        lua.create_function(|lua, ()| {
+            let spell = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model.quest.as_ref().and_then(|q| q.reward_spell.clone())
+            };
+            reward_spell_returns(lua, spell)
+        })?,
     )?;
 
     // ── Intents ───────────────────────────────────────────────────────────────────────────────────
@@ -357,6 +415,57 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     install_action(lua, "CloseQuest", super::QuestAction::Close)?;
     install_action(lua, "CompleteQuest", super::QuestAction::Continue)?;
 
+    // GetQuestBackgroundMaterial() → nil | string (0x502230; 0 args, 1 return). The reference's
+    // `QuestFrame_GetMaterial` (QuestFrame.lua:597-603) treats nil as "Parchment" and any string
+    // as the name of a material whose four `$parentMaterial*` quadrants and text colours
+    // (`GetMaterialTextColors`) the panel switches to. Answered from the pushed panel state.
+    g.set(
+        "GetQuestBackgroundMaterial",
+        lua.create_function(|lua, ()| {
+            let material = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model
+                    .quest
+                    .as_ref()
+                    .and_then(|q| q.background_material.clone())
+            };
+            match material {
+                Some(m) => Ok(Value::String(lua.create_string(&m)?)),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
+    // QuestChooseRewardError() — 0x5021a0, 0 args, 0 returns: the Complete button pressed with
+    // choices on offer and none picked (stock `QuestRewardCompleteButton_OnClick`,
+    // QuestFrame.lua:96-100). Sixteen bytes — `push 0x98; call 0x496720` — the game-error row
+    // `ERR_QUEST_MUST_CHOOSE` (wow-re quest-material-reward-spell-bindings.md §2): the row's sound
+    // cue `igQuestFailed` plays first, then kind 2 routes the GlobalStrings text through
+    // `UI_ERROR_MESSAGE` — synchronously, as SignalEvent is — and UIErrorsFrame prints it. The
+    // text is read from the same global the FrameXML shows, so a localised chain shows its own
+    // string; the shipped English is the fallback when no GlobalStrings is loaded.
+    g.set(
+        "QuestChooseRewardError",
+        lua.create_function(|lua, ()| {
+            {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                model
+                    .sound_queue
+                    .push(super::SoundRequest::KitName("igQuestFailed".to_string()));
+            }
+            let text: String = lua
+                .globals()
+                .get::<Option<String>>("ERR_QUEST_MUST_CHOOSE")?
+                .unwrap_or_else(|| "You must choose a reward.".to_string());
+            super::tick::fire_event_into(
+                lua,
+                "UI_ERROR_MESSAGE",
+                vec![super::ScriptValue::Str(text)],
+            );
+            Ok(())
+        })?,
+    )?;
+
     // ConfirmAcceptQuest() — the escort confirm's Yes (ref StaticPopup.lua:731-733, raised by
     // QUEST_ACCEPT_CONFIRM). No argument and no quest id: the client answers whichever confirm it
     // is holding, so the engine counts the calls and the app supplies the id (decision 1733).
@@ -369,16 +478,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetQuestReward(choice) — the reward panel's Complete button: queue the chosen choice index
-    // (Era passes the 1-based item id; the app maps it to the 0-based wire index). A quest with no
-    // choice rewards passes 0/nil.
+    // GetQuestReward(choice) — the reward panel's Complete button. FrameXML passes the 1-based row
+    // (`QuestFrameRewardPanel.itemChoice = this:GetID()`, stock QuestFrame.lua:97-101) and the
+    // wire wants the 0-based choice (`CMSG_QUESTGIVER_CHOOSE_REWARD`'s reward index — vmangos
+    // indexes `RewChoiceItemId[reward]` with it), so the conversion is the binding's, as it is the
+    // client's; our own Lua used to do the -1 itself (1944). A quest with no choice rewards
+    // passes 0, which stays 0.
     g.set(
         "GetQuestReward",
         lua.create_function(|lua, choice: Option<u32>| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model
-                .quest_actions
-                .push(super::QuestAction::Reward(choice.unwrap_or(0)));
+            model.quest_actions.push(super::QuestAction::Reward(
+                choice.unwrap_or(0).saturating_sub(1),
+            ));
             Ok(())
         })?,
     )?;
@@ -429,6 +541,43 @@ mod tests {
             reward_money: 1234,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn background_material_answers_the_pushed_material_or_nil() {
+        let mut s = UiScript::new().unwrap();
+        s.set_quest(Some(QuestState::default()));
+        assert!(s
+            .eval::<bool>("return GetQuestBackgroundMaterial() == nil")
+            .unwrap());
+        s.set_quest(Some(QuestState {
+            background_material: Some("Stone".into()),
+            ..QuestState::default()
+        }));
+        assert_eq!(
+            s.eval::<String>("return GetQuestBackgroundMaterial()")
+                .unwrap(),
+            "Stone"
+        );
+    }
+
+    #[test]
+    fn choose_reward_error_fires_the_error_event_with_the_global_string() {
+        let mut s = UiScript::new().unwrap();
+        s.run(
+            "ERR_QUEST_MUST_CHOOSE = 'Pick one.' \
+             local f = CreateFrame('Frame') f:RegisterEvent('UI_ERROR_MESSAGE') \
+             f:SetScript('OnEvent', function() SEEN = arg1 end) \
+             N = table.getn({QuestChooseRewardError()})",
+        )
+        .unwrap();
+        assert_eq!(s.eval::<String>("return SEEN").unwrap(), "Pick one.");
+        assert_eq!(s.eval::<i64>("return N").unwrap(), 0, "zero return values");
+        assert_eq!(
+            s.take_sounds(),
+            vec![crate::script::SoundRequest::KitName("igQuestFailed".into())],
+            "row 0x98's cue plays with the message"
+        );
     }
 
     #[test]
@@ -572,14 +721,14 @@ mod tests {
         assert_eq!(s.take_quest_actions(), vec![QuestAction::Accept]);
 
         s.run("CompleteQuest()").unwrap(); // progress -> reward
-        s.run("GetQuestReward(2)").unwrap(); // choose reward index 2
+        s.run("GetQuestReward(2)").unwrap(); // row 2 (1-based) → wire choice 1 (0-based)
         s.run("GetQuestReward()").unwrap(); // no-choice quest -> 0
         s.run("DeclineQuest()").unwrap();
         assert_eq!(
             s.take_quest_actions(),
             vec![
                 QuestAction::Continue,
-                QuestAction::Reward(2),
+                QuestAction::Reward(1),
                 QuestAction::Reward(0),
                 QuestAction::Close,
             ]

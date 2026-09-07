@@ -17,7 +17,7 @@ mod prop_probes; // the per-instance interior-prop SH probe table (slot ↔ Mesh
 mod resolve; // the per-frame time-of-day sample into WowLighting + the WMO interior-fog crossfade
 mod sh; // the model SH light-probe coefficient math
 pub use blob::LightBlob;
-pub use global_light::{new_shared_light_buffer, LightRooms, SharedLightBuffer};
+pub use global_light::{new_shared_light_buffer, LightRooms, SharedLightBuffer, WorldPointLight};
 pub use prop_probes::{PropProbeSlot, PropProbes, MAX_PROP_PROBES};
 // The std430 layout itself — row indices, byte sizes, region offsets and the folds that fill them
 // — stays in the crate. Off-world producers state values through `LightBlob` and never a row index
@@ -286,6 +286,41 @@ pub struct GameClock {
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LightingResolveSet;
 
+/// **The read side of [`LightingResolveSet`] — every `Update` system that reads the resolved
+/// [`WowLighting`] belongs in this set.** Configured once, here, as
+/// `LightingConsumeSet.after(LightingResolveSet)`; a consumer joins the contract with
+/// `.in_set(..)` instead of remembering a bespoke `.after(..)`, which is precisely what five of
+/// them did not remember (decision 2032).
+///
+/// **Why the contract needs a name of its own.** [`resolve::update_time_lighting`] is a *late*
+/// system by construction — it waits on the wire drain ([`crate::schedule::WorldStage::Net`]),
+/// the weather tick and the submersion verdict, each of which waits on something else. A consumer
+/// that declares no ordering waits on nothing, so Bevy's executor starts it at the top of
+/// `Update` and it reads the value the resolve wrote **last** frame. That is not a race: it is
+/// deterministic, it happens on every frame, and it is invisible for as long as the atmosphere
+/// only drifts with the clock.
+///
+/// It stops being invisible at a **submersion crossing**, where the atmosphere does not drift but
+/// jumps — the whole underwater `LightParams` swaps in or out in one frame, on the very frame
+/// [`crate::sky`]'s and [`crate::clouds`]'s own gates un-hide the domes. Report B354 is that
+/// frame photographed: coming up off the Savage Coast, the first dry frame painted the sky dome
+/// in Stranglethorn's UNDERWATER sky stops (`LightParams` 27) over an already-dry world, and
+/// [`crate::clouds`]'s surfacing full-rebuild — the fix for the 0.4 s cloud pop-in — rebuilt the
+/// coverage field at the *underwater* cloud density, which Stranglethorn authors as 0.0, so it
+/// rebuilt an empty sky and the clouds crept back band by band exactly as they had before that
+/// fix existed.
+///
+/// A consumer that runs in `PostUpdate` (the material/GPU pushes, the camera-anchored follows) is
+/// already after the resolve by schedule and needs nothing from this set.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LightingConsumeSet;
+
+/// The one place [`LightingConsumeSet`] is tied to [`LightingResolveSet`] — a named function so
+/// the test below locks the SAME edge the plugin installs, rather than a copy of it.
+pub(crate) fn configure_lighting_sets(app: &mut App) {
+    app.configure_sets(Update, LightingConsumeSet.after(LightingResolveSet));
+}
+
 /// The lighting subsystem: registers the WoW-light resource + game-clock, a **black** background
 /// (Phase 0 — the DBC sky comes back in a later step), and the two per-frame systems that resolve the
 /// `Light.dbc` values for the time of day and push them onto the materials.
@@ -293,6 +328,8 @@ pub(crate) struct LightingPlugin;
 
 impl Plugin for LightingPlugin {
     fn build(&self, app: &mut App) {
+        // The read side of the resolve, configured once (see [`LightingConsumeSet`]).
+        configure_lighting_sets(app);
         app.init_resource::<WowLighting>()
             .init_resource::<PropProbes>()
             .init_resource::<GameClock>()
@@ -319,5 +356,140 @@ impl Plugin for LightingPlugin {
         // The shared global-light buffer (build_light_data after the resolve above; the extract +
         // render-world upload). Materials read this instead of carrying their own light copy.
         global_light::register(app);
+    }
+}
+
+#[cfg(test)]
+mod ordering_tests {
+    use super::*;
+
+    /// The edge itself, asserted the way the defect presented: **not** "did they happen to run in
+    /// this order" — B354's whole point is that an unordered pair *does* run in some order, one
+    /// the executor picks and that changes with the graph around it — but "is the order
+    /// DETERMINED". Two conflicting systems with no path between them are an *ambiguity*, which
+    /// Bevy will name when asked; deleting or inverting [`configure_lighting_sets`] puts the
+    /// ambiguity back and this fails.
+    ///
+    /// (An earlier cut of this test asserted the observed order and passed with the edge removed,
+    /// because the executor's arbitrary choice happened to be the right one. That is exactly the
+    /// reassurance the bug was hiding behind for months.)
+    #[test]
+    fn consumers_are_ordered_against_the_resolve() {
+        use bevy::ecs::schedule::{LogLevel, ScheduleBuildSettings, ScheduleBuildWarning};
+
+        #[derive(Resource, Default)]
+        struct Probe(u32);
+
+        let mut app = App::new();
+        app.init_resource::<Probe>();
+        configure_lighting_sets(&mut app);
+        app.edit_schedule(Update, |s| {
+            s.set_build_settings(ScheduleBuildSettings {
+                ambiguity_detection: LogLevel::Warn,
+                ..default()
+            });
+        });
+        app.add_systems(
+            Update,
+            (
+                (|mut p: ResMut<Probe>| p.0 += 1).in_set(LightingConsumeSet),
+                (|mut p: ResMut<Probe>| p.0 += 1).in_set(LightingResolveSet),
+            ),
+        );
+        app.update();
+        let warnings = app
+            .get_schedule(Update)
+            .expect("Update schedule")
+            .warnings()
+            .iter()
+            .filter(|w| matches!(w, ScheduleBuildWarning::Ambiguity(_)))
+            .count();
+        assert_eq!(
+            warnings, 0,
+            "a `LightingConsumeSet` system and a `LightingResolveSet` system are ambiguous — \
+             `configure_lighting_sets` no longer orders the read side after the resolve"
+        );
+    }
+
+    /// **Every `Update` reader of [`WowLighting`] in this crate joins the contract.** The defect
+    /// B354 photographed was not a subtle one in any single system — it was five systems that
+    /// each read the resolved atmosphere and none of which said when, so the executor started
+    /// them at the top of `Update` and they got last frame's. A named set only helps if joining
+    /// it is not something a sixth consumer can quietly forget, so this reads the crate's own
+    /// source and insists.
+    ///
+    /// The allowlist is the set of readers that are after the resolve **by schedule** rather than
+    /// by the set — every one of them runs in `PostUpdate` or is chained onto the resolve itself.
+    /// Adding a name here is a claim about WHEN it runs; make it only with the reason.
+    ///
+    /// Scoped to this crate's sources — `benilla-app`'s three readers are outside what a
+    /// `benilla-world` test can see (two are after the resolve by schedule; `minimap` is a
+    /// deliberate exception, decision 2032).
+    #[test]
+    fn every_update_reader_joins_the_consume_set() {
+        /// after-by-schedule, so the set would be redundant — file → why.
+        const ALLOWED: &[(&str, &str)] = &[
+            (
+                "lighting/resolve.rs",
+                "apply_sky_backdrop is .chain()ed onto the resolve",
+            ),
+            (
+                "lighting/global_light.rs",
+                "build_light_data: PostUpdate, .after(update_time_lighting)",
+            ),
+            (
+                "sun/follow.rs",
+                "the celestial follows: PostUpdate, BillboardPlace",
+            ),
+            ("weather/precip/mod.rs", "push_precip: PostUpdate"),
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read_dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("read source");
+                // A system param, not a doc mention: `Res<…WowLighting>` on one line.
+                let reads = text.lines().any(|l| {
+                    !l.trim_start().starts_with("//")
+                        && l.contains("Res<")
+                        && l.contains("WowLighting>")
+                });
+                // Membership means a real `.in_set(..)` CALL, not a doc comment naming the set —
+                // an early cut of this check passed a file whose only mention was the comment
+                // explaining why it joined.
+                let joins = text.lines().any(|l| {
+                    !l.trim_start().starts_with("//")
+                        && l.contains("in_set(")
+                        && l.contains("LightingConsumeSet")
+                });
+                if !reads || joins {
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(&root)
+                    .expect("under src")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if !ALLOWED.iter().any(|(f, _)| *f == rel) {
+                    offenders.push(rel);
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these read `WowLighting` without joining `LightingConsumeSet`: {offenders:?}\n\
+             Order the system `.in_set(crate::lighting::LightingConsumeSet)`, or — if it already \
+             runs after the resolve by schedule (PostUpdate, or chained onto it) — add it to \
+             ALLOWED here with the reason."
+        );
     }
 }

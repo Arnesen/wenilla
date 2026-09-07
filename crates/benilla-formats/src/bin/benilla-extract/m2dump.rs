@@ -1536,3 +1536,60 @@ pub fn m2part(chain: &mut Chain, internal_path: &str) -> Result<()> {
     }
     Ok(())
 }
+
+/// Dump an M2's **camera table**, in raw file-index order — the index space a `<Model>` widget's
+/// `Model:SetCamera(n)` walks (decision 2027; the selection is raw, `cameraLookup` is not
+/// consulted there, so the table position IS the answer and the record's `type` is not).
+///
+/// Prints, per record: its `type` word, the eye and look-at target at rest (`base + key 0`, raw
+/// WoW model space), the diagonal fov in radians and degrees, near/far, the roll, and the key
+/// count of each of the three tracks — the last column being the one that says whether the camera
+/// is a still rig (every character/creature/interface camera in the chain) or an authored path
+/// (the `Cameras\*.m2` fly-bys). The `cameraLookup` table is printed beside it, because the
+/// portrait bake selects through it and the pane does not, and confusing the two is a one-line
+/// mistake with a wrong picture at the end of it.
+pub fn m2cam(chain: &mut Chain, internal_path: &str) -> Result<()> {
+    let name = normalize(internal_path);
+    let data = chain
+        .read_file(&name)
+        .with_context(|| format!("reading '{name}' from chain"))?;
+    let cams = benilla_formats::parse_m2_pane_cameras(&data);
+    let lookup = benilla_m2::parse_camera_lookup(&data);
+    println!("{name}: {} camera(s), cameraLookup {lookup:?}", cams.len());
+    if cams.is_empty() {
+        return Ok(());
+    }
+    println!(
+        "idx  type              eye                      target            fov(rad/deg)   near     far     roll   keys p/t/r"
+    );
+    for (i, c) in cams.iter().enumerate() {
+        let s = &c.still;
+        let keys = c.tracks.as_deref().map_or([1, 1, 1], |t| {
+            [
+                t.positions.keys.len(),
+                t.target.keys.len(),
+                t.roll.keys.len(),
+            ]
+        });
+        println!(
+            "{i:>3}  {:>4}  ({:>8.4},{:>8.4},{:>8.4})  ({:>8.4},{:>8.4},{:>8.4})  {:.5}/{:>6.2}  {:>7.4}  {:>7.3}  {:>5.3}  {}/{}/{}{}",
+            c.camera_type,
+            s.position[0],
+            s.position[1],
+            s.position[2],
+            s.target[0],
+            s.target[1],
+            s.target[2],
+            s.fov,
+            s.fov.to_degrees(),
+            s.near_clip,
+            s.far_clip,
+            s.roll,
+            keys[0],
+            keys[1],
+            keys[2],
+            if c.tracks.is_some() { "  ANIMATED" } else { "" },
+        );
+    }
+    Ok(())
+}

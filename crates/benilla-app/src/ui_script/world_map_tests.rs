@@ -3,29 +3,38 @@
 //! (`SMSG_GOSSIP_POI` → [`crate::poi_marker`]); the `AreaPOI.dbc` rows are 0203's deferred slice
 //! and arrive through the same list, so these tests pin the *pool*, not the marker.
 //!
-//! Driven through the shipped `assets/ui/WorldMapFrame.xml` in a bare engine (no Bevy) — the
-//! panel-test idiom: push host state, run the repaint, read the frames back.
+//! Driven through the reference's own `WorldMapFrame.xml` off the player's chain (1980) in a bare
+//! engine (no Bevy) — the panel-test idiom: push host state, run the repaint, read the frames back.
 
-use benilla_ui::script::{UiScript, WorldMapLandmarkView};
+use benilla_ui::script::{
+    BattlefieldFlagView, BattlefieldPositionView, QuadContent, UiScript, WorldMapLandmarkView,
+    ARROW_MODEL,
+};
 
 /// The map plus everything its OnLoad touches, in the shipped list's own order.
 fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for file in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml", // the map's continent/zone pickers initialize into it at OnLoad
         "ScrollTemplates.xml",
-        // The blip templates, which WorldMapFrame.xml instantiates with inherits=. Not
-        // optional: an unknown template is a loader WARNING, not an error, so leaving this
-        // out loads clean and then hands every blip a sizeless, anchorless frame.
-        "WorldMapFrameTemplates.xml",
-        "WorldMapFrame.xml",
+        // The stock update walks MAX_PARTY_MEMBERS and MAX_RAID_MEMBERS, which the party and
+        // raid files own.
+        r"Interface\FrameXML\PartyMemberFrame.lua",
+        r"Interface\FrameXML\RaidFrame.lua",
+        // The reference's own map, which <Include>s its blip templates itself.
+        r"Interface\FrameXML\WorldMapFrame.xml",
     ] {
         // `test_ui::load_ui`, not a local read: a manifest entry carrying a path separator is the
         // REFERENCE's own file and must come off the player's chain, which
@@ -37,6 +46,33 @@ fn harness() -> UiScript {
     }
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     s
+}
+
+/// The stock per-frame update, driven the way its `OnUpdate` script runs it: `this` is the map
+/// button and the elapsed time its one argument. Everything on the sheet — the arrow, the party
+/// and raid blips, the battleground teammates and flags, the corpse — is seated here.
+/// The map arrow's file facts (`MinimapArrow.m2`: one looping 3.333 s Stand keying no bone; the
+/// header box `x ∈ [−0.0127, 0.0135]`, `y ∈ [−0.0118, 0.0145]` — render law §2), handed to the
+/// engine the way the app does once the asset lands (2007/2015).
+fn arrow_facts(s: &mut UiScript) {
+    use benilla_ui::widget::{ModelFileFacts, SequenceFacts};
+    s.set_model_facts(
+        ARROW_MODEL,
+        ModelFileFacts {
+            sequences: vec![SequenceFacts {
+                anim_id: 0,
+                duration_ms: 3333,
+                looping: true,
+            }],
+            bbox: ([-0.0127, -0.0118, 0.0], [0.0135, 0.0145, 0.0]),
+            cameras: 0,
+        },
+    );
+}
+
+fn update(s: &mut UiScript) {
+    s.run("this = WorldMapButton WorldMapButton_OnUpdate(0.1) this = nil")
+        .unwrap();
 }
 
 fn landmark(name: &str, icon: u32, uv: (f32, f32)) -> WorldMapLandmarkView {
@@ -135,8 +171,9 @@ fn the_poi_pool_grows_and_parks_its_tail() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// Hovering a POI names it. The description line only appears on landmarks that carry one — the
-/// guard's directions never do, a battleground node's "In Conflict" would.
+/// Hovering a POI names it in the map's area label; the description line beneath carries the
+/// landmark's status only when it has one — the guard's directions never do, a battleground
+/// node's "In Conflict" would — and is blanked otherwise (stock `WorldMapPOI_OnEnter`).
 #[test]
 fn hovering_a_poi_names_it_and_adds_a_status_line_only_when_there_is_one() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -146,14 +183,15 @@ fn hovering_a_poi_names_it_and_adds_a_status_line_only_when_there_is_one() {
     s.run("this = WorldMapFramePOI1 this:GetScript(\"OnEnter\")() this = nil")
         .unwrap();
     assert_eq!(
-        s.eval::<String>("return GameTooltipTextLeft1:GetText()")
+        s.eval::<String>("return WorldMapFrameAreaLabel:GetText()")
             .unwrap(),
         "Lion's Pride Inn"
     );
-    assert!(
-        s.eval::<bool>("return GameTooltipTextLeft2:GetText() == nil or GameTooltipTextLeft2:GetText() == \"\"")
+    assert_eq!(
+        s.eval::<String>("return WorldMapFrameAreaDescription:GetText()")
             .unwrap(),
-        "no description → no second line"
+        "",
+        "no description → an empty description line"
     );
 
     let mut with_status = landmark("Stables", 6, (0.5, 0.5));
@@ -163,7 +201,7 @@ fn hovering_a_poi_names_it_and_adds_a_status_line_only_when_there_is_one() {
     s.run("this = WorldMapFramePOI1 this:GetScript(\"OnEnter\")() this = nil")
         .unwrap();
     assert_eq!(
-        s.eval::<String>("return GameTooltipTextLeft2:GetText()")
+        s.eval::<String>("return WorldMapFrameAreaDescription:GetText()")
             .unwrap(),
         "In Conflict"
     );
@@ -235,7 +273,7 @@ fn party_blips_sit_at_their_map_positions_and_hide_when_absent() {
     };
 
     // Nobody in the party: every slot answers the hide sentinel.
-    s.run("WorldMapParty_Update()").unwrap();
+    update(&mut s);
     for i in 1..=4 {
         assert!(!shown(&s, i), "slot {i} hides while the party is empty");
     }
@@ -248,8 +286,9 @@ fn party_blips_sit_at_their_map_positions_and_hide_when_absent() {
         0.0,
         None,
         vec![Some((0.25, 0.75)), None, Some((0.5, 0.125))],
+        Vec::new(),
     );
-    s.run("WorldMapParty_Update()").unwrap();
+    update(&mut s);
     let diag = s
         .eval::<String>(
             r#"return "p1="..tostring(GetPlayerMapPosition("party1")).." p3="..tostring(GetPlayerMapPosition("party3"))"#,
@@ -284,11 +323,171 @@ fn party_blips_sit_at_their_map_positions_and_hide_when_absent() {
     );
 
     // The party breaks up: the blips go with it.
-    s.set_world_map_feed(None, Some((0.5, 0.5)), 0.0, None, Vec::new());
-    s.run("WorldMapParty_Update()").unwrap();
+    s.set_world_map_feed(None, Some((0.5, 0.5)), 0.0, None, Vec::new(), Vec::new());
+    update(&mut s);
     for i in 1..=4 {
         assert!(!shown(&s, i), "slot {i} hides when the party is gone");
     }
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The player arrow is the reference's own** (1980): `WorldMapFrame_OnLoad` creates it
+/// (`CreateWorldMapArrowFrame(WorldMapFrame)`, an anonymous `Model` pane holding the minimap
+/// arrow), and the update seats it at the player's UV on the detail sheet — the same point the
+/// `WorldMapPlayer` mouseover button is seated at — turns it to the facing and shows it; off-map
+/// hides it. The pane extracts as the minimap-arrow model the app draws as a sprite.
+#[test]
+fn the_player_arrow_is_the_stock_model_pane_seated_and_turned_by_the_update() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    // The whole manifest, not the kit: the arrow's quad is read off the render list, which
+    // needs the map VISIBLE — and showing it is `ShowUIPanel`'s full-screen route through
+    // `UIParent` (see the furniture test below for the same setup and why the player exists).
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1600.0, 900.0);
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    arrow_facts(&mut s);
+    s.resolve();
+    s.run("ShowUIPanel(WorldMapFrame)").unwrap();
+    s.resolve();
+    s.set_world_map_feed(None, Some((0.25, 0.75)), 1.25, None, Vec::new(), Vec::new());
+    update(&mut s);
+    s.resolve();
+    let arrow = |s: &mut UiScript| {
+        s.extract().into_iter().find(|q| {
+            matches!(&q.content, QuadContent::ModelPane { model: Some(m), .. } if m == ARROW_MODEL)
+        })
+    };
+    let pane = arrow(&mut s).expect("the arrow pane is in the render list");
+    assert!(
+        matches!(&pane.content, QuadContent::ModelPane { facing, .. } if (*facing - 1.25).abs() < 1e-6),
+        "turned to the facing: {:?}",
+        pane.content
+    );
+    let rect = pane.rect.expect("…with a resolved rect");
+    // The implicit rect (2015): the file's box in layout units — at 16:9 a layout unit is
+    // 768·√((16/9)²+1) = 1566.4 FrameXML units, so 0.0262 × 0.0263 reads 41.0 × 41.2.
+    assert!(
+        (rect.right - rect.left - 0.0262 * 1566.4).abs() < 0.2
+            && (rect.top - rect.bottom - 0.0263 * 1566.4).abs() < 0.2,
+        "sized by the file's box: {rect:?}"
+    );
+    // …and the model is re-centred on it every update (`0x4a7b20`'s ½·GetWidth, ½·GetHeight in
+    // layout units = half the box).
+    assert!(
+        matches!(&pane.content, QuadContent::ModelPane { position, .. }
+            if (position.0 - 0.0131).abs() < 1e-4 && (position.1 - 0.01315).abs() < 1e-4),
+        "{:?}",
+        pane.content
+    );
+    // The seat, read back in Lua: the arrow is anonymous, so it is found among the map's
+    // children by kind and compared against the mouseover button the update seats at the same
+    // point.
+    let (dx, dy) = s
+        .eval::<(f64, f64)>(
+            r#"local px, py = WorldMapPlayer:GetCenter()
+               for _, child in ipairs({ WorldMapFrame:GetChildren() }) do
+                   if child:GetObjectType() == "Model" and child:IsShown() then
+                       local ax, ay = child:GetCenter()
+                       return ax - px, ay - py
+                   end
+               end
+               return 1e9, 1e9"#,
+        )
+        .unwrap();
+    assert!(
+        dx.abs() < 0.5 && dy.abs() < 0.5,
+        "seated with WorldMapPlayer ({dx}, {dy})"
+    );
+
+    // Off the displayed map: the (0,0) sentinel hides it.
+    s.set_world_map_feed(None, None, 0.0, None, Vec::new(), Vec::new());
+    update(&mut s);
+    s.resolve();
+    assert!(arrow(&mut s).is_none(), "off-map hides the arrow");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **Battleground teammates and the flag carrier** (1980) come through the position family the
+/// stock update polls after the party arm: each teammate takes the next `WorldMapRaid` frame
+/// past the raid's own, carrying its name for the tooltip; the carrier takes `WorldMapFlag1`
+/// wearing the token's texture; the `(0, 0)` sentinel hides; and the empty push — leaving the
+/// battleground — hides them all.
+#[test]
+fn battleground_teammates_and_the_flag_draw_from_the_position_family() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = harness();
+    s.set_world_map_feed(None, Some((0.5, 0.5)), 0.0, None, Vec::new(), Vec::new());
+    s.set_battlefield_positions(
+        vec![
+            BattlefieldPositionView {
+                uv: (0.25, 0.75),
+                name: Some("Probe".into()),
+            },
+            BattlefieldPositionView {
+                uv: (0.0, 0.0),
+                name: None,
+            },
+        ],
+        Some(BattlefieldFlagView {
+            uv: (0.4, 0.6),
+            token: Some("HordeFlag".into()),
+        }),
+        1.0,
+    );
+    update(&mut s);
+    assert!(
+        s.eval::<bool>(r#"return WorldMapRaid1:IsShown() and WorldMapRaid1.name == "Probe""#)
+            .unwrap(),
+        "the placed teammate shows on the first raid frame with its name"
+    );
+    assert!(
+        !s.eval::<bool>("return WorldMapRaid2:IsShown()").unwrap(),
+        "the (0,0) teammate hides"
+    );
+    assert!(s.eval::<bool>("return WorldMapFlag1:IsShown()").unwrap());
+    assert_eq!(
+        s.eval::<String>("return WorldMapFlag1Texture:GetTexture()")
+            .unwrap(),
+        r"Interface\WorldStateFrame\HordeFlag"
+    );
+    assert!(!s.eval::<bool>("return WorldMapFlag2:IsShown()").unwrap());
+    let (w, h) = s
+        .eval::<(f64, f64)>(
+            "return WorldMapDetailFrame:GetWidth(), WorldMapDetailFrame:GetHeight()",
+        )
+        .unwrap();
+    let (sheet_left, sheet_top) = s
+        .eval::<(f64, f64)>("return WorldMapDetailFrame:GetLeft(), WorldMapDetailFrame:GetTop()")
+        .unwrap();
+    let (bx, by) = s
+        .eval::<(f64, f64)>("return WorldMapRaid1:GetCenter()")
+        .unwrap();
+    assert!(
+        (bx - (sheet_left + 0.25 * w)).abs() < 0.5,
+        "u scales by the sheet's width"
+    );
+    assert!(
+        (by - (sheet_top - 0.75 * h)).abs() < 0.5,
+        "v runs DOWN from the sheet's top"
+    );
+
+    s.set_battlefield_positions(Vec::new(), None, 1.0);
+    update(&mut s);
+    assert!(
+        !s.eval::<bool>("return WorldMapRaid1:IsShown() or WorldMapFlag1:IsShown()")
+            .unwrap(),
+        "leaving the battleground hides them"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -368,4 +567,183 @@ fn the_maps_own_furniture_survives_the_hide_that_showing_it_performs() {
     assert_eq!(visible(&s, "UIParent"), 1, "and the HUD comes back after");
     assert_eq!(visible(&s, "BlackoutWorld"), 0, "with the blackout down");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **Hovering the player arrow on a scaled map names the player** (director report: an empty
+/// tooltip). On a window narrower than 4:3 the stock `SetupFullscreenScale` scales the map
+/// under 1 (0.802 here); `WorldMapUnit_OnEnter` then asks `MouseIsOver(WorldMapPlayer)` for the
+/// text, which read the cursor against the blip's own-unit edges without the reference's scale
+/// division and answered nil — a tooltip with no lines (decision 1985).
+#[test]
+fn hovering_the_player_blip_on_a_scaled_map_names_the_player() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(821.0, 768.0);
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    s.resolve();
+    s.run("ShowUIPanel(WorldMapFrame)").unwrap();
+    s.resolve();
+    assert!(
+        s.eval::<f64>("return WorldMapFrame:GetScale()").unwrap() < 0.99,
+        "the narrow window scales the map under 1"
+    );
+    s.set_world_map_feed(None, Some((0.5, 0.5)), 0.0, None, Vec::new(), Vec::new());
+    update(&mut s);
+    s.resolve();
+    let (px, py, eff) = s
+        .eval::<(f64, f64, f64)>(
+            "local x, y = WorldMapPlayer:GetCenter() return x, y, WorldMapPlayer:GetEffectiveScale()",
+        )
+        .unwrap();
+    s.mouse_move((px * eff) as f32, (py * eff) as f32);
+    assert_eq!(
+        s.hit_test_name((px * eff) as f32, (py * eff) as f32)
+            .as_deref(),
+        Some("WorldMapPlayer")
+    );
+    assert!(s.eval::<bool>("return WorldMapTooltip:IsShown()").unwrap());
+    assert_eq!(
+        s.eval::<String>("return WorldMapTooltipTextLeft1:GetText()")
+            .unwrap(),
+        "Probefour"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The player arrow draws over the zone's explored-area overlays** — the director's report: on a
+/// zone sheet the arrow was nowhere, and only the zoomed-out continent sheet (which has no
+/// overlays) showed it.
+///
+/// The stock file creates those overlays as `WorldMapDetailFrame:CreateTexture(…, "ARTWORK")`
+/// (`WorldMapFrame.lua:108`) and the arrow as a `Model` child of `WorldMapFrame`
+/// (`WorldMapFrame.lua:15`) — two frames at the SAME level, and inside one `(strata, level)`
+/// bucket the draw layer outranks the frame (decision 0884). A frame's own slot is layer 0, so
+/// the arrow lost to every one of those ARTWORK textures. Reproduced here with the reference's own
+/// call, and asserted as the render list's order rather than a z-key's internals.
+#[test]
+fn the_player_arrow_draws_over_the_zones_explored_overlays() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1600.0, 900.0);
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
+    assert!(super::load_default_ui(&s).is_empty());
+    s.resolve();
+    arrow_facts(&mut s);
+    s.run("ShowUIPanel(WorldMapFrame)").unwrap();
+    s.resolve();
+    s.set_world_map_feed(None, Some((0.5, 0.5)), 0.0, None, Vec::new(), Vec::new());
+    update(&mut s);
+    // The overlay the stock file lays over a zone sheet, in its own words — covering the whole
+    // detail frame, which is what an explored zone's art amounts to.
+    s.run(
+        r#"local o = WorldMapDetailFrame:CreateTexture("WorldMapOverlay1", "ARTWORK")
+           o:SetTexture("Interface\\WorldMap\\Elwynn\\ElwynnForest1")
+           o:SetAllPoints(WorldMapDetailFrame)
+           o:Show()"#,
+    )
+    .unwrap();
+    s.resolve();
+
+    let quads = s.extract();
+    let arrow = quads
+        .iter()
+        .find(|q| {
+            matches!(&q.content, QuadContent::ModelPane { model: Some(m), .. } if m == ARROW_MODEL)
+        })
+        .expect("the arrow pane is in the render list");
+    let overlay = quads
+        .iter()
+        .find(|q| {
+            matches!(
+                &q.content,
+                QuadContent::Texture { path: Some(p), .. } if p.contains("ElwynnForest1")
+            )
+        })
+        .expect("the overlay texture is in the render list");
+    assert!(
+        arrow.z > overlay.z,
+        "the arrow must paint after the zone overlay (arrow {:#x}, overlay {:#x})",
+        arrow.z,
+        overlay.z
+    );
+}
+
+/// **A click over a map POI still answers the map's UV** — the director's report: alt-clicking to
+/// jump did nothing while the cursor was over a town like Goldshire, "like the name display is
+/// blocking it".
+///
+/// It was: the stock file makes every POI icon a child of `WorldMapButton`
+/// (`WorldMapFrame.lua:178`), so the topmost frame over a town is the icon, and the UV query
+/// demanded the button itself. The player's own blip (a child of the button too) is the same
+/// story, which is what this drives — it needs no landmark data to be real.
+#[test]
+fn a_click_over_a_blip_still_answers_the_maps_uv() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1600.0, 900.0);
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
+    assert!(super::load_default_ui(&s).is_empty());
+    s.resolve();
+    s.run("ShowUIPanel(WorldMapFrame)").unwrap();
+    s.resolve();
+    s.set_world_map_feed(None, Some((0.4, 0.6)), 0.0, None, Vec::new(), Vec::new());
+    update(&mut s);
+    s.resolve();
+
+    let (px, py, eff) = s
+        .eval::<(f64, f64, f64)>(
+            "local x, y = WorldMapPlayer:GetCenter() return x, y, WorldMapPlayer:GetEffectiveScale()",
+        )
+        .unwrap();
+    let (x, y) = ((px * eff) as f32, (py * eff) as f32);
+    assert_eq!(
+        s.hit_test_name(x, y).as_deref(),
+        Some("WorldMapPlayer"),
+        "the blip is what the mouse is over"
+    );
+    let (u, v) = s
+        .world_map_uv_at(x, y)
+        .expect("the click still lands on the map");
+    // The blip sits where the feed put it, so the UV under it is that position.
+    assert!(
+        (u - 0.4).abs() < 0.01 && (v - 0.6).abs() < 0.01,
+        "the UV under the blip is the blip's own: {u}, {v}"
+    );
+    // …and a click on the map's own chrome is still not a map click.
+    let (cx, cy, ceff) = s
+        .eval::<(f64, f64, f64)>(
+            "local x, y = WorldMapFrameCloseButton:GetCenter() return x, y, WorldMapFrameCloseButton:GetEffectiveScale()",
+        )
+        .unwrap();
+    assert!(
+        s.world_map_uv_at((cx * ceff) as f32, (cy * ceff) as f32)
+            .is_none(),
+        "the close button is not the map"
+    );
 }

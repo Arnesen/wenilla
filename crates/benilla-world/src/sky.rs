@@ -18,10 +18,10 @@
 //! elevation (tessellation-independent → no banding). Like the reference, the dome does NOT write
 //! depth (the [`SkyExt::specialize`] hook) — the z-buffer stays clean over sky pixels, which is what
 //! lets the far-forced glare quads (`celestial.wgsl`) be occluded per-pixel by world geometry alone.
-//! The dome's own fragments likewise force the far depth (`sky.wgsl`; the law is in
-//! [`crate::sky_order`]), so the world always paints over the backdrop no matter how the radius
-//! compares to a given piece of geometry — the WDL horizon ring reaches past this shell. The dome
-//! tracks the camera
+//! The dome's own depth is likewise the far plane, pinned in the vertex stage every sky material
+//! shares (`sky_vertex.wgsl`; the law is in [`crate::sky_order`]), so the world always paints over
+//! the backdrop no matter how the radius compares to a given piece of geometry — the WDL horizon
+//! ring reaches past this shell. The dome tracks the camera
 //! *position* but stays world-aligned (identity rotation) so the gradient is fixed to the world
 //! horizon regardless of look direction.
 //!
@@ -82,6 +82,11 @@ pub struct SkyExt {
 }
 
 impl MaterialExtension for SkyExt {
+    /// The shared sky vertex stage — the far-depth pin ([`crate::sky_order`], "The depth law").
+    fn vertex_shader() -> ShaderRef {
+        crate::sky_order::SKY_VERTEX_SHADER.into()
+    }
+
     fn fragment_shader() -> ShaderRef {
         "embedded://benilla_world/shaders/sky.wgsl".into()
     }
@@ -90,8 +95,9 @@ impl MaterialExtension for SkyExt {
     /// note in the module header, byte-confirmed by the `celestial-frame-anatomy` pin: every sky
     /// element inherits `CSky::Render`'s depth-write-off state). Depth-TEST stays on, so terrain
     /// still occludes the dome; what this buys is a clean z-buffer over sky pixels — the glare
-    /// quads (forced to the far depth in `celestial.wgsl`) are occluded per-pixel by *world*
-    /// geometry only, never by the backdrop dome they must shine over.
+    /// quads (pinned to the far depth like the dome itself) are occluded per-pixel by *world*
+    /// geometry only, never by the backdrop dome they must shine over. Plus the state every sky
+    /// pipeline takes ([`crate::sky_order::sky_pipeline_state`]).
     fn specialize(
         _pipeline: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
@@ -101,6 +107,7 @@ impl MaterialExtension for SkyExt {
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
             depth.depth_write_enabled = false;
         }
+        crate::sky_order::sky_pipeline_state(descriptor);
         Ok(())
     }
 }
@@ -120,7 +127,11 @@ impl Plugin for SkyPlugin {
             .add_systems(
                 Update,
                 (
-                    update_sky_colors,
+                    // The dome's stops are the resolved atmosphere, so the push belongs on the
+                    // READ side of the resolve (`lighting::LightingConsumeSet`) — unordered it
+                    // runs at the top of `Update` and paints last frame's palette, which on a
+                    // surfacing frame is the underwater one (B354, decision 2032).
+                    update_sky_colors.in_set(crate::lighting::LightingConsumeSet),
                     // The dome stands down for a WMO skybox, so its gate must read the SETTLED
                     // resolve, not whichever side of it the executor picked (`crate::skybox`).
                     apply_sky_visibility
@@ -220,7 +231,7 @@ fn setup_sky(
 }
 
 /// Pin the dome to the camera and scale it to just inside the far plane (the radius only has to keep
-/// the dome unclipped — occlusion is `sky.wgsl`'s forced far depth). World-aligned (identity rotation)
+/// the dome unclipped — occlusion is `sky_vertex.wgsl`'s far-depth pin). World-aligned (identity rotation)
 /// → the gradient stays fixed to the world horizon regardless of camera look direction.
 #[allow(clippy::type_complexity)]
 fn follow_camera(

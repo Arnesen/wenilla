@@ -38,6 +38,11 @@ pub enum SessionRequest {
     CancelLogout,
     /// `ForceQuit()` — end the process now, no server round trip.
     ForceQuit,
+    /// `ForceLogout()` — the session dispatcher with `force = 1`: `CMSG_PLAYER_LOGOUT` (`0x4A`,
+    /// empty) instead of `Logout`'s `0x4B`, the pending-logout latch bypassed, and nothing at all
+    /// without a live in-world session (decision 1963; wow-re `staticpopup-dialog-bindings.md`
+    /// §4).
+    ForceLogout,
     /// `ReloadUI()` — tear this VM down and build a fresh one, without leaving the world.
     ///
     /// The reference's `ReloadUI 0x4884d0` reads no arguments and returns no values; it only sets
@@ -81,6 +86,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         ("Quit", SessionRequest::Quit),
         ("CancelLogout", SessionRequest::CancelLogout),
         ("ForceQuit", SessionRequest::ForceQuit),
+        ("ForceLogout", SessionRequest::ForceLogout),
         ("ReloadUI", SessionRequest::ReloadUi),
         ("StopCinematic", SessionRequest::StopCinematic),
     ] {

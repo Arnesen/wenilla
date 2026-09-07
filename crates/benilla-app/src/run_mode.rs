@@ -51,6 +51,24 @@ pub(crate) fn scenario_active() -> bool {
     std::env::var("WOW_CAPTURE").is_ok()
 }
 
+/// **Is the player UI opted into this capture?** — the harness's [`crate::capture::ui_opted_in`],
+/// forwarded from here for the same reason [`scenario_active`] lives here: three consumers outside
+/// the harness need the answer (the UI load, the synthetic unit feed, the window size), and **all
+/// of them must still compile in a build with no harness in it**. `mod capture` is
+/// `#[cfg(feature = "dev")]`; this module is not.
+///
+/// `false` in a player build is the correct answer and not a stub: that binary has no scenario
+/// table and no `$WOW_CAPTURE` handling, so there is no capture for the UI to be opted into.
+#[cfg(feature = "dev")]
+pub(crate) fn capture_ui_opted_in() -> bool {
+    crate::capture::ui_opted_in()
+}
+
+#[cfg(not(feature = "dev"))]
+pub(crate) fn capture_ui_opted_in() -> bool {
+    false
+}
+
 /// **Do the credentials come from the environment?** (`$WOW_USER` / `$WOW_PASS` / `$WOW_CHAR` —
 /// the login screen's env fast path.)
 ///

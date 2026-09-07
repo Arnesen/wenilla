@@ -8,12 +8,13 @@ use bevy::ecs::entity::EntityHashSet;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions};
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use avian3d::prelude::*;
 
 use crate::creature_anim::wrap_pi;
 use crate::net::Embodied;
+use crate::ui_script::PointerOverUi;
 use benilla_assets::materials::WowModelMaterial;
 use benilla_world::interact::{WorldClick, WorldRightClick, WorldRightPress};
 use benilla_world::model_fade::{
@@ -761,6 +762,11 @@ pub(crate) struct CameraControl {
     pub(super) collision_distance: f32,
     /// The button currently held for look, or `None`.
     pub(super) look: Option<LookButton>,
+    /// **Which mouse buttons the world owns** this frame ([`WorldMouse`]) — the player side's one
+    /// answer to "did the UI eat that press?", written by [`latch_world_mouse`] before anything
+    /// reads a button. The look session, the camera's input command word and the both-button run
+    /// all read it instead of `ButtonInput`.
+    pub(super) world_mouse: WorldMouse,
     /// Logical cursor position captured when look began, to restore on release.
     pub(super) cursor_stash: Option<Vec2>,
     /// The self-avatar's render alpha for this frame, from the camera-to-pivot distance
@@ -824,6 +830,88 @@ impl LookButton {
     }
 }
 
+/// **The mouse buttons the world owns**, latched at the press — where the player side asks
+/// about a primary *press*, instead of `ButtonInput<MouseButton>` (ledger B364). The raw buttons
+/// stay readable for the hold and release of a gesture already claimed, which is
+/// [`run_look_session`]'s business and no one else's.
+///
+/// 1.12 never reads the mouse for any of this. It reads two *bindings* — `TurnOrAction` (right)
+/// and `CameraOrSelectOrMove` (left) — and a press a UI frame captured never dispatches them: it
+/// sets neither of `[InputControl+0x4]`'s mouse bits, engages no look session, and classifies as
+/// no [`FollowState`]. That is the observable rule, and it is why a right-click in a bag has never
+/// turned anyone. Only the look session applied it here; the command word and the both-button run
+/// read the raw buttons, so a right-click on a Who-list row was a `Turn`, whose Smart row is
+/// `(0.0, 1.0)` — an immediate return that ran to completion and swung the camera round to behind
+/// the character (B364). The same raw read had both primaries over a bag running the avatar
+/// forward, through [`super::state::forward_axis`]'s both-button term.
+///
+/// **Latched, not re-tested each frame**, because the reference latches: the down that reached the
+/// world sets the bit, and that button's *up* clears it. A level test would hand the button back
+/// to the UI mid-gesture the moment a frame appeared under the (stationary, locked) cursor — an
+/// edge on the command word from nothing the player did.
+#[derive(Default)]
+pub(super) struct WorldMouse {
+    /// Held by the world right now, indexed by [`LookButton`].
+    held: [bool; 2],
+    /// Took its DOWN edge from the world this frame, same index.
+    down: [bool; 2],
+}
+
+impl WorldMouse {
+    /// Is the world holding this button?
+    pub(super) fn held(&self, b: LookButton) -> bool {
+        self.held[b as usize]
+    }
+
+    /// Did the world take this button's DOWN edge this frame?
+    pub(super) fn down(&self, b: LookButton) -> bool {
+        self.down[b as usize]
+    }
+
+    /// Both primaries in the world's hand — vanilla's both-button run, minus the presses the UI ate.
+    pub(super) fn both(&self) -> bool {
+        self.held(LookButton::Right) && self.held(LookButton::Left)
+    }
+
+    /// Latch this frame. `world_press` says whether a DOWN edge *now* belongs to the world; the
+    /// held bits then ride to their own release, whatever the cursor is over by then — including
+    /// the release a cover synthesises by emptying the button planes, which is what keeps a
+    /// loading screen from stranding a latched bit.
+    fn update(&mut self, buttons: &ButtonInput<MouseButton>, world_press: bool) {
+        for b in [LookButton::Right, LookButton::Left] {
+            let i = b as usize;
+            self.down[i] = world_press && buttons.just_pressed(b.button());
+            self.held[i] = (self.held[i] || self.down[i]) && buttons.pressed(b.button());
+        }
+    }
+}
+
+/// Decide, once per frame, which mouse buttons the world owns — [`CameraControl::world_mouse`].
+///
+/// **Its own system**, ahead of every reader, rather than a call inside [`super::control`]: the
+/// readers are not all in the controller. The look session and the camera's command word are, but
+/// `/follow`'s both-button cancel ([`super::follow::steer_follow`]) is a system that runs *before*
+/// it — reading a latch the controller wrote would put that cancel a frame behind, and a frame
+/// late on an edge-driven cancel is the wrong frame entirely.
+///
+/// A press belongs to the world when it lands in the viewport off the UI — or whenever a look
+/// session already owns the (hidden, locked) cursor, because the second button of a chord joins a
+/// gesture the world already has.
+pub(super) fn latch_world_mouse(
+    buttons: Res<ButtonInput<MouseButton>>,
+    pointer_over_ui: Res<PointerOverUi>,
+    mut rig: ResMut<CameraControl>,
+    cameras: Query<&Camera, With<FlyCam>>,
+    window: Single<&Window, With<PrimaryWindow>>,
+) {
+    let Ok(camera) = cameras.single() else {
+        return;
+    };
+    let world_press =
+        rig.look.is_some() || (cursor_in_viewport(&window, camera) && !pointer_over_ui.0);
+    rig.world_mouse.update(&buttons, world_press);
+}
+
 #[derive(Component)]
 // `pub(crate)` on the TYPE only — the scripted camera park has to name it in a query. Its fields
 // stay `pub(super)`; [`FlyCam::park`] is the whole surface an instrument gets (decision 1174).
@@ -875,8 +963,6 @@ pub(super) fn run_look_session(
     face_yaw: &mut f32,
     window: &mut Window,
     cursor_opts: &mut CursorOptions,
-    camera: &Camera,
-    pointer_over_ui: bool,
     inspect_enabled: bool,
     // A left press this frame the UI already consumed as a cursor-payload world drop (0216 §3) —
     // the left click test must yield to it exactly as it yields to a UI hover, so dropping a held
@@ -892,19 +978,19 @@ pub(super) fn run_look_session(
     now: f32,
 ) {
     // The right button's DOWN edge, before any click-vs-drag classification — the reference's
-    // WorldFrame OnMouseDown fires at the press whether it becomes a click or a turn. It belongs
-    // to the world when the press lands in the viewport off the UI, or whenever a look session
-    // already owns the (hidden, locked) cursor — a right join into a left-orbit is still a world
-    // press. Ground-targeting's cancel reads this edge (decision 0792).
-    if buttons.just_pressed(MouseButton::Right)
-        && (rig.look.is_some() || (cursor_in_viewport(window, camera) && !pointer_over_ui))
-    {
+    // WorldFrame OnMouseDown fires at the press whether it becomes a click or a turn. Whether the
+    // press was the world's at all is [`latch_world_mouse`]'s single answer, shared with the
+    // camera's command word: the viewport off the UI, or a right join into a left-orbit, whose
+    // session already owns the cursor. Ground-targeting's cancel reads this edge (decision 0792).
+    if rig.world_mouse.down(LookButton::Right) {
         world_right_press.write(WorldRightPress);
     }
     // A chord — both primaries down — is a both-button run, never a select. The reference kills the
     // pending click on the *second* press and refuses to arm a new one while another primary is held
     // (`0x514ac1`, `0x51481a`), so neither release of a chord can dispatch. Cancel both tests.
-    if buttons.pressed(MouseButton::Left) && buttons.pressed(MouseButton::Right) {
+    // The world's pair, not the device's: what those two sites test is the *binding* state, so a
+    // primary a UI frame is holding has never been half of a chord (ledger B364).
+    if rig.world_mouse.both() {
         *left_click = None;
         *right_click = None;
     }
@@ -947,14 +1033,16 @@ pub(super) fn run_look_session(
                     }
                 }
             }
-            // The latched button went up. If the *other* look button is still held (both-button run
-            // → single-button), hand the look session off to it rather than ending it — vanilla keeps
-            // turning/orbiting seamlessly on the remaining button, cursor staying hidden throughout.
+            // The latched button went up. If the *other* look button is still held **by the
+            // world** (both-button run → single-button), hand the look session off to it rather
+            // than ending it — vanilla keeps turning/orbiting seamlessly on the remaining button,
+            // cursor staying hidden throughout. A primary the UI is holding is not a candidate:
+            // its binding never fired, so the reference has nothing to hand off to (B364).
             let other = match active {
                 LookButton::Right => LookButton::Left,
                 LookButton::Left => LookButton::Right,
             };
-            if buttons.pressed(other.button()) {
+            if rig.world_mouse.held(other) {
                 rig.look = Some(other);
             } else {
                 rig.look = None;
@@ -967,18 +1055,19 @@ pub(super) fn run_look_session(
             }
         }
     } else {
-        // A press over the egui dev UI (the overlaid debug panel, the perf pill) or outside the world
-        // viewport is not ours — this keeps a slider-drag from grabbing the cursor into mouse-look.
-        let world_press = cursor_in_viewport(window, camera) && !pointer_over_ui;
+        // A press over the egui dev UI (the overlaid debug panel, the perf pill), over a
+        // mouse-enabled player frame, or outside the world viewport is not ours — the whole content
+        // of [`WorldMouse`], and what keeps a slider-drag from grabbing the cursor into mouse-look.
         // Right-drag turn. Arms its context-click test too; not armed when left is already down (a
         // chord is never a click).
-        if buttons.just_pressed(MouseButton::Right) && world_press {
+        if rig.world_mouse.down(LookButton::Right) {
             rig.look = Some(LookButton::Right);
             rig.cursor_stash = window.cursor_position();
             cursor_opts.grab_mode = CursorGrabMode::Locked;
             cursor_opts.visible = false;
-            *right_click = (!buttons.pressed(MouseButton::Left)).then(|| PressGesture::new(now));
-        } else if buttons.just_pressed(MouseButton::Left) && world_press && !inspect_enabled {
+            *right_click =
+                (!rig.world_mouse.held(LookButton::Left)).then(|| PressGesture::new(now));
+        } else if rig.world_mouse.down(LookButton::Left) && !inspect_enabled {
             // Left-drag orbit — engaged on the press, exactly like right, because the reference
             // engages on the press (`0x51491f`). The select is not deferred behind it; it rides
             // along and settles at the release. While the inspector is armed left belongs to it
@@ -990,7 +1079,7 @@ pub(super) fn run_look_session(
             // A press the UI already consumed as a cursor-payload world drop (0216 §3) still orbits
             // — the reference's orbit is unconditional on the down edge — but must not also select.
             *right_click = None;
-            *left_click = (!click_consumed && !buttons.pressed(MouseButton::Right))
+            *left_click = (!click_consumed && !rig.world_mouse.held(LookButton::Right))
                 .then(|| PressGesture::new(now));
         }
     }
@@ -1865,6 +1954,109 @@ mod tests {
             run(&mut rig, c, follow_cmd::FORWARD, parked, 1.0).abs() < 1.0e-4,
             "the release edge arms a fresh return"
         );
+    }
+
+    /// **B364** (MarcusAga): right-clicking a row of the Who list swung the camera round to
+    /// behind the character — over ~180°, on a body that never turned. The click itself was the
+    /// UI's (1816's no-fall-through hit test opened the dropdown); only the camera's command word
+    /// saw it, because the word's two mouse bits were built from `ButtonInput` with no UI term.
+    /// `RIGHT_MOUSE` alone is a [`FollowState::Turn`], and Smart's Turn row is `(0.0, 1.0)` — no
+    /// delay, full factor — so the return armed on the press edge and ran to completion.
+    ///
+    /// The decode is pinned end to end, from the latch to the row the classifier picks, because
+    /// each half was individually right: the classifier is the reference's (the test below), and
+    /// the look session's own gate was already there. What was missing was the word reading the
+    /// same gate.
+    #[test]
+    fn a_press_the_ui_ate_never_reaches_the_camera_command_word() {
+        let word = |world_press: bool| {
+            let mut rig = CameraControl::default();
+            let mut buttons = ButtonInput::<MouseButton>::default();
+            buttons.press(MouseButton::Right);
+            rig.world_mouse.update(&buttons, world_press);
+            super::super::input::look_input(
+                &crate::bindings::BindingsState::default(),
+                &super::super::Player::default(),
+                &rig,
+            )
+            .follow_command
+        };
+        let classify = |command| {
+            FollowInput {
+                cfg: FollowConfig::default(),
+                face_yaw: 0.0,
+                command,
+            }
+            .state(false)
+        };
+
+        // The report: the press landed on a UI row.
+        assert_eq!(word(false), 0, "a captured press sets no mouse bit");
+        assert_eq!(classify(word(false)), FollowState::Idle);
+        assert_eq!(
+            FollowStyle::Smart.row(FollowState::Idle),
+            (0.0, 0.0),
+            "and Idle is the row that arms nothing — the swing has no source"
+        );
+
+        // The control that must not change: the same press in the world still turns.
+        assert_eq!(word(true), follow_cmd::RIGHT_MOUSE);
+        assert_eq!(classify(word(true)), FollowState::Turn);
+        assert_eq!(FollowStyle::Smart.row(FollowState::Turn), (0.0, 1.0));
+    }
+
+    /// The latch's own law: a button is claimed at the DOWN edge and held to its own release.
+    ///
+    /// Level-testing "is the cursor over UI *right now*" instead would drop the bit mid-drag the
+    /// moment a frame appeared under the (stationary, locked) cursor — a phantom edge on the
+    /// command word, which is exactly what arms a return. And the second button of a chord has to
+    /// join: the reference's both-button run is both bindings held, and the second press lands on
+    /// a cursor the first one already hid.
+    #[test]
+    fn the_world_holds_a_button_from_its_press_to_its_release() {
+        let mut rig = CameraControl::default();
+        let mut buttons = ButtonInput::<MouseButton>::default();
+
+        // Pressed over a UI row: never claimed, and no amount of later frames claims it.
+        buttons.press(MouseButton::Right);
+        rig.world_mouse.update(&buttons, false);
+        assert!(!rig.world_mouse.held(LookButton::Right));
+        buttons.clear();
+        rig.world_mouse.update(&buttons, true);
+        assert!(
+            !rig.world_mouse.held(LookButton::Right),
+            "a press the UI ate is never handed back mid-hold"
+        );
+        buttons.release(MouseButton::Right);
+        buttons.clear();
+
+        // Pressed in the world: claimed, and it survives the UI arriving under the locked cursor.
+        buttons.press(MouseButton::Right);
+        rig.world_mouse.update(&buttons, true);
+        assert!(rig.world_mouse.down(LookButton::Right));
+        buttons.clear();
+        rig.world_mouse.update(&buttons, false);
+        assert!(rig.world_mouse.held(LookButton::Right));
+        assert!(
+            !rig.world_mouse.down(LookButton::Right),
+            "the edge is one frame"
+        );
+
+        // The chord's second button joins the gesture the world already holds…
+        buttons.press(MouseButton::Left);
+        rig.world_mouse.update(&buttons, true);
+        assert!(
+            rig.world_mouse.both(),
+            "both primaries = the both-button run"
+        );
+
+        // …and the release is what ends it — including the synthetic one a cover produces by
+        // emptying the button planes, which is a release of both without a `just_released`.
+        buttons = ButtonInput::<MouseButton>::default();
+        rig.world_mouse.update(&buttons, false);
+        assert!(!rig.world_mouse.both());
+        assert!(!rig.world_mouse.held(LookButton::Right));
+        assert!(!rig.world_mouse.held(LookButton::Left));
     }
 
     /// The state classifier's three vanilla input rules (wow-re `camera-smooth-style.md` §6.2) —

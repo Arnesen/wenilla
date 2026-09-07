@@ -1,5 +1,5 @@
-//! The shipped `assets/ui/UIPanelTemplates.xml` + `assets/ui/OptionsFrameTemplates.xml` — the
-//! reference's SHARED widget kit, driven the way an addon drives it.
+//! The stock `Interface\FrameXML\UIPanelTemplates.xml` + our `assets/ui/OptionsFrameTemplates.xml`
+//! — the reference's SHARED widget kit, driven the way an addon drives it.
 //!
 //! **These are not tests of a window.** Nothing benilla ships instantiates a single template in
 //! either file: their only consumer is a third-party addon writing
@@ -43,14 +43,19 @@ fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for file in [
-        "Fonts.xml",
-        "UIParent.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "ScrollTemplates.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
+        r"Interface\FrameXML\CharacterFrameTemplates.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
         r"Interface\FrameXML\OptionsFrameTemplates.xml",
         "OptionsFrameTemplates.xml",
     ] {
@@ -233,7 +238,7 @@ fn a_panel_button_from_the_template_labels_and_paints() {
 
 /// `UIPanelCloseButton` — 8 call sites across 4 corpus addons, and the one template here whose
 /// whole point is its script: `HideUIPanel(this:GetParent())`, resolved at click time against
-/// `UiPanels.xml`.
+/// the chain's `UIParent.xml`.
 #[test]
 fn the_templated_close_button_hides_the_frame_it_sits_on() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -433,7 +438,7 @@ fn the_options_check_button_resolves_its_whole_inheritance_chain() {
 /// real 1.12.1 client has, read from `reference/1.12-globals.tsv`.
 ///
 /// Scoped to these two files on purpose: the rest of `assets/ui` is full of deliberately
-/// benilla-shaped template names (`BenillaScrollBarTemplate`, `BenillaMacroPanelButtonTemplate`,
+/// benilla-shaped template names (`BenillaScrollBarTemplate`, `BenillaScriptLogRowTemplate`,
 /// `OptionsRedButtonTemplate`), and a whole-tree sweep would be asserting something else. These
 /// two files make the opposite claim — *these are the reference's own names, which is why an addon
 /// can find them* — so that claim is the one worth gating. A template renamed to something
@@ -521,28 +526,42 @@ fn tab_resize_falls_back_to_this_when_no_tab_is_passed() {
     assert!(width > 0.0, "the tab got a width, got {width}");
 }
 
-/// **The window tab's structural clamp, driven the way the client drives it — from `OnUpdate`.**
+/// **The reference's own window tab fits its text in `<OnShow>`, on the first show, with no
+/// settle** — the property that let benilla's own copy of this template retire (decision 1993).
 ///
-/// 1002's law is that a tab may never grow past its window's drawn right edge, whatever fit the
-/// instance asked for. `BenillaTabButton_OnUpdate` enforces it by comparing the fitted width
-/// against the room, and it used to read that width from `PanelTemplates_TabResize`'s return —
-/// a benilla-only line on OUR copy of that verb.
+/// The reference fits a tab exactly once, from the template's `<OnShow>`
+/// (`CharacterFrameTemplates.xml:77-80`): `PanelTemplates_TabResize(0)`, whose `width` is
+/// `tabText:GetWidth() + padding`. That needs a `GetStringWidth` that answers during the Lua call
+/// that asked. Ours landed a frame late when our template was written, so our copy re-fit from
+/// `OnUpdate` until the measure settled; the engine has a synchronous measurer now
+/// (`script::measure`), so the stock handler is the whole fit. The falsifier is a tab still wearing
+/// the template's authored 115 after one show — which is exactly what an OnShow-only fit on the old
+/// engine produced.
 ///
-/// 1837 put `Interface\FrameXML\UIPanelTemplates.lua` on the chain BELOW `UiPanels.xml`, so the
-/// reference's `PanelTemplates_TabResize` is the one that runs, and it returns nothing. The
-/// comparison became `nil > number`: a raise, once per tab per width change, with the clamp
-/// silently off the air and the tab already sized by the unclamped first call.
+/// It also pins **1004's structural half, now on the reference's own file**: the highlight anchors
+/// `LEFT +10` / `RIGHT −10`, so it spans the tab at every width and `TabResize`'s own
+/// `highlightTexture:SetWidth(tabWidth)` — and the `<OnShow>`'s second line, `SetWidth(
+/// GetTextWidth() + 30)` — are dead against two opposing anchors, here as in the reference.
 ///
-/// The existing tab test drives `OnLoad` and never ticks, which is why nothing caught it.
+/// **What went with our template is 1002's clamp** (superseded by 1993): a tab may now grow past
+/// its window's drawn edge exactly as it does in the real client, whose only caps are the numbers
+/// each window passes `TabResize` itself. That is asserted here by its absence — the long label
+/// below overflows the 160-wide probe window and nothing stops it.
 #[test]
-fn a_tab_never_grows_past_its_windows_right_edge() {
+fn the_stock_tab_fits_its_text_on_the_first_show() {
     let _data = benilla_formats::wow_data_or_skip!();
+    /// `2 * $parentLeft:GetWidth()` — the template's two 20-unit end slices.
+    const SIDES: f64 = 40.0;
     let mut s = harness();
     s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
-    // A deliberately narrow window and a long label: the natural fit does not fit.
+    // The highlight authors NO `<Size>`, so its height is content-derived off the art's texel
+    // extent (decisions 1349/1664) — `UI-Character-Tab-Highlight.blp` is 128x32. Without a probe
+    // the Y axis never resolves and the region has no rect at all, which is a property of an
+    // engine-less VM, not of the template.
+    s.set_texture_size_probe(Box::new(|_| Some((128, 32))));
     let doc = benilla_ui::framexml::parse(
         r#"<Ui>
-            <Frame name="ProbeWindow">
+            <Frame name="ProbeWindow" parent="UIParent" hidden="true">
                 <Size><AbsDimension x="160" y="200"/></Size>
                 <Anchors><Anchor point="TOPLEFT"/></Anchors>
                 <Frames>
@@ -560,21 +579,58 @@ fn a_tab_never_grows_past_its_windows_right_edge() {
     let report = benilla_ui::loader::load_in(&s, &doc, "test", &|_: &str| None);
     assert!(report.errors.is_empty(), "load: {:?}", report.errors);
 
-    // Two ticks: the first lands the measure, the second settles against it.
-    s.tick(0.1);
-    s.tick(0.1);
+    // The first show, and nothing else: no tick, no measure round trip to pump.
+    s.run("ProbeWindow:Show()").unwrap();
     assert!(
         s.errors().is_empty(),
-        "the settle must not raise — the clamp reads the fit back, not a return value: {:?}",
+        "the stock OnShow must not raise: {:?}",
         s.errors()
     );
+    s.resolve();
 
-    let (left, width) = s
-        .eval::<(f64, f64)>("return ProbeTab:GetLeft(), ProbeTab:GetWidth()")
+    let (label, width) = s
+        .eval::<(f64, f64)>("return ProbeTabText:GetStringWidth(), ProbeTab:GetWidth()")
         .unwrap();
+    assert!(label > 0.0, "the label measured synchronously, got {label}");
+    assert_eq!(
+        width,
+        label + SIDES,
+        "the tab is its text plus the two end slices, from OnShow alone"
+    );
+    assert_ne!(width, 115.0, "…and not the template's authored pre-fit");
+
+    // No settle: a frame later it is the same number, because nothing re-fits it.
+    for _ in 0..3 {
+        s.tick(0.016);
+    }
+    s.resolve();
+    assert_eq!(
+        s.eval::<f64>("return ProbeTab:GetWidth()").unwrap(),
+        width,
+        "the fit is once, in OnShow — nothing may move it per frame"
+    );
+
+    // 1004, structurally: the highlight is the tab inset 10 on each side, at this width.
+    // Lit, so it joins the resolved tree — the way the dropdown kit's checked rows are lit.
+    s.run("ProbeTab:LockHighlight()").unwrap();
+    s.resolve();
+    let (tl, tr, hl, hr) = s
+        .eval::<(f64, f64, f64, f64)>(
+            "return ProbeTab:GetLeft(), ProbeTab:GetRight(), \
+             ProbeTabHighlightTexture:GetLeft(), ProbeTabHighlightTexture:GetRight()",
+        )
+        .unwrap();
+    assert_eq!(
+        (hl - tl, tr - hr),
+        (10.0, 10.0),
+        "the highlight spans the tab's own edges — the OnShow SetWidth is inert against them"
+    );
+
+    // 1002's clamp is gone with our template: the reference has no such guarantee, and the long
+    // label really does run past the window's right edge now.
     let right = s.eval::<f64>("return ProbeWindow:GetRight()").unwrap();
     assert!(
-        left + width <= right + 0.5,
-        "the tab ran past its window: left {left} + width {width} > right {right}"
+        tl + width > right,
+        "the probe label was meant to overflow: left {tl} + width {width} <= right {right}"
     );
 }

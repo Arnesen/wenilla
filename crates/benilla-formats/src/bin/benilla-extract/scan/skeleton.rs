@@ -581,3 +581,134 @@ pub fn bonescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
     }
     Ok(())
 }
+
+/// Sweep every `.m2` and census the **event table's positional half** — the `bone` and `position`
+/// fields every `M2Event` record carries beside its 4CC and timestamps.
+///
+/// The question it exists to answer: the reference's animation-event dispatchers hand their arms
+/// the event's **own** world point (`0x5f3e20`'s `[ebp+0x10]`, `&M2SceneCallback.position` — the
+/// authored `position` transformed by its bone's live matrix and the model's placement), while a
+/// consumer that plays every anim-event sound at the model root is using the placement alone. That
+/// difference is worth code only where the records are actually *off* the origin, or on a bone
+/// that *moves*; where every record of a tag sits at the origin on a static bone the two are the
+/// same point and the simpler consumer is not wrong.
+///
+/// So, per 4CC: how many records, how many sit more than [`OFF_ORIGIN`] from the model origin (the
+/// `position` field is already model-space — it is the marker's REST point, which is why
+/// `build_markers` subtracts the bone pivot to get a bone-local offset), how many ride a bone
+/// **whose chain any sequence keys** (the bone's own track being empty says nothing: it inherits
+/// its parent's matrix), and the largest offset seen with the model that authors it.
+pub fn eventmarkerscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    /// Yards from the model origin past which a marker is "off the origin". Well under any
+    /// audible 3D difference, so it is a *presence* threshold, not a significance one.
+    const OFF_ORIGIN: f32 = 0.01;
+    let names = super::m2_names(chain, prefix)?;
+    // 4CC → (records, off-origin, on a keyed bone, max offset, the model + bone at that max)
+    let mut per_tag: BTreeMap<String, (u32, u32, u32, f32, String)> = BTreeMap::new();
+    let (mut scanned, mut carriers) = (0u32, 0u32);
+    // Models authoring the SAME 4CC more than once, and those whose duplicates disagree about
+    // where they are: the reference's kernel fires a specific RECORD and snapshots that record's
+    // point, so a consumer that resolves the tag by a first-match table scan answers the wrong
+    // point exactly here.
+    let (mut dup_models, mut dup_split) = (0u32, 0u32);
+    let mut dup_examples: Vec<String> = Vec::new();
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        let Ok(format) = benilla_m2::parse_m2(&mut std::io::Cursor::new(&bytes)) else {
+            continue;
+        };
+        let model = format.model();
+        scanned += 1;
+        if model.event_markers.is_empty() {
+            continue;
+        }
+        carriers += 1;
+        // Which bones any sequence keys at all. A marker's own bone being unkeyed is NOT enough
+        // to make it static — the bone inherits its parent's matrix — so the test walks the
+        // ancestor chain, which is the difference between "sits still" and "sits still relative to
+        // something that moves".
+        let keyed: BTreeSet<u16> = benilla_formats::parse_m2_animations(&bytes)
+            .iter()
+            .flat_map(|a| a.bones.iter().map(|b| b.bone))
+            .collect();
+        let moves = |bone: u16| {
+            let mut b = bone as i32;
+            // Bounded by the bone count: a malformed parent cycle must not spin here.
+            for _ in 0..model.bones.len() + 1 {
+                let Ok(idx) = usize::try_from(b) else {
+                    return false;
+                };
+                if keyed.contains(&(idx as u16)) {
+                    return true;
+                }
+                let Some(rec) = model.bones.get(idx) else {
+                    return false;
+                };
+                b = rec.parent as i32;
+            }
+            false
+        };
+        let mut by_ident: BTreeMap<[u8; 4], Vec<(u16, [f32; 3])>> = BTreeMap::new();
+        for m in &model.event_markers {
+            by_ident
+                .entry(m.ident)
+                .or_default()
+                .push((m.bone, m.position));
+        }
+        let dups: Vec<_> = by_ident.iter().filter(|(_, v)| v.len() > 1).collect();
+        if !dups.is_empty() {
+            dup_models += 1;
+            let split: Vec<_> = dups
+                .iter()
+                .filter(|(_, v)| v.iter().any(|x| *x != v[0]))
+                .collect();
+            if !split.is_empty() {
+                dup_split += 1;
+                if dup_examples.len() < 12 {
+                    let tags: Vec<String> = split
+                        .iter()
+                        .map(|(i, v)| format!("{}×{}", String::from_utf8_lossy(&i[..]), v.len()))
+                        .collect();
+                    dup_examples.push(format!("  {name}  {}", tags.join(" ")));
+                }
+            }
+        }
+        for m in &model.event_markers {
+            let d = (m.position[0].powi(2) + m.position[1].powi(2) + m.position[2].powi(2)).sqrt();
+            let e = per_tag
+                .entry(String::from_utf8_lossy(&m.ident).into_owned())
+                .or_insert((0, 0, 0, 0.0, String::new()));
+            e.0 += 1;
+            e.1 += u32::from(d > OFF_ORIGIN);
+            e.2 += u32::from(moves(m.bone));
+            if d > e.3 {
+                e.3 = d;
+                e.4 = format!("{name} bone {}", m.bone);
+            }
+        }
+    }
+    println!(
+        "=== M2 event markers: how far each 4CC's records sit from the model origin ===\n  \
+         tag    records  off-origin  on a MOVING bone   max offset (yd)  where"
+    );
+    for (tag, (n, off, keyed, max, where_)) in &per_tag {
+        println!("  {tag}  {n:>7}  {off:>10}  {keyed:>16}  {max:>16.3}  {where_}");
+    }
+    println!(
+        "\n=== same-4CC duplicate records ===\n  {dup_models} model(s) author some 4CC more than \
+         once; {dup_split} of them place the duplicates at DIFFERENT (bone, position) pairs — the \
+         population where resolving a fired event by a first-match table scan gives the wrong \
+         point, and the reason a fired event has to carry its own record's."
+    );
+    for e in &dup_examples {
+        println!("{e}");
+    }
+    eprintln!(
+        "{scanned} models scanned, {carriers} carry an event table. `position` is model space, so \
+         a record at 0.000 with no keyed bone renders the model root and the event's own point the \
+         SAME world position — the transform earns its code only on the rows above it."
+    );
+    Ok(())
+}

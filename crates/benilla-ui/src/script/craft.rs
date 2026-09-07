@@ -72,6 +72,8 @@
 
 use mlua::{Lua, MultiValue, Value, Variadic};
 
+use super::binding_abi::number_arg;
+use super::item_stats::item_link;
 use super::Model;
 
 /// One reagent a recipe consumes (`GetCraftReagentInfo`): the bag-counted need/have plus the resolved
@@ -355,6 +357,60 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // trainingPointCost, requiredLevel (ref l.37/168/289's own 7-tuple — module doc). `craftType` is
     // the difficulty color key, never "header"; `isExpanded` is always nil; the trailing two are
     // Beast Training's own fields, hardcoded 0 (out of scope, module doc). OOB → a single nil.
+    // The two link verbs (wow-re `tradeskill/scratch/tradeskill-craft-item-links.md`, 1973).
+    //
+    // GetCraftItemLink(index) — `0x4f72a0`: the number gate raises its Usage; then the spell's
+    // Spell.dbc `castUI` decides. An Enchanting recipe (`castUI == 3` — this window's craft type,
+    // and the only shipped input: every castUI-3 row, including the twenty that create an item
+    // such as Runed Copper Rod) takes the ENCHANT leg, which cannot fail:
+    // `|cffffffff|Henchant:<spellId>|h[<spell name>]|h|r` — fixed white, the spell's id and name.
+    // Any other craft type would scan the effects for CREATE_ITEM, which no shipped row carries,
+    // and answer ZERO values — Beast Training's rows do.
+    g.set(
+        "GetCraftItemLink",
+        lua.create_function(|lua, index: Value| {
+            let index = number_arg(lua, index, "Usage: GetCraftItemLink(index)")?;
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let link = usize::try_from(index)
+                .ok()
+                .and_then(|i| recipe(&model, i))
+                .filter(|_| model.craft.as_ref().is_some_and(|c| c.craft_type == 3))
+                .map(|r| format!("|cffffffff|Henchant:{}|h[{}]|h|r", r.spell_id, r.name));
+            Ok(match link {
+                Some(l) => MultiValue::from_vec(vec![Value::String(lua.create_string(&l)?)]),
+                None => MultiValue::new(),
+            })
+        })?,
+    )?;
+
+    // GetCraftReagentItemLink(index, reagentIndex) — `0x4f7730`, a byte-clone of the trade-skill
+    // one with its own Usage: both arguments number-gated, `reagentIndex` 1-based over the
+    // non-empty slots, ALWAYS one value — the reagent's `|Hitem:` link or nil.
+    g.set(
+        "GetCraftReagentItemLink",
+        lua.create_function(|lua, (index, reagent): (Value, Value)| {
+            let usage = "Usage: GetCraftReagentItemLink(index, reagentIndex)";
+            let index = number_arg(lua, index, usage)?;
+            let reagent = number_arg(lua, reagent, usage)?;
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let link = usize::try_from(index)
+                .ok()
+                .and_then(|i| recipe(&model, i))
+                .zip(usize::try_from(reagent).ok().and_then(|r| r.checked_sub(1)))
+                .and_then(|(r, ri)| r.reagents.get(ri))
+                .and_then(|re| {
+                    model
+                        .item_templates
+                        .get(&re.item)
+                        .map(|t| item_link(re.item, &t.name, t.quality))
+                });
+            Ok(match link {
+                Some(l) => Value::String(lua.create_string(&l)?),
+                None => Value::Nil,
+            })
+        })?,
+    )?;
+
     g.set(
         "GetCraftInfo",
         lua.create_function(|lua, index: usize| {
@@ -867,6 +923,59 @@ mod tests {
             s.take_craft_dos(),
             vec![24495, 24508, 24509, 24510, 24440, 24441, 24463, 24464],
             "no spellLevel key at type 3 — the order is name then the deterministic id tie-break"
+        );
+    }
+
+    /// The craft link pair (wow-re `tradeskill-craft-item-links.md`, 1973): an Enchanting recipe
+    /// answers the ENCHANT link — fixed white, the spell's id and name — and cannot miss; another
+    /// craft type answers zero values (no shipped CREATE_ITEM input); the reagent link is nil
+    /// until its template is in the store, then the item link in its quality colour; the raises.
+    #[test]
+    fn the_craft_link_verbs_answer_the_clients_shapes() {
+        let mut s = UiScript::new().unwrap();
+        s.set_craft(Some(state()));
+        // Row 1 is whichever recipe the window's own order puts first: the link names THAT spell.
+        let first = s.eval::<String>("return (GetCraftInfo(1))").unwrap();
+        let spell = state()
+            .recipes
+            .iter()
+            .find(|r| r.name == first)
+            .map(|r| r.spell_id)
+            .expect("row 1 is a pushed recipe");
+        assert_eq!(
+            s.eval::<String>("return (GetCraftItemLink(1))").unwrap(),
+            format!("|cffffffff|Henchant:{spell}|h[{first}]|h|r")
+        );
+        assert!(s
+            .eval::<bool>("return GetCraftReagentItemLink(1, 1) == nil")
+            .unwrap());
+        s.set_item_template(
+            10940,
+            crate::script::ItemTemplateView {
+                name: "Illusion Dust".into(),
+                quality: 2,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            s.eval::<String>("return GetCraftReagentItemLink(1, 1)")
+                .unwrap(),
+            "|cff1eff00|Hitem:10940:0:0:0|h[Illusion Dust]|h|r"
+        );
+        assert!(s
+            .eval::<bool>("return select('#', GetCraftReagentItemLink(1, 5)) == 1 and GetCraftReagentItemLink(1, 5) == nil")
+            .unwrap());
+        for bad in ["GetCraftItemLink(nil)", "GetCraftReagentItemLink(1)"] {
+            let err = s.run(bad).expect_err(bad).to_string();
+            assert!(err.contains("Usage: GetCraft"), "{bad}: {err}");
+        }
+        let mut beasts = state();
+        beasts.craft_type = 1;
+        s.set_craft(Some(beasts));
+        assert!(
+            s.eval::<bool>("return select('#', GetCraftItemLink(1)) == 0")
+                .unwrap(),
+            "a non-Enchanting craft answers zero values"
         );
     }
 }

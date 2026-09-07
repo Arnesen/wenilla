@@ -120,10 +120,14 @@ fn install_texture_resolvers(world: &mut World, script: &mut UiScript) {
 }
 
 /// Does this run want the player UI at all? Captures stay pristine — their baselines regression-test
-/// the WORLD render — unless `WOW_CAPTURE_UI=1` opts the UI in.
+/// the WORLD render — unless the UI is opted in, which happens two ways: `WOW_CAPTURE_UI=1` on any
+/// scenario, or the scenario **declaring a `ui:` fixture**, which is the harness saying the window
+/// is the subject — [`crate::run_mode::capture_ui_opted_in`] is the one predicate, and its doc says why all
+/// three consumers of it must agree. A run with no `CaptureMode` is an ordinary client and always
+/// wants its UI.
 fn ui_wanted(world: &World) -> bool {
     !world.contains_resource::<crate::run_mode::CaptureMode>()
-        || std::env::var("WOW_CAPTURE_UI").as_deref() == Ok("1")
+        || crate::run_mode::capture_ui_opted_in()
 }
 
 /// The world-entry UI load, armed at `OnEnter(InWorld)` and run by [`run_pending_entry_load`]
@@ -208,10 +212,30 @@ enum EntryStage {
 /// cover's — cheap to render — and every one of them is a frame the browser can answer.
 const ENTRY_LOAD_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
 
-/// `OnEnter(InWorld)`: arm the deferred entry load. The load itself runs a few frames later —
-/// see [`PendingEntryUiLoad`].
-pub(crate) fn arm_entry_ui_load(mut commands: Commands) {
-    commands.insert_resource(PendingEntryUiLoad::default());
+/// **The boot VM, parked for the deferral window** (decision 1978). Between the world-entry edge
+/// and the deferred entry load there is no VM in the world at all: the boot VM waits here, out of
+/// every feed's reach, and the load takes it back. Every feed takes the VM as an `Option` and
+/// already returns on `None` — the glue phase's shape — so a feed keyed on a per-VM memo cannot
+/// push into a VM that has no interface yet and then hold the real push back (the chat plate
+/// that stayed white, and 1348's whole class). `ingame_ui_pending` stays for the feeds that
+/// name it; with the VM parked it is belt and braces.
+pub(crate) struct ParkedBootVm(UiScript);
+
+/// `OnEnter(InWorld)`: arm the deferred entry load and park the boot VM. The load itself runs a
+/// few frames later — see [`PendingEntryUiLoad`] and [`ParkedBootVm`].
+pub(crate) fn arm_entry_ui_load(world: &mut World) {
+    world.insert_resource(PendingEntryUiLoad::default());
+    if let Some(vm) = world.remove_non_send_resource::<UiScript>() {
+        world.insert_non_send_resource(ParkedBootVm(vm));
+    }
+}
+
+/// The parked boot VM back into the world, if one is parked — the session end and the
+/// left-before-the-load arm both want the VM where the tail expects it.
+fn unpark_boot_vm(world: &mut World) {
+    if let Some(ParkedBootVm(vm)) = world.remove_non_send_resource::<ParkedBootVm>() {
+        world.insert_non_send_resource(vm);
+    }
 }
 
 /// **Is the in-game UI still owed for this world entry?** True from `OnEnter(InWorld)` until
@@ -257,6 +281,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     if !in_world {
         // Left the world before the load ran — nothing to build a UI for.
         world.remove_resource::<PendingEntryUiLoad>();
+        unpark_boot_vm(world);
         return;
     }
     let covering = world
@@ -273,9 +298,11 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     {
         return;
     }
-    // One frame's slice: steps until the budget is spent (at least one), then yield. The VM
-    // leaves the world for the slice and comes back at its end, so every other system sees it
-    // between frames exactly as it did around the old single burst.
+    // One frame's slice: steps until the budget is spent (at least one), then yield. The VM comes
+    // out of the park the arm put it in (1978) for the duration of the slice and goes straight
+    // back at the end of it, so no feed ever sees the half-built interface — 1978's window is the
+    // whole load, which for a sliced load is many frames rather than the old single burst.
+    unpark_boot_vm(world);
     if !ui_wanted(world) {
         world.remove_resource::<PendingEntryUiLoad>();
         return;
@@ -360,7 +387,9 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
             break; // resume next frame
         }
     }
-    world.insert_non_send_resource(script);
+    // Back to the park, not to the live slot: the load is not done, and 1978's window is open
+    // until it is. `EntryStage::Finish` is the one arm that hands the VM back to the world.
+    world.insert_non_send_resource(ParkedBootVm(script));
 }
 
 /// The entry load's opening: the identity the addons see, the realm and player the file scopes
@@ -390,6 +419,11 @@ fn entry_prepare(world: &mut World, script: &mut UiScript) -> (Option<(String, S
                 .get_resource::<crate::cvars::CvarPersist>()
                 .is_none_or(crate::cvars::CvarPersist::addon_version_check)
         });
+    // The VM's font engine, before the first `<OnLoad>` runs (decision 2028) — the one-shot's
+    // own call carries the why. It belongs on this path for the same reason and one more: the
+    // sliced load spans frames, so a file loaded in slice one would otherwise measure 0 until
+    // whichever later frame `extract::drive_script` first seated a measurer.
+    seat_text_measurer_for_load(world, script);
     script.set_instruction_budget(addons::LOAD_INSTRUCTION_BUDGET);
     (identity, version_check)
 }
@@ -422,6 +456,26 @@ fn entry_finish(world: &mut World, script: &mut UiScript, identity: Option<(Stri
     world.insert_resource(AddOnIdentity(identity));
 }
 
+/// Install the host's font engine into `script` for the CURRENT raster seam, if the glyph atlas
+/// exists yet — the load edge's half of [`super::extract::seat_text_measurer`].
+///
+/// No atlas means no measure to be had (it bakes on the first `Update`, from the patch chain and
+/// the window's real `scale_factor`); the per-frame pass seats one on the first frame it appears,
+/// exactly as before.
+fn seat_text_measurer_for_load(world: &mut World, script: &mut UiScript) {
+    let ui_scale = world
+        .get_resource::<super::UiScaleCvar>()
+        .map_or(1.0, |c| c.0);
+    let h = {
+        let mut q = world.query_filtered::<&Window, With<bevy::window::PrimaryWindow>>();
+        q.single(world).map_or(0.0, Window::height)
+    };
+    let Some(atlas) = world.get_resource::<crate::ui_text::UiFontAtlas>() else {
+        return;
+    };
+    super::extract::seat_text_measurer(script, atlas, super::seam_scale(h, ui_scale));
+}
+
 /// Materialize the in-game UI for **this** session.
 ///
 /// **Once per world entry, not once per process** (decision 1290). The reference builds the whole
@@ -440,6 +494,9 @@ fn entry_finish(world: &mut World, script: &mut UiScript, identity: Option<(Stri
 /// capture boots straight into `InWorld`, so before that this would have run ahead of
 /// [`benilla_assets::AssetSet::Open`] and loaded against no patch chain.
 pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
+    // The VM the entry edge parked (1978); the live slot is the fallback for a caller that did
+    // not go through the arm.
+    unpark_boot_vm(world);
     if !ui_wanted(world) {
         return;
     }
@@ -482,6 +539,16 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
                 .get_resource::<crate::cvars::CvarPersist>()
                 .is_none_or(crate::cvars::CvarPersist::addon_version_check)
         });
+    // **The VM's font engine, before the first `<OnLoad>` runs** (decision 2028). Every file the
+    // walk below loads may measure the text it just set — the era's own tab law is
+    // `label:GetStringWidth() + 40` at OnLoad, and the addon corpus writes the same pair — and a
+    // `GetStringWidth` with no measurer installed answers 0. Seated only from the per-frame pass
+    // (`extract::drive_script`, an `Update` system), a VM that is BORN and LOADED inside one
+    // exclusive `PreUpdate` slot never sees it: that is exactly `ReloadUI()`, which mints a fresh
+    // boot VM in `end_ui_session` and calls straight into here, so every `/reload` measured 0
+    // through its whole load edge and only converged a frame later off whatever poll the caller
+    // had written to survive it.
+    seat_text_measurer_for_load(world, &mut script);
     let _ = load_ingame_ui(&mut script, identity.as_ref(), version_check);
     // The Minimap widget was born a moment ago with `MinimapState::default()`; seed its two live
     // zoom indices from the persisted CVars now, before anything reads them — the reference's own
@@ -619,12 +686,24 @@ pub(crate) struct AddOnIdentity(pub(crate) Option<(String, String)>);
 /// three independent Bevy systems on one state edge cannot express that, and until this landed the
 /// flat write and the `AddOns.txt` write were exactly that.
 ///
+/// **The layout cache is step three, and it was missing until B353.** The quote above has always
+/// carried `layout-cache.txt`; the body skipped it, because [`crate::ui_layout`] had hung its own
+/// saver off `OnExit(InWorld)` instead. Two things follow from being outside the tail, and the
+/// bug report is both of them: a `/reload` never leaves `InWorld` ([`run_pending_reload`] calls
+/// this function and the rebuild back to back), so that saver never ran on the root a player uses
+/// most; and on the roots where it did run it was racing [`end_ui_session`]'s VM replacement on
+/// the same unordered edge — measured (bevy 0.18) to move with nothing but registration
+/// positions. In the tail it is neither: one call, ahead of the replacement, on every root.
+/// (It is also the one step that keeps a writer *outside* this function: a debounced
+/// crash-save, which the reference has not got and which the next paragraph is not about.)
+///
 /// **There is no autosave**, deliberately: the reference has none (decision 1128, and
 /// `ds:0xb4b3f4` has three references image-wide). These are a handful of scalars a player toggles
 /// a few times a session, and every file is written whole from the live globals.
 pub(crate) fn shutdown_ui_state(script: &mut UiScript, identity: Option<&(String, String)>) {
     script.fire_event("PLAYER_LEAVING_WORLD", vec![]);
     script.fire_event("PLAYER_LOGOUT", vec![]);
+    crate::ui_layout::save_now(script, identity);
     crate::ui_saved::save(script);
     addons::save_addon_variables(script, identity);
     addons::save_enable_state(script, identity);
@@ -644,6 +723,9 @@ pub(crate) fn shutdown_ui_state(script: &mut UiScript, identity: Option<&(String
 /// Exclusive rather than a `NonSendMut` system because it both drops and installs a `NonSend`, and
 /// because the shutdown writes must be ordered against each other — see [`shutdown_ui_state`].
 pub(crate) fn end_ui_session(world: &mut World) {
+    // A VM still parked (the load never ran) goes back into the world first, so the tail below
+    // runs against the same slot it always did (1978).
+    unpark_boot_vm(world);
     // An armed-but-unrun entry load ([`PendingEntryUiLoad`]) means this session never built an
     // in-game UI: there are no globals to save and no addon state to write, and running the
     // shutdown tail against the boot VM would overwrite the real files with that emptiness.
@@ -895,4 +977,33 @@ pub(crate) fn is_emote_token_line(line: &str) -> bool {
         && name
             .bytes()
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The entry edge parks the boot VM (1978): between the arm and the load there is no VM in
+    /// the world for any feed to push into, and the session end puts a never-loaded one back.
+    #[test]
+    fn the_entry_edge_parks_the_boot_vm_and_the_session_end_returns_it() {
+        let mut world = World::new();
+        let boot = UiScript::new().unwrap();
+        let session = boot.session();
+        world.insert_non_send_resource(boot);
+        arm_entry_ui_load(&mut world);
+        assert!(
+            world.get_non_send_resource::<UiScript>().is_none(),
+            "no VM in the deferral window"
+        );
+        assert!(world.get_resource::<PendingEntryUiLoad>().is_some());
+        assert!(world.get_non_send_resource::<ParkedBootVm>().is_some());
+        // Left the world before the load ran: the VM comes back, untouched.
+        unpark_boot_vm(&mut world);
+        let vm = world
+            .get_non_send_resource::<UiScript>()
+            .expect("the parked VM is back");
+        assert_eq!(vm.session(), session, "the same VM, no session moved");
+        assert!(world.get_non_send_resource::<ParkedBootVm>().is_none());
+    }
 }

@@ -2,8 +2,8 @@
 //! the jump ballistics, and the facing turn (each child module's math, exercised together here
 //! like [`super`]'s original single-file block).
 
-use std::time::Duration;
 use bevy::platform::time::Instant;
+use std::time::Duration;
 
 use benilla_protocol::{JumpInfo, MonsterMoveFacing, MoveSpeeds};
 use bevy::prelude::Quat;
@@ -427,6 +427,7 @@ fn spline_interpolates_constant_speed_and_faces_travel() {
     // Two legs: 10 yd east (+X), then 10 yd north-ish (+Y), over 4s total (constant speed → 2s/leg).
     let start = Instant::now();
     let s = Spline {
+        deck: None,
         points: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0]],
         start,
         duration: Duration::from_secs(4),
@@ -467,6 +468,7 @@ fn spline_travel_pitch_is_the_segment_climb_angle() {
     // observed-mover pitch rule `asin(dir.z)` the swimming-creature body pitch renders.
     let start = Instant::now();
     let s = Spline {
+        deck: None,
         points: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 10.0]],
         start,
         duration: Duration::from_secs(4),
@@ -492,7 +494,7 @@ fn monster_move_carries_every_waypoint() {
         [10.0, 10.0, 0.0],
         [10.0, 10.0, 5.0],
     ];
-    let s = monster_move_spline(path.clone(), 42, false, 2000, false, true)
+    let s = monster_move_spline(path.clone(), 42, false, 2000, false, true, None)
         .expect("a moving monster-move yields a spline");
     assert_eq!(
         s.points, path,
@@ -509,6 +511,54 @@ fn monster_move_carries_every_waypoint() {
     );
 }
 
+/// **`MSG_MOVE_TIME_SKIPPED` advances the chain's wire clock and nothing else** (decision 1935).
+/// The whole of the reference's handler is `[CMovement+0xac] += lag` (`0x603b40` → `0x61ab90`),
+/// and `+0xac` is this chain's `last_wire_ms`. The property that matters is downstream: after the
+/// skip, the mover's next packet — whose stamp is `lag` further on than it would otherwise have
+/// been — must schedule as though nothing unusual happened. Drop the skip and that same packet
+/// buys `lag` ms of extra `wire_delta` and fires that much late.
+#[test]
+fn a_reported_skip_keeps_the_relay_chain_level_with_the_sender() {
+    let step = |chain: &mut RelayChain, wire_ms: u32, now_ms: f64| {
+        chain.schedule(wire_ms, now_ms, 0, true)
+    };
+    // Two chains fed identically, except that one is told about the sender's 300 ms skip.
+    let (mut told, mut untold) = (RelayChain::default(), RelayChain::default());
+    step(&mut told, 10_000, 0.0);
+    step(&mut untold, 10_000, 0.0);
+
+    told.skip_time(300);
+
+    // The sender's next packet: 100 ms of real play later, but its stamp has ALSO carried the
+    // 300 ms it skipped — so the wire step is 400 while only 100 ms of our clock passed.
+    let a = step(&mut told, 10_400, 100.0);
+    let b = step(&mut untold, 10_400, 100.0);
+    assert!(
+        a < b,
+        "the informed chain schedules earlier: it already knew 300 of those 400 ms were skipped, \
+         not travelled (informed {a}, uninformed {b})"
+    );
+    assert!(
+        (b - a - 300.0).abs() < 1e-6,
+        "and the difference is exactly the skip it was told about: {} vs 300",
+        b - a
+    );
+}
+
+/// A skip for a mover whose chain has never seen a packet is inert: there is no reference stamp
+/// to advance, and the first real packet seeds both cells off itself.
+#[test]
+fn a_skip_before_the_first_packet_changes_nothing() {
+    let mut seeded = RelayChain::default();
+    let mut cold = RelayChain::default();
+    cold.skip_time(5_000);
+    assert_eq!(
+        seeded.schedule(10_000, 0.0, 0, true),
+        cold.schedule(10_000, 0.0, 0, true),
+        "an unseeded chain has no clock to move"
+    );
+}
+
 #[test]
 fn monster_move_flying_spline_is_not_grounded() {
     // A FLYING path keeps the server's Z — the ground-clamp must leave it alone.
@@ -519,6 +569,7 @@ fn monster_move_flying_spline_is_not_grounded() {
         2000,
         true,
         true,
+        None,
     )
     .expect("a flying monster-move still yields a spline");
     assert!(
@@ -536,7 +587,8 @@ fn monster_move_stop_clears_the_spline() {
             true,
             2000,
             false,
-            true
+            true,
+            None
         )
         .is_none(),
         "a Stop move snaps and clears, never builds a path"
@@ -552,7 +604,8 @@ fn monster_move_zero_duration_clears_the_spline() {
             false,
             0,
             false,
-            true
+            true,
+            None
         )
         .is_none(),
         "a zero-duration move would divide by ~0 when sampled; treat as stationary"
@@ -562,7 +615,7 @@ fn monster_move_zero_duration_clears_the_spline() {
 #[test]
 fn monster_move_without_a_travelable_path_clears_the_spline() {
     assert!(
-        monster_move_spline(vec![[1.0, 2.0, 3.0]], 0, false, 2000, false, true).is_none(),
+        monster_move_spline(vec![[1.0, 2.0, 3.0]], 0, false, 2000, false, true, None).is_none(),
         "a single point is nowhere to travel — no spline"
     );
 }

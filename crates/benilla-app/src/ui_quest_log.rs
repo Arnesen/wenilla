@@ -7,7 +7,7 @@
 //! Unlike the questgiver panels (a transient NPC-session window), the quest log is **durable
 //! player state**: [`feed_quest_log`] reads the self player's `PLAYER_QUEST_LOG` descriptor slots
 //! every frame (the wire pin's field 198 + 3·slot) rather than reacting to one wire event, and
-//! resolves EVERY occupied slot's title/level/objectives from the `SMSG_QUEST_QUERY_RESPONSE`
+//! resolves EVERY occupied slot's title/level/tag/objectives from the `SMSG_QUEST_QUERY_RESPONSE`
 //! template cache ([`QuestLog`] — the exact ask-once twin of [`crate::items::Items`]'s template
 //! cache): [`build_objectives`] turns the template's fixed objective quads + the slot's counters
 //! (creature/GO objectives) or the live bag count (item objectives; the wire pin: item-objective
@@ -53,6 +53,7 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
+use crate::ui_action::Spells;
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
@@ -138,7 +139,8 @@ impl Plugin for UiQuestLogPlugin {
         app.init_resource::<QuestLog>()
             .add_systems(
                 Startup,
-                load_quest_header_names.after(benilla_assets::AssetSet::Open),
+                (load_quest_header_names, load_quest_tag_names)
+                    .after(benilla_assets::AssetSet::Open),
             )
             .add_systems(
                 Update,
@@ -329,6 +331,7 @@ fn build_detail(
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
     macros: &crate::npc_text::MacroContext,
+    spells: Option<&Spells>,
 ) -> QuestLogDetail {
     let (required_money, reward_money) = money_split(template.money);
     let rewards = template
@@ -353,6 +356,7 @@ fn build_detail(
         reward_money,
         choices,
         rewards,
+        reward_spell: crate::ui_quest::reward_spell_view(template.reward_spell, spells),
     }
 }
 
@@ -409,6 +413,66 @@ fn feed_server_clock(
     script.set_server_unix_time(now);
 }
 
+/// The header literal the reference paints for a header whose id is exactly `0` (`0x84b4ec`, its
+/// only reference image-wide). It is a **designer-data tell, not a transient**: the only value that
+/// can become a header id is a CACHED template's `zoneOrSort`, so it cannot appear while a template
+/// is in flight — which is what makes it safe to render at all (wow-re
+/// `ui/scratch/questlog-list-rebuild.md`, B5).
+const MISSING_HEADER: &str = "Missing header! (quest designers)";
+
+/// One row's grouping/ordering inputs — everything [`order_groups`] needs, and nothing else, so
+/// the display order is testable without a Bevy world.
+struct GroupRow {
+    zone_or_sort: i32,
+    /// The resolved header name for `zone_or_sort` — [`MISSING_HEADER`] for `0`, and the empty
+    /// string for an id neither `AreaTable` nor `QuestSort` names (the reference's lookup simply
+    /// finds no string there, and collates it as `""`).
+    header: String,
+    level: u32,
+    title: String,
+    slot: u8,
+}
+
+/// **The quest log's display order** — §5-verified (wow-re `ui/scratch/questlog-list-rebuild.md`;
+/// rebuild `0x4de510`, group sort `0x4de751`/`0x4de8f0`, row comparator `0x4deac0`). Returns the
+/// header groups in order, each with its rows' indices in order.
+///
+/// - **Groups**: one per distinct `ZoneOrSort`, and `id == 0` is forced **FIRST**, before any name
+///   lookup (`0x4de913`). An id that names no row collates as `""` and lands next. The rest go by
+///   resolved name through the client's collator `0x64a4c0`, which is **case-INSENSITIVE**
+///   (`_strnicmp 0x414310`) — a byte-wise `cmp` puts `"Elwynn Forest"` and `"eastern kingdoms"` in
+///   the wrong relative place.
+/// - **Within a group**: **level ASC** (`0x4decd9`), then **title** through that same collator
+///   (`0x4decfb`). Descriptor-slot order — what this used to do, and what benilla claimed — was
+///   REFUTED: `0x4deac0` reads `entry+0x4` into a stack slot it never uses.
+/// - The reference's `qsort` is **unstable**, so a full (level, title) tie is unspecified there.
+///   We break it on slot, which is deterministic and so cannot contradict an unspecified order.
+fn order_groups(rows: &[GroupRow]) -> Vec<(i32, String, Vec<usize>)> {
+    let mut groups: Vec<(i32, String, Vec<usize>)> = Vec::new();
+    for (i, r) in rows.iter().enumerate() {
+        match groups.iter_mut().find(|(z, _, _)| *z == r.zone_or_sort) {
+            Some((_, _, idxs)) => idxs.push(i),
+            None => groups.push((r.zone_or_sort, r.header.clone(), vec![i])),
+        }
+    }
+    // `id == 0` first (rank 0), then everything else by case-folded name — `""` for an
+    // unresolvable id, so it sorts immediately after.
+    groups.sort_by_key(|(zos, name, _)| {
+        if *zos == 0 {
+            (0u8, String::new())
+        } else {
+            (1, name.to_lowercase())
+        }
+    });
+    for (_, _, idxs) in &mut groups {
+        idxs.sort_by_key(|&i| {
+            let r = &rows[i];
+            (r.level, r.title.to_lowercase(), r.slot)
+        });
+    }
+    groups
+}
+
 /// Read the self player's `PLAYER_QUEST_LOG` descriptor slots each frame, resolve entries/detail,
 /// and push a [`QuestLogState`] snapshot on change (diffed against a `Local`, the crate's standard
 /// feed shape). Also refreshes [`QuestLog::active_quest_ids`]/`entry_slots` for the greeting split
@@ -423,7 +487,9 @@ fn feed_quest_log(
     icons: Option<Res<ItemDisplays>>,
     commands: Res<NetCommands>,
     header_names: Option<Res<QuestHeaderNamesRes>>,
+    tag_names: Option<Res<QuestTagNamesRes>>,
     states: Res<crate::world_state::WorldStates>,
+    spells: Option<Res<Spells>>,
     mut last: Local<crate::ui_script::VmMemo<QuestLogState>>,
     mut prior_quest_ids: Local<crate::ui_script::VmMemo<Option<HashSet<u32>>>>,
 ) {
@@ -467,41 +533,88 @@ fn feed_quest_log(
         *prior_quest_ids = Some(current);
     }
 
-    // ── Section headers (the ref's zone/sort groups) ────────────────────────────────────────────
-    // Group rows by their template's ZoneOrSort NAME (positive → AreaTable zone, negative →
-    // QuestSort sort — [`benilla_formats::QuestHeaderNames`]); an unknown/0/in-flight id falls
-    // into a shared "Quests" bucket until the template lands. Headers sort alphabetically and
-    // quests keep descriptor-slot order within their group — INTERIM: the real client's exact
-    // group/quest ordering (CQuestLog sort) is unpinned; a wow-re follow-up owns it.
-    const FALLBACK_HEADER: &str = "Quests";
-    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
-    for (i, r) in rows.iter().enumerate() {
-        let zos = quest_log
-            .template(r.quest_id, &commands)
-            .map(|t| t.zone_or_sort)
-            .unwrap_or(0);
-        let name = header_names
-            .as_ref()
-            .and_then(|h| h.0.resolve(zos))
-            .unwrap_or(FALLBACK_HEADER)
-            .to_string();
-        match groups.iter_mut().find(|(n, _)| *n == name) {
-            Some((_, idxs)) => idxs.push(i),
-            None => groups.push((name, vec![i])),
+    // ── The IN-FLIGHT GATE — all of the log, or none of it ──────────────────────────────────────
+    // The reference's rebuild (`0x4de510`) counts cache misses into `[0xbb7498]`, skips the row
+    // for each miss entirely (`0x4de66b`/`0x4de67e` — no row AND no header for its group), and
+    // then `0x4de545` makes any FURTHER rebuild a total no-op — not even `QUEST_LOG_UPDATE` —
+    // while the counter is non-zero. Only the arriving response decrements it, rebuilding once
+    // when it reaches 0. So a cold cache shows an EMPTY log (`GetNumQuestLogEntries()` → `0, 0`,
+    // and the stock UI paints `EmptyQuestLogFrame`), and then the whole thing appears in ONE step,
+    // complete. **It is never partially filled** (wow-re `ui/scratch/questlog-list-rebuild.md`,
+    // §5 trio + arbitration; our B3 claim — a placeholder row per in-flight quest — was REFUTED).
+    //
+    // The empty window is the COLD case only: the reference loads `WDB/questcache.wdb` into this
+    // same cache before world-enter (`0x554f9b`), so a returning character's rows are there
+    // immediately. We have no such disk cache yet, so ours is the cold path every login — which is
+    // exactly the reference's own behaviour on a fresh `WDB`, not a deviation.
+    //
+    // `template()` is still called for every row first, because the miss is what SENDS the query
+    // (the reference's rebuild sends `CMSG_QUEST_QUERY` too, once per id ever — our `pending` set
+    // is that same dedupe).
+    // Deliberately a loop and NOT `.all(..)`: `template()` is what SENDS the query, and the
+    // reference asks for every missing id, not just the first. Short-circuiting here would leave
+    // the rest of a cold log unrequested — and then nothing would ever arrive to un-gate it.
+    let mut all_cached = true;
+    for r in &rows {
+        if quest_log.template(r.quest_id, &commands).is_none() {
+            all_cached = false;
         }
     }
-    groups.sort_by(|(a, _), (b, _)| a.cmp(b));
+    let rows: Vec<Row> = if all_cached { rows } else { Vec::new() };
+
+    // ── Section headers (the ref's zone/sort groups) ────────────────────────────────────────────
+    // One header per distinct `ZoneOrSort` (positive → AreaTable zone, negative → QuestSort sort —
+    // [`benilla_formats::QuestHeaderNames`]), in first-appearance order, then sorted. Every row
+    // here has a cached template, so `zone_or_sort` is always the real one — the gate above is
+    // what makes that true.
+    //
+    // **The group order** (`0x4de751`, comparator `0x4de8f0`): `id == 0` is forced FIRST, before
+    // any name lookup (`0x4de913`); an id that names no row collates as `""` and lands next; the
+    // rest are ordered by resolved name through the client's collator `0x64a4c0`, which is
+    // **case-INSENSITIVE** (`_strnicmp 0x414310`) — not the byte `cmp` we had.
+    //
+    // **`id == 0` renders as the literal `"Missing header! (quest designers)"`** (`0x84b4ec`, its
+    // only reference image-wide). That string is a **designer-data tell, not a transient**: the
+    // only value that can become a header id is a CACHED template's `zoneOrSort`, so it cannot
+    // appear while anything is in flight. Which is precisely why it is safe to render — and why it
+    // could not have been, before the gate above existed.
+    let ordered = {
+        let keyed: Vec<GroupRow> = rows
+            .iter()
+            .map(|r| {
+                let t = quest_log.templates.get(&r.quest_id);
+                let zos = t.map(|t| t.zone_or_sort).unwrap_or(0);
+                GroupRow {
+                    zone_or_sort: zos,
+                    header: if zos == 0 {
+                        MISSING_HEADER.to_string()
+                    } else {
+                        header_names
+                            .as_ref()
+                            .and_then(|h| h.0.resolve(zos))
+                            .unwrap_or_default()
+                            .to_string()
+                    },
+                    level: t.map(|t| t.level).unwrap_or(0),
+                    title: t.map(|t| t.title.clone()).unwrap_or_default(),
+                    slot: r.slot,
+                }
+            })
+            .collect();
+        order_groups(&keyed)
+    };
+    let groups = ordered;
 
     let mut entries: Vec<QuestLogEntryView> = Vec::new();
     let mut entry_slots: Vec<Option<u8>> = Vec::new();
     let mut header_keys: Vec<Option<String>> = Vec::new();
-    for (name, row_idxs) in &groups {
+    for (_, name, row_idxs) in &groups {
         let collapsed = quest_log.collapsed.contains(name);
         entries.push(QuestLogEntryView {
             quest_id: 0,
             title: name.clone(),
             level: 0,
-            tag: None,
+            tag: None, // a header names a zone/sort, never a quest — it can carry no tag
             is_header: true,
             collapsed,
             complete: 0,
@@ -516,12 +629,20 @@ fn feed_quest_log(
             if collapsed {
                 continue; // folded: the quest stays in the log, just not in the visible list
             }
-            let (title, level, pushable, objectives) = match quest_log
+            let (title, level, tag, pushable, objectives) = match quest_log
                 .template(r.quest_id, &commands)
             {
                 Some(t) => (
                     t.title.clone(),
                     t.level,
+                    // The `(Elite)`/`(Dungeon)`/`(Raid)`/`(PvP)` suffix: the template's `Type` is
+                    // a `QuestInfo.dbc` row id ([`benilla_formats::QuestTagNames`]), and `Type`
+                    // 0 — the untagged majority — names no row. Absent table (no client data) =
+                    // no tag, never an empty string: the row Lua branches on presence.
+                    tag_names
+                        .as_ref()
+                        .and_then(|tags| tags.0.resolve(t.quest_type))
+                        .map(str::to_string),
                     // `QUEST_FLAGS_SHARABLE` (vmangos `QuestDef.h:153`) — the whole of the
                     // shareable test, and it is the CLIENT's alone: vmangos's
                     // `HandlePushQuestToParty` never checks the bit, it only re-tests it on the
@@ -531,11 +652,10 @@ fn feed_quest_log(
                     t.flags & quest_flags::SHARABLE != 0,
                     build_objectives(t, &r.log_slot, &store.0, &mut items, &mut names, &commands),
                 ),
-                // Title/level/objectives placeholder while the template is in flight — the
-                // QUEST_LOG_UPDATE refresh on landing fills the row in. `pushable` false with it:
-                // the reference reads the same cache, so its button is dark until the answer lands
-                // too.
-                None => ("...".to_string(), 0, false, Vec::new()),
+                // Unreachable: the in-flight gate above emptied `rows` unless EVERY template is
+                // cached, which is the reference's own all-or-nothing rebuild. This arm used to
+                // paint a `"..."` placeholder row — the behaviour the §5 refuted.
+                None => unreachable!("the in-flight gate leaves only cached rows"),
             };
             let complete = if r.log_slot.state & quest_slot_state::COMPLETE != 0 {
                 1
@@ -548,7 +668,7 @@ fn feed_quest_log(
                 quest_id: r.quest_id,
                 title,
                 level,
-                tag: None,
+                tag,
                 is_header: false,
                 collapsed: false,
                 complete,
@@ -586,9 +706,16 @@ fn feed_quest_log(
         .filter(|e| !e.is_header)
         .map(|e| e.quest_id)
         .and_then(|quest_id| {
-            quest_log
-                .template(quest_id, &commands)
-                .map(|t| build_detail(t, &mut items, icons.as_deref(), &commands, &macros))
+            quest_log.template(quest_id, &commands).map(|t| {
+                build_detail(
+                    t,
+                    &mut items,
+                    icons.as_deref(),
+                    &commands,
+                    &macros,
+                    spells.as_deref(),
+                )
+            })
         });
 
     let fresh = QuestLogState {
@@ -629,8 +756,6 @@ fn feed_quest_log(
     script.set_quest_log(fresh.clone());
     script.fire_event("QUEST_LOG_UPDATE", vec![]);
     if !progressed.is_empty() {
-        // Post-push = post-prune: the current watch list, the byte law's index space.
-        let watched = script.quest_log_watched();
         for quest in progressed {
             for line in quest.changed_lines {
                 script.fire_event("UI_INFO_MESSAGE", vec![ScriptValue::Str(line)]);
@@ -643,13 +768,13 @@ fn feed_quest_log(
                 };
                 script.fire_event("UI_INFO_MESSAGE", vec![ScriptValue::Str(msg)]);
             }
-            let watch_index = watched
-                .iter()
-                .position(|&id| id == quest.quest_id)
-                .map_or(0, |p| p as i64 + 1);
-            script.fire_event("QUEST_WATCH_UPDATE", vec![ScriptValue::Int(watch_index)]);
+            // QUEST_WATCH_UPDATE's arg1 is the quest's LOG index: stock QuestLog_OnEvent hands it
+            // to AutoQuestWatch_Update(questIndex), whose end is AddQuestWatch(questIndex)
+            // (QuestLogFrame.lua:68, 752-769). Ours used to pass the watch-list position and
+            // fire a BENILLA_QUEST_PROGRESS twin carrying the log index; the twin went with the
+            // window (1944).
             script.fire_event(
-                "BENILLA_QUEST_PROGRESS",
+                "QUEST_WATCH_UPDATE",
                 vec![ScriptValue::Int(i64::from(quest.index))],
             );
         }
@@ -689,8 +814,6 @@ fn advanced(now: &QuestLogObjectiveView, was: &QuestLogObjectiveView) -> bool {
 /// One quest whose objectives advanced between log states — the announce unit of
 /// [`feed_quest_log`].
 struct QuestProgress {
-    /// The quest id (stable identity — the watch list is id-keyed).
-    quest_id: u32,
     /// The quest's 1-based index in the NEW log (the Era API's quest-log index space).
     index: u32,
     /// The quest title (the COMPLETE toast's `%s`; empty falls to the UNKNOWN form).
@@ -730,7 +853,6 @@ fn quests_with_progressed_objectives(
                 .collect();
             let completed = e.complete == 1 && prev.complete != 1;
             (!changed_lines.is_empty() || completed).then_some(QuestProgress {
-                quest_id: e.quest_id,
                 index: i as u32 + 1,
                 title: e.title.clone(),
                 changed_lines,
@@ -764,6 +886,27 @@ fn load_quest_header_names(
     match loaded {
         Ok(names) => commands.insert_resource(QuestHeaderNamesRes(names)),
         Err(e) => warn!("ui_quest_log: quest header names failed to load: {e:#}"),
+    }
+}
+
+/// The quest `Type → tag name` lookup ([`benilla_formats::QuestTagNames`] — `QuestInfo.dbc`),
+/// loaded once at startup. Absent when the client data didn't load; the feed then pushes no tag,
+/// which is what an untagged quest pushes anyway.
+#[derive(Resource)]
+pub(crate) struct QuestTagNamesRes(pub benilla_formats::QuestTagNames);
+
+/// Startup: read the `QuestInfo.dbc` tag names through the patch chain (the header-names load's
+/// exact shape).
+fn load_quest_tag_names(mut commands: Commands, assets: Option<Res<benilla_assets::WorldAssets>>) {
+    use benilla_assets::LockRecover;
+    let Some(assets) = assets else { return };
+    let loaded = {
+        let mut chain = assets.chain.lock_recover();
+        benilla_formats::load_quest_tag_names(&mut chain)
+    };
+    match loaded {
+        Ok(names) => commands.insert_resource(QuestTagNamesRes(names)),
+        Err(e) => warn!("ui_quest_log: quest tag names failed to load: {e:#}"),
     }
 }
 
@@ -831,6 +974,87 @@ fn drain_quest_log_abandons(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── order_groups — the §5-verified display order ────────────────────────────────────────────
+
+    fn grow(zos: i32, header: &str, level: u32, title: &str, slot: u8) -> GroupRow {
+        GroupRow {
+            zone_or_sort: zos,
+            header: header.into(),
+            level,
+            title: title.into(),
+            slot,
+        }
+    }
+
+    /// Group order: `id == 0` first regardless of its name, then an unnamed id (`""`), then the
+    /// rest by CASE-INSENSITIVE name — the client's collator is `_strnicmp`, so a byte-wise
+    /// compare (which is what this used to do) puts an all-lowercase name in the wrong place.
+    #[test]
+    fn groups_put_id_zero_first_then_unnamed_then_case_folded_names() {
+        let rows = vec![
+            grow(12, "Elwynn Forest", 1, "a", 0),
+            grow(-3, "warlock", 1, "b", 1), // lowercase: byte-cmp would sort it after "Westfall"
+            grow(0, MISSING_HEADER, 1, "c", 2),
+            grow(40, "Westfall", 1, "d", 3),
+            grow(999, "", 1, "e", 4), // an id neither table names
+        ];
+        let order: Vec<i32> = order_groups(&rows).into_iter().map(|(z, _, _)| z).collect();
+        // `warlock` before `Westfall` is the discriminating pair: case-folded, `wa` < `we`; by
+        // BYTES, `W`(0x57) < `w`(0x77) puts `Westfall` first. Everything else about this list is
+        // the same either way, which is why the old byte-wise sort looked fine.
+        assert_eq!(order, vec![0, 999, 12, -3, 40]);
+    }
+
+    /// The `id == 0` header carries the reference's own literal — a designer-data tell, and
+    /// reachable only because a row is never listed before its template is cached.
+    #[test]
+    fn the_zero_header_is_the_references_literal() {
+        let rows = vec![grow(0, MISSING_HEADER, 1, "a", 0)];
+        let groups = order_groups(&rows);
+        assert_eq!(groups[0].1, "Missing header! (quest designers)");
+    }
+
+    /// Within a group: level ASC, then title (case-insensitively) — NOT descriptor-slot order,
+    /// which is what benilla claimed and `0x4deac0` refuted.
+    #[test]
+    fn within_a_group_it_is_level_then_title_not_slot_order() {
+        // Deliberately seeded in the reverse of the expected order by slot.
+        let rows = vec![
+            grow(12, "Elwynn Forest", 9, "Zzz", 0),
+            grow(12, "Elwynn Forest", 3, "beta", 1),
+            grow(12, "Elwynn Forest", 3, "Alpha", 2),
+            grow(12, "Elwynn Forest", 1, "Anything", 3),
+        ];
+        let groups = order_groups(&rows);
+        assert_eq!(groups.len(), 1);
+        let titles: Vec<&str> = groups[0]
+            .2
+            .iter()
+            .map(|&i| rows[i].title.as_str())
+            .collect();
+        // level 1, then the two level-3s by case-folded title ("Alpha" < "beta" — a byte compare
+        // would put uppercase "Alpha" before "beta" too, so the discriminating pair is below),
+        // then level 9.
+        assert_eq!(titles, vec!["Anything", "Alpha", "beta", "Zzz"]);
+    }
+
+    /// The case-folding is load-bearing in its own right: `"apple"` must precede `"Banana"`, which
+    /// a byte-wise compare gets wrong (uppercase `B` = 0x42 sorts before lowercase `a` = 0x61).
+    #[test]
+    fn title_order_is_case_insensitive() {
+        let rows = vec![
+            grow(12, "Zone", 5, "apple", 0),
+            grow(12, "Zone", 5, "Banana", 1),
+        ];
+        let groups = order_groups(&rows);
+        let titles: Vec<&str> = groups[0]
+            .2
+            .iter()
+            .map(|&i| rows[i].title.as_str())
+            .collect();
+        assert_eq!(titles, vec!["apple", "Banana"]);
+    }
 
     // ── remap_selection ─────────────────────────────────────────────────────────────────────────
 

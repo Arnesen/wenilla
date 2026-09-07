@@ -67,4 +67,23 @@ impl WorldWriter {
             &messages::resurrect_response(caster, accept),
         )
     }
+
+    /// Ask a battleground spirit healer for its clock (`CMSG_AREA_SPIRIT_HEALER_QUERY`) — sent
+    /// when the client adopts a new healer; answered by `SMSG_AREA_SPIRIT_HEALER_TIME`
+    /// (decision 1963).
+    pub fn area_spirit_healer_query(&mut self, healer: u64) -> Result<()> {
+        self.send(
+            opcode::CMSG_AREA_SPIRIT_HEALER_QUERY,
+            &messages::area_spirit_healer(healer),
+        )
+    }
+
+    /// Queue for the healer's next wave (`CMSG_AREA_SPIRIT_HEALER_QUEUE`) —
+    /// `AcceptAreaSpiritHeal()`'s packet, carrying the cached healer (decision 1963).
+    pub fn area_spirit_healer_queue(&mut self, healer: u64) -> Result<()> {
+        self.send(
+            opcode::CMSG_AREA_SPIRIT_HEALER_QUEUE,
+            &messages::area_spirit_healer(healer),
+        )
+    }
 }

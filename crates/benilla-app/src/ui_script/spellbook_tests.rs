@@ -1,7 +1,7 @@
 //! The shipped **spellbook window** driven end-to-end, engine-only (no Bevy): the real
-//! `assets/ui/SpellBookFrame.xml` loaded behind `Fonts.xml`/`UiPanels.xml`/`GameTooltip.xml`
-//! (plus `ActionBar.xml` for the cross-window place test) and fed a small synthetic book —
-//! mirroring `character_tests.rs`'s/`action_bar_tests.rs`'s harness (decision 0216 §8, slice 5).
+//! `Interface\FrameXML\SpellBookFrame.xml` loaded behind
+//! `Fonts.xml`/`UIParent.xml`/`GameTooltip.xml` (plus `ActionBar.xml` for the cross-window place
+//! test) and fed a small synthetic book — mirroring `character_tests.rs`'s/`action_bar_tests.rs`'s harness (decision 0216 §8, slice 5).
 
 use benilla_ui::script::{SpellBookState, SpellSlotView, SpellTabView, UiScript};
 
@@ -80,34 +80,83 @@ fn click(s: &mut UiScript, name: &str, button: &str) {
     s.mouse_button(x, y, button, false);
 }
 
+/// The reference's spellbook needs the action-bar chain beneath it: `SpellBookFrame_OnShow` and
+/// `_OnHide` call `MultiActionBar_ShowAllGrids`/`HideAllGrids` (MultiActionBars.lua, whose file
+/// wants the options window's uvars), `OnShow` calls `UpdateMicroButtons`, and the window docks
+/// in UiPanels' left slot. One chain, in the manifest's order, for every test that opens it.
+pub(super) fn spellbook_ui(w: f32, h: f32) -> UiScript {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(w, h);
+    for f in [
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        r"Interface\FrameXML\OptionsFrameTemplates.xml",
+        r"Interface\FrameXML\ReputationFrame.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        "ScrollTemplates.xml",
+        "KeyBindingsPage.xml",
+        "OptionsFrame.xml",
+        "Interface\\FrameXML\\MultiActionBars.xml",
+        r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
+        "Interface\\FrameXML\\SpellBookFrame.xml",
+        "SpellBookAdapters.xml",
+    ] {
+        load_xml(&s, f);
+    }
+    s
+}
+
 /// The loader itself: every file the window depends on parses and materializes with no errors —
-/// the window + close + prev/next page buttons + 12 spell buttons (each with a Cooldown child)
-/// + 8 skill-line tabs + the 3 Spell/Pet toggle tabs.
+/// the window + close + prev/next page buttons + 12 spell buttons (each with a Cooldown and an
+/// AutoCast Model child) + 8 skill-line tabs + the 3 Spell/Pet toggle tabs + the tab flash frame.
 #[test]
 fn shipped_spellbook_loads_clean() {
     let s = UiScript::new().unwrap();
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "GameTooltip.xml");
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/SpellBookFrame.xml"),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "loader errors: {:?}",
-        report.errors
-    );
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
+    // The reference's own file, off the chain, with the one adapter it needs from this engine.
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    let frames = load_xml(&s, "Interface\\FrameXML\\SpellBookFrame.xml");
+    load_xml(&s, "SpellBookAdapters.xml");
+    assert!(s.errors().is_empty(), "loader errors: {:?}", s.errors());
     assert_eq!(
-        report.frames, 39,
-        "window + close + prev/next + 12 spell buttons (each with a Cooldown child) + 8 \
-         skill-line tabs + the 3 Spell/Pet toggle tabs (decision 1032)"
+        frames, 52,
+        "window + close + prev/next + 12 spell buttons (each with its Cooldown and AutoCast \
+         Model children) + 8 skill-line tabs + the 3 Spell/Pet toggle tabs + the tab flash frame"
     );
+    for name in ["SpellBookFrame", "SpellButton12", "SpellButton1AutoCast"] {
+        assert!(
+            s.eval::<bool>(&format!("return {name} ~= nil")).unwrap(),
+            "{name} exists"
+        );
+    }
 }
 
 /// The whole contract in one end-to-end drive: `ToggleSpellBook` (the 'P' binding's entry point)
@@ -117,17 +166,7 @@ fn shipped_spellbook_loads_clean() {
 /// bar-to-bar drag uses — packing kind 0x00 (SPELL) with the spell id.
 #[test]
 fn shipped_spellbook_drives_end_to_end() {
-    let mut s = UiScript::new().unwrap();
-    s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "ActionBar.xml");
-    load_xml(&s, "SpellBookFrame.xml");
+    let mut s = spellbook_ui(1024.0, 768.0);
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
 
     s.set_spellbook(book());
@@ -194,6 +233,14 @@ fn shipped_spellbook_drives_end_to_end() {
     // (`cursor::bar::place_action`) a bar-to-bar drag uses: a plain click on an action button
     // routes through UseAction's checkCursor=1 fork to a place. Packs kind 0x00 (SPELL, decision
     // 0216 §1) with the spell id — `action_sets` is the app's own CMSG_SET_ACTION_BUTTON queue.
+    // An EMPTY main-bar slot is hidden under the reference (ActionButton.lua:69-70) until a held
+    // payload opens the grid: the engine derives ACTIONBAR_SHOWGRID from the cursor's edge and
+    // fires it on the next tick, as the app ticks between any two mouse events.
+    s.tick(0.016);
+    assert!(
+        s.eval::<bool>("return ActionButton1:IsVisible()").unwrap(),
+        "the held spell opened the empty well"
+    );
     let (ax, ay) = center(&s, "ActionButton1");
     s.mouse_button(ax, ay, "LeftButton", true);
     s.mouse_button(ax, ay, "LeftButton", false);
@@ -211,20 +258,7 @@ fn shipped_spellbook_drives_end_to_end() {
 fn shipped_spellbook_shows_the_cooldown_pie() {
     use benilla_ui::script::QuadContent;
 
-    let mut s = UiScript::new().unwrap();
-    s.set_screen_size(1024.0, 768.0);
-    for f in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        r"Interface\FrameXML\UIPanelTemplates.lua",
-        r"Interface\FrameXML\UIPanelTemplates.xml",
-        "GameTooltip.xml",
-        "Cooldown.xml",
-        "SpellBookFrame.xml",
-    ] {
-        load_xml(&s, f);
-    }
+    let mut s = spellbook_ui(1024.0, 768.0);
     s.set_spellbook(book());
     s.run("ToggleSpellBook(BOOKTYPE_SPELL)").unwrap();
     s.tick(10.0); // GetTime = 10
@@ -234,23 +268,19 @@ fn shipped_spellbook_shows_the_cooldown_pie() {
     b.slots[0].cooldown = Some((6_000, 10_000, true));
     s.set_spellbook(b);
     s.fire_event("SPELL_UPDATE_COOLDOWN", vec![]);
+    // The stock machine (decision 2019): sequence 0 armed by `CooldownFrame_SetTimer`, scrubbed
+    // by the next paint's `OnUpdateModel`.
+    super::test_ui::cooldown_facts(&mut s);
+    s.tick(0.0);
     s.resolve();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-    let sweep = s.extract().into_iter().find_map(|q| {
-        if s.quad_owner_name(q.target).as_deref() != Some("SpellButton1Cooldown") {
-            return None;
-        }
-        match q.content {
-            QuadContent::Cooldown { fraction, flash } => Some((fraction, flash)),
-            _ => None,
-        }
-    });
-    let (fraction, flash) = sweep.expect("SpellButton1's Cooldown widget is showing");
-    assert!(
-        (fraction - 0.4).abs() < 1e-3,
-        "4 s elapsed of 10 ⇒ the sweep sits at 40%, got {fraction}"
+    let play = super::test_ui::cooldown_play(&s, "SpellButton1Cooldown")
+        .expect("SpellButton1's cooldown pane is showing");
+    assert_eq!(
+        play,
+        (0, 400),
+        "4 s elapsed of 10 ⇒ the sweep sits at 40 %: sequence 0 at 400 ms"
     );
-    assert_eq!(flash, None);
 
     // An on-hold triple: no sweep (CooldownFrame_SetTimer's enable gate), the icon dims to 40%.
     let mut b = book();
@@ -283,24 +313,33 @@ fn shipped_spellbook_shows_the_cooldown_pie() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The empty-slot LOOK, pinned at the quad level (the regression that shipped with slice 5): a
-/// slot past the book's length is a **disabled** SpellButton with no DisabledTexture and an
-/// unchecked ring — so it draws its UI-Spellbook-SpellBackground square and **nothing else**. The
-/// slice-5 build leaked both the UI-Quickslot2 NormalTexture (disabled wrongly fell back to
-/// Normal) and the CheckButtonHilight ring (the reference's `SetChecked(0)` was read Lua-truthy),
-/// putting a gold ring on all 12 slots — the director's "spellbook looks very wrong".
+/// The empty-slot LOOK, pinned at the quad level: a slot past the book's length is a **disabled**
+/// SpellButton, and it draws its `UI-Spellbook-SpellBackground` square **and its `UI-Quickslot2`
+/// socket ring** — but no `CheckButtonHilight` glow.
+///
+/// **The ring was wrong to remove, and this test asserted the wrong half for a year** (decision
+/// 2011, correcting 0227's second finding). 0227 read the empty slot as a *born-disabled* button
+/// whose Normal texture had therefore never been shown — but stock `SpellButton_UpdateButton`
+/// `Disable()`s a button that was created enabled and has been wearing its ring since LoadXML
+/// (l.328, and the `CSimpleButton` ctor `0x7786a0` ends in `SetState(NORMAL)`), so the shown
+/// pointer `+0x4c4` is already on the ring when the disable arrives and `SetState 0x779790` has
+/// no step that takes it off. The reference's own Lua is the tell: the disable branch resets that
+/// very ring's vertex colour to white (l.337), which is only meaningful on a ring that draws.
+///
+/// What the slice-5 build really got wrong was the OTHER ring — the `CheckButtonHilight` glow on
+/// all 12 slots, from reading the reference's `SetChecked(0)` as Lua-truthy (0227's first
+/// finding, which stands). That is the half this still pins.
 #[test]
-fn shipped_spellbook_empty_slot_draws_only_the_background() {
-    let mut s = UiScript::new().unwrap();
-    s.set_screen_size(640.0, 700.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "SpellBookFrame.xml");
-    // An EMPTY book: every slot takes the `id > offset + numSpells` disable path.
+fn shipped_spellbook_empty_slot_draws_its_background_and_socket_ring() {
+    let mut s = spellbook_ui(640.0, 700.0);
+    // A one-spell book: slot 5 takes the reference's `id > offset + numSpells` disable path. (A
+    // book with NO spells is a state no character is ever in — the reference's own
+    // `ToggleSpellBook` clamps the page to 0 for it and every button id goes negative.)
+    let mut b = book();
+    b.tabs.truncate(1);
+    b.tabs[0].num_spells = 1;
+    b.slots.truncate(1);
+    s.set_spellbook(b);
     s.run("ToggleSpellBook(BOOKTYPE_SPELL)").unwrap();
     s.tick(0.05);
     s.resolve();
@@ -316,8 +355,11 @@ fn shipped_spellbook_empty_slot_draws_only_the_background() {
     }
     assert_eq!(
         slot5_paths,
-        vec!["Interface\\Spellbook\\UI-Spellbook-SpellBackground".to_string()],
-        "an empty slot draws its background square and nothing else (no ring, no checked glow)"
+        vec![
+            "Interface\\Spellbook\\UI-Spellbook-SpellBackground".to_string(),
+            "Interface\\Buttons\\UI-Quickslot2".to_string(),
+        ],
+        "an empty slot keeps its socket ring and gains no checked glow"
     );
     // The reference passes SetChecked(0) — numeric coercion, not Lua truthiness.
     assert!(!s
@@ -329,9 +371,7 @@ fn shipped_spellbook_empty_slot_draws_only_the_background() {
 /// l.132/134/268/296-303/336): 1/"true"/true check; 0/"false"/nil/non-numeric strings uncheck.
 #[test]
 fn set_checked_uses_blizzard_bool_coercion() {
-    let s = UiScript::new().unwrap();
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "SpellBookFrame.xml");
+    let s = spellbook_ui(1024.0, 768.0);
     for (arg, want) in [
         ("1", true),
         ("0", false),
@@ -398,16 +438,7 @@ fn pet_book() -> benilla_ui::script::PetBookState {
 /// the class token's label, and a right-click flips autocast instead of casting.
 #[test]
 fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
-    let mut s = UiScript::new().unwrap();
-    s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "SpellBookFrame.xml");
+    let mut s = spellbook_ui(1024.0, 768.0);
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     s.set_spellbook(book());
 
@@ -480,13 +511,13 @@ fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
             .unwrap(),
         "a passive is not autocastable"
     );
-    // …and the shine marker follows the SECOND (is it on) — the native lane (decision 1383)
-    // draws the sparkle wherever a shown marker sits, so shown-ness IS the enable.
+    // …and the shine MODEL follows the SECOND (is it on) — the stock `$parentAutoCast`, whose
+    // file the tile renderer draws (2013/2014), so shown-ness IS the enable.
     assert!(s
-        .eval::<bool>("return SpellButton1Shine:IsVisible()")
+        .eval::<bool>("return SpellButton1AutoCast:IsVisible()")
         .unwrap());
     assert!(!s
-        .eval::<bool>("return SpellButton3Shine:IsVisible()")
+        .eval::<bool>("return SpellButton3AutoCast:IsVisible()")
         .unwrap());
     // The corner brackets' RECT, through the live widget. Asserted on the resolved rect rather
     // than the XML, so an anchor bug between the two is still caught — and CENTERED with no
@@ -516,29 +547,35 @@ fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
         br[3]
     );
 
-    // The marker's RECT: 1391 gave it the ref's own 36x36 at CENTER (1,1); 1393 squares it on the
-    // button instead, so the glow and the brackets share a centre. Checked here rather than
-    // trusted to the XML, because the whole spell-book thread turns on where this viewport sits.
-    let geom: Vec<f32> = ["GetWidth", "GetHeight"]
+    // The pane's RECT: the ref's own template gives it 36x36 at CENTER (1,1); 1393 squares it on
+    // the button instead (now by re-seating the stock Model, 2014), so the glow and the brackets
+    // share a centre. Checked here rather than trusted to the XML, because the whole spell-book
+    // thread turns on where this viewport sits.
+    let geom: Vec<f32> = ["GetWidth", "GetHeight", "GetModelScale"]
         .iter()
         .map(|m| {
-            s.eval::<f32>(&format!("return SpellButton1Shine:{m}()"))
+            s.eval::<f32>(&format!("return SpellButton1AutoCast:{m}()"))
                 .unwrap()
         })
         .collect();
     assert!(
         (geom[0] - 37.0).abs() < 0.01 && (geom[1] - 37.0).abs() < 0.01,
-        "shine marker is {geom:?}, expected 37x37 (1393 squares it on the button)"
+        "shine pane is {geom:?}, expected 37x37 (1393 squares it on the button)"
+    );
+    assert!(
+        (geom[2] - 1.48).abs() < 0.001,
+        "shine pane's model scale is {}, expected 1393's 1.48 (the pet button's rim ratio)",
+        geom[2]
     );
     let dx = s
-        .eval::<f32>("return SpellButton1Shine:GetLeft() - SpellButton1:GetLeft()")
+        .eval::<f32>("return SpellButton1AutoCast:GetLeft() - SpellButton1:GetLeft()")
         .unwrap();
     let dy = s
-        .eval::<f32>("return SpellButton1Shine:GetBottom() - SpellButton1:GetBottom()")
+        .eval::<f32>("return SpellButton1AutoCast:GetBottom() - SpellButton1:GetBottom()")
         .unwrap();
     assert!(
         dx.abs() < 0.01 && dy.abs() < 0.01,
-        "shine marker sits at ({dx}, {dy}) inside the button; 1393 squares it on the button so it \
+        "shine pane sits at ({dx}, {dy}) inside the button; 1393 squares it on the button so it \
          is concentric with the brackets — the ref's +1,+1 is what read as a top/right bias"
     );
 
@@ -656,14 +693,16 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
     );
     for file in [
         r"Interface\FrameXML\GlobalStrings.lua",
-        "Fonts.xml",
-        "BasicControls.xml", // `TEXT`
-        "MoneyFrame.xml",
-        "UiPanels.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        "Interface\\FrameXML\\BasicControls.xml", // `TEXT`
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
         // `ShowMacroFrame` lives here since 1848.
-        "UIParent.xml",
-        "GameTooltip.xml",
-        "Cooldown.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
         // **ScrollTemplates BEFORE UIPanelTemplates, which is the manifest's own order.** Ours
         // still carries dead `FauxScrollFrame_*` copies that the chain overrides by loading after
         // (1846's step 3, deliberately not done); load them the other way round and OUR copies win
@@ -673,13 +712,38 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
         r"Interface\FrameXML\UIPanelTemplates.xml",
         // The icon chooser's scroll frame inherits `ClassTrainerListScrollFrameTemplate`.
         r"Interface\FrameXML\ClassTrainerFrameTemplates.xml",
-        "MicroMenu.xml",
-        "ActionBar.xml",
-        r"Interface\AddOns\Blizzard_MacroUI\Blizzard_MacroUI.xml",
-        "SpellBookFrame.xml",
+        r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
+        // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
+        // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
+        // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
+        // two template files its check boxes inherit through (1875).
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        r"Interface\FrameXML\OptionsFrameTemplates.xml",
+        r"Interface\FrameXML\ReputationFrame.xml",
+        // The reference's spellbook shows and hides the multibar grids (MultiActionBars.lua),
+        // whose file wants the options window's uvars — the same tail `spellbook_ui` carries.
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        "KeyBindingsPage.xml",
+        "OptionsFrame.xml",
+        "Interface\\FrameXML\\MultiActionBars.xml",
+        "Interface\\FrameXML\\SpellBookFrame.xml",
+        "SpellBookAdapters.xml",
     ] {
         load_xml(&s, file);
     }
+    // The window is a LoadOnDemand addon, reached the way the app reaches it: seated off the
+    // chain as a registry row (1957) and loaded by the reference's own `MacroFrame_LoadUI`
+    // (UIParent.xml; 1967).
+    super::test_ui::seat_chain_addon(&mut s, "Blizzard_MacroUI");
+    s.run("MacroFrame_LoadUI()").unwrap();
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
 
     // The file's own book plus a third Fire spell that is PASSIVE — book id 3, which the ref's

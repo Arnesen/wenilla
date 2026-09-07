@@ -3,10 +3,17 @@
 //! `StandardMaterial`; the fragment shaders live in `src/shaders/{celestial,star}.wgsl`,
 //! compiled in and served as `embedded://benilla_world/shaders/…` (decision 1175).
 
-use bevy::pbr::{ExtendedMaterial, MaterialExtension};
+use bevy::mesh::MeshVertexBufferLayoutRef;
+use bevy::pbr::{
+    ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline,
+};
 use bevy::prelude::*;
-use bevy::render::render_resource::AsBindGroup;
+use bevy::render::render_resource::{
+    AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+};
 use bevy::shader::ShaderRef;
+
+use crate::sky_order::{sky_pipeline_state, SKY_VERTEX_SHADER};
 
 /// Material for every celestial body sprite — the **discs** (sun, white moon, moon02) *and* their
 /// additive lens-flare **glares** — an [`ExtendedMaterial`] over `StandardMaterial` whose fragment
@@ -48,8 +55,23 @@ pub struct CelestialExt {
 }
 
 impl MaterialExtension for CelestialExt {
+    /// The shared sky vertex stage — the far-depth pin ([`crate::sky_order`], "The depth law").
+    fn vertex_shader() -> ShaderRef {
+        SKY_VERTEX_SHADER.into()
+    }
+
     fn fragment_shader() -> ShaderRef {
         "embedded://benilla_world/shaders/celestial.wgsl".into()
+    }
+
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        sky_pipeline_state(descriptor);
+        Ok(())
     }
 }
 
@@ -71,7 +93,22 @@ pub type StarMaterial = ExtendedMaterial<StandardMaterial, StarExt>;
 pub struct StarExt {}
 
 impl MaterialExtension for StarExt {
+    /// The shared sky vertex stage — the far-depth pin ([`crate::sky_order`], "The depth law").
+    fn vertex_shader() -> ShaderRef {
+        SKY_VERTEX_SHADER.into()
+    }
+
     fn fragment_shader() -> ShaderRef {
         "embedded://benilla_world/shaders/star.wgsl".into()
+    }
+
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        sky_pipeline_state(descriptor);
+        Ok(())
     }
 }

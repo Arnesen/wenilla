@@ -9,37 +9,30 @@
 
 use benilla_ui::script::{FriendInfo, SocialRequest, SocialState, UiScript, WhoInfo};
 
-use super::test_ui::load_ui_strict as load_xml;
-
 /// The window's own manifest slice, in `load_default_ui` order.
 fn setup() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
-    // The row right-click menu is the shared UnitPopup "FRIEND" menu, so the window's slice of
-    // the manifest includes it (it loads well before FriendsFrame.xml in the real order).
-    load_xml(&s, "UnitPopup.xml");
-    load_xml(&s, "ScrollTemplates.xml");
-    // The guild pane's frames inherit the reference's shared UIPanelButtonTemplate /
-    // UIPanelCloseButton / UIPanelScrollFrameTemplate rather than a private copy (decision 1257),
-    // so this file's slice needs the shared kit — and the strict `load_xml` above is what would
-    // otherwise let those frames load art-less and silent.
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "FriendsFrame.xml");
-    // The social window's fourth tab lives in its own file, and it is part of THIS window's
-    // manifest slice now: `BENILLA_FRIENDS_SUBFRAMES` names "RaidFrame", and both
-    // `FriendsFrame_ShowSubFrame` and `FriendsFrame_OnHide` resolve every name in that list
-    // through `getglobal` and call `:Hide()` on it. The reference's list names it too and never
-    // guards, because there RaidFrame.xml is FrameXML and always loaded — so the guard belongs in
-    // the harness's load order, not in shipped Lua defending against a state the client cannot be
-    // in (decision 1549).
-    load_xml(&s, "RaidFrame.xml");
+    super::test_ui::load_social_ui(&mut s);
     s
+}
+
+/// One `/who` row as the app's feed would have resolved it.
+fn who(name: &str, level: u32, class: &str, zone: &str) -> WhoInfo {
+    WhoInfo {
+        name: name.to_string(),
+        guild: String::new(),
+        level,
+        race: "Human".to_string(),
+        class: class.to_string(),
+        zone: zone.to_string(),
+    }
+}
+
+/// The name painted into who row `row`.
+fn who_name(s: &UiScript, row: u32) -> String {
+    s.eval::<String>(&format!("return WhoFrameButton{row}Name:GetText()"))
+        .unwrap()
 }
 
 fn friend(name: &str, level: u32, class: &str, area: &str, connected: bool) -> FriendInfo {
@@ -126,6 +119,45 @@ fn the_window_opens_on_friends_with_the_guild_tab_disabled() {
     assert!(!s.eval::<bool>("return FriendsFrame:IsVisible()").unwrap());
 }
 
+/// **The social window's tabs fit their labels on the first show — through TWO inheritance hops.**
+///
+/// `FriendsFrameTab1..4` inherit `FriendsFrameTabTemplate`, which inherits
+/// `CharacterFrameTabButtonTemplate` (the reference's own file, on the chain since 1993). The
+/// middle template declares an `<OnClick>` and nothing else, and handler replacement is **per
+/// handler name** (wow-re `template-onload-replacement-law.md`) — so the base template's
+/// `<OnShow>` fit still runs, two hops down. That is the arrangement this pins: a row of tabs
+/// still wearing the base template's authored 115 would mean the OnShow was lost on the way.
+#[test]
+fn the_social_tabs_fit_their_labels_on_the_first_show() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    /// `2 * FriendsFrameTab1Left:GetWidth()` — the big tab's two 20-unit end slices.
+    const SIDES: f64 = 40.0;
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    // The app installs `AtlasMeasurer`; the reference's fit is inline, so a harness that models
+    // the async round trip models a configuration the app does not have (1848's correction).
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
+    super::test_ui::load_social_ui(&mut s);
+    s.run("ToggleFriendsFrame(1)").unwrap();
+    s.resolve();
+
+    for i in 1..=4 {
+        let (label, width): (f64, f64) = s
+            .eval(&format!(
+                "return FriendsFrameTab{i}Text:GetStringWidth(), FriendsFrameTab{i}:GetWidth()"
+            ))
+            .unwrap();
+        assert!(label > 0.0, "tab {i} measured its label");
+        assert_eq!(
+            width,
+            label + SIDES,
+            "tab {i} is its text plus the two end slices, from the base template's OnShow"
+        );
+        assert_ne!(width, 115.0, "tab {i} is still at the authored pre-fit");
+    }
+    assert!(s.errors().is_empty(), "no handler errors: {:?}", s.errors());
+}
+
 /// A friend row shows name/zone/status on its top line and "Level N Class" underneath; an
 /// OFFLINE friend takes the greyed offline template instead. This is the test that fails if
 /// `GetFriendInfo`'s six returns ever come back in the wrong order.
@@ -151,17 +183,17 @@ fn friend_rows_render_the_online_and_offline_templates() {
     );
 
     assert_eq!(
-        s.eval::<String>("return FriendsFrameFriendButton1NameLocation:GetText()")
+        s.eval::<String>("return FriendsFrameFriendButton1ButtonTextNameLocation:GetText()")
             .unwrap(),
         "Onerogue |cffffffff- Elwynn Forest|r <AFK>"
     );
     assert_eq!(
-        s.eval::<String>("return FriendsFrameFriendButton1Info:GetText()")
+        s.eval::<String>("return FriendsFrameFriendButton1ButtonTextInfo:GetText()")
             .unwrap(),
         "Level 60 Rogue"
     );
     assert_eq!(
-        s.eval::<String>("return FriendsFrameFriendButton2NameLocation:GetText()")
+        s.eval::<String>("return FriendsFrameFriendButton2ButtonTextNameLocation:GetText()")
             .unwrap(),
         "|cff999999Twomage - Offline|r"
     );
@@ -250,8 +282,19 @@ fn the_friend_buttons_queue_their_verbs() {
         benilla_ui::script::PartyRequest::InviteName(n) if n == "Twomage"
     )));
 
+    // Send Message is the reference's `ChatFrame_OpenChat("/w Twomage ")`: the box shows with
+    // the text PENDING (`editBox.setText = 1`), applied by its next OnUpdate, whose OnTextSet
+    // runs the parse that turns the line into a whisper to the friend (1959).
     s.run("FriendsFrame_SendMessage()").unwrap();
-    assert_eq!(s.take_tell_requests(), vec!["Twomage".to_string()]);
+    s.tick(0.05);
+    assert!(s
+        .eval::<bool>("return ChatFrameEditBox:IsVisible()")
+        .unwrap());
+    assert_eq!(
+        s.eval::<(String, String)>("return ChatFrameEditBox.chatType, ChatFrameEditBox.tellTarget")
+            .unwrap(),
+        ("WHISPER".to_string(), "Twomage".to_string())
+    );
 }
 
 /// The Ignore toggle-tab swaps tab 1's list without leaving the tab, and the ignore rows render
@@ -284,12 +327,12 @@ fn the_ignore_list_is_the_other_half_of_tab_one() {
         "Ignore List"
     );
     assert_eq!(
-        s.eval::<String>("return FriendsFrameIgnoreButton1Name:GetText()")
+        s.eval::<String>("return FriendsFrameIgnoreButton1ButtonTextName:GetText()")
             .unwrap(),
         "Spammer"
     );
     assert_eq!(
-        s.eval::<String>("return FriendsFrameIgnoreButton2Name:GetText()")
+        s.eval::<String>("return FriendsFrameIgnoreButton2ButtonTextName:GetText()")
             .unwrap(),
         "Ninja"
     );
@@ -308,9 +351,12 @@ fn the_ignore_list_is_the_other_half_of_tab_one() {
     assert!(s
         .eval::<bool>("return FriendsListFrame:IsVisible()")
         .unwrap());
+    // The reference's `ShowIgnorePanel` shows the WINDOW (its tab switch is commented out in the
+    // stock file), so the list that was up stays up — the friends list here (1959).
     s.run("ShowIgnorePanel()").unwrap();
+    assert!(s.eval::<bool>("return FriendsFrame:IsVisible()").unwrap());
     assert!(s
-        .eval::<bool>("return IgnoreListFrame:IsVisible()")
+        .eval::<bool>("return FriendsListFrame:IsVisible()")
         .unwrap());
 }
 
@@ -409,6 +455,60 @@ fn the_who_dropdown_switches_the_variable_column() {
     );
 }
 
+/// **B365's retest, pinned.** The Who list's column headers sort, the same header clicked twice
+/// REVERSES, and the earlier click survives as a tie-breaker — the reference's seven-slot chain
+/// (`SortWho 0x5ad890`, decision 2030).
+///
+/// What makes this the *window's* test rather than the chain's: every assertion reads the painted
+/// row straight after `Click()`, with **no feed tick in between**. That can only pass if
+/// `WHO_LIST_UPDATE` fires synchronously from inside the binding, the way `SignalEvent` does — the
+/// half of the bug the director could see, since our old sort redrew a tick later and only ever
+/// ascended.
+#[test]
+fn the_who_headers_sort_and_a_repeated_click_reverses() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = setup();
+    s.run("ShowWhoPanel()").unwrap();
+    push(
+        &mut s,
+        SocialState {
+            who: vec![
+                who("Galas", 60, "Warrior", "Elwynn Forest"),
+                who("Erdrin", 12, "Mage", "Elwynn Forest"),
+            ],
+            who_total: 2,
+            ..Default::default()
+        },
+        "WHO_LIST_UPDATE",
+    );
+    let _ = s.take_social_requests();
+    assert_eq!(who_name(&s, 1), "Galas", "the server's order, unsorted");
+
+    // Header 1 is Name (`FriendsFrame.xml:1313`).
+    s.run("WhoFrameColumnHeader1:Click()").unwrap();
+    assert_eq!(who_name(&s, 1), "Erdrin", "Name, ascending");
+    assert_eq!(
+        s.take_social_requests(),
+        vec![SocialRequest::SortWho("name".to_string())],
+        "and the app hears the click too"
+    );
+
+    s.run("WhoFrameColumnHeader1:Click()").unwrap();
+    assert_eq!(who_name(&s, 1), "Galas", "the same header again reverses");
+
+    // Header 3 is Level (`:1394`) — ascending puts the level 12 first.
+    s.run("WhoFrameColumnHeader3:Click()").unwrap();
+    assert_eq!(who_name(&s, 1), "Erdrin", "Level, ascending");
+    s.run("WhoFrameColumnHeader3:Click()").unwrap();
+    assert_eq!(who_name(&s, 1), "Galas", "and Level reverses too");
+
+    // Back to Name: promoted from behind, it keeps the descending direction it was left in
+    // rather than flipping — the chain's memory, not a per-click toggle.
+    s.run("WhoFrameColumnHeader1:Click()").unwrap();
+    assert_eq!(who_name(&s, 1), "Galas", "Name, still descending");
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
 /// The who buttons need a selected row, and selecting one enables both. A fresh answer clears
 /// the selection — row 3 of the last query is not row 3 of this one.
 #[test]
@@ -463,10 +563,13 @@ fn the_who_buttons_need_a_selected_row() {
         },
         "WHO_LIST_UPDATE",
     );
+    // The reference keeps the selection across answers: `WhoList_Update` enables the buttons
+    // whenever `WhoFrame.selectedWho` is set, and its WHO_LIST_UPDATE arm clears nothing. (Our
+    // transcription dropped it; 1959.)
     assert!(
-        !s.eval::<bool>("return WhoFrameAddFriendButton:IsEnabled() ~= 0")
+        s.eval::<bool>("return WhoFrameAddFriendButton:IsEnabled() ~= 0")
             .unwrap(),
-        "a fresh answer drops the old selection"
+        "a fresh answer keeps the selection"
     );
 }
 
@@ -507,57 +610,6 @@ fn the_who_edit_box_sends_its_filter() {
     );
 }
 
-/// The slash bodies are the reference's: a NAMED `/friends` befriends, a bare one refreshes; a
-/// bare `/who` opens the panel and fills the edit box with the default filter.
-#[test]
-fn the_slash_bodies_match_the_reference() {
-    let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = setup();
-    // The WhoFrame's OnLoad routes results to chat until it is shown; drain that so each
-    // assertion below sees only what its own call queued.
-    let _ = s.take_social_requests();
-
-    s.run("BenillaSlashFriends(\"Onerogue\")").unwrap();
-    assert_eq!(
-        s.take_social_requests(),
-        vec![SocialRequest::AddFriend("Onerogue".to_string())]
-    );
-    s.run("BenillaSlashFriends(\"\")").unwrap();
-    assert_eq!(
-        s.take_social_requests(),
-        vec![SocialRequest::RefreshFriends]
-    );
-
-    // `/ignore <name>` toggles rather than adds — the ref's AddOrDelIgnore.
-    s.run("BenillaSlashIgnore(\"Spammer\")").unwrap();
-    assert_eq!(
-        s.take_social_requests(),
-        vec![SocialRequest::ToggleIgnore("Spammer".to_string())]
-    );
-
-    // A bare `/who` opens the Who panel and sends the default filter, which it also shows.
-    s.run("BenillaSlashWho(\"\")").unwrap();
-    assert!(s.eval::<bool>("return WhoFrame:IsVisible()").unwrap());
-    let requests = s.take_social_requests();
-    let sent = requests
-        .iter()
-        .find_map(|r| match r {
-            SocialRequest::Who(filter) => Some(filter.clone()),
-            _ => None,
-        })
-        .expect("a bare /who still sends a query");
-    assert!(
-        sent.starts_with("z-\""),
-        "the default filter is zone-scoped: {sent}"
-    );
-    assert_eq!(
-        s.eval::<String>("return WhoFrameEditBox:GetText()")
-            .unwrap(),
-        sent,
-        "and the edit box shows what was sent"
-    );
-}
-
 /// The Add Friend button with no friendly target opens the name-entry dialog — the first
 /// customer of the popup engine's `hasEditBox` capability. Accepting sends what was typed.
 #[test]
@@ -584,7 +636,9 @@ fn add_friend_without_a_target_opens_the_name_dialog() {
 
     let _ = s.take_social_requests();
     s.run("StaticPopup1EditBox:SetText(\"Onerogue\")").unwrap();
-    s.run("StaticPopup_OnClick(StaticPopup1, 1)").unwrap();
+    // Through the button: the stock dialog's OnAccept reads `this:GetParent()`, which only a
+    // real click seats.
+    s.run("StaticPopup1Button1:Click()").unwrap();
     assert_eq!(
         s.take_social_requests(),
         vec![SocialRequest::AddFriend("Onerogue".to_string())]
@@ -664,7 +718,14 @@ fn right_clicking_a_who_row_opens_the_friend_menu() {
         Some(1),
         "the menu has a Whisper row"
     );
-    assert_eq!(s.take_tell_requests(), vec!["Tigole".to_string()]);
+    // The stock WHISPER row is `ChatFrame_SendTell(name)`: the chat box opens on the tell, its
+    // pending text applied by the box's next OnUpdate (1959).
+    s.tick(0.05);
+    assert_eq!(
+        s.eval::<(String, String)>("return ChatFrameEditBox.chatType, ChatFrameEditBox.tellTarget")
+            .unwrap(),
+        ("WHISPER".to_string(), "Tigole".to_string())
+    );
 }
 
 /// An OFFLINE friend's right-click opens nothing — there is no verb to offer them, which is the
@@ -723,103 +784,69 @@ fn selecting_a_row_reads_back_in_the_same_tick() {
         .contains(&SocialRequest::SelectFriend(2)));
 }
 
-/// **The window's geometry, diffed against the reference FrameXML itself.**
-///
-/// Every number in `FriendsFrame.xml` is a transcription of one in the reference's own file, and a
-/// wrong one is invisible to every other test here: the frame loads, the clicks work, only the
-/// *look* is wrong — so it surfaces as a screenshot from the director, one tab at a time. Two
-/// rounds of that is what this replaces. Four of the five it caught on its first run were the
-/// FriendsListFrame's values that had leaked into the IgnoreListFrame subtree, which is exactly
-/// the failure mode of building a sibling pane by copy-adapting instead of transcribing.
-///
-/// It scrapes both files for `<AbsDimension>` pairs per named element and compares the elements
-/// that exist in both (ours carry a `Benilla` prefix). Deliberately narrow — it does not try to
-/// understand the XML, only to notice that a number moved. Known-benign differences are listed
-/// explicitly rather than filtered by a pattern, so a NEW difference can never hide inside an
-/// exemption. Skips without the extracted reference.
+/// **B363 — the who list reaches its last rows.** Liho's `/who` found 49, showed 17, and the knob
+/// travelled while the rows stayed. On the stock window the mechanism is a one-row loss:
+/// `WhoListScrollFrame` is 287 tall (stock `FriendsFrame.xml` l.1661) against seventeen rows of
+/// sixteen, so the child's overflow past the frame, `n × 16 − 287`, sits fifteen pixels under the
+/// bar's `(n − 17) × 16`, and an engine that clamped `SetVerticalScroll` into that overflow
+/// stopped the row offset at `n − 18`. The reference stores the bar's value as given (decision
+/// 2017). Drives the bar to its end and reads the seventeenth row: the forty-ninth name.
 #[test]
-fn the_window_geometry_matches_the_reference_framexml() {
+fn the_who_list_reaches_its_last_row_at_the_bars_end() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let Some(reference) = super::framexml_diff::reference("FriendsFrame.xml") else {
-        eprintln!("skipping: no extracted FrameXML");
-        return;
-    };
+    let mut s = setup();
+    s.run("ShowWhoPanel()").unwrap();
+    let who: Vec<WhoInfo> = (1..=49)
+        .map(|i| WhoInfo {
+            name: format!("Who{i:02}"),
+            guild: String::new(),
+            level: 60,
+            race: "Human".to_string(),
+            class: "Warrior".to_string(),
+            zone: "Elwynn Forest".to_string(),
+        })
+        .collect();
+    push(
+        &mut s,
+        SocialState {
+            who,
+            who_total: 49,
+            ..Default::default()
+        },
+        "WHO_LIST_UPDATE",
+    );
+    s.resolve();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
-    // Differences that are ours on purpose. Each is a *deliberate* deviation with a reason, not a
-    // tolerance: the list is short and every entry names why.
-    const EXPECTED: &[&str] = &[
-        // The ref omits an all-zero <Offset>; we write none at all. Same anchor, fewer bytes.
-        "FriendsFrameFriendButton2",
-        "FriendsFrameFriendButton3",
-        "FriendsFrameFriendButton4",
-        "FriendsFrameFriendButton5",
-        "FriendsFrameFriendButton6",
-        "FriendsFrameFriendButton7",
-        "FriendsFrameFriendButton8",
-        "FriendsFrameFriendButton9",
-        "FriendsFrameFriendButton10",
-        "FriendsFrameIgnoreButton2",
-        "FriendsFrameIgnoreButton3",
-        "FriendsFrameIgnoreButton4",
-        "FriendsFrameIgnoreButton5",
-        "FriendsFrameIgnoreButton6",
-        "FriendsFrameIgnoreButton7",
-        "FriendsFrameIgnoreButton8",
-        "FriendsFrameIgnoreButton9",
-        "FriendsFrameIgnoreButton10",
-        "FriendsFrameIgnoreButton11",
-        "FriendsFrameIgnoreButton12",
-        "FriendsFrameIgnoreButton13",
-        "FriendsFrameIgnoreButton14",
-        "FriendsFrameIgnoreButton15",
-        "FriendsFrameIgnoreButton16",
-        "FriendsFrameIgnoreButton17",
-        "FriendsFrameIgnoreButton18",
-        "FriendsFrameIgnoreButton19",
-        "FriendsFrameIgnoreButton20",
-        "WhoFrameButton2",
-        "WhoFrameButton3",
-        "WhoFrameButton4",
-        "WhoFrameButton5",
-        "WhoFrameButton6",
-        "WhoFrameButton7",
-        "WhoFrameButton8",
-        "WhoFrameButton9",
-        "WhoFrameButton10",
-        "WhoFrameButton11",
-        "WhoFrameButton12",
-        "WhoFrameButton13",
-        "WhoFrameButton14",
-        "WhoFrameButton15",
-        "WhoFrameButton16",
-        "WhoFrameButton17",
-        "FriendsFrameToggleTab2",
-        "IgnoreFrameToggleTab2",
-        "FriendsFrameTopLeft",
-        "FriendsFrameTopRight",
-        "FriendsFrameBottomLeft",
-        "FriendsFrameBottomRight",
-        "WhoFrameAddFriendButton",
-        "WhoFrameWhoButton",
-        // The ref writes an all-zero <Offset> on these two row columns; we write none.
-        "FriendsFrameButtonTemplate/Info",
-        "FriendsFrameWhoButtonTemplate/Variable",
-        // Our column header carries the highlight's two anchors inline (the ref's sit in a
-        // separate <HighlightTexture> block the scrape attributes to the same element).
-        "WhoFrameColumnHeaderTemplate/Right",
-        // The three faux-scroll frames: the ref decorates each with two UI-Character-ScrollBar
-        // trough textures. benilla's FauxScrollFrameTemplate draws its own complete bar
-        // (decisions 0247/0250/0251), so the ref's loose art would double it.
-        "FriendsFrameFriendsScrollFrame",
-        "FriendsFrameIgnoreScrollFrame",
-        "WhoListScrollFrame",
-        // …and the guild pane's, the fourth of the same kind (decision 1257).
-        "GuildListScrollFrame",
-        // The window's own close button predates UIPanelTemplates.xml shipping the reference's
-        // `UIPanelCloseButton`, so it states inline the 32x32 that template confers. The guild
-        // pane's two close buttons inherit it and therefore need no entry here.
-        "FriendsFrameCloseButton",
-    ];
+    // The reference's own numbers, and the control: the overflow is shorter than the bar.
+    let (_, bar_max) = s
+        .eval::<(f64, f64)>("return WhoListScrollFrameScrollBar:GetMinMaxValues()")
+        .unwrap();
+    assert_eq!(bar_max, 512.0, "(49 − 17) × 16");
+    let overflow = s
+        .eval::<f64>("return WhoListScrollFrame:GetVerticalScrollRange()")
+        .unwrap();
+    assert_eq!(
+        overflow, 497.0,
+        "49 × 16 − 287: the frame is taller than its rows"
+    );
 
-    super::framexml_diff::assert_geometry_matches("FriendsFrame.xml", &reference, EXPECTED, 210);
+    s.run("WhoListScrollFrameScrollBar:SetValue(512)").unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(
+        s.eval::<i64>("return FauxScrollFrame_GetOffset(WhoListScrollFrame)")
+            .unwrap(),
+        32
+    );
+    assert_eq!(
+        s.eval::<String>("return WhoFrameButton1Name:GetText()")
+            .unwrap(),
+        "Who33"
+    );
+    assert_eq!(
+        s.eval::<String>("return WhoFrameButton17Name:GetText()")
+            .unwrap(),
+        "Who49",
+        "the last hit is on the last row"
+    );
 }

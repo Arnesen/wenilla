@@ -19,7 +19,7 @@
 //! - **`SpellVisualKit` field 14** (`kit+0x38`, the `ShakeID` column) → once per kit play, via
 //!   [`SpellKitShake`] and [`fire_kit_shakes`], which carries the mechanism and the one deviation.
 //! - **the `$SHK` animation event** → its payload *is* a group id, fired ungated at the event's own
-//!   bone-transformed point ([`event_point`]).
+//!   bone-transformed point — the fired key's own, carried on the event (decision 1904).
 //!
 //! **`$SHK` is decoded by exactly two handlers**, hanging off the GameObject (typemask `0x20`,
 //! `0x5f3e20`) and DynamicObject (`0x40`, `0x5d58c0`) trampolines — the dword `0x4b485324` occurs
@@ -106,7 +106,7 @@ use benilla_formats::{CameraShake, CameraShakeCatalog, SpellShakeGroup};
 use crate::creature_anim::{
     footfall_culls, footfall_side, move_flags, AnimSoundEvent, MovementState, SpellKitShake,
 };
-use crate::entities::{BoneAttach, Creatures};
+use crate::entities::Creatures;
 use crate::net::{Embodied, NetEntity, ObjectStore, Spline};
 use crate::player::ViewSubject;
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
@@ -288,19 +288,13 @@ struct Shakes(CameraShakeCatalog);
 fn fire_shakes(
     mut events: MessageReader<AnimSoundEvent>,
     time: Res<Time>,
-    units: Query<(
-        &NetEntity,
-        &GlobalTransform,
-        Option<&BoneAttach>,
-        Option<&benilla_world::rig_anim::RigPose>,
-    )>,
+    units: Query<(&NetEntity, &GlobalTransform)>,
     parents: Query<&ChildOf>,
     roots: Query<(
         Option<&ObjectStore>,
         Option<&MovementState>,
         Option<&NetEntity>,
     )>,
-    joints: Query<&GlobalTransform>,
     camera: Query<&GlobalTransform, With<WorldCamera>>,
     creatures: Option<Res<Creatures>>,
     shakes: Option<Res<Shakes>>,
@@ -322,7 +316,7 @@ fn fire_shakes(
         if !thud && !shk && footfall_side(&ev.ident).is_none() {
             continue; // `$FSD` is the sound handler's; only the VISUAL channel shakes
         }
-        let Ok((net, transform, attach, pose)) = units.get(ev.entity) else {
+        let Ok((net, transform)) = units.get(ev.entity) else {
             continue;
         };
         if shk {
@@ -341,8 +335,7 @@ fn fire_shakes(
             // **No gates at all** — no distance, visibility, CVar or state test (the sibling
             // `$DSL` arm and the footstep path both have them; this one has none). The position is
             // the event's own bone-transformed point, not the object's origin.
-            let at = event_point(attach, pose, &joints, &ev.ident)
-                .unwrap_or_else(|| transform.translation());
+            let at = ev.pos.unwrap_or_else(|| transform.translation());
             live.add_group(group, &shakes.0, at, now);
             continue;
         }
@@ -383,33 +376,16 @@ fn fire_shakes(
                 continue;
             }
         }
-        // The planted foot: the event's own marker through the live joint, exactly as the decal
-        // derives it. No marker/joint = the unit origin.
-        let foot = event_point(attach, pose, &joints, &ev.ident)
-            .unwrap_or_else(|| transform.translation());
+        // The planted foot: the FIRED key's own point, resolved once by the scanner exactly as
+        // the kernel snapshots it (decision 1904), not a by-4CC re-find of the marker table. The
+        // difference is real — 75 shipped models author some 4CC more than once at different
+        // points — and it is the same quantity the decal derives.
+        let foot = ev.pos.unwrap_or_else(|| transform.translation());
         if footfall_culls(eye, foot) {
             continue;
         }
         live.add(*row, foot, now);
     }
-}
-
-/// The world point an animation-event marker names on a live model — the planted foot for a
-/// footfall tag, the authored shake point for `$SHK`. `None` when the model carries no marker for
-/// the tag or has no live rig, and every caller falls back to the object's own origin.
-///
-/// This is the reference's own quantity: `placementMatrix · (boneMatrix[event.bone] ·
-/// event.position)`, computed once by the M2 event kernel (`0x719370`) and carried by value in the
-/// queue record it drains. The decal path derives it the same way, which is why the two share this.
-fn event_point(
-    attach: Option<&BoneAttach>,
-    pose: Option<&benilla_world::rig_anim::RigPose>,
-    joints: &Query<&GlobalTransform>,
-    ident: &[u8; 4],
-) -> Option<Vec3> {
-    let (a, p) = attach.zip(pose)?;
-    let (bone, offset) = a.markers.get(ident).copied()?;
-    p.posed_point(joints.get(p.joints_root).ok()?, bone, offset)
 }
 
 /// Fire the camera shake a spell-visual kit's field 14 names — the **spell-side producer**
@@ -864,6 +840,7 @@ mod tests {
             ..default()
         };
         let path = |grounded: bool| Spline {
+            deck: None,
             points: vec![[0.0; 3], [1.0, 0.0, 0.0]],
             start: std::time::Instant::now(),
             duration: std::time::Duration::from_secs(1),

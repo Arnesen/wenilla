@@ -14,7 +14,27 @@ authors = ["sam <samuv.eth@gmail.com>"]
 # and a workspace default-features choice can't be subtracted from downstream.
 [workspace.dependencies]
 anyhow = "1.0.102"
-bevy = "0.18.1"
+# bevy's `default` is `["2d", "3d", "ui"]`, and every one of those three pulls `audio`
+# (= `bevy_audio` + `vorbis`) — so a default bevy compiles rodio, a second cpal, a second ALSA
+# binding and an ogg/vorbis decoder into a client that mixes through kira and has had bevy's
+# `AudioPlugin` disabled at boot since 0530. This spells the same `default` out with `audio`
+# taken away: `2d`/`3d`/`ui` decomposed into the parts they are made of, which is the whole
+# union of the three minus that one entry (decision 1932 has the expansion, verified against a
+# before/after feature tree). Nothing else in the graph asks for it — avian3d, bevy_egui and
+# bevy_transform_interpolation all take bevy with `default-features = false`.
+#
+# If a future bevy needs another member, add it here by name; do not reach back for `2d`/`3d`/
+# `ui`, which would quietly bring the audio stack with it.
+bevy = { version = "0.18.1", default-features = false, features = [
+    "default_app",
+    "default_platform",
+    "2d_bevy_render",
+    "3d_bevy_render",
+    "ui_api",
+    "ui_bevy_render",
+    "scene",
+    "picking",
+] }
 # The render app's raw GPU handles (the WOW_GPU_MS meter's query set): bevy 0.18 does not wrap
 # wgpu's QuerySet family, so the meter reaches for the same wgpu the workspace already builds.
 wgpu = "27"
@@ -40,6 +60,9 @@ sha1 = "0.10.6"
 lua-src = { path = "third_party/lua-src" }
 # The browser build keeps `lua_Integer = i64` on wasm32 — one-line fork, see third_party/mlua-sys/BENILLA.md.
 mlua-sys = { path = "third_party/mlua-sys" }
+# kira 0.12.1 with one patch: spatial gains and the volume tween evaluated per CHUNK and
+# interpolated, not per frame (decision 1945; `third_party/kira/BENILLA.md`).
+kira = { path = "third_party/kira" }
 
 # Optimize *dependencies* even in dev builds. avian/parry collision math (and wgpu/bevy render) is
 # unusably slow at opt-level 0 — a plain `cargo run` crawls to <1 fps once physics is doing real work.

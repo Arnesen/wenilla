@@ -1,12 +1,12 @@
 //! The shipped **trainer window** driven end-to-end, engine-only (no Bevy): the real
-//! `assets/ui/TrainerFrame.xml` — a client-sorted, collapsible **skill-line tree** with a **dropdown**
-//! state filter and a draggable **scroll bar** (decisions 0247/0251) — loaded behind its deps
-//! (`UiPanels.xml` + `UIDropDownMenu.xml` + `ScrollTemplates.xml` + `MerchantFrame.xml` for the
-//! `BenillaMoney_*` coin helpers) and fed a synthetic service list. Covers what only a runtime load
-//! exercises: the Lua parses and every referenced global resolves, the tree renders interleaved
-//! header/service rows, a header click folds its group, the dropdown filter hides a state, the wheel
-//! scrolls the list, the NPC name rides `arg1` into the title, the byte-exact GlobalStrings render, the
-//! Train button gates on available-and-affordable, and the buy queues the row's spell id.
+//! The reference's own `Blizzard_TrainerUI` addon — a client-sorted, collapsible **skill-line
+//! tree** with a **dropdown** state filter and a draggable **scroll bar** (decisions 0247/0251) —
+//! loaded behind its deps (`UiPanels.xml` + `UIDropDownMenu.xml` + `ScrollTemplates.xml` +
+//! `MerchantFrame.xml` for the the stock money frames) and fed a synthetic service list. Covers
+//! what only a runtime load exercises: the Lua parses and every referenced global resolves, the
+//! tree renders interleaved header/service rows, a header click folds its group, the dropdown
+//! filter hides a state, the wheel scrolls the list, the NPC name rides `arg1` into the title, the
+//! byte-exact GlobalStrings render, the Train button gates on available-and-affordable, and the buy queues the row's spell id.
 
 use benilla_ui::script::{
     ExtractedQuad, QuadContent, ScriptValue, SoundRequest, TrainerAbilityReq, TrainerService,
@@ -22,24 +22,82 @@ use super::test_ui::load_ui as load_xml;
 /// pushes into the engine on every show — so a test that wants the full tree sets those, not the
 /// engine's own `SetTrainerServiceTypeFilter`, which the next `TRAINER_SHOW` would overwrite.
 fn trainer_script() -> UiScript {
+    let mut s = trainer_script_base();
+    // The reference's own LoadOnDemand addon's files, direct off the chain (what its `LoadAddOn`
+    // runs), and the FrameXML templates file its list inherits from (1957).
+    load_xml(
+        &s,
+        "Interface\\AddOns\\Blizzard_TrainerUI\\Blizzard_TrainerUI.xml",
+    );
+    finish_trainer_load(&mut s);
+    s
+}
+
+/// Everything the manifest loads before the trainer addon — the chain a LoadOnDemand load lands
+/// on. The stock row's label is a width-0 `<ButtonText>` (fit the text), so a measurer is seated
+/// the way the app's VM has one at world entry.
+fn trainer_script_base() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_* (the kit's MenuBackdrop), app order
-    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml"); // the filter dropdown's kit
-    load_xml(&s, "ScrollTemplates.xml"); // the faux-scroll bar kit
-    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // BenillaMoney_Set/_Clear/_SetColor live here
-    load_xml(&s, "TrainerFrame.xml");
-    s.run(
-        "TRAINER_FILTER_AVAILABLE = 1 TRAINER_FILTER_UNAVAILABLE = 1 TRAINER_FILTER_USED = 1 \
-         BenillaTrainerFrame_ApplyFilter()",
-    )
-    .unwrap();
+    s.set_text_measurer(Box::new(super::FixedWidthFont(7.0)));
+    // The reference's window calls `UpdateMicroButtons` on show and inherits the panel kit's
+    // templates, so the harness carries what the manifest loads before it, in the manifest's
+    // order (ScrollTemplates BEFORE UIPanelTemplates, 1846) — and the reference's own
+    // LoadOnDemand addon last, with the FrameXML templates file its list inherits from (1957).
+    for f in [
+        "Interface\\FrameXML\\Fonts.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
+        "ScrollTemplates.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        r"Interface\FrameXML\OptionsFrameTemplates.xml",
+        r"Interface\FrameXML\ReputationFrame.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        "KeyBindingsPage.xml",
+        "OptionsFrame.xml",
+        "Interface\\FrameXML\\MultiActionBars.xml",
+        r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
+        "Interface\\FrameXML\\CharacterFrameTemplates.xml",
+        "Interface\\FrameXML\\MerchantFrame.xml",
+        "Interface\\FrameXML\\ClassTrainerFrameTemplates.xml",
+    ] {
+        load_xml(&s, f);
+    }
     s
+}
+
+/// What follows the addon's files in its LoadOnDemand load (1957): the saved chunk (none in a
+/// bare harness) and then its ADDON_LOADED, whose arm pushes the three filter globals into the
+/// engine. The harness wants "used" shown too. The stock title reads `UnitName("npc")`, so the
+/// trainer NPC is seated here as the app seats it on TRAINER_SHOW.
+fn finish_trainer_load(s: &mut UiScript) {
+    s.set_unit(
+        "npc",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Sana Winterhoof".into()),
+            ..Default::default()
+        }),
+    );
+    s.run("TRAINER_FILTER_USED = 1").unwrap();
+    s.fire_event(
+        "ADDON_LOADED",
+        vec![ScriptValue::Str("Blizzard_TrainerUI".into())],
+    );
 }
 
 /// Whether any rendered text quad carries `color` (within a small tolerance) — used to spot the
@@ -191,7 +249,7 @@ fn shipped_trainer_frame_drives_end_to_end() {
 
     // Hidden by default.
     assert!(!s
-        .eval::<bool>("return BenillaTrainerFrame:IsVisible()")
+        .eval::<bool>("return ClassTrainerFrame:IsVisible()")
         .unwrap());
 
     // The app's feed: 50 copper in the purse + the warrior menu, then the open event with the name.
@@ -205,22 +263,22 @@ fn shipped_trainer_frame_drives_end_to_end() {
 
     // Shown, title took the NPC name off arg1.
     assert!(s
-        .eval::<bool>("return BenillaTrainerFrame:IsVisible()")
+        .eval::<bool>("return ClassTrainerFrame:IsVisible()")
         .unwrap());
     assert_eq!(
-        s.eval::<String>("return BenillaTrainerTitleText:GetText()")
+        s.eval::<String>("return ClassTrainerNameText:GetText()")
             .unwrap(),
         "Sana Winterhoof"
     );
 
     // Row 1 renders the "Arms" header (its name, no indent); row 2 the first service.
     assert_eq!(
-        s.eval::<String>("return BenillaTrainerService1Text:GetText()")
+        s.eval::<String>("return ClassTrainerSkill1Text:GetText()")
             .unwrap(),
         "Arms"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaTrainerService2Text:GetText()")
+        s.eval::<String>("return ClassTrainerSkill2Text:GetText()")
             .unwrap(),
         "  Heroic Strike"
     );
@@ -232,12 +290,12 @@ fn shipped_trainer_frame_drives_end_to_end() {
         2
     );
     assert_eq!(
-        s.eval::<String>("return BenillaTrainerCostLabel:GetText()")
+        s.eval::<String>("return ClassTrainerCostLabel:GetText()")
             .unwrap(),
         "Cost:"
     );
     assert!(s
-        .eval::<bool>("return BenillaTrainerTrainButton:IsEnabled() ~= 0")
+        .eval::<bool>("return ClassTrainerTrainButton:IsEnabled() ~= 0")
         .unwrap());
 
     // Train buys the selected service — the row's spell id reaches the app's drain.
@@ -247,11 +305,11 @@ fn shipped_trainer_frame_drives_end_to_end() {
     assert!(s.take_trainer_buys().is_empty(), "drained");
 
     // Select the available-but-unaffordable service (Thunder Clap, index 6, 500c > 50c): Train disables
-    // and the cost coins redden (BenillaMoney_SetColor 1.0, 0.1, 0.1).
-    s.run("SelectTrainerService(6); BenillaTrainerFrame_Update()")
+    // and the cost coins redden (SetMoneyFrameColor 1.0, 0.1, 0.1).
+    s.run("this = ClassTrainerSkill6; ClassTrainerSkillButton_OnClick('LeftButton')")
         .unwrap();
     assert!(!s
-        .eval::<bool>("return BenillaTrainerTrainButton:IsEnabled() ~= 0")
+        .eval::<bool>("return ClassTrainerTrainButton:IsEnabled() ~= 0")
         .unwrap());
     s.resolve();
     assert!(
@@ -261,10 +319,10 @@ fn shipped_trainer_frame_drives_end_to_end() {
 
     // Select the gated service (Cleave, index 3): the Requires: line is built from the level/skill/
     // ability gates (byte-exact REQUIRES_LABEL), and Train stays disabled (unavailable).
-    s.run("SelectTrainerService(3); BenillaTrainerFrame_Update()")
+    s.run("this = ClassTrainerSkill3; ClassTrainerSkillButton_OnClick('LeftButton')")
         .unwrap();
     let reqs = s
-        .eval::<String>("return BenillaTrainerSkillRequirements:GetText()")
+        .eval::<String>("return ClassTrainerSkillRequirements:GetText()")
         .unwrap();
     assert!(reqs.starts_with("Requires: "), "reqs: {reqs}");
     for term in ["Level", "Swords", "Charge"] {
@@ -278,14 +336,14 @@ fn shipped_trainer_frame_drives_end_to_end() {
         "a known prerequisite shows white with its rank: {reqs}"
     );
     assert!(!s
-        .eval::<bool>("return BenillaTrainerTrainButton:IsEnabled() ~= 0")
+        .eval::<bool>("return ClassTrainerTrainButton:IsEnabled() ~= 0")
         .unwrap());
 
     // The app's client-side close: clear the snapshot + fire TRAINER_CLOSED → the window hides.
     s.set_trainer(None);
     s.fire_event("TRAINER_CLOSED", vec![]);
     assert!(!s
-        .eval::<bool>("return BenillaTrainerFrame:IsVisible()")
+        .eval::<bool>("return ClassTrainerFrame:IsVisible()")
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -303,25 +361,25 @@ fn clicking_a_header_row_collapses_its_group() {
     // Full tree: 2 headers + 4 services = 6 rows; row 2 is Heroic Strike.
     assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 6);
     assert_eq!(
-        s.eval::<String>("return BenillaTrainerService2Text:GetText()")
+        s.eval::<String>("return ClassTrainerSkill2Text:GetText()")
             .unwrap(),
         "  Heroic Strike"
     );
 
     // Click the Arms header (row 1): its two services fold → 4 rows (H:Arms, H:Fury, Rend, Thunder
     // Clap). Row 2 is now the Fury header.
-    s.run("BenillaTrainerSkillButton_OnClick(BenillaTrainerService1, 'LeftButton')")
+    s.run("this = ClassTrainerSkill1; ClassTrainerSkillButton_OnClick('LeftButton')")
         .unwrap();
     assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 4);
     assert_eq!(
-        s.eval::<String>("return BenillaTrainerService2Text:GetText()")
+        s.eval::<String>("return ClassTrainerSkill2Text:GetText()")
             .unwrap(),
         "Fury",
         "Arms folded; its header (row 1) now abuts the Fury header (row 2)"
     );
 
     // Click it again → expands back to 6 rows.
-    s.run("BenillaTrainerSkillButton_OnClick(BenillaTrainerService1, 'LeftButton')")
+    s.run("this = ClassTrainerSkill1; ClassTrainerSkillButton_OnClick('LeftButton')")
         .unwrap();
     assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 6);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -341,7 +399,9 @@ fn filter_hides_a_state_keeping_headers() {
     // Drive the dropdown's own click handler for the "used" row: the row button rides as `this` with
     // its pre-click state (checked=on, value="used"), exactly as UIDropDownMenuButton_OnClick invokes
     // the row func. It flips the engine filter off and repaints. Rend drops (6 → 5); headers remain.
-    s.run("this = { value = 'used', checked = 1 }; BenillaTrainerFilterDropDown_OnClick()")
+    s.run("ToggleDropDownMenu(1, nil, ClassTrainerFrameFilterDropDown)")
+        .unwrap();
+    s.run("this = DropDownList1Button3; UIDropDownMenuButton_OnClick()")
         .unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert_eq!(
@@ -372,7 +432,7 @@ fn filter_rows_toggle_through_the_dropdown_kit() {
 
     // Open the menu the way the capsule's arrow does. Row 2 is "Unavailable" (Initialize's order),
     // checked because trainer_script() turned every state on.
-    s.run("ToggleDropDownMenu(1, nil, BenillaTrainerFilterDropDown)")
+    s.run("ToggleDropDownMenu(1, nil, ClassTrainerFrameFilterDropDown)")
         .unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     let row_checked = |s: &mut UiScript| {
@@ -415,9 +475,9 @@ fn filter_rows_toggle_through_the_dropdown_kit() {
     // what the clicks left behind (the two states left on, "used" still on from trainer_script()).
     s.run("this = DropDownList1Button2; UIDropDownMenuButton_OnClick()")
         .unwrap();
-    s.run("ToggleDropDownMenu(1, nil, BenillaTrainerFilterDropDown)")
+    s.run("ToggleDropDownMenu(1, nil, ClassTrainerFrameFilterDropDown)")
         .unwrap(); // same owner → closes
-    s.run("ToggleDropDownMenu(1, nil, BenillaTrainerFilterDropDown)")
+    s.run("ToggleDropDownMenu(1, nil, ClassTrainerFrameFilterDropDown)")
         .unwrap(); // re-open → re-Initialize
     assert!(
         !row_checked(&mut s),
@@ -460,11 +520,11 @@ fn wheel_over_a_row_scrolls_the_list() {
     s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
-    let row1 = "return BenillaTrainerService1Text:GetText()";
+    let row1 = "return ClassTrainerSkill1Text:GetText()";
     // At the top: row 1 is the "Arms" header, row 2 the first service.
     assert_eq!(s.eval::<String>(row1).unwrap(), "Arms");
     assert_eq!(
-        s.eval::<String>("return BenillaTrainerService2Text:GetText()")
+        s.eval::<String>("return ClassTrainerSkill2Text:GetText()")
             .unwrap(),
         "  Service 01"
     );
@@ -485,7 +545,7 @@ fn wheel_over_a_row_scrolls_the_list() {
     // reference's and is asserted as "a page, not a row"; pinning the exact row count would pin a
     // pixel arithmetic whose inputs resolve a frame apart.
     let offset = s
-        .eval::<i64>("return BenillaTrainerListScrollFrame.offset or -1")
+        .eval::<i64>("return ClassTrainerListScrollFrame.offset or -1")
         .unwrap();
     assert!(
         offset > 1,
@@ -502,7 +562,7 @@ fn wheel_over_a_row_scrolls_the_list() {
     // there is the clamp working, not the wheel failing.
     s.mouse_wheel(x, y, -1.0);
     assert_eq!(
-        s.eval::<i64>("return BenillaTrainerListScrollFrame.offset or -1")
+        s.eval::<i64>("return ClassTrainerListScrollFrame.offset or -1")
             .unwrap(),
         offset,
         "clamped at the bottom (numItems - numToDisplay), never past it"
@@ -512,7 +572,7 @@ fn wheel_over_a_row_scrolls_the_list() {
     s.mouse_wheel(x, y, 1.0);
     s.mouse_wheel(x, y, 1.0);
     assert_eq!(
-        s.eval::<i64>("return BenillaTrainerListScrollFrame.offset or -1")
+        s.eval::<i64>("return ClassTrainerListScrollFrame.offset or -1")
             .unwrap(),
         0,
         "back at the top, clamped"
@@ -544,13 +604,13 @@ fn a_selected_or_hovered_service_row_paints_its_name_white() {
     // The name really is the button's own label now — a child FontString would leave
     // GetFontString() nil and no per-state font could reach it.
     assert!(
-        s.eval::<bool>("return BenillaTrainerService1:GetFontString() ~= nil")
+        s.eval::<bool>("return ClassTrainerSkill1:GetFontString() ~= nil")
             .unwrap(),
         "the row name is the Button's ButtonText, the only region per-state fonts reach"
     );
 
     // Cleave (index 3) is unavailable → red when not selected. Select it → its name goes white.
-    s.run("SelectTrainerService(3); BenillaTrainerFrame_Update()")
+    s.run("this = ClassTrainerSkill3; ClassTrainerSkillButton_OnClick('LeftButton')")
         .unwrap();
     s.resolve();
     assert!(
@@ -559,7 +619,7 @@ fn a_selected_or_hovered_service_row_paints_its_name_white() {
     );
 
     // Select Heroic Strike (index 2): Cleave is no longer selected → back to unavailable red.
-    s.run("SelectTrainerService(2); BenillaTrainerFrame_Update()")
+    s.run("this = ClassTrainerSkill2; ClassTrainerSkillButton_OnClick('LeftButton')")
         .unwrap();
     s.resolve();
     assert!(
@@ -616,7 +676,7 @@ fn wheel_scroll_is_silent_but_the_arrows_click() {
     );
 
     // The down arrow (enabled at the top), though — clicking it plays the ref's arrow click.
-    s.run("BenillaTrainerListScrollFrameScrollBarScrollDownButton:Click()")
+    s.run("ClassTrainerListScrollFrameScrollBarScrollDownButton:Click()")
         .unwrap();
     assert!(
         s.take_sounds().contains(&click),
@@ -640,12 +700,12 @@ fn the_scrollbar_arrows_step_the_list_the_way_they_point() {
     s.set_trainer(Some(long_menu())); // 16 rows > 11 visible → the bar shows
     s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
     let offset = |s: &mut UiScript| {
-        s.eval::<i64>("return BenillaTrainerListScrollFrame.offset or -1")
+        s.eval::<i64>("return ClassTrainerListScrollFrame.offset or -1")
             .unwrap()
     };
     let click = |s: &mut UiScript, which: &str| {
         s.run(&format!(
-            "BenillaTrainerListScrollFrameScrollBarScroll{which}Button:Click()"
+            "ClassTrainerListScrollFrameScrollBarScroll{which}Button:Click()"
         ))
         .unwrap();
     };
@@ -667,42 +727,70 @@ fn the_scrollbar_arrows_step_the_list_the_way_they_point() {
 }
 
 /// **The filter is remembered across a restart** (decision 1128) — the whole persistence path, in
-/// one test: the shipped XML declares its three globals for saving at file scope, a dropdown toggle
-/// writes the *global* (not only the engine mask), the serialized file carries it, and a fresh VM
-/// that loads the same XML and then executes that file comes up with the toggled filter applied.
-///
-/// It also pins the two halves that are easy to "simplify" apart and silently break: writing only
-/// the engine mask in the click handler would lose the choice at the next list packet (the reference
-/// rebuilds that mask on every one), and applying the globals only in `<OnShow>` would leave the
-/// first painted frame under the reset.
+/// The reference's own restart, through its own mechanism (1957): the addon is a LoadOnDemand
+/// registry row read off the chain; `LoadAddOn` runs its files (file-scope defaults), then its
+/// per-addon saved file over them, then fires ADDON_LOADED — whose arm pushes the three filter
+/// globals into the engine. A dropdown toggle writes the GLOBAL; the addon's `## SavedVariables`
+/// carry it into the file; a fresh VM loading the addon comes up with the toggle applied.
 #[test]
 fn the_state_filter_survives_a_restart_through_the_saved_variables_file() {
-    let mut s = trainer_script();
-    s.set_money(50);
-    s.set_trainer(Some(menu()));
-    s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
-    assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 6);
+    let _data = benilla_formats::wow_data_or_skip!();
+    let toc =
+        super::reference_ui::read("Interface/AddOns/Blizzard_TrainerUI/Blizzard_TrainerUI.toc")
+            .map(|b| benilla_ui::toc::Toc::parse(&benilla_ui::source::decode(&b)))
+            .expect("the addon's toc off the chain");
+    assert!(toc.load_on_demand(), "the reference ships it LoadOnDemand");
+    let info = || {
+        let mut i = super::addons::info_from_toc("Blizzard_TrainerUI", &toc);
+        i.chain = true;
+        i
+    };
+    let saved_dir =
+        std::env::temp_dir().join(format!("benilla-trainer-saved-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&saved_dir);
+    std::fs::create_dir_all(&saved_dir).unwrap();
+    let boot = |s: &mut UiScript| {
+        s.set_addon_chain_reader(Box::new(super::reference_ui::read));
+        s.register_addons(vec![info()], None, Some(saved_dir.clone()), None);
+        s.set_unit(
+            "npc",
+            Some(benilla_ui::script::UnitState {
+                exists: true,
+                name: Some("Sana Winterhoof".into()),
+                ..Default::default()
+            }),
+        );
+        s.set_money(50);
+        s.set_trainer(Some(menu()));
+        // The reference's arm: TRAINER_SHOW → ClassTrainerFrame_LoadUI → UIParentLoadAddOn.
+        s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
+        assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+        assert!(
+            s.eval::<bool>("return IsAddOnLoaded('Blizzard_TrainerUI') == 1")
+                .unwrap(),
+            "loaded on demand, off the chain"
+        );
+    };
 
-    // This XML declared exactly the reference's three globals, in its order. Filtered to the
-    // trainer's own prefix because the registry belongs to the whole UI: every file the harness
-    // loads adds its own (GameTooltip.xml's SHOW_NEWBIE_TIPS since 1136), and what the OTHER files
-    // register is not this test's business.
-    let declared: Vec<String> = s
-        .saved_variable_names()
-        .into_iter()
-        .filter(|n| n.starts_with("TRAINER_"))
-        .collect();
+    let mut s = trainer_script_base();
+    boot(&mut s);
+    // The reference's own file-scope default hides known spells (TRAINER_FILTER_USED = 0), so
+    // the one used service is out on the very first paint: 2 headers + 3 of the 4 services.
+    assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 5);
     assert_eq!(
-        declared,
+        info().saved_variables,
         vec![
             "TRAINER_FILTER_AVAILABLE",
             "TRAINER_FILTER_UNAVAILABLE",
             "TRAINER_FILTER_USED",
-        ]
+        ],
+        "the toc's own three, in its order"
     );
 
-    // Toggle "Unavailable" off through the dropdown row's own handler (pre-click state on `this`).
-    s.run("this = { value = 'unavailable', checked = 1 }; BenillaTrainerFilterDropDown_OnClick()")
+    // Toggle "Unavailable" off through the dropdown row's own handler.
+    s.run("ToggleDropDownMenu(1, nil, ClassTrainerFrameFilterDropDown)")
+        .unwrap();
+    s.run("this = DropDownList1Button2; UIDropDownMenuButton_OnClick()")
         .unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert_eq!(
@@ -710,19 +798,17 @@ fn the_state_filter_survives_a_restart_through_the_saved_variables_file() {
         0,
         "the click must write the SAVED global, not just the engine mask"
     );
-    let text = s.saved_variables_text();
+    let text = s.saved_variables_text_for(&info().saved_variables);
     assert!(
         text.contains("TRAINER_FILTER_UNAVAILABLE = 0"),
         "the file carries the toggle: {text}"
     );
+    std::fs::write(saved_dir.join("Blizzard_TrainerUI.lua"), &text).unwrap();
 
-    // The restart: a fresh VM with the same XML (file-scope defaults stand), then the saved file
-    // executed over them, then a trainer opens.
-    let mut fresh = trainer_script();
-    fresh.run(&text).unwrap();
-    fresh.set_money(50);
-    fresh.set_trainer(Some(menu()));
-    fresh.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
+    // The restart: a fresh VM loads the addon on demand — files, then the saved file, then
+    // ADDON_LOADED — and the first paint is already filtered.
+    let mut fresh = trainer_script_base();
+    boot(&mut fresh);
     assert!(
         !fresh
             .eval::<bool>("return GetTrainerServiceTypeFilter('unavailable') == 1")
@@ -731,14 +817,10 @@ fn the_state_filter_survives_a_restart_through_the_saved_variables_file() {
     );
     assert_eq!(
         fresh.eval::<i64>("return GetNumTrainerServices()").unwrap(),
-        5,
+        4,
         "Cleave (the unavailable service) is hidden on the very first paint after the restart"
     );
-    assert!(
-        fresh.errors().is_empty(),
-        "script errors: {:?}",
-        fresh.errors()
-    );
+    let _ = std::fs::remove_dir_all(&saved_dir);
 }
 
 /// A **new list packet resets the engine's filter mask** to the builder's own default — mask 3 at a
@@ -749,7 +831,10 @@ fn the_state_filter_survives_a_restart_through_the_saved_variables_file() {
 fn a_new_list_packet_resets_the_filter_mask_and_the_collapse_set() {
     let mut s = trainer_script();
     s.set_trainer(Some(menu()));
-    s.run("BenillaTrainerFrame_ApplyFilter()").unwrap();
+    s.fire_event(
+        "ADDON_LOADED",
+        vec![ScriptValue::Str("Blizzard_TrainerUI".into())],
+    );
     // Collapse a group, and turn a state off directly (no global) — both are engine-side state.
     s.run("CollapseTrainerSkillLine(1) SetTrainerServiceTypeFilter('used', 1)")
         .unwrap();
@@ -879,7 +964,7 @@ fn a_long_row_name_stays_on_one_line_and_carries_its_rank_along() {
     // Find each name's row by what it painted (the group comparator owns the order, not this test).
     let row_of = |s: &mut UiScript, needle: &str| -> i64 {
         s.eval::<i64>(&format!(
-            "for i = 1, 11 do local b = getglobal('BenillaTrainerService' .. i) \
+            "for i = 1, 11 do local b = getglobal('ClassTrainerSkill' .. i) \
              local t = b:GetText() if t and strfind(t, '{needle}', 1, 1) then return i end \
              end return 0"
         ))
@@ -891,9 +976,9 @@ fn a_long_row_name_stays_on_one_line_and_carries_its_rank_along() {
 
     let geom = |s: &mut UiScript, row: i64| -> (f32, f32, f32, f32) {
         s.eval::<(f32, f32, f32, f32)>(&format!(
-            "local b = getglobal('BenillaTrainerService{row}') \
+            "local b = getglobal('ClassTrainerSkill{row}') \
              local n = b:GetFontString() \
-             return n:GetHeight(), n:GetRight(), b.subtext:GetLeft(), b:GetHeight()"
+             return n:GetHeight(), n:GetRight(), getglobal(b:GetName() .. 'SubText'):GetLeft(), b:GetHeight()"
         ))
         .unwrap()
     };
@@ -940,11 +1025,12 @@ fn learning_a_spell_keeps_the_filter_and_the_collapse_a_re_open_still_resets() {
 
     let mut s = trainer_script();
     // The reference's own file-scope defaults (1128), then the player's choice below.
-    s.run(
-        "TRAINER_FILTER_AVAILABLE = 1 TRAINER_FILTER_UNAVAILABLE = 1 TRAINER_FILTER_USED = 0 \
-         BenillaTrainerFrame_ApplyFilter()",
-    )
-    .unwrap();
+    s.run("TRAINER_FILTER_AVAILABLE = 1 TRAINER_FILTER_UNAVAILABLE = 1 TRAINER_FILTER_USED = 0")
+        .unwrap();
+    s.fire_event(
+        "ADDON_LOADED",
+        vec![ScriptValue::Str("Blizzard_TrainerUI".into())],
+    );
     s.set_money(5000);
 
     // The trainer feed (`ui_trainer::feed_trainer`), reduced to the part this bug lives in.
@@ -968,11 +1054,11 @@ fn learning_a_spell_keeps_the_filter_and_the_collapse_a_re_open_still_resets() {
     let mut open = TrainerOpen::default();
     open.open(DAZALAR, 0, vec![], "Hello, hunter!".into());
     feed(&mut s, &mut open, menu(), "TRAINER_SHOW");
-    s.run("ToggleDropDownMenu(1, nil, BenillaTrainerFilterDropDown)")
+    s.run("ToggleDropDownMenu(1, nil, ClassTrainerFrameFilterDropDown)")
         .unwrap();
     s.run("this = DropDownList1Button2; UIDropDownMenuButton_OnClick()")
         .unwrap();
-    s.run("ToggleDropDownMenu(1, nil, BenillaTrainerFilterDropDown)")
+    s.run("ToggleDropDownMenu(1, nil, ClassTrainerFrameFilterDropDown)")
         .unwrap();
     assert!(
         !filter_on(&mut s, "unavailable"),
@@ -1005,37 +1091,39 @@ fn learning_a_spell_keeps_the_filter_and_the_collapse_a_re_open_still_resets() {
         "and the list is still his — the folded Arms group is empty of learnables now, so it goes \
          with its header, leaving Fury over Thunder Clap"
     );
-    s.run("ToggleDropDownMenu(1, nil, BenillaTrainerFilterDropDown)")
+    s.run("ToggleDropDownMenu(1, nil, ClassTrainerFrameFilterDropDown)")
         .unwrap();
     assert!(
         !s.eval::<bool>("return DropDownList1Button2Check:IsVisible() and true or false")
             .unwrap(),
         "the dropdown agrees with the list, instead of claiming a filter the list ignores"
     );
-    s.run("ToggleDropDownMenu(1, nil, BenillaTrainerFilterDropDown)")
+    s.run("ToggleDropDownMenu(1, nil, ClassTrainerFrameFilterDropDown)")
         .unwrap();
 
-    // He walks away and comes back: THIS packet opens a window, so the reference's reset lands —
-    // and the window's own OnShow/TRAINER_SHOW puts the saved globals straight back over it. The
-    // filter survives (it is saved), the collapse does not (it is engine-side, and the reset clears
-    // it) — the reference's own split.
+    // He walks away and comes back: THIS packet opens a window, so the reference's reset lands
+    // (`0x4d75d9` writes the mask to 3 on every list) — and nothing puts the saved globals back
+    // over it: the stock addon pushes them once, on ITS ADDON_LOADED, which a LoadOnDemand
+    // addon fires on the session's first trainer. The collapse is engine-side and clears too
+    // (1957; the transcription used to re-push on show, which the reference never does).
     open.clear();
     open.open(DAZALAR, 0, vec![], "Hello, hunter!".into());
     let mut learned = menu();
     learned.services[0].category = TrainerServiceCategory::Used;
     feed(&mut s, &mut open, learned, "TRAINER_SHOW");
     assert!(
-        !filter_on(&mut s, "unavailable"),
-        "the saved filter is pushed back over the packet reset"
+        filter_on(&mut s, "unavailable"),
+        "a fresh list is the reference's reset: unavailable shows again"
     );
+    assert!(filter_on(&mut s, "available"));
     assert!(
-        filter_on(&mut s, "available"),
-        "and the states he never turned off are still on"
+        !filter_on(&mut s, "used"),
+        "and the reset's mask is 3 — used stays hidden"
     );
     assert_eq!(
-        rows(&mut s),
-        2,
-        "nothing collapsed now — but still filtered"
+        s.eval::<i64>("return TRAINER_FILTER_UNAVAILABLE").unwrap(),
+        0,
+        "his saved choice is still the global's, for the next session's first trainer"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

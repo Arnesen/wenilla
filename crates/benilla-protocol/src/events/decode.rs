@@ -136,6 +136,18 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                 CastOutcome::Failed { reason, .. } => Some(reason),
             },
         }],
+        ServerPacket::PetTameFailure { reason } => vec![SessionEvent::PetTameFailure { reason }],
+        ServerPacket::PetNameInvalid => vec![SessionEvent::PetNameInvalid],
+        ServerPacket::PetBroken => vec![SessionEvent::PetBroken],
+        ServerPacket::PetActionSound { pet_guid, talk } => {
+            vec![SessionEvent::PetActionSound { pet_guid, talk }]
+        }
+        ServerPacket::PetDismissSound { model_id, position } => {
+            vec![SessionEvent::PetDismissSound {
+                model_id,
+                position: [position.x, position.y, position.z],
+            }]
+        }
         ServerPacket::ItemQueryResponse { entry, info } => {
             vec![SessionEvent::ItemTemplate { entry, info }]
         }
@@ -206,6 +218,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             vec![SessionEvent::AttackStop { attacker, victim }]
         }
         ServerPacket::AttackerState(s) => vec![SessionEvent::AttackerState(s)],
+        ServerPacket::AttackSwingError(e) => vec![SessionEvent::AttackSwingError(e)],
+        ServerPacket::CancelCombat => vec![SessionEvent::CancelCombat],
+        ServerPacket::FeignDeathResisted => vec![SessionEvent::FeignDeathResisted],
         ServerPacket::AiReaction { unit, reaction } => {
             vec![SessionEvent::AiReaction { unit, reaction }]
         }
@@ -257,6 +272,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             item_guid,
             spell_id,
         }],
+        ServerPacket::ItemTime { item_guid, seconds } => {
+            vec![SessionEvent::ItemTime { item_guid, seconds }]
+        }
         ServerPacket::ItemEnchantTime {
             item_guid,
             slot,
@@ -640,8 +658,12 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::TriggerCinematic { cinematic_id } => {
             vec![SessionEvent::CinematicTriggered { cinematic_id }]
         }
+        ServerPacket::MoveTimeSkipped { guid, lag_ms } => {
+            vec![SessionEvent::MoveTimeSkipped { guid, lag_ms }]
+        }
         ServerPacket::MonsterMove {
             guid,
+            transport,
             start,
             spline_id,
             path,
@@ -652,6 +674,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             run_mode,
         } => vec![SessionEvent::MonsterMove {
             guid,
+            transport,
             start: v3(start),
             spline_id,
             path: path.into_iter().map(v3).collect(),
@@ -766,6 +789,32 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::TalentWipeConfirm { trainer, cost } => {
             vec![SessionEvent::TalentWipeConfirm { trainer, cost }]
         }
+        ServerPacket::PetUnlearnConfirm { trainer, cost } => {
+            vec![SessionEvent::PetUnlearnConfirm { trainer, cost }]
+        }
+        ServerPacket::RaidGroupOnly { delay_ms, reason } => {
+            vec![SessionEvent::RaidGroupOnly { delay_ms, reason }]
+        }
+        ServerPacket::AreaSpiritHealerTime { healer, ms } => {
+            vec![SessionEvent::AreaSpiritHealerTime { healer, ms }]
+        }
+        ServerPacket::BattlefieldStatus(status) => vec![SessionEvent::BattlefieldStatus(status)],
+        ServerPacket::PvpLogData(data) => vec![SessionEvent::PvpLogData(data)],
+        ServerPacket::BattlefieldList(list) => vec![SessionEvent::BattlefieldList(list)],
+        ServerPacket::BattlefieldPositions(p) => vec![SessionEvent::BattlefieldPositions(p)],
+        ServerPacket::TabardVendorActivate(g) => vec![SessionEvent::TabardVendorActivate(g)],
+        ServerPacket::SaveGuildEmblemResult(r) => vec![SessionEvent::SaveGuildEmblemResult(r)],
+        ServerPacket::GroupJoinedBattleground { result } => {
+            vec![SessionEvent::GroupJoinedBattleground { result }]
+        }
+        ServerPacket::BattlegroundPlayer { guid, joined } => {
+            vec![SessionEvent::BattlegroundPlayer { guid, joined }]
+        }
+        ServerPacket::MeetingStoneSetQueue { area, status } => {
+            vec![SessionEvent::MeetingStoneSetQueue { area, status }]
+        }
+        ServerPacket::MeetingStoneNotice(notice) => vec![SessionEvent::MeetingStoneNotice(notice)],
+        ServerPacket::TutorialFlags(flags) => vec![SessionEvent::TutorialFlags(flags.bytes)],
         ServerPacket::PlayerBound { binder, area } => {
             vec![SessionEvent::PlayerBound { binder, area }]
         }

@@ -170,6 +170,7 @@ mod tests {
         world.init_resource::<crate::ui_cast::QueuedMeleeSpell>();
         world.init_resource::<crate::cooldowns::Cooldowns>();
         world.init_resource::<crate::ui_action::CastErrors>();
+        world.init_resource::<crate::ui_action::UiErrorKeys>();
         world.init_resource::<crate::ui_action::AutoRepeatActive>();
         world.init_resource::<crate::ui_tradeskill::TradeSkillOpens>();
         world.init_resource::<super::super::SpellTargeting>();

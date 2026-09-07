@@ -128,6 +128,8 @@ fn load_item_sounds(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
 /// payload transition (decision 0216) — an Item transition always plays its own per-item kit
 /// instead, never this pair.
 const INTERFACESOUND_CURSORGRABOBJECT: u32 = 902;
+/// `LOOTWINDOWCOINSOUND` — SoundEntries kit 895, the coin clink the money pickup names (1962).
+const LOOTWINDOWCOINSOUND: u32 = 895;
 const INTERFACESOUND_CURSORDROPOBJECT: u32 = 903;
 
 /// Which half of a gesture pair a transition plays: the payload landing on the cursor (`Gain`,
@@ -224,10 +226,15 @@ fn play_item_gesture_sounds(
         | CursorPayload::PetAction(_)
         // Mode 10 joins them: the stabled-pet grab `0x495010` calls the same generic path and
         // names no per-item kit (decision 1677).
-        | CursorPayload::StablePet(_) => {
-            let kit_id = match gesture {
-                CursorGesture::Gain => INTERFACESOUND_CURSORGRABOBJECT,
-                CursorGesture::Loss => INTERFACESOUND_CURSORDROPOBJECT,
+        | CursorPayload::StablePet(_)
+        // Mode 2 (1962, 1965): the money pickup AND drop both play `LOOTWINDOWCOINSOUND` — the
+        // same kit 895 the purse plays on a change (`sound/money.rs`) — and never the generic drop
+        // kit (wow-re `money-cursor-law.md` §2).
+        | CursorPayload::Money(_) => {
+            let kit_id = match (&payload, gesture) {
+                (CursorPayload::Money(_), _) => LOOTWINDOWCOINSOUND,
+                (_, CursorGesture::Gain) => INTERFACESOUND_CURSORGRABOBJECT,
+                (_, CursorGesture::Loss) => INTERFACESOUND_CURSORDROPOBJECT,
             };
             if let Err(e) = kit::play_kit(
                 &mut kits,

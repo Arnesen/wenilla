@@ -15,8 +15,12 @@ use super::test_ui::load_ui as load_xml;
 fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "CastingBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    // The stock file writes `CastingBarText:SetText(FAILED)` rather than a literal, so the window
+    // needs GlobalStrings — which the manifest has above it, and which our own retired
+    // `CastingBar.xml` did not need because it hardcoded "Failed".
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\CastingBarFrame.xml");
     s
 }
 
@@ -381,11 +385,22 @@ fn bottom(s: &UiScript, name: &str) -> f64 {
 fn managed_positions_track_the_bottom_bar_stack() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "CastingBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\CastingBarFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
-    load_xml(&s, "ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml"); // the dropdown kit's MenuBackdrop reads TOOLTIP_DEFAULT_COLOR
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
 
     // The loader's post-load bootstrap, replayed with no bars in existence: the bare bases.
     s.run("UIParent_ManageFramePositions()").unwrap();
@@ -401,14 +416,30 @@ fn managed_positions_track_the_bottom_bar_stack() {
     // The bar stubs carry a no-op SetPoint: `MultiBarBottomLeft` and `ShapeshiftBarFrame` are
     // themselves rows in UIPARENT_MANAGED_FRAME_POSITIONS, so since those frames wear their
     // reference names the pass positions them as well as reading their visibility.
-    s.run("MultiBarBottomLeft = { IsShown = function() return true end, SetPoint = function() end, ClearAllPoints = function() end }; MultiBarBottomRight = MultiBarBottomLeft; UIParent_ManageFramePositions()")
+    // **The bottom-bar flags come from the SAVED GLOBALS, not from the frames.** The stock pass
+    // reads `SHOW_MULTI_ACTIONBAR_1`/`_2` (`UIParent.lua:1598-1606`) and never asks the bars
+    // whether they are shown — our retired copy asked, which is why this drive used to fake a
+    // frame with an `IsShown`. The fake also had no `IsObjectType`, which the pass calls on every
+    // row it seats (1988).
+    s.run("SHOW_MULTI_ACTIONBAR_1 = 1 SHOW_MULTI_ACTIONBAR_2 = 1 UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();
     assert_eq!(bottom(&s, "CastingBarFrame"), 100.0, "60 + bottomEither 40");
     assert_eq!(bottom(&s, "ChatFrame1"), 102.0, "85 + bottomLeft 17");
 
     // The stance bar shows (the warrior at login): the pet term, plus chat's both-flags extra.
-    s.run("ShapeshiftBarFrame = { IsShown = function() return true end, SetPoint = function() end, ClearAllPoints = function() end }; UIParent_ManageFramePositions()")
+    // The pass's shapeshift-appearance arm (the reference's own, UIParent.lua:1705-1732 — in ours
+    // since 1938) touches the bar's three shelf textures by name, unguarded as the reference has
+    // it; a stand-in frame needs stand-in textures.
+    s.run(
+        "local t = { Show = function() end, Hide = function() end } \
+         ShapeshiftBarLeft, ShapeshiftBarMiddle, ShapeshiftBarRight = t, t, t",
+    )
+    .unwrap();
+    s.run(
+        "ShapeshiftBarFrame = ShapeshiftBarFrame or CreateFrame(\"Frame\", \"ShapeshiftBarFrame\") \
+         ShapeshiftBarFrame:Show() UIParent_ManageFramePositions()",
+    )
         .unwrap();
     s.resolve();
     assert_eq!(bottom(&s, "CastingBarFrame"), 140.0, "60 + 40 + pet 40");
@@ -419,7 +450,7 @@ fn managed_positions_track_the_bottom_bar_stack() {
     );
 
     // It hides again (a druid leaving forms is the live case): everything settles back.
-    s.run("ShapeshiftBarFrame = { IsShown = function() return false end, SetPoint = function() end, ClearAllPoints = function() end }; UIParent_ManageFramePositions()")
+    s.run("ShapeshiftBarFrame:Hide() UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();
     assert_eq!(bottom(&s, "CastingBarFrame"), 100.0);

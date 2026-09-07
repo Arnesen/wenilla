@@ -120,7 +120,7 @@ use chain_beam::{simulate_chain_beams, spawn_chain_beams};
 // The container feed reads the icon column off the same catalog resource (one DBC parse).
 // The one InventoryType → equipment-slot table (`attach::preview`): the dressing-room feed places a
 // tried-on item by the very same map the preview it feeds dresses by (decision 1060).
-pub(crate) use attach::equip_slot;
+pub(crate) use attach::{equip_slot, BodyPartsDesc};
 pub(crate) use equipment::ItemDisplays;
 pub(crate) use equipment::{BoneAttach, Equipment};
 // The instruments' read of what a body is actually WEARING vs what it resolved (`WOW_DRESS_CENSUS`).
@@ -139,6 +139,29 @@ pub(crate) const ATTACH_OVERHEAD: u16 = 18;
 /// the RIDER's own model (character models seat it higher so overhead content clears the
 /// mount's bulk). A rider model without it falls back to 18 like the client.
 pub(crate) const ATTACH_OVERHEAD_MOUNTED: u16 = 29;
+
+/// The overhead attachment slot to use for a unit **right now** — the reference's own pick inside
+/// the marker attach `0x6074c0` (VERIFIED, wow-re object-layer `questgiver-marker.md` Q2), always
+/// queried on the unit's *body* model: slot **29** when a mount MODEL exists (`unit+0xdc != 0` —
+/// our [`mount::MountChild`]) *and* the body authors 29, else slot **18**; `None` when the body
+/// authors neither, which is the reference's "marker created but never parented" (invisible) and
+/// this file's bbox fallback for the overhead readers.
+///
+/// **The pick is LIVE, not a bake.** `0x6074c0`'s five call sites include `0x5ffae7` inside
+/// `0x5ffa50` — the `UNIT_FIELD_MOUNTDISPLAYID` field-watch handler (`0x604330 mov edx,0x1fc; mov
+/// ecx,3`), the very handler [`mount::reseat_mounts`] ports — so the reference re-runs the whole
+/// attach, slot choice included, on every mount and dismount. A per-frame *reader*
+/// ([`overhead_anchor`]) gets that for free; a consumer that PARENTS something at the slot
+/// ([`crate::quest_markers`]) has to notice the move and re-parent itself (decision 1871).
+pub(crate) fn overhead_slot(attach: &BoneAttach, mounted: bool) -> Option<u16> {
+    if mounted && attach.points.contains_key(&ATTACH_OVERHEAD_MOUNTED) {
+        Some(ATTACH_OVERHEAD_MOUNTED)
+    } else if attach.points.contains_key(&ATTACH_OVERHEAD) {
+        Some(ATTACH_OVERHEAD)
+    } else {
+        None
+    }
+}
 
 /// The `0x608640` fallback multiplier (`0x80c5d0` = 1.25): a unit whose model has no PlayerName
 /// attachment anchors overhead content at `feet + scale × bbox_z × 1.25`.
@@ -196,6 +219,58 @@ pub(crate) struct OverheadFallback(pub(crate) f32);
 /// parents a `NetEntity` (the `ChildOf` sites are the portrait booth, the pipe-warm menagerie and
 /// the UI glue), so its global IS its local. A `PostUpdate` caller ([`crate::nameplates`], which
 /// moved there for this very lag) is unaffected: after propagation the two are the same value.
+/// The client's **per-attachment z-bias** fallback table, `[0x862708]` — 37 floats, attachment
+/// ids `0..=0x24`, read as `[0x862708 + 4·id]` under a `0 ≤ id < 0x25` guard (wow-re
+/// `object-layer/scratch/anim-event-position-law.md` §4, §5-cross-checked). It is consulted only
+/// when the model does **not** carry the attachment the caller asked for: the sound then plays at
+/// the unit's own position raised by this much, which is how a headless or attachment-less model
+/// still puts a mouth sound somewhere plausible instead of at its feet.
+const ATTACH_Z_BIAS: [f32; 37] = [
+    1.0, 1.0, 1.0, 1.5, 1.5, 1.8, 1.8, 0.5, 0.5, 1.0, 1.0, 2.0, 1.5, 1.0, 1.0, 1.0, 1.0, 2.0, 2.5,
+    0.0, 2.0, 1.5, 1.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 3.0, 1.5, 1.5, 1.0, 1.0, 1.5, 1.0, 1.0,
+];
+
+/// **`0x623b90(attachId)` — where a unit-attached sound is born**, as a [`SystemParam`] because
+/// two different routers need the same three pure reads.
+///
+/// [`SystemParam`]: bevy::ecs::system::SystemParam
+///
+/// `AttachPoints::point` returns The attachment's live world
+/// point when the model carries it (`0x712cb0` finds the record, `0x712d50` transforms it), else
+/// the unit's own `GetPosition` raised by [`ATTACH_Z_BIAS`]`[attachId]` (`0x623be2 fadd
+/// [4·ebx + 0x862708]`).
+///
+/// Two anim-event arms reach it and they are the reason this exists as a named function rather
+/// than inline at either: the emote voice `$CSD` asks for **17** (`0x623c3a push 0x11`), and a
+/// **whiffed** melee swing's `$CSS` asks for **1** (`0x624bdd`). Both are emphatically *not* the
+/// fired event's own point, which is what makes them the exceptions in
+/// `anim-event-position-law.md` §3's table — a player model's six head-mounted `$CSD` records do
+/// not decide where that sound plays.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct AttachPoints<'w, 's> {
+    anchors: Query<'w, 's, &'static BoneAttach>,
+    poses: Query<'w, 's, &'static benilla_world::rig_anim::RigPose>,
+    globals: Query<'w, 's, &'static GlobalTransform>,
+}
+
+impl AttachPoints<'_, '_> {
+    /// The world point, with `fallback` standing in for the reference's `GetPosition` (the caller
+    /// already holds the unit's transform, and passing it keeps this a pure read).
+    pub(crate) fn point(&self, entity: Entity, attach: u16, fallback: Vec3) -> Vec3 {
+        self.anchors
+            .get(entity)
+            .ok()
+            .and_then(|a| {
+                let &(bone, offset) = a.points.get(&attach)?;
+                let pose = self.poses.get(entity).ok()?;
+                pose.posed_point(self.globals.get(pose.joints_root).ok()?, bone, offset)
+            })
+            .unwrap_or_else(|| {
+                fallback + Vec3::Y * ATTACH_Z_BIAS.get(attach as usize).copied().unwrap_or(0.0)
+            })
+    }
+}
+
 pub(crate) fn overhead_anchor<F: bevy::ecs::query::QueryFilter>(
     entity: Entity,
     tf: &Transform,
@@ -209,13 +284,7 @@ pub(crate) fn overhead_anchor<F: bevy::ecs::query::QueryFilter>(
         .get(entity)
         .ok()
         .and_then(|a| {
-            let slot = if mounts.contains(entity) && a.points.contains_key(&ATTACH_OVERHEAD_MOUNTED)
-            {
-                ATTACH_OVERHEAD_MOUNTED
-            } else {
-                ATTACH_OVERHEAD
-            };
-            let &(bone, offset) = a.points.get(&slot)?;
+            let &(bone, offset) = a.points.get(&overhead_slot(a, mounts.contains(entity))?)?;
             let pose = poses.get(entity).ok()?;
             let own;
             let root = if pose.joints_root == entity {
@@ -320,6 +389,13 @@ impl Creatures {
     /// A display's **death-thud camera-shake preset** — same table, fired on `$DTH`.
     pub(crate) fn death_thud_shake(&self, display_id: u32) -> Option<u32> {
         self.catalog.death_thud_shake(display_id)
+    }
+
+    /// A display's **audible size class** (`0 Small`..`4 Colossal`) — the axis the body-fall
+    /// sample is picked on (`crate::sound::death_thud`). The display's own column overrides the
+    /// model's; see [`benilla_formats::CreatureCatalog::size_class`].
+    pub(crate) fn size_class(&self, display_id: u32) -> Option<u32> {
+        self.catalog.size_class(display_id)
     }
 
     /// A display's **spawned-creature render scale** — see
@@ -485,6 +561,8 @@ pub(super) struct SkinKey {
     /// guilds' members wear the *same* tabard display and must not share one atlas. Without it the
     /// first guild to composite would lend its crest to every other guild on screen.
     pub(super) emblem: Option<benilla_formats::GuildEmblem>,
+    /// The tabard designer's preview flag (1977): the emblem paints over an empty tabard slot.
+    pub(super) tabard_preview: bool,
 }
 
 /// Marks a net entity whose visual (model children or fallback cube) has been attached, so the attach
@@ -592,6 +670,28 @@ type WireBody = (
     Option<&'static benilla_world::world_unit::WorldUnit>,
 );
 
+/// One viewer-reconcile row: the entity, whether it is the embodied self, whether it is marked.
+type ViewerRow = (
+    Entity,
+    Has<crate::net::Embodied>,
+    Has<benilla_world::world_unit::ViewerUnit>,
+);
+
+/// Only entities that can be a viewer at all — one of the two markers present.
+type ViewerCandidate = Or<(
+    With<crate::net::Embodied>,
+    With<benilla_world::world_unit::ViewerUnit>,
+)>;
+
+/// The edges on which a body's [`WorldUnit`](benilla_world::world_unit::WorldUnit) restatement can
+/// move — [`publish_world_units`]' query filter (the anchor's removal is read separately).
+type WireBodyMoved = Or<(
+    Changed<NetEntity>,
+    Changed<collision_height::CollisionHeight>,
+    Changed<ModelBound>,
+    Added<crate::transport::TransportAnchor>,
+)>;
+
 /// **Restate every wire body as a [`WorldUnit`](benilla_world::world_unit::WorldUnit)** — the game's half
 /// of the unit inversion (see that module).
 ///
@@ -602,14 +702,22 @@ type WireBody = (
 /// visible to the world this frame.
 fn publish_world_units(
     mut commands: Commands,
-    bodies: Query<WireBody>,
-    viewers: Query<(
-        Entity,
-        Has<crate::net::Embodied>,
-        Has<benilla_world::world_unit::ViewerUnit>,
-    )>,
+    // Only bodies whose inputs moved this frame: the restatement is a pure function of these
+    // four, and walking every resident body to compare equal answers was ~1.3 k struct builds
+    // a frame at the Stormwind pin (decision 1979's floor). A body leaving its transport loses
+    // the anchor without a `Changed` — that edge is read off `unanchored`.
+    bodies: Query<WireBody, WireBodyMoved>,
+    all_bodies: Query<WireBody>,
+    mut unanchored: RemovedComponents<crate::transport::TransportAnchor>,
+    // Only entities that can be a viewer at all: the reconcile below needs one of the two
+    // present, and an unfiltered query walked every entity in the world each frame.
+    viewers: Query<ViewerRow, ViewerCandidate>,
 ) {
-    for (entity, net, height, bound, anchored, current) in &bodies {
+    let freed: Vec<Entity> = unanchored.read().collect();
+    let due = bodies
+        .iter()
+        .chain(freed.iter().filter_map(|&e| all_bodies.get(e).ok()));
+    for (entity, net, height, bound, anchored, current) in due {
         let want = benilla_world::world_unit::WorldUnit {
             // The wire kind is answered HERE and never handed over (1177): the engine asks "does
             // this body displace water", and translating its own vocabulary into that answer is
@@ -685,6 +793,7 @@ impl Plugin for EntitiesPlugin {
                 .before(benilla_world::schedule::WorldStage::Input),
         )
         .init_resource::<SkinComposites>()
+        .init_resource::<attach::MergedFormsCache>()
         // The 16 bone-pile body models (decision 1706), keyed (race, sex) rather than by a
         // display id — a skeleton has no CreatureDisplayInfo row.
         .init_resource::<corpse::BonesModels>()
@@ -1548,5 +1657,74 @@ mod display_mirror_tests {
         let c = creatures(4449, crate::entities::display::empty_shell());
         assert!(c.display_mirror(4449).is_none(), "parts not built yet");
         assert!(c.display_mirror(1).is_none(), "unknown display");
+    }
+}
+
+#[cfg(test)]
+mod overhead_slot_tests {
+    use super::*;
+
+    /// A body model authoring exactly `slots` (the bone/offset payload is immaterial here).
+    fn body(slots: &[u16]) -> BoneAttach {
+        BoneAttach {
+            points: slots.iter().map(|&s| (s, (0u16, Vec3::ZERO))).collect(),
+            markers: HashMap::new(),
+        }
+    }
+
+    /// `0x6074c0`'s pick and only it: 29 is *preferred*, never required, and never taken by an
+    /// unmounted unit. So a character body — which authors both (wow-re's table: HumanMale 18 at
+    /// z 2.2123, 29 at z 1.4029) — moves 18 ↔ 29 across a mount, a creature that authors only 18
+    /// (AncientOfLore, Kobold) stays at 18 whether or not it is mounted, and a body authoring
+    /// neither anchors nothing: the reference creates the marker and never parents it.
+    #[test]
+    fn twenty_nine_needs_both_a_mount_model_and_the_authored_point() {
+        let both = body(&[ATTACH_OVERHEAD, ATTACH_OVERHEAD_MOUNTED]);
+        assert_eq!(overhead_slot(&both, false), Some(ATTACH_OVERHEAD));
+        assert_eq!(overhead_slot(&both, true), Some(ATTACH_OVERHEAD_MOUNTED));
+
+        let plain = body(&[ATTACH_OVERHEAD]);
+        assert_eq!(overhead_slot(&plain, false), Some(ATTACH_OVERHEAD));
+        assert_eq!(
+            overhead_slot(&plain, true),
+            Some(ATTACH_OVERHEAD),
+            "no 29 on the body ⇒ the mounted leg falls back to 18, like the client"
+        );
+
+        let mounted_only = body(&[ATTACH_OVERHEAD_MOUNTED]);
+        assert_eq!(
+            overhead_slot(&mounted_only, false),
+            None,
+            "29 is never the unmounted fallback — the fallback is 18 or nothing"
+        );
+        assert_eq!(
+            overhead_slot(&mounted_only, true),
+            Some(ATTACH_OVERHEAD_MOUNTED)
+        );
+
+        assert_eq!(overhead_slot(&body(&[]), true), None, "never parented");
+    }
+}
+
+#[cfg(test)]
+mod attach_bias_tests {
+    use super::*;
+
+    /// The z-bias fallback table `[0x862708]`, verbatim (wow-re
+    /// `object-layer/scratch/anim-event-position-law.md` §4). It is 37 f32 for attachment ids
+    /// `0..=0x24`, and the two ids that actually reach it through an animation event are the
+    /// emote voice's **17** and a whiffed swing's **1** — so those two are what a drift here
+    /// would move, on exactly the models that lack the attachment.
+    #[test]
+    fn the_z_bias_table_is_the_reference_row_for_ever_id() {
+        assert_eq!(ATTACH_Z_BIAS.len(), 0x25, "ids 0..=0x24");
+        assert_eq!(ATTACH_Z_BIAS[17], 2.0, "$CSD's fallback lift");
+        assert_eq!(ATTACH_Z_BIAS[1], 1.0, "a whiffed $CSS's");
+        // The two that are not 1.0-or-1.5, which is what makes a transcription slip visible.
+        assert_eq!(ATTACH_Z_BIAS[19], 0.0);
+        assert_eq!(ATTACH_Z_BIAS[29], 3.0);
+        assert_eq!(ATTACH_Z_BIAS[18], 2.5);
+        // Out of range reads as no lift, matching the reference's `0 ≤ id < 0x25` guard.
+        assert_eq!(ATTACH_Z_BIAS.get(0x25), None);
     }
 }

@@ -506,6 +506,43 @@ impl TransportTimetable {
         Some(tt)
     }
 
+    /// **The cycle instant this path first stands on `map_id`, searching forward from
+    /// `from_cycle_ms` and wrapping** — the client-side answer to "the server says this transport
+    /// has just crossed onto that continent; where in my own timetable is that?"
+    ///
+    /// A client computes a transport's position from its own path clock, anchored whenever the
+    /// object's CREATE block last arrived, so that clock is free to drift from the server's about
+    /// *when* a crossing happens (measured live at 32–144 ms on the 1.12 fleet). The server does
+    /// re-anchor it on arrival — `Map::SendInitSelf` sends the ridden transport's create first,
+    /// which is why `SendInitTransports` then skips it — but that lands a round trip after the
+    /// worldport ack, and a consumer that must place a rider *in the worldport frame* has nothing
+    /// to place them through until it does. This is that answer: the instant our own timetable
+    /// puts the transport on the map the server just named.
+    ///
+    /// Returns the frame's **arrival** instant (the start of its window), so the sample lands at
+    /// the head of the destination leg rather than mid-travel. `None` if no keyframe lies on
+    /// `map_id` at all — the caller has misidentified the transport.
+    pub fn first_cycle_on_map(&self, from_cycle_ms: u32, map_id: u32) -> Option<u32> {
+        let n = self.frames.len();
+        if n == 0 {
+            return None;
+        }
+        // The frame `from_cycle_ms` currently sits in — the scan starts there so a clock already
+        // on the destination leg answers "right here" instead of a whole cycle away.
+        let start = self
+            .frames
+            .iter()
+            .position(|f| from_cycle_ms < f.next_arrive_time)
+            .unwrap_or(n - 1);
+        (0..n)
+            .map(|k| (start + k) % n)
+            .find(|&i| self.frames[i].map_id == map_id)
+            .map(|i| match i {
+                0 => 0,
+                _ => self.frames[i - 1].next_arrive_time,
+            })
+    }
+
     /// Whether any of the cycle's keyframes lies on `map_id` — i.e. this transport exists on
     /// that map for part of its loop. The cross-map worldport (decision 0455) keeps such a
     /// transport alive through the map switch (its clock is one continuous domain over the

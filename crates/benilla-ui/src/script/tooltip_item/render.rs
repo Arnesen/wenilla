@@ -70,6 +70,18 @@ pub(super) struct ItemInstance {
     /// "Cooldown remaining", the same item off cooldown shows `<Right Click to Open>`.**
     /// Decision 0896.
     pub openable_source: bool,
+    /// **The instance's remaining LIFETIME in milliseconds** — a duration-limited item (a
+    /// conjured stone, a holiday gift, a timed quest item) counting down to its own destruction.
+    /// `None` = no timer, which is every ordinary item and every template/link source.
+    ///
+    /// App-resolved from the client-local deadline `SMSG_ITEM_TIME_UPDATE` parks
+    /// ([`crate::script::ContainerSlot::duration_ms`]), not from the instance's
+    /// `ITEM_FIELD_DURATION` field: vmangos's own writer says the field is not what the client
+    /// displays from — *"Though the client has the information in the item's data field, we have
+    /// to send SMSG_ITEM_TIME_UPDATE to display the remaining time"* (`Item::SendTimeUpdate`,
+    /// `Objects/Item.cpp:1094`) — which is the same split the temporary-enchant countdown one
+    /// field up already takes (decisions 0920/1933).
+    pub duration_ms: Option<u64>,
 }
 
 /// The SET block's blank gold spacer — the reference's own literal `0x854b2c`, and it is **not**
@@ -425,6 +437,17 @@ pub(super) fn render_view(
             WHITE,
         ))?;
     }
+    // **ITEM_DURATION `0x854bb4` — the item's own expiry countdown** (`0x52ce0d`, one of the four
+    // sites that set the builder's `[ebp-0x38]` return, wow-re `tooltip-content-law.md` §E3's
+    // census). It sits here by that address: after the durability precompute the note pins at
+    // `0x52cd0e–0x52cd22` (law line 18) and well before `ITEM_COOLDOWN_TIME` at `0x52e140` (line
+    // 23) — the numbered law list omits the line entirely, which is the gap decision 1933 names.
+    // Formatted through the same `0x52fa50` ladder as the enchant countdown, with key prefix
+    // `ITEM_DURATION`; unlike its siblings that prefix ships **no `_P1` plural twin**, so every
+    // count reads "days"/"hrs" (`GlobalStrings.lua:2401-2404`).
+    if let Some(ms) = inst.and_then(|i| i.duration_ms) {
+        add((duration_left(ms), WHITE))?;
+    }
     // Class/race lists — red when the player's own bit is absent (the usable ask).
     if v.allowable_class > 0
         && (v.allowable_class & full_mask(&CLASS_NAMES)) != full_mask(&CLASS_NAMES)
@@ -618,22 +641,56 @@ pub(super) fn render_view(
 /// Templates are the shipped enUS values (`Interface\FrameXML\GlobalStrings.lua:2406-2411`),
 /// inlined like every other string in this builder.
 fn enchant_time_left(name: &str, ms: u64) -> String {
+    match time_bucket(ms) {
+        (TimeBucket::Days, 1) => format!("{name} (1 day)"),
+        (TimeBucket::Days, n) => format!("{name} ({n} days)"),
+        (TimeBucket::Hours, 1) => format!("{name} (1 hour)"),
+        (TimeBucket::Hours, n) => format!("{name} ({n} hrs)"),
+        (TimeBucket::Min, n) => format!("{name} ({n} min)"),
+        (TimeBucket::Sec, n) => format!("{name} ({n} sec)"),
+    }
+}
+
+/// The item self-expiry line's text — the same `0x52fa50` bucket ladder as
+/// [`enchant_time_left`] (largest unit that fits; **ceil** in the day/hour/minute arms,
+/// **truncated** in the seconds arm), composed against key prefix `ITEM_DURATION`.
+///
+/// The one difference from its siblings is the absence of a plural split: `ITEM_DURATION_*` ships
+/// no `_P1` twin (`GlobalStrings.lua:2401-2404`), so a one-day timer reads "Duration: 1 days"
+/// exactly as the reference's own string table spells it.
+fn duration_left(ms: u64) -> String {
+    match time_bucket(ms) {
+        (TimeBucket::Days, n) => format!("Duration: {n} days"),
+        (TimeBucket::Hours, n) => format!("Duration: {n} hrs"),
+        (TimeBucket::Min, n) => format!("Duration: {n} min"),
+        (TimeBucket::Sec, n) => format!("Duration: {n} sec"),
+    }
+}
+
+/// The rung [`time_bucket`] picked — `0x52fa50`'s runtime key suffix, as a type.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TimeBucket {
+    Days,
+    Hours,
+    Min,
+    Sec,
+}
+
+/// `0x52fa50`'s bucket + count, shared by every countdown line the item builder emits (the
+/// temporary enchant, the item's own expiry, and — when it is fed — the cooldown remaining).
+/// The largest unit that fits wins (`>= 1 day` · `>= 1 h` · `>= 1 min` · else seconds); the count
+/// is **ceil** in the day/hour/minute arms (the `roundUp` argument, which all seven of the
+/// function's callers pass as 1) and plain **truncation** in the seconds arm.
+fn time_bucket(ms: u64) -> (TimeBucket, u64) {
     const SEC: u64 = 1_000;
     const MIN: u64 = 60 * SEC;
     const HOUR: u64 = 60 * MIN;
     const DAY: u64 = 24 * HOUR;
-    let ceil = |unit: u64| ms.div_ceil(unit);
     match ms {
-        _ if ms >= DAY => match ceil(DAY) {
-            1 => format!("{name} (1 day)"),
-            n => format!("{name} ({n} days)"),
-        },
-        _ if ms >= HOUR => match ceil(HOUR) {
-            1 => format!("{name} (1 hour)"),
-            n => format!("{name} ({n} hrs)"),
-        },
-        _ if ms >= MIN => format!("{name} ({} min)", ceil(MIN)),
-        _ => format!("{name} ({} sec)", ms / SEC),
+        _ if ms >= DAY => (TimeBucket::Days, ms.div_ceil(DAY)),
+        _ if ms >= HOUR => (TimeBucket::Hours, ms.div_ceil(HOUR)),
+        _ if ms >= MIN => (TimeBucket::Min, ms.div_ceil(MIN)),
+        _ => (TimeBucket::Sec, ms / SEC),
     }
 }
 
@@ -671,6 +728,23 @@ mod tests {
         assert_eq!(t(86_400_001), "Rockbiter (2 days)");
         // Zero never reaches here (the app drops an expired timer), but it must not panic.
         assert_eq!(t(0), "Rockbiter (0 sec)");
+    }
+
+    /// The item self-expiry line shares the enchant countdown's ladder and differs in exactly one
+    /// way: `ITEM_DURATION_*` ships **no `_P1` plural twin**, so a one-unit count reads the same
+    /// plural spelling as any other ("1 days", "1 hrs") — the shipped enUS strings say so
+    /// (`GlobalStrings.lua:2401-2404`), and inventing a singular here would be our own invention,
+    /// not the reference's.
+    #[test]
+    fn item_duration_shares_the_ladder_but_not_the_plural() {
+        assert_eq!(duration_left(1_900), "Duration: 1 sec"); // seconds truncate
+        assert_eq!(duration_left(59_999), "Duration: 59 sec");
+        assert_eq!(duration_left(60_000), "Duration: 1 min"); // minutes ceil
+        assert_eq!(duration_left(241_000), "Duration: 5 min");
+        assert_eq!(duration_left(3_600_000), "Duration: 1 hrs"); // no singular twin
+        assert_eq!(duration_left(3_600_001), "Duration: 2 hrs");
+        assert_eq!(duration_left(86_400_000), "Duration: 1 days");
+        assert_eq!(duration_left(1_209_600_000), "Duration: 14 days");
     }
 
     /// `ITEM_SPELL_CHARGES` and its `_P1` plural twin — one rule, both consumers (the standalone

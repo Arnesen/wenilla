@@ -15,16 +15,24 @@ use super::test_ui::load_ui as load_xml;
 /// live here since window 6 (our ItemRef.xml used to carry a private second copy of both).
 fn load_popup_frames(s: &UiScript) {
     for file in [
-        "Fonts.xml",
-        "UIParent.xml",
-        // `SmallMoneyFrame_OnLoad`, which UiPanels' own StaticPopup money rows call at load.
-        "MoneyFrame.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        // `SmallMoneyFrame_OnLoad`, which the chain's StaticPopup money rows call at load.
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         // `StaticPopupDialogs` and the `PanelTemplates_*` family, both of which FriendsFrame.xml
         // reaches at LOAD (its tab row and its confirm dialogs).
-        "UiPanels.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua", // `TEXT`, read at file scope below
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\StaticPopup.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
+        "Interface\\FrameXML\\UIMenu.xml",
+        "Interface\\FrameXML\\ChatFrame.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
-        "UnitPopup.xml",
+        "Interface\\FrameXML\\UnitPopup.xml",
         "Interface\\FrameXML\\ItemRef.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
@@ -36,9 +44,10 @@ fn load_popup_frames(s: &UiScript) {
         "Interface\\FrameXML\\TargetFrame.xml",
         "Interface\\FrameXML\\PetFrame.xml",
         "ScrollTemplates.xml",
-        r"Interface\FrameXML\UIPanelTemplates.lua",
-        r"Interface\FrameXML\UIPanelTemplates.xml",
-        "FriendsFrame.xml",
+        "Interface\\FrameXML\\CharacterFrameTemplates.xml",
+        "Interface\\FrameXML\\FriendsFrame.xml",
+        // Declares ChatFrameEditBox, which the rename dialog's OnHide refocuses (1960).
+        "Interface\\FrameXML\\FloatingChatFrame.xml",
     ] {
         load_xml(s, file);
     }
@@ -66,8 +75,9 @@ fn bake_strings(s: &UiScript) {
         -- The newbie tooltip the stock unit frame raises on a HOVER, which every test in this file
         -- takes on its way to a right-click. `UnitFrame_OnEnter` (ref `UnitFrame.lua:58-65`) runs
         -- the detailed-tip branch whenever `SHOW_NEWBIE_TIPS == "1"` — 1.12's own default
-        -- (`UIOptionsFrame.lua:100`), which our `GameTooltip.xml:46` sets at load — and for a
-        -- player-controlled target that is not us it calls
+        -- (`UIOptionsFrame.lua:100`, a file benilla does not build; our `assets/ui/OptionsFrame.xml`
+        -- is the definer, and this harness loads no options file, so the branch is not reached
+        -- here). For a player-controlled target that is not us that branch calls
         -- `GameTooltip_AddNewbieTip(PLAYER_OPTIONS_LABEL, 1, 1, 1, NEWBIE_TOOLTIP_PLAYEROPTIONS)`.
         -- Both are nil in a bare harness, and `GameTooltip:SetText(nil)` raises. Verbatim from the
         -- real `Interface\FrameXML\GlobalStrings.lua` off the 1.12.1 chain (l.3081 and l.2755).
@@ -108,11 +118,13 @@ fn chat_name_right_click_opens_the_invite_menu() {
         s.eval::<bool>("return DropDownList1:IsVisible()").unwrap(),
         "the chat-name right-click opens the FRIEND dropdown"
     );
-    // title (Bob) + Whisper + Invite + Cancel — the rest of FRIEND is DEFERRED/hidden.
+    // title (Bob) + Whisper + Invite + Target + Cancel — the reference's FRIEND menu with its two
+    // guild rows hidden by their own predicates (no guild, no guild frame). Our transcription
+    // had deferred Target; the stock row is `TargetByName`, which exists (1958).
     assert_eq!(
         s.eval::<i64>("return DropDownList1.numButtons").unwrap(),
-        4,
-        "title + Whisper + Invite + Cancel"
+        5,
+        "title + Whisper + Invite + Target + Cancel"
     );
     assert_eq!(
         s.eval::<String>("return DropDownList1Button1:GetText()")
@@ -138,13 +150,21 @@ fn chat_name_right_click_opens_the_invite_menu() {
         "Invite on a chat name queues an invite-by-name"
     );
 
-    // A plain LEFT-click on the name whispers instead (ref's else branch).
+    // A plain LEFT-click on the name whispers instead (ref's else branch): the stock
+    // `ChatFrame_SendTell` puts the box into WHISPER mode at the name and opens it (1960).
     s.run(r#"SetItemRef("player:Carol", "|Hplayer:Carol|h[Carol]|h", "LeftButton")"#)
         .unwrap();
+    s.tick(0.05);
     assert_eq!(
-        s.take_tell_requests(),
-        vec!["Carol".to_string()],
+        s.eval::<(String, String)>("return ChatFrameEditBox.chatType, ChatFrameEditBox.tellTarget")
+            .unwrap(),
+        ("WHISPER".to_string(), "Carol".to_string()),
         "left-click a chat name opens a whisper"
+    );
+    assert!(
+        s.eval::<bool>("return ChatFrameEditBox:IsVisible()")
+            .unwrap(),
+        "and the box is open"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -457,21 +477,28 @@ fn solo_target_inspect_click_reaches_inspect_unit() {
 
 // ── The PET menu (decision 1066; report B219) ───────────────────────────────────────────────────
 
-/// The pet menu's own prefix. Two things join the popup prefix: `UiPanels.xml` (the StaticPopup
-/// engine, because two of the four rows go behind a dialog) and `PetActionBar.xml`, which is where
-/// those three dialogs are registered — with the pet arc, not with the rows. `Cooldown.xml` and
+/// The pet menu's own prefix. What joins the popup prefix is `StaticPopup.xml` — the StaticPopup
+/// engine, because two of the four rows go behind a dialog, and since 1953 where the pet arc's
+/// three dialogs are registered (they rode our pet-bar file until it became the reference's).
+/// `Cooldown.xml` and
 /// `ActionBar.xml` are the pet bar's own load deps, not this menu's.
 fn load_pet_menu_frames(s: &UiScript) {
     for file in [
-        "Fonts.xml",
-        "UIParent.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua", // `TEXT`, read at file scope below
+        "Interface\\FrameXML\\StaticPopup.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
+        "Interface\\FrameXML\\UIMenu.xml",
+        "Interface\\FrameXML\\ChatFrame.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
-        "UnitPopup.xml",
+        "Interface\\FrameXML\\UnitPopup.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
         "Interface\\FrameXML\\BuffFrame.xml",
@@ -481,9 +508,13 @@ fn load_pet_menu_frames(s: &UiScript) {
         "Interface\\FrameXML\\PartyFrame.xml",
         "Interface\\FrameXML\\TargetFrame.xml",
         "Interface\\FrameXML\\PetFrame.xml",
-        "Cooldown.xml",
-        "ActionBar.xml",
-        "PetActionBar.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
+        // Declares ChatFrameEditBox, which the rename dialog's OnHide refocuses (1960).
+        "Interface\\FrameXML\\FloatingChatFrame.xml",
     ] {
         load_xml(s, file);
     }
@@ -787,150 +818,6 @@ fn the_pet_details_row_opens_the_pet_paper_doll() {
     assert_eq!(
         s.eval::<String>("return BENILLA_TEST_TOGGLED").unwrap(),
         "PetPaperDollFrame"
-    );
-    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-}
-
-// ── The enable-pass driver (BenillaUnitPopupDriver) ─────────────────────────────────────────────
-
-/// **The idle popup driver parks itself** (decision 1396's class, the audit's driver-hide item):
-/// with no unit menu of ours open, `UnitPopup_OnUpdate`'s early-out hides the driver's own frame —
-/// and the engine dispatches OnUpdate only to visible frames (`tick.rs`), so the per-frame scan
-/// stops entirely. `UnitPopup_ShowMenu` — the one opener every unit menu goes through (grep:
-/// UnitFrames/PartyFrame/FriendsFrame/ItemRef all call it) — wakes it again.
-///
-/// The probe wraps `UnitPopup_OnUpdate` in a counter: after the first tick parks the shipped-shown
-/// driver, ten idle ticks never run the pass. The control: an open target menu still runs the
-/// per-frame enable pass — a disconnected target's Whisper row greys, and greys back live when the
-/// unit reconnects mid-open — and closing the menu re-parks the driver.
-#[test]
-fn an_idle_unit_popup_driver_parks_itself_off_the_tick() {
-    let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = UiScript::new().unwrap();
-    s.set_screen_size(1024.0, 768.0);
-    bake_strings(&s);
-    load_popup_frames(&s);
-
-    s.set_unit(
-        "player",
-        Some(UnitState {
-            exists: true,
-            name: Some("Me".into()),
-            is_player: true,
-            player_controlled: true,
-            ..UnitState::default()
-        }),
-    );
-    // A friendly player target, DISCONNECTED (is_connected defaults to false): the Whisper row's
-    // grey predicate is live from the first enable pass.
-    s.set_unit(
-        "target",
-        Some(UnitState {
-            exists: true,
-            name: Some("Ally".into()),
-            health: 40,
-            max_health: 40,
-            is_player: true,
-            player_controlled: true,
-            reaction: 5,
-            ..UnitState::default()
-        }),
-    );
-    s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
-    s.resolve();
-    assert!(s.errors().is_empty(), "load errors: {:?}", s.errors());
-
-    s.run(
-        "BENILLA_TEST_POPUP_TICKS = 0\n\
-         local real = UnitPopup_OnUpdate\n\
-         function UnitPopup_OnUpdate(elapsed)\n\
-             BENILLA_TEST_POPUP_TICKS = BENILLA_TEST_POPUP_TICKS + 1\n\
-             real(elapsed)\n\
-         end",
-    )
-    .unwrap();
-
-    // The driver ships shown; the first tick's early-out parks it, and then nothing runs.
-    s.tick(0.016);
-    s.resolve();
-    assert!(
-        !s.eval::<bool>("return BenillaUnitPopupDriver:IsShown()")
-            .unwrap(),
-        "no menu open: the first tick parks the driver"
-    );
-    s.run("BENILLA_TEST_POPUP_TICKS = 0").unwrap();
-    for _ in 0..10 {
-        s.tick(0.016);
-        s.resolve();
-    }
-    assert_eq!(
-        s.eval::<i64>("return BENILLA_TEST_POPUP_TICKS").unwrap(),
-        0,
-        "a parked driver never runs the enable pass"
-    );
-
-    // Open the PLAYER menu through the real hit path: the driver wakes...
-    let (cx, cy) = s
-        .eval::<(f64, f64)>("return TargetFrame:GetCenter()")
-        .unwrap();
-    s.mouse_button(cx as f32, cy as f32, "RightButton", true);
-    s.mouse_button(cx as f32, cy as f32, "RightButton", false);
-    s.resolve();
-    assert!(
-        s.eval::<bool>("return DropDownList1:IsVisible()").unwrap(),
-        "the menu opened"
-    );
-    assert!(
-        s.eval::<bool>("return BenillaUnitPopupDriver:IsShown()")
-            .unwrap(),
-        "UnitPopup_ShowMenu wakes the driver"
-    );
-
-    // ...and the pass runs per frame: the disconnected target's Whisper row greys...
-    s.tick(0.016);
-    s.resolve();
-    assert!(
-        s.eval::<i64>("return BENILLA_TEST_POPUP_TICKS").unwrap() > 0,
-        "an open menu ticks the enable pass"
-    );
-    assert!(
-        !s.eval::<bool>("return DropDownList1Button2:IsEnabled() ~= 0")
-            .unwrap(),
-        "Whisper greys against a disconnected target"
-    );
-
-    // ...and un-greys LIVE when the unit reconnects while the menu is up — the whole reason the
-    // pass is per-frame rather than baked at open.
-    s.set_unit(
-        "target",
-        Some(UnitState {
-            exists: true,
-            name: Some("Ally".into()),
-            health: 40,
-            max_health: 40,
-            is_player: true,
-            player_controlled: true,
-            reaction: 5,
-            is_connected: true,
-            ..UnitState::default()
-        }),
-    );
-    s.tick(0.016);
-    s.resolve();
-    assert!(
-        s.eval::<bool>("return DropDownList1Button2:IsEnabled() ~= 0")
-            .unwrap(),
-        "Whisper enables the frame the target reconnects"
-    );
-
-    // Closing the menu re-parks the driver on its next tick.
-    s.run("CloseDropDownMenus()").unwrap();
-    s.tick(0.016);
-    s.resolve();
-    assert!(
-        !s.eval::<bool>("return BenillaUnitPopupDriver:IsShown()")
-            .unwrap(),
-        "a closed menu parks the driver again"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

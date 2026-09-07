@@ -10,6 +10,14 @@
 //!    screen shows "Spell is not ready yet." while `SPELL_FAILED_NOT_READY` reads
 //!    "Not yet recovered", and "Not enough rage" for a rage spell's NO_POWER.
 //!
+//!    **This layer — and only this layer — is per-CASTER** (decision 2033). `SMSG_PET_CAST_FAILED`
+//!    is not the same handler with a flag: it is `Spell_C::HandlePetCastFailed 0x6e8eb0`, a
+//!    separate switch over a separate 142-byte index table, and it overrides a different ten
+//!    reasons. Six of them are the `ERR_PET_SPELL_*` catalog rows, which have no other raise site
+//!    in the client — "Your pet is out of range." where the player reads "Out of range." —
+//!    and seven of the player's overrides are simply absent there. [`Caster`] picks the table;
+//!    layers 1 and 3 are shared code in the binary and shared code here.
+//!
 //! 3. A per-reason **argument arm** (the second dispatch `0x6e1d8e`, 13 targets) fills that
 //!    message's own `%s`/`%d` from a DBC or item name before it is displayed. The two arms whose
 //!    tables benilla already loads live in [`FailArgs::fill`]; the drain fills three more before
@@ -22,12 +30,14 @@
 //! NO_POWER).
 //!
 //! **The argument arms, and what is still approximate.** Filled: `0x5e` REQUIRES_SPELL_FOCUS and
-//! `0x5d` REQUIRES_AREA here (decision 1313 — `0x6e1f62`/`0x6e1fad`), and `0x78` TOTEMS / `0x5c`
+//! `0x5d` REQUIRES_AREA here (decision 1313 — `0x6e1f62`/`0x6e1fad`), plus `0x8d`
+//! PREVENTED_BY_MECHANIC (decision 1948 — `0x6e2190`, and the one arm whose word is produced
+//! locally rather than read off the wire), and `0x78` TOTEMS / `0x5c`
 //! REAGENTS / `0x19`–`0x1b` EQUIPPED_ITEM_CLASS\* in the drain, which owns them because their
 //! fills need the item caches and the query-then-redisplay cache-miss behavior ("Requires Mining
 //! Pick", decisions 0545 + 0552). Still stripped rather than filled — each needs a DBC we do not
-//! load yet: `0x56` ONLY_SHAPESHIFT (form-name list), `0x8d` PREVENTED_BY_MECHANIC
-//! (`SpellMechanic.dbc`), `0x90` MIN_SKILL (`SkillLine.dbc`), `0x31` NEED_EXOTIC_AMMO and `0x84`
+//! load yet: `0x56` ONLY_SHAPESHIFT (form-name list), `0x90` MIN_SKILL (`SkillLine.dbc`),
+//! `0x31` NEED_EXOTIC_AMMO and `0x84`
 //! PROSPECT_NEED_MORE. Stripping is a **deliberate divergence**, now byte-confirmed as one: on a
 //! bad id or an absent word the reference jumps to the default arm with the pointer still on the
 //! *unfilled* template, so it displays a literal `Requires %s` (wow-re §WIRE-ARGS C3 — the fill
@@ -36,7 +46,9 @@
 //! `0x0a`'s item-spell leg (`ERR_INVALID_ITEM_TARGET`) is unmodeled — the drain does not know
 //! item-ness.
 
-use benilla_formats::{AreaTableCatalog, SpellDisplay, SpellFocusCatalog};
+use benilla_formats::{AreaTableCatalog, SpellDisplay, SpellFocusCatalog, SpellMechanicCatalog};
+
+use super::Caster;
 
 /// Wire reason → its `SPELL_FAILED_*` GlobalStrings key (the `0x6e23e0` table, byte-exact).
 pub(super) const CAST_FAIL_KEYS: [&str; 146] = [
@@ -220,6 +232,8 @@ pub(super) struct FailArgs<'a> {
     pub(super) focus: Option<&'a SpellFocusCatalog>,
     /// `AreaTable.dbc` (`0xc0e048`) — the `0x5d` arm's `AreaName`.
     pub(super) areas: Option<&'a AreaTableCatalog>,
+    /// `SpellMechanic.dbc` (`0xc0d7c4`) — the `0x8d` arm's mechanic name (decision 1948).
+    pub(super) mechanics: Option<&'a SpellMechanicCatalog>,
 }
 
 impl FailArgs<'_> {
@@ -247,6 +261,13 @@ impl FailArgs<'_> {
     /// in `Spell.dbc` holds it, so an absent word means an unfilled message.
     fn fill(&self, reason: u8, spell: Option<&SpellDisplay>) -> Option<String> {
         match reason {
+            // **`0x8d` PREVENTED_BY_MECHANIC** (`0x6e2190`) → `SpellMechanic.dbc` (`0xc0d7c4`),
+            // so "Can't do that while %s" reads "Can't do that while stunned". Unlike its two
+            // neighbours the word is not the wire's: this refusal is raised locally and the id
+            // comes from the crowd-control ladder's own exemption scan (decisions 1941/1948).
+            // A `0` or unknown id leaves the template to the strip fallback, which is also what
+            // the arm does when the scan named no mechanic at all.
+            0x8D => self.mechanics?.name(self.arg?).map(str::to_string),
             0x5D => self.areas?.name(self.arg?).map(str::to_string),
             0x5E => {
                 let id = self
@@ -304,6 +325,7 @@ impl CastFailLine {
 /// VM's GlobalStrings lookup (an absent or empty key resolves to `None`, the data-suppression
 /// face). Reasons beyond the table print their code — our debug affordance, not a ref string.
 pub(super) fn cast_fail_text(
+    caster: Caster,
     reason: u8,
     spell: Option<&SpellDisplay>,
     args: FailArgs<'_>,
@@ -311,45 +333,100 @@ pub(super) fn cast_fail_text(
 ) -> Option<CastFailLine> {
     let get_text = |key: &str| get(key).filter(|s| !s.is_empty());
     let get_display = |key: &'static str| get_text(key).map(|text| CastFailLine { key, text });
-    // The errorId overrides (`0x6e1aab–0x6e1c5f`): the replaced-message reasons.
-    match reason {
-        0x01 => return get_display("ERR_SPELL_FAILED_ALREADY_AT_FULL_HEALTH"),
-        0x02 => {
-            let t = get_display("ERR_SPELL_FAILED_ALREADY_AT_FULL_POWER_S")?;
-            let power = spell.map_or(0, |d| d.power_type);
-            let name = get_text(power_keys(power).1).unwrap_or_default();
-            return Some(t.fill(&name));
-        }
-        0x09 => return get_display("ERR_GENERIC_NO_TARGET"),
-        0x17 => return None, // DONT_REPORT: control-flow hidden (jumps past DisplayError)
-        0x18 => return get_display("ERR_SPELL_FAILED_EQUIPPED_ITEM"),
-        0x28 => {
-            return get_display(if is_potion(spell) {
-                "ERR_POTION_COOLDOWN"
-            } else {
-                "ERR_ITEM_COOLDOWN"
-            });
-        }
-        0x3C => {
-            let key = if is_food(spell) {
-                "ERR_FOOD_COOLDOWN"
-            } else if is_potion(spell) {
-                "ERR_POTION_COOLDOWN"
-            } else if spell.is_some_and(|d| d.attributes & 0x10 != 0) {
-                "ERR_ABILITY_COOLDOWN"
-            } else {
-                "ERR_SPELL_COOLDOWN"
-            };
-            return get_display(key);
-        }
-        0x41 => return get_display("ERR_SPELL_FAILED_NOTUNSHEATHED"),
-        0x4D => {
-            let power = spell.map_or(0, |d| d.power_type);
-            return get_display(power_keys(power).0);
-        }
-        0x59 => return get_display("ERR_SPELL_OUT_OF_RANGE"),
-        0x8E => return get_display("ERR_PLAY_TIME_EXCEEDED"),
-        _ => {}
+    // The errorId overrides — the replaced-message reasons. **Which table is asked is the
+    // caster's** (decision 2033): the reference does not flag one handler, it ships two, and they
+    // disagree on ten reasons. Everything past this match — the `SPELL_FAILED_*` vocabulary, the
+    // argument arms, the strip fallback — is shared, exactly as it is in the binary.
+    match caster {
+        // `Spell_C::HandlePetCastFailed 0x6e8eb0`: `cmp reason,0x8d; ja default`, then a 142-byte
+        // index table (`0x6e93d0`) over 15 jump targets (`0x6e9394`). Six of the ten overrides are
+        // the `ERR_PET_SPELL_*` catalog rows, which exist for this handler and nothing else —
+        // "Your pet is dead." where the player reads "You are dead".
+        Caster::Pet => match reason {
+            0x00 => return get_display("ERR_PET_SPELL_AFFECTING_COMBAT"), // 0x14c @0x6e8fab
+            0x13 => return get_display("ERR_PET_SPELL_DEAD"),             // 0x150 @0x6e9017
+            0x32 => return get_display("ERR_PET_SPELL_NOPATH"),           // 0x151 @0x6e9032
+            0x33 => return get_display("ERR_PET_SPELL_NOT_BEHIND"),       // 0x14e @0x6e8fe1
+            0x59 => return get_display("ERR_PET_SPELL_OUT_OF_RANGE"),     // 0x14d @0x6e8fc6
+            0x5F => return get_display("ERR_PET_SPELL_ROOTED"),           // 0x14b @0x6e8f4f
+            0x65 => return get_display("ERR_PET_SPELL_TARGETS_DEAD"),     // 0x14f @0x6e8ffc
+            // `0x6e8f2a` computes its id: `((SpellRec+0x18 & 0x10) | 0x300) >> 4`, which is only
+            // ever `0x31` or `0x30`. The player's four-way (`0x6e1aab`) tests the spell CATEGORY
+            // first for food and potion; the pet's does not test it at all, because a pet eats
+            // and drinks nothing.
+            0x3C => {
+                return get_display(if spell.is_some_and(|d| d.attributes & 0x10 != 0) {
+                    "ERR_ABILITY_COOLDOWN"
+                } else {
+                    "ERR_SPELL_COOLDOWN"
+                });
+            }
+            // `0x6e8f6a`: health (`SpellRec+0x7c` == `-2`) takes `0x123`, everything else indexes
+            // `[0x8118f0 + 4*power]`. Those five dwords are byte-identical to the player's table
+            // at `0x8118dc` (`0x11f 0x120 0x121 0x122 0x168`), so this is the SAME pick, not a
+            // pet-specific one — which is why [`power_keys`] serves both and a hunter pet's focus
+            // ability reads "Not enough focus" either way.
+            0x4D => {
+                let power = spell.map_or(0, |d| d.power_type);
+                return get_display(power_keys(power).0);
+            }
+            // What is deliberately absent is as load-bearing as what is here: the pet's index
+            // table sends `0x01`/`0x02` (already at full health/power), `0x09` (no target),
+            // `0x18` (equipped item), `0x28` (item cooldown), `0x41` (unsheathed) and `0x8e`
+            // (play time) to the generic arm, so a pet never says any of those seven lines.
+            //
+            // `0x17` DONT_REPORT is the one that looks like a divergence and is not: the player's
+            // handler hides it by control flow, the pet's routes it to the generic arm — but
+            // `SPELL_FAILED_DONT_REPORT` has no string in 5875's `GlobalStrings.lua`, so the
+            // passthrough below draws nothing and the two agree on screen.
+            //
+            // `0x56` ONLY_SHAPESHIFT has a real arm here (`0x6e921a`, errorId `0xd6`) that fills
+            // the template with a `SpellShapeshiftForm.dbc` name and displays it through the bare
+            // `"%s"` of `ERR_SPELL_FAILED_SHAPESHIFT_FORM_S` — the same net line the player's own
+            // unmodeled arm would produce, and stripped the same way here for the same reason
+            // (that DBC is not loaded). Same surface, same silence, no pet-specific work.
+            _ => {}
+        },
+        // `Spell_C::HandleCastFailed 0x6e1a00` (`0x6e1aab`–`0x6e1c5f`).
+        Caster::Player => match reason {
+            0x01 => return get_display("ERR_SPELL_FAILED_ALREADY_AT_FULL_HEALTH"),
+            0x02 => {
+                let t = get_display("ERR_SPELL_FAILED_ALREADY_AT_FULL_POWER_S")?;
+                let power = spell.map_or(0, |d| d.power_type);
+                let name = get_text(power_keys(power).1).unwrap_or_default();
+                return Some(t.fill(&name));
+            }
+            0x09 => return get_display("ERR_GENERIC_NO_TARGET"),
+            0x17 => return None, // DONT_REPORT: control-flow hidden (jumps past DisplayError)
+            0x18 => return get_display("ERR_SPELL_FAILED_EQUIPPED_ITEM"),
+            0x28 => {
+                return get_display(if is_potion(spell) {
+                    "ERR_POTION_COOLDOWN"
+                } else {
+                    "ERR_ITEM_COOLDOWN"
+                });
+            }
+            0x3C => {
+                let key = if is_food(spell) {
+                    "ERR_FOOD_COOLDOWN"
+                } else if is_potion(spell) {
+                    "ERR_POTION_COOLDOWN"
+                } else if spell.is_some_and(|d| d.attributes & 0x10 != 0) {
+                    "ERR_ABILITY_COOLDOWN"
+                } else {
+                    "ERR_SPELL_COOLDOWN"
+                };
+                return get_display(key);
+            }
+            0x41 => return get_display("ERR_SPELL_FAILED_NOTUNSHEATHED"),
+            0x4D => {
+                let power = spell.map_or(0, |d| d.power_type);
+                return get_display(power_keys(power).0);
+            }
+            0x59 => return get_display("ERR_SPELL_OUT_OF_RANGE"),
+            0x8E => return get_display("ERR_PLAY_TIME_EXCEEDED"),
+            _ => {}
+        },
     }
     // The passthrough layer: errorId 0x2c ("%s") displays GetText(SPELL_FAILED_<name>) as-is.
     let Some(key) = CAST_FAIL_KEYS.get(usize::from(reason)) else {
@@ -409,7 +486,172 @@ mod tests {
                 "ERR_SPELL_FAILED_NOTUNSHEATHED",
                 "You have nothing to attack with.",
             ),
+            // The pet's own six, verbatim from the shipped file — and NO `ERR_PET_SPELL_NOPATH`,
+            // because 5875 ships none, which is a fact these tests rest on.
+            ("ERR_PET_SPELL_AFFECTING_COMBAT", "Your pet is in combat."),
+            ("ERR_PET_SPELL_DEAD", "Your pet is dead."),
+            (
+                "ERR_PET_SPELL_NOT_BEHIND",
+                "Your pet must be behind its target.",
+            ),
+            ("ERR_PET_SPELL_OUT_OF_RANGE", "Your pet is out of range."),
+            ("ERR_PET_SPELL_ROOTED", "Your pet is unable to move."),
+            ("ERR_PET_SPELL_TARGETS_DEAD", "Your pet\'s target is dead."),
+            ("SPELL_FAILED_AFFECTING_COMBAT", "You are in combat"),
+            ("SPELL_FAILED_CASTER_DEAD", "You are dead"),
+            ("SPELL_FAILED_NOPATH", "No path available"),
+            ("SPELL_FAILED_NOT_BEHIND", "You must be behind your target"),
+            ("SPELL_FAILED_ROOTED", "You are unable to move"),
+            ("SPELL_FAILED_TARGETS_DEAD", "Your target is dead"),
+            ("SPELL_FAILED_BAD_IMPLICIT_TARGETS", "No target"),
+            ("SPELL_FAILED_NOT_UNSHEATHED", "You must be unsheathed"),
+            ("ERR_OUT_OF_FOCUS", "Not enough focus"),
         ])
+    }
+
+    /// **The six lines that exist for the pet and nobody else.** Each is a row the client raises
+    /// only from `Spell_C::HandlePetCastFailed 0x6e8eb0`, and each is checked against what the
+    /// *player* gets for the same wire reason — because "our pet reads the same string we do" is
+    /// exactly the shape of the defect decision 2033 corrects, and a one-sided assert would not
+    /// have caught it.
+    #[test]
+    fn the_pet_speaks_its_own_six_refusals() {
+        let m = gs();
+        let g = getter(&m);
+        let say = |caster, reason| {
+            cast_fail_text(caster, reason, None, FailArgs::default(), &g).map(|l| l.text)
+        };
+        for (reason, pet, player) in [
+            (0x00, "Your pet is in combat.", "You are in combat"),
+            (0x13, "Your pet is dead.", "You are dead"),
+            (
+                0x33,
+                "Your pet must be behind its target.",
+                "You must be behind your target",
+            ),
+            (0x59, "Your pet is out of range.", "Out of range."),
+            (
+                0x5F,
+                "Your pet is unable to move.",
+                "You are unable to move",
+            ),
+            (0x65, "Your pet\'s target is dead.", "Your target is dead"),
+        ] {
+            assert_eq!(
+                say(Caster::Pet, reason).as_deref(),
+                Some(pet),
+                "pet {reason:#04x}"
+            );
+            assert_eq!(
+                say(Caster::Player, reason).as_deref(),
+                Some(player),
+                "player {reason:#04x}"
+            );
+        }
+    }
+
+    /// **NOPATH is silent for the pet and spoken for the player**, which reads like a bug and is
+    /// the reference: the pet arm raises errorId `0x151`, whose key `ERR_PET_SPELL_NOPATH` has no
+    /// string in 5875's `GlobalStrings.lua`, so `DisplayError` shows nothing. The player's `0x32`
+    /// takes the passthrough and reads "No path available".
+    #[test]
+    fn the_pets_nopath_is_silent_because_5875_ships_no_string() {
+        let m = gs();
+        let g = getter(&m);
+        assert_eq!(
+            cast_fail_text(Caster::Pet, 0x32, None, FailArgs::default(), &g),
+            None
+        );
+        assert_eq!(
+            cast_fail_text(Caster::Player, 0x32, None, FailArgs::default(), &g)
+                .unwrap()
+                .text,
+            "No path available"
+        );
+    }
+
+    /// The pet's `0x3c` computes its id from one bit — `((SpellRec+0x18 & 0x10) | 0x300) >> 4` —
+    /// so it has only the ability/spell split. The player's tests the spell CATEGORY first and has
+    /// a food and a potion leg. A pet eats nothing, so a potion-category spell that says "Item is
+    /// not ready yet." for us says "Spell is not ready yet." for it.
+    #[test]
+    fn the_pet_has_no_food_or_potion_cooldown_leg() {
+        let m = gs();
+        let g = getter(&m);
+        let potion = spell(0, 4, 0);
+        let ability = spell(0, 0, 0x10);
+        let text = |caster, d| {
+            cast_fail_text(caster, 0x3C, Some(d), FailArgs::default(), &g)
+                .unwrap()
+                .text
+        };
+        assert_eq!(text(Caster::Player, &potion), "Item is not ready yet.");
+        assert_eq!(text(Caster::Pet, &potion), "Spell is not ready yet.");
+        // The one leg they share, so the collapse is a missing branch and not a missing table.
+        assert_eq!(text(Caster::Player, &ability), "Ability is not ready yet.");
+        assert_eq!(text(Caster::Pet, &ability), "Ability is not ready yet.");
+    }
+
+    /// The pet's index table sends seven of the player's overrides to its generic arm, so those
+    /// lines are the player's alone. Checked on the two with the sharpest tell: `0x09`, where the
+    /// text changes, and `0x41`, where the **surface** changes too — the player's override is the
+    /// one yellow cast failure in the game, and the pet's passthrough is red.
+    #[test]
+    fn the_pet_does_not_take_the_players_overrides() {
+        use benilla_ui::messages::{kind_of, MsgKind};
+        let m = gs();
+        let g = getter(&m);
+        let line = |caster, reason| {
+            cast_fail_text(caster, reason, None, FailArgs::default(), &g).expect("a line")
+        };
+
+        assert_eq!(line(Caster::Player, 0x09).text, "You have no target.");
+        assert_eq!(line(Caster::Pet, 0x09).text, "No target");
+
+        let mine = line(Caster::Player, 0x41);
+        assert_eq!(mine.key, "ERR_SPELL_FAILED_NOTUNSHEATHED");
+        assert_eq!(kind_of(mine.key), MsgKind::Info);
+        let its = line(Caster::Pet, 0x41);
+        assert_eq!(its.key, PASSTHROUGH);
+        assert_eq!(its.text, "You must be unsheathed");
+        assert_eq!(kind_of(its.key), MsgKind::Error);
+    }
+
+    /// `0x4d` NO_POWER is the override the two handlers **agree** on, and that is a byte fact
+    /// rather than an assumption: the pet's table at `0x8118f0` holds the same five dwords as the
+    /// player's at `0x8118dc`. So [`power_keys`] serves both, and a hunter pet's focus ability
+    /// reads the focus line on either path.
+    #[test]
+    fn the_pets_no_power_pick_is_the_players() {
+        let m = gs();
+        let g = getter(&m);
+        let focus = spell(2, 0, 0);
+        for caster in [Caster::Player, Caster::Pet] {
+            assert_eq!(
+                cast_fail_text(caster, 0x4D, Some(&focus), FailArgs::default(), &g)
+                    .unwrap()
+                    .text,
+                "Not enough focus"
+            );
+        }
+    }
+
+    /// `0x17` DONT_REPORT looks like a divergence between the two handlers and is not: the
+    /// player's hides it by control flow, the pet's routes it to the generic arm — but
+    /// `SPELL_FAILED_DONT_REPORT` has no string in 5875, so both draw nothing. Worth a test
+    /// because the two mechanisms are different and only the *outcome* is shared, so a future
+    /// change to either one should have to notice.
+    #[test]
+    fn dont_report_is_silent_on_both_paths_for_two_different_reasons() {
+        let m = gs();
+        let g = getter(&m);
+        assert!(!m.contains_key("SPELL_FAILED_DONT_REPORT"));
+        for caster in [Caster::Player, Caster::Pet] {
+            assert_eq!(
+                cast_fail_text(caster, 0x17, None, FailArgs::default(), &g),
+                None
+            );
+        }
     }
 
     /// **The one cast failure that is not a red line.** Reason `0x41` overrides to
@@ -430,16 +672,19 @@ mod tests {
         let m = gs();
         let g = getter(&m);
 
-        let line = cast_fail_text(0x41, None, FailArgs::default(), &g).expect("a line");
+        let line =
+            cast_fail_text(Caster::Player, 0x41, None, FailArgs::default(), &g).expect("a line");
         assert_eq!(line.key, "ERR_SPELL_FAILED_NOTUNSHEATHED");
         assert_eq!(kind_of(line.key), MsgKind::Info);
 
         // An override that IS red, and a passthrough that falls to errorId 0x2c.
-        let red = cast_fail_text(0x59, None, FailArgs::default(), &g).expect("a line");
+        let red =
+            cast_fail_text(Caster::Player, 0x59, None, FailArgs::default(), &g).expect("a line");
         assert_eq!(red.key, "ERR_SPELL_OUT_OF_RANGE");
         assert_eq!(kind_of(red.key), MsgKind::Error);
 
-        let through = cast_fail_text(0x43, None, FailArgs::default(), &g).expect("a line");
+        let through =
+            cast_fail_text(Caster::Player, 0x43, None, FailArgs::default(), &g).expect("a line");
         assert_eq!(through.key, PASSTHROUGH);
         assert_eq!(kind_of(through.key), MsgKind::Error);
     }
@@ -476,25 +721,25 @@ mod tests {
         let m = gs();
         let g = getter(&m);
         assert_eq!(
-            cast_fail_text(0x43, None, FailArgs::default(), &g)
+            cast_fail_text(Caster::Player, 0x43, None, FailArgs::default(), &g)
                 .unwrap()
                 .text,
             "Out of ammo"
         );
         assert_eq!(
-            cast_fail_text(0x59, None, FailArgs::default(), &g)
+            cast_fail_text(Caster::Player, 0x59, None, FailArgs::default(), &g)
                 .unwrap()
                 .text,
             "Out of range."
         );
         assert_eq!(
-            cast_fail_text(0x76, None, FailArgs::default(), &g)
+            cast_fail_text(Caster::Player, 0x76, None, FailArgs::default(), &g)
                 .unwrap()
                 .text,
             "Target too close"
         );
         assert_eq!(
-            cast_fail_text(0x09, None, FailArgs::default(), &g)
+            cast_fail_text(Caster::Player, 0x09, None, FailArgs::default(), &g)
                 .unwrap()
                 .text,
             "You have no target."
@@ -502,21 +747,27 @@ mod tests {
         // 0x3c: plain spell → spell cooldown; Attr&0x10 → ability; potion category → potion.
         let plain = spell(0, 0, 0);
         assert_eq!(
-            cast_fail_text(0x3C, Some(&plain), FailArgs::default(), &g)
+            cast_fail_text(Caster::Player, 0x3C, Some(&plain), FailArgs::default(), &g)
                 .unwrap()
                 .text,
             "Spell is not ready yet."
         );
         let ability = spell(1, 0, 0x10);
         assert_eq!(
-            cast_fail_text(0x3C, Some(&ability), FailArgs::default(), &g)
-                .unwrap()
-                .text,
+            cast_fail_text(
+                Caster::Player,
+                0x3C,
+                Some(&ability),
+                FailArgs::default(),
+                &g
+            )
+            .unwrap()
+            .text,
             "Ability is not ready yet."
         );
         let potion = spell(0, 4, 0);
         assert_eq!(
-            cast_fail_text(0x3C, Some(&potion), FailArgs::default(), &g)
+            cast_fail_text(Caster::Player, 0x3C, Some(&potion), FailArgs::default(), &g)
                 .unwrap()
                 .text,
             "Item is not ready yet."
@@ -531,14 +782,14 @@ mod tests {
         let g = getter(&m);
         let rage = spell(1, 0, 0);
         assert_eq!(
-            cast_fail_text(0x4D, Some(&rage), FailArgs::default(), &g)
+            cast_fail_text(Caster::Player, 0x4D, Some(&rage), FailArgs::default(), &g)
                 .unwrap()
                 .text,
             "Not enough rage"
         );
         let mana = spell(0, 0, 0);
         assert_eq!(
-            cast_fail_text(0x4D, Some(&mana), FailArgs::default(), &g)
+            cast_fail_text(Caster::Player, 0x4D, Some(&mana), FailArgs::default(), &g)
                 .unwrap()
                 .text,
             "Not enough mana"
@@ -552,16 +803,22 @@ mod tests {
     fn suppression_hex_fallback_and_template_strip() {
         let m = gs();
         let g = getter(&m);
-        assert_eq!(cast_fail_text(0x17, None, FailArgs::default(), &g), None);
-        assert_eq!(cast_fail_text(0x08, None, FailArgs::default(), &g), None);
         assert_eq!(
-            cast_fail_text(0x92, None, FailArgs::default(), &g)
+            cast_fail_text(Caster::Player, 0x17, None, FailArgs::default(), &g),
+            None
+        );
+        assert_eq!(
+            cast_fail_text(Caster::Player, 0x08, None, FailArgs::default(), &g),
+            None
+        );
+        assert_eq!(
+            cast_fail_text(Caster::Player, 0x92, None, FailArgs::default(), &g)
                 .unwrap()
                 .text,
             "Spell failed (0x92)"
         );
         assert_eq!(
-            cast_fail_text(0x5C, None, FailArgs::default(), &g)
+            cast_fail_text(Caster::Player, 0x5C, None, FailArgs::default(), &g)
                 .unwrap()
                 .text,
             "Missing reagent"
@@ -585,26 +842,26 @@ mod tests {
         let g = |key: &str| s.lua().globals().get::<String>(key).ok();
 
         assert_eq!(
-            cast_fail_text(0x43, None, FailArgs::default(), &g)
+            cast_fail_text(Caster::Player, 0x43, None, FailArgs::default(), &g)
                 .unwrap()
                 .text,
             "Out of ammo"
         );
         assert_eq!(
-            cast_fail_text(0x59, None, FailArgs::default(), &g)
+            cast_fail_text(Caster::Player, 0x59, None, FailArgs::default(), &g)
                 .unwrap()
                 .text,
             "Out of range."
         );
         assert_eq!(
-            cast_fail_text(0x3C, None, FailArgs::default(), &g)
+            cast_fail_text(Caster::Player, 0x3C, None, FailArgs::default(), &g)
                 .unwrap()
                 .text,
             "Spell is not ready yet."
         );
         let rage = spell(1, 0, 0);
         assert_eq!(
-            cast_fail_text(0x4D, Some(&rage), FailArgs::default(), &g)
+            cast_fail_text(Caster::Player, 0x4D, Some(&rage), FailArgs::default(), &g)
                 .unwrap()
                 .text,
             "Not enough rage"
@@ -613,20 +870,72 @@ mod tests {
         // player reads IS the GlobalStrings value. A typo'd key here would degrade a real refusal
         // to a dead-looking button, which is what this test exists to catch.
         assert_eq!(
-            cast_fail_text(0x50, None, FailArgs::default(), &g)
+            cast_fail_text(Caster::Player, 0x50, None, FailArgs::default(), &g)
                 .unwrap()
                 .text,
             "Cannot use while swimming"
         );
         assert_eq!(
-            cast_fail_text(0x58, None, FailArgs::default(), &g)
+            cast_fail_text(Caster::Player, 0x58, None, FailArgs::default(), &g)
                 .unwrap()
                 .text,
             "Can only use while swimming"
         );
         // The data-suppression face on the real file: the absent keys show nothing.
-        assert_eq!(cast_fail_text(0x08, None, FailArgs::default(), &g), None);
-        assert_eq!(cast_fail_text(0x21, None, FailArgs::default(), &g), None);
+        assert_eq!(
+            cast_fail_text(Caster::Player, 0x08, None, FailArgs::default(), &g),
+            None
+        );
+        assert_eq!(
+            cast_fail_text(Caster::Player, 0x21, None, FailArgs::default(), &g),
+            None
+        );
+
+        // The pet's table against the player's own shipped file (decision 2033). Both halves
+        // matter: the six rows resolve to the pet wording, and `ERR_PET_SPELL_NOPATH` resolves to
+        // NOTHING — the claim the `SILENT_IN_5875` entry rests on, checked here against the real
+        // `GlobalStrings.lua` rather than against a fixture that could simply have omitted it.
+        for (reason, pet, player) in [
+            (0x00, "Your pet is in combat.", "You are in combat"),
+            (0x13, "Your pet is dead.", "You are dead"),
+            (
+                0x33,
+                "Your pet must be behind its target.",
+                "You must be behind your target",
+            ),
+            (0x59, "Your pet is out of range.", "Out of range."),
+            (
+                0x5F,
+                "Your pet is unable to move.",
+                "You are unable to move",
+            ),
+            (0x65, "Your pet\'s target is dead.", "Your target is dead"),
+        ] {
+            assert_eq!(
+                cast_fail_text(Caster::Pet, reason, None, FailArgs::default(), &g)
+                    .map(|l| l.text)
+                    .as_deref(),
+                Some(pet),
+                "pet {reason:#04x}"
+            );
+            assert_eq!(
+                cast_fail_text(Caster::Player, reason, None, FailArgs::default(), &g)
+                    .map(|l| l.text)
+                    .as_deref(),
+                Some(player),
+                "player {reason:#04x}"
+            );
+        }
+        assert_eq!(
+            cast_fail_text(Caster::Pet, 0x32, None, FailArgs::default(), &g),
+            None,
+            "5875 ships no ERR_PET_SPELL_NOPATH, so the reference shows nothing"
+        );
+        assert!(
+            g("PET_SPELL_NOPATH").is_some(),
+            "and the near-miss key that made the old map look right IS shipped — which is the \
+             whole trap"
+        );
 
         // B255, end to end on the real data: the argument arms against the real DBCs and the real
         // GlobalStrings templates. Without the fill these read as the bare stems "Requires" and
@@ -634,34 +943,67 @@ mod tests {
         let focus =
             benilla_formats::load_spell_focus_catalog(&mut chain).expect("SpellFocusObject");
         let areas = benilla_formats::load_area_table_catalog(&mut chain).expect("AreaTable");
+        let mechanics =
+            benilla_formats::load_spell_mechanic_catalog(&mut chain).expect("SpellMechanic");
         let args = |arg: u32| FailArgs {
             arg: Some(arg),
             focus: Some(&focus),
             areas: Some(&areas),
+            mechanics: Some(&mechanics),
         };
+        // **0x8d PREVENTED_BY_MECHANIC** (decision 1948) — the crowd-control ladder's renamed
+        // refusal, and the one argument arm whose word is produced locally rather than read off
+        // the wire. The names are lower-case adjectives in the shipped data, which is what makes
+        // them read as the tail of the sentence.
+        assert_eq!(
+            cast_fail_text(Caster::Player, 0x8D, None, args(12), &g)
+                .unwrap()
+                .text,
+            "Can't do that while stunned"
+        );
+        assert_eq!(
+            cast_fail_text(Caster::Player, 0x8D, None, args(5), &g)
+                .unwrap()
+                .text,
+            "Can't do that while fleeing"
+        );
+        // An unknown or absent mechanic strips to the bare stem rather than showing a raw `%s`.
+        assert!(!cast_fail_text(Caster::Player, 0x8D, None, args(999), &g)
+            .unwrap()
+            .text
+            .contains('%'));
+
         // 0x5e REQUIRES_SPELL_FOCUS: the Crown of the Earth phials' own refusal. Focus 12 is the
         // Starbreeze Village moonwell — using the Jade Phial at any *other* pool is the report.
         assert_eq!(
-            cast_fail_text(0x5E, None, args(12), &g).unwrap().text,
+            cast_fail_text(Caster::Player, 0x5E, None, args(12), &g)
+                .unwrap()
+                .text,
             "Requires Starbreeze Village Moonwell"
         );
         assert_eq!(
-            cast_fail_text(0x5E, None, args(1), &g).unwrap().text,
+            cast_fail_text(Caster::Player, 0x5E, None, args(1), &g)
+                .unwrap()
+                .text,
             "Requires Anvil"
         );
         // 0x5d REQUIRES_AREA: area 1657 is Darnassus.
         assert_eq!(
-            cast_fail_text(0x5D, None, args(1657), &g).unwrap().text,
+            cast_fail_text(Caster::Player, 0x5D, None, args(1657), &g)
+                .unwrap()
+                .text,
             "You need to be in Darnassus"
         );
         // The fallbacks. An id the DBC doesn't name, and a wire word the server never sent, both
         // decline the arm and fall through to the strip — never a raw `%s` on screen.
         assert_eq!(
-            cast_fail_text(0x5E, None, args(999_999), &g).unwrap().text,
+            cast_fail_text(Caster::Player, 0x5E, None, args(999_999), &g)
+                .unwrap()
+                .text,
             "Requires"
         );
         assert_eq!(
-            cast_fail_text(0x5D, None, FailArgs::default(), &g)
+            cast_fail_text(Caster::Player, 0x5D, None, FailArgs::default(), &g)
                 .unwrap()
                 .text,
             "You need to be in"
@@ -675,6 +1017,7 @@ mod tests {
         };
         assert_eq!(
             cast_fail_text(
+                Caster::Player,
                 0x5E,
                 Some(&filling),
                 FailArgs {

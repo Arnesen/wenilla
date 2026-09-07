@@ -12,6 +12,8 @@ use bevy::render::render_resource::{Buffer, Face};
 use benilla_assets::materials::{WowModelExt, WowModelMaterial, VANILLA_ALPHA_KEY_REF};
 
 mod batch;
+pub mod lazy;
+pub mod park;
 mod visibility;
 
 pub use batch::{BatchVariants, M2BatchMaterials, ModelMaterials, SkyboxBatch};
@@ -113,7 +115,7 @@ pub struct MatKey {
     zfill: bool,
     /// This batch is part of a **WMO skybox** ([`crate::skybox`]) — the building-owned painted sky,
     /// drawn on this lane like any other M2 since decision 1264. Its own key axis because the lane
-    /// changes pipeline state ([`SKY_DEPTH_MARKER`]: forced far depth, no early-Z) and sort rung
+    /// changes pipeline state ([`SKY_DEPTH_MARKER`]: the far depth pinned at the vertex) and sort rung
     /// ([`skybox_sort_bias`]), so a skybox batch must never dedupe onto the identical-looking world
     /// batch — `CavernsOfTimeSky` and Elwynn share no texture today, but nothing enforces that and
     /// the collision would be a world doodad silently drawn at the far plane.
@@ -142,8 +144,12 @@ pub struct MatKey {
 /// intensity per instance via the `MeshTag` shade byte ([`crate::entity_shade`]).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShadeSel {
-    /// Lit ground, the boosted intensity family (the binary's 2.5): ADT map doodads on unshadowed
-    /// ground, and every entity M2.
+    /// Lit ground, the boosted intensity family (the binary's 2.5): **every entity M2, and only
+    /// those** — a unit, a player, a GameObject. The 2.5 and its 3.3333/s chase live on the
+    /// WENTITY light node (vtable `0x810810`, hung off `[obj+0xe0]`); an object without one
+    /// cannot reach either. ADT map doodads were on this variant until 2050 and are not entities:
+    /// they are `CMapDoodadDef`s, whose `[+0xa4]` is only ever {0.0, 0.5, 1.0} and which have no
+    /// ramp target field at all (`+0xf8` is `m[2][3]` of their world matrix).
     ///
     /// Entities still select this, but what it *means* for them changed in 0809. The selector is
     /// only the static half — the per-instance `MeshTag` shade byte carries the rest, and
@@ -152,8 +158,14 @@ pub enum ShadeSel {
     /// GameObjects keep the real 2.5/0.5 chase. So for an entity this variant reads "on the light-node
     /// path"; the node decides the amplitude.
     Lit,
-    /// Lit ground, intensity 1.0: an exterior WMO MODD prop — §8b, byte-verified never to reach
-    /// the 2.5 site (a Stormwind street fountain is NOT brightened like an Elwynn tree).
+    /// Lit ground, intensity 1.0: **either doodad class** — an exterior WMO MODD prop *and* an ADT
+    /// map doodad, byte-verified never to reach the 2.5 site.
+    ///
+    /// The parenthetical this doc carried until 2050 — "a Stormwind street fountain is NOT
+    /// brightened like an Elwynn tree" — was exactly backwards about the tree: both are
+    /// `CMapDoodadDef`s and both commit 1.0 lit / 0.5 shadowed. What is brightened is the
+    /// *entity* walking past them. Measured over six trace frames: 111 identified MDDF
+    /// placements, 356 draws, gains only ∈ {0.5, 1.0}.
     Matte,
     /// The base sits on MCSH-shadowed terrain: the dim intensity (the binary's 0.5).
     Shaded,
@@ -351,141 +363,145 @@ pub fn model_material(
             ..default()
         },
     };
-    let handle = materials.add(ExtendedMaterial {
-        base,
-        extension: WowModelExt {
-            // `clutter_fade.z` is unread by the shader, so it carries the per-batch pipeline markers
-            // `specialize` keys on: bit0 = no-depth-write (M2 0x10), bit1 = no-depth-test (0x08),
-            // bit2 = additive blend. (`x`/`y`/`w` stay the ground-clutter distance fade — `0` here.)
-            clutter_fade: Vec4::new(
-                0.0,
-                0.0,
-                // Bit 3 = OPAQUE-INTENT: an opaque/alpha-key steady batch whose output alpha is
-                // semantically meaningless (opaque/mask pipelines ignore it — only blend pipelines
-                // read it). The shader pins such batches' output alpha to 1.0: a spec-level no-op
-                // that armors against a multi-view pipeline-state mixup observed on macOS/Metal
-                // (opaque WMO/M2 draws intermittently bound with blending enabled when an extra
-                // camera exists, bleeding the garbage BLP alpha channel — the "pale film on
-                // buildings" regression; full measured chain in the fix commit).
-                // Bits 4-6 = the per-batch FOG POLICY (`FogPolicy` discriminant, wow-re
-                // rf-weather-emission-timeline ROUND 4): 0 = scene so clutter/water materials —
-                // which leave the byte's high bits 0 (see `WorldAssets::model_material`,
-                // `water_fx`) — keep ordinary scene fog; 1/2/3 = the additive/Mod/Mod2x BLACK/
-                // WHITE/GREY fog colours; 4 = fog disabled outright (render flag 0x02).
-                // Bits 7/8 = the MULTIPLY blends (decision 0528): `specialize` swaps the pipeline
-                // to the byte-verified factors — Mod DST_COLOR/ZERO, Mod2x DST_COLOR/SRC_COLOR
-                // (exact on the 0161 gamma lane: the framebuffer holds gamma, like the reference).
-                // Bit 10 = TWIN CUTOUT (decision 0842): this fade twin's SOURCE batch alpha-tests,
-                // so the shader re-applies the hard 224/255 cutout on the unfaded alpha (the
-                // reference's promoted-AlphaKey ALPHAREF = A×224 — the same fixed silhouette). An
-                // Opaque source sets no bit: the reference disables its alpha test outright, steady
-                // and promoted alike (`m2-blend-promotion-zfill.md` §2 keys ALPHAREF on the STORED
-                // blend mode, mode 0 → ref 0).
-                f32::from(
-                    u16::from(no_depth_write)
-                        | (u16::from(no_depth_test) << 1)
-                        | (u16::from(is_additive) << 2)
-                        | (u16::from(
-                            matches!(blend, ModelBlend::Opaque | ModelBlend::AlphaTest)
-                                && !fade_variant
-                                && !is_additive,
-                        ) << 3)
-                        | (u16::from(fog_policy as u8) << 4)
-                        | (u16::from(blend == ModelBlend::Mod) << 7)
-                        | (u16::from(blend == ModelBlend::Mod2x) << 8)
-                        | (u16::from(fade_variant && source_cutout) * TWIN_CUTOUT_MARKER)
-                        | (u16::from(env_map) * ENV_MAP_MARKER)
-                        | (u16::from(sky_depth) * SKY_DEPTH_MARKER),
+    let handle = lazy::defer(
+        materials,
+        ExtendedMaterial {
+            base,
+            extension: WowModelExt {
+                // `clutter_fade.z` is unread by the shader, so it carries the per-batch pipeline markers
+                // `specialize` keys on: bit0 = no-depth-write (M2 0x10), bit1 = no-depth-test (0x08),
+                // bit2 = additive blend. (`x`/`y`/`w` stay the ground-clutter distance fade — `0` here.)
+                clutter_fade: Vec4::new(
+                    0.0,
+                    0.0,
+                    // Bit 3 = OPAQUE-INTENT: an opaque/alpha-key steady batch whose output alpha is
+                    // semantically meaningless (opaque/mask pipelines ignore it — only blend pipelines
+                    // read it). The shader pins such batches' output alpha to 1.0: a spec-level no-op
+                    // that armors against a multi-view pipeline-state mixup observed on macOS/Metal
+                    // (opaque WMO/M2 draws intermittently bound with blending enabled when an extra
+                    // camera exists, bleeding the garbage BLP alpha channel — the "pale film on
+                    // buildings" regression; full measured chain in the fix commit).
+                    // Bits 4-6 = the per-batch FOG POLICY (`FogPolicy` discriminant, wow-re
+                    // rf-weather-emission-timeline ROUND 4): 0 = scene so clutter/water materials —
+                    // which leave the byte's high bits 0 (see `WorldAssets::model_material`,
+                    // `water_fx`) — keep ordinary scene fog; 1/2/3 = the additive/Mod/Mod2x BLACK/
+                    // WHITE/GREY fog colours; 4 = fog disabled outright (render flag 0x02).
+                    // Bits 7/8 = the MULTIPLY blends (decision 0528): `specialize` swaps the pipeline
+                    // to the byte-verified factors — Mod DST_COLOR/ZERO, Mod2x DST_COLOR/SRC_COLOR
+                    // (exact on the 0161 gamma lane: the framebuffer holds gamma, like the reference).
+                    // Bit 10 = TWIN CUTOUT (decision 0842): this fade twin's SOURCE batch alpha-tests,
+                    // so the shader re-applies the hard 224/255 cutout on the unfaded alpha (the
+                    // reference's promoted-AlphaKey ALPHAREF = A×224 — the same fixed silhouette). An
+                    // Opaque source sets no bit: the reference disables its alpha test outright, steady
+                    // and promoted alike (`m2-blend-promotion-zfill.md` §2 keys ALPHAREF on the STORED
+                    // blend mode, mode 0 → ref 0).
+                    f32::from(
+                        u16::from(no_depth_write)
+                            | (u16::from(no_depth_test) << 1)
+                            | (u16::from(is_additive) << 2)
+                            | (u16::from(
+                                matches!(blend, ModelBlend::Opaque | ModelBlend::AlphaTest)
+                                    && !fade_variant
+                                    && !is_additive,
+                            ) << 3)
+                            | (u16::from(fog_policy as u8) << 4)
+                            | (u16::from(blend == ModelBlend::Mod) << 7)
+                            | (u16::from(blend == ModelBlend::Mod2x) << 8)
+                            | (u16::from(fade_variant && source_cutout) * TWIN_CUTOUT_MARKER)
+                            | (u16::from(env_map) * ENV_MAP_MARKER)
+                            | (u16::from(sky_depth) * SKY_DEPTH_MARKER),
+                    ),
+                    0.0,
                 ),
-                0.0,
-            ),
-            // x = WMO (FFP N·L × MOCV, not the M2 SH probe); y = distance-fade blend variant; z = WMO
-            // interior group (sun off, baked MOCV carries the room); w = **unlit fullbright** (>0.5 ⇒
-            // bypass lighting in wow_model.wgsl): the M2 UNLIT (0x01) flag, or WMO UNLIT on an
-            // exterior-group batch (the interior drawer ignores it — section law, `wmo-lit-selector`).
-            // Additive is NOT fullbright: the real client *lights* additive batches unless 0x01 is set
-            // (wow-re `m2-no-envmap-texgen`'s lighting section — `DAT_00811fa8[4] = 1`), so an
-            // un-flagged additive (e.g. ArmorReflect shine) is lit. **That note's headline is
-            // otherwise wrong and this cite reaches only its lighting table** (decision 0971): the
-            // M2 path DOES generate env-map texcoords — in the vertex program, which the note's
-            // `SetRenderState` sweep could not see. See [`ENV_MAP_MARKER`].
-            // M2 Mod/Mod2x ARE fullbright regardless of 0x01 — the lighting table
-            // `DAT_00811fa8 = {1,1,1,1,1,0,0}` clears GL_LIGHTING for modes 5/6 (wow-re
-            // `m2-depth-blend-state`); WMO lighting stays flag-driven only (decision 0528).
-            model_flags: Vec4::new(
-                if is_wmo { 1.0 } else { 0.0 },
-                if fade_variant { 1.0 } else { 0.0 },
-                if is_interior { 1.0 } else { 0.0 },
-                if is_emissive || (!is_wmo && matches!(blend, ModelBlend::Mod | ModelBlend::Mod2x))
-                {
-                    1.0
-                } else {
-                    0.0
-                },
-            ),
-            // x = the static MCSH terrain-shade SELECTOR ([`ShadeSel`]: 1.0 ADT-lit / 0.6 matte /
-            // 0.2 shaded; shader thresholds at 0.85 and 0.5) that chooses which live sun LEVEL scales the
-            // FFP matte's diffuse term. Static per material (a doodad doesn't move), so it dedups the
-            // variants; moving entities are Lit here and mix per instance via the `MeshTag` shade byte.
-            // y = the WMO authored batch order, read by `wow_model.wgsl`'s VERTEX stage: it scales
-            // clip z by (1 + y·2⁻²³) so a later coplanar batch wins the reverse-Z depth test in any
-            // draw order — the byte-verified MOBA draw-order determinism. Uniform data by design:
-            // as a `WowModelKey` axis driving a fixed-function depth bias it made every batch index
-            // its own PIPELINE, and a first city sight compiled ~3000 of them synchronously on the
-            // render thread (decision 0837). `WOW_WMO_BIAS=0` (B38's A/B diagnostic) zeroes it here.
-            // zw = the batch's live **UV-animation offset** (decision 0130 phase 3, wow-re
-            // `m2-texanim-uv`: the real client adds the sampled translation to the stage UVs —
-            // translation is un-pivoted, and no placed doodad uses rotation/scaling). Seeded at
-            // t = 0 here; `doodad_anim::tick_anim_materials` re-samples it per drawn frame on the
-            // shared clock (frozen in captures).
-            sun_scale: {
-                let uv0 = uv_anim.map_or([0.0, 0.0], |a| a.sample(0.0));
-                // The clip-z nudge stays WMO-only: M2 coplanar layers pass GreaterEqual at exactly
-                // equal depth (same mesh, same transform, same vertex path), and their ORDER is
-                // the sort bias above — nudging their depth would be an unverified extra.
-                let order =
-                    if !is_wmo || matches!(std::env::var("WOW_WMO_BIAS").as_deref(), Ok("0")) {
-                        0.0
+                // x = WMO (FFP N·L × MOCV, not the M2 SH probe); y = distance-fade blend variant; z = WMO
+                // interior group (sun off, baked MOCV carries the room); w = **unlit fullbright** (>0.5 ⇒
+                // bypass lighting in wow_model.wgsl): the M2 UNLIT (0x01) flag, or WMO UNLIT on an
+                // exterior-group batch (the interior drawer ignores it — section law, `wmo-lit-selector`).
+                // Additive is NOT fullbright: the real client *lights* additive batches unless 0x01 is set
+                // (wow-re `m2-no-envmap-texgen`'s lighting section — `DAT_00811fa8[4] = 1`), so an
+                // un-flagged additive (e.g. ArmorReflect shine) is lit. **That note's headline is
+                // otherwise wrong and this cite reaches only its lighting table** (decision 0971): the
+                // M2 path DOES generate env-map texcoords — in the vertex program, which the note's
+                // `SetRenderState` sweep could not see. See [`ENV_MAP_MARKER`].
+                // M2 Mod/Mod2x ARE fullbright regardless of 0x01 — the lighting table
+                // `DAT_00811fa8 = {1,1,1,1,1,0,0}` clears GL_LIGHTING for modes 5/6 (wow-re
+                // `m2-depth-blend-state`); WMO lighting stays flag-driven only (decision 0528).
+                model_flags: Vec4::new(
+                    if is_wmo { 1.0 } else { 0.0 },
+                    if fade_variant { 1.0 } else { 0.0 },
+                    if is_interior { 1.0 } else { 0.0 },
+                    if is_emissive
+                        || (!is_wmo && matches!(blend, ModelBlend::Mod | ModelBlend::Mod2x))
+                    {
+                        1.0
                     } else {
-                        f32::from(batch_order)
+                        0.0
+                    },
+                ),
+                // x = the static MCSH terrain-shade SELECTOR ([`ShadeSel`]: 1.0 ADT-lit / 0.6 matte /
+                // 0.2 shaded; shader thresholds at 0.85 and 0.5) that chooses which live sun LEVEL scales the
+                // FFP matte's diffuse term. Static per material (a doodad doesn't move), so it dedups the
+                // variants; moving entities are Lit here and mix per instance via the `MeshTag` shade byte.
+                // y = the WMO authored batch order, read by `wow_model.wgsl`'s VERTEX stage: it scales
+                // clip z by (1 + y·2⁻²³) so a later coplanar batch wins the reverse-Z depth test in any
+                // draw order — the byte-verified MOBA draw-order determinism. Uniform data by design:
+                // as a `WowModelKey` axis driving a fixed-function depth bias it made every batch index
+                // its own PIPELINE, and a first city sight compiled ~3000 of them synchronously on the
+                // render thread (decision 0837). `WOW_WMO_BIAS=0` (B38's A/B diagnostic) zeroes it here.
+                // zw = the batch's live **UV-animation offset** (decision 0130 phase 3, wow-re
+                // `m2-texanim-uv`: the real client adds the sampled translation to the stage UVs —
+                // translation is un-pivoted, and no placed doodad uses rotation/scaling). Seeded at
+                // t = 0 here; `doodad_anim::tick_anim_materials` re-samples it per drawn frame on the
+                // shared clock (frozen in captures).
+                sun_scale: {
+                    let uv0 = uv_anim.map_or([0.0, 0.0], |a| a.sample(0.0));
+                    // The clip-z nudge stays WMO-only: M2 coplanar layers pass GreaterEqual at exactly
+                    // equal depth (same mesh, same transform, same vertex path), and their ORDER is
+                    // the sort bias above — nudging their depth would be an unverified extra.
+                    let order =
+                        if !is_wmo || matches!(std::env::var("WOW_WMO_BIAS").as_deref(), Ok("0")) {
+                            0.0
+                        } else {
+                            f32::from(batch_order)
+                        };
+                    Vec4::new(shade.selector(), order, uv0[0], uv0[1])
+                },
+                // The animated M2Color tint's first key (identity white for static batches — their
+                // constant tint rides the vertex colours instead). A lane that never re-samples this
+                // shows exactly the old static bake; the effect lane clones + ticks it per instance.
+                // `w` = the WMO interior batch-class lane: an interior group's INT batches draw UNLIT
+                // (pure tex × MOCV) and its TRANS batches lerp lit↔bake by the MOCV alpha (wow-re
+                // `trace-forensics-abbey-interior-d3d` §2 — observed on the abbey at close range, the
+                // northshire "lit interior batch" datum having been a mis-identified unit). Exterior
+                // groups' batches (and every M2) ride 0 = the exterior law.
+                tint: {
+                    let t0 = rgb_anim.map_or([1.0, 1.0, 1.0], |a| a.sample(0.0));
+                    let class_lane = match (is_interior && is_wmo, wmo_class) {
+                        (true, Some(WmoBatchClass::Int)) => 1.0,
+                        (true, Some(WmoBatchClass::Trans)) => 2.0,
+                        _ => 0.0,
                     };
-                Vec4::new(shade.selector(), order, uv0[0], uv0[1])
+                    Vec4::new(t0[0], t0[1], t0[2], class_lane)
+                },
+                // The WMO window/glass law (`WowModelExt::sidn`): xyz = the authored SIDN emissive
+                // (gamma bytes /255 — the shader ramps it by the live night fraction on lit lanes),
+                // w = the WINDOW midpoint-light flag.
+                sidn: {
+                    let c = sidn.unwrap_or([0, 0, 0]);
+                    Vec4::new(
+                        f32::from(c[0]) / 255.0,
+                        f32::from(c[1]) / 255.0,
+                        f32::from(c[2]) / 255.0,
+                        if window { 1.0 } else { 0.0 },
+                    )
+                },
+                // Static until a sampler registers this material (decision 1381) — then the
+                // table slot is baked in exactly once.
+                anim_slots: Vec4::ZERO,
+                light_buf: light.clone(),
             },
-            // The animated M2Color tint's first key (identity white for static batches — their
-            // constant tint rides the vertex colours instead). A lane that never re-samples this
-            // shows exactly the old static bake; the effect lane clones + ticks it per instance.
-            // `w` = the WMO interior batch-class lane: an interior group's INT batches draw UNLIT
-            // (pure tex × MOCV) and its TRANS batches lerp lit↔bake by the MOCV alpha (wow-re
-            // `trace-forensics-abbey-interior-d3d` §2 — observed on the abbey at close range, the
-            // northshire "lit interior batch" datum having been a mis-identified unit). Exterior
-            // groups' batches (and every M2) ride 0 = the exterior law.
-            tint: {
-                let t0 = rgb_anim.map_or([1.0, 1.0, 1.0], |a| a.sample(0.0));
-                let class_lane = match (is_interior && is_wmo, wmo_class) {
-                    (true, Some(WmoBatchClass::Int)) => 1.0,
-                    (true, Some(WmoBatchClass::Trans)) => 2.0,
-                    _ => 0.0,
-                };
-                Vec4::new(t0[0], t0[1], t0[2], class_lane)
-            },
-            // The WMO window/glass law (`WowModelExt::sidn`): xyz = the authored SIDN emissive
-            // (gamma bytes /255 — the shader ramps it by the live night fraction on lit lanes),
-            // w = the WINDOW midpoint-light flag.
-            sidn: {
-                let c = sidn.unwrap_or([0, 0, 0]);
-                Vec4::new(
-                    f32::from(c[0]) / 255.0,
-                    f32::from(c[1]) / 255.0,
-                    f32::from(c[2]) / 255.0,
-                    if window { 1.0 } else { 0.0 },
-                )
-            },
-            // Static until a sampler registers this material (decision 1381) — then the
-            // table slot is baked in exactly once.
-            anim_slots: Vec4::ZERO,
-            light_buf: light.clone(),
         },
-    });
+    );
     cache.insert(key, handle.clone());
     handle
 }
@@ -508,11 +524,11 @@ pub(crate) const TWIN_CUTOUT_MARKER: u16 = 1 << 10;
 pub(crate) const ENV_MAP_MARKER: u16 = 1 << 12;
 
 /// `clutter_fade.z` marker bit 13: the **WMO-skybox lane** — this batch is part of a building's
-/// painted sky, so `specialize` compiles the shader's `WOW_SKY_DEPTH` branch (forced far depth) and
-/// drops the rasterizer bias constant. It *is* a
-/// [`benilla_assets::materials::WowModelKey`] axis, unlike [`ENV_MAP_MARKER`]: writing
-/// `@builtin(frag_depth)` costs the pipeline its early-Z, so exactly one camera-anchored model may
-/// pay it and every other draw in the frame must keep the pipeline that doesn't.
+/// painted sky, so `specialize` compiles the shader's `WOW_SKY_DEPTH` branch (the far depth,
+/// pinned at the vertex — decision 2016) and drops the rasterizer bias constant. It *is* a
+/// [`benilla_assets::materials::WowModelKey`] axis, unlike [`ENV_MAP_MARKER`]: the pin belongs
+/// to exactly one camera-anchored model, and every other draw in the frame must keep the
+/// pipeline that leaves its depth real.
 pub(crate) const SKY_DEPTH_MARKER: u16 = 1 << 13;
 
 /// Sort-bias step per authored batch on the **WMO-skybox lane** — [`BATCH_ORDER_SORT_EPS`]'s job,
@@ -626,27 +642,30 @@ pub fn zfill_material(
         cull_mode,
         ..default()
     };
-    let handle = materials.add(ExtendedMaterial {
-        base,
-        extension: WowModelExt {
-            // Bit 10 (the twin-cutout marker) drives the shader's hard 224/255 cutout — set
-            // exactly when the colour pass discards, so depth and colour coverage agree.
-            clutter_fade: Vec4::new(
-                0.0,
-                0.0,
-                f32::from(ZFILL_MARKER | if cutout { TWIN_CUTOUT_MARKER } else { 0 }),
-                0.0,
-            ),
-            // Not a fade twin (`model_flags.y` = 0): the zfill pipeline branch forces its own
-            // depth-write, and the cutout rides bit 10 above, so the bit has no work here.
-            model_flags: Vec4::ZERO,
-            sun_scale: Vec4::new(ShadeSel::Lit.selector(), 0.0, 0.0, 0.0),
-            tint: Vec4::new(1.0, 1.0, 1.0, 0.0),
-            sidn: Vec4::ZERO,
-            anim_slots: Vec4::ZERO,
-            light_buf: light.clone(),
+    let handle = lazy::defer(
+        materials,
+        ExtendedMaterial {
+            base,
+            extension: WowModelExt {
+                // Bit 10 (the twin-cutout marker) drives the shader's hard 224/255 cutout — set
+                // exactly when the colour pass discards, so depth and colour coverage agree.
+                clutter_fade: Vec4::new(
+                    0.0,
+                    0.0,
+                    f32::from(ZFILL_MARKER | if cutout { TWIN_CUTOUT_MARKER } else { 0 }),
+                    0.0,
+                ),
+                // Not a fade twin (`model_flags.y` = 0): the zfill pipeline branch forces its own
+                // depth-write, and the cutout rides bit 10 above, so the bit has no work here.
+                model_flags: Vec4::ZERO,
+                sun_scale: Vec4::new(ShadeSel::Lit.selector(), 0.0, 0.0, 0.0),
+                tint: Vec4::new(1.0, 1.0, 1.0, 0.0),
+                sidn: Vec4::ZERO,
+                anim_slots: Vec4::ZERO,
+                light_buf: light.clone(),
+            },
         },
-    });
+    );
     cache.insert(key, handle.clone());
     handle
 }
@@ -1119,6 +1138,23 @@ pub fn plugin(app: &mut App) {
     // unbounded residency `art_scope` was written to end.
     app.init_resource::<ModelMaterials>()
         .add_systems(Update, (scope_model_materials, evict_model_materials));
+    // Deferred realization (`lazy`): a built material becomes an asset the frame something
+    // visible binds it. The top of `PostUpdate` — `Assets::insert` only QUEUES its
+    // `AssetEvent::Added`, so the sweep has to land before the store publishes
+    // (`AssetEventSystems`) or the bound entity loses a frame of drawing, and before
+    // `VisibilityPropagate` clears the view-visibility bits it reads. Both bounds and why they
+    // are the only two available: `lazy`'s module doc.
+    app.add_systems(
+        PostUpdate,
+        lazy::realize_bound
+            .before(bevy::asset::AssetEventSystems)
+            .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate),
+    );
+    // Parking (`park`): a long-hidden streamed part puts its `Mesh3d` down. `Update`, after the
+    // authority, on last frame's propagated verdict — the order the module doc explains.
+    if park::enabled() {
+        app.add_systems(Update, park::park_hidden_parts.after(ModelVisSet));
+    }
 }
 
 /// Expire the material dedup by **distance** (decision 0785).
@@ -1180,6 +1216,15 @@ pub struct ModelPart {
     pub kind: ModelKind,
     pub blend: ModelBlend,
 }
+
+/// **Why this submesh is an entity at all** — the world streamer's answer, one static label per
+/// batch, for the census (`VIS_CENSUS … why …`). A city keeps thousands of hidden model
+/// submeshes resident on the entity path while the retained pass draws the world (5.6k ADT
+/// doodad submeshes at the Stormwind auction house, 1945), and every one of them rides every
+/// per-`Mesh3d` sweep; which divert declined it is the first question about pricing them.
+/// Absent on units, GameObjects and everything the app lane spawns.
+#[derive(Component, Clone, Copy)]
+pub struct EntityPathWhy(pub &'static str);
 
 /// Ordering handle so the one system allowed to *override* the model-`Visibility` authority — the
 /// self-avatar first-person hide ([`crate::player`]) — can run **after** it and win the frame.

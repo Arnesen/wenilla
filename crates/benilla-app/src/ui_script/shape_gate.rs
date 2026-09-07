@@ -25,9 +25,15 @@
 //! `AcceptBattlefieldPort` for theirs. Names are filtered to the query verbs — `Get*`, `Is*`,
 //! `Has*`, `Can*`, `Unit*`, `Num*` — which is a loss of coverage, never a wrong assertion.
 //!
-//! **A call that raises is skipped, not failed.** 53 of the 83 unit-table bindings gate their
-//! arguments and raise on a nil token (1834/1836), so a no-argument probe of those is expected to
-//! throw; that says nothing about arity. Only a call that *returns* is measured.
+//! **A call that raises is skipped, not failed.** A raise says nothing about arity, so only a call
+//! that *returns* is measured. That rule used to cost the whole unit surface: the unit bindings
+//! gate their token and raise on a nil one (1834/1836), so a no-argument probe threw for every one
+//! of them, and the 62 `Unit*` rows this table calls `arity_conf = exact` were silently
+//! uncovered — the gap named in this doc and never priced. The probe now **seats a player** and
+//! calls `Unit*` with a real token, which took coverage from **220 bindings to 249**. All 29 newly
+//! measured agreed with the reference on the first run; the value here is that they cannot drift
+//! away from it unnoticed, not that anything was found wrong. The remainder still raise, needing
+//! state a seated body does not supply, and are still skipped.
 //!
 //! ## The name is not a key
 //!
@@ -102,7 +108,21 @@ fn every_query_binding_answers_the_reference_s_return_arity() {
         by_name.entry(&r.name).or_default().push(r);
     }
 
-    let s = benilla_ui::script::UiScript::new().expect("VM");
+    let mut s = benilla_ui::script::UiScript::new().expect("VM");
+    // **Seat a player, so the unit surface can be probed at all.** The unit bindings gate their
+    // token and raise on a nil one (1834/1836), so a no-argument probe measured *nothing* for the
+    // 62 `Unit*` rows this table calls `arity_conf = exact` — the gate's own doc named that gap in
+    // prose and nobody had priced it. With a body seated they answer instead of raising, which is
+    // the difference between covering the unit surface and skipping it.
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Shapeprobe".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
     let mut checked = 0usize;
     let mut mismatches: Vec<String> = Vec::new();
 
@@ -128,11 +148,17 @@ fn every_query_binding_answers_the_reference_s_return_arity() {
         }
         let want = first.arity;
 
-        // A call that raises says nothing about arity — 53 of the unit bindings gate their
-        // arguments and raise on a nil token (1834/1836).
+        // A call that raises still says nothing about arity. The unit bindings are the reason:
+        // they gate their arguments and raise on a nil token (1834/1836), so they are called with
+        // a real token against the body seated above rather than with nothing.
+        let call = if name.starts_with("Unit") {
+            format!(r#"{name}("player")"#)
+        } else {
+            format!("{name}()")
+        };
         let probe = format!(
             "if type({name}) ~= 'function' then return -1 end \
-             local ok, n = pcall(function() return select('#', {name}()) end) \
+             local ok, n = pcall(function() return select('#', {call}) end) \
              if not ok then return -1 end return n"
         );
         let got: i64 = match s.eval(&probe) {
@@ -156,8 +182,13 @@ fn every_query_binding_answers_the_reference_s_return_arity() {
         }
     }
 
+    // A floor, not a target: it exists so a change that quietly stops the probe from measuring
+    // anything fails loudly instead of passing vacuously. Seating a player took the count from
+    // **220 to 249** by making the unit bindings answerable, so the old floor of 40 was six times
+    // below reality and would have sat green through losing the entire unit surface. Raise this
+    // whenever coverage rises; never lower it to make a change fit.
     assert!(
-        checked >= 40,
+        checked >= 240,
         "the gate measured only {checked} bindings — it has stopped covering anything"
     );
     // The list may only SHRINK. An entry that now agrees is a fix nobody deleted the note for,

@@ -248,12 +248,29 @@ impl Plugin for DebugPanelPlugin {
 /// here — fonts only initialize inside a real begin-pass). `run` is the initialization path.
 fn feed_gated_egui_output(
     mut contexts: Query<(&mut EguiContext, &mut EguiFullOutput, &EguiContextSettings)>,
+    // The empty pass's output after its first run, with the one-time texture delta (the font
+    // atlas) already delivered: every later gated frame feeds this clone instead of running a
+    // real begin/end pass — memory GC, a fresh `FullOutput`, a tessellation of nothing —
+    // 1.4 % of a parked frame's main thread for a panel that is closed (decision 1979).
+    mut cached: Local<Option<egui::FullOutput>>,
 ) {
     for (mut ctx, mut full_output, settings) in &mut contexts {
         if settings.run_manually && full_output.0.is_none() {
-            // `get_mut`, not `get`: the immutable getter sits behind bevy_egui's
-            // `immutable_ctx` feature, off in our build.
-            full_output.0 = Some(ctx.get_mut().run(egui::RawInput::default(), |_| {}));
+            full_output.0 = Some(match &*cached {
+                Some(out) => out.clone(),
+                None => {
+                    // `get_mut`, not `get`: the immutable getter sits behind bevy_egui's
+                    // `immutable_ctx` feature, off in our build. The first run is fed whole
+                    // (its texture delta carries the fonts); the cache keeps everything but
+                    // that delta, which must reach the GPU exactly once.
+                    let out = ctx.get_mut().run(egui::RawInput::default(), |_| {});
+                    let mut keep = out.clone();
+                    keep.textures_delta = Default::default();
+                    keep.shapes.clear();
+                    *cached = Some(keep);
+                    out
+                }
+            });
         }
     }
 }

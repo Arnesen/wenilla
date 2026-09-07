@@ -3,7 +3,7 @@
 //! The net bridge queues [`CastBarEdge`]s (self-casts only — the producers filter on the self
 //! guid; the channel pair is self-only *on the wire*), and the drain fires the reference
 //! client's FrameScript events into the script VM — `SPELLCAST_START` and family, the exact
-//! contract `assets/ui/CastingBar.xml` (the extracted 1.12 `CastingBarFrame`) registers for.
+//! contract stock `Interface\FrameXML\CastingBarFrame.xml` registers for.
 //! The spell name rides the event (resolved here from the `Spell.dbc` catalog — the script VM
 //! has no spell-catalog binding, deliberately: one lookup face, decision 0107).
 

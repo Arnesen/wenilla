@@ -83,3 +83,44 @@ pub(crate) fn load_spell_icon_map(chain: &mut Chain) -> Result<HashMap<u32, Stri
     }
     Ok(icons)
 }
+
+/// A minimal `ID(0) … Name(name_col) …` schema of `cols` u32-wide columns — the shape every
+/// "id → localized name" DBC has, since a string column is itself one u32 offset into the string
+/// block. Enough for the id→name reads; the loc block's other 7 slots and its flag mask stay
+/// anonymous `cN` columns.
+pub(crate) fn id_name_schema(what: &str, name_col: usize, cols: usize) -> Schema {
+    let mut s = Schema::new(what);
+    for i in 0..cols {
+        if i == name_col {
+            s.add_field(SchemaField::new("Name", FieldType::String));
+        } else {
+            s.add_field(SchemaField::new(format!("c{i}"), FieldType::UInt32));
+        }
+    }
+    s
+}
+
+/// Read an `ID → name` DBC through the patch chain into a map, skipping rows whose name is empty.
+/// Shared by every such table ([`crate::quest_headers`]'s AreaTable/QuestSort,
+/// [`crate::quest_info`]'s QuestInfo) — the layout differences are the two column numbers.
+pub(crate) fn load_id_name_table(
+    chain: &mut Chain,
+    file: &str,
+    name_col: usize,
+    cols: usize,
+    what: &str,
+) -> Result<HashMap<u32, String>> {
+    let bytes = chain
+        .read_file(file)
+        .with_context(|| format!("reading {file}"))?;
+    let rs = parse(&bytes, id_name_schema(what, name_col, cols), what)?;
+    let mut out = HashMap::with_capacity(rs.records().len());
+    for r in rs.records() {
+        // `str_at` already drops an empty string — a row whose name slot points at the string
+        // block's leading NUL is a hole, not a name.
+        if let (Some(id), Some(name)) = (u32_at(r, 0), str_at(&rs, r, name_col)) {
+            out.insert(id, name);
+        }
+    }
+    Ok(out)
+}

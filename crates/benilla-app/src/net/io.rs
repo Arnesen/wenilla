@@ -654,12 +654,14 @@ async fn run(
     session.set_active_mover_async(guid).await?;
 
     let billing_time_rested = session.billing_time_rested();
+    let tutorial_flags = session.take_tutorial_flags();
     let (mut reader, writer) = session.into_split()?;
     if events_tx
         .send(SessionEvent::Connected {
             self_guid: guid,
             name,
             billing_time_rested,
+            tutorial_flags,
         })
         .is_err()
     {
@@ -758,6 +760,22 @@ async fn run(
     }
 }
 
+/// Drain the writer's sent-packet log into the trace as `out` lines — one per packet that reached
+/// the socket, by opcode name and body length. A no-op unless the `out` tag armed the log when the
+/// connection was handed over. `pub(super)` because the browser's per-frame pump
+/// (`crate::net::web_writer_pump`) is the other write loop and wants the same `out` lines.
+pub(super) fn trace_sends(w: &mut WorldWriter) {
+    w.drain_sent(|opcode, len| {
+        benilla_assets::trace::line(
+            "out",
+            &format!(
+                "{opcode:#06x} {} len={len}",
+                benilla_protocol::messages::opcode_name(opcode).unwrap_or("?")
+            ),
+        );
+    });
+}
+
 /// The single write thread (native only — a page has no threads; `crate::net`'s `web_writer_pump`
 /// is the browser's answer, and it drains the same two channels through the same [`dispatch`]).
 ///
@@ -785,7 +803,13 @@ fn writer_loop(
     loop {
         crossbeam_channel::select! {
             recv(writer_rx) -> w => match w {
-                Ok(w) => {
+                Ok(mut w) => {
+                    // Arm the outbound opcode trace for this connection (tag `out`). Armed here
+                    // rather than at construction because the sink is an app-side concern and a
+                    // writer outlives none of them; a fresh socket starts a fresh log.
+                    if benilla_assets::trace::enabled_for("out") {
+                        w.watch_sends();
+                    }
                     writer = Some(w);
                     warned = 0;
                     // A fresh connection restarts the keepalive from scratch, like the real
@@ -836,6 +860,7 @@ fn writer_loop(
                             warned += 1;
                         }
                     }
+                    trace_sends(w);
                 }
             },
             recv(cmd_rx) -> cmd => {
@@ -844,17 +869,28 @@ fn writer_loop(
                     // No live writer: the session is gone and this command evaporates. Traced
                     // unconditionally — this is the state in which a client keeps *deciding* to send
                     // movement (`snd` lines) that no one will ever receive (decision 0621).
+                    // **Both lines name the command.** They used to write a fixed string, so a
+                    // login that dropped five commands before the writer existed said only that
+                    // five of something went missing — and since `writer` is set exactly once and
+                    // never reset, this can only ever fire before the first `player_login`, which
+                    // makes the WHICH the entire question. A census of all 322 send sites could
+                    // not answer it from the source; `cmd` is owned and unused here and
+                    // `ClientCommand` derives `Debug`, so one login now answers it outright.
                     if benilla_assets::trace::enabled() {
-                        benilla_assets::trace::line("wire", "DROPPED — no live session");
+                        benilla_assets::trace::line(
+                            "wire",
+                            &format!("DROPPED — no live session: {cmd:?}"),
+                        );
                     }
                     if warned < SEND_WARN_CAP {
-                        bevy::log::warn!("net: dropping command — not connected");
+                        bevy::log::warn!("net: dropping command — not connected: {cmd:?}");
                         warned += 1;
                     }
                     continue;
                 };
                         let result = dispatch(w, cmd);
                         // **What actually reached the socket** (tag `wire`, decision 0621). The controller's
+                // **What actually reached the socket** (tag `wire`, decision 0621). The controller's
                 // `snd` line is written before the command is even queued, so it records a decision,
                 // not a transmission — a client whose session died goes on producing `snd` lines into
                 // a dead channel forever, which is exactly the ambiguity that cost us a hunt. Only
@@ -869,6 +905,13 @@ fn writer_loop(
                         warned += 1;
                     }
                 }
+                // **What actually reached the socket, by name** (tag `out`) — the outbound twin of
+                // the `in` line above. One command can be more than one packet, so this drains
+                // rather than naming the command: the log is the writer's own, recorded after each
+                // successful write, so a line here is a transmission and never an intention. It is
+                // what `wire`'s "a silent failure log beside a busy `snd` log means every packet
+                // went out" was standing in for, said directly.
+                trace_sends(w);
             },
         }
     }
@@ -906,6 +949,7 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             orientation,
             spline_id,
         } => w.move_spline_done(flags, pos, orientation, spline_id),
+        ClientCommand::MoveTimeSkipped { guid, lag_ms } => w.move_time_skipped(guid, lag_ms),
         ClientCommand::ForceSpeedAck {
             kind,
             guid,
@@ -973,6 +1017,19 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         ClientCommand::LeaveChannel { name } => w.leave_channel(&name),
         ClientCommand::ChannelList { name } => w.channel_list(&name),
         ClientCommand::RandomRoll { min, max } => w.random_roll(min, max),
+        ClientCommand::ChannelOwner { name } => w.channel_owner(&name),
+        ClientCommand::ChannelSetOwner { name, player } => w.channel_set_owner(&name, &player),
+        ClientCommand::ChannelPassword { name, password } => w.channel_password(&name, &password),
+        ClientCommand::ChannelModerator { name, player } => w.channel_moderator(&name, &player),
+        ClientCommand::ChannelUnmoderator { name, player } => w.channel_unmoderator(&name, &player),
+        ClientCommand::ChannelMute { name, player } => w.channel_mute(&name, &player),
+        ClientCommand::ChannelUnmute { name, player } => w.channel_unmute(&name, &player),
+        ClientCommand::ChannelInvite { name, player } => w.channel_invite(&name, &player),
+        ClientCommand::ChannelKick { name, player } => w.channel_kick(&name, &player),
+        ClientCommand::ChannelBan { name, player } => w.channel_ban(&name, &player),
+        ClientCommand::ChannelUnban { name, player } => w.channel_unban(&name, &player),
+        ClientCommand::ChannelAnnouncements { name } => w.channel_announcements(&name),
+        ClientCommand::ChannelModerate { name } => w.channel_moderate(&name),
         ClientCommand::PlayedTime => w.played_time(),
         ClientCommand::NameQuery { guid } => w.name_query(guid),
         ClientCommand::CreatureQuery { entry, guid } => w.creature_query(entry, guid),
@@ -985,6 +1042,12 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             target,
         } => w.use_item(bag_index, slot, spell_index, target),
         ClientCommand::OpenItem { bag_index, slot } => w.open_item(bag_index, slot),
+        ClientCommand::WrapItem {
+            gift_bag,
+            gift_slot,
+            item_bag,
+            item_slot,
+        } => w.wrap_item(gift_bag, gift_slot, item_bag, item_slot),
         ClientCommand::AutoEquipItem { bag_index, slot } => w.auto_equip_item(bag_index, slot),
         ClientCommand::SetAmmo { entry } => w.set_ammo(entry),
         ClientCommand::SwapInvItem { src_slot, dst_slot } => w.swap_inv_item(src_slot, dst_slot),
@@ -1078,6 +1141,34 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         ClientCommand::BinderActivate { binder } => w.binder_activate(binder),
         ClientCommand::SummonResponse { summoner } => w.summon_response(summoner),
         ClientCommand::TalentWipeConfirm { trainer } => w.talent_wipe_confirm(trainer),
+        ClientCommand::ForceLogout => w.player_logout(),
+        ClientCommand::AreaSpiritHealerQueue { healer } => w.area_spirit_healer_queue(healer),
+        ClientCommand::BattlefieldPort { map_id, accept } => w.battlefield_port(map_id, accept),
+        ClientCommand::RequestBattlefieldScoreData => w.request_battlefield_score_data(),
+        ClientCommand::LeaveBattlefield { map_id } => w.leave_battlefield(map_id),
+        ClientCommand::MeetingStoneLeave => w.meeting_stone_leave(),
+        ClientCommand::MeetingStoneStatusQuery => w.meeting_stone_status_query(),
+        ClientCommand::TutorialFlag { id } => w.tutorial_flag(id),
+        ClientCommand::TutorialClear => w.tutorial_clear(),
+        ClientCommand::TutorialReset => w.tutorial_reset(),
+        ClientCommand::BattlefieldList { map_id } => w.battlefield_list(map_id),
+        ClientCommand::RequestBattlefieldPositions => w.request_battlefield_positions(),
+        ClientCommand::TabardVendorActivate { npc } => w.tabard_vendor_activate(npc),
+        ClientCommand::SaveGuildEmblem { vendor, design } => w.save_guild_emblem(vendor, design),
+        ClientCommand::BattlemasterHello { npc } => w.battlemaster_hello(npc),
+        ClientCommand::BattlemasterJoin {
+            battlemaster,
+            map_id,
+            instance_id,
+            as_group,
+        } => w.battlemaster_join(battlemaster, map_id, instance_id, as_group),
+        ClientCommand::BattlefieldJoin {
+            map_id,
+            instance_id,
+            as_group,
+        } => w.battlefield_join(map_id, instance_id, as_group),
+        ClientCommand::BattlefieldStatusRequest => w.battlefield_status(),
+        ClientCommand::PetUnlearn { trainer } => w.pet_unlearn(trainer),
         ClientCommand::BankerActivate { guid } => w.banker_activate(guid),
         ClientCommand::BuyBankSlot { guid } => w.buy_bank_slot(guid),
         ClientCommand::AutoBankItem { bag, slot } => w.autobank_item(bag, slot),
@@ -1147,15 +1238,16 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             receiver,
             subject,
             body,
+            stationery,
             item_guid,
             money,
             cod,
         } => w.send_mail(
             mailbox, &receiver, &subject, &body,
-            // stationery/package: vmangos discards both — player mail is always
-            // stored MAIL_STATIONERY_DEFAULT (41, decision 0544) regardless of what
-            // rides the wire here.
-            41, 0, item_guid, money, cod,
+            // The stationery the player selected (1970) and package 0 — vmangos
+            // discards both and stores MAIL_STATIONERY_DEFAULT (41, decision 0544),
+            // but the wire carries what the client chose, as the reference's does.
+            stationery, 0, item_guid, money, cod,
         ),
         ClientCommand::MailTakeMoney { mailbox, mail_id } => w.mail_take_money(mailbox, mail_id),
         ClientCommand::MailTakeItem { mailbox, mail_id } => w.mail_take_item(mailbox, mail_id),
@@ -1302,6 +1394,9 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         ClientCommand::ToggleCloak => w.toggle_cloak(),
         ClientCommand::FriendListRequest => w.friend_list(),
         ClientCommand::AddFriend { name } => w.add_friend(&name),
+        ClientCommand::SetLookingForGroup { slots, comment } => {
+            w.set_looking_for_group(slots, &comment)
+        }
         ClientCommand::DelFriend { guid } => w.del_friend(guid),
         ClientCommand::AddIgnore { name } => w.add_ignore(&name),
         ClientCommand::DelIgnore { guid } => w.del_ignore(guid),

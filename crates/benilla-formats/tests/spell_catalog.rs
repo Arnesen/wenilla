@@ -37,6 +37,74 @@ fn spell_catalog_resolves_known_spells() {
 
     // The visual/speed column pins (decision 0107 data plane), cross-checked against the local
     // vmangos `spell_template` (`spellVisual1`/`speed`) — see `src/spells.rs` docs for the method.
+    // **`PreventionType` (column 165)** — which crowd-control flag refuses the spell LOCALLY
+    // (decision 1903): 1 silence, 2 pacify, 0 neither. Pinned here because the column has an
+    // adjacent look-alike: 164 is `DmgClass`, which takes the same 0/1/2 on every one of these
+    // rows. **Auto Shot separates them decisively** — it is `DmgClass = 3` (RANGED), a value
+    // `PreventionType` never takes, so a one-column slip fails this test rather than passing
+    // quietly. (The byte offset `SpellRec+0x294 / 4 = 165` is the other half of the pin.)
+    assert_eq!(
+        catalog.get(133).expect("Fireball").prevention_type,
+        1,
+        "Fireball is silence-preventable"
+    );
+    assert_eq!(
+        catalog.get(78).expect("Heroic Strike").prevention_type,
+        2,
+        "Heroic Strike is pacify-preventable"
+    );
+    assert_eq!(
+        catalog.get(6603).expect("Attack").prevention_type,
+        0,
+        "the auto-attack is neither"
+    );
+    assert_eq!(
+        catalog.get(75).expect("Auto Shot").prevention_type,
+        2,
+        "Auto Shot is pacify-preventable — and its DmgClass 3 is what makes column 164 \
+         distinguishable from 165 at all"
+    );
+
+    // **The crowd-control exemption's three columns** (decision 1946): `School` 1, `Mechanic` 5,
+    // `EffectMechanic[0..2]` 79–81. Pinned against spells whose values are common knowledge, and
+    // the per-effect pair is the convincing half — Frostbolt carries its SNARE on effect 0 and
+    // Frost Nova its ROOT on effect 1, which no neighbouring column would reproduce.
+    assert_eq!(catalog.get(133).expect("Fireball").school, 2, "fire");
+    assert_eq!(catalog.get(116).expect("Frostbolt").school, 4, "frost");
+    assert_eq!(catalog.get(585).expect("Smite").school, 1, "holy");
+    assert_eq!(
+        catalog.get(78).expect("Heroic Strike").school,
+        0,
+        "physical"
+    );
+
+    assert_eq!(
+        catalog.get(118).expect("Polymorph").mechanic,
+        17,
+        "MECHANIC_POLYMORPH"
+    );
+    assert_eq!(
+        catalog.get(5782).expect("Fear").mechanic,
+        5,
+        "MECHANIC_FEAR"
+    );
+    assert_eq!(
+        catalog.get(133).expect("Fireball").mechanic,
+        0,
+        "a plain nuke carries no mechanic"
+    );
+
+    assert_eq!(
+        catalog.get(116).expect("Frostbolt").effect_mechanic[0],
+        11,
+        "Frostbolt's slow is MECHANIC_SNARE, on effect 0"
+    );
+    assert_eq!(
+        catalog.get(122).expect("Frost Nova").effect_mechanic[1],
+        7,
+        "Frost Nova's root is MECHANIC_ROOT, on effect 1 — not effect 0"
+    );
+
     let fireball = catalog.get(133).expect("Fireball");
     assert_eq!(fireball.visual, 67, "Fireball's SpellVisual id");
     assert_eq!(fireball.speed, 24.0, "Fireball's projectile speed");

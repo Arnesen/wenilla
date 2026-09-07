@@ -35,9 +35,9 @@
 //!   rather than being skipped (`0x48efe0`).
 //! - **ESC is not an engine binding.** `StopCinematic` has zero native callers in the reference:
 //!   the only skip path is `CinematicFrame.xml`'s own `OnKeyDown`, which is why benilla's copy of
-//!   that frame (`assets/ui/CinematicFrame.xml`) carries the same handler and why the Lua binding
-//!   queues [`SessionRequest::StopCinematic`](benilla_ui::script::SessionRequest) rather than
-//!   reaching in here.
+//!   that frame (stock `Interface\FrameXML\CinematicFrame.xml`) carries the same handler and why
+//!   the Lua binding queues [`SessionRequest::StopCinematic`](benilla_ui::script::SessionRequest)
+//!   rather than reaching in here.
 //! - **The ack ends the run, once.** `CMSG_COMPLETE_CINEMATIC` goes out on a natural end and on an
 //!   ESC skip alike (`0x48f080`). Decision 0196 is why it can never be dropped: unacked, vmangos
 //!   re-anchors object visibility to its own copy of the flying camera and everything around the

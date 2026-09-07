@@ -230,18 +230,28 @@ impl Loader<'_> {
                     .next()
                     .map(abs_dim)
                     .unwrap_or((None, None));
-                self.call_region(
-                    wrapper,
-                    "SetPoint",
-                    (
-                        point.to_string(),
-                        rel_to,
-                        rel_point,
-                        x.unwrap_or(0.0),
-                        y.unwrap_or(0.0),
-                    ),
-                    dbg,
+                let args = (
+                    point.to_string(),
+                    rel_to,
+                    rel_point,
+                    x.unwrap_or(0.0),
+                    y.unwrap_or(0.0),
                 );
+                // A target that is not built yet waits for the frame's subtree (`Loader::deferred_anchors`).
+                if args
+                    .1
+                    .as_deref()
+                    .is_some_and(|n| !self.anchor_target_exists(n))
+                {
+                    self.deferred_anchors.push(super::DeferredAnchor {
+                        wrapper: wrapper.clone(),
+                        region: true,
+                        args,
+                        dbg: dbg.to_string(),
+                    });
+                    continue;
+                }
+                self.call_region(wrapper, "SetPoint", args, dbg);
             }
         }
     }

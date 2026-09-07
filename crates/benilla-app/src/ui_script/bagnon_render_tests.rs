@@ -438,7 +438,7 @@ fn without_a_player_at_addon_load_bagnon_draws_an_empty_window() {
 }
 
 /// The **other** fault, pinned on its own so a later regression names itself: the reference's
-/// `SetItemButton*` family (`assets/ui/ItemButtonTemplate.xml`).
+/// `SetItemButton*` family (`Interface\FrameXML\ItemButtonTemplate.xml`).
 ///
 /// Bagnon ends every slot update with `SetItemButtonDesaturated` / `SetItemButtonTexture` /
 /// `SetItemButtonCount`. While those were nil the raise landed inside `BagnonFrame_AddBag`'s
@@ -1133,16 +1133,16 @@ fn a_texture_gradient_tints_the_art_it_sits_on() {
 /// **The director's report: "when I first open the bags with bagnon the gold numbers are all
 /// cramped up; if I close and open again it looks good."**
 ///
-/// Bagnon's money display is `SmallMoneyFrameTemplate` — OUR `MoneyFrame.xml`. Its `ShowCoin` used
-/// to size each coin with `label:GetStringWidth()`, which is served from the measure round-trip and
-/// therefore reads **0 in the tick that set the text**: every coin came out at exactly one icon
-/// width and the digits overlapped. The second open looked right because the first open's measure
-/// had landed in the cache by then — the reopen was reading the previous open's numbers.
+/// Bagnon's money display is `SmallMoneyFrameTemplate`, off the chain's own `MoneyFrame.xml`. Its
+/// `ShowCoin` used to size each coin with `label:GetStringWidth()`, which is served from the
+/// measure round-trip and therefore reads **0 in the tick that set the text**: every coin came out
+/// at exactly one icon width and the digits overlapped. The second open looked right because the
+/// first open's measure had landed in the cache by then — the reopen was reading the previous open's numbers.
 ///
-/// The fix sums `BENILLA_DIGIT_W`, the app's per-digit advance feed
-/// ([`benilla_ui::script::UiScript::set_digit_advances`]) — data pushed ahead, so the answer exists
-/// *in* the tick. That feed's own doc names this frame as what it was built for; only the merchant
-/// price had ever used it.
+/// The fix is the engine's font measurer answering inside the Lua call that asked
+/// (`benilla_ui`'s `script::measure`): `GetStringWidth` returns a real number in the tick that set
+/// the text. A digits-only stand-in — a per-digit advance feed pushed ahead from the app — shipped
+/// first and was retired by the general answer (decision 1285).
 ///
 /// The assertion is the FIRST open, which is the half that was broken.
 #[test]

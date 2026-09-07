@@ -39,7 +39,7 @@ use bevy::prelude::*;
 use super::{
     move_trace, Player, CAPSULE_HEIGHT, FEATHER_TERMINAL_VELOCITY, FOOT_CONE_HEIGHT, GRAVITY,
     GROUND_COS, GROUND_PROBE, HOVER_CLIMB_RATE, HOVER_HEIGHT, JUMP_SPEED, LAND_PROBE, SKIN_WIDTH,
-    STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_ADVANCE, STEP_UP_HEIGHT, TERMINAL_VELOCITY,
+    STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_ADVANCE_PER_YARD, STEP_UP_HEIGHT, TERMINAL_VELOCITY,
     WATER_WALK_PITCH_FLOOR, WEDGE_MIN_FALL, WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
 };
 
@@ -401,6 +401,7 @@ pub(super) fn step(
             player.horiz_vel,
             time.delta(),
             Support {
+                rise: STEP_UP_HEIGHT,
                 offset: hover_offset,
                 water: water_floor,
                 steep: player.steep_support,
@@ -554,6 +555,7 @@ pub(super) fn step(
         dx: (center - pre_move).xz().length(),
         grounded,
         on_walkable,
+        moving,
         vel_y: player.vel_y,
         snap: snap_probe,
         climb,
@@ -587,8 +589,14 @@ pub(super) fn step(
 ///
 /// They travel together because they are the same question asked twice: how far below the feet does
 /// "the ground" start, and does the thing under us count as a floor at all.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub(crate) struct Support {
+    /// **The mover's rise budget** — the reference's `H` (`0x617430`): how high the atomic step-up
+    /// may lift the body, and the yardstick of its certify reach (`H·tan50°`). [`STEP_UP_HEIGHT`]
+    /// for a player body — our own, and every watched one — and
+    /// [`super::CREATURE_STEP_UP_HEIGHT`] for a creature the server walks (decision 1125 has the
+    /// byte split: `0x5fa550`'s FALSE leg reads the constant `2.0`).
+    pub(crate) rise: f32,
     /// The body rests this far **above** the surface — HOVER's float (decision 0866),
     /// [`super::HOVER_HEIGHT`] while the mode is up and `0.0` for everyone else, which is the
     /// ordinary case.
@@ -610,6 +618,19 @@ pub(crate) struct Support {
     /// reference's `0x4000000` (decision 1125). It is the sole gate on the step-down probe's deep
     /// reach; see the reach in [`grounded_step`].
     pub(crate) steep: bool,
+}
+
+impl Default for Support {
+    /// A player body on an ordinary frame: no hover, no liquid floor, a walkable support, and the
+    /// player's own rise budget.
+    fn default() -> Self {
+        Self {
+            rise: STEP_UP_HEIGHT,
+            offset: 0.0,
+            water: None,
+            steep: false,
+        }
+    }
 }
 
 /// What one grounded walk step resolved against the world came out as ([`grounded_step`]).
@@ -682,7 +703,8 @@ pub(crate) fn grounded_step(
             center,
             horiz_vel / speed,
             travel,
-            travel.max(STEP_UP_ADVANCE),
+            travel.max(support.rise * STEP_UP_ADVANCE_PER_YARD),
+            support.rise,
         )
     } else {
         StepAttempt {
@@ -840,7 +862,7 @@ pub(crate) fn grounded_step(
     let reach = d.x.hypot(d.z) * STEP_SLOPE_RATIO
         + STEP_SNAP_SLACK
         + if support.steep || popped.is_some() {
-            STEP_UP_HEIGHT
+            support.rise
         } else {
             0.0
         }
@@ -1287,6 +1309,7 @@ pub(crate) fn step_up(
     dir_h: Vec3,
     look: f32,
     advance: f32,
+    rise: f32,
 ) -> StepAttempt {
     let none = |verdict| StepAttempt {
         contact: None,
@@ -1306,8 +1329,8 @@ pub(crate) fn step_up(
         verdict,
     };
 
-    // Rise: the free headroom, at most H.
-    let up = cast(center, Vec3::Y * STEP_UP_HEIGHT).map_or(STEP_UP_HEIGHT, |h| h.distance);
+    // Rise: the free headroom, at most H — the mover's own budget (`Support::rise`).
+    let up = cast(center, Vec3::Y * rise).map_or(rise, |h| h.distance);
     if up < 1e-3 {
         return at(StepVerdict::NoHeadroom);
     }
@@ -1350,6 +1373,7 @@ pub(crate) fn step_up(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::player::state::STEP_UP_ADVANCE;
     use crate::player::AIR_NUDGE_SPEED;
     use crate::player::CAPSULE_RADIUS;
     use bevy::ecs::system::RunSystemOnce;
@@ -1427,7 +1451,15 @@ mod tests {
                 let start = Vec3::new(-1.0, CAPSULE_HEIGHT * 0.5, 0.0);
                 let run = cast(start, Vec3::X).map_or(1.0, |h| h.distance);
                 let center = start + Vec3::X * run;
-                step_up(&cast, center, Vec3::X, TRAVEL_60FPS, advance).verdict
+                step_up(
+                    &cast,
+                    center,
+                    Vec3::X,
+                    TRAVEL_60FPS,
+                    advance,
+                    STEP_UP_HEIGHT,
+                )
+                .verdict
             })
             .unwrap()
     }
@@ -1809,9 +1841,8 @@ mod tests {
                     Vec3::X * 7.0,
                     dt,
                     Support {
-                        offset: 0.0,
-                        water: None,
                         steep: true,
+                        ..Support::default()
                     },
                 );
                 g.center.y - center.y
@@ -2001,6 +2032,7 @@ mod tests {
                     Vec3::X,
                     TRAVEL_60FPS,
                     STEP_UP_ADVANCE,
+                    STEP_UP_HEIGHT,
                 )
                 .verdict
             })
@@ -2269,8 +2301,8 @@ mod tests {
     /// **B322, the lift** (decision 1616): the director's *"it doesn't bring you to surface when
     /// used in water"*, for the case the reference actually surfaces — a body standing in liquid
     /// too shallow to swim in. The surface is solid geometry over there, so a body inside it is a
-    /// body inside a wall, and the sweep's depenetration is what puts it on top. Ours is a queried
-    /// plane with no sweep, so the resolve has to say it.
+    /// body inside a wall that the swept resolve keeps on top. Ours is a queried plane with no
+    /// sweep, so the resolve has to say it.
     #[test]
     fn water_walking_lifts_a_wader_out_of_the_water() {
         const SURFACE: f32 = 0.0;

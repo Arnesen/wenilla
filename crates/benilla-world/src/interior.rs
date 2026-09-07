@@ -418,7 +418,11 @@ impl Plugin for InteriorPlugin {
             // placements it rays are the ones this frame's residency published.
             .add_systems(
                 Update,
-                classify_entity_interior.after(crate::wmo_portal::WmoPvsSet),
+                classify_entity_interior
+                    .after(crate::wmo_portal::WmoPvsSet)
+                    // The fold reads the resolved `WowLighting`, so it belongs on the resolve's
+                    // read side (`lighting::LightingConsumeSet`, decision 2032).
+                    .in_set(crate::lighting::LightingConsumeSet),
             )
             .add_observer(enqueue_on_fade_latch);
     }
@@ -1083,7 +1087,7 @@ fn seat_probe_slot(commands: &mut Commands, anchor: Entity, new: u16) {
     commands.queue(
         move |world: &mut World| match world.get_entity_mut(anchor) {
             Ok(mut e) => {
-                e.remove::<PropProbeSlot>();
+                // One insert: the slot's `on_replace` hook frees the outgoing slot (2005).
                 e.insert(PropProbeSlot(new));
             }
             Err(_) => world.resource_mut::<PropProbes>().release(new),

@@ -105,6 +105,13 @@ pub struct ContainerSlot {
     /// hands over the row's name plus the three facts the line law needs to place and paint it.
     /// Empty = unenchanted, or the enchant DBC never loaded. Decisions 0915/0920.
     pub enchants: Vec<super::EnchantView>,
+    /// **The instance's remaining LIFETIME in milliseconds** — a duration-limited item counting
+    /// down to its own destruction (a conjured stone, a holiday gift, a timed quest item). Its
+    /// only feed is `SMSG_ITEM_TIME_UPDATE`, parked as an absolute deadline and recomputed on
+    /// read ([`crate::items::Items::duration_remaining_display_ms`] in benilla-app), floored to
+    /// the whole second so the snapshot moves once a second rather than every frame.
+    /// `None` = no timer, which is nearly every item. Decision 1933.
+    pub duration_ms: Option<u64>,
     /// The petition this item names, when it is a signable charter — **line 3 of the tooltip's
     /// emission law**, between the NAME and the green `ITEM_SIGNABLE` line.
     ///
@@ -263,6 +270,47 @@ impl super::UiScript {
         std::mem::take(&mut self.model_mut().container_destroys)
     }
 
+    /// **Arm the gift-wrap cursor** on the paper at `(bag, slot)` — the app's call when a
+    /// right-click takes the reference's begin-wrap arm (`ItemInfo::begins_gift_wrap`).
+    ///
+    /// Three acts, exactly the three `0x5edea0` performs (wow-re
+    /// `object-layer/scratch/gift-wrap-law.md`): the paper's slot reads **locked**, the displayed
+    /// cursor becomes **mode 2** (`Interface\Cursor\Cast.blp` — the same art the cast cursor
+    /// uses, table `0x853b88` slot 2), and **nothing goes on the wire**. What completes it is the
+    /// next left-click on a container slot. Decision 1934.
+    pub fn arm_gift_wrap(&mut self, bag: i64, slot: u32) {
+        let mut model = self.model_mut();
+        model.pending_wrap = Some(PendingWrap { bag, slot });
+        model.ui_cursor = Some(UiCursorMode::Cast);
+        model.ui_cursor_dirty = true;
+        cursor::queue_lock_changed(&mut model, bag, slot);
+    }
+
+    /// **Cancel an armed gift wrap and nothing else** — disarm, unlock the paper, reset the
+    /// cursor. Deliberately narrower than `ClearCursor`, which also drops any held payload:
+    /// what wow-re records is that a right-click "uses the item and cancels the wrap", not by
+    /// which of the two routes, so this touches only the half the finding actually names.
+    pub fn cancel_gift_wrap(&mut self) -> Option<PendingWrap> {
+        let mut model = self.model_mut();
+        let wrap = model.pending_wrap.take()?;
+        cursor::queue_lock_changed(&mut model, wrap.bag, wrap.slot);
+        model.ui_cursor = None;
+        model.ui_cursor_dirty = true;
+        Some(wrap)
+    }
+
+    /// Is a gift wrap armed, and on which slot? Read by the app to decide whether a right-click
+    /// is cancelling one.
+    pub fn gift_wrap_armed(&self) -> Option<PendingWrap> {
+        self.model_ref().pending_wrap
+    }
+
+    /// Drain the `(giftBag, giftSlot, itemBag, itemSlot)` quads a completed wrap queued — the app
+    /// resolves each pair to the wire's bag/slot addressing and sends `CMSG_WRAP_ITEM`.
+    pub fn take_container_wraps(&mut self) -> Vec<(i64, u32, i64, u32)> {
+        std::mem::take(&mut self.model_mut().container_wraps)
+    }
+
     /// The mode the last FrameXML cursor call armed — `None` after a `ResetCursor`. This is the
     /// *value* of the most recent write; whether a write happened at all is
     /// [`Self::take_cursor_write`], and that is what the app acts on (decision 1061).
@@ -283,6 +331,19 @@ impl super::UiScript {
         let mut model = self.model_mut();
         std::mem::take(&mut model.ui_cursor_dirty).then_some(model.ui_cursor)
     }
+}
+
+/// **The armed gift wrap** — which piece of wrapping paper the next container click will spend.
+///
+/// The reference holds this as globals beside the displayed-cursor mode rather than as a cursor
+/// *payload*; the distinction is load-bearing and is why this is its own type instead of a
+/// [`cursor::CursorPayload`] variant (see [`super::Model::pending_wrap`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PendingWrap {
+    /// The paper's container id, in the same bag space every cursor verb speaks.
+    pub bag: i64,
+    /// The paper's 1-based slot within that container.
+    pub slot: u32,
 }
 
 /// A **displayed-cursor override** the FrameXML cursor family arms (wow-re cursor-system.md §7): the
@@ -330,6 +391,49 @@ pub enum UiCursorMode {
 ///
 /// Returns whether the caller should repaint (the source-slot lock or the held payload changed).
 fn pickup_container_item(model: &mut super::Model, bag: i64, slot: u32) -> bool {
+    // **The gift-wrap completion, ahead of the whole gesture** (decision 1934). `0x4f9b30` is the
+    // *only* entry to the wrap sender `0x5edfc0` image-wide — which is why the paper doll cannot
+    // finish a wrap and an equipped item is therefore unwrappable — and it takes this branch
+    // before it looks at the cursor at all.
+    if let Some(wrap) = model.pending_wrap {
+        // An empty or unresolved slot **bails and leaves the wrap armed** — the reference's own
+        // edge. Nothing is spent and the cursor keeps its mode, so the next click can still land
+        // on a real item.
+        if !model
+            .containers
+            .get(&bag)
+            .and_then(|c| c.slots.get(&slot))
+            .is_some_and(|s| s.item_id != 0)
+        {
+            return false;
+        }
+        // **The paper has to still be there.** `0x5edfef` bails when the stashed gift GUID no
+        // longer resolves, and — the edge worth transcribing — it then sends *and clears*
+        // nothing: the wrap stays armed and the paper's slot stays locked. So this returns
+        // without touching either.
+        if !model
+            .containers
+            .get(&wrap.bag)
+            .and_then(|c| c.slots.get(&wrap.slot))
+            .is_some_and(|s| s.item_id != 0)
+        {
+            return false;
+        }
+        // No eligibility test of any kind. The wrap arm reads each item's `ITEM_FIELD_CONTAINED`
+        // and nothing else — not flags, not stack count, not bind state — and the client ships six
+        // `ERR_CANT_WRAP_*` strings for the server to answer with (`SMSG_INVENTORY_CHANGE_FAILURE`
+        // reasons 43-48). Same law as the openable click (decision 0896): gating locally would eat
+        // the click in silence and cost the player their error line.
+        model.pending_wrap = None;
+        model.container_wraps.push((wrap.bag, wrap.slot, bag, slot));
+        // The paper unlocks and the cursor resets **immediately**, not on the server's answer:
+        // `0x5edfc0` calls `0x5eded0` at `0x5ee0aa`, right after the send. The target is never
+        // locked at all.
+        cursor::queue_lock_changed(model, wrap.bag, wrap.slot);
+        model.ui_cursor = None;
+        model.ui_cursor_dirty = true;
+        return true;
+    }
     match model.cursor.take() {
         None => {
             let picked = model
@@ -424,7 +528,9 @@ fn pickup_container_item(model: &mut super::Model, bag: i64, slot: u32) -> bool 
             | CursorPayload::PetAction(_)
             // Mode 10 (decision 1677) — a stabled pet refuses a bag/doll slot exactly as the
             // spell/action family does, and stays on the cursor for the stable window to take.
-            | CursorPayload::StablePet(_)),
+            | CursorPayload::StablePet(_)
+            // Mode 2 (1962) — coins have no slot to land in; a money frame's DropFunc takes them.
+            | CursorPayload::Money(_)),
         ) => {
             model.cursor = Some(other);
             false
@@ -653,7 +759,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let held = matches!(
                     &model.cursor,
                     Some(CursorPayload::Item(c)) if c.bag == bag && c.slot == slot
-                );
+                ) ||
+                // An armed gift wrap locks its paper for as long as it stands (`0x4953e0` at
+                // `0x5edeb5`) — the same dimming a held item's source slot shows, and released by
+                // the send or by any cancel rather than by the server (decision 1934).
+                    matches!(
+                        &model.pending_wrap,
+                        Some(w) if w.bag == bag && w.slot == slot
+                    );
                 (
                     model
                         .containers
@@ -858,7 +971,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContainerMove, ContainerSlot, ContainerState};
+    use super::{ContainerMove, ContainerSlot, ContainerState, PendingWrap, UiCursorMode};
     use crate::script::UiScript;
 
     fn backpack() -> ContainerState {
@@ -866,6 +979,7 @@ mod tests {
         slots.insert(
             1,
             ContainerSlot {
+                duration_ms: None,
                 petition: None,
                 already_bound: false,
                 bar_placeable: true,
@@ -901,6 +1015,71 @@ mod tests {
             num_slots: 16,
             slots,
         }
+    }
+
+    /// **The gift-wrap state machine** (decision 1934), all four of its edges. Armed by the app's
+    /// right-click on a wrapper, the arm locks the paper and paints cursor mode 2 and sends
+    /// nothing; the next LEFT-click on a container slot spends it; an empty slot bails and leaves
+    /// it armed; and any `ClearCursor` cancels it.
+    #[test]
+    fn an_armed_gift_wrap_spends_on_the_next_container_click() {
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(backpack()));
+        // The arm: nothing on the wire, the paper reads locked, the cursor is mode 2, and the
+        // held-item predicate stays FALSE — this is a cursor mode, not a payload.
+        s.arm_gift_wrap(0, 1);
+        assert_eq!(s.gift_wrap_armed(), Some(PendingWrap { bag: 0, slot: 1 }));
+        assert!(s.take_container_wraps().is_empty(), "arming sends nothing");
+        assert_eq!(s.take_cursor_write(), Some(Some(UiCursorMode::Cast)));
+        assert!(
+            s.eval::<bool>("local _, _, locked = GetContainerItemInfo(0, 1) return locked")
+                .unwrap(),
+            "the paper dims while the wrap stands"
+        );
+        assert!(
+            !s.eval::<bool>("return CursorHasItem()").unwrap(),
+            "the wrap writes no payload, so every stock CursorHasItem() gate stays shut"
+        );
+        // A click on an EMPTY slot bails and leaves the wrap armed — the reference's own edge.
+        s.eval::<()>("PickupContainerItem(0, 9)").unwrap();
+        assert_eq!(s.gift_wrap_armed(), Some(PendingWrap { bag: 0, slot: 1 }));
+        assert!(s.take_container_wraps().is_empty());
+        // A click on a real item spends it: the paper's pair leads, as the wire does.
+        s.eval::<()>("PickupContainerItem(0, 4)").unwrap();
+        assert_eq!(s.take_container_wraps(), vec![(0, 1, 0, 4)]);
+        assert_eq!(s.gift_wrap_armed(), None);
+        assert_eq!(
+            s.take_cursor_write(),
+            Some(None),
+            "the cursor resets on the send, not on the server's answer"
+        );
+        assert!(
+            s.cursor_payload().is_none(),
+            "the completing click is spent on the wrap, not on picking the target up"
+        );
+    }
+
+    /// Any `ClearCursor` cancels an armed wrap — the reference tests it FIRST inside
+    /// `ClearCursor 0x495190` and does so ungated by either parameter, so all 70 of its call
+    /// sites cancel (decision 1934).
+    #[test]
+    fn clear_cursor_cancels_an_armed_gift_wrap() {
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(backpack()));
+        s.arm_gift_wrap(0, 1);
+        let _ = s.take_cursor_write();
+        s.eval::<()>("ClearCursor()").unwrap();
+        assert_eq!(s.gift_wrap_armed(), None);
+        assert_eq!(s.take_cursor_write(), Some(None), "and the mode goes back");
+        assert!(
+            !s.eval::<bool>("local _, _, locked = GetContainerItemInfo(0, 1) return locked")
+                .unwrap(),
+            "the paper unlocks with the cancel — the lock never waited on a server"
+        );
+        // …and the next container click is an ordinary pickup again.
+        s.eval::<()>("PickupContainerItem(0, 1)").unwrap();
+        assert!(s.take_container_wraps().is_empty());
+        assert!(s.cursor_payload().is_some(), "a plain pickup, as before");
     }
 
     #[test]
@@ -1032,6 +1211,7 @@ mod tests {
         state.slots.insert(
             5,
             ContainerSlot {
+                duration_ms: None,
                 petition: None,
                 already_bound: false,
                 bar_placeable: true,

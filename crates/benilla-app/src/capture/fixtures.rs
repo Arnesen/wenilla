@@ -51,9 +51,10 @@ pub(super) fn seed_ui_fixture(
     mut selection: ResMut<crate::target::Selection>,
     mut player: ResMut<crate::player::Player>,
     // Bundled: Bevy systems cap at 16 top-level params — a nested tuple is one param.
-    (mut actions, mut bank): (
+    (mut actions, mut bank, mut exit): (
         ResMut<crate::ui_action::PlayerActions>,
         ResMut<crate::ui_bank::BankOpen>,
+        MessageWriter<AppExit>,
     ),
 ) {
     // A glue-screen capture has no world scenario, and no glue screen opens a UI fixture.
@@ -67,6 +68,22 @@ pub(super) fn seed_ui_fixture(
         return;
     }
     ctx.ui_seeded = true;
+
+    // **A UI capture with no script VM is not a capture — refuse it.** Every seed below opens its
+    // window by calling into the in-game UI, so with no VM they all fail the same way: a nil
+    // global, one `warn!` in a log full of pipeline chatter, a valid-looking PNG of a UI-less
+    // world, and exit 0. That is the false-negative shape `method.md` §6 exists to prevent, and it
+    // burned a session. `scenario_wants_ui` removed the cause (a `ui:` scenario no longer needs
+    // `WOW_CAPTURE_UI=1`); this is the tripwire for whatever else could leave the VM absent, and
+    // it exits non-zero the way the window-size refusal does (`video::warn_if_window_mismatch`).
+    if script.is_none() {
+        error!(
+            "capture: REFUSING this capture — scenario {:?} declares a UI fixture but no script              VM exists, so its window cannot be opened and the shot would be a UI-less world              wearing the scenario's name.",
+            scenario.name
+        );
+        exit.write(AppExit::error());
+        return;
+    }
 
     // A creature guid whose entry bits (24–47) carry 90001 — the NameCache resolves vendor/NPC
     // names by that entry, so inserting the name by entry makes the title path run for real.
@@ -135,6 +152,10 @@ pub(super) fn seed_ui_fixture(
     };
 
     match fixture {
+        // Nothing to open — the UI being loaded (and `demo_unit_feed`'s synthetic player/target)
+        // IS the fixture. The `script.is_none()` refusal above still guards it: these scenarios
+        // photograph the player UI, so a run without a VM is as wrong for them as for any other.
+        UiFixture::Bare => {}
         UiFixture::Merchant => {
             names.insert_creature(
                 NPC_ENTRY,
@@ -231,8 +252,8 @@ pub(super) fn seed_ui_fixture(
             gossip.quests = vec![(783, 0, 5, "Eagan Peltskinner".into())];
             // One short option AND four that WRAP — the live shape both gossip bugs came in as
             // (the director's screenshots), and a menu deliberately TALLER than the parchment so
-            // the capture covers the whole chain: the per-row auto-height
-            // (`BenillaGossipRow_Resize`), the scroll frame that contains the overflow, and the
+            // the capture covers the whole chain: the stock `GossipResize`'s per-row auto-height,
+            // the scroll frame that contains the overflow, and the
             // scrollbar that appears with it. A fixture of one-line labels showed none of this —
             // every row fit the template's 16 px and nothing ever overflowed.
             let judgement = [
@@ -490,13 +511,16 @@ pub(super) fn seed_ui_fixture(
             };
             // Entry 1 (selected by first-valid auto-selection): in progress, one creature
             // objective at 3/10 (the slot counter below) + one item objective (bags are empty in
-            // capture → 0/5), choice + fixed rewards, money.
+            // capture → 0/5), choice + fixed rewards, money. `quest_type: 1` is QuestInfo.dbc's
+            // "Elite" — the real 783 is a plain quest, but this fixture is the only thing that
+            // puts a row TAG in front of the capture, and the tag and the "(Complete)" state word
+            // are different branches of the same row string (entry 2 covers the other).
             quest_log.insert_template(QuestTemplate {
                 quest_id: 783,
                 method: 2,
                 level: 2,
                 zone_or_sort: 12,
-                quest_type: 0,
+                quest_type: 1,
                 rep_objective_faction: 0,
                 rep_objective_value: 0,
                 next_quest_in_chain: 0,
@@ -1049,8 +1073,10 @@ pub(super) fn seed_ui_fixture(
             };
             // The dropdown list open (0992, re-seated onto Camera Following Style by 1649), same
             // posture as the page fixtures: real CVar set, the live open-select-toggle path. The
-            // list's width settles from its OnUpdate a frame later (the kit's WIDTH SETTLE law) —
-            // inside the capture's settle frames.
+            // list's width lands inside the click that opens it — the stock kit's
+            // `UIDropDownMenu_Refresh` sizes every button from `normalText:GetWidth() + 60`
+            // (`UIDropDownMenu.lua` l.395-422) and the engine's measurer answers that getter in
+            // the call that asked, so there is no settle to wait out.
             script.register_cvars(crate::cvars::registered_pairs());
             if let Err(e) = script.run(
                 "ShowUIPanel(OptionsFrame); OptionsFrameCategoryListRowControls:Click(); \
@@ -1230,9 +1256,9 @@ pub(super) fn seed_ui_fixture(
                 "ChatFrameEditBox:SetText(\"hello northshire\")\n\
                  ChatFrameEditBox:HighlightText(6, 16)\n\
                  ChatFrame1:SetScript('OnUpdate', function()\n\
-                     BenillaFCF_TabResize(ChatFrame1Tab)\n\
+                     PanelTemplates_TabResize(10, ChatFrame1Tab)\n\
                      ChatFrame1Tab:SetAlpha(1.0)\n\
-                     for _, t in ipairs(BenillaFCF_Textures(1)) do t:SetAlpha(0.25) end\n\
+                     FCF_SetWindowAlpha(ChatFrame1, 0.25, 1)\n\
                  end)",
             ) {
                 warn!("capture: ui-chatedit seed failed: {e}");
@@ -1269,7 +1295,7 @@ pub(super) fn seed_ui_fixture(
             //                                                             a tab quad is measured against
             let mode = std::env::var("WOW_TABHOVER").unwrap_or_else(|_| "1".into());
             let select = if mode == "3" { 1 } else { 2 };
-            if let Err(e) = script.run(&format!("BenillaFCF_TabClick({select})")) {
+            if let Err(e) = script.run(&format!("FCF_SelectDockFrame(ChatFrame{select})")) {
                 warn!("capture: ui-chat-tabhover select failed: {e}");
             }
             script.resolve();
@@ -1429,6 +1455,7 @@ fn seed_bag_window(
         benilla_ui::script::ContainerSlot {
             petition: None,
             durability: None,
+            duration_ms: None,
             bar_placeable: true,
             texture: icon(disp),
             count,
@@ -1525,6 +1552,7 @@ fn seed_equipped_bags(
         |disp: u32, count: u32, name: &str, quality: u32| benilla_ui::script::ContainerSlot {
             petition: None,
             durability: None,
+            duration_ms: None,
             bar_placeable: true,
             texture: icon(disp),
             count,

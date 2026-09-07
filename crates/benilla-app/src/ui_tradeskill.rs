@@ -19,8 +19,11 @@
 //! Craft-vs-TradeSkill routing are all byte-confirmed. **The header law landed too:** rows group
 //! by the created item's `(ItemClass, ItemSubClass)`, named from `ItemSubClass.dbc`, two-level
 //! sort (0446; the filter family on top of it, 0452) — this feed resolves each recipe's `group`
-//! ([`resolve_recipe`]), so the book is no longer flat. Remaining gap: the spell-focus tool never
-//! rendered red (no client-side proximity model — the server refuses the cast).
+//! ([`resolve_recipe`]), so the book is no longer flat. The spell-focus tool never renders red, and
+//! that is **faithful, not a gap** (wow-re `tradeskill-tools-and-spell-focus.md`, §5-carved): the
+//! reference's own `hasTool` for a focus is the literal `1.0` with no predicate anywhere, and the
+//! client holds neither a focus id nor a radius to test proximity with. The server refusing the
+//! cast is the whole of the feedback, there as here.
 
 // `bevy::platform::time::Instant`, not `bevy::platform::time::Instant`: this flows into `crate::cooldowns`/`crate::ui_script::UiClock`, which on wasm32 (the default `web` Bevy feature) is a genuinely different type from `bevy::platform::time::Instant` — a plain alias for it everywhere else.
 use bevy::platform::time::Instant;
@@ -311,18 +314,33 @@ fn resolve_recipe(
         .flatten()
         .map_or((None, 0, 0), |(g, it, il)| (Some(g), it, il));
 
-    // Tools: the two totem items (present-not-consumed — a Blacksmith Hammer) + the spell focus
-    // (Anvil/Forge/Cooking Fire; never red — module doc INTERIM).
+    // Tools — **the spell FOCUS first, then `Totem[0]`, then `Totem[1]`** (wow-re
+    // `tradeskill/scratch/tradeskill-tools-and-spell-focus.md`, §5-carved: `0x4ff980`'s own push
+    // order). We had the totems leading, which reverses the Requirements line for every recipe
+    // that needs both — a Blacksmithing anvil recipe reads "Blacksmith Hammer, Anvil" instead of
+    // "Anvil, Blacksmith Hammer".
+    //
+    // **The focus is unconditionally satisfied, and that is VERIFIED rather than a gap.** Its
+    // `hasTool` is the instruction immediate `push 0x3ff00000 / push 0` — the literal `1.0`, with
+    // no predicate at all: an exhaustive absence (17 calls, 7 absolute operands, **zero FPU**;
+    // `SpellRec+0x3c` has exactly two readers image-wide; the GameObject descriptor block carries
+    // no focus id or radius, so the client could not test proximity even if it wanted to). The
+    // reference NEVER reddens an Anvil line. `BuildColoredListString` is still byte-faithful and
+    // still reds an unmet TOTEM — that half is live.
+    //
+    // A tool whose template has not landed contributes **no pair at all** (the reference drops it
+    // and fires `CMSG_ITEM_QUERY_SINGLE`, so the arity grows between calls) — which is what the
+    // `if let Some(info)` below already does, for the same reason.
     let mut tools = Vec::new();
+    if d.requires_spell_focus != 0 {
+        if let Some(name) = focus.and_then(|f| f.catalog.name(d.requires_spell_focus)) {
+            tools.push((name.to_string(), true));
+        }
+    }
     for &t in d.totems.iter().filter(|&&t| t != 0) {
         let have = count_of(&store.0, items, t, InventoryScope::CARRIED) > 0;
         if let Some(info) = items.template(t, 0, commands) {
             tools.push((info.name.clone(), have));
-        }
-    }
-    if d.requires_spell_focus != 0 {
-        if let Some(name) = focus.and_then(|f| f.catalog.name(d.requires_spell_focus)) {
-            tools.push((name.to_string(), true));
         }
     }
 
@@ -428,6 +446,14 @@ fn feed_trade_skill(
         return;
     }
     script.set_trade_skill(fresh.clone());
+    // The client has every product's and reagent's template cached by the time its list shows,
+    // and `GetTradeSkillItemLink`/`GetTradeSkillReagentItemLink` never query — so the feed asks
+    // for the templates the store lacks when the list lands, and the verbs read the answers (1973).
+    if let Some(f) = &fresh {
+        script.ask_item_templates(f.recipes.iter().flat_map(|r| {
+            std::iter::once(r.product_item).chain(r.reagents.iter().map(|re| re.item))
+        }));
+    }
     match (&*last, &fresh) {
         (None, Some(f)) => {
             debug!(

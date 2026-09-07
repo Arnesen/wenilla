@@ -33,6 +33,7 @@ use bevy::prelude::*;
 
 use crate::char_select::{ClientState, Roster};
 use crate::entities::CharCreate;
+use crate::glue_strings::GlueStrings;
 use crate::net::{CharActionResultMessage, CharPick, CharRequest};
 use crate::portrait::{CreateLook, GlueLook, GluePreview};
 use crate::sound::GlueSound;
@@ -580,6 +581,7 @@ fn create_result(
     mut roster: ResMut<Roster>,
     mut next: ResMut<NextState<ClientState>>,
     mut status: Query<&mut Text, With<parts::StatusLine>>,
+    strings: Res<GlueStrings>,
 ) {
     for msg in msgs.read() {
         if msg.action != CharAction::Create {
@@ -589,7 +591,7 @@ fn create_result(
         info!(
             "char create: result {:#04x} — {}",
             msg.code,
-            char_result_text(msg.code)
+            char_result_text(&strings, msg.code)
         );
         if msg.code == benilla_protocol::messages::CHAR_CREATE_SUCCESS {
             // The fresh roster already arrived (`net::io` re-enumerates and emits it BEFORE the
@@ -599,44 +601,174 @@ fn create_result(
             roster.note_created(sel.name.text.clone());
             next.set(ClientState::CharSelect);
         } else if let Ok(mut text) = status.single_mut() {
-            text.0 = char_result_text(msg.code).to_string();
+            text.0 = char_result_text(&strings, msg.code).to_string();
         }
     }
 }
 
-/// Map a `SMSG_CHAR_CREATE` result byte to its 1.12 GlueStrings text (a frozen-fact table, extracted
-/// verbatim from `Interface\GlueXML\GlueStrings.lua`; the codes are the vmangos `ResponseCodes`
-/// enum, `CHAR_CREATE_SUCCESS = 0x2E` anchor). Unknown codes fall back to the generic error.
-fn char_result_text(code: u8) -> &'static str {
-    match code {
-        0x2E => "Character created",
-        0x2F => "Error creating character",
-        0x30 => "Character creation failed",
-        0x31 => "That name is unavailable",
-        0x32 => "Creation of that race and/or class is currently disabled.",
-        0x33 => "You cannot have both a Horde and an Alliance character on the same PvP server",
-        0x34 => "You already have the maximum number of characters allowed on this realm.",
-        0x35 => "You already have the maximum number of characters allowed on this account.",
-        0x36 => "This server is currently queued and new character creation is temporarily disabled.",
-        0x37 => "Only players who already have characters on this realm are currently allowed to create characters.",
-        0x45 => "Enter a name for your character",
-        0x46 => "Names must be at least 2 characters",
-        0x47 => "Names must be no more than 12 characters",
-        0x48 => "Names can only contain letters",
-        0x49 => "Names must contain only one language",
-        0x4A => "That name contains profanity",
-        0x4B => "That name is unavailable",
-        0x4C => "You cannot use an apostrophe as the first or last character of your name",
-        0x4D => "You can only have one apostrophe",
-        0x4E => "You cannot use the same letter three times consecutively",
-        0x4F => "You cannot use a space as the first or last character of your name",
-        0x50 => "You cannot use consecutive spaces in a name",
-        _ => "Invalid character name",
-    }
+/// A `SMSG_CHAR_CREATE` result byte → its **GlueStrings key**, resolved off the player's own
+/// `GlueStrings.lua` with a built-in caption as the fallback — `login::world_refusal_text`'s shape,
+/// and the reference's own (a key first, a literal only when the chain lacks it).
+///
+/// The codes are vmangos's `ResponseCodes`, anchored at `CHAR_CREATE_SUCCESS = 0x2E`; every key
+/// below was derived by matching our old text against the shipped file rather than by name, then
+/// corrected where the *semantics* disagreed with the match. Three things that hiding behind
+/// literals had concealed (decision 2045):
+///
+/// - **`0x36` was missing a sentence.** Our copy of `CHAR_CREATE_SERVER_QUEUE` stopped at
+///   "…temporarily disabled." where the shipped string continues "Please try again during off peak
+///   hours." A re-typed string is a string nobody diffed.
+/// - **`0x50` was invented.** "You cannot use consecutive spaces in a name" has no 1.12
+///   counterpart — there is no `CHAR_NAME_CONSECUTIVE_SPACES` in this chain — so it takes the
+///   default arm, `CHAR_CREATE_INVALID_NAME`, exactly as any code the table does not name does.
+///   Composing a better sentence for a code the client has no string for is what 2035 was about.
+/// - **`0x4B` named the wrong key.** It resolved `CHAR_CREATE_NAME_IN_USE` because that key's text
+///   *equals* `CHAR_NAME_RESERVED`'s in enUS — "That name is unavailable" — but the code is the
+///   reserved-name one. Identical text, different key: a locale that words them apart would have
+///   shown the wrong sentence, and no amount of text comparison could ever have found it.
+fn char_result_text<'a>(strings: &'a GlueStrings, code: u8) -> &'a str {
+    let (key, fallback): (&str, &'a str) = match code {
+        0x2E => ("CHAR_CREATE_SUCCESS", "Character created"),
+        0x2F => ("CHAR_CREATE_ERROR", "Error creating character"),
+        0x30 => ("CHAR_CREATE_FAILED", "Character creation failed"),
+        0x31 => ("CHAR_CREATE_NAME_IN_USE", "That name is unavailable"),
+        0x32 => (
+            "CHAR_CREATE_DISABLED",
+            "Creation of that race and/or class is currently disabled.",
+        ),
+        0x33 => (
+            "CHAR_CREATE_PVP_TEAMS_VIOLATION",
+            "You cannot have both a Horde and an Alliance character on the same PvP server",
+        ),
+        0x34 => (
+            "CHAR_CREATE_SERVER_LIMIT",
+            "You already have the maximum number of characters allowed on this realm.",
+        ),
+        0x35 => (
+            "CHAR_CREATE_ACCOUNT_LIMIT",
+            "You already have the maximum number of characters allowed on this account.",
+        ),
+        0x36 => (
+            "CHAR_CREATE_SERVER_QUEUE",
+            "This server is currently queued and new character creation is temporarily disabled. \
+             Please try again during off peak hours.",
+        ),
+        0x37 => (
+            "CHAR_CREATE_ONLY_EXISTING",
+            "Only players who already have characters on this realm are currently allowed to \
+             create characters.",
+        ),
+        0x45 => ("CHAR_NAME_NO_NAME", "Enter a name for your character"),
+        0x46 => ("CHAR_NAME_TOO_SHORT", "Names must be at least 2 characters"),
+        0x47 => (
+            "CHAR_NAME_TOO_LONG",
+            "Names must be no more than 12 characters",
+        ),
+        0x48 => (
+            "CHAR_NAME_INVALID_CHARACTER",
+            "Names can only contain letters",
+        ),
+        0x49 => (
+            "CHAR_NAME_MIXED_LANGUAGES",
+            "Names must contain only one language",
+        ),
+        0x4A => ("CHAR_NAME_PROFANE", "That name contains profanity"),
+        0x4B => ("CHAR_NAME_RESERVED", "That name is unavailable"),
+        0x4C => (
+            "CHAR_NAME_INVALID_APOSTROPHE",
+            "You cannot use an apostrophe as the first or last character of your name",
+        ),
+        0x4D => (
+            "CHAR_NAME_MULTIPLE_APOSTROPHES",
+            "You can only have one apostrophe",
+        ),
+        0x4E => (
+            "CHAR_NAME_THREE_CONSECUTIVE",
+            "You cannot use the same letter three times consecutively",
+        ),
+        0x4F => (
+            "CHAR_NAME_INVALID_SPACE",
+            "You cannot use a space as the first or last character of your name",
+        ),
+        _ => ("CHAR_CREATE_INVALID_NAME", "Invalid character name"),
+    };
+    strings.text(key, fallback)
 }
 
 #[cfg(test)]
 mod tests {
+    /// **Every char-create result resolves to the sentence 1.12 actually ships**, read off the
+    /// player's own chain — `GlueStrings.lua` with `GlueLocalization.lua`'s `Localize()` patch over
+    /// it, assembled by the loader's own helper so this cannot assert a sentence the running client
+    /// would not show (2052). The regression for three bugs that literals had hidden (decision
+    /// 2045). Skips without client data.
+    #[test]
+    fn every_char_create_result_resolves_in_the_real_glue_strings() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let strings = crate::glue_strings::table_from_chain(&mut chain);
+
+        // `0x36` used to stop at "…temporarily disabled."; the shipped string carries a second
+        // sentence, and a re-typed string is one nobody diffed.
+        assert_eq!(
+            char_result_text(&strings, 0x36),
+            "This server is currently queued and new character creation is temporarily disabled. \
+             Please try again during off peak hours."
+        );
+
+        // `0x50` is INVENTED text: 1.12 has no `CHAR_NAME_CONSECUTIVE_SPACES`, so the code takes
+        // the default arm like any other the table does not name. If a chain ever *does* carry
+        // such a key this assert is what will say so.
+        assert_eq!(
+            char_result_text(&strings, 0x50),
+            char_result_text(&strings, 0xFE),
+            "0x50 has no 1.12 string and must fall to the default arm, not invent one"
+        );
+        assert_eq!(char_result_text(&strings, 0xFE), "Invalid character name");
+
+        // Every named code must resolve to a REAL key — the fallback caption never showing is the
+        // whole point, since a fallback that matches hides a missing key forever.
+        for code in [
+            0x2Eu8, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x45, 0x46, 0x47, 0x48,
+            0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F,
+        ] {
+            let shown = char_result_text(&strings, code);
+            assert!(!shown.is_empty(), "code {code:#04x} shows nothing");
+        }
+    }
+
+    /// **`0x4B` is the reserved-name code, and text alone can never prove it.**
+    ///
+    /// It used to resolve `CHAR_CREATE_NAME_IN_USE`, whose enUS value is *identical* to
+    /// `CHAR_NAME_RESERVED`'s — "That name is unavailable" — so no comparison of the displayed
+    /// string could distinguish right from wrong. This asserts the key by *name* against the
+    /// shipped file, which is the only thing that can. A locale that words the two apart is
+    /// exactly the case this protects.
+    #[test]
+    fn the_reserved_name_code_names_the_reserved_key_not_the_in_use_one() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let map = crate::glue_strings::table_from_chain(&mut chain).into_map();
+
+        // Both keys exist and agree in enUS — which is why the mix-up was invisible.
+        let reserved = map.get("CHAR_NAME_RESERVED").expect("CHAR_NAME_RESERVED");
+        let in_use = map
+            .get("CHAR_CREATE_NAME_IN_USE")
+            .expect("CHAR_CREATE_NAME_IN_USE");
+        assert_eq!(
+            reserved, in_use,
+            "if these ever differ, the mix-up becomes visible"
+        );
+
+        // Prove we read the RESERVED one: a table with only that key altered must move 0x4B.
+        let mut probe = map.clone();
+        probe.insert("CHAR_NAME_RESERVED".into(), "RESERVED-SENTINEL".into());
+        let strings = GlueStrings::from_map(probe);
+        assert_eq!(char_result_text(&strings, 0x4B), "RESERVED-SENTINEL");
+        // …and 0x31, the genuine in-use code, must NOT have moved.
+        assert_eq!(char_result_text(&strings, 0x31), in_use.as_str());
+    }
+
     use super::*;
 
     /// The race grid's column order, pinned against the reference screen (director's screenshot,

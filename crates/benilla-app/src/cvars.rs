@@ -36,8 +36,8 @@
 //! config would make the A/B sticky), the session runs and saves around them, and the file keeps
 //! whatever it already said for those keys.
 
-use std::collections::{BTreeMap, HashSet};
 use bevy::platform::time::Instant;
+use std::collections::{BTreeMap, HashSet};
 
 use bevy::prelude::*;
 
@@ -525,7 +525,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // Enhanced Tooltips (B230): 1.12's `UberTooltips`, the *Enhanced Tooltips* checkbox
     // (`UIOptionsFrame.lua:15`, `USE_UBERTOOLTIPS`). **No host knob** — its consumers are Lua, and
     // there are three: PetActionBar.xml forks the whole tooltip on it (a token's own text with the
-    // binding appended, vs the engine's pet-spell channel), ActionBar.xml and StanceBar.xml fork
+    // binding appended, vs the engine's pet-spell channel), the stock action and shapeshift buttons fork
     // their anchor. Registered "1" — byte-read, not behaviour-derived: WoW.exe `0x48fdd9`, default
     // string `0x82e748`, with the sibling rows `BlockTrades`→"0" and `UnitNameRenderMode`→"2"
     // confirming the layout. Those three Lua sites each carried the reference's fork in prose and
@@ -746,6 +746,19 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "1639: benilla's own — the reference has no off-screen buffer to hang a resolution dial \
          on; its nearest equivalent, `gxResolution`, drops the interface with the world",
     ),
+    // **The FPS journal** (decision 2008) — benilla's own, and the one instrument that ships:
+    // `/console fpsJournal 1` appends a per-second row of position, frame cost and the GPU's
+    // per-pass split to `benilla-config/Diagnostics/fps-journal.csv` in any build, which is how
+    // a player on hardware we do not own measures for us. The knob is
+    // [`crate::perf::FpsJournalSetting`]. Off by default; persisted like every row, so a
+    // reporter who turns it on keeps it on until they turn it off — the file is theirs to
+    // attach and theirs to delete.
+    ours(
+        "fpsJournal",
+        "0",
+        "2008: benilla's own — 1.12 has no player-side perf log; its nearest thing is the \
+         Ctrl+R framerate label, a number with no file behind it",
+    ),
     same(crate::char_select::CVAR_LAST_CHARACTER, "0"),
 ];
 
@@ -894,6 +907,7 @@ pub(crate) struct KnobParams<'w> {
     block_trades: ResMut<'w, crate::ui_trade::BlockTrades>,
     auto_self_cast: ResMut<'w, crate::ui_action::AutoSelfCast>,
     realmlist: ResMut<'w, crate::realmlist::Realmlist>,
+    fps_journal: ResMut<'w, crate::perf::FpsJournalSetting>,
 }
 
 impl KnobParams<'_> {
@@ -929,6 +943,7 @@ impl KnobParams<'_> {
             block_trades: &mut self.block_trades,
             auto_self_cast: &mut self.auto_self_cast,
             realmlist: &mut self.realmlist,
+            fps_journal: &mut self.fps_journal,
         }
     }
 }
@@ -960,34 +975,61 @@ struct Knobs<'a> {
     block_trades: &'a mut crate::ui_trade::BlockTrades,
     auto_self_cast: &'a mut crate::ui_action::AutoSelfCast,
     realmlist: &'a mut crate::realmlist::Realmlist,
+    fps_journal: &'a mut crate::perf::FpsJournalSetting,
+}
+
+/// **The string-valued rows**, matched ahead of the numeric parse every other row goes through —
+/// which would reject them as bad values. `gxResolution` was the first (decision 1627) and its
+/// comment named this as the shape a second one would join rather than a second special case
+/// somewhere else; `realmList` (1667) is the second, `realmName` the third. Every arm shares the
+/// numeric miss's posture below: known key, bad value — consumed, with a warn, and the resource
+/// keeps its truth.
+///
+/// **Split out of [`apply_to_knobs`] so the table can be held to it.** The claim
+/// "a string row without an arm here is a CVar the client will never honour" was written beside
+/// [`the_string_valued_cvars_are_the_realm_and_the_windowed_size`] and then not enforced:
+/// `realmName` shipped with no arm, so every launch after the first connect warned
+/// `cvar realmName: unparseable value 'VMaNGOS' ignored` on the way past the numeric parse. As a
+/// separate `bool` this is something a test can call for every non-numeric row in the table, which
+/// is what [`every_string_valued_row_is_claimed_before_the_numeric_parse`] now does.
+fn apply_string_valued(key: &str, name: &str, value: &str, knobs: &mut Knobs) -> bool {
+    if !is_string_valued(key) {
+        return false;
+    }
+    match key {
+        "gxresolution" => match crate::video::parse_resolution(value) {
+            Some(size) => knobs.video.windowed = size,
+            None => warn!("cvar {name}: unparseable value '{value}' ignored"),
+        },
+        "realmlist" => match crate::realmlist::normalize(value) {
+            Some(address) => knobs.realmlist.set(&address),
+            None => warn!("cvar {name}: unusable realmlist '{value}' ignored"),
+        },
+        // No host knob, and none wanted: the live realm name is written from the session
+        // (`ui_script::addons::load_third_party`), and the persisted one reaches `GetCVar` through
+        // `set_cvar_saved_base` without passing here at all. Claimed anyway — the `statusBarText`
+        // posture — so the value is CONSUMED rather than falling to a numeric parse that can only
+        // reject it, and so a toggle still dirties the config.
+        "realmname" => {}
+        _ => {}
+    }
+    true
+}
+
+/// Which keys [`apply_string_valued`] claims — lowercased, and split out from the arms so a test
+/// can hold the TABLE to it without building a `Knobs`. The claim it makes possible: every
+/// registered row whose default does not parse as a number is named here
+/// ([`every_string_valued_row_is_claimed_before_the_numeric_parse`]).
+fn is_string_valued(key: &str) -> bool {
+    matches!(key, "gxresolution" | "realmlist" | "realmname")
 }
 
 /// Apply one CVar to its knob resource (parse + the knob's own clamp). `false` = not a knob this
 /// build knows (the caller decides whether that warns or rides through).
 fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
     let key = name.to_ascii_lowercase();
-    // **The string-valued rows**, matched ahead of the numeric parse every other row goes through
-    // — which would reject them as bad values. `gxResolution` was the first (decision 1627) and
-    // its comment named this as the shape a second one would join rather than a second special
-    // case somewhere else; `realmList` (1667) is that second one, so this is now that shape.
-    // Every arm shares the numeric miss's posture below: known key, bad value — consumed, with a
-    // warn, and the resource keeps its truth.
-    match key.as_str() {
-        "gxresolution" => {
-            match crate::video::parse_resolution(value) {
-                Some(size) => knobs.video.windowed = size,
-                None => warn!("cvar {name}: unparseable value '{value}' ignored"),
-            }
-            return true;
-        }
-        "realmlist" => {
-            match crate::realmlist::normalize(value) {
-                Some(address) => knobs.realmlist.set(&address),
-                None => warn!("cvar {name}: unusable realmlist '{value}' ignored"),
-            }
-            return true;
-        }
-        _ => {}
+    if apply_string_valued(&key, name, value, knobs) {
+        return true;
     }
     let Ok(v) = value.parse::<f32>() else {
         warn!("cvar {name}: unparseable value '{value}' ignored");
@@ -1082,6 +1124,10 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "renderscale" => {
             knobs.render_scale.0 = v.clamp(*RENDER_SCALE_RANGE.start(), *RENDER_SCALE_RANGE.end());
         }
+        // The FPS journal switch (2008): a flag, the client's int-parse + `!= 0`. The journal
+        // system reads the knob every frame, so the file opens on the next second and closes
+        // the second it is turned off.
+        "fpsjournal" => knobs.fps_journal.0 = v != 0.0,
         // Multisampling (1629) — the reference's own `atoi`-then-clamp `[1, 16]` at `0x63b250`.
         // Writing the knob live is faithful, not a bug: the CVar holds the PENDING value (latched),
         // and nothing reads this resource after the world camera's spawn.
@@ -1368,6 +1414,7 @@ fn sync_cvars(
             msaa_formats,
             tex_filter,
             realmlist,
+            fps_journal,
         } = &params;
         // The config file's values go in FIRST (decision 1291): registration — ours below, or an
         // addon's `RegisterCVar` later — starts a key at its saved value. This is what carries a
@@ -1400,7 +1447,7 @@ fn sync_cvars(
                 .collect(),
         );
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 44] = [
+        let session: [(&str, String); 45] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -1461,6 +1508,7 @@ fn sync_cvars(
             ("gxMultisample", msaa.samples.to_string()),
             ("trilinear", flag(tex_filter.trilinear)),
             ("anisotropic", tex_filter.aniso.to_string()),
+            ("fpsJournal", flag(fps_journal.0)),
             // The other string-valued row (1667): what the next logon attempt will actually dial,
             // including a `$WOW_HOST` the player never typed.
             (
@@ -1908,6 +1956,7 @@ mod tests {
         let mut realmlist =
             crate::realmlist::Realmlist::unpinned(crate::realmlist::DEFAULT_REALMLIST);
         let mut auto_self_cast = crate::ui_action::AutoSelfCast::default();
+        let mut fps_journal = crate::perf::FpsJournalSetting::default();
         let mut knobs = Knobs {
             sound: &mut sound,
             auto_self_cast: &mut auto_self_cast,
@@ -1932,6 +1981,7 @@ mod tests {
             tex_filter: &mut tex_filter,
             msaa_formats: &msaa_formats,
             realmlist: &mut realmlist,
+            fps_journal: &mut fps_journal,
         };
         assert!(apply_to_knobs("MusicVolume", "0.7", &mut knobs));
         assert_eq!(knobs.sound.music, 0.7);
@@ -2001,6 +2051,12 @@ mod tests {
         assert_eq!(knobs.render_scale.0, *RENDER_SCALE_RANGE.end());
         assert!(apply_to_knobs("renderscale", "0", &mut knobs));
         assert_eq!(knobs.render_scale.0, *RENDER_SCALE_RANGE.start());
+        // The FPS journal switch (2008): a flag, case-insensitive, off as shipped.
+        assert!(!knobs.fps_journal.0);
+        assert!(apply_to_knobs("fpsJournal", "1", &mut knobs));
+        assert!(knobs.fps_journal.0);
+        assert!(apply_to_knobs("fpsjournal", "0", &mut knobs));
+        assert!(!knobs.fps_journal.0);
         // Enable flags: any nonzero is on, zero is off (the client's int-parse + != 0).
         assert!(apply_to_knobs("EnableMusic", "0", &mut knobs));
         assert!(!knobs.sound.music_enabled);
@@ -2250,6 +2306,7 @@ mod tests {
             .init_resource::<crate::ui_guild::GuildMemberNotify>()
             .init_resource::<crate::ui_trade::BlockTrades>()
             .init_resource::<crate::ui_action::AutoSelfCast>()
+            .init_resource::<crate::perf::FpsJournalSetting>()
             .add_plugins(CvarPlugin);
         app.insert_non_send_resource(UiScript::new().unwrap());
         app
@@ -2472,5 +2529,32 @@ mod tests {
             crate::realmlist::normalize(default_of(crate::realmlist::CVAR_REALMLIST)).as_deref(),
             Some(crate::realmlist::DEFAULT_REALMLIST),
         );
+    }
+
+    /// **The claim the test above only asserted in prose, now enforced.** Its doc says a string
+    /// row that forgets its arm in [`apply_to_knobs`] "is a CVar the player can set and the client
+    /// will never honour, and this is what makes adding one impossible to do quietly" — and then
+    /// `realmName` was added and did exactly that. It reached the numeric parse, which can only
+    /// reject it, so every launch after the first connect logged
+    /// `cvar realmName: unparseable value 'VMaNGOS' ignored`.
+    ///
+    /// It was the mild half of the failure — the persisted value still reaches `GetCVar` through
+    /// `set_cvar_saved_base`, so nothing was actually lost, and the warn was libel rather than
+    /// news. A string row that DID own a knob would have been silently dropped. Both directions
+    /// are pinned: a new non-numeric row that skips [`is_string_valued`] fails here, and a key
+    /// named there that stops being a registered string row fails here too.
+    #[test]
+    fn every_string_valued_row_is_claimed_before_the_numeric_parse() {
+        for r in REGISTERED {
+            let key = r.name.to_ascii_lowercase();
+            assert_eq!(
+                r.default.parse::<f32>().is_err(),
+                is_string_valued(&key),
+                "{}: a row's default parsing as a number and `is_string_valued` must agree — \
+                 a string row that misses the guard falls to the numeric parse, which only \
+                 rejects it",
+                r.name,
+            );
+        }
     }
 }

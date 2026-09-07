@@ -33,15 +33,15 @@ pub use world_assets::*;
 mod model;
 pub use model::{
     bone_target_id, merged_static_mesh_faded, submesh_to_skinned_mesh, submesh_to_static_mesh,
-    AnimClip, BillboardInfo, GlobalBone, GlobalSeqChannel, ModelAnimations, ModelAttachment,
-    ModelJoint, ModelMarker, ModelSkeleton, ModelSubmesh, PoseBone, PoseClip, PoseNode, PoseSource,
-    PoseTrack, ATTRIBUTE_WOW_FADE_SPHERE, ATTRIBUTE_WOW_JOINT_INDEX, ATTRIBUTE_WOW_JOINT_WEIGHT,
-    ATTRIBUTE_WOW_MERGED_SLOT,
+    AnimClip, BillboardInfo, ClipEvent, GlobalBone, GlobalSeqChannel, ModelAnimations,
+    ModelAttachment, ModelJoint, ModelMarker, ModelSkeleton, ModelSubmesh, PoseBone, PoseClip,
+    PoseNode, PoseSource, PoseTrack, ATTRIBUTE_WOW_FADE_SPHERE, ATTRIBUTE_WOW_JOINT_INDEX,
+    ATTRIBUTE_WOW_JOINT_WEIGHT, ATTRIBUTE_WOW_MERGED_SLOT,
 };
 mod adt;
 mod terrain;
 mod wdt;
-pub use adt::{chunk_to_mesh, AdtLoader, AdtTile, ChunkShading};
+pub use adt::{chunk_to_mesh, chunks_to_mesh, AdtLoader, AdtTile, ChunkShading};
 pub use wdt::{WdtIndex, WdtIndexLoader};
 mod blp;
 pub use blp::{BlpImageLoader, BlpLoaderSettings, BlpVariant};
@@ -52,7 +52,8 @@ mod tex_filter;
 pub use tex_filter::{publish_tex_filter, tex_filter, TexFilterSetting, ANISO_RANGE};
 mod m2;
 pub use m2::{
-    EmitterBillboard, M2Model, M2ModelLoader, ModelEmitter, ModelLight, ModelRibbon, PortraitCamera,
+    EmitterBillboard, M2Model, M2ModelLoader, M2SequenceInfo, ModelEmitter, ModelLight,
+    ModelRibbon, PortraitCamera,
 };
 mod wmo;
 pub use benilla_formats::{WmoPortalInfo, WmoPortalRef};

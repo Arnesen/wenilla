@@ -24,6 +24,7 @@ use bevy::core_pipeline::FullscreenShader;
 use bevy::ecs::query::QueryItem;
 use bevy::image::BevyDefault as _;
 use bevy::prelude::*;
+use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::render_graph::{
     NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
@@ -130,6 +131,8 @@ impl ViewNode for UiGammaNode {
             &layout,
             &BindGroupEntries::sequential((post.source, &pipelines.sampler)),
         );
+        // Its diagnostic span: the journal's `gpu_ui` column counts this decode (2008).
+        let diagnostics = render_context.diagnostic_recorder();
         let mut pass = render_context
             .command_encoder()
             .begin_render_pass(&RenderPassDescriptor {
@@ -144,9 +147,11 @@ impl ViewNode for UiGammaNode {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+        let span = diagnostics.pass_span(&mut pass, "ui_gamma_decode");
         pass.set_pipeline(decode);
         pass.set_bind_group(0, &bind, &[]);
         pass.draw(0..3, 0..1);
+        span.end(&mut pass);
         Ok(())
     }
 }

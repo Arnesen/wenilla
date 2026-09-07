@@ -306,50 +306,6 @@ fn plural_token(token: &str, ordinal: Option<u32>, get: &dyn Fn(&str) -> Option<
     token.to_string()
 }
 
-/// Fill a 1.12 message template the way `SStrPrintf` does: `%s` and `%d` consumed **in order**,
-/// left to right, from the argument list the caller built in the template's own order.
-///
-/// `%%` collapses to one `%`, because that is what `SStrPrintf` does — no 1.12 lockout template
-/// contains one, but leaving it doubled would be the deviation, not collapsing it. Any other
-/// specifier is copied through, and so is one whose argument has run out: a template we
-/// mis-modelled should look wrong, not look plausible.
-fn fill_template(template: &str, map_name: Option<&str>, numbers: &[u32]) -> String {
-    let mut out = String::with_capacity(template.len() + 16);
-    let mut strings = map_name.into_iter();
-    let mut nums = numbers.iter();
-    let mut chars = template.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '%' {
-            out.push(c);
-            continue;
-        }
-        match chars.peek() {
-            Some('s') => {
-                if let Some(s) = strings.next() {
-                    chars.next();
-                    out.push_str(s);
-                } else {
-                    out.push(c);
-                }
-            }
-            Some('d') => {
-                if let Some(n) = nums.next() {
-                    chars.next();
-                    out.push_str(&n.to_string());
-                } else {
-                    out.push(c);
-                }
-            }
-            Some('%') => {
-                chars.next();
-                out.push('%');
-            }
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
 /// Resolve one queued line to its displayed text — `GetText` + the `%s`/`%d` fills, then the
 /// debug wrapper if the save-created flag asked for it.
 ///
@@ -363,7 +319,16 @@ fn lockout_text(
 ) -> Option<String> {
     let token = plural_token(line.token, line.ordinal, get);
     let template = get(&token).filter(|s| !s.is_empty())?;
-    let text = fill_template(&template, map_name, &line.numbers);
+    // Arguments in the template's own order — every lockout template takes its `%s` before its
+    // `%d`s (checked against all fourteen tokens), which is what makes one ordered list exact.
+    let mut args: Vec<benilla_ui::strings::Arg<'_>> = Vec::new();
+    args.extend(map_name.map(benilla_ui::strings::Arg::S));
+    args.extend(
+        line.numbers
+            .iter()
+            .map(|n| benilla_ui::strings::Arg::D(i64::from(*n))),
+    );
+    let text = benilla_ui::strings::fill(&template, &args);
     if text.is_empty() {
         return None;
     }
@@ -1180,9 +1145,13 @@ mod tests {
     /// than fills keeps the leftovers literally rather than eating the next argument.
     #[test]
     fn fill_is_positional_and_never_borrows_the_wrong_argument() {
-        assert_eq!(fill_template("%s: %d/%d", Some("MC"), &[2, 5]), "MC: 2/5");
-        assert_eq!(fill_template("%s: %d/%d", Some("MC"), &[2]), "MC: 2/%d");
-        assert_eq!(fill_template("100%% sure", None, &[]), "100% sure");
-        assert_eq!(fill_template("no fills", None, &[7]), "no fills");
+        use benilla_ui::strings::{fill, Arg};
+        assert_eq!(
+            fill("%s: %d/%d", &[Arg::S("MC"), Arg::D(2), Arg::D(5)]),
+            "MC: 2/5"
+        );
+        assert_eq!(fill("%s: %d/%d", &[Arg::S("MC"), Arg::D(2)]), "MC: 2/%d");
+        assert_eq!(fill("100%% sure", &[]), "100% sure");
+        assert_eq!(fill("no fills", &[Arg::D(7)]), "no fills");
     }
 }

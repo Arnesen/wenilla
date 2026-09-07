@@ -72,6 +72,10 @@ pub fn is_transport(guid: u64) -> bool {
     matches!(high(guid), HIGH_MO_TRANSPORT | HIGH_TRANSPORT)
 }
 
+pub fn is_gameobject(guid: u64) -> bool {
+    high(guid) == HIGH_GAMEOBJECT
+}
+
 /// The embedded template entry, for the guid families that carry one. Two different layouts, both
 /// VERIFIED against vmangos:
 ///

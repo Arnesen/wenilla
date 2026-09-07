@@ -16,7 +16,7 @@
 
 use std::ffi::c_void;
 
-use mlua::{LightUserData, Lua, Table, Value};
+use mlua::{LightUserData, Lua, ObjectLike, Table, Value};
 
 use super::binding_abi::optional_string;
 use super::{Model, REG_FRAME_META, REG_FRAME_METHODS, REG_SCRIPTS, REG_WRAPPERS};
@@ -29,6 +29,7 @@ use crate::widget::{FrameHandle, FrameKind};
 mod events_regions;
 mod frame_state;
 mod layout_methods;
+pub(crate) use layout_methods::eff_scale;
 pub(crate) mod movable;
 pub(crate) mod toplevel;
 pub(crate) use layout_methods::{anchor_bits_eq, anchor_retarget_is_structural};
@@ -153,9 +154,11 @@ fn enum_token(s: &str) -> String {
     s.trim().to_ascii_uppercase()
 }
 
+/// The reference's strata NAME table (`0x8119f8`) has eight rows, `BACKGROUND`..`TOOLTIP`; stratum
+/// 0 (`WORLD`) has no name and no XML or Lua can put a frame there — the WorldFrame's constructor
+/// is its only writer (decision 1984, wow-re `worldframe-widget.md` §4).
 fn strata_from_str(s: &str) -> Option<Strata> {
     Some(match enum_token(s).as_str() {
-        "WORLD" => Strata::World,
         "BACKGROUND" => Strata::Background,
         "LOW" => Strata::Low,
         "MEDIUM" => Strata::Medium,
@@ -203,6 +206,9 @@ pub fn frame_kind_from_tag(s: &str) -> Option<FrameKind> {
 fn frame_kind_from_str(s: &str) -> Option<FrameKind> {
     Some(match enum_token(s).as_str() {
         "FRAME" => FrameKind::Frame,
+        // The world frame's own registered type (decision 1983; `0x495948` in the registration
+        // batch, the one row passing `1` as its third argument).
+        "WORLDFRAME" => FrameKind::WorldFrame,
         // `TaxiRouteFrame` — a registered `CreateFrame` type that is a `CSimpleFrame` and NOTHING
         // else, so it maps to `Frame` rather than earning a kind (decision 1828; wow-re
         // `ui/scratch/taxiroute-widget-type.md`). Factory `0x495ba0` allocates `0x314`, the same
@@ -234,6 +240,8 @@ fn frame_kind_from_str(s: &str) -> Option<FrameKind> {
         "SCROLLFRAME" => FrameKind::ScrollFrame,
         "MODEL" => FrameKind::Model,
         "PLAYERMODEL" => FrameKind::PlayerModel,
+        "DRESSUPMODEL" => FrameKind::DressUpModel,
+        "TABARDMODEL" => FrameKind::TabardModel,
         "MESSAGEFRAME" => FrameKind::MessageFrame,
         "SCROLLINGMESSAGEFRAME" => FrameKind::ScrollingMessageFrame,
         "COLORSELECT" => FrameKind::ColorSelect,
@@ -241,7 +249,6 @@ fn frame_kind_from_str(s: &str) -> Option<FrameKind> {
         "MOVIEFRAME" => FrameKind::MovieFrame,
         "GAMETOOLTIP" => FrameKind::GameTooltip,
         "MINIMAP" => FrameKind::Minimap,
-        "COOLDOWN" => FrameKind::Cooldown,
         _ => return None,
     })
 }
@@ -317,10 +324,45 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // SetupFullscreenScale(frame) — the registered binding `0x48c270` the stock WorldMapFrame.xml,
+    // CinematicFrame.xml and UIOptionsFrame.xml call from OnShow (decision 1980; wow-re
+    // `system/ui/scratch/setup-fullscreen-scale.md`, VERIFIED at the bytes): the frame's scale
+    // becomes `min(0.75 · a, 1.0)` for the CONFIGURED aspect `a` — the `gxResolution` width over
+    // height (the `widescreen` CVar's default of 1 selects it; at 0 the aspect is 4:3 and the
+    // scale 1) — and nothing else is written: no anchor, size or position, and `UIParent`'s
+    // scale never enters. It is the same `CSimpleFrame::SetScale` the Lua method calls. The
+    // window's aspect is the configured one here (the UI-unit rect keeps the pixel ratio); NaN
+    // takes the 1.0 leg as the reference's `fcomp` does. The three raises are the binding's own.
+    lua.globals().set(
+        "SetupFullscreenScale",
+        lua.create_function(|lua, frame: Value| {
+            let Value::Table(frame) = frame else {
+                return Err(mlua::Error::runtime("Usage: SetupFullscreenScale(frame)"));
+            };
+            if decode_id(&frame).is_err() {
+                return Err(mlua::Error::runtime(
+                    "SetupFullscreenScale(): Couldn't find 'this' in frame object",
+                ));
+            }
+            if frame_handle_of(lua, &frame).is_err() {
+                return Err(mlua::Error::runtime(
+                    "SetupFullscreenScale(): Wrong object type, expected frame",
+                ));
+            }
+            let scale = {
+                let model = lua.app_data_ref::<Model>().expect("model");
+                fullscreen_scale(model.screen.width() / model.screen.height())
+            };
+            frame.call_method::<()>("SetScale", scale)
+        })?,
+    )?;
+
     // GetCursorPosition() → x, y — the last cursor position the host fed (`mouse_move`/
-    // `mouse_button`), UI units y-up like every other coordinate read. The real client scales by
-    // the UI scale; ours is the constant 1 (`GetEffectiveScale`), so the ref's `/scale` dance is
-    // an identity. The world map polls this every OnUpdate for hover/click math.
+    // `mouse_button`), UI units y-up like every other coordinate read — the SCREEN's units, which
+    // is what the reference hands Lua too; a caller inside a scaled frame divides by its
+    // `GetEffectiveScale()` (the reference's own `MouseIsOver` does, and the stock world map at
+    // a scale under 1 is the case that made the division load-bearing here — decision 1985). The
+    // world map polls this every OnUpdate for hover/click math.
     lua.globals().set(
         "GetCursorPosition",
         lua.create_function(|lua, ()| {
@@ -399,8 +441,22 @@ fn kind_method_registries(lua: &Lua, this: &Table) -> &'static [&'static str] {
             super::modelframe::REG_PLAYERMODEL_METHODS,
             super::modelframe::REG_MODEL_METHODS,
         ],
+        // Three of its own, then PlayerModel's three, then Model's 23: `CGDressUpModelFrame`'s
+        // lookup probes `0x84f190` and misses into `CGCharacterModelBase`'s `0x506260`, which
+        // misses into `CSimpleModel`'s `0x76f870` (1969).
+        Some(FrameKind::DressUpModel) => &[
+            super::dressup::REG_DRESSUPMODEL_METHODS,
+            super::modelframe::REG_PLAYERMODEL_METHODS,
+            super::modelframe::REG_MODEL_METHODS,
+        ],
+        // Ten of its own (`0x84ee40`), then PlayerModel's three, then Model's 23 — the same
+        // derived → base probe as its sibling (1977).
+        Some(FrameKind::TabardModel) => &[
+            super::tabard::REG_TABARDMODEL_METHODS,
+            super::modelframe::REG_PLAYERMODEL_METHODS,
+            super::modelframe::REG_MODEL_METHODS,
+        ],
         Some(FrameKind::Minimap) => &[super::minimap::REG_MINIMAP_METHODS],
-        Some(FrameKind::Cooldown) => &[super::cooldown::REG_COOLDOWN_METHODS],
         Some(FrameKind::GameTooltip) => &[super::tooltip::REG_TOOLTIP_METHODS],
         _ => &[],
     }
@@ -422,12 +478,26 @@ fn kind_method_registries(lua: &Lua, this: &Table) -> &'static [&'static str] {
 /// `virtual="true"`, or of a shape that does not fit the kind asked for — is still a warning plus a
 /// working frame, because the registry lookup itself succeeded and that is the only thing the miss
 /// branch tests.
-fn create_frame(
+pub(super) fn create_frame(
     lua: &Lua,
     (kind, name, parent, inherits): (String, Option<Value>, Option<Value>, Option<Value>),
 ) -> mlua::Result<Table> {
     let frame_kind = frame_kind_from_str(&kind)
         .ok_or_else(|| mlua::Error::runtime(format!("CreateFrame: unknown frame type '{kind}'")))?;
+    // The WorldFrame's registry record is a ONE-SHOT: the reference unlinks and releases it the
+    // moment the first `<WorldFrame>` is instantiated (`0x6ee439`), so a second one — from any
+    // XML, or `CreateFrame("WorldFrame")` — takes the lookup's miss leg, `Unknown frame type`
+    // (decision 1984). The loader reaches this through the same global, so it covers both.
+    if frame_kind == FrameKind::WorldFrame
+        && lua
+            .app_data_ref::<Model>()
+            .expect("model app_data")
+            .world_frame_made
+    {
+        return Err(mlua::Error::runtime(format!(
+            "CreateFrame: unknown frame type '{kind}'"
+        )));
+    }
     // **`name` and `inherits` are `lua_tostring` positions, and a NUMBER is a string to it.**
     // `0x7060b0` reads both through `0x6f3690` with no type guard at all, so `CreateFrame("Frame",
     // 5)` names the frame `"5"` — a `Value::String`-only match drops it (wow-re
@@ -519,6 +589,9 @@ fn create_frame(
     let id = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
         let h = model.arena.create(frame_kind, name, parent_handle);
+        if frame_kind == FrameKind::WorldFrame {
+            model.world_frame_made = true;
+        }
         // The client's CreateFrame inheritance (the ctor doc's "loader/CreateFrame concern" —
         // widget/mod.rs `create`): a child enters its PARENT's stratum at the parent's level + 1.
         // The ctor's bare MEDIUM/0 left a DIALOG-strata popup drawing its own translucent
@@ -566,4 +639,62 @@ fn install_frame_methods(lua: &Lua) -> mlua::Result<()> {
     toplevel::install(lua, &m)?;
     lua.set_named_registry_value(REG_FRAME_METHODS, m)?;
     Ok(())
+}
+
+/// `0x48c270`'s law: `g = 0.75 · aspect`, and the scale is `g` below 1.0, else 1.0 — NaN lands on
+/// the 1.0 leg (the `fcomp` compare fails every ordered test).
+pub(crate) fn fullscreen_scale(aspect: f32) -> f32 {
+    let g = 0.75 * aspect;
+    if g < 1.0 {
+        g
+    } else {
+        1.0
+    }
+}
+
+#[cfg(test)]
+mod fullscreen_scale_tests {
+    use super::fullscreen_scale;
+    use crate::script::UiScript;
+
+    #[test]
+    fn the_scale_is_three_quarters_of_the_aspect_capped_at_one() {
+        assert_eq!(fullscreen_scale(4.0 / 3.0), 1.0);
+        assert_eq!(fullscreen_scale(16.0 / 9.0), 1.0);
+        assert!((fullscreen_scale(5.0 / 4.0) - 0.9375).abs() < 1e-6);
+        assert_eq!(fullscreen_scale(f32::NAN), 1.0);
+    }
+
+    #[test]
+    fn the_verb_scales_the_frame_and_raises_its_three_strings() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(1280.0, 1024.0);
+        s.run(r#"f = CreateFrame("Frame", "FS") SetupFullscreenScale(f)"#)
+            .unwrap();
+        assert!((s.eval::<f64>("return f:GetScale()").unwrap() - 0.9375).abs() < 1e-6);
+        s.set_screen_size(1600.0, 900.0);
+        s.run("SetupFullscreenScale(f)").unwrap();
+        assert_eq!(s.eval::<f64>("return f:GetScale()").unwrap(), 1.0);
+        for (call, needle) in [
+            (
+                "SetupFullscreenScale()",
+                "Usage: SetupFullscreenScale(frame)",
+            ),
+            (
+                "SetupFullscreenScale(7)",
+                "Usage: SetupFullscreenScale(frame)",
+            ),
+            (
+                "SetupFullscreenScale({})",
+                "Couldn't find 'this' in frame object",
+            ),
+            (
+                "SetupFullscreenScale(f:CreateTexture())",
+                "Wrong object type, expected frame",
+            ),
+        ] {
+            let err = s.run(call).unwrap_err().to_string();
+            assert!(err.contains(needle), "{call}: {err}");
+        }
+    }
 }

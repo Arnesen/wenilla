@@ -166,3 +166,67 @@ fn item_set_block_counts_and_colors() {
     assert_eq!(s.take_item_set_asks(), vec![1], "the set ask recorded");
     assert!(s.take_errors().is_empty());
 }
+
+/// `GameTooltip:SetQuestItem(type, index)` and `SetQuestLogItem(type, index)` — the quest-giver
+/// panels' and the quest log's reward hovers (stock QuestFrameTemplates.xml:148,
+/// QuestLogFrame.xml:113): the row's item by id through the shared renderer; a row that is not
+/// there leaves the tooltip empty (1944).
+#[test]
+fn quest_item_hovers_render_the_rows_item_by_id() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_item_template(
+        2024,
+        ItemTemplateView {
+            name: "Militia Hammer".into(),
+            quality: 1,
+            ..Default::default()
+        },
+    );
+    let row = || QuestItemView {
+        item_id: 2024,
+        name: Some("Militia Hammer".into()),
+        quality: 1,
+        ..Default::default()
+    };
+    s.set_quest(Some(QuestState {
+        panel: QuestPanel::Detail,
+        choices: vec![row()],
+        ..QuestState::default()
+    }));
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "Q1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(a, "ANCHOR_RIGHT"); tt:SetQuestItem("choice", 1)
+        "#,
+    )
+    .unwrap();
+    assert_eq!(lines_of(&mut s)[0].0, "Militia Hammer");
+
+    s.run(r#"TT:SetOwner(Q1, "ANCHOR_RIGHT"); TT:SetQuestItem("choice", 2)"#)
+        .unwrap();
+    assert_eq!(
+        s.eval::<i64>("return TT:NumLines()").unwrap(),
+        0,
+        "an out-of-range row shows nothing"
+    );
+    s.run(r#"TT:SetOwner(Q1, "ANCHOR_RIGHT"); TT:SetQuestItem("reward", 1)"#)
+        .unwrap();
+    assert_eq!(s.eval::<i64>("return TT:NumLines()").unwrap(), 0);
+
+    s.set_quest_log(QuestLogState {
+        detail: Some(QuestLogDetail {
+            rewards: vec![row()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    s.run(r#"TT:SetOwner(Q1, "ANCHOR_RIGHT"); TT:SetQuestLogItem("reward", 1)"#)
+        .unwrap();
+    assert_eq!(lines_of(&mut s)[0].0, "Militia Hammer");
+    s.run(r#"TT:SetOwner(Q1, "ANCHOR_RIGHT"); TT:SetQuestLogItem("choice", 1)"#)
+        .unwrap();
+    assert_eq!(s.eval::<i64>("return TT:NumLines()").unwrap(), 0);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

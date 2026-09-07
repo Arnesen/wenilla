@@ -27,7 +27,7 @@
 //! stem; [`blips`] — the phase-3 blip layer (AreaPOI landmark arrows, quest-giver dots, the
 //! hover tooltip).
 
-mod blips;
+pub(crate) mod blips;
 /// The party blip's position law, shared with the world map (report B320): one function decides
 /// where a member is, so the two surfaces can never disagree about it.
 pub(crate) use blips::party_member_pos;
@@ -274,10 +274,6 @@ struct MinimapAssets {
     /// (`Rotating-MinimapArrow.mdx`) the reference re-animates per blip source. See
     /// [`blips::RimArrow`] for the sequence→layer table and why there are four of them.
     rim_arrows: blips::RimArrowArt,
-    /// The ping marker's three drawn layers — the flat re-expression of `MinimapPing.mdx`'s
-    /// coincident additive quads, at the model's own byte-measured sizes and animation
-    /// ([`ping::PingArt`], decisions 1596/1599).
-    ping: ping::PingArt,
     /// The unit-blip atlas (`Interface\Minimap\ObjectIcons`, five 32-px dot cells) — the
     /// quest-giver dots.
     object_icons: Option<Handle<Image>>,
@@ -315,7 +311,7 @@ fn setup_minimap(
         Ok(translate) => {
             info!("minimap: md5translate.trs — {} tiles", translate.len());
             let mask = assets.mask_texture("Textures\\MinimapMask", &mut images);
-            let arrow = assets.sprite_texture("Interface\\Minimap\\MinimapArrow", &mut images);
+            let arrow = assets.sprite_texture(blips::PLAYER_ARROW_TEXTURE, &mut images);
             let poi = assets.sprite_texture("Interface\\Minimap\\POIIcons", &mut images);
             let mut rim_arrows = blips::RimArrowArt::default();
             for kind in blips::RimArrow::ALL {
@@ -323,29 +319,6 @@ fn setup_minimap(
             }
             let object_icons =
                 assets.sprite_texture("Interface\\Minimap\\ObjectIcons", &mut images);
-            // `ping6` is deliberately absent: the model carries it on two quads whose weight
-            // track is a single key of 0, so the client culls those batches before it reads their
-            // blend mode. Loading it would be loading art that never draws.
-            let ping = ping::PingArt {
-                ping5: assets.sprite_texture("Interface\\Minimap\\Ping\\ping5", &mut images),
-                ping2: assets.sprite_texture("Interface\\Minimap\\Ping\\ping2", &mut images),
-                ping4: assets.sprite_texture("Interface\\Minimap\\Ping\\ping4", &mut images),
-            };
-            // Per layer, not just "none of them": the three do different jobs, and a silently
-            // absent `ping4` would cost the ring — the one thing the eye actually reads — while
-            // the marker still looked plausible (1203's rule, applied to art).
-            for (name, present) in [
-                ("ping5", ping.ping5.is_some()),
-                ("ping2", ping.ping2.is_some()),
-                ("ping4", ping.ping4.is_some()),
-            ] {
-                if !present {
-                    warn!(
-                        "minimap: Interface\\Minimap\\Ping\\{name} missing — the ping marker \
-                           will draw without that layer"
-                    );
-                }
-            }
             if mask.is_none() {
                 warn!("minimap: MinimapMask.blp missing — the map will draw square");
             }
@@ -366,7 +339,6 @@ fn setup_minimap(
                 poi,
                 rim_arrows,
                 object_icons,
-                ping,
                 forms,
             });
         }
@@ -751,10 +723,12 @@ fn emit_minimap(
     // draw under the player arrow; the quest dots draw LAST — above it (the client's own draw
     // order). Hover lands in [`blips::MinimapBlipHover`] for the tooltip drive.
     // Our own descriptor's tracking state (PRIVATE fields — only ever on the self entity).
-    let tracking = self_store
-        .iter()
-        .next()
-        .map(|s| blips::SelfTracking {
+    let me = self_store.iter().next();
+    // Our own guid — the classifier compares a candidate's charm/summon owner against it, so our
+    // own pet and minions never take a dot (§W15 Q2d).
+    let self_guid = me.map(|(_, g)| g.0);
+    let tracking = me
+        .map(|(s, _)| blips::SelfTracking {
             creatures: s.0.player_track_creatures(),
             resources: s.0.player_track_resources(),
             stealthed: s.0.player_track_stealthed(),
@@ -872,6 +846,7 @@ fn emit_minimap(
                 tracking,
                 &tracked,
                 quest.statuses(),
+                self_guid,
                 &names,
                 &go_templates,
                 locks.as_deref().map(|l| &l.0),
@@ -885,8 +860,8 @@ fn emit_minimap(
             blips::emit_quest_dots(
                 ctx,
                 quest.statuses(),
-                &guids,
-                &unit_pos,
+                &tracked,
+                self_guid,
                 icons,
                 player_indoors,
                 // A dot NPC's own containment — the same faces-only down-ray the entity light
@@ -929,14 +904,12 @@ fn emit_minimap(
         }
     }
 
-    // The ping draws LAST — above the dots and the player arrow. In the reference `MiniMapPing` is
-    // a Lua Frame child of the Minimap, so it composites over everything the engine drew into the
-    // widget's hole; ours is engine-drawn but keeps that place in the order.
-    //
-    // This is also where a `Minimap:PingLocation` click is drained: the geometry it must resolve
-    // against is the geometry standing right here, this frame (decision 1596).
+    // A `Minimap:PingLocation` click is seated here, against the geometry standing right here,
+    // this frame (decision 1596). The marker itself is the stock `MiniMapPing` `<Model>`, a Lua
+    // child of the Minimap that composites over everything the engine drew into the widget's
+    // hole — rendered by `crate::ui_models` since decision 2008.
     if let Some(ctx) = &blip_ctx {
-        ping::emit_ping(ctx, &mut ping, click, map.0, &assets.ping, &mut quads);
+        ping::seat_click(ctx, &mut ping, click);
     }
 }
 
@@ -1098,6 +1071,11 @@ impl Plugin for MinimapPlugin {
                     probe_minimap_widget
                         .in_set(UiQuadAppend)
                         .before(emit_minimap),
+                    // Deliberately NOT on the lighting resolve's read side, though it reads
+                    // `WowLighting` (decision 2032): joining `LightingConsumeSet` would put a
+                    // 178th engine item through the world API wall, and what it buys is one
+                    // frame of the right day-night tint on a 140 px map — invisible even on a
+                    // submersion crossing, which is the one moment that value jumps.
                     emit_minimap.in_set(UiQuadAppend),
                     // After the emit that fills it: the composite camera draws what THIS frame's
                     // interior branch asked for, so the target the blit quad samples is never a

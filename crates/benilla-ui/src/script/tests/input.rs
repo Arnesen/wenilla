@@ -621,12 +621,12 @@ fn the_unfired_script_kinds_still_raise_rather_than_silently_accepting() {
         "OnCursorChanged",
         // 2.0's secure-frame system — no such slot exists in any 1.12 resolver.
         "OnAttributeChanged",
-        // Real 1.12 slots we do not fire, and zero corpus call sites.
+        // Real 1.12 slots we do not fire, and zero corpus call sites. (`OnUpdateModel` and
+        // `OnAnimFinished` left this list with decision 2007: the tick's model pass fires
+        // them — `script::tests::model_clock`.)
         "OnHorizontalScroll",
         "OnHyperlinkEnter",
         "OnMessageScrollChanged",
-        "OnUpdateModel",
-        "OnAnimFinished",
         "OnInputLanguageChanged",
     ] {
         let err = s

@@ -883,3 +883,81 @@ fn the_dismiss_word_is_the_carved_literal() {
     assert_eq!(entry.action(), PET_COMMAND_DISMISS);
     assert!(!entry.is_spell(), "dismiss is a command, never a cast");
 }
+
+/// The bar's two events are two edges (1953): a change of the slots fires `PET_BAR_UPDATE`; a
+/// change of the cooldown triples alone fires `PET_BAR_UPDATE_COOLDOWN` — the reference's
+/// cooldown-subsystem fire for the pet bank (wow-re `pet-action-bar-api.md` §9) — and the
+/// pushed state carries the new triple either way.
+#[test]
+fn a_cooldown_alone_fires_the_cooldown_event_and_not_the_bar_update() {
+    use bevy::prelude::*;
+    use std::collections::HashMap;
+    const CLAW: u32 = 3010;
+    let claw = || benilla_formats::SpellDisplay {
+        recovery_ms: 8_000,
+        ..spell("Claw", None)
+    };
+    let mut bar = PetBar {
+        spells: state(PET_COMMAND_FOLLOW, PET_REACT_DEFENSIVE),
+        ..Default::default()
+    };
+    bar.spells.bar[3] = packed(CLAW, PET_ACT_ENABLED);
+    let mut app = App::new();
+    app.init_resource::<crate::ui_script::UiClock>()
+        .init_resource::<crate::net::GuidIndex>()
+        .insert_resource(crate::ui_action::Spells {
+            catalog: benilla_formats::SpellCatalog::from_displays(HashMap::from([(CLAW, claw())])),
+            ..crate::ui_action::Spells::empty_for_tests()
+        })
+        .insert_resource(bar)
+        .add_systems(Update, super::bar::feed_pet_bar);
+    let script = benilla_ui::script::UiScript::new().unwrap();
+    script
+        .run(
+            r#"
+            SEEN = {}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("PET_BAR_UPDATE")
+            f:RegisterEvent("PET_BAR_UPDATE_COOLDOWN")
+            f:SetScript("OnEvent", function() table.insert(SEEN, event) end)
+        "#,
+        )
+        .unwrap();
+    app.insert_non_send_resource(script);
+    let seen = |app: &mut App| -> Vec<String> {
+        app.update();
+        let mut s = app
+            .world_mut()
+            .non_send_resource_mut::<benilla_ui::script::UiScript>();
+        s.resolve();
+        let out = s.eval::<Vec<String>>("return SEEN").unwrap();
+        s.run("SEEN = {}").unwrap();
+        out
+    };
+    assert_eq!(
+        seen(&mut app),
+        vec!["PET_BAR_UPDATE".to_string()],
+        "the bar arrives"
+    );
+    assert_eq!(seen(&mut app), Vec::<String>::new(), "nothing moved");
+
+    app.world_mut()
+        .resource_mut::<PetBar>()
+        .cooldowns
+        .start_spell(CLAW, &claw(), 0, std::time::Instant::now());
+    assert_eq!(
+        seen(&mut app),
+        vec!["PET_BAR_UPDATE_COOLDOWN".to_string()],
+        "a cooldown alone is the bank's edge, not the bar's"
+    );
+    let (start, duration, enable): (f64, f64, i32) = app
+        .world_mut()
+        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .eval("return GetPetActionCooldown(4)")
+        .unwrap();
+    assert!(
+        duration > 7.9 && duration < 8.1,
+        "the triple was pushed: {start} {duration}"
+    );
+    assert_eq!(enable, 1);
+}

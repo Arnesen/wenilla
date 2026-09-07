@@ -371,7 +371,7 @@ pub(super) fn sync_dressup_booth(
     //
     // And the other half of `SetRotation`: the turn-in-place shuffle
     // ([`super::booth::drive_booth_turn`], 1559). The dressing room wires the same held-arrow
-    // `OnUpdate` the character window does (`BenillaDressUpModel_OnUpdate`), so it steps its feet
+    // `OnUpdate` the character window does (the stock `Model_OnUpdate`, 1969), so it steps its feet
     // the same way. Keyed on the yaw alone — this block also runs for a re-bake, which is a
     // `RefreshUnit` in the reference and does not turn the model.
     if booth.turn.faced != Some(preview.yaw) {

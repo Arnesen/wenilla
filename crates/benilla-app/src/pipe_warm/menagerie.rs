@@ -300,6 +300,9 @@ pub(super) fn spawn_menagerie(
                 light,
                 None, // the shared lane — see the note above
             );
+            // The warmer reads what it builds (`model_render::lazy` parks a built material
+            // until something visible binds it; the warmer's entities bind next frame).
+            benilla_world::model_render::lazy::realize_all(materials);
             if let Some(m) = materials.get(&plain) {
                 let mut m = m.clone();
                 m.extension.clutter_fade = Vec4::new(52.5, 70.0, 0.0, 1.0);
@@ -349,6 +352,7 @@ pub(super) fn spawn_menagerie(
                         light,
                         None, // the shared lane — see the note above
                     );
+                    benilla_world::model_render::lazy::realize_all(materials);
                     if let Some(m) = materials.get(&h) {
                         let mut m = m.clone();
                         m.base.depth_bias = bucket;
@@ -595,6 +599,7 @@ fn far_twins_of(
     materials: &mut Assets<WowModelMaterial>,
     src: &[Handle<WowModelMaterial>],
 ) -> Vec<Handle<WowModelMaterial>> {
+    benilla_world::model_render::lazy::realize_all(materials);
     let twins: Vec<WowModelMaterial> = src
         .iter()
         .filter_map(|h| materials.get(h))
@@ -760,6 +765,9 @@ fn warm_quad(colors: bool, skinned: bool) -> RenderSubmesh {
         },
         interior: false,
         emissive: false,
+        icon_slot: false,
+        uv_rot_seq: None,
+        uv_scale_seq: None,
         sidn: None,
         window: false,
         additive: false,

@@ -95,10 +95,21 @@ fn every_error_key_in_the_source_is_a_catalog_row() {
 #[test]
 fn every_error_key_in_the_source_resolves_to_real_text() {
     /// Keys whose row the shipped `GlobalStrings.lua` has **no string for**, so the reference
-    /// itself shows nothing when it raises them. Both are documented where they are raised —
-    /// `ui_items::equip_error` (errorId 362) and `ui_action::cast_fail` (the pet-happiness arm).
-    /// A third entry here is a defect until someone proves otherwise.
-    const SILENT_IN_5875: &[&str] = &["ERR_CANT_BE_DISENCHANTED", "ERR_NOT_HAPPY_ENOUGH"];
+    /// itself shows nothing when it raises them. Each is documented where it is raised —
+    /// `ui_items::equip_error` (errorId 362), `ui_action::cast_fail` (the pet-happiness arm), and
+    /// `net::apply::pet` (errorId 337, both pet handlers' NOPATH arm). A fourth entry here is a
+    /// defect until someone proves otherwise.
+    ///
+    /// `ERR_PET_SPELL_NOPATH` is the one worth reading twice, because it is a trap: 5875 *does*
+    /// ship a `PET_SPELL_NOPATH` ("No path available for your pet"), one letter-group away and
+    /// perfectly plausible on screen — but it is not row 337's key and no code path in the client
+    /// raises it. benilla named it for months and showed the wrong string for the wrong byte
+    /// (decision 2033). Silence here is the reference's behaviour, not a gap.
+    const SILENT_IN_5875: &[&str] = &[
+        "ERR_CANT_BE_DISENCHANTED",
+        "ERR_NOT_HAPPY_ENOUGH",
+        "ERR_PET_SPELL_NOPATH",
+    ];
 
     let data = match benilla_formats::wow_data() {
         Some(d) => d,
@@ -267,4 +278,43 @@ fn every_sounding_catalog_row_also_has_text_to_show() {
         );
     }
     assert_eq!(sounding, 86, "56 voice lines + 30 named cues");
+}
+
+/// **The non-`ERR_` half of the same tripwire, for the one family that has one** (decision 2039):
+/// every string `pet_tame_failure_key` can return must be a real global of the 1.12 client.
+///
+/// The walk above collects `"ERR_…"` literals, which is every catalog row — and is therefore
+/// blind to a raise site that names something else. `SMSG_PET_TAME_FAILURE` is precisely that
+/// shape: the message it raises is `ERR_TAME_FAILED`, but the *text* comes from a second lookup
+/// of a `PETTAME_*` key, and an invented one there would fail exactly the way this file's header
+/// describes — silently, with no line shown and nobody to file it.
+///
+/// Checked against `reference/1.12-globals.tsv`, the running client's own `_G` (decision 1189),
+/// rather than against the install: it is in-tree, so this holds on a machine with no client.
+#[test]
+fn every_pettame_key_is_a_real_1_12_global() {
+    let tsv = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../reference/1.12-globals.tsv"
+    );
+    let text = std::fs::read_to_string(tsv).expect("the reference surface");
+    let globals: BTreeSet<&str> = text
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| l.split('\t').next())
+        .collect();
+
+    // The whole reachable image of the table: 1..=11 index it, everything else is the default
+    // arm. `u8` is small enough to just walk.
+    let reachable: BTreeSet<&str> = (0..=u8::MAX)
+        .map(benilla_protocol::messages::pet_tame_failure_key)
+        .collect();
+    assert_eq!(reachable.len(), 12, "eleven arms plus the default");
+    for key in &reachable {
+        assert!(globals.contains(key), "{key} is not a 1.12 global");
+    }
+    // The message the fill goes into, and the two bodiless arms beside it.
+    for key in ["ERR_TAME_FAILED", "ERR_INVALID_PETNAME", "ERR_PET_BROKEN"] {
+        assert!(globals.contains(key), "{key} is not a 1.12 global");
+    }
 }

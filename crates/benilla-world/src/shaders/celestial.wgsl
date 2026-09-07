@@ -38,11 +38,13 @@
 // further back still (`[0.995, 1.0]`) — so the z-buffer occludes every sky element per-pixel behind
 // everything the world drew (a ridge, a wall, one leaf), while the sky itself (which writes no depth)
 // never blocks it. Same mechanism here: the quads' geometry stays on their shells (12 units for the
-// glare — its pinned screen footprint — and `far·0.85` for the discs), but EVERY fragment FORCES its
-// depth to 0.0 — reverse-Z "infinitely far" — under Bevy's GreaterEqual test: it passes only where the
-// depth buffer still holds the clear value, i.e. where no opaque geometry drew. Discs used to pass
-// their own rasterized depth through, on the assumption that their shell sits beyond all world
-// geometry; the WDL horizon ring reaches past it, so a distant hill lost to a disc it should occlude.
+// glare — its pinned screen footprint — and `far·0.85` for the discs), but EVERY vertex pins its
+// clip z to 0.0 — reverse-Z "infinitely far" (`sky_vertex.wgsl`, the stage every sky shader shares) —
+// under Bevy's GreaterEqual test: a fragment passes only where the depth buffer still holds the
+// clear value, i.e. where no opaque geometry drew. Discs used to pass their own rasterized depth
+// through, on the assumption that their shell sits beyond all world geometry; the WDL horizon ring
+// reaches past it, so a distant hill lost to a disc it should occlude. Until 2016 the pin was a
+// `frag_depth` write here, which cost the pipeline its early-Z; the vertex pin is the same number.
 
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
@@ -50,15 +52,6 @@
     forward_io::VertexOutput,
     mesh_view_bindings::view,
 }
-
-// `forward_io::FragmentOutput` + the forced-depth builtin: every sky fragment writes the far depth.
-struct CelestialOutput {
-    @location(0) color: vec4<f32>,
-    @builtin(frag_depth) depth: f32,
-}
-
-/// Reverse-Z "infinitely far" — the sky pass's forced depth (`sky_order.rs`).
-const SKY_FAR_DEPTH: f32 = 0.0;
 
 // Per-material control (set in `sun/materials.rs` `CelestialExt`). `.x` = the horizon alpha-ramp scale `k`
 // (`k = 30.0`: the binary's 0.4-unit band at its radius-12 disc, in sin-elevation terms — 0x6d1960).
@@ -88,7 +81,7 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
 }
 
 @fragment
-fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> CelestialOutput {
+fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> @location(0) vec4<f32> {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     let base = alpha_discard(pbr_input.material, pbr_input.material.base_color);
 
@@ -124,17 +117,13 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Celestia
     // premultiply by `a` in gamma space, emit raw onto the gamma buffer (0161). `celestial.y` =
     // brightness (1.0 everywhere; multiplies the RGB only, so the blend's dst term is unaffected).
     let gamma = linear_to_srgb(base.rgb);
-    var out: CelestialOutput;
+    // (The far depth for BOTH is the vertex stage's — see the header: a sky element survives only
+    // on pixels no opaque geometry claimed, the reference's back-slice depth test.)
     if celestial.z >= 0.5 {
         // ADDITIVE GLARE: (rgb·a, alpha 0) under (ONE, 1−src_alpha) ⇒ `dst + gamma·a` — the
         // reference's SRC_ALPHA, ONE byte addition, `a` = the lens-flare intensity envelope.
-        out.color = vec4<f32>(gamma * a * celestial.y, 0.0);
-    } else {
-        // DISC: premultiplied gamma blend (AlphaMode::Premultiplied).
-        out.color = vec4<f32>(gamma * a * celestial.y, a);
+        return vec4<f32>(gamma * a * celestial.y, 0.0);
     }
-    // Forced far depth for BOTH (see the header): a sky element survives only on pixels no opaque
-    // geometry claimed — the reference's back-slice depth test.
-    out.depth = SKY_FAR_DEPTH;
-    return out;
+    // DISC: premultiplied gamma blend (AlphaMode::Premultiplied).
+    return vec4<f32>(gamma * a * celestial.y, a);
 }

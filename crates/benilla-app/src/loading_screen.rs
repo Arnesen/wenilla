@@ -11,9 +11,16 @@
 //! The two cases out of current scope (taxi/boat/zeppelin's moving flight-path icon; a richer
 //! progress model) slot in as an extra overlay layer / a different progress source without restructure.
 //!
-//! **The lifecycle is event-raised, readiness-cleared (decision 0737).** The reference *blocks* on
-//! its world load, so its screen covers from the entry edge until the world is loaded by
-//! construction; an async-streaming client has to build that observable explicitly. The screen
+//! **The lifecycle is event-raised, readiness-cleared (decision 0737)** — and the reference's is
+//! too, which 0737 assumed it was not. This header claimed for months that the reference *blocks*
+//! on its world load and so covers "by construction"; the wow-re round behind decision 1990 says
+//! half of that is wrong. The reference runs ordinary frames with **one** blocking stretch inside
+//! them (`SMSG_NEW_WORLD`'s `0x401b00` defers `0x401bc0` onto the deadline heap, which drains at
+//! `0x420d0c` and runs to completion in that one iteration, `Sleep(1)` residency spins and all) —
+//! but the screen is raised *frames earlier*, at `TRANSFER_PENDING`, and dismissed *frames later*
+//! by a per-frame readiness poll. Which is this file's shape. What an async-streaming client has to
+//! build explicitly is not the lifecycle after all: it is the **input suppression** the blocking
+//! stretch does not provide either (see [`input`], decision 1990). The screen
 //! rises at the explicit edges — the character pick's `Connected` edge (before the glue tears
 //! down), `SMSG_TRANSFER_PENDING` (the portal walk-in), the worldport snap — all observed *here*,
 //! from the messages/resources the net bridge already publishes; a residency backstop catches any
@@ -36,6 +43,12 @@ use benilla_assets::{AssetSet, WorldAssets};
 use benilla_world::schedule::WorldStage;
 use benilla_world::terrain_stream::WorldLoadProgress;
 use benilla_world::world_map::CurrentMap;
+
+/// **The cover takes the input plane** — the loading screen's input half, in its own file because
+/// it is a different mechanism (a source cut in `PreUpdate`) from the state machine below, and one
+/// file should not have to explain both.
+mod input;
+pub(crate) use input::CoverInput;
 
 // Bar layout — VERIFIED THREE ways (build 5875): the `WoW.exe` `LoadingScreen.cpp` bar descriptor
 // table (@0x7ffd34, `FUN_00407150`) gives entry = {cx, cy, halfW, halfH} with rect = [cx ± halfW·0.5]
@@ -211,7 +224,8 @@ impl LoadingScreen {
         self.active
     }
 
-    /// An active cover, for tests that drive covered-frame accounting (the entry-load deferral).
+    /// An active cover, for tests that drive covered-frame accounting (the entry-load deferral)
+    /// and the cursor's covered arm.
     #[cfg(test)]
     pub(crate) fn test_covering() -> Self {
         Self {
@@ -259,6 +273,10 @@ impl Plugin for LoadingScreenPlugin {
             // we cover it here. Visibility set now propagates in PostUpdate and renders this frame, so
             // the swap never flashes.
             .add_systems(Update, drive_loading_screen.in_set(WorldStage::Present));
+        // …and the other half of what a cover *is*: while it is up, the client takes no input
+        // (`input`). Wired here rather than as a plugin of its own so the cover and its input rule
+        // can never be registered apart.
+        input::build(app);
     }
 }
 

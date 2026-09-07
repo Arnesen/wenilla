@@ -58,7 +58,7 @@ pub use window::StreamWindow;
 // The WMO prop-light machinery lives spawn-side (0830's named carve, executed in 0832); the two
 // outside consumers — `crate::interior` and `crate::entities`' `wmo_props` — keep their
 // `terrain_stream::X` paths, same as the `queries` items below.
-pub use spawn::prop_light::{fold_interior_probe, interior_light_up, PropLobeLight};
+pub use spawn::prop_light::{fold_interior_probe, hex_word, interior_light_up, PropLobeLight};
 // The shared placed-model assembler + the off-thread collider build — also the WMO-gameobject
 // doodad-prop path's spawner (`crate::entities`' `wmo_props`: the ship's sails ride the streamed
 // gameobject entity, and its cargo hulls ride the boat's kinematic body).
@@ -68,7 +68,7 @@ pub use spawn::{m2_anim_bound, m2_fade, point_light, spawn_model_entities, Spawn
 use queries::update_current_area;
 pub use queries::{
     area_id_under, doodad_ground_shade, ground_effect_under, terrain_height_under,
-    AreaAuthoritySet, CurrentArea, ShadeResolve,
+    terrain_height_under_cached, AreaAuthoritySet, CurrentArea, ShadeResolve,
 };
 
 /// Wall-clock spent per frame spawning streamed-in geometry (terrain tiles in [`stream_terrain`],
@@ -111,6 +111,15 @@ pub struct TerrainStreamer {
     /// neighbourhood's every placement every frame for the rest of the run — the settled-work scan
     /// the latch exists to stop.
     was_paced: bool,
+    /// The last frame found nothing to request, drop or spawn and every resident tile stood
+    /// furnished — so a frame with the same window, the same pacing and a complete load has
+    /// nothing to do and skips the window walk (three window-sized allocations and a scan of
+    /// every resident tile, on every still frame — decision 1979's floor).
+    settled: bool,
+    /// The focus tile the off-grid tripwire below last reported, so a focus parked outside the
+    /// map's WDT grid says so **once** rather than every frame. `None` while the focus is on the
+    /// grid (so re-entering the state re-reports).
+    off_grid_reported: Option<(i32, i32)>,
 }
 
 /// The placement id the map-global WMO is registered under. A WMO-only map authors **no** ADT tiles
@@ -169,7 +178,7 @@ struct TileState {
 /// own cross-tile dedup (a building straddling N tiles is spawned once and refcounted). The model assets
 /// are loaded by `Handle`, so the `AssetServer` dedups the *decode*; this dedups the *instance*.
 #[derive(Resource, Default)]
-struct Placements {
+pub(crate) struct Placements {
     /// By MDDF/MODF uniqueId: the placement + how many loaded tiles reference it.
     by_id: HashMap<u32, Placement>,
     /// Material dedup, so submeshes sharing a (texture, blend, sidedness, kind, fade-variant) share one
@@ -181,6 +190,18 @@ struct Placements {
     /// steady state). Kept by the register/handoff/release sites here; the spawner itself settles
     /// it as models land (and adds a WMO's props the moment they resolve).
     pending_spawns: usize,
+}
+
+impl Placements {
+    /// Every entity some registered placement owns — the set a despawn walks. The duplicate
+    /// census (`world_census`) subtracts it from the live `WorldObject` population: a placed
+    /// part alive outside this set outlived its registration, which is what a doubled prop is.
+    pub(crate) fn owned(&self) -> std::collections::HashSet<Entity> {
+        self.by_id
+            .values()
+            .flat_map(|p| p.entities.iter().copied())
+            .collect()
+    }
 }
 
 /// A shared placement: its resident model handle, world transform, and spawned submesh entities. Doodad
@@ -732,6 +753,29 @@ fn stream_terrain(
     let window = StreamWindow::at(view.farclip, center[0], center[1]);
     let tiling = cfg.as_ref().map(|c| c.tex_tiles).unwrap_or(8.0);
     let (cx, cy) = window.focus_tile();
+    let same_window = state.focus == (cx, cy) && state.reach == Some((window.inner, window.outer));
+    // Never while a load is in flight: `paced` is false from a snap until the body settles, and
+    // the tail this skip bypasses is where the load is RELEASED — the retained pass's undrawn
+    // count that `presentable()` reads, the burst-over `flush_now`, and the settle hold. A
+    // skip that engaged the frame `complete` flipped, with the pass still baking the new
+    // cells, froze that count above zero and held the loading screen up for good — the
+    // .tele hang of 2026-09-04, the day after this skip landed (1982). So the skip needs a
+    // paced, presentable, complete world, and even then keeps the undrawn count fresh so a
+    // later rebake un-skips it.
+    if same_window
+        && state.settled
+        && focus.paced
+        && state.was_paced == focus.paced
+        && (wdt_index.is_some() || state.wdt_ungated)
+        && load_progress
+            .as_ref()
+            .is_none_or(|p| p.complete && p.presentable())
+    {
+        if let (Some(p), Some(gx)) = (load_progress.as_mut(), staticgx.as_deref()) {
+            p.gx_pending = crate::static_gx::StaticGx::undrawn_regions(gx);
+        }
+        return;
+    }
     state.focus = (cx, cy);
     // One line per change of reach — the slider moved, or the first frame — so a run log says
     // what the residency window was when a tile count or a frame cost was read off it.
@@ -754,6 +798,36 @@ fn stream_terrain(
     let mut desired = window.wanted_tiles();
     if let Some(w) = wdt_index {
         desired.retain(|&(tx, ty)| w.has_tile(tx as u32, ty as u32));
+    }
+
+    // **The focus is off this map's tile grid** — the window touches no tile the WDT authors, so
+    // there is nothing to stream and nothing to wait for. On an ADT map that is never a place a
+    // body can legitimately stand: it means the focus was written in some *other* map's
+    // coordinates (the 2026-09-05 report — a rider composed through a cross-map transport whose
+    // own pose was still the source continent's) or has left the world entirely.
+    //
+    // It earns a tripwire because of what it does DOWNSTREAM and silently: `desired` empty makes
+    // `total == 0`, which [`WorldLoadProgress::is_ready`] reads as *not ready* — so the loading
+    // screen can never clear — while the vacuous arm below reports `focus_resident = true`, so the
+    // backstop that would have re-raised a cover cannot fire either. The player is left staring at
+    // a loading screen whose wait line reads `0/0 resident` with every other term nominal. Naming
+    // the map and the tile turns that into one greppable line. Once per focus tile, never a frame
+    // loop; `global_wmo` maps legitimately author no tiles and are excluded.
+    if wdt_index.is_some() && !state.global_wmo && desired.is_empty() {
+        let focus_tile = window.focus_tile();
+        if state.off_grid_reported != Some(focus_tile) {
+            state.off_grid_reported = Some(focus_tile);
+            let map_name = state.map_dir.clone().unwrap_or_default();
+            warn!(
+                "terrain: view focus [{:.1}, {:.1}] is OFF map {map_name}'s tile grid (tile \
+                 {focus_tile:?}) — the window wants no tile the WDT authors, so nothing streams \
+                 and a loading cover cannot clear. A focus written in another map's coordinates \
+                 is the usual cause.",
+                center[0], center[1],
+            );
+        }
+    } else if !desired.is_empty() {
+        state.off_grid_reported = None;
     }
 
     // Unload tiles no longer desired: despawn the terrain entity, release the placements, drop the
@@ -794,6 +868,7 @@ fn stream_terrain(
             .filter(|&tile| !window.keeps(tile))
             .collect()
     };
+    let stale_empty = stale.is_empty();
     if unload_budget > 0 && stale.len() > unload_budget {
         stale.sort_by_key(|&(tx, ty)| std::cmp::Reverse((tx - cx).abs().max((ty - cy).abs())));
         stale.truncate(unload_budget);
@@ -832,6 +907,7 @@ fn stream_terrain(
     // the only cost of the window edge (~2 tiles out, in fog) filling over a few frames. World
     // entry and teleports stay unstaggered: the loading screen exists to absorb that burst, and
     // the settle release waits on exactly these tiles.
+    let mut fresh_empty = true;
     if wdt_index.is_some() || state.wdt_ungated {
         let live = focus.paced;
         let mut fresh: Vec<(i32, i32)> = desired
@@ -839,6 +915,7 @@ fn stream_terrain(
             .copied()
             .filter(|c| !state.tiles.contains_key(c))
             .collect();
+        fresh_empty = fresh.is_empty();
         if live && fresh.len() > 1 {
             fresh.sort_by_key(|&(tx, ty)| (tx - cx).abs().max((ty - cy).abs()));
             fresh.truncate(1);
@@ -993,6 +1070,12 @@ fn stream_terrain(
     // focus tile that doesn't exist (map edge) counts as resident so we never get stuck waiting
     // for ground that isn't there.
     // The pacing edge, read and advanced once per frame (see [`TerrainStreamer::was_paced`]).
+    state.settled = stale_empty
+        && fresh_empty
+        && state
+            .tiles
+            .values()
+            .all(|t| t.entity.is_some() && t.furnished);
     let was_paced = std::mem::replace(&mut state.was_paced, focus.paced);
     if let Some(p) = load_progress.as_mut() {
         p.focus_tile = Some((cx, cy));

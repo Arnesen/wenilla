@@ -145,7 +145,12 @@ impl Plugin for ProbeKeyPlugin {
         app.insert_resource(ProbeKeys { taps, armed: false })
             .add_systems(
                 bevy::app::PreUpdate,
-                fire_probe_key.after(bevy::input::InputSystems),
+                fire_probe_key
+                    .after(bevy::input::InputSystems)
+                    // …and after the loading cover's input swallow, which runs in the same window
+                    // and empties every button plane: an instrument driving the client is the
+                    // operator, not the player, so its press has to land on the far side of it.
+                    .after(crate::loading_screen::CoverInput),
             );
     }
 }

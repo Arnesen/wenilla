@@ -257,6 +257,7 @@ impl CharSections {
         hair_color: u8,
         equipment: [Option<&ItemDisplay>; 8],
         emblem: Option<GuildEmblem>,
+        tabard_preview: bool,
     ) -> Result<Option<BlpMipChain>> {
         let Some(base_path) = self.skin_texture(race, sex, skin) else {
             return Ok(None);
@@ -288,7 +289,7 @@ impl CharSections {
         }
         // The equipment plan, built once: the blits below consume it, and the underwear reads it as its
         // gate. One plan, so "what dresses this tile?" has a single answer (decision 0074's `equip_blits`).
-        let plan = equip_blits(&equipment, emblem);
+        let plan = equip_blits(&equipment, emblem, tabard_preview);
         // The underwear ([`UNDERWEAR_TILES`]) — the tile's fallback, not an under-layer: a contribution
         // in any of the group's TESTED columns and the client draws no underwear there at all, leaving
         // the base skin it already blitted. Drawn before the equipment because the untested columns (the
@@ -602,9 +603,16 @@ pub fn equip_column(equipment: &[Option<&ItemDisplay>; 8], slot: usize, layer: u
 pub fn equip_blits<'a>(
     equipment: &[Option<&'a ItemDisplay>; 8],
     emblem: Option<GuildEmblem>,
+    tabard_preview: bool,
 ) -> Vec<EquipBlit<'a>> {
-    let emblem = emblem
-        .filter(|_| equipment[SLOT_TABARD].is_some_and(|d: &ItemDisplay| d.takes_guild_emblem()));
+    // The tabard designer's preview (decision 1977, wow-re RF-0089 §6/§7c): the reference's
+    // `0x47a610` installs the five onto the character component with no ItemDisplayInfo test —
+    // the previewed tabard is the geoset flap over an EMPTY slot — so the emblem paints whenever
+    // the preview flag is up, and otherwise only over a worn tabard whose display asks for it.
+    let emblem = emblem.filter(|_| {
+        tabard_preview
+            || equipment[SLOT_TABARD].is_some_and(|d: &ItemDisplay| d.takes_guild_emblem())
+    });
     let mut plan = Vec::new();
     for (layer, _tile) in EQUIP_TILES.iter().enumerate() {
         let mut row: [Option<EquipBlit<'a>>; 8] = [None; 8];
@@ -643,6 +651,29 @@ pub fn equip_blits<'a>(
         plan.extend(row.into_iter().flatten());
     }
     plan
+}
+
+/// The **ArmLower** layer — the tile whose occupancy gates the shirt's sleeve geoset (below).
+const LAYER_ARM_LOWER: usize = 1;
+
+/// Whether anything **other than the shirt** dresses the forearm — the byte-true gate on the geoset
+/// dispatch's B3 arm (`0x4775bd`, the six dwords `cc+0x26c..cc+0x280` = cells 1..6 of the ArmLower
+/// equip row; the shirt's own default cell is 0, which the loop skips).
+///
+/// The shirt carries a sleeve geoset (802/803, the cuff flare) that must not survive under a
+/// garment painting the same skin: a chest with sleeve art, a bracer, or a glove takes the tile and
+/// the cuff underneath it is dropped. Reading the *grid* rather than "is a chest equipped" is what
+/// makes both directions right — 533 of the 637 shipped chest displays leave `ArmLowerTexture`
+/// empty (the cuff survives them), while 566 of 570 wrist displays fill it (the cuff goes).
+///
+/// Off [`equip_blits`], so the promotion rules stay in one place: a sleeved chest and a
+/// glove-geoset glove are lifted to cells 5 and 6, still inside the tested range. The guild emblem
+/// is passed as `None` because it only ever writes layers 3 and 4 ([`EMBLEM_LAYERS`]) — this row
+/// reads the same either way.
+pub fn forearm_dressed(equipment: &[Option<&ItemDisplay>; 8]) -> bool {
+    equip_blits(equipment, None, false)
+        .iter()
+        .any(|b| b.layer == LAYER_ARM_LOWER && (1..=6).contains(&b.column))
 }
 
 /// The atlas rect layer `layer`'s equipment contributions composite into — `(x, y, w, h)` in pixels
@@ -881,7 +912,7 @@ mod tests {
             Some(&plain_gloves),
             None,
         ];
-        let g1: Vec<_> = equip_blits(&eq, None)
+        let g1: Vec<_> = equip_blits(&eq, None, false)
             .iter()
             .filter(|s| s.layer == 1)
             .map(worn_cell)
@@ -897,7 +928,7 @@ mod tests {
             Some(&geoset_gloves),
             None,
         ];
-        let g1: Vec<_> = equip_blits(&eq, None)
+        let g1: Vec<_> = equip_blits(&eq, None, false)
             .iter()
             .filter(|s| s.layer == 1)
             .map(worn_cell)
@@ -980,7 +1011,7 @@ mod tests {
             Some(&guild_tabard),
         ];
         assert_eq!(
-            cells(&equip_blits(&eq, Some(emblem))),
+            cells(&equip_blits(&eq, Some(emblem), false)),
             want(&[
                 (3, 2, "Background"),
                 (3, 3, "Border"),
@@ -995,7 +1026,7 @@ mod tests {
         // look a guildless player wearing a Guild Tabard gets, and the look everyone gets for the
         // frames between spawning and `SMSG_GUILD_QUERY_RESPONSE`.
         assert_eq!(
-            cells(&equip_blits(&eq, None)),
+            cells(&equip_blits(&eq, None, false)),
             want(&[(3, 4, "tabard_tu"), (4, 4, "tabard_tl")])
         );
         // A tabard that does not ask for the emblem keeps its art even for a guilded wearer: the
@@ -1011,11 +1042,11 @@ mod tests {
             Some(&plain_tabard),
         ];
         assert_eq!(
-            cells(&equip_blits(&plain, Some(emblem))),
+            cells(&equip_blits(&plain, Some(emblem), false)),
             want(&[(3, 4, "tabard_tu"), (4, 4, "tabard_tl")])
         );
         // And no tabard at all is no emblem, however guilded the wearer.
-        assert!(equip_blits(&[None; 8], Some(emblem)).is_empty());
+        assert!(equip_blits(&[None; 8], Some(emblem), false).is_empty());
 
         // Under a shirt: the shirt keeps cell 0, the emblem stacks above it — and nothing reaches
         // the arm layers, which the shirt still owns alone.
@@ -1030,7 +1061,7 @@ mod tests {
             Some(&guild_tabard),
         ];
         assert_eq!(
-            cells(&equip_blits(&eq, Some(emblem))),
+            cells(&equip_blits(&eq, Some(emblem), false)),
             want(&[
                 (0, 0, "shirt_au"),
                 (1, 0, "shirt_al"),
@@ -1193,7 +1224,7 @@ mod tests {
                 (1, 3),
                 "the bra is TextureName[1] into TorsoUpper"
             );
-            equip_blits(eq, em)
+            equip_blits(eq, em, false)
                 .iter()
                 .any(|s| s.layer == layer && s.column < tested)
         };
@@ -1269,7 +1300,7 @@ mod tests {
         );
 
         fn g6(eq: &[Option<&ItemDisplay>; 8]) -> Vec<(i8, String)> {
-            equip_blits(eq, None)
+            equip_blits(eq, None, false)
                 .iter()
                 .filter(|s| s.layer == 6)
                 .map(|s| {
@@ -1370,7 +1401,7 @@ mod tests {
         );
         let eq = [None, None, None, None, Some(&odd), None, None, None];
         assert!(
-            equip_blits(&eq, None).is_empty(),
+            equip_blits(&eq, None, false).is_empty(),
             "a -1 cell drops the contribution entirely"
         );
 
@@ -1380,7 +1411,7 @@ mod tests {
         );
         let eq = [None, Some(&blank), None, None, None, None, None, None];
         assert!(
-            equip_blits(&eq, None).is_empty(),
+            equip_blits(&eq, None, false).is_empty(),
             "an empty texture name is not a contribution"
         );
     }
@@ -1465,7 +1496,7 @@ mod tests {
             read_texture_mip_chain(&mut chain, "Character\\Human\\Male\\HumanMaleSkin00_03.blp")
                 .expect("read base skin");
         let comp = cs
-            .composite_body(&mut chain, 1, 0, 3, 0, 1, 0, 0, [None; 8], None)
+            .composite_body(&mut chain, 1, 0, 3, 0, 1, 0, 0, [None; 8], None, false)
             .expect("composite ok")
             .expect("base skin row present");
 
@@ -1624,7 +1655,9 @@ mod tests {
             "the sheet is authored exactly tile-sized"
         );
         let comp = cs
-            .composite_body(&mut chain, race, sex, skin, 0, 0, 0, 0, [None; 8], None)
+            .composite_body(
+                &mut chain, race, sex, skin, 0, 0, 0, 0, [None; 8], None, false,
+            )
             .expect("composite ok")
             .expect("base skin row present");
 
@@ -1762,7 +1795,9 @@ mod tests {
         ];
         for (label, equipment, (g3_want, g3), (g5_want, g5)) in cases {
             let comp = cs
-                .composite_body(&mut chain, race, sex, skin, 0, 0, 0, 0, equipment, None)
+                .composite_body(
+                    &mut chain, race, sex, skin, 0, 0, 0, 0, equipment, None, false,
+                )
                 .expect("composite ok")
                 .expect("base skin row present");
             for (tile, name, want_name, want) in [
@@ -1818,7 +1853,7 @@ mod tests {
             [None, None, None, None, None, None, None, Some(tabard)];
 
         // (2) — every layer resolves, and each is authored at its tile's exact extent.
-        for step in equip_blits(&equipment, Some(emblem)) {
+        for step in equip_blits(&equipment, Some(emblem), false) {
             let path = step
                 .candidates(0)
                 .into_iter()
@@ -1835,7 +1870,7 @@ mod tests {
 
         // (3) — the repaint is confined to the two torso tiles.
         let mut compose = |em: Option<GuildEmblem>| {
-            cs.composite_body(&mut chain, 1, 0, 3, 0, 1, 0, 0, equipment, em)
+            cs.composite_body(&mut chain, 1, 0, 3, 0, 1, 0, 0, equipment, em, false)
                 .expect("composite ok")
                 .expect("base skin row present")
         };
@@ -1912,7 +1947,7 @@ mod tests {
             items.get(10141).expect("boots display"),
         );
         let mut compose = |equipment: [Option<&ItemDisplay>; 8]| {
-            cs.composite_body(&mut chain, 1, 0, 3, 0, 1, 0, 0, equipment, None)
+            cs.composite_body(&mut chain, 1, 0, 3, 0, 1, 0, 0, equipment, None, false)
                 .expect("composite ok")
                 .expect("base skin row present")
         };

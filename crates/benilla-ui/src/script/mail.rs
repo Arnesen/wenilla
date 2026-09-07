@@ -133,6 +133,26 @@ pub struct MailState {
     pub inbox: Vec<MailInboxRow>,
 }
 
+/// One usable stationery, as the send tab's picker lists it (`GetNumStationeries` /
+/// `GetStationeryInfo`, 1970) — the app computes the usable set off `Stationery.dbc` and the
+/// player's bags, sorted by price, and pushes it whole ([`super::UiScript::set_mail_stationeries`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StationeryView {
+    /// The `Stationery.dbc` row id — what `SelectStationery` stores and `CMSG_SEND_MAIL` carries.
+    pub id: u32,
+    /// The stationery item's name (`GetStationeryInfo`'s first return).
+    pub name: String,
+    /// The item's icon as a FULL path (`Interface\Icons\…`) — `GetStationeryInfo`'s second
+    /// return is used raw by `SetTexture` (MailFrame.lua l.671), unlike the bare basename below.
+    pub icon: String,
+    /// The item's BuyPrice in copper, or `None` when the player already carries the item
+    /// (`GetStationeryInfo`'s third return is nil then).
+    pub cost: Option<u32>,
+    /// The bare texture basename (`GetSelectedStationeryTexture`), wrapped by the Lua as
+    /// `STATIONERY_PATH..texture.."1"/"2"`.
+    pub texture: String,
+}
+
 /// A drained `SendMail` intent — the app resolves the attachment `(bag, slot)` to an item guid and
 /// builds `CMSG_SEND_MAIL` from this (decision 0544 P2).
 #[derive(Clone, Debug, PartialEq)]
@@ -140,6 +160,9 @@ pub struct MailSendRequest {
     pub target: String,
     pub subject: String,
     pub body: String,
+    /// The selected `Stationery.dbc` id — `CMSG_SEND_MAIL`'s sixth field (never 0 here: a send with
+    /// no selection aborts before it is queued, `0x4ae8dd`).
+    pub stationery: u32,
     /// Money to enclose (copper) — `SetSendMailMoney`'s last value.
     pub money: u32,
     /// COD amount (copper) — `SetSendMailCOD`'s last value; `0` when not a COD send.
@@ -212,6 +235,7 @@ impl super::UiScript {
             target,
             subject,
             body,
+            stationery: model.mail_stationery,
             money: model.mail_send_money,
             cod: model.mail_send_cod,
             item,
@@ -225,6 +249,29 @@ impl super::UiScript {
         model.mail_send_item = None;
         model.mail_send_money = 0;
         model.mail_send_cod = 0;
+    }
+
+    /// Drop the attachment alone — `SendMail`'s attached-item-gone abort (`ERR_ITEM_NOT_FOUND`, no
+    /// packet, `MAIL_SEND_INFO_UPDATE` at `0x4ae98d`): the bag slot no longer holds the item the
+    /// send tab shows. The money and COD amounts stay, as the reference leaves them.
+    pub fn drop_send_mail_item(&mut self) {
+        let mut model = self.model_mut();
+        if model.mail_send_item.take().is_some() {
+            model
+                .pending_events
+                .push(("MAIL_SEND_INFO_UPDATE".to_string(), Vec::new()));
+        }
+    }
+
+    /// Push the usable stationery list, in the picker's order (1970; see [`StationeryView`]).
+    pub fn set_mail_stationeries(&mut self, list: Vec<StationeryView>) {
+        self.model_mut().mail_stationeries = list;
+    }
+
+    /// Clear the stationery selection — the client does it at `0x4ace07` on BOTH opening and
+    /// closing the mailbox, which is why the stock `SendMailFrame_Reset` re-selects row 1 on show.
+    pub fn clear_stationery(&mut self) {
+        self.model_mut().mail_stationery = 0;
     }
 
     /// Push `HasNewMail()`'s answer (decision 0544 P3) — login-scoped, independent of whether a
@@ -508,32 +555,97 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "SendMail",
         lua.create_function(|lua, (target, subject, body): (String, String, String)| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .mail_send = Some((target, subject, body));
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            // `SendMail 0x4ae800` (decision 1965): money and COD are exclusive AT SEND TIME — both
+            // set is a silent abort, no packet — and a COD with no attached item aborts the same
+            // way. 0 returns on every path, so Lua cannot tell.
+            if model.mail_send_money != 0 && model.mail_send_cod != 0 {
+                return Ok(());
+            }
+            if model.mail_send_cod != 0 && model.mail_send_item.is_none() {
+                return Ok(());
+            }
+            // No stationery selected — `0x4ae8dd je`: the send silently aborts, no packet, 0
+            // returns (1970). The selection is cleared on mailbox open and close, and the stock
+            // `SendMailFrame_Reset` re-selects row 1, so a send from the stock tab always has one.
+            if model.mail_stationery == 0 {
+                return Ok(());
+            }
+            model.mail_send = Some((target, subject, body));
             Ok(())
         })?,
     )?;
 
     // SetSendMailMoney(copper) → 1 (the SEND_MONEY popup's OnAccept gates SendMail on the truthy
     // return, StaticPopup.lua l.252). Stores the enclose-money amount the app reads at send time.
+    // SetSendMailMoney(copper) — `0x4ae0f0` → `0x4adbe0` (decision 1965): a non-number RAISES;
+    // more than the purse (unsigned) shows ERR_NOT_ENOUGH_MONEY and answers nil; else the store,
+    // SEND_MAIL_MONEY_CHANGED, and the number 1 — StaticPopup.lua l.257 branches on that value.
     g.set(
         "SetSendMailMoney",
-        lua.create_function(|lua, copper: u32| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .mail_send_money = copper;
+        lua.create_function(|lua, copper: Value| {
+            let n = crate::script::binding_abi::number_arg(
+                lua,
+                copper,
+                "Usage: SetSendMailMoney(amount)",
+            )? as u32;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            if u64::from(n) > model.money {
+                model.ui_errors.push("ERR_NOT_ENOUGH_MONEY");
+                return Ok(Value::Nil);
+            }
+            model.mail_send_money = n;
+            model
+                .pending_events
+                .push(("SEND_MAIL_MONEY_CHANGED".to_string(), Vec::new()));
             Ok(Value::Integer(1))
         })?,
     )?;
 
+    // GetSendMailMoney() / GetSendMailCOD() → the two amounts as stored (`0x4ae150` / `0x4ae1c0`,
+    // one number each — `reference/1.12-shapes.tsv`): what the stock money kit's SEND_MAIL and
+    // SEND_MAIL_COD types display (1962).
+    g.set(
+        "GetSendMailMoney",
+        lua.create_function(|lua, ()| {
+            Ok(i64::from(
+                lua.app_data_ref::<Model>()
+                    .expect("model app_data")
+                    .mail_send_money,
+            ))
+        })?,
+    )?;
+    g.set(
+        "GetSendMailCOD",
+        lua.create_function(|lua, ()| {
+            Ok(i64::from(
+                lua.app_data_ref::<Model>()
+                    .expect("model app_data")
+                    .mail_send_cod,
+            ))
+        })?,
+    )?;
+
     // SetSendMailCOD(copper) — store the COD amount the app reads at send time (MailFrame.lua l.497).
+    // SetSendMailCOD(copper) — `0x4ae180` → `0x4adc70` (decision 1965): a non-number RAISES;
+    // without an attached item nothing happens at all — no store, no event, no message — and
+    // there is no affordability or sign check; 0 returns on every path.
     g.set(
         "SetSendMailCOD",
-        lua.create_function(|lua, copper: u32| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .mail_send_cod = copper;
+        lua.create_function(|lua, copper: Value| {
+            let n = crate::script::binding_abi::number_arg(
+                lua,
+                copper,
+                "Usage: SetSendMailCOD(amount)",
+            )? as u32;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            if model.mail_send_item.is_none() {
+                return Ok(());
+            }
+            model.mail_send_cod = n;
+            model
+                .pending_events
+                .push(("SEND_MAIL_COD_CHANGED".to_string(), Vec::new()));
             Ok(())
         })?,
     )?;
@@ -601,6 +713,89 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // ── The stationery family (wow-re `ui/scratch/stationery-bindings.md`, 1970) ──
+    // The list is the app's (`Stationery.dbc` × the player's bags × the template cache); the
+    // client rebuilds it from `GetNumStationeries` (`0x4ae202` → `0x4ad970`), on world enter and
+    // on the last item-query answer — the app's per-frame recompute covers all three moments.
+
+    // `GetNumStationeries()` — 0 args, 1 number: the usable count.
+    g.set(
+        "GetNumStationeries",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(model.mail_stationeries.len() as i64)
+        })?,
+    )?;
+
+    // `GetStationeryInfo(index)` — shape A (`lua_isnumber`, truncate), raising its Usage on a
+    // non-number; 1-based, unsigned bound; exactly 3 returns on every exit: name, the FULL icon
+    // path, BuyPrice in copper — cost nil when the player carries the item; 3 nils out of range.
+    g.set(
+        "GetStationeryInfo",
+        lua.create_function(|lua, index: Value| {
+            let index = crate::script::binding_abi::number_arg(
+                lua,
+                index,
+                "Usage: GetStationeryInfo(index)",
+            )?;
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let row = usize::try_from(index)
+                .ok()
+                .and_then(|i| i.checked_sub(1))
+                .and_then(|i| model.mail_stationeries.get(i));
+            let Some(row) = row else {
+                return Ok(MultiValue::from_vec(vec![
+                    Value::Nil,
+                    Value::Nil,
+                    Value::Nil,
+                ]));
+            };
+            Ok(MultiValue::from_vec(vec![
+                Value::String(lua.create_string(&row.name)?),
+                Value::String(lua.create_string(&row.icon)?),
+                row.cost
+                    .map_or(Value::Nil, |c| Value::Integer(i64::from(c))),
+            ]))
+        })?,
+    )?;
+
+    // `SelectStationery(index)` — shape A, raising its Usage on a non-number; 0 returns. In range
+    // it stores the row's DBC id; **out of range is not an error — it writes 0**, a deselect.
+    g.set(
+        "SelectStationery",
+        lua.create_function(|lua, index: Value| {
+            let index = crate::script::binding_abi::number_arg(
+                lua,
+                index,
+                "Usage: SelectStationery(index)",
+            )?;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.mail_stationery = usize::try_from(index)
+                .ok()
+                .and_then(|i| i.checked_sub(1))
+                .and_then(|i| model.mail_stationeries.get(i))
+                .map_or(0, |row| row.id);
+            Ok(())
+        })?,
+    )?;
+
+    // `GetSelectedStationeryTexture()` — 0 args, 1 return: the BARE `Stationery.dbc` texture name
+    // of the selection; nil for no selection (id 0) or an id the table does not carry.
+    g.set(
+        "GetSelectedStationeryTexture",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let id = model.mail_stationery;
+            let tex = (id != 0)
+                .then(|| model.mail_stationeries.iter().find(|r| r.id == id))
+                .flatten();
+            Ok(match tex {
+                Some(row) => Value::String(lua.create_string(&row.texture)?),
+                None => Value::Nil,
+            })
+        })?,
+    )?;
+
     Ok(())
 }
 
@@ -618,6 +813,11 @@ fn click_send_mail_item(model: &mut Model) {
             model.mail_send_item = Some(item);
             cursor::queue_cursor_update(model);
             cursor::queue_lock_changed(model, bag, slot);
+            // The attachment changed — `MAIL_SEND_INFO_UPDATE` at `0x4ae0de` (0 args, 1970); the
+            // stock tab re-reads `GetSendMailItem` and the postage on it.
+            model
+                .pending_events
+                .push(("MAIL_SEND_INFO_UPDATE".to_string(), Vec::new()));
         }
         // Empty cursor, a filled slot → pick the attachment back onto the cursor (detach).
         None => {
@@ -626,6 +826,9 @@ fn click_send_mail_item(model: &mut Model) {
                 model.cursor = Some(CursorPayload::Item(item));
                 cursor::queue_cursor_update(model);
                 cursor::queue_lock_changed(model, bag, slot);
+                model
+                    .pending_events
+                    .push(("MAIL_SEND_INFO_UPDATE".to_string(), Vec::new()));
             }
         }
         // A spell/action payload is refused — put it back untouched (container.rs's refuse arm).
@@ -639,6 +842,19 @@ fn click_send_mail_item(model: &mut Model) {
 mod tests {
     use super::*;
     use crate::script::UiScript;
+
+    /// A send needs a stationery selected (1970): seat the default and select it, the way the
+    /// stock `SendMailFrame_Reset` does on MAIL_SHOW.
+    fn select_default_stationery(s: &mut UiScript) {
+        s.set_mail_stationeries(vec![super::StationeryView {
+            id: 41,
+            name: "Default Stationery".into(),
+            icon: "Interface\\Icons\\INV_Letter_15".into(),
+            cost: Some(0),
+            texture: "STATIONERYTEST".into(),
+        }]);
+        s.run("SelectStationery(1)").unwrap();
+    }
 
     fn row(item_id: u32) -> MailInboxRow {
         MailInboxRow {
@@ -906,21 +1122,34 @@ mod tests {
     #[test]
     fn send_folds_money_cod_and_returns_true_from_setmoney() {
         let mut s = UiScript::new().unwrap();
+        s.set_money(5_000);
         assert!(s.take_mail_send().is_none());
+        // The purse gate (1965): more than the purse answers nil and names the refusal.
+        assert!(s
+            .eval::<bool>("return SetSendMailMoney(9999) == nil")
+            .unwrap());
+        assert_eq!(s.take_ui_errors(), vec!["ERR_NOT_ENOUGH_MONEY"]);
         assert!(s
             .eval::<bool>("return SetSendMailMoney(1234) == 1")
             .unwrap());
+        // A COD with no attached item is completely silent: no store, no event (1965).
         s.run("SetSendMailCOD(50)").unwrap();
+        assert_eq!(s.eval::<i64>("return GetSendMailCOD()").unwrap(), 0);
+        select_default_stationery(&mut s);
         s.run("SendMail('Jaina', 'Hi', 'body text')").unwrap();
         let req = s.take_mail_send().expect("a send was queued");
         assert_eq!(req.target, "Jaina");
         assert_eq!(req.subject, "Hi");
         assert_eq!(req.body, "body text");
-        assert_eq!((req.money, req.cod), (1234, 50));
+        assert_eq!((req.money, req.cod), (1234, 0));
         assert_eq!(req.item, None);
         assert!(s.take_mail_send().is_none(), "drained");
-        // GetSendMailPrice is the flat 30c.
         assert_eq!(s.eval::<i64>("return GetSendMailPrice()").unwrap(), 30);
+        assert!(
+            s.run("SetSendMailMoney(nil)").is_err(),
+            "a non-number raises"
+        );
+        assert!(s.run("SetSendMailCOD({})").is_err());
     }
 
     #[test]
@@ -952,6 +1181,7 @@ mod tests {
         assert_eq!((name.as_str(), count, quality), ("Linen Cloth", 7, 1));
 
         // A send folds in the attachment's (bag, slot).
+        select_default_stationery(&mut s);
         s.run("SendMail('Alt', 'stuff', '')").unwrap();
         assert_eq!(s.take_mail_send().unwrap().item, Some((0, 5)));
 
@@ -981,6 +1211,7 @@ mod tests {
         s.run("ClickSendMailItemButton()").unwrap();
         s.run("SetSendMailMoney(99) SetSendMailCOD(5)").unwrap();
         s.clear_send_mail_item();
+        select_default_stationery(&mut s);
         s.run("SendMail('x','y','z')").unwrap();
         let req = s.take_mail_send().unwrap();
         assert_eq!((req.money, req.cod, req.item), (0, 0, None));
@@ -1003,5 +1234,104 @@ mod tests {
         assert!(s.eval::<bool>("return HasNewMail() == 1").unwrap());
         s.set_has_new_mail(false);
         assert!(s.eval::<bool>("return HasNewMail() == nil").unwrap());
+    }
+}
+
+#[cfg(test)]
+mod stationery_tests {
+    use super::StationeryView;
+    use crate::script::UiScript;
+
+    fn seated() -> UiScript {
+        let mut s = UiScript::new().unwrap();
+        s.set_mail_stationeries(vec![
+            StationeryView {
+                id: 41,
+                name: "Default Stationery".into(),
+                icon: "Interface\\Icons\\INV_Letter_15".into(),
+                cost: Some(0),
+                texture: "STATIONERYTEST".into(),
+            },
+            StationeryView {
+                id: 64,
+                name: "Valentine Stationery".into(),
+                icon: "Interface\\Icons\\INV_ValentinesCard02".into(),
+                cost: None,
+                texture: "STATIONERY_VAL".into(),
+            },
+        ]);
+        s
+    }
+
+    /// The four verbs, shape by shape (wow-re `stationery-bindings.md`): the count; the info
+    /// triple with a nil cost for a carried paper and three nils past the end; a numeric string
+    /// passes the number gate and a non-number raises the Usage; the selection stores the DBC id,
+    /// out of range deselects, and the texture is the bare basename or nil.
+    #[test]
+    fn the_stationery_family_answers_like_the_client() {
+        let s = seated();
+        assert_eq!(s.eval::<i64>("return GetNumStationeries()").unwrap(), 2);
+        assert_eq!(
+            s.eval::<(String, String, i64)>("return GetStationeryInfo(1)")
+                .unwrap(),
+            (
+                "Default Stationery".into(),
+                "Interface\\Icons\\INV_Letter_15".into(),
+                0
+            )
+        );
+        assert!(
+            s.eval::<bool>("local n, t, c = GetStationeryInfo(\"2\") return n == \"Valentine Stationery\" and c == nil")
+                .unwrap(),
+            "a carried paper costs nil; a numeric string is an index"
+        );
+        assert!(
+            s.eval::<bool>(
+                "local n, t, c = GetStationeryInfo(3) return n == nil and t == nil and c == nil"
+            )
+            .unwrap(),
+            "past the end: three nils"
+        );
+        for bad in [
+            "GetStationeryInfo()",
+            "GetStationeryInfo(\"x\")",
+            "SelectStationery(nil)",
+        ] {
+            let err = s.run(bad).expect_err(bad).to_string();
+            assert!(err.contains("Usage: "), "{bad}: {err}");
+        }
+        assert!(s
+            .eval::<bool>("return GetSelectedStationeryTexture() == nil")
+            .unwrap());
+        s.run("SelectStationery(2)").unwrap();
+        assert_eq!(
+            s.eval::<String>("return GetSelectedStationeryTexture()")
+                .unwrap(),
+            "STATIONERY_VAL"
+        );
+        s.run("SelectStationery(9)").unwrap();
+        assert!(
+            s.eval::<bool>("return GetSelectedStationeryTexture() == nil")
+                .unwrap(),
+            "out of range is a deselect, not an error"
+        );
+    }
+
+    /// A send with no stationery selected aborts silently — no request, no error; with one
+    /// selected the request carries the DBC id. Opening/closing the mailbox clears it.
+    #[test]
+    fn a_send_needs_a_stationery_and_carries_its_id() {
+        let mut s = seated();
+        s.run("SendMail(\"Bob\", \"hi\", \"body\")").unwrap();
+        assert!(
+            s.take_mail_send().is_none(),
+            "no selection: silently nothing"
+        );
+        s.run("SelectStationery(1) SendMail(\"Bob\", \"hi\", \"body\")")
+            .unwrap();
+        assert_eq!(s.take_mail_send().map(|r| r.stationery), Some(41));
+        s.clear_stationery();
+        s.run("SendMail(\"Bob\", \"hi\", \"body\")").unwrap();
+        assert!(s.take_mail_send().is_none());
     }
 }

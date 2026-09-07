@@ -1,6 +1,6 @@
-//! The player buff bar (`assets/ui/BuffFrame.xml`, decisions 0255/0257) against its reference
-//! behaviour. The XML/Lua is the unit under test; the app-side feed (`crate::ui_aura`) is stubbed by
-//! pushing an [`AuraState`] list straight through [`UiScript::set_auras`] and firing
+//! The player buff bar (stock `Interface\FrameXML\BuffFrame.xml`, decisions 0255/0257) against its
+//! reference behaviour. The XML/Lua is the unit under test; the app-side feed (`crate::ui_aura`) is
+//! stubbed by pushing an [`AuraState`] list straight through [`UiScript::set_auras`] and firing
 //! `PLAYER_AURAS_CHANGED`, so these exercise the *button* handlers — the row/filter wiring, the
 //! dispel-tinted border, the stack count, the countdown, the warning flash, and the right-click
 //! cancel — the way the reference's own `BuffButton_*` do.
@@ -26,27 +26,37 @@ fn harness() -> UiScript {
     // under a timed aura. Our copy carried them as `X = X or "%d s"` fallbacks; the reference's
     // file formats them straight and `format(nil, …)` raises.
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "Fonts.xml"); // NORMAL/HIGHLIGHT_FONT_COLOR + the FontStrings' faces
-                               // `GameTooltip`, which the reference's BuffButton_Update indexes on EVERY repaint to ask
-                               // `IsOwned(this)` (BuffFrame.lua l.104) — not just on hover. Ours guarded it; the reference
-                               // does not, so a session without the tooltip loses the whole repaint.
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml"); // NORMAL/HIGHLIGHT_FONT_COLOR + the FontStrings' faces
+                                                    // `GameTooltip`, which the reference's BuffButton_Update indexes on EVERY repaint to ask
+                                                    // `IsOwned(this)` (BuffFrame.lua l.104) — not just on hover. Ours guarded it; the reference
+                                                    // does not, so a session without the tooltip loses the whole repaint.
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     // `SecondsToTimeAbbrev`, which 1.12 keeps in UIParent.lua and so do we since window 18.
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "ActionBar.xml"); // BENILLA_FALLBACK_ICON (the unknown-icon fallback)
-                                   // The timer switch, PLANTED ON — not the shipped value. 1.12 declares it in
-                                   // UIOptionsFrame.lua (default "0"); we have no counterpart to that file, so it lives with the
-                                   // row that drives it (OptionsFrame.xml), where it shipped "1" from 0255/1139 until 1804 put
-                                   // it back on the reference's "0". These tests are about the timer text and the geometry it
-                                   // buys, so the harness turns it on the way the Interface page's row does. Order matters: the
-                                   // reference's `BuffFrame_OnLoad` calls `BuffButtons_UpdatePositions`, which seats the debuff
-                                   // row 20px differently depending on this value, so setting it afterwards leaves the bar laid
-                                   // out for the wrong one.
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\MainMenuBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml"); // BENILLA_FALLBACK_ICON (the unknown-icon fallback)
+                                                                  // The timer switch, PLANTED ON — not the shipped value. 1.12 declares it in
+                                                                  // UIOptionsFrame.lua (default "0"); we have no counterpart to that file, so it lives with the
+                                                                  // row that drives it (OptionsFrame.xml), where it shipped "1" from 0255/1139 until 1804 put
+                                                                  // it back on the reference's "0". These tests are about the timer text and the geometry it
+                                                                  // buys, so the harness turns it on the way the Interface page's row does. Order matters: the
+                                                                  // reference's `BuffFrame_OnLoad` calls `BuffButtons_UpdatePositions`, which seats the debuff
+                                                                  // row 20px differently depending on this value, so setting it afterwards leaves the bar laid
+                                                                  // out for the wrong one.
     s.run("SHOW_BUFF_DURATIONS = \"1\"").unwrap();
     load_xml(&s, "Interface\\FrameXML\\BuffFrame.xml");
     // …and APPLIED, the way the app applies it (`manifest::apply_buff_durations`).

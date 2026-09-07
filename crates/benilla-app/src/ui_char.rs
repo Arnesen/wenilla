@@ -95,7 +95,7 @@ struct CharFeedMemo {
     items_objects: gate::Watch,
     items_templates: gate::Watch,
     names_generation: gate::Watch,
-    /// `Items::enchant_display_epoch` — one step per displayable countdown change (the slot
+    /// `Items::countdown_display_epoch` — one step per displayable countdown change (the slot
     /// views read second-floored countdowns), including the last elapse's collapsing push.
     enchant_deadlines: gate::Watch,
     /// `PendingItemOps::epoch` — one step per change to the in-flight lock set. Watched BESIDE
@@ -604,6 +604,8 @@ fn slot_view(
     // feed's twin.
     let enchant_ms: [Option<u64>; 7] =
         std::array::from_fn(|s| items.enchant_remaining_display_ms(guid, s as u32));
+    // The item's own expiry countdown — the bag feed's twin (decision 1933).
+    let duration_ms = items.duration_remaining_display_ms(guid);
     let obj = items.object(guid)?;
     let entry = obj.object_entry()?;
     let count = obj.item_stack_count().unwrap_or(1).max(1);
@@ -710,6 +712,7 @@ fn slot_view(
         bar_placeable,
         creator,
         enchants,
+        duration_ms,
     })
 }
 
@@ -805,8 +808,10 @@ fn inventory_slots(
             bar_placeable: false,
             creator: None,
             // Ammo carries no enchant slots to read: the wire never streams an ammo instance
-            // here, only the template id off the player descriptor.
+            // here, only the template id off the player descriptor — and for the same reason it
+            // carries no expiry countdown either (there is no instance guid to key one on).
             enchants: Vec::new(),
+            duration_ms: None,
         });
     }
     // Equipment 1..=19, then Bag0Slot..Bag3Slot (ids 20..23, PaperDollItemFrame.dbc-verified) —
@@ -1061,7 +1066,9 @@ pub(crate) fn feed_char(
     // second per ticking enchant, plus one final step at the elapse. Holding the gate open on
     // `live_enchant_deadlines() > 0` (the first 1439 shape) rebuilt both snapshots and fired
     // `UNIT_INVENTORY_CHANGED` at frame rate for the whole life of a poison.
-    let deadlines_moved = memo.enchant_deadlines.moved(items.enchant_display_epoch());
+    let deadlines_moved = memo
+        .enchant_deadlines
+        .moved(items.countdown_display_epoch());
     let self_changed = !changed_self.is_empty();
     // `is_added` for the icon catalog: the feeds read only its load-once icon column;
     // its model-cache half churns every frame (the containers gate's own note).

@@ -617,7 +617,7 @@ pub(super) struct CommitOutcome {
 /// TAB, so `engaged && had_old` covers the same observable; our `engaged` is the server-echoed
 /// [`Engaged`], not the ref's instant local lock (one-RTT lag on a switch fired mid-attack-
 /// start); and the ref's invalid-new-target Attack sends a second (duplicate) ATTACKSTOP we
-/// don't. Shared with the UI's `TargetUnit` drain ([`super::target_unit_requests`]) so every
+/// don't. Shared with the UI's `TargetUnit` drain (`super::target_unit_requests`) so every
 /// non-mouse selection writer commits identically — a `TargetUnit("player")` mid-combat stops
 /// the swing and does NOT re-point (the tail's self exception).
 pub(super) fn commit(
