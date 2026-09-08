@@ -403,6 +403,7 @@ fn an_armed_trail_commits_a_strip_to_the_effect_stream() {
         .add_systems(Update, (begin_effect_frame, draw_weapon_trails).chain());
     let cam = app.world_mut().spawn(WorldCamera).id();
     let _ = cam;
+    let wearer = app.world_mut().spawn_empty().id();
     let mut trail = WeaponTrail::new(Vec3::Y, Vec3::ZERO);
     trail.arm(kit_324(), 0);
     let hand = app
@@ -412,6 +413,7 @@ fn an_armed_trail_commits_a_strip_to_the_effect_stream() {
             Transform::default(),
             GlobalTransform::default(),
             InheritedVisibility::VISIBLE,
+            benilla_world::model_fade::ParentModel(wearer),
         ))
         .id();
     // Frame 1 seeds one pair; a strip needs two, so the first commit is empty by construction.
@@ -482,6 +484,7 @@ fn a_hidden_weapon_draws_nothing() {
         .add_systems(Startup, init_trail_white)
         .add_systems(Update, (begin_effect_frame, draw_weapon_trails).chain());
     app.world_mut().spawn(WorldCamera);
+    let wearer = app.world_mut().spawn_empty().id();
     let mut trail = WeaponTrail::new(Vec3::Y, Vec3::ZERO);
     trail.arm(kit_324(), 0);
     app.world_mut().spawn((
@@ -489,6 +492,7 @@ fn a_hidden_weapon_draws_nothing() {
         Transform::default(),
         GlobalTransform::default(),
         InheritedVisibility::HIDDEN,
+        benilla_world::model_fade::ParentModel(wearer),
     ));
     for _ in 0..6 {
         app.world_mut()
@@ -497,4 +501,84 @@ fn a_hidden_weapon_draws_nothing() {
         app.update();
     }
     assert!(app.world().resource::<EffectQuads>().draws.is_empty());
+}
+
+/// **The trail takes its WEARER's light, not the scene's** (decision 2086).
+///
+/// The draw runs inside the weapon model's own per-frame callback, during the wearer's model draw,
+/// so the enabled lights it inherits are the ones the M2 collector committed for that unit —
+/// four-way byte-derived through `0x70d982 → 0x70ca50 → 0x70baf0` plus the held-weapon `[+0x3b8]`
+/// alias. Outdoors that is the day/night ambient, which is the fallback. Indoors it is the light
+/// node's own committed word, and taking the sky's instead tinted every indoor trail cool.
+#[test]
+fn an_indoor_wearers_committed_ambient_wins_over_the_scenes() {
+    fn strip_rgb(app: &App) -> [f32; 3] {
+        let quads = app.world().resource::<EffectQuads>();
+        let draw = quads.draws.first().expect("one draw");
+        let v = quads.verts[draw.range.start as usize];
+        [v.color[0], v.color[1], v.color[2]]
+    }
+    // A Goldshire-inn character's committed ambient word against a night sky's.
+    const ROOM: [f32; 3] = [0.298, 0.216, 0.141];
+    const SKY: [f32; 3] = [0.224, 0.259, 0.290];
+
+    let mut lit = [[0.0; 3]; 2];
+    for (i, indoors) in [false, true].into_iter().enumerate() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<EffectQuads>()
+            .insert_resource({
+                let mut l = benilla_world::lighting::WowLighting::default();
+                l.ambient = SKY;
+                l
+            })
+            .add_systems(Startup, init_trail_white)
+            .add_systems(Update, (begin_effect_frame, draw_weapon_trails).chain());
+        app.world_mut().spawn(WorldCamera);
+        let mut wearer = app.world_mut().spawn_empty();
+        if indoors {
+            wearer.insert(benilla_world::interior::NodeAmbient(ROOM));
+        }
+        let wearer = wearer.id();
+        let mut trail = WeaponTrail::new(Vec3::Y, Vec3::ZERO);
+        trail.arm(kit_324(), 0);
+        let hand = app
+            .world_mut()
+            .spawn((
+                trail,
+                Transform::default(),
+                GlobalTransform::default(),
+                InheritedVisibility::VISIBLE,
+                benilla_world::model_fade::ParentModel(wearer),
+            ))
+            .id();
+        for f in 1..=4u32 {
+            app.world_mut()
+                .get_mut::<GlobalTransform>(hand)
+                .expect("the hand exists")
+                .clone_from(&GlobalTransform::from_translation(Vec3::X * f as f32));
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_millis(16));
+            app.update();
+        }
+        lit[i] = strip_rgb(&app);
+    }
+    // Kit 324's #f82929 through each ambient. The two are close in magnitude and opposite in hue,
+    // so a channel RATIO is the assertion that would actually catch the wrong one being used.
+    let [out_r, out_g, _] = lit[0];
+    let [in_r, in_g, _] = lit[1];
+    assert!(
+        (out_r / (248.0 / 255.0) - SKY[0]).abs() < 1e-5,
+        "outdoors takes the scene ambient: {lit:?}"
+    );
+    assert!(
+        (in_r / (248.0 / 255.0) - ROOM[0]).abs() < 1e-5,
+        "indoors takes the wearer's committed word: {lit:?}"
+    );
+    assert!(
+        in_r > out_r && in_g < out_g,
+        "the room is warmer AND redder than the sky — the hue flip is the visible half: {lit:?}"
+    );
 }

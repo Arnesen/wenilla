@@ -38,7 +38,7 @@ pub(super) fn select_input(
     mut next: ResMut<NextState<ClientState>>,
     mut sounds: MessageWriter<GlueSound>,
     mut intent: ResMut<crate::login::LoginIntent>,
-    glue_dialog: Res<crate::login::LoginDialog>,
+    glue_dialog: Res<crate::glue::dialog::GlueDialog>,
     time: Res<Time>,
     mut last_click: Local<Option<(usize, f32)>>,
 ) {

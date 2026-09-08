@@ -79,6 +79,15 @@ pub(super) enum UiFixture {
     /// render): slot icons, the attribute/resistance panes with buff coloring, melee + ranged
     /// blocks, the ammo count, the level line.
     Character,
+    /// **The loading screen, held up, with the tip of the day on it** (decision 2083).
+    ///
+    /// Not a window: it raises the world-entry loading screen — per-map backdrop, progress bar,
+    /// and the `TipEdge::Pick` that chooses a `GameTips.dbc` row — and pins it so the harness has
+    /// a still frame to settle on. Every other screen in the client can be photographed by
+    /// standing in front of it; this one is up for a second on a path nobody can pause, which is
+    /// exactly why its tip could ship dead, log `tip 0 of 74` twice in a live smoke run, and be
+    /// caught by nothing at all.
+    LoadingTip,
     /// The shared **StaticPopup** plate, shown as the group-invite dialog (`PARTY_INVITE`).
     ///
     /// Every other StaticPopup customer in the tree raises its dialog over another window's opaque
@@ -1041,6 +1050,17 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         look: GROUND_LOOK,
         minute: 720,
         ui: Some(UiFixture::Social),
+    },
+    // The world-entry loading screen, held up with its tip of the day. Run with
+    // `WOW_CAPTURE=loading-tip`. The backdrop is whatever `Map.dbc` → `LoadingScreens.dbc` gives
+    // this scenario's map, so it photographs the art chain and the bar as well as the tip.
+    Scenario {
+        name: "loading-tip",
+        map: Some(MAP_AZEROTH),
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::LoadingTip),
     },
     // The era Options window over the ground scene. Run with
     // `WOW_CAPTURE=ui-options`.

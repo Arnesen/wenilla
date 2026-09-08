@@ -28,7 +28,15 @@
 //! **Only on the glue→world transition.** The setter `0x406630` (a seven-byte
 //! `mov [0x882e10],ecx; ret`) has exactly one caller, and neither `SMSG_TRANSFER_PENDING` arm sets
 //! it — so an in-world portal or worldport screen carries **no tip**. That is why this module hangs
-//! off the loading screen's `world entry` raise and clears on every other one.
+//! off the loading screen's `world entry` raise.
+//!
+//! **It comes down with the screen, never with a raise.** `[0x882e10]`'s only other writer
+//! image-wide is `0x407f2b`, inside the dismiss `0x407e80` — so the two edges are *pick at the
+//! entry raise* and *clear at the dismiss*, and nothing that happens mid-load can take a tip away.
+//! This module used to clear on every non-entry raise, which read the same for an in-world screen
+//! (the tip was already down) and was wrong for exactly one case: the login snap
+//! `SMSG_LOGIN_VERIFY_WORLD`, which benilla was treating as a fresh load, wiped the tip a server
+//! round-trip into **every** world entry.
 //!
 //! The reference lays the text out **once per raise** and draws it every frame, between the
 //! background quad and the progress bar. Its placement, in the screen's own `[0,1]` ortho:
@@ -37,14 +45,28 @@
 //! at 16:9); position `(0.5 − s·0.5, 0.1 + yoff, 0)`; `justifyH = 0` (left); wrap width `s`; body
 //! `0xd7c8c8c8` ARGB with an opaque black shadow at `(+0.001, −0.001)`.
 //!
-//! **`yoff` is `(1 − a)·0.5` and we do not apply it, on purpose.** wow-re left that term
-//! *unreconciled*: `0x406a60` already applies the letterbox as a viewport, and `yoff` is
-//! bit-for-bit the same `(1 − a)·0.5` added again inside it, which may double-count on a display
-//! narrower than 4:3. benilla's loading screen is a **4:3 content box by construction** (the root
-//! letterboxes and the area is `100vh × 4/3`), and at 4:3 the reference's own `yoff` is exactly
-//! zero — so placing the tip in that box at `y = 0.1` is the reference's layout on the one aspect
-//! where the ambiguity cannot bite. If wow-re settles the term differently the fix is this comment
-//! and one constant.
+//! **Placing it in the 4:3 box is not an approximation of that — it is the same numbers.** The
+//! reference's `[0,1]` ortho spans the whole window, so its `s` and `left` both carry `a`; ours are
+//! percentages of a box that is `H` tall and `4H/3` wide. Multiply them out and the `a` cancels:
+//!
+//! ```text
+//! ref wrap  = s·W          = 515·W / (a·1024)          = 515·H / (1024·0.75) = 0.6706·H
+//! our wrap  = s₁·(4H/3)    = (515/1024)·(4H/3)                               = 0.6706·H
+//! ref left  = (0.5 − s/2)·W                                   = 0.5·W − 0.3353·H
+//! our left  = (W − 4H/3)/2 + (0.5 − s₁/2)·(4H/3)              = 0.5·W − 0.3353·H
+//! ```
+//!
+//! …for **every** aspect, not just 4:3 — the reference's own wrap column is a constant multiple of
+//! the window HEIGHT, which is exactly what a height-fit letterboxed box makes it. And `yoff` is
+//! settled rather than dodged: `0x4066b9`'s `fcom; fnstsw; test ah,5; jp` takes the `(1 − a)·0.5`
+//! arm **only for `a < 1`**, so on any window at least 4:3 wide the term is zero and the two
+//! layouts agree bit for bit. Narrower than 4:3 they part — but so does the whole loading screen
+//! there (our box overflows where the reference letterboxes top and bottom), and that is the
+//! screen's difference to answer, not the tip's.
+//!
+//! `TIP_BOTTOM`'s `0.1` is not a round number either: `0x4066ee` builds it as `0.05·0.5 + 0.075`,
+//! which is the bar border's own `halfH·0.5 + cy` — **the tip's baseline IS the top edge of the
+//! progress bar**, so the block always sits directly on it.
 //!
 //! The `|cffffd100Tip:|r ` prefix and the trailing `\r\n` are **in the DBC data**, and the escapes
 //! *are* interpreted (`0x5c28af`, flags bit `0x800` clear), so the gold "Tip:" is markup rather
@@ -69,7 +91,13 @@ const TIP_SCALE: f32 = 515.0 / 1024.0;
 /// just above the progress bar's `cy = 0.075`.
 const TIP_BOTTOM: f32 = 0.1;
 
-/// `0.018 · [0x832a48]` — the font height as a fraction of the viewport height.
+/// **The font height is 1.8 % of the viewport HEIGHT**, and the `[0x832a48]` in `0x406659`'s
+/// `0.018 · [0x832a48]` is the unit conversion, not part of the number. `0x41ad10` writes that
+/// slot as `1/√(x²+1)` and its neighbour `[0x832a44]` as `x/√(x²+1)` — height/diagonal and
+/// width/diagonal, i.e. the pair that turns a height- or width-fraction into the diagonal-
+/// normalized units `0x44d040` and the placement round trip both work in (`0x41ae70 = x·[832a48]`
+/// beside `0x41ae60 = x·[832a44]`). Reading the 0.6 the shipped `.data` holds as a factor to apply
+/// would shrink the line to five-eighths of the reference's.
 const TIP_FONT_FRACTION: f32 = 0.018;
 
 /// The body colour `0xd7c8c8c8` (ARGB) and its shadow offset, in the same `[0,1]` space.
@@ -213,6 +241,30 @@ pub(crate) const fn base_color() -> Color {
     TIP_COLOR
 }
 
+/// **The tip node's components, in one place.** The loading screen spawns this under its 4:3
+/// content box; [`drive_game_tip`] queries it back. They were written twice — the tuple in
+/// `loading_screen.rs`, the query here — with nothing tying the two together.
+pub(crate) fn tip_bundle() -> impl Bundle {
+    (
+        Text::new(String::new()),
+        TextLayout {
+            linebreak: LineBreak::WordBoundary,
+            justify: Justify::Left,
+        },
+        TextFont::default(),
+        TextColor(TIP_COLOR),
+        TextShadow::default(),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Percent(0.0),
+            bottom: Val::Percent(0.0),
+            width: Val::Percent(0.0),
+            ..default()
+        },
+        Visibility::Hidden,
+    )
+}
+
 pub(crate) struct GameTipPlugin;
 
 impl Plugin for GameTipPlugin {
@@ -262,79 +314,91 @@ fn drive_game_tip(
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     mut persist: ResMut<crate::cvars::CvarPersist>,
 ) {
-    if let Some(edge) = screen.take_tip_edge() {
-        let next = match edge {
-            crate::loading_screen::TipEdge::Pick => raise(
-                &mut tips,
-                setting.show,
-                roster
-                    .as_ref()
-                    .is_some_and(|r| r.pending_level() == Some(0)),
-                setting.next,
-            ),
-            crate::loading_screen::TipEdge::Clear => {
-                clear(&mut tips);
-                None
-            }
-        };
-        if let Some(next) = next {
-            // The cursor moves only when a tip was actually shown — a suppressed tip freezes it.
-            setting.next = i64::from(next);
-            if let Some(mut script) = script {
-                crate::cvars::write_host_cvar(
-                    &mut script,
-                    &mut persist,
-                    "gameTip",
-                    &next.to_string(),
-                );
-            }
-            // The run's own evidence: which row this screen carries and where the cursor lands.
-            // A tip is a picture on a screen that is up for a second, so "did it pick one" is a
-            // question for a log line, not for a capture.
-            info!("loading screen: tip {} of {}", next - 1, tips.catalog.len());
+    let Some(edge) = screen.take_tip_edge() else {
+        return;
+    };
+    let next = match edge {
+        crate::loading_screen::TipEdge::Pick => raise(
+            &mut tips,
+            setting.show,
+            roster
+                .as_ref()
+                .is_some_and(|r| r.pending_level() == Some(0)),
+            setting.next,
+        ),
+        crate::loading_screen::TipEdge::Clear => {
+            clear(&mut tips);
+            None
         }
-        // The text is laid out once per raise, not per frame, exactly as the reference does.
-        let Ok((entity, mut n, mut font, mut shadow, mut vis)) = node.single_mut() else {
-            return;
-        };
-        let Some(tip) = tips.shown() else {
-            *vis = Visibility::Hidden;
-            commands.entity(entity).despawn_related::<Children>();
-            return;
-        };
-        // The 4:3 content box is `100vh` tall and `100vh · 4/3` wide, so the window's height is the
-        // box's height and the box's width follows from it.
-        let height = windows.iter().next().map_or(768.0, |w| w.height());
-        let l = layout(height * 4.0 / 3.0, height);
-        let (left, bottom, width) = geometry();
-        n.left = Val::Percent(left);
-        n.bottom = Val::Percent(bottom);
-        n.width = Val::Percent(width);
-        font.font = crate::char_select::wow_font(&assets);
-        font.font_size = l.font_size;
-        shadow.offset = l.shadow;
-        shadow.color = Color::BLACK;
-        *vis = Visibility::Inherited;
+    };
+    if let Some(next) = next {
+        // The cursor moves only when a tip was actually shown — a suppressed tip freezes it. This
+        // is `EnterWorld`'s own bookkeeping and belongs to the PICK, not to the draw: it stands
+        // even on a frame the paint below cannot complete.
+        setting.next = i64::from(next);
+        if let Some(mut script) = script {
+            crate::cvars::write_host_cvar(&mut script, &mut persist, "gameTip", &next.to_string());
+        }
+    }
 
-        // The coloured runs: the first is the `Text` root's own, the rest are `TextSpan` children.
-        let runs = spans(tip, base_color());
-        let mut e = commands.entity(entity);
-        e.despawn_related::<Children>();
-        match runs.split_first() {
-            Some(((head, head_color), rest)) => {
-                e.insert((Text::new(head.clone()), TextColor(*head_color)));
-                let (rest, tf) = (rest.to_vec(), font.clone());
-                e.with_children(|c| {
-                    for (text, color) in rest {
-                        c.spawn((TextSpan::new(text), tf.clone(), TextColor(color)));
-                    }
-                });
-            }
-            None => {
-                e.insert(Text::new(String::new()));
-                *vis = Visibility::Hidden;
-            }
+    // The text is laid out once per raise, not per frame, exactly as the reference does.
+    let Ok((entity, mut n, mut font, mut shadow, mut vis)) = node.single_mut() else {
+        // Our own `setup_loading_screen` spawns this node, so a miss is a STRUCTURAL bug — the
+        // bundle no longer answering the shape of this query — and never a state a run can
+        // legitimately be in. It was a silent `return` for one release, and it cost the whole
+        // feature while every other instrument read green (decision 2083).
+        warn!("loading screen: the tip node is missing — no tip can draw");
+        return;
+    };
+    let Some(tip) = tips.shown() else {
+        *vis = Visibility::Hidden;
+        commands.entity(entity).despawn_related::<Children>();
+        return;
+    };
+    // The 4:3 content box is `100vh` tall and `100vh · 4/3` wide, so the window's height is the
+    // box's height and the box's width follows from it.
+    let height = windows.iter().next().map_or(768.0, |w| w.height());
+    let l = layout(height * 4.0 / 3.0, height);
+    let (left, bottom, width) = geometry();
+    n.left = Val::Percent(left);
+    n.bottom = Val::Percent(bottom);
+    n.width = Val::Percent(width);
+    font.font = crate::char_select::wow_font(&assets);
+    font.font_size = l.font_size;
+    shadow.offset = l.shadow;
+    shadow.color = Color::BLACK;
+    *vis = Visibility::Inherited;
+
+    // The coloured runs: the first is the `Text` root's own, the rest are `TextSpan` children.
+    let runs = spans(tip, base_color());
+    let painted = !runs.is_empty();
+    let mut e = commands.entity(entity);
+    e.despawn_related::<Children>();
+    match runs.split_first() {
+        Some(((head, head_color), rest)) => {
+            e.insert((Text::new(head.clone()), TextColor(*head_color)));
+            let (rest, tf) = (rest.to_vec(), font.clone());
+            e.with_children(|c| {
+                for (text, color) in rest {
+                    c.spawn((TextSpan::new(text), tf.clone(), TextColor(color)));
+                }
+            });
         }
+        None => {
+            e.insert(Text::new(String::new()));
+            *vis = Visibility::Hidden;
+        }
+    }
+
+    // The run's own evidence — and it sits HERE, past the query, the layout and the runs, because
+    // the line it replaces sat in front of all three: it reported a row picked over a screen that
+    // drew nothing, and a live smoke run printed it twice while the feature was entirely dead.
+    if let (Some(next), true) = (next, painted) {
+        info!(
+            "loading screen: tip {} of {} on screen",
+            next - 1,
+            tips.catalog.len()
+        );
     }
 }
 
@@ -380,7 +444,7 @@ pub(crate) fn raise(
     }
 }
 
-/// Every other raise — an in-world portal or worldport — carries no tip.
+/// The dismiss (`0x407f2b`, inside `0x407e80`) — the only thing that takes a tip down.
 pub(crate) fn clear(tips: &mut GameTips) {
     tips.shown = None;
 }
@@ -483,5 +547,125 @@ mod tests {
             (l.font_size - 13.824).abs() < 0.01,
             "0.018 of the box height"
         );
+    }
+
+    /// An app holding the real node and the real system, one tip in the table.
+    fn tip_app() -> (App, Entity) {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        app.init_asset::<bevy::text::Font>();
+        app.init_resource::<crate::cvars::CvarPersist>();
+        app.init_resource::<GameTipSetting>();
+        app.insert_resource(GameTips {
+            catalog: GameTipsCatalog::from_tips(vec![
+                "|cffffd100Tip:|r Talk to the innkeeper.\r\n".to_string(),
+            ]),
+            shown: None,
+        });
+        app.init_resource::<crate::loading_screen::LoadingScreen>();
+        let tip = app
+            .world_mut()
+            .spawn((crate::loading_screen::LoadingTip, tip_bundle()))
+            .id();
+        app.add_systems(Update, drive_game_tip);
+        (app, tip)
+    }
+
+    fn set_edge(app: &mut App, edge: crate::loading_screen::TipEdge) {
+        app.world_mut()
+            .resource_mut::<crate::loading_screen::LoadingScreen>()
+            .tip_edge = Some(edge);
+    }
+
+    /// **The tip has to reach the node, and only a run of the real system can say that.** Every
+    /// pure-function test here covers the *pick* — and the pick is exactly the half that worked: it
+    /// advanced the cursor, wrote `gameTip`, and logged "tip N of 74" over a screen that drew
+    /// nothing, because the spawned bundle was one component short of what [`drive_game_tip`]'s
+    /// query asks for and the missed `single_mut()` returned in silence. So this drives the
+    /// system over the bundle the loading screen actually spawns and looks at the glass end.
+    #[test]
+    fn a_pick_paints_the_node_the_loading_screen_spawns() {
+        let (mut app, tip) = tip_app();
+        set_edge(&mut app, crate::loading_screen::TipEdge::Pick);
+        app.update();
+
+        let w = app.world();
+        assert_eq!(
+            w.get::<Visibility>(tip),
+            Some(&Visibility::Inherited),
+            "the tip node never came out of hiding"
+        );
+        assert_eq!(
+            w.get::<Text>(tip).map(|t| t.0.as_str()),
+            Some("Tip:"),
+            "the gold prefix is the root run"
+        );
+        let kids = w
+            .get::<Children>(tip)
+            .expect("the body sentence is a TextSpan child");
+        assert_eq!(kids.len(), 1, "one run after the prefix");
+        assert_eq!(
+            w.get::<TextSpan>(kids[0]).map(|t| t.0.as_str()),
+            Some(" Talk to the innkeeper.")
+        );
+        // …and the geometry the paint writes, which is what puts it above the bar rather than at
+        // the box's corner where the bundle leaves it.
+        let node = w.get::<Node>(tip).expect("Node");
+        assert_eq!(node.bottom, Val::Percent(geometry().1));
+        assert_eq!(node.width, Val::Percent(geometry().2));
+        assert!(
+            w.get::<TextFont>(tip).is_some_and(|f| f.font_size > 0.0),
+            "the font height is resolved from the window"
+        );
+        // The cursor moved with it: `gameTip` holds the NEXT row.
+        assert_eq!(w.resource::<GameTipSetting>().next, 1);
+    }
+
+    /// **A tip outlives every raise and dies with the screen** — [`crate::loading_screen`]'s law
+    /// (decision 2081), seen from the painting end. That module's own test asserts which *edges*
+    /// the state machine emits; this one asserts what the painter does with them, and the case that
+    /// matters is the one with no edge at all: a raise landing on a live screen must leave the line
+    /// exactly where it is, same text and same cursor. Between them the two cover the login snap
+    /// that used to wipe the tip a server round-trip into every world entry.
+    #[test]
+    fn the_tip_outlives_a_second_raise_and_dies_with_the_screen() {
+        let (mut app, tip) = tip_app();
+        set_edge(&mut app, crate::loading_screen::TipEdge::Pick);
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(tip),
+            Some(&Visibility::Inherited)
+        );
+
+        // The destination snap: `drive_loading_screen` raises again and sets NO edge.
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(tip),
+            Some(&Visibility::Inherited),
+            "a raise with no edge must leave the line where it is"
+        );
+        assert_eq!(
+            app.world().get::<Text>(tip).map(|t| t.0.as_str()),
+            Some("Tip:")
+        );
+        assert_eq!(
+            app.world().resource::<GameTipSetting>().next,
+            1,
+            "and it must not re-pick: one screen, one row"
+        );
+
+        // The dismiss.
+        set_edge(&mut app, crate::loading_screen::TipEdge::Clear);
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(tip),
+            Some(&Visibility::Hidden),
+            "the pending tip dies with the screen"
+        );
+        assert!(app
+            .world()
+            .get::<Children>(tip)
+            .is_none_or(|c| c.is_empty()));
     }
 }

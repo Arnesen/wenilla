@@ -52,14 +52,23 @@
 //!   the whole ambient contribution comes from the M2 lighting collector's own enabled lights —
 //!   the same lights our lit emitters take their `ambient` from.
 //!
-//! So the trail **darkens with the scene** rather than burning at its authored colour. Two named
-//! approximations, both the same class as [`crate::fishing_line`]'s:
+//! So the trail **darkens with the scene** rather than burning at its authored colour — and the
+//! scene it darkens with is its **wearer's**, not the world's. The draw runs inside the weapon
+//! model's own per-frame callback during the wearer's model draw, so the enabled lights it
+//! inherits are the ones the M2 collector committed for that unit; the held weapon's light node is
+//! the wearer's own by aliasing (`[item+0x3b8] = [wearer+0x3b8]`, `0x718960`). Both halves are
+//! four-way byte-derived (wow-re `format7-lighting-term.md`, `part-lit-normal-space.md` §6):
 //!
-//! - we sample the scene ambient ([`benilla_world::lighting::WowLighting`]) rather than summing a
-//!   per-model light collector, so an interior trail takes the exterior ambient;
-//! - the **emissive** term is not modelled. It is inherited material state whose value that round
-//!   did not pin, and `EMISSIVEMATERIALSOURCE` is set nowhere, so it is a constant we would be
-//!   inventing rather than reproducing.
+//! - **outdoors** a unit's committed ambient IS the day/night ambient, so
+//!   [`benilla_world::lighting::WowLighting`] is exact, not an approximation;
+//! - **indoors** it is the light node's own ramped word, chasing `cap96(MOCV)` — the room's light,
+//!   never the sky's ([`benilla_world::interior::NodeAmbient`], the ambient half of the same
+//!   committed words [`benilla_world::interior::ParticleLight`] folds whole). Its absence is the
+//!   exterior lane, which is why the fallback above is the right one and not a guess.
+//!
+//! One named approximation is left: the **emissive** term is not modelled. It is inherited
+//! material state whose value that round did not pin, and `EMISSIVEMATERIALSOURCE` is set nowhere,
+//! so it is a constant we would be inventing rather than reproducing.
 //!
 //! The fold happens on the CPU, into the vertex colours, and the draw declares
 //! [`benilla_world::particles::buffer::EffectLighting::None`] — the ambient is a per-draw constant,
@@ -401,27 +410,35 @@ fn draw_weapon_trails(
     white: Res<TrailWhite>,
     lighting: Option<Res<benilla_world::lighting::WowLighting>>,
     world_cam: Query<Entity, With<WorldCamera>>,
+    // The wearer's committed ambient word, present only while its light node is on the interior
+    // bake lane — the trail takes its WEARER's light, not the scene's (see the module doc).
+    indoors: Query<&benilla_world::interior::NodeAmbient>,
     mut trails: Query<(
         Entity,
         &mut WeaponTrail,
         &GlobalTransform,
         &InheritedVisibility,
+        &benilla_world::model_fade::ParentModel,
     )>,
 ) {
     let Ok(cam) = world_cam.single() else {
         return;
     };
-    // The ambient half of the fixed-function term, folded per draw (see the module doc). Absent
-    // before the first lighting resolve — burn at the authored colour rather than at black.
-    let ambient = lighting.as_deref().map_or([1.0; 3], |l| {
-        [
-            l.ambient[0].clamp(0.0, 1.0),
-            l.ambient[1].clamp(0.0, 1.0),
-            l.ambient[2].clamp(0.0, 1.0),
-        ]
-    });
+    // The EXTERIOR ambient — the fallback, and the right answer outdoors: a unit's own committed
+    // ambient there is the day/night one (`0x69e4ad`'s exterior intensity leg). Absent before the
+    // first lighting resolve — burn at the authored colour rather than at black.
+    let scene = lighting.as_deref().map_or([1.0; 3], |l| l.ambient);
     let now_ms = time.elapsed().as_millis() as u32;
-    for (entity, mut trail, prop, vis) in &mut trails {
+    for (entity, mut trail, prop, vis, wearer) in &mut trails {
+        // Indoors the wearer's node carries a committed ambient word of its own — the ramped chase
+        // toward `cap96(MOCV)`, the room's own light rather than the sky's. Its ABSENCE is the
+        // exterior lane. A Goldshire-inn character's word is ≈ (0.30, 0.22, 0.14) warm against a
+        // night sky's ≈ (0.22, 0.26, 0.29) cool: similar in magnitude, opposite in hue, which is
+        // why taking the scene's outdoors-and-in tinted every indoor trail with the sky.
+        let ambient = indoors
+            .get(wearer.0)
+            .map_or(scene, |a| a.0)
+            .map(|c| c.clamp(0.0, 1.0));
         let bottom = prop.transform_point(trail.bottom);
         let top = prop.transform_point(trail.top);
         let Some(swing) = trail.swing.as_mut() else {

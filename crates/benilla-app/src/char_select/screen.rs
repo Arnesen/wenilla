@@ -657,7 +657,7 @@ pub(super) fn exit_select(
     roots: Query<Entity, With<CharSelectUi>>,
     mut preview: ResMut<GluePreview>,
     mut dialog: ResMut<super::dialog::DeleteDialog>,
-    mut glue_dialog: ResMut<crate::login::LoginDialog>,
+    mut glue_dialog: ResMut<crate::glue::dialog::GlueDialog>,
 ) {
     for e in &roots {
         commands.entity(e).despawn();
@@ -672,8 +672,5 @@ pub(super) fn exit_select(
     // `exit_login` closes it on the same edge for the same reason. The tree goes with it **here**
     // rather than being left to the driver: the driver runs on the glue screens only, so on the
     // edges out of the glue layer there would be nobody left to despawn the root.
-    if let Some(root) = glue_dialog.root.take() {
-        commands.entity(root).despawn();
-    }
-    glue_dialog.close();
+    glue_dialog.dismiss(&mut commands);
 }

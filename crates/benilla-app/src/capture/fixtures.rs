@@ -51,10 +51,11 @@ pub(super) fn seed_ui_fixture(
     mut selection: ResMut<crate::target::Selection>,
     mut player: ResMut<crate::player::Player>,
     // Bundled: Bevy systems cap at 16 top-level params — a nested tuple is one param.
-    (mut actions, mut bank, mut exit): (
+    (mut actions, mut bank, mut exit, mut loading): (
         ResMut<crate::ui_action::PlayerActions>,
         ResMut<crate::ui_bank::BankOpen>,
         MessageWriter<AppExit>,
+        ResMut<crate::loading_screen::LoadingScreen>,
     ),
 ) {
     // A glue-screen capture has no world scenario, and no glue screen opens a UI fixture.
@@ -156,6 +157,11 @@ pub(super) fn seed_ui_fixture(
         // IS the fixture. The `script.is_none()` refusal above still guards it: these scenarios
         // photograph the player UI, so a run without a VM is as wrong for them as for any other.
         UiFixture::Bare => {}
+        // The one fixture that opens no window: it raises the world-entry loading screen over the
+        // settled scene and pins it there, tip and all. `hold_for_capture` sets the `Pick` edge;
+        // `crate::game_tip::drive_game_tip` paints it on the next frame, and the stability watch
+        // settles on the held image.
+        UiFixture::LoadingTip => loading.hold_for_capture(scenario.map),
         UiFixture::Merchant => {
             names.insert_creature(
                 NPC_ENTRY,

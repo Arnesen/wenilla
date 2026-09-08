@@ -8,6 +8,7 @@
 pub(crate) mod add_material;
 pub(crate) mod art;
 pub(crate) mod backdrop;
+pub(crate) mod dialog;
 pub(crate) mod widgets;
 
 use bevy::ecs::entity::EntityHashSet;
@@ -31,8 +32,10 @@ use widgets::{ArtSwap, GlueBtn, GlueCaption, GlueDisabled, OutlineCopy};
 pub(crate) struct GlueVisuals;
 
 /// The shared glue infrastructure both screens stand on: the ADD-mode UI material pipeline, the
-/// [`GlueArt`] resource (loaded on first screen entry), and the GlueStrings table. Registered
-/// before either screen plugin (`main.rs`).
+/// [`GlueArt`] resource (loaded on first screen entry), the GlueStrings table, and the one
+/// [`dialog::GlueDialog`] every glue screen raises. Registered before either screen plugin
+/// (`main.rs`) — which is also why the dialog's resource and message live here rather than in a
+/// screen: they outlive any single screen's plugin.
 pub(crate) struct GluePlugin;
 
 impl Plugin for GluePlugin {
@@ -46,6 +49,8 @@ impl Plugin for GluePlugin {
                 crate::glue_strings::load_glue_strings.after(benilla_assets::AssetSet::Open),
             )
             .init_resource::<GlueClicks>()
+            .init_resource::<dialog::GlueDialog>()
+            .add_message::<dialog::GlueDialogAnswer>()
             .add_systems(PreUpdate, glue_clicks.after(bevy::ui::UiSystems::Focus))
             .add_systems(
                 Update,

@@ -132,12 +132,12 @@ impl Plugin for CharSelectPlugin {
                         input::rotate_model,
                         debug_select_dialog,
                         dialog::drive_delete_dialog,
-                        // The shared glue dialog (`crate::login::drive_dialog`) — the reference's
-                        // one `GlueDialog`, which on this screen carries the refused character
-                        // login. Its home is the login module only because that is where it was
-                        // first needed; the widget is the glue layer's, and the two screens run
-                        // the same instance of it rather than each keeping a copy.
-                        crate::login::drive_dialog,
+                        // The reference's one `GlueDialog` (`crate::glue::dialog`), which on this
+                        // screen carries the refused character login. Both glue screens run the
+                        // same system over the same resource; what a press *means* is answered
+                        // per-screen, and an `Error` — the only kind reachable here — needs no
+                        // answer at all.
+                        crate::glue::dialog::drive_glue_dialog,
                         // Before the list refresh, and before `select_input` reads a click that
                         // landed on the panel rather than the screen (decision 1196).
                         debug_select_addons,
@@ -608,7 +608,7 @@ fn back_on_login_refused(
     mut msgs: MessageReader<CharacterLoginFailedMessage>,
     mut roster: ResMut<Roster>,
     mut next: ResMut<NextState<ClientState>>,
-    mut dialog: ResMut<crate::login::LoginDialog>,
+    mut dialog: ResMut<crate::glue::dialog::GlueDialog>,
     strings: Option<Res<GlueStrings>>,
 ) {
     let Some(msg) = msgs.read().last().copied() else {
@@ -1248,7 +1248,7 @@ mod tests {
             .init_resource::<crate::ui_script::UiKeyboardCapture>()
             .add_message::<EnteredWorldMessage>()
             .add_message::<CharacterLoginFailedMessage>()
-            .init_resource::<crate::login::LoginDialog>()
+            .init_resource::<crate::glue::dialog::GlueDialog>()
             .add_systems(Update, (enter_on_connected, back_on_login_refused).chain());
         app.world_mut().resource_mut::<Roster>().pending_pick = Some(7);
 
@@ -1276,7 +1276,9 @@ mod tests {
         // And the player is told. No GlueStrings in this App, so this is the fallback literal —
         // the shipped sentence for vmangos's `1` is asserted against the real chain below.
         assert_eq!(
-            app.world().resource::<crate::login::LoginDialog>().text,
+            app.world()
+                .resource::<crate::glue::dialog::GlueDialog>()
+                .text,
             "World server is down",
             "a refusal the player cannot see is the bug this whole path exists to end",
         );
