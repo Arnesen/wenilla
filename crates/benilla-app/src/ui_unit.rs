@@ -128,11 +128,14 @@ struct UnitFeedMemo {
     /// The last `(PLAYER_XP, PLAYER_NEXT_LEVEL_XP)` pair pushed, for the `PLAYER_XP_UPDATE` trigger —
     /// the XP bar's feed is a player-global (like coinage), not a per-unit-token field.
     last_xp: Option<(u32, u32)>,
-    /// The last `(restState, restPool, PLAYER_FLAGS)` triple pushed, for the `UPDATE_EXHAUSTION`
-    /// and `PLAYER_UPDATE_RESTING` triggers — player-globals like the XP pair (decisions
-    /// 1082/1087). The whole flags dword, not just the resting bit: the client's `0x5ee990`
-    /// fires `PLAYER_UPDATE_RESTING` on any PLAYER_FLAGS delta. Pushed as one snapshot so
+    /// The last `(restState, restPool, PLAYER_FLAGS)` triple pushed, for the `UPDATE_EXHAUSTION`,
+    /// `PLAYER_UPDATE_RESTING` and `PLAYTIME_CHANGED` triggers — player-globals like the XP pair
+    /// (decisions 1082/1087/2078). Pushed as one snapshot so
     /// `GetRestState`/`GetXPExhaustion`/`IsResting` never read it half-updated.
+    ///
+    /// The whole flags dword is kept because the two flag events read **different bits of it**
+    /// (`0x20` and `0x1000|0x2000`), not because either fires on the word as a whole — 2078
+    /// corrected that, and the feed XORs against this to find which arm moved.
     last_rest: Option<(u8, u32, u32)>,
     /// Our avatar's last-seen `UNIT_FIELD_LEVEL`, for the `PLAYER_LEVEL_UP` trigger (decision
     /// 1094). `None` until first seen — the first sighting is the login descriptor, not a ding.
@@ -924,6 +927,11 @@ pub(crate) fn snapshot(
         // TYPEMASK_PLAYER restriction achieves there: a non-player has no PLAYER block at all, so
         // the field simply reads absent.
         group_leader: store.0.player_is_group_leader(),
+        // The raw `PLAYER_FLAGS` dword `PLAYER_FLAGS_CHANGED` fires on (decision 2078) — the
+        // `flags`/`UNIT_FLAGS` pattern one field over. Absent on a creature, which reads 0 and so
+        // can never produce a delta, exactly as the reference's TYPEID_PLAYER-scoped watcher
+        // cannot be registered against one.
+        player_flags: store.0.player_flags(),
         reaction,
         race: race.map(|(n, _)| n.to_string()),
         race_file: race.map(|(_, f)| f.to_string()),
@@ -1254,6 +1262,53 @@ pub(crate) fn fire_transitions(
     // feed's own posture (1953, corrected in 1957). The stock pet bar filters it for `"pet"`.
     if prev.is_some() && changed(|u| u64::from(u.flags)) {
         script.fire_event("UNIT_FLAGS", vec![tok()]);
+    }
+    // `PLAYER_FLAGS_CHANGED` (id 407) — the `UNIT_FLAGS` arm above, one descriptor field over, and
+    // until decision 2078 one of the events a migrated stock window registered and nothing here
+    // produced. Byte-read out of `WoW.exe` at `0x5eea27`-`0x5eea3d`:
+    //
+    // ```
+    // 5eea27  8b 56 08 8b 02 89 45 f0 8b 4a 04 89 4d f4   ; [ebp-0x10] = this player's own GUID
+    // 5eea35  ba 97 01 00 00                              ; edx = 0x197 = 407
+    // 5eea3a  8d 4d f0
+    // 5eea3d  e8 0e 74 f2 ff                              ; call 0x515e50 — the token fan-out
+    // ```
+    //
+    // Three properties, each load-bearing and each verified rather than assumed:
+    //
+    // 1. **Unguarded.** No bit test stands between the XOR-diff at `0x5ee9b8` and this fire, so
+    //    *any* `PLAYER_FLAGS` bit moving announces itself — not just the ones this struct decodes.
+    //    That is why the trigger is the raw dword (`UnitState::player_flags`) and not a bool.
+    // 2. **Above the local-GUID gate** at `0x5eea93` (the ghost/resting/PvP/play-time arms below it
+    //    are self-only; this one is not) — and the trampoline `0x5e2850` resolves the changed
+    //    object by GUID under TYPEMASK_PLAYER, "any player, not the local one" (wow-re
+    //    `object-layer/ledger.tsv`). So a *stranger's* flags fire it, which is the whole reason the
+    //    stock target frame can listen.
+    // 3. **Once per unit token naming that GUID, `arg1` = the token, no `arg2`** — `0x515e50` walks
+    //    `0x515c50`'s token array and calls `0x703f50(id, "%s", token)` per entry (wow-re
+    //    `ui/scratch/unit-field-event-bridge.md` §2.2). That is exactly this function's own shape,
+    //    which is why the arm belongs here and not beside the self-only feeds below.
+    //
+    // **"Fires for any player" is not "reaches Lua", and the difference is free here.**
+    // `0x515e63 test eax,eax / 0x515e6a jle 0x515e8a` skips the fan-out loop entirely on a zero
+    // token count, so a remote player who is nobody's target, mouseover, party or raid member
+    // announces **nothing** to the VM — the handler still runs, and its helm/cloak arms above the
+    // gate still repaint them, but no event is signalled. This feed gets that for nothing by
+    // construction: it is only ever called *per token*, so a tokenless player is never reached
+    // (wow-re `object-layer/scratch/player-flags-delta-arms.md`, the 2078 correction round).
+    //
+    // `prev.is_some()` for the same reason `UNIT_FLAGS` carries it: this is a mirror-diff watcher,
+    // and a unit's first snapshot is its CREATE, which runs no notify pass (1098 §4).
+    //
+    // **The sole 1.12 consumer is the target frame's PARTY-LEADER icon, not an AFK/DND badge** —
+    // `TargetFrame.lua:88-95` re-runs the `UnitIsPartyLeader("target")` show/hide, and bit `0x1` is
+    // that predicate's descriptor leg. Nothing in 1.12 FrameXML draws an AFK or DND badge on a unit
+    // frame, and build 5875 has no `UnitIsAFK`/`UnitIsDND` binding at all (wow-re
+    // `ui/scratch/unit-predicate-return-shape.md` §5, a zero-hit whole-image byte census); the
+    // `<AFK>`/`<DND>` the era shows are the chat line's `arg6` flag. This comment is here because
+    // the gap list said "the AFK/DND badge" for months and sent the first look at the wrong window.
+    if prev.is_some() && changed(|u| u64::from(u.player_flags)) {
+        script.fire_event("PLAYER_FLAGS_CHANGED", vec![tok()]);
     }
     // The POWER pair is named per resource in 1.12, not once with the token as arg2: the reference's
     // `UnitFrameManaBar_Initialize` registers `UNIT_MANA`/`UNIT_RAGE`/`UNIT_FOCUS`/`UNIT_ENERGY`/
@@ -1698,16 +1753,40 @@ fn feed_units(
         }
     }
 
-    // The rest feed (decisions 1082/1087): the `PLAYER_BYTES_2` rest-state byte, the
-    // `PLAYER_REST_STATE_EXPERIENCE` pool and PLAYER_FLAGS, pushed as one snapshot. Two watches,
-    // the byte-verified grain (wow-re rested-xp-bindings.md §5): `UPDATE_EXHAUSTION` on a
-    // state-or-pool change (the client installs a watcher on each — `0x5de4e0` on the byte,
-    // `0x5de4b0` on the pool field), `PLAYER_UPDATE_RESTING` on **any PLAYER_FLAGS delta**
-    // (`0x5ee990` fires it beside PLAYER_FLAGS_CHANGED without testing which bit moved — the
-    // resting bit is just its loudest consumer). Runs before the PLAYER_ENTERING_WORLD fire
-    // below, like the XP push: in the real client the descriptor always lands before that
-    // event, so the first paint reads real state — the model's byte-2 default (its doc) is the
-    // backstop, this ordering is the guarantee itself.
+    // The rest feed (decisions 1082/1087/2078): the `PLAYER_BYTES_2` rest-state byte, the
+    // `PLAYER_REST_STATE_EXPERIENCE` pool and PLAYER_FLAGS, pushed as one snapshot. Runs before
+    // the PLAYER_ENTERING_WORLD fire below, like the XP push: in the real client the descriptor
+    // always lands before that event, so the first paint reads real state — the model's byte-2
+    // default (its doc) is the backstop, this ordering is the guarantee itself.
+    //
+    // **The self-only arms below are each gated on their OWN bits**, which is `0x5ee990`'s actual
+    // shape and not what this comment said until 2078. Everything from `0x5eea93` down — where the
+    // handler compares the changed player's GUID against the local one — is self-only, and inside
+    // that region each arm carries its own `test`:
+    //
+    // ```
+    // 5eead0  f6 45 fc 20   test byte [ebp-4],0x20   ; the RESTING bit CHANGED?
+    // 5eead4  74 26         je   0x5eeafc            ;   no -> skip the whole arm
+    // 5eead6..5eeaed              tutorial popup 0x4b5390(0x1d), only if the bit is now SET
+    // 5eeaf2  b9 95 01 00 00 / e8 …  mov ecx,0x195 ; call 0x703e50   <- PLAYER_UPDATE_RESTING
+    // 5eeafc  ...
+    // 5eeaff  f6 c4 02      test ah,0x2              ; bit 0x200, the PvP-desired arm (0652)
+    // 5eeb65  f6 c4 30      test ah,0x30             ; bits 0x1000|0x2000, the play-time regimes
+    // 5eeb6f  e8 …          call 0x703e50 (ecx=0x212) <- PLAYTIME_CHANGED
+    // ```
+    //
+    // `0x5eeaf2` sits INSIDE the `0x20` arm (`0x5eeaf2 < 0x5eeafc`, the `je`'s target), so
+    // **PLAYER_UPDATE_RESTING fires only on the resting bit's own edge** — not, as wow-re's
+    // `rested-xp-bindings.md` §5 and its `0x5ee990` ledger row both say, "on every flags change,
+    // not only the resting bit". That claim is what this feed was built against, and it made every
+    // helm toggle, every leadership pass and every AFK flip announce a resting change to the UI.
+    // The note's "argless unconditionally" is true only of the *direction*: the inner
+    // `0x5eeae4 je` skips the tutorial popup, never the fire, so both edges of the bit fire it.
+    // A correction round is dispatched into wow-re; the bytes above are read straight out of
+    // `WoW.exe` (file offset 0x1eead0, PE imagebase 0x400000, .text RVA 0x1000 → raw 0x1000).
+    //
+    // `UPDATE_EXHAUSTION` is unchanged and was already right: two separate watchers, `0x5de4e0` on
+    // the rest-state byte and `0x5de4b0` on the pool field, neither of them this handler.
     if let Some((store, _)) = self_q.iter().next() {
         let rest = (
             store.0.player_rest_state().unwrap_or(0),
@@ -1720,8 +1799,8 @@ fn feed_units(
             memo.last_rest = Some(rest);
             script.set_rest_state(rest.0, rest.1, rest.2 & PLAYER_FLAGS_RESTING != 0);
             // The same descriptor word carries the two play-time bits, and they ride the same
-            // memo: `0x5ee990` fires PLAYER_FLAGS_CHANGED on ANY PLAYER_FLAGS delta without
-            // testing which bit moved, so one snapshot is the faithful granularity for all three.
+            // memo — the PUSH is one snapshot because the wire delivers one dword; only the
+            // EVENTS below split by bit.
             script.set_play_time(
                 rest.2 & PLAYER_FLAGS_PARTIAL_PLAY_TIME != 0,
                 rest.2 & PLAYER_FLAGS_NO_PLAY_TIME != 0,
@@ -1741,8 +1820,22 @@ fn feed_units(
                     ));
                 }
             }
-            if prev.map(|p| p.2) != Some(rest.2) {
-                script.fire_event("PLAYER_UPDATE_RESTING", vec![]);
+            // The two self-only flag events, each on its own bits' edge (`0x5eead0` and
+            // `0x5eeb65` above). `prev` None is the login descriptor and stays silent for both,
+            // the same fresh-CREATE reasoning the rest message carries — a mirror-diff watcher
+            // has nothing to diff against on a create.
+            if let Some(p) = prev {
+                let moved = p.2 ^ rest.2;
+                if moved & PLAYER_FLAGS_RESTING != 0 {
+                    script.fire_event("PLAYER_UPDATE_RESTING", vec![]);
+                }
+                // PLAYTIME_CHANGED (id 530) — `0x5eeb65 test ah,0x30`, argless, self-only. Stock
+                // `PlayerFrame.lua:23` registers it and `PlayerFrame_UpdatePlaytime` reads
+                // `PartialPlayTime()`/`NoPlayTime()`, both of which we already feed off this very
+                // snapshot; the event was the one missing half. Decision 2078.
+                if moved & (PLAYER_FLAGS_PARTIAL_PLAY_TIME | PLAYER_FLAGS_NO_PLAY_TIME) != 0 {
+                    script.fire_event("PLAYTIME_CHANGED", vec![]);
+                }
             }
         }
     }
@@ -2211,6 +2304,198 @@ mod tests {
         );
         // Nothing moved: nothing fires. The control that stops this passing by firing always.
         assert!(fired(base.clone(), base.clone()).is_empty());
+    }
+
+    /// **`PLAYER_FLAGS_CHANGED` — the event a migrated stock window listened for and nothing
+    /// fired** (decision 2078), pinned on the three properties that make it what it is.
+    ///
+    /// The gap was invisible from both ends, which is 1819's shape exactly: `TargetFrame.lua`
+    /// registered the name and this feed never spoke it, so the target frame's party-leader icon
+    /// only ever refreshed on a re-target. The census that caught it
+    /// (`reference_ui::every_event_a_chain_file_registers_has_a_producer`) described it as "the
+    /// AFK/DND badge"; the handler at `TargetFrame.lua:88-95` is the LEADER icon, and 1.12 has no
+    /// AFK/DND badge on any unit frame — so the control below is a bit no `UnitState` field
+    /// decodes, proving the trigger is the raw dword and not the two bools next to it.
+    #[test]
+    fn player_flags_changed_fires_per_token_on_any_bit_and_never_on_first_sight() {
+        let fired = |prev: Option<UnitState>, cur: UnitState| -> Vec<String> {
+            let mut s = UiScript::new().unwrap();
+            s.run(
+                r#"
+                SEEN = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("PLAYER_FLAGS_CHANGED")
+                f:SetScript("OnEvent", function() table.insert(SEEN, event .. ":" .. arg1) end)
+            "#,
+            )
+            .unwrap();
+            fire_transitions(&mut s, "target", prev.as_ref(), &cur);
+            s.eval::<Vec<String>>("return SEEN").unwrap()
+        };
+        let base = UnitState {
+            exists: true,
+            has_object: true,
+            ..Default::default()
+        };
+        let with = |flags: u32| UnitState {
+            player_flags: flags,
+            group_leader: flags & 0x1 != 0,
+            ghost: flags & 0x10 != 0,
+            ..base.clone()
+        };
+
+        // The 1.12 consumer's own bit: `PLAYER_FLAGS_GROUP_LEADER 0x1`, `UnitIsPartyLeader`'s
+        // descriptor leg — leadership passing to the player you are targeting.
+        assert_eq!(
+            fired(Some(with(0)), with(0x1)),
+            vec!["PLAYER_FLAGS_CHANGED:target".to_string()],
+            "arg1 is the unit token, and there is no arg2 (0x515e50 -> 0x703f50(id, \"%s\", token))"
+        );
+        // …and back down. The reference tests the XOR-diff, not the new value.
+        assert_eq!(
+            fired(Some(with(0x1)), with(0)),
+            vec!["PLAYER_FLAGS_CHANGED:target".to_string()]
+        );
+
+        // **The control that proves the trigger is the RAW DWORD.** `PLAYER_FLAGS_HIDE_HELM 0x400`
+        // is a bit no `UnitState` field decodes — the fire at `0x5eea35` carries no bit test, so
+        // it announces this exactly as loudly as the leader bit. A version of this arm driven off
+        // `group_leader`/`ghost` passes every assertion above and fails here.
+        assert_eq!(
+            fired(Some(with(0)), with(0x400)),
+            vec!["PLAYER_FLAGS_CHANGED:target".to_string()],
+            "an undecoded bit still fires it — the handler tests no bit at all"
+        );
+
+        // First sight is the CREATE, and a CREATE runs no notify pass (1098 §4) — the same
+        // posture `UNIT_FLAGS` holds one field over.
+        assert!(
+            fired(None, with(0x1)).is_empty(),
+            "a unit's first snapshot is its create, not a transition"
+        );
+        // The control that stops all of the above passing by firing always.
+        assert!(fired(Some(with(0x1)), with(0x1)).is_empty());
+    }
+
+    /// **The two SELF-ONLY arms of the same handler, each on its own bits** — the half that was
+    /// over-firing, and the half that was missing (decision 2078).
+    ///
+    /// `0x5ee990`'s local-GUID gate at `0x5eea93` divides it: `PLAYER_FLAGS_CHANGED` above (any
+    /// player), and below it three arms that each carry their own `test` against the XOR-diff.
+    /// benilla fired `PLAYER_UPDATE_RESTING` on *any* `PLAYER_FLAGS` delta, because wow-re's
+    /// `rested-xp-bindings.md` §5 says it does; `0x5eead0 f6 45 fc 20 / 74 26` says otherwise —
+    /// the `je`'s target is `0x5eeafc` and the fire is at `0x5eeaf2`, inside the arm.
+    #[test]
+    fn the_self_flag_events_each_fire_on_their_own_bits() {
+        use bevy::ecs::system::RunSystemOnce;
+        const FIELD_PLAYER_FLAGS: u16 = 190;
+
+        let mut app = App::new();
+        app.init_resource::<Selection>()
+            .init_resource::<UnitFeedState>()
+            .init_resource::<NameCache>()
+            .init_resource::<Reputations>()
+            .init_resource::<crate::ui_party::GroupState>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::ui_guild::GuildState>();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        app.insert_resource(NetCommands(tx));
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+                SEEN = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("PLAYER_UPDATE_RESTING")
+                f:RegisterEvent("PLAYTIME_CHANGED")
+                f:RegisterEvent("UPDATE_EXHAUSTION")
+                f:SetScript("OnEvent", function() table.insert(SEEN, event) end)
+            "#,
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+        let me = app
+            .world_mut()
+            .spawn((
+                SelfPlayer,
+                Guid(0x77),
+                ObjectStore(
+                    benilla_protocol::ObjectFields::from_pairs(&[])
+                        .into_created(benilla_protocol::messages::ObjectType::Player),
+                ),
+            ))
+            .id();
+
+        // Set PLAYER_FLAGS, run the feed, read back what fired.
+        let step = |app: &mut App, flags: u32| -> Vec<String> {
+            app.world_mut()
+                .entity_mut(me)
+                .get_mut::<ObjectStore>()
+                .unwrap()
+                .0
+                .merge(benilla_protocol::ObjectFields::from_pairs(&[(
+                    FIELD_PLAYER_FLAGS,
+                    flags,
+                )]));
+            app.world_mut().run_system_once(feed_units).unwrap();
+            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            s.resolve();
+            let out = s.eval::<Vec<String>>("return SEEN").unwrap();
+            s.run("SEEN = {}").unwrap();
+            out
+        };
+
+        // Login: the first rest snapshot seeds the memo and says nothing about the flags word.
+        // (`UPDATE_EXHAUSTION` is a different watcher — `0x5de4e0`/`0x5de4b0`, not this handler —
+        // and its first-sight fire is 1087's settled posture, so it is filtered, not asserted on.)
+        let flag_events = |v: Vec<String>| -> Vec<String> {
+            v.into_iter().filter(|e| e != "UPDATE_EXHAUSTION").collect()
+        };
+        assert!(
+            flag_events(step(&mut app, 0)).is_empty(),
+            "the login descriptor is a create: structurally silent (1098 §4)"
+        );
+
+        // **The regression.** `PLAYER_FLAGS_HIDE_HELM 0x400` moves and the resting bit does not —
+        // before 2078 this announced a resting change to every listener in the UI.
+        assert!(
+            flag_events(step(&mut app, 0x400)).is_empty(),
+            "a non-resting, non-playtime bit fires neither self event"
+        );
+        // The resting bit's own edge, both ways: `0x5eead0 test byte [ebp-4],0x20`.
+        assert_eq!(
+            flag_events(step(&mut app, 0x400 | PLAYER_FLAGS_RESTING)),
+            vec!["PLAYER_UPDATE_RESTING".to_string()]
+        );
+        assert_eq!(
+            flag_events(step(&mut app, 0x400)),
+            vec!["PLAYER_UPDATE_RESTING".to_string()],
+            "the fire is on the XOR-diff, so the clear edge fires it too"
+        );
+
+        // `PLAYTIME_CHANGED` — `0x5eeb65 test ah,0x30`, the two play-time regimes together.
+        assert_eq!(
+            flag_events(step(&mut app, 0x400 | PLAYER_FLAGS_PARTIAL_PLAY_TIME)),
+            vec!["PLAYTIME_CHANGED".to_string()]
+        );
+        assert_eq!(
+            flag_events(step(
+                &mut app,
+                0x400 | PLAYER_FLAGS_PARTIAL_PLAY_TIME | PLAYER_FLAGS_NO_PLAY_TIME
+            )),
+            vec!["PLAYTIME_CHANGED".to_string()],
+            "the second regime bit is the same arm, not a second event"
+        );
+
+        // Both arms at once, from one dword: the handler runs them in order and neither masks the
+        // other.
+        assert_eq!(
+            flag_events(step(&mut app, 0x400 | PLAYER_FLAGS_RESTING)),
+            vec![
+                "PLAYER_UPDATE_RESTING".to_string(),
+                "PLAYTIME_CHANGED".to_string()
+            ]
+        );
     }
 
     /// **Report B304 — Quiver's range indicator read Dead Zone on a far target.**

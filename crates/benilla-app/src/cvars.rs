@@ -539,6 +539,32 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // the director's `/p` ask, and is a click away on the Chat page.
     same("ChatBubbles", "1"),
     same("ChatBubblesParty", "0"),
+    // **The two text filters** (2077) — 1.12's own pair, and both are real features rather than
+    // vestigial switches, which is what the wow-re §5 round behind `text-filter-law.md` settled.
+    // Registered `"1"` each, byte-read: `0x402e68` (`profanityFilter`, name `0x82e7f4`, callback
+    // `0x403570`) and `0x402e8e` (`spamFilter`, name `0x82e7d4`, callback `0x4035b0`), both pushing
+    // the shared `"1"` literal `0x82e748`, both category 4.
+    //
+    // `profanityFilter` masks matched spans of `ChatProfanity.dbc` in place, and it gates INSIDE
+    // the shared masker (`0x4a1a66`), so all thirteen of its call sites are covered by the one
+    // switch — the 14 social chat types, mail, the guild MOTD/info/rank names, item text and the
+    // send path. `spamFilter` is a predicate over `SpamMessages.dbc` at the chat chokepoint that
+    // **drops** a matching line silently. The knob for both is
+    // [`crate::text_filter::TextFilterSwitches`]; the engine is `crate::text_filter`.
+    same("profanityFilter", "1"),
+    same("spamFilter", "1"),
+    // **The loading-screen tip of the day** (2077) — 1.12's own pair, both registered lazily by
+    // `CGlueMgr::EnterWorld` on its way to the config flush (`0x46b633` `gameTip` `"0"`,
+    // `0x46b658` `showGameTips` `"1"`, both category 5, neither with a callback or a help string;
+    // wow-re `system/loadingscreen/scratch/game-tip-of-the-day.md`).
+    //
+    // `gameTip` is not a preference — it is the **cursor**, and it holds the NEXT row rather than
+    // the one on screen, which is why the reference's own `Config.wtf` reads `SET gameTip "34"`
+    // while showing row 33. It is registered here because that is how it persists: the file is
+    // composed from the VM's live table, so the host's advance writes through it. `crate::game_tip`
+    // is the law.
+    same("gameTip", "0"),
+    same("showGameTips", "1"),
     // *Detailed Loot Information* (1589, the Chat page) — 1.12's `showLootSpam`, whose subject is
     // group LOOT ROLLS (its own tooltip: "Uncheck this to hide individual loot roll messages and
     // only show the winner"). Registered `"1"`, **byte-read**: wow-re's census of `0xb4e2bc`
@@ -898,6 +924,8 @@ pub(crate) struct KnobParams<'w> {
     tex_filter: ResMut<'w, benilla_assets::TexFilterSetting>,
     pane_rate: ResMut<'w, PaneRate>,
     guild_notify: ResMut<'w, crate::ui_guild::GuildMemberNotify>,
+    text_filter: ResMut<'w, crate::text_filter::TextFilterSwitches>,
+    game_tip: ResMut<'w, crate::game_tip::GameTipSetting>,
     block_trades: ResMut<'w, crate::ui_trade::BlockTrades>,
     auto_self_cast: ResMut<'w, crate::ui_action::AutoSelfCast>,
     realmlist: ResMut<'w, crate::realmlist::Realmlist>,
@@ -934,6 +962,8 @@ impl KnobParams<'_> {
             tex_filter: &mut self.tex_filter,
             pane_rate: &mut self.pane_rate,
             guild_notify: &mut self.guild_notify,
+            text_filter: &mut self.text_filter,
+            game_tip: &mut self.game_tip,
             block_trades: &mut self.block_trades,
             auto_self_cast: &mut self.auto_self_cast,
             realmlist: &mut self.realmlist,
@@ -966,6 +996,8 @@ struct Knobs<'a> {
     tex_filter: &'a mut benilla_assets::TexFilterSetting,
     pane_rate: &'a mut PaneRate,
     guild_notify: &'a mut crate::ui_guild::GuildMemberNotify,
+    text_filter: &'a mut crate::text_filter::TextFilterSwitches,
+    game_tip: &'a mut crate::game_tip::GameTipSetting,
     block_trades: &'a mut crate::ui_trade::BlockTrades,
     auto_self_cast: &'a mut crate::ui_action::AutoSelfCast,
     realmlist: &'a mut crate::realmlist::Realmlist,
@@ -1080,6 +1112,12 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         // the caller dirties the config and the value persists — with nothing to apply this side.
         "statusbartext" | "ubertooltips" => {}
         // The two bubble switches (1139) — flags, like every other pair here.
+        "showgametips" => knobs.game_tip.show = v != 0.0,
+        // The cursor, not a preference — a hand-edited or downgraded value lands here verbatim and
+        // `game_tip::raise` clamps it, which is the reference's own tolerance (`0x46b682`).
+        "gametip" => knobs.game_tip.next = v as i64,
+        "profanityfilter" => knobs.text_filter.profanity = v != 0.0,
+        "spamfilter" => knobs.text_filter.spam = v != 0.0,
         "chatbubbles" => knobs.bubbles.all = v != 0.0,
         "chatbubblesparty" => knobs.bubbles.party = v != 0.0,
         // The loot-roll detail switch (1589) — a flag over the roll-line composer's two shapes.
@@ -1376,6 +1414,8 @@ fn sync_cvars(
             guild_notify,
             block_trades,
             auto_self_cast,
+            text_filter,
+            game_tip,
             msaa,
             msaa_formats,
             tex_filter,
@@ -1413,7 +1453,7 @@ fn sync_cvars(
                 .collect(),
         );
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 45] = [
+        let session: [(&str, String); 49] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -1456,6 +1496,10 @@ fn sync_cvars(
             ("WorldDetail", (clutter.density - 1.0).to_string()),
             ("ChatBubbles", flag(bubbles.all)),
             ("ChatBubblesParty", flag(bubbles.party)),
+            ("profanityFilter", flag(text_filter.profanity)),
+            ("spamFilter", flag(text_filter.spam)),
+            ("showGameTips", flag(game_tip.show)),
+            ("gameTip", game_tip.next.to_string()),
             ("minimapZoom", minimap.outdoor.to_string()),
             ("minimapInsideZoom", minimap.inside.to_string()),
             ("gxVSync", flag(video.vsync)),
@@ -1500,6 +1544,24 @@ fn sync_cvars(
             persist.last_change = Some(Instant::now());
         }
     }
+}
+
+/// **A HOST-side CVar write that persists** — the counterpart to a Lua `SetCVar`, for the one CVar
+/// the engine itself owns: `gameTip`, the loading screen's cursor (2077).
+///
+/// It has to go through the VM's table rather than through the knob alone, because
+/// [`save_config`] composes the file from `cvars_snapshot()` — the knob is only ever *seeded* into
+/// a VM at claim time, so a host write that stops at the knob is invisible to the file and the
+/// cursor resets every launch. Marking dirty here is what arms the debounced save.
+pub(crate) fn write_host_cvar(
+    script: &mut UiScript,
+    persist: &mut CvarPersist,
+    name: &str,
+    value: &str,
+) {
+    script.set_cvar_host(name, value);
+    persist.dirty = true;
+    persist.last_change = Some(Instant::now());
 }
 
 /// Fold the dying VM's CVar table into the persist state — the session edge's half of decision
@@ -1923,9 +1985,13 @@ mod tests {
             crate::realmlist::Realmlist::unpinned(crate::realmlist::DEFAULT_REALMLIST);
         let mut auto_self_cast = crate::ui_action::AutoSelfCast::default();
         let mut fps_journal = crate::perf::FpsJournalSetting::default();
+        let mut text_filter = crate::text_filter::TextFilterSwitches::default();
+        let mut game_tip = crate::game_tip::GameTipSetting::default();
         let mut knobs = Knobs {
             sound: &mut sound,
             auto_self_cast: &mut auto_self_cast,
+            text_filter: &mut text_filter,
+            game_tip: &mut game_tip,
             scale: &mut scale,
             view: &mut view,
             look: &mut look,
@@ -2233,6 +2299,8 @@ mod tests {
             .init_resource::<crate::ui_trade::BlockTrades>()
             .init_resource::<crate::ui_action::AutoSelfCast>()
             .init_resource::<crate::perf::FpsJournalSetting>()
+            .init_resource::<crate::text_filter::TextFilterSwitches>()
+            .init_resource::<crate::game_tip::GameTipSetting>()
             .add_plugins(CvarPlugin);
         app.insert_non_send_resource(UiScript::new().unwrap());
         app

@@ -28,26 +28,43 @@
 //! a shapeshift) is the teardown, exactly as `0x6c6970` frees the object with the model reference
 //! it holds.
 //!
-//! ## The two named deviations
+//! ## The light term — ambient only, and no `N·L` half
 //!
-//! - **The trail is LIT in the reference and unlit here.** The callback writes EGxRs `0x0e = 1`
-//!   (`0x6c6847`; `GL_LIGHTING` / `D3DRS_LIGHTING = TRUE`) — but its vertex format carries **no
-//!   normal** (format 7 is position + colour, stride 16), and what a fixed-function pipeline
-//!   produces from a lit vertex with no normal is not settled by the state bit alone. wow-re's own
-//!   round left the neighbouring question — whether the device even disables the texture unit for
-//!   a declaration with no texcoord — `DEFERRED:` on `gx`'s board for the same unwalked functions
-//!   (`0x594210`, `0x5a1b20`). Modelling a light term on a guess at the normal would be inventing
-//!   the look; the authored colour burns as it is until the bytes say what the light does to it.
-//!   Dispatched.
-//! - **No combat-over-combat fast path.** `0x5fe43c` skips the latch read entirely when the unit
-//!   is *already* playing a combat animation and requests another one — it re-times the clip
-//!   instead of restarting it (`0x5fe48b ret`, before `0x5fe48e`), so the arm is **held**, not
-//!   lost, and fires on the next play that is not that shape. The combat set is `0x5fcc10`'s
-//!   bytemap `{10, 16–24, 30, 36, 57, 58, 59, 85–88, 95, 117, 118}`. benilla's driver is batched
-//!   and has no single "currently playing id" across its base and masked slots, so this is not
-//!   modelled: we fire on the frame's edge, which makes a trail start *slightly earlier* than the
-//!   reference in the one case where a combat one-shot lands mid-combat-animation. Over-firing,
-//!   never under-firing, and never a trail the reference would not eventually draw.
+//! The callback turns lighting **on** (EGxRs `0x0e = 1` at `0x6c6847`) over a vertex format that
+//! carries **no normal** (format 7 is position + colour, stride 16). That combination is not a
+//! contradiction and it is not a no-op — it selects a specific, reduced term, derived at the bytes
+//! in wow-re `format7-lighting-term.md`:
+//!
+//! ```text
+//! out = (Σ enabled lights' Ambient) × authoredColour  +  inherited material Emissive
+//! ```
+//!
+//! - The vertex colour **is** the material: `0x5a1e30` sets both `DIFFUSEMATERIALSOURCE` and
+//!   `AMBIENTMATERIALSOURCE` to `D3DMCS_COLOR1` off the format's diffuse bit, which format 7 has.
+//! - The normal is **explicitly disabled**, not stale: `0x592a60` replaces the format mask rather
+//!   than OR-ing it, and `0x59c100` issues `glDisableClientState(GL_NORMAL_ARRAY)` when the bit is
+//!   clear (D3D's format-7 descriptor carries `−1` in the normal column). So there is no `N·L` to
+//!   compute and the **diffuse half contributes nothing** — which is why this does not simply take
+//!   [`benilla_world::particles::buffer::EffectLighting::Scene`], whose term is
+//!   `clamp(ambient + diffuse·max(N·L, 0))` against the world up axis. Applying that here would
+//!   add a sun term the reference does not have.
+//! - The global `D3DRS_AMBIENT` (EGxRs id 6) has **zero writers image-wide** and defaults to 0, so
+//!   the whole ambient contribution comes from the M2 lighting collector's own enabled lights —
+//!   the same lights our lit emitters take their `ambient` from.
+//!
+//! So the trail **darkens with the scene** rather than burning at its authored colour. Two named
+//! approximations, both the same class as [`crate::fishing_line`]'s:
+//!
+//! - we sample the scene ambient ([`benilla_world::lighting::WowLighting`]) rather than summing a
+//!   per-model light collector, so an interior trail takes the exterior ambient;
+//! - the **emissive** term is not modelled. It is inherited material state whose value that round
+//!   did not pin, and `EMISSIVEMATERIALSOURCE` is set nowhere, so it is a constant we would be
+//!   inventing rather than reproducing.
+//!
+//! The fold happens on the CPU, into the vertex colours, and the draw declares
+//! [`benilla_world::particles::buffer::EffectLighting::None`] — the ambient is a per-draw constant,
+//! and per-draw constants belong in the vertex stream on a lane whose whole design is one shared
+//! buffer of them (the effect lane's own rule; it is what the `Committed` variant exists for).
 //!
 //! ## What is deliberately NOT here
 //!
@@ -321,6 +338,18 @@ fn fade_step(dt_ms: u32, alpha: u8) -> u32 {
 /// the unit plays next, and because `0x5fe2f0` is the image's **single** animation entry point
 /// that is the charge's own run, not the swing at the end of it.
 ///
+/// **The combat fast path is honoured, and benilla got it for free.** `0x5fe43c` returns before
+/// the latch read when the unit is *already* playing a combat animation and requests another one —
+/// it re-times the current clip instead of restarting it — so the arm survives that call. Missing
+/// that would not have invented trails out of nothing, but it would have drawn trails from arms
+/// the reference **supersedes before firing** (`0x60d835` is a plain `mov` into a one-slot field,
+/// so a second proc overwrites the first), with the superseded colours and durations, on 23 of the
+/// 34 type-8 kits. We do not fire there because the driver's own request loop already models the
+/// fast path (decision 0406, `select::is_combat_anim` = `0x5fcc10`'s byte-decoded set): it
+/// `continue`s without playing, so neither `base_played` nor `masked_played` is raised and the
+/// edge stays low. Pinned by
+/// [`the fast path test`](crate::creature_anim::driver::tests).
+///
 /// There is **no per-frame recompute** in the reference (`0x5fd8b0` has one caller;
 /// `0x5fd9e0`'s 38 sites are all event-driven), so an arm on a unit that then changes nothing sits
 /// armed indefinitely and the trail starts late — at whatever event finally plays something. The
@@ -370,6 +399,7 @@ fn draw_weapon_trails(
     time: Res<Time>,
     mut draw: WorldEffectDraw,
     white: Res<TrailWhite>,
+    lighting: Option<Res<benilla_world::lighting::WowLighting>>,
     world_cam: Query<Entity, With<WorldCamera>>,
     mut trails: Query<(
         Entity,
@@ -381,6 +411,15 @@ fn draw_weapon_trails(
     let Ok(cam) = world_cam.single() else {
         return;
     };
+    // The ambient half of the fixed-function term, folded per draw (see the module doc). Absent
+    // before the first lighting resolve — burn at the authored colour rather than at black.
+    let ambient = lighting.as_deref().map_or([1.0; 3], |l| {
+        [
+            l.ambient[0].clamp(0.0, 1.0),
+            l.ambient[1].clamp(0.0, 1.0),
+            l.ambient[2].clamp(0.0, 1.0),
+        ]
+    });
     let now_ms = time.elapsed().as_millis() as u32;
     for (entity, mut trail, prop, vis) in &mut trails {
         let bottom = prop.transform_point(trail.bottom);
@@ -434,7 +473,12 @@ fn draw_weapon_trails(
                 verts.push(EffectVertex {
                     pos: pos.to_array(),
                     uv: [0.0, 0.0],
-                    color: [rgb[0], rgb[1], rgb[2], a],
+                    color: [
+                        rgb[0] * ambient[0],
+                        rgb[1] * ambient[1],
+                        rgb[2] * ambient[2],
+                        a,
+                    ],
                 });
             }
         }

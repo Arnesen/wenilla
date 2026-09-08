@@ -202,6 +202,21 @@ pub struct UnitState {
     /// `UNIT_FIELD_FLAGS`, raw — what `UNIT_FLAGS` fires on (the app's `fire_transitions`); the
     /// three readings above are bits of it.
     pub flags: u32,
+    /// `PLAYER_FLAGS` (descriptor index 190), raw — what **`PLAYER_FLAGS_CHANGED`** fires on, the
+    /// [`Self::flags`] pattern one field over. `0` on a creature, which has no PLAYER block.
+    ///
+    /// The reference watches this dword type-wide over TYPEID_PLAYER (`0x468070(ecx=4, edx=8,
+    /// width 4)` registered at `0x5e25d7`), and its handler `0x5ee990` fires the event from
+    /// `0x5eea35`-`0x5eea3d` — **unguarded by any bit test, and above the local-player GUID gate
+    /// at `0x5eea93`** — so *any* bit moving on *any* player announces itself, remote players
+    /// included. Decision 2078.
+    ///
+    /// Raw, not a decoded subset, and that is the point: [`Self::group_leader`] (`0x1`) and
+    /// [`Self::ghost`] (`0x10`) are the only bits this struct decodes, while `0x2`/`0x4` (the
+    /// chat AFK/DND flags), `0x8` (GM), `0x200` (PvP-desired), `0x400`/`0x800` (hide helm/cloak)
+    /// and `0x1000`/`0x2000` (the play-time regimes) all move without touching either. Firing off
+    /// the decoded pair would silently under-announce every one of them.
+    pub player_flags: u32,
     /// The unit's owner — `UNIT_FIELD_SUMMONEDBY`, else its charmer, else its creator; `0` for
     /// nobody's. What `UnitPlayerOrPetInParty`/`InRaid` read for the "or pet" half (1958).
     pub owner: u64,

@@ -2176,3 +2176,84 @@ fn the_unit_frames_publish_every_name_the_reference_declares() {
         .unwrap();
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
+
+/// **The reported symptom, on the stock file that has it: the target's leader crown went stale.**
+///
+/// `PLAYER_FLAGS_CHANGED` was one of the events a migrated window registered and nothing here
+/// produced (decision 2078). `TargetFrame.lua:88-95` is its only 1.12 consumer and it re-runs the
+/// **party-leader icon** — *not* an AFK/DND badge, which 1.12 has nowhere on a unit frame and has
+/// no `UnitIsAFK`/`UnitIsDND` binding to draw from. With no producer, `TargetFrame_Update` was the
+/// crown's only writer, so it moved on a re-target and at no other moment: leadership passing to
+/// the player you were already holding did nothing on screen.
+///
+/// This drives the real stock file, so it is the symptom itself and not a proxy for it.
+#[test]
+fn the_target_leader_crown_follows_player_flags_changed() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_unit_frames(&s);
+
+    let mate = |leader: bool| {
+        Some(UnitState {
+            exists: true,
+            has_object: true,
+            name: Some("Groupmate".into()),
+            health: 100,
+            max_health: 100,
+            level: 30,
+            power_type: 0,
+            power: 50,
+            max_power: 50,
+            // `UnitIsPartyLeader`'s descriptor leg — PLAYER_FLAGS bit 0x1 — and the raw dword the
+            // event fires on, moved together the way the wire moves them.
+            group_leader: leader,
+            player_flags: u32::from(leader),
+            // **A NON-ZERO guid, or this test cannot fail.** `UnitIsPartyLeader` is two legs ORed
+            // and the second is a raw compare against the group's leader guid, with no zero guard
+            // — verified 1.12 behaviour, which is why `UnitIsPartyLeader(nil)` answers 1 while
+            // solo (`unit::bindings`). A default `UnitState` carries `guid: 0`, which equals the
+            // zeroed leader of an empty group, so the crown is up from the first frame and every
+            // assertion below passes for the wrong reason. Naming a guid puts the descriptor leg
+            // in sole charge, which is the leg this event exists to refresh.
+            guid: 0x4000_0000_0000_0009,
+            ..UnitState::default()
+        })
+    };
+    let crown =
+        |s: &UiScript| -> bool { s.eval::<bool>("return TargetLeaderIcon:IsShown()").unwrap() };
+
+    // Target an ordinary group member: no crown.
+    s.set_unit("target", mate(false));
+    s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+    assert!(!crown(&s), "not the leader: no crown");
+
+    // **Leadership passes to them while you hold the target.** This is the whole report.
+    s.set_unit("target", mate(true));
+    // The control FIRST: the same event for a different token must change nothing, because the
+    // stock handler is gated on `arg1 == "target"`. A producer that fired argless — or that fired
+    // the wrong token — would light the crown here and the assertion below would prove nothing.
+    s.fire_event(
+        "PLAYER_FLAGS_CHANGED",
+        vec![ScriptValue::Str("player".into())],
+    );
+    assert!(
+        !crown(&s),
+        "arg1 = \"player\" is not this frame's unit — the token gate is real"
+    );
+
+    s.fire_event(
+        "PLAYER_FLAGS_CHANGED",
+        vec![ScriptValue::Str("target".into())],
+    );
+    assert!(crown(&s), "the crown appears without a re-target");
+
+    // And back down — the reference fires on the XOR-diff, so the clear edge is the same event.
+    s.set_unit("target", mate(false));
+    s.fire_event(
+        "PLAYER_FLAGS_CHANGED",
+        vec![ScriptValue::Str("target".into())],
+    );
+    assert!(!crown(&s), "leadership leaves and the crown goes with it");
+
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

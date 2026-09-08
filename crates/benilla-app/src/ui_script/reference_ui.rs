@@ -2345,11 +2345,6 @@ mod tests {
             ("PET_UI_CLOSE", "PetPaperDollFrame.lua"),
             ("PET_UI_UPDATE", "PetPaperDollFrame.lua"),
             ("PLAYER_DAMAGE_DONE_MODS", "PaperDollFrame.lua"),
-            (
-                "PLAYER_FLAGS_CHANGED",
-                "TargetFrame.lua — the AFK/DND badge",
-            ),
-            ("PLAYTIME_CHANGED", "PlayerFrame.lua"),
             ("SHOW_COMPARE_TOOLTIP", "PaperDollFrame.lua"),
             ("SYSMSG", "UIErrorsFrame.lua"),
             ("UNIT_DEFENSE", "PetPaperDollFrame.lua"),

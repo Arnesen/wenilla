@@ -932,7 +932,9 @@ fn every_kind_is_in_all() {
     seen.sort_unstable();
     seen.dedup();
     assert_eq!(seen.len(), before, "a kind is listed twice in ALL");
-    assert_eq!(before, 92, "92 kinds — update this when the kind set grows");
+    // 93 since 2077: `CHAT_MSG_FILTERED` (`0x5B`) is a real server line, not the never-wire value
+    // this tree had it filed as — the server's "your message was filtered" notice.
+    assert_eq!(before, 93, "93 kinds — update this when the kind set grows");
 }
 
 #[test]

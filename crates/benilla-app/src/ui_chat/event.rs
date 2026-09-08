@@ -64,6 +64,9 @@ pub(crate) enum ChatEventKind {
     RaidLeader,
     RaidWarning,
     RaidBossEmote,
+    /// `CHAT_MSG_FILTERED` (`0x5B`) — the server's "your message was filtered" notice, whose
+    /// `arg2` is the addressee the stock frame formats `CHAT_FILTERED` over (2077).
+    Filtered,
     Battleground,
     BattlegroundLeader,
     BgSystemNeutral,
@@ -260,6 +263,7 @@ impl ChatEventKind {
             K::RaidLeader,
             K::RaidWarning,
             K::RaidBossEmote,
+            K::Filtered,
             K::Battleground,
             K::BattlegroundLeader,
             K::BgSystemNeutral,
@@ -490,6 +494,7 @@ pub(crate) fn event_name(kind: ChatEventKind) -> &'static str {
         K::RaidLeader => "CHAT_MSG_RAID_LEADER",
         K::RaidWarning => "CHAT_MSG_RAID_WARNING",
         K::RaidBossEmote => "CHAT_MSG_RAID_BOSS_EMOTE",
+        K::Filtered => "CHAT_MSG_FILTERED",
         K::Battleground => "CHAT_MSG_BATTLEGROUND",
         K::BattlegroundLeader => "CHAT_MSG_BATTLEGROUND_LEADER",
         K::BgSystemNeutral => "CHAT_MSG_BG_SYSTEM_NEUTRAL",
@@ -641,6 +646,11 @@ pub(crate) fn default_color(kind: ChatEventKind) -> [u8; 3] {
         K::ChannelJoin | K::ChannelLeave | K::ChannelList => [192, 128, 128],
         K::ChannelNotice | K::ChannelNoticeUser => [192, 192, 192],
         K::Ignored => [255, 0, 0],
+        // `ChatTypeInfo["FILTERED"] = { sticky = 0 }` (ChatFrame.lua l.112) carries **no colour**,
+        // so the stock frame passes nil r/g/b to `AddMessage` and the line takes the window's own
+        // default. White is that default, and this table's consumers (the bubble tint, the edit
+        // box header) never see this kind anyway — it is not a speech line.
+        K::Filtered => [255, 255, 255],
         K::Skill => [85, 85, 255],
         K::Loot => [0, 170, 0],
         K::Money => [255, 255, 0],
@@ -746,6 +756,7 @@ pub(crate) fn kind_of_wire(chat_type: u8) -> Option<ChatEventKind> {
         m::CHAT_MSG_RAID_LEADER => K::RaidLeader,
         m::CHAT_MSG_RAID_WARNING => K::RaidWarning,
         m::CHAT_MSG_RAID_BOSS_EMOTE => K::RaidBossEmote,
+        m::CHAT_MSG_FILTERED => K::Filtered,
         m::CHAT_MSG_BATTLEGROUND => K::Battleground,
         m::CHAT_MSG_BATTLEGROUND_LEADER => K::BattlegroundLeader,
         m::CHAT_MSG_BG_SYSTEM_NEUTRAL => K::BgSystemNeutral,

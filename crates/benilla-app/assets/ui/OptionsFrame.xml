@@ -295,6 +295,31 @@
             end
         end
 
+        -- ── Show Tutorials' SETTER: the reference's own Save arm (decision 2077) ────────────
+        -- UIOptionsFrame.lua l.318-327, verbatim in behaviour. Its CheckButtons row is a bare
+        -- `{ index = 28 }` with no cvar and no uvar, which is why decision 1140's census filed it
+        -- as an "index-only entry with no store at all" and left it out; that reading is wrong.
+        -- The store is not in the TABLE, it is in the three special-case arms `UIOptionsFrame_Load`
+        -- (l.239), `_Save` (l.318) and `_SetDefaults` (l.645) keep for this key — the getter is
+        -- `TutorialsEnabled()` and the setter is the Reset/Clear pair, because "disable tutorials"
+        -- in 1.12 literally means "mark every bit of the acknowledged bank", not a CVar (1976;
+        -- wow-re censused all 210 `CVar::Register` sites and there is no tutorial CVar).
+        --
+        -- The `~=` guard is the reference's and it matters: `TutorialsEnabled()` returns the NUMBER
+        -- 1 or nil, so re-ticking an already-on row does not re-`ResetTutorials()` — which would
+        -- re-arm every tutorial the player has already dismissed.
+        function OptionsFrame_SetTutorialsEnabled(value)
+            if ( tonumber(value) ~= TutorialsEnabled() ) then
+                if ( value == "1" ) then
+                    ResetTutorials()
+                    TutorialFrameCheckButton:SetChecked(1)
+                else
+                    ClearTutorials()
+                end
+                TutorialFrame_HideAllAlerts()
+            end
+        end
+
         UIOptionsFrameCheckButtons = { };
         ------------------- Basic Options -------------------
         -- Controls
@@ -927,7 +952,12 @@
             -- reference's own on-screen order. Its Basic Options Display box is three COLUMNS read
             -- left to right: A gives Status Text (CheckButton2), B gives Show Cloak → Show Helm
             -- (31 → 20, sitting under the name toggles that live on our Nameplates page), C gives
-            -- the 42 → 39 → 66 chain. Help (29) closes the page, as before.
+            -- the 42 → 39 → 66 chain. The **Help** box closes the page, and since 2077 it is
+            -- the box's own order rather than its one shippable row: 28 (Show Tutorials), 44
+            -- (Show Loading Screen Tips, anchored under 28 there) then 29 (Show Detailed
+            -- Tooltips). 28 was left out by 1140's census as an "index-only entry
+            -- with no store at all"; that reading missed the three special-case arms
+            -- `UIOptionsFrame_Load`/`_Save`/`_SetDefaults` keep for the key, which are its store.
             -- The target-of-target pair (decision 1576) breaks that left-to-right reading, and
             -- it has to: 1.12 keeps it in a box this window has no page for — Advanced Options'
             -- "Raid & Party" — so there is no column order to preserve, only a neighbour to pick.
@@ -936,7 +966,8 @@
                 "RowStatusText", "RowTargetOfTarget", "RowTargetOfTargetMode",
                 "RowShowCloak", "RowShowHelm",
                 "RowInstantQuestText", "RowBuffDurations", "RowAutoQuestWatch",
-                "RowNewbieTips",
+                "RowProfanityFilter",
+                "RowShowTutorials", "RowTipOfTheDay", "RowNewbieTips",
             },
             -- 1.12's Advanced Options **Chat** box (decision 1589, B246 — "no chat section in
             -- options"). The page was called `Social` and held exactly the two chat-bubble
@@ -954,17 +985,17 @@
             --   · 51 Auto-join Guild Recruitment Channel — carries **no cvar, uvar or func in the
             --        reference either** (UIOptionsFrame.lua l.51 is a bare `{ index = 51 }`), so
             --        it is inert there; a working row here would be an invention, not a fix
-            --   · 68 Disable Spam Filter — benilla filters no chat text. Unlike 51 this is a REAL
-            --        omission and not an inert row: `spamFilter` is registered "1" at `0x402e8e`
-            --        with a change callback, and its one reader is the chat chokepoint `0x49a870`,
-            --        which drops a `CHAT_MSG_FILTERED` line on a word-list hit unless the type is
-            --        whisper (§5, wow-re `system/ui/scratch/spam-filter-cvar.md`). The row lands
-            --        with the filter.
+            -- Row 68, Disable Spam Filter, **shipped by 2077** — and the note it replaces was
+            -- wrong twice over, both corrected at the bytes by wow-re's `text-filter-law.md`.
+            -- The filter is not a word list, it is 28 compiled PCRE patterns from
+            -- `SpamMessages.dbc`; and it does not drop `CHAT_MSG_FILTERED` lines, it is armed for
+            -- every type EXCEPT that one (`0x49aad2`'s `jne` skips the disarm, which the older
+            -- note read backwards). It drops a matching line silently, with nothing in its place.
             -- 1139's note about the 37 → 46 → 38 gap is closed by this record: 46 is Loot Spam,
             -- and it has a knob now.
             Chat = {
                 "RowGuildMemberAlert", "RowRemoveChatDelay", "RowChatBubbles", "RowLootSpam",
-                "RowPartyChatBubbles",
+                "RowPartyChatBubbles", "RowSpamFilter",
             },
             -- 1.12's Advanced Options "Action Bars" group, whole (decision 1500 completing 1136).
             -- Its six rows, the four bar toggles then the grid switch then the lock. That is the
@@ -3367,10 +3398,73 @@
                                                     "Automatic Quest Tracking", "OPTION_TOOLTIP_AUTO_QUEST_WATCH")
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowNewbieTips" inherits="OptionsCheckboxRowTemplate">
+                                        <!-- Column C's last link (decision 2077): 1.12 anchors
+                                             CheckButton5 TOP to CheckButton66's BOTTOM, so
+                                             Profanity Filter closes the 42 -> 39 -> 66 chain the
+                                             three rows above are. It reads as a chat setting and
+                                             the reference files it under Display; the reference's
+                                             seat wins, as everywhere else on this page.
+
+                                             What it actually does is wider than its neighbours
+                                             suggest: `profanityFilter` gates INSIDE the shared
+                                             masker (`0x4a1a66`), so one tick covers all thirteen
+                                             of its call sites. benilla wires the largest — the
+                                             fourteen social chat types — and `crate::text_filter`
+                                             names the twelve still to come. -->
+                                        <Frame name="$parentRowProfanityFilter" inherits="OptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowAutoQuestWatch" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowAutoQuestWatch" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>OptionsRow_OnLoad(self, "profanityFilter", "Profanity Filter",
+                                                "OPTION_TOOLTIP_PROFANITY_FILTER")</OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- The HELP box opens here (decision 2077). 1.12 seats
+                                             CheckButton28 at its TOPLEFT and hangs 44 (Show
+                                             Loading Screen Tips) under it, with 29 (this page's
+                                             Show Detailed Tooltips) off to the right of the Reset
+                                             Tutorials button — so 28 -> 44 -> 29 is the box's own
+                                             reading order flattened into our column, which is the
+                                             order below.
+                                             The Reset Tutorials BUTTON itself is not here: it is
+                                             not a checkbox, and `ResetTutorials()` is exactly what
+                                             ticking this row already does. -->
+                                        <Frame name="$parentRowShowTutorials" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowProfanityFilter" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowProfanityFilter" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <!-- A `func` row, like Show Cloak / Show Helm: there is
+                                                 no store, the bank IS the state. Its default is the
+                                                 reference's own hand-written one
+                                                 (UIOptionsFrame_SetDefaults l.645,
+                                                 `OptionsFrame_EnableCheckBox(checkButton, 1, 1)`). -->
+                                            <Scripts><OnLoad>
+                                                OptionsFuncRow_OnLoad(self, TutorialsEnabled,
+                                                    OptionsFrame_SetTutorialsEnabled, "1",
+                                                    "Show Tutorials", "OPTION_TOOLTIP_SHOW_TUTORIALS")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- CheckButton44, anchored under 28 in the reference's own
+                                             Help box. Its LABEL is 1.12's own and it is not the
+                                             name the tooltip uses: `SHOW_TIPOFTHEDAY_TEXT` reads
+                                             "Show Loading Screen Tips", while the description
+                                             under `OPTION_TOOLTIP_SHOW_TIPOFTHEDAY` still calls it
+                                             the tip of the day. Both are the reference's strings,
+                                             so both stand. -->
+                                        <Frame name="$parentRowTipOfTheDay" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowShowTutorials" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowShowTutorials" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>OptionsRow_OnLoad(self, "showGameTips",
+                                                "Show Loading Screen Tips",
+                                                "OPTION_TOOLTIP_SHOW_TIPOFTHEDAY")</OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowNewbieTips" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowTipOfTheDay" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowTipOfTheDay" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 OptionsGlobalRow_OnLoad(self, "SHOW_NEWBIE_TIPS",
@@ -3479,6 +3573,34 @@
                                             <Scripts><OnLoad>
                                                 OptionsRow_OnLoad(self, "ChatBubblesParty",
                                                     "Show Party Chat Bubbles", "OPTION_TOOLTIP_PARTY_CHAT_BUBBLES")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- CheckButton 68, the last link in the reference's chat
+                                             chain, and the row this page's note has been promising
+                                             since 1589 ("the row lands with the filter"). It lands
+                                             with decision 2077.
+
+                                             **Value-INVERTED**, like Sticky Targeting: the label
+                                             says *Disable* Spam Filter, so the box is checked when
+                                             `spamFilter` reads "0". That is the reference's own
+                                             pair of arms — `UIOptionsFrame.lua` l.253 checks it on
+                                             `GetCVar == "0"` and l.337 flips the value before
+                                             writing.
+
+                                             The filter behind it drops a line matching any of
+                                             `SpamMessages.dbc`'s 28 gold-seller patterns, silently
+                                             and with nothing in its place — every chat type except
+                                             CHAT_MSG_FILTERED, never for a GM-tagged line or a GM
+                                             viewer. See `crate::text_filter`. -->
+                                        <Frame name="$parentRowSpamFilter" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowPartyChatBubbles" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowPartyChatBubbles" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "spamFilter", "Disable Spam Filter",
+                                                    "OPTION_TOOLTIP_DISABLE_SPAM_FILTER")
+                                                self.invert = 1
                                             </OnLoad></Scripts>
                                         </Frame>
                                     </Frames>

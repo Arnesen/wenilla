@@ -278,6 +278,15 @@ impl Roster {
         self.pending_row().map(|c| c.map)
     }
 
+    /// The pending pick's level — the loading screen's tip-of-the-day guard (decision 2077). The
+    /// reference keeps a synthesised flag at `[selChar+0x10a]` that `0x5b42a0` sets iff this byte
+    /// arrived as `0` in `SMSG_CHAR_ENUM`, and a set flag suppresses the tip. vmangos always sends
+    /// a real level, so the arm is unreachable against our server; it is honoured because it costs
+    /// one comparison and a different server is free to send a zero.
+    pub(crate) fn pending_level(&self) -> Option<u8> {
+        self.pending_row().map(|c| c.level)
+    }
+
     /// The picked character's `(map, wow xyz)` — **where the world we are about to load actually
     /// is**, known from the roster row a whole server round-trip before `SMSG_LOGIN_VERIFY_WORLD`
     /// says so. The streamers aim at this during world entry (decision 0777); without it the only

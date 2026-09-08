@@ -4114,3 +4114,67 @@ fn a_gait_change_raises_the_anim_edge_and_a_steady_frame_does_not() {
     app.update();
     assert!(edge(&app), "and so does a one-shot");
 }
+
+/// **The combat fast path must NOT raise the anim edge** (decision 2076, wow-re
+/// `format7-lighting-term.md`'s second question).
+///
+/// `0x5fe43c` returns at `0x5fe48b` — *before* `0x5fe48e`, the weapon-trail latch's only read —
+/// when the unit is already playing a combat animation and requests another one. So a pending
+/// trail arm survives that play. It matters because `0x60d835` arms a **one-slot** field with a
+/// plain `mov`: a second proc overwrites the first before it ever fires, and a client that fired
+/// on every request would draw trails from arms the reference superseded — with the superseded
+/// colours and durations, on 23 of the 34 type-8 kits.
+///
+/// benilla does not need to build that gate: the driver's request loop already fast-paths
+/// combat-over-combat (decision 0406) and `continue`s without playing, so the edge never rises.
+/// This pins the connection between the two, which is otherwise invisible — they live in different
+/// modules and neither mentions the other's mechanism.
+#[test]
+fn a_combat_over_combat_fast_path_does_not_raise_the_anim_edge() {
+    let mut app = app();
+    let unit = jumper(&mut app);
+    let edge = |app: &App| {
+        app.world()
+            .entity(unit)
+            .get::<AnimDriver>()
+            .unwrap()
+            .started_anim()
+    };
+    let parked = |app: &App| {
+        app.world()
+            .entity(unit)
+            .get::<AnimDriver>()
+            .unwrap()
+            .deferred
+    };
+    app.update(); // settle: Stand
+                  // A combat one-shot — Special1H(57) is in `0x5fcc10`'s set, and the model has it.
+    app.world_mut().write_message(EmoteAnim {
+        entity: unit,
+        anim_id: 57,
+        seq: 1,
+    });
+    app.update();
+    assert!(edge(&app), "the first combat play arms normally");
+    // A SECOND combat request while the first still runs — AttackUnarmed(16), also in the set.
+    // The fast path re-times the live clip and parks the request; nothing is armed.
+    app.world_mut().write_message(SwingMessage {
+        attacker: unit,
+        victim: None,
+        hit_info: 0x2,
+        victim_state: 1,
+        damage: 21,
+        seq: 2,
+    });
+    app.update();
+    assert_eq!(
+        parked(&app),
+        Some(16),
+        "the swing parks behind the kit clip — the fast path fired"
+    );
+    assert!(
+        !edge(&app),
+        "…and it re-times rather than plays, so `0x5fe2f0` returns before the latch read and a \
+         pending trail arm survives"
+    );
+}

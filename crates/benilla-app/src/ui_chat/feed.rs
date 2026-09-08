@@ -720,6 +720,10 @@ pub(super) fn feed_chat(
     // (`TRADESKILL_LOG`, `FEEDPET_LOG`, `ITEMENCHANTMENT*`, `SPELLDURABILITYDAMAGE`) resolve it
     // here, through the same ask-once cache the reference's own deferred queue re-runs against.
     mut items: ResMut<crate::items::Items>,
+    // The two 1.12 text filters (decision 2077), bundled for the same reason `SpeakerEffects` is:
+    // this list is at the sixteen-parameter ceiling. This IS the reference's `0x49a870`, so both
+    // arms belong here and nowhere else.
+    mut text_filter: crate::text_filter::ChatTextFilter,
 ) {
     let Some(mut script) = script else {
         return;
@@ -832,7 +836,38 @@ pub(super) fn feed_chat(
                 // again, so an addon receiving a foreign-language line cannot recover the
                 // plaintext. Ours cannot either, deliberately.
                 let language = langs.effective_language(msg.chat_type, msg.language);
-                let text = langs.garble(language, &plain);
+                let mut text = langs.garble(language, &plain);
+
+                // ── The two text filters, in the reference's own order (decision 2077) ─────────
+                //
+                // They run HERE, on the one buffer the garble just filled, because that is where
+                // `0x49a870` runs them: it fills `[ebp-0xd0c]` once (plain copy or garble) and
+                // both arms operate on that buffer, so a filtered line is filtered in the language
+                // the viewer actually reads.
+                //
+                // **Spam first, mask second, fire third**, and the order is not cosmetic: a line
+                // the spam filter drops is never masked, so its characters must not consume mask
+                // indices — the mask phase is a process-global that carries across every message
+                // and subsystem, and masking before deciding to drop would drift it.
+                if text_filter.should_drop(msg.chat_type, msg.chat_tag, langs.is_gm(), &text) {
+                    // **Nothing is shown in its place.** `0x49ab33`'s not-a-whisper leg jumps to
+                    // `0x49afd7`, the bare epilogue — no event, no substitute text, no chat line.
+                    //
+                    // NOT built, and named rather than faked: the whisper leg. A dropped
+                    // `CHAT_MSG_WHISPER` with a non-zero report guid also sends `CMSG_CHAT_FILTERED`
+                    // (`0x331`) before returning — still firing no event, so the player sees the
+                    // same nothing either way. The packet's BODY is not settled (wow-re parked
+                    // `0x508680`'s send-path verdict as a DEFERRED), vmangos has no handler for the
+                    // opcode, and inventing a body to send a server that ignores it would be worse
+                    // than the honest gap.
+                    debug!(
+                        "chat: spam filter dropped [{:#04x}] {:?}",
+                        msg.chat_type, text
+                    );
+                    continue;
+                }
+                text_filter.mask_chat(msg.chat_type, &mut text);
+                let text = text;
                 let mut event = ChatEvent {
                     kind,
                     text: text.clone(),

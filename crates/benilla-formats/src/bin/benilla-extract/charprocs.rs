@@ -160,9 +160,19 @@ pub fn run(chain: &mut Chain) -> Result<()> {
         let anim = kit.and_then(|k| k.anim_id);
         let [r, g, b] = trail.rgb();
         let spells = reach.get(kit_id);
+        // `CharParamOne` is printed even though the type-8 arm never reads it (`0x60d80a`'s three
+        // `_ftol`s take Zero/Two/Three only). wow-re's note states every shipped row carries
+        // `20.0` there; a census that hides the column cannot catch that being wrong, and it is —
+        // Sinister Strike's kit 399 carries 15.0.
+        let unread = kit
+            .and_then(|k| {
+                k.char_procs()
+                    .find(|p| p.ty == char_proc_type::WEAPON_TRAIL)
+            })
+            .map_or(0.0, |p| p.params[1]);
         println!(
             "  kit {kit_id:<5} anim {:<6} slots {slots}  #{r:02x}{g:02x}{b:02x} a{:<4} {:>6} ms  \
-             {} spell(s)",
+             one={unread:<5} {} spell(s)",
             anim.map_or("-".to_string(), |a| a.to_string()),
             trail.alpha(),
             trail.duration_ms,

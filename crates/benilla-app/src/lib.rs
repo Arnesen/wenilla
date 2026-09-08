@@ -107,6 +107,7 @@ mod screen_fade;
 mod screenshot;
 mod shaders;
 
+mod game_tip;
 mod name_persist;
 /// Where "the client is going down" may be observed, and why that is `Last` and not `Update`
 /// (decision 1528). Every system that persists state on the way out registers through it.
@@ -116,6 +117,7 @@ mod sound;
 /// The melee swing refusal's latch + 4 s repeat (`SMSG_ATTACKSWING_*`).
 mod swing_refusal;
 mod target;
+mod text_filter;
 mod textinput;
 mod transport;
 mod tutorial;
@@ -668,6 +670,8 @@ pub fn run(build: BuildId) -> AppExit {
     .add_plugins(BattlefieldScorePlugin)
     .add_plugins(BattlefieldPlugin)
     .add_plugins(BattlefieldPositionsPlugin)
+    .add_plugins(crate::game_tip::GameTipPlugin)
+    .add_plugins(crate::text_filter::TextFilterPlugin)
     .add_plugins(TutorialPlugin)
     // The melee swing refusals (`SMSG_ATTACKSWING_NOTINRANGE`/`_BADFACING`/`_DEADTARGET`/
     // `_CANT_ATTACK`): the latch the packets set, and the 4 s repeat that shows it while an

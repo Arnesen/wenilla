@@ -177,6 +177,15 @@ fn count_entry_cover(
 #[derive(Resource)]
 struct LoadingScreenCatalogRes(LoadingScreenCatalog);
 
+/// What a raise means for the tip of the day (decision 2077).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TipEdge {
+    /// The glue→world entry: pick the next row and advance the cursor.
+    Pick,
+    /// Every other raise: this screen carries no tip.
+    Clear,
+}
+
 /// Loading-screen state machine (decision 0737: event-raised, readiness-cleared).
 #[derive(Resource, Default)]
 pub(crate) struct LoadingScreen {
@@ -207,6 +216,11 @@ pub(crate) struct LoadingScreen {
     displayed: f32,
     /// Decoded backdrop art by BLP path, so repeated teleports to a continent don't re-decode.
     art_cache: HashMap<String, Handle<Image>>,
+    /// **Which tip the next raise should carry** — `Pick` on the glue→world entry, `Clear` on every
+    /// other raise, taken by [`crate::game_tip::drive_game_tip`] on the same frame. A field rather
+    /// than a message because it is a property OF the raise, and the raise is this struct's.
+    pub(crate) tip_edge: Option<TipEdge>,
+
     /// `Time::elapsed_secs` at the last raise + at the last wait-instrument line (see
     /// [`WAIT_LOG_AFTER`]).
     active_since: f32,
@@ -234,6 +248,12 @@ impl LoadingScreen {
         }
     }
 
+    /// Take the raise's tip edge, if one is pending — read once, by
+    /// [`crate::game_tip::drive_game_tip`].
+    pub(crate) fn take_tip_edge(&mut self) -> Option<TipEdge> {
+        self.tip_edge.take()
+    }
+
     /// Raise (or re-arm) the screen for a fresh load. `awaiting_snap` marks a raise whose
     /// destination snap is still in flight; `map` is the destination when the edge knows it.
     fn raise(&mut self, reason: &str, awaiting_snap: bool, map: Option<u32>, now: f32) {
@@ -258,6 +278,10 @@ struct LoadingBackdrop;
 struct LoadingBarFill;
 #[derive(Component)]
 struct LoadingBarBorder;
+/// The tip-of-the-day text block (decision 2077) — its `Text` root; the coloured runs are its
+/// children, rebuilt when the shown tip changes.
+#[derive(Component)]
+pub(crate) struct LoadingTip;
 
 pub(crate) struct LoadingScreenPlugin;
 
@@ -365,6 +389,30 @@ fn setup_loading_screen(
                     height: Val::Percent(100.0),
                     ..default()
                 },
+            ));
+            // The tip of the day (decision 2077), drawn between the background quad and the
+            // progress bar — the reference's own order (`0x406e12`/`0x406e18`). The block is
+            // positioned in PERCENT of this 4:3 area, which is exactly the space
+            // `crate::game_tip`'s constants are in; only the font size and the shadow need pixels,
+            // and those follow the window each frame. Empty and hidden until a glue->world raise
+            // fills it.
+            area.spawn((
+                LoadingTip,
+                Text::new(String::new()),
+                TextLayout {
+                    linebreak: LineBreak::WordBoundary,
+                    justify: Justify::Left,
+                },
+                TextFont::default(),
+                TextColor(crate::game_tip::base_color()),
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Percent(0.0),
+                    bottom: Val::Percent(0.0),
+                    width: Val::Percent(0.0),
+                    ..default()
+                },
+                Visibility::Hidden,
             ));
             // Fill — left-anchored; width = progress·FILL_MAX_WIDTH (set each frame). y from the
             // BOTTOM (verified by screenshot + binary). The fill art is a horizontally-uniform
@@ -486,6 +534,12 @@ fn drive_loading_screen(
     if entered.read().next().is_some() && *state.get() != crate::char_select::ClientState::InWorld {
         let map = roster.as_ref().and_then(|r| r.pending_map());
         screen.raise("world entry", true, map, now);
+        // **The tip of the day rides THIS edge and no other** (decision 2077): the reference's
+        // setter `0x406630` has exactly one caller, inside `CGlueMgr::EnterWorld`, and neither
+        // `SMSG_TRANSFER_PENDING` arm reaches it — so a portal or worldport screen carries no tip.
+        // The pick itself is `crate::game_tip`'s, one system over; this list is at Bevy's
+        // sixteen-parameter ceiling and the tip needs three resources of its own.
+        screen.tip_edge = Some(TipEdge::Pick);
     }
     // A portal walk-in (`SMSG_TRANSFER_PENDING`, no transport): the server is about to unload us
     // and the `SMSG_NEW_WORLD` snap follows after its own load — cover now, like the reference.
@@ -494,6 +548,7 @@ fn drive_loading_screen(
         match &t.0 {
             Some(info) if info.transport_entry.is_none() => {
                 screen.raise("transfer pending", true, Some(info.map_id), now);
+                screen.tip_edge = Some(TipEdge::Clear);
             }
             // The latch cleared with no snap in flight = `SMSG_TRANSFER_ABORTED` (a worldport
             // clears it too, but that path also lands below this frame): stop awaiting, and the
@@ -507,6 +562,7 @@ fn drive_loading_screen(
     // screen at all is the backstop's call (a summon across the room shouldn't flash one).
     for w in worldports.read() {
         screen.raise("worldport", false, Some(w.map_id), now);
+        screen.tip_edge = Some(TipEdge::Clear);
     }
     let teleported = teleports.read().next().is_some();
     if teleported {
@@ -578,6 +634,7 @@ fn drive_loading_screen(
         && *state.get() == crate::char_select::ClientState::InWorld
     {
         screen.raise("focus not resident", false, None, now);
+        screen.tip_edge = Some(TipEdge::Clear);
     }
 
     // --- …and the same test at the SNAP, on everything the reveal actually needs. The backstop
@@ -606,6 +663,7 @@ fn drive_loading_screen(
         && !(progress.is_ready() && progress.presentable())
     {
         screen.raise("teleport, destination not presentable", false, None, now);
+        screen.tip_edge = Some(TipEdge::Clear);
     }
 
     // --- Clear: the destination snap has landed, the scene is presentable (tiles + focus
