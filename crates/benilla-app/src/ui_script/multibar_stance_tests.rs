@@ -1206,14 +1206,15 @@ fn the_shipped_setter_passes_exactly_four_arguments() {
     load_xml(&s, "OptionsFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
 
-    // `r##`: the Lua contains `select("#", ...)`, and `"#` would close a single-hash raw string.
+    // 5.0's `arg.n`, not `select("#", ...)`: `...` as a value is not in this VM's grammar, because
+    // it is not in the 1.12 client's (decision 2101).
     s.run(
-        r##"
+        r#"
         BENILLA_TEST_TOGGLE_ARGC = nil
         function SetActionBarToggles(...)
-            BENILLA_TEST_TOGGLE_ARGC = select("#", ...)
+            BENILLA_TEST_TOGGLE_ARGC = arg.n
         end
-        "##,
+        "#,
     )
     .unwrap();
     // The shipped setter is the Action Bars row's own closure (OptionsFrame.xml), which is

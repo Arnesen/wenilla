@@ -203,10 +203,13 @@ fn delete_item_confirm_no_clears_without_destroying() {
     );
 
     // Count repaints from here — the No-click path must trigger one via the event, not a click.
+    // 5.0's vararg spelling: the implicit `arg` table forwarded with `unpack`, because `...` as a
+    // VALUE is not in this VM's grammar — it is not in the 1.12 client's (decision 2101).
     s.run(
         "repaints = 0\n\
          local real = ContainerFrame_Update\n\
-         ContainerFrame_Update = function(...) repaints = repaints + 1; return real(...) end",
+         ContainerFrame_Update = function(...) repaints = repaints + 1; \
+         return real(unpack(arg, 1, arg.n)) end",
     )
     .unwrap();
 

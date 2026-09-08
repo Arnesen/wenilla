@@ -105,6 +105,111 @@ pub(super) fn publish_global(lua: &Lua, name: &str, wrapper: &Table) -> mlua::Re
     Ok(())
 }
 
+/// A widget **name string** argument, already looked up in `_G` — every Lua binding that takes
+/// "a frame or its name" resolves one of these ([`prefetch_named_target`] then
+/// [`resolve_named_target`]).
+///
+/// **The client has ONE widget namespace and it is the Lua globals table.** The wrapper binder
+/// `0x701bd0` publishes `_G[name] = T` for a named widget (non-overwriting, via `lua_settable`),
+/// and every by-name resolver reads that table back — `0x76c760` (globals index → Lua type 5 →
+/// **raw** `t[0]` → `lua_touserdata` → `IsA`; `SetParent`'s string arm `0x7a1550`, `SetScrollChild`
+/// `0x790fa0`, the XML `parent=` chain) and the layout-vtable `+0x28` entry `0x76c700`, which
+/// expands a leading `$parent` (`0x76c5b0`) and then calls `0x76c760`. There is no engine-side
+/// name→frame map behind either: for frames and regions a name's only effects are the copy into
+/// `[widget+0x98]` and that `_G` publish. (`CSimpleFont` names are the one exception — they key a
+/// Storm hash at `0xcf4e78` — and fonts are not anchor targets.) `wow-5875-re`
+/// `system/ui/scratch/name-string-widget-resolution.md`; `system/ui/ledger.tsv` rows
+/// `0x76c5b0`/`0x76c700`/`0x76c760`/`0x7a2540`.
+///
+/// So the name is not a *frame name* — it is a **global**, and a frame's published name is only the
+/// commonest way one comes to exist. Resolving against a private registry instead makes an alias
+/// invisible: `Bar8Button1 = CharacterBag3Slot` at an addon's file scope is a global that is no
+/// frame's name, and Bartender2 anchors every bar's buttons through exactly those (decision 2105).
+///
+/// ## Why the lookup is its own phase
+///
+/// The reference's read is **`lua_gettable 0x6f3a40` → `luaV_index 0x6f7cf0`**, not `lua_rawget`
+/// (the binary holds both, 0xc0 apart; only the former walks `__index`, MAXTAGLOOP 100). So a
+/// metatable on `_G` is honoured — and a `__index` can be a *Lua* function that calls straight back
+/// into a widget binding. Running that under a live `Model` guard would take a second borrow and
+/// panic, so the `_G` read is done with **no guard alive** and the decode happens after.
+pub(crate) struct NamedTarget {
+    /// The name as the client looked it up — after `$parent` expansion where the caller allows it.
+    /// This is the spelling a diagnostic must quote.
+    pub(crate) name: String,
+    /// `_G[name]`, kept only when it is a table (the Lua-type-5 gate). Identity is checked later.
+    wrapper: Option<Table>,
+}
+
+impl NamedTarget {
+    /// A name argument we could not even read (a non-UTF-8 Lua string) — it names nothing, and the
+    /// caller's miss path quotes this placeholder the way it always has.
+    pub(crate) fn unreadable() -> Self {
+        Self {
+            name: "<non-utf8>".into(),
+            wrapper: None,
+        }
+    }
+}
+
+/// Read `_G[name]` for a name-string argument. **Call with no `Model` borrow alive** — see
+/// [`NamedTarget`].
+///
+/// `parent_base` is the name a leading `$parent` expands to, or `None` for the bindings that do not
+/// expand it. `0x76c5b0` has exactly two call sites — `SetName 0x76c691` and `0x76c71c` inside the
+/// layout resolver `0x76c700` — so `SetPoint`/`SetAllPoints`' `relativeTo` **is** expanded at
+/// runtime, and `SetParent`, `SetScrollChild` and the XML `parent=` chain (which call `0x76c760`
+/// directly) are **not**.
+pub(crate) fn prefetch_named_target(
+    lua: &Lua,
+    name: &str,
+    parent_base: Option<&str>,
+) -> NamedTarget {
+    let name = match parent_base {
+        Some(base) => crate::framexml::resolve_name(name, base),
+        None => name.to_string(),
+    };
+    let wrapper = match lua.globals().get::<Value>(name.as_str()) {
+        Ok(Value::Table(t)) => Some(t),
+        _ => None,
+    };
+    NamedTarget { name, wrapper }
+}
+
+/// Decode a [`NamedTarget`] to the stable id of a live frame **or** region (the namespace is one —
+/// a Texture or FontString publishes into `_G` on the same rule a Frame does).
+///
+/// `SetPoint` type-checks against the **root** `CScriptRegion` id `[0xcf0c3c]`, which every widget
+/// accepts; `SetParent`/`SetScrollChild` use the narrower Frame id `[0xcf0c10]`, so those callers
+/// narrow the result to `id_to_frame` themselves.
+pub(crate) fn resolve_named_target(model: &Model, target: &NamedTarget) -> Option<u32> {
+    let id = decode_id(target.wrapper.as_ref()?).ok()?;
+    (model.id_to_frame.contains_key(&id) || model.id_to_region.contains_key(&id)).then_some(id)
+}
+
+/// The name a leading `$parent` expands to: the first widget at or above `start` with a non-empty
+/// name (`0x76c5b0`'s `+0x9c` walk, skipping an empty `GetName`), and
+/// [`crate::framexml::DEFAULT_PARENT_NAME`] (`"Top"`) when there is none (rf27 rules 3/5).
+///
+/// `start` is the anchoring widget's **parent**: a frame's own anchors say `$parent` of its
+/// enclosing frame, and a region's say `$parent` of its owner — which is that region's `+0x9c`.
+pub(crate) fn parent_token_base(model: &Model, start: Option<FrameHandle>) -> String {
+    let mut cur = start;
+    while let Some(p) = cur {
+        let Some(f) = model.arena.frame(p) else { break };
+        if let Some(n) = f.name.as_deref().filter(|n| !n.is_empty()) {
+            return n.to_string();
+        }
+        cur = f.parent;
+    }
+    crate::framexml::DEFAULT_PARENT_NAME.to_string()
+}
+
+/// [`parent_token_base`] for a frame's own anchors — the walk starts at its parent.
+pub(crate) fn frame_parent_token_base(model: &Model, h: FrameHandle) -> String {
+    parent_token_base(model, model.arena.frame(h).and_then(|f| f.parent))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // String → enum parsing (the client's tables, transcribed in order.rs / layout.rs)
 // ─────────────────────────────────────────────────────────────────────────────────────────────

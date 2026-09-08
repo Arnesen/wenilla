@@ -25,9 +25,9 @@
 //!    pending layout, then scan its stratum bucket from **its own level upward** for a frame that is
 //!    not itself, is not one of its descendants (`is_descendant 0x767010`), and whose screen rect
 //!    intersects non-emptily. The answer is stored as `+0xb4` bit `0x10`.
-//! 3. **The raise, gated on that bit** (`0x7651ac..0x7651e7`): `level_compact 0x764eb0` renumbers the
-//!    stratum's occupied levels contiguously into `[0, count)`, then
-//!    `set_frame_level(bucket->count, propagate = 1)`.
+//! 3. **The raise, gated on that bit** (`0x7651ac..0x7651e7`): `level_compact 0x764eb0` squeezes the
+//!    free levels out of the stratum — over **every live frame of it, hidden included**
+//!    (`ui/scratch/level-compact-law.md`) — then `set_frame_level(bucket->count, propagate = 1)`.
 //!
 //! Three consequences the tests pin: a raise is **`level := top occupied level + 1`**, not a list
 //! reshuffle; it is **occlusion-gated** — `Raise()` on a frame that overlaps nothing changes nothing
@@ -52,8 +52,15 @@
 //!   regardless of when each was last shown. The arithmetic is pinned in
 //!   `tests/toplevel.rs::a_raise_is_top_occupied_level_plus_one_after_compaction`.
 //! - **`level_compact`** is [`crate::widget::WidgetArena::compact_levels`] — an order-preserving
-//!   renumber of the visible frames in one stratum. It changes no draw order by itself; it is what
-//!   keeps `level := max + 1` from ratcheting upward for the length of a session.
+//!   renumber of **every frame** in one stratum, hidden ones included: `0x764eb0` walks the client's
+//!   master frame list filtering on strata and level alone, and never reads `+0xd4`
+//!   (`ui/scratch/level-compact-law.md`, decision 2104). It changes no draw order by itself; it is
+//!   what keeps `level := max + 1` from ratcheting upward for the length of a session. Renumbering
+//!   only the *bucket* (the visible half) is the one shape it may not have: the raise's `propagate`
+//!   delta is computed in the new numbering and applied to levels that are still in the old one, so
+//!   a squeeze taken out of a visible child and not out of its hidden sibling inverts a pair that
+//!   `parent.level + 1` made equal — see that method's own doc for the window it broke, and for the
+//!   two places ours is deliberately simpler than the bytes.
 //! - **The OVERLAPPED bit is computed, never stored** — and that is *exact*, not a shortcut. The bit
 //!   is written only by `0x7650f0` and the per-tick pass `0x7657d0`, and read only by `0x7650f0`,
 //!   which with `force = 1` recomputes it immediately before reading it. The stored value is

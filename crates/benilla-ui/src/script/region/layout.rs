@@ -149,9 +149,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "SetAllPoints",
         lua.create_function(|lua, (this, target): (Table, Value)| {
             let rh = region_handle_of(lua, &this)?;
+            // The `_G` read runs before the guard — see `region::prefetch_region_target`.
+            let named = super::prefetch_region_target(lua, &target, rh);
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let owner = region_owner_id(&mut model, rh);
-            let rel_id = resolve_target(&mut model, &target, owner);
+            let rel_id = resolve_target(&mut model, &target, named.as_ref(), owner);
             let pair = [
                 Anchor::new(Point::TopLeft, rel_id, Point::TopLeft, 0.0, 0.0),
                 Anchor::new(Point::BottomRight, rel_id, Point::BottomRight, 0.0, 0.0),

@@ -3,6 +3,7 @@ use mlua::{ObjectLike, Table};
 use crate::framexml::{self, Element};
 use crate::script::LabelFont;
 
+use super::regions::FontAttrs;
 use super::{
     abs_dim, abs_value, children_named, children_named_any, color_of, tex_coords_of, Loader,
 };
@@ -137,7 +138,7 @@ impl Loader<'_> {
                     // SetPoint over a live implicit corner would otherwise leave the OTHER corner
                     // standing (the slot law) and weld an anchored state texture to the button.
                     this.call_region(&region, "ClearAllPoints", (), dbg);
-                    this.apply_region_layout(t, &region, self_name, dbg);
+                    this.apply_region_layout(t, &region, self_name, dbg, FontAttrs::Own);
                     if let Err(e) = crate::script::implicit_creation_anchor_lua(this.lua, &region) {
                         this.report
                             .errors
@@ -176,16 +177,26 @@ impl Loader<'_> {
         // **Both spellings of the label** (`ButtonText` | `NormalText`), in document order.
         //
         // `<NormalText>` is not a synonym bolted on here — it is the binary's own second name for
-        // this slot, and it does strictly more: `CSimpleButton::LoadXML 0x7788c0` constructs the
-        // label `CSimpleFontString` on the `<NormalText>` leg (`0x778b6c call 0x770d30`), clears
-        // its `ownsFontAttrs` (`0x778b7b` — the ONE site image-wide that clears it), hands it to
-        // the shared adopter `0x778d20`, and runs its `LoadXML 0x770f40` with the whole
-        // font-attribute surface skipped, because the SAME node is fed separately to the button's
-        // persistent Normal-state `CSimpleFont` at `+0x33c` (`0x778ba9`/`0x778baf call 0x783c30`).
-        // One owner per attribute, no double application — which is why this pass reads the
-        // element's geometry and name and the state-font pass below reads its `inherits=`/`font=`,
-        // and neither reads the other's. (wow-re `scratch/fontstring-loadxml-font-attrs.md` §3/§7,
-        // `scratch/resize-bounds-and-button-fontstring.md` §5.3 — all VERIFIED off the bytes.)
+        // this slot, and **it is a genuinely different leg** (wow-re
+        // `scratch/button-label-build-and-anchor-order.md`, §5 + arbitration, VERIFIED; it
+        // corrected the earlier reading this comment used to carry). `CSimpleButton::LoadXML
+        // 0x7788c0`'s 15-comparison child chain routes the two label spellings apart:
+        //
+        // - `<ButtonText>` (tag `0x8799f0`, compared `0x7789c1`) → `0x7789d0 call 0x6f2780`, the
+        //   **ordinary `<FontString>` region builder** — whose only other caller is the `<Layers>`
+        //   walker (`0x769e61`). It never writes `+0x12c`, so the ctor's `1` stands, both gates in
+        //   `0x770f40` stay open, and the element's `justifyH`/`justifyV` (and `inherits=`,
+        //   `font=`, `<Color>`, `<Shadow>`) apply to the LABEL, exactly like any other FontString.
+        // - `<NormalText>` (tag `0x879978`, compared `0x778b43`) → the inline build
+        //   `[0x778b4c, 0x778bb6)`, a hand-rolled copy of that builder carrying
+        //   `0x778b7b mov byte [edi+0x12c],0` — the ONE site image-wide that clears the gate. Its
+        //   font attributes are skipped on the label and fed to the button's persistent
+        //   Normal-state `CSimpleFont` at `+0x33c` (`0x778ba9`/`0x778baf call 0x783c30`) instead.
+        // - `<HighlightText>`/`<DisabledText>` build no region at all: pure aliases for the
+        //   Highlight/Disabled fonts (`0x778bf4`), which is why they are not in this loop.
+        //
+        // So both spellings make the label and take its geometry and name, and only `<NormalText>`
+        // hands its font attributes away — [`FontAttrs`] below is that one difference.
         //
         // The reference FrameXML writes only `<ButtonText>` (31 sites, 16 of them
         // `name="$parentText"`) and never `<NormalText>`, so nothing we ship could notice the
@@ -194,9 +205,17 @@ impl Loader<'_> {
         // name="$parentText" …>` left `KLHTM_SelfFrameHeaderNameText` nil, and the addon died in
         // its `PLAYER_LOGIN` handler on exactly that global.
         for bt in children_named_any(el, &["ButtonText", "NormalText"]) {
+            // Which leg built this label decides who owns its font attributes — see the chain
+            // above. `<ButtonText>` goes through the ordinary FontString builder and keeps them;
+            // `<NormalText>` is the one the button disowns (`0x778b7b`).
+            let font_attrs = if bt.tag.eq_ignore_ascii_case("NormalText") {
+                FontAttrs::Disowned
+            } else {
+                FontAttrs::Own
+            };
             // Create the label slot even with no text yet (the geometry below must land on a real
             // region; SetText is the slot's lazy constructor), then apply the element's own
-            // `<Size>/<Anchors>`/justify to it — the ref anchors ButtonText all over (the quest
+            // `<Size>`/`<Anchors>` to it — the ref anchors ButtonText all over (the quest
             // greeting rows hang theirs at TOPLEFT+20 beside the bullet; without this every
             // labelled Button centered its text over the whole face).
             // `<ButtonText text=>` is a FontString's own attribute — the same global-string lookup
@@ -228,12 +247,31 @@ impl Loader<'_> {
             self.call(wrapper, "SetText", label, dbg);
             if let Ok(region) = wrapper.call_method::<Table>("GetFontString", ()) {
                 // Same clear→layout→implicit order as the state textures above (decision 1310):
-                // SetText materialized the label with the runtime path's implicit CENTER anchor;
-                // the XML path re-derives it AFTER the element's own `<Anchors>`/justify apply
-                // (so a `<ButtonText justifyH="LEFT">` with no anchors seats LEFT, as the real
-                // FontString post-step `0x771480` would).
+                // SetText materialized the label with the runtime path's implicit anchor; the XML
+                // path re-derives it AFTER the element's own `<Anchors>` apply, which is where
+                // both real legs run it (`0x6f27f5` for `<ButtonText>`, `0x778b96` for
+                // `<NormalText>` — two of that post-step's three call sites).
+                //
+                // **`font_attrs` is the load-bearing argument here** (decision 2100). On the
+                // `<NormalText>` leg the element's `justifyH`/`justifyV` belong to the button's
+                // per-state font, never to the label, so the post-step reads the string's
+                // untouched ctor word (`0x212` = CENTER|MIDDLE) and seats CENTER. Applying the
+                // word to the label instead seated Gatherer's whole quick-menu LEFT→LEFT against
+                // the reference's centred rows: its `GathererUI_PopupButtonTemplate` states its
+                // alignment once, as `<NormalText inherits="GameFontNormal" justifyH="LEFT"/>`,
+                // and every row is `SetWidth` to one common width, so a left-seated label puts all
+                // seven texts on one left edge. The word still reaches the *paint* and
+                // `GetJustifyH()` — `0x783c30`'s tail notify writes the resolved justify into the
+                // label's own `+0x120` (`0x784111` → `0x784180` → `0x773530` → `0x770800` at
+                // `0x770876`), downstream of the anchor — which is why the visible difference is
+                // the anchor alone.
+                //
+                // The adopter's own conditional anchor (`0x778d20`, `[button+0x390]` — decision
+                // 1996) is **structurally dead on both XML label paths**: the builder anchors
+                // first, and the 9-slot scan at `0x778d5f` then finds a slot filled. It is live
+                // only where the label is born from `text=` or Lua `SetText`.
                 self.call_region(&region, "ClearAllPoints", (), dbg);
-                self.apply_region_layout(bt, &region, self_name, dbg);
+                self.apply_region_layout(bt, &region, self_name, dbg, font_attrs);
                 if let Err(e) = crate::script::implicit_creation_anchor_lua(self.lua, &region) {
                     self.report
                         .errors
@@ -560,7 +598,7 @@ impl Loader<'_> {
                 if let Some(mode) = tt.attr("alphaMode") {
                     self.call_region(&region, "SetBlendMode", mode.to_string(), dbg);
                 }
-                self.apply_region_layout(tt, &region, self_name, dbg);
+                self.apply_region_layout(tt, &region, self_name, dbg, FontAttrs::Own);
                 if let Some(tc) = tex_coords_of(tt) {
                     self.call_region(&region, "SetTexCoord", tc, dbg);
                 }
@@ -634,7 +672,7 @@ impl Loader<'_> {
                     if let Some(mode) = tt.attr("alphaMode") {
                         self.call_region(&region, "SetBlendMode", mode.to_string(), dbg);
                     }
-                    self.apply_region_layout(tt, &region, self_name, dbg);
+                    self.apply_region_layout(tt, &region, self_name, dbg, FontAttrs::Own);
                     if let Some(tc) = tex_coords_of(tt) {
                         self.call_region(&region, "SetTexCoord", tc, dbg);
                     }

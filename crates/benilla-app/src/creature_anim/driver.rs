@@ -48,7 +48,7 @@ mod tests;
 mod wound;
 
 pub(super) use grip::drive_hand_grip;
-use play::{oneshot_finished, play_clip, roll_loop, roll_oneshot};
+use play::{holds_own_clip, oneshot_finished, play_clip, roll_loop, roll_oneshot};
 use wound::{wound_evict, wound_trigger, wound_upkeep, WoundEdge};
 
 /// The weight of a masked upper-body one-shot overlay ([`AnimDriver::overlay`]) over the base clip on
@@ -1126,9 +1126,14 @@ pub(super) fn drive_animations(
                 // ref's mid-air cast). Cutting an airborne clip freezes the outgoing node first —
                 // the pose-snapshot decay of the client's op4 blend, scoped exactly like
                 // [`leave_special`]'s (decision 0503).
-                if matches!(special, Some(select::Special::Jump | select::Special::Fall)) {
+                if let Some(sp) =
+                    special.filter(|sp| matches!(sp, select::Special::Jump | select::Special::Fall))
+                {
+                    // …the ARC's clip, not merely whatever bone 0 holds ([`holds_own_clip`]) —
+                    // the freeze's missing predicate, at its second site (decision 2098).
                     if let Some(active) = tr
                         .get_main_animation()
+                        .filter(|&n| holds_own_clip(anims, catalog, sp, n))
                         .and_then(|n| player.animation_mut(n))
                     {
                         active.set_speed(0.0);
@@ -1448,7 +1453,16 @@ pub(super) fn drive_animations(
 
         let masked_played = masked_played || hold_played.is_some();
 
-        let base_played = base_played || (drv.mode, drv.gait) != pre_state;
+        // A mode/gait change is a **proxy** for the mode machine's plays, and the base-anim lock
+        // is the one state where the proxy is wrong for longer than the single frame its own doc
+        // allows: while the lock refuses, the machine still walks its brackets — Gait →
+        // Entering(Jump) → Looping(Jump) → Land — with every play declined, so a change there
+        // means nothing was armed at all. Claiming otherwise evicted the victim's flinch off the
+        // key-bone and latched the weapon trail's edge (2076) on a play that never happened
+        // (decision 2098). Only the PROXY is gated: an arm that reached the player directly says
+        // so on its own.
+        let base_played =
+            base_played || ((drv.mode, drv.gait) != pre_state && !drv.base_lock.refuses());
         // The weapon-trail latch's edge (decision 2076) — `0x5fe2f0` is the image's single
         // animation entry point, so ANY start consumes the arm, the mode machine's gait plays
         // included. Written every pass (never OR'd) so it is exactly this frame's.

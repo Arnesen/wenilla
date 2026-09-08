@@ -228,7 +228,7 @@ pub use measure::TextMeasure;
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState};
 pub(crate) use minimap::apply_model_attrs as apply_minimap_model_attrs;
 pub(crate) use model::Model;
-pub use model::{TextureProbe, TextureSizeProbe};
+pub use model::{FontProbe, TextureProbe, TextureSizeProbe};
 pub use party::{PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo};
 pub use pet::{PetActionView, PetStats};
 pub use pvp::{HonorState, InspectHonorData};
@@ -1525,14 +1525,15 @@ impl UiScript {
     /// Its silent sibling is [`Self::report_load_failure`] (decision 1495) — same retention, no
     /// dispatch, for the load failures that never raise at all.
     pub fn report_script_error(&self, msg: &str) {
-        let mut model = self.model_mut();
         // Retained as a **Load** row, not an Error one (decision 1495): every caller of this is
         // the load walk, and from the player's side "the addon's file scope raised" and "the
-        // addon's file was missing" are the same fact — the addon is not running.
-        model
-            .diagnostics
-            .record(diagnostics::DiagnosticKind::Load, msg);
-        model.pending_error_dispatch.push(msg.to_string());
+        // addon's file was missing" are the same fact — the addon is not running. The retention
+        // half is `diagnostics::record_load_failure`, shared with the demand-load path so the
+        // rule has one implementation (2107); the dispatch is what makes this the loud sibling.
+        diagnostics::record_load_failure(&self.lua, msg);
+        self.model_mut()
+            .pending_error_dispatch
+            .push(msg.to_string());
     }
 
     /// Hand every queued script error to the Lua-side error handler — the reference's own shape:

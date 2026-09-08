@@ -443,6 +443,21 @@ impl ChatLog {
             .filter(|p| !matches!(p, Pending::Addon { .. }))
             .count()
     }
+
+    /// The text of every already-composed line waiting to render, in order — the queue's
+    /// [`Pending::Event`] entries, which is what everything that pushes a finished sentence
+    /// ([`Self::push_event`]) lands as. The `Wire`/`Notice`/`Roll` shapes are deliberately absent:
+    /// those have no text yet, and a caller asserting on a sentence wants only the ones that do.
+    #[cfg(test)]
+    pub(crate) fn pending_lines(&self) -> Vec<String> {
+        self.pending
+            .iter()
+            .filter_map(|p| match p {
+                Pending::Event(e) => Some(e.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 /// The VM's own string table as a lookup — `getglobal(key)`, which is where every sentence this

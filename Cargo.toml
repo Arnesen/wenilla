@@ -46,16 +46,19 @@ sha1 = "0.10.6"
 # section stood empty for the project's whole life.
 #
 # The one entry below is not a fork of a WoW crate at all. `lua-src` compiles the Lua the client's
-# addon VM runs on, and the 1.12 corpus needs one opcode that Lua 5.1 deleted — the iterator-less
-# generic-for (`for k, v in someTable do`), which 183 of 218 corpus addons are reached by and which
-# is the first session-start error for 60 of them. It is an OPCODE, so no layer above the VM can
-# reach it: not a library function, not a global, not a metamethod.
+# addon VM runs on, and benilla's Lua has to accept EXACTLY the grammar the 1.12.1 client's Lua
+# accepts — no more and no less. Six hunks, all byte-read out of the client's own parser and VM:
+# three restore what 5.1 removed (the iterator-less generic-for `for k, v in someTable do`, which
+# 183 of 218 corpus addons are reached by; nesting long strings; the constructor's compat
+# semicolon), three delete what 5.1 added (`...` as an expression, `#`, `%`). Both directions are
+# below the reach of any layer above the VM — an opcode and a grammar are not a library function,
+# a global, or a metamethod — and the corpus ASKS about the second direction directly: 170
+# `loadstring` sites compile a vararg expression purely to find out which interpreter they are on.
 #
-# The fork is currently BYTE-IDENTICAL to upstream's 5.1.5 sources, and is landed that way on
-# purpose: the pipeline is proven transparent before the behavioural payload goes into it, so that
-# when the suite moves, the patch is the only thing that could have moved it. The payload waits on
-# an RE answer about what the real client's own Lua does — stock Lua 5.0 is corroboration, not the
-# authority. `third_party/lua-src/BENILLA.md` has the current state and the verifying command.
+# The fork landed BYTE-IDENTICAL to upstream's 5.1.5 sources on purpose: the pipeline was proven
+# transparent before any behavioural payload went into it, so when the suite moved, the patch was
+# the only thing that could have moved it. `third_party/lua-src/BENILLA.md` has the current state,
+# the per-hunk byte evidence and the verifying command (decisions 1215, 1315, 2101).
 [patch.crates-io]
 lua-src = { path = "third_party/lua-src" }
 # kira 0.12.1 with one patch: spatial gains and the volume tween evaluated per CHUNK and

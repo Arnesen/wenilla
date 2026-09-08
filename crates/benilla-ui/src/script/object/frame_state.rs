@@ -193,6 +193,74 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
+    // ── GetFrameType / IsFrameType: the FRAME-side spellings of the pair above (decision 2106) ──
+    //
+    // 1.12 registers the type-identity pair **twice, under two names**. The Region script
+    // (`CScriptRegion`) publishes `GetObjectType`/`IsObjectType` — that is the pair above, and its
+    // `IsObjectType` binding is `0x7a1290`. The *frame* script (`CSimpleFrameScript.cpp`,
+    // `__FILE__` `0x879504`) publishes `GetFrameType 0x773640` and `IsFrameType 0x773700` as well,
+    // and wow-5875-re carved both (`system/ui/scratch/item17-frameapi-batch1.md`, 76-entry
+    // registrar table verified at the bytes). `GetObjectType`/`IsObjectType` are what LATER
+    // clients kept; `GetFrameType`/`IsFrameType` are 1.12's own, and we shipped only the first
+    // pair. That is 1189's superset argument inverted — not an extra name we invented, a real one
+    // we were missing — and it cost the world map:
+    //
+    //     Cartographer 2.02, LookNFeel.lua:368, inside OnEnable:
+    //         if v:GetFrameType() == "Model" and not v:GetName() then self.playerModel = v end
+    //
+    // With the verb nil that line raised, AceAddon swallowed it, `self.playerModel` stayed nil,
+    // and the next `Cartographer_ChangeZone` → `SetAlpha` put a red script error on screen from
+    // `LookNFeel.lua:737` every time the map opened. FuBar's own `FuBar.lua:576`
+    // (`type(frame:GetFrameType()) ~= "string"`) is the same call.
+    //
+    // Both delegate to the same `type_chain` the `Object` pair reads: `GetFrameType` is
+    // `call [edx+0x1c]` — the identical per-class type-name slot `GetObjectType` reads — then
+    // `lua_pushstring`, one value, extra arguments ignored. `IsFrameType` walks the chain through
+    // `[eax+0x18]`, the same case-insensitive whole-string compare, and answers the NUMBER 1 or
+    // nil.
+    //
+    // **One edge is INFERRED and named rather than guessed silently:** wow-re's note glosses
+    // `IsFrameType`'s *absent-argument* branch as "pushes the frame's own typename (`call [eax+4]`
+    // GetName)", which is self-contradictory — a typename and a name are different slots — so the
+    // branch is not settled. We take the sibling's behaviour (the `Usage:` raise) pending a byte
+    // read. No caller in the 219-addon corpus, the director's AddOns, or the shipped FrameXML ever
+    // omits the argument: `JIM_toolbox/Config2/Pulse_Config.lua:118` is the corpus's only
+    // `IsFrameType` site and it passes `"Slider"`.
+    m.set(
+        "GetFrameType",
+        lua.create_function(|lua, this: Table| {
+            Ok(Value::String(lua.create_string(chain_of(lua, &this)?[0])?))
+        })?,
+    )?;
+    m.set(
+        "IsFrameType",
+        lua.create_function(|lua, (this, want): (Table, Value)| {
+            let chain = chain_of(lua, &this)?;
+            let want = match &want {
+                Value::String(s) => s.to_str()?.to_string(),
+                Value::Number(n) => n.to_string(),
+                Value::Integer(i) => i.to_string(),
+                _ => {
+                    let h = frame_handle_of(lua, &this)?;
+                    let model = lua.app_data_ref::<Model>().expect("model");
+                    let who = model
+                        .arena
+                        .frame(h)
+                        .and_then(|f| f.name.clone())
+                        .unwrap_or_else(|| "<unnamed>".to_string());
+                    return Err(mlua::Error::runtime(format!(
+                        "Usage: {who}:IsFrameType(\"TYPE\")"
+                    )));
+                }
+            };
+            Ok(if chain.iter().any(|t| want.eq_ignore_ascii_case(t)) {
+                Value::Number(1.0)
+            } else {
+                Value::Nil
+            })
+        })?,
+    )?;
+
     m.set(
         "GetParent",
         lua.create_function(|lua, this: Table| {
@@ -334,6 +402,16 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     .unwrap_or_else(|| "<unnamed>".to_string())
             };
             let parent_arg = it.next();
+            // `_G[name]` is read with no guard alive (`object::NamedTarget`), and **without**
+            // `$parent` expansion: `0x7a1550` calls `0x76c760` directly, and only the layout
+            // vtable's `0x76c700` runs the token.
+            let named = match &parent_arg {
+                Some(Value::String(s)) => Some(match s.to_str() {
+                    Ok(n) => super::prefetch_named_target(lua, n.as_ref(), None),
+                    Err(_) => super::NamedTarget::unreadable(),
+                }),
+                _ => None,
+            };
             let new_parent = {
                 let model = lua.app_data_ref::<Model>().expect("model");
                 match &parent_arg {
@@ -349,11 +427,18 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                                 ))
                             })?,
                     ),
-                    Some(Value::String(s)) => {
-                        let n = s.to_str()?.to_string();
-                        Some(model.arena.lookup(&n).ok_or_else(|| {
+                    Some(Value::String(_)) => {
+                        // `_G[name]` + the **Frame** tag check — the reference's `0x76c760`
+                        // (`0x7a1550`'s NAME-string path) type-guards against `[0xcf0c10]`, the
+                        // narrow Frame id, not `SetPoint`'s root `[0xcf0c3c]`. So a global naming
+                        // a REGION fails here exactly as an absent one does.
+                        let nt = named.as_ref().expect("a String argument is prefetched");
+                        let hit = super::resolve_named_target(&model, nt)
+                            .and_then(|id| model.id_to_frame.get(&id).copied());
+                        Some(hit.ok_or_else(|| {
                             mlua::Error::runtime(format!(
-                                "{who}:SetParent(): Couldn't find region named '{n}'"
+                                "{who}:SetParent(): Couldn't find region named '{}'",
+                                nt.name
                             ))
                         })?)
                     }

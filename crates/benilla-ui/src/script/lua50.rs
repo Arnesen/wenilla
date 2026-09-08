@@ -112,57 +112,18 @@ const REMOVED: &[(&str, &[&str])] = &[
     ("math", &["fmod", "modf", "huge", "cosh", "sinh", "tanh"]),
 ];
 
-/// Lua 5.0's `luaL_getn`/`luaL_setn`, transcribed — **including the private `sizes` table**, which
-/// is the part that matters and the part a plain reading of the manual leaves out.
-///
-/// 5.0 does **not** simply write `t.n`. `luaL_setn` writes `t.n` *only if a numeric `t.n` already
-/// exists*; otherwise it stores the size in a weak-keyed table kept in the registry, so the size
-/// is invisible to anything walking the table. `luaL_getn` reads `t.n`, then `sizes[t]`, then
-/// falls back to counting.
-///
-/// **The first draft of this module wrote `t.n` unconditionally, and the corpus caught it inside
-/// an hour.** `AceOO-2.0`'s `_Embed` walks its mixin's exports with `next(state.export, field)`
-/// and errors on any field the target already has; a spurious `n` made that
-/// `Method conflict in attempt to mixin. Field "n"` — **39 addons**, a *bigger* wall than the
-/// `setn` gap it was meant to fix. Writing "faithful to Lua 5.0" in a doc comment does not make a
-/// derivation verified, and an addon iterating a table is a sharper instrument than a memory of
-/// `lauxlib.c`.
-const LUA_5_0_TABLE_SIZE: &str = r#"
-do
-    -- The registry-side weak table. Weak KEYS: a table nobody else holds must still be
-    -- collectable, and 5.0's own `getsizes` uses exactly this metatable.
-    local sizes = setmetatable({}, { __mode = "k" })
-
-    function table.setn(t, n)
-        if type(rawget(t, "n")) == "number" then
-            rawset(t, "n", n)   -- an existing numeric `n` field IS the size; keep using it
-        else
-            sizes[t] = n        -- otherwise the size lives out of sight
-        end
-    end
-
-    function table.getn(t)
-        local n = rawget(t, "n")
-        if type(n) == "number" then return n end
-        n = sizes[t]
-        if type(n) == "number" then return n end
-        return #t               -- neither: the array border, which is 5.1's whole answer
-    end
-end
-"#;
+/// Lua 5.0's remembered table size, and the whole `n`-based table library that rides it
+/// (decision 2102) — [`table_size`]'s own header is the mechanism, the byte census behind it, and
+/// the runtime failure that retired this module's "revisit if ever traced" note.
+mod table_size;
 
 /// Install the dialect. Runs **before** the WoW stdlib layer, so its aliases bind the 5.0-shaped
 /// functions rather than the 5.1 ones they replace.
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
-    // ── 1 · `setn`/`getn` get their 5.0 meaning back ──────────────────────────────────────────
-    // Written in Lua because the weak-keyed side table below is the whole mechanism and a Lua
-    // `setmetatable({}, {__mode="k"})` says that in one line.
-    lua.load(LUA_5_0_TABLE_SIZE)
-        .set_name("=[benilla lua5.0 dialect]")
-        .set_mode(mlua::ChunkMode::Text)
-        .exec()?;
+    // ── 1 · the `n`-based table library gets its 5.0 meaning back ─────────────────────────────
+    table_size::install(lua)?;
 
     // ── 2 · the 5.1-only members go ───────────────────────────────────────────────────────────
     for (lib, names) in REMOVED {
@@ -469,38 +430,121 @@ mod tests {
         assert_eq!(s.eval::<f64>("return __pow(2, 10)").unwrap(), 1024.0);
     }
 
-    /// **The corpus's other dialect probe, and we answer it wrong** (decision 1208).
+    /// **The corpus's other dialect probe, answered the way 1.12's parser answers it** (2101,
+    /// closing 1208).
     ///
     /// Ace2 asks "am I on Lua 5.1?" by compiling a 5.1-only construct — the vararg *expression*,
     /// which 5.0 has no grammar for (5.0 collects varargs into `arg`; the shipped 1.12 FrameXML
     /// reads `arg`/`arg.n` 64 times across 177 files and never once writes `...` as a value):
     ///
     /// ```lua
-    /// if loadstring("return function(...) return ... end") and AceLibrary:HasInstance(MAJOR)
-    ///     then return end -- lua51 check
+    /// local lua51 = loadstring("return function(...) return ... end") and true or false
     /// ```
     ///
-    /// On the real 1.12 client that `loadstring` returns nil, the guard never fires, and normal
-    /// revision comparison decides which copy of a library wins. On ours it compiles, so the
-    /// **newer** copy silently declines to register and whichever copy loaded first is pinned
-    /// forever. **92 library files across 24 corpus addon folders carry it.**
+    /// 170 `loadstring` sites across the 219-addon corpus are that one question. Answering it
+    /// `true` puts every Ace-embedding addon on its client-2.0 branch — which is how Cartographer
+    /// came to hook `CloseSpecialWindows`, a name 1.12's `_G` does not have.
     ///
-    /// Asserted rather than fixed: unlike `table.setn` or `bit`, this is not reachable from inside
-    /// Lua — it is the parser. 1208 records the measurement; 1202 is where the fix lives.
+    /// The fix is the parser, not a library: `simpleexp` (client `0x6fd240`) has no `TK_DOTS`
+    /// arm, so `...` as a value falls to `prefixexp` and raises. The exact probe line is asserted
+    /// here in the shape the addons write it.
     #[test]
-    fn the_vararg_expression_compiles_and_that_is_the_1208_divergence() {
+    fn the_vararg_expression_is_a_syntax_error_as_it_is_on_1_12() {
         let s = UiScript::new().unwrap();
         assert!(
-            s.eval::<bool>(r#"return loadstring("return function(...) return ... end") ~= nil"#)
-                .unwrap(),
-            "if this ever fails, the VM became 5.0-shaped and 1208 closed with 1202"
+            s.eval::<bool>(
+                r#"return (loadstring("return function(...) return ... end") and true or false) == false"#
+            )
+            .unwrap(),
+            "the Ace2 lua51 probe must answer false, as it does on the 1.12 client"
         );
-        // The 5.0 half of the same question, which we answer correctly (1194): `arg` still exists.
+        // ...and it fails the way 5.0 fails it: `simpleexp`'s default arm -> `prefixexp`, whose
+        // head accepts only `(` or a NAME. Same reject site, same words, as a stray `;`.
+        let msg: String = s
+            .eval(r#"local f, e = loadstring("return ...") return tostring(e)"#)
+            .unwrap();
+        assert!(
+            msg.contains("unexpected symbol"),
+            "5.0's own message for this, not a bespoke one: {msg}"
+        );
+        // The 5.0 half of the same question, which we already answered correctly (1194): `arg`.
         assert_eq!(
             s.eval::<i64>("local f = function(...) return arg.n end return f(1, 2, 3)")
                 .unwrap(),
             3,
             "`arg` is 5.1's compat-vararg table, which is the form all of 1.12 FrameXML uses"
+        );
+        // And now EVERY vararg function gets one. 5.1 cleared VARARG_NEEDSARG for any function
+        // that mentioned `...`; with the arm deleted nothing clears it, which is 5.0's rule.
+        assert_eq!(
+            s.eval::<i64>("local f = function(a, ...) return arg.n end return f(1, 2, 3)")
+                .unwrap(),
+            2
+        );
+        // A `...` in a PARAMETER LIST is 5.0's own grammar and must still parse — the deletion is
+        // `simpleexp`'s arm, not `parlist`'s.
+        assert!(s
+            .eval::<bool>(r#"return loadstring("return function(...) return arg.n end") ~= nil"#)
+            .unwrap());
+    }
+
+    /// **`#` and `%` are not in 1.12's grammar either** (2101) — the same class, the same
+    /// byte evidence, gated in the same hunk-set.
+    ///
+    /// `getunopr` (`0x6fe0a0`) is a leaf testing exactly two tokens, `-` and `not`, so its
+    /// `OPR_NOUNOPR` is 2 — a three-member enum, 5.0's, not 5.1's four-member one with
+    /// `OPR_LEN`. `getbinopr` (`0x6fe0c0`) bases its switch at `'*'` (0x2A); `%` is 0x25, below
+    /// the range, and reaches `OPR_NOBINOPR` = 14 — a fifteen-member `BinOpr`, again 5.0's. The
+    /// metamethod-name pool at `0x871896` has neither `__len` nor `__mod`, which is where
+    /// wow-5875-re saw it first (`system/ui/scratch/lua-dialect.md` §1).
+    #[test]
+    fn the_length_and_modulo_operators_are_not_in_the_grammar() {
+        let s = UiScript::new().unwrap();
+        for probe in ["return #t", "return 7 % 3", "local n = #({1,2}) return n"] {
+            assert!(
+                s.eval::<bool>(&format!("return loadstring({:?}) == nil", probe))
+                    .unwrap(),
+                "{probe} is 5.1-only syntax; 1.12's parser rejects it"
+            );
+        }
+        // The 5.0 spellings of both, which the reference has and every 1.12-era addon uses.
+        assert_eq!(s.eval::<i64>("return table.getn({1,2,3})").unwrap(), 3);
+        assert_eq!(s.eval::<i64>("return getn({1,2,3})").unwrap(), 3);
+        assert_eq!(s.eval::<f64>("return math.mod(7, 3)").unwrap(), 1.0);
+        assert_eq!(s.eval::<i64>("return string.len('abcd')").unwrap(), 4);
+    }
+
+    /// **The shapes the reference's own files are written in still load** — the other half of the
+    /// gate, and the one that would make it a regression if it ever stopped being true.
+    ///
+    /// Measured, not assumed: the three constructs above appear **zero** times in the extracted
+    /// 1.12 FrameXML (177 files), GlueXML, Blizzard's own addons, and the director's installed
+    /// AddOns folder. This chunk is the 5.0 grammar those files actually use, including the three
+    /// 5.0-isms the fork restores (1215's iterator-less generic-for, `LUA_COMPAT_LSTR`'s nesting
+    /// long strings, 1315's constructor semicolon).
+    #[test]
+    fn the_5_0_grammar_the_reference_writes_still_parses() {
+        let s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            -- 5.0 varargs: the implicit `arg` table, the form all of 1.12 FrameXML uses.
+            local function count(...) local n = 0 for i = 1, arg.n do n = n + arg[i] end return n end
+            -- the iterator-less generic-for (1215)
+            local sum = 0
+            for k, v in { 3, 4 } do sum = sum + v end
+            -- a table constructor with 5.0's compat semicolon (1315)
+            local t = { a = 1; b = 2; }
+            -- nesting long strings (LUA_COMPAT_LSTR = 2)
+            local s2 = [[outer [[inner]] outer]]
+            -- 5.0's own spellings for what `#`/`%` would say
+            BENILLA_GRAMMAR_OK = count(1, 2, 3) + sum + t.a + t.b
+                + table.getn({ 1, 2 }) + math.mod(7, 3) + string.len(s2)
+            "#,
+        )
+        .expect("the reference's own grammar must still load");
+        assert_eq!(
+            s.eval::<i64>("return BENILLA_GRAMMAR_OK").unwrap(),
+            6 + 7 + 3 + 2 + 1 + 21
         );
     }
 
@@ -538,19 +582,19 @@ mod tests {
         assert!(ms >= 0.0, "elapsed milliseconds, not nil: {ms}");
     }
 
-    /// The known divergence, pinned so it is a decision rather than a surprise.
-    ///
-    /// In Lua 5.0 `table.insert` consults `getn`, so this would land at index 1. Here it lands at
-    /// `#t + 1`. Recorded in the module doc with the corpus measurement that justifies it; if this
-    /// test ever needs to change, the trade has been revisited on purpose.
+    /// The divergence that USED to be pinned here is gone (decision 2102): `table.insert` now
+    /// consults the remembered size, as `0x7fb6d8` does. The behaviour it asserted — an append
+    /// landing at the border after `setn(t, 0)` — was traced to a real addon failure, so the
+    /// mechanism moved to [`super::table_size`] and its tests moved with it. This is the one line
+    /// that used to say otherwise, kept as the shape a reader will look for.
     #[test]
-    fn table_insert_still_uses_the_border_not_setn() {
+    fn table_insert_consults_the_remembered_size() {
         let s = UiScript::new().unwrap();
         assert_eq!(
-            s.eval::<i64>("local t = {1,2,3} table.setn(t, 0) table.insert(t, 9) return #t")
+            s.eval::<i64>("local t = {1,2,3} table.setn(t, 0) table.insert(t, 9) return t[1]")
                 .unwrap(),
-            4,
-            "5.1's insert appends at the border; 5.0's would have written index 1"
+            9,
+            "5.0's insert writes index getn+1, which after setn(t, 0) is index 1"
         );
     }
 }

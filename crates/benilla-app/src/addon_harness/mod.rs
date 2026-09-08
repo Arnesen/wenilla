@@ -507,9 +507,13 @@ fn survey_one(
     script.set_instruction_budget(ADDON_INSTRUCTION_BUDGET);
     script.set_screen_size(1024.0, 768.0);
     // Before anything runs: the AddOn API must answer for the whole installed set, not for nothing.
-    // `None` roots because a survey must never read or write the director's real saved variables
-    // (the same reason `drive_session_start` is not `finish_ui_load` — 1213 §4).
-    script.register_addons(registry.to_vec(), None, None, None);
+    // The **saved-variable** roots are `None` — a survey must never read or write the director's
+    // real ones (the same reason `drive_session_start` is not `finish_ui_load`, 1213 §4). The
+    // ADDONS root is not one of those and is passed in full (decision 2102): without it every
+    // `LoadAddOn("<a folder addon>")` answered `MISSING`, which is a state the real client cannot
+    // produce and is exactly the 1193/1212 fault one level up — `/msbt`'s
+    // `UIParentLoadAddOn("MikScrollingBattleTextOptions")` is the shape it hides.
+    script.register_addons(registry.to_vec(), Some(root.to_path_buf()), None, None);
     seat_a_session(&mut script);
     let _ = crate::ui_script::load_default_ui(&script);
     // The addon's DEPENDENCIES, first and recursively — `AddOn_Load 0x51f240`'s own first two
@@ -547,12 +551,20 @@ fn survey_one(
     let baseline = RenderBaseline::of(&script);
 
     let (errors, absent) = load_addon_files(&script, root, name, &toc);
+    // The registry has to agree with the VM about what has loaded: the live walk stamps each
+    // addon at `0x51f5ad`'s position (`ui_script::addons`'s `mark_addon_loaded`, just before
+    // `ADDON_LOADED`), and without it here `IsAddOnLoaded` answered nil for an addon whose files
+    // had just run — and a LoadOnDemand dependent of it got `DEP_NOT_DEMAND_LOADED` rather than
+    // loading (decision 2102). The dependency chain is stamped too, in load order.
+    for loaded in dep_order.iter().chain(std::iter::once(&name.to_string())) {
+        script.mark_addon_loaded(loaded);
+    }
     let wants = missing_calls(root, name, &toc, &known, &dep_methods);
     // AFTER the addon's files: a template it declares in its OWN XML is registered by then, so it
     // is not missing. The check asks the VM's live registry, not a name list.
     let missing_templates = missing_templates(&script, root, name, &toc);
     let missing_inherits = missing_inherits(&script, root, name, &toc);
-    let session_errors = drive_session_start(&mut script, name, &dep_order);
+    let session_errors = drive_session_start(&mut script, name, &dep_order, installed);
     let probe_errors = drive_ui_probe(&mut script);
     // AFTER the UI probe and BEFORE the method oracle, and both halves of that are load-bearing.
     // After, because the probe leaves the addon fully driven — and this pass re-OPENS what the
@@ -886,7 +898,12 @@ fn only_on(have: &[String], probes: &[String]) -> String {
 /// second reaches the common `ScheduleEvent(..., 0)`/`(..., 0.05)` shapes and Ace's own one-second
 /// `AceEvent_FullyInitialized` timer; it does not reach a ten-second self-heal, and that
 /// under-report is stated rather than hidden.
-fn drive_session_start(script: &mut UiScript, name: &str, deps: &[String]) -> Vec<String> {
+fn drive_session_start(
+    script: &mut UiScript,
+    name: &str,
+    deps: &[String],
+    installed: &BTreeSet<String>,
+) -> Vec<String> {
     // **Every addon in the VM gets its OWN `ADDON_LOADED`, in load order** — the client fires one
     // per loaded addon with that addon's folder in `arg1`, and a dependency's initialiser is
     // almost always gated on exactly that:
@@ -938,34 +955,91 @@ fn drive_session_start(script: &mut UiScript, name: &str, deps: &[String]) -> Ve
     let raised = script.errors().split_off(before);
     raised
         .into_iter()
-        .filter(|e| !raised_inside_a_dependencys_own_file(e, name, deps))
+        .filter(|e| !raised_inside_another_addons_own_file(e, name, installed))
         .collect()
 }
 
-/// Does this raise belong to a DEPENDENCY's file rather than the surveyed addon's?
+/// Does this raise belong to **another installed addon's** file rather than the surveyed addon's?
 ///
-/// The rule `load_dependencies` already states for load errors, now enforceable for session errors
-/// too: *a library that fails is its own row; blaming its consumers would count one fault once per
-/// addon that embeds it.* Only the FIRST line is consulted — that is the raise site; the frames
-/// below it are the call path, and a consumer calling into a library that then raises is still the
-/// library's fault, exactly as it is at load time.
+/// The rule `load_dependencies` already states for load errors, enforceable for session errors
+/// since 1226: *a library that fails is its own row; blaming its consumers would count one fault
+/// once per addon that embeds it.* Only the FIRST line is consulted — that is the raise site; the
+/// frames below it are the call path, and a consumer calling into a library that then raises is
+/// still the library's fault, exactly as it is at load time.
 ///
-/// **Conservative on purpose.** A chunk that names no addon folder at all — our own FrameXML, an
-/// `[string "Frame:OnEvent"]` handler — is KEPT, because the surveyed addon is what drove it. Only
-/// a chunk that positively names one of this addon's own dependencies is dropped. Getting that
-/// backwards would swing the column the other way, and the whole point of 1226 is that a proxy
-/// which errs silently in one direction is how the number drifted in the first place.
-fn raised_inside_a_dependencys_own_file(err: &str, name: &str, deps: &[String]) -> bool {
-    let Some(first) = err.lines().next() else {
+/// **The exemption was "a DECLARED DEPENDENCY's file" and that was too narrow** (decision 2107).
+/// Once the harness's VMs got a real AddOns root, `LoadAddOn` began doing what it does in a real
+/// session, and the corpus's largest family drives it deliberately: `FuBar.lua:1034`'s
+/// `LoadLoadOnDemandPlugins` demand-loads **every** installed `FuBar_*` plugin the moment any one
+/// of them seats. So surveying `FuBar_MoneyFu` runs fifty *siblings*' file scope, and
+/// `FuBar_BattlegroundFu`'s embedded `Glory-2.0` raises `Glory-2.0 requires Deformat-2.0` —
+/// a library `FuBar_BattlegroundFu` does not ship and that a dozen of its siblings do, which is
+/// this module's own stated one-VM-per-addon limitation and not a gap of ours. It is not
+/// `FuBar_MoneyFu`'s row either: it is `FuBar_BattlegroundFu`'s, where the survey already counts it
+/// once. **49 of the corpus's 219 addons were failing on somebody else's file.**
+///
+/// A demand-loaded sibling is the same category as a declared dependency — code the surveyed addon
+/// did not write — so the test is now "an installed addon that is not this one", which subsumes
+/// `deps` (every dependency is installed) and adds the siblings.
+///
+/// **Conservative on purpose, unchanged.** A chunk that names no addon folder at all — our own
+/// FrameXML, an `[string "Frame:OnEvent"]` handler — is KEPT, because the surveyed addon is what
+/// drove it. And the surveyed addon's own folder is tested FIRST, so a raise inside its own
+/// `Libs\Ace\…` is never handed to an installed addon that happens to be called `Ace`.
+fn raised_inside_another_addons_own_file(
+    err: &str,
+    name: &str,
+    installed: &BTreeSet<String>,
+) -> bool {
+    let Some(first) = err.lines().next().map(str::to_ascii_lowercase) else {
         return false;
     };
-    // The surveyed addon's own folder always wins, even when a dependency's name is a substring of
-    // a path inside it.
-    if first.contains(&format!("\\{name}\\")) || first.starts_with(&format!("{name}\\")) {
+    let owns = |line: &str, folder: &str| {
+        line.contains(&format!("\\{folder}\\"))
+            || line.contains(&format!("{folder}/"))
+            || line.starts_with(&format!("{folder}\\"))
+    };
+    let mine = name.to_ascii_lowercase();
+    // The surveyed addon's own folder always wins, even when another addon's name is a substring
+    // of a path inside it.
+    if owns(&first, &mine) {
         return false;
     }
-    deps.iter()
-        .any(|d| first.contains(&format!("\\{d}\\")) || first.starts_with(&format!("{d}\\")))
+    if installed.iter().any(|d| owns(&first, d)) {
+        return true;
+    }
+    raised_inside_a_demand_load(err, &mine)
+}
+
+/// The raise site names **no file at all** — did it happen inside a `LoadAddOn` this addon made?
+///
+/// An inline `<OnEvent>`/`<OnLoad>` body is compiled under the FRAME's name
+/// (`[string "AuctioneerFrame:OnEvent"]`), not the file's, so the folder test above cannot see
+/// whose code it is — and 1226's conservative half then KEEPS it, charged to whoever drove it.
+/// That is right for a handler the surveyed addon's own events reached, and wrong for one reached
+/// through a demand load, which is somebody else's addon loading its own frames.
+///
+/// The traceback says which. `Stubby.lua:581`'s `inspectAddOn` calls `LoadAddOn` on every addon it
+/// finds, Auctioneer's `AuctioneerFrame:OnEvent` raises inside that call, and the frame between
+/// them is `[C]: in function 'LoadAddOn'`. So: walk the traceback from the raise site down, and if
+/// a `LoadAddOn` frame comes **before** any frame naming the surveyed addon's own folder, the code
+/// that raised belongs to the addon being loaded. It cost six addons their row — Stubby and the
+/// five that pull it in — for one raise in Auctioneer, which has its own row already.
+///
+/// **The false negative, stated:** the surveyed addon's OWN inline handler, fired by an event that
+/// happened to be dispatched inside a demand load it made, is exempted too. That is the same
+/// direction the dependency exemption has always erred in, and the alternative — charging every
+/// addon that calls `LoadAddOn` for its neighbours' code — is what this replaces.
+fn raised_inside_a_demand_load(err: &str, mine: &str) -> bool {
+    for line in err.lines().skip(1).map(str::to_ascii_lowercase) {
+        if line.contains(&format!("\\{mine}\\")) || line.contains(&format!("{mine}/")) {
+            return false; // our own frame is above the boundary: our raise
+        }
+        if line.contains("in function 'loadaddon'") {
+            return true;
+        }
+    }
+    false
 }
 
 /// Invoke the reference's own UI entry points, so an addon's OVERRIDES actually execute.
@@ -2912,6 +2986,97 @@ mod tests {
             vec!["error: 'X' is obsolete"],
             "the file, the source position and the quoted name are all per-addon noise"
         );
+    }
+
+    /// **A raise in a DEMAND-LOADED SIBLING is that sibling's row, not the surveyed addon's**
+    /// (decision 2107) — the FuBar shape, verbatim from the corpus.
+    ///
+    /// `FuBar.lua:1034`'s `LoadLoadOnDemandPlugins` demand-loads every installed `FuBar_*` the
+    /// moment any one of them seats, so surveying `FuBar_MoneyFu` runs `FuBar_BattlegroundFu`'s
+    /// file scope. Its embedded `Glory-2.0` wants a `Deformat-2.0` a dozen of its siblings ship and
+    /// it does not — this module's one-VM-per-addon limitation, and `FuBar_BattlegroundFu`'s own
+    /// row, where the survey counts it once. It cost 49 addons their session-start row.
+    #[test]
+    fn a_raise_in_another_installed_addons_file_is_that_addons_row() {
+        let installed: BTreeSet<String> = ["fubar", "fubar_moneyfu", "fubar_battlegroundfu", "ace"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let sibling = "LoadAddOn: FuBar_BattlegroundFu/lib\\Glory-2.0\\Glory-2.0.lua: runtime \
+                       error: ...Ons\\FuBar_BattlegroundFu\\lib\\Glory-2.0\\Glory-2.0.lua:23: \
+                       Glory-2.0 requires Deformat-2.0";
+        assert!(
+            raised_inside_another_addons_own_file(sibling, "FuBar_MoneyFu", &installed),
+            "a sibling's own file is the sibling's row"
+        );
+        // The surveyed addon's OWN file is always its own row — including a library it embeds
+        // whose folder name is itself an installed addon.
+        let mine = "runtime error: Interface\\AddOns\\FuBar_MoneyFu\\Libs\\Ace\\Ace.lua:8: boom";
+        assert!(!raised_inside_another_addons_own_file(
+            mine,
+            "FuBar_MoneyFu",
+            &installed
+        ));
+        // A chunk naming no addon folder at all is KEPT — the surveyed addon drove it.
+        let ours = "runtime error: [string \"Frame:OnEvent\"]:2: attempt to index a nil value";
+        assert!(!raised_inside_another_addons_own_file(
+            ours,
+            "FuBar_MoneyFu",
+            &installed
+        ));
+        // A folder that is not installed is not somebody else's row either.
+        let stranger = "runtime error: Interface\\AddOns\\NotInstalled\\x.lua:1: boom";
+        assert!(!raised_inside_another_addons_own_file(
+            stranger,
+            "FuBar_MoneyFu",
+            &installed
+        ));
+    }
+
+    /// **A raise inside a `LoadAddOn` the surveyed addon made is the LOADED addon's row** — even
+    /// when the raise site names no file at all (decision 2107).
+    ///
+    /// An inline `<OnEvent>` body is compiled under the frame's name, so the folder test is blind
+    /// to it. `Stubby.lua:581` demand-loads every addon it finds; Auctioneer's
+    /// `AuctioneerFrame:OnEvent` raises inside that call. Six addons — Stubby and the five that
+    /// pull it in — were failing on that one raise, which Auctioneer's own row already carries.
+    #[test]
+    fn a_raise_inside_a_demand_load_belongs_to_the_addon_being_loaded() {
+        let installed: BTreeSet<String> = ["stubby", "auctioneer", "enchantrix"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let through_loadaddon =
+            "runtime error: [string \"AuctioneerFrame:OnEvent\"]:4: attempt to \
+             index field 'Core' (a nil value)\n\
+             stack traceback:\n\
+             \t[C]: in ?\n\
+             \t[string \"AuctioneerFrame:OnEvent\"]:4: in function <...>\n\
+             \t[C]: in function 'LoadAddOn'\n\
+             \tInterface\\AddOns\\Stubby\\Stubby.lua:581: in upvalue 'inspectAddOn'";
+        assert!(
+            raised_inside_another_addons_own_file(through_loadaddon, "Stubby", &installed),
+            "the LoadAddOn frame sits between the raise and Stubby's own code"
+        );
+        assert!(
+            raised_inside_another_addons_own_file(through_loadaddon, "Enchantrix", &installed),
+            "…and the same for an addon that only pulled Stubby in"
+        );
+        // The surveyed addon's OWN frame ABOVE the boundary keeps the raise: it drove it itself.
+        let ours_first = "runtime error: [string \"StubbyFrame:OnEvent\"]:2: boom\n\
+             stack traceback:\n\
+             \tInterface\\AddOns\\Stubby\\Stubby.lua:12: in function 'Stubby.Thing'\n\
+             \t[C]: in function 'LoadAddOn'";
+        assert!(!raised_inside_another_addons_own_file(
+            ours_first, "Stubby", &installed
+        ));
+        // No LoadAddOn anywhere: 1226's conservative KEEP is untouched.
+        let plain = "runtime error: [string \"StubbyFrame:OnEvent\"]:2: boom\n\
+             stack traceback:\n\
+             \t[C]: in ?";
+        assert!(!raised_inside_another_addons_own_file(
+            plain, "Stubby", &installed
+        ));
     }
 
     /// mlua's `[string "Frame:OnLoad"]:2:` chunk name is a position, not words.

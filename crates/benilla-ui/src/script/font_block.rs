@@ -242,10 +242,16 @@ pub(super) fn install(
                 let (path, height) = set_font_args(&file, &height, widget)?;
                 let rh = resolve(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
+                // The verdict is the host's when there is a host: nil is a *load* failure
+                // (`0x5c1ae0` under the `0x44d040` font-factory cache), so a path naming no file
+                // — an addon's TTF the AddOns folder does not hold — has to come back falsey, and
+                // only the store knows. With no probe installed, a non-empty path is 1: a VM with
+                // no font backend has nothing for a load to fail against (decision 2103).
+                let ok =
+                    !path.is_empty() && model.font_probe.as_ref().is_none_or(|probe| probe(&path));
                 let d = model.region_data.entry(rh).or_default();
                 // Every argument supplied is an EXPLICIT set: it must survive a later mutation of
                 // the font object this region inherits.
-                let ok = !path.is_empty();
                 if ok {
                     d.font_path = Some(path);
                     d.font_explicit.face = true;

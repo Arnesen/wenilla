@@ -251,6 +251,15 @@ pub(super) fn play(
     rng: &mut u32,
     window: &mut Option<(bevy::animation::graph::AnimationNodeIndex, u32)>,
 ) {
+    // The lock's guard is `PlayAnimation`'s **front door**, above the arm helper that draws the
+    // rolls (`0x5fe2f0`'s epilogue return is at `0x5fe3a1`; the `_rand()` sites live inside
+    // `0x5fdba0`'s op4 call). So a refused play must not roll either: the variation and replay
+    // draws come off the ONE shared stream (decision 0114), and rolling them for a body that
+    // cannot move would perturb every other unit's picks for the clip's whole 2 s — the same
+    // churn 2096 caught in the gait selector's live trace, at the event-play door instead.
+    if lock.refuses() {
+        return;
+    }
     if let Some(c) = find_resolved(anims, id, catalog) {
         let (c, repeat) = if looping {
             let (c, r) = roll_loop(anims, c, relaxed, rng);
@@ -342,6 +351,33 @@ pub(super) fn oneshot_finished(
     }
 }
 
+/// Whether bone 0 still holds `sp`'s **own** clip — the arc's enter or its loop, resolved through
+/// the model's baked fallback exactly as [`play`] resolved it when it armed (decision 0082) and
+/// compared on the *resolved* id, so a rolled variation counts as the same clip.
+///
+/// This is the predicate the airborne snapshot-freeze (decision 0503, scoped by 1566) never had.
+/// The freeze exists to still **the cut airborne clip** before the landing cross-fades over it;
+/// both its sites took whatever bone 0 happened to hold, on the unstated assumption that the arc's
+/// own clip is what is there. The base-anim lock (2096) is the first thing that ever falsified it,
+/// and it falsified it catastrophically: every play the arc asked for was refused, so bone 0 still
+/// held the `Knockdown` that took the lock — and the landing stopped **that** dead. A clip stopped
+/// dead never finishes, and the lock clears on the finished id, so the body stayed on its back for
+/// the rest of the session with every later play refused (the director's report, decision 2098).
+pub(super) fn holds_own_clip(
+    anims: &ModelAnimations,
+    catalog: Option<&AnimDataCatalog>,
+    sp: Special,
+    node: bevy::animation::graph::AnimationNodeIndex,
+) -> bool {
+    let Some(cur) = anims.clips.iter().find(|c| c.node == node) else {
+        return false;
+    };
+    [sp.enter(), sp.loop_id()]
+        .into_iter()
+        .filter_map(|id| find_resolved(anims, id, catalog))
+        .any(|head| head.anim_id == cur.anim_id)
+}
+
 /// Enter the Special `sp`, returning the mode to adopt. A pose or a jump plays its enter one-shot
 /// and settles through [`Mode::Entering`]; **Fall has no enter** — the client plays the Fall(40)
 /// loop directly the tick FALLINGFAR latches (`0x602c40`) — so it goes straight to
@@ -430,11 +466,32 @@ pub(super) fn leave_special(
     // derivation; what produces the reference's lingering kick is not yet known.
     // …and the frozen node is NAMED (decision 0906), so the per-frame rate write
     // ([`sync_base_rate`]) skips it instead of restarting the clock a line above just stopped.
+    //
+    // …and it is **the arc's own clip** that is stilled, never merely whatever bone 0 holds
+    // ([`holds_own_clip`]) — the predicate this always meant and never wrote down.
     if matches!(sp, Special::Jump | Special::Fall) {
         if let Some(node) = tr.get_main_animation() {
-            if let Some(active) = player.animation_mut(node) {
-                active.set_speed(0.0);
-                *frozen = Some(node);
+            if holds_own_clip(anims, catalog, sp, node) {
+                if let Some(active) = player.animation_mut(node) {
+                    active.set_speed(0.0);
+                    *frozen = Some(node);
+                }
+            } else if benilla_assets::trace::enabled() {
+                // The declined freeze is TRACED, because the wedge it used to cause was
+                // completely silent: nothing logs a clip being stopped, and a stopped clip that
+                // holds the base-anim lock ends the unit's animation for the session (2098).
+                let held = anims
+                    .clips
+                    .iter()
+                    .find(|c| c.node == node)
+                    .map(|c| c.anim_id);
+                benilla_assets::trace::line(
+                    "anim",
+                    &format!(
+                        "anim freeze DECLINED leaving {sp:?}: bone 0 holds {held:?}, not this \
+                         arc's clip"
+                    ),
+                );
             }
         }
     }

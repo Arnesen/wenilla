@@ -242,23 +242,23 @@ fn the_lua_5_0_dialect_vanilla_addons_are_written_in_runs_here() {
         local n, first, second = varargs("a", "b")
         assert(n == 2 and first == "a" and second == "b")
 
-        -- **The one real edge**, and it is compat mode's rule rather than a gap: `arg` is
-        -- synthesized only for a vararg function that does NOT also mention `...` in its body.
-        -- Use both spellings in one function and `arg` is nil. Vanilla addon code is uniformly
-        -- 5.0 and never mixes them, so this costs an addon nothing — it only means one of OUR
-        -- transcriptions must pick a spelling per function and stay with it.
-        local function mixed(...) return arg == nil and select("#", ...) or -1 end
-        assert(mixed(1, 2, 3) == 3)
-
-        -- `...` alone is the 5.1 spelling and is unaffected.
-        local function modern(...) return select("#", ...) end
-        assert(modern("x", "y") == 2)
+        -- The edge that used to be here is gone (decision 2101). `arg` was synthesized only for
+        -- a vararg function that did NOT also mention `...` in its body, so mixing the two
+        -- spellings in one function left `arg` nil. `...` as a value is no longer in the grammar
+        -- at all, so nothing can clear the flag and EVERY vararg function has its `arg`.
+        local function fixed_and_varargs(a, ...) return a, arg.n, arg[1] end
+        local a, n, first = fixed_and_varargs("a", "b", "c")
+        assert(a == "a" and n == 2 and first == "b")
 
         -- 5.0's table/string/math spellings, all of which 5.1 renamed.
         assert(table.getn({ 1, 2, 3 }) == 3)
         assert(string.gfind ~= nil)          -- 5.1 renamed this to string.gmatch
         assert(math.mod(7, 3) == 1)
-        assert(7 % 3 == 1)                   -- and the 5.1 operator 5.0 lacks also works
+        -- ...and the 5.1 OPERATORS 5.0 lacks are not in the grammar: `%`, `#`, and `...` as a
+        -- value all fail to compile, exactly as they do on the 1.12 client (2101).
+        assert(loadstring("return 7 % 3") == nil)
+        assert(loadstring("return #({1})") == nil)
+        assert(loadstring("return function(...) return ... end") == nil)
     "##,
     )
     .unwrap();

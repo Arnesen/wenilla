@@ -56,7 +56,7 @@ fn install_boot_vm(world: &mut World) {
             return;
         }
     };
-    install_texture_resolvers(world, &mut script);
+    install_addon_asset_resolvers(world, &mut script);
     load_global_strings(world, &script);
     load_emote_tokens(world, &script);
     if ui_wanted(world) {
@@ -67,13 +67,16 @@ fn install_boot_vm(world: &mut World) {
     world.insert_non_send_resource(script);
 }
 
-/// Wire up the halves of `Interface\AddOns\` texture art (decision 1322): the sprite decoder's
-/// **loose-file root** (so addon-shipped BLP/TGA files render at all — the store's
-/// [`benilla_assets::WorldAssets::set_loose_sprite_root`]) and the VM's **texture probe** (so the
+/// Wire up the halves of `Interface\AddOns\` **art and fonts** (decisions 1322, 2103): the sprite
+/// decoder's **loose-file root** (so addon-shipped BLP/TGA files render at all — the store's
+/// [`benilla_assets::WorldAssets::set_loose_addon_root`]), the VM's **texture probe** (so the
 /// path form of `SetTexture` can answer the reference's 1|nil load verdict — Atlas picks its map
-/// art by that return). Both resolve the same one folder ([`addons::root`], hermetic-`None` under
-/// `$WOW_CAPTURE`), and the probe walks the same [`benilla_assets::sprite_candidates`] the
-/// renderer decodes with, so the verdict the Lua caller gets is the verdict the screen shows.
+/// art by that return), and the VM's **font probe** (the same 1|nil for `SetFont`, whose nil is a
+/// load failure — `!OmniCC` uses it as a font-file validity check). All resolve the same one folder
+/// ([`addons::root`], hermetic-`None` under `$WOW_CAPTURE`), and each probe walks exactly the
+/// store its renderer reads — [`benilla_assets::sprite_candidates`] for art, the chain-then-folder
+/// pair [`crate::ui_text`]'s face loader uses for fonts — so the verdict the Lua caller gets is the
+/// verdict the screen shows.
 ///
 /// The **size probe** beside it is the same oracle answering a different question — how many texels
 /// wide and tall is the art — which is what lets a region that authored no size on an axis take
@@ -82,23 +85,30 @@ fn install_boot_vm(world: &mut World) {
 /// is the number the screen shows, and memoises per texture key: the ask is per zero-size region
 /// per resolve, and the answer cannot change for a key that already read.
 ///
-/// No `WorldAssets` (no client data) means no backend: nothing to install, and the VM's path form
-/// keeps answering nil — the engine-less truth.
-fn install_texture_resolvers(world: &mut World, script: &mut UiScript) {
+/// No `WorldAssets` (no client data) means no backend: nothing to install, so `SetTexture`'s path
+/// form keeps answering nil and `SetFont`'s keeps answering 1 — each store's own engine-less truth
+/// (`Model::texture_probe` / `Model::font_probe` carry why the two defaults differ).
+///
+/// Both probes test **existence**, not decode success: a file that is there but will not decode
+/// answers 1 and draws nothing. That is 1322's stated approximation and it is unchanged here; the
+/// renderer's own `texture miss` / `font miss` WARN is what names such a file.
+fn install_addon_asset_resolvers(world: &mut World, script: &mut UiScript) {
     let root = addons::root();
     let Some(mut assets) = world.get_resource_mut::<benilla_assets::WorldAssets>() else {
         return;
     };
-    assets.set_loose_sprite_root(root.clone());
+    assets.set_loose_addon_root(root.clone());
     let chain = assets.chain.clone();
     let size_chain = chain.clone();
     let size_root = root.clone();
+    let font_chain = chain.clone();
+    let font_root = root.clone();
     script.set_texture_probe(Box::new(move |path| {
         benilla_assets::sprite_candidates(path).iter().any(|c| {
             chain.lock_recover().contains(c)
                 || root
                     .as_deref()
-                    .is_some_and(|r| benilla_assets::loose_sprite_file(r, c).is_some())
+                    .is_some_and(|r| benilla_assets::loose_addon_file(r, c).is_some())
         })
     }));
     // Keyed by the reference string exactly as the region carries it, so the hit path allocates
@@ -115,6 +125,24 @@ fn install_texture_resolvers(world: &mut World, script: &mut UiScript) {
         let measured = benilla_assets::sprite_dimensions(&size_chain, size_root.as_deref(), path);
         sizes.borrow_mut().insert(path.to_string(), measured);
         measured
+    }));
+    // The font oracle. Existence over the same two stores, in the same order, that
+    // `ui_text::engine`'s face loader reads — a `SetFont` that answers 1 and then draws Friz
+    // because the two disagreed would be worse than no probe at all. Memoised for the same reason
+    // the size probe is: an addon can call `SetFont` per animated string per frame (MSBT does),
+    // and a path's answer cannot change mid-session.
+    let seen: std::cell::RefCell<std::collections::HashMap<String, bool>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+    script.set_font_probe(Box::new(move |path| {
+        if let Some(&cached) = seen.borrow().get(path) {
+            return cached;
+        }
+        let found = font_chain.lock_recover().contains(path)
+            || font_root.as_deref().is_some_and(|r| {
+                benilla_assets::loose_addon_file(r, &benilla_assets::normalize_path(path)).is_some()
+            });
+        seen.borrow_mut().insert(path.to_string(), found);
+        found
     }));
 }
 

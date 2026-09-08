@@ -210,10 +210,31 @@ impl super::UiScript {
     ///
     /// The caller still logs its own line; this is the retention half, not a replacement for it.
     pub fn report_load_failure(&self, msg: &str) {
-        self.model_mut()
-            .diagnostics
-            .record(DiagnosticKind::Load, msg);
+        record_load_failure(&self.lua, msg);
     }
+}
+
+/// **THE rule for "an addon file did not load"** — one implementation, both loaders (decision
+/// 2107).
+///
+/// The startup walk reaches it through [`super::UiScript::report_load_failure`]; `LoadAddOn`'s
+/// demand load reaches it directly, because it runs inside a Lua binding and holds only `&Lua`
+/// (1191 §4). That was the whole defect 2107 fixes: the two paths had **two copies** of the rule
+/// and the demand-load copy classified a missing manifest entry as a script error, so an addon the
+/// reference loads (logging `Couldn't open %s` and continuing) came back as a session failure here.
+///
+/// The reference's own shape, VERIFIED (wow-re `system/ui/scratch/xml-toc-path-resolution.md` §4
+/// and `include-lua-dispatch.md` §7): a failed open is **non-fatal** — `0x6edaa0` logs
+/// `"Couldn't open %s"` (`0x846ff4`) to the log sink at severity 2 and returns null; every failure
+/// leg "reports through the sink and returns normally, with no throw, no `longjmp` and no abort",
+/// and the enclosing `.toc`/document keeps loading. Nothing on that path reaches the Lua error
+/// handler, which is why this never dispatches (1495) and why 1450 made it a WARN: a broken
+/// package is the *package's* defect, and ERROR means "the client is broken".
+pub(crate) fn record_load_failure(lua: &Lua, msg: &str) {
+    lua.app_data_mut::<Model>()
+        .expect("model app_data set")
+        .diagnostics
+        .record(DiagnosticKind::Load, msg);
 }
 
 /// Register the error-log reads the `BenillaScriptLogFrame` polls.

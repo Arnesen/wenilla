@@ -4321,4 +4321,108 @@ mod base_anim_lock {
             "already playing it — the leg leaves the block having done nothing"
         );
     }
+
+    /// The airborne clips, on the same victim — the director's follow-up report: *"there is some
+    /// bug it seems, I ended up stuck laying down after a knock, might be because I was jumping
+    /// or running at the same time"*.
+    fn airborne_model() -> ModelAnimations {
+        ModelAnimations {
+            graph: Handle::default(),
+            clips: vec![
+                clip(0, STAND_NODE, true),        // Stand
+                clip(121, KNOCKDOWN_NODE, false), // Knockdown — takes the lock
+                clip(37, 3, false),               // JumpStart
+                clip(38, 4, true),                // Jump hang
+                clip(39, 5, false),               // JumpEnd
+                clip(40, 6, true),                // Fall
+            ],
+            hand_close: [None, None],
+            playable_animation_lookup: Vec::new(),
+            animation_lookup: Vec::new(),
+            global_bones: Vec::new(),
+            first_seq: None,
+            pose: Default::default(),
+        }
+    }
+
+    fn knocked_jumper(app: &mut App) -> Entity {
+        app.world_mut()
+            .spawn((
+                airborne_model(),
+                AnimationPlayer::default(),
+                AnimationTransitions::new(),
+                AnimDriver::default(),
+                MovementState::default(),
+            ))
+            .id()
+    }
+
+    /// **The wedge**: jumping while the lock is held used to stop the locked clip DEAD, and a clip
+    /// that never finishes never releases the lock — so the body lay on its back for the rest of
+    /// the session, every subsequent play refused.
+    ///
+    /// The mechanism is 0503's snapshot-freeze in [`super::play::leave_special`], which stills the
+    /// cut airborne clip before the landing cross-fades over it. It took whatever bone 0 held, on
+    /// the assumption that the arc's own clip is what it armed — and the lock is the first thing
+    /// ever to falsify that: every play the arc asked for was refused, so bone 0 still held the
+    /// `Knockdown`, and the landing froze *that*.
+    #[test]
+    fn a_jump_taken_while_locked_never_freezes_the_locked_clip() {
+        let mut app = app();
+        let unit = knocked_jumper(&mut app);
+        app.update(); // settle: Stand
+        oneshot(&mut app, unit, 121);
+        let knockdown = AnimationNodeIndex::new(KNOCKDOWN_NODE as usize);
+        assert_eq!(
+            main_node(&app, unit),
+            Some(knockdown),
+            "the impact kit's Knockdown holds the base"
+        );
+
+        // Space, flat on their back: the launch enters the bracket, and every clip in the bracket
+        // is refused — so bone 0 still holds the Knockdown for the whole arc.
+        app.world_mut().entity_mut(unit).insert(MovementState {
+            flags: move_flags::FALLING,
+            vertical_speed: 7.96,
+            ..Default::default()
+        });
+        advance(&mut app, 16);
+        assert!(
+            !app.world()
+                .entity(unit)
+                .get::<AnimDriver>()
+                .unwrap()
+                .started_anim,
+            "the bracket walked with its play declined — nothing started, so nothing downstream              may read a play out of the mode change (the flinch's eviction, 2076's trail edge)"
+        );
+        advance(&mut app, 16);
+        assert_eq!(
+            main_node(&app, unit),
+            Some(knockdown),
+            "the arc's own JumpStart/hang are refused, exactly as the guard orders"
+        );
+
+        // Touchdown.
+        app.world_mut()
+            .entity_mut(unit)
+            .insert(MovementState::default());
+        advance(&mut app, 16);
+
+        assert_eq!(
+            app.world().entity(unit).get::<AnimDriver>().unwrap().frozen,
+            None,
+            "the landing's freeze is the AIRBORNE clip's alone — it must never still a clip the \
+             arc did not arm"
+        );
+        assert_eq!(
+            app.world()
+                .entity(unit)
+                .get::<AnimationPlayer>()
+                .unwrap()
+                .animation(knockdown)
+                .map(bevy::animation::ActiveAnimation::speed),
+            Some(1.0),
+            "…so the Knockdown runs on, finishes, and releases the lock"
+        );
+    }
 }

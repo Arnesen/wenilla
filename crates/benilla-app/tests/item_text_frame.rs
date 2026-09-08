@@ -331,7 +331,7 @@ fn the_reported_book_crest_draws_at_the_blps_own_size() {
     let chain = std::sync::Mutex::new(benilla_formats::open_chain(&data).expect("open chain"));
 
     let mut s = UiScript::new().unwrap();
-    // The host oracle, wired exactly as `ui_script::lifecycle::install_texture_resolvers` wires the
+    // The host oracle, wired exactly as `ui_script::lifecycle::install_addon_asset_resolvers` wires the
     // live one: the same decoder, so the size the layout resolves with is the size the screen shows.
     s.set_texture_size_probe(Box::new(move |path| {
         benilla_assets::sprite_dimensions(&chain, None, path)
