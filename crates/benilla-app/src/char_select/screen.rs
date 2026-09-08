@@ -8,8 +8,8 @@
 //! name (`GlueFontNormalHuge` at BOTTOM (0,100)), Enter World (200×60 at BOTTOM (0,30)) with the
 //! rotate pair tucked under it, Back (BOTTOMRIGHT (−30,25)) and Delete Character to its left, and
 //! the right-column character frame: 260×642 at TOPRIGHT (−5,−15), `Glue-Tooltip` backdrop tinted
-//! `DEFAULT_TOOLTIP_COLOR` at 0.85 alpha, holding the realm banner, the disabled Change Realm
-//! button (realm choice is out of scope — decision 0465 §6), ten 256×70 row buttons from TOPLEFT
+//! `DEFAULT_TOOLTIP_COLOR` at 0.85 alpha, holding the realm banner, the Change Realm
+//! button (back to [`crate::realm_select`]'s list), ten 256×70 row buttons from TOPLEFT
 //! (24,−65) at the authored 57 px pitch (13 px overlap, hit-inset 15), and Create New Character at
 //! the frame's BOTTOM (0,15). The delete dialog is [`super::dialog`]'s.
 
@@ -41,7 +41,7 @@ pub(super) enum SelectAction {
     Back,
     Delete,
     CreateChar,
-    /// Rendered disabled — realm choice is out of scope (decision 0465 §6).
+    /// Back to the realm list — drops the parked session, keeps the logon.
     ChangeRealm,
     /// Open the AddOns list (decision 1197) — the reference's `CharacterSelectAddonsButton`.
     Addons,
@@ -388,8 +388,9 @@ fn character_frame(
                 font,
                 s,
             );
-            // Change Realm (below the banner) — rendered disabled: realm choice is out of scope
-            // (decision 0465 §6; a dead-but-enabled button would lie).
+            // Change Realm (below the banner) — live. It was drawn permanently disabled for as
+            // long as there was no realm list behind it to go back to; there is now, and it
+            // costs a world dial rather than a re-login (`crate::realm_select`).
             frame
                 .spawn((Node {
                     position_type: PositionType::Absolute,

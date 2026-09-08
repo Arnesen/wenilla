@@ -47,6 +47,29 @@ pub(crate) struct RelayMove {
     /// `MSG_MOVE_HEARTBEAT` — excluded from the pre-fire reconcile lerp (the reference's `0x619090`
     /// skips tag `0x26`); it applies as an outright snap.
     pub(crate) heartbeat: bool,
+    /// `MSG_MOVE_TELEPORT` — somebody else blinked (decision 2061). Excluded from the pre-fire
+    /// reconcile for the opposite reason to a heartbeat's: not "the dead-reckon has already
+    /// converged" but "there is nothing to converge to". The pose is a **discontinuity**; lerping
+    /// a mover toward it would drag them across the gap the teleport exists to skip, sweeping the
+    /// capsule through every wall in between.
+    pub(crate) teleport: bool,
+}
+
+impl RelayMove {
+    /// **Does this queued move arm the pre-fire reconcile?** The two blends
+    /// ([`super::remote::facing_lerp`] and the position lerp) exist to make the pose a queued move
+    /// carries land *smoothly* at its fire-time, so both are skipped for the two kinds of move that
+    /// smoothing cannot help — for opposite reasons:
+    ///
+    /// - a **heartbeat** needs no blend: the scheduled dead-reckon has structurally converged on it
+    ///   by the fire-time, and the reference skips it explicitly (tag `0x26` at `0x619030
+    ///   @0x61904b` / `0x619090 @0x6190bb`; decisions 0601/0603);
+    /// - a **teleport** has nothing to blend *to*: its position is a discontinuity, and lerping the
+    ///   mover into it would walk them — swept capsule and all — across the gap the teleport exists
+    ///   to skip (decision 2061).
+    pub(crate) fn reconciles(&self) -> bool {
+        !self.heartbeat && !self.teleport
+    }
 }
 
 /// One **scheduled** relayed move — the reference's queued move-event node (`0x617570`: fire-time at

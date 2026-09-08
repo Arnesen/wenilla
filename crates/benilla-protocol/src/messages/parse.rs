@@ -122,10 +122,21 @@ fn read_move_set_speed(kind: SpeedKind, r: &mut impl Read) -> io::Result<ServerP
     })
 }
 
-/// True for a relayed player-movement opcode — one the server rebroadcasts as
-/// `[packed guid][MovementInfo]` (every opcode bound to vmangos `HandleMovementOpcodes`, VERIFIED
-/// `Opcodes.cpp`). Excludes `MSG_MOVE_TELEPORT_ACK` / `MSG_MOVE_WORLDPORT_ACK`, which share the family
-/// but carry different bodies and are decoded by their own arms.
+/// True for a relayed movement opcode — one the server rebroadcasts as `[packed guid][MovementInfo]`.
+/// Two groups, one wire shape and one client handler (`0x603bb0`, wow-re `re/net/opcode-handlers.tsv`
+/// — 30 rows pointing at it, of which these are 23):
+///
+/// - the **echoed input stream**, every opcode bound to vmangos `HandleMovementOpcodes` (VERIFIED
+///   `Opcodes.cpp`): another player's walking, turning, jumping, swimming, facing;
+/// - the **observer leg of the movement-mode family** (decision 2061): root/unroot, hover,
+///   feather-fall, water-walk and the near-teleport, broadcast by
+///   `MovementPacketSender::Send{MovementFlagChange,Teleport}ToObservers` once the mover's own
+///   client has acked. Same body, no ack, and the apply/unapply direction rides the `MovementInfo`
+///   flags word rather than the opcode (see [`super::opcode`]'s block).
+///
+/// Excludes `MSG_MOVE_TELEPORT_ACK` / `MSG_MOVE_WORLDPORT_ACK`, which share the family but carry
+/// different bodies and are decoded by their own arms — note `MSG_MOVE_TELEPORT` (197) is the
+/// observer's teleport and is NOT `MSG_MOVE_TELEPORT_ACK` (199): no counter dword, so it parses here.
 const fn is_movement_relay(o: u16) -> bool {
     matches!(
         o,
@@ -155,6 +166,16 @@ const fn is_movement_relay(o: u16) -> bool {
             // need to: the server built that `MovementInfo` from the victim's own ack, so its jump
             // tail already IS the quad, and the arc replays from it like any other relayed jump.
             | opcode::MSG_MOVE_KNOCK_BACK
+            // The observer leg of the movement-mode family (decision 2061): somebody else was
+            // rooted, levitated (hover + feather fall + water walk), or blinked. The mode lands in
+            // the `MovementInfo` flags word this body already carries, so no arm of its own is
+            // needed — only the opcode's admission to the family.
+            | opcode::MSG_MOVE_ROOT
+            | opcode::MSG_MOVE_UNROOT
+            | opcode::MSG_MOVE_HOVER
+            | opcode::MSG_MOVE_FEATHER_FALL
+            | opcode::MSG_MOVE_WATER_WALK
+            | opcode::MSG_MOVE_TELEPORT
     )
 }
 

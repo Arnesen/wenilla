@@ -86,7 +86,7 @@ use crate::entities::Creatures;
 use crate::net::{NetEntity, ObjectStore, SelfPlayer};
 
 use super::events::AnimSoundEvent;
-use super::spell_visual::{FxClass, FxStage, SpellKitFx, SpellVisuals};
+use super::spell_visual::{FxClass, FxSlot, FxStage, SpellKitFx, SpellVisuals};
 
 /// The event that asks "what does this unit breathe?" — `0x5fffad cmp eax,0x48544224`.
 const BTH: [u8; 4] = *b"$BTH";
@@ -202,7 +202,7 @@ pub(super) fn fire_breath(
     let (Some(visuals), Some(creatures)) = (visuals, creatures) else {
         return;
     };
-    let Some(path) = visuals.0.hardcoded_effect(COLD_BREATH_EFFECT) else {
+    let Some((effect, path)) = visuals.0.hardcoded_effect(COLD_BREATH_EFFECT) else {
         return; // no such row — no breath (the DBC-resource degrade shape)
     };
     let path = path.to_string();
@@ -261,7 +261,11 @@ pub(super) fn fire_breath(
             class: FxClass::Hold,
             // `0x5fbf50` — destroy at the first completion; the shipped clip runs 1.5 s.
             stage: FxStage::OneShot,
-            effects: vec![(BREATH_ATTACH, path.clone())],
+            effects: vec![FxSlot {
+                tag: BREATH_ATTACH,
+                effect,
+                path: path.clone(),
+            }],
         });
     }
     // Streamed units despawn on range-out — drop their puff memory with them.

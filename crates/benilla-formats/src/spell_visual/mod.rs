@@ -419,14 +419,14 @@ pub struct SpellVisualCatalog {
     /// `SpellVisualEffectName` id → the effect model's `.mdx` path (field 2 — the table's one
     /// column the kit slots consume).
     effect_paths: HashMap<u32, String>,
-    /// The `"HARDCODED *"`-named rows, name → path — the client's engine-spawned effect set,
+    /// The `"HARDCODED *"`-named rows, name → (record id, path) — the client's engine-spawned effect set,
     /// resolved BY NAME once at boot exactly like this (`0x61f5b0` matches a 14-string baked
     /// table against the name column: loot art, footsteps, breath, level-up…; wow-re
     /// `loot-corpse-effect.md` + `levelup-ding.md`). Three consumers today: "HARDCODED Loot Art"
     /// (id 14 → `Particles\LootFX.mdl`, the corpse sparkle), "HARDCODED Unit Level Up"
     /// (id 21 → `Spells\LevelUp\LevelUp.mdl`, the ding) and "HARDCODED Mount Poof"
     /// (id 1185 → `Spells\DruidMorph_Impact_Base.mdx`, the mount-up cloud — decision 0927).
-    hardcoded: HashMap<String, String>,
+    hardcoded: HashMap<String, (u32, String)>,
     /// `SpellChainEffects` id → the beam's geometry/animation row ([`chain_effects`], decision 0955).
     /// Reached only through a kit's [`VisualKit::chain_proc`].
     chain_effects: HashMap<u32, ChainEffect>,
@@ -464,12 +464,16 @@ impl SpellVisualCatalog {
         self
     }
 
-    /// Seed one `"HARDCODED …"` name → model path, for fixtures exercising the engine-spawned
-    /// effects (the loot sparkle, the level-up ding, the mount poof). The live path is the boot
-    /// name-resolve inside [`load_spell_visual_catalog`], which is what `0x61f5b0` does.
+    /// Seed one `"HARDCODED …"` name → (record id, model path), for fixtures exercising the
+    /// engine-spawned effects (the loot sparkle, the level-up ding, the mount poof). The live
+    /// path is the boot name-resolve inside [`load_spell_visual_catalog`], which is what
+    /// `0x61f5b0` does. The **id** is carried because it is half the reference's same-slot
+    /// replace key (`0x6208e0`; decision 2057) — an engine-spawned effect dedups exactly like a
+    /// kit slot's.
     #[must_use]
-    pub fn with_hardcoded(mut self, name: &str, path: &str) -> Self {
-        self.hardcoded.insert(name.to_string(), path.to_string());
+    pub fn with_hardcoded(mut self, name: &str, id: u32, path: &str) -> Self {
+        self.hardcoded
+            .insert(name.to_string(), (id, path.to_string()));
         self
     }
 
@@ -521,21 +525,22 @@ impl SpellVisualCatalog {
             .filter(|p| !p.is_empty())
     }
 
-    /// An engine-spawned hardcoded effect's model path, by the client's own baked name string
-    /// ([`SpellVisualCatalog::hardcoded`]). Mirrors the client's boot name-resolve
+    /// An engine-spawned hardcoded effect's `(record id, model path)`, by the client's own baked
+    /// name string ([`SpellVisualCatalog::hardcoded`]). Mirrors the client's boot name-resolve
     /// (`0x61f5b0`, stricmp-family — hence the case-insensitive compare over the tiny set);
-    /// `None` when the shipped table names no such row.
-    pub fn hardcoded_effect(&self, name: &str) -> Option<&str> {
+    /// `None` when the shipped table names no such row. The id rides along because every consumer
+    /// hands it to the same-slot replace (`0x6208e0`, decision 2057).
+    pub fn hardcoded_effect(&self, name: &str) -> Option<(u32, &str)> {
         self.hardcoded
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_str())
-            .filter(|p| !p.is_empty())
+            .map(|(_, (id, path))| (*id, path.as_str()))
+            .filter(|(_, p)| !p.is_empty())
     }
 
-    /// The `"HARDCODED Loot Art"` row's model path — the lootable-corpse sparkle, riding the
-    /// shared hardcoded map (one name-resolve mechanism for the whole engine-spawned set).
-    pub fn loot_art_path(&self) -> Option<&str> {
+    /// The `"HARDCODED Loot Art"` row — the lootable-corpse sparkle, riding the shared hardcoded
+    /// map (one name-resolve mechanism for the whole engine-spawned set).
+    pub fn loot_art_effect(&self) -> Option<(u32, &str)> {
         self.hardcoded_effect("HARDCODED Loot Art")
     }
 
@@ -709,7 +714,7 @@ pub fn load_spell_visual_catalog(chain: &mut Chain) -> Result<SpellVisualCatalog
             // the client's own boot name-resolve can hit (the "HARDCODED " prefix; its
             // matchers are stricmp-family, so lookups compare case-insensitively).
             if let Some(name) = str_at(&sven_set, r, 1).filter(|n| n.starts_with("HARDCODED ")) {
-                hardcoded.insert(name, path.clone());
+                hardcoded.insert(name, (id, path.clone()));
             }
             effect_paths.insert(id, path);
         }

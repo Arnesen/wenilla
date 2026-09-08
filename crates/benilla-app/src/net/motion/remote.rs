@@ -127,7 +127,16 @@ pub(in crate::net) fn trace_relay(
         return;
     }
     let lead = chain.lead_ms(now_ms);
-    let kind = if mv.heartbeat { "hb" } else { "tr" };
+    // `tp` is its own tag, not folded into `tr`: a mover that appears in the wrong place is the
+    // one report where "was there a teleport?" is the whole question, and the trace has to answer
+    // it without a second run (decision 2061).
+    let kind = if mv.heartbeat {
+        "hb"
+    } else if mv.teleport {
+        "tp"
+    } else {
+        "tr"
+    };
     benilla_assets::trace::line(
         "rly",
         &format!(
@@ -666,14 +675,18 @@ pub(in crate::net) fn extrapolate_remote_units(
         //   blend the SIMULATED pose so it lands on the event position at the fire-time.
         // A heartbeat is excluded from both arms (`0x619030 @0x61904b` / `0x619090 @0x6190bb`
         // skip tag 0x26) — it snaps at fire, and by then the scheduled dead-reckon has
-        // structurally converged.
+        // structurally converged. **A teleport is excluded too** (decision 2061), for the
+        // opposite reason: not "already converged" but "nothing to converge to". Both blends are
+        // built to make a *continuous* pose land smoothly; a blink is a discontinuity, and
+        // blending toward it walks the mover — swept capsule and all — across the very gap the
+        // teleport skips.
         if let Some(ev) = rm.pending.front() {
             let remaining_s = ((ev.fire_ms - now_ms) / 1000.0) as f32;
             // A heartbeat is excluded from BOTH pre-fire blends — the reference's facing arm
             // `0x619030` skips tag 0x26 exactly as the position arm `0x619090` does (wow-re
             // `remote-air-facing.md`, decision 0603) — so it applies as an outright snap at
             // fire; the smoothed facings are the transition/SET_FACING family's.
-            if remaining_s > 0.0 && !ev.mv.heartbeat {
+            if remaining_s > 0.0 && ev.mv.reconciles() {
                 orientation = facing_lerp(orientation, ev.mv.orientation, dt, remaining_s);
                 // Predict from the pre-frame state to the fire-time (this frame's dt + what's left).
                 let (predicted, ..) = rm.advance(s, dt + remaining_s);

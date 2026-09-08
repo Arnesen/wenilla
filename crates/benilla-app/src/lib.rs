@@ -100,6 +100,7 @@ mod preflight;
 mod probe_shield;
 mod quest_markers;
 mod raid_marks;
+mod realm_select;
 mod realmlist;
 mod run_mode;
 mod screen_fade;
@@ -585,6 +586,9 @@ pub fn run(build: BuildId) -> AppExit {
     // The login screen (decision 0539): the faithful AccountLogin glue + the credential policy
     // that answers the IO thread's pre-logon park.
     .add_plugins(login::LoginPlugin)
+    // The realm list: the faithful RealmList glue + the policy that answers the IO thread's
+    // realm park. The client used to take `realms.first()` and offer no way to say otherwise.
+    .add_plugins(realm_select::RealmSelectPlugin)
     // The character-creation screen + its live preview booth (decision 0423).
     .add_plugins(char_create::CharCreatePlugin)
     // Audio: the delegated mixer + WoW's owned selection layer (decision 0070).

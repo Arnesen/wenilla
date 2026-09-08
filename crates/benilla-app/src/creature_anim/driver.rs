@@ -364,11 +364,11 @@ pub(super) fn drive_animations(
     // keys on what is *currently playing* when each call runs.
     let mut pending: bevy::ecs::entity::EntityHashMap<Vec<(OneShotReq, u64)>> = default();
     // …and by victim: a landed hit with the flinch bit (`HitInfo & 0x2` — the sole trigger gate,
-    // decision 0111) plays the victim's wound-flinch **decay overlay** below, as does a spell
-    // impact whose kit carries a CombatWound anim ([`WoundAnim`], decision 0099 phase 4 — the
-    // kit player's own 8–10 branch). Last hit wins, matching the client, where a re-trigger
-    // re-seeds the same secondary slot. Independent of the attacker-side 0x10000 suppressor
-    // (that bit gates the *swing* animation only).
+    // decision 0111) plays the victim's wound-flinch **decay overlay** below, as does a spell-side
+    // flinch ([`WoundAnim`] — the kit player's 8–10 branch, a harmful instant impact, a missile
+    // impact; severity 0 every time, decision 2058). Last hit wins, matching the client, where a
+    // re-trigger re-seeds the same secondary slot. Independent of the attacker-side 0x10000
+    // suppressor (that bit gates the *swing* animation only).
     let mut pending_wound: bevy::ecs::entity::EntityHashMap<WoundEdge> = default();
     for s in swings.read() {
         // HitInfo bit 0x10000 suppresses the swing anim (decision 0073's verified suppressor).
@@ -394,7 +394,7 @@ pub(super) fn drive_animations(
         }
     }
     for w in spell_wounds.read() {
-        pending_wound.insert(w.entity, WoundEdge::Spell(w.anim_id));
+        pending_wound.insert(w.entity, WoundEdge::Spell);
     }
     // This frame's victim DEFENSE reactions (`$CPP`, decision 0279), keyed by victim — last wins
     // (a re-trigger re-arms the same primary). Resolved to an anim id inside the loop: the parry
@@ -1369,11 +1369,12 @@ pub(super) fn drive_animations(
         wound_evict(&mut drv, &mut player, masked_played, base_played);
 
         if let Some(&edge) = pending_wound.get(&entity) {
-            // A melee edge picks its wound id by severity + the victim's engagement (decision
-            // 0111); a spell edge arrives with the kit's own id (the client passes it through).
+            // Both edges pick the wound id by severity + the victim's engagement (decision
+            // 0111's `0x60ea70`); a spell edge is the client's `severity = 0` call (decision
+            // 2058), so it is CombatWound/StandWound by engagement and never the kit's own id.
             let id = match edge {
                 WoundEdge::Melee(hit_info) => select::wound_anim(hit_info, engaged),
-                WoundEdge::Spell(anim_id) => anim_id,
+                WoundEdge::Spell => select::wound_anim(0, engaged),
             };
             wound_trigger(
                 &mut drv,

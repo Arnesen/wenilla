@@ -1505,6 +1505,11 @@ pub fn m2part(chain: &mut Chain, internal_path: &str) -> Result<()> {
 
         // The derived read: what this record actually puts on screen.
         let rate = e.timing.peak_rate();
+        // A burst emitter's count is NOT its peak rate: the burst fires on the rising edge of
+        // `enabled && rate > 0`, and an emitter whose gate closes on the same keyframe its rate
+        // opens fires nothing at all. Reading `peak_rate` here reported 50 phantom particles for
+        // `Strike_Impact_Chest`'s flare and sent a whole diagnosis 2.7x over on count.
+        let burst = e.timing.first_burst(Some(0));
         let life = e.params.peak_lifespan();
         let speed = views[0]
             .1
@@ -1524,7 +1529,13 @@ pub fn m2part(chain: &mut Chain, internal_path: &str) -> Result<()> {
         println!(
             "     derived: {} · reach ~{reach:.2} yd · size {size_lo:.3}..{size_hi:.3} yd · peak alpha {:.2}",
             if e.burst() {
-                format!("burst of ~{rate:.0} particles, life {life:.2}s")
+                match burst {
+                    Some((t, n)) => {
+                        format!("burst of {n:.0} particles at t={t:.2}s, life {life:.2}s")
+                    }
+                    None => "NEVER FIRES — the enabled gate never opens while the rate is nonzero"
+                        .to_string(),
+                }
             } else {
                 format!(
                     "steady ~{:.0} live (rate {rate:.1}/s × life {life:.2}s)",

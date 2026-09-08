@@ -121,23 +121,97 @@ fn dial(host: &str, port: u16) -> Result<TcpStream> {
     })
 }
 
-/// A realm as advertised by the auth server's realm list.
+/// A realm as advertised by the auth server's realm list — **every** field the wire carries.
+///
+/// Three of them used to be dropped on the floor (`_flag`, `_category`, `_realm_id`) and
+/// `population` was stringified on arrival, which was survivable only while benilla connected to
+/// `realms.first()` and never drew a list. The realm-list screen needs all of them, and it needs
+/// the population as the float it is.
 #[derive(Debug, Clone)]
 pub struct RealmInfo {
     pub name: String,
     /// `host:port` of the world server, as the client would connect to it.
     pub address: String,
-    pub population: String,
+    /// The population float — **not** what the realm list displays. The displayed word
+    /// (`Low`/`Medium`/`High`/`Full`/…) is a *band* computed against the mean and standard
+    /// deviation of **every** realm; see `realm_select::load` on the app side.
+    ///
+    /// Already **rewritten** if the server sent one of the three sentinel values — see
+    /// [`auth::MAGIC_POPULATIONS`]. What is stored here is what the reference's own parser would
+    /// hold, which is the only value it is safe to average.
+    pub population: f32,
+    /// How many characters this account has on that realm — a genuine count, printed by the list as
+    /// `"(3)"`. (The client's realm record keeps it at `[realm+0x130]`; wow-re's earlier band sweep
+    /// had read that offset as the realm type, which is really the dword at `[+0x04]` below.)
     pub characters: u8,
-    /// The wire's `realm_type` (the list "icon"): 0 Normal, 1 PvP, 6 RP, 8 RPPvP — the select
-    /// screen's `(PVP)`/`(RP)` realm-name suffix keys on it.
+    /// The realm **type** — the join key for the game-type columns, *not* an enumeration to match
+    /// on directly. `GetRealmInfo` resolves `(pvp, rp)` by scanning `Cfg_Configs.dbc` for the row
+    /// whose `RealmType` equals this; `realm_select::load::pvp_rp` is that table.
     pub realm_type: u32,
+    /// The realm-flags byte — the client's realm record `[realm+0x08]`.
+    ///
+    /// **Only `0x01` (invalid) and `0x02` (offline) — plus `0x04` — actually travel on the wire.**
+    /// The `0x20`/`0x40`/`0x80` sentinels that mean Recommended / New / Full are *synthesized on
+    /// arrival* from the magic populations the server sends instead, exactly as the reference's
+    /// parser does it ([`auth::MAGIC_POPULATIONS`]) — so this byte is the client's view of the
+    /// flags, not the server's.
+    pub flags: u8,
+    /// The wire's category (timezone) byte — the realm list's category tabs group on it. Matched
+    /// against a category id by **equality**; it is not an index into anything.
+    pub category: u8,
+    /// The wire's realm id.
+    pub id: u8,
 }
 
-/// Result of a successful logon: the SRP6 session key (carried into the world server) + realms.
+/// Result of a successful logon: the SRP6 session key (carried into the world server), the realms,
+/// and the **still-open realmd socket** the list was read from.
+///
+/// The socket is kept because the realm list is not a one-shot: the reference's `RealmList.lua`
+/// re-requests it every `REALM_LIST_REFRESH_TIME` (5 s) for as long as its window is open, which
+/// is how a realm going offline or filling up shows up without a re-login. [`Logon::refresh_realms`]
+/// is that request. It is private so the only thing anyone can do with the connection is ask it
+/// the one question it still answers.
 pub struct Logon {
     pub session_key: [u8; SESSION_KEY_LENGTH],
     pub realms: Vec<RealmInfo>,
+    /// `None` once a refresh has failed — the list we hold is then the last word, and we stop
+    /// asking rather than retrying a dead socket every five seconds.
+    stream: Option<TcpStream>,
+}
+
+impl Logon {
+    /// Re-request the realm list on the realmd connection — the reference's `RequestRealmList`.
+    ///
+    /// Returns whether the list was refreshed. A failed refresh **drops the connection and keeps
+    /// the realms we already have**: a stale list the player can still pick from beats an empty
+    /// one, and realmd closing an idle socket is ordinary. Bounded by `timeout` so a park that
+    /// calls this can never block on a server that accepted the request and said nothing.
+    pub fn refresh_realms(&mut self, timeout: std::time::Duration) -> bool {
+        let Some(stream) = self.stream.as_mut() else {
+            return false;
+        };
+        let refreshed = (|| -> Result<Vec<RealmInfo>> {
+            stream.set_read_timeout(Some(timeout))?;
+            auth::write_realm_list_request(stream).context("requesting realm list")?;
+            auth::read_realm_list(stream).context("reading realm list")
+        })();
+        match refreshed {
+            Ok(realms) => {
+                self.realms = realms;
+                true
+            }
+            Err(_) => {
+                self.stream = None;
+                false
+            }
+        }
+    }
+
+    /// Whether the realmd connection is still up, i.e. whether [`Self::refresh_realms`] can do
+    /// anything. Lets a caller stop scheduling refreshes rather than calling into a no-op.
+    pub fn realmd_live(&self) -> bool {
+        self.stream.is_some()
+    }
 }
 
 /// Perform the full SRP6 logon against a vanilla `realmd` and fetch the realm list.
@@ -216,6 +290,7 @@ pub fn logon(host: &str, username: &str, password: &str) -> Result<Logon> {
     Ok(Logon {
         session_key,
         realms,
+        stream: Some(stream),
     })
 }
 

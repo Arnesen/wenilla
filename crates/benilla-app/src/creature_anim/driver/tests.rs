@@ -529,11 +529,11 @@ fn cast_hold_stows_even_when_the_model_lacks_the_spell_anims() {
     assert_eq!(sheath(&app), Some(1), "re-drawn once the cast resolves");
 }
 
-/// A spell impact whose kit carries a CombatWound anim rides the wound **secondary slot**, never
-/// the one-shot route — the client's own 8–10 branch inside the kit player (`0x60edf0` @
-/// `0x60f3ad`, decision 0099 phase 4): the [`WoundAnim`] edge arms the decaying overlay and the
-/// base track keeps playing untouched underneath (routing it as a one-shot would replace the
-/// base — the exact mistake decision 0111 falsified for melee).
+/// A spell-side flinch rides the wound **secondary slot**, never the one-shot route — the
+/// client's `0x60ea70(severity = 0)` from the kit player's 8–10 branch, the harmful instant
+/// impact, or the missile arrival (decision 2058): the [`WoundAnim`] edge arms the decaying
+/// overlay and the base track keeps playing untouched underneath (routing it as a one-shot would
+/// replace the base — the exact mistake decision 0111 falsified for melee).
 #[test]
 fn spell_impact_wound_rides_the_secondary_slot() {
     let mut app = app();
@@ -541,7 +541,7 @@ fn spell_impact_wound_rides_the_secondary_slot() {
         graph: Handle::default(),
         clips: vec![
             clip(0, 1, true),  // Stand
-            clip(9, 2, false), // CombatWound — Fireball's impact-kit anim
+            clip(8, 2, false), // StandWound — the unengaged victim's severity-0 pick
         ],
         hand_close: [None, None],
         playable_animation_lookup: Vec::new(),
@@ -567,20 +567,75 @@ fn spell_impact_wound_rides_the_secondary_slot() {
     assert!(drv(&app, unit).wound.is_none());
     let gait_before = drv(&app, unit).gait;
 
-    app.world_mut().write_message(WoundAnim {
-        entity: unit,
-        anim_id: 9,
-    });
+    app.world_mut().write_message(WoundAnim { entity: unit });
     app.update();
     assert!(
         drv(&app, unit).wound.is_some(),
-        "the impact kit's wound anim armed the secondary slot"
+        "the spell flinch armed the secondary slot"
     );
     assert_eq!(
         drv(&app, unit).gait,
         gait_before,
         "the base track is untouched — a decaying overlay, not a replace"
     );
+}
+
+/// The spell flinch is the client's **severity-0** wound call (decision 2058): it never carries
+/// the kit's own id, so the clip is CombatWound(9) on an engaged victim and StandWound(8) on an
+/// unengaged one — `0x60ea70`'s `(severity, engaged)` pick, the same as a non-crit melee hit.
+#[test]
+fn spell_flinch_picks_the_wound_by_engagement() {
+    fn model() -> ModelAnimations {
+        ModelAnimations {
+            graph: Handle::default(),
+            clips: vec![
+                clip(0, 1, true),   // Stand
+                clip(8, 2, false),  // StandWound
+                clip(9, 3, false),  // CombatWound
+                clip(10, 4, false), // CombatCritical — a spell flinch must never land here
+            ],
+            hand_close: [None, None],
+            playable_animation_lookup: Vec::new(),
+            animation_lookup: Vec::new(),
+            global_bones: Vec::new(),
+            first_seq: None,
+            pose: Default::default(),
+        }
+    }
+    let mut app = app();
+    let engaged = app
+        .world_mut()
+        .spawn((
+            model(),
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+            Engaged,
+        ))
+        .id();
+    let idle = app
+        .world_mut()
+        .spawn((
+            model(),
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+        ))
+        .id();
+    app.update(); // settle both bases
+    app.world_mut().write_message(WoundAnim { entity: engaged });
+    app.world_mut().write_message(WoundAnim { entity: idle });
+    app.update();
+    let node = |e: Entity| {
+        app.world()
+            .entity(e)
+            .get::<AnimDriver>()
+            .unwrap()
+            .wound
+            .map(|w| w.node.index())
+    };
+    assert_eq!(node(engaged), Some(3), "engaged: CombatWound(9)");
+    assert_eq!(node(idle), Some(2), "unengaged: StandWound(8)");
 }
 
 /// The whiff slow-down touches SWING anims only (decision 0279's scoping): a spell kit's

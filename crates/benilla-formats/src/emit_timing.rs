@@ -98,6 +98,47 @@ impl EmitTiming {
             .fold(0.0, f32::max)
     }
 
+    /// The **burst this emitter actually fires** on sequence slot `seq`, as
+    /// `(seconds into the slot, particle count)` — or `None` when it never fires one.
+    ///
+    /// The reference's burst gate is `enabled != 0 && sampledRate > 0`, both sampled from the
+    /// same clock in the same frame, and it triggers on that predicate's **rising edge**, emitting
+    /// `ftol(rate)` particles (wow-re `part-emission-burst-flag.md` §1, `0x718ed2`–`0x718ef6`;
+    /// benilla's `particles::accumulate_emission` runs the same rule). Both tracks are STEP, so
+    /// this walks a 60 Hz grid over the slot's keyed span — the same resolution a running frame
+    /// gives it — and reports the first instant the predicate holds.
+    ///
+    /// **`None` is a real shipped shape, not a parse failure.** An emitter whose enabled track
+    /// falls to 0 on the very keyframe its rate track rises off 0 never emits anything: the two
+    /// conditions are never true together. `Spells\\Strike_Impact_Chest.m2`'s gold flare emitter
+    /// is exactly that, and reading its [`Self::peak_rate`] as a particle count overstates the
+    /// effect by 50 particles that neither client draws.
+    ///
+    /// A gseq-tagged track is sampled against `shared_now = 0` — this is a static dump/inspection
+    /// face, not a running clock.
+    pub fn first_burst(&self, seq: Option<usize>) -> Option<(f32, f32)> {
+        let i = self.idx(seq);
+        let span = |o: &Option<ScalarAnim>| -> f32 {
+            o.as_ref()
+                .and_then(|a| a.keys.last())
+                .map_or(0.0, |&(t, _)| t)
+        };
+        let end = span(self.rate.get(i)?).max(span(self.enabled.get(i)?));
+        const STEP: f32 = 1.0 / 60.0;
+        let mut frame = 0;
+        loop {
+            let t = frame as f32 * STEP;
+            if t > end + STEP {
+                return None;
+            }
+            let rate = self.rate(seq, t, 0.0);
+            if rate > 0.0 && self.emitting(seq, t, 0.0) {
+                return Some((t, rate.trunc()));
+            }
+            frame += 1;
+        }
+    }
+
     /// `Some(rate)` when every slot bakes the same single-key rate — the overwhelmingly common
     /// shape, and the dump instruments' quiet case.
     pub fn constant_rate(&self) -> Option<f32> {

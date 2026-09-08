@@ -719,3 +719,117 @@ fn spline_move_mode_family_parses_golden() {
     );
     assert_eq!(SplineMode::Hover.flag(), messages::MoveMode::Hover.flag());
 }
+
+/// **The observer leg of the movement-mode family, byte-exact** (decision 2061) — the six opcodes
+/// that tell everyone *else* a player was rooted, levitated or blinked. Until this landed they hit
+/// [`ServerPacket::Other`] and were dropped, so a watched player kept sliding through a root and
+/// stood in the wrong place after a Blink until their next ordinary pose packet.
+///
+/// Four things are asserted, because each is how this leg differs from a sibling it is otherwise a
+/// twin of:
+///
+/// 1. **The body is the ordinary relay shape** — `[packed guid][MovementInfo]`, no counter. That is
+///    the whole difference from the ack'd `SMSG_FORCE_MOVE_ROOT` leg (`[packed guid][u32 counter]`)
+///    and from `MSG_MOVE_TELEPORT_ACK` (`[packed guid][u32 counter][MovementInfo]`); reading a
+///    counter that isn't there would shift the pose by four bytes and desync the rest of the read.
+/// 2. **Apply/unapply rides the flags word, not the opcode.** Only root splits in two; hover,
+///    feather-fall and water-walk use ONE opcode for both directions, because vmangos runs
+///    `SetHoverReal` &co. *before* the broadcast (`MovementHandler.cpp:626-638`, `:743-744`) so the
+///    `m_movementInfo` it sends already carries the bit's new state.
+/// 3. **The whole word reaches the app**, which is what makes (2) work: `UnitMove.flags` is the
+///    wire word verbatim, and Levitate — feather fall + hover + water walk at once (decision 1706)
+///    — arrives as three packets whose flags words accumulate server-side.
+/// 4. **`MSG_MOVE_TELEPORT` is tagged as a teleport and nothing else is.** The pose is a
+///    discontinuity; the app's pre-fire reconcile has to know not to glide the mover into it.
+#[test]
+fn observer_move_mode_family_parses_golden() {
+    // Packed guid 0xAA (mask 0x01, one byte) + a 28-byte MovementInfo with no conditional tails:
+    // flags, time 12345, pos (1, 2, 3), orientation 0.5, fall_time 0. 30 bytes total — FOUR SHORT
+    // of `MSG_MOVE_TELEPORT_ACK`'s same-content body, which is the point of the length assertion.
+    let info = |flags: u32| {
+        let mut b = hx("01aa");
+        b.extend_from_slice(&flags.to_le_bytes());
+        b.extend_from_slice(&hx("393000000000803f00000040000040400000003f00000000"));
+        b
+    };
+
+    const ROOT: u32 = 0x0000_1000;
+    const WATER_WALK: u32 = 0x1000_0000;
+    const FEATHER_FALL: u32 = 0x2000_0000;
+    const HOVER: u32 = 0x4000_0000;
+
+    // (opcode, the flags word the server would have written into it, is-a-teleport)
+    let expected = [
+        (messages::opcode::MSG_MOVE_ROOT, ROOT, false),
+        (messages::opcode::MSG_MOVE_UNROOT, 0, false),
+        (messages::opcode::MSG_MOVE_WATER_WALK, WATER_WALK, false),
+        // The same opcode, the other direction — the bit is simply absent.
+        (messages::opcode::MSG_MOVE_WATER_WALK, 0, false),
+        (messages::opcode::MSG_MOVE_FEATHER_FALL, FEATHER_FALL, false),
+        (messages::opcode::MSG_MOVE_HOVER, HOVER, false),
+        // Levitate grants all three at once (decision 1706) — one word, three bits.
+        (
+            messages::opcode::MSG_MOVE_HOVER,
+            HOVER | FEATHER_FALL | WATER_WALK,
+            false,
+        ),
+        (messages::opcode::MSG_MOVE_TELEPORT, 0, true),
+    ];
+
+    for (op, flags, is_teleport) in expected {
+        let body = info(flags);
+        assert_eq!(body.len(), 30, "the relay shape, with no counter dword");
+        let packet = messages::parse_server(op, &body)
+            .unwrap_or_else(|e| panic!("{op:#06x} must parse as an ordinary relay: {e}"));
+        match &packet {
+            ServerPacket::PlayerMove {
+                guid: 0xAA,
+                opcode,
+                flags: f,
+                position,
+                ..
+            } => {
+                assert_eq!(*opcode, op);
+                assert_eq!(*f, flags, "the whole flags word survives for {op:#06x}");
+                // Four bytes off and this would read (2.0, 3.0, 0.5) — the counter-eating bug.
+                assert_eq!(
+                    (position.x, position.y, position.z),
+                    (1.0, 2.0, 3.0),
+                    "the pose starts right after the guid for {op:#06x}"
+                );
+            }
+            other => panic!(
+                "expected a relayed PlayerMove for {op:#06x}, got {}",
+                other.name()
+            ),
+        }
+        match decode(packet).as_slice() {
+            [SessionEvent::UnitMove {
+                guid: 0xAA,
+                flags: f,
+                teleport,
+                heartbeat,
+                ..
+            }] => {
+                assert_eq!(*f, flags);
+                assert_eq!(
+                    *teleport, is_teleport,
+                    "only MSG_MOVE_TELEPORT is a discontinuity ({op:#06x})"
+                );
+                assert!(!*heartbeat, "none of these is the periodic pulse");
+            }
+            other => panic!("expected one UnitMove event for {op:#06x}, got {other:?}"),
+        }
+    }
+
+    // The numbers themselves (vmangos `Opcodes_1_12_1.h`; cross-checked against the client's own
+    // name table). `MSG_MOVE_TELEPORT` (197) is NOT `MSG_MOVE_TELEPORT_ACK` (199) — the pair this
+    // family is easiest to get wrong on, and the reason (1)'s length assertion exists.
+    assert_eq!(messages::opcode::MSG_MOVE_TELEPORT, 197);
+    assert_eq!(messages::opcode::MSG_MOVE_TELEPORT_ACK, 199);
+    assert_eq!(messages::opcode::MSG_MOVE_ROOT, 236);
+    assert_eq!(messages::opcode::MSG_MOVE_UNROOT, 237);
+    assert_eq!(messages::opcode::MSG_MOVE_HOVER, 247);
+    assert_eq!(messages::opcode::MSG_MOVE_FEATHER_FALL, 688);
+    assert_eq!(messages::opcode::MSG_MOVE_WATER_WALK, 689);
+}

@@ -123,7 +123,13 @@ pub(crate) fn apply_net_updates(
     session_msgs: (
         MessageWriter<TeleportMessage>,
         MessageWriter<WorldportMessage>,
-        MessageWriter<CharListMessage>,
+        // **The two park publications, paired** — the tuple is at Bevy's 16-param ceiling, and
+        // these are the pair that belongs together: the realm list and the character roster are
+        // the same thing one park apart, each published so the app's policy can answer it.
+        (
+            MessageWriter<CharListMessage>,
+            MessageWriter<crate::net::RealmListMessage>,
+        ),
         MessageWriter<CharActionResultMessage>,
         MessageWriter<EnteredWorldMessage>,
         MessageWriter<LoggedOutMessage>,
@@ -524,7 +530,7 @@ pub(crate) fn apply_net_updates(
     let (
         mut teleports,
         mut worldports,
-        mut char_lists,
+        (mut char_lists, mut realm_lists),
         mut char_actions,
         mut entered_world,
         mut logged_out,
@@ -580,6 +586,9 @@ pub(crate) fn apply_net_updates(
                 terminal,
                 dial,
             } => session::login_failed(refusal, reason, terminal, dial, &mut login_failures),
+            SessionEvent::RealmList { realms } => {
+                realm_lists.write(crate::net::RealmListMessage { realms });
+            }
             SessionEvent::CharacterList { characters, realm } => {
                 session::character_list(characters, realm, &mut status, &mut char_lists)
             }
@@ -723,6 +732,7 @@ pub(crate) fn apply_net_updates(
                 pitch,
                 time,
                 heartbeat,
+                teleport,
                 fall_time,
                 jump,
                 transport,
@@ -743,6 +753,7 @@ pub(crate) fn apply_net_updates(
                         jump,
                         transport,
                         heartbeat,
+                        teleport,
                     },
                     now_ms,
                     &mut commands,

@@ -151,6 +151,18 @@ pub enum SessionEvent {
     /// A login attempt progressed to `stage` (decision 0539) — IO-thread-emitted, like
     /// [`Self::CharacterList`], never wire-decoded.
     LoginStage { stage: LoginStage },
+    /// **The realms this account may enter** (`CMD_REALM_LIST`), and the IO thread's third park.
+    ///
+    /// Emitted the moment the SRP6 logon succeeds, *before* any world socket is dialed: which
+    /// realm to dial is the answer this park is waiting for. Like [`Self::CharacterList`] it is a
+    /// pure IO-thread emit and the thread blocks on its channel until the app answers — the app
+    /// owns the policy (a remembered realm, `WOW_REALM`, or the player on the realm-list screen),
+    /// exactly as it owns the character pick.
+    ///
+    /// Re-emitted on every refresh while the screen is up (the reference re-requests the list
+    /// every 5 s) and again when the player asks to change realm, so the app never has to cache a
+    /// list across parks.
+    RealmList { realms: Vec<crate::RealmInfo> },
     /// **We are queued for a full realm** (`SMSG_AUTH_RESPONSE(AUTH_WAIT_QUEUE)`) — a wait, not
     /// an outcome. Emitted once per queue packet while the world handshake is parked; the attempt
     /// is still live and ends normally with a roster (admitted) or a failure. `position` is `None`
@@ -321,6 +333,13 @@ pub enum SessionEvent {
         /// lerp is armed only for NON-heartbeat events (`0x619090` excludes tag `0x26`); a
         /// heartbeat applies as an outright snap (decision 0601).
         heartbeat: bool,
+        /// True for `MSG_MOVE_TELEPORT` — somebody else **blinked** (decision 2061): the observer
+        /// leg of the near-teleport, broadcast by `MovementPacketSender::SendTeleportToObservers`
+        /// once the mover acked its own `MSG_MOVE_TELEPORT_ACK`. Same body as any relay, but
+        /// `position` is a **discontinuity, not a step** — so it applies as an outright snap and is
+        /// excluded from the pre-fire reconcile, which exists to make a *continuous* pose land
+        /// smoothly and would otherwise glide a blinking mage across the intervening 20 yards.
+        teleport: bool,
         fall_time: u32,
         jump: Option<JumpInfo>,
         transport: Option<TransportPose>,

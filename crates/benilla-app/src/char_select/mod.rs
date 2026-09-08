@@ -37,8 +37,7 @@ use crate::net::{
     LoggedOutMessage,
 };
 
-/// The app's lifecycle: which screen owns the session (decision 0193). Grows glue variants
-/// (`RealmList`, …) as the glue arc fills in.
+/// The app's lifecycle: which screen owns the session (decision 0193).
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub(crate) enum ClientState {
     /// Parked pre-logon at the login screen (decision 0539): the IO thread waits for credentials;
@@ -46,6 +45,11 @@ pub(crate) enum ClientState {
     /// resubmit, or the director's typed submit).
     #[default]
     Login,
+    /// Parked at the **realm list**: the logon succeeded, the IO thread is holding the world dial
+    /// until the app names a realm, and [`crate::realm_select`]'s policy decides what answers it
+    /// (`WOW_REALM`, the remembered `realmName`, or the director's click). 0193 planned this
+    /// variant and it took until the realm subsystem existed to mean anything.
+    RealmList,
     /// Parked at character select: the select screen is up, the IO thread waits for a pick, and
     /// the in-world input surfaces (player controller, FrameXML keyboard) are gated off.
     CharSelect,

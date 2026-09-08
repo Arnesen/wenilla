@@ -95,20 +95,27 @@ pub(super) fn refresh_list(
     if let Ok(mut t) = banner.single_mut() {
         let new = match &roster.realm {
             Some(realm) => {
-                let suffix = match realm.realm_type {
-                    1 => strings.text("PVP_PARENTHESES", "(PVP)"),
-                    6 => strings.text("RP_PARENTHESES", "(RP)"),
-                    8 => strings.text("RPPVP_PARENTHESES", "(RPPVP)"),
-                    _ => "",
+                // `GetServerName`'s own `isPVP, isRP` pair, from the one table that owns it.
+                // The banner's normal-realm arm is EMPTY, unlike the realm list's `Normal` — the
+                // reference leaves `serverType = ""` when neither flag is set.
+                let suffix = match crate::realm_select::pvp_rp(realm.realm_type) {
+                    (true, true) => strings.text("RPPVP_PARENTHESES", "(RPPVP)"),
+                    (false, true) => strings.text("RP_PARENTHESES", "(RP)"),
+                    (true, false) => strings.text("PVP_PARENTHESES", "(PVP)"),
+                    (false, false) => "",
                 };
                 let down = (status.last_reason.is_some() && roster.pending_pick.is_none())
                     .then(|| strings.text("SERVER_DOWN", "Server down"));
                 realm_banner(&realm.name, suffix, down)
             }
-            None => match &status.last_reason {
-                Some(_) => strings.text("SERVER_DOWN", "Server down").to_string(),
-                None => "Connecting…".to_string(),
-            },
+            // **`CharSelectRealmName:Hide()`** (`CharacterSelect.lua` l.66): with no server name
+            // the reference hides the FontString outright — it has no string for this case, and
+            // ours used to invent one (`"Connecting…"`). Empty text is our Hide.
+            //
+            // It is also all but unreachable now. The realm is chosen *before* the world dial, so
+            // by the time this screen exists the session has one; what is left here is the
+            // no-network harness, which is exactly the case the reference draws nothing for.
+            None => String::new(),
         };
         if t.0 != new {
             t.0 = new;
@@ -173,7 +180,6 @@ pub(super) fn refresh_banner_and_buttons(
     for (action, mut disabled) in &mut disables {
         let want = match action {
             SelectAction::EnterWorld | SelectAction::Delete => !have_chars,
-            SelectAction::ChangeRealm => true,
             _ => false,
         };
         if disabled.0 != want {

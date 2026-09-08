@@ -9,14 +9,15 @@ use bevy::prelude::*;
 use super::super::{find_resolved, AnimDriver, MovementState, Wound};
 use super::select::{self, STAND};
 
-/// One frame's wound edge for a victim — the two client trigger paths into the same secondary
-/// slot (`0x60ea70`): a landed melee hit (`SMSG_ATTACKERSTATEUPDATE`, resolved to a wound id by
-/// severity + engagement at trigger time) or a spell-impact kit whose anim is the CombatWound
-/// family (the kit player's own 8–10 branch — decision 0099 phase 4, carrying the kit's id).
+/// One frame's wound edge for a victim — the client's trigger paths into the same secondary
+/// slot (`0x60ea70`): a landed melee hit (`SMSG_ATTACKERSTATEUPDATE`, its `HitInfo` — severity
+/// is the crit bit) or a spell-side flinch ([`super::super::WoundAnim`]: the kit player's 8–10
+/// branch, the harmful instant impact, the missile impact — every one `severity = 0`, decision
+/// 2058). Both resolve to an id by severity + engagement at trigger time.
 #[derive(Clone, Copy)]
 pub(super) enum WoundEdge {
     Melee(u32),
-    Spell(u16),
+    Spell,
 }
 
 /// Wound-flinch decay upkeep (decision 0111): the client's kernel advances every armed
@@ -48,6 +49,9 @@ pub(super) fn wound_upkeep(drv: &mut AnimDriver, player: &mut AnimationPlayer) {
         if finished {
             player.stop(wd.node);
             drv.wound = None;
+            if benilla_assets::trace::enabled() {
+                benilla_assets::trace::line("fct", "wound expire (λ reached 0, slot released)");
+            }
         }
     }
 }
@@ -78,6 +82,15 @@ pub(super) fn wound_evict(
         if evicted {
             player.stop(wd.node);
             drv.wound = None;
+            if benilla_assets::trace::enabled() {
+                benilla_assets::trace::line(
+                    "fct",
+                    &format!(
+                        "wound evict masked={} (a blended re-arm took the bone's secondary)",
+                        wd.masked
+                    ),
+                );
+            }
         }
     }
 }
@@ -157,7 +170,29 @@ pub(super) fn wound_trigger(
                     span: c.duration,
                     masked,
                 });
+                // The `WOW_MOVE_TRACE` line a flinch report is read against: which id, which
+                // bone, over what span, and what it lays over (`others` = the subtree's other
+                // weight, so the peak share is always 75% — decision 0111).
+                if benilla_assets::trace::enabled() {
+                    benilla_assets::trace::line(
+                        "fct",
+                        &format!(
+                            "wound trigger id={id} masked={masked} span={:.3} base={base} others={others}",
+                            c.duration
+                        ),
+                    );
+                }
+            } else if benilla_assets::trace::enabled() {
+                benilla_assets::trace::line(
+                    "fct",
+                    &format!("wound trigger id={id} SKIPPED (the base track owns the node)"),
+                );
             }
+        } else if benilla_assets::trace::enabled() {
+            benilla_assets::trace::line(
+                "fct",
+                &format!("wound trigger id={id} SKIPPED (no playable clip, or a zero span)"),
+            );
         }
     }
 }

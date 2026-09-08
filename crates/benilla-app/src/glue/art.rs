@@ -150,6 +150,13 @@ pub(crate) struct GlueArt {
     pub(crate) dropdown_arrow_up: Option<Handle<Image>>,
     pub(crate) dropdown_arrow_down: Option<Handle<Image>>,
     pub(crate) quest_hilight: Option<Handle<AddUiMaterial>>,
+    /// The same `UI-QuestLogTitleHighlight` art as a **plain texture**. The realm list tints its
+    /// selection band per row (`RealmListHighlightTexture:SetVertexColor` — green when you have
+    /// characters on that realm, red when it is invalid, gold otherwise), and a shared
+    /// `AddUiMaterial` handle cannot carry a per-row colour. **Stated divergence:** drawn
+    /// alpha-blended rather than the reference's `alphaMode="ADD"`, which is the price of the
+    /// tint until the ADD material grows a colour uniform.
+    pub(crate) title_highlight: Option<Handle<Image>>,
     pub(crate) check_disabled: Option<Handle<Image>>,
     pub(crate) tooltip_border: Option<BackdropEdges>,
     pub(crate) char_scrollbar: Option<(Handle<Image>, Vec2)>,
@@ -399,6 +406,8 @@ impl GlueArt {
             images,
             add_mats,
         );
+        self.title_highlight =
+            assets.sprite_texture("Interface\\QuestFrame\\UI-QuestLogTitleHighlight", images);
         self.check_disabled =
             assets.sprite_texture("Interface\\Buttons\\UI-CheckBox-Check-Disabled", images);
         self.tooltip_border = super::backdrop::backdrop_edges(
@@ -413,13 +422,14 @@ impl GlueArt {
         );
         debug!(
             "glue art: addonlist set — helpframe {} header {} close {} droparrow {}/{} \
-             questhl {} greycheck {} tipborder {} scrolltrack {}",
+             questhl {} titlehl {} greycheck {} tipborder {} scrolltrack {}",
             self.help_frame.is_some(),
             self.dialog_header.is_some(),
             self.close_btn.is_some(),
             self.dropdown_arrow_up.is_some(),
             self.dropdown_arrow_down.is_some(),
             self.quest_hilight.is_some(),
+            self.title_highlight.is_some(),
             self.check_disabled.is_some(),
             self.tooltip_border.is_some(),
             self.char_scrollbar.is_some(),

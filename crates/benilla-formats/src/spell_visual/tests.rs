@@ -308,7 +308,7 @@ fn real_spell_visual_chain_resolves_fireball() {
     // (row 21, byte-verified `0x61f5b0`/`0x8618e0`, decision 0304's §5 fold-back).
     assert_eq!(
         cat.hardcoded_effect("HARDCODED Unit Level Up"),
-        Some("Spells\\LevelUp\\LevelUp.mdl"),
+        Some((21, "Spells\\LevelUp\\LevelUp.mdl")),
         "the level-up pillar resolves by name"
     );
     assert!(
@@ -388,7 +388,7 @@ fn real_effect_name_table_resolves_the_loot_art_row() {
     let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_visual_catalog(&mut chain).expect("load the visual catalog");
-    assert_eq!(cat.loot_art_path(), Some("Particles\\LootFX.mdl"));
+    assert_eq!(cat.loot_art_effect(), Some((14, "Particles\\LootFX.mdl")));
     // The model the row names ships in the chain (consumers rewrite .mdl → .m2 to load it).
     assert!(
         chain.read_file("Particles\\LootFX.m2").is_ok(),

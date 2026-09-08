@@ -100,6 +100,7 @@ fn a_relayed_swimmer_renders_pitched_and_the_gates_render_level() {
         jump: None,
         transport: None,
         heartbeat: false,
+        teleport: false,
     };
     // Through the real arrival path, not a hand-set field: `apply_move` is what the relay and
     // the queue drain both go through, so this is the seam that would drop the pitch.
@@ -891,6 +892,7 @@ fn replay_frames(script: &[(u32, f64, u32)]) -> (Vec<u32>, u32) {
             jump: None,
             transport: None,
             heartbeat: false,
+            teleport: false,
         };
         let (live, empty) = (rm.flags, rm.pending.is_empty());
         let fire_ms = rm.relay.schedule(wire_ms, now, live, empty);
@@ -1189,5 +1191,129 @@ fn a_flag_still_remote_is_left_where_the_wire_put_it() {
     assert!(
         rm.wow_pos[2] < seated[2],
         "a mover carrying a direction bit is integrated and resolved against the world"
+    );
+}
+
+// ── The observer leg of the movement-mode family (decision 2061) ──────────────────────────────
+
+/// Build the `RelayMove` the six observer opcodes decode to — an ordinary relay carrying whatever
+/// flags word the server wrote, since apply/unapply rides that word and not the opcode.
+fn observed(flags: u32, position: [f32; 3], teleport: bool) -> super::relay::RelayMove {
+    super::relay::RelayMove {
+        wire_ms: 1000,
+        position,
+        orientation: 0.0,
+        flags,
+        pitch: 0.0,
+        fall_time: 0,
+        jump: None,
+        transport: None,
+        heartbeat: false,
+        teleport,
+    }
+}
+
+/// Run one relayed move through the real arrival path (`apply_move` — the seam the relay and the
+/// queue drain both go through), starting from `before`.
+fn apply_observed(before: RemoteMotion, mv: &super::relay::RelayMove) -> RemoteMotion {
+    use bevy::ecs::system::RunSystemOnce;
+    let mv = mv.clone();
+    let mut world = bevy::prelude::World::new();
+    world.init_resource::<bevy::ecs::message::Messages<crate::creature_anim::HardLanding>>();
+    let e = world.spawn_empty().id();
+    world
+        .run_system_once(
+            move |mut commands: bevy::prelude::Commands,
+                  mut landings: bevy::prelude::MessageWriter<crate::creature_anim::HardLanding>| {
+                let mut rm = before.clone();
+                super::remote::apply_move(e, &mv, &mut rm, 0.0, &mut commands, &mut landings);
+                rm
+            },
+        )
+        .expect("the one-shot apply runs")
+}
+
+/// **A watched player's root actually stops them** (decision 2061) — the reported "he keeps sliding
+/// after the root lands".
+///
+/// The mechanism is not ours: the rooted player's OWN client wipes its direction bits when it
+/// applies `SetRoot 0x7c7340` (`& 0xffe07f00`), acks with that wiped word, and vmangos stores the
+/// ack verbatim (`HandleMoverRelocation`: `pMover->m_movementInfo = movementInfo`, forcing
+/// `MOVEFLAG_ROOT` back on) before broadcasting it to observers as `MSG_MOVE_ROOT`. So the correct
+/// receiver is the plain one — fold the whole word — and the ONLY thing that was wrong was that we
+/// never parsed the packet. This pins the consequence: after it, nothing the integration gate tests
+/// survives, which is what stops the dead-reckon.
+#[test]
+fn an_observed_root_lands_the_wiped_word_and_stops_the_dead_reckon() {
+    let walking = motion(move_flags::FORWARD, 0.0);
+    assert_ne!(
+        walking.flags & move_flags::INTEGRATED,
+        0,
+        "precondition: this mover is being stepped"
+    );
+
+    // What vmangos actually broadcasts: ROOT set, the direction bits gone.
+    let rooted = apply_observed(walking, &observed(move_flags::ROOT, [0.0; 3], false));
+
+    assert_eq!(
+        rooted.flags & move_flags::INTEGRATED,
+        0,
+        "nothing the integration gate tests survives the root — this is what stops the slide"
+    );
+    assert_ne!(
+        rooted.flags & move_flags::ROOT,
+        0,
+        "and the bit itself lands"
+    );
+}
+
+/// **Levitate reaches an observer** (decision 2061, with 1706's three-at-once): `SPELL_AURA_HOVER`,
+/// `_FEATHER_FALL` and `_WATER_WALK` are granted together, each broadcast on its own observer
+/// opcode, and each carries the *whole* `m_movementInfo` flags word — so the last one to arrive
+/// holds all three bits. The extrapolator's ground resolve reads exactly this word (unioned with
+/// the `SMSG_SPLINE_MOVE_*` component) for its hover offset and water plane, so landing the word IS
+/// landing the effect.
+#[test]
+fn an_observed_levitate_lands_all_three_granted_bits() {
+    let trio = move_flags::HOVER | move_flags::SAFE_FALL | move_flags::WATER_WALKING;
+    let floating = apply_observed(motion(0, 0.0), &observed(trio, [0.0; 3], false));
+    assert_eq!(
+        floating.flags, trio,
+        "hover + feather fall + water walk, from one broadcast word"
+    );
+
+    // …and the un-levitate is the same word with the bits gone — no opcode says "unapply".
+    let landed = apply_observed(floating, &observed(0, [0.0; 3], false));
+    assert_eq!(landed.flags, 0, "the revoke is the absence of the bits");
+}
+
+/// **A blink is a discontinuity, and the pre-fire reconcile must not blend into it** (decision
+/// 2061). Both blends exist to land a *continuous* pose smoothly; armed on a teleport they would
+/// drag the mover across the 20 yards the Blink exists to skip — sweeping the shared capsule
+/// through every wall in between — which is the same "he slid there" symptom, wearing a new hat.
+///
+/// The pose itself still applies in full: a teleport is excluded from the *blend*, never from the
+/// apply.
+#[test]
+fn a_teleport_is_excluded_from_the_pre_fire_reconcile_but_not_from_the_apply() {
+    let dest = [20.0, 5.0, 3.0];
+    let tp = observed(move_flags::FORWARD, dest, true);
+    let hb = super::relay::RelayMove {
+        heartbeat: true,
+        ..observed(move_flags::FORWARD, dest, false)
+    };
+    let walk = observed(move_flags::FORWARD, dest, false);
+
+    assert!(!tp.reconciles(), "a blink is not blended toward");
+    assert!(!hb.reconciles(), "nor is a heartbeat (decision 0601)");
+    assert!(
+        walk.reconciles(),
+        "…but an ordinary transition still is — the smoothing this gate protects"
+    );
+
+    let there = apply_observed(motion(move_flags::FORWARD, 0.0), &tp);
+    assert_eq!(
+        there.wow_pos, dest,
+        "the teleport pose lands outright: excluded from the blend, never from the apply"
     );
 }

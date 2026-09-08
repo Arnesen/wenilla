@@ -567,7 +567,11 @@ fn aura_state_kit_arms_persistent_and_reaps_on_aura_end() {
         assert_eq!(*class, super::FxClass::AuraState);
         assert_eq!(
             effects.as_slice(),
-            [(0x16, "Spells\\Item_Bread.mdx".to_string())],
+            [super::FxSlot {
+                tag: 0x16,
+                effect: BREAD_FX,
+                path: "Spells\\Item_Bread.mdx".to_string(),
+            }],
             "bread at the spell hand"
         );
     }
@@ -921,6 +925,7 @@ fn the_mount_poof_puffs_on_the_build_leg_only() {
     const FIELD_MOUNTDISPLAYID: u16 = 133;
     /// `SpellVisualEffectName` row 1185's shipped path — the druid-morph cloud.
     const POOF: &str = "Spells\\DruidMorph_Impact_Base.mdx";
+    const POOF_FX: u32 = 1185; // the shipped `SpellVisualEffectName` row (decision 0927)
     /// The M2 attach the hardcoded-effect spawn stamps (`DAT_0080c968[6]`).
     const BASE_ATTACH: u16 = 0x13;
 
@@ -928,8 +933,11 @@ fn the_mount_poof_puffs_on_the_build_leg_only() {
     app.add_plugins(MinimalPlugins);
     app.add_message::<SpellKitFx>();
     app.insert_resource(SpellVisuals(
-        SpellVisualCatalog::from_tables(HashMap::new(), HashMap::new())
-            .with_hardcoded("HARDCODED Mount Poof", POOF),
+        SpellVisualCatalog::from_tables(HashMap::new(), HashMap::new()).with_hardcoded(
+            "HARDCODED Mount Poof",
+            POOF_FX,
+            POOF,
+        ),
     ));
     app.add_systems(Update, super::arm_mount_poof_fx);
 
@@ -938,7 +946,7 @@ fn the_mount_poof_puffs_on_the_build_leg_only() {
     // Streams in ALREADY mounted: first sight arms the memory, silently.
     let unit = app.world_mut().spawn(store(2404)).id();
     app.update();
-    let puffs = |app: &mut App| -> Vec<(u16, String)> {
+    let puffs = |app: &mut App| -> Vec<super::FxSlot> {
         let mut out = Vec::new();
         let world = app.world_mut();
         let mut msgs = world.resource_mut::<Messages<SpellKitFx>>();
@@ -968,7 +976,11 @@ fn the_mount_poof_puffs_on_the_build_leg_only() {
     app.update();
     assert_eq!(
         puffs(&mut app),
-        vec![(BASE_ATTACH, POOF.to_string())],
+        vec![super::FxSlot {
+            tag: BASE_ATTACH,
+            effect: POOF_FX,
+            path: POOF.to_string(),
+        }],
         "the build leg puffs the druid-morph cloud at the base attach"
     );
 
@@ -980,7 +992,14 @@ fn the_mount_poof_puffs_on_the_build_leg_only() {
     // A swap (N → N′) is a change, and the reference rebuilds and puffs again.
     app.world_mut().entity_mut(unit).insert(store(2405));
     app.update();
-    assert_eq!(puffs(&mut app), vec![(BASE_ATTACH, POOF.to_string())]);
+    assert_eq!(
+        puffs(&mut app),
+        vec![super::FxSlot {
+            tag: BASE_ATTACH,
+            effect: POOF_FX,
+            path: POOF.to_string(),
+        }]
+    );
 }
 
 /// **The link that makes the beam exist at all** (decision 0955 slice 2): a kit carrying a chain

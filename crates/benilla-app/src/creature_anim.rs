@@ -705,18 +705,21 @@ fn flourish_to_anim(
     }
 }
 
-/// Play a **wound-flinch** on a unit: the given `AnimationData.dbc` id (8–10, the CombatWound
-/// family) laid into the wound SECONDARY-blend slot — a decaying overlay that never interrupts
-/// what plays underneath (decision 0111). The spell pipeline's counterpart to the melee flinch:
-/// the client's kit player itself branches here (`0x60edf0` @ `0x60f3ad`: anim in `[8,10]` →
-/// the wound trigger `0x60ea70`, anything else → `PlayAnimation`), so an impact kit's wound anim
-/// must never ride the [`EmoteAnim`] one-shot route — that replaces the base track, the exact
-/// routing decision 0111 falsified. Written by [`spell_visual::route_cast_visuals`]; consumed by
-/// [`driver::drive_animations`] into the same per-frame wound slot as a melee hit.
+/// A **spell-side wound flinch** on `entity` — the client's `0x60ea70(unit, severity = 0)`
+/// reached from three spell paths (decision 2058): the kit player's own branch (`0x60edf0` @
+/// `0x60f3ad`: a kit anim in `[8,10]` goes here instead of `PlayAnimation`), the instant-hit
+/// impact loop (`0x6e8bf0` @ `0x6e8c89` — after the impact kit, iff the spell targets enemies,
+/// [`benilla_formats::SpellDisplay::is_harmful`]), and the missile impact hand-off (`0x61dc50` @
+/// `0x61dc74` — before the impact kit, every living target). All three pass **severity 0**, so
+/// the id is never the kit's own column: the trigger picks CombatWound(9) / StandWound(8) by the
+/// victim's engagement exactly like a non-crit melee hit ([`select::wound_anim`]) and lays it
+/// into the SECONDARY-blend slot — a decaying overlay that never interrupts what plays
+/// underneath (decision 0111). Never the [`EmoteAnim`] one-shot route: that replaces the base
+/// track, the exact routing 0111 falsified. Written by [`spell_visual::route_cast_visuals`];
+/// consumed by [`driver::drive_animations`] into the same per-frame wound slot as a melee hit.
 #[derive(Message, Clone, Copy)]
 pub(crate) struct WoundAnim {
     pub(crate) entity: Entity,
-    pub(crate) anim_id: u16,
 }
 
 /// The target lists off one `SMSG_SPELL_GO` (decision 0099 phase 4) — the payload [`CastEvent`]'s

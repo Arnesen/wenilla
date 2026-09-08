@@ -1307,6 +1307,45 @@ pub const SMSG_MOVE_UNSET_HOVER: u16 = 0x00F5; // 245
 pub const CMSG_MOVE_HOVER_ACK: u16 = 0x00F6; // 246
 pub const CMSG_MOVE_FEATHER_FALL_ACK: u16 = 0x02CF; // 719
 
+// **The OBSERVER leg of that same family** — what everyone *else* is told once the mover acks
+// (decision 2061). The ack'd family above and the `SMSG_SPLINE_MOVE_*` twelve below are only two
+// of the three legs, and this is the one that was missing: `SMSG_SPLINE_MOVE_*` reaches a unit the
+// **server** drives (a creature), and the ack'd leg reaches only the mover's **own** client — so a
+// *player* being rooted, levitated or blinked had no leg at all, and every such change was invisible
+// until that player's next ordinary pose packet.
+//
+// vmangos names the three legs itself, in one table (`Movement/MovementPacketSender.h:30-60`):
+// `{ SMSG_FORCE_MOVE_ROOT → CMSG_FORCE_MOVE_ROOT_ACK → MSG_MOVE_ROOT }` and its three siblings,
+// plus `{ MSG_MOVE_TELEPORT_ACK → MSG_MOVE_TELEPORT_ACK → MSG_MOVE_TELEPORT }`. `SendMovementFlagChange
+// ToObservers` / `SendTeleportToObservers` (`MovementPacketSender.cpp:221-239`, `:368-397`) write
+// `[packed guid][MovementInfo]` and stop — **the ordinary relay shape**, decoded by
+// [`super::parse`]'s relay arm like a heartbeat.
+//
+// **The client agrees they are one family.** All six register the *same* handler as the 22 relay
+// opcodes we already carry — `0x603bb0` (wow-re `re/net/opcode-handlers.tsv`; 30 rows, one handler),
+// which reads a packed guid, resolves it under `TYPEMASK_UNIT` and hands the body to
+// `OnUnitMoveEvent 0x601580`. There is nothing to ack: the ack already happened, on the mover's own
+// client.
+//
+// **Apply/unapply is in the flags word, not the opcode.** Only root splits into two opcodes; hover,
+// feather-fall and water-walk each use ONE for both directions, because the server has already
+// written the bit into the `m_movementInfo` it is about to broadcast (`SetHoverReal` &co. run
+// *before* the send, `Handlers/MovementHandler.cpp:626-638`/`:743-744`). So the receiver folds the
+// whole word and asks nothing of the opcode — which is what our relay arm already does.
+//
+// **`MSG_MOVE_TELEPORT` carries no counter** (unlike `MSG_MOVE_TELEPORT_ACK`, 0x00C7, whose
+// `[packed guid][u32 counter][MovementInfo]` is the *mover's* handshake): an observer has nothing to
+// ack, so the dword isn't there. It is sent **twice** per near-teleport — once before the relocation
+// and once after (`Player::ExecuteTeleportNear`) — so observers around both the old and the new
+// position hear it; both carry the destination, so applying both is idempotent. It is also how a
+// **creature** blink arrives (`Unit::NearTeleportTo`, which `DisableSpline()`s first).
+pub const MSG_MOVE_TELEPORT: u16 = 0x00C5; // 197
+pub const MSG_MOVE_ROOT: u16 = 0x00EC; // 236
+pub const MSG_MOVE_UNROOT: u16 = 0x00ED; // 237
+pub const MSG_MOVE_HOVER: u16 = 0x00F7; // 247
+pub const MSG_MOVE_FEATHER_FALL: u16 = 0x02B0; // 688
+pub const MSG_MOVE_WATER_WALK: u16 = 0x02B1; // 689
+
 // **The knockback handshake** — the server aims a launch at our own mover, the mover flies it, and
 // the ack is what the server relays onward (decision 1702). Numbers VERIFIED vmangos
 // `Opcodes_1_11_2.h:242-244` (unchanged into 1.12.1) and cross-checked against the client's own name
