@@ -13,6 +13,7 @@ pub(crate) mod widgets;
 
 use bevy::ecs::entity::EntityHashSet;
 use bevy::prelude::*;
+use bevy::ui::FocusPolicy;
 
 use art::{tc_rect, GlueArt, BTN_BG, BTN_HOVER, BUTTON_TC, GOLD};
 use widgets::{ArtSwap, GlueBtn, GlueCaption, GlueDisabled, OutlineCopy};
@@ -55,6 +56,12 @@ impl Plugin for GluePlugin {
             .add_systems(
                 Update,
                 (backdrop::fit_backdrop_borders, seat_outline_copies),
+            )
+            // The chrome's canvas is the boxed scene (2091) — fitted before the layout that reads
+            // it, so a screen spawned this frame never lays out against the window first.
+            .add_systems(
+                PostUpdate,
+                fit_glue_canvas.before(bevy::ui::UiSystems::Layout),
             )
             .add_systems(
                 Update,
@@ -186,6 +193,81 @@ pub(crate) const ROTATE_RATE: f32 = 120.0 * std::f32::consts::PI / 180.0;
 /// and lifting it would resize the director's UI without being asked.
 pub(crate) fn screen_scale(window: Option<&Window>) -> f32 {
     window.map(|w| (w.height() / 768.0).min(2.2)).unwrap_or(1.0)
+}
+
+/// **The rect a glue screen's chrome lays out into: the boxed scene, never the window** (decision
+/// 2091, B377).
+///
+/// [`screen_scale`] answers *how big* an authored coordinate draws; this answers *what it is
+/// measured from*. The two are not the same question once the scene is pillarboxed (decision
+/// 1619): past the aspect its art can fill, the booth camera renders into a centred box with black
+/// bars either side, and a chrome node anchored `right: 0` against the *window* lands out in the
+/// bar — the logo, the version line, Realmlist/Quit, the character list and Delete/Back all did, at
+/// 21:9 (Henhouse's 3440×1440 report). 1619 wrote that residue down and left it; this is the
+/// answer. Anchor the chrome to the **box** — the window's height, the box's width — and the glue
+/// canvas is exactly what a reference client of the box's own aspect would lay out on, which is
+/// what the reporter's own 1.12 shots are: a 16:9 client, centred by the monitor, everything
+/// inside it.
+///
+/// The screen's root stays full-window: the black bars are the booth camera's own *output* clear
+/// inside a window-sized render target (1619 §3), so the full-bleed scene pane that samples that
+/// target must keep covering the window. Only the chrome moves in.
+#[derive(Component)]
+pub(crate) struct GlueCanvas;
+
+/// The canvas node itself — full height, inset to the pillarbox's bars, sized by its own insets so
+/// it recentres itself. Spawn one under a screen's root and hang the chrome off it; the insets are
+/// kept current by [`fit_glue_canvas`] (which also fills them in on the spawn frame, before the
+/// first layout runs).
+///
+/// Spawn it as a sibling **after** the screen's full-bleed scene pane, so the chrome keeps drawing
+/// over the scene exactly as it did when it hung off the root.
+pub(crate) fn glue_canvas() -> (GlueCanvas, FocusPolicy, Node) {
+    (
+        GlueCanvas,
+        // **`Pass`, and it is load-bearing.** `ui_focus_system` treats a hovered node with no
+        // `FocusPolicy` as `Block` (`focus_policy.unwrap_or(&FocusPolicy::Block)`) and stops the
+        // walk there — so a canvas spanning the whole box would swallow every hover and press
+        // before they reached the full-bleed scene pane beneath it, and the select and create
+        // screens' drag-to-rotate would simply stop working. The canvas is a coordinate frame, not
+        // a surface: it passes everything its own chrome does not take.
+        FocusPolicy::Pass,
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(0.0),
+            right: Val::Px(0.0),
+            top: Val::Px(0.0),
+            bottom: Val::Px(0.0),
+            ..default()
+        },
+    )
+}
+
+/// Seat every [`GlueCanvas`] on the boxed scene's rect, every frame the bars change.
+///
+/// In `PostUpdate` **before** `UiSystems::Layout`, which is what keeps a screen spawned this frame
+/// from laying out once against the window and snapping in the next: the tree's commands have been
+/// applied by then, so a canvas born in `Update` is fitted before it is ever laid out. Writing
+/// only on change keeps it off Bevy's `Changed<Node>` path on the ~every frame nothing moves.
+pub(crate) fn fit_glue_canvas(
+    window: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    scene: Option<Res<crate::portrait::CreateScene>>,
+    mut canvases: Query<&mut Node, With<GlueCanvas>>,
+) {
+    if canvases.is_empty() {
+        return;
+    }
+    let (left, right) = crate::portrait::glue_canvas_bars(
+        window.single().ok(),
+        scene.and_then(|s| s.viewport_aspect()),
+    );
+    let (left, right) = (Val::Px(left), Val::Px(right));
+    for mut node in &mut canvases {
+        if node.left != left || node.right != right {
+            node.left = left;
+            node.right = right;
+        }
+    }
 }
 
 /// Mirror every outlined text's content into its black copies ([`widgets::outlined_text`]) — the
@@ -350,7 +432,8 @@ mod tests {
         FallbackFace, GlueBtn, GlueCaption, GlueDisabled, Hilight, LockHighlight,
     };
     use super::{
-        glue_button_visuals, glue_clicks, glue_hilights, screen_scale, GlueArt, GlueClicks, GOLD,
+        glue_button_visuals, glue_canvas, glue_clicks, glue_hilights, screen_scale, FocusPolicy,
+        GlueArt, GlueClicks, GOLD,
     };
     use bevy::prelude::*;
     use bevy::window::WindowResolution;
@@ -490,6 +573,25 @@ mod tests {
             "a disabled button does not highlight"
         );
         assert_ne!(colour(&app), GOLD, "it grays (the ref's GlueFontDisable)");
+    }
+
+    /// **The chrome canvas passes what it does not take** (decision 2091). `ui_focus_system`
+    /// reads a hovered node with no `FocusPolicy` as `Block` and stops the walk there, so a canvas
+    /// spanning the whole boxed scene would eat every hover and press before the full-bleed scene
+    /// pane under it saw one — and drag-to-rotate on the select and create screens would go dead
+    /// with nothing on screen to show for it. Pinned here because the failure is invisible to
+    /// every other check we run.
+    #[test]
+    fn the_chrome_canvas_never_swallows_the_scenes_drags() {
+        let (_, policy, node) = glue_canvas();
+        assert_eq!(policy, FocusPolicy::Pass);
+        // …and it is sized by its own four insets, so [`fit_glue_canvas`] can move it by writing
+        // two of them (a width would have to be recomputed, and could disagree with the camera).
+        assert_eq!(node.position_type, PositionType::Absolute);
+        assert_eq!((node.width, node.height), (Val::Auto, Val::Auto));
+        for inset in [node.left, node.right, node.top, node.bottom] {
+            assert_eq!(inset, Val::Px(0.0));
+        }
     }
 
     /// The authored layout must FIT the window at every height — the B120 regression.

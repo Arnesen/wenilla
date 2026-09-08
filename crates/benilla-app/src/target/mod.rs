@@ -118,6 +118,8 @@ pub(crate) use by_name::{AssistRequest, TargetByNameRequest};
 // `duel_rung` is the diagnostic face of the same walk, for `/reaction` (decision 0637).
 pub(crate) use ring::{duel_rung, ring_reaction, ring_variant, Factions, RingVariant};
 
+pub(crate) use click::DeselectGuid;
+
 /// Our current target: the selected entity and its server guid, or `None`. Set the instant we click a
 /// unit (client-authoritative for the ring — the real client doesn't wait for the server), cleared on
 /// deselect or when the target streams out. The guid is what we send in `CMSG_SET_SELECTION` and, later,
@@ -355,6 +357,7 @@ impl Plugin for TargetPlugin {
             .add_message::<AttackNearestRequest>()
             .add_message::<TargetByNameRequest>()
             .add_message::<AssistRequest>()
+            .add_message::<click::DeselectGuid>()
             .add_systems(
                 Startup,
                 (

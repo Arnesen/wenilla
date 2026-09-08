@@ -708,6 +708,7 @@ pub(crate) fn simulate_ribbons(
                 no_depth_test: false,
                 main_entity: entity,
                 light: None, // trails never carry a light override (world lane only)
+                clip: None,  // …and never ride a UI model pane's atlas cell
             },
         );
     }

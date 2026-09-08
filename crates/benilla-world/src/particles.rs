@@ -277,6 +277,9 @@ pub struct ParticleEmitter {
     /// [`quads::DrawFrame::size_scale`]. `1.0` (a yard) for every world lane; a UI model tile
     /// sets its pixels-per-unit through [`Self::set_size_scale`].
     size_scale: f32,
+    /// The render-target rectangle this cloud is confined to, target pixels — see
+    /// [`Self::set_clip`]. `None` = the whole target (every world emitter).
+    pub(crate) clip: Option<Vec4>,
 }
 
 /// One wired CHILD emitter (see [`ParticleEmitter::children`]): the recursion model's own
@@ -381,6 +384,21 @@ impl ParticleEmitter {
     /// (`gated && gate_inputs_still && !fade.is_changed()`, decision 1979's floor) reads none of
     /// the owner's inputs: a world-lane cloud left gated here on a still camera could never
     /// re-enter its own draw set. One full gate evaluation on the thaw edge is the price.
+    /// **Confine this cloud's quads to a rectangle of the render target**, in target pixels —
+    /// the UI model tiles' cell ([`crate::particles::buffer::EffectDrawSpec::clip`], decision
+    /// 2093). `None` (the default, and every world emitter) draws over the whole target.
+    ///
+    /// A tile's cloud is quads in the shared atlas's own space, so without this a cloud that
+    /// reaches past its cell lands in the cell the shelf packed beside it — which the composite
+    /// hands to a different widget (B379: the autocast shine's golden `GlowStar` down the left
+    /// edge of a bag slot's cooldown). The reference has no atlas and no such reach: it draws
+    /// each `<Model>` with the widget's rect as the VIEWPORT.
+    pub fn set_clip(&mut self, clip: Option<Vec4>) {
+        if self.clip != clip {
+            self.clip = clip;
+        }
+    }
+
     pub fn set_frozen(&mut self, frozen: bool) {
         self.frozen = frozen;
         if !frozen {
@@ -773,6 +791,7 @@ pub fn spawn_emitter(
             geometry: emitter.geometry.clone(),
             model_instances: Vec::new(),
             size_scale: 1.0,
+            clip: None,
         },
     ));
     if emitter.recursion.is_some() {

@@ -8,7 +8,9 @@
 //!
 //! ## One VM per addon, deliberately
 //!
-//! Every addon is surveyed in a **fresh** [`UiScript`] with our own FrameXML loaded underneath it.
+//! Every addon is surveyed in a **fresh** [`UiScript`] with the whole in-game interface loaded
+//! underneath it — the stock 1.12 FrameXML off the player's chain plus the few files still ours
+//! (1751), exactly what a live session seats.
 //! That costs a full UI load per addon and buys the only property that makes the report readable:
 //! one addon's failure cannot be another's. Loading them all into one VM means the first addon to
 //! leave a global in a bad state gets blamed for the next twenty, and the distribution 1188 asks
@@ -1332,8 +1334,10 @@ fn source_files(root: &Path, name: &str, toc: &Toc) -> Vec<String> {
 /// The FrameXML digest of the interface this survey loaded (`crate::ui_script::framexml_digest`).
 ///
 /// **Print it beside every number.** A survey run is only comparable to another survey run that
-/// loaded the same interface, and in a dev build `assets/ui` is read from the source tree — so an
-/// edit by anything sharing the checkout moves the headline with no rebuild and no announcement.
+/// loaded the same interface, and in a dev build the manifest and the files still ours are read
+/// from the source tree — so an edit by anything sharing the checkout moves the headline with no
+/// rebuild and no announcement. A chain entry contributes its name only (its bytes are the
+/// player's install), so migrating a window changes the digest and playing does not.
 pub fn framexml_digest() -> String {
     crate::ui_script::framexml_digest()
 }

@@ -269,6 +269,7 @@ pub(crate) fn update_ground_fx_decals(
                 no_depth_test: false,
                 main_entity: entity,
                 light: None,
+                clip: None,
             },
         );
     }

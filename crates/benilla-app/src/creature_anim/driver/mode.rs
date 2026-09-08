@@ -105,6 +105,7 @@ pub(super) fn run(
                 // What we're entering is no longer wanted before the enter even finished — preempt
                 // to the new Special, to the gait (a pose cut by movement), or to this one's exit.
                 drv.mode = leave_special(
+                    &mut drv.base_lock,
                     sp,
                     special,
                     moving,
@@ -120,6 +121,7 @@ pub(super) fn run(
                 );
             } else if oneshot_finished(player, anims, sp.enter(), catalog) {
                 play(
+                    &mut drv.base_lock,
                     tr,
                     player,
                     anims,
@@ -137,6 +139,7 @@ pub(super) fn run(
         Mode::Looping(sp) => {
             if special != Some(sp) {
                 drv.mode = leave_special(
+                    &mut drv.base_lock,
                     sp,
                     special,
                     moving,
@@ -157,6 +160,7 @@ pub(super) fn run(
             if let Some(sp) = special {
                 // A new jump or a pose interrupts (a second jump, or sitting right after landing).
                 drv.mode = enter_special(
+                    &mut drv.base_lock,
                     sp,
                     relaxed,
                     tr,
@@ -183,6 +187,7 @@ pub(super) fn run(
                 // A new Special interrupts the exit — re-sitting during the stand-up, say. Enter
                 // it straight away instead of waiting the stand-up out.
                 drv.mode = enter_special(
+                    &mut drv.base_lock,
                     next,
                     relaxed,
                     tr,
@@ -229,6 +234,7 @@ pub(super) fn run(
                 }
                 drv.mode = if let Some(sp) = under {
                     leave_special(
+                        &mut drv.base_lock,
                         sp,
                         special,
                         moving,
@@ -244,6 +250,7 @@ pub(super) fn run(
                     )
                 } else if let Some(sp) = special {
                     enter_special(
+                        &mut drv.base_lock,
                         sp,
                         relaxed,
                         tr,
@@ -270,6 +277,7 @@ pub(super) fn run(
                 // (decision 0083 (c) — the enter never replays after an interruption).
                 if oneshot_finished(player, anims, id, catalog) {
                     play(
+                        &mut drv.base_lock,
                         tr,
                         player,
                         anims,
@@ -347,6 +355,7 @@ pub(super) fn run(
             if let Some(sp) = special {
                 // Enter a Special state.
                 drv.mode = enter_special(
+                    &mut drv.base_lock,
                     sp,
                     relaxed,
                     tr,
@@ -518,6 +527,9 @@ pub(super) fn run(
                 let clip = cands
                     .iter()
                     .find_map(|&id| find_resolved(anims, id, catalog));
+                // Did the base actually take a clip this pass? Only the lock can say no, and
+                // when it does the bookkeeping below must not run ([`play::BaseAnimLock`]).
+                let mut armed = true;
                 if drv.gait == Some(target) {
                     // The gait is already armed and stays armed — its rate is
                     // [`play::sync_base_rate`]'s per-frame write below, which finds whichever
@@ -525,55 +537,81 @@ pub(super) fn run(
                     // sweeping every node of the id. A completed ranged Load simply clamps at
                     // full draw and stays there; nothing promotes it (0994).
                 } else if let Some(c) = clip {
-                    // A looping base arm rolls its variation when relaxed (decision 0123 —
-                    // the client's base-arm `variationIdx = −1`; a combat/cast arm keeps the
-                    // deterministic head) AND its replay budget (decision 0516 §7d — the
-                    // watchdog window). A re-armed Stand landing on its rare look-around
-                    // variations IS the idle fidget.
-                    let (c, budget) = roll_loop(anims, c, relaxed, rng);
-                    if traced && benilla_assets::trace::enabled() {
-                        // Every fresh gait play, including a same-clip replay (which the
-                        // settled-state diff below cannot see) — the exact restart-from-head
-                        // event a "frames snap" report is hunting.
-                        benilla_assets::trace::line(
-                            "anim",
-                            &format!(
-                                "{subject}PLAY gait {} (was {:?}) rate {:.2}",
-                                c.anim_id,
-                                drv.gait,
-                                playback_rate(c, mv.speed, model_scale)
-                            ),
-                        );
+                    // **The two bypasses the reference keeps** (wow-re
+                    // `base-anim-lock-knockdown.md` §6/§7.6): the death poses and the mount attach
+                    // write the arm primitive directly and are not gated by the base-anim lock. In
+                    // benilla both arrive as ordinary gait targets, so they say so here — a body
+                    // knocked flat and then killed must still fall dead, and mounting during a
+                    // `Knockdown` overrides the clip.
+                    if target == DEATH || target == select::MOUNT {
+                        drv.base_lock.release();
                     }
-                    // The ranged Load plays ONCE and freezes at full draw: as a Forever
-                    // gait it WRAPPED to its head at completion — the frames + cross-fade
-                    // against the restarted reach-to-quiver were the director's "jumps
-                    // back to the start the moment it gets fully pulled", in every build
-                    // that replayed a pull (trace-caught, decision 0412). The clamp IS the
-                    // drawn pose; nothing follows it (0994).
-                    // Loot 50 is likewise authored clamp — one 0.5 s kneel-down that must
-                    // FREEZE in the rummage pose; as Forever it would wrap back to standing
-                    // and re-kneel every half second.
-                    let repeat = if select::is_ranged_load(target) || target == select::LOOT {
-                        // A deliberate freeze — no window either: a watchdog re-pull is
-                        // exactly what the reference's missing completion dispatch rules out.
-                        drv.loop_window = None;
-                        bevy::animation::RepeatAnimation::Never
+                    // Held: the selector does not even roll. The reference re-picks the base on an
+                    // EVENT (`0x5fd9e0(-1)` from a packet handler), never once a frame, so a
+                    // per-frame retry while the lock refuses would burn the shared variation RNG
+                    // (decision 0114's single `_rand` stream) for the clip's whole 2 s and perturb
+                    // every other unit's rolls with it. `drv.gait` stays `None`, so the pick
+                    // happens exactly once — the frame the clip releases the lock.
+                    if drv.base_lock.refuses() {
+                        armed = false;
                     } else {
-                        drv.loop_window = Some((c.node, budget));
-                        bevy::animation::RepeatAnimation::Forever
-                    };
-                    drv.gait_rate = playback_rate(c, mv.speed, model_scale);
-                    play_clip(tr, player, c, repeat, drv.gait_rate);
-                    drv.gait = Some(target);
+                        // A looping base arm rolls its variation when relaxed (decision 0123 —
+                        // the client's base-arm `variationIdx = −1`; a combat/cast arm keeps the
+                        // deterministic head) AND its replay budget (decision 0516 §7d — the
+                        // watchdog window). A re-armed Stand landing on its rare look-around
+                        // variations IS the idle fidget.
+                        let (c, budget) = roll_loop(anims, c, relaxed, rng);
+                        if traced && benilla_assets::trace::enabled() {
+                            // Every fresh gait play, including a same-clip replay (which the
+                            // settled-state diff below cannot see) — the exact restart-from-head
+                            // event a "frames snap" report is hunting.
+                            benilla_assets::trace::line(
+                                "anim",
+                                &format!(
+                                    "{subject}PLAY gait {} (was {:?}) rate {:.2}",
+                                    c.anim_id,
+                                    drv.gait,
+                                    playback_rate(c, mv.speed, model_scale)
+                                ),
+                            );
+                        }
+                        // The ranged Load plays ONCE and freezes at full draw: as a Forever
+                        // gait it WRAPPED to its head at completion — the frames + cross-fade
+                        // against the restarted reach-to-quiver were the director's "jumps
+                        // back to the start the moment it gets fully pulled", in every build
+                        // that replayed a pull (trace-caught, decision 0412). The clamp IS the
+                        // drawn pose; nothing follows it (0994).
+                        // Loot 50 is likewise authored clamp — one 0.5 s kneel-down that must
+                        // FREEZE in the rummage pose; as Forever it would wrap back to standing
+                        // and re-kneel every half second.
+                        let repeat = if select::is_ranged_load(target) || target == select::LOOT {
+                            // A deliberate freeze — no window either: a watchdog re-pull is
+                            // exactly what the reference's missing completion dispatch rules out.
+                            drv.loop_window = None;
+                            bevy::animation::RepeatAnimation::Never
+                        } else {
+                            drv.loop_window = Some((c.node, budget));
+                            bevy::animation::RepeatAnimation::Forever
+                        };
+                        drv.gait_rate = playback_rate(c, mv.speed, model_scale);
+                        let rate = drv.gait_rate;
+                        armed = play_clip(&mut drv.base_lock, tr, player, c, repeat, rate);
+                        if armed {
+                            drv.gait = Some(target);
+                        } else {
+                            drv.loop_window = None;
+                        }
+                    }
                 } else {
                     drv.gait = Some(target); // no clip (bind pose) — record the target so we don't churn
                 }
-                // The base is now arm-consistent with this movement state — every branch above
-                // leaves `drv.gait == Some(target)`. A one-shot that displaces it later reads
-                // this, not its own arm-time flags, to know whether the movement state has
-                // moved on since (decision 0894).
-                drv.gait_flags = mv.flags;
+                if armed {
+                    // The base is now arm-consistent with this movement state — every branch above
+                    // leaves `drv.gait == Some(target)`. A one-shot that displaces it later reads
+                    // this, not its own arm-time flags, to know whether the movement state has
+                    // moved on since (decision 0894).
+                    drv.gait_flags = mv.flags;
+                }
             }
         }
     }

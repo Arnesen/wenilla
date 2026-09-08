@@ -160,26 +160,37 @@ fn spawn_screen(
     let empty = GlueStrings::default();
     let strings = strings.unwrap_or(&empty);
 
-    let mut root = commands.spawn((
-        LoginUi {
-            with_art: art.button_up.is_some(),
-            s,
-        },
-        GlobalZIndex(SCREEN_Z),
-        Node {
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            ..default()
-        },
-        BackgroundColor(BACKDROP),
-    ));
-    root.with_children(|ui| {
-        // The 3D scene, full-bleed and first — the ref's screen IS the fullscreen ModelFFX
-        // (`UI_MainMenu`); the page tint behind it is the no-art fallback.
-        if let Some(image) = scene_image {
-            ui.spawn((ImageNode::new(image), overlay()));
-        }
+    let root = commands
+        .spawn((
+            LoginUi {
+                with_art: art.button_up.is_some(),
+                s,
+            },
+            GlobalZIndex(SCREEN_Z),
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                ..default()
+            },
+            BackgroundColor(BACKDROP),
+        ))
+        .with_children(|ui| {
+            // The 3D scene, full-bleed and first — the ref's screen IS the fullscreen ModelFFX
+            // (`UI_MainMenu`); the page tint behind it is the no-art fallback. It stays on the
+            // WINDOW while the chrome below does not: the pillarbox's black bars are the booth
+            // camera's own output clear *inside* this window-sized target (1619 §3), so the pane
+            // that samples the target covers the window and brings the bars with it.
+            if let Some(image) = scene_image {
+                ui.spawn((ImageNode::new(image), overlay()));
+            }
+        })
+        .id();
 
+    // ...and every piece of chrome hangs off the CANVAS — the boxed scene's own rect (decision
+    // 2091). Anchored to the window instead, the logo, the version line and Realmlist/Quit stood
+    // out in the bars at 21:9 (B377).
+    let mut canvas = commands.spawn((crate::glue::glue_canvas(), ChildOf(root)));
+    canvas.with_children(|ui| {
         // The WoW logo (`AccountLoginLogo`, 256×128 at TOPLEFT (3,−7), OVERLAY).
         if let Some(logo) = &art.logo {
             ui.spawn((ImageNode::new(logo.clone()), abs(s, 3.0, 7.0, 256.0, 128.0)));

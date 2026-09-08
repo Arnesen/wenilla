@@ -4180,25 +4180,34 @@ fn a_combat_over_combat_fast_path_does_not_raise_the_anim_edge() {
     );
 }
 
-/// The **stage-2 base recompute** (decision 2085): a state kit's animation id is compared against
-/// what the unit is already playing (`0x5fdb50`) and, on a difference, spent on
-/// `0x5fd9e0(unit, -1)` — never played. So the recompute is an animation *cutter*, and the case
-/// that names it is a spell cutting its own impact clip: Charge's kit 348 plays `Knockdown`(121),
-/// kit 349 names `Stun`(14), and 121 ≠ 14 ends the Knockdown.
+/// The **base-animation lock** (decision 2096, VERIFIED wow-re `base-anim-lock-knockdown.md`) —
+/// the reason a Lashed player visibly falls over, and the correction to 2085's reading.
 ///
-/// The match arm is the other half and is not decoration: `0x60f393 je 0x60f3ca` leaves the block
-/// having done nothing at all, so a state kit naming the clip already running must not restart or
-/// cut it.
-mod stage_two_recompute {
+/// A stun's root recomputes the base unconditionally and the selector resolves `Stand(0)`; what
+/// stops that overwriting the victim's `Knockdown` is `0x5fe2f0`'s head guard on
+/// `[unit+0xd58] & 0xc0000`, a bit the arm helper set keyed on the id it actually armed. So the
+/// recompute is not skipped — **the play it asks for is refused**, and the clip runs its full
+/// 2000 ms. The director watched exactly this on the reference client, fighting the Silithus worm
+/// whose Lash (6607) puts nothing on its victim but that one clip.
+///
+/// The same guard scopes 2085's claim that a state kit's anim is an animation *cutter*: it cannot
+/// cut a clip that took the lock, so Charge does **not** cut its own Knockdown.
+mod base_anim_lock {
     use super::*;
-    use crate::creature_anim::Mode;
+    use crate::creature_anim::{BaseAnimRecompute, Mode};
+
+    /// Stand, Knockdown (the locking id), and SpecialUnarmed (an ordinary one-shot that does not
+    /// lock) — the pair that separates the guard from a plain re-pick.
+    const STAND_NODE: u32 = 1;
+    const KNOCKDOWN_NODE: u32 = 2;
 
     fn model() -> ModelAnimations {
         ModelAnimations {
             graph: Handle::default(),
             clips: vec![
-                clip(0, 1, true),    // Stand
-                clip(121, 2, false), // Knockdown — the impact kit's one-shot
+                clip(0, STAND_NODE, true),        // Stand
+                clip(121, KNOCKDOWN_NODE, false), // Knockdown — takes the lock
+                clip(118, 3, false),              // SpecialUnarmed — takes nothing
             ],
             hand_close: [None, None],
             playable_animation_lookup: Vec::new(),
@@ -4220,64 +4229,96 @@ mod stage_two_recompute {
             .id()
     }
 
-    /// A one-shot is armed, then a state kit naming a DIFFERENT id lands: the clip ends.
-    #[test]
-    fn a_differing_state_kit_anim_cuts_the_one_shot() {
-        let mut app = app();
-        let unit = victim(&mut app);
+    fn main_node(app: &App, unit: Entity) -> Option<AnimationNodeIndex> {
+        app.world()
+            .entity(unit)
+            .get::<AnimationTransitions>()
+            .unwrap()
+            .get_main_animation()
+    }
 
+    fn oneshot(app: &mut App, unit: Entity, anim_id: u16) {
         app.world_mut().write_message(EmoteAnim {
             entity: unit,
-            anim_id: 121,
+            anim_id,
             seq: 1,
         });
         app.update();
-        assert!(
-            matches!(
-                app.world().entity(unit).get::<AnimDriver>().unwrap().mode,
-                Mode::Swing { id: 121, .. }
-            ),
-            "the impact kit's Knockdown holds the base slot"
+    }
+
+    fn recompute(app: &mut App, unit: Entity, anim_id: u16) {
+        app.world_mut().write_message(BaseAnimRecompute {
+            entity: unit,
+            anim_id,
+        });
+        app.update();
+    }
+
+    /// The whole report, in one assertion: a `Knockdown` on the base survives the recompute the
+    /// stun's own root triggers, because the `Stand` it asks for is refused.
+    #[test]
+    fn a_knockdown_survives_the_base_recompute() {
+        let mut app = app();
+        let unit = victim(&mut app);
+        oneshot(&mut app, unit, 121);
+        assert_eq!(
+            main_node(&app, unit),
+            Some(AnimationNodeIndex::new(KNOCKDOWN_NODE as usize)),
+            "the impact kit's Knockdown holds the base"
         );
 
-        app.world_mut()
-            .write_message(crate::creature_anim::BaseAnimRecompute {
-                entity: unit,
-                anim_id: 14, // Stun — what kit 349 names, and never plays
-            });
-        app.update();
+        recompute(&mut app, unit, 14); // the state kit's `Stun`, which is never played
+
         assert_eq!(
-            app.world().entity(unit).get::<AnimDriver>().unwrap().mode,
-            Mode::Gait,
-            "121 != 14 recomputes the base, which is what ends the Knockdown"
+            main_node(&app, unit),
+            Some(AnimationNodeIndex::new(KNOCKDOWN_NODE as usize)),
+            "the recompute fires, resolves Stand, and the lock refuses it — the clip stays"
+        );
+        assert_eq!(
+            app.world().entity(unit).get::<AnimDriver>().unwrap().gait,
+            None,
+            "and nothing may claim the base holds Stand: the target stays unset so the selector \
+             tries again once the clip releases the lock"
         );
     }
 
-    /// …and a state kit naming the id already playing does nothing at all.
+    /// …and the guard is the id's, not a blanket refusal: an ordinary one-shot takes no lock, so
+    /// the same recompute ends it. This is 2085's mechanism, correctly scoped.
     #[test]
-    fn a_matching_state_kit_anim_leaves_the_one_shot_alone() {
+    fn a_non_locking_one_shot_is_cut_by_the_same_recompute() {
         let mut app = app();
         let unit = victim(&mut app);
-
-        app.world_mut().write_message(EmoteAnim {
-            entity: unit,
-            anim_id: 121,
-            seq: 1,
-        });
-        app.update();
-
-        app.world_mut()
-            .write_message(crate::creature_anim::BaseAnimRecompute {
-                entity: unit,
-                anim_id: 121,
-            });
-        app.update();
+        oneshot(&mut app, unit, 118);
         assert!(
             matches!(
                 app.world().entity(unit).get::<AnimDriver>().unwrap().mode,
-                Mode::Swing { id: 121, .. }
+                Mode::Swing { id: 118, .. }
             ),
-            "`je 0x60f3ca` — already playing it, so the leg does nothing"
+            "SpecialUnarmed holds the base slot"
+        );
+
+        recompute(&mut app, unit, 14);
+
+        assert_eq!(
+            main_node(&app, unit),
+            Some(AnimationNodeIndex::new(STAND_NODE as usize)),
+            "nothing refused the Stand, so it took the slot"
+        );
+    }
+
+    /// A state kit naming the id already playing does nothing at all (`0x60f393 je 0x60f3ca`).
+    #[test]
+    fn a_matching_state_kit_anim_leaves_the_base_alone() {
+        let mut app = app();
+        let unit = victim(&mut app);
+        oneshot(&mut app, unit, 118);
+        recompute(&mut app, unit, 118);
+        assert!(
+            matches!(
+                app.world().entity(unit).get::<AnimDriver>().unwrap().mode,
+                Mode::Swing { id: 118, .. }
+            ),
+            "already playing it — the leg leaves the block having done nothing"
         );
     }
 }

@@ -319,7 +319,7 @@ pub(super) fn dump_booth_target(
 ///
 /// `None` on an unexpected format, so a future target-format change is a loud warning rather than a
 /// garbled PNG.
-fn encode_target_readback(shot: &Image) -> Option<Image> {
+pub(crate) fn encode_target_readback(shot: &Image) -> Option<Image> {
     use bevy::asset::RenderAssetUsages;
     use bevy::render::render_resource::{TextureDimension, TextureFormat};
 

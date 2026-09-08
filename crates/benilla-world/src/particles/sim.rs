@@ -796,6 +796,7 @@ pub(super) fn simulate_particles(
             model_instances,
             gated: _,
             frozen: _,
+            clip,
         } = &mut *emitter;
         // The water-interleave MODEL frame, captured before the draw-anchor local shadows the
         // `anchor` field below: the cloud anchor is "the MODEL, never the bone" — its transform
@@ -1390,6 +1391,9 @@ pub(super) fn simulate_particles(
                 no_depth_test: false,
                 main_entity: entity,
                 light: light_override.map(|l| l.0.clone()),
+                // The pane cell a UI model tile's cloud is confined to (`set_clip`); `None` for
+                // every world emitter, which owns the whole target.
+                clip: *clip,
             },
         );
         // CHILD pools: their own texture/blend/fog identity, the PARENT's anchor and rung
@@ -1433,6 +1437,8 @@ pub(super) fn simulate_particles(
                     no_depth_test: false,
                     main_entity: entity,
                     light: light_override.map(|l| l.0.clone()),
+                    // A child cloud draws where its parent does — same cell, same clip.
+                    clip: *clip,
                 },
             );
         }

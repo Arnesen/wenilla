@@ -275,6 +275,8 @@ pub struct EffectDraw {
     /// [`EffectLightOverride`]'s buffer, when the producer carries one (`None` = the world's
     /// shared light buffer).
     pub(crate) light: Option<Buffer>,
+    /// The target-pixel rectangle this draw is clipped to — see [`EffectDrawSpec::clip`].
+    pub(crate) clip: Option<Vec4>,
 }
 
 /// The frame's shared stream. Cleared at the top of `PostUpdate`'s effect set
@@ -370,6 +372,23 @@ pub struct EffectDrawSpec {
     pub no_depth_test: bool,
     pub main_entity: Entity,
     pub light: Option<Buffer>,
+    /// **Clip this draw to a rectangle of its RENDER TARGET, in target pixels** — `(min.x,
+    /// min.y, max.x, max.y)`, `None` for the whole target, which is every world family.
+    ///
+    /// It exists for the UI model tiles (decision 2008): every visible `<Model>` pane renders
+    /// into its own cell of ONE shared atlas, and a pane's particles are quads in that atlas's
+    /// space — so a cloud that reaches past its cell lands in the cell **next to** it, which the
+    /// composite hands to a different widget. The reference cannot have this: it draws each
+    /// `<Model>` straight into the back buffer with the widget's own rect as the VIEWPORT
+    /// (wow-re `modelframe-render-law.md` §6), and the scissor eats the overflow. One shared
+    /// camera cannot carry a viewport per pane, so the clip rides the draw instead and the
+    /// fragment discards outside it — the same picture, at the same rank.
+    ///
+    /// B379: the pet bar's autocast shine (`UI-AutoCastButton.m2` — four additive spline
+    /// emitters, no render batch at all) circles its button on the very edge with an ~8 px
+    /// half-extent, which spilled six pixels of golden `GlowStar` across the 2-texel gutter and
+    /// down the LEFT edge of whatever cooldown pane the shelf packed beside it.
+    pub clip: Option<Vec4>,
 }
 
 impl EffectQuads {
@@ -420,6 +439,7 @@ impl EffectQuads {
                 range: start..end,
                 main_entity: spec.main_entity,
                 light: spec.light,
+                clip: spec.clip,
             });
         }
     }
@@ -535,6 +555,7 @@ mod tests {
                     no_depth_test: false,
                     main_entity: Entity::PLACEHOLDER,
                     light: None,
+                    clip: None,
                 },
             );
         }
@@ -634,6 +655,7 @@ impl<'w> WorldEffectDraw<'w> {
                 no_depth_test: false,
                 main_entity: Entity::PLACEHOLDER,
                 light: None,
+                clip: None,
             },
             quads: &mut self.quads,
         }

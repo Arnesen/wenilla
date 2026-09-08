@@ -10,11 +10,14 @@
 //! faithful to the *documented* widget model, not byte-pinned (same posture as StatusBar's fill and
 //! ScrollFrame's scroll; decisions 0112/0250).
 //!
-//! `SetValue` fires `OnValueChanged` **only on an actual change** ([`SliderState::store_value`]).
-//! That is load-bearing, not an optimization: the real scrollbar template wires
-//! `OnValueChanged → this:GetParent():SetVerticalScroll(arg1)` and the ScrollFrame's
-//! `OnVerticalScroll → scrollbar:SetValue(arg1)` back the other way, so a fire-always `SetValue`
-//! would recurse forever (`UIPanelTemplates.xml`). The change-gate breaks the loop after one hop.
+//! `SetValue` fires `OnValueChanged` on the **first-ever** value and after that **only on an
+//! actual change** ([`SliderState::store_value`] — the client's `+0x314` bit2, wow-re
+//! `slider-mouse-law.md` §6). The change-gate is load-bearing, not an optimization: the real
+//! scrollbar template wires `OnValueChanged → this:GetParent():SetVerticalScroll(arg1)` and the
+//! ScrollFrame's `OnVerticalScroll → scrollbar:SetValue(arg1)` back the other way, so a fire-always
+//! `SetValue` would recurse forever (`UIPanelTemplates.xml`); the gate breaks the loop after one
+//! hop. `SetMinMaxValues` re-clamps through the same gate only once a value exists, so a range set
+//! from `<OnLoad>` never runs a handler the addon has not armed yet.
 //!
 //! The methods live in their own registry table, consulted by the frame `__index` dispatcher only
 //! for Slider frames — so duck-typing addons (`if frame:GetThumbTexture() then …`) see `nil` on
@@ -109,13 +112,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetMinMaxValues",
         lua.create_function(|lua, (this, min, max): (Table, f32, f32)| {
             // Unlike StatusBar, a reversed pair is NOT swapped (the Slider LoadXML stores min +
-            // (max−min) and does no swap, RF-28). The held value re-clamps into the new range; a
-            // move fires OnValueChanged — a value change the caller didn't set explicitly is still a
-            // change (the store_value clamp guards a degenerate max<min range).
-            let changed = with_slider(lua, &this, |s| {
-                (s.min, s.max) = (min, max);
-                s.store_value(s.value)
-            })?;
+            // (max−min) and does no swap, RF-28). A held value re-clamps into the new range and a
+            // move fires OnValueChanged — but only once a value EXISTS (`SliderState::set_min_max`,
+            // the client's bit2): on a fresh slider this sets the range and fires nothing.
+            let changed = with_slider(lua, &this, |s| s.set_min_max(min, max))?;
             fire_value_changed(lua, &this, changed)
         })?,
     )?;

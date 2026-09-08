@@ -1396,14 +1396,32 @@ pub(super) fn clear_target_requests(
     mut selection: ResMut<Selection>,
     mut seam: crate::creature_anim::AttackSeam,
     engaged: Query<(), (With<Engaged>, With<SelfPlayer>)>,
+    mut guid_asks: MessageReader<DeselectGuid>,
 ) {
+    // The engine-side teardown ask (`0x493910(guid, 1)`): a no-op unless the selection IS that
+    // guid — the loot window's move-start close is its one producer today (decision 2097).
+    let asked = guid_asks.read().any(|ask| selection.guid == Some(ask.0));
     let Some(mut script) = script else {
+        if asked {
+            clear(&mut selection, &mut seam, !engaged.is_empty());
+        }
         return;
     };
-    if script.take_target_clear() {
+    // Both drained every frame: a `||` that short-circuited on `asked` would leave the VM's
+    // ClearTarget flag armed for the next frame and clear whatever was targeted by then.
+    let vm_clear = script.take_target_clear();
+    if asked || vm_clear {
         clear(&mut selection, &mut seam, !engaged.is_empty());
     }
 }
+
+/// Ask for the selection teardown **if the selection is this guid** — the reference's
+/// `CGGameUI::SelectionTeardown 0x493910(guid, ecx=1)`, which no-ops unless a selection exists
+/// and equals the argument. The loot window's move-start close raises it for a dead corpse
+/// (`0x48f369`, decision 2097); drained by [`clear_target_requests`], so the attack-stop and the
+/// wire clear stay the teardown's.
+#[derive(bevy::ecs::message::Message, Clone, Copy, Debug)]
+pub(crate) struct DeselectGuid(pub(crate) u64);
 
 /// Drain the UI's **selection asks** — `TargetUnit(token)`, `AssistUnit(token)` and
 /// `TargetLastEnemy()` — and commit each through the shared SetSelection path ([`scan::commit`]).

@@ -1550,11 +1550,15 @@ fn a_shooter_with_no_ranged_weapon_resolves_no_clip_at_all() {
 /// watcher and this one, the impact hand-off `0x61dced` — so the state kit's id is only ever the
 /// right-hand side of `0x60f390`'s compare, spent on a base recompute.
 ///
-/// The subject is the real Silithus chain, because it is also the case that names the mechanism:
-/// a Dredge Striker's **Charge** (22911 → visual 3783) plays `Knockdown`(121) from impact kit 348
-/// and then **cuts its own Knockdown** with state kit 349's `Stun`(14), 121 ≠ 14 forcing the
-/// recompute. Before this, benilla played the 14 as a second one-shot — a `Stun` pose the
-/// reference never shows on anything.
+/// The subject is the real Silithus chain: a Dredge Striker's **Charge** (22911 → visual 3783)
+/// plays `Knockdown`(121) from impact kit 348, and state kit 349 names `Stun`(14). Before this,
+/// benilla played the 14 as a second one-shot — a `Stun` pose the reference never shows on
+/// anything.
+///
+/// **Scope, corrected by decision 2096:** the recompute this emits does NOT cut the Knockdown.
+/// `Knockdown` takes the base-animation lock when it arms, so the `Stand` the recompute resolves is
+/// refused and the clip plays out — which is what the director sees on the reference. The recompute
+/// cuts only what holds no lock. What this test pins is the router's half: one play, not two.
 #[test]
 fn a_state_kits_anim_is_a_recompute_and_never_a_second_play() {
     const CHARGE: u32 = 22911;

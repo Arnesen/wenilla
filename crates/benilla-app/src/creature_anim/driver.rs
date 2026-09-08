@@ -42,7 +42,7 @@ use super::{
 
 mod grip;
 mod mode;
-mod play;
+pub(super) mod play;
 #[cfg(test)]
 mod tests;
 mod wound;
@@ -921,6 +921,12 @@ pub(super) fn drive_animations(
         // plays (the key-bone) evict a masked wound. A play on the *other* bone leaves the wound
         // decaying (the §5's inherited-swing case). Mode/gait changes proxy the mode machine's own
         // base plays; the flags catch the same-id re-plays the proxy can't see.
+        // ── The **base-animation lock**'s clearer, keyed on the FINISHED id and run before
+        // anything re-picks the base this frame — the reference clears at `0x5fc9c6`, above
+        // `OnAnimationFinished`'s own reason branch, so completion and pre-emption both release it
+        // ([`play::BaseAnimLock`], decision 2096).
+        drv.base_lock.release_finished(&player, anims, catalog);
+
         let pre_state = (drv.mode, drv.gait);
         let mut base_played = false;
         let mut masked_played = false;
@@ -1017,6 +1023,13 @@ pub(super) fn drive_animations(
             requests.extend(drv.deferred.take());
         }
         for id in requests {
+            // **The lock, first** — `0x5fe2f0`'s head guard returns before any routing, descriptor
+            // build or slot election, so it precedes the fast path and the dedup below and takes
+            // the deferral with it: "no routing, no arm, no deferral" ([`play::BaseAnimLock`]).
+            // This is what keeps a stunned victim knocked flat for the whole clip.
+            if drv.base_lock.refuses() {
+                continue;
+            }
             // The COMBAT FAST-PATH (`0x5fe43c`–`0x5fe48b`, wow-re `combat-anim-fastpath.md`,
             // decision 0406): a combat clip requested while another combat clip is playing is
             // NOT armed — the CURRENT clip's rate doubles (op6 2.0f re-times its remainder,
@@ -1122,7 +1135,7 @@ pub(super) fn drive_animations(
                     }
                 }
                 if let Some((c, repeat)) = picked {
-                    play_clip(&mut tr, &mut player, c, repeat, 1.0);
+                    play_clip(&mut drv.base_lock, &mut tr, &mut player, c, repeat, 1.0);
                 }
                 drv.mode = Mode::Swing { id, under: special };
                 drv.gait = None;
@@ -1213,6 +1226,7 @@ pub(super) fn drive_animations(
                         let rate = player.animation(node).map_or(1.0, |a| a.speed());
                         let (c, fresh) = roll_loop(anims, head, relaxed, &mut rng);
                         play_clip(
+                            &mut drv.base_lock,
                             &mut tr,
                             &mut player,
                             c,

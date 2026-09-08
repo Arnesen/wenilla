@@ -659,6 +659,7 @@ fn warm_effect_lane(
                             no_depth_test: false,
                             main_entity: cam,
                             light: None,
+                            clip: None,
                         },
                     );
                 }
@@ -694,6 +695,7 @@ fn warm_effect_lane(
                 no_depth_test: true,
                 main_entity: cam,
                 light: None,
+                clip: None,
             },
         );
     }

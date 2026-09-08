@@ -545,6 +545,7 @@ fn push_drift(
                 no_depth_test: false,
                 main_entity: Entity::PLACEHOLDER,
                 light: None,
+                clip: None,
             },
         );
         cloud.submitted = submitted;

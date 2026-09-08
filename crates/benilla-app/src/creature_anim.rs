@@ -872,6 +872,11 @@ pub(crate) struct AnimDriver {
     /// the cast keeps bone 0 — where the reference's next base request overwrites it and leaves the
     /// character neutral.
     gait_flags: u32,
+    /// The **base-animation lock** ([`driver::play::BaseAnimLock`]) — the reference's
+    /// `[unit+0xd58] & 0xc0000`. While a `Knockdown`/`LiftOff`/`Land` holds it, every base request
+    /// is refused outright, which is how a stunned victim's knockdown survives the root's own
+    /// `Stand` recompute (decision 2096).
+    base_lock: driver::play::BaseAnimLock,
     /// The unit's **client-side sheath state** — the mirror of the client's committed CUR cache
     /// (`[unit+0xd40]`, decision 0080): what the weapon placement renders (absent a
     /// [`VisualSheath`] ceremony pin) and what the setter/reconcile test against. Seeded from
@@ -1061,6 +1066,7 @@ impl Default for AnimDriver {
             mode: Mode::Gait,
             gait: None,
             gait_flags: 0,
+            base_lock: driver::play::BaseAnimLock::default(),
             sheath_cur: None,
             sheath_byte: None,
             sheath_swap: None,

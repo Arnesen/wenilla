@@ -74,6 +74,9 @@ pub(super) fn control(
         // The tutorial system's world-input sites (1976): Movement acknowledged + the 10 s
         // Targeting popup on a movement input, Cameras acknowledged on a mouse-look.
         crate::tutorial::InputHooks,
+        // The loot window's move-start close (decision 2097): the reference's movement-START
+        // guard `0x60e990`, reported here beside the cast bar's edge and consumed by `ui_loot`.
+        ResMut<crate::ui_loot::LootMoveStart>,
     ),
     // Nested into one param to stay within Bevy's 16-element system-param tuple limit (see `mouse`).
     speed_capsule: (
@@ -1088,6 +1091,21 @@ pub(super) fn control(
                 || autorun_armed)
         {
             net.7 .0 = true;
+        }
+        // The loot window's own walk-away (decision 2097) — the reference's movement-START guard
+        // `0x60e990`, called first by every player-initiated START emitter: forward/back, strafe,
+        // keyboard-turn and pitch START, pitch STOP, `SetPitch` and Jump pass `arg2 = 0` and close
+        // an open loot at distance zero; mouse-look `SetFacing` passes `arg2 = 1` and does not.
+        // A different mask from the cast's `0x10f0` above — TURN is in this one — and the same
+        // `IsActivePlayer(this)` gate: a possessed mover's steps close nothing of ours.
+        if steering_ourselves
+            && (move_flags_now
+                & (move_flags::ANY_MOVE | move_flags::TURN_LEFT | move_flags::TURN_RIGHT)
+                & !player.move_flags
+                != 0
+                || jumped)
+        {
+            net.14 .0 = true;
         }
 
         // Stream this frame's movement to the server — a `MSG_MOVE_*` per movement-axis transition, the

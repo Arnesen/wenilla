@@ -79,7 +79,8 @@ use benilla_assets::materials::WowModelMaterial;
 
 mod framing;
 pub(crate) use framing::{
-    attachment_point, head_anchor, pane_projection, PortraitAnchors, WowPortraitProjection,
+    attachment_point, glue_canvas_bars, head_anchor, pane_projection, PortraitAnchors,
+    WowPortraitProjection,
 };
 use framing::{body_frame, frame, PORTRAIT_FOV};
 mod booth;
@@ -95,13 +96,14 @@ mod dressup;
 pub(crate) use dressup::{DressUpBake, DressUpLook, DressUpPreview};
 mod glue_booth;
 pub(crate) use glue_booth::{
-    CreateLook, GhostKit, GlueLook, GluePetBake, GluePreview, GluePreviewBake, GlueScene, PetLook,
-    PreviewBillboard, PreviewEffects, PreviewPart, PreviewRider, SelectLook, GLUE_SLOT,
+    CreateLook, CreateScene, GhostKit, GlueLook, GluePetBake, GluePreview, GluePreviewBake,
+    GlueScene, PetLook, PreviewBillboard, PreviewEffects, PreviewPart, PreviewRider, SelectLook,
+    GLUE_SLOT,
 };
 mod light;
 pub(crate) use light::{material_variant, VariantLane};
 use light::{model_pane_light, studio_light, BoothLight};
-mod test_bake;
+pub(crate) mod test_bake;
 
 /// The portrait slots we bake, each with its own render layer/camera: the player + target unit
 /// frames, `"pet"` (decision 0990's frame), and `"npc"` — the NPC an interaction window (gossip /

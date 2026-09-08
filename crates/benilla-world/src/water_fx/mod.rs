@@ -619,6 +619,7 @@ fn push_water_foam(
                 no_depth_test: false,
                 main_entity: Entity::PLACEHOLDER,
                 light: None,
+                clip: None,
             },
         );
     }

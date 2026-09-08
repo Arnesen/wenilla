@@ -108,6 +108,19 @@ pub(super) const UNIT_FLAG_LOOT_SUPPRESS: u32 = 0x1000_0000;
 /// and by `SMSG_MOUNTSPECIAL_ANIM` (observed riders; our own echo is dropped in the net drain).
 pub(crate) const MOUNT_SPECIAL: u16 = 94;
 
+/// The three ids whose arm takes the **base-animation lock** — `0x5fdba0`'s tail keyed on the id
+/// actually armed, byte table `0x5fdd90` (wow-re `base-anim-lock-knockdown.md` §2). While one of
+/// these holds bone 0, `PlayAnimation` refuses every base request outright, which is what lets a
+/// stunned victim's `Knockdown` play out over the root's own `Stand` recompute.
+///
+/// They are the clips with a definite start and end pose — the ones a re-pick mid-flight would
+/// leave the body wrong: knocked flat, or halfway off the ground.
+pub(crate) const KNOCKDOWN: u16 = 121;
+/// See [`KNOCKDOWN`] — the taxi/lift pair, which take the same lock under the reference's other bit.
+pub(crate) const LIFT_OFF: u16 = 192;
+/// See [`KNOCKDOWN`].
+pub(crate) const LAND: u16 = 200;
+
 /// Movement direction/mode flag bits, matching the client's CMovement `MOVEMENTFLAGS` (cached at
 /// `unit+0x9e8`; VERIFIED wow-5875-re RF-0057 + the jump §5 cross-check). The selector tests these
 /// exactly as the binary does, so a streamed unit can eventually drop the server's raw `u32` straight in.

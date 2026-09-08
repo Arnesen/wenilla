@@ -610,6 +610,22 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
 
 @fragment
 fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
+    // **The UI model tile's cell clip** (decision 2093). A `<Model>` pane's batches render into
+    // that pane's cell of ONE shared atlas, and a model may draw outside its widget rect —
+    // `ForcedBackpackItem.mdx`'s card is authored 45..83 layout units above an origin that sits
+    // at the rect's bottom-left. The reference cannot leak: it draws each pane straight into the
+    // back buffer with the widget's rect as the VIEWPORT (`modelframe-render-law.md` §6). One
+    // shared atlas camera cannot carry a viewport per pane, so the tile hands its cell down as a
+    // mat-anim row (`anim_slots.w`, the row's `[min.x, min.y, max.x, max.y]` in ATLAS TEXELS —
+    // which is what `@builtin(position)` is here) and the fragment is the scissor. `w == 0` is
+    // the pinned-zero row: every world material, no clip, one comparison.
+    if (m.anim_slots.w > 0.5) {
+        let r = wow_light.matanim[u32(m.anim_slots.w)];
+        if (in.position.x < r.x || in.position.y < r.y
+            || in.position.x > r.z || in.position.y > r.w) {
+            discard;
+        }
+    }
     // HARD FAR-CLIP WALL (faithful `farclip` ~777 yd) — see terrain.wgsl. Per-pixel discard beyond the
     // projection far plane (planar eye-Z), so distant buildings/trees reveal closest-part-first and the
     // sky/WDL shows behind. `wow_light.fog_params.w` = farclip (0 ⇒ disabled). Clutter (≤70 yd) never hits it.
