@@ -607,6 +607,117 @@ fn aura_state_kit_arms_persistent_and_reaps_on_aura_end() {
 /// cast kit plays a body animation emits its [`MissileSpawn`] deferred (`awaits_release`) —
 /// the launch waits for the animation's release keyframe — while a cast kit with no animation
 /// (or none at all) launches at GO.
+/// The spell impact body twitch (decision 2058, sharpened by 2063): an instant harmful spell's GO
+/// lays ONE severity-0 wound on each hit target (`0x6e8bf0` @ `0x6e8c89`), a helpful one lays none;
+/// a state kit naming a wound anim adds nothing on either (the client's stage-2 play never reaches
+/// the `[8,10]` test, `0x60f383`); and a missile ARRIVAL wounds unconditionally (`0x61dc50` @
+/// `0x61dc74`) — even for the helpful spell.
+#[test]
+fn a_harmful_go_wounds_each_hit_once_and_a_missile_arrival_always() {
+    const HARMFUL: u32 = 7386; // Sunder Armor's shape: instant, enemy-targeted
+    const HELPFUL: u32 = 139; // Renew's shape: instant, ally-targeted
+    const VISUAL_H: u32 = 406;
+    const VISUAL_F: u32 = 280;
+    const IMPACT_KIT: u32 = 556; // no anim
+    const STATE_KIT: u32 = 436; // names CombatWound(9) — must add nothing
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.add_message::<CastEvent>()
+        .add_message::<SpellGoTargets>()
+        .add_message::<KitPush>()
+        .add_message::<EmoteAnim>()
+        .add_message::<WoundAnim>()
+        .add_message::<SpellKitSound>()
+        .add_message::<SpellKitShake>()
+        .add_message::<SpellKitFx>()
+        .add_message::<MissileSpawn>()
+        .add_message::<crate::entities::dest_fx::GroundBurst>()
+        .add_message::<super::ChainProcPlay>()
+        .add_message::<SheathRequest>();
+    let stages = VisualStages {
+        impact: IMPACT_KIT,
+        state: STATE_KIT,
+        ..Default::default()
+    };
+    app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
+        HashMap::from([(VISUAL_H, stages), (VISUAL_F, stages)]),
+        HashMap::from([
+            (
+                IMPACT_KIT,
+                VisualKit {
+                    anim_id: None,
+                    ..Default::default()
+                },
+            ),
+            (
+                STATE_KIT,
+                VisualKit {
+                    anim_id: Some(9),
+                    ..Default::default()
+                },
+            ),
+        ]),
+    )));
+    app.insert_resource(crate::ui_action::Spells {
+        catalog: SpellCatalog::from_displays(HashMap::from([
+            (
+                HARMFUL,
+                SpellDisplay {
+                    visual: VISUAL_H,
+                    targets: 0x80,
+                    ..Default::default()
+                },
+            ),
+            (
+                HELPFUL,
+                SpellDisplay {
+                    visual: VISUAL_F,
+                    targets: 0x100,
+                    ..Default::default()
+                },
+            ),
+        ])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    app.add_systems(Update, route_cast_visuals);
+
+    let caster = app.world_mut().spawn_empty().id();
+    let target = app.world_mut().spawn_empty().id();
+    let wounds = |app: &mut App| -> Vec<Entity> {
+        app.world_mut()
+            .resource_mut::<Messages<WoundAnim>>()
+            .drain()
+            .map(|w| w.entity)
+            .collect()
+    };
+    for (spell_id, expected) in [(HARMFUL, vec![target]), (HELPFUL, Vec::new())] {
+        app.world_mut()
+            .write_message(cast_event(caster, spell_id, CastEventKind::Go));
+        app.world_mut().write_message(SpellGoTargets {
+            caster,
+            spell_id,
+            hits: vec![target],
+            misses: Vec::new(),
+            dest: None,
+            ammo_display_id: None,
+            seq: 1,
+        });
+        app.update();
+        assert_eq!(wounds(&mut app), expected, "instant GO of spell {spell_id}");
+    }
+    // A missile landing wounds whoever it lands on, hostility untested.
+    app.world_mut().write_message(cast_event(
+        target,
+        HELPFUL,
+        CastEventKind::Impact {
+            weapon_visual: None,
+        },
+    ));
+    app.update();
+    assert_eq!(wounds(&mut app), vec![target], "missile arrival");
+}
+
 #[test]
 fn missile_spawn_defers_iff_the_cast_kit_animates() {
     const ANIMATED: u32 = 133; // Fireball's shape: cast kit with anim 53

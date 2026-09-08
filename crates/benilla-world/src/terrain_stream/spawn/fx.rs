@@ -163,13 +163,12 @@ pub(super) fn emitter_fade(
 ) -> particles::EmitterFade {
     let room = instance.zip(groups.filter(|g| !g.is_empty()));
     particles::EmitterFade {
-        radius: fade.0,
-        center: transform.transform_point(fade.1),
         instance,
         room: room.map(|(instance, groups)| crate::wmo_portal::WmoGroupVis {
             instance,
             groups: groups.clone(),
         }),
+        ..particles::EmitterFade::sphere(fade.0, transform.transform_point(fade.1))
     }
 }
 

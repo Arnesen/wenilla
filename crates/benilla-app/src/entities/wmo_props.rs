@@ -336,6 +336,11 @@ pub(super) fn spawn_wmo_gameobject_props(
                 &object,
                 shade,
                 interior_slot,
+                // No draw-set gate: a transport's props ride a MOVING parent, and an `EmitterFade`
+                // measures from a baked world point that a mover has none of — the same reason
+                // their emitters carry none (module docs above). The assembler builds the bare
+                // sphere its mesh lane needs from `radius`/`center` instead.
+                None,
                 radius,
                 center,
                 anim_bound,

@@ -19,9 +19,9 @@ pub use events::{
 };
 pub use messages::{
     AttackSwingError, CharCreateReq, CharEnumItem, Character, CorpseLook, CreateSpline, ItemInfo,
-    JumpInfo, MonsterMoveFacing, MoveMode, MoverState, ObjectFields, OwnerFallback, ServerPacket,
-    SpeedKind, SplineMode, TransportPose, CHARACTER_FLAG_GHOST, CHARACTER_FLAG_HIDE_CLOAK,
-    CHARACTER_FLAG_HIDE_HELM, CHARACTER_FLAG_RENAME,
+    JumpInfo, MonsterMoveFacing, MoveMode, MoverState, ObjectFields, OwnerFallback, RelayVerb,
+    ServerPacket, SpeedKind, SplineMode, TransportPose, CHARACTER_FLAG_GHOST,
+    CHARACTER_FLAG_HIDE_CLOAK, CHARACTER_FLAG_HIDE_HELM, CHARACTER_FLAG_RENAME,
 };
 pub use world::{
     WardenRequired, WorldAuthReject, WorldReader, WorldSession, WorldWriter, WORLD_PORT,

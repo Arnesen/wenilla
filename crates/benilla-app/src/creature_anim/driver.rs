@@ -298,6 +298,10 @@ pub(super) fn drive_animations(
             // hover, walk-mode, swim. `unify` folds them into the flags word the selector reads, so
             // a creature the server has rooted or put in walk mode is animated as one.
             Option<&crate::net::UnitMoveModes>,
+            // The unit's aura CharProc nodes — read for ONE thing here: whether a proc-11
+            // animation-rate node (the freeze auras' `0x6201d0` node, decision 0889) is on the
+            // unit, which is the client's `+0x2c & 0x4` wound-flinch refusal (decision 2063).
+            Option<&crate::aura_visual::AuraNodes>,
         ),
     )>,
     // A mount child's movement view is its HOST's (decision 0441): the same
@@ -458,6 +462,7 @@ pub(super) fn drive_animations(
             nock_latched,
             transform,
             move_modes,
+            aura_nodes,
         ),
     ) in &mut units
     {
@@ -1376,16 +1381,32 @@ pub(super) fn drive_animations(
                 WoundEdge::Melee(hit_info) => select::wound_anim(hit_info, engaged),
                 WoundEdge::Spell => select::wound_anim(0, engaged),
             };
-            wound_trigger(
-                &mut drv,
-                &mut player,
-                anims,
-                catalog,
-                &mut rng,
-                id,
-                &mv,
-                mounted,
-            );
+            // The trigger's fourth entry gate (`0x60eaac`–`0x60eac8`, wow-re
+            // `charproc-rate-override-wound-gate.md`, decision 2063): a CharProc-11 rate-override
+            // node on the unit's effect list — the freeze auras' node, Freezing Trap / Ice Block /
+            // petrify / web wrap — refuses EVERY flinch, melee and spell alike, for as long as it
+            // lives. The gate is the node's presence, not its rate (kit 3071's 1.0 gates too), so
+            // it reads the node list, not the pause the rate applies.
+            let rate_node = aura_nodes.is_some_and(|n| n.head_anim_rate().is_some());
+            if rate_node {
+                if benilla_assets::trace::enabled() {
+                    benilla_assets::trace::line(
+                        "fct",
+                        &format!("wound trigger id={id} REFUSED (a proc-11 rate node is attached)"),
+                    );
+                }
+            } else {
+                wound_trigger(
+                    &mut drv,
+                    &mut player,
+                    anims,
+                    catalog,
+                    &mut rng,
+                    id,
+                    &mv,
+                    mounted,
+                );
+            }
         }
 
         // ── The per-animation sheath reconcile (decision 0080 structure 3 — the client's

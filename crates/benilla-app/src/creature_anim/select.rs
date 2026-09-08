@@ -191,6 +191,19 @@ pub(crate) mod move_flags {
     /// turn bits, walk mode, root, [`FALLING`]/[`FALLING_FAR`], swim, water-walk — is inside.
     pub const SERVER_AUTHORED: u32 = 0x75a0_7dff;
 
+    /// Merge a server-authored packet's `MOVEMENTFLAGS` into a mover's own — the reference's masked
+    /// merge (`0x618c30 @0x618de7-df3`: `new = old ^ ((old ^ wire) & 0x75a07dff)`), **not** an
+    /// assignment. One law, both movers: our own (`player::wire_in`'s self-addressed pose) and every
+    /// watched one (`net::motion::remote::apply_move`), because the reference runs this merge inside
+    /// the one scheduler both go through and the mask is arm-invariant across all thirty relay
+    /// opcodes (wow-re `collision/scratch/movement-relay-family-map.md`, decision 2064).
+    ///
+    /// The omission that bites is pinned by test on the self lane: [`ON_TRANSPORT`] sits **outside**
+    /// the mask, so a server-authored pose can relocate a rider but never board or deboard them.
+    pub const fn merge_server_authored(local: u32, wire: u32) -> u32 {
+        (local & !SERVER_AUTHORED) | (wire & SERVER_AUTHORED)
+    }
+
     /// Any horizontal-movement direction bit (forward/back/strafe) — the client's `[9e8] & 0xf` gate.
     pub const ANY_MOVE: u32 = FORWARD | BACKWARD | STRAFE_LEFT | STRAFE_RIGHT;
 

@@ -638,6 +638,75 @@ fn spell_flinch_picks_the_wound_by_engagement() {
     assert_eq!(node(idle), Some(2), "unengaged: StandWound(8)");
 }
 
+/// The wound trigger's fourth entry gate (`0x60eaac`–`0x60eac8`, wow-re
+/// `charproc-rate-override-wound-gate.md`; decision 2063): a CharProc-11 rate-override node on
+/// the unit — what a freeze aura (Ice Block, Freezing Trap, petrify, web wrap) leaves attached —
+/// refuses every flinch for its life. The gate is the node's *presence*: kit 3071's rate of 1.0
+/// (no freeze at all) closes it exactly like the family's 0.0. A unit without the node flinches.
+#[test]
+fn a_rate_override_node_refuses_the_wound() {
+    fn model() -> ModelAnimations {
+        ModelAnimations {
+            graph: Handle::default(),
+            clips: vec![clip(0, 1, true), clip(8, 2, false)],
+            hand_close: [None, None],
+            playable_animation_lookup: Vec::new(),
+            animation_lookup: Vec::new(),
+            global_bones: Vec::new(),
+            first_seq: None,
+            pose: Default::default(),
+        }
+    }
+    let mut app = app();
+    let spawn = |app: &mut App, nodes: Option<crate::aura_visual::AuraNodes>| {
+        let mut e = app.world_mut().spawn((
+            model(),
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+        ));
+        if let Some(n) = nodes {
+            e.insert(n);
+        }
+        e.id()
+    };
+    let frozen = spawn(
+        &mut app,
+        Some(crate::aura_visual::AuraNodes::with_rate_node_for_tests(
+            11958, 0.0,
+        )),
+    );
+    let held_at_one = spawn(
+        &mut app,
+        Some(crate::aura_visual::AuraNodes::with_rate_node_for_tests(
+            3071, 1.0,
+        )),
+    );
+    let free = spawn(&mut app, None);
+    app.update();
+    for e in [frozen, held_at_one, free] {
+        app.world_mut().write_message(WoundAnim { entity: e });
+    }
+    app.update();
+    let wounded = |e: Entity| {
+        app.world()
+            .entity(e)
+            .get::<AnimDriver>()
+            .unwrap()
+            .wound
+            .is_some()
+    };
+    assert!(
+        !wounded(frozen),
+        "Ice Block's rate-0 node refuses the flinch"
+    );
+    assert!(
+        !wounded(held_at_one),
+        "the gate is the node, not the rate: a 1.0 node refuses too"
+    );
+    assert!(wounded(free), "no node: the flinch lays as before");
+}
+
 /// The whiff slow-down touches SWING anims only (decision 0279's scoping): a spell kit's
 /// full-body special (Special1H 57) rides the same `Mode::Swing` slot, and a concurrent
 /// auto-attack miss must not drag it to half speed — the director's "the Eviscerate spin

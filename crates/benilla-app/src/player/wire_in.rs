@@ -529,7 +529,7 @@ pub(super) fn apply_server_moves(
 /// a server-authored pose can relocate a rider but never board or deboard them. See
 /// [`move_flags::SERVER_AUTHORED`].
 pub(super) fn merge_server_flags(local: u32, wire: u32) -> u32 {
-    (local & !move_flags::SERVER_AUTHORED) | (wire & move_flags::SERVER_AUTHORED)
+    move_flags::merge_server_authored(local, wire)
 }
 
 /// Apply one bare self-addressed `MSG_MOVE_*` — a pose the *server* wrote for our own mover, with

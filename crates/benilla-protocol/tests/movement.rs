@@ -6,7 +6,7 @@
 mod common;
 
 use benilla_protocol::events::{decode, SessionEvent};
-use benilla_protocol::messages::{self, MovementInfo, TransportPose};
+use benilla_protocol::messages::{self, MovementInfo, RelayVerb, TransportPose};
 use benilla_protocol::wire::{write_packed_guid, Vector3d};
 use benilla_protocol::ServerPacket;
 use common::hx;
@@ -758,25 +758,34 @@ fn observer_move_mode_family_parses_golden() {
     const FEATHER_FALL: u32 = 0x2000_0000;
     const HOVER: u32 = 0x4000_0000;
 
-    // (opcode, the flags word the server would have written into it, is-a-teleport)
+    // (opcode, the flags word the server would have written into it, the opcode's own verb)
     let expected = [
-        (messages::opcode::MSG_MOVE_ROOT, ROOT, false),
-        (messages::opcode::MSG_MOVE_UNROOT, 0, false),
-        (messages::opcode::MSG_MOVE_WATER_WALK, WATER_WALK, false),
-        // The same opcode, the other direction — the bit is simply absent.
-        (messages::opcode::MSG_MOVE_WATER_WALK, 0, false),
-        (messages::opcode::MSG_MOVE_FEATHER_FALL, FEATHER_FALL, false),
-        (messages::opcode::MSG_MOVE_HOVER, HOVER, false),
+        (messages::opcode::MSG_MOVE_ROOT, ROOT, RelayVerb::Root(true)),
+        (messages::opcode::MSG_MOVE_UNROOT, 0, RelayVerb::Root(false)),
+        (
+            messages::opcode::MSG_MOVE_WATER_WALK,
+            WATER_WALK,
+            RelayVerb::Pose,
+        ),
+        // The same opcode, the other direction — the bit is simply absent, and the verb is still
+        // `Pose`: for these three the word is the whole message.
+        (messages::opcode::MSG_MOVE_WATER_WALK, 0, RelayVerb::Pose),
+        (
+            messages::opcode::MSG_MOVE_FEATHER_FALL,
+            FEATHER_FALL,
+            RelayVerb::Pose,
+        ),
+        (messages::opcode::MSG_MOVE_HOVER, HOVER, RelayVerb::Pose),
         // Levitate grants all three at once (decision 1706) — one word, three bits.
         (
             messages::opcode::MSG_MOVE_HOVER,
             HOVER | FEATHER_FALL | WATER_WALK,
-            false,
+            RelayVerb::Pose,
         ),
-        (messages::opcode::MSG_MOVE_TELEPORT, 0, true),
+        (messages::opcode::MSG_MOVE_TELEPORT, 0, RelayVerb::Teleport),
     ];
 
-    for (op, flags, is_teleport) in expected {
+    for (op, flags, expected_verb) in expected {
         let body = info(flags);
         assert_eq!(body.len(), 30, "the relay shape, with no counter dword");
         let packet = messages::parse_server(op, &body)
@@ -807,16 +816,14 @@ fn observer_move_mode_family_parses_golden() {
             [SessionEvent::UnitMove {
                 guid: 0xAA,
                 flags: f,
-                teleport,
-                heartbeat,
+                verb,
                 ..
             }] => {
                 assert_eq!(*f, flags);
                 assert_eq!(
-                    *teleport, is_teleport,
-                    "only MSG_MOVE_TELEPORT is a discontinuity ({op:#06x})"
+                    *verb, expected_verb,
+                    "the opcode's verb, and only for the three that have one ({op:#06x})"
                 );
-                assert!(!*heartbeat, "none of these is the periodic pulse");
             }
             other => panic!("expected one UnitMove event for {op:#06x}, got {other:?}"),
         }

@@ -329,17 +329,11 @@ pub enum SessionEvent {
         /// *deltas* between consecutive stamps — replay paced by the sender's own cadence, wow-re
         /// `remote-apply-timing.md`; the app mirrors that per unit (decisions 0601/0615).
         time: u32,
-        /// True for `MSG_MOVE_HEARTBEAT` — the periodic mid-move pulse. The reference's reconcile
-        /// lerp is armed only for NON-heartbeat events (`0x619090` excludes tag `0x26`); a
-        /// heartbeat applies as an outright snap (decision 0601).
-        heartbeat: bool,
-        /// True for `MSG_MOVE_TELEPORT` — somebody else **blinked** (decision 2061): the observer
-        /// leg of the near-teleport, broadcast by `MovementPacketSender::SendTeleportToObservers`
-        /// once the mover acked its own `MSG_MOVE_TELEPORT_ACK`. Same body as any relay, but
-        /// `position` is a **discontinuity, not a step** — so it applies as an outright snap and is
-        /// excluded from the pre-fire reconcile, which exists to make a *continuous* pose land
-        /// smoothly and would otherwise glide a blinking mage across the intervening 20 yards.
-        teleport: bool,
+        /// **What this packet's opcode means on top of the pose** — heartbeat, teleport, root, or
+        /// nothing at all ([`crate::messages::RelayVerb`], decision 2064). Twenty-three opcodes
+        /// share this one body and one client handler; three of them are more than narration, and
+        /// the enum is exactly those three.
+        verb: crate::messages::RelayVerb,
         fall_time: u32,
         jump: Option<JumpInfo>,
         transport: Option<TransportPose>,

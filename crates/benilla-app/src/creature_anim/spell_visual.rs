@@ -556,6 +556,13 @@ struct KitPlay {
     sound: bool,
     /// The stage this play is, for the instances' animation lifecycle ([`FxStage`]).
     stage: FxStage,
+    /// Whether the kit tail's anim branch may lay a wound for an `AnimID ∈ [8,10]` — the
+    /// client's `0x60f383`: a **stage-2** (state) play runs the base recompute only and never
+    /// reaches the `[8,10]` test, so a state kit naming a wound anim wounds nobody (wow-re
+    /// `charproc-rate-override-wound-gate.md` §7 (A), decision 2063). The other exclusion there —
+    /// stage 4 with a zero cast time — never reaches this branch in benilla: a precast kit's anim
+    /// becomes the [`CastHold`], not a `play_kit` call.
+    wound: bool,
 }
 
 impl KitPlay {
@@ -566,6 +573,7 @@ impl KitPlay {
         effects: true,
         sound: true,
         stage: FxStage::OneShot,
+        wound: true,
     };
 }
 
@@ -581,7 +589,10 @@ fn play_kit(
     if let Some(anim_id) = kit.anim_id {
         if (8..=10).contains(&anim_id) {
             // `0x60f3b8: push 0; call 0x60ea70` — severity 0, the kit's own id is NOT what plays.
-            out.wounds.write(WoundAnim { entity });
+            // A state-stage play never gets here in the client ([`KitPlay::wound`]).
+            if play.wound {
+                out.wounds.write(WoundAnim { entity });
+            }
         } else {
             out.oneshots.write(EmoteAnim {
                 entity,
@@ -686,6 +697,7 @@ fn play_impact(
             |s: &VisualStages| s.state,
             KitPlay {
                 effects: false,
+                wound: false,
                 ..KitPlay::DISCRETE
             },
         ),

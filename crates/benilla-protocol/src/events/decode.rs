@@ -702,8 +702,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             flags,
             pitch,
             time,
-            heartbeat: opcode == crate::messages::opcode::MSG_MOVE_HEARTBEAT,
-            teleport: opcode == crate::messages::opcode::MSG_MOVE_TELEPORT,
+            verb: crate::messages::RelayVerb::of(opcode),
             fall_time,
             jump,
             transport,
@@ -973,8 +972,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                 flags,
                 pitch,
                 time,
-                heartbeat: false,
-                teleport: false,
+                // A speed change carries a fresh pose, and nothing more: the opcode's meaning is
+                // the speed, which rides its own event beside this one.
+                verb: crate::messages::RelayVerb::Pose,
                 fall_time,
                 jump,
                 transport,

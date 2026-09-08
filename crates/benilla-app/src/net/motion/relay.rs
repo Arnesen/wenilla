@@ -26,7 +26,7 @@
 //! idle+empty gate `@0x618ce4`/`@0x618cf3`, re-base `@0x618cfc-d41`, clamps `@0x618d0d`/`@0x618d49`,
 //! fire store `@0x618dcc`, due test `@0x618dd2`) · `0x618b50` (the ring) · `0x615c30` (the drain).
 
-use benilla_protocol::{JumpInfo, TransportPose};
+use benilla_protocol::{JumpInfo, RelayVerb, TransportPose};
 
 /// One relayed move exactly as it came off the wire — the payload of
 /// [`benilla_protocol::SessionEvent::UnitMove`], before [`RelayChain`] decides *when* it applies.
@@ -44,31 +44,24 @@ pub(crate) struct RelayMove {
     pub(crate) fall_time: u32,
     pub(crate) jump: Option<JumpInfo>,
     pub(crate) transport: Option<TransportPose>,
-    /// `MSG_MOVE_HEARTBEAT` — excluded from the pre-fire reconcile lerp (the reference's `0x619090`
-    /// skips tag `0x26`); it applies as an outright snap.
-    pub(crate) heartbeat: bool,
-    /// `MSG_MOVE_TELEPORT` — somebody else blinked (decision 2061). Excluded from the pre-fire
-    /// reconcile for the opposite reason to a heartbeat's: not "the dead-reckon has already
-    /// converged" but "there is nothing to converge to". The pose is a **discontinuity**; lerping
-    /// a mover toward it would drag them across the gap the teleport exists to skip, sweeping the
-    /// capsule through every wall in between.
-    pub(crate) teleport: bool,
+    /// **What this packet's opcode means on top of the pose** (decision 2064) — the receiver's
+    /// switch, and the only thing about a relay that is not in its `MovementInfo`.
+    pub(crate) verb: RelayVerb,
 }
 
 impl RelayMove {
     /// **Does this queued move arm the pre-fire reconcile?** The two blends
-    /// ([`super::remote::facing_lerp`] and the position lerp) exist to make the pose a queued move
-    /// carries land *smoothly* at its fire-time, so both are skipped for the two kinds of move that
-    /// smoothing cannot help — for opposite reasons:
+    /// ([`super::remote::facing_lerp`] and the position lerp) exist to land a queued move's pose
+    /// *smoothly* at its fire-time, and the reference arms them for every relay but **one**: the
+    /// queued node's tag `0x26`, which `0x619030` (facing) and `0x619090` (position) both skip.
     ///
-    /// - a **heartbeat** needs no blend: the scheduled dead-reckon has structurally converged on it
-    ///   by the fire-time, and the reference skips it explicitly (tag `0x26` at `0x619030
-    ///   @0x61904b` / `0x619090 @0x6190bb`; decisions 0601/0603);
-    /// - a **teleport** has nothing to blend *to*: its position is a discontinuity, and lerping the
-    ///   mover into it would walk them — swept capsule and all — across the gap the teleport exists
-    ///   to skip (decision 2061).
+    /// **That tag is the TELEPORT's, and this client believed for two years it was the
+    /// heartbeat's** (decision 2064, correcting 0601/0603). A teleport is the one move smoothing
+    /// cannot help — its position is a discontinuity, so blending toward it walks the mover, swept
+    /// capsule and all, across the gap the teleport exists to skip. A heartbeat has no such
+    /// problem and the reference blends it like anything else.
     pub(crate) fn reconciles(&self) -> bool {
-        !self.heartbeat && !self.teleport
+        self.verb != RelayVerb::Teleport
     }
 }
 

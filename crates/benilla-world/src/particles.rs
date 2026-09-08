@@ -552,6 +552,19 @@ pub struct EmitterFade {
 }
 
 impl EmitterFade {
+    /// A bare fade **sphere** — the gate of a placement that is nobody's furniture: an ADT map
+    /// doodad, a WMO root's own geometry, a prop on a moving transport. `center` is WORLD space,
+    /// already placed. The building-prop form goes through
+    /// [`crate::terrain_stream::emitter_fade`], which composes this with the instance and rooms.
+    pub(crate) fn sphere(radius: f32, center: Vec3) -> Self {
+        Self {
+            radius,
+            center,
+            instance: None,
+            room: None,
+        }
+    }
+
     /// This owner's distance-fade ALPHA (not the cutoff): the reference writes it into the
     /// doodad's `CM2Model+0x180`, so it multiplies that model's particles exactly as it does its
     /// batches (`FUN_00683f80` → `+0x180` → `+0x19c` → `emitter+0x1a8`, decision 0827). The

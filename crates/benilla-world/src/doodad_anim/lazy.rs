@@ -250,7 +250,7 @@ mod tests {
             .spawn((
                 DoodadAnimHost {
                     meshes: vec![part],
-                    fade: (1.0, Vec3::ZERO),
+                    fade: crate::particles::EmitterFade::sphere(1.0, Vec3::ZERO),
                     clip: Some((AnimationNodeIndex::new(1), 2.0)),
                     armed_at: 0.0,
                     window_hi: f32::INFINITY,
