@@ -4266,7 +4266,6 @@ fn without_a_seated_measurer_the_same_fit_reads_zero() {
 const UNBACKED_REFERENCE_CVARS: &[(&str, &str)] = &[
     ("autointeract", "click-to-move"),
     ("assistAttack", "assist-attack"),
-    ("autoClearAFK", "no auto-clear of the AFK flag"),
     ("UnitNamePlayerGuild", "guild names over player nameplates"),
     (
         "UnitNamePlayerPVPTitle",

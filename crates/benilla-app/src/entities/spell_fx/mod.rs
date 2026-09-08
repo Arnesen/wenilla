@@ -98,6 +98,33 @@ pub(crate) struct SpellFx {
     pub(crate) models: HashMap<String, DisplayModel>,
 }
 
+/// Get-or-insert this path's cache entry, starting its M2 load on the spot — **the only way any
+/// site may reach [`SpellFx::models`]**, read or write.
+///
+/// [`super::evict_display_caches`] clears every display cache on a `MapChange`, and its doc states
+/// the contract that makes that safe: *"these caches are get-or-insert at every use site, so a
+/// cleared entry rebuilds on the next spawn that wants it."* This cache was the one that broke it.
+/// Its three consumers looked entries up with a bare `get` and each carried a comment calling the
+/// miss unreachable — "created with the instance", "the spawn created the cache entry" — because
+/// the entry *is* created with the instance, one system earlier. What none of them could see is
+/// that an eviction lands **between** the two, and the entry is never re-created: only a fresh
+/// `SpellKitFx::Begin` inserts, and an aura already sitting in its slots never emits another.
+///
+/// The map flip that does it is the ordinary one: `world_map::announce_map_change` fires on the
+/// login `0 → 1`, ~0.4–1.7 s into every session, which is exactly when a body that entered the
+/// world already carrying an aura is arming that aura's state kit. A **persistent** instance
+/// stranded there is silent and permanent — the `PENDING_TIMEOUT` reaper is gated
+/// `!inst.persistent`, so it is never spawned, never expired, and never traced. Measured at 9 runs
+/// in 10 (decision 2085; bug: the stun swirl not showing).
+pub(super) fn ensure_model(fx: &mut SpellFx, asset_server: &AssetServer, path: &str) {
+    fx.models
+        .entry(path.to_string())
+        .or_insert_with(|| DisplayModel {
+            handle: ModelHandle::M2(asset_server.load(m2_url(path))),
+            ..super::empty_shell()
+        });
+}
+
 /// The live **per-instance tint clones**: an effect part whose M2Color RGB animates gets its own
 /// material clone at attach (one cast = one phase — the doodad lane's shared-clock registry
 /// [`benilla_world::doodad_anim::TintAnimMaterials`] would run every Battle Shout on one global pulse),
@@ -733,12 +760,7 @@ pub(super) fn resolve_spell_fx(
                             &mut commands,
                             &mut emitters,
                         );
-                        fx.models
-                            .entry(path.clone())
-                            .or_insert_with(|| DisplayModel {
-                                handle: ModelHandle::M2(asset_server.load(m2_url(path))),
-                                ..super::empty_shell()
-                            });
+                        ensure_model(&mut fx, &asset_server, path);
                         instances.push(FxInstance {
                             spell_id: *spell_id,
                             persistent: *persistent,
@@ -906,7 +928,8 @@ pub(super) fn attach_spell_fx(
         Option<&mut benilla_world::rig_anim::RigPose>,
         &GlobalTransform,
     )>,
-    fx: Option<Res<SpellFx>>,
+    fx: Option<ResMut<SpellFx>>,
+    asset_server: Res<AssetServer>,
     spells: Option<Res<crate::ui_action::Spells>>,
     time: Res<Time>,
     mut wow_materials: ResMut<Assets<WowModelMaterial>>,
@@ -915,7 +938,7 @@ pub(super) fn attach_spell_fx(
     mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
     mut emitters: Query<&mut benilla_world::particles::ParticleEmitter>,
 ) {
-    let Some(fx) = fx else {
+    let Some(mut fx) = fx else {
         return;
     };
     let now = time.elapsed_secs();
@@ -986,8 +1009,9 @@ pub(super) fn attach_spell_fx(
             if !inst.persistent && inst.expires.is_none() {
                 inst.expires = Some(now + PENDING_TIMEOUT);
             }
+            ensure_model(&mut fx, &asset_server, &inst.path);
             let Some(dm) = fx.models.get(&inst.path) else {
-                return true; // cache entry pending (shouldn't happen — created with the instance)
+                return true; // unreachable — just inserted
             };
             if dm.parts.is_none() {
                 return true; // model still loading — spawn on a later pass
@@ -1190,6 +1214,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default()))
             .init_asset::<WowModelMaterial>()
+            .init_asset::<benilla_assets::M2Model>()
             .init_asset::<SkinnedMeshInverseBindposes>()
             .init_resource::<SpellFx>()
             .init_resource::<FxTintAnims>()
@@ -1389,5 +1414,79 @@ mod tests {
         send(&mut app, begin(unit, SPURT, tag, "Spells\\Ring.mdx"));
         send(&mut app, begin(unit, SPURT, tag, "Spells\\Ring.mdx"));
         assert_eq!(slots_of(&app, unit), vec![(SPURT, tag), (SPURT, tag)]);
+    }
+
+    /// The stun swirl that never appeared (decision 2085): a kit instance whose cache entry was
+    /// wiped by the login `MapChange` between its `Begin` and its spawn pass.
+    ///
+    /// The fixture is the aftermath, not the race — an instance holding a path the cache no longer
+    /// knows, which is what a session that entered the world already carrying an aura looks like
+    /// ~0.4–1.7 s in. Before [`ensure_model`] guarded the read, the spawn pass returned "still
+    /// pending" for ever: nothing re-created the entry (only a fresh `SpellKitFx::Begin` inserts,
+    /// and a standing aura emits no second one), and a *persistent* instance is exempt from the
+    /// `PENDING_TIMEOUT` reaper, so it was never spawned, never expired and never traced.
+    ///
+    /// The assertions are the two halves of that: the entry comes back, **and** the instance is
+    /// still there to use it — reaping it instead would make the failure quiet rather than fixed.
+    #[test]
+    fn an_evicted_cache_entry_is_rebuilt_by_the_spawn_pass() {
+        const PATH: &str = "Spells\\StunSwirl_State_Head.mdx";
+
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins.build().disable::<bevy::time::TimePlugin>(),
+            AssetPlugin::default(),
+        ))
+        .init_asset::<WowModelMaterial>()
+        .init_asset::<benilla_assets::M2Model>()
+        .init_asset::<bevy::mesh::skinning::SkinnedMeshInverseBindposes>()
+        .init_resource::<Time>()
+        .init_resource::<SpellFx>()
+        .init_resource::<FxTintAnims>()
+        .init_resource::<benilla_world::rig_palette::RigPalettes>()
+        .add_systems(Update, attach_spell_fx);
+
+        let unit = app
+            .world_mut()
+            .spawn((
+                GlobalTransform::default(),
+                FxAttached {
+                    instances: vec![FxInstance {
+                        spell_id: 9032,
+                        persistent: true,
+                        class: FxClass::AuraState,
+                        stage: FxStage::State,
+                        tag: 0x14,
+                        effect: 50,
+                        path: PATH.to_string(),
+                        root: None,
+                        expires: None,
+                        decaying: false,
+                    }],
+                },
+            ))
+            .id();
+        assert!(
+            app.world().resource::<SpellFx>().models.is_empty(),
+            "the fixture is a cache the eviction already cleared"
+        );
+
+        app.update();
+
+        assert!(
+            app.world().resource::<SpellFx>().models.contains_key(PATH),
+            "the spawn pass must get-or-insert its entry, not read and give up"
+        );
+        assert_eq!(
+            app.world()
+                .entity(unit)
+                .get::<FxAttached>()
+                .expect("the unit keeps its instance list")
+                .instances
+                .len(),
+            1,
+            "the instance must survive to use the rebuilt entry — a persistent one is never reaped \
+             for being pending"
+        );
     }
 }

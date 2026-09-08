@@ -22,7 +22,9 @@ use crate::items::Items;
 use crate::net::{NetCommands, NetEntity, ObjectStore};
 use benilla_assets::{LockRecover, WorldAssets};
 
-use super::{CastEvent, CastEventKind, CastHold, EmoteAnim, SpellGoTargets, WoundAnim};
+use super::{
+    BaseAnimRecompute, CastEvent, CastEventKind, CastHold, EmoteAnim, SpellGoTargets, WoundAnim,
+};
 
 /// The client's literal missile-model fallback when the visual chain resolves to nothing
 /// (`0x860c9c` — a checkerboard cube, shipped in the real MPQs; faithful, not a joke).
@@ -531,11 +533,12 @@ type KitSpawnWriters<'w> = (
     MessageWriter<'w, ChainProcPlay>,
     MessageWriter<'w, SpellKitShake>,
     MessageWriter<'w, crate::weapon_trail::TrailArm>,
+    MessageWriter<'w, BaseAnimRecompute>,
 );
 
 /// The writer set one discrete kit play fans out to — bundled so [`play_kit`] threads through the
 /// router's arms as one argument (each writer keeps its own system-param lifetime).
-struct KitOut<'a, 'w1, 'w2, 'w3, 'w4, 'w5, 'w6, 'w7> {
+struct KitOut<'a, 'w1, 'w2, 'w3, 'w4, 'w5, 'w6, 'w7, 'w8> {
     oneshots: &'a mut MessageWriter<'w1, EmoteAnim>,
     wounds: &'a mut MessageWriter<'w2, WoundAnim>,
     sounds: &'a mut MessageWriter<'w3, SpellKitSound>,
@@ -547,6 +550,9 @@ struct KitOut<'a, 'w1, 'w2, 'w3, 'w4, 'w5, 'w6, 'w7> {
     /// The kit's weapon-trail ARM, if its `CharProc` slots name one — the dispatcher's type-8
     /// case (2076). A latch, not a play: nothing is drawn until the unit's next animation.
     trails: &'a mut MessageWriter<'w7, crate::weapon_trail::TrailArm>,
+    /// The **stage-2** base recompute — what a state kit's anim id spends itself on instead of
+    /// playing ([`BaseAnimRecompute`], decision 2085).
+    recomputes: &'a mut MessageWriter<'w8, BaseAnimRecompute>,
 }
 
 /// One kit played as a **discrete event** on a unit — the client's `PlaySpellVisualKit`
@@ -571,13 +577,21 @@ struct KitPlay {
     sound: bool,
     /// The stage this play is, for the instances' animation lifecycle ([`FxStage`]).
     stage: FxStage,
-    /// Whether the kit tail's anim branch may lay a wound for an `AnimID ∈ [8,10]` — the
-    /// client's `0x60f383`: a **stage-2** (state) play runs the base recompute only and never
-    /// reaches the `[8,10]` test, so a state kit naming a wound anim wounds nobody (wow-re
-    /// `charproc-rate-override-wound-gate.md` §7 (A), decision 2063). The other exclusion there —
-    /// stage 4 with a zero cast time — never reaches this branch in benilla: a precast kit's anim
-    /// becomes the [`CastHold`], not a `play_kit` call.
-    wound: bool,
+    /// Is this the **stage-2** (state-kit) play? It is the client's `0x60f383
+    /// cmp [ebx+0x10],2`, and it forks the whole anim branch — which is why it is the stage and
+    /// not, as it was until decision 2085, a "may this lay a wound" flag.
+    ///
+    /// Stage 2 is **foreclosed from the play site**: `0x60f387 jne` diverts it around the sole
+    /// `0x60f3c5 call 0x5fe2f0` that ever hands a kit's `AnimID` to the animation primitive, and
+    /// its leg leaves the block with `jmp 0x60f3ca` (VERIFIED, wow-re
+    /// `state-kit-anim-and-stun-pose.md` §1). So a state kit neither plays its anim nor reaches
+    /// the `[8,10]` wound test (the half decision 2063 already had): the id is only ever the
+    /// right-hand side of a comparison against what the unit is already playing, and a mismatch
+    /// spends itself on a base recompute ([`BaseAnimRecompute`]).
+    ///
+    /// The other exclusion at `0x60f3a0` — stage 4 with a zero cast time — never reaches this
+    /// branch in benilla: a precast kit's anim becomes the [`CastHold`], not a `play_kit` call.
+    stage_2: bool,
 }
 
 impl KitPlay {
@@ -588,7 +602,7 @@ impl KitPlay {
         effects: true,
         sound: true,
         stage: FxStage::OneShot,
-        wound: true,
+        stage_2: false,
     };
 }
 
@@ -602,12 +616,13 @@ fn play_kit(
     out: &mut KitOut,
 ) {
     if let Some(anim_id) = kit.anim_id {
-        if (8..=10).contains(&anim_id) {
+        if play.stage_2 {
+            // Stage 2: a COMPARISON, never a play ([`KitPlay::stage_2`]). The driver holds the
+            // armed id, so it makes the comparison and spends the mismatch on the recompute.
+            out.recomputes.write(BaseAnimRecompute { entity, anim_id });
+        } else if (8..=10).contains(&anim_id) {
             // `0x60f3b8: push 0; call 0x60ea70` — severity 0, the kit's own id is NOT what plays.
-            // A state-stage play never gets here in the client ([`KitPlay::wound`]).
-            if play.wound {
-                out.wounds.write(WoundAnim { entity });
-            }
+            out.wounds.write(WoundAnim { entity });
         } else {
             out.oneshots.write(EmoteAnim {
                 entity,
@@ -722,7 +737,8 @@ fn play_impact(
             |s: &VisualStages| s.state,
             KitPlay {
                 effects: false,
-                wound: false,
+                stage_2: true,
+                stage: FxStage::State,
                 ..KitPlay::DISCRETE
             },
         ),
@@ -773,12 +789,13 @@ pub(super) fn route_cast_visuals(
     };
     // Disjoint field borrows: the beam writer rides `out` for the whole body while the missile and
     // burst writers stay free for the GO loop below.
-    let (missiles, bursts, chains, shakes, trails) = (
+    let (missiles, bursts, chains, shakes, trails, recomputes) = (
         &mut spawns.0,
         &mut spawns.1,
         &mut spawns.2,
         &mut spawns.3,
         &mut spawns.4,
+        &mut spawns.5,
     );
     let mut out = KitOut {
         oneshots: &mut oneshots,
@@ -788,6 +805,7 @@ pub(super) fn route_cast_visuals(
         chain: chains,
         shakes,
         trails,
+        recomputes,
     };
 
     // The `holds` query is one command-flush stale: an instant cast's START and GO drain from
@@ -1318,6 +1336,7 @@ pub(crate) fn arm_aura_state_fx(
     mut fx: MessageWriter<SpellKitFx>,
     mut procs: MessageWriter<AuraProc>,
     mut sounds: MessageWriter<SpellKitSound>,
+    mut recomputes: MessageWriter<BaseAnimRecompute>,
     mut armed: Local<EntityHashMap<Vec<u32>>>,
 ) {
     let full_sweep = visuals.as_ref().is_some_and(|v| v.is_changed())
@@ -1369,7 +1388,11 @@ pub(crate) fn arm_aura_state_fx(
                 .char_procs()
                 .filter_map(crate::aura_visual::node_for)
                 .collect();
-            if effects.is_empty() && nodes.is_empty() && kit.sound.is_none() {
+            if effects.is_empty()
+                && nodes.is_empty()
+                && kit.sound.is_none()
+                && kit.anim_id.is_none()
+            {
                 continue; // a state kit that does nothing we model — nothing to arm or reap
             }
             if !effects.is_empty() {
@@ -1396,6 +1419,15 @@ pub(crate) fn arm_aura_state_fx(
             // sound router.
             if let Some(kit_sound) = kit.sound {
                 sounds.write(SpellKitSound::Play { entity, kit_sound });
+            }
+            // …and the ADD edge's stage-2 leg: the kit's anim id is a COMPARISON against what the
+            // unit is already playing, spent on a base recompute when they differ and on nothing
+            // when they agree ([`BaseAnimRecompute`], decision 2085). It is emitted only on this
+            // edge, which is the reference's own shape: an aura REFRESHED in place rewrites its
+            // slot with the same id and a non-zero flags nibble, and `0x604d00` fires neither of
+            // its two arms for that — no re-spawn, no re-arm, no recompute.
+            if let Some(anim_id) = kit.anim_id {
+                recomputes.write(BaseAnimRecompute { entity, anim_id });
             }
             next.push(spell_id);
         }
@@ -1729,6 +1761,7 @@ pub(super) fn replay_morph_kit(
     mut chain: MessageWriter<ChainProcPlay>,
     mut shakes: MessageWriter<SpellKitShake>,
     mut trails: MessageWriter<crate::weapon_trail::TrailArm>,
+    mut recomputes: MessageWriter<BaseAnimRecompute>,
 ) {
     for swap in swaps.read() {
         // Consume-and-clear even when the kit resolves to nothing — the reference clears
@@ -1751,6 +1784,7 @@ pub(super) fn replay_morph_kit(
             chain: &mut chain,
             shakes: &mut shakes,
             trails: &mut trails,
+            recomputes: &mut recomputes,
         };
         play_kit(
             swap.entity,

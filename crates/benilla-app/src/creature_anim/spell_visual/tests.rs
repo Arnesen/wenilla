@@ -45,6 +45,7 @@ fn app() -> App {
         .add_message::<SpellKitSound>()
         .add_message::<SpellKitShake>()
         .add_message::<crate::weapon_trail::TrailArm>()
+        .add_message::<super::BaseAnimRecompute>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
@@ -207,6 +208,7 @@ fn precast_kit_sound_rings_once_at_start() {
         .add_message::<SpellKitSound>()
         .add_message::<SpellKitShake>()
         .add_message::<crate::weapon_trail::TrailArm>()
+        .add_message::<super::BaseAnimRecompute>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
@@ -493,7 +495,8 @@ fn aura_state_kit_arms_persistent_and_reaps_on_aura_end() {
     app.add_message::<crate::aura_visual::AuraProc>();
     app.add_message::<SpellKitSound>()
         .add_message::<SpellKitShake>()
-        .add_message::<crate::weapon_trail::TrailArm>();
+        .add_message::<crate::weapon_trail::TrailArm>()
+        .add_message::<super::BaseAnimRecompute>();
     app.init_resource::<FxLog>();
     app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables_with_paths(
         HashMap::from([(
@@ -634,6 +637,7 @@ fn a_harmful_go_wounds_each_hit_once_and_a_missile_arrival_always() {
         .add_message::<SpellKitSound>()
         .add_message::<SpellKitShake>()
         .add_message::<crate::weapon_trail::TrailArm>()
+        .add_message::<super::BaseAnimRecompute>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
@@ -741,6 +745,7 @@ fn missile_spawn_defers_iff_the_cast_kit_animates() {
         .add_message::<SpellKitSound>()
         .add_message::<SpellKitShake>()
         .add_message::<crate::weapon_trail::TrailArm>()
+        .add_message::<super::BaseAnimRecompute>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
@@ -854,6 +859,7 @@ fn a_targetless_dest_go_spawns_a_ground_missile_whose_arrival_sounds_at_the_poin
         .add_message::<SpellKitSound>()
         .add_message::<SpellKitShake>()
         .add_message::<crate::weapon_trail::TrailArm>()
+        .add_message::<super::BaseAnimRecompute>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
@@ -1343,6 +1349,7 @@ fn real_shooter(weapon: &RealRanged) -> Option<(App, Entity)> {
         .add_message::<SpellKitSound>()
         .add_message::<SpellKitShake>()
         .add_message::<crate::weapon_trail::TrailArm>()
+        .add_message::<super::BaseAnimRecompute>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
@@ -1533,5 +1540,189 @@ fn a_shooter_with_no_ranged_weapon_resolves_no_clip_at_all() {
     assert!(
         app.world().entity(unit).get::<CastHold>().is_none(),
         "and no pull to hold"
+    );
+}
+
+/// **A state kit's animation id is a comparison, never a play** (decision 2085; VERIFIED wow-re
+/// `state-kit-anim-and-stun-pose.md` §1): `0x60edf0`'s tail has exactly one site that hands a
+/// kit's `AnimID` to the animation primitive (`0x60f3c5 call 0x5fe2f0`) and `0x60f387 jne`
+/// diverts stage 2 around it. Both `SpellVisual` field-4 consumers hardcode stage 2 — the aura
+/// watcher and this one, the impact hand-off `0x61dced` — so the state kit's id is only ever the
+/// right-hand side of `0x60f390`'s compare, spent on a base recompute.
+///
+/// The subject is the real Silithus chain, because it is also the case that names the mechanism:
+/// a Dredge Striker's **Charge** (22911 → visual 3783) plays `Knockdown`(121) from impact kit 348
+/// and then **cuts its own Knockdown** with state kit 349's `Stun`(14), 121 ≠ 14 forcing the
+/// recompute. Before this, benilla played the 14 as a second one-shot — a `Stun` pose the
+/// reference never shows on anything.
+#[test]
+fn a_state_kits_anim_is_a_recompute_and_never_a_second_play() {
+    const CHARGE: u32 = 22911;
+    const CHARGE_VISUAL: u32 = 3783;
+    const IMPACT_KIT: u32 = 348;
+    const STATE_KIT: u32 = 349;
+    const KNOCKDOWN: u16 = 121;
+    const STUN: u16 = 14;
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.add_message::<CastEvent>()
+        .add_message::<SpellGoTargets>()
+        .add_message::<KitPush>()
+        .add_message::<EmoteAnim>()
+        .add_message::<WoundAnim>()
+        .add_message::<SpellKitSound>()
+        .add_message::<SpellKitShake>()
+        .add_message::<crate::weapon_trail::TrailArm>()
+        .add_message::<super::BaseAnimRecompute>()
+        .add_message::<SpellKitFx>()
+        .add_message::<MissileSpawn>()
+        .add_message::<crate::entities::dest_fx::GroundBurst>()
+        .add_message::<super::ChainProcPlay>()
+        .add_message::<SheathRequest>();
+    app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
+        HashMap::from([(
+            CHARGE_VISUAL,
+            VisualStages {
+                impact: IMPACT_KIT,
+                state: STATE_KIT,
+                ..Default::default()
+            },
+        )]),
+        HashMap::from([
+            (
+                IMPACT_KIT,
+                VisualKit {
+                    anim_id: Some(KNOCKDOWN),
+                    ..Default::default()
+                },
+            ),
+            (
+                STATE_KIT,
+                VisualKit {
+                    anim_id: Some(STUN),
+                    ..Default::default()
+                },
+            ),
+        ]),
+    )));
+    app.insert_resource(crate::ui_action::Spells {
+        catalog: SpellCatalog::from_displays(HashMap::from([(
+            CHARGE,
+            SpellDisplay {
+                visual: CHARGE_VISUAL,
+                ..Default::default()
+            },
+        )])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    app.add_systems(Update, route_cast_visuals);
+
+    let caster = app.world_mut().spawn_empty().id();
+    let victim = app.world_mut().spawn_empty().id();
+    app.world_mut()
+        .write_message(cast_event(caster, CHARGE, CastEventKind::Go));
+    app.world_mut().write_message(SpellGoTargets {
+        caster,
+        spell_id: CHARGE,
+        hits: vec![victim],
+        misses: Vec::new(),
+        dest: None,
+        ammo_display_id: None,
+        seq: 1,
+    });
+    app.update();
+
+    let plays: Vec<(Entity, u16)> = app
+        .world_mut()
+        .resource_mut::<Messages<EmoteAnim>>()
+        .drain()
+        .map(|e| (e.entity, e.anim_id))
+        .collect();
+    assert_eq!(
+        plays,
+        vec![(victim, KNOCKDOWN)],
+        "the impact kit plays; the state kit must not add a second one-shot"
+    );
+    let recomputes: Vec<(Entity, u16)> = app
+        .world_mut()
+        .resource_mut::<Messages<super::BaseAnimRecompute>>()
+        .drain()
+        .map(|r| (r.entity, r.anim_id))
+        .collect();
+    assert_eq!(
+        recomputes,
+        vec![(victim, STUN)],
+        "the state kit's id is spent on the stage-2 recompute instead"
+    );
+}
+
+/// A state kit whose **whole visual is its animation id** still arms (decision 2085). The aura
+/// watcher's entry test asks "does this kit do anything we model?", and the anim was missing from
+/// it — the B114 shape one level over, where an effects-only test dropped Stealth's proc-only kit.
+/// 15 of the shipped state kits are anim-only (`benilla-extract kitanim`), among them kit 586's
+/// `Stun`(14) — Sneezing Fit, Smoke Bomb and kin.
+#[test]
+fn an_anim_only_state_kit_still_arms_on_the_aura_add_edge() {
+    use benilla_protocol::messages::ObjectFields;
+
+    const SPELL: u32 = 6902; // Sneezing Fit
+    const VISUAL: u32 = 517;
+    const STATE_KIT: u32 = 586; // anim 14, no effect slot, no sound, no CharProc
+    const STUN: u16 = 14;
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.add_message::<SpellKitFx>()
+        .add_message::<crate::aura_visual::AuraProc>()
+        .add_message::<SpellKitSound>()
+        .add_message::<super::BaseAnimRecompute>();
+    app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
+        HashMap::from([(
+            VISUAL,
+            VisualStages {
+                state: STATE_KIT,
+                ..Default::default()
+            },
+        )]),
+        HashMap::from([(
+            STATE_KIT,
+            VisualKit {
+                anim_id: Some(STUN),
+                ..Default::default()
+            },
+        )]),
+    )));
+    app.insert_resource(crate::ui_action::Spells {
+        catalog: SpellCatalog::from_displays(HashMap::from([(
+            SPELL,
+            SpellDisplay {
+                visual: VISUAL,
+                ..Default::default()
+            },
+        )])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    app.add_systems(Update, super::arm_aura_state_fx);
+
+    let unit = app
+        .world_mut()
+        .spawn(crate::net::ObjectStore(ObjectFields::from_pairs(&[
+            (47, SPELL),
+            (95, 0x0E),
+        ])))
+        .id();
+    app.update();
+
+    let recomputes: Vec<(Entity, u16)> = app
+        .world_mut()
+        .resource_mut::<Messages<super::BaseAnimRecompute>>()
+        .drain()
+        .map(|r| (r.entity, r.anim_id))
+        .collect();
+    assert_eq!(
+        recomputes,
+        vec![(unit, STUN)],
+        "an anim-only state kit is not nothing — its ADD edge owes a recompute"
     );
 }

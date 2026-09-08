@@ -69,6 +69,15 @@ const VERDICTS: &[(&str, Verdict)] = &[
         "CursorOptions",
         Open("an OUTPUT (grab/visible), not a channel — the cover has nothing to take from it"),
     ),
+    (
+        "CursorLeft",
+        Open(
+            "the cover READS it rather than taking it (decision 2090): a `None` in the window's \
+             position field is either winit's departure or the cover's own blank, and the hand-back \
+             must not confuse them — restoring the stash over a pointer the player took out of the \
+             window would warp it back in. Draining it would blind the gate to its own signal.",
+        ),
+    ),
     // ── Not input at all ────────────────────────────────────────────────────────────────────
     ("ButtonState", Plumbing),
     // The cursor OUTPUTS — the art and the grab mode benilla *writes*. Nothing arrives through

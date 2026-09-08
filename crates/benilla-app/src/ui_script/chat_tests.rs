@@ -1291,3 +1291,76 @@ fn a_quick_exit_and_reentry_keeps_the_plates_hover_fade() {
         "shipped: and on every hover after — got {later}"
     );
 }
+
+/// **`/afk` and `/dnd`, through the reference's own parser and out the far side as a SEND.**
+///
+/// The director's report: typing either printed `Unknown chat type "AFK".` and nothing happened —
+/// no away flag, so no `<AFK>` over the head and no `<AFK>` on their chat lines, because both of
+/// those surfaces were already built and were waiting on a flag that never got set.
+///
+/// The break was a seam, which is why this test spans it rather than testing either side. benilla's
+/// own slash grammar has always had a working `/afk` (`ui_chat::input::parse`'s `S::ChatAfk`), but
+/// migrating the chat window (1948) put the stock `ChatFrame.lua` on the chain and **its** parser
+/// claims a slash line first — so the live path became
+/// `ChatEdit_ParseText` → `SlashCmdList["CHAT_AFK"](msg)` → `SendChatMessage(msg, "AFK")` →
+/// `SendType::from_token`, which answered `None` because a doc comment there asserted AFK/DND
+/// "set a flag rather than sending a line". They do not: they are `CMSG_MESSAGECHAT` `0x14`/`0x15`
+/// and the SERVER toggles the bit. Decision 2082.
+///
+/// So the assertion runs the two halves in series: the stock file really does emit the token, and
+/// the token really does resolve to a wire kind. Testing either alone passes while the seam is
+/// broken — which is exactly how this shipped.
+#[test]
+fn the_stock_afk_and_dnd_commands_reach_the_wire() {
+    use crate::net::ChatKind;
+    use crate::ui_chat::edit::SendType;
+
+    let typed = |line: &str| -> (String, String) {
+        let mut s = chat_frame();
+        assert!(s.focus_editbox("ChatFrameEditBox"));
+        s.char_input(line);
+        assert!(s.key_input("ENTER"), "the box consumes ENTER");
+        let sends = s.take_chat_sends();
+        assert_eq!(sends.len(), 1, "{line:?} produced one send");
+        (sends[0].text.clone(), sends[0].chat_type.clone())
+    };
+
+    // Half one — the stock `SlashCmdList` body, verbatim: `SendChatMessage(msg, "AFK")`.
+    let (text, token) = typed("/afk Away from Keyboard");
+    assert_eq!(
+        (text.as_str(), token.as_str()),
+        ("Away from Keyboard", "AFK")
+    );
+    // Half two — the seam that was cut. `None` here is the reported bug.
+    assert_eq!(
+        SendType::from_token(&token).map(SendType::wire),
+        Some(ChatKind::Afk),
+        "the token the stock file sends must resolve to a wire kind"
+    );
+
+    let (text, token) = typed("/dnd Do not Disturb");
+    assert_eq!((text.as_str(), token.as_str()), ("Do not Disturb", "DND"));
+    assert_eq!(
+        SendType::from_token(&token).map(SendType::wire),
+        Some(ChatKind::Dnd)
+    );
+
+    // **A BARE `/afk` still sends** — with an empty body, which is the toggle. The stock body
+    // passes `msg` straight through, and vmangos's `CHAT_MSG_AFK` arm reads an empty message as
+    // "toggle" and a non-empty one as "set, and store this as the auto-reply".
+    let (text, token) = typed("/afk");
+    assert_eq!((text.as_str(), token.as_str()), ("", "AFK"));
+    assert_eq!(
+        SendType::from_token(&token).map(SendType::wire),
+        Some(ChatKind::Afk),
+        "the bare toggle is a send too, not a no-op"
+    );
+
+    // The control: a token the reference has no send for still answers None, so the arms above
+    // are two specific additions and not a blanket "anything goes" that would let a typo through.
+    assert!(SendType::from_token("NOT_A_CHAT_TYPE").is_none());
+    assert!(
+        SendType::from_token("TEXT_EMOTE").is_none(),
+        "a real ChatTypeInfo key that is nonetheless not sendable stays None"
+    );
+}

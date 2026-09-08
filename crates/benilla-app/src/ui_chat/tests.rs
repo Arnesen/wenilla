@@ -1,5 +1,3 @@
-use crate::net::ChatKind;
-
 use super::event::{default_color, ChatEvent, ChatEventKind as K};
 use super::input::{emote_send_eligible, emote_target, EmoteGate, ParsedChat};
 
@@ -1005,6 +1003,7 @@ fn stub_table() -> super::commands::SlashCommands {
         ("SLASH_LEAVE1", "/leave"),
         ("SLASH_LIST_CHANNEL1", "/chatlist"),
         ("SLASH_CHAT_AFK1", "/afk"),
+        ("SLASH_CHAT_DND1", "/dnd"),
         ("SLASH_RANDOM1", "/random"),
         ("SLASH_RANDOM2", "/roll"),
         ("SLASH_PLAYED1", "/played"),
@@ -1058,11 +1057,22 @@ fn action_commands_parse() {
             name: "world".into()
         }
     );
+    // `/afk` and `/dnd` run the reference's OWN `SlashCmdList` bodies rather than building a bare
+    // send (2088). They used to be a `ParsedChat::AfkDnd` that went straight to the wire — correct
+    // until the away law landed, and a second implementation the moment it did: no echo, no
+    // client-side default substitution, no mirror write. The argument still rides WHOLE, which is
+    // what this row has always pinned.
     assert_eq!(
         parse_line("/afk farming"),
-        ParsedChat::AfkDnd {
-            kind: ChatKind::Afk,
-            msg: "farming".into(),
+        ParsedChat::Lua {
+            body: "SlashCmdList[\"CHAT_AFK\"](\"farming\")".into()
+        }
+    );
+    // Bare, because that is the toggle — and the empty string has to survive to the send.
+    assert_eq!(
+        parse_line("/dnd"),
+        ParsedChat::Lua {
+            body: "SlashCmdList[\"CHAT_DND\"](\"\")".into()
         }
     );
     assert_eq!(parse_line("/roll"), ParsedChat::Random { min: 1, max: 100 });

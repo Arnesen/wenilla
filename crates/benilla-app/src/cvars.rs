@@ -221,6 +221,16 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "1667: that host has not resolved since 2019, so shipping it makes every first launch a \
          DNS failure; benilla dials the machine it is running on",
     ),
+    // The implicit AFK clear (2088) — a REAL 1.12 CVar, byte-read off its own registration
+    // (`0x5e24d4 push 0x82e748`, handle taken from the store AFTER the call at `0x5e24ef` into
+    // `[0xc4d68c]`, whose single reader `0x5eb84b` tests `[cvar+0x28]` for non-zero; wow-re
+    // `ui/scratch/afk-dnd-command-law.md` §10). Registered default `"1"`.
+    //
+    // It gates FIVE implicit clears, not one: any chat send whose type is not `0x14` (which is why
+    // `/dnd` clears AFK before marking), plus Jump, forward/back, strafe and turn
+    // (`0x513d36`/`0x514e23`/`0x514f0b`/`0x514fca`). With the CVar off the clear is a **total**
+    // no-op — no echo, no mirror write, no packet.
+    same("autoClearAFK", "1"),
     same("MasterVolume", "1"),
     same("SoundVolume", "1"),
     same("MusicVolume", "0.4"),

@@ -8,7 +8,6 @@
 //! No aliases live here: which strings reach which arm is [`super::super::commands`]'s table,
 //! built from the shipped `GlobalStrings.lua`.
 
-use crate::net::ChatKind;
 use crate::ui_chat::commands::{Command, DevCmd, SlashCommands, SlashIndex};
 
 /// Escape a player-typed string for embedding in a Lua double-quoted literal: backslashes and
@@ -48,8 +47,6 @@ pub(in crate::ui_chat) enum ParsedChat {
     Leave { name: String },
     /// `/chatlist <name>` (aliases /chatwho /chatinfo) — the member roster ask.
     ChatList { name: String },
-    /// `/afk [msg]` / `/dnd [msg]` — the away toggles (CHAT_MSG_AFK/DND sends).
-    AfkDnd { kind: ChatKind, msg: String },
     /// `/random [min] [max]` (aliases /rand /rnd /roll): bare = 1-100, one number = 1-N.
     Random { min: u32, max: u32 },
     /// `/played` — CMSG_PLAYED_TIME.
@@ -302,14 +299,17 @@ fn slash_command(index: SlashIndex, args: &str) -> ParsedChat {
             // The bare joined-channel listing is P6's (it needs the list).
             None => ParsedChat::Unknown,
         },
-        S::ChatAfk => ParsedChat::AfkDnd {
-            kind: ChatKind::Afk,
-            msg: args.to_string(),
-        },
-        S::ChatDnd => ParsedChat::AfkDnd {
-            kind: ChatKind::Dnd,
-            msg: args.to_string(),
-        },
+        // **The reference's own bodies, not a second implementation** (2088). These used to build
+        // a bare `ClientCommand::Chat` — which was right until the away law landed, and would now
+        // be a SECOND `/afk` that sends the packet with no echo, no default substitution and no
+        // mirror write. The stock parser claims a typed `/afk` before this table ever sees it, so
+        // the only lines still arriving here are the ones that never touched the edit box (a
+        // `WOW_PROBE_CHAT` rig's), and routing them through `SlashCmdList` funnels them into the
+        // same `SendChatMessage` seam the player's own keystrokes take — one implementation, and
+        // the probe exercises the real path rather than a shadow of it. Same posture, and the same
+        // reasoning, as the social verbs below.
+        S::ChatAfk => social_body("CHAT_AFK", args),
+        S::ChatDnd => social_body("CHAT_DND", args),
         S::Random => {
             let mut nums = args
                 .split_whitespace()

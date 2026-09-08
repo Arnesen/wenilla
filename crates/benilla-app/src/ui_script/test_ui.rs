@@ -748,6 +748,78 @@ pub(super) fn click(s: &mut UiScript, name: &str, button: &str) {
     s.mouse_button(x, y, button, false);
 }
 
+/// Seat the world frame in a fixture, the way the manifest does — the file the world drop's
+/// click target comes from, plus the one its `OnUpdate` reads a constant out of.
+///
+/// `WorldFrame_OnUpdate` ticks the popups and breath bars that a hidden UI would otherwise
+/// freeze, and it walks `1, MIRRORTIMER_NUMTIMERS` to do it — a global whose home is
+/// `MirrorTimer.lua`, manifest entry 53. A harness that takes the world frame without it raises
+/// `'for' limit must be a number` on every tick. Loading the real file rather than setting the
+/// constant by hand is [`BAG_UI`]'s own rule (`PartyFrame.xml` is there for the same reason):
+/// a stubbed constant passes and teaches nothing about the real load.
+///
+/// `StaticPopup.xml` — the other name that loop reads — is already in every fixture that calls
+/// this, since the popup is what these tests are about.
+pub(super) fn load_world_frame(s: &UiScript) {
+    load_ui(s, r"Interface\FrameXML\WorldFrame.xml");
+    load_ui(s, r"Interface\FrameXML\MirrorTimer.xml");
+}
+
+/// A completed left CLICK on the game world, at a point the loaded `WorldFrame` actually owns.
+///
+/// **The point is searched, not assumed, and that is the whole lesson of B380** (decision 2089).
+/// Every world-drop fixture in the house used to click `(-50, -50)` — off-screen, where the hit
+/// test answers nothing at all — which is a world click only in a house with no `WorldFrame`
+/// loaded. The stock file's frame is full-screen and mouse-enabled, so from the day it joined the
+/// manifest it took every real world click while those fixtures went on passing over the void.
+///
+/// The point cannot be a constant either, because a harness holds the windows its test needs and
+/// not the ones that would hide them — `bag_setup`'s `PaperDollFrame` has no `CharacterFrame` to
+/// sit inside, so it covers the middle of the screen. So: walk a coarse grid over the world
+/// frame's own rect and take the first cell it owns. When it owns none, panic naming what is
+/// there — a fixture with no world to click is one that would pass for the wrong reason.
+pub(super) fn world_click(s: &mut UiScript) {
+    let (x, y) = world_point(s);
+    s.mouse_move(x, y);
+    s.mouse_button(x, y, "LeftButton", true);
+    assert!(
+        s.mouse_button(x, y, "LeftButton", false),
+        "a world drop consumes the completed click"
+    );
+}
+
+/// [`world_click`]'s search. Separate so the failure can say what it looked at.
+fn world_point(s: &mut UiScript) -> (f32, f32) {
+    s.resolve();
+    let r: Vec<f32> = s
+        .eval(
+            "local f = WorldFrame \
+             return { f:GetLeft(), f:GetBottom(), f:GetWidth(), f:GetHeight() }",
+        )
+        .expect(
+            "the fixture must load Interface\\FrameXML\\WorldFrame.xml (load_world_frame): a \
+             world drop is a click on THAT frame, not on nothing (decision 2089)",
+        );
+    assert_eq!(r.len(), 4, "WorldFrame: unresolved rect {r:?}");
+    let (steps, mut blockers) = (7, Vec::new());
+    for row in 0..steps {
+        for col in 0..steps {
+            let x = r[0] + r[2] * (col as f32 + 0.5) / steps as f32;
+            let y = r[1] + r[3] * (row as f32 + 0.5) / steps as f32;
+            match s.hit_test(x, y) {
+                Some(id) if s.is_world_frame(id) => return (x, y),
+                _ => blockers.push(
+                    s.hit_test_name(x, y)
+                        .unwrap_or_else(|| "<anonymous>".into()),
+                ),
+            }
+        }
+    }
+    blockers.sort();
+    blockers.dedup();
+    panic!("no point on the world frame is clickable — the UI covers all {steps}x{steps} of them: {blockers:?}")
+}
+
 /// Seat one of the reference's LoadOnDemand Blizzard addons off the chain, so a harness's
 /// `UIParentLoadAddOn(name)` can load it the way the app does (1957; the combat text since
 /// 1964). Needs client data — the caller has already checked with `wow_data_or_skip!`.

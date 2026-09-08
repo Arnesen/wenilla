@@ -35,8 +35,8 @@ use super::select::{
 };
 use super::sheath::{advance_sheath_ceremony, start_sheath_ceremony};
 use super::{
-    find_resolved, move_flags, AnimData, AnimDriver, AutoRepeatArmed, CastHold, DefenseAnim,
-    EmoteAnim, Engaged, MovementState, NockLatch, Overlay, OverlayFade, SheathRequest,
+    find_resolved, move_flags, AnimData, AnimDriver, AutoRepeatArmed, BaseAnimRecompute, CastHold,
+    DefenseAnim, EmoteAnim, Engaged, MovementState, NockLatch, Overlay, OverlayFade, SheathRequest,
     SheathSwapMessage, SwingImpact, SwingMessage, SwingSlowdown, Wielded, WoundAnim,
 };
 
@@ -357,6 +357,9 @@ pub(super) fn drive_animations(
         // headless test worlds that build no net seam; a missing cache reads exactly like a
         // template we have not received, which is the reference's own null-record leg.
         Option<Res<crate::names::NameCache>>,
+        // The **stage-2 base recomputes** ([`BaseAnimRecompute`]) — in the tuple for the same
+        // reason as its neighbours: this system sits on the 16-SystemParam ceiling.
+        MessageReader<BaseAnimRecompute>,
     ),
     // The variation roll's LCG state (decision 0114 — the client's single CRT `_rand` stream,
     // shared by every play; [`select::msvc_rand`]).
@@ -365,7 +368,7 @@ pub(super) fn drive_animations(
     // diff-only filter; see the trace block after the mode machine).
     mut anim_trace_last: Local<std::collections::HashMap<Entity, String>>,
 ) {
-    let (emote_sounds, loot_kneel, time, names) = aux;
+    let (emote_sounds, loot_kneel, time, names, mut recomputes) = aux;
     let dt = time.delta_secs();
     // This frame's one-shot PLAY CALLS (swings + anim-emotes), gathered per unit and replayed
     // in the client's call order below ([`PlaySeq`] stamps — the net drain stamps packet order,
@@ -427,6 +430,13 @@ pub(super) fn drive_animations(
             .entry(e.entity)
             .or_default()
             .push((OneShotReq::Emote(e.anim_id), e.seq));
+    }
+    // This frame's **stage-2 base recomputes** — a state kit's anim id, which is never played
+    // ([`BaseAnimRecompute`]). Last wins: the reference makes the comparison per kit play, and two
+    // in one frame leave the second's verdict standing.
+    let mut pending_recompute: bevy::ecs::entity::EntityHashMap<u16> = default();
+    for r in recomputes.read() {
+        pending_recompute.insert(r.entity, r.anim_id);
     }
     // This frame's sheath requests, keyed by unit (a later request replaces an earlier — the
     // client's last SetSheatheState call wins).
@@ -1214,6 +1224,35 @@ pub(super) fn drive_animations(
                 }
             }
         }
+        // ── The **stage-2 base recompute** (`0x60f389`–`0x60f399`, decision 2085): a state kit
+        // that names an animation compares it against the id the unit is already playing
+        // (`0x5fdb50` — the upper-body key bone if it holds one, else bone 0) and, on a
+        // difference, runs `0x5fd9e0(unit, -1)`. It never plays the id, and on a match it does
+        // nothing at all.
+        //
+        // It runs HERE, after this frame's one-shot arms, because that ordering is the whole
+        // observable effect: the impact kit (stage 1) plays first and the state kit (stage 2)
+        // then cuts it. Charge (22911) is the case that names itself — `Knockdown`(121) from kit
+        // 348, cut by kit 349's `Stun`(14) because 121 ≠ 14.
+        //
+        // Expressed as the re-selection, not a re-arm: clearing the gait target IS the recompute
+        // (decision 1655), and dropping `Mode::Swing` is what ends a one-shot. **Named residual:**
+        // a unit inside a Special (a pose, an airborne arc) is left alone — the reference's
+        // recompute re-enters the selector chain, which would land back in the same state, and
+        // forcing `Mode::Gait` here would replay the pose's enter clip instead.
+        if let Some(&want) = pending_recompute.get(&entity) {
+            let armed = drv.overlay.map(|ov| ov.id).or_else(|| {
+                tr.get_main_animation()
+                    .and_then(|n| anims.clips.iter().find(|c| c.node == n))
+                    .map(|c| c.anim_id)
+            });
+            if armed != Some(want) && matches!(drv.mode, Mode::Swing { .. } | Mode::Gait) {
+                drv.deferred = None; // a normal arm clears the cache (`0x5fe48e`)
+                drv.mode = Mode::Gait;
+                drv.gait = None; // recompute a fresh gait next frame
+            }
+        }
+
         // ── **The mode machine** — the base track's whole decision, lifted into [`mode`]
         // (decision 0933). It is the one phase of this pass with a clean input boundary: a fixed
         // set of already-computed facts in, the driver + player + transitions out, and none of

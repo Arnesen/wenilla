@@ -175,6 +175,7 @@ fn app() -> App {
         .add_message::<crate::creature_anim::DefenseAnim>()
         .add_message::<crate::creature_anim::SwingSlowdown>()
         .add_message::<EmoteAnim>()
+        .add_message::<super::super::BaseAnimRecompute>()
         .add_message::<WoundAnim>()
         .add_message::<SheathRequest>()
         .add_message::<SheathSwapMessage>();
@@ -4177,4 +4178,106 @@ fn a_combat_over_combat_fast_path_does_not_raise_the_anim_edge() {
         "…and it re-times rather than plays, so `0x5fe2f0` returns before the latch read and a \
          pending trail arm survives"
     );
+}
+
+/// The **stage-2 base recompute** (decision 2085): a state kit's animation id is compared against
+/// what the unit is already playing (`0x5fdb50`) and, on a difference, spent on
+/// `0x5fd9e0(unit, -1)` — never played. So the recompute is an animation *cutter*, and the case
+/// that names it is a spell cutting its own impact clip: Charge's kit 348 plays `Knockdown`(121),
+/// kit 349 names `Stun`(14), and 121 ≠ 14 ends the Knockdown.
+///
+/// The match arm is the other half and is not decoration: `0x60f393 je 0x60f3ca` leaves the block
+/// having done nothing at all, so a state kit naming the clip already running must not restart or
+/// cut it.
+mod stage_two_recompute {
+    use super::*;
+    use crate::creature_anim::Mode;
+
+    fn model() -> ModelAnimations {
+        ModelAnimations {
+            graph: Handle::default(),
+            clips: vec![
+                clip(0, 1, true),    // Stand
+                clip(121, 2, false), // Knockdown — the impact kit's one-shot
+            ],
+            hand_close: [None, None],
+            playable_animation_lookup: Vec::new(),
+            animation_lookup: Vec::new(),
+            global_bones: Vec::new(),
+            first_seq: None,
+            pose: Default::default(),
+        }
+    }
+
+    fn victim(app: &mut App) -> Entity {
+        app.world_mut()
+            .spawn((
+                model(),
+                AnimationPlayer::default(),
+                AnimationTransitions::new(),
+                AnimDriver::default(),
+            ))
+            .id()
+    }
+
+    /// A one-shot is armed, then a state kit naming a DIFFERENT id lands: the clip ends.
+    #[test]
+    fn a_differing_state_kit_anim_cuts_the_one_shot() {
+        let mut app = app();
+        let unit = victim(&mut app);
+
+        app.world_mut().write_message(EmoteAnim {
+            entity: unit,
+            anim_id: 121,
+            seq: 1,
+        });
+        app.update();
+        assert!(
+            matches!(
+                app.world().entity(unit).get::<AnimDriver>().unwrap().mode,
+                Mode::Swing { id: 121, .. }
+            ),
+            "the impact kit's Knockdown holds the base slot"
+        );
+
+        app.world_mut()
+            .write_message(crate::creature_anim::BaseAnimRecompute {
+                entity: unit,
+                anim_id: 14, // Stun — what kit 349 names, and never plays
+            });
+        app.update();
+        assert_eq!(
+            app.world().entity(unit).get::<AnimDriver>().unwrap().mode,
+            Mode::Gait,
+            "121 != 14 recomputes the base, which is what ends the Knockdown"
+        );
+    }
+
+    /// …and a state kit naming the id already playing does nothing at all.
+    #[test]
+    fn a_matching_state_kit_anim_leaves_the_one_shot_alone() {
+        let mut app = app();
+        let unit = victim(&mut app);
+
+        app.world_mut().write_message(EmoteAnim {
+            entity: unit,
+            anim_id: 121,
+            seq: 1,
+        });
+        app.update();
+
+        app.world_mut()
+            .write_message(crate::creature_anim::BaseAnimRecompute {
+                entity: unit,
+                anim_id: 121,
+            });
+        app.update();
+        assert!(
+            matches!(
+                app.world().entity(unit).get::<AnimDriver>().unwrap().mode,
+                Mode::Swing { id: 121, .. }
+            ),
+            "`je 0x60f3ca` — already playing it, so the leg does nothing"
+        );
+    }
 }

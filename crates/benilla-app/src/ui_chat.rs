@@ -16,13 +16,18 @@ use crate::ui_script::UiInput;
 mod ace_gate_tests;
 /// The world broadcasts (`SMSG_ZONE_UNDER_ATTACK`/`_DEFENSE_MESSAGE`/`_SERVER_MESSAGE`) — the
 /// AreaTable/ServerMessages resolve and the joined-defense-channel walk they land on.
+mod away;
 mod broadcast;
 mod channels;
 /// The combat log's chat lines (B297) — classification, chat type, and the GlobalString key each
 /// combat packet's sentence is built from.
 pub(crate) mod combat;
 pub(crate) mod commands;
-mod edit;
+/// The chat edit box's send path — `SendType`, the chat-type TOKEN an addon or the stock
+/// `SlashCmdList` passes to `SendChatMessage`, and its map to a wire kind. `pub(crate)` because
+/// that token→wire seam is what `ui_script::chat_tests` spans: the stock file emitting the token
+/// and this module resolving it are two halves that each pass alone while the join is cut (2082).
+pub(crate) mod edit;
 mod event;
 mod feed;
 mod frames;
@@ -36,6 +41,7 @@ mod settings;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use away::AfkMirror;
 pub(crate) use broadcast::Broadcast;
 /// The joined-channel roster + the `ChatChannels.dbc` catalog. Read outside this module by the
 /// world-state readout ([`crate::world_state_ui`]), whose `Type == 1` gate is "has the player
@@ -54,6 +60,8 @@ pub(crate) struct UiChatPlugin;
 impl Plugin for UiChatPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ChatLog>()
+            .init_resource::<away::AfkMirror>()
+            .init_resource::<away::AfkMirrorMemo>()
             .init_resource::<frames::ChatWindows>()
             .init_resource::<edit::ChannelState>()
             .init_resource::<channels::ZoneChannelWalk>()
@@ -127,6 +135,11 @@ impl Plugin for UiChatPlugin {
             .add_systems(
                 Update,
                 (
+                    // The AFK mirror's reconcile runs FIRST in the chain, so a `/afk` typed this
+                    // frame reads the descriptor's settled state rather than racing it (2088).
+                    away::reconcile_afk_mirror,
+                    // …and the four movement clears, which share the CVar and the mirror.
+                    away::movement_clears_afk,
                     input::drain_chat_input,
                     // An addon's own line into the wire (decision 1199). AFTER the box's drain
                     // and in the same chain, so a `SendChatMessage` fired from a slash handler
