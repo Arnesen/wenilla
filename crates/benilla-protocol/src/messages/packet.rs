@@ -104,6 +104,21 @@ pub enum ServerPacket {
     CharDelete {
         result: u8,
     },
+    /// `SMSG_CHARACTER_LOGIN_FAILED` — the server refused the `CMSG_PLAYER_LOGIN` we just sent.
+    ///
+    /// The byte is a **1-based reason index**, not a `ResponseCodes` value: the client feeds it to
+    /// a six-entry jump table (`0x5aae08`, behind `dec eax; cmp eax,5; ja`) that maps it onto the
+    /// `CHAR_LOGIN_*` status codes, so `1` is "world server is down" and everything past `6` is
+    /// the default "login failed" (VERIFIED off `WoW.exe` — wow-5875-re
+    /// `system/net/scratch/char-login-failed-law.md`). Both emulators speak that dialect: vmangos
+    /// sends a bare `1`, and mangos-classic's live enum is `CharLoginFailReasons` 0x01–0x08 (its
+    /// `ResponseCodes` `CHAR_LOGIN_*` block is commented out).
+    ///
+    /// Kept raw here all the same — turning it into a player-facing string is the glue layer's
+    /// job, and it is the only place that holds the reference's table.
+    CharacterLoginFailed {
+        result: u8,
+    },
     UpdateObject {
         objects: Vec<Object>,
     },
@@ -1588,6 +1603,7 @@ impl ServerPacket {
             ServerPacket::CharEnum { .. } => "SMSG_CHAR_ENUM".into(),
             ServerPacket::CharCreate { .. } => "SMSG_CHAR_CREATE".into(),
             ServerPacket::CharDelete { .. } => "SMSG_CHAR_DELETE".into(),
+            ServerPacket::CharacterLoginFailed { .. } => "SMSG_CHARACTER_LOGIN_FAILED".into(),
             ServerPacket::UpdateObject { .. } => "SMSG_UPDATE_OBJECT".into(),
             ServerPacket::CompressedMoves { .. } => "SMSG_COMPRESSED_MOVES".into(),
             ServerPacket::DestroyObject { .. } => "SMSG_DESTROY_OBJECT".into(),

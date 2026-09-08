@@ -38,12 +38,15 @@ pub(super) fn select_input(
     mut next: ResMut<NextState<ClientState>>,
     mut sounds: MessageWriter<GlueSound>,
     mut intent: ResMut<crate::login::LoginIntent>,
+    glue_dialog: Res<crate::login::LoginDialog>,
     time: Res<Time>,
     mut last_click: Local<Option<(usize, f32)>>,
 ) {
-    // A modal owns the input while it is up — the delete confirm, the AddOns list, or the realm
-    // list, which stands over this screen rather than replacing it.
-    if dialog.open || panel.open || realms.shown {
+    // A modal owns the input while it is up — the delete confirm, the AddOns list, the realm
+    // list (which stands over this screen rather than replacing it), or the shared glue dialog
+    // (a refused character login is said in that one, and its Okay must not double as this
+    // screen's Enter World / Escape).
+    if dialog.open || panel.open || realms.shown || glue_dialog.is_open() {
         return;
     }
     let now = time.elapsed_secs();

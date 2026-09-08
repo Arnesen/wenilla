@@ -130,7 +130,13 @@ pub(crate) fn apply_net_updates(
             MessageWriter<CharListMessage>,
             MessageWriter<crate::net::RealmListMessage>,
         ),
-        MessageWriter<CharActionResultMessage>,
+        // **The pick park's two verdicts, paired** (the tuple is at Bevy's 16-element ceiling, and
+        // these belong together): what a create/delete came back with, and the refusal of the pick
+        // itself.
+        (
+            MessageWriter<CharActionResultMessage>,
+            MessageWriter<super::CharacterLoginFailedMessage>,
+        ),
         MessageWriter<EnteredWorldMessage>,
         MessageWriter<LoggedOutMessage>,
         MessageWriter<super::SpeedChangeMessage>,
@@ -531,7 +537,7 @@ pub(crate) fn apply_net_updates(
         mut teleports,
         mut worldports,
         (mut char_lists, mut realm_lists),
-        mut char_actions,
+        (mut char_actions, mut char_login_failures),
         mut entered_world,
         mut logged_out,
         mut speed_changes,
@@ -594,6 +600,9 @@ pub(crate) fn apply_net_updates(
             }
             SessionEvent::CharActionResult { action, code } => {
                 session::char_action_result(action, code, &mut char_actions)
+            }
+            SessionEvent::CharacterLoginFailed { result } => {
+                session::character_login_failed(result, &mut char_login_failures)
             }
             SessionEvent::CinematicTriggered { cinematic_id } => {
                 session::cinematic_triggered(cinematic_id, &mut cinematics)

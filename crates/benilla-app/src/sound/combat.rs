@@ -860,17 +860,20 @@ fn combat_sounds(
                         continue;
                     }
                 }
+                // **A zero column plays NOTHING** (decision 2075). benilla used to walk down the
+                // family here — crushing → critical → ordinary — on the reasoning that "crushing
+                // rows are often 0 in data"; they are, and the reference is simply silent for
+                // them. `0x623490` tests the selected id exactly once (`0x6234e6 test ebx,ebx ;
+                // 0x6234e8 je 0x62350e`, the shared epilogue), and no fallback is even reachable:
+                // the row pointer dies at `0x6234e4`, so neither the bus pick `0x623b10` (which
+                // takes the category) nor the play `0x458890` (bus, kit, &pos) ever sees the row
+                // to re-read a column from. The CGPlayer twin `0x62f880` is identical
+                // (`0x62f8be`/`0x62f8c3`). wow-re
+                // `object-layer/scratch/wound-parry-gate-and-injury-vocal.md` §13.
                 let vocal = net
                     .display_id
                     .and_then(|d| voices.0.for_display(d))
-                    .map(|v| {
-                        let idx = if crushing { 2 } else { usize::from(crit) };
-                        // Crushing rows are often 0 in data — fall back down the family.
-                        [v.injury[idx], v.injury[usize::from(crit)], v.injury[0]]
-                            .into_iter()
-                            .find(|k| *k != 0)
-                            .unwrap_or(0)
-                    })
+                    .map(|v| v.injury[if crushing { 2 } else { usize::from(crit) }])
                     .unwrap_or(0);
                 // Your own wounds get the CGPlayer twin's private bus 8 (cap 1); everyone
                 // else's share the world's bus 7 (cap 2).

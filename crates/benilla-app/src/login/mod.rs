@@ -76,6 +76,22 @@ impl Plugin for LoginPlugin {
                         tick_login_caret,
                         screen::refresh_boxes,
                         screen::refresh_checkbox,
+                        // **The dialog is the GLUE's, not this screen's.** The reference's
+                        // `GlueDialog` is a `GlueParent` child shown over whichever glue screen is
+                        // up, and benilla needed that the moment a *character* login could be
+                        // refused: `SMSG_CHARACTER_LOGIN_FAILED` has to be said on the select
+                        // screen, where the pick was made. So [`drive_dialog`] is `pub(crate)` and
+                        // the select screen's chain runs it too — one widget, two screens, rather
+                        // than a second copy of it over there. The kinds this screen owns
+                        // (`Status`, `Queued`, `Realmlist`) can only be *opened* from here, so
+                        // only `Error` is ever reachable on the other one.
+                        //
+                        // It stays inside each screen's own chain rather than being hoisted out
+                        // with a `before`/`after` pair: the shared painters below sit in this
+                        // chain, and ordering a system both after `login_input` and before
+                        // `art_swaps` from outside makes `art_swaps` transitively ordered against
+                        // its own `SystemTypeSet`, which Bevy rejects at schedule build — a panic
+                        // no unit test sees and only a real run finds.
                         drive_dialog,
                         // Both after `drive_dialog`: it is what spawns the dialog's edit box, and
                         // what a realmlist Okay changes the address in.
@@ -656,7 +672,15 @@ fn to_select_on_roster(
     intent.in_flight = false;
     intent.park = IoPark::Active;
     intent.retry_at = None;
-    dialog.close();
+    // **Only the dialogs the roster ANSWERS.** This used to close whatever was up, which was
+    // right while the only dialog that could be up here was this screen's own "Connecting…". It
+    // stopped being right when a refused *character* login started raising an `Error` on the
+    // select screen: the refusal's relist produces a roster a second later, and closing on it
+    // would take the message off the screen before the player had read it — the same silent
+    // refusal, one layer up. An `Error` is dismissed by its Okay, never by an arriving packet.
+    if matches!(dialog.kind, Some(DialogKind::Status | DialogKind::Queued)) {
+        dialog.close();
+    }
     if *state.get() == ClientState::Login {
         next.set(ClientState::CharSelect);
     }
@@ -1105,7 +1129,7 @@ fn dialog_keys(kind: DialogKind, on_screen: bool, enter: bool, escape: bool) -> 
     (button1, kind == DialogKind::Realmlist && escape)
 }
 
-/// The login screen's one dialog (the ref's shared `GlueDialog`): kind + text; the driver spawns/
+/// The glue layer's one dialog (the ref's shared `GlueDialog`): kind + text; the driver spawns/
 /// despawns the tree (respawning on a kind change — the button caption differs) and updates the
 /// text in place.
 #[derive(Resource, Default)]
@@ -1131,12 +1155,25 @@ pub(crate) struct LoginDialog {
 }
 
 impl LoginDialog {
-    fn open_status(&mut self, text: &str) {
-        self.kind = Some(DialogKind::Status);
+    /// Raise the one-button error dialog over whichever glue screen is up.
+    ///
+    /// `pub(crate)` for the character-select screen: a refused *character* login
+    /// (`SMSG_CHARACTER_LOGIN_FAILED`) is said there, not here, and it is the same dialog — the
+    /// reference has exactly one, under `GlueParent`.
+    pub(crate) fn open_error(&mut self, text: &str) {
+        self.kind = Some(DialogKind::Error);
         self.set_text(text);
     }
-    fn open_error(&mut self, text: &str) {
-        self.kind = Some(DialogKind::Error);
+
+    /// Is a dialog up? The glue screens' modal test — while one is, the screen behind it does not
+    /// answer clicks or keys (the select screen's own delete confirm and AddOns panel are read the
+    /// same way).
+    pub(crate) fn is_open(&self) -> bool {
+        self.kind.is_some()
+    }
+
+    fn open_status(&mut self, text: &str) {
+        self.kind = Some(DialogKind::Status);
         self.set_text(text);
     }
     /// Enter the queue: a fresh ring (a second login must not inherit the first one's estimate)
@@ -1165,7 +1202,7 @@ impl LoginDialog {
             self.dirty = true;
         }
     }
-    fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         self.kind = None;
         self.text.clear();
         self.dirty = false;
@@ -1177,7 +1214,7 @@ impl LoginDialog {
 /// stage boundary) and forgets the intent; Error's Okay just closes. Esc = the button; Enter
 /// confirms an error.
 #[allow(clippy::too_many_arguments)]
-fn drive_dialog(
+pub(crate) fn drive_dialog(
     mut commands: Commands,
     mut dialog: ResMut<LoginDialog>,
     mut intent: ResMut<LoginIntent>,
@@ -1468,6 +1505,49 @@ mod tests {
             app.world().resource::<LoginDialog>().kind.is_none(),
             "with no dialog: nothing went wrong",
         );
+    }
+
+    /// **A roster does not take a refusal off the screen.**
+    ///
+    /// [`to_select_on_roster`] closes the dialog because a roster is the answer to this screen's
+    /// "Connecting…" — but since a refused *character* login raises an `Error` on the SELECT
+    /// screen, and its own relist produces a roster a second later, an unscoped close would wipe
+    /// the message before it could be read. That is the original bug (a refusal nobody sees) one
+    /// layer up, and nothing else would catch it: the build is green either way and the window is
+    /// a second long.
+    #[test]
+    fn an_arriving_roster_closes_the_connecting_dialog_but_not_an_error() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .insert_state(ClientState::CharSelect)
+            .init_resource::<LoginIntent>()
+            .init_resource::<LoginDialog>()
+            .add_message::<CharListMessage>()
+            .add_systems(Update, to_select_on_roster);
+
+        // The refusal's dialog survives its own relist.
+        app.world_mut()
+            .resource_mut::<LoginDialog>()
+            .open_error("World server is down");
+        app.world_mut().write_message(CharListMessage {
+            characters: Vec::new(),
+            realm: None,
+        });
+        app.update();
+        let dialog = app.world().resource::<LoginDialog>();
+        assert_eq!(dialog.kind, Some(DialogKind::Error));
+        assert_eq!(dialog.text, "World server is down");
+
+        // …and the connecting dialog the roster IS the answer to still closes.
+        app.world_mut()
+            .resource_mut::<LoginDialog>()
+            .open_status("Connecting");
+        app.world_mut().write_message(CharListMessage {
+            characters: Vec::new(),
+            realm: None,
+        });
+        app.update();
+        assert!(app.world().resource::<LoginDialog>().kind.is_none());
     }
 
     /// An **unattended** run keeps 0065's paced reconnect on a lost session — the verdict rides

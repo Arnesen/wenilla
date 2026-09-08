@@ -656,6 +656,7 @@ fn warm_effect_lane(
                             raster_bias,
                             raster_slope,
                             cam_relative: false,
+                            no_depth_test: false,
                             main_entity: cam,
                             light: None,
                         },
@@ -663,5 +664,37 @@ fn warm_effect_lane(
                 }
             }
         }
+        // The depth-test-off arm (2076), warmed as the ONE combination that ships rather than as
+        // another factor of the cross product above — the weapon swing trail is its only producer
+        // and it always draws alpha-blended, unlit, with no rasterizer settle. A hole here is a
+        // live compile on the first Heroic Strike anyone lands, which is the whole failure this
+        // module exists to prevent; a doubled cross product would be 36 more warm draws per camera
+        // for pipelines nothing will ever ask for.
+        let start = quads.begin();
+        for (u, v) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
+            quads.verts.push(EffectVertex {
+                pos: [u * 0.01, v * 0.01, 0.0],
+                uv: [u, v],
+                color: [1.0, 1.0, 1.0, 1.0],
+            });
+        }
+        quads.commit_quads(
+            start,
+            EffectDrawSpec {
+                cam,
+                texture: tex.id(),
+                blend: EffectBlend::Alpha,
+                fog: EffectFog::Off,
+                lighting: benilla_world::particles::buffer::EffectLighting::None,
+                anchor: Vec3::ZERO,
+                bias: 0.0,
+                raster_bias: 0,
+                raster_slope: 0.0,
+                cam_relative: false,
+                no_depth_test: true,
+                main_entity: cam,
+                light: None,
+            },
+        );
     }
 }

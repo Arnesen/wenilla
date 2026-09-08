@@ -1396,6 +1396,10 @@ pub(super) fn drive_animations(
         let masked_played = masked_played || hold_played.is_some();
 
         let base_played = base_played || (drv.mode, drv.gait) != pre_state;
+        // The weapon-trail latch's edge (decision 2076) — `0x5fe2f0` is the image's single
+        // animation entry point, so ANY start consumes the arm, the mode machine's gait plays
+        // included. Written every pass (never OR'd) so it is exactly this frame's.
+        drv.started_anim = masked_played || base_played;
         wound_evict(entity, &mut drv, &mut player, masked_played, base_played);
 
         if let Some(&edge) = pending_wound.get(&entity) {

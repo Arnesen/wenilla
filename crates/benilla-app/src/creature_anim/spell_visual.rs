@@ -521,9 +521,21 @@ pub(crate) struct KitPush {
     pub(crate) seq: u64,
 }
 
+/// The lanes [`route_cast_visuals`] resolves here but does not own — bundled into ONE system
+/// param because that system sits at Bevy's 16-`SystemParam` ceiling: the missile spawns
+/// (phase 4), the dest one-shot orders (0797), the beam plays (0955), the camera shakes (1849)
+/// and the weapon-trail arms (2076). Each is built by the module that owns what it becomes.
+type KitSpawnWriters<'w> = (
+    MessageWriter<'w, MissileSpawn>,
+    MessageWriter<'w, crate::entities::dest_fx::GroundBurst>,
+    MessageWriter<'w, ChainProcPlay>,
+    MessageWriter<'w, SpellKitShake>,
+    MessageWriter<'w, crate::weapon_trail::TrailArm>,
+);
+
 /// The writer set one discrete kit play fans out to — bundled so [`play_kit`] threads through the
 /// router's arms as one argument (each writer keeps its own system-param lifetime).
-struct KitOut<'a, 'w1, 'w2, 'w3, 'w4, 'w5, 'w6> {
+struct KitOut<'a, 'w1, 'w2, 'w3, 'w4, 'w5, 'w6, 'w7> {
     oneshots: &'a mut MessageWriter<'w1, EmoteAnim>,
     wounds: &'a mut MessageWriter<'w2, WoundAnim>,
     sounds: &'a mut MessageWriter<'w3, SpellKitSound>,
@@ -532,6 +544,9 @@ struct KitOut<'a, 'w1, 'w2, 'w3, 'w4, 'w5, 'w6> {
     chain: &'a mut MessageWriter<'w5, ChainProcPlay>,
     /// The kit's camera shake, if field 14 names a group (1849).
     shakes: &'a mut MessageWriter<'w6, SpellKitShake>,
+    /// The kit's weapon-trail ARM, if its `CharProc` slots name one — the dispatcher's type-8
+    /// case (2076). A latch, not a play: nothing is drawn until the unit's next animation.
+    trails: &'a mut MessageWriter<'w7, crate::weapon_trail::TrailArm>,
 }
 
 /// One kit played as a **discrete event** on a unit — the client's `PlaySpellVisualKit`
@@ -622,6 +637,16 @@ fn play_kit(
             spell_id,
             proc,
         });
+    }
+    // …and its type-8 case (`0x60d80a`, decision 2076), run on the same terms and for the same
+    // reason: the arm is two words written on the UNIT, not one of the kit's attach-point models,
+    // so `play.effects` does not gate it. The dispatcher runs at `0x60f35c` *before* the kit's own
+    // animation is played at `0x60f3c5`, which is how a kit carrying both a proc-8 and an anim id
+    // fires its trail on its own swing — our `EmoteAnim` above and this arm both land before the
+    // driver reads either, so that self-fire falls out of the ordering rather than being arranged.
+    if let Some(trail) = kit.trail_proc() {
+        out.trails
+            .write(crate::weapon_trail::TrailArm { entity, trail });
     }
     if !play.effects {
         return;
@@ -735,15 +760,7 @@ pub(super) fn route_cast_visuals(
     mut sounds: MessageWriter<SpellKitSound>,
     mut fx: MessageWriter<SpellKitFx>,
     mut sheaths: MessageWriter<super::SheathRequest>,
-    // One tuple param (the 16-SystemParam ceiling): the missile spawns, the dest one-shot orders
-    // (0797), the beam plays (0955) and the camera shakes (1849) — the lanes resolved here where
-    // the catalogs live, built by `crate::entities` and `crate::camera_shake`.
-    mut spawns: (
-        MessageWriter<MissileSpawn>,
-        MessageWriter<crate::entities::dest_fx::GroundBurst>,
-        MessageWriter<ChainProcPlay>,
-        MessageWriter<SpellKitShake>,
-    ),
+    mut spawns: KitSpawnWriters,
     visuals: Option<Res<SpellVisuals>>,
     spells: Option<Res<crate::ui_action::Spells>>,
     mut weapon_src: WeaponVisualSrc,
@@ -756,8 +773,13 @@ pub(super) fn route_cast_visuals(
     };
     // Disjoint field borrows: the beam writer rides `out` for the whole body while the missile and
     // burst writers stay free for the GO loop below.
-    let (missiles, bursts, chains, shakes) =
-        (&mut spawns.0, &mut spawns.1, &mut spawns.2, &mut spawns.3);
+    let (missiles, bursts, chains, shakes, trails) = (
+        &mut spawns.0,
+        &mut spawns.1,
+        &mut spawns.2,
+        &mut spawns.3,
+        &mut spawns.4,
+    );
     let mut out = KitOut {
         oneshots: &mut oneshots,
         wounds: &mut wounds,
@@ -765,6 +787,7 @@ pub(super) fn route_cast_visuals(
         fx: &mut fx,
         chain: chains,
         shakes,
+        trails,
     };
 
     // The `holds` query is one command-flush stale: an instant cast's START and GO drain from
@@ -1202,6 +1225,13 @@ pub(super) fn route_cast_visuals(
                         spell_id: cur,
                         proc,
                     });
+                }
+                // …and the type-8 arm from the same caller: kit 370 (Whirlwind Primer / Axe
+                // Flurry, a 10 000 ms trail) is reached at the CHANNEL stage and nowhere else,
+                // so without this leg the longest trail in the table never arms (2076).
+                if let Some(trail) = kit.trail_proc() {
+                    out.trails
+                        .write(crate::weapon_trail::TrailArm { entity, trail });
                 }
                 // The channel kit's effect models — persistent while the field holds (the
                 // client's stage-2 lifetime, and so the stage-2 Birth → Hold → Decay lifecycle:
@@ -1698,6 +1728,7 @@ pub(super) fn replay_morph_kit(
     mut fx: MessageWriter<SpellKitFx>,
     mut chain: MessageWriter<ChainProcPlay>,
     mut shakes: MessageWriter<SpellKitShake>,
+    mut trails: MessageWriter<crate::weapon_trail::TrailArm>,
 ) {
     for swap in swaps.read() {
         // Consume-and-clear even when the kit resolves to nothing — the reference clears
@@ -1719,6 +1750,7 @@ pub(super) fn replay_morph_kit(
             fx: &mut fx,
             chain: &mut chain,
             shakes: &mut shakes,
+            trails: &mut trails,
         };
         play_kit(
             swap.entity,

@@ -9,6 +9,9 @@ pub const SMSG_CHAR_ENUM: u16 = 0x003B;
 // SMSG body the result byte (`CHAR_DELETE_SUCCESS` = 0x39, `SharedDefines.h` ResponseCodes).
 pub const CMSG_CHAR_DELETE: u16 = 0x0038;
 pub const SMSG_CHAR_DELETE: u16 = 0x003C;
+/// `SMSG_CHARACTER_LOGIN_FAILED` (VERIFIED vmangos `Opcodes_1_12_1.h`: 65) — the server's refusal
+/// of a `CMSG_PLAYER_LOGIN`. Body: one result byte.
+pub const SMSG_CHARACTER_LOGIN_FAILED: u16 = 0x0041;
 pub const SMSG_NAME_QUERY_RESPONSE: u16 = 0x0051; // 81
 pub const SMSG_CREATURE_QUERY_RESPONSE: u16 = 0x0061; // 97
 /// VERIFIED vmangos `Opcodes_1_12_1.h:86`: 83. Answers `CMSG_PET_NAME_QUERY` — the only query that

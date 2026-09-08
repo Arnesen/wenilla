@@ -188,6 +188,7 @@ mod ui_unit;
 mod ui_world_map;
 mod video;
 mod vplates;
+mod weapon_trail;
 mod world_backdrop;
 mod world_state;
 mod world_state_ui;
@@ -537,6 +538,7 @@ pub fn run(build: BuildId) -> AppExit {
     // `benilla-config/Diagnostics/fps-journal.csv`; `WOW_FPS_JOURNAL=<csv>` is the harness lever.
     .add_plugins(perf::FpsJournalPlugin)
     .add_plugins(BowstringPlugin)
+    .add_plugins(weapon_trail::WeaponTrailPlugin)
     .add_plugins(FishingLinePlugin)
     .add_plugins(QuestMarkersPlugin)
     // Pipeline-compile counters + the live-compile tripwire (decision 0837: macOS builds every

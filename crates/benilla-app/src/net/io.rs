@@ -6,14 +6,20 @@
 //! handshake (emitting [`SessionEvent::LoginStage`]s,
 //! and [`SessionEvent::LoginFailed`] + re-park on any pre-roster failure), it **parks at character
 //! select**: it emits the roster as a [`SessionEvent::CharacterList`] and blocks until the app
-//! answers with a guid over the pick channel. The pick sends `CMSG_PLAYER_LOGIN`, and the thread
-//! streams decoded [`SessionEvent`]s from there. All *policy* (credential auto-resubmit and its
-//! pacing, the env fast path, auto-relogin on reconnect, the director's click) is app-side
+//! answers with a guid over the pick channel. The pick sends `CMSG_PLAYER_LOGIN` and announces
+//! the connection **without waiting for the server's verdict** (the entry's head start, decision
+//! 0777 — the destination's tiles stream a round-trip early), and the thread streams decoded
+//! [`SessionEvent`]s from there. A `SMSG_CHARACTER_LOGIN_FAILED` in that stream is the verdict
+//! arriving late: it ends the cycle like a logout ([`Cycle::LoginRefused`]). All *policy*
+//! (credential auto-resubmit and its pacing, the env fast path, auto-relogin on reconnect, the
+//! director's click) is app-side
 //! ([`crate::login`], [`crate::char_select`]); this thread is a pure sequencer — it never sleeps.
 //!
 //! On a stream failure it emits a [`SessionEvent::Disconnected`] carrying
 //! [`SessionEnd::Lost`] and returns to the login park; a clean in-game logout
-//! ([`SessionEvent::LoggedOut`]) does the same with [`SessionEnd::LoggedOut`]. What happens next is
+//! ([`SessionEvent::LoggedOut`]) does the same with [`SessionEnd::LoggedOut`], and so does a
+//! **refused character login** ([`SessionEvent::CharacterLoginFailed`]) — the pick is announced
+//! optimistically, so a refusal is an entry taken back rather than a failure to enter. What happens next is
 //! the app's, and the two answers differ (decision 1262): the logout relists, while a loss ends the
 //! session at the account screen unless nobody is there to type. A single long-lived sibling write thread drains
 //! [`ClientCommand`](super::ClientCommand)s down to the server; each successful connection hands it
@@ -269,6 +275,17 @@ enum Cycle {
     /// A clean in-game logout: emit the teardown `Disconnected` (decision 0065's path), then park.
     /// The app's pending credentials re-establish the roster silently (decision 0539 §3).
     LoggedOut,
+    /// The server refused the character we picked (`SMSG_CHARACTER_LOGIN_FAILED`) — we are not in
+    /// the world, and the optimistic entry this thread already announced has to be taken back.
+    ///
+    /// It ends the cycle **exactly like a logout**, and for the same reason: by the time the
+    /// refusal lands the session has been split and the writer handed away, so there is no way
+    /// back to the character-select park on this connection. The relist that follows is the
+    /// logout path's, unchanged — the player sees their roster again, one reconnect they never
+    /// asked about behind it. (The reference keeps its connection here; the refusal is rare
+    /// enough, and the divergence invisible enough, that paying for it with the machinery a
+    /// logout already has is the trade decision 0065 made for the identical case.)
+    LoginRefused,
 }
 
 /// Everything [`spawn_net`] hands the app: the inbound event stream, the outbound command sender,
@@ -335,12 +352,18 @@ pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
                     match run(&cfg, &events_tx, &writer_tx, &parks, &abandon, &read_clock) {
                         Ok(Cycle::Exit) => return,
                         Ok(Cycle::Repark) => {}
-                        Ok(Cycle::LoggedOut) => {
+                        Ok(end @ (Cycle::LoggedOut | Cycle::LoginRefused)) => {
                             // Clean logout: the Disconnected tears the streamed world down app-side
                             // (decision 0065's path); the app's pending credentials re-park us live.
+                            // A refused login rides the same edge — the world it tears down is the
+                            // one the entry had only started to build.
+                            let reason = match end {
+                                Cycle::LoggedOut => "logged out",
+                                _ => "character login refused",
+                            };
                             if events_tx
                                 .send(SessionEvent::Disconnected {
-                                    reason: "logged out".into(),
+                                    reason: reason.into(),
                                     end: SessionEnd::LoggedOut,
                                 })
                                 .is_err()
@@ -774,7 +797,7 @@ fn run(
             .find(|c| c.guid == guid)
             .map(|c| c.name.clone())
             .unwrap_or_default();
-        session.player_login(guid)?;
+        session.player_login(refuse_once(guid))?;
         session.set_active_mover(guid)?;
 
         let billing_time_rested = session.billing_time_rested();
@@ -838,14 +861,20 @@ fn run(
                             }
                             continue;
                         }
-                        // A confirmed logout ends the cycle *after* the app hears about it.
-                        let logged_out = matches!(ev, SessionEvent::LoggedOut);
+                        // A confirmed logout — and a refused character login — end the cycle
+                        // *after* the app hears about it, so the screen always has the reason
+                        // before the teardown that acts on it.
+                        let ends = match ev {
+                            SessionEvent::LoggedOut => Some(Cycle::LoggedOut),
+                            SessionEvent::CharacterLoginFailed { .. } => Some(Cycle::LoginRefused),
+                            _ => None,
+                        };
                         // Receiver dropped → the app exited; end the thread cleanly.
                         if events_tx.send(ev).is_err() {
                             return Ok(Cycle::Exit);
                         }
-                        if logged_out {
-                            return Ok(Cycle::LoggedOut);
+                        if let Some(cycle) = ends {
+                            return Ok(cycle);
                         }
                     }
                 }
@@ -886,6 +915,35 @@ fn run(
             }
         }
     } // 'realm
+}
+
+/// **The refusal rehearsal** (`WOW_REFUSE_LOGIN=1`): make the server refuse the *first* character
+/// login of the run, so the path a refusal takes is walkable on demand.
+///
+/// A refused `CMSG_PLAYER_LOGIN` is rare on a local server and cannot be staged by hand — every
+/// guid the screen can offer is a real character on the account — which is exactly why the client
+/// sat on an unclearable loading screen for so long without anyone noticing. This sends the pick
+/// with a guid vmangos cannot read as a player (`HIGHGUID_UNIT`), which its
+/// `!packet.guid.IsPlayer()` guard refuses immediately, touching nothing else. The guid on the
+/// wire is the only thing altered: everything the app is told still names the real character, so
+/// what runs afterwards is the genuine path and not a special case.
+///
+/// **Once**, not every pick — so the run continues into the recovery (dialog → relist → a second
+/// pick that works) rather than looping on a refusal the `WOW_CHAR` fast path would re-answer
+/// forever. Inert without the env.
+fn refuse_once(guid: u64) -> u64 {
+    /// `HIGHGUID_UNIT | 1` — a guid no player can have, and one the server rejects before it
+    /// looks anything up. Shared with `benilla-protocol`'s `login_refusal_probe`.
+    const NOT_A_PLAYER: u64 = 0xF130_0000_0000_0001;
+    static ARMED: std::sync::OnceLock<AtomicU64> = std::sync::OnceLock::new();
+    let armed = ARMED
+        .get_or_init(|| AtomicU64::new(u64::from(std::env::var_os("WOW_REFUSE_LOGIN").is_some())));
+    if armed.swap(0, Ordering::SeqCst) == 1 {
+        bevy::log::warn!("net: WOW_REFUSE_LOGIN — sending this pick with a non-player guid");
+        NOT_A_PLAYER
+    } else {
+        guid
+    }
 }
 
 /// Drain the writer's sent-packet log into the trace as `out` lines — one per packet that reached

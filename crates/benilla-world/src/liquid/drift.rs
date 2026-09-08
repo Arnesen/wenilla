@@ -542,6 +542,7 @@ fn push_drift(
                 raster_bias: 0,
                 raster_slope: 0.0,
                 cam_relative: true,
+                no_depth_test: false,
                 main_entity: Entity::PLACEHOLDER,
                 light: None,
             },

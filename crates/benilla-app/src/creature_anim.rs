@@ -856,6 +856,20 @@ pub(crate) struct AnimDriver {
     sheath_byte: Option<u8>,
     /// The pending mid-animation weapon swap, while a draw/stow one-shot is in flight.
     sheath_swap: Option<SheathSwap>,
+    /// **Did this unit start an animation THIS frame** — of any kind: a one-shot, a masked
+    /// overlay, a cast/channel hold, or the mode machine's own base/gait play. Rewritten every
+    /// pass by [`driver::drive_animations`], so a reader one system later sees exactly the
+    /// frame's edge.
+    ///
+    /// Its one consumer is the weapon-trail latch ([`crate::weapon_trail`], decision 2076). The
+    /// reference consumes `unit+0xd1c`/`+0xd20` inside `CGUnit::PlayAnimation 0x5fe2f0` itself
+    /// (`0x5fe48e`, the fields' only reader), and `0x5fe2f0` is the **single** animation entry
+    /// point in the image — 40 call sites, locomotion among them (`0x602c60` → `0x5fd9e0` →
+    /// `0x5fd8b0` → `0x5fd100`), which is why this is not a one-shot flag: a unit that simply
+    /// starts running consumes the arm, and that is what starts Charge's trail (wow-re
+    /// `charproc8-trail-draw-state.md` §11.5/§11.6). benilla's driver is one batched system, not
+    /// a per-play function, so the arm cannot be read at the call the way the reference reads it.
+    started_anim: bool,
     /// A **masked upper-body one-shot** in flight (decision 0087): a swing/emote the live-state route
     /// sent to the SpineLow overlay (moving / seated / airborne-in-combat), playing *beside* [`Mode`]
     /// while the base track keeps driving the legs (run / sit / jump-arc). `None` = no overlay; a
@@ -1022,6 +1036,7 @@ impl Default for AnimDriver {
             sheath_cur: None,
             sheath_byte: None,
             sheath_swap: None,
+            started_anim: false,
             overlay: None,
             overlay_fade: None,
             wound: None,
@@ -1076,6 +1091,18 @@ impl AnimDriver {
     /// cache the placement renders and the Z toggle flips. `None` until first driven.
     pub(crate) fn sheath_state(&self) -> Option<u8> {
         self.sheath_cur
+    }
+
+    /// Did this unit start an animation this frame — see [`Self::started_anim`].
+    pub(crate) fn started_anim(&self) -> bool {
+        self.started_anim
+    }
+
+    /// Stand in for the driver's own write, so a consumer's test can raise the edge without
+    /// standing up the whole animation pass to produce it.
+    #[cfg(test)]
+    pub(crate) fn set_started_anim(&mut self, played: bool) {
+        self.started_anim = played;
     }
 
     /// Whether a draw/stow ceremony is in flight — the manual toggle's mid-ceremony debounce
@@ -1172,6 +1199,12 @@ impl Plugin for CreatureAnimPlugin {
                     // one-shot lands the same frame the packet (or space press) arrived.
                     flourish_to_anim,
                     drive_animations,
+                    // The weapon-trail latch (decision 2076) — immediately after the driver,
+                    // because the edge it consumes is `AnimDriver::played_anim`, which the driver
+                    // rewrites every pass. The reference reads the latch *inside*
+                    // `PlayAnimation 0x5fe2f0` itself; one system later is as close as a
+                    // batched driver gets, and it is still the same frame.
+                    crate::weapon_trail::fire_weapon_trails,
                     drive_hand_grip,
                     fire_anim_events,
                     // After the event scan: consume this frame's impact tags; the SwingImpact

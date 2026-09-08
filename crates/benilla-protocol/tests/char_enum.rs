@@ -140,3 +140,31 @@ fn logout_complete_decodes_to_logged_out() {
     let p = messages::parse_server(messages::opcode::SMSG_LOGOUT_COMPLETE, &[]).unwrap();
     assert!(matches!(decode(p)[..], [SessionEvent::LoggedOut]));
 }
+
+/// The **refused** pick (`SMSG_CHARACTER_LOGIN_FAILED`, opcode 65): one result byte, straight
+/// through to the event the glue layer answers.
+///
+/// It used to parse into nothing at all — the opcode had a name and no arm — so a server that
+/// refused a character login said it to a client that could not hear it, and the entry the IO
+/// thread had already announced simply never finished. The byte travels **raw**: it is a 1-based
+/// reason index whose meaning is a table in the reference's glue layer, and the wire has no
+/// business holding that table. `0x01` is vmangos's only value; `0x08` is the top of
+/// mangos-classic's `CharLoginFailReasons`, past the client's six-entry switch.
+#[test]
+fn a_refused_character_login_parses_and_decodes() {
+    for result in [0x01u8, 0x08] {
+        let p = messages::parse_server(
+            messages::opcode::SMSG_CHARACTER_LOGIN_FAILED,
+            std::slice::from_ref(&result),
+        )
+        .unwrap();
+        assert!(matches!(
+            p,
+            ServerPacket::CharacterLoginFailed { result: got } if got == result
+        ));
+        assert!(matches!(
+            decode(p)[..],
+            [SessionEvent::CharacterLoginFailed { result: got }] if got == result
+        ));
+    }
+}

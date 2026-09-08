@@ -784,3 +784,56 @@ fn real_hunter_shots_take_the_bows_load_and_release_clips() {
     assert_eq!(cat.kit(7).and_then(|k| k.anim_id), Some(105), "LoadBow");
     assert_eq!(cat.kit(164).and_then(|k| k.anim_id), Some(46), "AttackBow");
 }
+
+/// The type-8 arm's decode is **plain truncation** (`_ftol` at `0x40a2b0`), not the small-int
+/// idiom every other integer-carrying param uses — a slot decoded the wrong way yields a colour
+/// of 0 and a duration of 0, i.e. silently no trail at all.
+#[test]
+fn a_weapon_trail_proc_decodes_by_truncation() {
+    // Kit 324's shipped row: Zero = 16263465 (`0xf82929`), One = 20, Two = 600, Three = 100.
+    let proc = CharProc {
+        ty: char_proc_type::WEAPON_TRAIL,
+        params: [16_263_465.0, 20.0, 600.0, 100.0],
+    };
+    let trail = proc.as_weapon_trail().expect("a live trail proc");
+    assert_eq!(trail.rgb(), [0xf8, 0x29, 0x29], "R248 G41 B41");
+    assert_eq!(trail.alpha(), 100);
+    assert_eq!(trail.duration_ms, 600);
+    assert_eq!(
+        trail.packed, 0x64f8_2929,
+        "0xAARRGGBB, as `unit+0xd1c` holds it"
+    );
+    assert_ne!(
+        proc.small_int(0),
+        u32::from(trail.rgb()[0]),
+        "the small-int decode is the WRONG idiom here and must not be reused"
+    );
+}
+
+/// `0x5fe494 cmp eax,edi ; je` — a zero duration fires nothing, so it is not a trail.
+#[test]
+fn a_zero_duration_trail_proc_is_no_trail() {
+    let proc = CharProc {
+        ty: char_proc_type::WEAPON_TRAIL,
+        params: [16_263_465.0, 20.0, 0.0, 100.0],
+    };
+    assert!(proc.as_weapon_trail().is_none());
+}
+
+/// Only type 8 reaches the arm — `VisualKit::trail_proc` must not answer for a tint or an alpha
+/// proc whose `params[2]` happens to be nonzero.
+#[test]
+fn only_type_eight_arms_a_trail() {
+    for ty in [
+        char_proc_type::TINT,
+        char_proc_type::ALPHA,
+        char_proc_type::ANIM_RATE,
+        char_proc_type::CHAIN_CAST,
+    ] {
+        let proc = CharProc {
+            ty,
+            params: [16_263_465.0, 20.0, 600.0, 100.0],
+        };
+        assert!(proc.as_weapon_trail().is_none(), "type {ty}");
+    }
+}

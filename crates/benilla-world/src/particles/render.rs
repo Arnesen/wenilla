@@ -89,6 +89,8 @@ struct ExtractedDraw {
     /// Vertices are already camera-relative — the prepare rebase skips this draw. See
     /// [`super::buffer::EffectDrawSpec::cam_relative`].
     cam_relative: bool,
+    /// This draw ignores the depth buffer. See [`super::buffer::EffectDrawSpec::no_depth_test`].
+    no_depth_test: bool,
     /// Vertex range in the shared stream.
     range: Range<u32>,
     /// A booth's scene-light override (0539 §5); `None` = the world's shared light buffer.
@@ -200,6 +202,9 @@ pub struct EffectPipelineKey {
     /// def rather than a uniform bit so the 95% unlit majority keeps the identical instruction
     /// stream it has today.
     lit: bool,
+    /// Does this draw ignore the depth buffer entirely (`depth_compare = Always`)? Two values
+    /// exist and only one family sets it — see [`super::buffer::EffectDrawSpec::no_depth_test`].
+    no_depth_test: bool,
 }
 
 impl SpecializedRenderPipeline for EffectPipeline {
@@ -281,11 +286,12 @@ impl SpecializedRenderPipeline for EffectPipeline {
         }
         // `$WOW_PARTICLE_NODEPTH` — the occlusion A/B (B16): force the depth COMPARE to
         // `Always`, splitting "nothing is emitted" from "emitted and the depth buffer eats it".
-        let depth_compare = if std::env::var_os("WOW_PARTICLE_NODEPTH").is_some() {
-            CompareFunction::Always
-        } else {
-            CompareFunction::GreaterEqual
-        };
+        let depth_compare =
+            if key.no_depth_test || std::env::var_os("WOW_PARTICLE_NODEPTH").is_some() {
+                CompareFunction::Always
+            } else {
+                CompareFunction::GreaterEqual
+            };
         RenderPipelineDescriptor {
             label: Some("wow_effect_pipeline".into()),
             layout: vec![self.view_layout.clone(), self.image_layout.clone()],
@@ -368,6 +374,7 @@ fn extract_effects(
         raster_bias: d.raster_bias,
         raster_slope: d.raster_slope,
         cam_relative: d.cam_relative,
+        no_depth_test: d.no_depth_test,
         range: d.range.clone(),
         light: d.light.clone(),
     }));
@@ -425,6 +432,7 @@ fn queue_effects(
                     raster_bias: draw.raster_bias,
                     raster_slope_bits: draw.raster_slope.to_bits(),
                     lit: draw.lit,
+                    no_depth_test: draw.no_depth_test,
                 },
             );
             phase.add(Transparent3d {

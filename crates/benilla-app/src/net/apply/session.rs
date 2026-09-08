@@ -21,10 +21,11 @@ use crate::ui_taxi::TaxiState;
 use crate::ui_trainer::TrainerOpen;
 
 use super::super::{
-    CharActionResultMessage, CharListMessage, CinematicTriggeredMessage, DisconnectedMessage,
-    DroppedOpcodes, EnteredWorldMessage, GameTime, GuidIndex, KnockBackMessage, LoggedOutMessage,
-    LoginFailedMessage, LoginStageMessage, NetStatus, PendingTransfer, Reputations, SelfGuid,
-    ServerTime, ServerWallClock, TeleportMessage, WorldportMessage,
+    CharActionResultMessage, CharListMessage, CharacterLoginFailedMessage,
+    CinematicTriggeredMessage, DisconnectedMessage, DroppedOpcodes, EnteredWorldMessage, GameTime,
+    GuidIndex, KnockBackMessage, LoggedOutMessage, LoginFailedMessage, LoginStageMessage,
+    NetStatus, PendingTransfer, Reputations, SelfGuid, ServerTime, ServerWallClock,
+    TeleportMessage, WorldportMessage,
 };
 
 /// The pre-logon handshake reached a new stage (decision 0539) — the login screen's dialog reads it.
@@ -80,6 +81,16 @@ pub(super) fn character_list(
     // path), and nothing else clears `last_reason` until the next world entry.
     status.last_reason = None;
     char_lists.write(CharListMessage { characters, realm });
+}
+
+/// The server refused the character we picked (`SMSG_CHARACTER_LOGIN_FAILED`) — the entry
+/// announced a moment ago is void. `crate::char_select` takes the screen back and says why.
+pub(super) fn character_login_failed(
+    result: u8,
+    out: &mut MessageWriter<CharacterLoginFailedMessage>,
+) {
+    warn!("net: character login refused (result {result:#04x})");
+    out.write(CharacterLoginFailedMessage { result });
 }
 
 /// A cinematic sequence was triggered (`SMSG_TRIGGER_CINEMATIC`) — hand it to

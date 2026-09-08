@@ -146,6 +146,7 @@ impl Plugin for NetPlugin {
             .add_message::<RealmListMessage>()
             .add_message::<CharListMessage>()
             .add_message::<CharActionResultMessage>()
+            .add_message::<CharacterLoginFailedMessage>()
             .add_message::<EnteredWorldMessage>()
             .add_message::<CinematicTriggeredMessage>()
             .add_message::<ServerSaidMessage>()
@@ -2400,6 +2401,17 @@ pub(crate) struct CharListMessage {
 pub(crate) struct CharActionResultMessage {
     pub(crate) action: benilla_protocol::CharAction,
     pub(crate) code: u8,
+}
+
+/// The server **refused** the character we picked (`SMSG_CHARACTER_LOGIN_FAILED`), bridged from the
+/// Net drain. The entry announced a moment earlier is void: `crate::char_select` takes the screen
+/// back and raises the refusal dialog, and the loading cover comes down with it.
+///
+/// `result` is the server's raw reason index — [`crate::char_select::char_login_refusal_text`] is
+/// the one place that holds the reference's table for it.
+#[derive(Message, Clone, Copy)]
+pub(crate) struct CharacterLoginFailedMessage {
+    pub(crate) result: u8,
 }
 
 /// We entered the world (the IO thread's `Connected`, bridged from the Net drain): flips

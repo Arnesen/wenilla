@@ -82,7 +82,7 @@ pub(super) struct CheckMark;
 pub(super) struct CheckHilight;
 /// The dialog's message text (updated in place on stage changes).
 #[derive(Component)]
-pub(super) struct DialogText;
+pub(crate) struct DialogText;
 /// The dialog's edit box row items — the ref's `GlueDialogEditBox`, painted from
 /// [`super::LoginDialog::edit`] by [`refresh_dialog_box`].
 #[derive(Component, Clone)]

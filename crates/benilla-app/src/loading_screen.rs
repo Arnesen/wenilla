@@ -453,6 +453,7 @@ fn drive_loading_screen(
         MessageReader<crate::net::TeleportMessage>,
         MessageReader<crate::net::LoggedOutMessage>,
         MessageReader<crate::net::DisconnectedMessage>,
+        MessageReader<crate::net::CharacterLoginFailedMessage>,
         Option<Res<crate::net::PendingTransfer>>,
         Option<Res<crate::char_select::Roster>>,
     ),
@@ -464,6 +465,7 @@ fn drive_loading_screen(
         mut teleports,
         mut logouts,
         mut lost,
+        mut refusals,
         transfer,
         roster,
     ) = edges;
@@ -520,7 +522,12 @@ fn drive_loading_screen(
     // arms `awaiting_snap` for a snap the dead socket will never send, so without the disarm here
     // the cover is what the player would have been left staring at.
     let session_over = lost.read().any(|m| m.session_over);
-    if logouts.read().next().is_some() || session_over {
+    // A **refused character login** is the same cut, and it needs the disarm as badly as a dead
+    // session does: the entry edge above raised the cover with `awaiting_snap` armed for a snap
+    // the server has just told us will never come, and nothing else in this function can end that
+    // wait. Left alone it is a loading screen with no world behind it and no way off.
+    let refused = refusals.read().next().is_some();
+    if logouts.read().next().is_some() || session_over || refused {
         screen.active = true;
         screen.blackout = true;
         screen.awaiting_snap = false;
@@ -530,6 +537,8 @@ fn drive_loading_screen(
             "loading screen: blackout ({})",
             if session_over {
                 "session lost"
+            } else if refused {
+                "character login refused"
             } else {
                 "logout"
             }

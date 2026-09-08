@@ -44,6 +44,7 @@ fn app() -> App {
         .add_message::<WoundAnim>()
         .add_message::<SpellKitSound>()
         .add_message::<SpellKitShake>()
+        .add_message::<crate::weapon_trail::TrailArm>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
@@ -205,6 +206,7 @@ fn precast_kit_sound_rings_once_at_start() {
         .add_message::<WoundAnim>()
         .add_message::<SpellKitSound>()
         .add_message::<SpellKitShake>()
+        .add_message::<crate::weapon_trail::TrailArm>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
@@ -490,7 +492,8 @@ fn aura_state_kit_arms_persistent_and_reaps_on_aura_end() {
     // messages just have to exist for the writers.
     app.add_message::<crate::aura_visual::AuraProc>();
     app.add_message::<SpellKitSound>()
-        .add_message::<SpellKitShake>();
+        .add_message::<SpellKitShake>()
+        .add_message::<crate::weapon_trail::TrailArm>();
     app.init_resource::<FxLog>();
     app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables_with_paths(
         HashMap::from([(
@@ -630,6 +633,7 @@ fn a_harmful_go_wounds_each_hit_once_and_a_missile_arrival_always() {
         .add_message::<WoundAnim>()
         .add_message::<SpellKitSound>()
         .add_message::<SpellKitShake>()
+        .add_message::<crate::weapon_trail::TrailArm>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
@@ -736,6 +740,7 @@ fn missile_spawn_defers_iff_the_cast_kit_animates() {
         .add_message::<WoundAnim>()
         .add_message::<SpellKitSound>()
         .add_message::<SpellKitShake>()
+        .add_message::<crate::weapon_trail::TrailArm>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
@@ -848,6 +853,7 @@ fn a_targetless_dest_go_spawns_a_ground_missile_whose_arrival_sounds_at_the_poin
         .add_message::<WoundAnim>()
         .add_message::<SpellKitSound>()
         .add_message::<SpellKitShake>()
+        .add_message::<crate::weapon_trail::TrailArm>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
@@ -1336,6 +1342,7 @@ fn real_shooter(weapon: &RealRanged) -> Option<(App, Entity)> {
         .add_message::<WoundAnim>()
         .add_message::<SpellKitSound>()
         .add_message::<SpellKitShake>()
+        .add_message::<crate::weapon_trail::TrailArm>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()

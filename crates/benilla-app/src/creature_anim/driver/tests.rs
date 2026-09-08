@@ -4054,3 +4054,63 @@ fn the_no_wound_flag_takes_the_parry_but_not_the_dodge() {
         "the flag does not reach DODGE — it enters `0x60ec00` only on victimState 3"
     );
 }
+
+/// **The weapon-trail latch's edge** (decision 2076): `AnimDriver::started_anim` must be raised by
+/// a plain gait change, not only by a one-shot.
+///
+/// `0x5fe2f0` is the image's single animation entry point — locomotion reaches it through
+/// `0x602c60` → `0x5fd9e0` → `0x5fd8b0` → `0x5fd100`, and no locomotion id is in the combat set
+/// that takes its no-latch fast path — so a unit that simply starts running consumes the pending
+/// arm. That is what starts Charge's trail: kit 44's anim id is `-1`, `0x60f366 jl` skips the play
+/// block entirely, and the arm waits for the charge's own run (wow-re
+/// `charproc8-trail-draw-state.md` §11.5/§11.6). A one-shot-only edge would leave 38 Charge spells
+/// with no trail at all.
+///
+/// The other half matters as much: there is **no per-frame animation recompute** in the reference
+/// (`0x5fd8b0` has one caller and `0x5fd9e0`'s 38 sites are all event-driven), so a unit standing
+/// still must NOT keep raising the edge and eating arms.
+#[test]
+fn a_gait_change_raises_the_anim_edge_and_a_steady_frame_does_not() {
+    let mut app = app();
+    let unit = app
+        .world_mut()
+        .spawn((
+            caster_model(),
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+            MovementState::default(),
+        ))
+        .id();
+    let edge = |app: &App| {
+        app.world()
+            .entity(unit)
+            .get::<AnimDriver>()
+            .unwrap()
+            .started_anim()
+    };
+    app.update(); // settle: Stand — itself a play
+    app.update();
+    assert!(!edge(&app), "a settled, motionless unit plays nothing");
+    // Start running: the gait changes, so the base track takes a play.
+    app.world_mut().entity_mut(unit).insert(MovementState {
+        flags: move_flags::FORWARD,
+        speed: 7.0,
+        ..Default::default()
+    });
+    app.update();
+    assert!(edge(&app), "starting to run IS a PlayAnimation");
+    app.update();
+    assert!(
+        !edge(&app),
+        "…and holding that run is not — the reference has no per-frame recompute"
+    );
+    // A one-shot raises it too, which is the ordinary case.
+    app.world_mut().write_message(EmoteAnim {
+        entity: unit,
+        anim_id: 57,
+        seq: 1,
+    });
+    app.update();
+    assert!(edge(&app), "and so does a one-shot");
+}

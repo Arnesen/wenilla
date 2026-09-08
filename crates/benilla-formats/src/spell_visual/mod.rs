@@ -158,6 +158,39 @@ impl CharProc {
         char_proc_small_int(self.params[i])
     }
 
+    /// This slot decoded as the **weapon swing trail** proc, or `None` when it is not one.
+    ///
+    /// The dispatcher's type-8 arm (`0x60d80a`–`0x60d83b`) is three `_ftol` calls and two stores,
+    /// and it is the one proc that uses **plain truncation** rather than
+    /// [`char_proc_small_int`] — so this decode must not borrow that idiom:
+    ///
+    /// ```text
+    /// 60d80a  fld [edi-0x20] ; call 0x40a2b0    ; ftol(CharParamZero)
+    /// 60d812  fld [edi+0x10] ; call 0x40a2b0    ; ftol(CharParamThree)
+    /// 60d823  shl eax,0x18 ; or ecx,eax
+    /// 60d828  mov [esi+0xd1c],ecx               ; unit+0xd1c = zero | (three << 24)
+    /// 60d82e  fld [edi]      ; call 0x40a2b0    ; ftol(CharParamTwo)
+    /// 60d835  mov [esi+0xd20],eax               ; unit+0xd20 = two
+    /// ```
+    ///
+    /// `CharParamOne` is **not read by this arm** — stated because every shipped type-8 row
+    /// carries `20.0` there and a reader will look for its use (wow-re `charproc8-weapon-trail.md`
+    /// §1).
+    ///
+    /// `None` for a zero duration: `0x5fe494 cmp eax,edi` / `je 0x5fe4b7` is the reference's own
+    /// test, and a zero-duration arm fires nothing.
+    pub fn as_weapon_trail(&self) -> Option<TrailProc> {
+        if self.ty != char_proc_type::WEAPON_TRAIL {
+            return None;
+        }
+        let ftol = |f: f32| f.trunc() as i32 as u32;
+        let duration_ms = ftol(self.params[2]);
+        (duration_ms != 0).then(|| TrailProc {
+            packed: ftol(self.params[0]) | (ftol(self.params[3]) << 24),
+            duration_ms,
+        })
+    }
+
     /// This slot decoded as a chain/beam proc, or `None` when it is not one — either the type key
     /// is not a chain key, or it is but `CharParamZero` decodes to `0`, which names no
     /// `SpellChainEffects` row and is how the shipped table writes an unused slot (`chain`'s
@@ -186,6 +219,40 @@ impl CharProc {
 /// it — so callers clamp or bounds-test as the consumer requires.
 pub fn char_proc_small_int(param: f32) -> u32 {
     (param + 512.0).to_bits() >> 14 & 0xff
+}
+
+/// A [`char_proc_type::WEAPON_TRAIL`] slot decoded — the two words the dispatcher latches onto the
+/// unit (`unit+0xd1c` / `unit+0xd20`) and the trail object copies into its `SWING` record
+/// (`+0x608` / `+0x60c`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrailProc {
+    /// `ftol(CharParamZero) | (ftol(CharParamThree) << 24)` — a packed **`0xAARRGGBB`**, kept as
+    /// the one dword the reference actually stores. Every shipped `CharParamZero` is a
+    /// `0x00RRGGBB` under `2^24`, so the OR never collides; read the channels through [`Self::rgb`]
+    /// and [`Self::alpha`] rather than re-deriving the shifts.
+    pub packed: u32,
+    /// `ftol(CharParamTwo)` — how long the trail keeps **appending**, in milliseconds. Never `0`
+    /// (that is the reference's own no-fire test, so it decodes to `None`). 600 on the ordinary
+    /// melee kits, 1000 on Charge, **10000** on Whirlwind's whole spin.
+    pub duration_ms: u32,
+}
+
+impl TrailProc {
+    /// The trail's colour, `[R, G, B]` — kit 324's `0xf82929` is `[248, 41, 41]`.
+    pub fn rgb(&self) -> [u8; 3] {
+        [
+            (self.packed >> 16) as u8,
+            (self.packed >> 8) as u8,
+            self.packed as u8,
+        ]
+    }
+
+    /// The trail's starting alpha, `0..=255`. `100` on every shipped row (≈ 39 %) — and it is a
+    /// *clock* as much as an opacity: the fade rate, the retained segment count and the
+    /// termination test are all `alpha`-derived (wow-re `charproc8-weapon-trail.md` §8).
+    pub fn alpha(&self) -> u8 {
+        (self.packed >> 24) as u8
+    }
 }
 
 /// The `CharProc` type keys benilla models, by name. The full key space is the dispatcher's 9 cases
@@ -220,6 +287,20 @@ pub mod char_proc_type {
     /// ships `8947848.0` = `0x888888`, which reads like a packed grey that landed in the rate
     /// column; it is passed through, not special-cased.
     pub const ANIM_RATE: i32 = 11;
+
+    /// **Weapon SWING TRAIL** (`0x60d80a`) — the ribbon a melee ability smears between its
+    /// weapon model's `$WTB` and `$WTT` event markers. The arm is a **latch on the unit**, not a
+    /// same-call effect: the proc writes `unit+0xd1c` (the packed colour) and `unit+0xd20` (the
+    /// duration in ms), and the unit's **next** `PlayAnimation` (`0x5fe2f0`, the field's sole
+    /// reader at `0x5fe48e`) hands both to each of its two weapon-hand trail objects and clears
+    /// the duration — so it fires exactly once per arm. See [`CharProc::as_weapon_trail`] and
+    /// wow-re `charproc8-weapon-trail.md`.
+    ///
+    /// 34 of the 1772 kits carry it and for **18 of them it is the entire visual** — kit 324
+    /// (Heroic Strike / Overpower / Mortal Strike / Bloodthirst / Rend, 218 spells), 3050
+    /// (Hamstring), 557 (Sunder Armor) name no emitter slot at all, so a client without this proc
+    /// renders nothing for them beyond the swing animation.
+    pub const WEAPON_TRAIL: i32 = 8;
 
     /// **Chain / beam visual**, the key the shipped table uses on **channel**-stage kits — Drain
     /// Life's rope, Mind Flay's mana beam, Health Funnel, C'Thun's eye beam. Both this and
@@ -388,6 +469,13 @@ impl VisualKit {
     /// modelled procs want (a single float: the alpha factor, the packed tint).
     pub fn char_proc_param(&self, ty: i32) -> Option<f32> {
         self.char_procs().find(|p| p.ty == ty).map(|p| p.params[0])
+    }
+
+    /// This kit's weapon-trail proc — the **first** slot that decodes to one, matching the
+    /// dispatcher's in-order walk (no shipped kit carries two type-8 slots). `None` when the kit
+    /// arms no trail. See [`char_proc_type::WEAPON_TRAIL`].
+    pub fn trail_proc(&self) -> Option<TrailProc> {
+        self.char_procs().find_map(|p| p.as_weapon_trail())
     }
 
     /// This kit's chain/beam proc — the **first** slot that decodes to one, matching the client's

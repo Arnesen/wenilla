@@ -243,6 +243,9 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_CHAR_CREATE => ServerPacket::CharCreate {
             result: read_u8(&mut r)?,
         },
+        opcode::SMSG_CHARACTER_LOGIN_FAILED => ServerPacket::CharacterLoginFailed {
+            result: read_u8(&mut r)?,
+        },
         opcode::SMSG_UPDATE_OBJECT => ServerPacket::UpdateObject {
             objects: update_object::read_update_object(&mut r)?,
         },

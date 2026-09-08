@@ -219,6 +219,21 @@ pub enum SessionEvent {
         /// (decision 1976); `None` when it will arrive in the world stream instead.
         tutorial_flags: Option<Vec<u8>>,
     },
+    /// The server **refused** the character we picked (`SMSG_CHARACTER_LOGIN_FAILED`) — we are not
+    /// in the world and never were, whatever [`Self::Connected`] said a moment ago.
+    ///
+    /// It arrives on the world stream, *after* the IO thread has optimistically announced the
+    /// connection (the pick is sent and the entry begins in the same breath, decision 0777 — the
+    /// destination tiles start streaming a whole round-trip before the server's snap). So this is
+    /// an entry being *revoked*, and the app answers it the way it answers a logout: tear the
+    /// half-built entry down, go back to character select, and say why. The IO thread cycles the
+    /// connection behind that, and a fresh [`Self::CharacterList`] follows.
+    ///
+    /// `result` is the server's raw byte — a **1-based reason index** the reference maps through a
+    /// six-entry jump table onto its `CHAR_LOGIN_*` strings. Mapping it to something a player can
+    /// read is the glue layer's job ([`crate::messages::ServerPacket::CharacterLoginFailed`] has
+    /// the wire law).
+    CharacterLoginFailed { result: u8 },
     /// The server confirmed our logout (`SMSG_LOGOUT_COMPLETE`) — we are back at character select.
     /// The IO thread cycles the connection immediately; a fresh [`Self::CharacterList`] follows.
     LoggedOut,

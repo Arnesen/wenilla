@@ -58,6 +58,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             characters,
             realm: None,
         }],
+        ServerPacket::CharacterLoginFailed { result } => {
+            vec![SessionEvent::CharacterLoginFailed { result }]
+        }
         ServerPacket::LogoutComplete => vec![SessionEvent::LoggedOut],
         ServerPacket::LogoutResponse { reason, instant } => {
             vec![SessionEvent::LogoutResponse { reason, instant }]
