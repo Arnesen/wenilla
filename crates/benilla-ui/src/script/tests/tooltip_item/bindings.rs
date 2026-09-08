@@ -9,7 +9,7 @@ use crate::script::*;
 /// The shopping-compare pipeline end-to-end (0274 P4): a bag-ring hover on the main GameTooltip
 /// with shift held fires `SHOW_COMPARE_TOOLTIP` once per finger slot; a ref-shaped listener
 /// (PaperDollFrame.lua:621-640) seats ShoppingTooltip1/2, whose ARMED `SetInventoryItem` renders
-/// the byte law's compare shape — gray "Currently Equipped", WHITE name, the compact cut (the
+/// the byte law's compare shape — the gray CURRENTLY_EQUIPPED header, WHITE name, the compact cut (the
 /// description never prints). Releasing shift hides the pair; a shift-up hover fires nothing
 /// until the rising edge.
 #[test]
@@ -135,7 +135,7 @@ fn shift_compare_fires_seats_and_renders_the_compare_shape() {
         assert(table.getn(compare_calls) == 2, "two ring compares, got " .. table.getn(compare_calls))
         assert(compare_calls[1] == "11:1" and compare_calls[2] == "12:2", "slot:index order")
         assert(ShoppingTooltip1:IsShown() and ShoppingTooltip2:IsShown())
-        assert(ShoppingTooltip1TextLeft1:GetText() == "Currently Equipped")
+        assert(ShoppingTooltip1TextLeft1:GetText() == "[CURRENTLY_EQUIPPED]")
         assert(ShoppingTooltip1TextLeft2:GetText() == "Old Loop")
         assert(ShoppingTooltip2TextLeft2:GetText() == "Older Loop")
         -- The compact cut at 0x52e14c: the description never prints on a compare.
@@ -167,10 +167,10 @@ fn shift_compare_fires_seats_and_renders_the_compare_shape() {
             })
             .unwrap_or([0.0; 4])
     };
-    let gray = color_of("Currently Equipped");
+    let gray = color_of("[CURRENTLY_EQUIPPED]");
     assert!(
         (gray[0] - 128.0 / 255.0).abs() < 0.01 && (gray[1] - 128.0 / 255.0).abs() < 0.01,
-        "Currently Equipped is gray, got {gray:?}"
+        "CURRENTLY_EQUIPPED is gray, got {gray:?}"
     );
     let name = color_of("Old Loop");
     assert_eq!(name, [1.0, 1.0, 1.0, 1.0], "compare name is WHITE");
@@ -493,7 +493,7 @@ fn set_merchant_compare_item_answers_one_or_nil_per_candidate_slot() {
         s.eval::<bool>(
             r#"local n = ShoppingTooltip1:NumLines()
                for i = 1, n do
-                 if getglobal("ShoppingTooltip1TextLeft"..i):GetText() == "Currently Equipped" then
+                 if getglobal("ShoppingTooltip1TextLeft"..i):GetText() == "[CURRENTLY_EQUIPPED]" then
                    return true
                  end
                end

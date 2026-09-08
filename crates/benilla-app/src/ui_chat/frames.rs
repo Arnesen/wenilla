@@ -5,15 +5,18 @@
 //! patterns, the `<AFK>/<DND>/<GM>` flag prefix, the `|Hplayer:…|h[Name]|h` link (never on EMOTE
 //! or monster lines), the `[Language]` header, the `[N. Name]` channel prefix with its " - Zone"
 //! tail stripped (the SPEECH branch only — a notice prints arg4 whole, 1275), and the
-//! `CHAT_<X>_NOTICE` channel-notice strings. Formats are QUOTED from the extracted GlobalStrings
-//! (0288's pin, §2/§4); colors come from the stock window's `ChatTypeInfo` table (1948), whose
-//! shipped defaults are transcribed in [`super::event::default_color`].
+//! `CHAT_<X>_NOTICE` channel-notice strings. **Every one of those formats is a KEY, resolved from
+//! the player's own `GlobalStrings.lua` at render time** (decision 2045) — and resolved the way
+//! `ChatFrame_OnEvent` itself does it, by splicing the type into `CHAT_<TYPE>_GET` and the notice
+//! token into `CHAT_<TOKEN>_NOTICE` rather than by carrying a table of English. Colors come from
+//! the stock window's `ChatTypeInfo` table (1948), whose shipped defaults are transcribed in
+//! [`super::event::default_color`].
 
 use bevy::prelude::*;
 
-use benilla_protocol::messages::channel_notice as notice;
+use benilla_ui::strings::{fill, Arg};
 
-use super::event::{event_name, ChatEvent, ChatEventKind};
+use super::event::{event_name, notice_token, ChatEvent, ChatEventKind};
 
 /// What the app keeps beside the reference's chat frames: the default language its composer
 /// needs for the log-file line, and the log files themselves. The per-window registration that
@@ -58,7 +61,12 @@ pub(crate) fn route(
     // tab flash. The app's transcription of that composition survives only for the log files,
     // which want the rendered line the window will show.
     let default_language = windows.default_language.clone();
-    if let Some(line) = compose(event, kind, &default_language) {
+    // The composer's strings are the VM's own — `getglobal` against the `GlobalStrings.lua` the
+    // reference's Lua reads, so the log line and the window line cannot say different things
+    // (decision 2045).
+    if let Some(line) = compose(event, kind, &default_language, &|key| {
+        script.lua().globals().get::<String>(key).ok()
+    }) {
         windows.logs.record(kind.is_combat_log(), &line);
     }
     script.fire_event(event_name(kind), event.script_args());
@@ -70,6 +78,7 @@ pub(crate) fn compose(
     event: &ChatEvent,
     kind: ChatEventKind,
     default_language: &str,
+    get: &dyn Fn(&str) -> Option<String>,
 ) -> Option<String> {
     use ChatEventKind as K;
     Some(match kind {
@@ -91,21 +100,37 @@ pub(crate) fn compose(
         // sentence was already built by the time it became an event — that is what
         // [`super::combat`] is — so there is nothing left for the composer to do.
         k if k.is_combat_log() => event.text.clone(),
-        // "%s is ignoring you." (CHAT_IGNORED, arg2).
-        K::Ignored => format!("{} is ignoring you.", event.sender),
-        // "[%s] " .. the member list (CHAT_CHANNEL_LIST_GET, l.1409) — arg4 WHOLE, see
-        // [`strip_zone`]: only the speech branch runs the gsub.
-        K::ChannelList => format!("[{}] {}", event.channel, event.text),
+        // `format(TEXT(CHAT_IGNORED), arg2)` (l.1404). **`CHAT_IGNORED`, not
+        // `ERR_IGNORING_YOU_S`** — both read "%s is ignoring you." in enUS and only the key says
+        // which one the client actually shows here (2045's "assert the identifier, not the
+        // sentence"); a locale that words them apart is where the difference surfaces.
+        K::Ignored => fill(
+            &get("CHAT_IGNORED").unwrap_or_default(),
+            &[Arg::S(&event.sender)],
+        ),
+        // `format(CHAT_CHANNEL_LIST_GET .. arg1, arg4)` (l.1409) — the member list IS the message
+        // and the channel fills the hole, with arg4 WHOLE: see [`strip_zone`] for why only the
+        // speech branch runs the gsub. The reference does not escape arg1 in this arm.
+        K::ChannelList => fill(
+            &format!(
+                "{}{}",
+                get("CHAT_CHANNEL_LIST_GET").unwrap_or_default(),
+                event.text
+            ),
+            &[Arg::S(&event.channel)],
+        ),
         K::ChannelNotice | K::ChannelNoticeUser => {
-            return compose_notice(event);
+            return compose_notice(event, kind, get);
         }
         // Everything else is the player/monster-line branch (l.1425-1467).
         _ => {
-            let pflag = match event.flag.as_str() {
-                "AFK" => "<AFK>",
-                "DND" => "<DND>",
-                "GM" => "<GM>",
-                _ => "",
+            // `pflag = TEXT(getglobal("CHAT_FLAG_"..arg6))` (l.1430) — `CHAT_FLAG_AFK`/`_DND`/
+            // `_GM`, spliced from the flag the wire sent rather than matched against three
+            // hardcoded angle-bracket tokens. An empty flag looks up nothing, as it does there.
+            let pflag = if event.flag.is_empty() {
+                String::new()
+            } else {
+                get(&format!("CHAT_FLAG_{}", event.flag)).unwrap_or_default()
             };
             let monster = matches!(
                 kind,
@@ -146,14 +171,22 @@ pub(crate) fn compose(
             } else {
                 String::new()
             };
-            // MONSTER_EMOTE / RAID_BOSS_EMOTE embed their `%s` in the text itself
-            // (CHAT_MONSTER_EMOTE_GET = "" — l.1437 keeps the name bare for the substitution).
-            let body = if matches!(kind, K::MonsterEmote | K::RaidBossEmote) {
-                format!("{header}{}", event.text.replace("%s", &named))
+            // `arg1 = gsub(arg1, "%%", "%%%%")` (l.1436), then
+            // `format(CHAT_<TYPE>_GET .. languageHeader .. arg1, name)` — ONE substitution over
+            // the pattern and the body concatenated, which is why the body has to be escaped
+            // first: a `%s` a player typed must not eat the name. The monster family and
+            // RAID_BOSS_EMOTE are the reference's deliberate exception (l.1434-1437): their
+            // `%s` IS the name's hole (`CHAT_MONSTER_EMOTE_GET = ""`), so the escape is skipped
+            // and the fill reaches into the text.
+            let text = if monster {
+                event.text.clone()
             } else {
-                let get = get_pattern(kind);
-                format!("{}{header}{}", get.replace("%s", &named), event.text)
+                event.text.replace('%', "%%")
             };
+            let body = fill(
+                &format!("{}{header}{text}", get_pattern(kind, get)),
+                &[Arg::S(&named)],
+            );
             // The channel prefix (l.1462-1466): arg4 with its " - Zone" tail stripped,
             // bracketed. arg4 arrives already numbered ("2. Trade - City") once the channel
             // wiring (P6) assigns numbers.
@@ -166,34 +199,19 @@ pub(crate) fn compose(
     })
 }
 
-/// The `CHAT_<TYPE>_GET` prefix patterns (GlobalStrings, quoted — `\32` spaces verbatim).
-fn get_pattern(kind: ChatEventKind) -> &'static str {
-    use ChatEventKind as K;
-    match kind {
-        K::Say => "%s says: ",
-        K::Yell => "%s yells: ",
-        K::Whisper => "%s whispers: ",
-        K::WhisperInform => "To %s: ",
-        K::Emote => "%s ",
-        K::Afk => "%s is Away From Keyboard: ",
-        K::Dnd => "%s does not wish to be disturbed: ",
-        K::Party => "[Party] %s: ",
-        K::Guild => "[Guild] %s: ",
-        K::Officer => "[Officer] %s: ",
-        K::Raid => "[Raid] %s: ",
-        K::RaidLeader => "[Raid Leader] %s: ",
-        K::RaidWarning => "[Raid Warning] %s: ",
-        K::Battleground => "[Battleground] %s: ",
-        K::BattlegroundLeader => "[Battleground Leader] %s: ",
-        K::Channel => "%s: ",
-        K::ChannelJoin => "%s joined channel.",
-        K::ChannelLeave => "%s left channel.",
-        K::MonsterSay => "%s says: ",
-        K::MonsterYell => "%s yells: ",
-        K::MonsterWhisper => "%s whispers: ",
-        // Handled before get_pattern is consulted.
-        _ => "%s",
-    }
+/// The `CHAT_<TYPE>_GET` prefix pattern for a kind — `getglobal("CHAT_"..type.."_GET")`, the
+/// reference's own splice (l.1445-1453), where `type` is the event name minus its `CHAT_MSG_`
+/// prefix. So this is a *derivation*, not a table: every kind the client fires has such a key by
+/// construction, and the ones with nothing to prefix ship as `""` (the whole combat/spell family,
+/// `CHAT_MONSTER_EMOTE_GET`, `CHAT_RAID_BOSS_EMOTE_GET`) rather than being absent.
+///
+/// A key the chain has no string for resolves to `""` — the same nothing an unprefixed line gets,
+/// and the reference's own data-suppression posture.
+fn get_pattern(kind: ChatEventKind, get: &dyn Fn(&str) -> Option<String>) -> String {
+    let ty = event_name(kind)
+        .strip_prefix("CHAT_MSG_")
+        .unwrap_or_default();
+    get(&format!("CHAT_{ty}_GET")).unwrap_or_default()
 }
 
 /// Strip the zone tail from a channel display name (`gsub(arg4, "%s%-%s.*", "")` —
@@ -212,52 +230,36 @@ fn strip_zone(channel: &str) -> &str {
     }
 }
 
-/// The `SMSG_CHANNEL_NOTIFY` → chat line law: the notice byte selects the quoted
-/// `CHAT_<X>_NOTICE` string (GlobalStrings 493-745); `channel` fills `%s` first, the tail names
-/// (already guid-resolved by the bridge) fill the rest. `None` = the 1.12 UI shows nothing for
-/// this notice (MODE_CHANGE has no NOTICE string — flag-change chatter is silent).
+/// The `SMSG_CHANNEL_NOTIFY` → chat line law: the notice byte becomes a **token**
+/// ([`notice_token`], the client's own `0x49c60c` jump table) and the token names the string —
+/// `getglobal("CHAT_"..arg1.."_NOTICE")`, l.1416/1424. `None` = the 1.12 UI shows nothing for this
+/// notice: MODE_CHANGE has no token and no NOTICE string (flag-change chatter is silent), and
+/// neither does a byte past the table.
+///
+/// **The argument list is the reference's, and its order never varies with the notice.**
+/// CHANNEL_NOTICE passes arg4 alone; CHANNEL_NOTICE_USER passes arg4 then arg2, plus arg5 when the
+/// packet carried a second name ("X kicked by Y"). One line reads the other way round —
+/// `CHAT_INVITE_NOTICE = "%2$s has invited you to join the channel '%1$s'."` — and it gets there
+/// with **positional specifiers in the string**, not with a special case at the call site. That is
+/// the whole argument for resolving these by key: hand-typing the English silently hardcodes one
+/// locale's word order (decision 2045).
 ///
 /// `chan` is arg4 **whole**, zone tail and all — see [`strip_zone`] for why the notice arms are
 /// not the gsub's callers.
-pub(crate) fn compose_notice(event: &ChatEvent) -> Option<String> {
-    let chan = &event.channel;
-    let a = &event.sender; // the notice's first name (actor / affected)
-    let b = &event.target; // the second name (kicked-by style)
-    let n: u8 = event.notice_byte().unwrap_or(0xFF);
-    Some(match n {
-        notice::YOU_JOINED => format!("Joined Channel: [{chan}]"),
-        notice::YOU_LEFT => format!("Left Channel: [{chan}]"),
-        notice::WRONG_PASSWORD => format!("Wrong password for {chan}."),
-        notice::NOT_MEMBER => format!("Not on channel {chan}."),
-        notice::NOT_MODERATOR => format!("Not a moderator of {chan}."),
-        notice::PASSWORD_CHANGED => format!("[{chan}] Password changed by {a}."),
-        notice::OWNER_CHANGED => format!("[{chan}] Owner changed to {a}."),
-        notice::PLAYER_NOT_FOUND => format!("[{chan}] Player {a} is not on channel."),
-        notice::NOT_OWNER => format!("[{chan}] You are not the channel owner."),
-        notice::CHANNEL_OWNER => format!("[{chan}] Channel owner is {a}."),
-        notice::MODE_CHANGE => return None, // no NOTICE string in 1.12 — silent
-        notice::ANNOUNCEMENTS_ON => format!("[{chan}] Channel announcements enabled by {a}."),
-        notice::ANNOUNCEMENTS_OFF => format!("[{chan}] Channel announcements disabled by {a}."),
-        notice::MODERATION_ON => format!("[{chan}] Channel moderation enabled by {a}."),
-        notice::MODERATION_OFF => format!("[{chan}] Channel moderation disabled by {a}."),
-        notice::MUTED => format!("[{chan}] You do not have permission to speak."),
-        notice::PLAYER_KICKED => format!("[{chan}] Player {a} kicked by {b}."),
-        notice::BANNED => format!("[{chan}] You are banned from that channel."),
-        notice::PLAYER_BANNED => format!("[{chan}] Player {a} banned by {b}."),
-        notice::PLAYER_UNBANNED => format!("[{chan}] Player {a} unbanned by {b}."),
-        notice::PLAYER_NOT_BANNED => format!("[{chan}] Player {a} is not banned."),
-        notice::PLAYER_ALREADY_MEMBER => format!("[{chan}] Player {a} is already on the channel."),
-        notice::INVITE => format!("{a} has invited you to join the channel '{chan}'."),
-        notice::INVITE_WRONG_FACTION => format!("Target is in the wrong alliance for {chan}."),
-        notice::WRONG_FACTION => format!("Wrong alliance for {chan}."),
-        notice::INVALID_NAME => "Invalid channel name".to_string(),
-        notice::NOT_MODERATED => format!("{chan} is not moderated"),
-        notice::PLAYER_INVITED => format!("[{chan}] You invited {a} to join the channel"),
-        notice::PLAYER_INVITE_BANNED => format!("[{chan}] {a} has been banned."),
-        notice::THROTTLED => format!(
-            "[{chan}] The number of messages that can be sent to this channel is limited, \
-             please wait to send another message."
-        ),
-        _ => return None,
-    })
+pub(crate) fn compose_notice(
+    event: &ChatEvent,
+    kind: ChatEventKind,
+    get: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let token = notice_token(event.notice_byte()?)?;
+    let template = get(&format!("CHAT_{token}_NOTICE"))?;
+    let mut args = vec![Arg::S(event.channel.as_str())];
+    if kind == ChatEventKind::ChannelNoticeUser {
+        args.push(Arg::S(&event.sender));
+        if !event.target.is_empty() {
+            args.push(Arg::S(&event.target));
+        }
+    }
+    let line = fill(&template, &args);
+    (!line.is_empty()).then_some(line)
 }

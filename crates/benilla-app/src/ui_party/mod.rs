@@ -124,27 +124,6 @@ pub struct GroupState {
     pub ready_check_answers: Vec<(u64, bool)>,
 }
 
-// The GlobalStrings templates, quoted verbatim from the reference client's own patch chain
-// (decision 0246 extraction; `GlobalStrings.lua` line numbers cited per constant).
-const JOINED_PARTY: &str = "%s joins the party."; // ERR_JOINED_GROUP_S (GlobalStrings:1665)
-const LEFT_PARTY: &str = "%s leaves the party."; // ERR_LEFT_GROUP_S (GlobalStrings:1670)
-const GROUP_DISBANDED: &str = "Your group has been disbanded."; // ERR_GROUP_DISBANDED (GlobalStrings:1582)
-const UNINVITE_YOU: &str = "You have been removed from the group."; // ERR_UNINVITE_YOU (GlobalStrings:1904)
-const INVITED_TO_GROUP: &str = "%s has invited you to join a group."; // ERR_INVITED_TO_GROUP_S (GlobalStrings:1654)
-const DECLINE_GROUP: &str = "%s declines your group invitation."; // ERR_DECLINE_GROUP_S (GlobalStrings:1545)
-const NEW_LEADER: &str = "%s is now the group leader."; // ERR_NEW_LEADER_S (GlobalStrings:1724)
-const NEW_LEADER_YOU: &str = "You are now the group leader."; // ERR_NEW_LEADER_YOU (GlobalStrings:1725)
-const RAID_MEMBER_ADDED: &str = "%s has joined the raid group"; // ERR_RAID_MEMBER_ADDED_S (GlobalStrings:1824)
-const RAID_MEMBER_REMOVED: &str = "%s has left the raid group"; // ERR_RAID_MEMBER_REMOVED_S (GlobalStrings:1825)
-const RAID_YOU_JOINED: &str = "You have joined a raid group"; // ERR_RAID_YOU_JOINED (GlobalStrings:1826)
-const READY_CHECK_START_S: &str = "%s has initiated a ready check"; // ERR_RAID_LEADER_READY_CHECK_START_S (GlobalStrings:1823)
-
-/// `format!`-free "%s" substitution — the templates are quoted verbatim from GlobalStrings, so
-/// they carry printf placeholders, not Rust ones.
-fn fmt_s(template: &str, arg: &str) -> String {
-    template.replacen("%s", arg, 1)
-}
-
 impl GroupState {
     /// Apply one `SMSG_GROUP_LIST` and compose the system lines its roster diff implies. The
     /// diff is **ungated** (the 0440 byte law, `0x5e6c19`/`0x5e6d37`): the cache starts empty,
@@ -158,7 +137,7 @@ impl GroupState {
         members: Vec<GroupMemberEntry>,
         leader: u64,
         loot: Option<GroupLootInfo>,
-    ) -> Vec<String> {
+    ) -> Vec<UiError> {
         let mut lines = Vec::new();
         // The all-zero shape is "you are no longer in a group" (vmangos sends a default packet,
         // `Group.h:257`); `leader == 0` is its reliable discriminator (a live group always names
@@ -167,19 +146,19 @@ impl GroupState {
         // Raid wording keys off whichever side of the transition was a raid. INTERIM (0440):
         // the §5 pinned the party line's `groupType==0` gate; the raid twin's exact trigger
         // wasn't walked.
-        let (added_tpl, removed_tpl) = if group_type == 1 || (leaving && self.group_type == 1) {
-            (RAID_MEMBER_ADDED, RAID_MEMBER_REMOVED)
+        let (added, removed) = if group_type == 1 || (leaving && self.group_type == 1) {
+            ("ERR_RAID_MEMBER_ADDED_S", "ERR_RAID_MEMBER_REMOVED_S")
         } else {
-            (JOINED_PARTY, LEFT_PARTY)
+            ("ERR_JOINED_GROUP_S", "ERR_LEFT_GROUP_S")
         };
         for m in &members {
             if !self.members.iter().any(|old| old.guid == m.guid) {
-                lines.push(fmt_s(added_tpl, &m.name));
+                lines.push(UiError::s(added, &m.name));
             }
         }
         for old in &self.members {
             if !members.iter().any(|m| m.guid == old.guid) {
-                lines.push(fmt_s(removed_tpl, &old.name));
+                lines.push(UiError::s(removed, &old.name));
             }
         }
         if leaving {
@@ -189,7 +168,7 @@ impl GroupState {
         // Our own party→raid conversion (or joining straight into a raid). INTERIM like the
         // wording pick above.
         if group_type == 1 && self.group_type != 1 {
-            lines.push(RAID_YOU_JOINED.to_string());
+            lines.push(UiError::key("ERR_RAID_YOU_JOINED"));
         }
         // The OTHER direction clears the raid-target board. `0x4ba550` — sole caller `0x5e6ebb`,
         // inside `SMSG_GROUP_LIST 0x7d`'s raid-flag-CLEAR leg — `rep stosd`-zeroes all eight slots
@@ -236,28 +215,28 @@ impl GroupState {
     /// `SMSG_GROUP_INVITE` — someone asked us in. Arms the pending invite (the popup rides it)
     /// and composes the chat-side notice line (CONFIRMED 0440: the real handler `0x5e6730`
     /// fires ERR_INVITED_TO_GROUP_S in addition to the popup's event).
-    pub fn apply_invited(&mut self, inviter: &str) -> Vec<String> {
+    pub fn apply_invited(&mut self, inviter: &str) -> Vec<UiError> {
         self.pending_invite = Some(inviter.to_string());
-        vec![fmt_s(INVITED_TO_GROUP, inviter)]
+        vec![UiError::s("ERR_INVITED_TO_GROUP_S", inviter)]
     }
 
     /// `SMSG_GROUP_DECLINE` — our invitee said no (sent to the inviter only).
-    pub fn apply_declined(&mut self, name: &str) -> Vec<String> {
-        vec![fmt_s(DECLINE_GROUP, name)]
+    pub fn apply_declined(&mut self, name: &str) -> Vec<UiError> {
+        vec![UiError::s("ERR_DECLINE_GROUP_S", name)]
     }
 
     /// `SMSG_GROUP_UNINVITE` (empty body) — we were kicked. Prints ERR_UNINVITE_YOU
     /// **unconditionally**, at the opcode (0440: handler `0x5e6850`); the empty roster echo
     /// that follows adds its own leave-diff lines, exactly like the reference.
-    pub fn apply_uninvited(&mut self) -> Vec<String> {
-        vec![UNINVITE_YOU.to_string()]
+    pub fn apply_uninvited(&mut self) -> Vec<UiError> {
+        vec![UiError::key("ERR_UNINVITE_YOU")]
     }
 
     /// `SMSG_GROUP_DESTROYED` — the group is gone outright. Gated on believing we're grouped
     /// (0440: `0x5e6880` tests `0x4e86d0() != 0`); the echo list's own lines still follow.
-    pub fn apply_destroyed(&mut self) -> Vec<String> {
+    pub fn apply_destroyed(&mut self) -> Vec<UiError> {
         if self.in_group {
-            vec![GROUP_DISBANDED.to_string()]
+            vec![UiError::key("ERR_GROUP_DISBANDED")]
         } else {
             Vec::new()
         }
@@ -265,11 +244,11 @@ impl GroupState {
 
     /// `SMSG_GROUP_SET_LEADER` — the broadcast leader change, by name (the guid is already in
     /// our roster; vmangos re-sends the full list right after, `Group::ChangeLeader`).
-    pub fn apply_leader_changed(&mut self, name: &str, own_name: Option<&str>) -> Vec<String> {
+    pub fn apply_leader_changed(&mut self, name: &str, own_name: Option<&str>) -> Vec<UiError> {
         if own_name == Some(name) {
-            vec![NEW_LEADER_YOU.to_string()]
+            vec![UiError::key("ERR_NEW_LEADER_YOU")]
         } else {
-            vec![fmt_s(NEW_LEADER, name)]
+            vec![UiError::s("ERR_NEW_LEADER_S", name)]
         }
     }
 
@@ -437,7 +416,7 @@ impl GroupState {
     /// nor pops; everyone **else** prints `ERR_RAID_LEADER_READY_CHECK_START_S` with the leader's
     /// name and gets the popup — the ticket the feed turns into a `READY_CHECK` event edge. Both
     /// arms bump the request generation and start a fresh answer log.
-    pub fn apply_ready_check_request(&mut self, we_lead: bool) -> Vec<String> {
+    pub fn apply_ready_check_request(&mut self, we_lead: bool) -> Vec<UiError> {
         self.ready_check_requests = self.ready_check_requests.wrapping_add(1);
         self.ready_check_answers.clear();
         if we_lead {
@@ -452,7 +431,7 @@ impl GroupState {
             .find(|m| m.guid == self.leader)
             .map(|m| m.name.as_str())
             .unwrap_or("");
-        vec![fmt_s(READY_CHECK_START_S, leader)]
+        vec![UiError::s("ERR_RAID_LEADER_READY_CHECK_START_S", leader)]
     }
 
     /// `MSG_RAID_READY_CHECK` (answer form) — one member's answer, which the server forwards to
@@ -526,7 +505,7 @@ mod tests {
 
         assert_eq!(
             g.apply_ready_check_request(false),
-            vec!["Alice has initiated a ready check".to_string()]
+            vec![UiError::s("ERR_RAID_LEADER_READY_CHECK_START_S", "Alice")]
         );
         assert_eq!((g.ready_check, g.ready_check_requests), (1, 1));
         assert!(
@@ -555,18 +534,18 @@ mod tests {
         // (the real client's cache starts empty, 0x5e6c19).
         assert_eq!(
             g.apply_list(0, 0, vec![member("Alice", 1)], 1, None),
-            vec!["Alice joins the party."]
+            vec![UiError::s("ERR_JOINED_GROUP_S", "Alice")]
         );
         assert!(g.in_group);
         // Carol joins.
         assert_eq!(
             g.apply_list(0, 0, vec![member("Alice", 1), member("Carol", 3)], 1, None),
-            vec!["Carol joins the party."]
+            vec![UiError::s("ERR_JOINED_GROUP_S", "Carol")]
         );
         // Carol leaves (3→2).
         assert_eq!(
             g.apply_list(0, 0, vec![member("Alice", 1)], 1, None),
-            vec!["Carol leaves the party."]
+            vec![UiError::s("ERR_LEFT_GROUP_S", "Carol")]
         );
         // An unchanged resync (loot/status churn re-sends the list) prints nothing.
         assert!(g
@@ -586,29 +565,29 @@ mod tests {
         );
         assert_eq!(
             g.apply_list(0, 0, Vec::new(), 0, None),
-            vec!["Alice leaves the party."]
+            vec![UiError::s("ERR_LEFT_GROUP_S", "Alice")]
         );
         assert!(!g.in_group);
 
         // Kicked: SMSG_GROUP_UNINVITE prints unconditionally at the opcode.
         let mut g = GroupState::default();
         g.apply_list(0, 0, vec![member("Alice", 1)], 1, None);
-        assert_eq!(
-            g.apply_uninvited(),
-            vec!["You have been removed from the group."]
-        );
+        assert_eq!(g.apply_uninvited(), vec![UiError::key("ERR_UNINVITE_YOU")]);
         assert_eq!(
             g.apply_list(0, 0, Vec::new(), 0, None),
-            vec!["Alice leaves the party."]
+            vec![UiError::s("ERR_LEFT_GROUP_S", "Alice")]
         );
 
         // Destroyed: GROUP_DESTROYED prints (grouped), the echo list still runs its diff.
         let mut g = GroupState::default();
         g.apply_list(0, 0, vec![member("Alice", 1)], 1, None);
-        assert_eq!(g.apply_destroyed(), vec!["Your group has been disbanded."]);
+        assert_eq!(
+            g.apply_destroyed(),
+            vec![UiError::key("ERR_GROUP_DISBANDED")]
+        );
         assert_eq!(
             g.apply_list(0, 0, Vec::new(), 0, None),
-            vec!["Alice leaves the party."]
+            vec![UiError::s("ERR_LEFT_GROUP_S", "Alice")]
         );
         // Ungrouped, GROUP_DESTROYED is silent (the 0x4e86d0 gate).
         assert!(g.apply_destroyed().is_empty());
@@ -618,7 +597,7 @@ mod tests {
         g.apply_list(0, 0, vec![member("Alice", 1)], 1, None);
         assert_eq!(
             g.apply_list(0, 0, Vec::new(), 0, None),
-            vec!["Alice leaves the party."]
+            vec![UiError::s("ERR_LEFT_GROUP_S", "Alice")]
         );
     }
 
@@ -630,15 +609,18 @@ mod tests {
         // Party → raid conversion: same roster, type flips.
         assert_eq!(
             g.apply_list(1, 0, vec![member("Alice", 1)], 1, None),
-            vec!["You have joined a raid group"]
+            vec![UiError::key("ERR_RAID_YOU_JOINED")]
         );
         // A raid join/leave uses the raid strings.
         assert_eq!(
             g.apply_list(1, 0, vec![member("Alice", 1), member("Dave", 4)], 1, None),
-            vec!["Dave has joined the raid group"]
+            vec![UiError::s("ERR_RAID_MEMBER_ADDED_S", "Dave")]
         );
         let mut lines = g.apply_list(1, 0, vec![member("Alice", 1)], 1, None);
-        assert_eq!(lines.pop().as_deref(), Some("Dave has left the raid group"));
+        assert_eq!(
+            lines.pop(),
+            Some(UiError::s("ERR_RAID_MEMBER_REMOVED_S", "Dave"))
+        );
         // Leaving the raid: the ack prints the LEAVE line; the empty list diffs with raid
         // wording (keyed off the departed group's type).
         assert_eq!(
@@ -647,7 +629,7 @@ mod tests {
         );
         assert_eq!(
             g.apply_list(0, 0, Vec::new(), 0, None),
-            vec!["Alice has left the raid group"]
+            vec![UiError::s("ERR_RAID_MEMBER_REMOVED_S", "Alice")]
         );
     }
 
@@ -670,7 +652,7 @@ mod tests {
         let mut g = GroupState::default();
         assert_eq!(
             g.apply_invited("Bob"),
-            vec!["Bob has invited you to join a group."]
+            vec![UiError::s("ERR_INVITED_TO_GROUP_S", "Bob")]
         );
         assert_eq!(g.pending_invite.as_deref(), Some("Bob"));
         assert_eq!(
@@ -691,7 +673,7 @@ mod tests {
         );
         assert_eq!(
             g.apply_declined("Carol"),
-            vec!["Carol declines your group invitation."]
+            vec![UiError::s("ERR_DECLINE_GROUP_S", "Carol")]
         );
     }
 
@@ -701,11 +683,11 @@ mod tests {
         let mut g = GroupState::default();
         assert_eq!(
             g.apply_leader_changed("Alice", Some("Benilla")),
-            vec!["Alice is now the group leader."]
+            vec![UiError::s("ERR_NEW_LEADER_S", "Alice")]
         );
         assert_eq!(
             g.apply_leader_changed("Benilla", Some("Benilla")),
-            vec!["You are now the group leader."]
+            vec![UiError::key("ERR_NEW_LEADER_YOU")]
         );
     }
 
@@ -954,5 +936,87 @@ mod tests {
                 msg.key
             );
         }
+    }
+
+    /// **The twelve roster/invite/leader lines, by key** — the family that used to be twelve
+    /// re-typed sentences beside twelve key names in comments, where nothing joined the two
+    /// (decision 2045). The same three checks the command-result family gets: the key resolves in
+    /// the shipped file, it is a catalog row (so its surface and sound are read rather than
+    /// guessed), and an `_S` row's hole matches the fill that reaches it.
+    ///
+    /// **What the old chat-log path could not do**, and this one does: `ERR_DECLINE_GROUP_S`'s row
+    /// names the `igPlayerInviteDecline` cue. Pushing the composed sentence straight into the chat
+    /// log threw the row away and with it the sound — silently, since a missing cue looks exactly
+    /// like a cue that has not been wired.
+    #[test]
+    fn the_roster_lines_resolve_and_carry_their_catalog_row() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let src = chain
+            .read_file("Interface\\FrameXML\\GlobalStrings.lua")
+            .expect("GlobalStrings.lua in the chain");
+        let s = benilla_ui::script::UiScript::new().expect("VM");
+        s.run(&String::from_utf8_lossy(&src)).expect("runs clean");
+
+        let mut g = GroupState::default();
+        let mut lines = Vec::new();
+        // Every producer in the file, DRIVEN rather than listed — a party join and leave, then a
+        // raid conversion with its own join and leave, then the per-opcode lines. Listing the keys
+        // would let a new line skip this test; driving the producers cannot.
+        lines.extend(g.apply_list(0, 0, vec![member("Alice", 1), member("Bob", 2)], 1, None));
+        lines.extend(g.apply_list(0, 0, vec![member("Alice", 1)], 1, None));
+        lines.extend(g.apply_list(1, 0, vec![member("Alice", 1), member("Dave", 4)], 1, None));
+        lines.extend(g.apply_list(1, 0, vec![member("Alice", 1)], 1, None));
+        lines.extend(g.apply_invited("Bob"));
+        lines.extend(g.apply_declined("Carol"));
+        lines.extend(g.apply_leader_changed("Alice", Some("Us")));
+        lines.extend(g.apply_leader_changed("Us", Some("Us")));
+        lines.extend(g.apply_uninvited());
+        lines.extend(g.apply_destroyed());
+        g.leader = 1;
+        lines.extend(g.apply_ready_check_request(false));
+
+        let mut keys: Vec<&str> = lines.iter().map(|m| m.key).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(
+            keys,
+            [
+                "ERR_DECLINE_GROUP_S",
+                "ERR_GROUP_DISBANDED",
+                "ERR_INVITED_TO_GROUP_S",
+                "ERR_JOINED_GROUP_S",
+                "ERR_LEFT_GROUP_S",
+                "ERR_NEW_LEADER_S",
+                "ERR_NEW_LEADER_YOU",
+                "ERR_RAID_LEADER_READY_CHECK_START_S",
+                "ERR_RAID_MEMBER_ADDED_S",
+                "ERR_RAID_MEMBER_REMOVED_S",
+                "ERR_RAID_YOU_JOINED",
+                "ERR_UNINVITE_YOU",
+            ],
+            "all twelve keys this window can raise are exercised below"
+        );
+
+        for msg in &lines {
+            let text: String = s.lua().globals().get(msg.key).expect(msg.key);
+            assert!(!text.is_empty(), "{} resolves empty", msg.key);
+            assert!(
+                benilla_ui::messages::by_key(msg.key).is_some(),
+                "{} is not a catalog row, so its surface and sound would be a guess",
+                msg.key
+            );
+            assert_eq!(
+                text.contains("%s"),
+                msg.arg_s().is_some(),
+                "{} vs its fill",
+                msg.key
+            );
+        }
+        assert_eq!(
+            benilla_ui::messages::by_key("ERR_DECLINE_GROUP_S").and_then(|r| r.sound),
+            Some("igPlayerInviteDecline"),
+            "the cue the chat-log path was dropping"
+        );
     }
 }

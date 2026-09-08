@@ -240,11 +240,15 @@ pub(crate) fn questgiver_invalid_key(reason: u32) -> &'static str {
 /// `4`/`0x32` → BAG_FULL, `0x11` → MAX_COUNT, everything else → the plain FAILED line. All three
 /// strings carry a `%s` the caller fills with the quest title (the ref pushes `questRecord+0x9c`
 /// alongside the msgId). Decision 0669.
+///
+/// The wording is the player's own and is never restated here (decision 2045) — the msgId is what
+/// identifies each arm, and `every_quest_refusal_key_resolves_in_the_real_global_strings` is what
+/// checks the three against the shipped table.
 pub(crate) fn questgiver_failed_key(reason: u32) -> &'static str {
     match reason {
-        4 | 50 => "ERR_QUEST_FAILED_BAG_FULL_S", // msgId 140 — "%s failed: Inventory is full."
-        17 => "ERR_QUEST_FAILED_MAX_COUNT_S",    // msgId 141 — "%s failed: Duplicate item found."
-        _ => "ERR_QUEST_FAILED_S",               // msgId 139 — "%s failed."
+        4 | 50 => "ERR_QUEST_FAILED_BAG_FULL_S", // msgId 140 — the bag-full wording
+        17 => "ERR_QUEST_FAILED_MAX_COUNT_S",    // msgId 141 — the duplicate-item wording
+        _ => "ERR_QUEST_FAILED_S",               // msgId 139 — the plain form
     }
 }
 

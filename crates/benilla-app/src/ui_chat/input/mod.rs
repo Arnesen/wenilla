@@ -553,13 +553,15 @@ pub(super) fn drain_chat_input(
                 "off" => group.clear_session(),
                 // The raid grid's instrument (decision 1549) — 25 synthetic rows, us leading.
                 "raid" => {
-                    for line in crate::ui_party::synthetic_raid(&mut group, &mut names, self_guid.0)
-                    {
-                        chat_log.push_event(super::event::ChatEvent::text_only(
-                            super::event::ChatEventKind::System,
-                            line,
-                        ));
-                    }
+                    // Onto the same by-key queue the wire arm uses (2045/2054), so the instrument
+                    // shows the lines a real roster would — resolved from GlobalStrings, on the
+                    // surface each catalog row names, with its sound. An instrument that composed
+                    // its own text would be eyeballing something the game never prints.
+                    chat_out.ui_errors.0.extend(crate::ui_party::synthetic_raid(
+                        &mut group,
+                        &mut names,
+                        self_guid.0,
+                    ));
                 }
                 "invite" => group.pending_invite = Some("Partner".to_string()),
                 // A group member's ping, without the group member (decision 1596). 35 yd
@@ -598,12 +600,10 @@ pub(super) fn drain_chat_input(
                         let w = benilla_assets::coords::bevy_to_wow(tf.translation());
                         (w[0], w[1])
                     });
-                    for line in crate::ui_party::synthetic_roster(&mut group, player_xy) {
-                        chat_log.push_event(super::event::ChatEvent::text_only(
-                            super::event::ChatEventKind::System,
-                            line,
-                        ));
-                    }
+                    chat_out
+                        .ui_errors
+                        .0
+                        .extend(crate::ui_party::synthetic_roster(&mut group, player_xy));
                     if arg == "lead" {
                         // The leader-view variant: an unmatched leader guid resolves to
                         // leader_index 0 in the feed — "we lead" — so the leader-only popup
@@ -898,7 +898,14 @@ pub(super) fn drain_chat_input(
                     None => warn!("castvis: no selection and no self avatar — dropped"),
                 }
             }
-            ParsedChat::ChatTest => chattest_battery(&mut chat_log),
+            ParsedChat::ChatTest => chattest_battery(&mut chat_log, &|key: &str| {
+                script
+                    .lua()
+                    .globals()
+                    .get::<String>(key)
+                    .ok()
+                    .filter(|t| !t.is_empty())
+            }),
             // `/logout` (and `/camp`) is the reference's own `SlashCmdList["LOGOUT"]` → `Logout()`,
             // so it takes the SAME route the game menu's Logout button does (decision 0674): the
             // request queues on the script seam, `crate::ui_logout` sends it and narrates the
@@ -1025,11 +1032,22 @@ pub(super) fn drain_chat_input(
                         continue;
                     }
                 }
-                // HELP_TEXT_SIMPLE (the ref's unknown-command reply, ChatEdit_ParseText l.2203).
-                chat_log.push_event(super::event::ChatEvent::text_only(
-                    super::event::ChatEventKind::System,
-                    "Type '/help' for a listing of a few commands.".to_string(),
-                ));
+                // HELP_TEXT_SIMPLE (the ref's unknown-command reply, ChatEdit_ParseText l.2203),
+                // read off the player's own table rather than re-typed here (decision 2045). It is
+                // no message-catalog row — the reference emits it from Lua straight into chat — so
+                // there is no surface or sound to look up, only the wording.
+                if let Some(text) = script
+                    .lua()
+                    .globals()
+                    .get::<String>("HELP_TEXT_SIMPLE")
+                    .ok()
+                    .filter(|t| !t.is_empty())
+                {
+                    chat_log.push_event(super::event::ChatEvent::text_only(
+                        super::event::ChatEventKind::System,
+                        text,
+                    ));
+                }
             }
         }
     }
@@ -1038,7 +1056,7 @@ pub(super) fn drain_chat_input(
 /// `/chattest` (the 0288 instrument): one synthetic line of every renderable form through the
 /// real event pipeline — kinds, flags, the language header, channel prefixes, notices, and both
 /// link forms (item + player), so formats/colors/links verify in one screen.
-fn chattest_battery(log: &mut super::feed::ChatLog) {
+fn chattest_battery(log: &mut super::feed::ChatLog, get: &dyn Fn(&str) -> Option<String>) {
     use super::event::{ChatEvent, ChatEventKind as K};
     let player = |kind: K, text: &str, sender: &str| {
         let mut e = ChatEvent::text_only(kind, text.into());
@@ -1094,7 +1112,7 @@ fn chattest_battery(log: &mut super::feed::ChatLog) {
     for e in battery {
         log.push_event(e);
     }
-    combat_log_battery(log);
+    combat_log_battery(log, get);
     info!("chattest: battery queued");
 }
 
@@ -1110,7 +1128,7 @@ fn chattest_battery(log: &mut super::feed::ChatLog) {
 ///
 /// The chat TYPES are picked to show the block's spread rather than one row: your own melee and
 /// spells, your pet, a hostile player, and a creature hitting you (which is the one that is red).
-fn combat_log_battery(log: &mut super::feed::ChatLog) {
+fn combat_log_battery(log: &mut super::feed::ChatLog, get: &dyn Fn(&str) -> Option<String>) {
     use super::combat::{self, Family, Fills, PendingCombat, Variant};
     use super::event::ChatEventKind as K;
 
@@ -1372,12 +1390,18 @@ fn combat_log_battery(log: &mut super::feed::ChatLog) {
                 ..fills(250, None, None)
             },
         ),
+        // The failure reason is the ONE fill in this battery that is a reference string rather
+        // than a synthetic name: production puts a resolved GlobalString in this slot
+        // (`ui_action::feed`'s `CAST_FAIL_KEYS` lookup), so a battery that typed English here
+        // would read as the only untranslated line on a localized install. `ERR_OUT_OF_MANA` and
+        // not `OUT_OF_MANA` — the same enUS sentence, but the byte-verified NO_POWER pick table
+        // `0x8118dc` names the former (`ui_action::cast_fail`).
         line(
             K::SpellFailedLocalPlayer,
             combat::SPELLFAILCAST,
             Variant::SelfOther,
             Fills {
-                named: "Not enough mana".into(),
+                named: get("ERR_OUT_OF_MANA").unwrap_or_default(),
                 ..fills(0, None, None)
             },
         ),

@@ -14,19 +14,26 @@ use bevy::prelude::*;
 use crate::area::AreaTableRes;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
-use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
+use crate::ui_action::{MessageSink, Shown, UiError};
 use crate::ui_unit::{class_names, race_names};
 
-use super::{fill_line, result_template, status_tag, SocialState};
+use super::{name_pushes, result_key, status_flag_key, SocialState};
 
 /// `WHO_LIST_FORMAT` / `WHO_LIST_GUILD_FORMAT` / `WHO_NUM_RESULTS(_P1)` — the chat-routed `/who`
-/// output (`GlobalStrings.lua:5441-5444`). These four keys appear **nowhere** in the reference's
-/// FrameXML (exhaustively grepped), which is what identifies them as engine-composed: when
-/// `SetWhoToUI` is off, the engine prints the results as chat lines itself. So do we.
-const WHO_LIST_FORMAT: &str = "|Hplayer:%s|h[%s]|h: Level %d %s %s - %s";
-const WHO_LIST_GUILD_FORMAT: &str = "|Hplayer:%s|h[%s]|h: Level %d %s %s <%s> - %s";
-const WHO_NUM_RESULTS: &str = "%d player total";
-const WHO_NUM_RESULTS_P1: &str = "%d players total";
+/// output. These four keys appear **nowhere** in the reference's FrameXML (exhaustively grepped),
+/// which is what identifies them as engine-composed: when `SetWhoToUI` is off, the engine prints
+/// the results as chat lines itself. So do we — and, since decision 2045, out of the player's own
+/// `GlobalStrings.lua` rather than out of a copy typed here.
+///
+/// **None of the four is a message-catalog row**, so these lines cannot go out through
+/// `Shown::keyed`: an unknown key takes that path's fallback and turns the line red. They are
+/// `Shown::unkeyed(MsgKind::Chat, …)`, the same route `/ginfo`'s two templates take (2054).
+const WHO_KEYS: [&str; 4] = [
+    "WHO_LIST_FORMAT",
+    "WHO_LIST_GUILD_FORMAT",
+    "WHO_NUM_RESULTS",
+    "WHO_NUM_RESULTS_P1",
+];
 
 /// The chat-frame threshold on an answer the Who frame did not claim. `SMSG_WHO`'s parser
 /// (`0x5adf60`) computes one **print flag** before its record loop (`0x5adf9c`–`0x5adfd5`) and
@@ -60,7 +67,7 @@ pub(super) fn feed_social(
     mut names: ResMut<NameCache>,
     areas: Option<Res<AreaTableRes>>,
     commands: Res<NetCommands>,
-    mut chat_log: ResMut<ChatLog>,
+    mut sink: MessageSink,
     mut fed: Local<crate::ui_script::VmMemo<FedSocial>>,
 ) {
     let Some(mut script) = script else {
@@ -69,11 +76,27 @@ pub(super) fn feed_social(
     let fed = fed.get(&script);
     let areas = areas.as_deref().map(|a| &a.0);
 
-    // The owed system lines first: a line about a friend who just went offline should land before
-    // the list update that removes their zone.
-    drain_result_lines(&mut social, &mut names, &commands, &mut chat_log);
+    // Everything that reads the VM's own string table, resolved under one borrow of it.
+    let (owed, friends, display_order) = {
+        let get = |key: &str| script.lua().globals().get::<String>(key).ok();
+        // Each owed line carries a catalog key, so the surface AND the sound come from its row —
+        // `ERR_FRIEND_ONLINE_SS`'s is `FRIENDJOINGAME`, which a straight chat push could not play.
+        let owed: Vec<Shown> = drain_result_lines(&mut social, &mut names, &commands)
+            .iter()
+            .filter_map(|e| {
+                crate::ui_action::ui_error_text(e, &get).map(|text| Shown::keyed(e.key, text))
+            })
+            .collect();
+        // The row's away tag, through `CHAT_FLAG_AFK`/`_DND` — the chat frame's own pair.
+        let away = |status: u8| status_flag_key(status).and_then(&get).unwrap_or_default();
+        let (friends, display_order) = friend_rows(&social, &mut names, &commands, areas, &away);
+        (owed, friends, display_order)
+    };
 
-    let (friends, display_order) = friend_rows(&social, &mut names, &commands, areas);
+    // The owed lines first: one about a friend who just went offline should land before the list
+    // update that removes their zone.
+    crate::ui_action::show_messages(&mut script, &mut sink, "ui_social", owed);
+
     let (ignores, ignore_order) = ignore_rows(&social, &mut names, &commands);
     let who = who_rows(&social, areas);
 
@@ -123,10 +146,13 @@ pub(super) fn feed_social(
             // order**: the per-record line is composed inside the parse loop (`0x5ae0a1`, one
             // call per record) and the `qsort` at `0x5ae0e2` sits past the loop's back-edge, so
             // it reorders only the array `GetWhoInfo` reads, never these lines.
-            let wire_order: Vec<WhoInfo> = social.who.iter().map(|e| who_row(e, areas)).collect();
-            for line in who_lines(&wire_order, social.who_total) {
-                system_line(&mut chat_log, line);
-            }
+            let printed = {
+                let get = |key: &str| script.lua().globals().get::<String>(key).ok();
+                let wire_order: Vec<WhoInfo> =
+                    social.who.iter().map(|e| who_row(e, areas)).collect();
+                who_lines(&wire_order, social.who_total, &get)
+            };
+            crate::ui_action::show_messages(&mut script, &mut sink, "ui_social", printed);
         }
     }
 }
@@ -137,34 +163,42 @@ fn answer_goes_to_the_frame(to_ui: bool, shown: usize) -> bool {
     to_ui || shown > WHO_CHAT_MAX
 }
 
-/// Compose and push every result line whose name has resolved. A line needing a name waits (the
-/// reference's resolve-then-compose order); one that doesn't goes out immediately.
+/// Name every result line whose subject has resolved. A line that needs a name waits for the
+/// query (the reference's resolve-then-compose order); one that doesn't is ready at once.
+///
+/// Whether a name is needed comes off the KEY's `_S`/`_SS` suffix ([`name_pushes`]) rather than
+/// off the resolved text: the text may not be there yet, and "no `%s` in it" and "no string for
+/// it" must not look the same.
 fn drain_result_lines(
     social: &mut SocialState,
     names: &mut NameCache,
     commands: &NetCommands,
-    chat_log: &mut ChatLog,
-) {
+) -> Vec<UiError> {
     let mut still_pending = Vec::new();
+    let mut ready = Vec::new();
     for update in std::mem::take(&mut social.pending_lines) {
-        let Some(template) = result_template(update.result) else {
+        let Some(key) = result_key(update.result) else {
             continue; // an unknown code shows nothing
         };
-        if !template.contains("%s") {
-            system_line(chat_log, template.to_string());
+        let pushes = name_pushes(key);
+        if pushes == 0 {
+            ready.push(UiError::key(key));
             continue;
         }
         // A named line with no subject (the server answers a failed lookup with guid 0) can never
-        // resolve — print nothing rather than "%s added to friends." or hold it forever.
+        // resolve — print nothing rather than a starved template, or hold it forever.
         if update.guid == 0 {
             continue;
         }
         match names.resolve(update.guid, commands).map(str::to_string) {
-            Some(name) => system_line(chat_log, fill_line(template, &name)),
+            // The same name, pushed as many times as the key's arity says — which is what the
+            // reference does for the `|Hplayer:%s|h[%s]|h` link.
+            Some(name) => ready.push(UiError::strings(key, &vec![name.as_str(); pushes])),
             None => still_pending.push(update),
         }
     }
     social.pending_lines = still_pending;
+    ready
 }
 
 /// The chat-routed `/who` output (module doc's four engine-only templates): one line per row **in
@@ -173,50 +207,45 @@ fn drain_result_lines(
 /// The order is the parser's, not a presentation choice: `0x5ae0a1` composes a record's line
 /// inside the loop that reads it, and the summary block `0x5ae0f1`–`0x5ae12a` sits after the
 /// loop's back-edge (wow-re `who-list-sort-law.md` §11.4).
-fn who_lines(rows: &[WhoInfo], total: u32) -> Vec<String> {
-    let template = if total == 1 {
-        WHO_NUM_RESULTS
-    } else {
-        WHO_NUM_RESULTS_P1
+fn who_lines(rows: &[WhoInfo], total: u32, get: &dyn Fn(&str) -> Option<String>) -> Vec<Shown> {
+    use benilla_ui::strings::{fill, Arg};
+
+    let chat = |text: String| {
+        (!text.is_empty()).then(|| Shown::unkeyed(benilla_ui::messages::MsgKind::Chat, text))
     };
     let mut lines = Vec::with_capacity(rows.len() + 1);
     for row in rows {
-        let template = if row.guild.is_empty() {
-            WHO_LIST_FORMAT
+        let key = if row.guild.is_empty() {
+            WHO_KEYS[0]
         } else {
-            WHO_LIST_GUILD_FORMAT
+            WHO_KEYS[1]
         };
-        // The templates are positional-by-order, not indexed: name, name, level, race, class,
-        // [guild,] zone.
-        let mut line = template.to_string();
-        for fill in [
-            row.name.as_str(),
-            row.name.as_str(),
-            &row.level.to_string(),
-            row.race.as_str(),
-            row.class.as_str(),
-        ] {
-            line = replace_first_token(&line, fill);
-        }
+        let Some(template) = get(key) else {
+            continue; // no string, no line
+        };
+        // The templates interleave `%s` and `%d` and are positional-by-order, not indexed: name,
+        // name, level, race, class, [guild,] zone. The shared filler walks both specifiers in one
+        // pass, which is what retired this file's own replace-first token walk (2045).
+        let mut args = vec![
+            Arg::S(&row.name),
+            Arg::S(&row.name),
+            Arg::D(i64::from(row.level)),
+            Arg::S(&row.race),
+            Arg::S(&row.class),
+        ];
         if !row.guild.is_empty() {
-            line = replace_first_token(&line, &row.guild);
+            args.push(Arg::S(&row.guild));
         }
-        line = replace_first_token(&line, &row.zone);
-        lines.push(line);
+        args.push(Arg::S(&row.zone));
+        lines.extend(chat(fill(&template, &args)));
     }
-    lines.push(template.replace("%d", &total.to_string()));
+    // The `_P1` plural twin for anything but exactly one — `GetText`'s own rule, so a zero total
+    // reads "0 players total" (see `benilla_ui::script::tooltip::plural_template`).
+    let total_key = if total == 1 { WHO_KEYS[2] } else { WHO_KEYS[3] };
+    if let Some(template) = get(total_key) {
+        lines.extend(chat(fill(&template, &[Arg::D(i64::from(total))])));
+    }
     lines
-}
-
-/// Replace the first `%s` or `%d` in `line` with `fill` — the templates interleave both, so a
-/// per-token replace-first walk fills them in wire order.
-fn replace_first_token(line: &str, fill: &str) -> String {
-    match (line.find("%s"), line.find("%d")) {
-        (Some(s), Some(d)) if d < s => line.replacen("%d", fill, 1),
-        (Some(_), _) => line.replacen("%s", fill, 1),
-        (None, Some(_)) => line.replacen("%d", fill, 1),
-        (None, None) => line.to_string(),
-    }
 }
 
 /// The friend rows in display order (name-sorted), plus the guid order that produced them so the
@@ -226,6 +255,7 @@ fn friend_rows(
     names: &mut NameCache,
     commands: &NetCommands,
     areas: Option<&AreaTableCatalog>,
+    away: &dyn Fn(u8) -> String,
 ) -> (Vec<FriendInfo>, Vec<u64>) {
     let mut rows: Vec<(u64, FriendInfo)> = social
         .friends
@@ -254,7 +284,7 @@ fn friend_rows(
                         .unwrap_or_default()
                         .to_string(),
                     connected: online,
-                    status: status_tag(entry.status).to_string(),
+                    status: away(entry.status),
                 },
             )
         })
@@ -344,10 +374,6 @@ fn index_of(order: &[u64], guid: u64) -> u32 {
         .iter()
         .position(|g| *g == guid)
         .map_or(0, |i| i as u32 + 1)
-}
-
-fn system_line(chat_log: &mut ChatLog, text: String) {
-    chat_log.push_event(ChatEvent::text_only(ChatEventKind::System, text));
 }
 
 /// Turn the Era API's social intents into their sends. Every "by index" intent resolves through
@@ -559,7 +585,22 @@ mod tests {
         );
 
         let wire: Vec<WhoInfo> = social.who.iter().map(|e| who_row(e, None)).collect();
-        let lines = who_lines(&wire, social.who_total);
+        // Against the real shipped templates: these four keys are engine-composed, so there is no
+        // FrameXML call site to read them off and a stub would only assert our own guess back.
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let src = chain
+            .read_file("Interface\\FrameXML\\GlobalStrings.lua")
+            .expect("GlobalStrings.lua in the chain");
+        let vm = benilla_ui::script::UiScript::new().expect("VM");
+        vm.run(&String::from_utf8_lossy(&src)).expect("runs clean");
+        let lines: Vec<String> = who_lines(&wire, social.who_total, &|key| {
+            vm.lua().globals().get::<String>(key).ok()
+        })
+        .iter()
+        .map(|s| s.text().to_string())
+        .collect();
+
         assert_eq!(lines.len(), 3, "one per row plus the total: {lines:?}");
         assert!(
             lines[0].contains("Zzz"),
@@ -619,31 +660,52 @@ mod tests {
         assert_eq!(index_of(&[11, 22], 0), 0, "nothing selected");
     }
 
-    /// The who templates interleave `%s` and `%d`, so the fills have to walk them in order.
+    /// **The who templates interleave `%s` and `%d`**, and the guilded one takes a seventh fill
+    /// the other does not — so the row's fields have to reach them in wire order, through one
+    /// walk that speaks both specifiers. That walk is `benilla_ui::strings::fill` now; this file
+    /// used to carry its own `replace_first_token`, one of the eight copies decision 2045 retired.
+    ///
+    /// Against the shipped templates, not a stub: these four keys are engine-composed, so there
+    /// is no FrameXML call site to read them off and a stub would assert our own guess back.
     #[test]
-    fn who_line_tokens_fill_in_wire_order() {
-        let mut line = WHO_LIST_GUILD_FORMAT.to_string();
-        for fill in [
-            "Tigole", "Tigole", "40", "Human", "Rogue", "Legacy", "Westfall",
-        ] {
-            line = replace_first_token(&line, fill);
-        }
+    fn who_lines_fill_both_specifiers_in_wire_order() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let src = chain
+            .read_file("Interface\\FrameXML\\GlobalStrings.lua")
+            .expect("GlobalStrings.lua in the chain");
+        let vm = benilla_ui::script::UiScript::new().expect("VM");
+        vm.run(&String::from_utf8_lossy(&src)).expect("runs clean");
+        let get = |key: &str| vm.lua().globals().get::<String>(key).ok();
+
+        let row =
+            |name: &str, level: u32, guild: &str, race: &str, class: &str, zone: &str| WhoInfo {
+                name: name.into(),
+                level,
+                guild: guild.into(),
+                race: race.into(),
+                class: class.into(),
+                zone: zone.into(),
+            };
+        let lines: Vec<String> = who_lines(
+            &[
+                row("Tigole", 40, "Legacy", "Human", "Rogue", "Westfall"),
+                row("Solo", 5, "", "Dwarf", "Priest", "Coldridge Valley"),
+            ],
+            2,
+            &get,
+        )
+        .iter()
+        .map(|s| s.text().to_string())
+        .collect();
+
         assert_eq!(
-            line,
+            lines[0],
             "|Hplayer:Tigole|h[Tigole]|h: Level 40 Human Rogue <Legacy> - Westfall"
         );
-    }
-
-    /// The unguilded template is the same walk minus the guild fill.
-    #[test]
-    fn the_unguilded_who_line_skips_the_guild() {
-        let mut line = WHO_LIST_FORMAT.to_string();
-        for fill in ["Solo", "Solo", "5", "Dwarf", "Priest", "Coldridge Valley"] {
-            line = replace_first_token(&line, fill);
-        }
         assert_eq!(
-            line,
-            "|Hplayer:Solo|h[Solo]|h: Level 5 Dwarf Priest - Coldridge Valley"
+            lines[1], "|Hplayer:Solo|h[Solo]|h: Level 5 Dwarf Priest - Coldridge Valley",
+            "the unguilded template skips the guild fill"
         );
     }
 

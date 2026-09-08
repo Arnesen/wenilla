@@ -31,56 +31,43 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// The drift still standing, per file: **208 literals over 31 files**, each a sentence the
-/// reference ships and we re-typed.
+/// **Empty, and that is the point.** This was decision 2045's ratchet — a per-file budget of
+/// re-typed sentences that might only ever go down — and it went down to nothing.
 ///
-/// **These numbers may only decrease.** They are not a budget to spend; every one is a string that
-/// will not translate, and some carry a surface and a voice line with them. Lower the count when
-/// you convert a file, and delete the row at zero — a row left stale fails this test too, so a
-/// conversion cannot quietly re-permit the drift it retired. `char_create` (2045) and `ui_trade`
-/// (2042, a neighbouring session) are both converted and have no row: that is what retiring one
-/// looks like, and the second was caught by this test rather than by remembering.
+/// It stays as an empty list rather than being deleted with the machinery, because the walk below
+/// is still the guard: a row appearing here is a file that started re-typing again, and the
+/// argument for the rule holds whether or not anything is currently breaking it.
 ///
-/// **Regenerate these against a clean tree, never mid-edit.** The walk is deterministic on the
-/// sources plus the shipped tables (two consecutive runs agree exactly), but a baseline captured
-/// while other files are half-converted records counts that no later tree will reproduce — which
-/// is exactly how the first cut of this list carried a row the gates then failed on.
-const ALLOWED: &[(&str, usize)] = &[
-    ("benilla-app/src/ui_chat/frames.rs", 48),
-    ("benilla-app/src/ui_tooltip/mod.rs", 28),
-    ("benilla-app/src/ui_party/mod.rs", 12),
-    ("benilla-app/src/ui_social/mod.rs", 18),
-    ("benilla-app/src/ui_petition/lines.rs", 15),
-    ("benilla-app/src/ui_chat/feed.rs", 13),
-    ("benilla-ui/src/script/tooltip_item/render.rs", 9),
-    ("benilla-app/src/ui_unit.rs", 6),
-    ("benilla-formats/src/spells/tokens.rs", 6),
-    ("benilla-app/src/ui_duel.rs", 5),
-    ("benilla-app/src/ui_social/feed.rs", 4),
-    ("benilla-app/src/ui_talent.rs", 4),
-    ("benilla-ui/src/script/tooltip_unit.rs", 4),
-    ("benilla-app/src/ui_quest.rs", 3),
-    ("benilla-app/src/ui_quest_log.rs", 3),
-    ("benilla-app/src/ui_script/resolve_bench.rs", 3),
-    ("benilla-ui/src/script/tooltip_item/names.rs", 3),
-    ("benilla-ui/src/script/tradeskill/view.rs", 3),
-    ("benilla-app/src/net/apply/chat.rs", 2),
-    ("benilla-app/src/ui_binder.rs", 2),
-    ("benilla-app/src/ui_char.rs", 2),
-    ("benilla-app/src/ui_trainer/law.rs", 2),
-    ("benilla-app/src/ui_trainer/mod.rs", 2),
-    ("benilla-ui/src/script/tooltip_item/mod.rs", 2),
-    ("benilla-ui/src/script/tooltip_spell.rs", 2),
-    ("benilla-ui/src/script/unit/mod.rs", 2),
-    ("benilla-app/src/death.rs", 1),
-    ("benilla-app/src/net/apply/quests.rs", 1),
-    ("benilla-app/src/ui_chat/input/mod.rs", 1),
-    ("benilla-app/src/ui_items/feed.rs", 1),
-    ("benilla-ui/src/script/talent.rs", 1),
-];
+/// **The number went UP once before it went down, and that is the part worth remembering.** Two
+/// defects in the walk itself — a `RESOLVERS` entry that a `sort_by_key` call satisfied, and a
+/// `#[cfg(test)]` stripper blind to the out-of-line `mod tests;` — had it reporting 160 where the
+/// truth was 180, hiding 36 literals inside one function while double-counting a handful
+/// elsewhere. A ratchet is only ever as honest as the walk under it: a number that may only
+/// decrease is worthless if the number was never right.
+///
+/// **What this walk still cannot do**, unchanged from 2045 and worth keeping in view now that the
+/// count is zero: it finds *re-typed* strings, because those are byte-identical to the shipped
+/// ones. It cannot find *invented* ones — text matching nothing has nothing to match against —
+/// and it cannot see a one-word value, which collides with ordinary program text. Three invented
+/// slot words and a hand-typed `LockType` name were found in this arc by reading the reference,
+/// not by this test.
+///
+/// **Regenerate against a clean tree, never mid-edit.** The walk is deterministic on the sources
+/// plus the shipped tables (two consecutive runs agree exactly), but a baseline captured while
+/// other files are half-converted records counts no later tree will reproduce.
+const ALLOWED: &[(&str, usize)] = &[];
 
 /// Paths that are never player-facing: dev instruments, probes, capture harnesses and benches.
 /// A `.learn <spell>` GM command is not a UI string even when it collides with one.
+///
+/// **`resolve_bench` is the one entry that is not a *category* but a hole in the walk**, and it is
+/// named here rather than papered over. The file is `#[cfg(test)] mod resolve_bench;` — test-only
+/// code, exactly what [`strip_test_modules`] exists to drop — but that stripper works *within* a
+/// file, and this module's body lives in another one whose name does not contain "test", so the
+/// walk visits it as production source. Its three hits are Lua fixtures inside `#[ignore]`d
+/// release-only benches (`GameTooltip:AddLine("Main Hand", …)` — a line whose only job is to have
+/// a width). Skipping cfg(test)-only *files* properly would mean parsing the module tree; this is
+/// the honest one-line stand-in until something needs the general answer.
 fn is_instrument(rel: &str) -> bool {
     [
         "/capture/",
@@ -89,6 +76,7 @@ fn is_instrument(rel: &str) -> bool {
         "debug_panel",
         "shape_gate",
         "framexml_diff",
+        "resolve_bench",
     ]
     .iter()
     .any(|p| rel.contains(p))
@@ -180,6 +168,12 @@ fn walk(dir: &Path, into: &mut Vec<PathBuf>) {
 }
 
 /// Does this function resolve a key at all? If so, a literal inside it is a fallback.
+///
+/// Matched on an **identifier boundary** for the bare-word entries, which is not fussiness:
+/// `by_key(` is a substring of `sort_by_key(`, and one `bonuses.sort_by_key(…)` was exempting the
+/// whole 530-line `render_view` — the largest literal-bearing function in the workspace — from
+/// this walk. A resolver list that can be satisfied by an unrelated method name is not a filter,
+/// it is a blindfold. Entries that begin with punctuation (`.text(`) are already delimited.
 const RESOLVERS: &[&str] = &[
     "strings.get(",
     ".text(",
@@ -191,6 +185,20 @@ const RESOLVERS: &[&str] = &[
     "glue_strings",
 ];
 
+/// [`RESOLVERS`], on an identifier boundary for the bare-word entries.
+fn resolves(body: &str) -> bool {
+    RESOLVERS.iter().any(|r| {
+        let word = r.starts_with(|c: char| c.is_alphanumeric() || c == '_');
+        body.match_indices(r).any(|(i, _)| {
+            !word
+                || !body[..i]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        })
+    })
+}
+
 #[test]
 fn no_user_facing_sentence_is_written_in_rust_when_the_reference_ships_one() {
     let data = match benilla_formats::wow_data() {
@@ -198,7 +206,7 @@ fn no_user_facing_sentence_is_written_in_rust_when_the_reference_ships_one() {
         None => return,
     };
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
-    let mut shipped = HashMap::new();
+    let mut shipped: HashMap<String, Vec<String>> = HashMap::new();
     // The base tables AND the locale patches laid over them (decision 2052): where `Localize()`
     // redefines a key, its wording is the one the player actually reads, so a set that stopped at
     // the base files would be grading against text this install never shows.
@@ -217,7 +225,15 @@ fn no_user_facing_sentence_is_written_in_rust_when_the_reference_ships_one() {
             // A one-word or punctuation-only value ("Locked", "%s") is too weak a signal: it
             // collides with ordinary program text. Sentences are what this is after.
             if n.split(' ').count() >= 2 && n.chars().any(|c| c.is_ascii_lowercase()) {
-                shipped.entry(n).or_insert(k);
+                // **Every** key with this wording, not the first one seen. A value maps to more
+                // than one key far more often than you would guess — `CHAT_IGNORED` and
+                // `ERR_IGNORING_YOU_S` are the same enUS sentence, and so are
+                // `INVTYPE_SHIELD`/`SECONDARYHANDSLOT`, `CHAR_CREATE_NAME_IN_USE`/
+                // `CHAR_NAME_RESERVED` — and naming one of them is how a reader converts a site
+                // to the wrong key. Which one belongs at a given call site is the *reference's
+                // code* to answer, never this table's; the report's job is to say that a choice
+                // exists (decision 2045, "assert the identifier, not the sentence").
+                shipped.entry(n).or_default().push(k);
                 taken += 1;
             }
         }
@@ -249,7 +265,7 @@ fn no_user_facing_sentence_is_written_in_rust_when_the_reference_ships_one() {
         }
         let src = strip_test_modules(&std::fs::read_to_string(path).expect("read source"));
         for (fname, body) in split_fns(&src) {
-            if RESOLVERS.iter().any(|r| body.contains(r)) {
+            if resolves(body) {
                 continue; // a literal here is a fallback beside a real lookup
             }
             for lit in string_literals(body) {
@@ -257,12 +273,31 @@ fn no_user_facing_sentence_is_written_in_rust_when_the_reference_ships_one() {
                 if n.split(' ').count() < 2 {
                     continue;
                 }
-                if let Some(key) = shipped.get(&n) {
+                if let Some(keys) = shipped.get(&n) {
+                    let mut keys = keys.clone();
+                    keys.sort_unstable();
                     found
                         .entry(rel.clone())
                         .or_default()
-                        .push(format!("{key} — {fname}: {lit:?}"));
+                        .push(format!("{} — {fname}: {lit:?}", keys.join(" | ")));
                 }
+            }
+        }
+    }
+
+    // A ratchet says only whether a file got worse; converting one needs the list. `cargo test -p
+    // benilla-app --test reference_strings -- --nocapture` with `BENILLA_REFSTRINGS_REPORT=1`
+    // prints every hit — key, function, literal — biggest file first, so a conversion starts from
+    // what is actually there rather than from a count.
+    if std::env::var_os("BENILLA_REFSTRINGS_REPORT").is_some() {
+        let mut files: Vec<(&String, &Vec<String>)> = found.iter().collect();
+        files.sort_by_key(|(f, h)| (std::cmp::Reverse(h.len()), (*f).clone()));
+        let total: usize = files.iter().map(|(_, h)| h.len()).sum();
+        println!("\n{total} re-typed literals over {} files", files.len());
+        for (file, hits) in files {
+            println!("\n{file} ({})", hits.len());
+            for h in hits {
+                println!("    {h}");
             }
         }
     }
@@ -300,41 +335,59 @@ fn no_user_facing_sentence_is_written_in_rust_when_the_reference_ships_one() {
     );
 }
 
-/// Cut every `#[cfg(test)]` block out of a source file before scanning it.
+/// Cut every `#[cfg(test)]` item out of a source file before scanning it.
 ///
 /// Without this the walk reads test fixtures as production text — `ui_action::cast_fail`'s unit
 /// tests build a *fake* GlobalStrings map whose 48 entries are, by construction, byte-identical to
 /// the shipped strings. Those are the test doing its job, not drift.
+///
+/// **The item's terminator is a brace OR a semicolon, whichever comes first**, and getting that
+/// wrong was silently corrupting this walk in both directions. `#[cfg(test)] mod tests;` — the
+/// out-of-line form, 28 files in this workspace — has no brace of its own, so a brace-only scan
+/// either ran off the end (re-appending the prefix it had already emitted, double-counting every
+/// literal above it: that is the whole of `unit/mod.rs`'s row of "2") or, when any later item had
+/// a brace, matched THAT one and deleted every line between — hiding real drift with no trace.
 fn strip_test_modules(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
     let mut rest = src;
     while let Some(at) = rest.find("#[cfg(test)]") {
         out.push_str(&rest[..at]);
-        // skip to the opening brace of the item that attribute guards, then brace-match it
         let after = &rest[at..];
-        let Some(open) = after.find('{') else { break };
-        let mut depth = 0usize;
-        let mut end = None;
-        for (i, c) in after[open..].char_indices() {
-            match c {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = Some(open + i + 1);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
+        let end = match (after.find('{'), after.find(';')) {
+            // A braced item: brace-match it away.
+            (Some(open), None) => brace_match(after, open),
+            (Some(open), Some(semi)) if open < semi => brace_match(after, open),
+            // `mod tests;` / `use …;` — the item ends at its semicolon and its body, if it has
+            // one, is another file's problem.
+            (_, Some(semi)) => Some(semi + 1),
+            (None, None) => None,
+        };
         match end {
             Some(e) => rest = &after[e..],
-            None => break,
+            // A trailing attribute with nothing after it: there is nothing left to keep.
+            None => return out,
         }
     }
     out.push_str(rest);
     out
+}
+
+/// The index just past the `}` matching the `{` at `open`, or `None` if it never closes.
+fn brace_match(src: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, c) in src[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Split a source file into `(fn name, body)` pairs — crude but enough to ask "does the enclosing

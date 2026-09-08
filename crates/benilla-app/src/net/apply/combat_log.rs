@@ -649,9 +649,15 @@ pub(super) fn exploration_xp(
 /// this packet.
 pub(super) fn level_up(l: LevelUpInfo, chat_log: &mut ChatLog) {
     let talent_points = u32::from(l.level >= 10);
-    chat_log.push_level_up(&l, talent_points);
-    // ...and park the raw tuple for `ui_unit`'s `PLAYER_LEVEL_UP`, whose nine args the reference's
-    // own ChatFrame reads (1884). The Rust lines above stay until that window migrates and can
-    // take over printing them — retiring them first would simply lose the ding.
+    // Park the raw tuple for `ui_unit`'s `PLAYER_LEVEL_UP`, whose nine args the reference's own
+    // `ChatFrame_OnEvent` reads (1884). **That is the whole of the ding's chat output.**
+    //
+    // This used to compose and print the five-line block in Rust as well, under a comment saying
+    // the Rust lines would stay "until that window migrates and can take over printing them".
+    // The window migrated — `benilla.toc` sources `Interface\FrameXML\ChatFrame.xml` and our own
+    // transcription is gone (1948) — and nobody came back to the condition, so the block was on
+    // screen **twice** (`ui_chat::tests::the_ding_block_is_printed_once` reproduces it: four lines
+    // from each side). A deliberate temporary that outlives its trigger is indistinguishable from
+    // a permanent one; this is what one looks like when it is found.
     chat_log.push_level_up_gains(&l, talent_points);
 }

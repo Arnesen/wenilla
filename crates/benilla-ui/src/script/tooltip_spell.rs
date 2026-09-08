@@ -119,7 +119,10 @@ pub(super) fn spell_view_of(lua: &Lua, spell_id: u32) -> Option<SpellTooltipView
 /// builder law, after the rank line), the "Next rank:" block, and the green learn hint.
 #[derive(Clone, Debug, Default)]
 pub(super) struct TalentLines {
-    pub rank_line: String,
+    /// `TOOLTIP_TALENT_RANK` = "Rank %d/%d", already filled by the caller off the player's own
+    /// string table. `None` = the table does not carry the key, and the plate shows no rank row
+    /// (decision 2045 — never an invented one).
+    pub rank_line: Option<String>,
     pub reqs: Vec<String>,
     /// The next rank's spell id (0 = none) — asked from the spell store when its description
     /// hasn't landed yet, so the hover's re-enter completes the block.
@@ -187,7 +190,9 @@ fn render_spell(
     // The talent head: "Rank r/m" (builder line 2, TOOLTIP_TALENT_RANK white) + the red
     // requirement lines while locked (position CONFIRMED, decision 0305 — TalentLines doc).
     if let Some(t) = talent {
-        append_line(lua, this, (t.rank_line.clone(), WHITE), None, false)?;
+        if let Some(rank) = &t.rank_line {
+            append_line(lua, this, (rank.clone(), WHITE), None, false)?;
+        }
         for req in &t.reqs {
             append_line(lua, this, (req.clone(), RED), None, true)?;
         }
@@ -250,21 +255,22 @@ fn render_spell(
         let color = if aura { WHITE } else { GOLD };
         append_line(lua, this, (desc.clone(), color), None, true)?;
     }
-    // The talent tail: the "Next rank:" block (TOOLTIP_TALENT_NEXT_RANK white + the next rank's
-    // gold description) and the green learn hint (builder line 13, TOOLTIP_TALENT_LEARN).
+    // The talent tail: the TOOLTIP_TALENT_NEXT_RANK header (white, `0x854a10` pushed at
+    // `0x52b2cd`) over the next rank's gold description, and the green learn hint (builder
+    // line 13, TOOLTIP_TALENT_LEARN `0x8549f8` at `0x52b362`). Both are keys into the player's
+    // own string table (decision 2045); an install without them shows the description alone
+    // rather than a sentence of ours.
     if let Some(t) = talent {
         if let Some(next) = &t.next_desc {
-            append_line(lua, this, ("Next rank:".to_string(), WHITE), None, false)?;
+            if let Some(header) = crate::strings::global(lua, "TOOLTIP_TALENT_NEXT_RANK") {
+                append_line(lua, this, (header, WHITE), None, false)?;
+            }
             append_line(lua, this, (next.clone(), GOLD), None, true)?;
         }
         if t.learn {
-            append_line(
-                lua,
-                this,
-                ("Click to learn".to_string(), GREEN),
-                None,
-                false,
-            )?;
+            if let Some(hint) = crate::strings::global(lua, "TOOLTIP_TALENT_LEARN") {
+                append_line(lua, this, (hint, GREEN), None, false)?;
+            }
         }
     }
     // The duration-remaining line (`SetPlayerBuff` only) is GOLD `0xffffd200` — the same gold as
@@ -309,7 +315,9 @@ pub(super) fn set_spell_with_talent(
         None => {
             // The view hasn't landed: show the talent head alone (the ask is recorded; the
             // hover's re-enter repaints complete) — the spell channel's own fallback shape.
-            append_line(lua, this, (talent.rank_line.clone(), WHITE), None, false)?;
+            if let Some(rank) = &talent.rank_line {
+                append_line(lua, this, (rank.clone(), WHITE), None, false)?;
+            }
         }
     }
     super::tooltip::show_or_hide_empty(lua, h);

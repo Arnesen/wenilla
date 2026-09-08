@@ -433,7 +433,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            super::super::frames::compose(&event, ChatEventKind::Channel, "Common").unwrap(),
+            crate::ui_chat::tests::compose(&event, ChatEventKind::Channel, "Common").unwrap(),
             "[3. LocalDefense] : |cffffff00Sentinel Hill is under attack!|r"
         );
     }

@@ -804,6 +804,26 @@ pub(crate) fn fire_chat_login(s: &mut benilla_ui::script::UiScript) {
     }
 }
 
+/// The `benilla_formats::TokenContext::text` seam (decision 2045): resolve a `GlobalStrings` key
+/// out of the VM and fill its `%d` holes through the one shared filler.
+///
+/// The split it implements is deliberate. `benilla-formats` walks the spell's columns and knows
+/// which key and which numbers a `$d` or `$s` token wants; it has no business knowing about a
+/// script VM or carrying a printf-family formatter, and it depends on neither crate that has one.
+/// So it names the key, and this renders it.
+pub(crate) fn token_text(
+    script: &benilla_ui::script::UiScript,
+) -> impl Fn(&str, &[i64]) -> Option<String> + '_ {
+    |key: &str, args: &[i64]| {
+        let template = benilla_ui::strings::global(script.lua(), key)?;
+        let args: Vec<_> = args
+            .iter()
+            .map(|n| benilla_ui::strings::Arg::D(*n))
+            .collect();
+        Some(benilla_ui::strings::fill(&template, &args))
+    }
+}
+
 /// [`test_ui::load_ui`] for a test module OUTSIDE `ui_script` — `ui_action::feed_tests` drives the
 /// real `UIErrorsFrame` end to end and needs the same both-stores reader everything else uses.
 #[cfg(test)]

@@ -69,6 +69,9 @@ fn spell_desc_text(
     spells: Option<&crate::ui_action::Spells>,
     id: u32,
     home_area: Option<&str>,
+    // The `$d`/`$s` tokens resolve `INT_SPELL_DURATION_*` / `INT_SPELL_POINTS_SPREAD_TEMPLATE`
+    // out of the VM (decision 2045); `benilla-formats` names the key, this side renders it.
+    text: &dyn Fn(&str, &[i64]) -> Option<String>,
 ) -> Option<String> {
     let sp = spells?;
     let d = sp.catalog.get(id)?;
@@ -81,6 +84,7 @@ fn spell_desc_text(
                 radii: &sp.radii,
                 lookup: &|i| sp.catalog.get(i),
                 home_area,
+                text,
             };
             Some(benilla_formats::substitute(desc, d, &ctx)).filter(|t| !t.is_empty())
         }
@@ -105,19 +109,15 @@ fn charges_count(spells: &[benilla_protocol::messages::ItemSpellEntry]) -> i32 {
         .unwrap_or(0)
 }
 
-/// A reputation rank (0..=7) → its enUS standing label (GlobalStrings
-/// `FACTION_STANDING_LABEL1..8`) — the "Requires <Faction> - <Standing>" tail.
-fn standing_label(rank: u32) -> &'static str {
-    [
-        "Hated",
-        "Hostile",
-        "Unfriendly",
-        "Neutral",
-        "Friendly",
-        "Honored",
-        "Revered",
-        "Exalted",
-    ][rank.min(7) as usize]
+/// A reputation rank (0..=7) → its standing label, `FACTION_STANDING_LABEL{rank+1}` off the
+/// player's own `GlobalStrings.lua` — the tail of the `ITEM_REQ_REPUTATION` line.
+///
+/// Keys rather than an eight-string table (decision 2045): the bare tokens, not the `_FEMALE`
+/// twins, which is the spelling the reference itself uses wherever it builds a standing label
+/// (`FACTION_STANDING_LABEL%d` `0x84b5dc`, wow-re `ui/scratch/quest-leaderboard-law.md` §5).
+/// `None` for an install that does not carry the row — the line then names no standing.
+fn standing_label(rank: u32, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    get(&format!("FACTION_STANDING_LABEL{}", rank.min(7) + 1))
 }
 
 /// Build an item template's tooltip view (decision 0274 P1): the full wire fields plus the
@@ -136,13 +136,17 @@ fn template_view(
     sub_classes: Option<&benilla_formats::ItemSubClassCatalog>,
     classes: Option<&benilla_formats::ItemClassCatalog>,
     icons: Option<&ItemDisplays>,
+    // The VM's own `GlobalStrings.lua`, for the reputation-requirement line (decision 2045).
+    get: &dyn Fn(&str) -> Option<String>,
+    // The same table, for the `$`-engine's own keyed tokens — see [`spell_desc_text`].
+    text: &dyn Fn(&str, &[i64]) -> Option<String>,
 ) -> benilla_ui::script::ItemTemplateView {
     let spell_name = |id: u32| -> Option<String> {
         spells
             .and_then(|s| s.catalog.get(id))
             .map(|sd| sd.name.clone())
     };
-    let spell_text = |id: u32| spell_desc_text(spells, id, home_area);
+    let spell_text = |id: u32| spell_desc_text(spells, id, home_area, text);
     benilla_ui::script::ItemTemplateView {
         name: t.name.clone(),
         quality: t.quality,
@@ -197,11 +201,21 @@ fn template_view(
             .flatten(),
         required_honor_rank: t.required_honor_rank,
         required_city_rank: t.required_city_rank,
+        // `ITEM_REQ_REPUTATION` ("%s - %s" after its own "Requires ") — `0x854b8c`, the key the
+        // reference's own item tooltip builds this line with (wow-re
+        // `ui/scratch/tooltip-content-law.md` §"required-spell / honor-rank"). Both holes are
+        // filled in the template's order; an install missing either key shows no line.
         required_rep_line: (t.required_rep_faction != 0)
             .then(|| {
-                factions
-                    .and_then(|c| c.faction_name(t.required_rep_faction))
-                    .map(|f| format!("Requires {f} - {}", standing_label(t.required_rep_rank)))
+                let faction = factions.and_then(|c| c.faction_name(t.required_rep_faction))?;
+                let standing = standing_label(t.required_rep_rank, get)?;
+                Some(benilla_ui::strings::fill(
+                    &get("ITEM_REQ_REPUTATION")?,
+                    &[
+                        benilla_ui::strings::Arg::S(faction),
+                        benilla_ui::strings::Arg::S(&standing),
+                    ],
+                ))
             })
             .flatten(),
         required_rep_faction: t.required_rep_faction,
@@ -257,6 +271,9 @@ pub(super) fn feed_item_sets(
     let skill_catalog = skill_lines.as_deref().map(|s| &s.catalog);
     let mut done: Vec<u32> = Vec::new();
     let mut push: Vec<(u32, benilla_ui::script::ItemSetView)> = Vec::new();
+    // Scoped, so the push below can take the VM mutably: the build reads the string table, the
+    // push writes the store, and the two cannot hold it at once.
+    let token_text = crate::ui_script::token_text(&script);
     for (&set_id, last) in pending.iter_mut() {
         let Some(row) = sets.0.set(set_id) else {
             done.push(set_id); // no such row — drop the ask for good
@@ -273,7 +290,7 @@ pub(super) fn feed_item_sets(
                 .bonuses
                 .iter()
                 .filter_map(|&(n, spell)| {
-                    spell_desc_text(spell_res, spell, None).map(|text| (n, text))
+                    spell_desc_text(spell_res, spell, None, &token_text).map(|desc| (n, desc))
                 })
                 .collect(),
             required_skill: row.required_skill,
@@ -295,6 +312,7 @@ pub(super) fn feed_item_sets(
             push.push((set_id, view));
         }
     }
+    drop(token_text);
     for (id, view) in push {
         script.set_item_set(id, view);
     }
@@ -401,21 +419,41 @@ pub(super) fn feed_item_stats(
         .copied()
         .filter(|&id| items.template(id, 0, &commands).is_some())
         .collect();
-    for id in ready {
-        pending.remove(&id);
-        let Some(t) = items.template(id, 0, &commands) else {
-            continue;
+    // Built first, pushed after: the reference-string lookup borrows the VM and `set_item_template`
+    // needs it mutably, so the resolve and the push cannot interleave.
+    let views: Vec<(u32, benilla_ui::script::ItemTemplateView)> = {
+        let get = |key: &str| {
+            script
+                .lua()
+                .globals()
+                .get::<String>(key)
+                .ok()
+                .filter(|t| !t.is_empty())
         };
-        let view = template_view(
-            &t.clone(),
-            spell_res,
-            skill_catalog,
-            home_area.as_deref(),
-            factions.as_deref().map(|f| f.catalog()),
-            sub_classes.as_deref().map(|s| &s.0),
-            classes.as_deref().map(|c| &c.0),
-            icons.as_deref(),
-        );
+        ready
+            .into_iter()
+            .filter_map(|id| {
+                pending.remove(&id);
+                let t = items.template(id, 0, &commands)?.clone();
+                Some((
+                    id,
+                    template_view(
+                        &t,
+                        spell_res,
+                        skill_catalog,
+                        home_area.as_deref(),
+                        factions.as_deref().map(|f| f.catalog()),
+                        sub_classes.as_deref().map(|s| &s.0),
+                        classes.as_deref().map(|c| &c.0),
+                        icons.as_deref(),
+                        &get,
+                        &crate::ui_script::token_text(&script),
+                    ),
+                ))
+            })
+            .collect()
+    };
+    for (id, view) in views {
         script.set_item_template(id, view);
     }
 }
@@ -1765,6 +1803,12 @@ mod tests {
             radii: benilla_formats::load_spell_radii(&mut chain).expect("SpellRadius.dbc"),
         };
 
+        // No string table: what this test is about is whether a line is built at all, and
+        // Fireball's description reaches no keyed token — a `$s1` spread renders from the spell's
+        // own columns. A fixture that pretended to hold GlobalStrings would be claiming coverage
+        // this assertion does not have.
+        let no_strings = |_: &str, _: &[i64]| None;
+
         // Every "Opening"/"Closing" the lock chain can reach — the key spells (3365/3366/6247/6477
         // are all literally named "Opening") carry no description, so NO Use: line may be built.
         for id in [3365u32, 3366, 6246, 6247, 6477, 21651] {
@@ -1774,7 +1818,7 @@ mod tests {
                 "spell {id} has a name — which is exactly what must NOT leak into the tooltip"
             );
             assert_eq!(
-                super::spell_desc_text(Some(&spells), id, None),
+                super::spell_desc_text(Some(&spells), id, None, &no_strings),
                 None,
                 "spell {id} ({:?}) has no description, so the reference prints no trigger line",
                 d.name
@@ -1783,7 +1827,7 @@ mod tests {
 
         // The control: a described spell still produces its line, so this is a law about EMPTY
         // descriptions and not a blanket mute. Fireball (133) is the tooltip suite's own anchor.
-        let fireball = super::spell_desc_text(Some(&spells), 133, None)
+        let fireball = super::spell_desc_text(Some(&spells), 133, None, &no_strings)
             .expect("a described spell still yields its line");
         assert!(
             fireball.contains("damage"),

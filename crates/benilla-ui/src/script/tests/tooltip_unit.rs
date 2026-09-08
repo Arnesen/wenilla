@@ -1,10 +1,35 @@
 //! The engine unit tooltip builder (decision 0274 P3, law per 0276): the level-line composition
-//! (four templates, the rank words, "??", Corpse, "Race Class (Player)"), the flag lines
+//! (four `TOOLTIP_UNIT_LEVEL*` keys, the `ELITE`/`BOSS` rank table, "??", `CORPSE`, "Race Class"
+//! over `PLAYER` — all seeded here as marked stand-ins, see [`seed_level_strings`]), the flag lines
 //! (PvP white / Skinnable red / Civilian green), the world-mouseover drive (default anchor +
 //! `UPDATE_MOUSEOVER_UNIT` recolor + the fade arm on loss), and the health-bar watcher.
 
 use super::common::script;
 use crate::script::*;
+
+/// A stand-in string table for the level line — the four `TOOLTIP_UNIT_LEVEL*` templates and the
+/// three word slots that fill them, **deliberately not the shipped wording**. What these tests
+/// establish is *which key* each slot combination reaches and what fills it, never what the
+/// sentence says (decision 2045, "assert the identifier, not the sentence"), and here that is not
+/// a formality: `TOOLTIP_UNIT_LEVEL_CLASS`'s enUS "Level %s %s" is word-for-word
+/// `FRIENDS_LEVEL_TEMPLATE`, `UNIT_TYPE_LEVEL_TEMPLATE` and `CHARACTER_SELECT_INFO`, and the bare
+/// template's "Level %s" is also `ITEM_LEVEL`, `LEVEL_GAINED` and `UNIT_LEVEL_TEMPLATE`. An
+/// assertion on the English would pass on all seven.
+fn seed_level_strings(s: &mut UiScript) {
+    s.run(
+        r#"
+        TOOLTIP_UNIT_LEVEL            = "[LEVEL %s]"
+        TOOLTIP_UNIT_LEVEL_CLASS      = "[LEVEL_CLASS %s %s]"
+        TOOLTIP_UNIT_LEVEL_TYPE       = "[LEVEL_TYPE %s %s]"
+        TOOLTIP_UNIT_LEVEL_CLASS_TYPE = "[LEVEL_CLASS_TYPE %s %s %s]"
+        CORPSE = "[CORPSE]"
+        PLAYER = "[PLAYER]"
+        ELITE  = "[ELITE]"
+        BOSS   = "[BOSS]"
+    "#,
+    )
+    .unwrap();
+}
 
 fn wolf() -> UnitState {
     UnitState {
@@ -21,10 +46,11 @@ fn wolf() -> UnitState {
     }
 }
 
-/// The creature law: gold name, subtitle, "Level 10 Beast (Elite)", red Skinnable.
+/// The creature law: gold name, subtitle, the CLASS_TYPE level line, red Skinnable.
 #[test]
 fn creature_line_law() {
     let mut s = script();
+    seed_level_strings(&mut s);
     s.set_screen_size(800.0, 600.0);
     let mut u = wolf();
     u.subtitle = Some("Alpha".into());
@@ -41,7 +67,7 @@ fn creature_line_law() {
         assert(tt:SetUnit("target") == 1, "SetUnit returns 1 on a live unit")
         assert(TTTextLeft1:GetText() == "Timber Wolf")
         assert(TTTextLeft2:GetText() == "Alpha")
-        assert(TTTextLeft3:GetText() == "Level 10 Beast (Elite)", "got " .. TTTextLeft3:GetText())
+        assert(TTTextLeft3:GetText() == "[LEVEL_CLASS_TYPE 10 Beast [ELITE]]", "got " .. TTTextLeft3:GetText())
         assert(TTTextLeft4:GetText() == "Skinnable")
         -- A RECOGNISED token naming nothing answers nil...
         assert(tt:SetUnit("party4") == nil, "a recognised but absent unit answers nil")
@@ -94,6 +120,7 @@ fn unqueried_wolf() -> UnitState {
 #[test]
 fn a_pending_name_titles_unknownobject_and_the_answer_replaces_it() {
     let mut s = script();
+    seed_level_strings(&mut s);
     s.set_screen_size(800.0, 600.0);
     s.set_unit("target", Some(unqueried_wolf()));
     s.set_player_req_state(PlayerReqState {
@@ -111,7 +138,7 @@ fn a_pending_name_titles_unknownobject_and_the_answer_replaces_it() {
                "the title is the GlobalString, got '" .. tostring(TTTextLeft1:GetText()) .. "'")
         -- The record's other lines are absent with it: no subtitle, and the level line takes the
         -- bare TOOLTIP_UNIT_LEVEL template because both the CLASS and TYPE slots are the record's.
-        assert(TTTextLeft2:GetText() == "Level 10", "got " .. TTTextLeft2:GetText())
+        assert(TTTextLeft2:GetText() == "[LEVEL 10]", "got " .. TTTextLeft2:GetText())
         -- The descriptor's own lines are NOT the record's and show anyway.
         assert(TTTextLeft3:GetText() == "Skinnable")
     "#,
@@ -132,7 +159,7 @@ fn a_pending_name_titles_unknownobject_and_the_answer_replaces_it() {
         assert(TT:SetUnit("target") == 1)
         assert(TTTextLeft1:GetText() == "Timber Wolf", "the answer replaced UNKNOWNOBJECT")
         assert(TTTextLeft2:GetText() == "Alpha")
-        assert(TTTextLeft3:GetText() == "Level 10 Beast (Elite)", "got " .. TTTextLeft3:GetText())
+        assert(TTTextLeft3:GetText() == "[LEVEL_CLASS_TYPE 10 Beast [ELITE]]", "got " .. TTTextLeft3:GetText())
         assert(TTTextLeft4:GetText() == "Skinnable")
     "#,
     )
@@ -191,6 +218,7 @@ fn a_pending_name_titles_unknownobject_and_the_answer_replaces_it() {
 #[test]
 fn faction_line_and_civilian_gate() {
     let mut s = script();
+    seed_level_strings(&mut s);
     s.set_screen_size(800.0, 600.0);
     s.set_player_req_state(PlayerReqState {
         level: 30,
@@ -217,7 +245,7 @@ fn faction_line_and_civilian_gate() {
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetUnit("target")
-        assert(TTTextLeft2:GetText() == "Level 20", "friendly creature: no type word; got " .. TTTextLeft2:GetText())
+        assert(TTTextLeft2:GetText() == "[LEVEL 20]", "friendly creature: no type word; got " .. TTTextLeft2:GetText())
         assert(TTTextLeft3:GetText() == "Stormwind", "faction line before PvP; got " .. TTTextLeft3:GetText())
         assert(TTTextLeft4:GetText() == "PvP")
         assert(TTTextLeft5 == nil or TTTextLeft5:GetText() == nil, "friendly civilian shows NO Civilian line")
@@ -243,7 +271,7 @@ fn faction_line_and_civilian_gate() {
         r#"
         TT:SetOwner(UF9, "ANCHOR_RIGHT")
         TT:SetUnit("target")
-        assert(TTTextLeft2:GetText() == "Level 20 Humanoid", "got " .. TTTextLeft2:GetText())
+        assert(TTTextLeft2:GetText() == "[LEVEL_CLASS 20 Humanoid]", "got " .. TTTextLeft2:GetText())
         assert(TTTextLeft3:GetText() == "PvP")
         assert(TTTextLeft4:GetText() == "Civilian", "hostile+grey+pvp civilian warns; got " .. TTTextLeft4:GetText())
         assert(TTTextLeft5:GetText() == "Leader")
@@ -280,6 +308,7 @@ fn faction_line_and_civilian_gate() {
 #[test]
 fn level_line_variants() {
     let mut s = script();
+    seed_level_strings(&mut s);
     s.set_screen_size(800.0, 600.0);
     s.set_player_req_state(PlayerReqState {
         level: 60,
@@ -304,7 +333,7 @@ fn level_line_variants() {
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetUnit("target")
-        assert(TTTextLeft2:GetText() == "Level 32 Human Rogue (Player)", "got " .. TTTextLeft2:GetText())
+        assert(TTTextLeft2:GetText() == "[LEVEL_CLASS_TYPE 32 Human Rogue [PLAYER]]", "got " .. TTTextLeft2:GetText())
         assert(TTTextLeft3:GetText() == "PvP")
     "#,
     )
@@ -326,7 +355,7 @@ fn level_line_variants() {
         r#"
         TT:SetOwner(UF2, "ANCHOR_RIGHT")
         TT:SetUnit("target")
-        assert(TTTextLeft2:GetText() == "Level 3 Corpse", "got " .. TTTextLeft2:GetText())
+        assert(TTTextLeft2:GetText() == "[LEVEL_CLASS 3 [CORPSE]]", "got " .. TTTextLeft2:GetText())
     "#,
     )
     .unwrap();
@@ -347,7 +376,7 @@ fn level_line_variants() {
         r#"
         TT:SetOwner(UF2, "ANCHOR_RIGHT")
         TT:SetUnit("target")
-        assert(TTTextLeft2:GetText() == "Level ?? Demon (Boss)", "got " .. TTTextLeft2:GetText())
+        assert(TTTextLeft2:GetText() == "[LEVEL_CLASS_TYPE ?? Demon [BOSS]]", "got " .. TTTextLeft2:GetText())
     "#,
     )
     .unwrap();
@@ -367,7 +396,7 @@ fn level_line_variants() {
     s.run(
         r#"
         TT:SetOwner(UF2, "ANCHOR_RIGHT"); TT:SetUnit("target")
-        assert(TTTextLeft2:GetText() == "Level ?? Beast", "hostile 10-up, got " .. TTTextLeft2:GetText())
+        assert(TTTextLeft2:GetText() == "[LEVEL_CLASS ?? Beast]", "hostile 10-up, got " .. TTTextLeft2:GetText())
     "#,
     )
     .unwrap();
@@ -376,7 +405,7 @@ fn level_line_variants() {
     s.run(
         r#"
         TT:SetOwner(UF2, "ANCHOR_RIGHT"); TT:SetUnit("target")
-        assert(TTTextLeft2:GetText() == "Level 70 Beast", "unfriendly 10-up, got " .. TTTextLeft2:GetText())
+        assert(TTTextLeft2:GetText() == "[LEVEL_CLASS 70 Beast]", "unfriendly 10-up, got " .. TTTextLeft2:GetText())
     "#,
     )
     .unwrap();
@@ -385,7 +414,7 @@ fn level_line_variants() {
     s.run(
         r#"
         TT:SetOwner(UF2, "ANCHOR_RIGHT"); TT:SetUnit("target")
-        assert(TTTextLeft2:GetText() == "Level 70 Orc Shaman (Player)", "hostile player, got " .. TTTextLeft2:GetText())
+        assert(TTTextLeft2:GetText() == "[LEVEL_CLASS_TYPE 70 Orc Shaman [PLAYER]]", "hostile player, got " .. TTTextLeft2:GetText())
     "#,
     )
     .unwrap();

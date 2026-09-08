@@ -48,6 +48,7 @@ use benilla_ui::script::{
     QuestItemView, QuestLogDetail, QuestLogEntryView, QuestLogObjectiveView, QuestLogState,
     ScriptValue, UiScript,
 };
+use benilla_ui::strings::{fill, Arg};
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
@@ -165,9 +166,22 @@ impl Plugin for UiQuestLogPlugin {
 /// live backpack+bags count, meaningful only for an item objective — [`crate::ui_items::count_of`]).
 ///
 /// The custom `text` field, when non-empty, REPLACES the auto-generated name in the line but keeps
-/// the "cur/req" suffix — CONFIRMED since (wow-re `ui/scratch/quest-leaderboard-law.md`: a
-/// creature objective carrying `ObjectiveText[i]` formats with `QUEST_OBJECTS_FOUND "%s: %d/%d"`,
-/// not the "slain" key, and that text IS the name — while `type` still answers `"monster"`).
+/// the "cur/req" suffix — CONFIRMED since (wow-re `ui/scratch/quest-leaderboard-law.md` §5: a
+/// creature objective carrying `ObjectiveText[i]` formats with `QUEST_OBJECTS_FOUND`, not the
+/// "slain" key, and that text IS the name — while `type` still answers `"monster"`).
+///
+/// **The three format keys are the leaderboard's own, and are NOT the progress toast's** (decision
+/// 2045's central trap: `QUEST_MONSTERS_KILLED` and `ERR_QUEST_ADD_KILL_SII` are the same enUS
+/// sentence, and `QUEST_OBJECTS_FOUND`/`QUEST_ITEMS_NEEDED`/`ERR_QUEST_ADD_FOUND_SII`/
+/// `ERR_QUEST_ADD_ITEM_SII` are the same four). `GetQuestLogLeaderBoard 0x4e0000` resolves
+/// `QUEST_MONSTERS_KILLED` `0x84b61c` (creature, no override), `QUEST_OBJECTS_FOUND` `0x84b634`
+/// (the override leg AND both GameObject legs) and `QUEST_ITEMS_NEEDED` `0x84b5f8` (item) — §5's
+/// table, address by address. Only the toast handler `0x5e5ad0` names the `ERR_*` twins, and it
+/// names them because they are *message-catalog* rows; these three are not.
+///
+/// A key the install does not carry renders the line with **empty text rather than no line**: the
+/// reference's `FrameScript_GetText` hands back its pre-seeded empty string and the leaderboard
+/// entry still exists, which is what `GetNumQuestLeaderBoards` counts.
 ///
 /// **Known-wrong (decision 1156, not yet corrected):** `finished` must be `cur >= req` and NOTHING
 /// else. The whole-quest COMPLETE bit is read exactly once in the reference binding, by the `event`
@@ -181,26 +195,42 @@ fn objective_line(
     creature_name: Option<&str>,
     item_name: Option<&str>,
     bag_count: u32,
+    // The VM's own `GlobalStrings.lua` (decision 2045).
+    get: &dyn Fn(&str) -> Option<String>,
 ) -> Option<QuestLogObjectiveView> {
+    // The reference's cache miss reads `" "` (`0x82ee00`); ours reads this, a longer-standing
+    // divergence that says "still in flight" rather than looking like a nameless objective.
     const PLACEHOLDER: &str = "...";
+    let line = |key: &str, name: &str, cur: u32, req: u32| {
+        get(key).map_or_else(String::new, |f| {
+            fill(
+                &f,
+                &[Arg::S(name), Arg::D(i64::from(cur)), Arg::D(i64::from(req))],
+            )
+        })
+    };
     if obj.creature_or_go != 0 && obj.required_count > 0 {
         let req = obj.required_count;
         let is_go = obj.creature_or_go & GO_OBJECTIVE_BIT != 0;
         let cur = u32::from(counter).min(req);
         let kind = if is_go { "object" } else { "monster" };
-        let text = if !obj.text.is_empty() {
-            format!("{}: {cur}/{req}", obj.text)
+        // §5's fork, in its own order: a non-empty override IS the name and takes
+        // `QUEST_OBJECTS_FOUND` on either kind; a GameObject takes that key on both its legs
+        // (the binding fetches it once, above its cache test, at `0x4e031e`); only a plain
+        // creature reaches `QUEST_MONSTERS_KILLED`. No gameobject-name cache yet — a later
+        // CMSG_GAMEOBJECT_QUERY slice — so a GO with no override wears the placeholder.
+        let (key, name) = if !obj.text.is_empty() {
+            ("QUEST_OBJECTS_FOUND", obj.text.as_str())
         } else if is_go {
-            // No gameobject-name cache yet — a later CMSG_GAMEOBJECT_QUERY slice.
-            format!("Objective: {cur}/{req}")
+            ("QUEST_OBJECTS_FOUND", PLACEHOLDER)
         } else {
-            format!(
-                "{} slain: {cur}/{req}",
-                creature_name.unwrap_or(PLACEHOLDER)
+            (
+                "QUEST_MONSTERS_KILLED",
+                creature_name.unwrap_or(PLACEHOLDER),
             )
         };
         return Some(QuestLogObjectiveView {
-            text,
+            text: line(key, name, cur, req),
             kind: kind.into(),
             finished: cur >= req,
             cur,
@@ -210,13 +240,18 @@ fn objective_line(
     if obj.item_id != 0 && obj.item_count > 0 {
         let req = obj.item_count;
         let cur = bag_count.min(req);
-        let text = if !obj.text.is_empty() {
-            format!("{}: {cur}/{req}", obj.text)
+        // Pre-existing divergence, preserved rather than quietly changed here: §5's item row
+        // resolves its name from the **item cache alone** — the per-objective override buffer
+        // (`template+0x14dc + i*0x100`) is read only by the creature and GameObject branches — so
+        // the reference would show the item's name where this shows `ObjectiveText[i]`. The FORMAT
+        // key is `QUEST_ITEMS_NEEDED` either way, which is what this conversion is about.
+        let name = if obj.text.is_empty() {
+            item_name.unwrap_or(PLACEHOLDER)
         } else {
-            format!("{}: {cur}/{req}", item_name.unwrap_or(PLACEHOLDER))
+            obj.text.as_str()
         };
         return Some(QuestLogObjectiveView {
-            text,
+            text: line("QUEST_ITEMS_NEEDED", name, cur, req),
             kind: "item".into(),
             finished: cur >= req,
             cur,
@@ -286,6 +321,8 @@ fn build_objectives(
     items: &mut Items,
     names: &mut NameCache,
     commands: &NetCommands,
+    // The VM's own `GlobalStrings.lua`, for [`objective_line`]'s three format keys.
+    get: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<QuestLogObjectiveView> {
     let mut objectives = Vec::with_capacity(template.objectives.len());
     for (i, obj) in template.objectives.iter().enumerate() {
@@ -315,6 +352,7 @@ fn build_objectives(
             creature_name.as_deref(),
             item_name.as_deref(),
             bag_count,
+            get,
         ) {
             objectives.push(line);
         }
@@ -490,6 +528,9 @@ fn feed_quest_log(
     tag_names: Option<Res<QuestTagNamesRes>>,
     states: Res<crate::world_state::WorldStates>,
     spells: Option<Res<Spells>>,
+    // The completion toasts are message-catalog rows, so they go out through the one sink that
+    // reads the row's surface and sound (`crate::ui_action::show_messages`).
+    mut sink: crate::ui_action::MessageSink,
     mut last: Local<crate::ui_script::VmMemo<QuestLogState>>,
     mut prior_quest_ids: Local<crate::ui_script::VmMemo<Option<HashSet<u32>>>>,
 ) {
@@ -532,6 +573,17 @@ fn feed_quest_log(
         }
         *prior_quest_ids = Some(current);
     }
+
+    // The player's own `GlobalStrings.lua`, for the leaderboard's three format keys (2045). Taken
+    // here, above the build, because everything between this and the push below reads the VM only.
+    let get = |key: &str| {
+        script
+            .lua()
+            .globals()
+            .get::<String>(key)
+            .ok()
+            .filter(|t| !t.is_empty())
+    };
 
     // ── The IN-FLIGHT GATE — all of the log, or none of it ──────────────────────────────────────
     // The reference's rebuild (`0x4de510`) counts cache misses into `[0xbb7498]`, skips the row
@@ -629,34 +681,41 @@ fn feed_quest_log(
             if collapsed {
                 continue; // folded: the quest stays in the log, just not in the visible list
             }
-            let (title, level, tag, pushable, objectives) = match quest_log
-                .template(r.quest_id, &commands)
-            {
-                Some(t) => (
-                    t.title.clone(),
-                    t.level,
-                    // The `(Elite)`/`(Dungeon)`/`(Raid)`/`(PvP)` suffix: the template's `Type` is
-                    // a `QuestInfo.dbc` row id ([`benilla_formats::QuestTagNames`]), and `Type`
-                    // 0 — the untagged majority — names no row. Absent table (no client data) =
-                    // no tag, never an empty string: the row Lua branches on presence.
-                    tag_names
-                        .as_ref()
-                        .and_then(|tags| tags.0.resolve(t.quest_type))
-                        .map(str::to_string),
-                    // `QUEST_FLAGS_SHARABLE` (vmangos `QuestDef.h:153`) — the whole of the
-                    // shareable test, and it is the CLIENT's alone: vmangos's
-                    // `HandlePushQuestToParty` never checks the bit, it only re-tests it on the
-                    // receiver's accept (`Player::CanShareQuest`). So an unshareable quest whose
-                    // button we wrongly enabled would push, and the party would get a detail panel
-                    // for a quest the server then refuses (decision 1733).
-                    t.flags & quest_flags::SHARABLE != 0,
-                    build_objectives(t, &r.log_slot, &store.0, &mut items, &mut names, &commands),
-                ),
-                // Unreachable: the in-flight gate above emptied `rows` unless EVERY template is
-                // cached, which is the reference's own all-or-nothing rebuild. This arm used to
-                // paint a `"..."` placeholder row — the behaviour the §5 refuted.
-                None => unreachable!("the in-flight gate leaves only cached rows"),
-            };
+            let (title, level, tag, pushable, objectives) =
+                match quest_log.template(r.quest_id, &commands) {
+                    Some(t) => (
+                        t.title.clone(),
+                        t.level,
+                        // The `(Elite)`/`(Dungeon)`/`(Raid)`/`(PvP)` suffix: the template's `Type` is
+                        // a `QuestInfo.dbc` row id ([`benilla_formats::QuestTagNames`]), and `Type`
+                        // 0 — the untagged majority — names no row. Absent table (no client data) =
+                        // no tag, never an empty string: the row Lua branches on presence.
+                        tag_names
+                            .as_ref()
+                            .and_then(|tags| tags.0.resolve(t.quest_type))
+                            .map(str::to_string),
+                        // `QUEST_FLAGS_SHARABLE` (vmangos `QuestDef.h:153`) — the whole of the
+                        // shareable test, and it is the CLIENT's alone: vmangos's
+                        // `HandlePushQuestToParty` never checks the bit, it only re-tests it on the
+                        // receiver's accept (`Player::CanShareQuest`). So an unshareable quest whose
+                        // button we wrongly enabled would push, and the party would get a detail panel
+                        // for a quest the server then refuses (decision 1733).
+                        t.flags & quest_flags::SHARABLE != 0,
+                        build_objectives(
+                            t,
+                            &r.log_slot,
+                            &store.0,
+                            &mut items,
+                            &mut names,
+                            &commands,
+                            &get,
+                        ),
+                    ),
+                    // Unreachable: the in-flight gate above emptied `rows` unless EVERY template is
+                    // cached, which is the reference's own all-or-nothing rebuild. This arm used to
+                    // paint a `"..."` placeholder row — the behaviour the §5 refuted.
+                    None => unreachable!("the in-flight gate leaves only cached rows"),
+                };
             let complete = if r.log_slot.state & quest_slot_state::COMPLETE != 0 {
                 1
             } else if r.log_slot.state & quest_slot_state::FAIL != 0 {
@@ -761,12 +820,22 @@ fn feed_quest_log(
                 script.fire_event("UI_INFO_MESSAGE", vec![ScriptValue::Str(line)]);
             }
             if quest.completed {
-                let msg = if quest.title.is_empty() {
-                    "Objective Complete.".to_string()
+                // The verified 0x198 pair — msgId `0xf8` `ERR_QUEST_OBJECTIVE_COMPLETE_S` when
+                // the handler has the objective text, `0xf9` `ERR_QUEST_UNKNOWN_COMPLETE` when it
+                // does not (wow-re `object-layer/scratch/quest-update-ui-feedback-law.md` §5's
+                // table; never `ERR_QUEST_COMPLETE_S`, which is the turn-in's own call site).
+                // Both are catalog rows, so the surface and the sound come from there rather than
+                // from a hand-picked `fire_event` here (decisions 1770/1815).
+                let line = if quest.title.is_empty() {
+                    crate::ui_action::keyed_line(&script, "ERR_QUEST_UNKNOWN_COMPLETE")
                 } else {
-                    format!("{} (Complete)", quest.title)
+                    crate::ui_action::keyed_line_s(
+                        &script,
+                        "ERR_QUEST_OBJECTIVE_COMPLETE_S",
+                        &[&quest.title],
+                    )
                 };
-                script.fire_event("UI_INFO_MESSAGE", vec![ScriptValue::Str(msg)]);
+                crate::ui_action::show_messages(&mut script, &mut sink, "ui_quest_log", line);
             }
             // QUEST_WATCH_UPDATE's arg1 is the quest's LOG index: stock QuestLog_OnEvent hands it
             // to AutoQuestWatch_Update(questIndex), whose end is AddQuestWatch(questIndex)
@@ -1141,11 +1210,29 @@ mod tests {
 
     // ── objective_line ──────────────────────────────────────────────────────────────────────────
 
+    /// A stand-in string table whose three templates are **deliberately not** the shipped wording.
+    ///
+    /// That is the point, and it is decision 2045's: in enUS `QUEST_MONSTERS_KILLED` and
+    /// `ERR_QUEST_ADD_KILL_SII` are the same sentence, and `QUEST_OBJECTS_FOUND`,
+    /// `QUEST_ITEMS_NEEDED` and their two `ERR_QUEST_ADD_*` twins are the same four — so an
+    /// assertion on English cannot tell a right key from a wrong one. These name the key in the
+    /// rendered line, so each case below asserts *which lookup happened*. The real wording is
+    /// checked against the player's own table by
+    /// [`the_leaderboard_keys_resolve_in_the_real_global_strings`].
+    fn probe_strings(key: &str) -> Option<String> {
+        match key {
+            "QUEST_MONSTERS_KILLED" => Some("<KILLED %s %d of %d>".into()),
+            "QUEST_OBJECTS_FOUND" => Some("<FOUND %s %d of %d>".into()),
+            "QUEST_ITEMS_NEEDED" => Some("<NEEDED %s %d of %d>".into()),
+            _ => None,
+        }
+    }
+
     #[test]
     fn creature_objective_with_resolved_name() {
         let o = obj(100, 10, 0, 0, "");
-        let line = objective_line(&o, 3, Some("Kobold Vermin"), None, 0).unwrap();
-        assert_eq!(line.text, "Kobold Vermin slain: 3/10");
+        let line = objective_line(&o, 3, Some("Kobold Vermin"), None, 0, &probe_strings).unwrap();
+        assert_eq!(line.text, "<KILLED Kobold Vermin 3 of 10>");
         assert_eq!(line.kind, "monster");
         assert!(!line.finished);
     }
@@ -1153,16 +1240,20 @@ mod tests {
     #[test]
     fn creature_objective_in_flight_shows_a_placeholder() {
         let o = obj(100, 10, 0, 0, "");
-        let line = objective_line(&o, 0, None, None, 0).unwrap();
-        assert_eq!(line.text, "... slain: 0/10");
+        let line = objective_line(&o, 0, None, None, 0, &probe_strings).unwrap();
+        assert_eq!(line.text, "<KILLED ... 0 of 10>");
     }
 
+    /// A GameObject objective with no name takes `QUEST_OBJECTS_FOUND` on the placeholder — the
+    /// binding fetches that key once, ABOVE its cache test (`0x4e031e`), so both its legs share
+    /// it. Before decision 2045 this composed an invented `"Objective: %d/%d"` line, which is a
+    /// sentence 1.12 never says.
     #[test]
     fn go_objective_falls_back_without_a_name_cache() {
         let go_id = ((-57i32) as u32) | 0x8000_0000;
         let o = obj(go_id, 1, 0, 0, "");
-        let line = objective_line(&o, 1, None, None, 0).unwrap();
-        assert_eq!(line.text, "Objective: 1/1");
+        let line = objective_line(&o, 1, None, None, 0, &probe_strings).unwrap();
+        assert_eq!(line.text, "<FOUND ... 1 of 1>");
         assert_eq!(line.kind, "object");
         assert!(line.finished); // cur (1) >= req (1)
     }
@@ -1171,8 +1262,8 @@ mod tests {
     fn go_objective_prefers_its_custom_text_over_the_fallback() {
         let go_id = ((-57i32) as u32) | 0x8000_0000;
         let o = obj(go_id, 4, 0, 0, "Destroy the barricade");
-        let line = objective_line(&o, 1, None, None, 0).unwrap();
-        assert_eq!(line.text, "Destroy the barricade: 1/4");
+        let line = objective_line(&o, 1, None, None, 0, &probe_strings).unwrap();
+        assert_eq!(line.text, "<FOUND Destroy the barricade 1 of 4>");
         assert_eq!(line.kind, "object");
     }
 
@@ -1180,8 +1271,8 @@ mod tests {
     fn item_objective_counts_bags_and_clamps_to_required() {
         let o = obj(0, 0, 2000, 5, "");
         // 8 in the bags, but required is only 5 — the line clamps, doesn't overshoot.
-        let line = objective_line(&o, 0, None, Some("Kobold Ear"), 8).unwrap();
-        assert_eq!(line.text, "Kobold Ear: 5/5");
+        let line = objective_line(&o, 0, None, Some("Kobold Ear"), 8, &probe_strings).unwrap();
+        assert_eq!(line.text, "<NEEDED Kobold Ear 5 of 5>");
         assert_eq!(line.kind, "item");
         assert!(line.finished);
     }
@@ -1189,16 +1280,52 @@ mod tests {
     #[test]
     fn item_objective_in_flight_shows_a_placeholder() {
         let o = obj(0, 0, 2000, 5, "");
-        let line = objective_line(&o, 0, None, None, 2).unwrap();
-        assert_eq!(line.text, "...: 2/5");
+        let line = objective_line(&o, 0, None, None, 2, &probe_strings).unwrap();
+        assert_eq!(line.text, "<NEEDED ... 2 of 5>");
     }
 
+    /// **The key fork §5 pins**, and the one an English assertion could never see: a creature
+    /// objective carrying `ObjectiveText[i]` stops being "slain" — the override IS the name and
+    /// the format becomes `QUEST_OBJECTS_FOUND` (`mov ecx,0x84b634` @`0x4e03e1`) — while `type`
+    /// still answers `"monster"`, because that is read from a fresh sign test of
+    /// `ReqCreatureOrGOId[i]`.
     #[test]
     fn custom_text_overrides_the_creature_auto_line() {
         let o = obj(100, 10, 0, 0, "Slay the vermin");
-        let line = objective_line(&o, 4, Some("Kobold Vermin"), None, 0).unwrap();
-        assert_eq!(line.text, "Slay the vermin: 4/10");
+        let line = objective_line(&o, 4, Some("Kobold Vermin"), None, 0, &probe_strings).unwrap();
+        assert_eq!(line.text, "<FOUND Slay the vermin 4 of 10>");
         assert_eq!(line.kind, "monster");
+    }
+
+    /// The three keys against the player's REAL `GlobalStrings.lua` — the guard a key assertion
+    /// needs beside it, since a typo'd key degrades a line to empty rather than to a wrong
+    /// sentence. Skips without client data.
+    #[test]
+    fn the_leaderboard_keys_resolve_in_the_real_global_strings() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let src = chain
+            .read_file("Interface\\FrameXML\\GlobalStrings.lua")
+            .expect("GlobalStrings.lua in the chain");
+        let vm = UiScript::new().expect("VM");
+        vm.run(&String::from_utf8_lossy(&src)).expect("runs clean");
+        let get = |key: &str| {
+            vm.lua()
+                .globals()
+                .get::<String>(key)
+                .ok()
+                .filter(|t| !t.is_empty())
+        };
+        for key in [
+            "QUEST_MONSTERS_KILLED",
+            "QUEST_OBJECTS_FOUND",
+            "QUEST_ITEMS_NEEDED",
+        ] {
+            assert!(get(key).is_some(), "{key} missing");
+        }
+        let o = obj(100, 10, 0, 0, "");
+        let line = objective_line(&o, 3, Some("Kobold Vermin"), None, 0, &get).unwrap();
+        assert_eq!(line.text, "Kobold Vermin slain: 3/10");
     }
 
     /// Decision 1158, correcting 0109: a line's `finished` is `cur >= req` and **nothing else**.
@@ -1211,15 +1338,15 @@ mod tests {
         let o = obj(100, 10, 0, 0, "");
         // The counter (1) is well short of required (10). Whatever the quest's state byte says,
         // THIS line is not finished.
-        let line = objective_line(&o, 1, Some("Kobold"), None, 0).unwrap();
-        assert_eq!(line.text, "Kobold slain: 1/10");
+        let line = objective_line(&o, 1, Some("Kobold"), None, 0, &probe_strings).unwrap();
+        assert_eq!(line.text, "<KILLED Kobold 1 of 10>");
         assert!(!line.finished);
     }
 
     #[test]
     fn empty_objective_slot_emits_no_line() {
         let o = obj(0, 0, 0, 0, "");
-        assert!(objective_line(&o, 0, None, None, 0).is_none());
+        assert!(objective_line(&o, 0, None, None, 0, &probe_strings).is_none());
     }
 
     // ── build_objectives: every occupied slot gets its own lines, not just the selection ────────────
@@ -1276,17 +1403,23 @@ mod tests {
         let commands = NetCommands(tx);
 
         let objectives = build_objectives(
-            &template, &log_slot, &store, &mut items, &mut names, &commands,
+            &template,
+            &log_slot,
+            &store,
+            &mut items,
+            &mut names,
+            &commands,
+            &probe_strings,
         );
 
         // The two unused quads emit nothing; the two real ones resolve in order — creature/item
         // names are unresolved (ask-once mid-flight, no answer seeded) so they fall to the same
         // placeholder path `objective_line`'s own tests already cover directly.
         assert_eq!(objectives.len(), 2);
-        assert_eq!(objectives[0].text, "... slain: 3/10");
+        assert_eq!(objectives[0].text, "<KILLED ... 3 of 10>");
         assert_eq!(objectives[0].kind, "monster");
         assert!(!objectives[0].finished);
-        assert_eq!(objectives[1].text, "...: 0/5");
+        assert_eq!(objectives[1].text, "<NEEDED ... 0 of 5>");
         assert_eq!(objectives[1].kind, "item");
     }
 
@@ -1314,14 +1447,20 @@ mod tests {
         let commands = NetCommands(tx);
 
         let objectives = build_objectives(
-            &template, &log_slot, &store, &mut items, &mut names, &commands,
+            &template,
+            &log_slot,
+            &store,
+            &mut items,
+            &mut names,
+            &commands,
+            &probe_strings,
         );
         assert_eq!(objectives.len(), 1);
         assert!(
             !objectives[0].finished,
             "the counter is 1/10 — the quest's COMPLETE bit is not this line's business"
         );
-        assert_eq!(objectives[0].text, "... slain: 1/10");
+        assert_eq!(objectives[0].text, "<KILLED ... 1 of 10>");
     }
 
     // ── money_split ──────────────────────────────────────────────────────────────────────────────

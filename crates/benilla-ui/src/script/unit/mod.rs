@@ -378,11 +378,23 @@ pub struct UnitState {
 ///
 /// One resolver, so the verb and the plate can never disagree about what a unit whose name is
 /// still in flight is called (decisions 2002, 2040).
+///
+/// **Both halves of that tail are here, and both are load-bearing.** The lookup is the rule
+/// (decision 2045: the sentence is the install's, not ours); the literal beside it is the
+/// reference's own `0x860fa4`, which is what "a literal is legitimate only as a fallback beside a
+/// lookup" means. Spelled `globals().get::<String>` — the shape `benilla-app`'s
+/// `reference_strings` tripwire recognises as a resolver — so the fallback reads as the fallback
+/// it is rather than as undeclared drift. It answers the same three cases the `mlua::Value` read
+/// it replaces did: a non-empty string is returned, and both a missing global and a present-but-
+/// EMPTY one take `0x860fa4` (the binary tests the pointer and then its first byte).
 pub fn unknownobject(lua: &Lua) -> mlua::Result<mlua::String> {
-    match lua.globals().get::<mlua::Value>("UNKNOWNOBJECT") {
-        Ok(mlua::Value::String(s)) if !s.as_bytes().is_empty() => Ok(s),
-        _ => lua.create_string("Unknown Being"),
-    }
+    // One expression, deliberately: `globals().get::<String>` is what the tripwire matches on,
+    // and a line break inside it would hide this resolver from the walk again.
+    let global = lua.globals().get::<String>("UNKNOWNOBJECT").ok();
+    lua.create_string(match global.as_deref() {
+        Some(s) if !s.is_empty() => s,
+        _ => "Unknown Being",
+    })
 }
 
 /// The grey-band table `0x80ae98` (a byte-identical twin at `0x81dda8` drives the nameplate's

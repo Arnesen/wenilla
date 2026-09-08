@@ -1028,7 +1028,7 @@ pub(crate) fn apply_net_updates(
                 crate::ui_binder::apply::bound(
                     area,
                     &mut binder,
-                    &mut chat_log,
+                    &mut ui_error_keys,
                     area_table.as_deref(),
                     &mut audio.0,
                 )
@@ -1182,9 +1182,9 @@ pub(crate) fn apply_net_updates(
                 channel, members, ..
             } => chat::channel_list(channel, &members, &mut chat_log),
             SessionEvent::ChatPlayerNotFound { name } => {
-                chat::chat_player_not_found(&name, &mut chat_log)
+                chat::chat_player_not_found(&name, &mut ui_error_keys)
             }
-            SessionEvent::ChatWrongFaction => chat::chat_wrong_faction(&mut chat_log),
+            SessionEvent::ChatWrongFaction => chat::chat_wrong_faction(&mut ui_error_keys),
             // The four world broadcasts — parked for `ui_chat::broadcast`'s resolve pass, which
             // owns the AreaTable/ServerMessages lookups and the joined-defense-channel walk.
             SessionEvent::ZoneUnderAttack { area_id } => chat::broadcast(
@@ -1222,21 +1222,21 @@ pub(crate) fn apply_net_updates(
             // ── The group/party family (decision 0434 §D2, superseded by 0440) — arm bodies in
             // `group` ──
             SessionEvent::GroupInvite { inviter } => {
-                group::invited(&mut group, &mut chat_log, &inviter)
+                group::invited(&mut group, &mut ui_error_keys, &inviter)
             }
             SessionEvent::GroupDecline { name } => {
-                group::declined(&mut group, &mut chat_log, &name)
+                group::declined(&mut group, &mut ui_error_keys, &name)
             }
-            SessionEvent::GroupUninvited => group::uninvited(&mut group, &mut chat_log),
+            SessionEvent::GroupUninvited => group::uninvited(&mut group, &mut ui_error_keys),
             SessionEvent::GroupLeaderChanged { name } => group::leader_changed(
                 &mut group,
-                &mut chat_log,
+                &mut ui_error_keys,
                 &name,
                 &self_guid,
                 &mut names,
                 &net_commands,
             ),
-            SessionEvent::GroupDestroyed => group::destroyed(&mut group, &mut chat_log),
+            SessionEvent::GroupDestroyed => group::destroyed(&mut group, &mut ui_error_keys),
             SessionEvent::GroupList {
                 group_type,
                 own_flags,
@@ -1245,7 +1245,7 @@ pub(crate) fn apply_net_updates(
                 loot,
             } => group::list(
                 &mut group,
-                &mut chat_log,
+                &mut ui_error_keys,
                 &mut quest,
                 group_type,
                 own_flags,
@@ -1271,7 +1271,7 @@ pub(crate) fn apply_net_updates(
             // alone — is logged for the engine's flags, which the timeout tick sums up after 30 s
             // (1.12 has no per-member answer surface, only the AFK summary line).
             SessionEvent::ReadyCheckRequest => {
-                group::ready_check_request(&mut group, &mut chat_log, &self_guid)
+                group::ready_check_request(&mut group, &mut ui_error_keys, &self_guid)
             }
             SessionEvent::RaidInstanceInfo { entries } => group.apply_raid_instance_info(entries),
             // A group member pinged (decision 1596). The wire carries raw world floats and the
@@ -1293,7 +1293,7 @@ pub(crate) fn apply_net_updates(
                 challenger,
             } => crate::ui_duel::apply::requested(
                 &mut duel,
-                &mut chat_log,
+                &mut ui_error_keys,
                 &net_commands,
                 arbiter,
                 challenger,
@@ -1325,13 +1325,13 @@ pub(crate) fn apply_net_updates(
             SessionEvent::DuelOutOfBounds => crate::ui_duel::apply::bounds(&mut duel, true),
             SessionEvent::DuelInBounds => crate::ui_duel::apply::bounds(&mut duel, false),
             SessionEvent::DuelComplete { started } => {
-                crate::ui_duel::apply::complete(&mut duel, &mut chat_log, started);
+                crate::ui_duel::apply::complete(&mut duel, &mut ui_error_keys, started);
             }
             SessionEvent::DuelWinner {
                 fled,
                 winner,
                 loser,
-            } => crate::ui_duel::apply::winner(&mut chat_log, fled, &winner, &loser),
+            } => crate::ui_duel::apply::winner(&mut duel, fled, &winner, &loser),
             SessionEvent::DuelCountdown { seconds } => {
                 crate::ui_duel::apply::countdown(&mut duel, seconds);
             }
@@ -1947,14 +1947,9 @@ pub(crate) fn apply_net_updates(
             SessionEvent::QuestObjectivesComplete { quest_id } => {
                 quest_objectives_complete(quest_id, &mut quest)
             }
-            SessionEvent::QuestFailed { quest_id, timed } => quest_failed(
-                quest_id,
-                timed,
-                &mut quest_log,
-                &net_commands,
-                &mut chat_log,
-                &mut quest,
-            ),
+            SessionEvent::QuestFailed { quest_id, timed } => {
+                quest_failed(quest_id, timed, &mut quest_log, &net_commands, &mut quest)
+            }
             SessionEvent::QuestLogFull => quest_log_full(&mut quest),
             // The party quest-share (decision 1733): one member's verdict on a quest we pushed,
             // and the escort-quest confirm. Both park in `QuestShare` for `crate::ui_quest_share`

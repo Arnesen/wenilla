@@ -10,15 +10,40 @@ struct TestCtx {
     items: Items,
     commands: NetCommands,
     _rx: crossbeam_channel::Receiver<crate::net::ClientCommand>,
+    /// The two lookups the builder resolves through, over the **shipped** `GlobalStrings.lua` in
+    /// a VM this harness owns.
+    ///
+    /// Every cell this builder composes is a key resolved at runtime (decision 2045), so a test
+    /// that asserts a rendered cell has to grade it against the player's own table — a stub would
+    /// pass on wording the client never shows, which is the trap 2052 named when it moved the
+    /// glue tests onto the loader's own assembly.
+    get: Box<Getter>,
+    text: Box<Filler>,
 }
+
+/// The two lookup shapes, named so the harness's fields read.
+type Getter = dyn Fn(&str) -> Option<String>;
+type Filler = dyn Fn(&str, &[i64]) -> Option<String>;
 
 impl TestCtx {
     fn new() -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
+        let vm = std::rc::Rc::new(benilla_ui::script::UiScript::new().expect("VM"));
+        crate::ui_script::load_ui_for_test(&vm, "Interface\\FrameXML\\GlobalStrings.lua");
+        let (for_get, for_text) = (vm.clone(), vm);
         Self {
             items: Items::default(),
             commands: NetCommands(tx),
             _rx: rx,
+            get: Box::new(move |key| benilla_ui::strings::global(for_get.lua(), key)),
+            text: Box::new(move |key, args: &[i64]| {
+                let template = benilla_ui::strings::global(for_text.lua(), key)?;
+                let args: Vec<_> = args
+                    .iter()
+                    .map(|n| benilla_ui::strings::Arg::D(*n))
+                    .collect();
+                Some(benilla_ui::strings::fill(&template, &args))
+            }),
         }
     }
 
@@ -43,6 +68,8 @@ impl TestCtx {
             items: &mut self.items,
             commands: &self.commands,
             sub_classes,
+            get: self.get.as_ref(),
+            text: self.text.as_ref(),
         }
     }
 }

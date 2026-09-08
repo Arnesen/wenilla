@@ -36,7 +36,6 @@ use benilla_ui::script::{power_token, ScriptValue, UiScript, UnitState, WornDisp
 use crate::names::NameCache;
 use crate::net::{Guid, NetCommands, ObjectStore, Reputations, SelfPlayer};
 use crate::target::{ring_reaction, Factions, Selection};
-use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
 use crate::ui_script::{gate, UiInput};
 
 /// The feed pass — runs **after [`benilla_world::schedule::WorldStage::Net`]** (the feeds snapshot state
@@ -183,6 +182,12 @@ impl Plugin for UiUnitPlugin {
                 )),
         )
         .init_resource::<UnitFeedState>()
+        // [`feed_units`] shows catalog messages (the rest-state pair, the PvP toggle) through
+        // `ui_action::show_messages`, whose sink is the chat log and the message-sound queue.
+        // The queue belongs to the sound stack, which a UI-only harness does not stand up, and a
+        // missing `ResMut` is a system-validation panic — so this plugin declares it. `init` is a
+        // no-op when the sound plugin has already put it there.
+        .init_resource::<crate::sound::MessageSounds>()
         .add_message::<UnitCombatFeedback>()
         .add_message::<CombatTextEvent>()
         .add_systems(
@@ -1128,28 +1133,27 @@ const PLAYER_FLAGS_RESTING: u32 = 0x20;
 const PLAYER_FLAGS_PARTIAL_PLAY_TIME: u32 = 0x1000;
 const PLAYER_FLAGS_NO_PLAY_TIME: u32 = 0x2000;
 
-/// The PvP-preference announcement rule (decision 0652): `(toast, verbose)` on a real change of the
-/// bit, `None` otherwise.
+/// The PvP-preference announcement rule (decision 0652): the `(toast, verbose)` **GlobalStrings
+/// keys** on a real change of the bit, `None` otherwise.
 ///
 /// `was: None` is first sight and stays silent — the reference's handler is driven by a
 /// *changed-bits* mask (`new ^ old`), so the descriptor that first carries the flag at login says
-/// nothing. The two texts are verbatim 1.12 `GlobalStrings.lua`: the `ERR_PVP_TOGGLE_*` toast
-/// (l.1788-1789) and the `PVP_TOGGLE_*_VERBOSE` chat sentence (l.3221-3222). Both are
-/// argument-free, so there is no format step.
+/// nothing.
+///
+/// **Keys, not sentences** (decision 2045), and the pair rides two different routes because the
+/// reference gives them two different natures. `ERR_PVP_TOGGLE_ON`/`_OFF` are message-catalog rows
+/// (437/438, `kind 1` — the yellow `UI_INFO_MESSAGE`), so the catalog names their surface;
+/// `PVP_TOGGLE_ON_VERBOSE`/`_OFF_VERBOSE` are **not** catalog rows at all, so there is no record to
+/// read a kind or a sound off and the chat surface is the handler's own — the `/ginfo` shape
+/// (`ui_guild::feed::ginfo_lines`, decision 2054). Both are argument-free, so there is no fill step.
 fn pvp_announcement(was: Option<bool>, now: bool) -> Option<(&'static str, &'static str)> {
     if was? == now {
         return None;
     }
     Some(if now {
-        (
-            "PvP combat toggled on",
-            "You are now flagged for PvP combat and will remain so until toggled off.",
-        )
+        ("ERR_PVP_TOGGLE_ON", "PVP_TOGGLE_ON_VERBOSE")
     } else {
-        (
-            "PvP combat toggled off",
-            "You will be unflagged for PvP combat after five minutes of non-PvP action in friendly territory.",
-        )
+        ("ERR_PVP_TOGGLE_OFF", "PVP_TOGGLE_OFF_VERBOSE")
     })
 }
 
@@ -1158,18 +1162,19 @@ fn pvp_announcement(was: Option<bool>, now: bool) -> Option<(&'static str, &'sta
 /// dispatcher's `rep cmpsb` mirror diff at `0x4655bb`), through the hard-coded 3×2 pair table
 /// `0x80af50` — state 1 → `ERR_EXHAUSTION_RESTED`, state 2 → `ERR_EXHAUSTION_NORMAL`, state 0 →
 /// the table's deliberate no-message sentinel (id 0x1d1), states ≥ 3 gated off before the table
-/// (`cmp esi,3; jae`), so the beta tiers never speak even though their strings ship. The line is
-/// a plain yellow SYSTEM chat message (`CHAT_MSG_SYSTEM`) — never UIErrorsFrame, no sound.
-/// enUS literals like every app-side chat line (`level_up_lines`' shape); the keys above are the
-/// GlobalStrings homes. Entering rested also arms a one-shot tutorial popup (id 0x19) — the
-/// tutorial system isn't built, a named cut.
+/// (`cmp esi,3; jae`), so the beta tiers never speak even though their strings ship.
+///
+/// The table holds **message ids**, so the answer here is the row's key and the catalog decides the
+/// rest (decision 2045): rows 346/347 are `kind 0` — a plain SYSTEM chat line, never UIErrorsFrame
+/// — with no cue and `type_tag 0x44`, so no voice either. Entering rested also arms a one-shot
+/// tutorial popup (id 0x19) — the tutorial system isn't built, a named cut.
 fn rest_state_message(prev: u8, new: u8) -> Option<&'static str> {
     if prev == new {
         return None;
     }
     match new {
-        1 => Some("You feel rested."),
-        2 => Some("You feel normal."),
+        1 => Some("ERR_EXHAUSTION_RESTED"),
+        2 => Some("ERR_EXHAUSTION_NORMAL"),
         _ => None,
     }
 }
@@ -1396,7 +1401,9 @@ fn feed_units(
     factions: Option<Res<Factions>>,
     reputations: Res<Reputations>,
     group: Res<crate::ui_party::GroupState>,
-    mut chat: ResMut<ChatLog>,
+    // The chat window AND the message-sound queue, because this feed shows catalog messages (the
+    // rest-state pair, the PvP toggle) and `show_messages` writes both on every line.
+    mut sink: crate::ui_action::MessageSink,
     // The guild-identity cache `GetGuildInfo(unit)` reads — `ResMut` because it is a LAZY cache
     // (decision 1257): a lookup that misses is what sends the `CMSG_GUILD_QUERY`, exactly as a
     // `NameCache::resolve` miss sends the name query above.
@@ -1813,12 +1820,9 @@ fn feed_units(
             // which the real client's fresh-CREATE path never runs through the notify pass
             // (byte-verified: login is structurally silent). The pool watcher never messages.
             if let Some(p) = prev {
-                if let Some(text) = rest_state_message(p.0, rest.0) {
-                    chat.push_event(ChatEvent::text_only(
-                        ChatEventKind::System,
-                        text.to_string(),
-                    ));
-                }
+                let line = rest_state_message(p.0, rest.0)
+                    .and_then(|key| crate::ui_action::keyed_line(&script, key));
+                crate::ui_action::show_messages(&mut script, &mut sink, "ui_unit", line);
             }
             // The two self-only flag events, each on its own bits' edge (`0x5eead0` and
             // `0x5eeb65` above). `prev` None is the login descriptor and stays silent for both,
@@ -1875,7 +1879,7 @@ fn feed_units(
                 // `SPELL_STAT0..4` order. Absent gains are ZEROS, not a shorter payload — a
                 // demotion really did gain nothing, and every consumer guards with `if ( argN > 0 )`
                 // so zero reads as "no line" while nil raises.
-                let (info, talent_points) = chat.take_level_up_gains(level).unzip();
+                let (info, talent_points) = sink.chat.take_level_up_gains(level).unzip();
                 let gain = |f: fn(&benilla_protocol::messages::LevelUpInfo) -> u32| {
                     ScriptValue::Int(i64::from(info.as_ref().map_or(0, f)))
                 };
@@ -2034,11 +2038,27 @@ fn feed_units(
         let desired = store.0.player_flags() & PLAYER_FLAGS_PVP_DESIRED != 0;
         if let Some((toast, verbose)) = pvp_announcement(memo.pvp_desired, desired) {
             gate.audit("feed_units", "the PvP-desired edge");
-            script.fire_event("UI_INFO_MESSAGE", vec![ScriptValue::Str(toast.to_string())]);
-            chat.push_event(ChatEvent::text_only(
-                ChatEventKind::System,
-                verbose.to_string(),
-            ));
+            // The toast is a catalog row, so its surface is read there; the verbose sentence is
+            // not one, so it is emitted `unkeyed` on the handler's own chat surface rather than
+            // pushed through `Shown::keyed`, whose unknown-key fallback would turn it RED (2054).
+            let lines = [
+                crate::ui_action::keyed_line(&script, toast),
+                script
+                    .lua()
+                    .globals()
+                    .get::<String>(verbose)
+                    .ok()
+                    .filter(|t| !t.is_empty())
+                    .map(|t| {
+                        crate::ui_action::Shown::unkeyed(benilla_ui::messages::MsgKind::Chat, t)
+                    }),
+            ];
+            crate::ui_action::show_messages(
+                &mut script,
+                &mut sink,
+                "ui_unit",
+                lines.into_iter().flatten(),
+            );
         }
         memo.pvp_desired = Some(desired);
     }
@@ -2397,6 +2417,9 @@ mod tests {
             .init_resource::<Reputations>()
             .init_resource::<crate::ui_party::GroupState>()
             .init_resource::<crate::ui_chat::ChatLog>()
+            // The feed's `MessageSink` is chat + sounds since the PvP/rest lines became message
+            // KEYS (decision 2080): the row a key names carries the cue, so the sink reads both.
+            .init_resource::<crate::sound::MessageSounds>()
             .init_resource::<crate::ui_guild::GuildState>();
         let (tx, _rx) = crossbeam_channel::unbounded();
         app.insert_resource(NetCommands(tx));
@@ -2874,8 +2897,12 @@ mod tests {
     }
 
     /// The PvP-preference announcement law (decision 0652), as the reference's changed-bits handler
-    /// runs it: silent on first sight, one pair per real edge, and the OFF text is the one that
-    /// explains the five-minute wait — the whole reason the toggle doesn't read as dead.
+    /// runs it: silent on first sight, one pair of KEYS per real edge.
+    ///
+    /// The assertion is on the identifiers, never the sentences (decision 2045) — an English
+    /// comparison passes exactly where two keys agree in enUS and diverge everywhere else. The
+    /// wording lives in the player's own `GlobalStrings.lua` and is checked against it by
+    /// [`the_pvp_and_rest_keys_resolve_in_the_real_global_strings`].
     #[test]
     fn pvp_announcement_speaks_only_on_an_edge() {
         assert_eq!(
@@ -2887,19 +2914,45 @@ mod tests {
         assert_eq!(pvp_announcement(Some(true), true), None, "no change");
         assert_eq!(pvp_announcement(Some(false), false), None, "no change");
 
-        let (toast, verbose) = pvp_announcement(Some(false), true).expect("turning it on speaks");
-        assert_eq!(toast, "PvP combat toggled on"); // GlobalStrings ERR_PVP_TOGGLE_ON
         assert_eq!(
-            verbose,
-            "You are now flagged for PvP combat and will remain so until toggled off."
+            pvp_announcement(Some(false), true),
+            Some(("ERR_PVP_TOGGLE_ON", "PVP_TOGGLE_ON_VERBOSE"))
         );
+        assert_eq!(
+            pvp_announcement(Some(true), false),
+            Some(("ERR_PVP_TOGGLE_OFF", "PVP_TOGGLE_OFF_VERBOSE"))
+        );
+    }
 
-        let (toast, verbose) = pvp_announcement(Some(true), false).expect("turning it off speaks");
-        assert_eq!(toast, "PvP combat toggled off"); // GlobalStrings ERR_PVP_TOGGLE_OFF
+    /// The four keys, against the player's REAL `GlobalStrings.lua` — the guard a key-based
+    /// assertion needs beside it, since a typo'd key degrades a real line to silence rather than
+    /// to a wrong sentence. Also pins the one thing the director would actually notice: the OFF
+    /// verbose sentence is the one that explains the five-minute wait, which is the whole reason
+    /// the toggle doesn't read as dead. Skips without client data.
+    #[test]
+    fn the_pvp_and_rest_keys_resolve_in_the_real_global_strings() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let src = chain
+            .read_file("Interface\\FrameXML\\GlobalStrings.lua")
+            .expect("GlobalStrings.lua in the chain");
+        let s = UiScript::new().expect("VM");
+        s.run(&String::from_utf8_lossy(&src)).expect("runs clean");
+        let g = |key: &str| s.lua().globals().get::<String>(key).unwrap_or_default();
+
+        for (was, now) in [(false, true), (true, false)] {
+            let (toast, verbose) = pvp_announcement(Some(was), now).expect("an edge speaks");
+            assert!(!g(toast).is_empty(), "{toast} missing");
+            assert!(!g(verbose).is_empty(), "{verbose} missing");
+        }
         assert!(
-            verbose.contains("five minutes"),
-            "the OFF sentence is what tells the player the flag lingers: {verbose}"
+            g("PVP_TOGGLE_OFF_VERBOSE").contains("five minutes"),
+            "the OFF sentence is what tells the player the flag lingers"
         );
+        for state in [1u8, 2] {
+            let key = rest_state_message(0, state).expect("states 1 and 2 speak");
+            assert!(!g(key).is_empty(), "{key} missing");
+        }
     }
 
     /// The rest-state chat law (decision 1098, wow-re §§6-10): a message needs a real byte
@@ -2908,11 +2961,11 @@ mod tests {
     /// swallowed by the dispatcher's mirror diff.
     #[test]
     fn rest_state_message_speaks_only_on_a_real_transition() {
-        assert_eq!(rest_state_message(2, 1), Some("You feel rested."));
-        assert_eq!(rest_state_message(1, 2), Some("You feel normal."));
+        assert_eq!(rest_state_message(2, 1), Some("ERR_EXHAUSTION_RESTED"));
+        assert_eq!(rest_state_message(1, 2), Some("ERR_EXHAUSTION_NORMAL"));
         assert_eq!(
             rest_state_message(0, 1),
-            Some("You feel rested."),
+            Some("ERR_EXHAUSTION_RESTED"),
             "0→1 IS a transition"
         );
         assert_eq!(
@@ -2957,7 +3010,10 @@ mod tests {
             .init_resource::<NameCache>()
             .init_resource::<Reputations>()
             .init_resource::<crate::ui_party::GroupState>()
-            .init_resource::<ChatLog>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            // `feed_units` shows catalog messages through `show_messages`, whose sink is the chat
+            // log AND the message-sound queue.
+            .init_resource::<crate::sound::MessageSounds>()
             .init_resource::<crate::ui_guild::GuildState>()
             .init_resource::<InteractNpc>();
         let (tx, _rx) = crossbeam_channel::unbounded();
