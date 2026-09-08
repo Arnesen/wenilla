@@ -16,9 +16,9 @@
 
 use bevy::prelude::*;
 
-use crate::net::{GuidIndex, ObjectStore, RemoteMotion};
+use crate::net::GuidIndex;
 
-use super::{EmoteAnim, MovementState, PlaySeq};
+use super::{EmoteAnim, PlaySeq};
 
 /// A gesture code — an index into `Emotes.dbc`'s five hard-coded `EmoteFlags` slots
 /// (`benilla_formats::emotes::GESTURE_FLAG_BITS`), which is literally the integer the client's
@@ -129,11 +129,7 @@ pub(super) fn drive_gestures(
     mut play_seq: ResMut<PlaySeq>,
     index: Res<GuidIndex>,
     emotes: Option<Res<crate::sound::EmoteSounds>>,
-    units: Query<(
-        Option<&ObjectStore>,
-        Option<&MovementState>,
-        Option<&RemoteMotion>,
-    )>,
+    units: super::emote_anim::PerformerQuery,
 ) {
     let asked = std::mem::take(&mut queue.0);
     let Some(emotes) = emotes else { return };
@@ -149,8 +145,9 @@ pub(super) fn drive_gestures(
         let Some(anim_id) = emotes.anim(emote_id) else {
             continue;
         };
-        let (store, movement, remote) = units.get(entity).unwrap_or((None, None, None));
-        if !super::emote_anim::play_eligible(store, movement, remote) {
+        let (store, movement, remote, engaged) =
+            units.get(entity).unwrap_or((None, None, None, false));
+        if !super::emote_anim::play_eligible(store, movement, remote, engaged) {
             debug!("gesture: {gesture:?} suppressed for {entity:?}");
             continue;
         }

@@ -22,6 +22,7 @@ use bevy::animation::graph::AnimationNodeIndex;
 use bevy::animation::transition::AnimationTransitions;
 use bevy::prelude::*;
 
+use crate::names::type_flags::DO_NOT_PLAY_WOUND_ANIM;
 use crate::net::{
     ClientCommand, FacingStep, NetCommands, ObjectStore, RemoteMotion, SelfPlayer, Spline,
     UnitSpeeds,
@@ -351,6 +352,11 @@ pub(super) fn drive_animations(
         // retiring node is *frozen* on the clip's final frame, so unlike the wound's decay there
         // is no playback clock to read the λ window off.
         Res<Time>,
+        // The creature-template cache — read for ONE bit, the victim's `DO_NOT_PLAY_WOUND_ANIM`
+        // (decision 2068), which is the wound trigger's first entry gate below. `Option` for the
+        // headless test worlds that build no net seam; a missing cache reads exactly like a
+        // template we have not received, which is the reference's own null-record leg.
+        Option<Res<crate::names::NameCache>>,
     ),
     // The variation roll's LCG state (decision 0114 — the client's single CRT `_rand` stream,
     // shared by every play; [`select::msvc_rand`]).
@@ -359,7 +365,7 @@ pub(super) fn drive_animations(
     // diff-only filter; see the trace block after the mode machine).
     mut anim_trace_last: Local<std::collections::HashMap<Entity, String>>,
 ) {
-    let (emote_sounds, loot_kneel, time) = aux;
+    let (emote_sounds, loot_kneel, time, names) = aux;
     let dt = time.delta_secs();
     // This frame's one-shot PLAY CALLS (swings + anim-emotes), gathered per unit and replayed
     // in the client's call order below ([`PlaySeq`] stamps — the net drain stamps packet order,
@@ -645,7 +651,7 @@ pub(super) fn drive_animations(
         let outgoing = drv.active_anim().unwrap_or(STAND);
         let relaxed = !select::arm_forces_head(engaged, cast_hold.is_some(), outgoing);
 
-        wound_upkeep(&mut drv, &mut player);
+        wound_upkeep(entity, &mut drv, &mut player);
 
         // Death overrides every state (a corpse doesn't transition); play Death and hold.
         if dead {
@@ -909,11 +915,30 @@ pub(super) fn drive_animations(
         let mut base_played = false;
         let mut masked_played = false;
         let mut played_oneshot: Option<u16> = None;
+        // The victim's cached creature template carries `DO_NOT_PLAY_WOUND_ANIM` (`type_flags`
+        // bit `0x8`) — the reference's `0x6125f0`, read at its two consumers below: the parry
+        // pick `0x60ec1f` and the wound flinch `0x60ea9f` (decision 2068). Keyed on the
+        // descriptor's `OBJECT_FIELD_ENTRY`, the way `0x60b160` keys the query record, and false
+        // on a template we have not received — `0x6125f0`'s own null leg.
+        let no_wound_anim = store
+            .and_then(|s| s.0.object_entry())
+            .zip(names.as_deref())
+            .and_then(|(entry, n)| n.creature_record(entry))
+            .is_some_and(|r| r.type_flags & DO_NOT_PLAY_WOUND_ANIM != 0);
         // Defense outranks a same-frame own swing/emote: the client's `$CPP` arm is the later
         // PlayAnimation call in that (rare) frame, and the being-hit reaction is the one the
         // player must read. Gated alive (`0x60ec00` checks IsDead / stand-state 7 before the LUT).
         let defense = pending_defense.get(&entity).and_then(|&vs| {
             if dead {
+                return None;
+            }
+            // `DO_NOT_PLAY_WOUND_ANIM` takes the **parry** with the flinch (`0x60ec1f`, the bit's
+            // second and last consumer — wow-re `wound-parry-gate-and-injury-vocal.md` Q1/Q6).
+            // The gate is inside `0x60ec00`, which the `$CPP` ladder enters only on
+            // victimState 3: DODGE/DEFLECT (30) and BLOCK (24) go straight to PlayAnimation from
+            // `0x624a90`/`0x624a74` and are NOT gated — a flagged creature still dodges and still
+            // raises its shield, it just never parries.
+            if vs == 3 && no_wound_anim {
                 return None;
             }
             // The parry LUT `0x60ec00` reads the victim's mainhand through `GetWeapon(0, 0)`
@@ -1371,7 +1396,7 @@ pub(super) fn drive_animations(
         let masked_played = masked_played || hold_played.is_some();
 
         let base_played = base_played || (drv.mode, drv.gait) != pre_state;
-        wound_evict(&mut drv, &mut player, masked_played, base_played);
+        wound_evict(entity, &mut drv, &mut player, masked_played, base_played);
 
         if let Some(&edge) = pending_wound.get(&entity) {
             // Both edges pick the wound id by severity + the victim's engagement (decision
@@ -1381,22 +1406,43 @@ pub(super) fn drive_animations(
                 WoundEdge::Melee(hit_info) => select::wound_anim(hit_info, engaged),
                 WoundEdge::Spell => select::wound_anim(0, engaged),
             };
-            // The trigger's fourth entry gate (`0x60eaac`–`0x60eac8`, wow-re
-            // `charproc-rate-override-wound-gate.md`, decision 2063): a CharProc-11 rate-override
-            // node on the unit's effect list — the freeze auras' node, Freezing Trap / Ice Block /
-            // petrify / web wrap — refuses EVERY flinch, melee and spell alike, for as long as it
-            // lives. The gate is the node's presence, not its rate (kit 3071's 1.0 gates too), so
-            // it reads the node list, not the pause the rate applies.
-            let rate_node = aura_nodes.is_some_and(|n| n.head_anim_rate().is_some());
-            if rate_node {
+            // The trigger's entry gates, in the reference's own order inside `0x60ea70`:
+            //
+            // 1. `0x60ea9f` → `0x6125f0`: the victim's cached creature template carries
+            //    `type_flags` bit `0x8`, **DO_NOT_PLAY_WOUND_ANIM** — a skeleton, a ghost, a
+            //    bone golem has no flesh to recoil, and the reference refuses every flinch it
+            //    would ever take, melee and spell alike (decision 2068; wow-re
+            //    `melee-blood-spurt-suppression.md` §6). It gates the ANIMATION only: the blood
+            //    spurt is a separate system reading [`SwingImpact`] itself, and wow-re §8 Q1 is
+            //    explicit that nothing keyed on creature type suppresses it — a skeleton bleeds.
+            //    A record we have not received yet reads as NOT flagged, which is `0x6125f0`'s
+            //    own null-record leg (`return record ? … : false`), so a creature whose query is
+            //    still in flight flinches there too.
+            // 2. `0x60eaac`–`0x60eac8` (wow-re `charproc-rate-override-wound-gate.md`, decision
+            //    2063): a CharProc-11 rate-override node on the unit's effect list — the freeze
+            //    auras' node, Freezing Trap / Ice Block / petrify / web wrap — refuses EVERY
+            //    flinch for as long as it lives. The gate is the node's presence, not its rate
+            //    (kit 3071's 1.0 gates too), so it reads the node list, not the pause it applies.
+            //
+            // `no_wound_anim` is read once above, where the parry pick — the flag's other
+            // consumer — needs the same answer.
+            let refusal = if no_wound_anim {
+                Some("the template carries DO_NOT_PLAY_WOUND_ANIM")
+            } else if aura_nodes.is_some_and(|n| n.head_anim_rate().is_some()) {
+                Some("a proc-11 rate node is attached")
+            } else {
+                None
+            };
+            if let Some(why) = refusal {
                 if benilla_assets::trace::enabled() {
                     benilla_assets::trace::line(
                         "fct",
-                        &format!("wound trigger id={id} REFUSED (a proc-11 rate node is attached)"),
+                        &format!("wound trigger unit={entity} id={id} REFUSED ({why})"),
                     );
                 }
             } else {
                 wound_trigger(
+                    entity,
                     &mut drv,
                     &mut player,
                     anims,

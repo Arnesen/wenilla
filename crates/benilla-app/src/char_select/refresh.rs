@@ -7,7 +7,7 @@
 use bevy::prelude::*;
 
 use crate::area::AreaTableRes;
-use crate::glue::widgets::{GlueDisabled, Hilight};
+use crate::glue::widgets::{GlueDisabled, Hilight, LockHighlight};
 use crate::glue_strings::GlueStrings;
 use crate::net::NetStatus;
 use crate::portrait::{GlueLook, GluePreview, SelectLook};
@@ -148,32 +148,28 @@ fn realm_banner(name: &str, suffix: &str, down: Option<&str>) -> String {
 
 /// Per-frame interaction visuals + button states: the row highlight (hover ∪ selected — the ref's
 /// `LockHighlight` on the selected row), and the enabled states — Enter World / Delete disable on
-/// an empty list (the ref's `UpdateCharacterList`), Create hides at the 10-cap or disconnected,
-/// Change Realm stays disabled (decision 0465 §6).
+/// an empty list (the ref's `UpdateCharacterList`), Create hides at the 10-cap or disconnected.
+/// (Change Realm was drawn deliberately dead under 0465 §6, until 2056 gave it something to do and
+/// 2072 made it work.)
 #[allow(clippy::type_complexity)]
 pub(super) fn refresh_banner_and_buttons(
     roster: Res<Roster>,
-    mut rows: Query<(&SelectAction, &Interaction, &Children), With<Button>>,
-    mut hilights: Query<&mut Visibility, With<Hilight>>,
+    mut rows: Query<(&SelectAction, &mut LockHighlight), With<Button>>,
     mut disables: Query<(&SelectAction, &mut GlueDisabled)>,
     mut create_vis: Query<
         (&SelectAction, &mut Visibility),
         (With<crate::glue::widgets::GlueBtn>, Without<Hilight>),
     >,
 ) {
-    for (action, interaction, children) in &mut rows {
+    // `LockHighlight` on the chosen row and nothing about *visibility*: hovering is
+    // `crate::glue::glue_hilights`' question, and the two used to be one expression here.
+    for (action, mut locked) in &mut rows {
         let SelectAction::Row(i) = action else {
             continue;
         };
-        let lit = roster.selected() == Some(*i) || *interaction != Interaction::None;
-        for child in children {
-            if let Ok(mut vis) = hilights.get_mut(*child) {
-                *vis = if lit {
-                    Visibility::Inherited
-                } else {
-                    Visibility::Hidden
-                };
-            }
+        let want = roster.selected() == Some(*i);
+        if locked.0 != want {
+            locked.0 = want;
         }
     }
     let have_chars = !roster.chars.is_empty();

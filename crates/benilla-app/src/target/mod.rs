@@ -22,6 +22,16 @@
 //!   Clicking empty ground / a non-unit, or pressing **Esc**, clears the target; the target's death
 //!   clears it too (in [`ring::update_ring`], where death is already read).
 //!
+//! **A unit the classifier refuses is not the mouseover at all** ([`hover::refuse_unselectable`]).
+//! `IsSelectable` (`UNIT_FIELD_FLAGS` bit 25 clear, or `UNIT_FIELD_CREATEDBY` == us) is tested by
+//! the hover grader `0x4828d0` at `0x482982`, and a false answer jumps straight to
+//! `0x482090(0,0)` + `ResetCursor 0x523d30` — the mouseover globals are cleared and the type
+//! dispatch that would have chosen a cursor never runs. It is the **same predicate** the selection
+//! commit runs (`0x60be60`, reached there through the `+0x58` thunk), not a second rule: no
+//! tooltip, no cursor, no brighten, no click. The pick itself reads no unit field — the flagged
+//! unit is a candidate and wins — which is why this is a grader and not a filter (wow-re
+//! `object-layer/scratch/not-selectable-mouse-refusal.md`; decision 2060).
+//!
 //! The mouseover/target "light-up" has two consumers: the per-model **emissive lift**
 //! ([`highlight`], the byte-verified additive term) and the V-plate's reaction-tinted **glow**
 //! (`crate::vplates`, drawn later off [`Hovered`] + [`Selection`]). The plate rect is itself part
@@ -149,6 +159,16 @@ pub(crate) struct Hovered {
     pub(crate) corpse: Option<Entity>,
     /// The hovered corpse's guid — `CMSG_LOOT` / `CMSG_RECLAIM_CORPSE` carry it.
     pub(crate) corpse_guid: Option<u64>,
+    /// **The pick won, and the grader threw it away** — [`hover::selectable_pick`], the
+    /// `IsSelectable` refusal at `0x482982`–`0x482987`. Both entity slots are empty, but
+    /// [`Self::distance`] still holds where the ray hit, because in the reference there is ONE
+    /// pick over all CGObjects: a non-selectable unit standing in front of a chest **wins** that
+    /// pick and is then discarded, so the chest behind it does not inherit the mouseover.
+    ///
+    /// Two readers, and no others: [`go_is_nearest`], and [`click::select_on_click`]'s
+    /// nothing-leg guard — a refused pick is an **object** hit, and the reference's object leg
+    /// clears no selection. Everything else sees an empty hover, which is the point.
+    pub(crate) refused: bool,
 }
 
 impl Hovered {
@@ -273,9 +293,11 @@ pub(crate) fn latch_press_pick(
 /// before corpses could be picked — would have handed the click, the cursor, the tooltip and the
 /// highlight to any GameObject on screen the instant the ray landed on a body instead of a unit.
 pub(crate) fn go_is_nearest(character: &Hovered, go: &HoveredObject) -> bool {
-    match (character.any(), go.target) {
-        (Some(_), Some(_)) => go.distance < character.distance,
-        (None, Some(_)) => true,
+    // A **refused** character pick still occupies the pick (see [`Hovered::refused`]): it wins on
+    // distance exactly as a kept one would, and then nothing is hovered at all.
+    match (character.any().is_some() || character.refused, go.target) {
+        (true, Some(_)) => go.distance < character.distance,
+        (false, Some(_)) => true,
         _ => false,
     }
 }
@@ -474,6 +496,20 @@ mod tests {
         assert!(!go_is_nearest(&corpse(true, 4.0), &obj(true, 10.0)));
         assert!(!go_is_nearest(&corpse(true, 5.0), &obj(true, 5.0)));
         assert!(go_is_nearest(&corpse(true, 10.0), &obj(true, 4.0)));
+        // A **refused** pick — a `NOT_SELECTABLE` unit the hover grader threw away
+        // (`hover::selectable_pick`; the predicate's own arms are pinned in
+        // `scan::tests::not_selectable_refuses_the_commit_and_keeps_the_old_target`) — holds the
+        // ground on distance exactly as a kept one does, and then nothing is hovered at all: the
+        // reference makes ONE pick over all CGObjects, so the flagged unit *wins* it and is
+        // discarded, and the chest standing behind it never inherits the mouseover.
+        let refused = |d: f32| Hovered {
+            refused: true,
+            distance: d,
+            ..Hovered::default()
+        };
+        assert!(!go_is_nearest(&refused(4.0), &obj(true, 10.0)));
+        assert!(!go_is_nearest(&refused(5.0), &obj(true, 5.0)));
+        assert!(go_is_nearest(&refused(10.0), &obj(true, 4.0)));
     }
 
     /// The latch survives the hover being cleared — which is the whole reason it exists.

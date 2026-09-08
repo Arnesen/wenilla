@@ -387,20 +387,24 @@ pub(crate) enum CharRequest {
     /// Select's Back (decision 0539): drop the parked session and return the IO thread to the
     /// pre-logon park — the app is heading to the login screen.
     Abandon,
-    /// Select's **Change Realm**: drop the parked session but keep the logon, so the IO thread
-    /// reopens the realm list rather than the login screen. Picking a different realm re-dials a
-    /// world server; it does not re-authenticate.
-    ChangeRealm,
 }
 
-/// The **realm channel**: the app's answer to each [`RealmListMessage`] while the IO thread is
-/// parked between the logon and the world dial. Sent by [`crate::realm_select`]'s policy (a
-/// remembered realm, `WOW_REALM`, or the player's click on the realm list); the parked read thread
-/// blocks on the other end.
+/// The **realm channel**: the app's answer to each [`RealmListMessage`], whichever park is asking.
+///
+/// **Two parks listen on it**, because the reference's realm list is a dialog rather than a screen
+/// (`RealmList.xml` is `frameStrata="DIALOG"` and `GlueParent.lua`'s `GlueScreenInfo` has no
+/// `realmlist` entry): the *login-side* realm park, between the logon and the first world dial,
+/// and the *character* park, where Change Realm raises the same list over the select screen. The
+/// app sends the same three requests either way and never has to know which one is listening —
+/// which is the point, since the answer to Cancel ("hide the dialog") is the same in both.
+///
+/// Sent by [`crate::realm_select`]'s policy (a remembered realm, `WOW_REALM`, or the player's
+/// click); the parked read thread blocks on the other end.
 #[derive(Resource)]
 pub(crate) struct RealmChoice(pub(crate) Sender<RealmRequest>);
 
 /// One request to the IO thread parked at the realm list.
+#[derive(Debug)]
 pub(crate) enum RealmRequest {
     /// Enter this realm — dial its world server. Carries the realm's **name**, not its index: the
     /// list is re-requested every few seconds while the screen is up, and a server that adds or
@@ -410,8 +414,11 @@ pub(crate) enum RealmRequest {
     /// Re-request the realm list on the still-open realmd connection (the reference's
     /// `RequestRealmList`, fired by `RealmList_OnUpdate` every 5 s while the window is open).
     Refresh,
-    /// The realm list's Cancel: drop the logon and return the IO thread to the pre-logon park —
-    /// the app is heading back to the login screen.
+    /// The realm list's Cancel — `RealmList_OnCancel`, which only hides the frame. What that means
+    /// depends on which park hears it, and in both cases it means "leave the screen underneath
+    /// alone": at the login-side park there is no session yet, so the thread returns to the
+    /// pre-logon park and the login screen is what the player is left looking at; at the character
+    /// park the parked world session is untouched and the select screen simply reappears.
     Abandon,
 }
 

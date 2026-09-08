@@ -1035,7 +1035,7 @@ pub(crate) fn enrich_unit(
     // under a pending name exactly as it does under a known one. It was gated on the record here
     // on the premise that "before the query answers we have no name line either" — the premise
     // decision 2002 corrected, and 2040 with it.
-    if rec.is_none_or(|r| r.type_flags & 0x10 == 0) {
+    if rec.is_none_or(|r| r.type_flags & crate::names::type_flags::NO_FACTION_TOOLTIP == 0) {
         state.faction_name = (|| {
             let catalog = factions?.catalog();
             let faction_id = catalog.template(store.0.unit_faction_template()?)?.faction;

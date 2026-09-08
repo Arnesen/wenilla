@@ -660,6 +660,7 @@ impl SelectCommit<'_, '_> {
             &mut self.seam,
             entity,
             guid,
+            self.stores.get(entity).ok(),
             me.is_some_and(|(_, _, engaged)| engaged),
             me.map(|(g, _, _)| g.0),
             attackable,

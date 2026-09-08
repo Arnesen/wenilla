@@ -217,9 +217,8 @@ pub(super) fn bark_chance_pass(threshold: u32, roll: u32) -> bool {
 /// The rest of the creature table is `{70, 100, 60, 100, 100, 40, 100, …}` (player twin
 /// `{35, 100, 30, 100, 100, 40, 100, …}`), and only classes 0, 2 and 5 are ever rolled — every
 /// other class carries 100, i.e. `P = 1`, which is why `$WNG`/`$WGG` (classes 7 and 10) and the
-/// ALERT bark (class 8) are faithfully unconditional. Class 2 (injury) is **not** encoded here:
-/// its live trigger route is still unpinned. Class 0 (exertion) now is — see
-/// [`EXERTION_CHANCE_CREATURE`].
+/// ALERT bark (class 8) are faithfully unconditional. Classes 0 and 2 are encoded beside this one
+/// — see [`EXERTION_CHANCE_CREATURE`] and [`INJURY_CHANCE_CREATURE`].
 pub(super) const STAND_CHANCE: u32 = 40;
 
 /// The class-0 (**exertion**) chance thresholds, and the one place in the vocal tables where the
@@ -235,6 +234,29 @@ pub(super) const STAND_CHANCE: u32 = 40;
 pub(super) const EXERTION_CHANCE_CREATURE: u32 = 70;
 /// The player twin of [`EXERTION_CHANCE_CREATURE`] — `0x86424c[0] = 35`.
 pub(super) const EXERTION_CHANCE_PLAYER: u32 = 35;
+
+/// The class-2 (**ordinary injury**) chance thresholds — the victim's wound grunt, and the third
+/// and last rolled class (decision 2073). `0x8626d4[2] = 60` (creature) and `0x86424c[2] = 30`
+/// (player): **P = 61/101 ≈ 60.4 %** and **31/101 ≈ 30.7 %**.
+///
+/// The twin is picked by the **victim's** own type, since the roll runs inside the victim's
+/// `[vtable+0x88]` — `0x623490` for a creature, `0x62f880` for a player — so a player being hit
+/// grunts about half as often as a creature taking the same blow, the same asymmetry class 0 has
+/// on the attacker's side.
+///
+/// Classes **3** (InjuryCritical) and **9** (InjuryCrushingBlow) carry 100 in both twins and are
+/// never rolled: a crit and a crushing blow always vocalise, an ordinary hit does not. That is the
+/// audible shape — the wound grunt thins out under sustained melee while the big hits punch
+/// through it — and playing class 2 unconditionally, which is what benilla did before 2073, is
+/// about 40 % too many grunts on a creature and 70 % too many on a player.
+///
+/// The route that reaches these was the "still unpinned" clause above: `0x624530`'s tail →
+/// `[vtable+0x88]` → the roll `0x623520` / `0x62f940` → the 13-way column selector `0x623020`
+/// (`+0x0c/+0x10/+0x14` = DBC columns 3/4/5). wow-re
+/// `object-layer/scratch/wound-parry-gate-and-injury-vocal.md`.
+pub(super) const INJURY_CHANCE_CREATURE: u32 = 60;
+/// The player twin of [`INJURY_CHANCE_CREATURE`] — `0x86424c[2] = 30`.
+pub(super) const INJURY_CHANCE_PLAYER: u32 = 30;
 
 /// The class-5 cooldown: **10 000 ms on ONE global timestamp** (`0x623290`,
 /// `GetTickCount − [0xc4e0e4] − 0x2710`). Not per unit and not per class — a single window shared
@@ -1391,6 +1413,39 @@ mod tests {
         // Class 1 (ExertionCritical) is 100 in both twins — combat.rs skips the roll entirely on
         // a crit, and this is why that shortcut is faithful rather than a convenience.
         assert_eq!(admitted(100), 101, "a critical swing always grunts");
+    }
+
+    /// The injury pair's shape (decision 2073), and the reason the victim's grunt thins out:
+    /// **class 2 is rolled, classes 3 and 9 are not.** `0x8626d4[2] = 60` for a creature victim
+    /// and `0x86424c[2] = 30` for a player one — so a creature vocalises about three hits in
+    /// five, a player fewer than one in three, while every crit and every crushing blow sounds.
+    ///
+    /// The numbers are the point: benilla played all three unconditionally before 2073, which is
+    /// 40 of every 100 creature grunts too many and 70 of every 100 on a player.
+    #[test]
+    fn an_ordinary_wound_grunt_is_rolled_but_a_crit_and_a_crush_always_sound() {
+        let bucket = |r: u32| ((101u64 * u64::from(r)) >> 32) as u32;
+        let admitted = |threshold: u32| {
+            (0..=100)
+                .filter(|&b| {
+                    let r = ((u64::from(b) << 32) / 101) as u32 + 1;
+                    bucket(r) == b && bark_chance_pass(threshold, r)
+                })
+                .count()
+        };
+        assert_eq!(admitted(INJURY_CHANCE_CREATURE), 61, "P = 61/101 ≈ 60.4 %");
+        assert_eq!(admitted(INJURY_CHANCE_PLAYER), 31, "P = 31/101 ≈ 30.7 %");
+        // Classes 3 (InjuryCritical) and 9 (InjuryCrushingBlow) carry 100 in both twins, which is
+        // why combat.rs skips the roll on a crit and a crushing blow rather than rolling a 100.
+        assert_eq!(
+            admitted(100),
+            101,
+            "a crit and a crushing blow always sound"
+        );
+        // The injury pair is strictly quieter than the exertion pair on the same twin — the
+        // attacker grunts more often than the victim does, in both directions.
+        assert!(admitted(INJURY_CHANCE_CREATURE) < admitted(EXERTION_CHANCE_CREATURE));
+        assert!(admitted(INJURY_CHANCE_PLAYER) < admitted(EXERTION_CHANCE_PLAYER));
     }
 
     /// **The two per-unit handles are disjoint** (decision 1399): the one-shot bark occupies

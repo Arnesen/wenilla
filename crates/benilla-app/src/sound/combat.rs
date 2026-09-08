@@ -49,8 +49,9 @@
 //!    impact tag: the `$AHn` digit block "has zero effect on the victim dispatch", so a beast's
 //!    bite and the parry clang both sound.
 //!
-//! Plus the victim's injury vocal (`Injury`/`InjuryCritical`/`InjuryCrushing`) on every
-//! damaging, undefended hit.
+//! Plus the victim's injury vocal (`Injury`/`InjuryCritical`/`InjuryCrushing`) on a damaging,
+//! undefended hit — the ordinary one **rolled** at the victim's own class-2 threshold, 60 for a
+//! creature and 30 for a player, while a crit and a crushing blow always sound (decision 2073).
 //!
 //! A `text_only` flush (supersede/attack-stop) drops its sounds — only the floating number
 //! flushes (decision 0149's flush law, inherited from the shared dispatch).
@@ -138,7 +139,8 @@ use benilla_world::schedule::WorldStage;
 use super::creature::CreatureVoices;
 use super::kit::{
     bark_chance_pass, object_sound_playing, play_kit_ext, Bus, KitRef, PlayExtras, SoundCategory,
-    SoundKits, Volume, EXERTION_CHANCE_CREATURE, EXERTION_CHANCE_PLAYER,
+    SoundKits, Volume, EXERTION_CHANCE_CREATURE, EXERTION_CHANCE_PLAYER, INJURY_CHANCE_CREATURE,
+    INJURY_CHANCE_PLAYER,
 };
 use super::{AudioListener, SoundConfig, SoundOutput};
 
@@ -829,16 +831,35 @@ fn combat_sounds(
             && swing.hit_info & HITINFO_ABSORB_OR_RESIST == 0
             && !matches!(swing.victim_state, VICTIM_PARRY | VICTIM_BLOCK)
         {
+            // The vocal's **class**, which decides both gates below: crushing `0x8000` → 9,
+            // else critical `0x80` → 3, else 2 (`0x62462c`/`0x624649`/`0x624666`).
+            let crushing = swing.hit_info & HITINFO_CRUSHING != 0;
             // The `AISOUNDDESC` gate (`0x4591f0` from `0x6234cb`): a server-pushed object sound
-            // live on the victim suppresses its own vocal, classes 0-3 and 8. The CGPlayer twin
+            // live on the victim suppresses its own vocal — **classes 0-3 and 8 only**
+            // (`0x6234bb`/`0x6234bf`/`0x6234c4`), so a CRUSHING blow's class 9 punches through a
+            // scripted voice line where an ordinary hit and a crit do not. The CGPlayer twin
             // `0x62f880` omits the gate, so a player is never suppressed. Filtered off the victim
             // rather than `continue`d, because everything else in this iteration still stands.
             let vocal_victim = victim.filter(|(_, _, net, ..)| {
-                net.kind == EntityKind::Player
+                crushing
+                    || net.kind == EntityKind::Player
                     || !swing.victim.is_some_and(|v| object_sound_playing(&out, v))
             });
             if let Some((victim_tr, _, net, victim_is_you, _)) = vocal_victim {
-                let crushing = swing.hit_info & HITINFO_CRUSHING != 0;
+                // The class chance roll (decision 2073), inside the victim's own `[vt+0x88]` and
+                // therefore keyed on the VICTIM's type: class 2 is 60 for a creature and 30 for a
+                // player, while classes 3 and 9 carry 100 and always sound. So an ordinary wound
+                // grunt thins out under sustained melee and the big hits punch through it.
+                if !crushing && !crit {
+                    let threshold = if net.kind == EntityKind::Player {
+                        INJURY_CHANCE_PLAYER
+                    } else {
+                        INJURY_CHANCE_CREATURE
+                    };
+                    if !bark_chance_pass(threshold, kits.roll()) {
+                        continue;
+                    }
+                }
                 let vocal = net
                     .display_id
                     .and_then(|d| voices.0.for_display(d))

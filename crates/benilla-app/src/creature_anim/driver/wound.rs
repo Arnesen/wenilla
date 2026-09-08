@@ -26,7 +26,7 @@ pub(super) enum WoundEdge {
 /// and λ = 0 the same frame). So this runs above the death override and touches nothing
 /// but its own node: λ = smoothstep(remaining)·0.75 over the clip's own span, blended out
 /// and gone — never a snap, never a stop of what plays underneath.
-pub(super) fn wound_upkeep(drv: &mut AnimDriver, player: &mut AnimationPlayer) {
+pub(super) fn wound_upkeep(entity: Entity, drv: &mut AnimDriver, player: &mut AnimationPlayer) {
     if let Some(wd) = drv.wound {
         let finished = match player.animation_mut(wd.node) {
             Some(a) if !a.is_finished() => {
@@ -50,7 +50,10 @@ pub(super) fn wound_upkeep(drv: &mut AnimDriver, player: &mut AnimationPlayer) {
             player.stop(wd.node);
             drv.wound = None;
             if benilla_assets::trace::enabled() {
-                benilla_assets::trace::line("fct", "wound expire (λ reached 0, slot released)");
+                benilla_assets::trace::line(
+                    "fct",
+                    &format!("wound expire unit={entity} (λ reached 0, slot released)"),
+                );
             }
         }
     }
@@ -68,6 +71,7 @@ pub(super) fn wound_upkeep(drv: &mut AnimDriver, player: &mut AnimationPlayer) {
 /// plays — a change with no play (Land's re-pick) merely evicts one frame before the play
 /// that follows it.
 pub(super) fn wound_evict(
+    entity: Entity,
     drv: &mut AnimDriver,
     player: &mut AnimationPlayer,
     masked_played: bool,
@@ -86,7 +90,7 @@ pub(super) fn wound_evict(
                 benilla_assets::trace::line(
                     "fct",
                     &format!(
-                        "wound evict masked={} (a blended re-arm took the bone's secondary)",
+                        "wound evict unit={entity} masked={} (a blended re-arm took the bone's secondary)",
                         wd.masked
                     ),
                 );
@@ -103,15 +107,17 @@ pub(super) fn wound_evict(
 /// gate — both §5 trigger agents refuted that hypothesis), and the upkeep above blends it
 /// out and self-releases — until a same-bone re-arm evicts it (the block above; a wound
 /// triggered here is this frame's *last* write, matching the client's packet order).
-/// Client gates without a benilla counterpart yet: the creature-template no-wound
-/// type-flag 0x8 (no template cache; the client itself passes on a null template) and the
-/// attached-spell-effect marker (no CEffect system until the VFX phases). The client
+/// The trigger's own entry gates live in the caller ([`super::drive_animations`]): the victim's
+/// `DO_NOT_PLAY_WOUND_ANIM` template flag (decision 2068) and the CharProc-11 rate-override node
+/// (2063), in the reference's own order. The one client gate still without a benilla counterpart
+/// is the attached-spell-effect marker (no CEffect system until the VFX phases). The client
 /// calls op4 directly — not PlayAnimation — so the flinch is faithfully invisible to the
 /// sheath reconcile and the event scan. `id` is the wound anim to lay (8–10), already resolved
 /// by the caller — melee by severity/engagement ([`select::wound_anim`]), a spell impact by its
 /// kit's own column ([`WoundEdge`]).
 #[allow(clippy::too_many_arguments)] // the trigger's full live-state + rng input set
 pub(super) fn wound_trigger(
+    entity: Entity,
     drv: &mut AnimDriver,
     player: &mut AnimationPlayer,
     anims: &ModelAnimations,
@@ -177,7 +183,7 @@ pub(super) fn wound_trigger(
                     benilla_assets::trace::line(
                         "fct",
                         &format!(
-                            "wound trigger id={id} masked={masked} span={:.3} base={base} others={others}",
+                            "wound trigger unit={entity} id={id} masked={masked} span={:.3} base={base} others={others}",
                             c.duration
                         ),
                     );
@@ -185,13 +191,17 @@ pub(super) fn wound_trigger(
             } else if benilla_assets::trace::enabled() {
                 benilla_assets::trace::line(
                     "fct",
-                    &format!("wound trigger id={id} SKIPPED (the base track owns the node)"),
+                    &format!(
+                        "wound trigger unit={entity} id={id} SKIPPED (the base track owns the node)"
+                    ),
                 );
             }
         } else if benilla_assets::trace::enabled() {
             benilla_assets::trace::line(
                 "fct",
-                &format!("wound trigger id={id} SKIPPED (no playable clip, or a zero span)"),
+                &format!(
+                    "wound trigger unit={entity} id={id} SKIPPED (no playable clip, or a zero span)"
+                ),
             );
         }
     }

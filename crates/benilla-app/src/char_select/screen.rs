@@ -20,7 +20,7 @@ use bevy::window::PrimaryWindow;
 use crate::glue::art::{GlueArt, BACKDROP, DIM, GOLD, NAME_EDGE};
 use crate::glue::backdrop::{backdrop_border, tiled_bg_node};
 use crate::glue::widgets::{
-    abs, glue_button, outlined_text, overlay, GlueBtnKind, GlueText, Hilight,
+    abs, glue_button, outlined_text, overlay, GlueBtnKind, GlueText, Hilight, LockHighlight,
 };
 use crate::glue_strings::GlueStrings;
 use crate::portrait::{GluePreview, PortraitImages, PortraitSource, GLUE_SLOT};
@@ -459,7 +459,8 @@ fn row_button(
         .spawn((
             SelectAction::Row(row),
             Button,
-            Visibility::Hidden, // shown by the refresh while the roster has this row
+            LockHighlight::default(), // `LockHighlight` on the selected row (refresh.rs)
+            Visibility::Hidden,       // shown by the refresh while the roster has this row
             Node {
                 position_type: PositionType::Absolute,
                 left: px(24.0),

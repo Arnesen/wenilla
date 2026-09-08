@@ -433,6 +433,35 @@ impl ParticleEmitter {
         self.alpha
     }
 
+    /// The **cloud anchor** this emitter was spawned under ([`EmitterFrames::anchor`]) — the model
+    /// instance it belongs to. The identity an effect lane uses to find its own emitters when the
+    /// instance ends ([`Self::drain_on_owner_loss`]).
+    pub fn anchor(&self) -> Option<Entity> {
+        self.anchor
+    }
+
+    /// Switch this emitter to [`OwnerLoss::Drain`] — **the effect is ending, so its already-emitted
+    /// particles must finish rather than pop** (wow-re `ceffect-particle-drain.md` §4a).
+    ///
+    /// The reference makes this distinction the same way, at the same moment. `0x6203e0` — the
+    /// teardown every ending `CEffect` reaches, whether by its completion callback or by the
+    /// same-slot replace — does **not** free the node: it pushes it onto the pending-destroy list
+    /// and hides it, which stops emission only. The particle draw path never reads a flag that
+    /// teardown clears (its own admission test is the live-particle count `emitter+0x64`,
+    /// `0x7b4b46`), so the survivors keep drawing and ageing out one at a time; `0x61f680` frees
+    /// the node on the first frame the aggregate `CM2Model+0x3d8` reads zero — **the free
+    /// condition and the draw condition are the same word**.
+    ///
+    /// It is deliberately NOT the spawn-time policy for an attached instance, because the *other*
+    /// way an effect's owner can vanish is the model dtor — a gear change, a display swap, a unit
+    /// streaming out — and there the reference frees the emitters synchronously and the pool must
+    /// go with the body (decisions 0826/0833: draining that case stranded ghost clouds in the air
+    /// where the character had been). Both look identical from inside the sim, so the ending side
+    /// says so explicitly.
+    pub fn drain_on_owner_loss(&mut self) {
+        self.on_owner_loss = OwnerLoss::Drain;
+    }
+
     /// The cloud's live world anchor — the census probe's fallback distance subject for an emitter
     /// with no [`EmitterFade`] (entity-owned: creatures, GameObjects, spell kits). A faded
     /// emitter's distance is measured to its OWNER's sphere instead, because that sphere is what
@@ -1034,6 +1063,58 @@ pub(crate) mod tests {
         );
         // The ordinary model, whose idle IS slot 0, is unchanged.
         assert_eq!(seeded_slot(model_emitter(0), EmitClock::Pinned), Some(0));
+    }
+
+    /// **The ending side asks for the drain; the spawn-time policy does not give it** (wow-re
+    /// `ceffect-particle-drain.md` §4a). An attached instance is spawned `Free` so that a model
+    /// dtor — a gear change, a display swap, a unit streaming out — takes its pool with the body
+    /// (0826/0833: draining that case stranded ghost clouds in the air). The *other* way an
+    /// effect's owner vanishes is the effect simply ending, and there the reference hides the node
+    /// and lets the particles age out. Both look identical from inside the sim, so the ending side
+    /// flips the policy explicitly — and this is the flip.
+    #[test]
+    fn an_ending_instance_switches_its_emitters_from_free_to_drain() {
+        use bevy::ecs::system::RunSystemOnce;
+        let root = Entity::from_raw_u32(7).unwrap();
+        let mut app = App::new();
+        let e = app
+            .world_mut()
+            .run_system_once(move |mut c: Commands| {
+                spawn_emitter(
+                    &mut c,
+                    &model_emitter(0),
+                    Transform::IDENTITY,
+                    EmitterFrames {
+                        anchor: Some(root),
+                        on_owner_loss: OwnerLoss::Free,
+                        ..default()
+                    },
+                    EmitClock::Pinned,
+                )
+            })
+            .unwrap()
+            .expect("the emitter spawns");
+
+        assert_eq!(
+            app.world().get::<ParticleEmitter>(e).unwrap().anchor(),
+            Some(root),
+            "the instance root is the identity its lane finds this emitter by",
+        );
+        assert_eq!(
+            app.world().get::<ParticleEmitter>(e).unwrap().on_owner_loss,
+            OwnerLoss::Free,
+            "spawned Free — a torn-down model must not strand its cloud",
+        );
+
+        app.world_mut()
+            .get_mut::<ParticleEmitter>(e)
+            .unwrap()
+            .drain_on_owner_loss();
+        assert_eq!(
+            app.world().get::<ParticleEmitter>(e).unwrap().on_owner_loss,
+            OwnerLoss::Drain,
+            "the ending instance's particles finish instead of popping",
+        );
     }
 
     /// Camera at the origin looking down −Z (Bevy's convention), and an owner sphere `depth` yd

@@ -674,6 +674,7 @@ pub(super) fn resolve_spell_fx(
     fx: Option<ResMut<SpellFx>>,
     time: Res<Time>,
     asset_server: Res<AssetServer>,
+    mut emitters: Query<&mut benilla_world::particles::ParticleEmitter>,
 ) {
     let Some(mut fx) = fx else { return };
     let now = time.elapsed_secs();
@@ -711,13 +712,27 @@ pub(super) fn resolve_spell_fx(
                     // decays out exactly as a reaped one does: in the reference these are two
                     // nodes, the old one dying on its own clock while the new one is born.
                     if *persistent {
-                        reap_matching(&mut instances, *spell_id, *class, &fx, now, &mut commands);
+                        reap_matching(
+                            &mut instances,
+                            *spell_id,
+                            *class,
+                            &fx,
+                            now,
+                            &mut commands,
+                            &mut emitters,
+                        );
                     }
                     for FxSlot { tag, effect, path } in effects {
                         // **The same-slot replace**, run per slot exactly where the reference
                         // runs it: `CEffect::AddEffect 0x61fdd0` opens with
                         // `0x6208e0(owner, rec, tag)` (decision 2057).
-                        replace_same_slot(&mut instances, *effect, *tag, &mut commands);
+                        replace_same_slot(
+                            &mut instances,
+                            *effect,
+                            *tag,
+                            &mut commands,
+                            &mut emitters,
+                        );
                         fx.models
                             .entry(path.clone())
                             .or_insert_with(|| DisplayModel {
@@ -741,7 +756,15 @@ pub(super) fn resolve_spell_fx(
                 SpellKitFx::Reap {
                     spell_id, class, ..
                 } => {
-                    reap_matching(&mut instances, *spell_id, *class, &fx, now, &mut commands);
+                    reap_matching(
+                        &mut instances,
+                        *spell_id,
+                        *class,
+                        &fx,
+                        now,
+                        &mut commands,
+                        &mut emitters,
+                    );
                 }
             }
         }
@@ -750,6 +773,35 @@ pub(super) fn resolve_spell_fx(
             Err(_) => {
                 commands.entity(entity).insert(FxAttached { instances });
             }
+        }
+    }
+}
+
+/// **Hand an ending instance's emitters to the drain** — the half of the reference's teardown
+/// `0x6203e0` that is not a despawn (wow-re `ceffect-particle-drain.md`, §4a byte-settled
+/// 2026-09-07).
+///
+/// An ending `CEffect` is *hidden*, not freed: emission stops, the already-emitted particles keep
+/// drawing and age out one at a time, and the node is released only on the frame the last one dies
+/// — the draw path's own admission test is the live-particle count itself (`0x7b4b46 mov
+/// eax,[esi+0x64]`), which nothing in the teardown touches. Despawning the root outright, as this
+/// lane did before, cut every live particle at once: for `Strike_Impact_Chest` a replace landing
+/// mid-burst threw away up to 0.30 s of a 0.334 s effect, as a pop mid-ramp.
+///
+/// The meshes are right to go with the root: the reference drops the model off the MESH draw list
+/// the same frame (`0x719207` gates it on the visible flag the teardown clears) while the PARTICLE
+/// list is gated on the busy mask (`0x71922c`), which the survivors keep set.
+///
+/// Emitters are free entities carrying their instance root as [`ParticleEmitter::anchor`], so that
+/// is the identity here — a linear scan, run only when an instance actually ends (a few per second
+/// in a fight, against a pool the sim already walks every frame).
+fn drain_instance_emitters(
+    emitters: &mut Query<&mut benilla_world::particles::ParticleEmitter>,
+    root: Entity,
+) {
+    for mut e in emitters.iter_mut() {
+        if e.anchor() == Some(root) {
+            e.drain_on_owner_loss();
         }
     }
 }
@@ -775,6 +827,7 @@ fn replace_same_slot(
     effect: u32,
     tag: u16,
     commands: &mut Commands,
+    emitters: &mut Query<&mut benilla_world::particles::ParticleEmitter>,
 ) {
     if tag == benilla_formats::WORLD_EFFECT_TAG {
         return;
@@ -784,6 +837,10 @@ fn replace_same_slot(
             return true;
         }
         if let Some(root) = i.root {
+            // The replaced node's particles finish — the replace bounds the number of EMITTING
+            // nodes, not the number of live particles (`ceffect-particle-drain.md` §1's note on
+            // the shared teardown).
+            drain_instance_emitters(emitters, root);
             commands.entity(root).despawn();
         }
         false
@@ -805,6 +862,7 @@ fn reap_matching(
     fx: &SpellFx,
     now: f32,
     commands: &mut Commands,
+    emitters: &mut Query<&mut benilla_world::particles::ParticleEmitter>,
 ) {
     instances.retain_mut(|i| {
         if i.decaying || !i.persistent || i.spell_id != spell_id || i.class != class {
@@ -816,6 +874,9 @@ fn reap_matching(
             .and_then(|dm| decay_span(dm.animations.as_ref()));
         let (Some(root), Some(span)) = (i.root, span) else {
             if let Some(root) = i.root {
+                // A reap with no `Decay` to play destroys at once — and that destroy is
+                // `0x6203e0` like any other, so its particles still drain.
+                drain_instance_emitters(emitters, root);
                 commands.entity(root).despawn();
             }
             return false;
@@ -852,6 +913,7 @@ pub(super) fn attach_spell_fx(
     mut tint_reg: ResMut<FxTintAnims>,
     ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
+    mut emitters: Query<&mut benilla_world::particles::ParticleEmitter>,
 ) {
     let Some(fx) = fx else {
         return;
@@ -863,6 +925,10 @@ pub(super) fn attach_spell_fx(
             if let Some(expires) = inst.expires {
                 if now >= expires {
                     if let Some(root) = inst.root {
+                        // The flash ran its span — but its particles have their own clocks and
+                        // outlive it (`drain_instance_emitters`). This is the completion
+                        // callback's leg of the same `0x6203e0` teardown the replace takes.
+                        drain_instance_emitters(&mut emitters, root);
                         commands.entity(root).despawn();
                     }
                     if benilla_assets::trace::enabled() {

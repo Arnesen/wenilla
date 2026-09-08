@@ -1534,6 +1534,7 @@ pub(crate) fn apply_net_updates(
                     &mut audio.15 .1,
                     &mut audio.15 .2,
                     &mut audio.15 .7,
+                    &stores,
                     play_seq.next(),
                 )
             }

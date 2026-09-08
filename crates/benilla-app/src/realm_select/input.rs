@@ -1,15 +1,19 @@
 //! The realm list's input — the reference's `RealmSelectButton_OnClick`/`OnDoubleClick`,
 //! `RealmList_OnOk`/`OnCancel`, `RealmListTab_OnClick`, `SortRealms`, and `RealmList_OnKeyDown`.
+//!
+//! **Every exit hides the dialog and touches nothing else.** `RealmList_OnOk` is
+//! `PlaySound; RealmList:Hide(); ChangeRealm(...)` and `RealmList_OnCancel` is
+//! `PlaySound; RealmList:Hide(); RealmListDialogCancelled()` — neither names a screen, because the
+//! screen it is standing on is the one the player goes back to (see [`super`]).
 
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 
-use crate::char_select::ClientState;
 use crate::net::{RealmChoice, RealmRequest};
 use crate::sound::GlueSound;
 
 use super::screen::{RealmAction, MAX_ROWS};
-use super::{answer, is_down, Realms};
+use super::{is_down, Realms};
 
 /// The double-click window — the same conventional interval the select screen uses.
 const DOUBLE_CLICK_SECS: f32 = 0.4;
@@ -22,14 +26,13 @@ pub(super) fn clicks(
     hits: Res<crate::glue::GlueClicks>,
     mut realms: ResMut<Realms>,
     choice: Res<RealmChoice>,
-    mut next: ResMut<NextState<ClientState>>,
     mut sounds: MessageWriter<GlueSound>,
     time: Res<Time>,
     mut last_click: Local<Option<(String, f32)>>,
 ) {
     let now = time.elapsed_secs();
     let mut enter = false;
-    let mut cancel = false;
+    let mut leave: Option<bool> = None; // Some(with_sound)
     for (entity, action) in &buttons {
         if !hits.hit(entity) {
             continue;
@@ -52,7 +55,8 @@ pub(super) fn clicks(
                 }
             }
             RealmAction::Ok => enter = true,
-            RealmAction::Cancel => cancel = true,
+            RealmAction::Cancel => leave = Some(true),
+            RealmAction::Close => leave = Some(false),
             // `realm_set_primary_key` (0x46e9b0) — move-to-front, and the clicked column keeps
             // the direction it already had unless it was already primary. See `Sort::click`.
             RealmAction::Sort(key) => realms.sort.click(key),
@@ -61,12 +65,8 @@ pub(super) fn clicks(
     if enter {
         try_enter(&mut realms, &choice, &mut sounds);
     }
-    if cancel {
-        // `RealmList_OnCancel`. Cancelling the realm list drops the logon: there is no screen
-        // between here and the login one.
-        sounds.write(GlueSound("gsLoginChangeRealmCancel"));
-        let _ = choice.0.send(RealmRequest::Abandon);
-        next.set(ClientState::Login);
+    if let Some(with_sound) = leave {
+        do_cancel(&mut realms, &choice, &mut sounds, with_sound);
     }
 }
 
@@ -76,13 +76,10 @@ pub(super) fn keys(
     mut wheel: MessageReader<MouseWheel>,
     mut realms: ResMut<Realms>,
     choice: Res<RealmChoice>,
-    mut next: ResMut<NextState<ClientState>>,
     mut sounds: MessageWriter<GlueSound>,
 ) {
     if keys.just_pressed(KeyCode::Escape) {
-        sounds.write(GlueSound("gsLoginChangeRealmCancel"));
-        let _ = choice.0.send(RealmRequest::Abandon);
-        next.set(ClientState::Login);
+        do_cancel(&mut realms, &choice, &mut sounds, true);
         return;
     }
     if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
@@ -143,7 +140,38 @@ fn scroll_into_view(realms: &mut Realms, row: usize, total: usize) {
     }
 }
 
-/// `RealmList_OnOk`: play the click and answer the park.
+/// `RealmList_OnCancel` — and `RealmListCloseButton`, which differs only in the sound
+/// (`with_sound`).
+///
+/// **The park's answer to `Abandon` is the whole difference between the two contexts**, and
+/// neither costs this function a branch — which is exactly the reference's own shape. Its
+/// `RealmListDialogCancelled` (`0x46ed20` → `0x46b810`, VERIFIED) opens by comparing the current
+/// glue screen's name against `"login"`: **not equal and it returns immediately**, so from
+/// character select the native does *nothing at all* — the realmd link, the world session and the
+/// operation record are untouched and `Hide()` is the entire effect. Equal, and it tail-jumps
+/// `CLoginMgr::Cancel` (`0x5b3320`), closing the realmd socket — **without any `SetGlueScreen`**,
+/// because the login screen was never left. Ours matches on both legs: the character park ignores
+/// `Abandon`, and the login-side park re-parks, which drops the `Logon` and its socket.
+///
+/// **One divergence, stated.** In the reference the X reaches only `CancelRealmListQuery`
+/// (`0x46ed10` → `0x46b7e0`: cancel the pending `COP_GET_REALMS` record, send nothing, close
+/// nothing), so from a login it leaves the realmd link up. Ours abandons on both, because our IO
+/// thread *parks* on the question rather than polling for it: a hidden dialog with the thread
+/// still blocked at the realm park is precisely the desync this whole redesign exists to remove.
+fn do_cancel(
+    realms: &mut Realms,
+    choice: &RealmChoice,
+    sounds: &mut MessageWriter<GlueSound>,
+    with_sound: bool,
+) {
+    if with_sound {
+        sounds.write(GlueSound("gsLoginChangeRealmCancel"));
+    }
+    realms.hide();
+    let _ = choice.0.send(RealmRequest::Abandon);
+}
+
+/// `RealmList_OnOk`: play the click, hide the frame, answer the park.
 ///
 /// **Deferred: the `REALM_IS_FULL` confirm.** The reference raises a Yes/No dialog first when the
 /// chosen realm's load band reads `Full` *and* you have no characters on it
@@ -156,12 +184,13 @@ fn scroll_into_view(realms: &mut Realms, row: usize, total: usize) {
 /// dialog is unreachable against the servers benilla connects to today.
 fn try_enter(realms: &mut Realms, choice: &RealmChoice, sounds: &mut MessageWriter<GlueSound>) {
     let Some(realm) = realms.selected() else {
-        return;
+        return; // nothing highlighted — the reference's Okay is disabled here
     };
     if is_down(realm) {
         return; // the reference disables OK for an offline realm
     }
     let name = realm.name.clone();
     sounds.write(GlueSound("gsLoginChangeRealmOK"));
-    answer(realms, choice, name);
+    realms.hide();
+    realms.enter(choice, name);
 }

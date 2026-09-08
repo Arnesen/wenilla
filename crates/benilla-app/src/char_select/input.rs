@@ -34,14 +34,16 @@ pub(super) fn select_input(
     pick: Res<CharPick>,
     mut dialog: ResMut<DeleteDialog>,
     mut panel: ResMut<super::addons::AddonsPanel>,
+    choice: Res<crate::net::RealmChoice>,
     mut next: ResMut<NextState<ClientState>>,
     mut sounds: MessageWriter<GlueSound>,
     mut intent: ResMut<crate::login::LoginIntent>,
     time: Res<Time>,
     mut last_click: Local<Option<(usize, f32)>>,
 ) {
-    // A modal owns the input while it is up — the delete confirm, or the AddOns list.
-    if dialog.open || panel.open {
+    // A modal owns the input while it is up — the delete confirm, the AddOns list, or the realm
+    // list, which stands over this screen rather than replacing it.
+    if dialog.open || panel.open || realms.shown {
         return;
     }
     let now = time.elapsed_secs();
@@ -99,17 +101,15 @@ pub(super) fn select_input(
                 panel.open_for(realm, chars);
             }
             SelectAction::Back => back_to_login = true,
-            // The reference's `CHANGE_REALM`: leave the parked session for the realm list. The
-            // IO thread keeps the logon, so this is a world dial away rather than a re-login —
-            // and the pending pick has to go, or the fresh roster on the OTHER realm would be
-            // auto-answered with a guid from this one.
+            // The reference's `CHANGE_REALM`: raise the realm list **over** this screen. Nothing
+            // is torn down and nothing is disconnected — the character park serves the list in
+            // place and only leaves when a realm is picked, so Cancel puts the player back here
+            // with the session they never left. The pending pick still has to go, or the fresh
+            // roster on the OTHER realm would be auto-answered with a guid from this one.
             SelectAction::ChangeRealm => {
                 sounds.write(GlueSound("gsLoginChangeRealmOK"));
                 roster.pending_pick = None;
-                // The remembered realm IS this one, so the list that comes back must not be
-                // auto-answered with it — that would be a button that appears to do nothing.
-                crate::realm_select::force_screen(&mut realms);
-                let _ = pick.0.send(crate::net::CharRequest::ChangeRealm);
+                crate::realm_select::open_over_char_select(&mut realms, &choice);
             }
             _ => {}
         }

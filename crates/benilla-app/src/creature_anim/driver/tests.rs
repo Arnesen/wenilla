@@ -18,7 +18,9 @@ use super::super::{
     SheathSwapMessage, SwingMessage, Wielded, WoundAnim,
 };
 use super::drive_animations;
+use crate::names::type_flags::{DO_NOT_PLAY_WOUND_ANIM, MORE_AUDIBLE, NO_FACTION_TOOLTIP};
 use crate::net::NetCommands;
+use benilla_protocol::ObjectFields;
 
 /// A hand holding something that is **not a weapon** — a torch, a held-in-off-hand trinket.
 ///
@@ -180,6 +182,7 @@ fn app() -> App {
     // and no test unit is the self player anyway.
     let (tx, _rx) = crossbeam_channel::unbounded();
     app.insert_resource(NetCommands(tx));
+    app.init_resource::<crate::names::NameCache>();
     app.insert_resource(catalog());
     app.add_systems(Update, drive_animations);
     app
@@ -3853,5 +3856,201 @@ fn a_special_goes_unarmed_only_when_both_hands_are_empty() {
     assert!(
         playing(&app, alone, 3) && !playing(&app, alone, 2),
         "both hands empty to the gate — SpecialUnarmed(118)"
+    );
+}
+
+/// A creature whose template carries **DO_NOT_PLAY_WOUND_ANIM** (`type_flags & 0x8`) takes no
+/// wound flinch at all — the reference's `0x60ea9f` gate inside the flinch itself, so it covers
+/// every trigger: the melee hit, the `$HIT` echo and the spell-side severity-0 call alike
+/// (decision 2068). This is the skeleton case: no flesh, no recoil.
+///
+/// The control beside it is the whole point — the gate must key on bit `0x8` and nothing else,
+/// and benilla read the *neighbouring* bit for months. So the unflagged victim here carries
+/// `NO_FACTION_TOOLTIP | MORE_AUDIBLE` (`0x30`, the two bits we already consume) and must still
+/// flinch: a gate on either neighbour, or on "any flag at all", fails right here.
+#[test]
+fn a_no_wound_creature_takes_no_flinch() {
+    fn model() -> ModelAnimations {
+        ModelAnimations {
+            graph: Handle::default(),
+            clips: vec![
+                clip(0, 1, true),  // Stand
+                clip(8, 2, false), // StandWound — the unengaged victim's severity-0 pick
+            ],
+            hand_close: [None, None],
+            playable_animation_lookup: Vec::new(),
+            animation_lookup: Vec::new(),
+            global_bones: Vec::new(),
+            first_seq: None,
+            pose: Default::default(),
+        }
+    }
+    // The victim's descriptor, carrying the one field the gate keys on.
+    fn streamed(entry: u32) -> crate::net::ObjectStore {
+        crate::net::ObjectStore(ObjectFields::from_pairs(&[(OBJECT_FIELD_ENTRY, entry)]))
+    }
+    const OBJECT_FIELD_ENTRY: u16 = 3;
+    const SKELETON: u32 = 1783; // a Scarlet Monastery skeleton's template entry
+    const WOLF: u32 = 69;
+
+    let mut app = app();
+    let record = |type_flags: u32| crate::names::CreatureRecord {
+        name: "victim".into(),
+        subname: None,
+        creature_type: 6, // Undead
+        pet_family: 0,
+        rank: 0,
+        type_flags,
+        civilian: false,
+        racial_leader: false,
+        display_id: 0,
+    };
+    {
+        let mut names = app.world_mut().resource_mut::<crate::names::NameCache>();
+        names.insert_creature(SKELETON, Some(record(DO_NOT_PLAY_WOUND_ANIM)));
+        // The control's flags are the two NEIGHBOURS, both set.
+        names.insert_creature(WOLF, Some(record(NO_FACTION_TOOLTIP | MORE_AUDIBLE)));
+    }
+
+    let spawn = |app: &mut App, entry: u32| {
+        app.world_mut()
+            .spawn((
+                model(),
+                AnimationPlayer::default(),
+                AnimationTransitions::new(),
+                AnimDriver::default(),
+                streamed(entry),
+            ))
+            .id()
+    };
+    let skeleton = spawn(&mut app, SKELETON);
+    let wolf = spawn(&mut app, WOLF);
+    // A creature whose query has not answered yet: the reference's null-record leg passes, so it
+    // flinches like anything else.
+    let unqueried = spawn(&mut app, 4242);
+    app.update(); // settle every base on Stand
+
+    for e in [skeleton, wolf, unqueried] {
+        app.world_mut().write_message(WoundAnim { entity: e });
+    }
+    app.update();
+
+    let wound = |e: Entity| {
+        app.world()
+            .entity(e)
+            .get::<AnimDriver>()
+            .unwrap()
+            .wound
+            .is_some()
+    };
+    assert!(
+        !wound(skeleton),
+        "DO_NOT_PLAY_WOUND_ANIM refuses the flinch"
+    );
+    assert!(
+        wound(wolf),
+        "the neighbouring bits (0x10 / 0x20) must not gate the flinch"
+    );
+    assert!(
+        wound(unqueried),
+        "a template we have not received reads as unflagged — `0x6125f0`'s null leg"
+    );
+}
+
+/// The flag's **second** consumer: `DO_NOT_PLAY_WOUND_ANIM` takes the victim's **parry** with its
+/// flinch (`0x60ec1f` inside the parry pick `0x60ec00`, wow-re
+/// `wound-parry-gate-and-injury-vocal.md` Q1/Q6 — the bit has exactly two callers and this is the
+/// other one). The `$CPP` ladder enters `0x60ec00` only on victimState 3, so DODGE and BLOCK
+/// reach `PlayAnimation` directly and are **not** gated: a flagged creature still dodges, it just
+/// never parries. Both halves are asserted here — the gate without its control is the bug this
+/// whole record is about.
+#[test]
+fn the_no_wound_flag_takes_the_parry_but_not_the_dodge() {
+    fn model() -> ModelAnimations {
+        ModelAnimations {
+            graph: Handle::default(),
+            clips: vec![
+                clip(0, 1, true),   // Stand
+                clip(21, 2, false), // Parry1H — a 1H sword's parry pick
+                clip(30, 3, false), // Dodge
+            ],
+            hand_close: [None, None],
+            playable_animation_lookup: Vec::new(),
+            animation_lookup: Vec::new(),
+            global_bones: Vec::new(),
+            first_seq: None,
+            pose: Default::default(),
+        }
+    }
+    const OBJECT_FIELD_ENTRY: u16 = 3;
+    const FLAGGED: u32 = 3870; // Stone Sleeper — really carries the bit on our world DB
+    const PLAIN: u32 = 69;
+
+    let mut app = app();
+    let record = |type_flags: u32| crate::names::CreatureRecord {
+        name: "victim".into(),
+        subname: None,
+        creature_type: 6,
+        pet_family: 0,
+        rank: 0,
+        type_flags,
+        civilian: false,
+        racial_leader: false,
+        display_id: 0,
+    };
+    {
+        let mut names = app.world_mut().resource_mut::<crate::names::NameCache>();
+        names.insert_creature(FLAGGED, Some(record(DO_NOT_PLAY_WOUND_ANIM)));
+        names.insert_creature(PLAIN, Some(record(0)));
+    }
+    let spawn = |app: &mut App, entry: u32| {
+        app.world_mut()
+            .spawn((
+                model(),
+                AnimationPlayer::default(),
+                AnimationTransitions::new(),
+                AnimDriver::default(),
+                // A 1H sword in the mainhand: `defense_anim` sends class 2 subclass 7 to
+                // Parry1H(21).
+                Wielded {
+                    main: Some((2, 7)),
+                    ..Default::default()
+                },
+                crate::net::ObjectStore(ObjectFields::from_pairs(&[(OBJECT_FIELD_ENTRY, entry)])),
+            ))
+            .id()
+    };
+    let flagged = spawn(&mut app, FLAGGED);
+    let plain = spawn(&mut app, PLAIN);
+    let dodger = spawn(&mut app, FLAGGED);
+    app.update(); // settle every base on Stand
+
+    for (victim, victim_state) in [(flagged, 3), (plain, 3), (dodger, 2)] {
+        app.world_mut()
+            .write_message(crate::creature_anim::DefenseAnim {
+                victim,
+                victim_state,
+            });
+    }
+    app.update();
+
+    let base = |e: Entity| {
+        app.world()
+            .entity(e)
+            .get::<AnimationTransitions>()
+            .unwrap()
+            .get_main_animation()
+            .map(|n| n.index())
+    };
+    assert_eq!(
+        base(flagged),
+        Some(1),
+        "flagged: no parry — the base holds Stand"
+    );
+    assert_eq!(base(plain), Some(2), "unflagged: Parry1H(21) plays");
+    assert_eq!(
+        base(dodger),
+        Some(3),
+        "the flag does not reach DODGE — it enters `0x60ec00` only on victimState 3"
     );
 }

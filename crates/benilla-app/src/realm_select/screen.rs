@@ -22,7 +22,7 @@
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use crate::glue::art::{GlueArt, GOLD};
+use crate::glue::art::{tc_rect, GlueArt, COLUMN_TAB_TC, GOLD, SORT_ARROW_TC};
 use crate::glue::widgets::{
     abs, glue_button, outlined_text, overlay, ArtSwap, GlueBtnKind, GlueText, Hilight,
 };
@@ -32,6 +32,10 @@ use super::load;
 use super::{Realms, SortKey};
 
 use crate::char_select::wow_font;
+
+/// Over the glue screen it stands on (1100), over that screen's own dialogs (1200), and over the
+/// AddOns panel's tooltip (1220) — the reference's `frameStrata="DIALOG"` with `toplevel="true"`.
+const REALM_Z: i32 = 1250;
 
 /// The panel plate, straight off `RealmList.xml`.
 const BG_W: f32 = 640.0;
@@ -63,9 +67,13 @@ const SORT_COLUMNS: [(SortKey, &str, f32, f32); 4] = [
     (SortKey::Characters, "REALM_CHARACTERS", 324.0, 110.0),
     (SortKey::Load, "REALM_LOAD", 434.0, 144.0),
 ];
+/// `RealmSortButtonTemplate`'s height, and the widths of its two `WhoFrame-ColumnTabs` end caps.
+const SORT_H: f32 = 19.0;
+const SORT_CAP_L: f32 = 5.0;
+const SORT_CAP_R: f32 = 4.0;
 /// The sort header row's top edge: anchored BOTTOMLEFT to the plate's TOPLEFT at −50, so the
 /// 19-tall button's *bottom* is at 50.
-const SORT_TOP: f32 = 50.0 - 19.0;
+const SORT_TOP: f32 = 50.0 - SORT_H;
 
 /// A row's four column boxes, chained off the `RealmListRealmButtonTemplate` anchors:
 /// `NormalText` 220 wide at LEFT +5, `PVP` 50 wide at its RIGHT +10, `Players` 32 wide at that
@@ -90,8 +98,13 @@ pub(super) enum RealmAction {
     /// A realm row (0-based *screen* row, resolved against the scroll offset at click time).
     Row(usize),
     Ok,
-    /// Cancel and the close X are the same action — the reference's `RealmList_OnCancel`.
+    /// The Cancel button, and ESCAPE — `RealmList_OnCancel`.
     Cancel,
+    /// The close X, which is **not** the Cancel button. `RealmListCloseButton`'s whole OnClick is
+    /// `RealmList:Hide()`, and `GlueCloseButton` (`GlueTemplates.xml` l.4) declares no sound — so
+    /// the X is silent where Cancel plays `gsLoginChangeRealmCancel`. Same outcome for the player,
+    /// one fewer click in the room.
+    Close,
     Sort(SortKey),
 }
 
@@ -116,11 +129,17 @@ pub(super) struct RowHighlight;
 #[derive(Component)]
 pub(super) struct OkButton;
 
-/// Spawn the screen once its prerequisites exist, and rebuild it when the art lands or the glue
-/// scale moves — the same shape as the select screen's own materialize.
+/// Raise, rebuild and tear down the dialog — `RealmList:Show()` / `:Hide()`, plus the rebuild rule
+/// every glue tree here follows (an artless early spawn upgrades when the client art lands, and a
+/// window resize rebuilds at the new glue scale).
+///
+/// **Not a state transition.** The frame is shown over whatever glue screen is current and hidden
+/// again; nothing about that screen changes, which is the whole of `RealmList`'s lifecycle in the
+/// reference (see [`super`]).
 #[allow(clippy::too_many_arguments)]
-pub(super) fn materialize_screen(
+pub(super) fn drive_screen(
     mut commands: Commands,
+    realms: Res<Realms>,
     existing: Query<(Entity, &RealmListUi)>,
     assets: Res<AssetServer>,
     mut art: ResMut<GlueArt>,
@@ -131,6 +150,12 @@ pub(super) fn materialize_screen(
     window: Query<&Window, With<PrimaryWindow>>,
     time: Res<Time>,
 ) {
+    if !realms.shown {
+        for (root, _) in &existing {
+            commands.entity(root).despawn();
+        }
+        return;
+    }
     if let Some(mut wa) = world_assets {
         art.ensure_loaded(&mut wa, &mut images, &mut add_mats);
     }
@@ -165,13 +190,6 @@ pub(super) fn materialize_screen(
     }
 }
 
-/// Tear the screen down on the way out of the state.
-pub(super) fn exit_realm_list(mut commands: Commands, ui: Query<Entity, With<RealmListUi>>) {
-    for e in &ui {
-        commands.entity(e).despawn();
-    }
-}
-
 fn spawn_screen(
     commands: &mut Commands,
     assets: &AssetServer,
@@ -190,7 +208,11 @@ fn spawn_screen(
     commands
         .spawn((
             RealmListUi { with_art, s },
-            GlobalZIndex(1200),
+            GlobalZIndex(REALM_Z),
+            // `enableMouse="true"` on a `setAllPoints` frame: the dialog eats every click that
+            // misses its own controls, so the screen underneath cannot be operated through it.
+            // (A `Button` with no `FocusPolicy` blocks, which is what we want here.)
+            Button,
             // The reference's own full-screen BACKGROUND layer: black at 0.75.
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.75)),
             Node {
@@ -212,7 +234,7 @@ fn spawn_screen(
                 spawn_plate(b, art, s);
                 spawn_header(b, art, &font, &text("SERVER_SELECTION"), s);
                 spawn_close(b, art, &font, s);
-                spawn_sort_headers(b, &font, strings, s);
+                spawn_sort_headers(b, art, &font, strings, s);
                 spawn_highlight(b, art, s);
                 for row in 0..MAX_ROWS {
                     spawn_row(b, &font, row, s);
@@ -309,10 +331,10 @@ fn spawn_header(
     );
 }
 
-/// `GlueCloseButton` at TOPRIGHT (−42, −3) — the same action as Cancel.
+/// `GlueCloseButton` at TOPRIGHT (−42, −3) — see [`RealmAction::Close`] for why it is not Cancel.
 fn spawn_close(b: &mut ChildSpawnerCommands, art: &GlueArt, font: &Handle<Font>, s: f32) {
     let mut x = b.spawn((
-        RealmAction::Cancel,
+        RealmAction::Close,
         Button,
         abs(s, BG_W - 42.0 - 32.0, 3.0, 32.0, 32.0),
     ));
@@ -361,9 +383,13 @@ fn spawn_close(b: &mut ChildSpawnerCommands, art: &GlueArt, font: &Handle<Font>,
     }
 }
 
-/// The four clickable column headers (`RealmSortButtonTemplate`).
+/// The four clickable column headers (`RealmSortButtonTemplate`): a three-slice
+/// `WhoFrame-ColumnTabs` plate, the label 8 in from the left with the `UI-SortArrow` beside it, and
+/// the `UI-Character-Tab-Highlight` sheen the shared [`crate::glue::glue_hilights`] pass lights on
+/// hover.
 fn spawn_sort_headers(
     b: &mut ChildSpawnerCommands,
+    art: &GlueArt,
     font: &Handle<Font>,
     strings: Option<&GlueStrings>,
     s: f32,
@@ -375,27 +401,76 @@ fn spawn_sort_headers(
         b.spawn((
             RealmAction::Sort(key),
             Button,
-            abs(s, left, SORT_TOP, w, 19.0),
+            abs(s, left, SORT_TOP, w, SORT_H),
         ))
         .with_children(|h| {
-            outlined_text(
-                h,
-                Node {
-                    left: Val::Px(4.0 * s),
-                    top: Val::Px(3.0 * s),
-                    ..default()
-                },
-                (),
-                (),
-                GlueText {
-                    text: &label,
-                    size: 12.0, // GlueFontHighlightSmall
-                    color: load::HIGHLIGHT,
-                    wrap: false,
-                },
-                font,
-                s,
-            );
+            // The plate: 5-wide left cap, 4-wide right cap, the middle stretched between them.
+            if let Some((tex, size)) = &art.column_tabs {
+                for (tc, l, cw) in [
+                    (COLUMN_TAB_TC[0], 0.0, SORT_CAP_L),
+                    (COLUMN_TAB_TC[1], SORT_CAP_L, w - SORT_CAP_L - SORT_CAP_R),
+                    (COLUMN_TAB_TC[2], w - SORT_CAP_R, SORT_CAP_R),
+                ] {
+                    h.spawn((
+                        ImageNode {
+                            image: tex.clone(),
+                            rect: Some(tc_rect(*size, tc)),
+                            ..default()
+                        },
+                        abs(s, l, 0.0, cw, SORT_H),
+                    ));
+                }
+            }
+            // The sheen, LEFT..RIGHT+4 and 24 tall — vertically centred on a 19-tall button.
+            if let Some(hi) = &art.tab_highlight {
+                h.spawn((
+                    Hilight,
+                    Visibility::Hidden,
+                    MaterialNode(hi.clone()),
+                    abs(s, 0.0, (SORT_H - 24.0) / 2.0, w + 4.0, 24.0),
+                ));
+            }
+            // `$parentText` at LEFT +8, with `$parentArrow` 3 to the right of its right edge.
+            let mut row = h.spawn(Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(8.0 * s),
+                top: Val::Px(0.0),
+                height: Val::Px(SORT_H * s),
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(3.0 * s),
+                ..default()
+            });
+            row.with_children(|r| {
+                outlined_text(
+                    r,
+                    Node::default(),
+                    (),
+                    (),
+                    GlueText {
+                        text: &label,
+                        size: 12.0, // GlueFontHighlightSmall
+                        color: load::HIGHLIGHT,
+                        wrap: false,
+                    },
+                    font,
+                    s,
+                );
+                if let Some((tex, size)) = &art.sort_arrow {
+                    r.spawn((
+                        ImageNode {
+                            image: tex.clone(),
+                            rect: Some(tc_rect(*size, SORT_ARROW_TC)),
+                            ..default()
+                        },
+                        Node {
+                            width: Val::Px(9.0 * s),
+                            height: Val::Px(8.0 * s),
+                            top: Val::Px(-2.0 * s),
+                            ..default()
+                        },
+                    ));
+                }
+            });
         });
     }
 }
@@ -470,7 +545,10 @@ fn spawn_row(b: &mut ChildSpawnerCommands, font: &Handle<Font>, row: usize, s: f
 pub(super) fn refresh_rows(
     realms: Res<Realms>,
     strings: Option<Res<GlueStrings>>,
-    mut rows: Query<(&RowOf, &mut Visibility), (With<RealmAction>, Without<RowHighlight>)>,
+    mut rows: Query<
+        (&RowOf, &Interaction, &mut Visibility),
+        (With<RealmAction>, Without<RowHighlight>),
+    >,
     mut cols: Query<(&RowOf, &Column, &mut Text, &mut TextColor)>,
     mut band: Query<
         (&mut Node, &mut Visibility, Option<&mut ImageNode>),
@@ -490,11 +568,17 @@ pub(super) fn refresh_rows(
     // The screen row → realm index map for this frame, honouring the scroll offset.
     let at = |row: usize| visible.get(realms.offset + row).copied();
 
-    for (RowOf(row), mut vis) in &mut rows {
+    // The row under the cursor, if any — `RealmListRealmButtonTemplate`'s `HighlightFont`, which
+    // is the only hover state a row has (the template carries no HighlightTexture).
+    let mut hovered = None;
+    for (RowOf(row), interaction, mut vis) in &mut rows {
         *vis = match at(*row) {
             Some(_) => Visibility::Inherited,
             None => Visibility::Hidden,
         };
+        if *interaction != Interaction::None {
+            hovered = Some(*row);
+        }
     }
 
     // Where the selection band goes, decided while walking the name column.
@@ -505,25 +589,30 @@ pub(super) fn refresh_rows(
         };
         let down = super::is_down(realm);
         let invalid = super::is_invalid(realm);
+        // `LockHighlight()` on the chosen row, `button:Disable()` on an offline one: the selected
+        // row wears its highlight font just as a hovered row does, and a disabled row wears
+        // neither.
+        let is_selected = selected.as_deref() == Some(realm.name.as_str()) && !down;
+        let lit = !down && (is_selected || hovered == Some(*row));
         let (new, c) = match column {
             Column::Name => {
-                if selected.as_deref() == Some(realm.name.as_str()) && !down {
+                if is_selected {
                     band_row = Some((*row, load::highlight_color(invalid, realm.characters)));
                 }
-                (
-                    realm.name.clone(),
-                    load::name_colors(down, invalid, realm.characters).0,
-                )
+                let (normal, highlight) = load::name_colors(down, invalid, realm.characters);
+                (realm.name.clone(), if lit { highlight } else { normal })
             }
+            // `RealmListUpdate` recolours the selected row's type and load columns to
+            // HIGHLIGHT_FONT_COLOR — the two computed words go white under the band.
             Column::Type => {
                 let (key, c) = load::type_column(realm.realm_type);
-                (text(key), c)
+                (text(key), if is_selected { load::HIGHLIGHT } else { c })
             }
             Column::Players => (load::players_text(realm.characters), load::HIGHLIGHT),
             Column::Load => {
                 let level = load::realm_load_classify(realm.flags, realm.population, mean, stddev);
                 let (key, c) = load::load_column(down, level);
-                (text(key), c)
+                (text(key), if is_selected { load::HIGHLIGHT } else { c })
             }
         };
         if t.0 != new {

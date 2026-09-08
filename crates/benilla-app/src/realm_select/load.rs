@@ -193,6 +193,12 @@ pub(crate) fn pvp_rp(realm_type: u32) -> (bool, bool) {
 /// then the default gold. Note the reference's own gold here is `1.0, 0.78, 0` — a *different*
 /// value from `NORMAL_FONT_COLOR`'s `1.0, 0.82, 0`, hardcoded at the four call sites rather than
 /// taken from the global. Kept as it is written.
+/// The row gold `RealmListUpdate` writes — **a literal in the Lua** (`SetTextColor(1.0, 0.78,
+/// 0.0)`), not `NORMAL_FONT_COLOR`, which is 0.82. Four hundredths, and the reference is explicit
+/// about it in both places it appears (the name and the selection band's vertex colour), so it is
+/// pinned rather than folded into [`NORMAL`].
+pub(super) const ROW_GOLD: Color = Color::srgb(1.0, 0.78, 0.0);
+
 pub(super) fn name_colors(down: bool, invalid: bool, characters: u8) -> (Color, Color) {
     if down {
         (GRAY, Color::srgb(0.8, 0.8, 0.8))
@@ -201,7 +207,7 @@ pub(super) fn name_colors(down: bool, invalid: bool, characters: u8) -> (Color, 
     } else if characters > 0 {
         (GREEN, HIGHLIGHT)
     } else {
-        (crate::glue::art::GOLD, HIGHLIGHT)
+        (ROW_GOLD, HIGHLIGHT)
     }
 }
 
@@ -214,7 +220,7 @@ pub(super) fn highlight_color(invalid: bool, characters: u8) -> Color {
     } else if characters > 0 {
         GREEN
     } else {
-        crate::glue::art::GOLD
+        ROW_GOLD
     }
 }
 

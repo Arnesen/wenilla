@@ -370,6 +370,21 @@ impl TargetScan<'_, '_> {
         self.self_q.single().ok().and_then(|(_, store, _)| store)
     }
 
+    /// Our own guid — `IsSelectable`'s `CREATEDBY` clause needs the active player's, and so does
+    /// the commit's self-target exception.
+    fn self_guid(&self) -> Option<u64> {
+        self.self_q
+            .single()
+            .ok()
+            .and_then(|(_, _, g)| g)
+            .map(|g| g.0)
+    }
+
+    /// An entity's streamed descriptor — the commit gate's `IsSelectable` input.
+    fn store_at(&self, entity: Entity) -> Option<&ObjectStore> {
+        self.stores.get(entity).ok()
+    }
+
     /// `0x6130a3`'s keep-or-drop test on a guid we are already holding: is the actor hostile to it?
     ///
     /// The reference reads `0x6061e0(actor, target) >= 4` — the **reaction alone**, not the full
@@ -620,15 +635,31 @@ pub(super) struct CommitOutcome {
 /// don't. Shared with the UI's `TargetUnit` drain (`super::target_unit_requests`) so every
 /// non-mouse selection writer commits identically — a `TargetUnit("player")` mid-combat stops
 /// the swing and does NOT re-point (the tail's self exception).
+#[allow(clippy::too_many_arguments)] // `0x493540`'s own inputs, one press's worth
 pub(super) fn commit(
     selection: &mut Selection,
     seam: &mut crate::creature_anim::AttackSeam,
     entity: Entity,
     guid: u64,
+    target_store: Option<&ObjectStore>,
     engaged: bool,
     self_guid: Option<u64>,
     new_attackable: bool,
 ) -> CommitOutcome {
+    // **`IsSelectable`, and it comes BEFORE the dedup** — `0x4935ec`–`0x4935f3`, the third of
+    // `0x493540`'s early-outs (wow-re `object-layer/scratch/selection-attack-seam.md` §3.1): the
+    // resolved object's slot-`+0x58` vcall answering 0 is a bare RETURN, so a non-selectable unit
+    // is a **complete** no-op — no stop, no `CMSG_SET_SELECTION`, no `PLAYER_TARGET_CHANGED`, no
+    // re-swing, and the target you already had is left exactly where it was.
+    //
+    // This is the one gate, at the one place the reference puts it, so every writer — the click,
+    // the right-click, TAB, `TargetUnit`/`/target`/`/assist`, the attack auto-acquire and the
+    // ATTACKERSTATEUPDATE self-defence acquire — is covered without knowing it exists. Without it
+    // a Stratholme Baron Rivendare in his pre-event state (vmangos gives him `NOT_SELECTABLE |
+    // SPAWNING` until the ziggurats fall) took a target on the very swing he opened with.
+    if !super::relations::is_selectable(target_store, self_guid) {
+        return CommitOutcome::default();
+    }
     if selection.guid == Some(guid) {
         return CommitOutcome::default(); // the setter's dedup: bail if already current
     }
@@ -733,8 +764,12 @@ fn cycle(
         seam,
         entity,
         guid,
+        scan.store_at(entity),
         engaged,
-        None,
+        // The real guid, where this used to pass `None`: `IsSelectable`'s `CREATEDBY` clause reads
+        // it. Inert for the swing leg it was already feeding — the candidate query excludes our own
+        // body, so a TAB pick can never *be* us.
+        scan.self_guid(),
         // Attack `0x5ecb70`'s new-target validation, which is what this flag carries: a mode-2
         // pick can never pass it. `CanAssist` demands reaction ≥ 4 and `CanAttack`'s mixed arm
         // demands < 4, so the two candidate sets are disjoint on that leg — a CTRL-TAB in the
@@ -869,7 +904,16 @@ fn acquire_nearest_enemy(
     // `engaged = false`: the switch law only fires when we were already swinging at the OLD
     // selection, and every path that reaches here had no selection or a non-hostile one — neither
     // is a thing you can be engaged with.
-    commit(selection, seam, c.entity, c.guid, false, None, false);
+    commit(
+        selection,
+        seam,
+        c.entity,
+        c.guid,
+        scan.store_at(c.entity),
+        false,
+        scan.self_guid(),
+        false,
+    );
     Some((c.entity, c.guid))
 }
 
@@ -1111,8 +1155,12 @@ pub(super) fn remember_last_enemy(
 /// empty → `SetSelection(attacker)`. Selection only: no counter-attack, never overwrites.
 pub(super) fn auto_acquire_attacker(
     mut swings: MessageReader<SwingMessage>,
-    self_player: Query<Entity, With<SelfPlayer>>,
+    self_player: Query<(Entity, &Guid), With<SelfPlayer>>,
     guids: Query<&Guid>,
+    // The attacker's descriptor — `0x493540`'s `IsSelectable` gate reads it. A mob that swings at
+    // us while flagged `NOT_SELECTABLE` must not become our target: this is the acquire the
+    // Stratholme Baron's opening hit came in on.
+    stores: Query<&ObjectStore>,
     mut selection: ResMut<Selection>,
     mut seam: crate::creature_anim::AttackSeam,
 ) {
@@ -1120,7 +1168,7 @@ pub(super) fn auto_acquire_attacker(
         if selection.target.is_some() {
             continue;
         }
-        let Ok(me) = self_player.single() else {
+        let Ok((me, my_guid)) = self_player.single() else {
             continue;
         };
         if s.victim != Some(me) {
@@ -1139,8 +1187,9 @@ pub(super) fn auto_acquire_attacker(
             &mut seam,
             s.attacker,
             guid.0,
+            stores.get(s.attacker).ok(),
             false,
-            None,
+            Some(my_guid.0),
             false,
         );
     }
@@ -1150,6 +1199,61 @@ pub(super) fn auto_acquire_attacker(
 mod tests {
     use super::*;
     use crate::net::NetCommands;
+
+    /// One `commit` through a one-shot system, returning its outcome.
+    fn go(
+        world: &mut World,
+        guid: u64,
+        engaged: bool,
+        self_guid: Option<u64>,
+        attackable: bool,
+    ) -> CommitOutcome {
+        go_with(world, guid, None, engaged, self_guid, attackable)
+    }
+
+    /// …and the same with a descriptor for the new target, which is what `IsSelectable` reads.
+    /// `None` is the reference's *unresolved* object (`0x4935c8`), which skips the vcall.
+    fn go_with(
+        world: &mut World,
+        guid: u64,
+        store: Option<ObjectStore>,
+        engaged: bool,
+        self_guid: Option<u64>,
+        attackable: bool,
+    ) -> CommitOutcome {
+        use bevy::ecs::system::RunSystemOnce;
+        world
+            .run_system_once(
+                move |mut selection: ResMut<Selection>,
+                      mut seam: crate::creature_anim::AttackSeam| {
+                    commit(
+                        &mut selection,
+                        &mut seam,
+                        Entity::PLACEHOLDER,
+                        guid,
+                        store.as_ref(),
+                        engaged,
+                        self_guid,
+                        attackable,
+                    )
+                },
+            )
+            .expect("commit runs as a one-shot system")
+    }
+
+    /// A world with everything the seams need, and nothing else — both commit tests' fixture.
+    fn commit_world() -> (World, crossbeam_channel::Receiver<ClientCommand>) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut world = World::new();
+        world.insert_resource(NetCommands(tx));
+        world.init_resource::<crate::ui_cast::QueuedMeleeSpell>();
+        world.init_resource::<crate::ui_action::AutoRepeatActive>();
+        world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
+        world.init_resource::<Messages<crate::player::StandStateRequest>>();
+        world.init_resource::<Selection>();
+        world.spawn(SelfPlayer);
+        (world, rx)
+    }
 
     /// The `SetSelection` wire law, byte-read from `0x493540` (the director's "TAB while
     /// auto-attacking kills the attack" bug): an engaged SWITCH is **stop → select → re-swing**
@@ -1165,17 +1269,7 @@ mod tests {
     /// its own packets.
     #[test]
     fn commit_follows_the_stop_select_reswing_law() {
-        use bevy::ecs::system::RunSystemOnce;
-
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let mut world = World::new();
-        world.insert_resource(NetCommands(tx));
-        world.init_resource::<crate::ui_cast::QueuedMeleeSpell>();
-        world.init_resource::<crate::ui_action::AutoRepeatActive>();
-        world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
-        world.init_resource::<Messages<crate::player::StandStateRequest>>();
-        world.init_resource::<Selection>();
-        world.spawn(SelfPlayer);
+        let (mut world, rx) = commit_world();
 
         let drain = |rx: &crossbeam_channel::Receiver<ClientCommand>| {
             rx.try_iter()
@@ -1189,31 +1283,6 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        // One `commit` through a one-shot system, returning its outcome.
-        fn go(
-            world: &mut World,
-            guid: u64,
-            engaged: bool,
-            self_guid: Option<u64>,
-            attackable: bool,
-        ) -> CommitOutcome {
-            world
-                .run_system_once(
-                    move |mut selection: ResMut<Selection>,
-                          mut seam: crate::creature_anim::AttackSeam| {
-                        commit(
-                            &mut selection,
-                            &mut seam,
-                            Entity::PLACEHOLDER,
-                            guid,
-                            engaged,
-                            self_guid,
-                            attackable,
-                        )
-                    },
-                )
-                .expect("commit runs as a one-shot system")
-        }
 
         // Not engaged: first select and a switch are selection-only; a same-guid re-commit dedups.
         assert!(go(&mut world, 0xA, false, Some(1), true).changed);
@@ -1267,6 +1336,67 @@ mod tests {
             None,
             "and the re-swing killed Auto Shot"
         );
+    }
+
+    /// **`IsSelectable` refuses the whole commit** — `0x493540`'s third early-out
+    /// (`0x4935ee`/`0x4935f3`), which sits *before* the dedup, so the refusal is a complete no-op:
+    /// nothing on the wire, no `PLAYER_TARGET_CHANGED`, and the target already in hand survives.
+    ///
+    /// The reported case is Stratholme's Baron Rivendare before the ziggurats fall — vmangos gives
+    /// him `UNIT_FLAG_NOT_SELECTABLE | UNIT_FLAG_SPAWNING` (`instance_stratholme.cpp`), so on the
+    /// real client he can be neither clicked, tabbed, nor auto-acquired when he opens on you.
+    #[test]
+    fn not_selectable_refuses_the_commit_and_keeps_the_old_target() {
+        use benilla_protocol::ObjectFields;
+        const FLAGS: u16 = 46;
+        const CREATEDBY: u16 = 14;
+        const OBJECT_TYPE: u16 = 2;
+        const NOT_SELECTABLE: u32 = 1 << 25;
+        // `OBJECT_FIELD_TYPE` bit 3 = a CGUnit_C, the only kind whose slot `+0x58` is not the
+        // `xor eax,eax` base stub.
+        let unit = |pairs: &[(u16, u32)]| {
+            let mut all = vec![(OBJECT_TYPE, 0x8u32)];
+            all.extend_from_slice(pairs);
+            ObjectStore(ObjectFields::from_pairs(&all))
+        };
+
+        let (mut world, rx) = commit_world();
+        let sent = |rx: &crossbeam_channel::Receiver<ClientCommand>| rx.try_iter().count();
+
+        // A plain live mob commits.
+        let plain = unit(&[]);
+        assert!(go_with(&mut world, 0xA, Some(plain), false, Some(1), true).changed);
+        assert_eq!(sent(&rx), 1);
+
+        // The Baron: flagged, created by nobody. Refused outright — and 0xA is still the target.
+        let baron = unit(&[(FLAGS, NOT_SELECTABLE | 0x2)]);
+        let out = go_with(&mut world, 0xB, Some(baron), true, Some(1), true);
+        assert!(!out.changed && !out.swung, "the commit is a complete no-op");
+        assert_eq!(sent(&rx), 0, "nothing goes out — not even the stop");
+        assert_eq!(
+            world.resource::<Selection>().guid,
+            Some(0xA),
+            "the target already in hand survives the refused click"
+        );
+
+        // The `CREATEDBY` clause: the same flag on a unit **I** created still selects (my totem).
+        let mine = unit(&[(FLAGS, NOT_SELECTABLE), (CREATEDBY, 1), (CREATEDBY + 1, 0)]);
+        assert!(go_with(&mut world, 0xC, Some(mine), false, Some(1), true).changed);
+        assert_eq!(sent(&rx), 1);
+
+        // Somebody else's flagged creation is not mine to click.
+        let theirs = unit(&[(FLAGS, NOT_SELECTABLE), (CREATEDBY, 9), (CREATEDBY + 1, 0)]);
+        assert!(!go_with(&mut world, 0xD, Some(theirs), false, Some(1), true).changed);
+        assert_eq!(sent(&rx), 0);
+
+        // A non-unit object answers the base stub — a GameObject guid can never be the selection.
+        let go_obj = ObjectStore(ObjectFields::from_pairs(&[(OBJECT_TYPE, 0x20)]));
+        assert!(!go_with(&mut world, 0xE, Some(go_obj), false, Some(1), true).changed);
+        assert_eq!(sent(&rx), 0);
+
+        // And an unresolved object skips the vcall entirely (the out-of-range party member).
+        assert!(go_with(&mut world, 0xF, None, false, Some(1), true).changed);
+        assert_eq!(sent(&rx), 1);
     }
 
     fn cand(guid: u64, score: f32, on_screen: bool) -> Candidate {

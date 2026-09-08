@@ -16,6 +16,20 @@ use bevy::prelude::*;
 use art::{tc_rect, GlueArt, BTN_BG, BTN_HOVER, BUTTON_TC, GOLD};
 use widgets::{ArtSwap, GlueBtn, GlueCaption, GlueDisabled, OutlineCopy};
 
+/// **The glue widgets' look, run once for every glue screen.**
+///
+/// These four passes are screen-agnostic by construction — they find their work by component, not
+/// by state — and every screen registering its own copy was a standing invitation to forget one.
+/// The realm list did exactly that: it shipped with `sync_outlines` and without
+/// [`glue_button_visuals`]/[`art_swaps`], so no button on it lit on hover, none took its pressed
+/// art, and the Okay it carefully marked [`GlueDisabled`] never greyed. Registered here, in
+/// [`GluePlugin`], a new screen gets them by existing.
+///
+/// A screen orders its own refresh **before** this set (`.before(GlueVisuals)`) so the disabled
+/// flags and captions it writes are rendered the same frame it writes them.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct GlueVisuals;
+
 /// The shared glue infrastructure both screens stand on: the ADD-mode UI material pipeline, the
 /// [`GlueArt`] resource (loaded on first screen entry), and the GlueStrings table. Registered
 /// before either screen plugin (`main.rs`).
@@ -36,6 +50,10 @@ impl Plugin for GluePlugin {
             .add_systems(
                 Update,
                 (backdrop::fit_backdrop_borders, seat_outline_copies),
+            )
+            .add_systems(
+                Update,
+                (art_swaps, glue_button_visuals, glue_hilights, sync_outlines).in_set(GlueVisuals),
             );
     }
 }
@@ -224,7 +242,6 @@ pub(crate) fn glue_button_visuals(
     >,
     children: Query<&Children>,
     mut captions: Query<&mut TextColor, With<GlueCaption>>,
-    mut hilights: Query<&mut Visibility, With<widgets::Hilight>>,
 ) {
     for (btn, disabled, interaction, mut node, mut bg, fallback, tc) in &mut glue_btns {
         let disabled = disabled.0;
@@ -255,10 +272,9 @@ pub(crate) fn glue_button_visuals(
         }
         // DESCENDANTS, not children. The caption is a **grandchild's** child: `outlined_text`
         // wraps every glue string in a layout wrapper + the −1px trim node before the real string,
-        // so a direct-children scan finds the `Hilight` overlay and the wrapper and never the
-        // `GlueCaption` — which is why the sheen lit on hover for a year while the caption stayed
-        // gold, and why a disabled button's caption never grayed either (1533). The walk is over a
-        // ~11-entity subtree; depth is the primitive's business, not this pass's.
+        // so a direct-children scan finds the wrapper and never the `GlueCaption` — which is why a
+        // disabled button's caption never grayed (1533). The walk is over a ~11-entity subtree;
+        // depth is the primitive's business, not this pass's.
         for child in children.iter_descendants(btn) {
             if let Ok(mut caption) = captions.get_mut(child) {
                 // The disabled caption grays (`GlueFontDisable`), hover whitens, rest is gold.
@@ -270,21 +286,67 @@ pub(crate) fn glue_button_visuals(
                     GOLD
                 };
             }
-            if let Ok(mut vis) = hilights.get_mut(child) {
-                *vis = if hovered {
-                    Visibility::Inherited
-                } else {
-                    Visibility::Hidden
-                };
-            }
+        }
+    }
+}
+
+/// What [`glue_hilights`] needs off a button to decide whether its sheen is lit: is the cursor on
+/// it, is it disabled, and is the screen holding it.
+type SheenSource = (
+    &'static Interaction,
+    Option<&'static GlueDisabled>,
+    Option<&'static widgets::LockHighlight>,
+);
+
+/// **Every button's highlight sheen, in one pass.** A [`widgets::Hilight`] lights while its owning
+/// [`Button`] is hovered — or while the screen holds it with [`widgets::LockHighlight`], the
+/// reference's own verb for a selected row.
+///
+/// There were **four** of these before, one per screen, and the realm list made five by having
+/// none: no button on it lit at all. Worse, the four had drifted — two folded selection into the
+/// same expression as hover, one folded in a scroll-position disable, and the one that lived
+/// inside [`glue_button_visuals`] was scoped `With<GlueBtn>, Without<ArtSwap>`, so the
+/// `GlueCloseButton` X on every panel in the client had a sheen that could never light. Splitting
+/// "is it lit?" (here) from "is it chosen?" (the screen's, as a `LockHighlight` flag) is what
+/// makes one owner possible.
+///
+/// **Walks UP, from each sheen to its nearest button** — not down from each button, which is the
+/// obvious shape and the wrong one: buttons nest. A modal dialog's own root is a `Button` (that is
+/// how it eats the clicks that miss its controls), so a descendant walk from there would light
+/// every sheen in the dialog at once. The nearest enclosing button is the one whose sheen it is,
+/// and there is exactly one of those.
+pub(crate) fn glue_hilights(
+    mut hilights: Query<(Entity, &mut Visibility), With<widgets::Hilight>>,
+    parents: Query<&ChildOf>,
+    buttons: Query<SheenSource, With<Button>>,
+) {
+    for (sheen, mut vis) in &mut hilights {
+        let lit = parents
+            .iter_ancestors(sheen)
+            .find_map(|up| buttons.get(up).ok())
+            .is_some_and(|(interaction, disabled, locked)| {
+                let live = !disabled.is_some_and(|d| d.0);
+                live && (*interaction != Interaction::None || locked.is_some_and(|l| l.0))
+            });
+        let want = if lit {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *vis != want {
+            *vis = want;
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::widgets::{FallbackFace, GlueBtn, GlueCaption, GlueDisabled};
-    use super::{glue_button_visuals, glue_clicks, screen_scale, GlueArt, GlueClicks, GOLD};
+    use super::widgets::{
+        FallbackFace, GlueBtn, GlueCaption, GlueDisabled, Hilight, LockHighlight,
+    };
+    use super::{
+        glue_button_visuals, glue_clicks, glue_hilights, screen_scale, GlueArt, GlueClicks, GOLD,
+    };
     use bevy::prelude::*;
     use bevy::window::WindowResolution;
 
@@ -446,5 +508,92 @@ mod tests {
                 LOWEST_CONTROL * s
             );
         }
+    }
+
+    // ── The sheen ────────────────────────────────────────────────────────────────────────────
+
+    /// Spawn `button > wrapper > sheen`, so the sheen is a **grand**child — the shape
+    /// `outlined_text` and every art overlay actually produce, and the one a direct-children scan
+    /// would miss.
+    fn sheen_app(disabled: bool, locked: bool) -> (App, Entity, Entity) {
+        let mut app = App::new();
+        app.add_systems(Update, glue_hilights);
+        let sheen = app.world_mut().spawn((Hilight, Visibility::Hidden)).id();
+        let wrapper = app.world_mut().spawn(Node::default()).add_child(sheen).id();
+        let button = app
+            .world_mut()
+            .spawn((
+                Button,
+                Interaction::None,
+                GlueDisabled(disabled),
+                LockHighlight(locked),
+            ))
+            .add_child(wrapper)
+            .id();
+        (app, button, sheen)
+    }
+
+    fn sheen_lit(app: &App, sheen: Entity) -> bool {
+        *app.world().get::<Visibility>(sheen).unwrap() == Visibility::Inherited
+    }
+
+    /// Hover lights it, leaving darkens it — and it reaches a sheen nested below a wrapper.
+    #[test]
+    fn a_sheen_follows_its_nearest_button() {
+        let (mut app, button, sheen) = sheen_app(false, false);
+        app.update();
+        assert!(!sheen_lit(&app, sheen), "at rest, dark");
+
+        *app.world_mut().get_mut::<Interaction>(button).unwrap() = Interaction::Hovered;
+        app.update();
+        assert!(sheen_lit(&app, sheen), "hovered, lit");
+
+        *app.world_mut().get_mut::<Interaction>(button).unwrap() = Interaction::None;
+        app.update();
+        assert!(
+            !sheen_lit(&app, sheen),
+            "and dark again when the cursor leaves"
+        );
+    }
+
+    /// **`LockHighlight` holds it lit with the cursor elsewhere** — the reference's own verb, and
+    /// what lets a selected row stay marked without the screen touching `Visibility`.
+    #[test]
+    fn a_locked_sheen_stays_lit_unhovered() {
+        let (mut app, _, sheen) = sheen_app(false, true);
+        app.update();
+        assert!(sheen_lit(&app, sheen));
+    }
+
+    /// A disabled button lights for neither reason. The reference's `Disable()` takes the
+    /// highlight with it, and an offline realm row (or a scroll arrow at the end of its travel)
+    /// must not glow under the cursor.
+    #[test]
+    fn a_disabled_button_never_lights() {
+        let (mut app, button, sheen) = sheen_app(true, true);
+        app.update();
+        assert!(!sheen_lit(&app, sheen), "locked but disabled: dark");
+        *app.world_mut().get_mut::<Interaction>(button).unwrap() = Interaction::Hovered;
+        app.update();
+        assert!(!sheen_lit(&app, sheen), "and hovering does not revive it");
+    }
+
+    /// **The walk stops at the nearest button.** A modal dialog's root is itself a `Button` (that
+    /// is how it eats the clicks that miss its controls), so hovering the dim must not light every
+    /// sheen inside it — which is exactly what a descendant walk from each button would do.
+    #[test]
+    fn an_outer_modal_button_does_not_light_the_sheens_inside_it() {
+        let (mut app, button, sheen) = sheen_app(false, false);
+        let root = app
+            .world_mut()
+            .spawn((Button, Interaction::Hovered))
+            .add_child(button)
+            .id();
+        app.update();
+        assert!(
+            !sheen_lit(&app, sheen),
+            "the dim is hovered, the inner button is not"
+        );
+        let _ = root;
     }
 }

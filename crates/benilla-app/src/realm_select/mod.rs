@@ -13,41 +13,71 @@
 //! (`realmList` the CVar, `RealmList` the window) and is kept rather than invented away: one is
 //! where you dial, this is what answers.
 //!
-//! ## The park
+//! ## Not a screen — a dialog
 //!
-//! The IO thread parks three times, and this is the middle one (`crate::net::io`): logon → **which
-//! realm?** → world handshake → **which character?**. At each park the thread publishes facts and
-//! blocks; the app owns the policy. Here the policy is:
+//! `RealmList` is **not** one of the glue screens. `GlueParent.lua`'s `GlueScreenInfo` table has
+//! entries for `login`, `charselect`, `realmwizard`, `charcreate`, `patchdownload`, `movie` and
+//! `credits` — and none for the realm list; `RealmList.xml` declares a `frameStrata="DIALOG"`
+//! frame that `RealmList_OnEvent` simply `Show()`s, and `RealmList_OnCancel` simply `Hide()`s.
+//! Whatever screen it went up over is still there underneath and is what the player is returned to.
+//!
+//! This shipped as a `ClientState` instead, and every symptom the director reported came out of
+//! that one error: Cancel had to pick a state to go to (it picked the login screen, so Change
+//! Realm's Cancel threw you out of the session), the character screen was torn down behind it, and
+//! — the bad one — a roster arriving while that state was up moved nothing, so Okay looked inert
+//! while the IO thread walked on to the character park. The next Cancel then sent an answer no
+//! park was listening for and every later login queued behind a thread two parks away: the client
+//! hung on "Connecting" with nothing in the log. It is a `shown` flag now, like the AddOns panel
+//! it shares a plate with, and the screen underneath is never touched.
+//!
+//! ## The parks
+//!
+//! The IO thread publishes the list from **two** parks (`crate::net::io`) and takes its answer on
+//! one channel: the *login-side* realm park (logon → **which realm?** → world handshake), and the
+//! *character* park, where Change Realm raises the same list over the select screen and the
+//! session underneath stays live. At each park the thread publishes facts and blocks; the app owns
+//! the policy. Here the policy is:
 //!
 //! 1. **`WOW_REALM`**, when set — the dev fast path past the screen, the realm-side twin of
 //!    `WOW_CHAR`. Matched case-insensitively; a name that is not on the list falls through rather
 //!    than failing, so a stale env var cannot strand a session.
-//! 2. **The remembered realm** — the `realmName` CVar, which 1.12 registers as a *persisted* CVar
+//! 2. **The realm this session is on** — a logout or a dropped connection comes back through this
+//!    park, and the answer is the realm you were already playing on, not a question.
+//! 3. **The remembered realm** — the `realmName` CVar, which 1.12 registers as a *persisted* CVar
 //!    for exactly this ("last realm connected to"). A launch that recognises its realm goes
 //!    straight to character select, and `Change Realm` is how you get back here.
-//! 3. **An unattended run takes the first realm that is up** — `crate::run_mode::unattended`
+//! 4. **An unattended run takes the first realm that is up** — `crate::run_mode::unattended`
 //!    (`WOW_UNATTENDED`/`WOW_CAPTURE`/`WOW_RIG`). A smoke run, a capture and a rig leg have nobody
 //!    in the room to click OK, and a screen that waits forever is how a park becomes a hang. This
 //!    is deliberately `unattended` and not `env_login` — 1769's distinction: credentials in the
 //!    environment do not mean nobody is watching, but these three cannot be a person.
-//! 4. **Otherwise the screen**, and the player picks.
+//! 5. **Otherwise the dialog**, and the player picks.
 //!
 //! ## Change Realm
 //!
 //! Costs a world dial, not a login. The SRP6 session key authenticates against any world server on
-//! the account's realm list and the list itself is already in hand, so the IO thread hands its
-//! logon forward (`net::io`'s `HeldLogon`) and reopens the list. That is also the reference's
-//! shape: its realmd connection outlives the screen.
+//! the account's realm list and the list itself is already in hand, so the character park serves
+//! the list **in place** — refreshing it on the realmd connection the cycle still holds — and only
+//! leaves when a realm is chosen. Cancel there does nothing at all, which is what makes it Cancel.
+//!
+//! That is the reference's shape, byte for byte (VERIFIED, wow-re):
+//! `CharacterSelect_ChangeRealm()` is `PlaySound + RequestRealmList(1)` and **names no screen**;
+//! `RequestRealmList` (`0x46ecf0` → `0x46b8d0`) sets `screenState = 4` and begins a
+//! `COP_GET_REALMS` on the realmd socket that is still open (it is closed at *world entry*,
+//! `0x46b70c`, not on the way to character select); and the world connection is **not** dropped by
+//! the button — only `ConnectToRealm` (`0x46b210`) drops it, once a realm is confirmed, deferring
+//! its dial to the disconnect handler. So the whole cost of opening the list is a list request,
+//! and the whole cost of cancelling is nothing.
 
 mod input;
 mod load;
 mod screen;
+mod smoke;
 
 pub(crate) use load::pvp_rp;
 
 use bevy::prelude::*;
 
-use crate::char_select::ClientState;
 use crate::net::{RealmChoice, RealmListMessage, RealmRequest};
 use benilla_protocol::RealmInfo;
 
@@ -80,16 +110,32 @@ pub(crate) struct Realms {
     pub(super) offset: usize,
     /// Which column the list is sorted on, and which way.
     pub(super) sort: Sort,
-    /// The realm we answered the park with — set when we send, cleared when a fresh list arrives,
-    /// so a re-published list cannot be answered twice.
-    answered: Option<String>,
+    /// **Is the dialog up?** The reference's `RealmList:IsVisible()`, and the whole of its
+    /// screen-state: a frame that is shown over the current glue screen and hidden again.
+    ///
+    /// It is also the auto-answer's off switch. While the player is looking at the list, no
+    /// remembered realm may answer it for them — without that, the five-second refresh would
+    /// re-publish and the policy would enter the very realm they opened the dialog to leave.
+    pub(super) shown: bool,
+    /// The realm this client considers **current** — the reference's `GetRealmInfo` `currentRealm`
+    /// return, which is the row `RealmListUpdate` highlights when nothing else is selected.
+    ///
+    /// **It is a string compare against the `realmName` CVar, and nothing else** (VERIFIED, wow-re:
+    /// `0x46ef9e` reads that CVar's current value through `0x5ab7d0` — the handle registered at
+    /// `0x63db90`, help `"Last realm connected to"` — and case-folds it against the realm record's
+    /// inline name at `realm+9`, pushing `1.0` on a match and `nil` otherwise; a 15-site census of
+    /// that getter found no competing mechanism anywhere in the image). It marks the realm you are
+    /// *connected to* on the character screen only because `ConnectToRealm` (`0x46b217`) writes the
+    /// CVar **before** it dials.
+    ///
+    /// Ours is that same fact tracked one step earlier: set when we answer a park with a realm,
+    /// seeded from the persisted CVar before we have. benilla's own `realmName` write lands at
+    /// world entry (`benilla_ui::script::UiScript::set_realm_name`), which is after the point the
+    /// highlight needs it, and moving that write is a change to the SavedVariables path this
+    /// screen has no business making.
+    current: Option<String>,
     /// Seconds until the next refresh request.
     refresh_in: f32,
-    /// **Show the screen for the next list, whatever the auto-answers say.** Armed by Change
-    /// Realm, and the reason it is needed: the remembered realm is the realm you are standing on,
-    /// so without this the policy would answer the list by re-entering the realm you just asked to
-    /// leave — a button that looks like it does nothing. Cleared as soon as it is honoured.
-    forced: bool,
     /// `WOW_REALM`, read once.
     env_realm: Option<String>,
     env_read: bool,
@@ -236,8 +282,41 @@ impl Realms {
     }
 
     /// Whether the OK button is live: a realm is highlighted and it is not offline.
+    ///
+    /// `RealmListUpdate` opens with `RealmListOkButton:Disable()` and only the highlighted-row
+    /// branches re-enable it, so a list with nothing selected has a dead Okay — which is what a
+    /// fresh login shows, since there is no current realm to preselect.
     pub(super) fn can_enter(&self) -> bool {
         self.selected().is_some_and(|r| !is_down(r))
+    }
+
+    /// Raise the dialog (`RealmList:Show()` → `RealmList_OnShow`): reset the scroll, seat the
+    /// highlight on [`Self::current`], and start the refresh countdown.
+    fn open(&mut self) {
+        self.shown = true;
+        self.offset = 0;
+        self.selected = self
+            .current
+            .as_deref()
+            .and_then(|want| {
+                self.realms
+                    .iter()
+                    .find(|r| r.name.eq_ignore_ascii_case(want))
+            })
+            .map(|r| r.name.clone());
+        self.refresh_in = REFRESH_SECS;
+    }
+
+    /// Answer a park with a realm — and remember it as [`Self::current`], the way the reference's
+    /// `ConnectToRealm` writes `realmName` on its way to the dial.
+    pub(super) fn enter(&mut self, choice: &RealmChoice, name: String) {
+        self.current = Some(name.clone());
+        let _ = choice.0.send(RealmRequest::Enter(name));
+    }
+
+    /// `RealmList:Hide()` — and nothing else. The screen underneath was never touched.
+    pub(super) fn hide(&mut self) {
+        self.shown = false;
     }
 }
 
@@ -261,35 +340,41 @@ pub(crate) struct RealmSelectPlugin;
 
 impl Plugin for RealmSelectPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Realms>()
-            .add_systems(Update, apply_realm_policy)
-            .add_systems(OnExit(ClientState::RealmList), screen::exit_realm_list)
-            .add_systems(
-                Update,
+        app.init_resource::<Realms>().add_systems(
+            Update,
+            (
+                apply_realm_policy,
+                // Ungated by state on purpose: the dialog stands over the login screen and over
+                // character select alike, and `shown` is the only thing that decides.
+                screen::drive_screen,
+                // Input first, then the row refresh — a click that moved the highlight shows on
+                // the frame it landed, not the next one.
+                smoke::debug_realm_smoke,
                 (
-                    screen::materialize_screen,
-                    screen::refresh_rows,
                     input::clicks,
                     input::keys,
                     tick_refresh,
-                    crate::glue::sync_outlines,
+                    screen::refresh_rows,
                 )
-                    .run_if(in_state(ClientState::RealmList)),
-            );
+                    .chain()
+                    .run_if(|realms: Res<Realms>| realms.shown),
+            )
+                .chain()
+                .after(benilla_world::schedule::WorldStage::Net)
+                .before(crate::glue::GlueVisuals),
+        );
     }
 }
 
-/// Answer the realm park — or show the screen and let the player answer it.
+/// Answer the realm park — or raise the dialog and let the player answer it.
 ///
-/// Runs in every state, like the roster policy it mirrors: a `Change Realm` from character select
-/// re-publishes the list while we are still in [`ClientState::CharSelect`], and this is what moves
-/// us off it.
+/// Runs in every state: the list is published from the login-side park *and* from the character
+/// park, and this one system is the policy for both.
 fn apply_realm_policy(
     mut msgs: MessageReader<RealmListMessage>,
     mut realms: ResMut<Realms>,
     choice: Res<RealmChoice>,
     persist: Res<crate::cvars::CvarPersist>,
-    mut next: ResMut<NextState<ClientState>>,
 ) {
     if !realms.env_read {
         realms.env_read = true;
@@ -297,33 +382,34 @@ fn apply_realm_policy(
     }
     for msg in msgs.read() {
         realms.realms = msg.realms.clone();
-        realms.answered = None;
         realms.refresh_in = REFRESH_SECS;
-        // Keep the tab and the highlight across a refresh when they still name something real;
-        // a first list (or one that dropped what we had) falls back to the first of each.
+        // Keep the tab across a refresh when it still names something real; a first list (or one
+        // that dropped what we had) falls back to the first.
         let cats = realms.categories();
         if !realms.category.is_some_and(|c| cats.contains(&c)) {
             realms.category = cats.first().copied();
         }
-        if realms.selected().is_none() {
-            realms.selected = realms
-                .rows()
-                .first()
-                .map(|&i| realms.realms[i].name.clone());
-        }
 
-        // A deliberate Change Realm outranks every auto-answer — see `Realms::forced`.
-        if std::mem::take(&mut realms.forced) {
-            next.set(ClientState::RealmList);
+        // **A list published while the dialog is up is a refresh, never a question.** The player
+        // is looking at it; answering over their shoulder with the realm they are standing on is
+        // the button-that-does-nothing bug in its purest form.
+        if realms.shown {
             continue;
         }
-        let remembered = persist.stored(CVAR_REALM_NAME);
-        match auto_answer(&realms, remembered, crate::run_mode::unattended()) {
+        let remembered = persist.stored(CVAR_REALM_NAME).map(str::to_string);
+        if realms.current.is_none() {
+            realms.current = remembered.clone();
+        }
+        match auto_answer(
+            &realms,
+            remembered.as_deref(),
+            crate::run_mode::unattended(),
+        ) {
             Some(name) => {
                 realms.select(&name);
-                answer(&mut realms, &choice, name);
+                realms.enter(&choice, name);
             }
-            None => next.set(ClientState::RealmList),
+            None => realms.open(),
         }
     }
 }
@@ -337,18 +423,29 @@ fn apply_realm_policy(
 /// Every arm requires the realm to be **up**. Auto-entering a realm the server says is offline
 /// would replace a screen that can explain itself with a dial that just fails.
 fn auto_answer(realms: &Realms, remembered: Option<&str>, unattended: bool) -> Option<String> {
-    // The two named arms, matched case-insensitively — vmangos does not normalise realm names and
-    // a config file is hand-editable.
-    let named = [realms.env_realm.as_deref(), remembered]
-        .into_iter()
-        .flatten()
-        .find_map(|want| {
-            realms
-                .realms
-                .iter()
-                .find(|r| r.name.eq_ignore_ascii_case(want) && !is_down(r))
-                .map(|r| r.name.clone())
-        });
+    // The named arms, matched case-insensitively — vmangos does not normalise realm names and a
+    // config file is hand-editable.
+    //
+    // **`current` sits ahead of the persisted CVar**, and it is not decoration: a clean logout and
+    // a lost session both come back through this park, and the realm to return to is the one this
+    // session is standing on. benilla writes `realmName` at world entry, so a session that never
+    // reached the world has nothing persisted — without this arm, a logout mid-way would answer
+    // the relist by *raising the dialog* over character select, which is not a question anybody
+    // asked.
+    let named = [
+        realms.env_realm.as_deref(),
+        realms.current.as_deref(),
+        remembered,
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|want| {
+        realms
+            .realms
+            .iter()
+            .find(|r| r.name.eq_ignore_ascii_case(want) && !is_down(r))
+            .map(|r| r.name.clone())
+    });
     named.or_else(|| {
         // Nobody to click OK: take the first realm that will have us, in the order the list is
         // drawn in, rather than parking on a screen no one will answer.
@@ -365,29 +462,25 @@ fn auto_answer(realms: &Realms, remembered: Option<&str>, unattended: bool) -> O
     })
 }
 
-/// Arm the screen for the next realm list, whatever the policy would otherwise auto-answer with.
+/// The character screen's **Change Realm**: raise the dialog over the select screen and ask for a
+/// fresh list.
 ///
-/// The character screen's Change Realm calls this on its way out: a deliberate ask for the list
-/// has to outrank every remembered answer, or the one arm that fires would be the realm being left.
-pub(crate) fn force_screen(realms: &mut Realms) {
-    realms.forced = true;
-}
-
-/// Send the pick down the park's channel, once.
-pub(super) fn answer(realms: &mut Realms, choice: &RealmChoice, name: String) {
-    if realms.answered.is_some() {
-        return;
-    }
-    realms.answered = Some(name.clone());
-    let _ = choice.0.send(RealmRequest::Enter(name));
+/// The reference's order is the engine's — `CHANGE_REALM` requests the list and the arriving
+/// `OPEN_REALM_LIST` shows the frame. We show it immediately against the list already in hand and
+/// let the refresh land underneath, because the list *is* already in hand and a dialog that waits
+/// a round trip to appear reads as a dropped click.
+///
+/// Nothing here touches the session. The character park serves the refresh in place and stays
+/// exactly where it is, which is what lets Cancel mean nothing at all.
+pub(crate) fn open_over_char_select(realms: &mut Realms, choice: &RealmChoice) {
+    realms.open();
+    let _ = choice.0.send(RealmRequest::Refresh);
 }
 
 /// The reference's `RealmList_OnUpdate`: count down `REALM_LIST_REFRESH_TIME` and re-request the
-/// list. Only while the screen is up — the park is not refreshed behind the player's back.
+/// list. Only while the dialog is up — `RealmList_OnHide` calls `CancelRealmListQuery`, and a park
+/// is never refreshed behind the player's back.
 fn tick_refresh(time: Res<Time>, mut realms: ResMut<Realms>, choice: Res<RealmChoice>) {
-    if realms.answered.is_some() {
-        return;
-    }
     realms.refresh_in -= time.delta_secs();
     if realms.refresh_in <= 0.0 {
         realms.refresh_in = REFRESH_SECS;
@@ -573,9 +666,57 @@ mod tests {
         assert!(!r.can_enter());
     }
 
+    /// **Raising the dialog seats the highlight on the realm you are on** — the reference's
+    /// `GetRealmInfo` `currentRealm`, which `RealmListUpdate` highlights when nothing else is
+    /// selected. With no current realm nothing is selected and Okay is dead, which is exactly what
+    /// `RealmListUpdate` does: it opens with `RealmListOkButton:Disable()` and only the
+    /// highlighted-row branches turn it back on.
+    #[test]
+    fn opening_the_dialog_highlights_the_realm_you_are_on() {
+        let mut r = list(vec![
+            realm("Alpha", 1, 0, 0, 0, 1.0),
+            realm("Mu", 1, 0, 0, 3, 1.0),
+        ]);
+        r.current = Some("Mu".into());
+        r.open();
+        assert!(r.shown);
+        assert_eq!(r.selected().map(|r| r.name.as_str()), Some("Mu"));
+        assert!(r.can_enter());
+
+        let mut fresh = list(vec![realm("Alpha", 1, 0, 0, 0, 1.0)]);
+        fresh.open();
+        assert!(fresh.selected().is_none(), "nothing to preselect");
+        assert!(
+            !fresh.can_enter(),
+            "and Okay is dead until a row is clicked"
+        );
+
+        // A remembered realm that is no longer listed cannot seat a highlight either.
+        let mut gone = list(vec![realm("Alpha", 1, 0, 0, 0, 1.0)]);
+        gone.current = Some("Elsewhere".into());
+        gone.open();
+        assert!(gone.selected().is_none());
+    }
+
+    /// **Cancel hides the dialog and touches nothing else** — no screen change, because the
+    /// reference's `RealmList_OnCancel` is `Hide()` and the screen underneath was never left.
+    #[test]
+    fn hide_is_the_whole_of_cancel() {
+        let mut r = list(vec![realm("Alpha", 1, 0, 0, 0, 1.0)]);
+        r.current = Some("Alpha".into());
+        r.open();
+        r.hide();
+        assert!(!r.shown);
+        assert_eq!(
+            r.selected().map(|r| r.name.as_str()),
+            Some("Alpha"),
+            "and the list keeps its state for the next time it is raised"
+        );
+    }
+
     /// The policy ladder: `WOW_REALM` first, then the remembered realm, then — only when nobody
     /// is in the room — the first row. Attended and with nothing remembered, the answer is the
-    /// screen, which is the whole point of having one.
+    /// dialog, which is the whole point of having one.
     #[test]
     fn the_auto_answer_ladder_is_env_then_remembered_then_unattended() {
         let mut r = list(vec![
@@ -585,7 +726,7 @@ mod tests {
         assert_eq!(
             auto_answer(&r, None, false),
             None,
-            "attended: show the screen"
+            "attended: show the dialog"
         );
         assert_eq!(auto_answer(&r, None, true).as_deref(), Some("Alpha"));
         assert_eq!(auto_answer(&r, Some("mu"), false).as_deref(), Some("Mu"));
@@ -594,6 +735,26 @@ mod tests {
             auto_answer(&r, Some("Mu"), false).as_deref(),
             Some("Alpha"),
             "WOW_REALM outranks the remembered realm"
+        );
+    }
+
+    /// **A logout comes back to the realm it left**, without asking. The relist arrives through the
+    /// same park a first login does, and the session's own realm has to outrank the persisted CVar
+    /// — which benilla only writes at world entry, so a session that never got there has nothing
+    /// persisted at all and would otherwise be asked to pick again.
+    #[test]
+    fn a_relogin_returns_to_the_realm_this_session_is_on() {
+        let mut r = list(vec![
+            realm("Alpha", 1, 0, 0, 0, 1.0),
+            realm("Mu", 1, 0, 0, 0, 1.0),
+        ]);
+        assert_eq!(auto_answer(&r, None, false), None, "nothing to go on: ask");
+        r.current = Some("Mu".into());
+        assert_eq!(auto_answer(&r, None, false).as_deref(), Some("Mu"));
+        assert_eq!(
+            auto_answer(&r, Some("Alpha"), false).as_deref(),
+            Some("Mu"),
+            "and it outranks the persisted realmName, which is the PREVIOUS session's"
         );
     }
 

@@ -43,13 +43,14 @@ pub(crate) enum ClientState {
     /// Parked pre-logon at the login screen (decision 0539): the IO thread waits for credentials;
     /// [`crate::login`]'s policy decides what answers it (the env fast path, the reconnect
     /// resubmit, or the director's typed submit).
+    ///
+    /// **The realm list is not one of these.** 0193 planned a `RealmList` variant and 2056 built
+    /// it; the reference has no such screen (`GlueParent.lua`'s `GlueScreenInfo` lists every glue
+    /// screen and the realm list is not among them — it is a `frameStrata="DIALOG"` frame shown
+    /// over whichever screen is up). It is [`crate::realm_select::Realms::shown`] now, and the
+    /// variant is gone rather than left unconstructed.
     #[default]
     Login,
-    /// Parked at the **realm list**: the logon succeeded, the IO thread is holding the world dial
-    /// until the app names a realm, and [`crate::realm_select`]'s policy decides what answers it
-    /// (`WOW_REALM`, the remembered `realmName`, or the director's click). 0193 planned this
-    /// variant and it took until the realm subsystem existed to mean anything.
-    RealmList,
     /// Parked at character select: the select screen is up, the IO thread waits for a pick, and
     /// the in-world input surfaces (player controller, FrameXML keyboard) are gated off.
     CharSelect,
@@ -136,13 +137,11 @@ impl Plugin for CharSelectPlugin {
                         refresh::refresh_list,
                         refresh::refresh_banner_and_buttons,
                         refresh::feed_glue_preview,
-                        crate::glue::art_swaps,
-                        crate::glue::glue_button_visuals,
                         delete_result,
                         debug_select_shot,
-                        crate::glue::sync_outlines,
                     )
                         .chain()
+                        .before(crate::glue::GlueVisuals)
                         .run_if(in_state(ClientState::CharSelect)),
                 )
                     .chain()

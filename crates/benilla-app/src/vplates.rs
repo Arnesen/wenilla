@@ -562,7 +562,18 @@ fn drive_vplates(
         if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
             continue;
         }
-        // NOT_SELECTABLE never gets a plate (bit 25 — part of the byte gate).
+        // NOT_SELECTABLE never gets a plate — `0x60f600`'s gate 2 (`0x60f622 shr ecx,0x19` /
+        // `0x60f628 jne 0x60f740` → pool + hide + clear `[unit+0xe60]`), unconditional, and re-run
+        // every tick because `0x60f600`'s caller `0x607ef9` sits inside CGUnit's OnUpdate
+        // (`vtable+0x38` = `0x607ed0`). So the flag arriving on a plated unit takes its plate away
+        // on the next tick, which falls out of this per-frame gate for free.
+        //
+        // **This suppression is load-bearing, not cosmetic** (wow-re
+        // `object-layer/scratch/not-selectable-mouse-refusal.md`, decision 2060): a plate hover
+        // publishes the mouseover *directly* — `0x7cb850 OnEnter` → `0x7cb869 call 0x492890`, with
+        // none of the `IsSelectable` grading the world hover gets at `0x482982`. If a flagged unit
+        // ever kept its plate, hovering that plate would hand it a name tooltip the reference never
+        // shows. The plate gate is the only thing standing there.
         if store.is_some_and(|s| s.0.unit_flags() & (1 << 25) != 0) {
             continue;
         }

@@ -160,7 +160,25 @@ pub(crate) struct GlueArt {
     pub(crate) check_disabled: Option<Handle<Image>>,
     pub(crate) tooltip_border: Option<BackdropEdges>,
     pub(crate) char_scrollbar: Option<(Handle<Image>, Vec2)>,
+
+    /// The realm list's own additions to that set (`RealmList.xml`): the sort headers'
+    /// `RealmSortButtonTemplate` — a three-slice `WhoFrame-ColumnTabs` plate, the
+    /// `UI-Character-Tab-Highlight` sheen it lights on hover, and the `UI-SortArrow` that sits
+    /// beside each label.
+    pub(crate) column_tabs: Option<(Handle<Image>, Vec2)>,
+    pub(crate) tab_highlight: Option<Handle<AddUiMaterial>>,
+    pub(crate) sort_arrow: Option<(Handle<Image>, Vec2)>,
 }
+
+/// `RealmSortButtonTemplate`'s three `WhoFrame-ColumnTabs` slices, `[left, right, top, bottom]`
+/// texcoords each — the left cap (5 wide), the stretched middle, and the right cap (4 wide).
+pub(crate) const COLUMN_TAB_TC: [[f32; 4]; 3] = [
+    [0.0, 0.078_125, 0.0, 0.593_75],
+    [0.078_125, 0.906_25, 0.0, 0.593_75],
+    [0.906_25, 0.968_75, 0.0, 0.593_75],
+];
+/// `$parentArrow`'s texcoords into `UI-SortArrow` (the down-pointing half).
+pub(crate) const SORT_ARROW_TC: [f32; 4] = [0.0, 0.5625, 0.0, 1.0];
 
 /// The `Interface\HelpFrame\HelpFrame-*` plate: six pieces tiling a 640×512 framed panel
 /// (TopLeft/Top 256², TopRight 128×256 across the top row; BotLeft/Bottom/BotRight below).
@@ -420,9 +438,23 @@ impl GlueArt {
             "Interface\\PaperDollInfoFrame\\UI-Character-ScrollBar",
             images,
         );
+        self.column_tabs = sized(
+            assets,
+            "Interface\\FriendsFrame\\WhoFrame-ColumnTabs",
+            images,
+        );
+        self.tab_highlight = add_overlay(
+            assets,
+            "Interface\\PaperDollInfoFrame\\UI-Character-Tab-Highlight",
+            FULL_TC,
+            images,
+            add_mats,
+        );
+        self.sort_arrow = sized(assets, "Interface\\Buttons\\UI-SortArrow", images);
         debug!(
             "glue art: addonlist set — helpframe {} header {} close {} droparrow {}/{} \
-             questhl {} titlehl {} greycheck {} tipborder {} scrolltrack {}",
+             questhl {} titlehl {} greycheck {} tipborder {} scrolltrack {} \
+             coltabs {} tabhl {} sortarrow {}",
             self.help_frame.is_some(),
             self.dialog_header.is_some(),
             self.close_btn.is_some(),
@@ -433,6 +465,9 @@ impl GlueArt {
             self.check_disabled.is_some(),
             self.tooltip_border.is_some(),
             self.char_scrollbar.is_some(),
+            self.column_tabs.is_some(),
+            self.tab_highlight.is_some(),
+            self.sort_arrow.is_some(),
         );
         debug!(
             "glue art: races {} classes {} gender {} factions {} banners {} hilight {} logo {} \

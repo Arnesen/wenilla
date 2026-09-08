@@ -8,13 +8,7 @@ use bevy::animation::graph::AnimationNodeIndex;
 use bevy::prelude::*;
 
 use super::{resolved_id, AnimData, AnimDriver};
-
-/// Bit `0x20` of the cached creature template's `type_flags` word — the one flag the reference's
-/// pass-2 election re-links a model for tick-only (`0x607da0`'s `0x623b70` arm), so an off-screen
-/// flagged creature's combat stays audible. The *name* is vmangos corroboration
-/// (`CREATURE_TYPEFLAGS_MORE_AUDIBLE`, `CreatureDefines.h:151`); the byte fact is the bit
-/// (wow-re `outdoor-object-pass-election.md` §4).
-const CREATURE_TYPEFLAGS_MORE_AUDIBLE: u32 = 0x20;
+use crate::names::type_flags::MORE_AUDIBLE;
 
 /// A model **event keyframe** crossed during playback this frame (the M2 `$xxx` tags — decision
 /// 0070 slice 3): the animation timeline's outbound trigger surface. The sound subsystem routes
@@ -182,7 +176,9 @@ pub(super) fn fire_anim_events(
         &AnimationPlayer,
         &AnimDriver,
         Has<benilla_world::rig_anim::AnimParked>,
-        Option<&crate::net::Guid>,
+        // The unit's descriptor — read for ONE field, `OBJECT_FIELD_ENTRY`, the key its cached
+        // creature template hangs off (see the `MORE_AUDIBLE` read below).
+        Option<&crate::net::ObjectStore>,
         &GlobalTransform,
         Option<&benilla_world::rig_anim::RigPose>,
     )>,
@@ -199,7 +195,7 @@ pub(super) fn fire_anim_events(
     names: Res<crate::names::NameCache>,
 ) {
     let catalog = anim_data.as_deref().map(|d| &d.0);
-    for (entity, anims, player, drv, parked, guid, world, pose) in &units {
+    for (entity, anims, player, drv, parked, store, world, pose) in &units {
         // The election's TICK half (decision 1482): a parked unit's event tracks are not
         // scanned — the reference's pass-2 walk never inserts the model into the tick worklist
         // (`0x683dd0` walk 2 skips `0x710b90`) — unless its cached template carries
@@ -210,11 +206,10 @@ pub(super) fn fire_anim_events(
         // nothing on the wake frame — instead of scanning the whole parked gap as one
         // crossing; the reference's re-admission is likewise a fresh record.
         if parked
-            && !guid.is_some_and(|g| {
-                names
-                    .peek_type_flags(g.0)
-                    .is_some_and(|f| f & CREATURE_TYPEFLAGS_MORE_AUDIBLE != 0)
-            })
+            && !store
+                .and_then(|s| s.0.object_entry())
+                .and_then(|entry| names.creature_record(entry))
+                .is_some_and(|r| r.type_flags & MORE_AUDIBLE != 0)
         {
             last.remove(&entity);
             last_overlay.remove(&entity);

@@ -80,11 +80,9 @@ impl Plugin for LoginPlugin {
                         // Both after `drive_dialog`: it is what spawns the dialog's edit box, and
                         // what a realmlist Okay changes the address in.
                         (screen::refresh_dialog_box, screen::refresh_realmlist),
-                        crate::glue::art_swaps,
-                        crate::glue::glue_button_visuals,
-                        crate::glue::sync_outlines,
                     )
                         .chain()
+                        .before(crate::glue::GlueVisuals)
                         .run_if(in_state(ClientState::Login)),
                     (smoke::debug_login_smoke, screen::debug_login_shot),
                 )
@@ -440,6 +438,7 @@ fn logon_refusal_text(strings: &GlueStrings, code: Option<u8>) -> &str {
 #[allow(clippy::too_many_arguments)]
 fn drive_policy(
     mut attempt: Attempt,
+    realm_list_up: Res<crate::realm_select::Realms>,
     mut dialog: ResMut<LoginDialog>,
     strings: Option<Res<GlueStrings>>,
     time: Res<Time>,
@@ -507,6 +506,13 @@ fn drive_policy(
         if matches!(dialog.kind, Some(DialogKind::Status)) {
             dialog.set_text(stage_text(strings, msg.stage));
         }
+    }
+    // The realm list answers the same question the status dialog is asking ("what are we
+    // connecting to?"), and the reference does not stack them: reaching the realm list means the
+    // login state moved past `LOGIN_STATE_CONNECTING`, and `CGlueMgr::UpdateLoginDialog` clears
+    // the dialog when it does. Ours would otherwise sit behind the list saying "Connecting".
+    if realm_list_up.shown && matches!(dialog.kind, Some(DialogKind::Status)) {
+        dialog.close();
     }
     // **The queue** (decision 1681): each packet is one sample, and the first one turns the
     // connecting dialog into the queue dialog. A queue is not a failure — the attempt is still in
@@ -768,6 +774,7 @@ fn enter_login(mut form: ResMut<LoginForm>, mut preview: ResMut<GluePreview>) {
 /// boxes / press the buttons / toggle the checkbox.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn login_input(
+    realms: Res<crate::realm_select::Realms>,
     presses: Query<(Entity, &LoginAction, Ref<Interaction>)>,
     clicks: Res<crate::glue::GlueClicks>,
     mut keyboard: MessageReader<KeyboardInput>,
@@ -784,6 +791,12 @@ fn login_input(
     mut commands: Commands,
     time: Res<Time>,
 ) {
+    // The realm list stands **over** this screen rather than replacing it (the reference's
+    // `RealmList` is a DIALOG-strata frame, not a glue screen), so while it is up the boxes,
+    // buttons and keys underneath are inert — including ESCAPE, which is its Cancel, not our Quit.
+    if realms.shown {
+        return;
+    }
     let empty = GlueStrings::default();
     let strings = strings.as_deref().unwrap_or(&empty);
 
@@ -1369,6 +1382,9 @@ mod tests {
         app.init_resource::<Time>()
             .init_resource::<LoginIntent>()
             .init_resource::<LoginDialog>()
+            // The policy asks whether the realm list is standing over this screen; in a harness
+            // that never raises one the answer is a default `Realms` — always "no".
+            .init_resource::<crate::realm_select::Realms>()
             // Literal, not Default: `Realmlist::default()` reads `$WOW_HOST`, and every probe
             // recipe in this repo exports it — a suite run from such a shell would otherwise
             // assert against whatever that shell happened to be pointing at.
