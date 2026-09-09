@@ -1319,7 +1319,7 @@ fn loot_method_id(method: &str) -> Option<u32> {
 pub(crate) fn synthetic_roster(
     group: &mut GroupState,
     player_xy: Option<(f32, f32)>,
-) -> Vec<String> {
+) -> Vec<crate::ui_action::UiError> {
     let members = vec![
         GroupMemberEntry {
             name: "Alice".into(),
@@ -1407,7 +1407,7 @@ pub(crate) fn synthetic_raid(
     group: &mut GroupState,
     names: &mut NameCache,
     self_guid: Option<u64>,
-) -> Vec<String> {
+) -> Vec<crate::ui_action::UiError> {
     // (name, class id, race id) — `benilla-formats`' own `ChrClasses`/`ChrRaces` ids, the pair
     // `NameCache::player_traits` hands `ui_unit::class_names`. Eight classes so every colour in
     // `RAID_CLASS_COLORS` shows; the races are Alliance-side and cosmetic here.

@@ -265,6 +265,8 @@ pub struct EffectDraw {
     pub(crate) raster_slope: f32,
     /// Are this draw's vertices **already camera-relative**? See [`EffectDrawSpec::cam_relative`].
     pub(crate) cam_relative: bool,
+    /// Does this draw ignore the depth buffer? See [`EffectDrawSpec::no_depth_test`].
+    pub(crate) no_depth_test: bool,
     /// Vertex range in [`EffectQuads::verts`] (a multiple of 4 for quads, 3 for tris).
     pub range: Range<u32>,
     /// The producing entity — the phase probe's identity for this item (`item.entity.1`, so a
@@ -273,6 +275,8 @@ pub struct EffectDraw {
     /// [`EffectLightOverride`]'s buffer, when the producer carries one (`None` = the world's
     /// shared light buffer).
     pub(crate) light: Option<Buffer>,
+    /// The target-pixel rectangle this draw is clipped to — see [`EffectDrawSpec::clip`].
+    pub(crate) clip: Option<Vec4>,
 }
 
 /// The frame's shared stream. Cleared at the top of `PostUpdate`'s effect set
@@ -356,8 +360,35 @@ pub struct EffectDrawSpec {
     ///
     /// The sort [`Self::anchor`] stays absolute either way — it is not a vertex.
     pub cam_relative: bool,
+    /// **Draw over everything** — force the depth COMPARE to `Always`, so this draw is never
+    /// occluded by anything already in the depth buffer. Nothing is depth-*written* either way on
+    /// a blended draw, so it occludes nothing in turn.
+    ///
+    /// The lane's default is `false`, and it stays the default: a depth-tested transparent is what
+    /// every particle, ribbon, decal and streak wants. One family sets it — the weapon swing trail,
+    /// whose callback writes EGxRs id `0x10` to `0` (`0x6c686e`; GL `glDisable(GL_DEPTH_TEST)`,
+    /// D3D `ZFUNC = D3DCMP_ALWAYS`) so the arc is never eaten by the swinging character's own
+    /// shoulder (wow-re `charproc8-trail-draw-state.md` §1; decision 2076).
+    pub no_depth_test: bool,
     pub main_entity: Entity,
     pub light: Option<Buffer>,
+    /// **Clip this draw to a rectangle of its RENDER TARGET, in target pixels** — `(min.x,
+    /// min.y, max.x, max.y)`, `None` for the whole target, which is every world family.
+    ///
+    /// It exists for the UI model tiles (decision 2008): every visible `<Model>` pane renders
+    /// into its own cell of ONE shared atlas, and a pane's particles are quads in that atlas's
+    /// space — so a cloud that reaches past its cell lands in the cell **next to** it, which the
+    /// composite hands to a different widget. The reference cannot have this: it draws each
+    /// `<Model>` straight into the back buffer with the widget's own rect as the VIEWPORT
+    /// (wow-re `modelframe-render-law.md` §6), and the scissor eats the overflow. One shared
+    /// camera cannot carry a viewport per pane, so the clip rides the draw instead and the
+    /// fragment discards outside it — the same picture, at the same rank.
+    ///
+    /// B379: the pet bar's autocast shine (`UI-AutoCastButton.m2` — four additive spline
+    /// emitters, no render batch at all) circles its button on the very edge with an ~8 px
+    /// half-extent, which spilled six pixels of golden `GlowStar` across the 2-texel gutter and
+    /// down the LEFT edge of whatever cooldown pane the shelf packed beside it.
+    pub clip: Option<Vec4>,
 }
 
 impl EffectQuads {
@@ -404,9 +435,11 @@ impl EffectQuads {
                 raster_bias: spec.raster_bias,
                 raster_slope: spec.raster_slope,
                 cam_relative: spec.cam_relative,
+                no_depth_test: spec.no_depth_test,
                 range: start..end,
                 main_entity: spec.main_entity,
                 light: spec.light,
+                clip: spec.clip,
             });
         }
     }
@@ -519,8 +552,10 @@ mod tests {
                     raster_bias: 0,
                     raster_slope: 0.0,
                     cam_relative: false,
+                    no_depth_test: false,
                     main_entity: Entity::PLACEHOLDER,
                     light: None,
+                    clip: None,
                 },
             );
         }
@@ -617,8 +652,10 @@ impl<'w> WorldEffectDraw<'w> {
                 raster_bias: 0,
                 raster_slope: 0.0,
                 cam_relative: false,
+                no_depth_test: false,
                 main_entity: Entity::PLACEHOLDER,
                 light: None,
+                clip: None,
             },
             quads: &mut self.quads,
         }
@@ -637,6 +674,14 @@ impl EffectBatch<'_> {
     /// Add this batch's colour to the framebuffer — glows, rings, beams.
     pub fn additive(mut self) -> Self {
         self.spec.blend = EffectBlend::Add;
+        self
+    }
+
+    /// Blend it over what is already drawn, `SRC_ALPHA / INV_SRC_ALPHA` — the lane's default,
+    /// spelled out for a producer whose blend is a *verified* state rather than an unremarked one
+    /// (the swing trail's EGxRs `0x07 = 2`, which reads like it ought to be additive and is not).
+    pub fn alpha(mut self) -> Self {
+        self.spec.blend = EffectBlend::Alpha;
         self
     }
 
@@ -672,6 +717,12 @@ impl EffectBatch<'_> {
     pub fn rung(mut self, sort: f32, raster: i32) -> Self {
         self.spec.bias = sort;
         self.spec.raster_bias = raster;
+        self
+    }
+
+    /// Draw over everything, occluded by nothing — see [`EffectDrawSpec::no_depth_test`].
+    pub fn over_everything(mut self) -> Self {
+        self.spec.no_depth_test = true;
         self
     }
 

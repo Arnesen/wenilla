@@ -364,7 +364,7 @@ fn main() {
     // globals are missing, and every number below is worse for a reason that has nothing to do
     // with the client — say so rather than letting two machines' numbers be compared in silence.
     println!(
-        "  VM: our whole FrameXML + a seated session{}\n",
+        "  VM: the stock 1.12 FrameXML off the player's chain + a seated session{}\n",
         if addon_harness::seated_with_global_strings() {
             " + the real GlobalStrings.lua"
         } else {

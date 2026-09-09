@@ -205,13 +205,33 @@ struct CacheStats {
 // The engine
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
+/// The two stores a font path can come from — the same pair, in the same order, that
+/// [`benilla_assets::WorldAssets`]'s sprite decoder walks (decision 1322, generalised by 2103).
+///
+/// Chain first: no MPQ holds an `Interface\AddOns\` path, so the order is unobservable and every
+/// client path stays on exactly the code it always ran.
+struct FontSource {
+    chain: Arc<Mutex<benilla_formats::Chain>>,
+    /// The ONE AddOns root, from `ui_script::addons::root()` — `None` under `$WOW_CAPTURE`, which
+    /// is what keeps a capture hermetic for free.
+    loose_root: Option<std::path::PathBuf>,
+}
+
 /// The font engine: faces, the two caches, and the texture pages.
 pub(crate) struct TextEngine {
     font_system: FontSystem,
     swash: SwashCache,
     faces: Vec<Face>,
-    /// Blizzard font path (lowercased) → index into [`Self::faces`].
+    /// Font path (lowercased) → index into [`Self::faces`]. Seeded with the four client faces and
+    /// grown on demand by [`Self::face_for`] — an addon's own TTF is a path like any other.
     path_to_face: HashMap<String, usize>,
+    /// Where a face the map does not carry is read from: the patch chain, then the one AddOns
+    /// folder for `Interface\AddOns\…` paths ([`FontSource`], decision 2103). `None` in a VM
+    /// with no install, which is the only state in which a font path cannot resolve at all.
+    source: Option<FontSource>,
+    /// Paths that failed to load, so a miss costs one read and one WARN rather than one per
+    /// measure. Cleared by nothing: a font file does not appear mid-session.
+    missing_fonts: HashSet<String>,
     /// The fallback face (Friz Quadrata) for a FontString with no/unknown font path.
     default_face: usize,
     /// The window's `scale_factor` — physical px per logical px. Every raster size derives from it
@@ -286,6 +306,11 @@ impl TextEngine {
             swash: SwashCache::new(),
             faces,
             path_to_face,
+            source: Some(FontSource {
+                chain: world_assets.chain.clone(),
+                loose_root: crate::ui_script::addons::root(),
+            }),
+            missing_fonts: HashSet::new(),
             default_face,
             dpi,
             chars: HashMap::new(),
@@ -299,11 +324,61 @@ impl TextEngine {
         })
     }
 
-    /// The face a Blizzard font path resolves to, or the fallback.
-    pub(super) fn face_for(&self, path: Option<&str>) -> usize {
-        path.and_then(|p| self.path_to_face.get(&p.to_ascii_lowercase()))
-            .copied()
-            .unwrap_or(self.default_face)
+    /// The face a font path resolves to, loading it on first use, or the fallback.
+    ///
+    /// **The four client TTFs are the ones we know the names of, not the ones that exist**
+    /// (decision 2103). `SetFont`/`<FontString font=>`/`CreateFont` take an arbitrary path, and an
+    /// addon that ships its own faces — Mik's Scrolling Battle Text ships thirty-one — names them
+    /// `Interface\Addons\<Addon>\Fonts\<x>.ttf`. Before this, every one of those silently
+    /// resolved to Friz Quadrata: the text drew, in the wrong face, with nothing anywhere saying
+    /// so. So a path the map does not carry is READ (chain, then the loose AddOns folder — the
+    /// same two stores in the same order 1322 gave textures) and registered.
+    ///
+    /// A path that will not load is remembered in [`Self::missing_fonts`] and warns once, then
+    /// falls back to Friz exactly as before — the reference degrades the same way (a `CGxFont`
+    /// that fails to build leaves the string on the font object it inherits).
+    pub(super) fn face_for(&mut self, path: Option<&str>) -> usize {
+        let Some(p) = path.filter(|p| !p.is_empty()) else {
+            return self.default_face;
+        };
+        let key = p.to_ascii_lowercase();
+        if let Some(&i) = self.path_to_face.get(&key) {
+            return i;
+        }
+        if self.missing_fonts.contains(&key) {
+            return self.default_face;
+        }
+        match self.load_face(p, &key) {
+            Some(i) => i,
+            None => {
+                warn!(
+                    "ui_text: font miss: '{p}' does not resolve in the patch chain or the AddOns \
+                     folder — falling back to {}",
+                    CLIENT_FONTS[0]
+                );
+                self.missing_fonts.insert(key);
+                self.default_face
+            }
+        }
+    }
+
+    /// Read and register one font path. `None` if no store has it or the bytes are not a face.
+    fn load_face(&mut self, path: &str, key: &str) -> Option<usize> {
+        let source = self.source.as_ref()?;
+        let bytes = read_font_bytes(source, path)?;
+        let ascent_ratio = hhea_ascent_ratio(&bytes).unwrap_or(0.794);
+        let (id, family) = register_font(&mut self.font_system, bytes)
+            .inspect_err(|e| warn!("ui_text: failed to register {path}: {e:#}"))
+            .ok()?;
+        let index = self.faces.len();
+        self.faces.push(Face {
+            id,
+            family,
+            ascent_ratio,
+        });
+        self.path_to_face.insert(key.to_string(), index);
+        info!("ui_text: loaded font face {path}");
+        Some(index)
     }
 
     /// **The size law.** A logical height becomes the exact integer device-pixel size it will be
@@ -361,8 +436,9 @@ impl TextEngine {
 
     /// The baseline-ascender fraction for a font path — the `[CGxFont+0x17c]` load_param, for a
     /// caller that already holds the lock.
-    pub(crate) fn ascent_ratio(&self, path: Option<&str>) -> f32 {
-        self.ascent_ratio_of(self.face_for(path))
+    pub(crate) fn ascent_ratio(&mut self, path: Option<&str>) -> f32 {
+        let face = self.face_for(path);
+        self.ascent_ratio_of(face)
     }
 
     /// Make sure every character of `text` is in the caches at this `(face, ppem, radius)`,
@@ -672,6 +748,22 @@ impl UiFontAtlas {
     }
 }
 
+/// Read one font path from the two stores, chain first.
+///
+/// The loose leg goes through the same [`benilla_assets::loose_addon_file`] the sprite decoder
+/// uses, so it inherits its rules whole: only `Interface\AddOns\` paths reach the folder, the
+/// component walk is case-insensitive (MSBT names its own files `Interface\Addons\…` with a
+/// lowercase `d`, and ships `mailrays.TTF` while its table says `mailrays.ttf`), and a
+/// dot-component is refused before any filesystem call.
+fn read_font_bytes(source: &FontSource, path: &str) -> Option<Vec<u8>> {
+    if let Ok(bytes) = source.chain.lock_recover().read(path) {
+        return Some(bytes);
+    }
+    let root = source.loose_root.as_deref()?;
+    let file = benilla_assets::loose_addon_file(root, &benilla_assets::normalize_path(path))?;
+    std::fs::read(file).ok()
+}
+
 /// A real-font engine for a test: the client faces, read through the app's own patch chain. `None`
 /// when there is no install, or the chain or a face will not open — every caller **skips** rather
 /// than fails (`wow_data_or_skip!`).
@@ -701,6 +793,12 @@ pub(super) fn test_engine(dpi: f32) -> Option<TextEngine> {
         swash: SwashCache::new(),
         faces,
         path_to_face,
+        // The same chain the four client faces were just read from, so a test can ask for a fifth.
+        source: Some(FontSource {
+            chain: Arc::new(Mutex::new(chain)),
+            loose_root: None,
+        }),
+        missing_fonts: HashSet::new(),
         default_face,
         dpi,
         chars: HashMap::new(),
@@ -1032,7 +1130,7 @@ mod ppem_tests {
     /// Each face resolves to itself, and an unknown path falls back to Friz.
     #[test]
     fn a_font_path_resolves_to_its_own_face() {
-        let Some(e) = engine_or_skip() else {
+        let Some(mut e) = engine_or_skip() else {
             return;
         };
         let friz = e.face_for(Some(TEST_FACES[0]));
@@ -1040,5 +1138,70 @@ mod ppem_tests {
         assert_eq!(friz, e.face_for(Some("Fonts\\NOSUCH.TTF")));
         assert_eq!(friz, e.face_for(Some("fonts\\frizqt__.ttf")), "case-folded");
         assert_ne!(friz, e.face_for(Some(TEST_FACES[1])), "ARIALN is its own");
+    }
+
+    /// **An addon-shipped TTF loads out of the ONE AddOns root** (decision 2103) — the leg the bug
+    /// was: MSBT ships thirty-one faces and names them `Interface\\Addons\\…\\Fonts\\<x>.ttf`,
+    /// a shape no MPQ carries, and every one of them silently drew as Friz Quadrata.
+    ///
+    /// The file is a real TTF (a client face, copied) because the assertion is that it REGISTERED,
+    /// not merely that a path matched; the reference spelling deliberately mismatches the folder's
+    /// case on every component, as the ecosystem's do (MSBT writes `Addons`, ships `mailrays.TTF`
+    /// and asks for `mailrays.ttf`).
+    #[test]
+    fn an_addon_shipped_font_loads_out_of_the_addons_root() {
+        let Some(mut e) = engine_or_skip() else {
+            return;
+        };
+        let bytes = {
+            let source = e.source.as_ref().expect("the test engine carries a chain");
+            let chain = source.chain.lock_recover();
+            chain.read(TEST_FACES[2]).expect("MORPHEUS is in the chain")
+        };
+        let root = std::env::temp_dir().join(format!("benilla-addon-font-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let fonts = root.join("MikScrollingBattleText").join("Fonts");
+        std::fs::create_dir_all(&fonts).unwrap();
+        std::fs::write(fonts.join("porky.TTF"), &bytes).unwrap();
+        e.source.as_mut().unwrap().loose_root = Some(root.clone());
+
+        let friz = e.face_for(Some(TEST_FACES[0]));
+        let addon = e.face_for(Some(
+            "Interface\\Addons\\mikscrollingbattletext\\fonts\\porky.ttf",
+        ));
+        assert_ne!(
+            friz, addon,
+            "an addon's own face must not fall back to Friz"
+        );
+        assert!(
+            e.missing_fonts.is_empty(),
+            "and it must not be recorded as a miss"
+        );
+        // A sibling path under the same root that is not there is still a miss — the folder is a
+        // store, not a wildcard.
+        assert_eq!(
+            friz,
+            e.face_for(Some(
+                "Interface\\Addons\\MikScrollingBattleText\\Fonts\\nope.ttf"
+            ))
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A path that resolves nowhere falls back to Friz and is remembered, so the read and the WARN
+    /// happen once rather than once per measure.
+    #[test]
+    fn an_unresolvable_font_path_is_remembered_as_missing() {
+        let Some(mut e) = engine_or_skip() else {
+            return;
+        };
+        let friz = e.face_for(Some(TEST_FACES[0]));
+        let bogus = "Interface\\Addons\\NoSuchAddon\\Fonts\\nope.ttf";
+        assert_eq!(friz, e.face_for(Some(bogus)));
+        assert!(e.missing_fonts.contains(&bogus.to_ascii_lowercase()));
+        assert_eq!(friz, e.face_for(Some(bogus)), "and the second ask is free");
+        // An empty path is the `SetFont("")` case and is not a miss — it is "no face named".
+        assert_eq!(friz, e.face_for(Some("")));
+        assert!(!e.missing_fonts.contains(""));
     }
 }

@@ -8,6 +8,8 @@ use std::time::Duration;
 use benilla_protocol::{JumpInfo, MonsterMoveFacing, MoveSpeeds};
 use bevy::prelude::Quat;
 
+use benilla_protocol::RelayVerb;
+
 use crate::creature_anim::move_flags;
 use crate::player::{GRAVITY, TERMINAL_VELOCITY};
 
@@ -100,7 +102,7 @@ fn a_relayed_swimmer_renders_pitched_and_the_gates_render_level() {
         fall_time: 0,
         jump: None,
         transport: None,
-        heartbeat: false,
+        verb: benilla_protocol::RelayVerb::Pose,
     };
     // Through the real arrival path, not a hand-set field: `apply_move` is what the relay and
     // the queue drain both go through, so this is the seam that would drop the pitch.
@@ -891,7 +893,7 @@ fn replay_frames(script: &[(u32, f64, u32)]) -> (Vec<u32>, u32) {
             fall_time: id as u32, // the packet's identity, carried through the queue
             jump: None,
             transport: None,
-            heartbeat: false,
+            verb: benilla_protocol::RelayVerb::Pose,
         };
         let (live, empty) = (rm.flags, rm.pending.is_empty());
         let fire_ms = rm.relay.schedule(wire_ms, now, live, empty);
@@ -1191,4 +1193,162 @@ fn a_flag_still_remote_is_left_where_the_wire_put_it() {
         rm.wow_pos[2] < seated[2],
         "a mover carrying a direction bit is integrated and resolved against the world"
     );
+}
+
+// ── The observer leg of the movement-mode family (decision 2061) ──────────────────────────────
+
+/// Build the `RelayMove` the six observer opcodes decode to — an ordinary relay carrying whatever
+/// flags word the server wrote (apply/unapply rides that word for five of the six) plus the
+/// opcode's verb, which matters for root and teleport alone.
+fn observed(flags: u32, position: [f32; 3], verb: RelayVerb) -> super::relay::RelayMove {
+    super::relay::RelayMove {
+        wire_ms: 1000,
+        position,
+        orientation: 0.0,
+        flags,
+        pitch: 0.0,
+        fall_time: 0,
+        jump: None,
+        transport: None,
+        verb,
+    }
+}
+
+/// Run one relayed move through the real arrival path (`apply_move` — the seam the relay and the
+/// queue drain both go through), starting from `before`.
+fn apply_observed(before: RemoteMotion, mv: &super::relay::RelayMove) -> RemoteMotion {
+    use bevy::ecs::system::RunSystemOnce;
+    let mv = mv.clone();
+    let mut world = bevy::prelude::World::new();
+    world.init_resource::<bevy::ecs::message::Messages<crate::creature_anim::HardLanding>>();
+    let e = world.spawn_empty().id();
+    world
+        .run_system_once(
+            move |mut commands: bevy::prelude::Commands,
+                  mut landings: bevy::prelude::MessageWriter<crate::creature_anim::HardLanding>| {
+                let mut rm = before.clone();
+                super::remote::apply_move(e, &mv, &mut rm, 0.0, &mut commands, &mut landings);
+                rm
+            },
+        )
+        .expect("the one-shot apply runs")
+}
+
+/// **A watched player's root actually stops them** (decision 2061) — the reported "he keeps sliding
+/// after the root lands".
+///
+/// The mechanism is not ours: the rooted player's OWN client wipes its direction bits when it
+/// applies `SetRoot 0x7c7340` (`& 0xffe07f00`), acks with that wiped word, and vmangos stores the
+/// ack verbatim (`HandleMoverRelocation`: `pMover->m_movementInfo = movementInfo`, forcing
+/// `MOVEFLAG_ROOT` back on) before broadcasting it to observers as `MSG_MOVE_ROOT`. So the correct
+/// receiver is the plain one — fold the whole word — and the ONLY thing that was wrong was that we
+/// never parsed the packet. This pins the consequence: after it, nothing the integration gate tests
+/// survives, which is what stops the dead-reckon.
+#[test]
+fn an_observed_root_lands_the_wiped_word_and_stops_the_dead_reckon() {
+    let walking = motion(move_flags::FORWARD, 0.0);
+    assert_ne!(
+        walking.flags & move_flags::INTEGRATED,
+        0,
+        "precondition: this mover is being stepped"
+    );
+
+    // What vmangos actually broadcasts: ROOT set, the direction bits gone.
+    let rooted = apply_observed(
+        walking,
+        &observed(move_flags::ROOT, [0.0; 3], RelayVerb::Root(true)),
+    );
+
+    assert_eq!(
+        rooted.flags & move_flags::INTEGRATED,
+        0,
+        "nothing the integration gate tests survives the root — this is what stops the slide"
+    );
+    assert_ne!(
+        rooted.flags & move_flags::ROOT,
+        0,
+        "and the bit itself lands"
+    );
+}
+
+/// **Levitate reaches an observer** (decision 2061, with 1706's three-at-once): `SPELL_AURA_HOVER`,
+/// `_FEATHER_FALL` and `_WATER_WALK` are granted together, each broadcast on its own observer
+/// opcode, and each carries the *whole* `m_movementInfo` flags word — so the last one to arrive
+/// holds all three bits. The extrapolator's ground resolve reads exactly this word (unioned with
+/// the `SMSG_SPLINE_MOVE_*` component) for its hover offset and water plane, so landing the word IS
+/// landing the effect.
+#[test]
+fn an_observed_levitate_lands_all_three_granted_bits() {
+    let trio = move_flags::HOVER | move_flags::SAFE_FALL | move_flags::WATER_WALKING;
+    let floating = apply_observed(motion(0, 0.0), &observed(trio, [0.0; 3], RelayVerb::Pose));
+    assert_eq!(
+        floating.flags, trio,
+        "hover + feather fall + water walk, from one broadcast word"
+    );
+
+    // …and the un-levitate is the same word with the bits gone — no opcode says "unapply".
+    let landed = apply_observed(floating, &observed(0, [0.0; 3], RelayVerb::Pose));
+    assert_eq!(landed.flags, 0, "the revoke is the absence of the bits");
+}
+
+/// **The teleport is the ONE relay the pre-fire reconcile skips — and the heartbeat is not**
+/// (decision 2064, correcting 0601/0603).
+///
+/// The queued node's tag `0x26`, which `0x619030` (facing) and `0x619090` (position) both bail on,
+/// is the teleport's: `push 0x26` occurs at exactly two addresses in the movement region
+/// (`0x6186bd`, `0x618736`), both inside functions reached only from the teleport arms — and
+/// `0x602fb0`, one of the two callers, sends `push 0xc7` (`MSG_MOVE_TELEPORT_ACK`) on its other
+/// branch. This client had it attributed to the heartbeat since 0601 and blended the wrong one.
+///
+/// Both halves are asserted, because getting either backwards is a distinct visible bug: blending
+/// toward a blink drags the mover — swept capsule and all — across the 20 yards it exists to skip,
+/// and *not* blending a heartbeat leaves a watched player's straight run snapping at 2 Hz, which is
+/// the whole reason the blends exist. And a teleport is excluded from the *blend*, never the apply.
+#[test]
+fn the_teleport_is_the_only_relay_the_reconcile_skips() {
+    let dest = [20.0, 5.0, 3.0];
+    let tp = observed(move_flags::FORWARD, dest, RelayVerb::Teleport);
+
+    assert!(!tp.reconciles(), "a blink is never blended toward");
+    for armed in [
+        RelayVerb::Heartbeat,
+        RelayVerb::Pose,
+        RelayVerb::Root(true),
+        RelayVerb::Root(false),
+    ] {
+        assert!(
+            observed(move_flags::FORWARD, dest, armed).reconciles(),
+            "{armed:?} arms both blends — tag 0x26 is the teleport's alone"
+        );
+    }
+
+    let there = apply_observed(motion(move_flags::FORWARD, 0.0), &tp);
+    assert_eq!(
+        there.wow_pos, dest,
+        "the teleport pose lands outright: excluded from the blend, never from the apply"
+    );
+}
+
+/// **The root opcode outranks the flags word it arrived with** (decision 2064). After the masked
+/// merge the client runs `SetRoot 0x7c7340` — `or 0x1000`, then the one-shot motion wipe
+/// `& 0xffe07f00` — unconditionally, so a `MSG_MOVE_ROOT` roots the mover even if the word it
+/// carried still had direction bits in it. vmangos always sends an already-wiped word, which is
+/// exactly why this is worth pinning: nothing in a live run would catch it going wrong.
+#[test]
+fn the_root_opcode_wins_over_a_word_that_disagrees_with_it() {
+    // A deliberately contradictory packet: the opcode says root, the word says "running forward,
+    // not rooted". The reference roots them anyway.
+    let liar = observed(move_flags::FORWARD, [0.0; 3], RelayVerb::Root(true));
+    let rooted = apply_observed(motion(move_flags::FORWARD, 0.0), &liar);
+    assert_ne!(rooted.flags & move_flags::ROOT, 0, "the opcode set the bit");
+    assert_eq!(
+        rooted.flags & move_flags::INTEGRATED,
+        0,
+        "and the one-shot wipe took the direction bits with it — this is what stops the slide"
+    );
+
+    // The unroot clears the bit and invents no movement: `ClearRoot 0x7c7370` is `and ~0x1000`,
+    // not the wipe run backwards.
+    let freed = apply_observed(rooted, &observed(0, [0.0; 3], RelayVerb::Root(false)));
+    assert_eq!(freed.flags, 0, "cleared, and still not moving");
 }

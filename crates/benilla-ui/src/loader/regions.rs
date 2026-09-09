@@ -4,6 +4,42 @@ use crate::framexml::{self, Element};
 
 use super::{abs_dim, abs_value, children_named, color_of, tex_coords_of, Loader};
 
+/// Whether a region parses **its own** font attributes — the reference's `FONTSTRING+0x12c`,
+/// which wow-re named `ownsFontAttrs` (`scratch/fontstring-loadxml-font-attrs.md` §3 and
+/// `scratch/button-label-build-and-anchor-order.md`, both VERIFIED).
+///
+/// It exists for exactly one element in the whole schema. The ctor sets it to 1
+/// (`0x770de7 mov byte [esi+0x12c],1`) and **one site image-wide clears it** — `0x778b7b`, inside
+/// `CSimpleButton::LoadXML 0x7788c0`'s inline build `[0x778b4c, 0x778bb6)`, which is the
+/// **`<NormalText>`** leg (tag `0x879978`, compared at `0x778b43`) and nothing else. A
+/// `<ButtonText>` (tag `0x8799f0`, `0x7789c1`) is built by the ordinary `<FontString>` region
+/// builder `0x6f2780` — the `<Layers>` walker's own — which never touches the flag, so an ordinary
+/// label keeps every attribute it is written with.
+///
+/// Cleared, gate B (`0x7710d3` → `je 0x771468`) makes that string's own
+/// `CSimpleFontString::LoadXML 0x770f40` skip `0x7710e1`–`0x771467` wholesale: `font=`,
+/// `<FontHeight>`, `outline=`, `monochrome=`, the file load, `spacing=`, `justifyV=`, `justifyH=`,
+/// `<Color>` and `<Shadow>`. (Gate A, `0x770f72`, additionally drops the `inherits=` registry-hit
+/// live link.) The SAME node is fed instead to the button's persistent Normal-state `CSimpleFont`
+/// at `+0x33c` (`0x778ba9`/`0x778baf call 0x783c30`) — one owner per attribute, no double
+/// application. The word still reaches the label's paint and its `GetJustifyH` answer: that
+/// loader's tail notify writes the resolved justify into the label's own `+0x120` (`0x784111` →
+/// `0x784180` → `0x773530` → `0x770800` at `0x770876`), **after** the anchor is placed.
+///
+/// Only `justifyH`/`justifyV` are gated here because they are the only two of that surface this
+/// pass ever applied: the rest live in `apply_fontstring_font`/`apply_region_visual`, which the
+/// button's label pass does not call. Geometry — `<Size>`, `<Anchors>`, `setAllPoints`, `name=` —
+/// is `CLayoutFrame::LoadXML`'s and is outside the gate on both legs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FontAttrs {
+    /// The ctor's default: an ordinary region — a `<Layers>` `<FontString>`, an EditBox's special
+    /// string, a title region, **and a Button's `<ButtonText>`** — owns its font attributes.
+    Own,
+    /// A Button's `<NormalText>`, the one element the client disowns: its font attributes belong
+    /// to the button's Normal-state font, never to the label.
+    Disowned,
+}
+
 impl Loader<'_> {
     /// `<Layers>`/`<Layer level=>`/`<Texture>`/`<FontString>` (rf24 `0x769d70`): create each region
     /// via CreateTexture/CreateFontString on the draw layer, then apply its file/color/text.
@@ -62,7 +98,13 @@ impl Loader<'_> {
                     {
                         self.call_region(&region_wrapper, "SetAlpha", a, dbg);
                     }
-                    self.apply_region_layout(region, &region_wrapper, parent_name, dbg);
+                    self.apply_region_layout(
+                        region,
+                        &region_wrapper,
+                        parent_name,
+                        dbg,
+                        FontAttrs::Own,
+                    );
                     if is_fontstring {
                         // Font object (`inherits=`) first, then the FontString's own `font=`/
                         // `<FontHeight>`/`outline=` overrides — before the generic visual pass applies
@@ -154,7 +196,7 @@ impl Loader<'_> {
                     }
                 },
             };
-            self.apply_region_layout(region, &region_wrapper, parent_name, dbg);
+            self.apply_region_layout(region, &region_wrapper, parent_name, dbg, FontAttrs::Own);
             self.apply_fontstring_font(region, &region_wrapper, dbg);
             self.apply_region_visual(region, &region_wrapper, false, dbg);
             // The creation-path implicit anchor (decision 1310), as in `apply_layers`. For the
@@ -184,15 +226,17 @@ impl Loader<'_> {
 
     /// A region's own geometry (decision 0068 v1): `<Size>` → SetWidth/SetHeight, `<Anchors>` →
     /// SetPoint (owner-relative; `relativeTo` is `$parent`-substituted like a frame's), the
-    /// `setAllPoints="true"` shorthand, and the FontString `justifyH` attr → SetJustifyH. This is the
-    /// join that makes region `<Size>`/`<Anchors>` actually place the region (before, both were
-    /// silently dropped — the smeared-merchant root cause).
+    /// `setAllPoints="true"` shorthand, and — only for a region that [`FontAttrs::Own`]s them —
+    /// the FontString `justifyH`/`justifyV` attrs → SetJustifyH/V. This is the join that makes
+    /// region `<Size>`/`<Anchors>` actually place the region (before, both were silently dropped
+    /// — the smeared-merchant root cause).
     pub(super) fn apply_region_layout(
         &mut self,
         region: &Element,
         wrapper: &Table,
         parent_name: &str,
         dbg: &str,
+        font_attrs: FontAttrs,
     ) {
         // ALL `<Size>` children in document order (same last-wins rule as `apply_size`: a templated
         // region's own `<Size>` must overwrite its template's).
@@ -205,11 +249,13 @@ impl Loader<'_> {
                 self.call_region(wrapper, "SetHeight", h, dbg);
             }
         }
-        if let Some(j) = region.attr("justifyH") {
-            self.call_region(wrapper, "SetJustifyH", j.to_string(), dbg);
-        }
-        if let Some(j) = region.attr("justifyV") {
-            self.call_region(wrapper, "SetJustifyV", j.to_string(), dbg);
+        if font_attrs == FontAttrs::Own {
+            if let Some(j) = region.attr("justifyH") {
+                self.call_region(wrapper, "SetJustifyH", j.to_string(), dbg);
+            }
+            if let Some(j) = region.attr("justifyV") {
+                self.call_region(wrapper, "SetJustifyV", j.to_string(), dbg);
+            }
         }
         if region.attr_bool("setAllPoints") {
             self.call_region(wrapper, "SetAllPoints", (), dbg);

@@ -308,10 +308,12 @@ function wipe(t)
     return t
 end
 
+-- 5.0 spelling throughout this file: a vararg function reads `arg`/`arg.n`, never `...` as a
+-- value, because 1.12's Lua has no grammar for that (decision 2101) and neither does ours.
 function tostringall(...)
-    local n = select('#', ...)
+    local n = arg.n
     local t = {}
-    for i = 1, n do t[i] = tostring((select(i, ...))) end
+    for i = 1, n do t[i] = tostring(arg[i]) end
     return unpack(t, 1, n)
 end
 
@@ -321,31 +323,32 @@ end
 function strsplit(delim, str, limit)
     local set = "[" .. delim:gsub("(.)", "%%%1") .. "]"
     local result = {}
+    local n = 0
     local start = 1
     while true do
-        if limit and #result >= limit - 1 then
-            result[#result + 1] = str:sub(start)
+        if limit and n >= limit - 1 then
+            n = n + 1; result[n] = str:sub(start)
             break
         end
         local s, e = str:find(set, start)
         if not s then
-            result[#result + 1] = str:sub(start)
+            n = n + 1; result[n] = str:sub(start)
             break
         end
-        result[#result + 1] = str:sub(start, s - 1)
+        n = n + 1; result[n] = str:sub(start, s - 1)
         start = e + 1
     end
-    return unpack(result)
+    return unpack(result, 1, n)
 end
 
 -- strjoin(sep, ...): join the varargs with `sep`.
 function strjoin(sep, ...)
-    return table.concat({ ... }, sep)
+    return table.concat(arg, sep, 1, arg.n)
 end
 
 -- strconcat(...): concatenate all args (WoW's join with no separator).
 function strconcat(...)
-    return table.concat({ ... })
+    return table.concat(arg, "", 1, arg.n)
 end
 
 -- strtrim(s [, chars]): trim leading/trailing chars (default whitespace).
@@ -362,44 +365,45 @@ do
 
     local function reformat(fmt, ...)
         if type(fmt) ~= "string" then
-            return _format(fmt, ...)
+            return _format(fmt, unpack(arg, 1, arg.n))
         end
         -- fast path: no "%<digit>" at all ⇒ definitely no positional spec.
         if not fmt:find("%%%d") then
-            return _format(fmt, ...)
+            return _format(fmt, unpack(arg, 1, arg.n))
         end
 
-        local args = { ... }
+        local args = arg
         local pieces = {}      -- rebuilt (sequential) format fragments
         local order = {}       -- for each real conversion: the source arg index, or false=sequential
         local seen_pos, seen_seq = false, false
-        local i, len = 1, #fmt
+        local npieces, norder = 0, 0
+        local i, len = 1, string.len(fmt)
 
         while i <= len do
             local c = fmt:sub(i, i)
             if c ~= "%" then
-                pieces[#pieces + 1] = c
+                npieces = npieces + 1; pieces[npieces] = c
                 i = i + 1
             elseif fmt:sub(i + 1, i + 1) == "%" then
-                pieces[#pieces + 1] = "%%"
+                npieces = npieces + 1; pieces[npieces] = "%%"
                 i = i + 2
             else
                 local j = i + 1
                 local ds, de = fmt:find("^%d+%$", j)  -- optional N$
                 if ds then
                     seen_pos = true
-                    order[#order + 1] = tonumber(fmt:sub(ds, de - 1))
+                    norder = norder + 1; order[norder] = tonumber(fmt:sub(ds, de - 1))
                     j = de + 1
                 else
                     seen_seq = true
-                    order[#order + 1] = false
+                    norder = norder + 1; order[norder] = false
                 end
                 -- copy flags/width/precision + the conversion letter
                 local ce = fmt:find("[" .. CONV .. "]", j)
                 if not ce then
                     error("invalid conversion in format string", 2)
                 end
-                pieces[#pieces + 1] = "%" .. fmt:sub(j, ce)
+                npieces = npieces + 1; pieces[npieces] = "%" .. fmt:sub(j, ce)
                 i = ce + 1
             end
         end
@@ -409,7 +413,7 @@ do
         end
 
         local out, seq = {}, 0
-        for k = 1, #order do
+        for k = 1, norder do
             local idx = order[k]
             if idx == false then
                 seq = seq + 1
@@ -418,7 +422,7 @@ do
                 out[k] = args[idx]
             end
         end
-        return _format(table.concat(pieces), unpack(out, 1, #order))
+        return _format(table.concat(pieces, "", 1, npieces), unpack(out, 1, norder))
     end
 
     string.format = reformat

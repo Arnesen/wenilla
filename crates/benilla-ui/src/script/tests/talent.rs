@@ -106,11 +106,27 @@ fn learn_talent_queues_for_the_app_drain() {
     assert!(s.take_errors().is_empty());
 }
 
-/// SetTalent = the spell builder + the talent interleave: name, "Rank r/m" white, cost line,
-/// gold description, "Next rank:" + the next rank's gold description, green "Click to learn".
+/// A stand-in string table for the talent tail's three keys — **deliberately not the shipped
+/// wording**, because what is under test is which key each line reaches and what fills it, never
+/// what the sentence says (decision 2045).
+fn seed_talent_strings(s: &mut UiScript) {
+    s.run(
+        r#"
+        TOOLTIP_TALENT_RANK      = "[RANK %d/%d]"
+        TOOLTIP_TALENT_NEXT_RANK = "[NEXT_RANK]"
+        TOOLTIP_TALENT_LEARN     = "[LEARN]"
+    "#,
+    )
+    .unwrap();
+}
+
+/// SetTalent = the spell builder + the talent interleave: name, TOOLTIP_TALENT_RANK white, cost
+/// line, gold description, TOOLTIP_TALENT_NEXT_RANK + the next rank's gold description, green
+/// TOOLTIP_TALENT_LEARN.
 #[test]
 fn set_talent_renders_the_interleaved_tooltip() {
     let mut s = script();
+    seed_talent_strings(&mut s);
     s.set_talents(one_tab_state());
     s.set_spell_tooltip(
         11070,
@@ -136,13 +152,13 @@ fn set_talent_renders_the_interleaved_tooltip() {
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetTalent(1, 1)
         assert(tt:IsShown(), "SetTalent shows")
-        -- name, Rank 3/5, Instant, desc, Next rank:, next desc, Click to learn = 7 lines.
+        -- name, rank, Instant, desc, next-rank header, next desc, learn hint = 7 lines.
         assert(tt:NumLines() == 7, "got " .. tt:NumLines())
         assert(TTTextLeft1:GetText() == "Improved Fireball")
-        assert(TTTextLeft2:GetText() == "Rank 3/5")
+        assert(TTTextLeft2:GetText() == "[RANK 3/5]", "got " .. TTTextLeft2:GetText())
         assert(TTTextLeft3:GetText() == "Instant")
-        assert(TTTextLeft5:GetText() == "Next rank:")
-        assert(TTTextLeft7:GetText() == "Click to learn")
+        assert(TTTextLeft5:GetText() == "[NEXT_RANK]")
+        assert(TTTextLeft7:GetText() == "[LEARN]")
     "#,
     )
     .unwrap();
@@ -151,7 +167,7 @@ fn set_talent_renders_the_interleaved_tooltip() {
     let quads = s.extract();
     let green = quads.iter().any(|q| {
         matches!(&q.content, QuadContent::Text { text: Some(t), color: Some(c), .. }
-            if t == "Click to learn" && c[0] < 1e-6 && (c[1] - 1.0).abs() < 1e-6)
+            if t == "[LEARN]" && c[0] < 1e-6 && (c[1] - 1.0).abs() < 1e-6)
     });
     assert!(green, "the learn hint is green");
     assert!(s.take_errors().is_empty());
@@ -162,6 +178,7 @@ fn set_talent_renders_the_interleaved_tooltip() {
 #[test]
 fn set_talent_locked_reqs_and_the_ask_once_miss() {
     let mut s = script();
+    seed_talent_strings(&mut s);
     s.set_talents(one_tab_state());
     // No spell view pushed for Ignite (11119): the render falls back, the ask is recorded.
     s.run(
@@ -171,7 +188,7 @@ fn set_talent_locked_reqs_and_the_ask_once_miss() {
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetTalent(1, 2)
         assert(tt:IsShown())
-        assert(TT2TextLeft1:GetText() == "Rank 0/5", "fallback shows the rank head")
+        assert(TT2TextLeft1:GetText() == "[RANK 0/5]", "fallback shows the rank head")
     "#,
     )
     .unwrap();
@@ -195,7 +212,7 @@ fn set_talent_locked_reqs_and_the_ask_once_miss() {
         local tt = getglobal("TT2")
         tt:SetOwner(getglobal("TB2"), "ANCHOR_RIGHT")
         tt:SetTalent(1, 2)
-        -- name, Rank 0/5, req(red), desc = 4 lines; rank 0 has no next block, locked has no hint.
+        -- name, rank, req(red), desc = 4 lines; rank 0 has no next block, locked has no hint.
         assert(tt:NumLines() == 4, "got " .. tt:NumLines())
         assert(TT2TextLeft3:GetText() == "Requires 5 points in Improved Fireball")
     "#,

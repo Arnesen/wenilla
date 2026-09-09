@@ -32,18 +32,25 @@ mod screen;
 use benilla_protocol::{CharAction, Character};
 use bevy::prelude::*;
 
+use crate::glue_strings::GlueStrings;
+
 use crate::net::{
-    CharActionResultMessage, CharListMessage, CharPick, CharRequest, EnteredWorldMessage,
-    LoggedOutMessage,
+    CharActionResultMessage, CharListMessage, CharPick, CharRequest, CharacterLoginFailedMessage,
+    EnteredWorldMessage, LoggedOutMessage,
 };
 
-/// The app's lifecycle: which screen owns the session (decision 0193). Grows glue variants
-/// (`RealmList`, …) as the glue arc fills in.
+/// The app's lifecycle: which screen owns the session (decision 0193).
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub(crate) enum ClientState {
     /// Parked pre-logon at the login screen (decision 0539): the IO thread waits for credentials;
     /// [`crate::login`]'s policy decides what answers it (the env fast path, the reconnect
     /// resubmit, or the director's typed submit).
+    ///
+    /// **The realm list is not one of these.** 0193 planned a `RealmList` variant and 2056 built
+    /// it; the reference has no such screen (`GlueParent.lua`'s `GlueScreenInfo` lists every glue
+    /// screen and the realm list is not among them — it is a `frameStrata="DIALOG"` frame shown
+    /// over whichever screen is up). It is [`crate::realm_select::Realms::shown`] now, and the
+    /// variant is gone rather than left unconstructed.
     #[default]
     Login,
     /// Parked at character select: the select screen is up, the IO thread waits for a pick, and
@@ -112,6 +119,7 @@ impl Plugin for CharSelectPlugin {
                         apply_roster_policy,
                         enter_on_connected,
                         back_on_logout,
+                        back_on_login_refused,
                         back_on_disconnect,
                         // LAST, and outside both `run_if`s: it mirrors the pick this frame ended
                         // with, and world entry is reached from the create screen too (1622).
@@ -124,6 +132,12 @@ impl Plugin for CharSelectPlugin {
                         input::rotate_model,
                         debug_select_dialog,
                         dialog::drive_delete_dialog,
+                        // The reference's one `GlueDialog` (`crate::glue::dialog`), which on this
+                        // screen carries the refused character login. Both glue screens run the
+                        // same system over the same resource; what a press *means* is answered
+                        // per-screen, and an `Error` — the only kind reachable here — needs no
+                        // answer at all.
+                        crate::glue::dialog::drive_glue_dialog,
                         // Before the list refresh, and before `select_input` reads a click that
                         // landed on the panel rather than the screen (decision 1196).
                         debug_select_addons,
@@ -132,13 +146,11 @@ impl Plugin for CharSelectPlugin {
                         refresh::refresh_list,
                         refresh::refresh_banner_and_buttons,
                         refresh::feed_glue_preview,
-                        crate::glue::art_swaps,
-                        crate::glue::glue_button_visuals,
                         delete_result,
                         debug_select_shot,
-                        crate::glue::sync_outlines,
                     )
                         .chain()
+                        .before(crate::glue::GlueVisuals)
                         .run_if(in_state(ClientState::CharSelect)),
                 )
                     .chain()
@@ -264,6 +276,15 @@ impl Roster {
     /// (decision 0737).
     pub(crate) fn pending_map(&self) -> Option<u32> {
         self.pending_row().map(|c| c.map)
+    }
+
+    /// The pending pick's level — the loading screen's tip-of-the-day guard (decision 2077). The
+    /// reference keeps a synthesised flag at `[selChar+0x10a]` that `0x5b42a0` sets iff this byte
+    /// arrived as `0` in `SMSG_CHAR_ENUM`, and a set flag suppresses the tip. vmangos always sends
+    /// a real level, so the arm is unreachable against our server; it is honoured because it costs
+    /// one comparison and a different server is free to send a zero.
+    pub(crate) fn pending_level(&self) -> Option<u8> {
+        self.pending_row().map(|c| c.level)
     }
 
     /// The picked character's `(map, wow xyz)` — **where the world we are about to load actually
@@ -568,6 +589,83 @@ fn back_on_disconnect(
     // just thrown out of, without ever seeing the screen.
     roster.pending_pick = None;
     next.set(ClientState::Login);
+}
+
+/// The server **refused** the character we picked (`SMSG_CHARACTER_LOGIN_FAILED`) → back to the
+/// glue layer, pick cleared, and the refusal said out loud.
+///
+/// The entry it undoes was optimistic: the IO thread announces the connection in the same breath
+/// as the pick (so the destination's tiles start streaming a round-trip early, decision 0777), and
+/// the refusal arrives after. So this runs the logout's transition on a world that was only ever
+/// half-built — the cover comes down with it ([`crate::loading_screen`]), and the IO thread's
+/// relist puts the roster back underneath.
+///
+/// **Clearing the pick is the load-bearing half.** `pending_pick` is 0065's reconnect memory, and
+/// the relist behind this refusal produces exactly the roster it auto-answers: left set, the
+/// client would re-enter the character the server just refused, be refused again, and loop — from
+/// behind a black screen, since each pass raises the cover afresh.
+fn back_on_login_refused(
+    mut msgs: MessageReader<CharacterLoginFailedMessage>,
+    mut roster: ResMut<Roster>,
+    mut next: ResMut<NextState<ClientState>>,
+    mut dialog: ResMut<crate::glue::dialog::GlueDialog>,
+    strings: Option<Res<GlueStrings>>,
+) {
+    let Some(msg) = msgs.read().last().copied() else {
+        return;
+    };
+    roster.pending_pick = None;
+    next.set(ClientState::CharSelect);
+    let empty = GlueStrings::default();
+    let strings = strings.as_deref().unwrap_or(&empty);
+    dialog.open_error(char_login_refusal_text(strings, msg.result));
+}
+
+/// The refusal byte, in the client's own words — the reference's jump table `0x5aae08`,
+/// transcribed.
+///
+/// **The byte is a 1-based reason index, not a status code**, and that is the whole reason this
+/// table exists rather than an offset. `ClientServices::OnCharLoginResult 0x5aad70` reads it as
+/// `movzx eax,byte[ebp+8]; dec eax; cmp eax,5; ja <default>` and jumps through a six-entry table,
+/// which maps `1..=6` onto the `CHAR_LOGIN_*` status codes `0x3e, 0x3f, 0x40, 0x42, 0x43, 0x44` —
+/// **skipping `0x41`**, `CHAR_LOGIN_FAILED`, which is reachable only as the default. So the
+/// tempting `0x3d + byte` is right for four rows and wrong for the rest, and `0` and anything past
+/// `6` are "Login failed" rather than an out-of-bounds read: the `ja` guard precedes the table.
+/// (VERIFIED off `WoW.exe`, cross-checked — wow-5875-re
+/// `system/net/scratch/char-login-failed-law.md`. The strings are the shipped
+/// `GlueStrings.lua:158-166`, quoted here only as the graceful-absence fallback.)
+///
+/// Both emulators speak this dialect. vmangos sends a bare `1` for all three of its refusal
+/// guards (`PlayerLoading() || GetPlayer() || !guid.IsPlayer()`), so **every** refusal from our
+/// own local server reads "World server is down" — the reference would say exactly that too, and
+/// saying anything better here would be benilla inventing a diagnosis the client cannot make.
+/// mangos-classic's live enum is `CharLoginFailReasons` `0x01..=0x08`; its `ResponseCodes`
+/// `CHAR_LOGIN_*` block, whose values would NOT survive this table, is commented out.
+pub(crate) fn char_login_refusal_text(strings: &GlueStrings, result: u8) -> &str {
+    let (key, fallback): (&str, &str) = match result {
+        1 => ("CHAR_LOGIN_NO_WORLD", "World server is down"),
+        2 => (
+            "CHAR_LOGIN_DUPLICATE_CHARACTER",
+            "A character with that name already exists",
+        ),
+        3 => (
+            "CHAR_LOGIN_NO_INSTANCES",
+            "No instance servers are available",
+        ),
+        4 => (
+            "CHAR_LOGIN_DISABLED",
+            "Login for that race, class, or character is currently disabled.",
+        ),
+        5 => ("CHAR_LOGIN_NO_CHARACTER", "Character not found"),
+        6 => (
+            "CHAR_LOGIN_LOCKED_FOR_TRANSFER",
+            "Your character is currently locked as part of the paid character transfer process.",
+        ),
+        // `0`, and `7` up (mangos-classic's `LOCKED_BY_BILLING` and `FAILED` among them): the
+        // switch's default arm, which is the only way `CHAR_LOGIN_FAILED` is ever reached.
+        _ => ("CHAR_LOGIN_FAILED", "Login failed"),
+    };
+    strings.text(key, fallback)
 }
 
 /// A confirmed `/logout` → back to the glue layer, pick cleared (the follow-up roster must be
@@ -1125,6 +1223,111 @@ mod tests {
             *app.world().resource::<State<ClientState>>().get(),
             ClientState::InWorld,
         );
+    }
+
+    /// **A refused character login takes the entry back** — and does it in the same frame the
+    /// entry was announced in.
+    ///
+    /// The IO thread sends `CMSG_PLAYER_LOGIN` and emits `Connected` in the same breath (the
+    /// entry's head start, decision 0777), so when the server refuses immediately — which is the
+    /// vmangos guard's whole shape: `PlayerLoading() || GetPlayer() || !guid.IsPlayer()` answers
+    /// before it touches the database — `Connected` and `SMSG_CHARACTER_LOGIN_FAILED` reach the
+    /// app in ONE drain. Both edges then fire in one `Update`, and the refusal has to be the last
+    /// word, exactly as a lost session does one test up.
+    ///
+    /// Without this the client flips `InWorld` against a world the server has just declined to
+    /// give it: no snap, no objects, and a loading cover armed for a snap that will never come —
+    /// which is the shape the whole fix exists to end.
+    #[test]
+    fn a_refused_login_beats_the_entry_it_revokes() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .insert_state(ClientState::CharSelect)
+            .init_resource::<Roster>()
+            .init_resource::<crate::ui_script::PlayerUiHover>()
+            .init_resource::<crate::ui_script::UiKeyboardCapture>()
+            .add_message::<EnteredWorldMessage>()
+            .add_message::<CharacterLoginFailedMessage>()
+            .init_resource::<crate::glue::dialog::GlueDialog>()
+            .add_systems(Update, (enter_on_connected, back_on_login_refused).chain());
+        app.world_mut().resource_mut::<Roster>().pending_pick = Some(7);
+
+        app.world_mut().write_message(EnteredWorldMessage {
+            billing_time_rested: 0,
+            tutorial_flags: None,
+        });
+        app.world_mut()
+            .write_message(CharacterLoginFailedMessage { result: 0x01 });
+        app.update();
+        app.update(); // `StateTransition` applies the pending state at the next frame
+
+        assert_eq!(
+            *app.world().resource::<State<ClientState>>().get(),
+            ClientState::CharSelect,
+            "the refusal must win — the reference leaves the player on the select screen it \
+             never actually took them off",
+        );
+        assert_eq!(
+            app.world().resource::<Roster>().pending_pick,
+            None,
+            "and the pick goes with it: the relist behind the refusal is auto-answered with \
+             `pending_pick`, so keeping it would re-enter the character just refused, forever",
+        );
+        // And the player is told. No GlueStrings in this App, so this is the fallback literal —
+        // the shipped sentence for vmangos's `1` is asserted against the real chain below.
+        assert_eq!(
+            app.world()
+                .resource::<crate::glue::dialog::GlueDialog>()
+                .text,
+            "World server is down",
+            "a refusal the player cannot see is the bug this whole path exists to end",
+        );
+    }
+
+    /// **Every refusal byte resolves to the sentence 1.12 actually ships**, read off the player's
+    /// own chain — the char-create screen's regression (2045/2052) applied to the table this
+    /// screen owns. Skips without client data.
+    ///
+    /// The two rows worth writing down. `1` is the only byte vmangos ever sends, and it reads
+    /// "World server is down" — not the "duplicate character" its own guard actually means, which
+    /// is the server's dialect and not ours to improve on. And `4` is where the tempting
+    /// `0x3d + byte` arithmetic breaks: the reference's table skips `CHAR_LOGIN_FAILED` (0x41),
+    /// so `4` is `CHAR_LOGIN_DISABLED` and not the "Login failed" an offset would give.
+    #[test]
+    fn every_refusal_byte_resolves_in_the_real_glue_strings() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let strings = crate::glue_strings::table_from_chain(&mut chain);
+
+        assert_eq!(char_login_refusal_text(&strings, 1), "World server is down");
+        assert_eq!(
+            char_login_refusal_text(&strings, 4),
+            "Login for that race, class, or character is currently disabled.",
+        );
+        assert_eq!(char_login_refusal_text(&strings, 5), "Character not found");
+
+        // The default arm, from both ends of the guard the reference's `dec eax; cmp eax,5; ja`
+        // draws — and it must be the same sentence, since there is only one default.
+        let default = char_login_refusal_text(&strings, 0);
+        assert_eq!(default, "Login failed");
+        for byte in [7u8, 8, 0x3f, 0x43, 0xff] {
+            assert_eq!(char_login_refusal_text(&strings, byte), default);
+        }
+
+        // Every named byte must resolve to a REAL key — a fallback that happens to match would
+        // hide a missing key forever.
+        let map = crate::glue_strings::table_from_chain(&mut chain).into_map();
+        for key in [
+            "CHAR_LOGIN_NO_WORLD",
+            "CHAR_LOGIN_DUPLICATE_CHARACTER",
+            "CHAR_LOGIN_NO_INSTANCES",
+            "CHAR_LOGIN_DISABLED",
+            "CHAR_LOGIN_NO_CHARACTER",
+            "CHAR_LOGIN_LOCKED_FOR_TRANSFER",
+            "CHAR_LOGIN_FAILED",
+        ] {
+            assert!(map.contains_key(key), "{key} is not in the shipped table");
+        }
     }
 
     /// B119 — a created character is selected against the roster **already in hand**. `net::io`

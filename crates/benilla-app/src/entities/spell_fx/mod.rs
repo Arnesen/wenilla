@@ -16,10 +16,20 @@
 //! (precast/channel) lives until its spell-id-keyed [`SpellKitFx::Reap`] (the client's
 //! `0x614150`); a **self-terminating** one (cast release, kit push) despawns after one pass of
 //! its model's sequence 0 — the stage-0/1 completion callback's clock, which runs whether or not
-//! the sequence moves a bone (the eat/drink tankard is a 6.667 s sequence with zero bone keys;
-//! against the ~5 s kit-resend cadence its instances overlap into a continuously held jug). The
-//! attach cascade for a model lacking the requested point is the client's: tag → `0xf` → `0x13`
-//! → the unit's base (wow-re §5, `0x61ceb0`).
+//! the sequence moves a bone (the eat/drink tankard is a 6.667 s sequence with zero bone keys,
+//! so it outlives the ~5 s kit-resend cadence and the jug is held continuously).
+//!
+//! Every spawn first runs the **same-slot replace** ([`replace_same_slot`], decision 2057): the
+//! reference's `0x6208e0`, which destroys any live instance of the same `SpellVisualEffectName`
+//! record at the same attach tag. It is what keeps a busy fight's effect count flat in the number
+//! of attackers, and it is also what swaps the tankard out on each resend.
+//!
+//! **The attach cascade below is mis-attributed and is a known divergence** (named in 2057, not
+//! yet fixed): `tag → 0xf → 0x13 → the unit's base` is `CMissile`'s (`0x61ceb0`,
+//! `Missile_C.cpp`), not `AddEffect`'s. wow-re corrected this on 2026-09-02
+//! (`spell-visual-apply.md`, from `melee-blood-spurt-suppression.md` §1/§7): `0x61fdd0` has no
+//! attachment test at all, so on a model lacking the tag the reference drops the effect
+//! permanently and invisibly where we relocate it.
 //!
 //! Effect models run their **bone rigs** ([`arm_effect_rig`] — the birth clip + global sequences
 //! pose the joints that meshes skin to and emitters/ribbons/cards ride), advance them through the
@@ -53,6 +63,7 @@ use bevy::animation::AnimatedBy;
 use bevy::ecs::entity::EntityHashMap;
 use bevy::prelude::*;
 
+use crate::creature_anim::spell_visual::FxSlot;
 use crate::creature_anim::{scan_events, AnimSoundEvent, FxClass, FxStage, SpellKitFx};
 use benilla_assets::m2_url;
 use benilla_assets::materials::WowModelMaterial;
@@ -85,6 +96,33 @@ const PENDING_TIMEOUT: f32 = 10.0;
 #[derive(Resource, Default)]
 pub(crate) struct SpellFx {
     pub(crate) models: HashMap<String, DisplayModel>,
+}
+
+/// Get-or-insert this path's cache entry, starting its M2 load on the spot — **the only way any
+/// site may reach [`SpellFx::models`]**, read or write.
+///
+/// [`super::evict_display_caches`] clears every display cache on a `MapChange`, and its doc states
+/// the contract that makes that safe: *"these caches are get-or-insert at every use site, so a
+/// cleared entry rebuilds on the next spawn that wants it."* This cache was the one that broke it.
+/// Its three consumers looked entries up with a bare `get` and each carried a comment calling the
+/// miss unreachable — "created with the instance", "the spawn created the cache entry" — because
+/// the entry *is* created with the instance, one system earlier. What none of them could see is
+/// that an eviction lands **between** the two, and the entry is never re-created: only a fresh
+/// `SpellKitFx::Begin` inserts, and an aura already sitting in its slots never emits another.
+///
+/// The map flip that does it is the ordinary one: `world_map::announce_map_change` fires on the
+/// login `0 → 1`, ~0.4–1.7 s into every session, which is exactly when a body that entered the
+/// world already carrying an aura is arming that aura's state kit. A **persistent** instance
+/// stranded there is silent and permanent — the `PENDING_TIMEOUT` reaper is gated
+/// `!inst.persistent`, so it is never spawned, never expired, and never traced. Measured at 9 runs
+/// in 10 (decision 2085; bug: the stun swirl not showing).
+pub(super) fn ensure_model(fx: &mut SpellFx, asset_server: &AssetServer, path: &str) {
+    fx.models
+        .entry(path.to_string())
+        .or_insert_with(|| DisplayModel {
+            handle: ModelHandle::M2(asset_server.load(m2_url(path))),
+            ..super::empty_shell()
+        });
 }
 
 /// The live **per-instance tint clones**: an effect part whose M2Color RGB animates gets its own
@@ -566,6 +604,9 @@ struct FxInstance {
     /// The M2 attachment id to hang from ([`benilla_formats::KIT_SLOT_TAGS`]), or
     /// [`benilla_formats::WORLD_EFFECT_TAG`] for the field-12 world-plant slot (0848/0850).
     tag: u16,
+    /// The `SpellVisualEffectName` record id — with [`Self::tag`], the reference's same-slot
+    /// replace key (`0x6208e0`; [`replace_same_slot`], decision 2057).
+    effect: u32,
     /// The model-cache key.
     path: String,
     /// The spawned instance root (a child of the attach joint), `None` while the model loads.
@@ -660,6 +701,7 @@ pub(super) fn resolve_spell_fx(
     fx: Option<ResMut<SpellFx>>,
     time: Res<Time>,
     asset_server: Res<AssetServer>,
+    mut emitters: Query<&mut benilla_world::particles::ParticleEmitter>,
 ) {
     let Some(mut fx) = fx else { return };
     let now = time.elapsed_secs();
@@ -697,21 +739,35 @@ pub(super) fn resolve_spell_fx(
                     // decays out exactly as a reaped one does: in the reference these are two
                     // nodes, the old one dying on its own clock while the new one is born.
                     if *persistent {
-                        reap_matching(&mut instances, *spell_id, *class, &fx, now, &mut commands);
+                        reap_matching(
+                            &mut instances,
+                            *spell_id,
+                            *class,
+                            &fx,
+                            now,
+                            &mut commands,
+                            &mut emitters,
+                        );
                     }
-                    for (tag, path) in effects {
-                        fx.models
-                            .entry(path.clone())
-                            .or_insert_with(|| DisplayModel {
-                                handle: ModelHandle::M2(asset_server.load(m2_url(path))),
-                                ..super::empty_shell()
-                            });
+                    for FxSlot { tag, effect, path } in effects {
+                        // **The same-slot replace**, run per slot exactly where the reference
+                        // runs it: `CEffect::AddEffect 0x61fdd0` opens with
+                        // `0x6208e0(owner, rec, tag)` (decision 2057).
+                        replace_same_slot(
+                            &mut instances,
+                            *effect,
+                            *tag,
+                            &mut commands,
+                            &mut emitters,
+                        );
+                        ensure_model(&mut fx, &asset_server, path);
                         instances.push(FxInstance {
                             spell_id: *spell_id,
                             persistent: *persistent,
                             class: *class,
                             stage: *stage,
                             tag: *tag,
+                            effect: *effect,
                             path: path.clone(),
                             root: None,
                             expires: None,
@@ -722,7 +778,15 @@ pub(super) fn resolve_spell_fx(
                 SpellKitFx::Reap {
                     spell_id, class, ..
                 } => {
-                    reap_matching(&mut instances, *spell_id, *class, &fx, now, &mut commands);
+                    reap_matching(
+                        &mut instances,
+                        *spell_id,
+                        *class,
+                        &fx,
+                        now,
+                        &mut commands,
+                        &mut emitters,
+                    );
                 }
             }
         }
@@ -733,6 +797,76 @@ pub(super) fn resolve_spell_fx(
             }
         }
     }
+}
+
+/// **Hand an ending instance's emitters to the drain** — the half of the reference's teardown
+/// `0x6203e0` that is not a despawn (wow-re `ceffect-particle-drain.md`, §4a byte-settled
+/// 2026-09-07).
+///
+/// An ending `CEffect` is *hidden*, not freed: emission stops, the already-emitted particles keep
+/// drawing and age out one at a time, and the node is released only on the frame the last one dies
+/// — the draw path's own admission test is the live-particle count itself (`0x7b4b46 mov
+/// eax,[esi+0x64]`), which nothing in the teardown touches. Despawning the root outright, as this
+/// lane did before, cut every live particle at once: for `Strike_Impact_Chest` a replace landing
+/// mid-burst threw away up to 0.30 s of a 0.334 s effect, as a pop mid-ramp.
+///
+/// The meshes are right to go with the root: the reference drops the model off the MESH draw list
+/// the same frame (`0x719207` gates it on the visible flag the teardown clears) while the PARTICLE
+/// list is gated on the busy mask (`0x71922c`), which the survivors keep set.
+///
+/// Emitters are free entities carrying their instance root as [`ParticleEmitter::anchor`], so that
+/// is the identity here — a linear scan, run only when an instance actually ends (a few per second
+/// in a fight, against a pool the sim already walks every frame).
+fn drain_instance_emitters(
+    emitters: &mut Query<&mut benilla_world::particles::ParticleEmitter>,
+    root: Entity,
+) {
+    for mut e in emitters.iter_mut() {
+        if e.anchor() == Some(root) {
+            e.drain_on_owner_loss();
+        }
+    }
+}
+
+/// **The same-slot replace walk** (`0x6208e0`, VERIFIED `[0x6208e0, 0x62092c]` — wow-re
+/// `kit30-effect-slot.md` §4; decision 2057): every `CEffect::AddEffect` (`0x61fdd0`) opens by
+/// walking the owner's `+0xb4` list and **destroying** (`0x6203e0`) each node carrying the same
+/// `SpellVisualEffectName` record at the same attach tag, so a re-play *replaces* a still-live
+/// same-model-same-slot emitter instead of stacking on it.
+///
+/// This is the whole reason a busy fight does not brighten without bound in the reference: five
+/// mobs' blood spurts on one flank of one body are one instance there, not five, and the count is
+/// **flat in the number of attackers** rather than linear. It is a *destroy*, not the reap's
+/// decay — the node is gone the same frame, and the newcomer is born in its place.
+///
+/// Two exclusions, both the reference's own:
+/// - **`tag == -1`** ([`benilla_formats::WORLD_EFFECT_TAG`], the field-12 world plant) is skipped
+///   at `0x620913`, so successive world plants genuinely coexist.
+/// - an instance already **decaying** is not reachable: the reference has moved it off `+0xb4`
+///   onto the pending-destroy list, exactly as [`reap_matching`] documents.
+fn replace_same_slot(
+    instances: &mut Vec<FxInstance>,
+    effect: u32,
+    tag: u16,
+    commands: &mut Commands,
+    emitters: &mut Query<&mut benilla_world::particles::ParticleEmitter>,
+) {
+    if tag == benilla_formats::WORLD_EFFECT_TAG {
+        return;
+    }
+    instances.retain(|i| {
+        if i.decaying || i.effect != effect || i.tag != tag {
+            return true;
+        }
+        if let Some(root) = i.root {
+            // The replaced node's particles finish — the replace bounds the number of EMITTING
+            // nodes, not the number of live particles (`ceffect-particle-drain.md` §1's note on
+            // the shared teardown).
+            drain_instance_emitters(emitters, root);
+            commands.entity(root).despawn();
+        }
+        false
+    });
 }
 
 /// The spell-id-keyed reap walk (`0x614150`): every live persistent instance of `(spell_id, class)`
@@ -750,6 +884,7 @@ fn reap_matching(
     fx: &SpellFx,
     now: f32,
     commands: &mut Commands,
+    emitters: &mut Query<&mut benilla_world::particles::ParticleEmitter>,
 ) {
     instances.retain_mut(|i| {
         if i.decaying || !i.persistent || i.spell_id != spell_id || i.class != class {
@@ -761,6 +896,9 @@ fn reap_matching(
             .and_then(|dm| decay_span(dm.animations.as_ref()));
         let (Some(root), Some(span)) = (i.root, span) else {
             if let Some(root) = i.root {
+                // A reap with no `Decay` to play destroys at once — and that destroy is
+                // `0x6203e0` like any other, so its particles still drain.
+                drain_instance_emitters(emitters, root);
                 commands.entity(root).despawn();
             }
             return false;
@@ -790,15 +928,17 @@ pub(super) fn attach_spell_fx(
         Option<&mut benilla_world::rig_anim::RigPose>,
         &GlobalTransform,
     )>,
-    fx: Option<Res<SpellFx>>,
+    fx: Option<ResMut<SpellFx>>,
+    asset_server: Res<AssetServer>,
     spells: Option<Res<crate::ui_action::Spells>>,
     time: Res<Time>,
     mut wow_materials: ResMut<Assets<WowModelMaterial>>,
     mut tint_reg: ResMut<FxTintAnims>,
     ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
+    mut emitters: Query<&mut benilla_world::particles::ParticleEmitter>,
 ) {
-    let Some(fx) = fx else {
+    let Some(mut fx) = fx else {
         return;
     };
     let now = time.elapsed_secs();
@@ -808,6 +948,10 @@ pub(super) fn attach_spell_fx(
             if let Some(expires) = inst.expires {
                 if now >= expires {
                     if let Some(root) = inst.root {
+                        // The flash ran its span — but its particles have their own clocks and
+                        // outlive it (`drain_instance_emitters`). This is the completion
+                        // callback's leg of the same `0x6203e0` teardown the replace takes.
+                        drain_instance_emitters(&mut emitters, root);
                         commands.entity(root).despawn();
                     }
                     if benilla_assets::trace::enabled() {
@@ -865,8 +1009,9 @@ pub(super) fn attach_spell_fx(
             if !inst.persistent && inst.expires.is_none() {
                 inst.expires = Some(now + PENDING_TIMEOUT);
             }
+            ensure_model(&mut fx, &asset_server, &inst.path);
             let Some(dm) = fx.models.get(&inst.path) else {
-                return true; // cache entry pending (shouldn't happen — created with the instance)
+                return true; // unreachable — just inserted
             };
             if dm.parts.is_none() {
                 return true; // model still loading — spawn on a later pass
@@ -1054,6 +1199,7 @@ mod tests {
             class: FxClass::AuraState,
             stage: FxStage::State,
             tag: 0x13,
+            effect: 1499, // Ice Barrier's state model
             path: "Spells\\IceShield_State.mdx".into(),
             root: Some(root),
             expires: None,
@@ -1068,6 +1214,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default()))
             .init_asset::<WowModelMaterial>()
+            .init_asset::<benilla_assets::M2Model>()
             .init_asset::<SkinnedMeshInverseBindposes>()
             .init_resource::<SpellFx>()
             .init_resource::<FxTintAnims>()
@@ -1150,5 +1297,196 @@ mod tests {
         let (mut app, unit, roots) = standing(&[true]);
         app.update();
         assert_eq!(instances_of(&app, unit), vec![(true, Some(roots[0]))]);
+    }
+
+    // ---- the same-slot replace (`0x6208e0`, decision 2057) ----
+
+    /// The blood spurt's record and the two flank tags — the case the rule exists for.
+    const SPURT: u32 = 63;
+    const FRONT: u16 = 0xf;
+    const BACK: u16 = 0x10;
+
+    /// An app running `resolve_spell_fx` alone, plus one bare unit.
+    fn resolving() -> (App, Entity) {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<WowModelMaterial>()
+            .init_asset::<benilla_assets::M2Model>()
+            .init_resource::<SpellFx>()
+            .add_message::<SpellKitFx>()
+            .add_systems(Update, resolve_spell_fx);
+        let unit = app.world_mut().spawn_empty().id();
+        (app, unit)
+    }
+
+    /// One self-terminating `Begin` carrying one slot.
+    fn begin(entity: Entity, effect: u32, tag: u16, path: &str) -> SpellKitFx {
+        SpellKitFx::Begin {
+            entity,
+            spell_id: 0,
+            persistent: false,
+            class: FxClass::Hold,
+            stage: FxStage::OneShot,
+            effects: vec![FxSlot {
+                tag,
+                effect,
+                path: path.into(),
+            }],
+        }
+    }
+
+    fn send(app: &mut App, msg: SpellKitFx) {
+        app.world_mut()
+            .resource_mut::<Messages<SpellKitFx>>()
+            .write(msg);
+        app.update();
+    }
+
+    /// Every live instance's `(effect, tag)`, in list order.
+    fn slots_of(app: &App, unit: Entity) -> Vec<(u32, u16)> {
+        app.world()
+            .entity(unit)
+            .get::<FxAttached>()
+            .map(|a| a.instances.iter().map(|i| (i.effect, i.tag)).collect())
+            .unwrap_or_default()
+    }
+
+    /// **The rule** (`0x6208e0`): a second play of the same record at the same tag DESTROYS the
+    /// first — five attackers' spurts on one flank are one instance, not five, which is why the
+    /// reference's effect count is flat in the number of attackers where ours was linear.
+    #[test]
+    fn a_replay_of_the_same_record_at_the_same_tag_replaces_rather_than_stacks() {
+        let (mut app, unit) = resolving();
+        send(&mut app, begin(unit, SPURT, FRONT, "Particles\\Spurt.mdx"));
+        // The first instance has been attached: give it the root the spawn pass would.
+        let root = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .entity_mut(unit)
+            .get_mut::<FxAttached>()
+            .unwrap()
+            .instances[0]
+            .root = Some(root);
+
+        send(&mut app, begin(unit, SPURT, FRONT, "Particles\\Spurt.mdx"));
+        assert_eq!(
+            slots_of(&app, unit),
+            vec![(SPURT, FRONT)],
+            "one instance, not two"
+        );
+        assert!(
+            app.world().get_entity(root).is_err(),
+            "the replaced node is DESTROYED the same frame, not left to decay",
+        );
+    }
+
+    /// The tag is half the key: the same record at a different attach point coexists — Execute's
+    /// cast kit hangs one record on BOTH hands (`0x15` and `0x16`), and both must survive.
+    #[test]
+    fn the_same_record_at_a_different_tag_coexists() {
+        let (mut app, unit) = resolving();
+        send(&mut app, begin(unit, SPURT, FRONT, "Particles\\Spurt.mdx"));
+        send(&mut app, begin(unit, SPURT, BACK, "Particles\\Spurt.mdx"));
+        assert_eq!(slots_of(&app, unit), vec![(SPURT, FRONT), (SPURT, BACK)]);
+    }
+
+    /// The record is the other half: two different records at one tag coexist, and keying the
+    /// walk on the model PATH instead would wrongly collapse them (two rows may name one `.mdx`).
+    #[test]
+    fn a_different_record_at_the_same_tag_coexists() {
+        let (mut app, unit) = resolving();
+        send(&mut app, begin(unit, SPURT, FRONT, "Particles\\Spurt.mdx"));
+        send(
+            &mut app,
+            begin(unit, SPURT + 1, FRONT, "Particles\\Spurt.mdx"),
+        );
+        assert_eq!(
+            slots_of(&app, unit),
+            vec![(SPURT, FRONT), (SPURT + 1, FRONT)]
+        );
+    }
+
+    /// The reference excludes `tag == -1` from the walk (`0x620913`), so successive world plants
+    /// genuinely stack — a second Thunder Clap ring does not eat the first.
+    #[test]
+    fn the_world_plant_slot_is_excluded_from_the_replace() {
+        let (mut app, unit) = resolving();
+        let tag = benilla_formats::WORLD_EFFECT_TAG;
+        send(&mut app, begin(unit, SPURT, tag, "Spells\\Ring.mdx"));
+        send(&mut app, begin(unit, SPURT, tag, "Spells\\Ring.mdx"));
+        assert_eq!(slots_of(&app, unit), vec![(SPURT, tag), (SPURT, tag)]);
+    }
+
+    /// The stun swirl that never appeared (decision 2085): a kit instance whose cache entry was
+    /// wiped by the login `MapChange` between its `Begin` and its spawn pass.
+    ///
+    /// The fixture is the aftermath, not the race — an instance holding a path the cache no longer
+    /// knows, which is what a session that entered the world already carrying an aura looks like
+    /// ~0.4–1.7 s in. Before [`ensure_model`] guarded the read, the spawn pass returned "still
+    /// pending" for ever: nothing re-created the entry (only a fresh `SpellKitFx::Begin` inserts,
+    /// and a standing aura emits no second one), and a *persistent* instance is exempt from the
+    /// `PENDING_TIMEOUT` reaper, so it was never spawned, never expired and never traced.
+    ///
+    /// The assertions are the two halves of that: the entry comes back, **and** the instance is
+    /// still there to use it — reaping it instead would make the failure quiet rather than fixed.
+    #[test]
+    fn an_evicted_cache_entry_is_rebuilt_by_the_spawn_pass() {
+        const PATH: &str = "Spells\\StunSwirl_State_Head.mdx";
+
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins.build().disable::<bevy::time::TimePlugin>(),
+            AssetPlugin::default(),
+        ))
+        .init_asset::<WowModelMaterial>()
+        .init_asset::<benilla_assets::M2Model>()
+        .init_asset::<bevy::mesh::skinning::SkinnedMeshInverseBindposes>()
+        .init_resource::<Time>()
+        .init_resource::<SpellFx>()
+        .init_resource::<FxTintAnims>()
+        .init_resource::<benilla_world::rig_palette::RigPalettes>()
+        .add_systems(Update, attach_spell_fx);
+
+        let unit = app
+            .world_mut()
+            .spawn((
+                GlobalTransform::default(),
+                FxAttached {
+                    instances: vec![FxInstance {
+                        spell_id: 9032,
+                        persistent: true,
+                        class: FxClass::AuraState,
+                        stage: FxStage::State,
+                        tag: 0x14,
+                        effect: 50,
+                        path: PATH.to_string(),
+                        root: None,
+                        expires: None,
+                        decaying: false,
+                    }],
+                },
+            ))
+            .id();
+        assert!(
+            app.world().resource::<SpellFx>().models.is_empty(),
+            "the fixture is a cache the eviction already cleared"
+        );
+
+        app.update();
+
+        assert!(
+            app.world().resource::<SpellFx>().models.contains_key(PATH),
+            "the spawn pass must get-or-insert its entry, not read and give up"
+        );
+        assert_eq!(
+            app.world()
+                .entity(unit)
+                .get::<FxAttached>()
+                .expect("the unit keeps its instance list")
+                .instances
+                .len(),
+            1,
+            "the instance must survive to use the rebuilt entry — a persistent one is never reaped \
+             for being pending"
+        );
     }
 }

@@ -202,6 +202,21 @@ pub struct UnitState {
     /// `UNIT_FIELD_FLAGS`, raw — what `UNIT_FLAGS` fires on (the app's `fire_transitions`); the
     /// three readings above are bits of it.
     pub flags: u32,
+    /// `PLAYER_FLAGS` (descriptor index 190), raw — what **`PLAYER_FLAGS_CHANGED`** fires on, the
+    /// [`Self::flags`] pattern one field over. `0` on a creature, which has no PLAYER block.
+    ///
+    /// The reference watches this dword type-wide over TYPEID_PLAYER (`0x468070(ecx=4, edx=8,
+    /// width 4)` registered at `0x5e25d7`), and its handler `0x5ee990` fires the event from
+    /// `0x5eea35`-`0x5eea3d` — **unguarded by any bit test, and above the local-player GUID gate
+    /// at `0x5eea93`** — so *any* bit moving on *any* player announces itself, remote players
+    /// included. Decision 2078.
+    ///
+    /// Raw, not a decoded subset, and that is the point: [`Self::group_leader`] (`0x1`) and
+    /// [`Self::ghost`] (`0x10`) are the only bits this struct decodes, while `0x2`/`0x4` (the
+    /// chat AFK/DND flags), `0x8` (GM), `0x200` (PvP-desired), `0x400`/`0x800` (hide helm/cloak)
+    /// and `0x1000`/`0x2000` (the play-time regimes) all move without touching either. Firing off
+    /// the decoded pair would silently under-announce every one of them.
+    pub player_flags: u32,
     /// The unit's owner — `UNIT_FIELD_SUMMONEDBY`, else its charmer, else its creator; `0` for
     /// nobody's. What `UnitPlayerOrPetInParty`/`InRaid` read for the "or pet" half (1958).
     pub owner: u64,
@@ -363,11 +378,23 @@ pub struct UnitState {
 ///
 /// One resolver, so the verb and the plate can never disagree about what a unit whose name is
 /// still in flight is called (decisions 2002, 2040).
+///
+/// **Both halves of that tail are here, and both are load-bearing.** The lookup is the rule
+/// (decision 2045: the sentence is the install's, not ours); the literal beside it is the
+/// reference's own `0x860fa4`, which is what "a literal is legitimate only as a fallback beside a
+/// lookup" means. Spelled `globals().get::<String>` — the shape `benilla-app`'s
+/// `reference_strings` tripwire recognises as a resolver — so the fallback reads as the fallback
+/// it is rather than as undeclared drift. It answers the same three cases the `mlua::Value` read
+/// it replaces did: a non-empty string is returned, and both a missing global and a present-but-
+/// EMPTY one take `0x860fa4` (the binary tests the pointer and then its first byte).
 pub fn unknownobject(lua: &Lua) -> mlua::Result<mlua::String> {
-    match lua.globals().get::<mlua::Value>("UNKNOWNOBJECT") {
-        Ok(mlua::Value::String(s)) if !s.as_bytes().is_empty() => Ok(s),
-        _ => lua.create_string("Unknown Being"),
-    }
+    // One expression, deliberately: `globals().get::<String>` is what the tripwire matches on,
+    // and a line break inside it would hide this resolver from the walk again.
+    let global = lua.globals().get::<String>("UNKNOWNOBJECT").ok();
+    lua.create_string(match global.as_deref() {
+        Some(s) if !s.is_empty() => s,
+        _ => "Unknown Being",
+    })
 }
 
 /// The grey-band table `0x80ae98` (a byte-identical twin at `0x81dda8` drives the nameplate's

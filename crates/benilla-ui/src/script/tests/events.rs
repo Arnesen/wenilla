@@ -1,4 +1,9 @@
 //! RegisterEvent + fire_event via BOTH conventions (RF-0025).
+//!
+//! The handler's extra arguments are read through 5.0's implicit `arg` table, not `select(n, ...)`:
+//! `...` as a value is not in this VM's grammar (decision 2101), because it is not in the 1.12
+//! client's. The point of the test is unchanged — the same handler sees the legacy globals
+//! (`this`, `event`, `arg1`) AND the positional arguments.
 
 use super::common::script;
 use crate::script::*;
@@ -14,9 +19,9 @@ fn fire_event_both_conventions_in_one_handler() {
             r_this_eq_self = (this == self)         -- legacy `this` global == modern `self`
             r_event_global = event                  -- modern `event` arg
             r_event_eq     = (event == _G.event)    -- == legacy `event` global
-            r_arg1_eq      = (arg1 == select(1, ...))  -- legacy `arg1` == modern select(1,...)
+            r_arg1_eq      = (arg1 == arg[1])        -- legacy `arg1` global == the vararg table
             r_arg1         = arg1
-            r_arg2         = select(2, ...)
+            r_arg2         = arg[2]
         end)
     "#,
     )

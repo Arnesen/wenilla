@@ -17,11 +17,19 @@ use crate::wire::{read_cstring, read_u32_le, read_u64_le, read_u8};
 // ChatMsg values (VERIFIED vmangos `SharedDefines.h:1191-1301`, the 5875 band — every
 // `#if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_11_2`-or-earlier guard is compile-time true for build
 // 5875). vmangos's enum runs the full `0x00..=0x5D`; the combat-log/spell/skill/loot/money block
-// (0x09, 0x0F-0x13, 0x17-0x50, 0x52-0x56, 0x5B) is **never** `SMSG_MESSAGECHAT` wire in 1.12 — canned
+// (0x09, 0x0F-0x13, 0x17-0x50, 0x52-0x56) is **never** `SMSG_MESSAGECHAT` wire in 1.12 — canned
 // emotes ride `SMSG_TEXT_EMOTE`, channel feedback rides `SMSG_CHANNEL_NOTIFY`/`_LIST`, and
 // skill/loot/money/xp lines are client-composed from their own opcodes (decision 0288) — so those
 // values have no named constant here. What's below is every type benilla either receives (as a
 // distinct wire shape or a renderable line) or sends.
+//
+// **`0x5B` was in that list until decision 2077 and it did not belong there.** It is
+// `CHAT_MSG_FILTERED`, and it is a real server→client line: 1.12's `ChatFrame.lua` puts it in
+// `ChatTypeGroup["SYSTEM"]` (l.128) and renders it at l.1405 as `format(CHAT_FILTERED, arg2)` —
+// "Unable to send chat to %s because your message contained reserved words." The client's own chat
+// chokepoint carves it out of the spam filter **by name** (`0x49aac9 cmp edi,0x5b`) precisely
+// because it is a line that arrives, and one the filter itself produces. vmangos declares the
+// constant and never sends it, which is what the wrong claim was really observing.
 pub const CHAT_MSG_SAY: u8 = 0x00;
 pub const CHAT_MSG_PARTY: u8 = 0x01;
 pub const CHAT_MSG_RAID: u8 = 0x02;
@@ -53,6 +61,12 @@ pub const CHAT_MSG_RAID_WARNING: u8 = 0x58;
 /// aliased `CHAT_MSG_MONSTER_WHISPER` instead; irrelevant here since 5875 always takes this branch).
 pub const CHAT_MSG_RAID_BOSS_WHISPER: u8 = 0x59;
 pub const CHAT_MSG_RAID_BOSS_EMOTE: u8 = 0x5A;
+/// **The server's "your message was filtered" notice** — not a filtered incoming line. The stock
+/// chat frame formats it as `CHAT_FILTERED` over `arg2` (the addressee), so the wire text carries
+/// the name rather than a sentence. It is the one chat type the client's own spam filter is
+/// *disarmed* for (`0x49aacc`), it is absent from the profanity arm's 14-type table, and it is
+/// delivered whatever both CVars say. wow-re `system/ui/scratch/text-filter-law.md`.
+pub const CHAT_MSG_FILTERED: u8 = 0x5B;
 pub const CHAT_MSG_BATTLEGROUND: u8 = 0x5C;
 pub const CHAT_MSG_BATTLEGROUND_LEADER: u8 = 0x5D;
 

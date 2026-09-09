@@ -1391,3 +1391,49 @@ fn the_language_declaring_spells_cover_nine_of_thirteen_languages() {
     // An ordinary ability declares nothing.
     assert_eq!(spells.declared_language(133), None); // Fireball
 }
+
+/// The hostility classifier ([`SpellDisplay::is_harmful`] — the client's `0x6ea280 == 2`) on the
+/// real 5875 rows, both routes: the enemy implicit target in slot A (Fireball 133, Charge 100,
+/// Sunder Armor 7386 — all `A[0] = 6`), an enemy area reached only through slot B (Frost Nova
+/// 122: `A[0] = 22` caster coordinates, `B[0] = 15` src-area enemy — harmful through B alone),
+/// and the helpful/neutral rows that must not flinch their target (Renew 139 and Healing Touch
+/// 5185 = 21 single friend, Arcane Intellect 1459 = 21, Battle Shout 6673 = 20 party area).
+/// Skips without client data.
+#[test]
+fn real_is_harmful_pins() {
+    let data = crate::wow_data_or_skip!();
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let spells = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
+    let row = |id: u32| {
+        spells
+            .get(id)
+            .unwrap_or_else(|| panic!("spell {id} in the catalog"))
+    };
+    for (id, name) in [
+        (133u32, "Fireball"),
+        (100, "Charge"),
+        (7386, "Sunder Armor"),
+        (122, "Frost Nova"),
+    ] {
+        assert!(row(id).is_harmful(), "{name} ({id}) targets enemies");
+    }
+    assert_eq!(
+        (
+            row(122).effect_implicit_target_a[0],
+            row(122).effect_implicit_target_b[0]
+        ),
+        (22, 15),
+        "Frost Nova is harmful through its B slot, the A slot being the caster's own spot"
+    );
+    for (id, name) in [
+        (139u32, "Renew"),
+        (5185, "Healing Touch"),
+        (1459, "Arcane Intellect"),
+        (6673, "Battle Shout"),
+    ] {
+        assert!(
+            !row(id).is_harmful(),
+            "{name} ({id}) does not target enemies"
+        );
+    }
+}

@@ -44,6 +44,8 @@ fn app() -> App {
         .add_message::<WoundAnim>()
         .add_message::<SpellKitSound>()
         .add_message::<SpellKitShake>()
+        .add_message::<crate::weapon_trail::TrailArm>()
+        .add_message::<super::BaseAnimRecompute>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
@@ -205,6 +207,8 @@ fn precast_kit_sound_rings_once_at_start() {
         .add_message::<WoundAnim>()
         .add_message::<SpellKitSound>()
         .add_message::<SpellKitShake>()
+        .add_message::<crate::weapon_trail::TrailArm>()
+        .add_message::<super::BaseAnimRecompute>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
@@ -490,7 +494,9 @@ fn aura_state_kit_arms_persistent_and_reaps_on_aura_end() {
     // messages just have to exist for the writers.
     app.add_message::<crate::aura_visual::AuraProc>();
     app.add_message::<SpellKitSound>()
-        .add_message::<SpellKitShake>();
+        .add_message::<SpellKitShake>()
+        .add_message::<crate::weapon_trail::TrailArm>()
+        .add_message::<super::BaseAnimRecompute>();
     app.init_resource::<FxLog>();
     app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables_with_paths(
         HashMap::from([(
@@ -567,7 +573,11 @@ fn aura_state_kit_arms_persistent_and_reaps_on_aura_end() {
         assert_eq!(*class, super::FxClass::AuraState);
         assert_eq!(
             effects.as_slice(),
-            [(0x16, "Spells\\Item_Bread.mdx".to_string())],
+            [super::FxSlot {
+                tag: 0x16,
+                effect: BREAD_FX,
+                path: "Spells\\Item_Bread.mdx".to_string(),
+            }],
             "bread at the spell hand"
         );
     }
@@ -603,6 +613,119 @@ fn aura_state_kit_arms_persistent_and_reaps_on_aura_end() {
 /// cast kit plays a body animation emits its [`MissileSpawn`] deferred (`awaits_release`) —
 /// the launch waits for the animation's release keyframe — while a cast kit with no animation
 /// (or none at all) launches at GO.
+/// The spell impact body twitch (decision 2058, sharpened by 2063): an instant harmful spell's GO
+/// lays ONE severity-0 wound on each hit target (`0x6e8bf0` @ `0x6e8c89`), a helpful one lays none;
+/// a state kit naming a wound anim adds nothing on either (the client's stage-2 play never reaches
+/// the `[8,10]` test, `0x60f383`); and a missile ARRIVAL wounds unconditionally (`0x61dc50` @
+/// `0x61dc74`) — even for the helpful spell.
+#[test]
+fn a_harmful_go_wounds_each_hit_once_and_a_missile_arrival_always() {
+    const HARMFUL: u32 = 7386; // Sunder Armor's shape: instant, enemy-targeted
+    const HELPFUL: u32 = 139; // Renew's shape: instant, ally-targeted
+    const VISUAL_H: u32 = 406;
+    const VISUAL_F: u32 = 280;
+    const IMPACT_KIT: u32 = 556; // no anim
+    const STATE_KIT: u32 = 436; // names CombatWound(9) — must add nothing
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.add_message::<CastEvent>()
+        .add_message::<SpellGoTargets>()
+        .add_message::<KitPush>()
+        .add_message::<EmoteAnim>()
+        .add_message::<WoundAnim>()
+        .add_message::<SpellKitSound>()
+        .add_message::<SpellKitShake>()
+        .add_message::<crate::weapon_trail::TrailArm>()
+        .add_message::<super::BaseAnimRecompute>()
+        .add_message::<SpellKitFx>()
+        .add_message::<MissileSpawn>()
+        .add_message::<crate::entities::dest_fx::GroundBurst>()
+        .add_message::<super::ChainProcPlay>()
+        .add_message::<SheathRequest>();
+    let stages = VisualStages {
+        impact: IMPACT_KIT,
+        state: STATE_KIT,
+        ..Default::default()
+    };
+    app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
+        HashMap::from([(VISUAL_H, stages), (VISUAL_F, stages)]),
+        HashMap::from([
+            (
+                IMPACT_KIT,
+                VisualKit {
+                    anim_id: None,
+                    ..Default::default()
+                },
+            ),
+            (
+                STATE_KIT,
+                VisualKit {
+                    anim_id: Some(9),
+                    ..Default::default()
+                },
+            ),
+        ]),
+    )));
+    app.insert_resource(crate::ui_action::Spells {
+        catalog: SpellCatalog::from_displays(HashMap::from([
+            (
+                HARMFUL,
+                SpellDisplay {
+                    visual: VISUAL_H,
+                    targets: 0x80,
+                    ..Default::default()
+                },
+            ),
+            (
+                HELPFUL,
+                SpellDisplay {
+                    visual: VISUAL_F,
+                    targets: 0x100,
+                    ..Default::default()
+                },
+            ),
+        ])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    app.add_systems(Update, route_cast_visuals);
+
+    let caster = app.world_mut().spawn_empty().id();
+    let target = app.world_mut().spawn_empty().id();
+    let wounds = |app: &mut App| -> Vec<Entity> {
+        app.world_mut()
+            .resource_mut::<Messages<WoundAnim>>()
+            .drain()
+            .map(|w| w.entity)
+            .collect()
+    };
+    for (spell_id, expected) in [(HARMFUL, vec![target]), (HELPFUL, Vec::new())] {
+        app.world_mut()
+            .write_message(cast_event(caster, spell_id, CastEventKind::Go));
+        app.world_mut().write_message(SpellGoTargets {
+            caster,
+            spell_id,
+            hits: vec![target],
+            misses: Vec::new(),
+            dest: None,
+            ammo_display_id: None,
+            seq: 1,
+        });
+        app.update();
+        assert_eq!(wounds(&mut app), expected, "instant GO of spell {spell_id}");
+    }
+    // A missile landing wounds whoever it lands on, hostility untested.
+    app.world_mut().write_message(cast_event(
+        target,
+        HELPFUL,
+        CastEventKind::Impact {
+            weapon_visual: None,
+        },
+    ));
+    app.update();
+    assert_eq!(wounds(&mut app), vec![target], "missile arrival");
+}
+
 #[test]
 fn missile_spawn_defers_iff_the_cast_kit_animates() {
     const ANIMATED: u32 = 133; // Fireball's shape: cast kit with anim 53
@@ -621,6 +744,8 @@ fn missile_spawn_defers_iff_the_cast_kit_animates() {
         .add_message::<WoundAnim>()
         .add_message::<SpellKitSound>()
         .add_message::<SpellKitShake>()
+        .add_message::<crate::weapon_trail::TrailArm>()
+        .add_message::<super::BaseAnimRecompute>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
@@ -733,6 +858,8 @@ fn a_targetless_dest_go_spawns_a_ground_missile_whose_arrival_sounds_at_the_poin
         .add_message::<WoundAnim>()
         .add_message::<SpellKitSound>()
         .add_message::<SpellKitShake>()
+        .add_message::<crate::weapon_trail::TrailArm>()
+        .add_message::<super::BaseAnimRecompute>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
@@ -921,6 +1048,7 @@ fn the_mount_poof_puffs_on_the_build_leg_only() {
     const FIELD_MOUNTDISPLAYID: u16 = 133;
     /// `SpellVisualEffectName` row 1185's shipped path — the druid-morph cloud.
     const POOF: &str = "Spells\\DruidMorph_Impact_Base.mdx";
+    const POOF_FX: u32 = 1185; // the shipped `SpellVisualEffectName` row (decision 0927)
     /// The M2 attach the hardcoded-effect spawn stamps (`DAT_0080c968[6]`).
     const BASE_ATTACH: u16 = 0x13;
 
@@ -928,8 +1056,11 @@ fn the_mount_poof_puffs_on_the_build_leg_only() {
     app.add_plugins(MinimalPlugins);
     app.add_message::<SpellKitFx>();
     app.insert_resource(SpellVisuals(
-        SpellVisualCatalog::from_tables(HashMap::new(), HashMap::new())
-            .with_hardcoded("HARDCODED Mount Poof", POOF),
+        SpellVisualCatalog::from_tables(HashMap::new(), HashMap::new()).with_hardcoded(
+            "HARDCODED Mount Poof",
+            POOF_FX,
+            POOF,
+        ),
     ));
     app.add_systems(Update, super::arm_mount_poof_fx);
 
@@ -938,7 +1069,7 @@ fn the_mount_poof_puffs_on_the_build_leg_only() {
     // Streams in ALREADY mounted: first sight arms the memory, silently.
     let unit = app.world_mut().spawn(store(2404)).id();
     app.update();
-    let puffs = |app: &mut App| -> Vec<(u16, String)> {
+    let puffs = |app: &mut App| -> Vec<super::FxSlot> {
         let mut out = Vec::new();
         let world = app.world_mut();
         let mut msgs = world.resource_mut::<Messages<SpellKitFx>>();
@@ -968,7 +1099,11 @@ fn the_mount_poof_puffs_on_the_build_leg_only() {
     app.update();
     assert_eq!(
         puffs(&mut app),
-        vec![(BASE_ATTACH, POOF.to_string())],
+        vec![super::FxSlot {
+            tag: BASE_ATTACH,
+            effect: POOF_FX,
+            path: POOF.to_string(),
+        }],
         "the build leg puffs the druid-morph cloud at the base attach"
     );
 
@@ -980,7 +1115,14 @@ fn the_mount_poof_puffs_on_the_build_leg_only() {
     // A swap (N → N′) is a change, and the reference rebuilds and puffs again.
     app.world_mut().entity_mut(unit).insert(store(2405));
     app.update();
-    assert_eq!(puffs(&mut app), vec![(BASE_ATTACH, POOF.to_string())]);
+    assert_eq!(
+        puffs(&mut app),
+        vec![super::FxSlot {
+            tag: BASE_ATTACH,
+            effect: POOF_FX,
+            path: POOF.to_string(),
+        }]
+    );
 }
 
 /// **The link that makes the beam exist at all** (decision 0955 slice 2): a kit carrying a chain
@@ -1206,6 +1348,8 @@ fn real_shooter(weapon: &RealRanged) -> Option<(App, Entity)> {
         .add_message::<WoundAnim>()
         .add_message::<SpellKitSound>()
         .add_message::<SpellKitShake>()
+        .add_message::<crate::weapon_trail::TrailArm>()
+        .add_message::<super::BaseAnimRecompute>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
@@ -1396,5 +1540,193 @@ fn a_shooter_with_no_ranged_weapon_resolves_no_clip_at_all() {
     assert!(
         app.world().entity(unit).get::<CastHold>().is_none(),
         "and no pull to hold"
+    );
+}
+
+/// **A state kit's animation id is a comparison, never a play** (decision 2085; VERIFIED wow-re
+/// `state-kit-anim-and-stun-pose.md` §1): `0x60edf0`'s tail has exactly one site that hands a
+/// kit's `AnimID` to the animation primitive (`0x60f3c5 call 0x5fe2f0`) and `0x60f387 jne`
+/// diverts stage 2 around it. Both `SpellVisual` field-4 consumers hardcode stage 2 — the aura
+/// watcher and this one, the impact hand-off `0x61dced` — so the state kit's id is only ever the
+/// right-hand side of `0x60f390`'s compare, spent on a base recompute.
+///
+/// The subject is the real Silithus chain: a Dredge Striker's **Charge** (22911 → visual 3783)
+/// plays `Knockdown`(121) from impact kit 348, and state kit 349 names `Stun`(14). Before this,
+/// benilla played the 14 as a second one-shot — a `Stun` pose the reference never shows on
+/// anything.
+///
+/// **Scope, corrected by decision 2096:** the recompute this emits does NOT cut the Knockdown.
+/// `Knockdown` takes the base-animation lock when it arms, so the `Stand` the recompute resolves is
+/// refused and the clip plays out — which is what the director sees on the reference. The recompute
+/// cuts only what holds no lock. What this test pins is the router's half: one play, not two.
+#[test]
+fn a_state_kits_anim_is_a_recompute_and_never_a_second_play() {
+    const CHARGE: u32 = 22911;
+    const CHARGE_VISUAL: u32 = 3783;
+    const IMPACT_KIT: u32 = 348;
+    const STATE_KIT: u32 = 349;
+    const KNOCKDOWN: u16 = 121;
+    const STUN: u16 = 14;
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.add_message::<CastEvent>()
+        .add_message::<SpellGoTargets>()
+        .add_message::<KitPush>()
+        .add_message::<EmoteAnim>()
+        .add_message::<WoundAnim>()
+        .add_message::<SpellKitSound>()
+        .add_message::<SpellKitShake>()
+        .add_message::<crate::weapon_trail::TrailArm>()
+        .add_message::<super::BaseAnimRecompute>()
+        .add_message::<SpellKitFx>()
+        .add_message::<MissileSpawn>()
+        .add_message::<crate::entities::dest_fx::GroundBurst>()
+        .add_message::<super::ChainProcPlay>()
+        .add_message::<SheathRequest>();
+    app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
+        HashMap::from([(
+            CHARGE_VISUAL,
+            VisualStages {
+                impact: IMPACT_KIT,
+                state: STATE_KIT,
+                ..Default::default()
+            },
+        )]),
+        HashMap::from([
+            (
+                IMPACT_KIT,
+                VisualKit {
+                    anim_id: Some(KNOCKDOWN),
+                    ..Default::default()
+                },
+            ),
+            (
+                STATE_KIT,
+                VisualKit {
+                    anim_id: Some(STUN),
+                    ..Default::default()
+                },
+            ),
+        ]),
+    )));
+    app.insert_resource(crate::ui_action::Spells {
+        catalog: SpellCatalog::from_displays(HashMap::from([(
+            CHARGE,
+            SpellDisplay {
+                visual: CHARGE_VISUAL,
+                ..Default::default()
+            },
+        )])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    app.add_systems(Update, route_cast_visuals);
+
+    let caster = app.world_mut().spawn_empty().id();
+    let victim = app.world_mut().spawn_empty().id();
+    app.world_mut()
+        .write_message(cast_event(caster, CHARGE, CastEventKind::Go));
+    app.world_mut().write_message(SpellGoTargets {
+        caster,
+        spell_id: CHARGE,
+        hits: vec![victim],
+        misses: Vec::new(),
+        dest: None,
+        ammo_display_id: None,
+        seq: 1,
+    });
+    app.update();
+
+    let plays: Vec<(Entity, u16)> = app
+        .world_mut()
+        .resource_mut::<Messages<EmoteAnim>>()
+        .drain()
+        .map(|e| (e.entity, e.anim_id))
+        .collect();
+    assert_eq!(
+        plays,
+        vec![(victim, KNOCKDOWN)],
+        "the impact kit plays; the state kit must not add a second one-shot"
+    );
+    let recomputes: Vec<(Entity, u16)> = app
+        .world_mut()
+        .resource_mut::<Messages<super::BaseAnimRecompute>>()
+        .drain()
+        .map(|r| (r.entity, r.anim_id))
+        .collect();
+    assert_eq!(
+        recomputes,
+        vec![(victim, STUN)],
+        "the state kit's id is spent on the stage-2 recompute instead"
+    );
+}
+
+/// A state kit whose **whole visual is its animation id** still arms (decision 2085). The aura
+/// watcher's entry test asks "does this kit do anything we model?", and the anim was missing from
+/// it — the B114 shape one level over, where an effects-only test dropped Stealth's proc-only kit.
+/// 15 of the shipped state kits are anim-only (`benilla-extract kitanim`), among them kit 586's
+/// `Stun`(14) — Sneezing Fit, Smoke Bomb and kin.
+#[test]
+fn an_anim_only_state_kit_still_arms_on_the_aura_add_edge() {
+    use benilla_protocol::messages::ObjectFields;
+
+    const SPELL: u32 = 6902; // Sneezing Fit
+    const VISUAL: u32 = 517;
+    const STATE_KIT: u32 = 586; // anim 14, no effect slot, no sound, no CharProc
+    const STUN: u16 = 14;
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.add_message::<SpellKitFx>()
+        .add_message::<crate::aura_visual::AuraProc>()
+        .add_message::<SpellKitSound>()
+        .add_message::<super::BaseAnimRecompute>();
+    app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
+        HashMap::from([(
+            VISUAL,
+            VisualStages {
+                state: STATE_KIT,
+                ..Default::default()
+            },
+        )]),
+        HashMap::from([(
+            STATE_KIT,
+            VisualKit {
+                anim_id: Some(STUN),
+                ..Default::default()
+            },
+        )]),
+    )));
+    app.insert_resource(crate::ui_action::Spells {
+        catalog: SpellCatalog::from_displays(HashMap::from([(
+            SPELL,
+            SpellDisplay {
+                visual: VISUAL,
+                ..Default::default()
+            },
+        )])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    app.add_systems(Update, super::arm_aura_state_fx);
+
+    let unit = app
+        .world_mut()
+        .spawn(crate::net::ObjectStore(ObjectFields::from_pairs(&[
+            (47, SPELL),
+            (95, 0x0E),
+        ])))
+        .id();
+    app.update();
+
+    let recomputes: Vec<(Entity, u16)> = app
+        .world_mut()
+        .resource_mut::<Messages<super::BaseAnimRecompute>>()
+        .drain()
+        .map(|r| (r.entity, r.anim_id))
+        .collect();
+    assert_eq!(
+        recomputes,
+        vec![(unit, STUN)],
+        "an anim-only state kit is not nothing — its ADD edge owes a recompute"
     );
 }

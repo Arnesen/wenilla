@@ -12,7 +12,9 @@
 
 use benilla_ui::script::{ContainerSlot, ContainerState, UiScript};
 
-use super::test_ui::{bag_open, bag_slot_button, load_ui as load_xml, BAG_UI};
+use super::test_ui::{
+    bag_open, bag_slot_button, load_ui as load_xml, load_world_frame, world_click, BAG_UI,
+};
 
 /// A one-item, one-slot backpack holding `item_id`/`name` at `quality`, so the confirm text and
 /// the wire's destroy count are exercisable end to end. Quality is what forks the driver, so it is
@@ -72,6 +74,14 @@ fn setup() -> UiScript {
     load_xml(&s, r"Interface\FrameXML\UIDropDownMenu.xml");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, r"Interface\FrameXML\FloatingChatFrame.xml"); // declares ChatFrameEditBox
+
+    // **The world frame, because the world drop is what raises this popup** (B380, decision
+    // 2089). Every test here used to click at `(-50, -50)` — off-screen, over nothing — which is
+    // a world click only in a house where no `WorldFrame` is loaded. The real client's is
+    // full-screen and mouse-enabled, and it swallowed every one of these clicks for three days
+    // while all ten tests stayed green. `world_click` lands on the world now, and this is the
+    // file that has to be there for there to be one.
+    load_world_frame(&s);
     s.set_money(0);
     s
 }
@@ -91,12 +101,21 @@ fn bag_setup() -> UiScript {
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
+    load_world_frame(&s); // [`setup`]'s reason, same fixture
+
+    // …and the paper doll goes back where the reference keeps it. [`BAG_UI`] leaves
+    // `CharacterFrame.xml` out on purpose (its own note: a window no bag test opens), so the
+    // frame `PaperDollFrame.xml` declares has no hidden parent to sit inside and stands on screen
+    // instead — it and its model child covering the world the drop has to be clicked on. The real
+    // client never shows it there; hiding it restores its state, it does not dodge the fixture's.
+    s.run("PaperDollFrame:Hide()")
+        .expect("the paper doll the missing CharacterFrame would have hidden");
     s.set_money(0);
     s
 }
 
 /// Pick up the fixture item and click-carry it into the world — a completed LEFT CLICK (press +
-/// release, both over nothing; 0218's byte-verified trigger) fires the world-drop
+/// release, both on the world frame; 0218's byte-verified trigger) fires the world-drop
 /// `DELETE_ITEM_CONFIRM(name, quality)` the driver listens for.
 fn pick_up_and_drop_in_world(s: &mut UiScript) {
     drop_in_world(s, 117, "Tough Jerky", 1);
@@ -108,12 +127,7 @@ fn drop_in_world(s: &mut UiScript, item_id: u32, name: &str, quality: u32) {
     s.set_container(0, Some(one_item_backpack(item_id, name, quality)));
     s.run("PickupContainerItem(0, 1)").unwrap();
     assert!(s.cursor_item().is_some(), "fixture: the item is held");
-    // Off past every frame (the bag sits bottom-right; off-screen negative is always clear).
-    s.mouse_button(-50.0, -50.0, "LeftButton", true);
-    assert!(
-        s.mouse_button(-50.0, -50.0, "LeftButton", false),
-        "a world drop consumes the completed click"
-    );
+    world_click(s);
     s.tick(0.01); // flush the queued DELETE_ITEM_CONFIRM into the driver's OnEvent
 }
 
@@ -189,10 +203,13 @@ fn delete_item_confirm_no_clears_without_destroying() {
     );
 
     // Count repaints from here — the No-click path must trigger one via the event, not a click.
+    // 5.0's vararg spelling: the implicit `arg` table forwarded with `unpack`, because `...` as a
+    // VALUE is not in this VM's grammar — it is not in the 1.12 client's (decision 2101).
     s.run(
         "repaints = 0\n\
          local real = ContainerFrame_Update\n\
-         ContainerFrame_Update = function(...) repaints = repaints + 1; return real(...) end",
+         ContainerFrame_Update = function(...) repaints = repaints + 1; \
+         return real(unpack(arg, 1, arg.n)) end",
     )
     .unwrap();
 
@@ -502,5 +519,43 @@ fn the_plain_arm_shows_no_edit_box() {
         1,
         "and YES is live immediately"
     );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The world drop, under the WHOLE shipped interface** — B380's own test (decision 2089).
+///
+/// The nine above build a fixture out of the files the popup needs, which is what let B380 hide:
+/// a fixture is a subset of the manifest, and the file that broke this one was a file no fixture
+/// had a reason to name. This one takes the manifest entire — the same load the player gets,
+/// world frame and action bars and chat and all — picks an item up off the bag and clicks the
+/// ground. It is the slowest test in the file and the only one that could not have been fooled.
+#[test]
+fn the_world_drop_survives_the_whole_shipped_interface() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    s.set_money(0);
+    s.set_container(0, Some(one_item_backpack(117, "Tough Jerky", 1)));
+    s.resolve();
+
+    s.run("PickupContainerItem(0, 1)").unwrap();
+    assert!(s.cursor_item().is_some(), "fixture: the item is held");
+    world_click(&mut s);
+    s.tick(0.01);
+
+    assert!(
+        s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
+        "clicking the ground with an item held raises the destroy confirm"
+    );
+    assert_eq!(
+        s.eval::<String>("return StaticPopup1Text:GetText()")
+            .unwrap(),
+        "Do you want to destroy Tough Jerky?"
+    );
+    // …and Yes destroys it, through the stock popup's own OnAccept.
+    s.run("StaticPopup1Button1:Click()").unwrap();
+    assert!(s.cursor_item().is_none(), "the cursor is empty after Yes");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

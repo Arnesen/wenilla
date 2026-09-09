@@ -166,9 +166,12 @@ pub struct WowLighting {
 }
 
 impl WowLighting {
-    /// Per-kind **water swatch endpoints**: `(shallow_rgb, deep_rgb, shallow_alpha, deep_alpha)`. The
-    /// from-above depth swatch is a plain **2-endpoint linear lerp** of the zone's dedicated `Light.dbc`
-    /// water rows — IntBand 16/17 (river/lake) or 14/15 (ocean), **RAW** (no ×0.711) — by the per-vertex
+    /// Per-kind **water swatch endpoints**: `(shallow_rgb, deep_rgb, shallow_alpha, deep_alpha)`. These
+    /// are the ENDPOINTS; the ramp between them is a 64-row byte-space accumulator that `liquid.wgsl`
+    /// reproduces (`swatch_row`), not the plain lerp this doc used to describe — it stops one row short
+    /// of `deep`, and the ocean's last row is darkened (decision 2074). The rows are the zone's
+    /// dedicated `Light.dbc` water rows — IntBand 16/17 (river/lake) or 14/15 (ocean), **RAW** (no
+    /// ×0.711) — indexed by the per-vertex
     /// depth `V` (river/lake `V = clamp(byte/42)`, built in `benilla-formats::liquid`). VERIFIED from WoW.exe
     /// `FUN_0068a830`, golden-vector-matched to the apitrace swatch (≤1/255 over all 64 rows). The shader
     /// (`liquid.wgsl`) lerps both colour and opacity by the *same* V, so they track together.
@@ -183,12 +186,16 @@ impl WowLighting {
     /// **no scale** — VERIFIED `WoW.exe FUN_006b6b60` builds `ca7f10[d] = shallow + d·(deep−shallow)/256`
     /// from `gWorldLight+0x114/+0x118`, corroborated by the apitrace swatch (`α = 127 + 2·row` ⇒
     /// 0.5→1.0 for river/lake, 0.75→1.0 for ocean). The alpha and the colour ride the SAME per-vertex
-    /// `V`, and the river/lake `V` is the **steep `clamp(byte/42)`** (VERIFIED `c81768` LUT /
-    /// `FUN_0068d790`) — NOT `byte/255`: a river channel saturates to opaque deep teal by **byte 42 ≈
-    /// 5 yd** (ramp ≈8.5 byte/yd, VERIFIED `probe_water_depth`), leaving only the shore edge
-    /// see-through. Ocean uses a different non-LUT path (placeholder `/255`, pending its own RE+A/B).
+    /// `V`, and **each kind rides its own verified LUT** — river/lake the steep `clamp(byte/42)`
+    /// (`c81768`, `FUN_0068d790`), ocean the gentle `clamp(byte/255)` (`c7fcd8`, `FUN_0068d690`),
+    /// both built side by side in `FUN_0068c4c0`. A river channel saturates to opaque deep teal by
+    /// **byte 42 ≈ 5 yd** (ramp ≈8.5 byte/yd, VERIFIED `probe_water_depth`, re-measured at 8.96 over
+    /// every MCLQ block in Azeroth + Kalimdor), leaving only the shore edge see-through; the sea
+    /// authors its byte 5.2× gentler (1.72 byte/yd), so its `/255` saturates at ~148 yd of depth —
+    /// the same ramp in yards, not a 6× slower one (decision 2069).
     /// (Earlier bugs: `×8 DEPTH_RAMP_SCALE` saturated at ~4 yd; then the gentle `byte/255` was the
-    /// WRONG LUT and the river middle never reached teal.)
+    /// WRONG LUT **for a river** and the river middle never reached teal — which is what got the
+    /// sea's own `/255` mislabelled a placeholder for months.)
     pub(crate) fn water_colors(&self, kind: LiquidKind) -> ([f32; 3], [f32; 3], f32, f32) {
         let (shallow_rgb, deep_rgb, alpha) = if kind == LiquidKind::Ocean {
             (

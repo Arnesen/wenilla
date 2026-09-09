@@ -1029,3 +1029,55 @@ fn create_font_string_applies_the_font_object_named_by_its_third_argument() {
     s.run(r#"TX = Host:CreateTexture(nil, "OVERLAY")"#)
         .expect("the two-argument form still works");
 }
+
+/// **`SetFont`'s nil is a LOAD failure, and only the host knows** (decision 2103).
+///
+/// The reference answers the number 1 or nil (`0x79f345`/`0x79f361`), and the nil originates in
+/// the font factory at `0x5c1ae0` — a path that names no readable file. `!OmniCC/main.lua:41`
+/// reads it exactly that way (`if not Font:SetFont(saved, size) then revert end`), and an addon
+/// that ships its own faces (MSBT ships thirty-one, under `Interface\Addons\…\Fonts\`) is the
+/// case that makes the answer depend on a store rather than on the string.
+///
+/// The engine-less default is the other half: with no probe a non-empty path answers 1, because a
+/// VM with no font backend has nothing for a load to fail against. That is the opposite default to
+/// `SetTexture`'s (1322) and the reason is in `Model::font_probe`.
+#[test]
+fn set_font_answers_the_hosts_load_verdict_when_there_is_a_host() {
+    let mut s = script();
+    s.run("FS = CreateFrame('Frame'):CreateFontString()")
+        .unwrap();
+
+    // No probe: any non-empty path is 1, an empty one is nil.
+    assert!(s
+        .eval::<bool>(r"return FS:SetFont('Interface\\Addons\\Nope\\Fonts\\x.ttf', 12) == 1")
+        .unwrap());
+    assert!(s.eval::<bool>("return FS:SetFont('', 12) == nil").unwrap());
+
+    // With one, the store decides — and the face it refused is NOT adopted, so the region keeps
+    // the last font that did load.
+    s.set_font_probe(Box::new(|path| {
+        path.eq_ignore_ascii_case("interface\\addons\\msbt\\fonts\\porky.ttf")
+            || path.eq_ignore_ascii_case("fonts\\frizqt__.ttf")
+    }));
+    assert!(s
+        .eval::<bool>(r"return FS:SetFont('Fonts\\FRIZQT__.TTF', 12) == 1")
+        .unwrap());
+    assert!(
+        s.eval::<bool>(r"return FS:SetFont('Interface\\AddOns\\MSBT\\Fonts\\porky.ttf', 18) == 1")
+            .unwrap(),
+        "an addon's own face, spelled in its own case, must load"
+    );
+    assert!(
+        s.eval::<bool>(r"return FS:SetFont('Interface\\AddOns\\MSBT\\Fonts\\gone.ttf', 18) == nil")
+            .unwrap(),
+        "a path the store does not hold is the reference's falsey load failure"
+    );
+    let (face, height, _) = s
+        .eval::<(String, f32, String)>("return FS:GetFont()")
+        .unwrap();
+    assert_eq!(
+        face, "Interface\\AddOns\\MSBT\\Fonts\\porky.ttf",
+        "the refused face must not replace the one that loaded"
+    );
+    assert_eq!(height, 18.0, "…while the height, which never fails, is set");
+}

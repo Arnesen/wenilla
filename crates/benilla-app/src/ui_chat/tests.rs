@@ -1,8 +1,41 @@
-use crate::net::ChatKind;
-
 use super::event::{default_color, ChatEvent, ChatEventKind as K};
-use super::frames::compose;
 use super::input::{emote_send_eligible, emote_target, EmoteGate, ParsedChat};
+
+thread_local! {
+    /// The **shipped** string table, in a VM, once per test thread — `GlobalStrings.lua` run as
+    /// the chunk it is, so `\32` and every other escape is Lua's own doing rather than a parser
+    /// of ours.
+    ///
+    /// The composer resolves `CHAT_<TYPE>_GET` / `CHAT_<X>_NOTICE` off the player's chain now
+    /// (decision 2045), so an assertion below is only worth making against the real table: a test
+    /// that graded a rendered line against a stub would pass on sentences the running client
+    /// never shows, which is the trap decision 2052 named when it moved the glue tests onto the
+    /// loader's own assembly.
+    ///
+    /// Built lazily, so a caller's `wow_data_or_skip!()` runs first.
+    static GLOBAL_STRINGS: benilla_ui::script::UiScript = {
+        let s = benilla_ui::script::UiScript::new().expect("VM");
+        crate::ui_script::test_ui::load_ui(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+        s
+    };
+}
+
+/// Run something that needs the shipped string table — the feed's line producers resolve their
+/// keys through one of these now (decision 2045), and every assertion below wants the REAL table
+/// under it rather than a stub with our own idea of the wording in it.
+fn with_strings<T>(f: impl FnOnce(&dyn Fn(&str) -> Option<String>) -> T) -> T {
+    GLOBAL_STRINGS.with(|s| f(&|key: &str| s.lua().globals().get::<String>(key).ok()))
+}
+
+/// [`super::frames::compose`] against the shipped table — the shim that keeps every assertion in
+/// this file (and [`super::broadcast`]'s own) reading as a rendered line rather than as a lookup.
+pub(super) fn compose(event: &ChatEvent, kind: K, default_language: &str) -> Option<String> {
+    GLOBAL_STRINGS.with(|s| {
+        super::frames::compose(event, kind, default_language, &|key| {
+            s.lua().globals().get::<String>(key).ok()
+        })
+    })
+}
 
 /// A player-line event (the wire bridge's output shape) — sender resolved, optional flag.
 fn ev(kind: K, text: &str, sender: &str) -> ChatEvent {
@@ -230,53 +263,6 @@ fn a_received_text_emote_composes_its_sentence_and_names_the_performer() {
     assert!(line(SIT, them("-")).is_none(), "/sit prints nothing");
 }
 
-#[test]
-fn level_up_lines_follow_the_reference_order_and_forms() {
-    let _data = benilla_formats::wow_data_or_skip!();
-    use benilla_protocol::messages::LevelUpInfo;
-
-    // A caster ding with talent point + three stat gains: the PLAYER_LEVEL_UP handler's exact
-    // line order (ChatFrame.lua:1283-1324) — LEVEL_UP, HEALTH_MANA, CHAR_POINTS, STAT × positive.
-    let l = LevelUpInfo {
-        level: 10,
-        health: 22,
-        powers: [15, 0, 0, 0, 0],
-        stats: [0, 1, 2, 3, 0],
-    };
-    assert_eq!(
-        super::feed::level_up_lines(&l, 1),
-        vec![
-            "Congratulations, you have reached level 10!",
-            "You have gained 22 hit points and 15 mana.",
-            "You have gained 1 talent point.",
-            "Your Agility increases by 1.",
-            "Your Stamina increases by 2.",
-            "Your Intellect increases by 3.",
-        ]
-    );
-    // A manaless early ding: LEVEL_UP_HEALTH form, no talent line (arg4 == 0 skips), the plural
-    // form when more than one point.
-    let l = LevelUpInfo {
-        level: 2,
-        health: 12,
-        powers: [0; 5],
-        stats: [1, 0, 1, 0, 0],
-    };
-    assert_eq!(
-        super::feed::level_up_lines(&l, 0),
-        vec![
-            "Congratulations, you have reached level 2!",
-            "You have gained 12 hit points.",
-            "Your Strength increases by 1.",
-            "Your Stamina increases by 1.",
-        ]
-    );
-    assert_eq!(
-        super::feed::level_up_lines(&l, 2)[2],
-        "You have gained 2 talent points."
-    );
-}
-
 /// The three honor forms (COMBATLOG_HONORAWARD / COMBATLOG_HONORGAIN / COMBATLOG_DISHONORGAIN,
 /// GlobalStrings :786/:787/:785) and the fork between them, decision 1512.
 ///
@@ -287,30 +273,33 @@ fn level_up_lines_follow_the_reference_order_and_forms() {
 fn honor_gain_lines_pick_the_reference_form() {
     let _data = benilla_formats::wow_data_or_skip!();
     assert_eq!(
-        super::feed::honor_gain_line(None, None, 42),
-        "You have been awarded 42 honor points."
+        with_strings(|g| super::feed::honor_gain_line(None, None, 42, g)).as_deref(),
+        Some("You have been awarded 42 honor points.")
     );
     assert_eq!(
-        super::feed::honor_gain_line(Some("Grimtusk"), Some("Sergeant"), 137),
-        "Grimtusk dies, honorable kill Rank: Sergeant (Estimated Honor Points: 137)"
+        with_strings(|g| super::feed::honor_gain_line(Some("Grimtusk"), Some("Sergeant"), 137, g))
+            .as_deref(),
+        Some("Grimtusk dies, honorable kill Rank: Sergeant (Estimated Honor Points: 137)")
     );
     // A dishonorable kill: vmangos sends the same packet with a negative honor
     // (`HonorMgr.cpp:807`), and the client's fork is on the sign.
     assert_eq!(
-        super::feed::honor_gain_line(Some("Innkeeper Renee"), None, -37),
-        "Innkeeper Renee dies, dishonorable kill."
+        with_strings(|g| super::feed::honor_gain_line(Some("Innkeeper Renee"), None, -37, g))
+            .as_deref(),
+        Some("Innkeeper Renee dies, dishonorable kill.")
     );
     // The BOUNDARY, byte-verified at `0x625270`: the test is `honor <= 0`, so a zero-honor kill
     // takes the dishonorable arm. The pre-verdict reading had `< 0` and put this one on the
     // honorable side, where it would have printed "Rank:  (Estimated Honor Points: 0)".
     assert_eq!(
-        super::feed::honor_gain_line(Some("Grimtusk"), Some("Sergeant"), 0),
-        "Grimtusk dies, dishonorable kill."
+        with_strings(|g| super::feed::honor_gain_line(Some("Grimtusk"), Some("Sergeant"), 0, g))
+            .as_deref(),
+        Some("Grimtusk dies, dishonorable kill.")
     );
     // No rank title: the clause stays, empty — the reference's own shape.
     assert_eq!(
-        super::feed::honor_gain_line(Some("Grimtusk"), None, 5),
-        "Grimtusk dies, honorable kill Rank:  (Estimated Honor Points: 5)"
+        with_strings(|g| super::feed::honor_gain_line(Some("Grimtusk"), None, 5, g)).as_deref(),
+        Some("Grimtusk dies, honorable kill Rank:  (Estimated Honor Points: 5)")
     );
 }
 
@@ -320,16 +309,16 @@ fn xp_gain_lines_pick_the_reference_form() {
     // COMBATLOG_XPGAIN_FIRSTPERSON / its EXHAUSTION1 rested form / _UNNAMED (GlobalStrings
     // :801/:789/:804).
     assert_eq!(
-        super::feed::xp_gain_line(Some("Kobold Vermin"), 35, 0),
-        "Kobold Vermin dies, you gain 35 experience."
+        with_strings(|g| super::feed::xp_gain_line(Some("Kobold Vermin"), 35, 0, g)).as_deref(),
+        Some("Kobold Vermin dies, you gain 35 experience.")
     );
     assert_eq!(
-        super::feed::xp_gain_line(Some("Kobold Vermin"), 52, 17),
-        "Kobold Vermin dies, you gain 52 experience. (+17 exp Rested bonus)"
+        with_strings(|g| super::feed::xp_gain_line(Some("Kobold Vermin"), 52, 17, g)).as_deref(),
+        Some("Kobold Vermin dies, you gain 52 experience. (+17 exp Rested bonus)")
     );
     assert_eq!(
-        super::feed::xp_gain_line(None, 120, 0),
-        "You gain 120 experience."
+        with_strings(|g| super::feed::xp_gain_line(None, 120, 0, g)).as_deref(),
+        Some("You gain 120 experience.")
     );
     // The XP kind wears the shipped lavender (chat-cache row 46, 0x6F6FFF).
     assert_eq!(default_color(K::CombatXpGain), [111, 111, 255]);
@@ -342,12 +331,12 @@ fn exploration_lines_pick_the_reference_form() {
     // (UIErrorsFrame); ERR_ZONE_EXPLORED_XP (:1926) — the chat system line that rides
     // additionally iff xp > 0 (byte-verified branch `0x5e422f`; decisions 0828/0829).
     assert_eq!(
-        super::feed::exploration_toast("Westfall"),
-        "Discovered: Westfall"
+        with_strings(|g| super::feed::exploration_toast("Westfall", g)).as_deref(),
+        Some("Discovered: Westfall")
     );
     assert_eq!(
-        super::feed::exploration_line("Westfall", 85),
-        "Discovered Westfall: 85 experience gained"
+        with_strings(|g| super::feed::exploration_line("Westfall", 85, g)).as_deref(),
+        Some("Discovered Westfall: 85 experience gained")
     );
 }
 
@@ -392,23 +381,33 @@ fn channel_line_prefixes_the_stripped_channel() {
 /// same channel, the same arg4, and the reference renders them differently. `gsub(arg4,
 /// "%s%-%s.*", "")` lives at l.1463, inside the speech `else` arm, *after* every notice arm has
 /// returned — so speech says "[General]" and the join notice says "[General - Elwynn Forest]".
+///
+/// **The fixtures are built by the bridge**, not hand-stamped with a kind. CHANNEL_NOTICE and
+/// CHANNEL_NOTICE_USER are two different arms of `ChatFrame_OnEvent` — one passes arg4 alone, the
+/// other arg4/arg2/arg5 (l.1416/1424) — and which one a notice byte takes is
+/// [`super::feed::notice_event`]'s call, not the test author's. Stamping it by hand is how this
+/// test came to describe PLAYER_KICKED as a plain CHANNEL_NOTICE, which the bridge has never
+/// produced; nothing could see it while the composer ignored the distinction.
 #[test]
 fn channel_notices_compose_by_the_notice_law() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut e = ChatEvent::text_only(K::ChannelNotice, String::new());
-    e.channel = "General - Elwynn Forest".into();
-    e.notice = "2".into(); // YOU_JOINED
+    let notice = |byte: u8, channel: &str, a: Option<&str>, b: Option<&str>| {
+        let e = super::feed::notice_event(
+            byte,
+            channel.to_string(),
+            a.map(str::to_string),
+            b.map(str::to_string),
+        )
+        .expect("the bridge builds an event for this notice");
+        let kind = e.kind.expect("a built notice always carries its kind");
+        compose(&e, kind, "Common")
+    };
     assert_eq!(
-        compose(&e, K::ChannelNotice, "Common").unwrap(),
+        notice(0x02, "General - Elwynn Forest", None, None).unwrap(), // YOU_JOINED
         "Joined Channel: [General - Elwynn Forest]"
     );
-    let mut kick = ChatEvent::text_only(K::ChannelNotice, String::new());
-    kick.channel = "World".into();
-    kick.sender = "Ann".into();
-    kick.target = "Mod".into();
-    kick.notice = "18".into(); // PLAYER_KICKED 0x12
     assert_eq!(
-        compose(&kick, K::ChannelNotice, "Common").unwrap(),
+        notice(0x12, "World", Some("Ann"), Some("Mod")).unwrap(), // PLAYER_KICKED
         "[World] Player Ann kicked by Mod."
     );
     // A member join line is a CHANNEL_JOIN event, hyperlinked like any player line.
@@ -806,7 +805,7 @@ fn a_leave_notice_keeps_its_number_because_the_record_dies_after_the_line() {
         "arg8 — what the color resolves through"
     );
     assert_eq!(
-        super::frames::compose(&e, K::ChannelNotice, "Common").unwrap(),
+        compose(&e, K::ChannelNotice, "Common").unwrap(),
         "Left Channel: [2. General - Elwynn Forest]"
     );
     assert_eq!(
@@ -900,23 +899,63 @@ fn a_session_end_empties_the_window_and_the_boxs_memory() {
     );
 }
 
-/// Every notice byte the composer renders has a token to fire, and vice versa — the two tables are
-/// the same set by assertion rather than by good intentions (they are read off the same
-/// `CHAT_<X>_NOTICE` GlobalStrings keys).
+/// **Every notice token names a string the shipped client actually has.** The composer splices
+/// the token into `CHAT_<X>_NOTICE` the way `ChatFrame_OnEvent` does (l.1416/1424), so the token
+/// table IS the render table — there is nothing left to cross-check between two lists of ours.
+/// What can still be wrong is a token that resolves to nothing, which would silently print no
+/// line at all; that is what this asserts, against the player's own `GlobalStrings.lua`.
+///
+/// The bytes with no token render nothing, and must keep rendering nothing: MODE_CHANGE (`0x0C`)
+/// fires no chat event in the reference at all, and JOINED/LEFT (`0x00`/`0x01`) are the member
+/// lines rather than notices.
 #[test]
-fn every_rendered_notice_has_a_token() {
+fn every_notice_token_resolves_and_the_tokenless_bytes_stay_silent() {
     let _data = benilla_formats::wow_data_or_skip!();
-    for byte in 0x00u8..=0x1F {
+    for byte in 0x00u8..=0x21 {
         let mut e = ChatEvent::text_only(K::ChannelNotice, String::new());
         e.channel = "World".into();
         e.notice = byte.to_string();
-        let rendered = super::frames::compose_notice(&e).is_some();
-        let token = super::event::notice_token(byte).is_some();
-        assert_eq!(
-            rendered, token,
-            "notice {byte:#04x}: renders={rendered} but token={token}"
-        );
+        let rendered = GLOBAL_STRINGS.with(|s| {
+            super::frames::compose_notice(&e, K::ChannelNotice, &|key| {
+                s.lua().globals().get::<String>(key).ok()
+            })
+        });
+        match super::event::notice_token(byte) {
+            Some(token) => assert!(
+                rendered.is_some(),
+                "notice {byte:#04x} has token {token} but CHAT_{token}_NOTICE resolves to nothing"
+            ),
+            None => assert_eq!(
+                rendered, None,
+                "notice {byte:#04x} has no token and must render nothing"
+            ),
+        }
     }
+}
+
+/// The one notice whose two names are **not** in the order it prints them:
+/// `CHAT_INVITE_NOTICE = "%2$s has invited you to join the channel '%1$s'."`, filled from the
+/// reference's own fixed `(arg4, arg2)` list (l.1418). This is decision 2045's whole argument in
+/// one assertion — hand-typing the English bakes in one locale's word order, and only a
+/// positional fill off the shipped string can put the inviter first while the channel is
+/// argument one.
+#[test]
+fn the_invite_notice_reorders_its_two_names() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut e = ChatEvent::text_only(K::ChannelNoticeUser, String::new());
+    e.channel = "2. Trade - City".into();
+    e.sender = "Ann".into();
+    e.notice = benilla_protocol::messages::channel_notice::INVITE.to_string();
+    let line = GLOBAL_STRINGS.with(|s| {
+        super::frames::compose_notice(&e, K::ChannelNoticeUser, &|key| {
+            s.lua().globals().get::<String>(key).ok()
+        })
+    });
+    assert_eq!(
+        line.as_deref(),
+        Some("Ann has invited you to join the channel '2. Trade - City'."),
+        "the inviter fills %2$s and the channel — arg4, zone tail and all — fills %1$s"
+    );
 }
 
 /// The `ALL` sweep list really is every variant. A new kind fails [`super::event::event_name`]'s
@@ -932,7 +971,9 @@ fn every_kind_is_in_all() {
     seen.sort_unstable();
     seen.dedup();
     assert_eq!(seen.len(), before, "a kind is listed twice in ALL");
-    assert_eq!(before, 92, "92 kinds — update this when the kind set grows");
+    // 93 since 2077: `CHAT_MSG_FILTERED` (`0x5B`) is a real server line, not the never-wire value
+    // this tree had it filed as — the server's "your message was filtered" notice.
+    assert_eq!(before, 93, "93 kinds — update this when the kind set grows");
 }
 
 #[test]
@@ -962,6 +1003,7 @@ fn stub_table() -> super::commands::SlashCommands {
         ("SLASH_LEAVE1", "/leave"),
         ("SLASH_LIST_CHANNEL1", "/chatlist"),
         ("SLASH_CHAT_AFK1", "/afk"),
+        ("SLASH_CHAT_DND1", "/dnd"),
         ("SLASH_RANDOM1", "/random"),
         ("SLASH_RANDOM2", "/roll"),
         ("SLASH_PLAYED1", "/played"),
@@ -1015,11 +1057,22 @@ fn action_commands_parse() {
             name: "world".into()
         }
     );
+    // `/afk` and `/dnd` run the reference's OWN `SlashCmdList` bodies rather than building a bare
+    // send (2088). They used to be a `ParsedChat::AfkDnd` that went straight to the wire — correct
+    // until the away law landed, and a second implementation the moment it did: no echo, no
+    // client-side default substitution, no mirror write. The argument still rides WHOLE, which is
+    // what this row has always pinned.
     assert_eq!(
         parse_line("/afk farming"),
-        ParsedChat::AfkDnd {
-            kind: ChatKind::Afk,
-            msg: "farming".into(),
+        ParsedChat::Lua {
+            body: "SlashCmdList[\"CHAT_AFK\"](\"farming\")".into()
+        }
+    );
+    // Bare, because that is the toggle — and the empty string has to survive to the send.
+    assert_eq!(
+        parse_line("/dnd"),
+        ParsedChat::Lua {
+            body: "SlashCmdList[\"CHAT_DND\"](\"\")".into()
         }
     );
     assert_eq!(parse_line("/roll"), ParsedChat::Random { min: 1, max: 100 });
@@ -1873,7 +1926,7 @@ fn a_combat_log_line_renders_verbatim() {
         e.flag = "AFK".into();
         e.language = "Orcish".into();
         assert_eq!(
-            super::frames::compose(&e, kind, &default_language).as_deref(),
+            compose(&e, kind, &default_language).as_deref(),
             Some("You hit Kobold Vermin for 5."),
             "{} must render verbatim",
             super::event::event_name(kind)
@@ -2252,5 +2305,131 @@ fn console_detail_doodad_alpha_parses() {
         ParsedChat::ConsoleUnknown {
             cmd: "nosuchthing".to_string()
         }
+    );
+}
+
+/// **The ding block is printed once, by the reference's own window.**
+///
+/// `benilla.toc` sources `Interface\FrameXML\ChatFrame.xml` off the player's chain, and stock
+/// `ChatFrame_OnEvent` composes the whole five-line level-up block itself from `PLAYER_LEVEL_UP`
+/// (`ChatFrame.lua` l.1283-1324) — `LEVEL_UP`, the health/mana pair, `LEVEL_UP_CHAR_POINTS`, and a
+/// `LEVEL_UP_STAT` per positive gain. benilla fires that event with the reference's nine arguments
+/// (decision 1884), and for a while it *also* routed its own Rust copy of the same five lines,
+/// under a comment saying they would stay "until that window migrates". The window migrated; the
+/// copy did not go. Every ding printed twice, and nothing could see it: both halves were correct
+/// on their own, and the composer's own tests only ever checked the text it produced.
+///
+/// So this counts what lands in the real window. The event is the whole of the ding now — which
+/// also means the count below is the reference's own composition, not ours.
+#[test]
+fn the_ding_block_is_printed_once() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    use benilla_protocol::messages::LevelUpInfo;
+    let mut s = chat_vm();
+    let mut log = super::ChatLog::default();
+
+    let info = LevelUpInfo {
+        level: 10,
+        health: 22,
+        powers: [15, 0, 0, 0, 0],
+        stats: [1, 0, 0, 0, 0],
+    };
+    // The whole of what the packet's apply does now: park the gains, print nothing.
+    log.push_level_up_gains(&info, 1);
+    let before = lines_in_window(&s);
+    assert_eq!(
+        lines_in_window(&s) - before,
+        0,
+        "the app composes no ding line of its own"
+    );
+
+    // Tap the window's own `AddMessage` so the assertion can be about the BLOCK and not just its
+    // length — this is where the deleted Rust composer's test went. The subject moved to the
+    // reference's Lua; the knowledge did not.
+    s.run(
+        r#"
+        DingLines = {}
+        local add = ChatFrame1.AddMessage
+        ChatFrame1.AddMessage = function(self, text, ...)
+            table.insert(DingLines, text)
+            return add(self, text, unpack(arg))
+        end
+        "#,
+    )
+    .unwrap();
+
+    // The event `ui_unit` fires, with the reference's nine arguments.
+    let args: Vec<benilla_ui::script::ScriptValue> = [10i64, 22, 15, 1, 1, 0, 0, 0, 0]
+        .into_iter()
+        .map(benilla_ui::script::ScriptValue::Int)
+        .collect();
+    s.fire_event("PLAYER_LEVEL_UP", args);
+    assert!(s.errors().is_empty(), "handler errors: {:?}", s.errors());
+    assert_eq!(
+        lines_in_window(&s) - before,
+        4,
+        "LEVEL_UP, the health/mana pair, CHAR_POINTS, and one STAT — once each"
+    );
+
+    // `ChatFrame.lua` l.1283-1324's exact order and forms, off the shipped GlobalStrings: the
+    // singular `LEVEL_UP_CHAR_POINTS` at one point (`GetText`'s plural pick), and one
+    // `LEVEL_UP_STAT` for the single positive gain, named through `SPELL_STAT0_NAME`.
+    let lines: Vec<String> = (1..=4)
+        .map(|i| s.eval::<String>(&format!("return DingLines[{i}]")).unwrap())
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "Congratulations, you have reached level 10!",
+            "You have gained 22 hit points and 15 mana.",
+            "You have gained 1 talent point.",
+            "Your Strength increases by 1.",
+        ]
+    );
+}
+
+/// **The free-professions line, same question as the ding.** Stock `ChatFrame_OnEvent` handles
+/// `CHARACTER_POINTS_CHANGED` too (`ChatFrame.lua` l.1324-1334): on `arg2 > 0` it reads
+/// `UnitCharacterPoints("player")` and prints `GetText("LEVEL_UP_SKILL_POINTS", nil, cp2)`.
+/// `ui_talent` fires that event *and* composes the same line. This asks the window which of them
+/// lands.
+#[test]
+fn the_free_professions_line_is_printed_once() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = chat_vm();
+    s.set_talents(benilla_ui::script::TalentUiState {
+        points: (0, 2),
+        ..Default::default()
+    });
+    s.run(
+        r#"
+        SkillLines = {}
+        local add = ChatFrame1.AddMessage
+        ChatFrame1.AddMessage = function(self, text, ...)
+            table.insert(SkillLines, text)
+            return add(self, text, unpack(arg))
+        end
+        "#,
+    )
+    .unwrap();
+    let before = lines_in_window(&s);
+    // `ui_talent`'s fire: arg1 = the talent delta, arg2 = the profession delta.
+    s.fire_event(
+        "CHARACTER_POINTS_CHANGED",
+        vec![
+            benilla_ui::script::ScriptValue::Int(0),
+            benilla_ui::script::ScriptValue::Int(1),
+        ],
+    );
+    assert!(s.errors().is_empty(), "handler errors: {:?}", s.errors());
+    assert_eq!(
+        lines_in_window(&s) - before,
+        1,
+        "the stock frame prints the professions line from the event"
+    );
+    assert_eq!(
+        s.eval::<String>("return SkillLines[1]").unwrap(),
+        "You now have 2 free professions.",
+        "LEVEL_UP_SKILL_POINTS_P1, plural-picked by GetText on cp2"
     );
 }

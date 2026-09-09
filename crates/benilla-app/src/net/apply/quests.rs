@@ -10,7 +10,6 @@ use benilla_protocol::messages::{
 use bevy::prelude::*;
 
 use crate::ui_action::UiError;
-use crate::ui_chat::ChatLog;
 use crate::ui_quest::QuestGiver;
 use crate::ui_quest_log::QuestLog;
 use crate::ui_quest_share::QuestShare;
@@ -163,26 +162,35 @@ pub(super) fn quest_objectives_complete(quest_id: u32, quest: &mut QuestGiver) {
     quest.bump_reask();
 }
 
-/// The quest failed (`SMSG_QUESTUPDATE_FAILED` / `_FAILEDTIMER` — `timed` picks which): the one
-/// quest-update with a CHAT surface (verified kind-0, key `ERR_QUEST_FAILED_S "%s failed."`) —
-/// named with the quest title when its template is cached. Follow-up: the verified handler also
-/// plays `igQuestFailed`; the apply loop has no sound seam here yet.
+/// The quest failed (`SMSG_QUESTUPDATE_FAILED` `0x196` / `_FAILEDTIMER` `0x197` — `timed` picks
+/// which): the one quest-update with a CHAT surface — msgId `0x8b` = `ERR_QUEST_FAILED_S`, catalog
+/// row 139, `kind 0`, named with the quest's title (the handler pushes `template+0x9c`).
+///
+/// **An uncached template is SILENT, and that is the handler's own gate rather than a fallback.**
+/// `0x5e5ad0`'s FAILED arm reads the questId, then *bails* if the template is not in the cache (or
+/// if the per-slot flag `byte[slot+7]&2` is set) — it never reaches `0x496720` (wow-re
+/// `object-layer/scratch/quest-update-ui-feedback-law.md` §"Per-opcode behaviour"). This used to
+/// compose `"Quest failed."` there, a sentence 1.12 has no string for and never says (decision
+/// 2045 named it as one of two remaining inventions).
+///
+/// The line rides `QuestGiver`'s by-key queue — the route `quest_log_full` and
+/// `quest_giver_invalid` already take — so `ui_quest::feed_quest` resolves it against the player's
+/// own `GlobalStrings.lua` and `show_messages` reads the row. **That also lands the sound the old
+/// path was dropping**: row 139 names the cue `igQuestFailed`, which the reference plays here and
+/// benilla had noted as an unbuilt follow-up.
 pub(super) fn quest_failed(
     quest_id: u32,
     timed: bool,
     quest_log: &mut QuestLog,
     net_commands: &NetCommands,
-    chat_log: &mut ChatLog,
     quest: &mut QuestGiver,
 ) {
     debug!("net: quest {quest_id} failed (timed: {timed})");
-    let line = quest_log
-        .template(quest_id, net_commands)
-        .map_or("Quest failed.".into(), |t| format!("{} failed.", t.title));
-    chat_log.push_event(crate::ui_chat::ChatEvent::text_only(
-        crate::ui_chat::ChatEventKind::System,
-        line,
-    ));
+    if let Some(t) = quest_log.template(quest_id, net_commands) {
+        quest.push_message(UiError::s("ERR_QUEST_FAILED_S", t.title.clone()));
+    } else {
+        debug!("net: quest {quest_id} has no cached template — the reference shows nothing");
+    }
     // A failure moves what the givers offer — the reference sweeps from these `SMSG_QUESTUPDATE_*`
     // handlers too (0654).
     quest.bump_reask();

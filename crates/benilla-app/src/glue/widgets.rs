@@ -15,10 +15,23 @@ use super::backdrop::{backdrop_border, tiled_bg_node};
 
 // ── The shared widget vocabulary ─────────────────────────────────────────────────────────────────
 
-/// A button's highlight overlay (shown on hover — and held while selected where the screen locks
-/// it, the ref's `LockHighlight`). Visibility is the owning screen's to drive.
+/// A button's highlight overlay: the reference's `HighlightTexture`, lit while the cursor is on
+/// the button — or held lit by [`LockHighlight`].
+///
+/// **Its visibility belongs to [`super::glue_hilights`] and to nothing else.** It used to be "the
+/// owning screen's to drive", which is how four screens ended up with four hand-rolled hover
+/// loops, two of them subtly different, and how the realm list ended up with none at all — no
+/// sheen on any of its buttons, because nobody remembered to write the fifth.
 #[derive(Component)]
 pub(crate) struct Hilight;
+/// **`Button:LockHighlight()`** — hold this button's [`Hilight`] lit whether or not the cursor is
+/// on it, which is how every glue list marks its selected row.
+///
+/// The reference's own verb, and the reason the sheen can have one owner: "lit" is
+/// `hovered || locked`, and a screen that knows which row is chosen says exactly that much and
+/// nothing about visibility.
+#[derive(Component, Default)]
+pub(crate) struct LockHighlight(pub(crate) bool);
 /// A button spawned with a plain-fill face because client art is missing — the only buttons whose
 /// `BackgroundColor` a hover pass may shade (every `Node` carries one since Bevy 0.15's required
 /// components, so presence alone can't distinguish the fallback).

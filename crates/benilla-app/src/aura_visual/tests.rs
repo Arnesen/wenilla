@@ -247,6 +247,7 @@ fn app_with_chains() -> App {
     app.add_message::<crate::creature_anim::SpellKitFx>();
     app.add_message::<crate::creature_anim::SpellKitSound>();
     app.add_message::<AuraProc>();
+    app.add_message::<crate::creature_anim::BaseAnimRecompute>();
     // The water-plane twin map the alpha author composes with (empty here — no water in a fixture).
     app.init_resource::<benilla_world::model_render::FarSideTwins>();
     app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(

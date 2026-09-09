@@ -37,20 +37,21 @@ fn item_line_law_and_red_requirements() {
         texts,
         vec![
             "Ravager",
-            "Binds when equipped",
-            "Two-Hand",
+            "[ITEM_BIND_ON_EQUIP]",
+            "[INVTYPE_2HWEAPON]",
+            // School 0 is physical: the reference names no school word for it either.
             "68 - 103 Damage",
-            "+ 2 - 4 Shadow Damage",
-            "(25.3 damage per second)",
+            "+ 2 - 4 [SCHOOL5] Damage",
+            "[DPS 25.3]",
             // Display order, NOT wire order: the fixture feeds (Stamina, Strength) but the
             // 0x808e88 table prints Strength first (STR,AGI,STA,INT,SPI,HP,MANA).
-            "+9 Strength",
-            "+12 Stamina",
-            "+10 Shadow Resistance",
-            "Durability 90 / 90",
-            "Classes: Warrior, Rogue",
-            "Requires Level 37",
-            "Chance on hit: Ravager",
+            "[MOD_STRENGTH +9]",
+            "[MOD_STAMINA +12]",
+            "[RESIST_SINGLE +10 [SCHOOL5]]",
+            "[DURABILITY 90/90]",
+            "[CLASSES Warrior, Rogue]",
+            "[MIN_LEVEL 37]",
+            "[ONPROC] Ravager",
             "\"A wicked axe of the Scarlet Crusade.\"",
         ],
         "the verified line order (0276)"
@@ -109,13 +110,9 @@ fn red_lines_track_player_state() {
             .unwrap_or_else(|| panic!("no line starting {needle}"))
             .1
     };
+    assert_eq!(find("[MIN_LEVEL"), [1.0, 1.0, 1.0, 1.0], "60 ≥ 37 → white");
     assert_eq!(
-        find("Requires Level"),
-        [1.0, 1.0, 1.0, 1.0],
-        "60 ≥ 37 → white"
-    );
-    assert_eq!(
-        find("Classes:"),
+        find("[CLASSES"),
         [1.0, 32.0 / 255.0, 32.0 / 255.0, 1.0],
         "mage → red"
     );
@@ -170,26 +167,26 @@ fn verified_families_signable_locked_resists_known() {
         texts,
         vec![
             "Sealed Charter",
-            "<Right Click for Details>",
-            "Unique",
-            "This Item Begins a Quest",
-            "Locked",
-            "+5 to All Resistances",
-            "Already known",
+            "[ITEM_SIGNABLE]",
+            "[ITEM_UNIQUE]",
+            "[ITEM_STARTS_QUEST]",
+            "[LOCKED]",
+            "[RESIST_ALL +5]",
+            "[ITEM_SPELL_KNOWN]",
             "\"Sign here.\"",
         ],
         "the verified gated families in the verified order"
     );
     let color = |needle: &str| lines.iter().find(|(t, _)| t == needle).unwrap().1;
     let red = [1.0, 32.0 / 255.0, 32.0 / 255.0, 1.0];
-    assert_eq!(color("Locked"), red, "LOCKED is red");
+    assert_eq!(color("[LOCKED]"), red, "LOCKED is red");
     assert_eq!(
-        color("Already known"),
+        color("[ITEM_SPELL_KNOWN]"),
         red,
         "SPELL_KNOWN is unconditional red"
     );
     assert_eq!(
-        color("<Right Click for Details>"),
+        color("[ITEM_SIGNABLE]"),
         [0.0, 1.0, 0.0, 1.0],
         "SIGNABLE is green"
     );
@@ -263,7 +260,11 @@ fn proficiency_and_reputation_reds() {
             .1
     };
     let lines = lines_of(&mut s);
-    assert_eq!(color(&lines, "Two-Hand"), white, "proficient slot is white");
+    assert_eq!(
+        color(&lines, "[INVTYPE_2HWEAPON]"),
+        white,
+        "proficient slot is white"
+    );
     assert_eq!(
         right_color(&mut s, "Axe"),
         white,
@@ -284,7 +285,7 @@ fn proficiency_and_reputation_reds() {
         .unwrap();
     let lines = lines_of(&mut s);
     assert_eq!(
-        color(&lines, "Two-Hand"),
+        color(&lines, "[INVTYPE_2HWEAPON]"),
         white,
         "slot survives a hard miss"
     );
@@ -302,7 +303,11 @@ fn proficiency_and_reputation_reds() {
     s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:SetItemById(871)"#)
         .unwrap();
     let lines = lines_of(&mut s);
-    assert_eq!(color(&lines, "Two-Hand"), red, "alt-usable reds the slot");
+    assert_eq!(
+        color(&lines, "[INVTYPE_2HWEAPON]"),
+        red,
+        "alt-usable reds the slot"
+    );
     assert_eq!(
         right_color(&mut s, "Axe"),
         white,
@@ -326,8 +331,10 @@ fn proficiency_and_reputation_reds() {
     s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:SetItemById(872)"#)
         .unwrap();
     let lines = lines_of(&mut s);
+    // `INVTYPE_WEAPONOFFHAND`, NOT `INVTYPE_SHIELD` — one enUS sentence, two keys, and only the
+    // weapon one belongs on an InventoryType 22.
     assert_eq!(
-        color(&lines, "Off Hand"),
+        color(&lines, "[INVTYPE_WEAPONOFFHAND]"),
         red,
         "no Dual Wield reds the slot"
     );
@@ -341,7 +348,11 @@ fn proficiency_and_reputation_reds() {
     s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:SetItemById(872)"#)
         .unwrap();
     let lines = lines_of(&mut s);
-    assert_eq!(color(&lines, "Off Hand"), white, "Dual Wield clears it");
+    assert_eq!(
+        color(&lines, "[INVTYPE_WEAPONOFFHAND]"),
+        white,
+        "Dual Wield clears it"
+    );
     // An item class with NO proficiency entry never reds (the map only ever holds classes
     // the server sent masks for).
     s.set_item_template(
@@ -358,7 +369,7 @@ fn proficiency_and_reputation_reds() {
         .unwrap();
     let lines = lines_of(&mut s);
     assert_eq!(
-        color(&lines, "Chest"),
+        color(&lines, "[INVTYPE_CHEST]"),
         white,
         "a class with no mask entry stays white"
     );
@@ -377,7 +388,7 @@ fn proficiency_and_reputation_reds() {
     s.run(
         r#"
         TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:SetItemById(889)
-        assert(TTTextLeft2:GetText() == "Finger")
+        assert(TTTextLeft2:GetText() == "[INVTYPE_FINGER]")
         assert(TTTextRight2:GetText() == nil or TTTextRight2:GetText() == "",
                "a ring never prints its Miscellaneous type")
     "#,
@@ -413,7 +424,7 @@ fn required_level_one_is_hidden() {
         assert(tt:NumLines() == 1, "req 1 hides like req 0, got " .. tt:NumLines())
         tt:SetOwner(a, "ANCHOR_RIGHT"); tt:SetItemById(13)
         assert(tt:NumLines() == 2, "req 2 prints, got " .. tt:NumLines())
-        assert(TTTextLeft2:GetText() == "Requires Level 2")
+        assert(TTTextLeft2:GetText() == "[MIN_LEVEL 2]")
     "#,
     )
     .unwrap();
@@ -516,11 +527,11 @@ fn charter_lines_sit_between_the_name_and_the_signable_line() {
         texts,
         vec![
             "Guild Charter",
-            "Guild Name: BTC",
-            "Guild Master: Twowarrior",
-            "<Right Click for Details>",
-            "Soulbound",
-            "Unique",
+            "[GUILD_CHARTER_TITLE BTC]",
+            "[GUILD_CHARTER_CREATOR Twowarrior]",
+            "[ITEM_SIGNABLE]",
+            "[ITEM_SOULBOUND]",
+            "[ITEM_UNIQUE]",
         ],
         "the two guild lines sit ABOVE the green line, not below it"
     );
@@ -542,10 +553,10 @@ fn charter_lines_sit_between_the_name_and_the_signable_line() {
         hover(&mut s, 2),
         vec![
             "Guild Charter",
-            "Guild Name: BTC",
-            "<Right Click for Details>",
-            "Soulbound",
-            "Unique"
+            "[GUILD_CHARTER_TITLE BTC]",
+            "[ITEM_SIGNABLE]",
+            "[ITEM_SOULBOUND]",
+            "[ITEM_UNIQUE]"
         ],
         "an unresolved owner withholds ITS line only — the repaint fills it"
     );
@@ -553,9 +564,9 @@ fn charter_lines_sit_between_the_name_and_the_signable_line() {
         hover(&mut s, 3),
         vec![
             "Guild Charter",
-            "<Right Click for Details>",
-            "Soulbound",
-            "Unique"
+            "[ITEM_SIGNABLE]",
+            "[ITEM_SOULBOUND]",
+            "[ITEM_UNIQUE]"
         ],
         "no record yet: exactly the plate we shipped before, not a blank one"
     );
@@ -563,11 +574,11 @@ fn charter_lines_sit_between_the_name_and_the_signable_line() {
         hover(&mut s, 4),
         vec![
             "Guild Charter",
-            "Petition: Something",
-            "Created by Someone",
-            "<Right Click for Details>",
-            "Soulbound",
-            "Unique"
+            "[PETITION_TITLE Something]",
+            "[PETITION_CREATOR Someone]",
+            "[ITEM_SIGNABLE]",
+            "[ITEM_SOULBOUND]",
+            "[ITEM_UNIQUE]"
         ],
         "the record's charter bit picks the key family"
     );
@@ -650,7 +661,7 @@ fn instance_tail_creator_and_readable() {
     let texts: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
     assert_eq!(
         texts,
-        vec!["Plain Letter", "Written by One", "<Right Click to Read>"],
+        vec!["Plain Letter", "[WRITTEN_BY One]", "[ITEM_READABLE]"],
         "the letter: writer line + instance-gated READABLE"
     );
     assert_eq!(lines[1].1, [1.0, 1.0, 1.0, 1.0], "WRITTEN_BY is white");
@@ -659,14 +670,18 @@ fn instance_tail_creator_and_readable() {
     s.run(r#"TT:SetOwner(getglobal("SlotL"), "ANCHOR_RIGHT"); TT:SetBagItem(0, 2)"#)
         .unwrap();
     let texts: Vec<String> = lines_of(&mut s).into_iter().map(|(t, _)| t).collect();
-    assert_eq!(texts, vec!["Plain Letter", "<Right Click to Read>"]);
+    assert_eq!(texts, vec!["Plain Letter", "[ITEM_READABLE]"]);
     // Crafted + locked: the green-escaped Made-by; no open line while LockID gates it.
     s.run(r#"TT:SetOwner(getglobal("SlotL"), "ANCHOR_RIGHT"); TT:SetBagItem(0, 3)"#)
         .unwrap();
     let texts: Vec<String> = lines_of(&mut s).into_iter().map(|(t, _)| t).collect();
     assert_eq!(
         texts,
-        vec!["Heavy Chest", "Locked", "|cff00ff00<Made by Geoffrey>|r"],
+        vec![
+            "Heavy Chest",
+            "[LOCKED]",
+            "|cff00ff00[CREATED_BY Geoffrey]|r"
+        ],
         "CREATED_BY carries the string's own green escape; locked chest hides OPENABLE"
     );
     // The instance UNLOCKED bit retires the LOCKED line AND satisfies the openable lock sub-gate.
@@ -674,14 +689,14 @@ fn instance_tail_creator_and_readable() {
         .unwrap();
     let lines = lines_of(&mut s);
     let texts: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
-    assert_eq!(texts, vec!["Heavy Chest", "<Right Click to Open>"]);
+    assert_eq!(texts, vec!["Heavy Chest", "[ITEM_OPENABLE]"]);
     assert_eq!(lines[1].1, [0.0, 1.0, 0.0, 1.0], "OPENABLE is green");
     // The director's case: a lockless LOOTABLE template (a clam) is openable outright — name +
     // the green line, nothing between them.
     s.run(r#"TT:SetOwner(getglobal("SlotL"), "ANCHOR_RIGHT"); TT:SetBagItem(0, 5)"#)
         .unwrap();
     let texts: Vec<String> = lines_of(&mut s).into_iter().map(|(t, _)| t).collect();
-    assert_eq!(texts, vec!["Small Barnacled Clam", "<Right Click to Open>"]);
+    assert_eq!(texts, vec!["Small Barnacled Clam", "[ITEM_OPENABLE]"]);
     // The same clam mid-cooldown takes SetBagItem's OTHER leg (p6=1) — the openable tree is
     // skipped wholesale, so the green line is gone (the reference prints ITEM_COOLDOWN_TIME in
     // its place; unfed here). `hasCooldown`, the binding's own return, is the same boolean.
@@ -765,23 +780,35 @@ fn a_runtime_bound_instance_overrides_the_bind_line_to_soulbound() {
     let bind_line = |s: &mut UiScript| {
         lines_of(s)
             .into_iter()
-            .find(|(t, _)| t == "Soulbound" || t.starts_with("Binds when") || t == "Quest Item")
+            .find(|(t, _)| {
+                matches!(
+                    t.as_str(),
+                    "[ITEM_SOULBOUND]"
+                        | "[ITEM_BIND_ON_PICKUP]"
+                        | "[ITEM_BIND_ON_EQUIP]"
+                        | "[ITEM_BIND_ON_USE]"
+                        | "[ITEM_BIND_QUEST]"
+                )
+            })
             .unwrap_or_else(|| panic!("no bind line at all"))
     };
     let (text, color) = bind_line(&mut s);
-    assert_eq!(text, "Soulbound", "a runtime-bound instance overrides §6");
+    assert_eq!(
+        text, "[ITEM_SOULBOUND]",
+        "a runtime-bound instance overrides §6"
+    );
     assert_eq!(color, [1.0, 1.0, 1.0, 1.0], "§6 is white");
 
     // Control 1: the SAME item, instance not bound — the template's bonding stands.
     s.run(r#"TT:SetBagItem(0, 2)"#).unwrap();
-    assert_eq!(bind_line(&mut s).0, "Binds when equipped");
+    assert_eq!(bind_line(&mut s).0, "[ITEM_BIND_ON_EQUIP]");
 
     // Control 2: a TEMPLATE hover carries no instance at all, so nothing can override.
     s.run(r#"TT:SetItemById(871)"#).unwrap();
-    assert_eq!(bind_line(&mut s).0, "Binds when equipped");
+    assert_eq!(bind_line(&mut s).0, "[ITEM_BIND_ON_EQUIP]");
 
     // Control 3: the override's other arm is ITEM_BIND_QUEST — the same text 4|5 already print.
     s.run(r#"TT:SetBagItem(0, 3)"#).unwrap();
-    assert_eq!(bind_line(&mut s).0, "Quest Item");
+    assert_eq!(bind_line(&mut s).0, "[ITEM_BIND_QUEST]");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

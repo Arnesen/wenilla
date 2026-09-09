@@ -161,20 +161,26 @@ pub(super) fn channel_list(channel: String, members: &[(u64, u8)], chat_log: &mu
     chat_log.push_event(ev);
 }
 
-/// A whisper target wasn't online — ERR_CHAT_PLAYER_NOT_FOUND_S (GlobalStrings:1534).
-pub(super) fn chat_player_not_found(name: &str, chat_log: &mut ChatLog) {
-    chat_log.push_event(ChatEvent::text_only(
-        ChatEventKind::System,
-        format!("No player named '{name}' is currently playing."),
+/// A whisper target wasn't online — `ERR_CHAT_PLAYER_NOT_FOUND_S`, catalog row 241, whose `%s`
+/// the server's own name fills.
+///
+/// The KEY travels rather than a composed sentence (decision 2045): this is the net-apply pass and
+/// there is no VM here, so `ui_action`'s drain is what resolves it against the player's own
+/// `GlobalStrings.lua` — and the row, not this call site, is what says the line goes to chat
+/// (`kind 0`) and makes no sound.
+pub(super) fn chat_player_not_found(name: &str, errors: &mut crate::ui_action::UiErrorKeys) {
+    errors.0.push(crate::ui_action::UiError::s(
+        "ERR_CHAT_PLAYER_NOT_FOUND_S",
+        name,
     ));
 }
 
-/// A cross-faction whisper was refused — ERR_CHAT_WRONG_FACTION (GlobalStrings:1537).
-pub(super) fn chat_wrong_faction(chat_log: &mut ChatLog) {
-    chat_log.push_event(ChatEvent::text_only(
-        ChatEventKind::System,
-        "You can only whisper to members of your alliance.".to_string(),
-    ));
+/// A cross-faction whisper was refused — `ERR_CHAT_WRONG_FACTION`, catalog row 240. Same route and
+/// the same reason as [`chat_player_not_found`], with no argument to fill.
+pub(super) fn chat_wrong_faction(errors: &mut crate::ui_action::UiErrorKeys) {
+    errors
+        .0
+        .push(crate::ui_action::UiError::key("ERR_CHAT_WRONG_FACTION"));
 }
 
 /// A server notice (`SMSG_NOTIFICATION`) — the **red UIErrorsFrame line**, never a chat line.

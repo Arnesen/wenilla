@@ -357,6 +357,19 @@ fn spawn_slot(
             });
         }
     }
+    // The **weapon swing trail's** object (wow-re `charproc8-weapon-trail.md` §9, decision 2076)
+    // — the reference's `WTOBJECT`, built per weapon HAND by `0x608d60` on the model it finds at
+    // that hand's attachment and freed with it. This is the first-class consumer decision 0531
+    // named and deferred: the `$WTB`/`$WTT` pair is a *trail* marker, and the bowstring above is
+    // the special case, not the rule. `0x6c67f0`'s `0x7130e0` presence gate is exactly the
+    // `string_anchors` `Option` — a weapon authoring only one marker draws nothing at all.
+    if slot_idx <= 1 {
+        if let Some([top, bottom]) = dm.string_anchors {
+            commands
+                .entity(root)
+                .insert(crate::weapon_trail::WeaponTrail::new(top.1, bottom.1));
+        }
+    }
     // The fishing line's near anchor (wow-re `fishing-line.md`, decision 1099): a MAINHAND prop
     // whose model authors `$CCH` is the pole (the reference gates on ItemCache {class 2, subclass
     // 20} + the marker's presence; exactly one weapon model in the chain authors the marker, so

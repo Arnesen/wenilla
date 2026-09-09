@@ -390,7 +390,17 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// "no part is fading" as opaque, which is false of a *pending* unit, and put a full-strength
 /// shadow on the ground under an invisible creature for the length of a load. A caller asking
 /// one question cannot make that mistake; a caller handed the inputs can.
-const CEILING: usize = 178;
+/// And 178 → 179: `interior::NodeAmbient`, a PUBLISH — one light node's committed **ambient word
+/// alone**, the ramped chase toward `cap96(MOCV)`. `ParticleLight` beside it is the same words
+/// folded into the whole fixed-function term (`ambient + 0.9·diffuse + Σ lamps`), which is what a
+/// lit particle quad receives; this is the read side for a draw whose vertex format carries **no
+/// normal**, so the normal array is disabled outright and its term is the ambient product and
+/// nothing else (the weapon swing trail, decisions 2079/2086). Published rather than reconstructed
+/// for the reason the entry above gives: the caller cannot rebuild it from `ParticleLight` — the
+/// diffuse lobe and the MOLT points are already summed in and cannot be subtracted back out — and
+/// a caller that reached for the *scene* ambient instead, which is what this replaces, tinted
+/// every indoor trail with the sky.
+const CEILING: usize = 179;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

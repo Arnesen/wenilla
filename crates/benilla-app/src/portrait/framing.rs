@@ -178,6 +178,59 @@ pub(super) fn glue_zoom_floor(fov: f32) -> f32 {
     (diag_to_vert(fov, REFERENCE_PANEL) * 0.5).tan()
 }
 
+/// **Where the pillarbox's box lands on the window**, in *physical* pixels: `(x, width)` of the
+/// centred box, or `None` when the framing fills the window
+/// ([`GlueFraming::viewport_aspect`] is `None`).
+///
+/// One formula, two readers, and that is the point of it being a function. The booth camera's
+/// `Viewport` ([`super::glue_booth::pillarbox_glue_scene`]) renders the scene into this rect; the
+/// glue screens' chrome is laid out *inside the same rect* ([`crate::glue::GlueCanvas`], decision
+/// 2091). They have to agree to the pixel — a rounding difference between two copies of this
+/// arithmetic is the version line or the Quit button sitting a pixel out over the bar.
+pub(crate) fn glue_box_physical(
+    full_w: u32,
+    full_h: u32,
+    viewport_aspect: Option<f32>,
+) -> Option<(u32, u32)> {
+    let aspect = viewport_aspect?;
+    let (full_w, full_h) = (full_w.max(1), full_h.max(1));
+    // A NaN/negative aspect saturates to 0 through `as u32` and clamps to 1: degenerate, finite,
+    // and never a panic — the same posture [`glue_scene_framing`] takes on a mid-resize window.
+    let box_w = ((full_h as f32 * aspect).round() as u32).clamp(1, full_w);
+    Some(((full_w - box_w) / 2, box_w))
+}
+
+/// The pillarbox's two **bars** in *logical* px — how far the glue chrome's canvas is inset from
+/// the left and right of the window (decision 2091). `(0.0, 0.0)` when the scene fills the window,
+/// which is every window at or below the aspect its scene's art can fill.
+///
+/// **Two numbers, not one halved.** A box whose leftover width is odd is one pixel off centre —
+/// the login gate at 3440×1440 is `330 | 2779 | 331`, which is what the report measured — and the
+/// canvas has to be the box, not a symmetric approximation of it.
+///
+/// Logical, because Bevy UI's `Val::Px` is. The box itself is decided in physical pixels (it is a
+/// camera viewport), so the bars are measured there and divided by the window's scale factor;
+/// insetting by a logical bar computed from the logical width would round a second time and could
+/// disagree with the camera by a pixel.
+pub(crate) fn glue_canvas_bars(
+    window: Option<&Window>,
+    viewport_aspect: Option<f32>,
+) -> (f32, f32) {
+    let Some(w) = window else {
+        return (0.0, 0.0);
+    };
+    let full_w = w.physical_width().max(1);
+    let Some((x, box_w)) = glue_box_physical(full_w, w.physical_height(), viewport_aspect) else {
+        return (0.0, 0.0);
+    };
+    let sf = if w.scale_factor() > 0.0 {
+        w.scale_factor()
+    } else {
+        1.0
+    };
+    (x as f32 / sf, full_w.saturating_sub(x + box_w) as f32 / sf)
+}
+
 /// The real client's portrait/model **projection**: gxumath `0x5c3cc0`, a *diagonal-FOV*
 /// perspective — half-angle `θ = (fov/2)/√(aspect²+1)`, `m11 = 1/tan θ`, `m00 = m11/aspect`.
 ///
@@ -907,6 +960,93 @@ mod tests {
         assert!(glue_scene_framing(1.0, 1.6, narrow_art)
             .viewport_aspect
             .is_none());
+    }
+
+    /// **B377 / decision 2091 — the chrome's canvas IS the camera's box.**
+    ///
+    /// At the reporter's own 3440×1440 the login gate boxes at 1.93:1 (1619 §3): `330 | 2779 |
+    /// 331` physical pixels, the bars he measured off the screenshot (332/331). The canvas insets
+    /// by exactly those two numbers — not by a symmetric half, which would hang a pixel of chrome
+    /// over the right bar — and it converts to Bevy UI's *logical* px on the way, which is the
+    /// half that a 2× display makes visible.
+    #[test]
+    fn the_chrome_canvas_is_the_cameras_own_box() {
+        use bevy::window::WindowResolution;
+
+        let (x, box_w) = glue_box_physical(3440, 1440, Some(1.93)).expect("21:9 boxes the gate");
+        assert_eq!((x, box_w), (330, 2779));
+        assert_eq!(
+            3440 - (x + box_w),
+            331,
+            "an odd leftover leaves the box one pixel off centre — the canvas follows it"
+        );
+
+        let win = |sf: Option<f32>| Window {
+            resolution: match sf {
+                Some(sf) => WindowResolution::new(3440, 1440).with_scale_factor_override(sf),
+                None => WindowResolution::new(3440, 1440),
+            },
+            ..default()
+        };
+        assert_eq!(
+            glue_canvas_bars(Some(&win(None)), Some(1.93)),
+            (330.0, 331.0),
+            "at scale 1 the logical bars are the physical ones"
+        );
+        assert_eq!(
+            glue_canvas_bars(Some(&win(Some(2.0))), Some(1.93)),
+            (165.0, 165.5),
+            "on a 2x display Val::Px is logical: half the physical bar"
+        );
+        // Unboxed, and no window at all: no inset — the chrome is the window's, as it was at 4:3
+        // and 16:9 before any of this.
+        assert_eq!(glue_canvas_bars(Some(&win(None)), None), (0.0, 0.0));
+        assert_eq!(glue_canvas_bars(None, Some(1.93)), (0.0, 0.0));
+        // A degenerate aspect boxes to a 1 px scene rather than panicking or wrapping, the same
+        // posture `glue_scene_framing` takes on a mid-resize window.
+        assert_eq!(
+            glue_box_physical(3440, 1440, Some(f32::NAN)),
+            Some((1719, 1))
+        );
+        assert_eq!(glue_box_physical(0, 0, Some(1.93)), Some((0, 1)));
+    }
+
+    /// The two readers of the box agree by construction — [`pillarbox_glue_scene`]'s viewport and
+    /// the chrome canvas both come off [`glue_box_physical`], so the frame the camera renders and
+    /// the frame the chrome lays out in are the same rect at every window the law boxes.
+    #[test]
+    fn the_box_the_camera_renders_is_the_box_the_chrome_lays_out_in() {
+        let t0 = (diag_to_vert(1.0, GLUE_AUTHORED_ASPECT) * 0.5).tan();
+        // The login gate's shape: art that runs out of width at 1.54·t0 (MainMenu, 1619 §2).
+        let art = Some(ArtExtent {
+            half_w: t0 * 1.54,
+            half_h: 10.0,
+        });
+        for (w, h) in [(3440, 1440), (2560, 1080), (5120, 1440), (3439, 1440)] {
+            let f = glue_scene_framing(1.0, w as f32 / h as f32, art);
+            let boxed = f
+                .viewport_aspect
+                .expect("every 21:9-and-wider window is boxed");
+            let (x, box_w) = glue_box_physical(w, h, Some(boxed)).expect("boxed");
+            let (left, right) = glue_canvas_bars(
+                Some(&Window {
+                    resolution: bevy::window::WindowResolution::new(w, h),
+                    ..default()
+                }),
+                Some(boxed),
+            );
+            assert_eq!((left as u32, right as u32), (x, w - x - box_w), "{w}x{h}");
+            assert!(
+                left + right > 0.0 && (box_w as f32) < w as f32,
+                "{w}x{h}: the bars are real"
+            );
+            // The scene the camera draws and the canvas the chrome draws on are one rect.
+            assert_eq!(
+                x + box_w + (right as u32),
+                w,
+                "{w}x{h}: no pixel unaccounted"
+            );
+        }
     }
 
     /// The authored box is never given up: art that does not even reach it (a `0.0` extent, or

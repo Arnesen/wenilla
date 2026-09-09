@@ -26,8 +26,8 @@ use benilla_assets::m2_url;
 use benilla_assets::materials::WowModelMaterial;
 
 use super::framing::{
-    attachment_point, diag_to_vert, glue_scene_framing, ArtExtent, GLUE_AUTHORED_ASPECT,
-    PORTRAIT_ASPECT,
+    attachment_point, diag_to_vert, glue_box_physical, glue_scene_framing, ArtExtent,
+    GLUE_AUTHORED_ASPECT, PORTRAIT_ASPECT,
 };
 use super::{
     aim, body_frame, new_target_image, spawn_booth_effects, spawn_booth_model, Booth,
@@ -257,6 +257,15 @@ pub(crate) struct CreateScene {
     /// **The stage the selection has asked for but has not been given yet** — see
     /// [`PendingSwap`]. `None` = the standing scene IS the requested one.
     pending: Option<PendingSwap>,
+}
+
+impl CreateScene {
+    /// The framing law's pillarbox for the window it last ran on: `Some(aspect)` while the scene
+    /// is boxed, `None` while it fills the window (decision 1619). Read by the glue screens'
+    /// chrome canvas, which lays out inside that box rather than over its bars (decision 2091).
+    pub(crate) fn viewport_aspect(&self) -> Option<f32> {
+        self.viewport_aspect
+    }
 }
 
 /// A requested stage swap, waiting for its half of the pair.
@@ -1229,15 +1238,18 @@ pub(super) fn pillarbox_glue_scene(
     let Ok(w) = window.single() else {
         return;
     };
-    let (full_w, full_h) = (w.physical_width().max(1), w.physical_height().max(1));
-    let viewport = scene.viewport_aspect.map(|aspect| {
-        let box_w = ((full_h as f32 * aspect).round() as u32).clamp(1, full_w);
-        bevy::camera::Viewport {
-            physical_position: UVec2::new((full_w - box_w) / 2, 0),
-            physical_size: UVec2::new(box_w, full_h),
-            ..default()
-        }
-    });
+    let full_h = w.physical_height().max(1);
+    // The SAME arithmetic the chrome's canvas insets by ([`glue_box_physical`], decision 2091) —
+    // one function, so the frame the camera renders and the frame the chrome lays out in cannot
+    // round apart.
+    let viewport =
+        glue_box_physical(w.physical_width(), full_h, scene.viewport_aspect).map(|(x, box_w)| {
+            bevy::camera::Viewport {
+                physical_position: UVec2::new(x, 0),
+                physical_size: UVec2::new(box_w, full_h),
+                ..default()
+            }
+        });
     for (booth, mut cam) in cams.iter_mut() {
         if booth.0 != GLUE_SLOT {
             continue;

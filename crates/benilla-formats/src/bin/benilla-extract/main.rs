@@ -19,6 +19,7 @@ mod chaincensus;
 mod charatlas;
 mod charprocs;
 mod glueextent;
+mod kitanim;
 mod m2dump;
 mod scan;
 mod shakecensus;
@@ -156,6 +157,16 @@ enum Command {
     /// from a live spell, and every state-stage (aura-lifetime) proc in full. The scope instrument
     /// for the aura-state CharProc system.
     Charprocs,
+    /// Census the `SpellVisualKit` **animation** column (field 2) — the half of a kit that plays a
+    /// clip on the unit's own BODY, as opposed to its attach-point effect models, its CharProcs or
+    /// its camera shake. Which anim ids the shipped table asks for, which lifecycle stage reaches
+    /// each (the stage picks the consumer: a `cast`/`impact` anim is a one-shot on the
+    /// caster/victim, a `state` anim belongs to an aura's whole life), then the state set in full
+    /// and the impact set ranked. The scope instrument for "the spell landed on me and my
+    /// character did nothing" — an anim that is never asked for leaves no trace to grep, unlike an
+    /// effect model that fails to spawn. `ANIM-ONLY` marks the state kits whose whole visual is the
+    /// anim, the class a "does this kit do anything?" test drops (the B114 shape one level over).
+    Kitanim,
     /// Dump an M2's collision hull as the mover collides with it: vertex/triangle counts, the
     /// model-space AABB (WoW axes, Z up), and its extents — the "what does walking into this
     /// actually hit" instrument (the step-up climb-vs-slide asset question, decision 0195; a
@@ -1005,6 +1016,7 @@ fn main() -> Result<()> {
         Command::Shakecensus => shakecensus::shakecensus(&mut chain)?,
         Command::Thudcensus => thudcensus::thudcensus(&mut chain)?,
         Command::Charprocs => charprocs::run(&mut chain)?,
+        Command::Kitanim => kitanim::run(&mut chain)?,
     }
 
     Ok(())

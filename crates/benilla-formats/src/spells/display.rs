@@ -197,6 +197,12 @@ pub struct SpellDisplay {
     /// enum the cast-arm's switch adjusts the flag_word by (and the usable walk's
     /// CanAttack/CanAssist fork inside the TargetAuraState leg keys on: 6 = enemy, 21 = friend).
     pub implicit_target_a1: u32,
+    /// `EffectImplicitTargetA[3]` (columns 82–84, [`COL_IMPLICIT_TARGET_A1`]) and
+    /// `EffectImplicitTargetB[3]` (columns 85–87, [`COL_IMPLICIT_TARGET_B1`]) — every effect's
+    /// implicit-target pair, the input of [`Self::is_harmful`] (the client's hostility classifier
+    /// walks all three slots, A then B). Slot 0 of A is also [`Self::implicit_target_a1`].
+    pub effect_implicit_target_a: [u32; 3],
+    pub effect_implicit_target_b: [u32; 3],
     /// `Stances` (column 11) — forms the spell is *explicitly* castable in, `1 << (form-1)` each
     /// (the form gate [`Self::usable_in_form`]). 0 = no form requirement of its own.
     pub stances: u32,
@@ -383,6 +389,8 @@ impl Default for SpellDisplay {
             effect_real_points_per_level: [0.0; 3],
             effect_amplitude: [0; 3],
             effect_apply_aura: [0; 3],
+            effect_implicit_target_a: [0; 3],
+            effect_implicit_target_b: [0; 3],
             effect_mechanic: [0; 3],
             effect_radius_index: [0; 3],
             effect_chain_targets: [0; 3],
@@ -457,6 +465,31 @@ impl SpellDisplay {
     /// Byte-verified in wow-re (`SpellRec+0x20&0x20 || +0x18&0x2` — the test every ranged trigger
     /// runs: the `SMSG_SPELL_START` stance/ammo sites `0x6e78b6`/`0x6e78f3` and the local cast-send
     /// site `0x6e5930`).
+    /// The client's spell-hostility classifier `Spell_C::GetSpellVisualState` (`0x6ea280`),
+    /// reduced to its `== 2` answer — **"this spell targets enemies"** — which is the gate on the
+    /// victim's **wound flinch after a spell impact** (the instant-hit loop `0x6e8bf0` @
+    /// `0x6e8c7b`, and the reflect impact `0x6e8cb0` @ `0x6e8cf1`; decision 2058). Byte-read
+    /// 2026-09-07 off `WoW.exe`: `Targets & 0x100` (the ally flag) ⇒ 1, never harmful; else
+    /// `Targets & 0x80` (the enemy flag) ⇒ 2; else, for each of the three effects, A then B, an
+    /// implicit target in the byte tables `0x6ea338` / `0x6ea378` (identical) marked `0` ⇒ 2 —
+    /// the set is `{2, 6, 15, 16, 24, 28, 53, 54}`, exactly the ids the modern enum names
+    /// `*_ENEMY` (nearby enemy, target enemy, the two enemy areas, the two enemy cones, the enemy
+    /// dest, the channeled enemy area). The function's remaining passes decide 1 (helpful) vs 0
+    /// and can never yield 2, so this predicate is the whole `== 2` truth.
+    pub fn is_harmful(&self) -> bool {
+        const ENEMY_TARGETS: [u32; 8] = [2, 6, 15, 16, 24, 28, 53, 54];
+        if self.targets & 0x100 != 0 {
+            return false;
+        }
+        if self.targets & 0x80 != 0 {
+            return true;
+        }
+        (0..3).any(|i| {
+            ENEMY_TARGETS.contains(&self.effect_implicit_target_a[i])
+                || ENEMY_TARGETS.contains(&self.effect_implicit_target_b[i])
+        })
+    }
+
     pub fn ranged_attack(&self) -> bool {
         self.attributes_ex2 & ATTR_EX2_AUTO_REPEAT != 0 || self.attributes & ATTR_RANGED != 0
     }
@@ -829,5 +862,35 @@ impl FormRefusal {
             FormRefusal::NotShapeshift => 0x3d,
             FormRefusal::OnlyShapeshift => 0x56,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `0x6ea280 == 2` predicate on synthetic rows: the two `Targets` flags outrank the
+    /// implicit-target walk (ally wins over everything, enemy wins next), and the walk reads all
+    /// three effects' A and B slots against the byte tables' enemy set.
+    #[test]
+    fn is_harmful_follows_the_client_classifier() {
+        let mut d = SpellDisplay::default();
+        assert!(!d.is_harmful(), "an empty row targets nobody");
+        d.targets = 0x80;
+        assert!(d.is_harmful(), "the enemy target flag alone is harmful");
+        d.targets = 0x80 | 0x100;
+        assert!(!d.is_harmful(), "the ally flag wins over the enemy flag");
+        d.targets = 0;
+        d.effect_implicit_target_a = [6, 0, 0];
+        assert!(d.is_harmful(), "TARGET_UNIT_TARGET_ENEMY in slot 0");
+        d.effect_implicit_target_a = [21, 0, 0];
+        assert!(!d.is_harmful(), "a single-friend target is not harmful");
+        d.effect_implicit_target_b = [0, 16, 0];
+        assert!(d.is_harmful(), "an enemy area in a B slot counts too");
+        d.effect_implicit_target_b = [0, 0, 0];
+        d.effect_implicit_target_a = [22, 0, 54];
+        assert!(d.is_harmful(), "the enemy cone in the third effect");
+        d.targets = 0x100;
+        assert!(!d.is_harmful(), "the ally flag short-circuits the walk");
     }
 }

@@ -616,8 +616,10 @@ fn push_water_foam(
                 // mesh, or bevy's sorted-phase batcher claims the item and rewrites its
                 // `batch_range` (gpu_preprocessing.rs keys purely on `item.main_entity()`) —
                 // the Goldshire-teleport crash. The chunk still keys the record grouping above.
+                no_depth_test: false,
                 main_entity: Entity::PLACEHOLDER,
                 light: None,
+                clip: None,
             },
         );
     }

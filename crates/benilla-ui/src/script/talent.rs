@@ -297,10 +297,22 @@ pub(super) fn install_tooltip_method(lua: &Lua, m: &Table) -> mlua::Result<()> {
                             .map(|v| v.description.clone())
                     })
                     .flatten();
+                // `TOOLTIP_TALENT_RANK` = "Rank %d/%d" (`0x854a2c`, pushed at `0x52b213`) —
+                // the key, filled with the two counts, never a sentence of ours (decision 2045).
+                // An install whose string table lacks it shows no rank line at all.
+                let rank_line = crate::strings::global(lua, "TOOLTIP_TALENT_RANK").map(|tmpl| {
+                    crate::strings::fill(
+                        &tmpl,
+                        &[
+                            crate::strings::Arg::D(t.rank.into()),
+                            crate::strings::Arg::D(t.max_rank.into()),
+                        ],
+                    )
+                });
                 (
                     t.display_spell,
                     TalentLines {
-                        rank_line: format!("Rank {}/{}", t.rank, t.max_rank),
+                        rank_line,
                         reqs: t.req_lines.clone(),
                         next_spell: t.next_spell,
                         next_desc,

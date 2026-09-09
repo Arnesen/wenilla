@@ -198,6 +198,15 @@ pub(crate) fn self_controlled(unit_flags: u32) -> bool {
 /// takes a GUID fast path and lands on the identical word.
 pub(crate) const UNIT_FLAG_IN_COMBAT: u32 = 0x0008_0000;
 
+/// `UNIT_FLAG_TAXI_FLIGHT` — the same `UNIT_FIELD_FLAGS` word, **bit 20** (vmangos
+/// `UnitDefines.h:511`; the client reads it as `shr reg,0x14; test rl,1` — wow-re counted 20
+/// independent sites of that idiom with no shared gate, `unit-flags-movement-gates.md` §4).
+///
+/// Beside its neighbour for the same reason that one is here: two readers today that have nothing
+/// to do with each other — `SetStandState`'s own guard #3 and the idle handler's auto-AFK gate —
+/// and a bit that is spelled out twice is a bit that eventually drifts.
+pub(crate) const UNIT_FLAG_TAXI_FLIGHT: u32 = 0x0010_0000;
+
 /// Ask for a **stand state** — the client's `SetStandState(newState)` (`0x5ed430`: send
 /// `CMSG_STANDSTATECHANGE` + apply locally through `0x6127b0`), as a message so every path that
 /// wants a posture funnels through the ONE setter in [`posture`] (the [`crate::creature_anim::

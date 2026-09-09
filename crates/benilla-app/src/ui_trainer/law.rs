@@ -163,13 +163,14 @@ pub(super) fn service_tooltip(wire_spell: u32, spells: &SpellCatalog) -> Trainer
 /// implementation gets wrong even when its ordering is right: the partition is **total**, so no row
 /// is ever dropped at a tradeskill trainer; and the header vocabulary is the client's own label table
 /// (`0x807520 + key * 0x40`), whose two entries are the global strings `TRADESKILL_SERVICE_STEP`
-/// ("Development Skills") and `TRADESKILL_SERVICE_LEARN` ("Recipes") — 1.12.1 enUS `GlobalStrings.lua`,
-/// the same inlining [`super::train_error_text`] does for `ERR_NOT_ENOUGH_MONEY`.
+/// and `TRADESKILL_SERVICE_LEARN` — **keys**, read off the player's own table at the feed rather
+/// than re-typed here (decision 2045); a header the install cannot name comes back empty, which is
+/// the reference's own data-suppression face.
 ///
 /// **Type 1** (mount — the client's "talent") is a *hybrid*, not a third predicate: an
 /// already-known service (`state == 2`) goes to the signed **`-1`** group (`0x4d77e8`) under the
-/// `KNOWN_TALENTS_HEADER` global string ("My Talents"); everything else takes the same skill-line
-/// path as types 0/3.
+/// `KNOWN_TALENTS_HEADER` global string; everything else takes the same skill-line path as
+/// types 0/3.
 ///
 /// **Types 0/3 (and type 1's remainder)** key on the **TAUGHT** spell's `SkillLine`
 /// (`0x4d7c60`→`0x60c920`, decision 0247 — the one hop in this file that survived 1124's audit); an
@@ -181,19 +182,24 @@ pub(super) fn service_group(
     category: TrainerServiceCategory,
     spells: &SpellCatalog,
     skill_lines: Option<&SkillLineCatalog>,
+    // The VM's own `GlobalStrings.lua` — the two label-table entries and the known-talents header.
+    get: &dyn Fn(&str) -> Option<String>,
 ) -> (u32, String) {
     if trainer_type == TRAINER_TYPE_TRADESKILL {
         let step = spells
             .get(wire_spell)
             .is_some_and(|d| d.effects.contains(&SPELL_EFFECT_SKILL_STEP));
         return if step {
-            (1, "Development Skills".to_string())
+            (1, get("TRADESKILL_SERVICE_STEP").unwrap_or_default())
         } else {
-            (2, "Recipes".to_string())
+            (2, get("TRADESKILL_SERVICE_LEARN").unwrap_or_default())
         };
     }
     if trainer_type == TRAINER_TYPE_MOUNT && category == TrainerServiceCategory::Used {
-        return (TRAINER_GROUP_KNOWN, "My Talents".to_string());
+        return (
+            TRAINER_GROUP_KNOWN,
+            get("KNOWN_TALENTS_HEADER").unwrap_or_default(),
+        );
     }
     let line = skill_lines
         .and_then(|c| c.spell_to_line(taught))

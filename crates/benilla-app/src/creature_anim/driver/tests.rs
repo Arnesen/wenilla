@@ -18,7 +18,9 @@ use super::super::{
     SheathSwapMessage, SwingMessage, Wielded, WoundAnim,
 };
 use super::drive_animations;
+use crate::names::type_flags::{DO_NOT_PLAY_WOUND_ANIM, MORE_AUDIBLE, NO_FACTION_TOOLTIP};
 use crate::net::NetCommands;
+use benilla_protocol::ObjectFields;
 
 /// A hand holding something that is **not a weapon** — a torch, a held-in-off-hand trinket.
 ///
@@ -173,6 +175,7 @@ fn app() -> App {
         .add_message::<crate::creature_anim::DefenseAnim>()
         .add_message::<crate::creature_anim::SwingSlowdown>()
         .add_message::<EmoteAnim>()
+        .add_message::<super::super::BaseAnimRecompute>()
         .add_message::<WoundAnim>()
         .add_message::<SheathRequest>()
         .add_message::<SheathSwapMessage>();
@@ -180,6 +183,7 @@ fn app() -> App {
     // and no test unit is the self player anyway.
     let (tx, _rx) = crossbeam_channel::unbounded();
     app.insert_resource(NetCommands(tx));
+    app.init_resource::<crate::names::NameCache>();
     app.insert_resource(catalog());
     app.add_systems(Update, drive_animations);
     app
@@ -529,11 +533,11 @@ fn cast_hold_stows_even_when_the_model_lacks_the_spell_anims() {
     assert_eq!(sheath(&app), Some(1), "re-drawn once the cast resolves");
 }
 
-/// A spell impact whose kit carries a CombatWound anim rides the wound **secondary slot**, never
-/// the one-shot route — the client's own 8–10 branch inside the kit player (`0x60edf0` @
-/// `0x60f3ad`, decision 0099 phase 4): the [`WoundAnim`] edge arms the decaying overlay and the
-/// base track keeps playing untouched underneath (routing it as a one-shot would replace the
-/// base — the exact mistake decision 0111 falsified for melee).
+/// A spell-side flinch rides the wound **secondary slot**, never the one-shot route — the
+/// client's `0x60ea70(severity = 0)` from the kit player's 8–10 branch, the harmful instant
+/// impact, or the missile arrival (decision 2058): the [`WoundAnim`] edge arms the decaying
+/// overlay and the base track keeps playing untouched underneath (routing it as a one-shot would
+/// replace the base — the exact mistake decision 0111 falsified for melee).
 #[test]
 fn spell_impact_wound_rides_the_secondary_slot() {
     let mut app = app();
@@ -541,7 +545,7 @@ fn spell_impact_wound_rides_the_secondary_slot() {
         graph: Handle::default(),
         clips: vec![
             clip(0, 1, true),  // Stand
-            clip(9, 2, false), // CombatWound — Fireball's impact-kit anim
+            clip(8, 2, false), // StandWound — the unengaged victim's severity-0 pick
         ],
         hand_close: [None, None],
         playable_animation_lookup: Vec::new(),
@@ -567,20 +571,144 @@ fn spell_impact_wound_rides_the_secondary_slot() {
     assert!(drv(&app, unit).wound.is_none());
     let gait_before = drv(&app, unit).gait;
 
-    app.world_mut().write_message(WoundAnim {
-        entity: unit,
-        anim_id: 9,
-    });
+    app.world_mut().write_message(WoundAnim { entity: unit });
     app.update();
     assert!(
         drv(&app, unit).wound.is_some(),
-        "the impact kit's wound anim armed the secondary slot"
+        "the spell flinch armed the secondary slot"
     );
     assert_eq!(
         drv(&app, unit).gait,
         gait_before,
         "the base track is untouched — a decaying overlay, not a replace"
     );
+}
+
+/// The spell flinch is the client's **severity-0** wound call (decision 2058): it never carries
+/// the kit's own id, so the clip is CombatWound(9) on an engaged victim and StandWound(8) on an
+/// unengaged one — `0x60ea70`'s `(severity, engaged)` pick, the same as a non-crit melee hit.
+#[test]
+fn spell_flinch_picks_the_wound_by_engagement() {
+    fn model() -> ModelAnimations {
+        ModelAnimations {
+            graph: Handle::default(),
+            clips: vec![
+                clip(0, 1, true),   // Stand
+                clip(8, 2, false),  // StandWound
+                clip(9, 3, false),  // CombatWound
+                clip(10, 4, false), // CombatCritical — a spell flinch must never land here
+            ],
+            hand_close: [None, None],
+            playable_animation_lookup: Vec::new(),
+            animation_lookup: Vec::new(),
+            global_bones: Vec::new(),
+            first_seq: None,
+            pose: Default::default(),
+        }
+    }
+    let mut app = app();
+    let engaged = app
+        .world_mut()
+        .spawn((
+            model(),
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+            Engaged,
+        ))
+        .id();
+    let idle = app
+        .world_mut()
+        .spawn((
+            model(),
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+        ))
+        .id();
+    app.update(); // settle both bases
+    app.world_mut().write_message(WoundAnim { entity: engaged });
+    app.world_mut().write_message(WoundAnim { entity: idle });
+    app.update();
+    let node = |e: Entity| {
+        app.world()
+            .entity(e)
+            .get::<AnimDriver>()
+            .unwrap()
+            .wound
+            .map(|w| w.node.index())
+    };
+    assert_eq!(node(engaged), Some(3), "engaged: CombatWound(9)");
+    assert_eq!(node(idle), Some(2), "unengaged: StandWound(8)");
+}
+
+/// The wound trigger's fourth entry gate (`0x60eaac`–`0x60eac8`, wow-re
+/// `charproc-rate-override-wound-gate.md`; decision 2063): a CharProc-11 rate-override node on
+/// the unit — what a freeze aura (Ice Block, Freezing Trap, petrify, web wrap) leaves attached —
+/// refuses every flinch for its life. The gate is the node's *presence*: kit 3071's rate of 1.0
+/// (no freeze at all) closes it exactly like the family's 0.0. A unit without the node flinches.
+#[test]
+fn a_rate_override_node_refuses_the_wound() {
+    fn model() -> ModelAnimations {
+        ModelAnimations {
+            graph: Handle::default(),
+            clips: vec![clip(0, 1, true), clip(8, 2, false)],
+            hand_close: [None, None],
+            playable_animation_lookup: Vec::new(),
+            animation_lookup: Vec::new(),
+            global_bones: Vec::new(),
+            first_seq: None,
+            pose: Default::default(),
+        }
+    }
+    let mut app = app();
+    let spawn = |app: &mut App, nodes: Option<crate::aura_visual::AuraNodes>| {
+        let mut e = app.world_mut().spawn((
+            model(),
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+        ));
+        if let Some(n) = nodes {
+            e.insert(n);
+        }
+        e.id()
+    };
+    let frozen = spawn(
+        &mut app,
+        Some(crate::aura_visual::AuraNodes::with_rate_node_for_tests(
+            11958, 0.0,
+        )),
+    );
+    let held_at_one = spawn(
+        &mut app,
+        Some(crate::aura_visual::AuraNodes::with_rate_node_for_tests(
+            3071, 1.0,
+        )),
+    );
+    let free = spawn(&mut app, None);
+    app.update();
+    for e in [frozen, held_at_one, free] {
+        app.world_mut().write_message(WoundAnim { entity: e });
+    }
+    app.update();
+    let wounded = |e: Entity| {
+        app.world()
+            .entity(e)
+            .get::<AnimDriver>()
+            .unwrap()
+            .wound
+            .is_some()
+    };
+    assert!(
+        !wounded(frozen),
+        "Ice Block's rate-0 node refuses the flinch"
+    );
+    assert!(
+        !wounded(held_at_one),
+        "the gate is the node, not the rate: a 1.0 node refuses too"
+    );
+    assert!(wounded(free), "no node: the flinch lays as before");
 }
 
 /// The whiff slow-down touches SWING anims only (decision 0279's scoping): a spell kit's
@@ -3730,4 +3858,571 @@ fn a_special_goes_unarmed_only_when_both_hands_are_empty() {
         playing(&app, alone, 3) && !playing(&app, alone, 2),
         "both hands empty to the gate — SpecialUnarmed(118)"
     );
+}
+
+/// A creature whose template carries **DO_NOT_PLAY_WOUND_ANIM** (`type_flags & 0x8`) takes no
+/// wound flinch at all — the reference's `0x60ea9f` gate inside the flinch itself, so it covers
+/// every trigger: the melee hit, the `$HIT` echo and the spell-side severity-0 call alike
+/// (decision 2068). This is the skeleton case: no flesh, no recoil.
+///
+/// The control beside it is the whole point — the gate must key on bit `0x8` and nothing else,
+/// and benilla read the *neighbouring* bit for months. So the unflagged victim here carries
+/// `NO_FACTION_TOOLTIP | MORE_AUDIBLE` (`0x30`, the two bits we already consume) and must still
+/// flinch: a gate on either neighbour, or on "any flag at all", fails right here.
+#[test]
+fn a_no_wound_creature_takes_no_flinch() {
+    fn model() -> ModelAnimations {
+        ModelAnimations {
+            graph: Handle::default(),
+            clips: vec![
+                clip(0, 1, true),  // Stand
+                clip(8, 2, false), // StandWound — the unengaged victim's severity-0 pick
+            ],
+            hand_close: [None, None],
+            playable_animation_lookup: Vec::new(),
+            animation_lookup: Vec::new(),
+            global_bones: Vec::new(),
+            first_seq: None,
+            pose: Default::default(),
+        }
+    }
+    // The victim's descriptor, carrying the one field the gate keys on.
+    fn streamed(entry: u32) -> crate::net::ObjectStore {
+        crate::net::ObjectStore(ObjectFields::from_pairs(&[(OBJECT_FIELD_ENTRY, entry)]))
+    }
+    const OBJECT_FIELD_ENTRY: u16 = 3;
+    const SKELETON: u32 = 1783; // a Scarlet Monastery skeleton's template entry
+    const WOLF: u32 = 69;
+
+    let mut app = app();
+    let record = |type_flags: u32| crate::names::CreatureRecord {
+        name: "victim".into(),
+        subname: None,
+        creature_type: 6, // Undead
+        pet_family: 0,
+        rank: 0,
+        type_flags,
+        civilian: false,
+        racial_leader: false,
+        display_id: 0,
+    };
+    {
+        let mut names = app.world_mut().resource_mut::<crate::names::NameCache>();
+        names.insert_creature(SKELETON, Some(record(DO_NOT_PLAY_WOUND_ANIM)));
+        // The control's flags are the two NEIGHBOURS, both set.
+        names.insert_creature(WOLF, Some(record(NO_FACTION_TOOLTIP | MORE_AUDIBLE)));
+    }
+
+    let spawn = |app: &mut App, entry: u32| {
+        app.world_mut()
+            .spawn((
+                model(),
+                AnimationPlayer::default(),
+                AnimationTransitions::new(),
+                AnimDriver::default(),
+                streamed(entry),
+            ))
+            .id()
+    };
+    let skeleton = spawn(&mut app, SKELETON);
+    let wolf = spawn(&mut app, WOLF);
+    // A creature whose query has not answered yet: the reference's null-record leg passes, so it
+    // flinches like anything else.
+    let unqueried = spawn(&mut app, 4242);
+    app.update(); // settle every base on Stand
+
+    for e in [skeleton, wolf, unqueried] {
+        app.world_mut().write_message(WoundAnim { entity: e });
+    }
+    app.update();
+
+    let wound = |e: Entity| {
+        app.world()
+            .entity(e)
+            .get::<AnimDriver>()
+            .unwrap()
+            .wound
+            .is_some()
+    };
+    assert!(
+        !wound(skeleton),
+        "DO_NOT_PLAY_WOUND_ANIM refuses the flinch"
+    );
+    assert!(
+        wound(wolf),
+        "the neighbouring bits (0x10 / 0x20) must not gate the flinch"
+    );
+    assert!(
+        wound(unqueried),
+        "a template we have not received reads as unflagged — `0x6125f0`'s null leg"
+    );
+}
+
+/// The flag's **second** consumer: `DO_NOT_PLAY_WOUND_ANIM` takes the victim's **parry** with its
+/// flinch (`0x60ec1f` inside the parry pick `0x60ec00`, wow-re
+/// `wound-parry-gate-and-injury-vocal.md` Q1/Q6 — the bit has exactly two callers and this is the
+/// other one). The `$CPP` ladder enters `0x60ec00` only on victimState 3, so DODGE and BLOCK
+/// reach `PlayAnimation` directly and are **not** gated: a flagged creature still dodges, it just
+/// never parries. Both halves are asserted here — the gate without its control is the bug this
+/// whole record is about.
+#[test]
+fn the_no_wound_flag_takes_the_parry_but_not_the_dodge() {
+    fn model() -> ModelAnimations {
+        ModelAnimations {
+            graph: Handle::default(),
+            clips: vec![
+                clip(0, 1, true),   // Stand
+                clip(21, 2, false), // Parry1H — a 1H sword's parry pick
+                clip(30, 3, false), // Dodge
+            ],
+            hand_close: [None, None],
+            playable_animation_lookup: Vec::new(),
+            animation_lookup: Vec::new(),
+            global_bones: Vec::new(),
+            first_seq: None,
+            pose: Default::default(),
+        }
+    }
+    const OBJECT_FIELD_ENTRY: u16 = 3;
+    const FLAGGED: u32 = 3870; // Stone Sleeper — really carries the bit on our world DB
+    const PLAIN: u32 = 69;
+
+    let mut app = app();
+    let record = |type_flags: u32| crate::names::CreatureRecord {
+        name: "victim".into(),
+        subname: None,
+        creature_type: 6,
+        pet_family: 0,
+        rank: 0,
+        type_flags,
+        civilian: false,
+        racial_leader: false,
+        display_id: 0,
+    };
+    {
+        let mut names = app.world_mut().resource_mut::<crate::names::NameCache>();
+        names.insert_creature(FLAGGED, Some(record(DO_NOT_PLAY_WOUND_ANIM)));
+        names.insert_creature(PLAIN, Some(record(0)));
+    }
+    let spawn = |app: &mut App, entry: u32| {
+        app.world_mut()
+            .spawn((
+                model(),
+                AnimationPlayer::default(),
+                AnimationTransitions::new(),
+                AnimDriver::default(),
+                // A 1H sword in the mainhand: `defense_anim` sends class 2 subclass 7 to
+                // Parry1H(21).
+                Wielded {
+                    main: Some((2, 7)),
+                    ..Default::default()
+                },
+                crate::net::ObjectStore(ObjectFields::from_pairs(&[(OBJECT_FIELD_ENTRY, entry)])),
+            ))
+            .id()
+    };
+    let flagged = spawn(&mut app, FLAGGED);
+    let plain = spawn(&mut app, PLAIN);
+    let dodger = spawn(&mut app, FLAGGED);
+    app.update(); // settle every base on Stand
+
+    for (victim, victim_state) in [(flagged, 3), (plain, 3), (dodger, 2)] {
+        app.world_mut()
+            .write_message(crate::creature_anim::DefenseAnim {
+                victim,
+                victim_state,
+            });
+    }
+    app.update();
+
+    let base = |e: Entity| {
+        app.world()
+            .entity(e)
+            .get::<AnimationTransitions>()
+            .unwrap()
+            .get_main_animation()
+            .map(|n| n.index())
+    };
+    assert_eq!(
+        base(flagged),
+        Some(1),
+        "flagged: no parry — the base holds Stand"
+    );
+    assert_eq!(base(plain), Some(2), "unflagged: Parry1H(21) plays");
+    assert_eq!(
+        base(dodger),
+        Some(3),
+        "the flag does not reach DODGE — it enters `0x60ec00` only on victimState 3"
+    );
+}
+
+/// **The weapon-trail latch's edge** (decision 2076): `AnimDriver::started_anim` must be raised by
+/// a plain gait change, not only by a one-shot.
+///
+/// `0x5fe2f0` is the image's single animation entry point — locomotion reaches it through
+/// `0x602c60` → `0x5fd9e0` → `0x5fd8b0` → `0x5fd100`, and no locomotion id is in the combat set
+/// that takes its no-latch fast path — so a unit that simply starts running consumes the pending
+/// arm. That is what starts Charge's trail: kit 44's anim id is `-1`, `0x60f366 jl` skips the play
+/// block entirely, and the arm waits for the charge's own run (wow-re
+/// `charproc8-trail-draw-state.md` §11.5/§11.6). A one-shot-only edge would leave 38 Charge spells
+/// with no trail at all.
+///
+/// The other half matters as much: there is **no per-frame animation recompute** in the reference
+/// (`0x5fd8b0` has one caller and `0x5fd9e0`'s 38 sites are all event-driven), so a unit standing
+/// still must NOT keep raising the edge and eating arms.
+#[test]
+fn a_gait_change_raises_the_anim_edge_and_a_steady_frame_does_not() {
+    let mut app = app();
+    let unit = app
+        .world_mut()
+        .spawn((
+            caster_model(),
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+            MovementState::default(),
+        ))
+        .id();
+    let edge = |app: &App| {
+        app.world()
+            .entity(unit)
+            .get::<AnimDriver>()
+            .unwrap()
+            .started_anim()
+    };
+    app.update(); // settle: Stand — itself a play
+    app.update();
+    assert!(!edge(&app), "a settled, motionless unit plays nothing");
+    // Start running: the gait changes, so the base track takes a play.
+    app.world_mut().entity_mut(unit).insert(MovementState {
+        flags: move_flags::FORWARD,
+        speed: 7.0,
+        ..Default::default()
+    });
+    app.update();
+    assert!(edge(&app), "starting to run IS a PlayAnimation");
+    app.update();
+    assert!(
+        !edge(&app),
+        "…and holding that run is not — the reference has no per-frame recompute"
+    );
+    // A one-shot raises it too, which is the ordinary case.
+    app.world_mut().write_message(EmoteAnim {
+        entity: unit,
+        anim_id: 57,
+        seq: 1,
+    });
+    app.update();
+    assert!(edge(&app), "and so does a one-shot");
+}
+
+/// **The combat fast path must NOT raise the anim edge** (decision 2076, wow-re
+/// `format7-lighting-term.md`'s second question).
+///
+/// `0x5fe43c` returns at `0x5fe48b` — *before* `0x5fe48e`, the weapon-trail latch's only read —
+/// when the unit is already playing a combat animation and requests another one. So a pending
+/// trail arm survives that play. It matters because `0x60d835` arms a **one-slot** field with a
+/// plain `mov`: a second proc overwrites the first before it ever fires, and a client that fired
+/// on every request would draw trails from arms the reference superseded — with the superseded
+/// colours and durations, on 23 of the 34 type-8 kits.
+///
+/// benilla does not need to build that gate: the driver's request loop already fast-paths
+/// combat-over-combat (decision 0406) and `continue`s without playing, so the edge never rises.
+/// This pins the connection between the two, which is otherwise invisible — they live in different
+/// modules and neither mentions the other's mechanism.
+#[test]
+fn a_combat_over_combat_fast_path_does_not_raise_the_anim_edge() {
+    let mut app = app();
+    let unit = jumper(&mut app);
+    let edge = |app: &App| {
+        app.world()
+            .entity(unit)
+            .get::<AnimDriver>()
+            .unwrap()
+            .started_anim()
+    };
+    let parked = |app: &App| {
+        app.world()
+            .entity(unit)
+            .get::<AnimDriver>()
+            .unwrap()
+            .deferred
+    };
+    app.update(); // settle: Stand
+                  // A combat one-shot — Special1H(57) is in `0x5fcc10`'s set, and the model has it.
+    app.world_mut().write_message(EmoteAnim {
+        entity: unit,
+        anim_id: 57,
+        seq: 1,
+    });
+    app.update();
+    assert!(edge(&app), "the first combat play arms normally");
+    // A SECOND combat request while the first still runs — AttackUnarmed(16), also in the set.
+    // The fast path re-times the live clip and parks the request; nothing is armed.
+    app.world_mut().write_message(SwingMessage {
+        attacker: unit,
+        victim: None,
+        hit_info: 0x2,
+        victim_state: 1,
+        damage: 21,
+        seq: 2,
+    });
+    app.update();
+    assert_eq!(
+        parked(&app),
+        Some(16),
+        "the swing parks behind the kit clip — the fast path fired"
+    );
+    assert!(
+        !edge(&app),
+        "…and it re-times rather than plays, so `0x5fe2f0` returns before the latch read and a \
+         pending trail arm survives"
+    );
+}
+
+/// The **base-animation lock** (decision 2096, VERIFIED wow-re `base-anim-lock-knockdown.md`) —
+/// the reason a Lashed player visibly falls over, and the correction to 2085's reading.
+///
+/// A stun's root recomputes the base unconditionally and the selector resolves `Stand(0)`; what
+/// stops that overwriting the victim's `Knockdown` is `0x5fe2f0`'s head guard on
+/// `[unit+0xd58] & 0xc0000`, a bit the arm helper set keyed on the id it actually armed. So the
+/// recompute is not skipped — **the play it asks for is refused**, and the clip runs its full
+/// 2000 ms. The director watched exactly this on the reference client, fighting the Silithus worm
+/// whose Lash (6607) puts nothing on its victim but that one clip.
+///
+/// The same guard scopes 2085's claim that a state kit's anim is an animation *cutter*: it cannot
+/// cut a clip that took the lock, so Charge does **not** cut its own Knockdown.
+mod base_anim_lock {
+    use super::*;
+    use crate::creature_anim::{BaseAnimRecompute, Mode};
+
+    /// Stand, Knockdown (the locking id), and SpecialUnarmed (an ordinary one-shot that does not
+    /// lock) — the pair that separates the guard from a plain re-pick.
+    const STAND_NODE: u32 = 1;
+    const KNOCKDOWN_NODE: u32 = 2;
+
+    fn model() -> ModelAnimations {
+        ModelAnimations {
+            graph: Handle::default(),
+            clips: vec![
+                clip(0, STAND_NODE, true),        // Stand
+                clip(121, KNOCKDOWN_NODE, false), // Knockdown — takes the lock
+                clip(118, 3, false),              // SpecialUnarmed — takes nothing
+            ],
+            hand_close: [None, None],
+            playable_animation_lookup: Vec::new(),
+            animation_lookup: Vec::new(),
+            global_bones: Vec::new(),
+            first_seq: None,
+            pose: Default::default(),
+        }
+    }
+
+    fn victim(app: &mut App) -> Entity {
+        app.world_mut()
+            .spawn((
+                model(),
+                AnimationPlayer::default(),
+                AnimationTransitions::new(),
+                AnimDriver::default(),
+            ))
+            .id()
+    }
+
+    fn main_node(app: &App, unit: Entity) -> Option<AnimationNodeIndex> {
+        app.world()
+            .entity(unit)
+            .get::<AnimationTransitions>()
+            .unwrap()
+            .get_main_animation()
+    }
+
+    fn oneshot(app: &mut App, unit: Entity, anim_id: u16) {
+        app.world_mut().write_message(EmoteAnim {
+            entity: unit,
+            anim_id,
+            seq: 1,
+        });
+        app.update();
+    }
+
+    fn recompute(app: &mut App, unit: Entity, anim_id: u16) {
+        app.world_mut().write_message(BaseAnimRecompute {
+            entity: unit,
+            anim_id,
+        });
+        app.update();
+    }
+
+    /// The whole report, in one assertion: a `Knockdown` on the base survives the recompute the
+    /// stun's own root triggers, because the `Stand` it asks for is refused.
+    #[test]
+    fn a_knockdown_survives_the_base_recompute() {
+        let mut app = app();
+        let unit = victim(&mut app);
+        oneshot(&mut app, unit, 121);
+        assert_eq!(
+            main_node(&app, unit),
+            Some(AnimationNodeIndex::new(KNOCKDOWN_NODE as usize)),
+            "the impact kit's Knockdown holds the base"
+        );
+
+        recompute(&mut app, unit, 14); // the state kit's `Stun`, which is never played
+
+        assert_eq!(
+            main_node(&app, unit),
+            Some(AnimationNodeIndex::new(KNOCKDOWN_NODE as usize)),
+            "the recompute fires, resolves Stand, and the lock refuses it — the clip stays"
+        );
+        assert_eq!(
+            app.world().entity(unit).get::<AnimDriver>().unwrap().gait,
+            None,
+            "and nothing may claim the base holds Stand: the target stays unset so the selector \
+             tries again once the clip releases the lock"
+        );
+    }
+
+    /// …and the guard is the id's, not a blanket refusal: an ordinary one-shot takes no lock, so
+    /// the same recompute ends it. This is 2085's mechanism, correctly scoped.
+    #[test]
+    fn a_non_locking_one_shot_is_cut_by_the_same_recompute() {
+        let mut app = app();
+        let unit = victim(&mut app);
+        oneshot(&mut app, unit, 118);
+        assert!(
+            matches!(
+                app.world().entity(unit).get::<AnimDriver>().unwrap().mode,
+                Mode::Swing { id: 118, .. }
+            ),
+            "SpecialUnarmed holds the base slot"
+        );
+
+        recompute(&mut app, unit, 14);
+
+        assert_eq!(
+            main_node(&app, unit),
+            Some(AnimationNodeIndex::new(STAND_NODE as usize)),
+            "nothing refused the Stand, so it took the slot"
+        );
+    }
+
+    /// A state kit naming the id already playing does nothing at all (`0x60f393 je 0x60f3ca`).
+    #[test]
+    fn a_matching_state_kit_anim_leaves_the_base_alone() {
+        let mut app = app();
+        let unit = victim(&mut app);
+        oneshot(&mut app, unit, 118);
+        recompute(&mut app, unit, 118);
+        assert!(
+            matches!(
+                app.world().entity(unit).get::<AnimDriver>().unwrap().mode,
+                Mode::Swing { id: 118, .. }
+            ),
+            "already playing it — the leg leaves the block having done nothing"
+        );
+    }
+
+    /// The airborne clips, on the same victim — the director's follow-up report: *"there is some
+    /// bug it seems, I ended up stuck laying down after a knock, might be because I was jumping
+    /// or running at the same time"*.
+    fn airborne_model() -> ModelAnimations {
+        ModelAnimations {
+            graph: Handle::default(),
+            clips: vec![
+                clip(0, STAND_NODE, true),        // Stand
+                clip(121, KNOCKDOWN_NODE, false), // Knockdown — takes the lock
+                clip(37, 3, false),               // JumpStart
+                clip(38, 4, true),                // Jump hang
+                clip(39, 5, false),               // JumpEnd
+                clip(40, 6, true),                // Fall
+            ],
+            hand_close: [None, None],
+            playable_animation_lookup: Vec::new(),
+            animation_lookup: Vec::new(),
+            global_bones: Vec::new(),
+            first_seq: None,
+            pose: Default::default(),
+        }
+    }
+
+    fn knocked_jumper(app: &mut App) -> Entity {
+        app.world_mut()
+            .spawn((
+                airborne_model(),
+                AnimationPlayer::default(),
+                AnimationTransitions::new(),
+                AnimDriver::default(),
+                MovementState::default(),
+            ))
+            .id()
+    }
+
+    /// **The wedge**: jumping while the lock is held used to stop the locked clip DEAD, and a clip
+    /// that never finishes never releases the lock — so the body lay on its back for the rest of
+    /// the session, every subsequent play refused.
+    ///
+    /// The mechanism is 0503's snapshot-freeze in [`super::play::leave_special`], which stills the
+    /// cut airborne clip before the landing cross-fades over it. It took whatever bone 0 held, on
+    /// the assumption that the arc's own clip is what it armed — and the lock is the first thing
+    /// ever to falsify that: every play the arc asked for was refused, so bone 0 still held the
+    /// `Knockdown`, and the landing froze *that*.
+    #[test]
+    fn a_jump_taken_while_locked_never_freezes_the_locked_clip() {
+        let mut app = app();
+        let unit = knocked_jumper(&mut app);
+        app.update(); // settle: Stand
+        oneshot(&mut app, unit, 121);
+        let knockdown = AnimationNodeIndex::new(KNOCKDOWN_NODE as usize);
+        assert_eq!(
+            main_node(&app, unit),
+            Some(knockdown),
+            "the impact kit's Knockdown holds the base"
+        );
+
+        // Space, flat on their back: the launch enters the bracket, and every clip in the bracket
+        // is refused — so bone 0 still holds the Knockdown for the whole arc.
+        app.world_mut().entity_mut(unit).insert(MovementState {
+            flags: move_flags::FALLING,
+            vertical_speed: 7.96,
+            ..Default::default()
+        });
+        advance(&mut app, 16);
+        assert!(
+            !app.world()
+                .entity(unit)
+                .get::<AnimDriver>()
+                .unwrap()
+                .started_anim,
+            "the bracket walked with its play declined — nothing started, so nothing downstream              may read a play out of the mode change (the flinch's eviction, 2076's trail edge)"
+        );
+        advance(&mut app, 16);
+        assert_eq!(
+            main_node(&app, unit),
+            Some(knockdown),
+            "the arc's own JumpStart/hang are refused, exactly as the guard orders"
+        );
+
+        // Touchdown.
+        app.world_mut()
+            .entity_mut(unit)
+            .insert(MovementState::default());
+        advance(&mut app, 16);
+
+        assert_eq!(
+            app.world().entity(unit).get::<AnimDriver>().unwrap().frozen,
+            None,
+            "the landing's freeze is the AIRBORNE clip's alone — it must never still a clip the \
+             arc did not arm"
+        );
+        assert_eq!(
+            app.world()
+                .entity(unit)
+                .get::<AnimationPlayer>()
+                .unwrap()
+                .animation(knockdown)
+                .map(bevy::animation::ActiveAnimation::speed),
+            Some(1.0),
+            "…so the Knockdown runs on, finishes, and releases the lock"
+        );
+    }
 }

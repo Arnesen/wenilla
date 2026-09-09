@@ -53,7 +53,19 @@ struct WowLight {
 // table M2 batches take, `0x70baf0`). y = forced-fog mode with zw = its start/end (the rain
 // lanes — unused until precipitation joins the lane in slice P2, kept so the struct is P2's
 // already).
-@group(1) @binding(3) var<uniform> wow_ext_params: vec4<f32>;
+//
+// `clip` is the draw's **render-target rectangle in target pixels** — `(min.x, min.y, max.x,
+// max.y)`, and `z <= x` means the whole target, which is every world draw. The UI model tiles
+// are the one customer (decision 2093): every visible `<Model>` pane renders into its own cell
+// of ONE shared atlas, so a cloud reaching past its cell would land in the cell beside it and
+// be composited onto a different widget. The reference clips this with the widget's own rect as
+// the VIEWPORT (`modelframe-render-law.md` §6); one shared camera cannot carry a viewport per
+// pane, so the rect rides the draw and the fragment discards outside it.
+struct EffectParams {
+    fog: vec4<f32>,
+    clip: vec4<f32>,
+};
+@group(1) @binding(3) var<uniform> wow_params: EffectParams;
 
 // The rain pass's forced fog colour: 0x80808080 → grey (render-state 0x0d).
 const RAIN_FOG_GREY: vec3<f32> = vec3<f32>(0.50196078, 0.50196078, 0.50196078);
@@ -112,6 +124,16 @@ fn vertex(v: Vertex) -> VertexOutput {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+    // The draw's target-rect clip (see `EffectParams::clip`). `@builtin(position)` is the
+    // framebuffer pixel, which for the UI tile atlas IS the atlas texel — so this is the
+    // scissor the reference gets from the widget's viewport, per fragment.
+    if (wow_params.clip.z > wow_params.clip.x) {
+        let p = in.clip_position.xy;
+        if (p.x < wow_params.clip.x || p.y < wow_params.clip.y
+            || p.x > wow_params.clip.z || p.y > wow_params.clip.w) {
+            discard;
+        }
+    }
     // `$WOW_PARTICLE_FLAT` (B16 instrument): solid magenta, no inputs — see render.rs.
 #ifdef WOW_PARTICLE_FLAT
     return vec4<f32>(1.0, 0.0, 1.0, 1.0);
@@ -191,22 +213,22 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // geometry — same start/end, same day-night colour, applied in gamma space BEFORE blend,
     // with NO additive special-case. The blend equation then does the whole night split by
     // itself. Missing fog was the "night smoke glows" bug. (Planar eye-Z, like terrain fog.)
-    if (wow_light.fog_color.w > 0.5 && wow_ext_params.x > 0.5) {
+    if (wow_light.fog_color.w > 0.5 && wow_params.fog.x > 0.5) {
         let denom = max(wow_light.fog_params.y - wow_light.fog_params.x, 0.001);
         let factor = clamp((wow_light.fog_params.y - in.view_z) / denom, 0.0, 1.0);
-        // The fog COLOUR follows the policy in wow_ext_params.x (see its declaration).
+        // The fog COLOUR follows the policy in wow_params.fog.x (see its declaration).
         var fog_rgb = wow_light.fog_color.xyz;
-        if (wow_ext_params.x > 1.5 && wow_ext_params.x < 2.5) { fog_rgb = vec3<f32>(0.0); }
-        else if (wow_ext_params.x > 2.5 && wow_ext_params.x < 3.5) { fog_rgb = vec3<f32>(1.0); }
-        else if (wow_ext_params.x > 3.5) { fog_rgb = RAIN_FOG_GREY; }
+        if (wow_params.fog.x > 1.5 && wow_params.fog.x < 2.5) { fog_rgb = vec3<f32>(0.0); }
+        else if (wow_params.fog.x > 2.5 && wow_params.fog.x < 3.5) { fog_rgb = vec3<f32>(1.0); }
+        else if (wow_params.fog.x > 3.5) { fog_rgb = RAIN_FOG_GREY; }
         rgb = mix(fog_rgb, rgb, factor);
     }
     // The FORCED fog (rain weather): grey-0.5 over the params' own start/end, regardless of
     // the scene fog state — under Mod2x the grey is neutral, so this IS the streak/patter
     // distance fade (rf-weather-render Q3).
-    if (wow_ext_params.y > 0.5) {
-        let denom = max(wow_ext_params.w - wow_ext_params.z, 0.001);
-        let factor = clamp((wow_ext_params.w - in.view_z) / denom, 0.0, 1.0);
+    if (wow_params.fog.y > 0.5) {
+        let denom = max(wow_params.fog.w - wow_params.fog.z, 0.001);
+        let factor = clamp((wow_params.fog.w - in.view_z) / denom, 0.0, 1.0);
         rgb = mix(RAIN_FOG_GREY, rgb, factor);
     }
 #ifdef BLEND_ADD

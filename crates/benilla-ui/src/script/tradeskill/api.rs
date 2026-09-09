@@ -8,7 +8,7 @@ use crate::script::item_stats::item_link;
 use crate::script::Model;
 
 use super::view::{
-    build_groups, first_recipe_index, inv_slot_name, num_rows, present_inv_slots, recipe_at, rows,
+    build_groups, first_recipe_index, inv_slot_token, num_rows, present_inv_slots, recipe_at, rows,
     select, selected_visible_index, set_collapsed, Row,
 };
 
@@ -439,8 +439,15 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let mut out = Vec::new();
+            // Each word is its `0x84dd70` token resolved off the player's own string table
+            // (decision 2045). A token the table does not carry answers the empty string rather
+            // than being dropped: the list is POSITIONAL — `GetTradeSkillInvSlotFilter(index)`
+            // indexes the same order — so a hole would shift every filter after it.
             for bit in present_inv_slots(&model) {
-                out.push(Value::String(lua.create_string(inv_slot_name(bit))?));
+                let word = inv_slot_token(bit)
+                    .and_then(|k| crate::strings::global(lua, k))
+                    .unwrap_or_default();
+                out.push(Value::String(lua.create_string(word)?));
             }
             Ok(MultiValue::from_vec(out))
         })?,

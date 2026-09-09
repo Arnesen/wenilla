@@ -113,6 +113,22 @@ pub fn spawn_model_entities(
     // (decision 0778). `None` everywhere else (exterior props fade; WMO groups use their own
     // per-submesh interior flag + batch class).
     interior_slot: Option<u16>,
+    // The placement's **draw-set gate** — its fade sphere plus, for a WMO prop, the building
+    // instance and the rooms that name it. `Some` on the world-static lanes, where the caller
+    // builds it ONCE ([`super::fx::emitter_fade`]) and hands the same value to every rider of the
+    // placement: the emitters, the ribbon trails, the glow lights — and, since 2059, the anim
+    // host, which used to fabricate its own with `instance: None, room: None` and so judged a
+    // particles-only WMO prop as exterior scene. Standing inside a sealed room that is
+    // `ExteriorGate::Windows([])`, which "admits nothing": every meshless prop of the building the
+    // camera was standing in was parked, its event track unscanned, and Stratholme's
+    // burning-building `$DSL` never fired.
+    //
+    // `None` on the entity-hosted lane (a transport's props), which carries no `EmitterFade` at
+    // all on purpose — a mover has no baked world point for one to measure from
+    // (`benilla_app::entities::wmo_props`). The bare sphere below is what its mesh lane needs, and
+    // `radius` is read for exactly that: in the `Some` arm the gate carries its own and this
+    // parameter is never consulted again.
+    fade: Option<&crate::particles::EmitterFade>,
     radius: f32,
     local_center: Vec3,
     // The model's authored **all-animation** bound in Bevy model-local space
@@ -176,6 +192,16 @@ pub fn spawn_model_entities(
     // its host bone off (0130 phase 4), and the FILE sequence slot its variation roll landed
     // on, which the emitters' rate/gate tracks must be sampled against (decision 0760).
 ) -> SpawnedModel {
+    // One gate for this placement, from here down: the caller's when it has one, else the bare
+    // sphere (which is the same value `emitter_fade` would build from the same inputs — the
+    // constructor is shared, so the two arms cannot drift). Every `radius`/world-centre read below
+    // goes through it.
+    let fade = match fade {
+        Some(f) => f.clone(),
+        None => {
+            crate::particles::EmitterFade::sphere(radius, transform.transform_point(local_center))
+        }
+    };
     let kind = object.kind;
     let is_wmo = kind == ModelKind::Wmo;
     let mut out = Vec::with_capacity(submeshes.len());
@@ -372,7 +398,7 @@ pub fn spawn_model_entities(
             interior_prop: interior_probe,
             order_free: matches!(sub.blend, ModelBlend::Opaque | ModelBlend::AlphaTest)
                 && !sub.additive,
-            never_fade: radius > crate::model_fade::NEVER_FADE_RADIUS,
+            never_fade: fade.radius > crate::model_fade::NEVER_FADE_RADIUS,
         };
         // A merged FADER blob lives permanently in the reference's own fading render state —
         // the blend twin (blend on, cutout ref on unfaded alpha, depth-write forced on) — with
@@ -391,7 +417,7 @@ pub fn spawn_model_entities(
         let merge_sphere = if steady_interior_prop {
             Vec4::new(0.0, 0.0, 0.0, f32::INFINITY)
         } else {
-            Vec4::from((transform.transform_point(local_center), radius))
+            Vec4::from((fade.center, fade.radius))
         };
         if crate::static_merge::census_enabled() {
             let key = merge
@@ -451,19 +477,24 @@ pub fn spawn_model_entities(
                     crate::static_gx::GxSite::Doodad { owner }
                         if !is_wmo && class.merges() && !class.interior_prop =>
                     {
-                        let fade = (!class.never_fade && !crate::static_gx::fade_lane_disabled())
-                            .then(|| crate::static_gx::GxFadeSeed {
-                                radius,
-                                local_center,
-                                stat_mesh: stat_mesh.clone(),
-                                aabb: *stat_aabb,
-                                cutout: cutout.clone(),
-                                blend: blend.clone(),
-                            });
+                        // `fade_seed`, not `fade`: the placement's draw-set gate is in scope
+                        // here under that name, and shadowing it with the retained pass's
+                        // per-batch seed reads as the same thing twice.
+                        let fade_seed = (!class.never_fade
+                            && !crate::static_gx::fade_lane_disabled())
+                        .then(|| crate::static_gx::GxFadeSeed {
+                            radius: fade.radius,
+                            local_center,
+                            stat_mesh: stat_mesh.clone(),
+                            aabb: *stat_aabb,
+                            cutout: cutout.clone(),
+                            blend: blend.clone(),
+                        });
                         // Never-fade admits bare; a fader admits only WITH its seed (the
                         // fade lane lever empties the seed, sending faders back to the
                         // entity path).
-                        (class.never_fade || fade.is_some()).then_some((*owner, None, None, fade))
+                        (class.never_fade || fade_seed.is_some())
+                            .then_some((*owner, None, None, fade_seed))
                     }
                     crate::static_gx::GxSite::Wmo { instance, groups }
                         if is_wmo && class.merges() =>
@@ -797,7 +828,7 @@ pub fn spawn_model_entities(
         // which is steady indoors). Adding `DoodadFade` is what makes the fade system drive the tag.
         if !steady_interior_prop {
             commands.entity(entity).insert(DoodadFade {
-                radius,
+                radius: fade.radius,
                 local_center: fade_center,
                 cutout,
                 blend,
@@ -830,7 +861,8 @@ pub fn spawn_model_entities(
         }
         commands.entity(h.root).insert(DoodadAnimHost {
             meshes: skinned_meshes,
-            fade: (radius, transform.transform_point(local_center)),
+            // The caller's one gate, not a second construction of it (2059).
+            fade: fade.clone(),
             clip: h.clip,
             armed_at: now,
             // Born already expired, so the first frame runs the holder setup's `variationIdx = -1`

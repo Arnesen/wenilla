@@ -891,7 +891,8 @@ fn pin_scene(
     roots: Query<&Transform, Without<WorldCamera>>,
     mut cam: Query<&mut Transform, With<WorldCamera>>,
 ) {
-    perf.visible = false; // the perf HUD is default-on; suppress it for a pristine, UI-free shot
+    perf.visible = false; // hidden by default since 2099, but a session may have chorded it up —
+                          // a capture is pristine and UI-free whatever the run did
                           // A glue screen has no world to light, no clock to pin and no camera to place. The shutter
                           // above needs none of that — it is watching the framebuffer.
     let Some(scenario) = ctx.scenario else {

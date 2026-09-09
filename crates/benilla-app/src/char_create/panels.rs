@@ -228,6 +228,9 @@ fn scrollbar(
                         step: track_h * s / 2.0,
                     },
                     Button,
+                    // At the end of its travel this arrow is disabled — `scroll_visuals` writes it
+                    // and `crate::glue::glue_hilights` reads it, so the sheen dies with the arrow.
+                    crate::glue::widgets::GlueDisabled(false),
                     ImageNode {
                         image: art.up.clone(),
                         rect: Some(tc_rect(art.size, SCROLL_BTN_TC)),

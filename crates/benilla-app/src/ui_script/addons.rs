@@ -345,10 +345,12 @@ fn read_under(root: &Path, rel: &str) -> Option<Vec<u8>> {
 /// allowed to compute that path (0954) — which is already `None` under `$WOW_CAPTURE`, so a
 /// deterministic baseline cannot depend on what somebody has installed (0008).
 ///
-/// `pub(crate)` since 1322: the texture side needs the same folder — the sprite decoder's
-/// `Interface\AddOns\` loose-file resolve and the `SetTexture` probe both map that virtual prefix
-/// onto this root (`ui_script::lifecycle::install_texture_resolvers`), so there is exactly one
-/// answer to "where do addons live" however the question is asked.
+/// `pub(crate)` since 1322: every asset an addon ships needs the same folder — the sprite
+/// decoder's `Interface\AddOns\` loose-file resolve, the `SetTexture` probe, and (2103) the font
+/// engine's face loader plus the `SetFont` probe all map that virtual prefix onto this root, so
+/// there is exactly one answer to "where do addons live" however the question is asked. The first
+/// three are wired in one place (`ui_script::lifecycle::install_addon_asset_resolvers`); the face
+/// loader reads it here directly, at engine construction, because it is not a VM concern.
 pub(crate) fn root() -> Option<PathBuf> {
     root_from(crate::local_state::home())
 }
@@ -2037,6 +2039,131 @@ mod tests {
                 .ok()
                 .as_deref(),
             Some("1")
+        );
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// **The `/msbt` shape** (decision 2102): a LoadOnDemand addon whose `## Dependencies:` names
+    /// an addon the STARTUP walk already loaded.
+    ///
+    /// This is the whole demand-load path a player actually meets — Mik's Scrolling Battle Text
+    /// ships its options as a separate `## LoadOnDemand: 1` package with
+    /// `## Dependencies: MikScrollingBattleText`, and `/msbt` reaches it through
+    /// `UIParentLoadAddOn`, whose failure message is the red
+    /// `Couldn't load %s: <ADDON_ + reason>` dialog. The dependency being **already loaded** is the
+    /// half nothing covered: a dependency the gate finds unloaded and not LoadOnDemand is
+    /// `DEP_NOT_DEMAND_LOADED`, so the startup walk's `mark_addon_loaded` stamp is what stands
+    /// between this and a dialog. (The addon harness answered `DEP_NOT_DEMAND_LOADED` here for
+    /// exactly that reason until 2102 gave it the same stamp.)
+    #[test]
+    fn a_load_on_demand_addon_loads_on_top_of_an_already_loaded_dependency() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let (home, _h) = hermetic_root("lod-dep");
+        write_addon(
+            &home,
+            "Base",
+            "## Interface: 11200\n## Title: Base\nbase.lua\n",
+            &[("base.lua", "BaseRan = true")],
+        );
+        write_addon(
+            &home,
+            "BaseOptions",
+            "## Interface: 11200\n## Title: Base Options\n## Dependencies: Base\n             ## LoadOnDemand: 1\nopts.lua\n",
+            &[("opts.lua", "OptsRan = BaseRan")],
+        );
+        let mut script = UiScript::new().unwrap();
+        script.set_screen_size(1024.0, 768.0);
+        let _ = load_third_party(&mut script, None, true);
+
+        // The dependency loaded at startup and the registry knows it — the stamp this rests on.
+        assert_eq!(
+            script.eval::<bool>("return IsAddOnLoaded('Base') == 1").ok(),
+            Some(true),
+            "a startup-loaded addon must read as loaded, or every LoadOnDemand dependent of it              answers DEP_NOT_DEMAND_LOADED"
+        );
+        assert_eq!(
+            script.eval::<bool>("return OptsRan == nil").ok(),
+            Some(true),
+            "and the LoadOnDemand package has not run"
+        );
+
+        // `UIParentLoadAddOn`'s own two lines, in order: load, then use what it created.
+        assert_eq!(
+            script
+                .eval::<Vec<String>>(
+                    "local loaded, reason = LoadAddOn('BaseOptions') \
+                     return { tostring(loaded), tostring(reason), tostring(OptsRan), \
+                              tostring(IsAddOnLoaded('BaseOptions')) }"
+                )
+                .ok(),
+            Some(vec!["1".into(), "nil".into(), "true".into(), "1".into()]),
+        );
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// **A `.toc` line naming a file the package does not ship does not stop a demand load**
+    /// (decision 2107) — 1450's rule, applied by `LoadAddOn` and not only by the startup walk.
+    ///
+    /// The reference logs `Couldn't open %s` and carries on (wow-re
+    /// `xml-toc-path-resolution.md` §4). Ours sent the miss to the **script-error** channel
+    /// instead, and the corpus paid for it the moment `LoadAddOn` became reachable at scale:
+    /// FuBar's `LoadLoadOnDemandPlugins` demand-loads 55 plugins whose `.toc`s each list an
+    /// `AmmoFuLocale-koKR.lua` none of them ships, and every one of them scored a session
+    /// failure for a file the real client shrugs at. 150 → 89 on the vanilla corpus.
+    #[test]
+    fn a_missing_manifest_file_does_not_fail_a_demand_load() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let (home, _h) = hermetic_root("lod-missing-file");
+        write_addon(
+            &home,
+            "Holey",
+            "## Interface: 11200\n## Title: Holey\n## LoadOnDemand: 1\n\
+             Locale-koKR.lua\nreal.lua\n",
+            // `Locale-koKR.lua` is listed and NOT written — the FuBar plugin shape exactly.
+            &[("real.lua", "HoleyRan = true")],
+        );
+        let mut script = UiScript::new().unwrap();
+        script.set_screen_size(1024.0, 768.0);
+        let _ = load_third_party(&mut script, None, true);
+
+        assert_eq!(
+            script
+                .eval::<Vec<String>>(
+                    "local loaded, reason = LoadAddOn('Holey') \
+                     return { tostring(loaded), tostring(reason), tostring(HoleyRan), \
+                              tostring(IsAddOnLoaded('Holey')) }"
+                )
+                .ok(),
+            Some(vec!["1".into(), "nil".into(), "true".into(), "1".into()]),
+            "the addon loads, its remaining files run, and it reads as loaded"
+        );
+        // The miss is a WARNING on the host channel, never a script error — the harness's session
+        // column and `smoke.sh`'s zero-ERROR count both read the error channel, and 1450's whole
+        // point is that a player's broken package cannot redden either.
+        assert!(
+            script.take_errors().is_empty(),
+            "a missing manifest entry must not reach the script-error channel"
+        );
+        let warnings = script.take_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("Holey/Locale-koKR.lua") && w.contains("not found")),
+            "…but it must still be said out loud: {warnings:?}"
+        );
+        // …and retained where the player can read it (1495), as the walk's misses are.
+        assert!(
+            script
+                .diagnostics()
+                .iter()
+                .any(|d| d.message.contains("Holey/Locale-koKR.lua")),
+            "the miss is retained in the diagnostic log"
         );
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }

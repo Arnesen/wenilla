@@ -370,6 +370,8 @@ pub(crate) fn drive_nameplates(
         Option<&InheritedVisibility>,
     )>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
+    // The optimistic AFK mirror (`[0xb6e5cc]`) — the own-player `<AFK>` override, 2088.
+    mirror: Res<crate::ui_chat::AfkMirror>,
     // The show-gate inputs (one tuple param — Bevy's 16-param ceiling).
     gates: (
         Res<Selection>,
@@ -532,6 +534,22 @@ pub(crate) fn drive_nameplates(
             store.map_or(0, |s| s.0.player_flags())
         } else {
             0
+        };
+        // **The own-player AFK override** (2088; wow-re `afk-dnd-command-law.md` §8, which settled
+        // what `overhead-name.md` had only INFERRED). The AFK slot `0x5ec9e0` — and only that slot
+        // — carries a pre-gate: if the subject's GUID is the active player's AND the optimistic
+        // mirror `[0xb6e5cc]` is non-zero, the `<AFK>` tag emits **regardless of the flag bit**
+        // (`0x5ec9fd`/`0x5eca04 jne 0x5eca12`, jumping past the `0x5eca0c test byte [ecx+8],0x2`).
+        // That is what puts `<AFK>` over your own head the instant you type `/afk`, a round trip
+        // before the descriptor confirms it. DND and GM have no such path — pure bit tests.
+        //
+        // Folded into `flags` rather than passed alongside, so `lines_current`'s in-place compare
+        // and `flag_prefix`'s build cannot disagree about it: the differential test that pins
+        // those two to each other keeps holding for free.
+        let flags = if is_self && mirror.is_afk() {
+            flags | 0x2
+        } else {
+            flags
         };
         let sub = if net.kind == EntityKind::Unit {
             benilla_protocol::guid::entry(guid.0)

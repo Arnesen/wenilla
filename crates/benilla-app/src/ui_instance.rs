@@ -291,21 +291,6 @@ impl InstanceState {
     }
 }
 
-/// The GlobalStrings token `GetText(token, nil, ordinal)` actually reads — `LocaleProperties.lua`
-/// (`GetPluralTag` → `GetPluralIndex`), which the reference calls into through `0x703bf0`.
-///
-/// Absent or exactly 1 → the bare token; **anything else, zero included** → `token .. "_P1"`, with
-/// `GetText`'s own fall-back to the bare token when the twin does not resolve.
-fn plural_token(token: &str, ordinal: Option<u32>, get: &dyn Fn(&str) -> Option<String>) -> String {
-    if ordinal.is_some_and(|n| n != 1) {
-        let plural = format!("{token}_P1");
-        if get(&plural).is_some_and(|s| !s.is_empty()) {
-            return plural;
-        }
-    }
-    token.to_string()
-}
-
 /// Resolve one queued line to its displayed text — `GetText` + the `%s`/`%d` fills, then the
 /// debug wrapper if the save-created flag asked for it.
 ///
@@ -317,8 +302,8 @@ fn lockout_text(
     map_name: Option<&str>,
     get: &dyn Fn(&str) -> Option<String>,
 ) -> Option<String> {
-    let token = plural_token(line.token, line.ordinal, get);
-    let template = get(&token).filter(|s| !s.is_empty())?;
+    // `GetText(token, nil, ordinal)`'s own plural pick, through the shared primitive.
+    let template = benilla_ui::strings::plural(line.token, line.ordinal, get)?;
     // Arguments in the template's own order — every lockout template takes its `%s` before its
     // `%d`s (checked against all fourteen tokens), which is what makes one ordered list exact.
     let mut args: Vec<benilla_ui::strings::Arg<'_>> = Vec::new();
@@ -825,26 +810,37 @@ mod tests {
     /// `if ( not string )` arm. Modelled with a locale that has the singular only.
     #[test]
     fn a_missing_plural_twin_falls_back_to_the_bare_token() {
+        // Marked stand-ins rather than the shipped wording: the primitive returns a *template*,
+        // so the assertion has to be readable as "which key did it reach", which is the thing
+        // worth asserting (decision 2045).
         let sparse = |key: &str| match key {
-            "RAID_INSTANCE_WARNING_HOURS" => Some("in %d hour.".to_string()),
+            "RAID_INSTANCE_WARNING_HOURS" => Some("<bare>".to_string()),
             _ => None,
         };
+        let both = |key: &str| match key {
+            "RAID_INSTANCE_WARNING_HOURS" => Some("<bare>".to_string()),
+            "RAID_INSTANCE_WARNING_HOURS_P1" => Some("<twin>".to_string()),
+            "RAID_INSTANCE_WELCOME" => Some("<welcome>".to_string()),
+            _ => None,
+        };
+        let plural = benilla_ui::strings::plural;
         assert_eq!(
-            plural_token("RAID_INSTANCE_WARNING_HOURS", Some(5), &sparse),
-            "RAID_INSTANCE_WARNING_HOURS"
+            plural("RAID_INSTANCE_WARNING_HOURS", Some(5), &sparse).as_deref(),
+            Some("<bare>"),
+            "no twin: GetText's own `if ( not string )` arm"
         );
         assert_eq!(
-            plural_token("RAID_INSTANCE_WARNING_HOURS", Some(5), &globals),
-            "RAID_INSTANCE_WARNING_HOURS_P1"
+            plural("RAID_INSTANCE_WARNING_HOURS", Some(5), &both).as_deref(),
+            Some("<twin>")
         );
         assert_eq!(
-            plural_token("RAID_INSTANCE_WARNING_HOURS", Some(1), &globals),
-            "RAID_INSTANCE_WARNING_HOURS",
+            plural("RAID_INSTANCE_WARNING_HOURS", Some(1), &both).as_deref(),
+            Some("<bare>"),
             "exactly 1 is the bare token"
         );
         assert_eq!(
-            plural_token("RAID_INSTANCE_WELCOME", None, &globals),
-            "RAID_INSTANCE_WELCOME",
+            plural("RAID_INSTANCE_WELCOME", None, &both).as_deref(),
+            Some("<welcome>"),
             "no ordinal is the bare token"
         );
     }
@@ -1092,17 +1088,21 @@ mod tests {
             );
         }
 
-        // The three plural twins exist, so `plural_token` really has something to select.
+        // The three plural twins exist, so the pick really has something to select — asserted by
+        // the twin's own shipped text, which differs from the bare token's.
         for token in [
             "RAID_INSTANCE_WARNING_HOURS",
             "RAID_INSTANCE_WARNING_MIN",
             "RAID_INSTANCE_WARNING_MIN_SOON",
         ] {
+            let twin = real(&format!("{token}_P1"));
+            assert!(twin.is_some(), "{token} has a shipped plural twin");
             assert_eq!(
-                plural_token(token, Some(2), &real),
-                format!("{token}_P1"),
-                "{token} has a shipped plural twin"
+                benilla_ui::strings::plural(token, Some(2), &real),
+                twin,
+                "{token} at two takes its twin"
             );
+            assert_ne!(twin, real(token), "{token}'s two forms differ");
         }
         // …and the welcome does not, which is why the reference passes it no ordinal at all.
         assert!(
@@ -1113,7 +1113,7 @@ mod tests {
         // Every warning template names the instance and takes exactly the fills we hand it.
         for (ty, fills) in [(1u32, 1usize), (2, 1), (3, 1), (4, 3)] {
             let line = warning(ty, 409, 3_600).expect("a template");
-            let template = real(&plural_token(line.token, line.ordinal, &real)).unwrap();
+            let template = benilla_ui::strings::plural(line.token, line.ordinal, &real).unwrap();
             assert!(template.contains("%s"), "{} names the instance", line.token);
             assert_eq!(
                 template.matches("%d").count(),

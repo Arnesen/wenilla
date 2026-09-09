@@ -70,11 +70,15 @@
 // is against the shader leg — which is the leg we implement. The two do not compose: an active ARB
 // program bypasses the texture environment entirely.
 //
-// A SINGLE swatch row (V) indexes both the colour and the alpha — they track together. V is `clamp(byte/42)`
-// for river/lake (VERIFIED `c81768`, saturates ~5 yd → the channel middle hits the deep teal row) and
-// byte/255 for ocean (placeholder; ocean uses a non-LUT UV path). (Earlier cuts: ripple-as-colour → black;
-// ×8 over-saturated; FLAT colour killed the gradient; sky×0.711 was the wrong builder; `byte/255` was the
-// wrong LUT → river middle never went teal. Corrected to rows 14–17 raw lerp + the /42 V, 2026-05-31.)
+// A SINGLE swatch row (V) indexes both the colour and the alpha — they track together. Each kind reads
+// its OWN verified LUT, built side by side in `FUN_0068c4c0`: `clamp(byte/42)` for river/lake
+// (`c81768`, `FUN_0068d790`, saturates ~5 yd → the channel middle hits the deep teal row) and
+// `clamp(byte/255)` for ocean (`c7fcd8`, `FUN_0068d690`, saturates ~148 yd). The divisors differ
+// because the authored bytes do — the sea ramps 1.72 byte/yd against a river's 8.96, and 83 % of ocean
+// vertices are pinned at 255 outright (decision 2069, `examples/liquid_depth_census`). (Earlier cuts:
+// ripple-as-colour → black; ×8 over-saturated; FLAT colour killed the gradient; sky×0.711 was the wrong
+// builder; `byte/255` on the RIVER was the wrong LUT → river middle never went teal. Corrected to
+// rows 14–17 raw lerp + the /42 V on rivers, 2026-05-31.)
 //
 // Two-sided comes from the material (cull off) and is right for EVERY kind: all four reference liquid
 // passes force GL_CULL_FACE off at pass entry against a cull-ON device baseline, and `glFrontFace` is
@@ -283,6 +287,66 @@ fn vertex(in: Vertex) -> LiquidVsOut {
     return out;
 }
 
+// ── The ADT depth swatch, as the reference actually BUILDS and SAMPLES it ────────────────────
+//
+// `FUN_0068a830` fills an 8×64 texture (U inert — each row is `rep stosd`-replicated across all 8
+// columns, matching the vertex fill's pinned `u = 0.5`). Its rows are an exact 32-bit integer
+// accumulator in **byte space**, not a float lerp:
+//
+//     step   = ((c1 - c0) << 8) >> 6     ; == 4*(c1 - c0) EXACTLY (six zero low bits, so the sar
+//     acc    = c0 << 8 ; acc += step     ;  cannot truncate -> no accumulator drift over 64 rows)
+//     row(i) = (acc >> 8) & 0xff         ; == c0 + floor(i*(c1 - c0) / 64),  i = 0..63
+//
+// Two things that costs us, both missed until wow-re's ocean §5 round (decision 2074):
+//
+//   * **the ramp never reaches the deep endpoint.** Row 63 is `c0 + floor(63*d/64)`, ≈98.4 % of the
+//     way, not `c1`. Our old `mix(shallow, deep, V)` ran the last 1/64 of the ramp that does not
+//     exist.
+//   * **the ocean's last row alone is darkened.** The tail `[0x68a9c0, 0x68aa36)` is gated on *last
+//     row* AND *selector == 0* (ocean; river is selector 1 and gets neither): RGB→HSV,
+//     `0x68aa13 fmul [0x8102ec]` — **V *= 0.9** (`0x3f666666`, the f32 nearest 0.9) — HSV→RGB, then
+//     `0x7bbec0`/`0x7bbec8` forcing that row's alpha to 255. `0x7bbd60`'s HSV→RGB writes every
+//     channel as a product with V and the tail touches neither H nor S (and `S == 0` returns
+//     `(V,V,V)` without reading H, so achromatic input takes no hue shift), so the colour half is
+//     exactly `floor(0.9 * byte)` per channel — transcribed at f32 and run over all 2^24 byte
+//     triples: 99.03 % bit-exact, **max deviation 1/255**.
+//
+// It is not a corner case: ~80 % of the ocean vertices in the shipped world carry depth byte 255,
+// so `V = 1.0` and this row IS the open sea (decision 2069's census).
+//
+// Sampling is **LINEAR/LINEAR, no mip, D3DTADDRESS_CLAMP** — flags word `0x201`, `0x5a2a18 and 7`
+// -> `0x85c7d8` row 1 `{MAG, MIN, MIP} = {2, 2, 0}`, `0x5a2a62 shr 3` -> `0x80a254[0] = 3`;
+// corroborated by a GL capture of this exact texture (8x64, levels 1, CLAMP_TO_EDGE, LINEAR/LINEAR).
+// So V maps to the texel coordinate `V*64 - 0.5` and blends across neighbouring rows: the darkening
+// **ramps in over the final 1/64 of V**, it does not step. That band is the only place any of this
+// is visible on a shore.
+//
+// The WMO arms do NOT come through here — their opacity is a different, 256-entry ramp
+// (`0xca7f10`), whose 1/256 granularity the plain lerp above reproduces.
+fn swatch_row(shallow: vec4<f32>, deep: vec4<f32>, i: f32, ocean: bool) -> vec4<f32> {
+    // RGB endpoints arrive already BYTES (`0x68a8fb`/`0x68a902` read two packed dwords straight out
+    // of DayNight state — there is no quantization step for RGB at all); the ALPHA endpoints are
+    // `LightParams` floats the reference quantizes `floor(v*255)` first.
+    let c0 = vec4<f32>(round(shallow.rgb * 255.0), floor(shallow.w * 255.0));
+    let c1 = vec4<f32>(round(deep.rgb * 255.0), floor(deep.w * 255.0));
+    let row = c0 + floor(i * (c1 - c0) / 64.0);
+    if ocean && i >= 63.0 {
+        return vec4<f32>(floor(row.rgb * 0.9), 255.0) / 255.0;
+    }
+    return row / 255.0;
+}
+
+/// The swatch sampled at depth coord `v`, LINEAR across the two rows it falls between.
+fn swatch_at(shallow: vec4<f32>, deep: vec4<f32>, v: f32, ocean: bool) -> vec4<f32> {
+    let t = clamp(v * 64.0 - 0.5, 0.0, 63.0);
+    let i0 = floor(t);
+    return mix(
+        swatch_row(shallow, deep, i0, ocean),
+        swatch_row(shallow, deep, min(i0 + 1.0, 63.0), ocean),
+        t - i0,
+    );
+}
+
 @fragment
 fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
     // HARD FAR-CLIP WALL (same as terrain/models, see terrain.wgsl): discard water beyond the
@@ -324,7 +388,8 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
 
     // Per-vertex swatch coord V (in `in.depth`, computed CPU-side in wow-formats/liquid.rs): river/lake
     // = `clamp(byte/42)` (VERIFIED WoW.exe `c81768` LUT / `FUN_0068d790`, saturating ~5 yd so the channel
-    // middle reaches the deep/teal row), ocean = byte/255 (placeholder, different path). The depth swatch
+    // middle reaches the deep/teal row), ocean = `clamp(byte/255)` (VERIFIED `c7fcd8` / `FUN_0068d690`,
+    // its own LUT on its own authored byte scale — decision 2069). The depth swatch
     // is a plain 2-endpoint lerp (`FUN_0068a830`), so a SINGLE V indexes BOTH the colour and the alpha
     // row: colour `shallow→deep` and opacity `shallow_α→deep_α` track together. (Earlier `×4` colour
     // compression + the gentle `byte/255` V were band-aids for a wrong "V tops at 0.31" belief — removed.)
@@ -337,8 +402,6 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
         shallow = wow_light.water_ocean[0];
         deep = wow_light.water_ocean[1];
     }
-    let water_tint = mix(shallow.rgb, deep.rgb, depth);
-
     // ---- The two WMO water arms ------------------------------------------------------------
     //
     // Neither is the ADT combine below. `0x6b62e0`'s category 0 splits on the owning group's
@@ -446,14 +509,19 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
     // `docs/knowledge/scratch/liquid-depth/fleck-deep.md`.)
     let secondary = in.secondary_vtx;
 
+    // The stage-0 depth swatch, built and sampled as the reference does (see `swatch_row`): a
+    // byte-space 64-row ramp that stops short of the deep endpoint, LINEAR across rows, with the
+    // ocean's last row darkened `floor(0.9*byte)` and its alpha forced opaque.
+    let swatch = swatch_at(shallow, deep, depth, w.kind.y > 0.5);
+
     // primary·colorTex.rgb  +  detail.rgb  +  (secondary + 0.25)·detail.a   (the ocean0_s.bls math)
-    var rgb = primary * water_tint + detail.rgb + (secondary + vec3<f32>(0.25)) * detail.a;
+    var rgb = primary * swatch.rgb + detail.rgb + (secondary + vec3<f32>(0.25)) * detail.a;
 
     // Opacity: depth ramp between the shallow/deep LightParams water alphas, over the SAME V as the
     // colour. Deeper = more opaque, up to α=1.0 where V saturates (river/lake byte 42 ≈ 5 yd), so the
     // channel middle is opaque + teal while the shore stays semi-transparent (V→0, α≈0.5) and the bottom
     // shows through (faithful — the pale edge band). One steep V drives both colour and opacity together.
-    let alpha = mix(shallow.w, deep.w, depth);
+    let alpha = swatch.w;
 
     // Distance fog (see `apply_fog`) — the water fog colour is also teal, so far water converges on the
     // haze.

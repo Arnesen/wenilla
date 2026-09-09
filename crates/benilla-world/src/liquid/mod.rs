@@ -18,10 +18,15 @@
 //! citation here used to name an "apitrace WoW.17 program 159" and a `docs/knowledge/terrain.md`,
 //! neither of which exists, and wow-re had the program attributed to a character draw. The body
 //! colour is **`primary · waterTint`**, where:
-//! - **`waterTint`** is a plain **2-endpoint linear lerp** of the zone's dedicated `Light.dbc` water
+//! - **`waterTint`** is a **64-row byte-space ramp** between the zone's dedicated `Light.dbc` water
 //!   rows, RAW (no ×0.711): IntBand rows 16/17 (river/lake) or 14/15 (ocean), shallow→deep, by the
 //!   per-vertex depth `V` (river/lake `V = clamp(byte/42)`, VERIFIED `c81768`/`FUN_0068d790`; saturates
-//!   ~5 yd so the channel middle reaches the deep/teal row). The swatch is rebuilt **per world frame**,
+//!   ~5 yd so the channel middle reaches the deep/teal row). `FUN_0068a830` builds it as an exact
+//!   integer accumulator — `row(i) = c0 + floor(i·(c1−c0)/64)`, `i = 0..63` — so it **never reaches
+//!   the deep endpoint**, and it is sampled LINEAR/CLAMP at texel `V·64 − 0.5`. **The ocean's last
+//!   row alone is then darkened** `floor(0.9·byte)` per channel (an HSV `V ×= 0.9` that reduces to
+//!   exactly that) with its alpha forced opaque — and ~80 % of the world's ocean vertices sample
+//!   that one row, so it is the open sea's actual colour (decision 2074). The swatch is rebuilt **per world frame**,
 //!   not baked once at bootstrap: the dirty flags `[0xc8117c]`/`[0xc81b70]` clear at
 //!   `0x680b90`/`0x680b97` and refill via `0x58acd0`, so colour and opacity track the zone and the
 //!   clock. (The earlier "reflected sky × 0.711 via `FUN_0068c250`" model fingered the WRONG builder —
@@ -32,20 +37,34 @@
 //! - the animated `lake_a`/`ocean_h` frame is the **`detailTex`** (near-black RGB + ripple alpha): a
 //!   faint flat lift + an achromatic shimmer on crests — NOT the body colour. Mipped + 16× aniso so the
 //!   ripple averages out at distance (near-field samples mip 0, so near sparkle is the term itself).
-//! - **opacity** = the SAME `V` indexes both colour and alpha (one swatch row → RGB + A): a ramp between
+//! - **opacity** = the SAME `V` indexes both colour and alpha (one swatch row → RGB + A): the same
+//!   64-row ramp between
 //!   the LightParams shallow/deep alphas — river 0.5→1.0, ocean 0.75→1.0. The river channel reaches
 //!   α=1.0 (opaque, deep teal) by byte 42 ≈ 5 yd; the shore stays see-through (the pale edge band —
-//!   the bottom shows). **OPEN:** we ramp it linearly (`127+2·row`), but wow-re reads the byte-verified
-//!   ADT water alpha as the `0xc7fbc0` LUT's `1.6·(i/63)^8` — a curve that stays near-transparent far
-//!   longer and then climbs hard. Unchanged so far: it is a look change to every ADT water surface in
-//!   the game, so it belongs in one A/B with the WMO arms rather than landing on its own.
+//!   the bottom shows). The linear ramp is right, and `0xc7fbc0`'s `1.6·(i/63)^8` — which this line
+//!   used to flag as a competing reading — is **not on this path at all**: its only consumer is
+//!   `0x68c250` (via `0x68c4a0`) building the separate texture `[0xc7fbb8]`, bound at `0x685257`
+//!   inside a branch proven **dead** (`[0xc800ec]` is BSS whose only writer stores 0 and which is
+//!   never a `0x58b2b0` out-param target, so both arms are controlled). It is the sky/overlay glare
+//!   falloff, not a liquid opacity curve. The swatch's alpha column is the same endpoint lerp its RGB
+//!   is (`0x68a830`). VERIFIED, wow-re's §5 ocean round — `terrain/scratch/ocean-depth-ramp-law.md`.
 //!
-//! River/lake `V = clamp(byte/42)` (steep `c81768` LUT, `FUN_0068d790`) — NOT `byte/255` (the `c7fcd8`
-//! LUT, a different draw list the from-above river path doesn't use; it left the river middle stuck on
-//! the shallow green row). Ocean uses a non-LUT UV path → placeholder `/255` pending its own RE+A/B.
+//! **Each kind reads its own depth LUT, and both are verified** — `FUN_0068c4c0` builds them side by
+//! side and the two vert-fills read them the same way, `tc0 = (0.5, ramp[depthByte])`: river/lake
+//! `c81768 = min(d/42, 1)` (`FUN_0068d790`, `fld` @`0x68d818`), ocean `c7fcd8 = min(d/255, 1)`
+//! (`FUN_0068d690`, `fld` @`0x68d718`). Putting the river's `/42` on a river was the 2026-05-31 fix;
+//! the ocean's `/255` was never the same mistake, and calling it a placeholder was ours, not the
+//! binary's — `0x68d890`, the address that claim rested on, is the **magma** vert-fill (authored
+//! per-vertex texcoords × 3/256), as `benilla_adt::LiquidVertex::texcoords` has always said.
+//! The two divisors differ because the two authored depth bytes do: measured over every MCLQ block in
+//! Azeroth + Kalimdor, the sea's byte ramps **1.72 byte/yd** against a river's **8.96**, so `/255`
+//! saturates at ~148 yd of depth and `/42` at ~4.7 yd — within ~15 % of each other in yards per unit
+//! of V — and 83.4 % of ocean vertices are pinned at byte 255 outright, so the open sea is authored
+//! fully deep and the ramp is a shore band. Decision 2069;
+//! `benilla-formats::examples::liquid_depth_census` is the instrument, `WOW_OCEAN_DEPTH_DIV` the A/B.
 //! (Earlier cuts: ripple-as-colour → black; `×8` → "deep too early"; FLAT colour → "completely gone";
-//! sky × 0.711 → wrong builder; `byte/255` → wrong LUT, no teal centre. Faithful = rows 14–17 raw lerp
-//! + the /42 V. 2026-05-31.)
+//! sky × 0.711 → wrong builder; `byte/255` on the RIVER → wrong LUT, no teal centre. Faithful =
+//! rows 14–17 raw lerp + the /42 V on rivers, the /255 V on the sea.)
 //!
 //! Two-sided, alpha-blended, depth-write off (Bevy's transparent pass = the verified MCLQ water render
 //! state).

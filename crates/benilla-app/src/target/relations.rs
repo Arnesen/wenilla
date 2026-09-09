@@ -85,6 +85,51 @@ pub(crate) fn can_interact(
 /// `UNIT_FLAG_NOT_SELECTABLE` (bit 25) — `CanAssist`'s own first disqualifier, and one of
 /// `CanAttack`'s five refusal bits (vmangos `UnitDefines.h`).
 const UNIT_FLAG_NOT_SELECTABLE: u32 = 1 << 25;
+
+/// `IsSelectable` — CGUnit_C's **vtable slot 21** (`0x60be60`), the predicate every selection path
+/// reaches through the `+0x58` thunk `0x5f1ec0` (`mov eax,[ecx]; jmp [eax+0x54]`):
+///
+/// ```text
+/// 60be60  mov  eax,[ecx+0x110]        ; the descriptor block
+/// 60be6f  shr  ecx,0x19 / test cl,1   ; UNIT_FIELD_FLAGS bit 25 (0x02000000) — clear ⇒ return 1
+/// 60be82  cmp  [eax+0x20],…           ; else UNIT_FIELD_CREATEDBY == the active player's guid
+/// 60be94  mov  eax,1 / ret            ;      ⇒ return 1, otherwise 0
+/// ```
+///
+/// So: **`NOT_SELECTABLE` clear, OR the unit is something *I* created.** The `CREATEDBY` clause is
+/// the asymmetry worth carrying — your own flagged creations (your totems, your traps) stay
+/// selectable, somebody else's do not.
+///
+/// Slot `+0x58` is the base stub `0x469fe0` (`xor eax,eax`) in **every** vtable but CGUnit_C's
+/// (`0x80c4f8`) and CGPlayer_C's (`0x80af78`), so a GameObject, an item or a corpse answers
+/// **false** here — which is the reason a non-unit guid can never become the selection.
+///
+/// **`None` is the reference's skipped vcall, not a refusal.** `SetSelection` only makes the call
+/// on an object the manager actually resolved (`0x4935c6`/`0x4935c8` falls straight through to the
+/// commit when it does not), which is how an out-of-range party member — on the roster, no
+/// streamed object — stays selectable. A missing store here is that same state, so it passes; and
+/// a store whose `OBJECT_FIELD_TYPE` has not streamed is read the same permissive way rather than
+/// refusing a selection over an absent field.
+///
+/// Byte-verified in wow-re: `ui/scratch/unitisvisible-object-presence.md` §5 (the function body and
+/// the three corroborating consumers of the same bit) and
+/// `object-layer/scratch/selection-attack-seam.md` §3.1 (the `SetSelection 0x493540` early-out at
+/// `0x4935ee`/`0x4935f3`, §5 trio + orchestrator byte-arbitration).
+pub(crate) fn is_selectable(store: Option<&ObjectStore>, self_guid: Option<u64>) -> bool {
+    let Some(store) = store else {
+        return true; // no resolved object — the reference never makes the call (`0x4935c8`)
+    };
+    // The base stub: only a CGUnit_C / CGPlayer_C carries a real slot-21 override.
+    if !matches!(
+        store.0.object_type(),
+        None | Some(ObjectType::Unit) | Some(ObjectType::Player)
+    ) {
+        return false;
+    }
+    store.0.unit_flags() & UNIT_FLAG_NOT_SELECTABLE == 0
+        || (self_guid.is_some() && store.0.unit_created_by() == self_guid)
+}
+
 /// `UNIT_FLAG_PVP` (bit 12) — what `IsPvP 0x605ff0` tests, after resolving the unit's owner
 /// (vmangos `UnitDefines.h:UNIT_FLAG_PVP = 0x1000`).
 const UNIT_FLAG_PVP: u32 = 0x1000;

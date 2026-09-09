@@ -587,7 +587,15 @@ fn run_files(lua: &Lua, name: &str, read: &Reader, files: &[String]) {
     for file in files {
         let path = crate::loader::join_ref(name, file);
         let Some(bytes) = read(&path) else {
-            log_error(lua, &format!("{name}/{file}: not found"));
+            // **A manifest entry the package does not ship is the PACKAGE's defect** — 1450's
+            // rule, and until 2107 this path had its own copy of it that said the opposite.
+            // The reference logs `Couldn't open %s` and carries on
+            // (`diagnostics::record_load_failure`'s doc has the bytes), so the addon still loads
+            // and `IsAddOnLoaded` still answers 1; the miss is retained and warned, never a
+            // script error. It cost 61 corpus addons their session-start row: FuBar's
+            // `LoadLoadOnDemandPlugins` demand-loads 55 plugins whose `.toc`s list a koKR
+            // localization file none of them ships.
+            load_miss(lua, name, file);
             continue;
         };
         if std::path::Path::new(file)
@@ -602,7 +610,10 @@ fn run_files(lua: &Lua, name: &str, read: &Reader, files: &[String]) {
         let doc = match crate::framexml::parse(&crate::source::decode(&bytes)) {
             Ok(d) => d,
             Err(e) => {
-                log_error(lua, &format!("{name}/{file}: {e}"));
+                // The walk's severity for the same thing: a document that will not parse is a
+                // load failure, not a raise — the reference answers it with a `FrameXML.log` line
+                // and silence (`Couldn't parse XML in %s` `0x846fd8`, sink severity 2).
+                load_failure(lua, &format!("{name}/{file}: {e}"));
                 continue;
             }
         };
@@ -611,6 +622,31 @@ fn run_files(lua: &Lua, name: &str, read: &Reader, files: &[String]) {
             log_error(lua, &format!("{name}/{file}: {e}"));
         }
     }
+}
+
+/// A `.toc` line naming a file the package does not contain, classified the one way
+/// ([`crate::script::diagnostics::record_load_failure`]) and logged the one severity (1450: a
+/// player's addon is never an ERROR of ours).
+///
+/// Both halves are the startup walk's, verbatim in effect: the walk pairs its `warn!` with
+/// `report_load_failure`, and this pairs the host warning channel — which the app drains at
+/// `warn!` — with the same retention call. What it deliberately does **not** touch is
+/// [`Model::errors`], the instruments' script-error channel: nothing raised.
+fn load_miss(lua: &Lua, name: &str, file: &str) {
+    load_failure(lua, &format!("{name}/{file}: not found"));
+}
+
+/// Record + say out loud, the pair [`log_error`]'s louder sibling makes for a failure that
+/// **raised**. `benilla-ui` has no logger of its own, so the second half goes on the host's
+/// non-fatal warning channel, which the app drains at `warn!` — the walk's own severity for the
+/// same failure.
+fn load_failure(lua: &Lua, msg: &str) {
+    let msg = format!("LoadAddOn: {msg}");
+    crate::script::diagnostics::record_load_failure(lua, &msg);
+    lua.app_data_mut::<Model>()
+        .expect("model")
+        .warnings
+        .push(msg);
 }
 
 /// `root/rel`, refusing to escape `root` — the AddOns-root sandbox (1186), lexical and applied

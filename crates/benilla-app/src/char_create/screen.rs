@@ -120,38 +120,48 @@ fn spawn_screen(
     let empty = GlueStrings::default();
     let strings = strings.unwrap_or(&empty);
 
-    let mut root = commands.spawn((
-        CharCreateUi { s },
-        DynTint::Backdrop,
-        GlobalZIndex(SCREEN_Z),
-        Node {
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            ..default()
-        },
-        BackgroundColor(BACKDROP),
-    ));
-    root.with_children(|ui| {
-        // The 3D scene, full-bleed and first (everything else draws over it) — the ref's screen IS
-        // a fullscreen ModelFFX: the per-race background with the character standing in it (the
-        // booth renders both into this window-sized target). The whole pane drags to rotate, the
-        // ref's full-frame mouse rotation; the page tint behind it is the no-art fallback.
-        let mut pane = ui.spawn((
-            CreateAction::Model,
-            Button,
+    let root = commands
+        .spawn((
+            CharCreateUi { s },
+            DynTint::Backdrop,
+            GlobalZIndex(SCREEN_Z),
             Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(0.0),
-                top: Val::Px(0.0),
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
                 ..default()
             },
-        ));
-        if let Some(image) = model_image {
-            pane.insert(ImageNode::new(image));
-        }
+            BackgroundColor(BACKDROP),
+        ))
+        .with_children(|ui| {
+            // The 3D scene, full-bleed and first (everything else draws over it) — the ref's
+            // screen IS a fullscreen ModelFFX: the per-race background with the character standing
+            // in it (the booth renders both into this window-sized target). The whole pane drags
+            // to rotate, the ref's full-frame mouse rotation; the page tint behind it is the
+            // no-art fallback. It keeps the WINDOW while the chrome below does not: a pillarbox's
+            // bars are the booth camera's own output clear inside this same target (1619 §3).
+            let mut pane = ui.spawn((
+                CreateAction::Model,
+                Button,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    ..default()
+                },
+            ));
+            if let Some(image) = model_image {
+                pane.insert(ImageNode::new(image));
+            }
+        })
+        .id();
 
+    // ...and every piece of chrome hangs off the CANVAS — the boxed scene's own rect (decision
+    // 2091). The race/class towers are this screen's edge-anchored chrome: against the window they
+    // stand over the bars, and 1587's "no void at 21:9" held only because they did (1619 §2).
+    let mut canvas = commands.spawn((crate::glue::glue_canvas(), ChildOf(root)));
+    canvas.with_children(|ui| {
         left_tower(ui, art, &font, s, strings);
 
         // The WoW logo (`CharacterCreateWoWLogo`, 256×128 at (3,−7)) — after the tower, like the

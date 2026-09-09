@@ -1394,6 +1394,92 @@ fn the_type_identity_verbs_answer_what_the_binary_answers() {
     );
 }
 
+/// **`GetFrameType`/`IsFrameType` — 1.12's own names for the pair above, on the FRAME side**
+/// (decision 2106).
+///
+/// The client registers type identity twice: `CScriptRegion` publishes
+/// `GetObjectType`/`IsObjectType` (the test above), and `CSimpleFrameScript.cpp` publishes
+/// `GetFrameType 0x773640` / `IsFrameType 0x773700` — both carved at the bytes in wow-5875-re
+/// `system/ui/scratch/item17-frameapi-batch1.md`. Later clients kept the first pair and dropped
+/// the second; we had shipped only the first, which is the inverse of 1189's usual failure — a
+/// real 1.12 name we were *missing*, not an invented one we offered.
+///
+/// It cost the world map. Cartographer 2.02's `LookNFeel.lua:368` finds the map's player arrow
+/// with `v:GetFrameType() == "Model" and not v:GetName()`; with the verb nil that raised inside
+/// `OnEnable`, AceAddon swallowed it, and every map open then put
+/// `LookNFeel.lua:737: attempt to index field 'playerModel'` on screen.
+#[test]
+fn the_frame_side_type_identity_verbs_are_1_12s_own_names() {
+    let s = crate::script::UiScript::new().unwrap();
+    s.run(
+        r#"
+        FTFrame = CreateFrame("Frame", "FTFrame")
+        FTButton = CreateFrame("Button", "FTButton")
+        FTModel = CreateFrame("Model", nil, FTFrame)
+        FTTex = FTFrame:CreateTexture("FTTex", "ARTWORK")
+        "#,
+    )
+    .unwrap();
+
+    // `GetFrameType` reads the same per-class type-name slot `GetObjectType` does (`[edx+0x1c]`),
+    // so the two agree by construction — one value, extra arguments ignored.
+    for (obj, leaf) in [
+        ("FTFrame", "Frame"),
+        ("FTButton", "Button"),
+        ("FTModel", "Model"),
+    ] {
+        assert_eq!(
+            s.eval::<String>(&format!("return {obj}:GetFrameType()"))
+                .unwrap(),
+            leaf
+        );
+        assert_eq!(
+            s.eval::<String>(&format!("return {obj}:GetObjectType()"))
+                .unwrap(),
+            leaf,
+            "the two names must never disagree — they read one slot"
+        );
+    }
+
+    // The exact line Cartographer walks the world map with.
+    assert!(
+        s.eval::<bool>(r#"return FTModel:GetFrameType() == "Model" and not FTModel:GetName()"#)
+            .unwrap(),
+        "an anonymous Model must answer its type AND a nil name — LookNFeel.lua:368"
+    );
+
+    // `IsFrameType` walks the same chain: the leaf, every base, the number 1 on a hit and nil on
+    // a miss, case-insensitive and whole-string.
+    assert_eq!(
+        s.eval::<i64>("return FTButton:IsFrameType('Button')")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        s.eval::<i64>("return FTButton:IsFrameType('frame')")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        s.eval::<i64>("return FTButton:IsFrameType('REGION')")
+            .unwrap(),
+        1
+    );
+    for absent in ["LayoutFrame", "ScriptObject", "Object", "Slider", "Fram"] {
+        assert!(
+            s.eval::<Option<i64>>(&format!("return FTButton:IsFrameType('{absent}')"))
+                .unwrap()
+                .is_none(),
+            "{absent} is not in a Button's chain"
+        );
+    }
+
+    // A REGION does not get the frame-side pair — the two registrars are distinct, and offering
+    // both names on everything would be the superset 1189 forbids.
+    assert!(s.eval::<bool>("return FTTex.GetFrameType == nil").unwrap());
+    assert!(s.eval::<bool>("return FTTex.IsFrameType == nil").unwrap());
+}
+
 /// **The frame side of the type identity, and the three chains a guess gets wrong.**
 ///
 /// `_Nameplates.lua` is why this half exists: it asks `Region:GetObjectType()` (the region twin)

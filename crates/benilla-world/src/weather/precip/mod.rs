@@ -667,8 +667,10 @@ fn push_precip(
         // Streaks, patters and mist are all centimetre-scale or bigger, so absolute world verts
         // cost them nothing; the flake draw below overrides this (its quads are millimetres).
         cam_relative: false,
+        no_depth_test: false,
         main_entity: Entity::PLACEHOLDER,
         light: None,
+        clip: None,
     };
     let start = quads.begin();
     push_streaks(&mut quads.verts, &precip.rain.drops, wind.tilt, cam_pos);

@@ -84,6 +84,14 @@ impl ChatLanguages {
     /// The addon sentinel is *not* handled here: `language == -1` never reaches this path at all
     /// (it is dropped upstream as addon traffic, decision 1029), and it is a `u32` by the time we
     /// see it.
+    /// **Is the viewer a GM?** — `PLAYER_FLAGS & 0x8`, read at the same `0x49a9cc` site the garble
+    /// gate reads it at. The chat chokepoint's spam arm needs the identical bit (`0x49ab03`), and
+    /// it is already here, so it is answered from here rather than re-derived from a second
+    /// descriptor query (decision 2077).
+    pub(crate) fn is_gm(&self) -> bool {
+        self.gm
+    }
+
     pub(crate) fn effective_language(&self, chat_type: u8, language: u32) -> u32 {
         if self.gm || !self.have_player || ALWAYS_UNIVERSAL.contains(&chat_type) {
             return 0;

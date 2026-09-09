@@ -29,10 +29,11 @@
 //! frame carries no such script), and SUPPRESSES `OnClick` for that release — an un-started
 //! gesture leaves the ordinary click path untouched. The **world drop**
 //! ([`cursor::world_drop_click`]) fires only on a completed left CLICK over the game world:
-//! press AND release both landed over no frame, no drag started (the byte-verified trigger — the
-//! client's `0x495300` runs on the WorldFrame click release; a drag release routes as a drag,
-//! never a click), routed by the app-fed pick ([`super::Model::world_pick`], decisions 0571 +
-//! 0574 — an object pick keeps everything, terrain drops items only, nothing drops any arm).
+//! press AND release both landed on **the world** ([`over_world`] — the world frame, or no frame
+//! at all where none is loaded), no drag started (the byte-verified trigger — the client's
+//! `0x495300` runs on the WorldFrame click release; a drag release routes as a drag, never a
+//! click), routed by the app-fed pick ([`super::Model::world_pick`], decisions 0571 + 0574 — an
+//! object pick keeps everything, terrain drops items only, nothing drops any arm).
 //!
 //! ## Division of labor with [`cursor`]
 //!
@@ -127,6 +128,32 @@ pub(super) fn install(lua: &mlua::Lua) -> mlua::Result<()> {
     Ok(())
 }
 
+/// Whether `h` is the world frame — the one frame whose mouse hits belong to the 3D world
+/// (decisions 1983/1984, `worldframe-widget.md`: "the hover walk probes strata 8→0 and the world
+/// frame wins exactly when nothing else mouse-enabled is under the cursor; the press runs the
+/// frame's Lua `OnMouseDown` (never consuming), then the `BUTTON1`/`BUTTON2` binding — which
+/// **is** the world click; the release mirrors it").
+fn is_world_handle(model: &Model, h: FrameHandle) -> bool {
+    model
+        .arena
+        .frame(h)
+        .is_some_and(|f| f.kind == crate::widget::FrameKind::WorldFrame)
+}
+
+/// Whether a press/release target is **the world** rather than the UI — the predicate the world
+/// drop is gated on, and the one thing decision 1983 silently changed the meaning of.
+///
+/// Before the stock `WorldFrame` joined the manifest (1983, 2026-09-04) the world was simply
+/// *where no frame is*, and this was spelled `hit.is_none()` throughout. The stock file anchors a
+/// mouse-enabled frame over the whole screen, so from that day every world click hit a frame and
+/// the world drop stopped firing — B380 (decision 2089). The world frame IS the reference's click
+/// target for a world click, so it answers **yes** here; `None` still answers yes too, because a
+/// harness with no `WorldFrame.xml` loaded (most tests, an install-less checkout) has nothing
+/// under the cursor at all and means the same thing by it.
+fn over_world(model: &Model, target: Option<FrameHandle>) -> bool {
+    target.is_none_or(|h| is_world_handle(model, h))
+}
+
 /// Whether `(x, y)` falls inside one of this frame's hyperlink spans — the engine half of the
 /// reference's per-span `CSimpleHyperlinkButton` children.
 fn link_span_hit(model: &Model, fh: FrameHandle, x: f32, y: f32) -> bool {
@@ -160,8 +187,7 @@ impl UiScript {
         model
             .id_to_frame
             .get(&id)
-            .and_then(|h| model.arena.frame(*h))
-            .is_some_and(|f| f.kind == crate::widget::FrameKind::WorldFrame)
+            .is_some_and(|h| is_world_handle(&model, *h))
     }
 
     pub fn hit_test_frame(&self, x: f32, y: f32) -> Option<FrameHandle> {
@@ -388,7 +414,7 @@ impl UiScript {
     /// if that frame carries no such script), and SUPPRESSES `OnClick` for this release (an
     /// un-started gesture leaves the ordinary click path untouched). The **world drop**
     /// ([`cursor::world_drop_click`]) fires ONLY on a completed left CLICK over the world —
-    /// press AND release both over no frame, no started drag (the byte-verified trigger: the
+    /// press AND release both [`over_world`], no started drag (the byte-verified trigger: the
     /// client's `0x495300` runs on the WorldFrame click release; a drag release routes as a
     /// drag, never a click — wow-re cursor-dragdrop-payload.md, and the director's report it
     /// confirmed) — routed by the app-fed pick (decisions 0571 + 0574): over an object nothing
@@ -583,16 +609,21 @@ impl UiScript {
                 );
                 let release = cursor::take_drag(&mut model, button);
                 let started = release.as_ref().is_some_and(|r| r.started);
-                // The world drop: press AND release both over no frame, no drag started —
+                // The world drop: press AND release both over THE WORLD, no drag started —
                 // a completed left click on the game world (never a drag release, which just
                 // keeps carrying; decision 0218's byte-verified trigger). What actually drops
                 // is routed inside `world_drop_click` by the app-fed world pick (decisions
                 // 0571 + 0574): an object pick keeps everything, terrain drops items only,
                 // nothing drops any arm.
+                //
+                // "Over the world" is [`over_world`], not `is_none()`: since 1983 the stock
+                // `WorldFrame` is a real mouse-enabled frame covering the screen, so a world
+                // click hits IT — which is exactly what the reference's own world click is
+                // (1984). Spelling this as "no frame" is what B380 was (decision 2089).
                 let dropped = button == "LeftButton"
                     && !started
-                    && hit_id.is_none()
-                    && pressed.is_none()
+                    && over_world(&model, hit_handle)
+                    && over_world(&model, pressed)
                     && cursor::world_drop_click(&mut model);
                 let wants = format!("{button}Up");
                 let click = if started {
@@ -796,7 +827,12 @@ impl UiScript {
                 self.push_error(e);
             }
         }
-        hit_id.is_some() || world_dropped
+        // Whether the **UI** consumed the event. A hit on the world frame is not the UI
+        // consuming anything — "the press runs the frame's Lua `OnMouseDown` (never consuming),
+        // then the `BUTTON1`/`BUTTON2` binding" (1984) — so it answers no unless the click was
+        // itself the world drop. Without that clause the stock `WorldFrame` would report every
+        // click in the game as eaten by the interface.
+        hit_id.is_some_and(|id| !self.is_world_frame(id)) || world_dropped
     }
 
     /// Fire `OnDragStop` on a gesture's source — the ONE place that ends a started drag, so the

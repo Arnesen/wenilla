@@ -667,6 +667,34 @@ pub(crate) struct EmoteAnim {
     pub(crate) seq: u64,
 }
 
+/// A **state kit's animation id, which is a comparison and never a play** — `PlaySpellVisualKit`'s
+/// stage-2 leg (VERIFIED, wow-re `state-kit-anim-and-stun-pose.md` §1/§2; decision 2085).
+///
+/// `0x60edf0`'s tail has exactly one site that hands a kit's `+0x8` to the play primitive
+/// (`0x60f3c5 call 0x5fe2f0`), and **stage 2 is diverted around it**: `0x60f387 jne` takes the
+/// stage-2 leg, which compares the unit's currently-armed id (`0x5fdb50` — upper-body key bone
+/// preferred, bone 0 as the fallback) against `kit.AnimID` and either does nothing (`je 0x60f3ca`,
+/// already playing it) or runs `0x5fd9e0(unit, -1)` — a **base-animation recompute** — before
+/// leaving the block for good. Both `SpellVisual` field-4 consumers hardcode stage 2 (the aura
+/// watcher `0x5ff4c6` and the impact hand-off `0x61dced`), so no path in the image ever plays a
+/// state kit's anim.
+///
+/// It is therefore an animation-**cutting** mechanism, and the cut is not incidental: Charge
+/// (22911) plays `Knockdown`(121) from its impact kit and then cuts it with its own state kit's
+/// `Stun`(14), because 121 ≠ 14 forces the recompute. That is also why no stun ever shows the
+/// `Stun` pose despite 23 kits naming it — the selector `0x5fd8b0` cannot produce 14 (its literal
+/// outputs are enumerated in the note), so the recompute lands on `Stand`.
+///
+/// The driver holds the comparison because the armed id lives there. An aura **refresh** in place
+/// emits nothing: the watcher `0x604d00` fires neither arm when a slot is rewritten with the same
+/// id and a non-zero flags nibble, which our per-unit armed-id diff reproduces by construction.
+#[derive(Message, Clone, Copy)]
+pub(crate) struct BaseAnimRecompute {
+    pub(crate) entity: Entity,
+    /// The state kit's `AnimID` — the right-hand side of `0x60f390`'s compare, never played.
+    pub(crate) anim_id: u16,
+}
+
 /// Rear up a rider's mount (decision 0441 P2): resolved to a [`EmoteAnim`] one-shot of
 /// MountSpecial(94) on the unit's MOUNT CHILD entity by [`flourish_to_anim`] — the §5-verified
 /// routing (the flourish plays on the mount model; the rider holds Mount(91) throughout).
@@ -705,18 +733,21 @@ fn flourish_to_anim(
     }
 }
 
-/// Play a **wound-flinch** on a unit: the given `AnimationData.dbc` id (8–10, the CombatWound
-/// family) laid into the wound SECONDARY-blend slot — a decaying overlay that never interrupts
-/// what plays underneath (decision 0111). The spell pipeline's counterpart to the melee flinch:
-/// the client's kit player itself branches here (`0x60edf0` @ `0x60f3ad`: anim in `[8,10]` →
-/// the wound trigger `0x60ea70`, anything else → `PlayAnimation`), so an impact kit's wound anim
-/// must never ride the [`EmoteAnim`] one-shot route — that replaces the base track, the exact
-/// routing decision 0111 falsified. Written by [`spell_visual::route_cast_visuals`]; consumed by
-/// [`driver::drive_animations`] into the same per-frame wound slot as a melee hit.
+/// A **spell-side wound flinch** on `entity` — the client's `0x60ea70(unit, severity = 0)`
+/// reached from three spell paths (decision 2058): the kit player's own branch (`0x60edf0` @
+/// `0x60f3ad`: a kit anim in `[8,10]` goes here instead of `PlayAnimation`), the instant-hit
+/// impact loop (`0x6e8bf0` @ `0x6e8c89` — after the impact kit, iff the spell targets enemies,
+/// [`benilla_formats::SpellDisplay::is_harmful`]), and the missile impact hand-off (`0x61dc50` @
+/// `0x61dc74` — before the impact kit, every living target). All three pass **severity 0**, so
+/// the id is never the kit's own column: the trigger picks CombatWound(9) / StandWound(8) by the
+/// victim's engagement exactly like a non-crit melee hit ([`select::wound_anim`]) and lays it
+/// into the SECONDARY-blend slot — a decaying overlay that never interrupts what plays
+/// underneath (decision 0111). Never the [`EmoteAnim`] one-shot route: that replaces the base
+/// track, the exact routing 0111 falsified. Written by [`spell_visual::route_cast_visuals`];
+/// consumed by [`driver::drive_animations`] into the same per-frame wound slot as a melee hit.
 #[derive(Message, Clone, Copy)]
 pub(crate) struct WoundAnim {
     pub(crate) entity: Entity,
-    pub(crate) anim_id: u16,
 }
 
 /// The target lists off one `SMSG_SPELL_GO` (decision 0099 phase 4) — the payload [`CastEvent`]'s
@@ -841,6 +872,11 @@ pub(crate) struct AnimDriver {
     /// the cast keeps bone 0 — where the reference's next base request overwrites it and leaves the
     /// character neutral.
     gait_flags: u32,
+    /// The **base-animation lock** ([`driver::play::BaseAnimLock`]) — the reference's
+    /// `[unit+0xd58] & 0xc0000`. While a `Knockdown`/`LiftOff`/`Land` holds it, every base request
+    /// is refused outright, which is how a stunned victim's knockdown survives the root's own
+    /// `Stand` recompute (decision 2096).
+    base_lock: driver::play::BaseAnimLock,
     /// The unit's **client-side sheath state** — the mirror of the client's committed CUR cache
     /// (`[unit+0xd40]`, decision 0080): what the weapon placement renders (absent a
     /// [`VisualSheath`] ceremony pin) and what the setter/reconcile test against. Seeded from
@@ -853,6 +889,20 @@ pub(crate) struct AnimDriver {
     sheath_byte: Option<u8>,
     /// The pending mid-animation weapon swap, while a draw/stow one-shot is in flight.
     sheath_swap: Option<SheathSwap>,
+    /// **Did this unit start an animation THIS frame** — of any kind: a one-shot, a masked
+    /// overlay, a cast/channel hold, or the mode machine's own base/gait play. Rewritten every
+    /// pass by [`driver::drive_animations`], so a reader one system later sees exactly the
+    /// frame's edge.
+    ///
+    /// Its one consumer is the weapon-trail latch ([`crate::weapon_trail`], decision 2076). The
+    /// reference consumes `unit+0xd1c`/`+0xd20` inside `CGUnit::PlayAnimation 0x5fe2f0` itself
+    /// (`0x5fe48e`, the fields' only reader), and `0x5fe2f0` is the **single** animation entry
+    /// point in the image — 40 call sites, locomotion among them (`0x602c60` → `0x5fd9e0` →
+    /// `0x5fd8b0` → `0x5fd100`), which is why this is not a one-shot flag: a unit that simply
+    /// starts running consumes the arm, and that is what starts Charge's trail (wow-re
+    /// `charproc8-trail-draw-state.md` §11.5/§11.6). benilla's driver is one batched system, not
+    /// a per-play function, so the arm cannot be read at the call the way the reference reads it.
+    started_anim: bool,
     /// A **masked upper-body one-shot** in flight (decision 0087): a swing/emote the live-state route
     /// sent to the SpineLow overlay (moving / seated / airborne-in-combat), playing *beside* [`Mode`]
     /// while the base track keeps driving the legs (run / sit / jump-arc). `None` = no overlay; a
@@ -1016,9 +1066,11 @@ impl Default for AnimDriver {
             mode: Mode::Gait,
             gait: None,
             gait_flags: 0,
+            base_lock: driver::play::BaseAnimLock::default(),
             sheath_cur: None,
             sheath_byte: None,
             sheath_swap: None,
+            started_anim: false,
             overlay: None,
             overlay_fade: None,
             wound: None,
@@ -1075,6 +1127,18 @@ impl AnimDriver {
         self.sheath_cur
     }
 
+    /// Did this unit start an animation this frame — see [`Self::started_anim`].
+    pub(crate) fn started_anim(&self) -> bool {
+        self.started_anim
+    }
+
+    /// Stand in for the driver's own write, so a consumer's test can raise the edge without
+    /// standing up the whole animation pass to produce it.
+    #[cfg(test)]
+    pub(crate) fn set_started_anim(&mut self, played: bool) {
+        self.started_anim = played;
+    }
+
     /// Whether a draw/stow ceremony is in flight — the manual toggle's mid-ceremony debounce
     /// (guards 11–12 of the client's `ToggleSheath` chain, decision 0080d).
     pub(crate) fn sheath_ceremony_active(&self) -> bool {
@@ -1108,6 +1172,7 @@ impl Plugin for CreatureAnimPlugin {
             .init_resource::<PlaySeq>()
             .init_resource::<gesture::GestureQueue>()
             .add_message::<EmoteAnim>()
+            .add_message::<BaseAnimRecompute>()
             .add_message::<MountFlourish>()
             .add_message::<WoundAnim>()
             .add_message::<SheathSwapMessage>()
@@ -1169,6 +1234,12 @@ impl Plugin for CreatureAnimPlugin {
                     // one-shot lands the same frame the packet (or space press) arrived.
                     flourish_to_anim,
                     drive_animations,
+                    // The weapon-trail latch (decision 2076) — immediately after the driver,
+                    // because the edge it consumes is `AnimDriver::played_anim`, which the driver
+                    // rewrites every pass. The reference reads the latch *inside*
+                    // `PlayAnimation 0x5fe2f0` itself; one system later is as close as a
+                    // batched driver gets, and it is still the same frame.
+                    crate::weapon_trail::fire_weapon_trails,
                     drive_hand_grip,
                     fire_anim_events,
                     // After the event scan: consume this frame's impact tags; the SwingImpact

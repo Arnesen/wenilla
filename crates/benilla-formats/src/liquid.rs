@@ -162,8 +162,9 @@ pub struct LiquidMesh {
     /// rather than anything the client generates ([`benilla_adt::LiquidVertex::texcoords`]).
     pub uvs: Vec<[f32; 2]>,
     /// Per-vertex liquid swatch coord **V** `0..1` from the MCLQ `SVert` depth byte, parallel to
-    /// `positions`. River/lake = `clamp(byte/42)` (VERIFIED `c81768`, saturates ~5 yd); ocean = byte/255
-    /// (placeholder — ocean uses a different non-LUT path, see `build_liquid_mesh`). The reference uses
+    /// `positions`. River/lake = `clamp(byte/42)` (VERIFIED `c81768`, saturates ~5 yd); ocean =
+    /// `clamp(byte/255)` (VERIFIED `c7fcd8`, saturates ~148 yd — its own LUT, on its own authored
+    /// byte scale; see [`OCEAN_DEPTH_V_SATURATION`]). The reference uses
     /// this single V to index the depth swatch for BOTH the body-colour band (shallow→deep water rows)
     /// and the opacity ramp (`colorTex.a` = `127+2·row`, deeper = more opaque).
     ///
@@ -216,6 +217,49 @@ const HEIGHT_SENTINEL: f32 = 1.0e9;
 /// `FUN_0068d690` that the from-above river path does not use — hence the river middle never reached
 /// the deep/teal swatch row until this. The river depth ramp is ≈8.5 byte/yd, so V saturates at ≈5 yd.)
 const RIVER_DEPTH_V_SATURATION: f32 = 42.0;
+/// Ocean depth-byte at which the swatch coord `V` saturates: `V = clamp(byte/255)`.
+/// VERIFIED — the ocean has its **own** LUT, not a missing one. `FUN_0068c4c0` builds
+/// `DAT_00c7fcd8[i] = min(i/255, 1.0)` (256 f32 entries, `fstp` @`0x68c57c`) beside the river's
+/// `c81768`, and the ocean vert-fill reads it at `0x68d718 fld [depth*4 + 0xc7fcd8]` exactly as the
+/// river fill reads its own at `0x68d818` — same shape, same `tc0 = (0.5, ramp[depthByte])`, only a
+/// different divisor (wow-re `terrain/scratch/rf81-liquid-color-lut-builder.md`, a §5 pair that
+/// converged byte-identically, corroborated independently by `water-shading-law.md` §5).
+///
+/// **The two divisors are not comparable, because the two depth bytes are not on one scale** — which
+/// is what made `/255` look 6× too slow beside the river's `/42`. Measured over every MCLQ block in
+/// Azeroth + Kalimdor (`examples/liquid_depth_census`, 17.4 M ocean and 0.55 M river wet vertices,
+/// each byte paired against its own geometric depth `surface − terrain`):
+///
+/// | | authored ramp | byte 255 is | V saturates at |
+/// |---|---|---|---|
+/// | river/lake | 8.96 byte/yd | 28 yd | byte 42 ≈ **4.7 yd** |
+/// | ocean | 1.72 byte/yd | 148 yd | byte 255 ≈ **148 yd** |
+///
+/// The artists authored the sea's byte **5.2× gentler per yard**, so the 6× gentler LUT lands the two
+/// ramps within ~15 % of each other in *yards of depth per unit of V*. `/42` on the ocean would be
+/// the correction applied twice. It is also not a subtle difference: **83.4 % of all ocean wet
+/// vertices are pinned at byte 255** — the open sea is authored fully deep, and the whole ramp is a
+/// shore band. (The river control reproduces its own independently-verified ≈8.5 byte/yd, which is
+/// what says the census measures what it claims to.)
+const OCEAN_DEPTH_V_SATURATION: f32 = 255.0;
+
+/// `WOW_OCEAN_DEPTH_DIV=<divisor>` — override [`OCEAN_DEPTH_V_SATURATION`] for one run.
+///
+/// The ocean depth ramp is 97 % of the water in the world and its whole visible extent is the shore
+/// band, so "is this the right curve" is a question about a beach, and a **look** question — the
+/// director's to call, not ours to grade from a screenshot. This is the A/B: `WOW_OCEAN_DEPTH_DIV=42`
+/// puts the river's ramp on the sea (deep by ~24 yd of depth instead of ~148), so the two can be run
+/// side by side against `./run-ref-client.sh` at the same shoreline. Read once, at first use.
+fn ocean_depth_v_divisor() -> f32 {
+    static DIV: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *DIV.get_or_init(|| {
+        std::env::var("WOW_OCEAN_DEPTH_DIV")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|d| *d > 0.0)
+            .unwrap_or(OCEAN_DEPTH_V_SATURATION)
+    })
+}
 
 /// Build a flat liquid surface mesh from one parsed MCLQ **block** at MCNK origin `position` (the
 /// chunk header's raw WoW `[x, y, z]`). A chunk can hold more than one block — see [`MclqChunk`].
@@ -277,12 +321,13 @@ pub(crate) fn build_liquid_mesh(mclq: &MclqChunk, position: [f32; 3]) -> Option<
         .unwrap_or(0);
     let kind = LiquidKind::from_adt_nibble(sound_nibble)?;
 
-    // Depth-byte → swatch coord `V` divisor (VERIFIED). River/lake (the `c81768`/`FUN_0068d790` path)
-    // saturates at byte 42 = ~5 yd, so the channel middle reaches the deep/teal swatch row. Ocean uses
-    // a DIFFERENT mechanism (`FUN_0068d890` reads explicit per-vertex MCLQ UVs, not a depth LUT) — left
-    // at /255 here pending its own RE + an in-game A/B; an ocean A/B has not been done since this fix.
+    // Depth-byte → swatch coord `V` divisor. BOTH are VERIFIED, and they are two LUTs built side by
+    // side in `FUN_0068c4c0`, not one law and one stand-in: river/lake `c81768` = `min(d/42, 1)` read
+    // by the river fill `FUN_0068d790`, ocean `c7fcd8` = `min(d/255, 1)` read by the ocean fill
+    // `FUN_0068d690`. They differ because the two authored depth bytes are on different scales — see
+    // [`OCEAN_DEPTH_V_SATURATION`] for the census that measures both.
     let depth_v_div = match kind {
-        LiquidKind::Ocean => 255.0,
+        LiquidKind::Ocean => ocean_depth_v_divisor(),
         _ => RIVER_DEPTH_V_SATURATION,
     };
     // Magma reads its UVs off the vertex and its depth off nothing at all (see `LiquidMesh::uvs` /
@@ -607,6 +652,106 @@ mod tests {
 
     /// Golden test against a real Elwynn tile: Crystal Lake area `Azeroth_32_48.adt` has 42 MCLQ
     /// water chunks (all river/still, surface ≈ 143.99 yd). Skips when the client isn't present.
+    /// Every liquid mesh a real tile builds, **paired with the raw MCLQ block it came from** — so a
+    /// depth assertion can be made against the bytes on disk rather than against the mesh's own
+    /// arithmetic run backwards.
+    fn tile_liquids_with_source(
+        chain: &mut crate::Chain,
+        map: &str,
+        tx: u32,
+        ty: u32,
+    ) -> Vec<(benilla_adt::MclqChunk, LiquidMesh)> {
+        let bytes = chain
+            .read_file(&format!("World\\Maps\\{map}\\{map}_{tx}_{ty}.adt"))
+            .expect("read adt");
+        let ParsedAdt::Root(root) =
+            parse_adt(&mut std::io::Cursor::new(&bytes[..])).expect("parse adt");
+        root.mcnk_chunks
+            .iter()
+            .flat_map(|m| {
+                m.liquids.iter().filter_map(|lq| {
+                    build_liquid_mesh(lq, m.header.position).map(|mesh| (lq.clone(), mesh))
+                })
+            })
+            .collect()
+    }
+
+    /// **The two depth divisors are two verified LUTs, not one law and one stand-in.** The ocean's
+    /// `/255` spent months labelled a placeholder on a misattributed address (`0x68d890` — the
+    /// *magma* vert-fill), so this pins both against real shipped data: an ocean tile off Baradin
+    /// Bay whose depth bytes run the full ramp, and Elwynn's rivers as the control.
+    ///
+    /// The V assertions read the **raw MCLQ depth byte**, never a byte recovered from the mesh's own
+    /// V (that would assert the arithmetic against itself and pass under any divisor). The shore-band
+    /// assertion is the one with teeth: the sea's byte is authored ~5× gentler per yard than a
+    /// river's, so putting the river's `/42` on the ocean saturates a shore band that should still
+    /// be ramping — which is exactly the look change this ramp is not.
+    #[test]
+    fn each_liquid_kind_rides_its_own_verified_depth_divisor() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+
+        // Baradin Bay: shelf water whose bytes span the ocean ramp rather than pinning at 255.
+        let ocean: Vec<(benilla_adt::MclqChunk, LiquidMesh)> =
+            tile_liquids_with_source(&mut chain, "Azeroth", 41, 41)
+                .into_iter()
+                .filter(|(_, m)| m.kind == LiquidKind::Ocean)
+                .collect();
+        assert!(!ocean.is_empty(), "Azeroth_41_41 carries ocean");
+
+        let mut raw: Vec<u8> = Vec::new();
+        for (src, mesh) in &ocean {
+            for (n, v) in mesh.depths.iter().enumerate() {
+                let byte = src.vertices[n].depth_byte();
+                raw.push(byte);
+                assert!(
+                    (*v - f32::from(byte) / OCEAN_DEPTH_V_SATURATION).abs() < 1e-4,
+                    "ocean V is the raw byte over 255 (VERIFIED `c7fcd8`); byte {byte} gave V={v}"
+                );
+            }
+        }
+
+        // The shore band exists and is NOT saturated — the whole point of the gentler divisor. Under
+        // `/42` every one of these mid-band verts would already read the deep row.
+        let mid = raw.iter().filter(|&&b| (42..=200).contains(&b)).count();
+        let pinned = raw.iter().filter(|&&b| b == u8::MAX).count();
+        assert!(
+            mid > 100,
+            "this tile must carry a real shore ramp to test, saw {mid} mid-band verts"
+        );
+        assert!(
+            mid * 4 > pinned,
+            "the `/42` divisor would flatten a shore band this tile spends {mid} verts ramping \
+             through (against {pinned} genuinely pinned-deep) — the look change the ocean ramp is not"
+        );
+
+        // Control: rivers/lakes DO ride `/42`, and Elwynn's channel middles reach the deep row.
+        let river: Vec<(benilla_adt::MclqChunk, LiquidMesh)> =
+            tile_liquids_with_source(&mut chain, "Azeroth", 32, 48)
+                .into_iter()
+                .filter(|(_, m)| m.kind == LiquidKind::Still)
+                .collect();
+        assert!(!river.is_empty(), "Azeroth_32_48 carries river/lake water");
+        let mut saturated_below_255 = false;
+        for (src, mesh) in &river {
+            for (n, v) in mesh.depths.iter().enumerate() {
+                let byte = src.vertices[n].depth_byte();
+                let want = (f32::from(byte) / RIVER_DEPTH_V_SATURATION).clamp(0.0, 1.0);
+                assert!(
+                    (*v - want).abs() < 1e-4,
+                    "river V is clamp(byte/42) (VERIFIED `c81768`); byte {byte} gave V={v}"
+                );
+                // The teeth on the river side: a byte well under 255 already reads fully deep,
+                // which `/255` could never produce.
+                saturated_below_255 |= (42..200).contains(&byte) && *v >= 0.999;
+            }
+        }
+        assert!(
+            saturated_below_255,
+            "a river channel middle saturates to the deep row by byte 42, not byte 255"
+        );
+    }
+
     #[test]
     fn parses_elwynn_lake_tile() {
         let data = crate::wow_data_or_skip!();

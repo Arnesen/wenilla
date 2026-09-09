@@ -755,6 +755,7 @@ dependencies = [
  "objc2-foundation 0.2.2",
  "rand 0.8.6",
  "raw-window-handle",
+ "regex",
  "rtrb",
  "serde",
  "serde_json",

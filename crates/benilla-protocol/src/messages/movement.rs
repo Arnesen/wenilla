@@ -233,6 +233,67 @@ impl SplineMode {
     }
 }
 
+/// **What the opcode of a relayed move means**, beyond the pose every one of them carries — the
+/// receiver's switch, modelled once (decision 2064).
+///
+/// The `[packed guid][MovementInfo]` relay family is 23 opcodes on ONE client handler (`0x603bb0` →
+/// `OnUnitMoveEvent 0x601580`), and for most of them the opcode is pure narration: the flags word in
+/// the body already says what changed, and `0x601580`'s parse runs *before* it even loads the opcode
+/// (`0x47eba0` at `0x6015ce`). Three cases are not narration, and this enum is exactly those three —
+/// VERIFIED against the binary in wow-re's `collision/scratch/movement-relay-family-map.md`, which
+/// maps all thirty rows.
+///
+/// Deliberately one field rather than a bag of booleans: they are disjoint (one opcode per packet)
+/// and the set is closed, so an enum forces every receiver to say what it does with each — which is
+/// how the mistake below was possible for as long as it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RelayVerb {
+    /// The ordinary pose stream: start/stop/strafe/jump/turn/pitch/swim/fall-land/set-facing,
+    /// walk-vs-run mode, the observer's hover / feather-fall / water-walk, and the knockback relay.
+    /// The opcode adds nothing the flags word does not already carry.
+    #[default]
+    Pose,
+    /// `MSG_MOVE_HEARTBEAT` — the periodic mid-move pulse.
+    ///
+    /// **It is NOT excluded from the pre-fire reconcile, and believing otherwise was a two-year
+    /// error** (decision 2064, correcting 0601/0603). The queued move-event node's tag `0x26`, which
+    /// `0x619030` (facing interp) and `0x619090` (position reconcile) both skip, is the
+    /// **teleport's**, not the heartbeat's — `push 0x26` appears at exactly two addresses in the
+    /// movement region, `0x6186bd` and `0x618736`, both inside functions reached only from the
+    /// teleport arms (`0x602fb0`, whose other branch sends `push 0xc7` = `MSG_MOVE_TELEPORT_ACK`).
+    /// A deferred heartbeat *is* eligible for both blends. The variant survives the correction
+    /// because the distinction is still worth tracing.
+    Heartbeat,
+    /// `MSG_MOVE_TELEPORT` — the observer's near-teleport (a Blink, a `.tele`). **The one opcode of
+    /// the thirty the client never smooths toward**: tag `0x26`, skipped by both blends. Every relay
+    /// snaps the pose (`0x7c6420` writes the wire pose into the live position *and* the integrator
+    /// base); this one additionally re-bases the mover, zeroes the interp cells `[cmov+0x148]`/
+    /// `[cmov+0x14c]` via `0x617e90`, and past 30.0 yd forces a world re-anchor.
+    Teleport,
+    /// `MSG_MOVE_ROOT` (`true`) / `MSG_MOVE_UNROOT` (`false`) — the one place in this family where
+    /// **the opcode decides and the flags word does not get a vote**. After the masked merge, the
+    /// client runs `SetRoot 0x7c7340` (`or 0x1000`, then the one-shot motion wipe `& 0xffe07f00`) or
+    /// `ClearRoot 0x7c7370` (`and ~0x1000`) unconditionally. vmangos happens to send a word that
+    /// already agrees — it forces `MOVEFLAG_ROOT` back on for a rooted mover
+    /// (`MovementHandler.cpp:1070`) — so honouring the opcode changes nothing today and makes the
+    /// root independent of the server continuing to be careful.
+    Root(bool),
+}
+
+impl RelayVerb {
+    /// Which verb a relay opcode carries. Anything not named here is [`Self::Pose`].
+    pub fn of(opcode: u16) -> Self {
+        use super::opcode as op;
+        match opcode {
+            op::MSG_MOVE_HEARTBEAT => Self::Heartbeat,
+            op::MSG_MOVE_TELEPORT => Self::Teleport,
+            op::MSG_MOVE_ROOT => Self::Root(true),
+            op::MSG_MOVE_UNROOT => Self::Root(false),
+            _ => Self::Pose,
+        }
+    }
+}
+
 /// One jump's ballistic launch parameters — the conditional `MovementInfo` tail present iff the
 /// `MOVEFLAG_JUMPING` (0x2000) flag is set. VERIFIED byte-for-byte against vmangos `MovementInfo::Read`
 /// (build 1.12.1): wire order is `zspeed, cosAngle, sinAngle, xyspeed` (note cos *before* sin). The

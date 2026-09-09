@@ -666,4 +666,72 @@ mod tests {
              and a fragment write costs every draw on this lane its early-Z (decision 2016)"
         );
     }
+
+    /// The ADT depth swatch, pinned two ways: the WGSL still carries the reference's own row
+    /// arithmetic, and that arithmetic reproduces wow-re's published byte vectors.
+    ///
+    /// The mirror below is a **spec anchor**, not a second implementation — nothing else calls it.
+    /// It exists because WGSL has no unit-test harness here (Bevy's `#import`/`#ifdef` mean naga
+    /// cannot validate these files standalone), so the source-text pin above it is what ties the two
+    /// together: change the shader's formula and this fails, pointing at the numbers it has to keep
+    /// producing.
+    ///
+    /// The vectors are wow-re's, from `terrain/scratch/ocean-depth-ramp-law.md` — `Light.dbc` id 4,
+    /// map 0, t = 1440, the ocean pair `LightIntBand` sub-14 → sub-15.
+    #[test]
+    fn liquid_swatch_reproduces_the_reference_row_ramp() {
+        let src = include_str!("shaders/liquid.wgsl");
+        // The row accumulator: `c0 + floor(i*(c1 - c0)/64)`, NOT a lerp to the deep endpoint.
+        assert!(
+            src.contains("let row = c0 + floor(i * (c1 - c0) / 64.0);"),
+            "the swatch stopped building its rows the way FUN_0068a830 does — a plain lerp to the \
+             deep endpoint runs a 64th of a ramp that does not exist (decision 2074)"
+        );
+        // The ocean-only tail: floor(0.9*byte) on the LAST row, alpha forced opaque.
+        assert!(
+            src.contains("if ocean && i >= 63.0 {")
+                && src.contains("vec4<f32>(floor(row.rgb * 0.9), 255.0)"),
+            "the ocean's last-row darkening is gone — ~80% of the world's ocean vertices sample \
+             that row, so this is the open sea's colour (decision 2074)"
+        );
+        // LINEAR sampling across the two rows V falls between, at texel `V*64 - 0.5`.
+        assert!(
+            src.contains("let t = clamp(v * 64.0 - 0.5, 0.0, 63.0);"),
+            "the swatch stopped sampling as an 8x64 LINEAR/CLAMP texture — the ocean darkening \
+             would step instead of ramping across the final 1/64 of V (decision 2074)"
+        );
+
+        /// `row(i)` for one channel, mirroring `swatch_row`'s byte arithmetic exactly.
+        fn row(c0: i32, c1: i32, i: i32) -> i32 {
+            c0 + (i * (c1 - c0)).div_euclid(64)
+        }
+        /// The ocean tail's colour half.
+        fn tail(b: i32) -> i32 {
+            (f64::from(b) * 0.9).floor() as i32
+        }
+
+        // Ocean shallow (sub-14) 0x00457b63 and deep (sub-15) 0x000b2228, as R/G/B.
+        let (shallow, deep) = ([69, 123, 99], [11, 34, 40]);
+        let at = |i| [0, 1, 2].map(|k| row(shallow[k], deep[k], i));
+
+        // Row 63 is one short of the endpoint on G — the ramp never arrives.
+        assert_eq!(at(63), [11, 35, 40], "row 63 before the ocean tail");
+        assert_ne!(
+            at(63)[1],
+            deep[1],
+            "the ramp must NOT reach the deep endpoint"
+        );
+        assert_eq!(
+            at(62),
+            [12, 36, 41],
+            "row 62, the other half of the last blend"
+        );
+        assert_eq!(
+            at(63).map(tail),
+            [9, 31, 36],
+            "row 63 after the ocean tail (HSV V *= 0.9, which is floor(0.9*byte) per channel)"
+        );
+        // The shallow end is the endpoint exactly — the tail and the shortfall are deep-end only.
+        assert_eq!(at(0), shallow, "row 0 is the shallow endpoint verbatim");
+    }
 }

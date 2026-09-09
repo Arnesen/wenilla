@@ -1,6 +1,18 @@
-//! The item tooltip's display vocabulary — the extracted enUS name tables (`INVTYPE_*`,
-//! subclass, damage school, `ITEM_MOD_*`, class/race lists) and the byte-verified color
-//! constants the render law paints with. Pure data; the law itself is [`super::render`].
+//! The item tooltip's display vocabulary — the builder's own **key** tables (`INVTYPE_*`,
+//! `ITEM_MOD_*`, `SPELL_SCHOOL%d_CAP`), the DBC-sourced subclass/class/race names, and the
+//! byte-verified color constants the render law paints with. Pure data; the law itself is
+//! [`super::render`], which resolves every key here against the player's own `GlobalStrings.lua`
+//! (decision 2045).
+//!
+//! **Keys, not sentences, and the difference is not cosmetic.** `INVTYPE_SHIELD` and
+//! `INVTYPE_WEAPONOFFHAND` both read "Off Hand" in enUS and are separately localizable
+//! everywhere else; a table that stored the English could not tell them apart, and this one had
+//! them collapsed into a single arm until 2045's sweep.
+//!
+//! **What stays a Rust literal here, and why it is not the same thing**: [`subclass_name`],
+//! [`CLASS_NAMES`] and [`RACE_NAMES`] name rows the reference reads out of DBC records (the
+//! `{class,subclass}` table `0xc0db90`, ChrClasses, ChrRaces), never out of `GlobalStrings.lua`.
+//! Those belong to the DBC-feed question, not to this one.
 
 /// The client's 7-entry quality→color table (wow-re RF-0055, VERIFIED at `0xc0d3c8` behind
 /// `GetItemQualityColor 0x48dfb0`): Poor gray, Common white, Uncommon green, Rare blue, Epic
@@ -30,33 +42,49 @@ pub(super) const GRAY: [f32; 4] = [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 
 /// The owned set member's pale cream — byte-read `0xc0d368 = ffffff97` (writer `0x529050`).
 pub(super) const CREAM: [f32; 4] = [1.0, 1.0, 151.0 / 255.0, 1.0];
 
-/// InventoryType → the slot line (the client's `INVTYPE_*` GlobalStrings, enUS). 0 (non-equip),
-/// 18 (bag), 27 (quiver) draw no slot line.
-pub(super) fn invtype_name(t: u32) -> Option<&'static str> {
+/// InventoryType → the slot line's GlobalString **key** — the builder's own 30-entry pointer
+/// table at `0x83ddb0`, indexed by `[record+0x2c]` directly (`0x52c103: mov ecx,[ecx*4+0x83ddb0]`,
+/// the read the law's §10 names), dumped entry by entry rather than matched by English.
+///
+/// **Index 0 and index 29 are the pre-seeded empty string `0x882748`** — a non-equip item and an
+/// out-of-range type name nothing, which is the `None` here. 18 (bag) and 27 (quiver) *do* have
+/// entries (`INVTYPE_BAG`/`INVTYPE_QUIVER`) but are unreachable: both are containers, and a
+/// container takes the CONTAINER_SLOTS line above this call instead.
+///
+/// **Four of these keys ship no value, and that is the reference's behaviour, not a gap.**
+/// `INVTYPE_AMMO` (24), `INVTYPE_THROWN` (25), `INVTYPE_RANGEDRIGHT` (26) and `INVTYPE_QUIVER`
+/// (27) are in the exe's table but absent from `GlobalStrings.lua`, so `FrameScript_GetText`
+/// hands the builder an empty left cell and an arrow shows only its type word. We had written
+/// "Projectile", "Thrown" and "Ranged" into those arms — three sentences 1.12 never shows, and
+/// exactly the invention class decision 2045 says a text-matching tripwire cannot catch.
+pub(super) fn invtype_key(t: u32) -> Option<&'static str> {
     Some(match t {
-        1 => "Head",
-        2 => "Neck",
-        3 => "Shoulder",
-        4 => "Shirt",
-        5 | 20 => "Chest",
-        6 => "Waist",
-        7 => "Legs",
-        8 => "Feet",
-        9 => "Wrist",
-        10 => "Hands",
-        11 => "Finger",
-        12 => "Trinket",
-        13 => "One-Hand",
-        14 | 22 => "Off Hand",
-        15 | 26 => "Ranged",
-        16 => "Back",
-        17 => "Two-Hand",
-        19 => "Tabard",
-        21 => "Main Hand",
-        23 => "Held In Off-hand",
-        24 => "Projectile",
-        25 => "Thrown",
-        28 => "Relic",
+        1 => "INVTYPE_HEAD",
+        2 => "INVTYPE_NECK",
+        3 => "INVTYPE_SHOULDER",
+        4 => "INVTYPE_BODY",
+        5 => "INVTYPE_CHEST",
+        6 => "INVTYPE_WAIST",
+        7 => "INVTYPE_LEGS",
+        8 => "INVTYPE_FEET",
+        9 => "INVTYPE_WRIST",
+        10 => "INVTYPE_HAND",
+        11 => "INVTYPE_FINGER",
+        12 => "INVTYPE_TRINKET",
+        13 => "INVTYPE_WEAPON",
+        14 => "INVTYPE_SHIELD",
+        15 => "INVTYPE_RANGED",
+        16 => "INVTYPE_CLOAK",
+        17 => "INVTYPE_2HWEAPON",
+        19 => "INVTYPE_TABARD",
+        20 => "INVTYPE_ROBE",
+        21 => "INVTYPE_WEAPONMAINHAND",
+        22 => "INVTYPE_WEAPONOFFHAND",
+        23 => "INVTYPE_HOLDABLE",
+        24 => "INVTYPE_AMMO",
+        25 => "INVTYPE_THROWN",
+        26 => "INVTYPE_RANGEDRIGHT",
+        28 => "INVTYPE_RELIC",
         _ => return None,
     })
 }
@@ -90,29 +118,31 @@ pub(super) fn subclass_name(class: u32, sub: u32) -> Option<&'static str> {
     })
 }
 
-/// Damage school suffix for a non-physical damage line ("5 - 9 Fire Damage").
-pub(super) fn school_name(s: u32) -> Option<&'static str> {
-    Some(match s {
-        1 => "Holy",
-        2 => "Fire",
-        3 => "Nature",
-        4 => "Frost",
-        5 => "Shadow",
-        6 => "Arcane",
-        _ => return None,
-    })
+/// A damage/resistance school's name key — `SPELL_SCHOOL%d_CAP`, the one string the builder
+/// composes at runtime rather than naming outright (`0x84e4cc`, pushed at `0x52c2a8` for the
+/// damage line and `0x52c8d1` for the resistance line; law §11/§16).
+///
+/// The index is the school itself: `SPELL_SCHOOL0_CAP` is "Physical" and 1..6 are
+/// Holy/Fire/Nature/Frost/Shadow/Arcane. **School 0 answers `None`** because the reference
+/// doesn't name it either — a physical weapon takes the school-less `DAMAGE_TEMPLATE` arm rather
+/// than printing the word.
+pub(super) fn school_key(s: u32) -> Option<String> {
+    (1..=6).contains(&s).then(|| format!("SPELL_SCHOOL{s}_CAP"))
 }
 
-/// Stat-mod type → its `ITEM_MOD_*` display name (vanilla types 0..7; 2 is unused).
-pub(super) fn stat_name(t: u32) -> Option<&'static str> {
+/// Stat-mod type → its `ITEM_MOD_*` key. Not a *name*: the key resolves to the whole line
+/// template, sign hole and all (`ITEM_MOD_AGILITY = "%c%d Agility"`), which is why 2 has no arm —
+/// the builder's 8-way jump table `0x52e510` skips it (law §15, keys byte-read at
+/// `0x52c6eb..0x52c777`).
+pub(super) fn stat_key(t: u32) -> Option<&'static str> {
     Some(match t {
-        0 => "Mana",
-        1 => "Health",
-        3 => "Agility",
-        4 => "Strength",
-        5 => "Intellect",
-        6 => "Spirit",
-        7 => "Stamina",
+        0 => "ITEM_MOD_MANA",
+        1 => "ITEM_MOD_HEALTH",
+        3 => "ITEM_MOD_AGILITY",
+        4 => "ITEM_MOD_STRENGTH",
+        5 => "ITEM_MOD_INTELLECT",
+        6 => "ITEM_MOD_SPIRIT",
+        7 => "ITEM_MOD_STAMINA",
         _ => return None,
     })
 }

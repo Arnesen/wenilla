@@ -102,7 +102,7 @@ use bevy::input::mouse::{
 };
 use bevy::math::DVec2;
 use bevy::prelude::*;
-use bevy::window::{CursorMoved, PrimaryWindow};
+use bevy::window::{CursorLeft, CursorMoved, PrimaryWindow};
 
 use super::LoadingScreen;
 
@@ -118,15 +118,52 @@ pub(crate) struct CoverInput;
 ///
 /// Re-read every covered frame, not stashed once: `bevy_winit` keeps writing the window's position
 /// on every physical move regardless of whether anyone reads the `CursorMoved` message we drain,
-/// so this tracks the pointer through the whole load and hands back the *current* place on the way
-/// out. Without the hand-back the position would stay `None` until the player's next mouse move —
-/// hover would come back dead after a teleport, which is the same defect in the other direction.
+/// so this tracks the pointer through the whole load and hands it back on the way out. Without the
+/// hand-back the position would stay `None` until the player's next mouse move — hover would come
+/// back dead after a teleport, and the first click would land nowhere, which is the same defect in
+/// the other direction.
+///
+/// # `set_physical_cursor_position` MOVES THE MOUSE (decision 2090)
+///
+/// The load-bearing fact, because the name does not say it and getting it wrong shipped a bug for
+/// months: **`Window::set_physical_cursor_position` is not "tell bevy where the pointer is", it is
+/// "put the pointer there".** It writes `Window.internal.physical_cursor_position`, and
+/// `bevy_winit::system::changed_windows` turns *any* change of that field to a `Some` into
+/// `winit_window.set_cursor_position(…)` — `CGWarpMouseCursorPosition` on macOS, a real hardware
+/// warp. There is no bookkeeping-only setter; this field is bevy's cursor-warp API, and winit is
+/// its only other writer.
+///
+/// So the hand-back cannot simply write what it stashed. It used to, and the pointer was yanked
+/// across the screen on every cover drop: measured on 2026-09-08 across a live `/logout`, the
+/// restore wrote `(811.9, 1242.6)` physical and the hardware cursor teleported from `(308, 588)`
+/// to `(406, 621)` points in the same millisecond. The stash goes stale over exactly the frames a
+/// cover is up for — a world teardown is one ~283 ms frame during which no events are pumped at
+/// all — so the pointer landed wherever it had been when the world went away, which after a click
+/// on the centred game menu's Logout is the middle of the window.
+///
+/// **The law, therefore: never write a position we do not know to be true right now.** Which is
+/// [`swallow_input_under_the_cover`]'s three-way hand-back:
+///
+/// - Winit already has a position (the field reads `Some`) → it is fresher than anything stashed,
+///   so leave it alone. This is the case a moving mouse always takes: the events queued during a
+///   hitch are delivered *before* the frame that drops the cover.
+/// - The pointer has left the window ([`left`](Self::left)), or the window does not have the
+///   keyboard → write nothing. We have no business moving a pointer that is over somebody else's
+///   window.
+/// - Otherwise nothing has moved since we stashed it, so the stash *is* where the pointer is and
+///   writing it back moves nothing.
 #[derive(Resource, Default)]
 pub(crate) struct CoveredPointer {
     /// The last position seen while covered, in physical pixels.
     stashed: Option<DVec2>,
     /// Is the window's cursor position currently ours (blanked) rather than winit's?
     blanked: bool,
+    /// Has winit said the pointer left the window since [`stashed`](Self::stashed) was taken?
+    ///
+    /// The one thing the window's own field cannot tell us: a `None` there is either winit's
+    /// `CursorLeft` or our blank, and the two must not be confused — restoring the stash over the
+    /// first would warp the pointer back *into* the window from wherever the player took it.
+    left: bool,
 }
 
 /// One frame's swallow of one button plane.
@@ -220,16 +257,40 @@ fn swallow_input_under_the_cover(
     screen: Res<LoadingScreen>,
     mut pointer: ResMut<CoveredPointer>,
     mut window: Query<&mut Window, With<PrimaryWindow>>,
+    mut departures: MessageReader<CursorLeft>,
     mut buttons: Buttons,
     mut raw: RawInput,
 ) {
+    // **Winit's last word on the pointer, read before anything below can overwrite it.** The
+    // window's position field already reflects the LAST cursor event of this frame (bevy_winit
+    // writes it as it dispatches, in order, before the update runs), so `Some` here is the live
+    // truth and outranks the stash. A `None` is ambiguous — winit's `CursorLeft` or our own blank —
+    // which is the whole reason [`CoveredPointer::left`] exists. Drained every frame, covered or
+    // not, so the reader never hands a covered frame a departure from two frames ago.
+    let departed = departures.read().count() > 0;
+    let here = window
+        .single()
+        .ok()
+        .and_then(|w| w.physical_cursor_position());
+    if here.is_some() {
+        pointer.left = false;
+    } else if departed {
+        pointer.left = true;
+    }
+
     if !screen.covering() {
-        // The way out: hand the window its pointer back, once, on the frame the cover drops.
+        // The way out: hand the window its pointer back, once, on the frame the cover drops — and
+        // only when that hand-back is TRUE, because the write is a hardware warp (see
+        // [`CoveredPointer`]). Winit's own fresher answer wins; a pointer that has left the window,
+        // or a window that does not have the keyboard, gets nothing.
         if pointer.blanked {
             pointer.blanked = false;
             let stashed = pointer.stashed.take();
+            let left = std::mem::take(&mut pointer.left);
             if let Ok(mut window) = window.single_mut() {
-                window.set_physical_cursor_position(stashed);
+                if here.is_none() && !left && window.focused {
+                    window.set_physical_cursor_position(stashed);
+                }
             }
         }
         return;
@@ -242,10 +303,13 @@ fn swallow_input_under_the_cover(
     // the load (see [`CoveredPointer`]); `physical_cursor_position()` already answers `None` for a
     // pointer outside the window, which is the same nothing we are about to write.
     if let Ok(mut window) = window.single_mut() {
-        if let Some(seen) = window.physical_cursor_position() {
+        if let Some(seen) = here {
             pointer.stashed = Some(seen.as_dvec2());
-        }
-        if window.physical_cursor_position().is_some() {
+            // Blanking is safe where restoring is not: `changed_windows` guards its warp on the
+            // *clamped* getter answering `Some`, so writing `None` re-caches without touching the
+            // hardware pointer. Only when there is something to blank — an unconditional write
+            // would deref-mut `Window` every covered frame, and a spurious `Changed<Window>` is a
+            // surface reconfigure (`video::apply_present_mode`'s note).
             window.set_physical_cursor_position(None);
         }
         pointer.blanked = true;
@@ -435,6 +499,119 @@ mod tests {
             seen(&app),
             Some(Vec2::new(400.0, 300.0)),
             "the position is handed back on the frame the cover drops"
+        );
+    }
+
+    /// **The hand-back never invents a position** (decision 2090). Writing the window's cursor
+    /// position is a hardware warp, so the cover may only write one it knows is still true — which
+    /// is the difference between handing the pointer back and dragging it across the player's
+    /// screen. Three cases, one harness: winit's fresher answer wins; a departed pointer and an
+    /// unfocused window get nothing; a still pointer gets its stash.
+    #[test]
+    fn the_hand_back_never_writes_a_position_it_does_not_know_to_be_true() {
+        /// Cover, blank, then drop the cover under `arrange` — answering: what does the cover write
+        /// into the window on the way out?
+        fn round_trip(arrange: impl FnOnce(&mut App, Entity)) -> Option<Vec2> {
+            let mut app = App::new();
+            app.add_plugins((
+                bevy::input::InputPlugin,
+                bevy::window::WindowPlugin {
+                    primary_window: None,
+                    exit_condition: bevy::window::ExitCondition::DontExit,
+                    ..default()
+                },
+            ))
+            .init_resource::<LoadingScreen>()
+            .init_resource::<CoveredPointer>()
+            .add_systems(
+                PreUpdate,
+                swallow_input_under_the_cover
+                    .in_set(CoverInput)
+                    .after(bevy::input::InputSystems),
+            );
+            let window = app
+                .world_mut()
+                .spawn((
+                    Window {
+                        resolution: bevy::window::WindowResolution::new(800, 600),
+                        ..default()
+                    },
+                    PrimaryWindow,
+                ))
+                .id();
+            let put = |app: &mut App, at: Option<DVec2>| {
+                app.world_mut()
+                    .entity_mut(window)
+                    .get_mut::<Window>()
+                    .unwrap()
+                    .set_physical_cursor_position(at);
+            };
+
+            // A pointer in the window, then the cover: one covered frame stashes and blanks it.
+            put(&mut app, Some(DVec2::new(400.0, 300.0)));
+            app.world_mut().resource_mut::<LoadingScreen>().active = true;
+            app.update();
+            assert!(
+                app.world()
+                    .entity(window)
+                    .get::<Window>()
+                    .unwrap()
+                    .physical_cursor_position()
+                    .is_none(),
+                "the cover blanked the position"
+            );
+
+            app.world_mut().resource_mut::<LoadingScreen>().active = false;
+            arrange(&mut app, window);
+            app.update();
+            app.world()
+                .entity(window)
+                .get::<Window>()
+                .unwrap()
+                .physical_cursor_position()
+        }
+
+        assert_eq!(
+            round_trip(|_, _| {}),
+            Some(Vec2::new(400.0, 300.0)),
+            "a pointer that never moved gets its stash back — writing it warps nothing, because \
+             that is where the pointer already is"
+        );
+
+        // Winit spoke first: bevy_winit writes the window's field as it dispatches the frame's
+        // events, so a `Some` on the drop frame is the live pointer. Overwriting it with the stash
+        // is exactly the warp — this is the case a moving mouse always takes, and the one that
+        // dragged the cursor to the middle of the window on every `/logout` before 2090.
+        assert_eq!(
+            round_trip(|app, window| {
+                app.world_mut()
+                    .entity_mut(window)
+                    .get_mut::<Window>()
+                    .unwrap()
+                    .set_physical_cursor_position(Some(DVec2::new(120.0, 90.0)));
+            }),
+            Some(Vec2::new(120.0, 90.0)),
+            "winit's fresher answer is left alone, never clobbered with the stash"
+        );
+
+        assert_eq!(
+            round_trip(|app, window| {
+                app.world_mut().write_message(CursorLeft { window });
+            }),
+            None,
+            "a pointer the player took out of the window is not dragged back into it"
+        );
+
+        assert_eq!(
+            round_trip(|app, window| {
+                app.world_mut()
+                    .entity_mut(window)
+                    .get_mut::<Window>()
+                    .unwrap()
+                    .focused = false;
+            }),
+            None,
+            "a window without the keyboard does not move the system pointer at all"
         );
     }
 }

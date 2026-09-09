@@ -160,13 +160,27 @@ pub(super) fn object_create(
             local_pos: [t.pos.x, t.pos.y, t.pos.z],
             local_orientation: t.orientation,
         });
-    // Warm the name cache the moment a unit streams in — the real client's cache is
-    // demand-driven too, but persisted (`CreatureCache.wdb`, wow-re dbcache node), so in
-    // practice it always answers instantly; asking at first *sight* rather than first
-    // *target* gives our session-lifetime cache the same instant feel (the ask-once
-    // discipline makes re-creates and shared templates free).
+    // Warm the name cache the moment a unit streams in. **This is the reference's own timing,
+    // not a convenience** (decision 2073): `0x60afb0` ResolveDisplayInfo registers the unit in
+    // the creature-query cache at `0x60b157`, on the create path (`0x5fb880` ← the `UPDATETYPE`
+    // driver's per-type table) and behind `0x60b134 cmp [OBJECT_FIELD_TYPE], 0x9` — so every
+    // creature it streams is asked for, whether or not anything ever shows its name. And for a
+    // creature the name IS that record's field 0 (`0x60934b`), so template and name are one
+    // query; only players use the separate guid-keyed ask. A `CreatureCache.wdb` hit answers it
+    // with no wire traffic at all there, which our session-lifetime cache approximates.
     if matches!(kind, EntityKind::Unit | EntityKind::Player) {
         let _ = names.resolve(guid, net_commands);
+        // …and for a **pet**, that ask is not the template ask. `resolve` routes a `HIGHGUID_PET`
+        // guid to the pet-NAME query, because a pet guid carries a pet number where a creature's
+        // carries its entry — so a tamed unit would never get a template record at all, and
+        // everything read off one (`type_flags`, rank, creature type) would silently degrade for
+        // it. The reference has no such split: its cache key is the DESCRIPTOR's entry
+        // (`[[unit+8]+0xc]`), which vmangos fills with the real `cinfo->entry` for pets too. Ask
+        // by that key as well; the ask-once discipline makes it free for every non-pet, whose
+        // descriptor entry and guid entry are the same number.
+        if let Some(entry) = fields.object_entry().filter(|&e| e != 0) {
+            let _ = names.resolve_creature(entry, guid, net_commands);
+        }
     }
     // Warm the lock cache the moment a GameObject streams in (decision 0239), so a
     // right-click resolves use-vs-cast instantly — the same ask-once, ask-at-sight

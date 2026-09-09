@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
-use benilla_formats::{char_proc_type, Chain, SpellVisualCatalog, VisualStages};
+use benilla_formats::{char_proc_type, Chain, SpellVisualCatalog, TrailProc, VisualStages};
 
 /// A `SpellVisual` stage's column selector — one of the five lifecycle-kit fields.
 type StagePick = fn(&VisualStages) -> u32;
@@ -33,6 +33,7 @@ fn type_name(ty: i32) -> &'static str {
         char_proc_type::ANIM_RATE => "ANIM_RATE (body anim playback rate — 0 freezes the pose)",
         char_proc_type::CHAIN_CHANNEL => "CHAIN (beam; the channel-stage key — 0955)",
         char_proc_type::CHAIN_CAST => "CHAIN (beam; the cast-stage key — 0955)",
+        char_proc_type::WEAPON_TRAIL => "TRAIL (weapon swing ribbon, $WTB→$WTT)",
         _ => "(unmodelled)",
     }
 }
@@ -117,6 +118,72 @@ pub fn run(chain: &mut Chain) -> Result<()> {
             "  spell {spell_id:>6} {name:<28} kit {kit_id:<5} type {ty:>3} param0 {param:<12} {}",
             type_name(*ty)
         );
+    }
+
+    // 4. The TRAIL set in full. Its shape is unlike the others': the proc carries no model and no
+    //    emitter, so a kit whose slot list is EMPTY still has a visual — and 18 of these are exactly
+    //    that, which is the single fact that decides whether the proc is worth building. The census
+    //    prints the slot count beside every row so that number stays checkable rather than quoted.
+    let trail_kits: BTreeMap<u32, TrailProc> = visuals
+        .kit_ids()
+        .filter_map(|id| Some((id, visuals.kit(id)?.trail_proc()?)))
+        .collect();
+    let mut reach: BTreeMap<u32, BTreeSet<(&str, u32, String)>> = BTreeMap::new();
+    for (spell_id, display) in spells.iter() {
+        let Some(stages) = visuals.stages(display.visual) else {
+            continue;
+        };
+        for (label, pick) in STAGES {
+            let kit_id = pick(stages);
+            if trail_kits.contains_key(&kit_id) {
+                reach
+                    .entry(kit_id)
+                    .or_default()
+                    .insert((label, spell_id, display.name.clone()));
+            }
+        }
+    }
+    println!(
+        "\nWEAPON-TRAIL kits ({} carry the proc, {} reached from a live spell, {} with NO emitter \
+         slot at all):",
+        trail_kits.len(),
+        reach.len(),
+        trail_kits
+            .keys()
+            .filter(|k| reach.contains_key(k))
+            .filter(|k| visuals.kit(**k).is_some_and(|v| v.effects().count() == 0))
+            .count(),
+    );
+    for (kit_id, trail) in &trail_kits {
+        let kit = visuals.kit(*kit_id);
+        let slots = kit.map_or(0, |k| k.effects().count());
+        let anim = kit.and_then(|k| k.anim_id);
+        let [r, g, b] = trail.rgb();
+        let spells = reach.get(kit_id);
+        // `CharParamOne` is printed even though the type-8 arm never reads it (`0x60d80a`'s three
+        // `_ftol`s take Zero/Two/Three only). wow-re's note states every shipped row carries
+        // `20.0` there; a census that hides the column cannot catch that being wrong, and it is —
+        // Sinister Strike's kit 399 carries 15.0.
+        let unread = kit
+            .and_then(|k| {
+                k.char_procs()
+                    .find(|p| p.ty == char_proc_type::WEAPON_TRAIL)
+            })
+            .map_or(0.0, |p| p.params[1]);
+        println!(
+            "  kit {kit_id:<5} anim {:<6} slots {slots}  #{r:02x}{g:02x}{b:02x} a{:<4} {:>6} ms  \
+             one={unread:<5} {} spell(s)",
+            anim.map_or("-".to_string(), |a| a.to_string()),
+            trail.alpha(),
+            trail.duration_ms,
+            spells.map_or(0, BTreeSet::len),
+        );
+        for (label, spell_id, name) in spells.into_iter().flatten().take(6) {
+            println!("        {label:8} {spell_id:>6} {name}");
+        }
+        if spells.map_or(0, BTreeSet::len) > 6 {
+            println!("        … and {} more", spells.map_or(0, BTreeSet::len) - 6);
+        }
     }
     Ok(())
 }

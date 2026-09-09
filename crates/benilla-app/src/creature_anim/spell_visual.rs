@@ -22,7 +22,9 @@ use crate::items::Items;
 use crate::net::{NetCommands, NetEntity, ObjectStore};
 use benilla_assets::{LockRecover, WorldAssets};
 
-use super::{CastEvent, CastEventKind, CastHold, EmoteAnim, SpellGoTargets, WoundAnim};
+use super::{
+    BaseAnimRecompute, CastEvent, CastEventKind, CastHold, EmoteAnim, SpellGoTargets, WoundAnim,
+};
 
 /// The client's literal missile-model fallback when the visual chain resolves to nothing
 /// (`0x860c9c` — a checkerboard cube, shipped in the real MPQs; faithful, not a joke).
@@ -64,14 +66,18 @@ const MEETING_STONE_JOIN_EFFECT: &str = "HARDCODED Meeting Stone Join";
 /// `0x61fae0(kind = 0xc, &guid, completion = 0x5fbf50)`: one-shot, non-persistent, the
 /// end-of-clip terminator, attached at `0x13` like every `HARDCODED` effect.
 pub(crate) fn meeting_stone_join_fx(visuals: &SpellVisuals, entity: Entity) -> Option<SpellKitFx> {
-    let path = visuals.0.hardcoded_effect(MEETING_STONE_JOIN_EFFECT)?;
+    let (effect, path) = visuals.0.hardcoded_effect(MEETING_STONE_JOIN_EFFECT)?;
     Some(SpellKitFx::Begin {
         entity,
         spell_id: 0,
         persistent: false,
         class: FxClass::Hold,
         stage: FxStage::OneShot,
-        effects: vec![(HARDCODED_FX_ATTACH, path.to_string())],
+        effects: vec![FxSlot {
+            tag: HARDCODED_FX_ATTACH,
+            effect,
+            path: path.to_string(),
+        }],
     })
 }
 
@@ -174,6 +180,27 @@ pub(crate) enum FxStage {
     Relive,
 }
 
+/// One attach-point **effect model** a play hangs on a unit: the `SpellVisualEffectName`
+/// **record id**, the M2 attachment tag it hangs from, and the model path.
+///
+/// The id is not decoration. It is half the reference's **same-slot replace** key: every
+/// `CEffect::AddEffect` (`0x61fdd0`) first calls `0x6208e0(owner, rec, tag)`, which walks the
+/// owner's `+0xb4` list and **destroys** every node carrying the same record id at the same tag
+/// (wow-re `kit30-effect-slot.md` §4, VERIFIED `[0x6208e0, 0x62092c]`; decision 2057). Keying on
+/// the path instead would be a different rule — two `SpellVisualEffectName` rows may name one
+/// `.mdx`, and the reference lets those coexist.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FxSlot {
+    /// The M2 attachment id to hang from ([`benilla_formats::KIT_SLOT_TAGS`]), or
+    /// [`benilla_formats::WORLD_EFFECT_TAG`] for the field-12 world plant — the reference's
+    /// `tag == -1`, which `0x620913` excludes from the replace walk, so those genuinely stack.
+    pub(crate) tag: u16,
+    /// The `SpellVisualEffectName` record id — the replace key's other half.
+    pub(crate) effect: u32,
+    /// The effect model's path (the model-cache key).
+    pub(crate) path: String,
+}
+
 /// A spell-visual kit's attach-point **effect model** edge (kit fields 3–11 →
 /// `SpellVisualEffectName` `.mdx` — decision 0099 phase 3; slot loop byte-pinned in wow-re
 /// `spell-visual-apply.md` §1.3). Written here, consumed by `crate::entities::spell_fx` (the
@@ -181,8 +208,8 @@ pub(crate) enum FxStage {
 /// reap-then-begin never races.
 #[derive(Message, Clone)]
 pub(crate) enum SpellKitFx {
-    /// Attach this kit's effect models to the unit — one instance per populated slot,
-    /// `(M2 attachment id, effect model path)`. `persistent` = the precast/channel/aura-state
+    /// Attach this kit's effect models to the unit — one instance per populated slot
+    /// ([`FxSlot`]). `persistent` = the precast/channel/aura-state
     /// lifetime (lives until a matching-[`FxClass`] [`Self::Reap`] — the client's stage-4/2
     /// no-self-termination); else the effect self-terminates after one pass of its model's
     /// first sequence (the stage-0/1 completion callback `0x5fbf50`). A persistent Begin
@@ -196,7 +223,7 @@ pub(crate) enum SpellKitFx {
         /// ([`FxStage`]) — a separate axis from `class`/`persistent`, both of which are about
         /// lifetime ownership rather than what the model plays.
         stage: FxStage,
-        effects: Vec<(u16, String)>,
+        effects: Vec<FxSlot>,
     },
     /// The owner's lifetime ended (GO / fail / channel-clear / a replacing cast for
     /// [`FxClass::Hold`]; the aura leaving the slots for [`FxClass::AuraState`]) — despawn the
@@ -471,9 +498,15 @@ pub(crate) fn held_strike_sound(
 /// A kit's populated emitter slots resolved to `(attach tag, model path)` pairs — the
 /// [`SpellKitFx::Begin`] payload. Slots whose `SpellVisualEffectName` row/path is missing are
 /// dropped (the client's NULL-record skip in the slot loop).
-fn resolve_kit_effects(visuals: &SpellVisualCatalog, kit: &VisualKit) -> Vec<(u16, String)> {
+fn resolve_kit_effects(visuals: &SpellVisualCatalog, kit: &VisualKit) -> Vec<FxSlot> {
     kit.effects()
-        .filter_map(|(tag, id)| visuals.effect_path(id).map(|p| (tag, p.to_string())))
+        .filter_map(|(tag, effect)| {
+            visuals.effect_path(effect).map(|path| FxSlot {
+                tag,
+                effect,
+                path: path.to_string(),
+            })
+        })
         .collect()
 }
 
@@ -490,9 +523,22 @@ pub(crate) struct KitPush {
     pub(crate) seq: u64,
 }
 
+/// The lanes [`route_cast_visuals`] resolves here but does not own — bundled into ONE system
+/// param because that system sits at Bevy's 16-`SystemParam` ceiling: the missile spawns
+/// (phase 4), the dest one-shot orders (0797), the beam plays (0955), the camera shakes (1849)
+/// and the weapon-trail arms (2076). Each is built by the module that owns what it becomes.
+type KitSpawnWriters<'w> = (
+    MessageWriter<'w, MissileSpawn>,
+    MessageWriter<'w, crate::entities::dest_fx::GroundBurst>,
+    MessageWriter<'w, ChainProcPlay>,
+    MessageWriter<'w, SpellKitShake>,
+    MessageWriter<'w, crate::weapon_trail::TrailArm>,
+    MessageWriter<'w, BaseAnimRecompute>,
+);
+
 /// The writer set one discrete kit play fans out to — bundled so [`play_kit`] threads through the
 /// router's arms as one argument (each writer keeps its own system-param lifetime).
-struct KitOut<'a, 'w1, 'w2, 'w3, 'w4, 'w5, 'w6> {
+struct KitOut<'a, 'w1, 'w2, 'w3, 'w4, 'w5, 'w6, 'w7, 'w8> {
     oneshots: &'a mut MessageWriter<'w1, EmoteAnim>,
     wounds: &'a mut MessageWriter<'w2, WoundAnim>,
     sounds: &'a mut MessageWriter<'w3, SpellKitSound>,
@@ -501,6 +547,12 @@ struct KitOut<'a, 'w1, 'w2, 'w3, 'w4, 'w5, 'w6> {
     chain: &'a mut MessageWriter<'w5, ChainProcPlay>,
     /// The kit's camera shake, if field 14 names a group (1849).
     shakes: &'a mut MessageWriter<'w6, SpellKitShake>,
+    /// The kit's weapon-trail ARM, if its `CharProc` slots name one — the dispatcher's type-8
+    /// case (2076). A latch, not a play: nothing is drawn until the unit's next animation.
+    trails: &'a mut MessageWriter<'w7, crate::weapon_trail::TrailArm>,
+    /// The **stage-2** base recompute — what a state kit's anim id spends itself on instead of
+    /// playing ([`BaseAnimRecompute`], decision 2085).
+    recomputes: &'a mut MessageWriter<'w8, BaseAnimRecompute>,
 }
 
 /// One kit played as a **discrete event** on a unit — the client's `PlaySpellVisualKit`
@@ -525,6 +577,21 @@ struct KitPlay {
     sound: bool,
     /// The stage this play is, for the instances' animation lifecycle ([`FxStage`]).
     stage: FxStage,
+    /// Is this the **stage-2** (state-kit) play? It is the client's `0x60f383
+    /// cmp [ebx+0x10],2`, and it forks the whole anim branch — which is why it is the stage and
+    /// not, as it was until decision 2085, a "may this lay a wound" flag.
+    ///
+    /// Stage 2 is **foreclosed from the play site**: `0x60f387 jne` diverts it around the sole
+    /// `0x60f3c5 call 0x5fe2f0` that ever hands a kit's `AnimID` to the animation primitive, and
+    /// its leg leaves the block with `jmp 0x60f3ca` (VERIFIED, wow-re
+    /// `state-kit-anim-and-stun-pose.md` §1). So a state kit neither plays its anim nor reaches
+    /// the `[8,10]` wound test (the half decision 2063 already had): the id is only ever the
+    /// right-hand side of a comparison against what the unit is already playing, and a mismatch
+    /// spends itself on a base recompute ([`BaseAnimRecompute`]).
+    ///
+    /// The other exclusion at `0x60f3a0` — stage 4 with a zero cast time — never reaches this
+    /// branch in benilla: a precast kit's anim becomes the [`CastHold`], not a `play_kit` call.
+    stage_2: bool,
 }
 
 impl KitPlay {
@@ -535,6 +602,7 @@ impl KitPlay {
         effects: true,
         sound: true,
         stage: FxStage::OneShot,
+        stage_2: false,
     };
 }
 
@@ -548,8 +616,13 @@ fn play_kit(
     out: &mut KitOut,
 ) {
     if let Some(anim_id) = kit.anim_id {
-        if (8..=10).contains(&anim_id) {
-            out.wounds.write(WoundAnim { entity, anim_id });
+        if play.stage_2 {
+            // Stage 2: a COMPARISON, never a play ([`KitPlay::stage_2`]). The driver holds the
+            // armed id, so it makes the comparison and spends the mismatch on the recompute.
+            out.recomputes.write(BaseAnimRecompute { entity, anim_id });
+        } else if (8..=10).contains(&anim_id) {
+            // `0x60f3b8: push 0; call 0x60ea70` — severity 0, the kit's own id is NOT what plays.
+            out.wounds.write(WoundAnim { entity });
         } else {
             out.oneshots.write(EmoteAnim {
                 entity,
@@ -580,6 +653,16 @@ fn play_kit(
             proc,
         });
     }
+    // …and its type-8 case (`0x60d80a`, decision 2076), run on the same terms and for the same
+    // reason: the arm is two words written on the UNIT, not one of the kit's attach-point models,
+    // so `play.effects` does not gate it. The dispatcher runs at `0x60f35c` *before* the kit's own
+    // animation is played at `0x60f3c5`, which is how a kit carrying both a proc-8 and an anim id
+    // fires its trail on its own swing — our `EmoteAnim` above and this arm both land before the
+    // driver reads either, so that self-fire falls out of the ordering rather than being arranged.
+    if let Some(trail) = kit.trail_proc() {
+        out.trails
+            .write(crate::weapon_trail::TrailArm { entity, trail });
+    }
     if !play.effects {
         return;
     }
@@ -596,6 +679,18 @@ fn play_kit(
     }
 }
 
+/// One spell landing on one unit — [`play_impact`]'s per-impact inputs.
+#[derive(Clone, Copy)]
+struct ImpactPlay {
+    spell_id: u32,
+    /// The CASTER's ranged fallback visual, already resolved (the caster may be gone by a
+    /// missile arrival), through which a basic shot's impact kit resolves.
+    weapon_visual: Option<u32>,
+    /// Lay the victim's severity-0 wound flinch beside the kit (decision 2058).
+    flinch: bool,
+    seq: u64,
+}
+
 /// The **unit-impact hand-off** (the client's `0x61dc50`, decision 0099 phase 4): the spell
 /// landed on `entity` — play the impact kit (stage 1), then the state kit (stage 2). The state
 /// kit plays its anim + sound only: its **effect models live for the aura's life**, owned by
@@ -608,15 +703,31 @@ fn play_kit(
 /// `0x61dc20` (37 B, content unpinned) is not modeled. `weapon_visual` = the CASTER's ranged
 /// fallback visual (already resolved — the caster may be gone by a missile arrival), through
 /// which a basic shot's impact kit resolves.
+///
+/// [`ImpactPlay::flinch`] is the **spell impact body twitch** (decision 2058): the client lays
+/// the victim's wound flinch at `severity = 0` beside the impact kit — the instant-hit loop
+/// `0x6e8bf0` does it after the kit iff the spell targets enemies (`0x6ea280 == 2`,
+/// [`benilla_formats::SpellDisplay::is_harmful`]), the missile hand-off `0x61dc50` does it
+/// before the kit for every living target. The caller decides which; the driver picks
+/// CombatWound/StandWound by engagement and blends it as a decaying overlay over whatever plays.
+/// Order between the flinch and the kit's own wound branch is moot here: both are severity-0
+/// edges on the same entity in the same frame.
 fn play_impact(
     entity: Entity,
-    spell_id: u32,
-    weapon_visual: Option<u32>,
-    seq: u64,
+    impact: ImpactPlay,
     spells: &crate::ui_action::Spells,
     visuals: &SpellVisualCatalog,
     out: &mut KitOut,
 ) {
+    let ImpactPlay {
+        spell_id,
+        weapon_visual,
+        flinch,
+        seq,
+    } = impact;
+    if flinch {
+        out.wounds.write(WoundAnim { entity });
+    }
     for (stage, play) in [
         (
             (|s: &VisualStages| s.impact) as fn(&VisualStages) -> u32,
@@ -626,6 +737,8 @@ fn play_impact(
             |s: &VisualStages| s.state,
             KitPlay {
                 effects: false,
+                stage_2: true,
+                stage: FxStage::State,
                 ..KitPlay::DISCRETE
             },
         ),
@@ -663,15 +776,7 @@ pub(super) fn route_cast_visuals(
     mut sounds: MessageWriter<SpellKitSound>,
     mut fx: MessageWriter<SpellKitFx>,
     mut sheaths: MessageWriter<super::SheathRequest>,
-    // One tuple param (the 16-SystemParam ceiling): the missile spawns, the dest one-shot orders
-    // (0797), the beam plays (0955) and the camera shakes (1849) — the lanes resolved here where
-    // the catalogs live, built by `crate::entities` and `crate::camera_shake`.
-    mut spawns: (
-        MessageWriter<MissileSpawn>,
-        MessageWriter<crate::entities::dest_fx::GroundBurst>,
-        MessageWriter<ChainProcPlay>,
-        MessageWriter<SpellKitShake>,
-    ),
+    mut spawns: KitSpawnWriters,
     visuals: Option<Res<SpellVisuals>>,
     spells: Option<Res<crate::ui_action::Spells>>,
     mut weapon_src: WeaponVisualSrc,
@@ -684,8 +789,14 @@ pub(super) fn route_cast_visuals(
     };
     // Disjoint field borrows: the beam writer rides `out` for the whole body while the missile and
     // burst writers stay free for the GO loop below.
-    let (missiles, bursts, chains, shakes) =
-        (&mut spawns.0, &mut spawns.1, &mut spawns.2, &mut spawns.3);
+    let (missiles, bursts, chains, shakes, trails, recomputes) = (
+        &mut spawns.0,
+        &mut spawns.1,
+        &mut spawns.2,
+        &mut spawns.3,
+        &mut spawns.4,
+        &mut spawns.5,
+    );
     let mut out = KitOut {
         oneshots: &mut oneshots,
         wounds: &mut wounds,
@@ -693,6 +804,8 @@ pub(super) fn route_cast_visuals(
         fx: &mut fx,
         chain: chains,
         shakes,
+        trails,
+        recomputes,
     };
 
     // The `holds` query is one command-flush stale: an instant cast's START and GO drain from
@@ -712,9 +825,13 @@ pub(super) fn route_cast_visuals(
 
     for p in pushes.read() {
         // The kit-push opcode (decision 0280, stage-0 semantics): fresh transient effects/sound
-        // on EVERY send — the client allocates new CEffects per call, no dedup — while the body
-        // anim rides the driver's arm-level same-id dedup (`0x5fdba0`), so a looping eat/drink
-        // clip free-runs across the ~5 s resends instead of restarting.
+        // on EVERY send, with no *kit-level* active-scan — while the body anim rides the driver's
+        // arm-level same-id dedup (`0x5fdba0`), so a looping eat/drink clip free-runs across the
+        // ~5 s resends instead of restarting.
+        //
+        // "No dedup" was too strong, and decision 2057 corrected it: there is no kit-level scan,
+        // but each SLOT still runs the same-(record, tag) replace (`0x6208e0`) on its way in, so
+        // the resend **swaps the old batch out** rather than piling a second jug on the first.
         if let Some(kit) = visuals.0.kit(p.kit_id) {
             play_kit(
                 p.entity,
@@ -906,11 +1023,16 @@ pub(super) fn route_cast_visuals(
                 // A missile arrived on this unit (decision 0099 phase 4; speed-0 impacts play
                 // inline from the GO loop below and never round-trip through here). The caster's
                 // ranged fallback rode the missile — resolve through it, not the target.
+                // `0x61dc50` @ `0x61dc74`: the arrival flinches every living target — no
+                // hostility test on this path (decision 2058).
                 play_impact(
                     ev.entity,
-                    ev.spell_id,
-                    weapon_visual,
-                    ev.seq,
+                    ImpactPlay {
+                        spell_id: ev.spell_id,
+                        weapon_visual,
+                        flinch: true,
+                        seq: ev.seq,
+                    },
                     spells,
                     &visuals.0,
                     &mut out,
@@ -996,12 +1118,18 @@ pub(super) fn route_cast_visuals(
             }
         }
         if display.speed <= 0.0 {
+            // `0x6e8bf0` @ `0x6e8c7b`–`0x6e8c89`: each hit target flinches after its impact kit
+            // iff the spell targets enemies (decision 2058).
+            let flinch = display.is_harmful();
             for &target in &go.hits {
                 play_impact(
                     target,
-                    go.spell_id,
-                    wv,
-                    go.seq,
+                    ImpactPlay {
+                        spell_id: go.spell_id,
+                        weapon_visual: wv,
+                        flinch,
+                        seq: go.seq,
+                    },
                     spells,
                     &visuals.0,
                     &mut out,
@@ -1116,6 +1244,13 @@ pub(super) fn route_cast_visuals(
                         proc,
                     });
                 }
+                // …and the type-8 arm from the same caller: kit 370 (Whirlwind Primer / Axe
+                // Flurry, a 10 000 ms trail) is reached at the CHANNEL stage and nowhere else,
+                // so without this leg the longest trail in the table never arms (2076).
+                if let Some(trail) = kit.trail_proc() {
+                    out.trails
+                        .write(crate::weapon_trail::TrailArm { entity, trail });
+                }
                 // The channel kit's effect models — persistent while the field holds (the
                 // client's stage-2 lifetime, and so the stage-2 Birth → Hold → Decay lifecycle:
                 // the channel poll `0x612a30` is one of the caller table's stage-2 sites).
@@ -1201,6 +1336,7 @@ pub(crate) fn arm_aura_state_fx(
     mut fx: MessageWriter<SpellKitFx>,
     mut procs: MessageWriter<AuraProc>,
     mut sounds: MessageWriter<SpellKitSound>,
+    mut recomputes: MessageWriter<BaseAnimRecompute>,
     mut armed: Local<EntityHashMap<Vec<u32>>>,
 ) {
     let full_sweep = visuals.as_ref().is_some_and(|v| v.is_changed())
@@ -1252,7 +1388,11 @@ pub(crate) fn arm_aura_state_fx(
                 .char_procs()
                 .filter_map(crate::aura_visual::node_for)
                 .collect();
-            if effects.is_empty() && nodes.is_empty() && kit.sound.is_none() {
+            if effects.is_empty()
+                && nodes.is_empty()
+                && kit.sound.is_none()
+                && kit.anim_id.is_none()
+            {
                 continue; // a state kit that does nothing we model — nothing to arm or reap
             }
             if !effects.is_empty() {
@@ -1279,6 +1419,15 @@ pub(crate) fn arm_aura_state_fx(
             // sound router.
             if let Some(kit_sound) = kit.sound {
                 sounds.write(SpellKitSound::Play { entity, kit_sound });
+            }
+            // …and the ADD edge's stage-2 leg: the kit's anim id is a COMPARISON against what the
+            // unit is already playing, spent on a base recompute when they differ and on nothing
+            // when they agree ([`BaseAnimRecompute`], decision 2085). It is emitted only on this
+            // edge, which is the reference's own shape: an aura REFRESHED in place rewrites its
+            // slot with the same id and a non-zero flags nibble, and `0x604d00` fires neither of
+            // its two arms for that — no re-spawn, no re-arm, no recompute.
+            if let Some(anim_id) = kit.anim_id {
+                recomputes.write(BaseAnimRecompute { entity, anim_id });
             }
             next.push(spell_id);
         }
@@ -1318,7 +1467,7 @@ pub(super) fn arm_loot_fx(
     mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
 ) {
     let full_sweep = visuals.as_ref().is_some_and(|v| v.is_changed());
-    let Some(path) = visuals.as_ref().and_then(|v| v.0.loot_art_path()) else {
+    let Some((effect, path)) = visuals.as_ref().and_then(|v| v.0.loot_art_effect()) else {
         return; // no client data / no such row — no loot art (the DBC-resource degrade shape)
     };
     let scan = if full_sweep {
@@ -1367,7 +1516,11 @@ pub(super) fn arm_loot_fx(
                 } else {
                     FxStage::Relive
                 },
-                effects: vec![(HARDCODED_FX_ATTACH, path.to_string())],
+                effects: vec![FxSlot {
+                    tag: HARDCODED_FX_ATTACH,
+                    effect,
+                    path: path.to_string(),
+                }],
             });
         } else if !lootable && armed.remove(&entity) {
             fx.write(SpellKitFx::Reap {
@@ -1404,7 +1557,7 @@ pub(super) fn arm_level_up_fx(
         };
         match levels.insert(entity, level) {
             Some(prev) if prev != level => {
-                let Some(path) = visuals
+                let Some((effect, path)) = visuals
                     .as_ref()
                     .and_then(|v| v.0.hardcoded_effect(LEVEL_UP_EFFECT))
                 else {
@@ -1418,7 +1571,11 @@ pub(super) fn arm_level_up_fx(
                     class: FxClass::Hold,
                     // The ding self-terminates on its own 1.867 s clip — the stage-0 shape.
                     stage: FxStage::OneShot,
-                    effects: vec![(HARDCODED_FX_ATTACH, path.to_string())],
+                    effects: vec![FxSlot {
+                        tag: HARDCODED_FX_ATTACH,
+                        effect,
+                        path: path.to_string(),
+                    }],
                 });
             }
             _ => {} // first sight arms; an unchanged write is a no-op
@@ -1472,7 +1629,7 @@ pub(super) fn arm_mount_poof_fx(
             // spawns nothing — and first sight arms silently, exactly like the ding: a unit that
             // streams in already mounted did not just mount.
             Some(prev) if prev != mount_display && mount_display != 0 => {
-                let Some(path) = visuals
+                let Some((effect, path)) = visuals
                     .as_ref()
                     .and_then(|v| v.0.hardcoded_effect(MOUNT_POOF_EFFECT))
                 else {
@@ -1486,7 +1643,11 @@ pub(super) fn arm_mount_poof_fx(
                     class: FxClass::Hold,
                     // `0x5fbf50` — destroy at the first completion; the shipped model runs 2.8 s.
                     stage: FxStage::OneShot,
-                    effects: vec![(HARDCODED_FX_ATTACH, path.to_string())],
+                    effects: vec![FxSlot {
+                        tag: HARDCODED_FX_ATTACH,
+                        effect,
+                        path: path.to_string(),
+                    }],
                 });
             }
             _ => {}
@@ -1599,6 +1760,8 @@ pub(super) fn replay_morph_kit(
     mut fx: MessageWriter<SpellKitFx>,
     mut chain: MessageWriter<ChainProcPlay>,
     mut shakes: MessageWriter<SpellKitShake>,
+    mut trails: MessageWriter<crate::weapon_trail::TrailArm>,
+    mut recomputes: MessageWriter<BaseAnimRecompute>,
 ) {
     for swap in swaps.read() {
         // Consume-and-clear even when the kit resolves to nothing — the reference clears
@@ -1620,6 +1783,8 @@ pub(super) fn replay_morph_kit(
             fx: &mut fx,
             chain: &mut chain,
             shakes: &mut shakes,
+            trails: &mut trails,
+            recomputes: &mut recomputes,
         };
         play_kit(
             swap.entity,

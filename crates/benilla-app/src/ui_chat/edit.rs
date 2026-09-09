@@ -29,6 +29,8 @@ pub(crate) enum SendType {
     Officer,
     Battleground,
     BattlegroundLeader,
+    Afk,
+    Dnd,
     Channel,
 }
 
@@ -36,10 +38,26 @@ impl SendType {
     /// The chat-type TOKEN an addon passes to `SendChatMessage` (decision 1199) — the reference's
     /// own `ChatTypeInfo` keys, uppercase.
     ///
-    /// `None` for a token we do not send. That is the honest answer for `"AFK"`/`"DND"` (which
-    /// set a flag rather than sending a line) and for anything an addon simply made up; the
-    /// caller reports it rather than guessing SAY, because a raid warning silently going to /say
-    /// is worse than one that does not go.
+    /// `None` for a token we do not send — anything an addon simply made up. The caller reports
+    /// it rather than guessing SAY, because a raid warning silently going to /say is worse than
+    /// one that does not go.
+    ///
+    /// **`"AFK"` and `"DND"` ARE sends, and this said the opposite** — "which set a flag rather
+    /// than sending a line". They are `CMSG_MESSAGECHAT` types `0x14`/`0x15` like every other row
+    /// here, carrying the away message as their body; it is the SERVER that toggles the
+    /// `PLAYER_FLAGS` bit off the packet and streams it back (vmangos `ChatHandler.cpp`'s
+    /// `CHAT_MSG_AFK` arm → `Player::ToggleAFK`). The wire half was already built and reachable —
+    /// `ChatKind::Afk`/`Dnd`, `writer::chat::send_afk`/`send_dnd`, `CHAT_TYPE_AFK` — and this
+    /// function was the only thing standing between the stock file and it.
+    ///
+    /// **What that cost, and why it is 1751's own lesson:** benilla's slash grammar has always
+    /// had a working `/afk` (`S::ChatAfk` → `ParsedChat::AfkDnd`). Migrating the chat window
+    /// (1948) put the stock `ChatFrame.lua` on the chain, and its parser claims a slash line
+    /// before benilla's grammar ever sees it — so `/afk` became
+    /// `SlashCmdList["CHAT_AFK"](msg)` → `SendChatMessage(msg, "AFK")` → here → `None`, and the
+    /// player got `Unknown chat type "AFK".` Migrating a window means building whatever engine
+    /// verb the stock file turns out to call; the verb existed, and a wrong sentence in this doc
+    /// comment is what kept it unreachable. Decision 2079.
     pub(crate) fn from_token(token: &str) -> Option<SendType> {
         Some(match token {
             "SAY" => SendType::Say,
@@ -54,6 +72,8 @@ impl SendType {
             "OFFICER" => SendType::Officer,
             "BATTLEGROUND" => SendType::Battleground,
             "BATTLEGROUND_LEADER" => SendType::BattlegroundLeader,
+            "AFK" => SendType::Afk,
+            "DND" => SendType::Dnd,
             "CHANNEL" => SendType::Channel,
             _ => return None,
         })
@@ -74,6 +94,8 @@ impl SendType {
             SendType::Officer => ChatKind::Officer,
             SendType::Battleground => ChatKind::Battleground,
             SendType::BattlegroundLeader => ChatKind::BattlegroundLeader,
+            SendType::Afk => ChatKind::Afk,
+            SendType::Dnd => ChatKind::Dnd,
             SendType::Channel => ChatKind::Channel,
         }
     }

@@ -420,9 +420,10 @@ pub enum WorldPick {
 }
 
 /// A world drop: a completed left CLICK on the game world while a payload is held — press and
-/// release both over no frame, no drag (the byte-verified trigger, decision 0218: the client's
-/// `0x495300` runs on the WorldFrame click release only; a drag released over the world routes
-/// as a drag and keeps carrying) — routed by [`Model::world_pick`] (decisions 0571 + 0574,
+/// release both on the world (the world frame, or no frame at all where none is loaded — the
+/// caller's `over_world`, decision 2089), no drag (the byte-verified trigger, decision 0218: the
+/// client's `0x495300` runs on the WorldFrame click release only; a drag released over the world
+/// routes as a drag and keeps carrying) — routed by [`Model::world_pick`] (decisions 0571 + 0574,
 /// byte-verified wow-re cursor-dragdrop-payload.md §11):
 ///
 /// - `Object`: NOTHING drops — the object leg (`0x492ce0`) keeps every real payload and

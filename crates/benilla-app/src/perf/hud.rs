@@ -58,17 +58,21 @@ const PILL_YIELD_GAP: f32 = 4.0;
 /// quads are reused byte-identical (see [`pill_quads`]).
 const HUD_REFRESH_SECS: f32 = 0.25;
 
-/// HUD state. The **dev chord + `P`** toggles `visible` (default on — it's a standing dev
-/// surface). `visible` is `pub(crate)` so the capture harness ([`crate::capture`]) can force the
-/// overlay off for pristine, UI-free screenshots.
+/// HUD state. The **dev chord + `P`** (Ctrl+Shift+P) toggles `visible`, and it starts **hidden**
+/// — the director's call, 2026-09-08: the pill sits over the game for the whole session and the
+/// game is what a dev build is for looking at. It is an instrument you reach for, not furniture.
+/// `visible` is `pub(crate)` so the capture harness ([`crate::capture`]) can force the overlay off
+/// for pristine, UI-free screenshots.
 ///
-/// **`WOW_PERF_HUD=0` starts it hidden**, which is how the HUD gets priced. 1370 records the open
-/// gap: every campaign anchor is measured on a binary that is drawing this overlay, at a cost
-/// booked as "est 0.4–1.2 ms CPU + unquantified GPU" — an estimate, never a measurement, because
-/// nothing could turn the fixture off without also changing the binary. One env var makes it an
-/// interleaved A/B on *one* binary instead (`scripts/leg.sh`), so the constant baked into every
-/// anchor becomes a number. The meters keep sampling either way: only the drawing stops, which is
-/// the half being priced.
+/// **`WOW_PERF_HUD=1` starts it shown**, which is how the HUD gets priced — the knob kept its
+/// meaning in both spellings when the default flipped, so `0` and unset are both hidden. 1370
+/// records the open gap: every campaign anchor was measured on a binary that draws this overlay,
+/// at a cost booked as "est 0.4–1.2 ms CPU + unquantified GPU" — an estimate, never a measurement,
+/// because nothing could turn the fixture off without also changing the binary. One env var makes
+/// it an interleaved A/B on *one* binary instead (`scripts/leg.sh`), so the constant baked into
+/// every anchor becomes a number. The meters keep sampling either way: only the drawing stops,
+/// which is the half being priced — and with the default flipped, the *unmeasured* leg is now the
+/// one nobody is running.
 #[derive(Resource)]
 pub(crate) struct PerfHud {
     pub(crate) visible: bool,
@@ -88,7 +92,7 @@ pub(crate) struct PerfHud {
 impl Default for PerfHud {
     fn default() -> Self {
         Self {
-            visible: std::env::var("WOW_PERF_HUD").as_deref() != Ok("0"),
+            visible: std::env::var("WOW_PERF_HUD").as_deref() == Ok("1"),
             snap: FrameStats::default(),
             // −∞, so the very first frame refreshes rather than drawing an empty snapshot.
             snap_at: f32::NEG_INFINITY,

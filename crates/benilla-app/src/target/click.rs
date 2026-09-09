@@ -70,6 +70,10 @@ pub(super) fn select_on_click(
     mut greeting: MessageWriter<crate::sound::NpcGreetingRequest>,
     ground: Res<crate::ui_action::SpellTargeting>,
     click_cfg: Res<ClickConfig>,
+    // The clicked unit's descriptor — `0x493540`'s `IsSelectable` gate reads it inside
+    // [`scan::commit`]. Read live rather than latched with the press pick: the reference resolves
+    // the object at the *commit*, not at the down edge.
+    stores: Query<&ObjectStore>,
 ) {
     let (hovered, occlusion) = (press.hovered, press.occlusion);
     // Drain the frame's clicks; act only if there was one and the inspector isn't holding left-click.
@@ -106,6 +110,7 @@ pub(super) fn select_on_click(
                 &mut seam,
                 entity,
                 guid,
+                stores.get(entity).ok(),
                 engaged,
                 self_guid,
                 press.attack,
@@ -125,7 +130,14 @@ pub(super) fn select_on_click(
             // selection — so a left-click on a body must leave the target exactly where it was.
             // Without this the corpse would arrive here (its guid is in the other slot) and read
             // as "clicked nothing", dropping the player's target every time they clicked a body.
-            if hovered.corpse.is_some() {
+            //
+            // **A REFUSED pick is the same kind of object hit** (decision 2060). The hover grader
+            // `0x4828d0` takes the mouseover away from a `NOT_SELECTABLE` unit, but the *click*
+            // never went through it: the down-edge pick `0x481f00` still found the object, so the
+            // release takes the object leg `0x4925d0`, whose tail `0x49280c call 0x493540` hits
+            // `SetSelection`'s own `IsSelectable` early-out and returns having changed nothing.
+            // Selecting is refused; deselecting was never on the table.
+            if hovered.corpse.is_some() || hovered.refused {
                 return;
             }
             if click_cfg.deselect_on_click && (!payload_held.0 || occlusion.distance.is_finite()) {
@@ -674,6 +686,7 @@ pub(super) fn act_on_right_click(
         &mut seam,
         entity,
         guid,
+        target,
         me.is_some_and(|(_, _, e)| e),
         me.map(|(_, g, _)| g.0),
         attack,
@@ -1383,14 +1396,32 @@ pub(super) fn clear_target_requests(
     mut selection: ResMut<Selection>,
     mut seam: crate::creature_anim::AttackSeam,
     engaged: Query<(), (With<Engaged>, With<SelfPlayer>)>,
+    mut guid_asks: MessageReader<DeselectGuid>,
 ) {
+    // The engine-side teardown ask (`0x493910(guid, 1)`): a no-op unless the selection IS that
+    // guid — the loot window's move-start close is its one producer today (decision 2097).
+    let asked = guid_asks.read().any(|ask| selection.guid == Some(ask.0));
     let Some(mut script) = script else {
+        if asked {
+            clear(&mut selection, &mut seam, !engaged.is_empty());
+        }
         return;
     };
-    if script.take_target_clear() {
+    // Both drained every frame: a `||` that short-circuited on `asked` would leave the VM's
+    // ClearTarget flag armed for the next frame and clear whatever was targeted by then.
+    let vm_clear = script.take_target_clear();
+    if asked || vm_clear {
         clear(&mut selection, &mut seam, !engaged.is_empty());
     }
 }
+
+/// Ask for the selection teardown **if the selection is this guid** — the reference's
+/// `CGGameUI::SelectionTeardown 0x493910(guid, ecx=1)`, which no-ops unless a selection exists
+/// and equals the argument. The loot window's move-start close raises it for a dead corpse
+/// (`0x48f369`, decision 2097); drained by [`clear_target_requests`], so the attack-stop and the
+/// wire clear stay the teardown's.
+#[derive(bevy::ecs::message::Message, Clone, Copy, Debug)]
+pub(crate) struct DeselectGuid(pub(crate) u64);
 
 /// Drain the UI's **selection asks** — `TargetUnit(token)`, `AssistUnit(token)` and
 /// `TargetLastEnemy()` — and commit each through the shared SetSelection path ([`scan::commit`]).
@@ -2016,6 +2047,87 @@ mod tests {
         });
         assert_eq!(closed.1, None);
         assert!(!interaction_already_open_on(NPC, &closed));
+    }
+
+    /// **The nothing-leg deselect, and the two object hits that are not it** — `select_on_click`'s
+    /// `_` arm.
+    ///
+    /// The reference's deselect lives in the terrain and *nothing* legs of the world click; an
+    /// **object** leg clears no selection, whatever it then decides to do with the object. Two
+    /// picks reach this arm carrying no `target`: a **corpse** (its guid is in the other slot,
+    /// decision 1723) and a **refused** one (a `NOT_SELECTABLE` unit the hover grader threw away,
+    /// decision 2060 — the click's own down-edge pick `0x481f00` still found the object, so the
+    /// release takes the object leg `0x4925d0` and its tail `0x493540` merely refuses to select).
+    /// Reading either as "clicked the sky" would drop the player's target: click a body mid-fight,
+    /// or click the flagged boss you are standing next to, and your target evaporates.
+    #[test]
+    fn an_object_hit_never_deselects_but_empty_world_does() {
+        use crate::net::NetCommands;
+        use bevy::ecs::system::RunSystemOnce;
+
+        const HELD: u64 = 0xF00D;
+
+        // One click of the left button over `pick`, returning the selection it left behind.
+        let click = |pick: Hovered| {
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let mut world = World::new();
+            world.insert_resource(NetCommands(tx));
+            world.init_resource::<InspectMode>();
+            world.init_resource::<crate::ui_cast::QueuedMeleeSpell>();
+            world.init_resource::<crate::ui_action::AutoRepeatActive>();
+            world.init_resource::<crate::ui_script::CursorPayloadHeld>();
+            world.init_resource::<crate::ui_action::SpellTargeting>();
+            world.init_resource::<ClickConfig>();
+            world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
+            world.init_resource::<Messages<crate::player::StandStateRequest>>();
+            world.init_resource::<Messages<crate::sound::NpcGreetingRequest>>();
+            world.init_resource::<Messages<WorldClick>>();
+            world.insert_resource(Selection {
+                target: Some(Entity::PLACEHOLDER),
+                guid: Some(HELD),
+            });
+            world.insert_resource(PressPick {
+                hovered: pick,
+                ..PressPick::default()
+            });
+            world.spawn(SelfPlayer);
+            // The clean left-click the player controller emits.
+            world
+                .resource_mut::<Messages<WorldClick>>()
+                .write(WorldClick);
+            world
+                .run_system_once(select_on_click)
+                .expect("select_on_click runs as a one-shot system");
+            world.resource::<Selection>().guid
+        };
+
+        // Empty world: the deselect arm, which is the behaviour the guards are carved out of.
+        assert_eq!(
+            click(Hovered::default()),
+            None,
+            "clicking the sky deselects"
+        );
+        // A corpse.
+        assert_eq!(
+            click(Hovered {
+                corpse: Some(Entity::PLACEHOLDER),
+                corpse_guid: Some(0xB0DE),
+                distance: 5.0,
+                ..Hovered::default()
+            }),
+            Some(HELD),
+            "a body is an object hit — the target must survive it"
+        );
+        // A refused unit.
+        assert_eq!(
+            click(Hovered {
+                refused: true,
+                distance: 5.0,
+                ..Hovered::default()
+            }),
+            Some(HELD),
+            "so is a NOT_SELECTABLE unit the grader threw away"
+        );
     }
 
     /// **The selection queue, end to end** — Lua in, `Selection` out — over the four ways it is

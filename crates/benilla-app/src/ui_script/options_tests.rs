@@ -798,6 +798,10 @@ fn interface_harness() -> UiScript {
             "Interface\\FrameXML\\QuestFrame.xml",
             r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
             "Interface\\FrameXML\\QuestLogFrame.xml",
+            // The Show Tutorials row's setter is the reference's own Save arm, which reaches
+            // `TutorialFrameCheckButton` and `TutorialFrame_HideAllAlerts` UNGUARDED (2077) — so
+            // the page's harness loads the window that declares them, as the client does.
+            "Interface\\FrameXML\\TutorialFrame.xml",
         ],
     );
     harness_on(s)
@@ -2299,13 +2303,13 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // 1493's; Terrain Distance 1513's) + the Combat page's 14 saved-variable rows (1134) + the Interface page's 6 (3 from
     // 1136, Buff Durations 1139, the target-of-target pair 1576), the Action Bars page's 2 (the
     // lock 1136, Always Show
-    // ActionBars 1500) and the Chat page's 1 (Remove Chat Hover Delay, 1589) + 6 API rows (the Interface page's Show Cloak / Show Helm, 1472; the Action
-    // Bars page's four multibar switches, 1500) — which is the point of counting here rather than
+    // ActionBars 1500) and the Chat page's 1 (Remove Chat Hover Delay, 1589) + 7 API rows (the Interface page's Show Cloak / Show Helm, 1472 and
+    // Show Tutorials, 2077; the Action Bars page's four multibar switches, 1500) — which is the point of counting here rather than
     // per page: the third store's rows are held to the same "the key is 1.12's own and it resolves"
     // bar as the other two. Camera Following Style is counted on the key it wears at rest (Smart's
     // OPTION_TOOLTIP_CAMERA1) and Show When on its own (Always's OPTION_TOOLTIP_TARGETOFTARGET5);
     // their other entries ride the same census as the selection moves.
-    // 55 of the 58 are 1.12's own; the other three are Render Scale (1639), Display Mode
+    // 59 of the 62 are 1.12's own; the other three are Render Scale (1639), Display Mode
     // (1650) and Enable Sound in Background (1847), whose descriptions are benilla's and whose
     // carve-out is above.
     // The 28th CVar row is Block Trades (1764), on the Controls page — its key
@@ -2313,7 +2317,12 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // 29th is Enable Error Speech (1815), 1.12's own fourth Sound checkbox, ditto; the 30th is
     // Enable Sound in Background (1847), the Audio page's fifth checkbox and the one row on that
     // page the reference never made settable.
-    assert_eq!(checked, 58, "every tipped row carries a live key");
+    // The 7th API row is Show Tutorials (2077) — the Interface page's Help box, whose store is
+    // `TutorialsEnabled()` / `ResetTutorials()` / `ClearTutorials()` rather than a CVar, and whose
+    // key OPTION_TOOLTIP_SHOW_TUTORIALS is 1.12's own.
+    // The 30th and 31st CVar rows are the two text filters (2077): Profanity Filter on the
+    // Interface page and Disable Spam Filter on the Chat page, both keys 1.12's own.
+    assert_eq!(checked, 62, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
@@ -2423,7 +2432,9 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
     // rather than 1.12 GlobalStrings — see the guard above.
     // …and Block Trades (1764), the Controls page's 28th CVar row, and Enable Error Speech
     // (1815), the Audio page's fourth checkbox and 1.12's own.
-    assert_eq!(raised, 58, "every row but Auto Loot raises a description");
+    // …and Show Tutorials (2077), the Interface page's seventh API row.
+    // …and the two text-filter rows (2077).
+    assert_eq!(raised, 62, "every row but Auto Loot raises a description");
 }
 
 /// The **Combat page** (decision 1134) — the first rows in this window whose store is a
@@ -3034,6 +3045,90 @@ fn the_equipment_display_rows_read_and_write_through_the_api_not_a_store() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// **Show Tutorials** (decision 2077) — the fourth `func` row, and the one 1.12's own table hides:
+/// its `UIOptionsFrameCheckButtons` entry is a bare `{ index = 28 }`, so a reading of the table
+/// alone (decision 1140's census) files it as unbound. The store is the three special-case arms —
+/// `TutorialsEnabled()` reads it, `ResetTutorials()`/`ClearTutorials()` write it — which is what
+/// this asserts: the row reads the acknowledged bank, ticking it OFF clears, ticking it back ON
+/// resets, and the reference's `~=` guard keeps a no-op click from re-arming every dismissed
+/// tutorial.
+#[test]
+fn show_tutorials_reads_the_bank_and_writes_through_clear_and_reset() {
+    let mut s = interface_harness();
+    // A bank with unacknowledged bits: tutorials are enabled.
+    s.set_tutorial_bank(Some(vec![0x00; 32]));
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowInterface:Click()")
+        .unwrap();
+    assert!(
+        s.eval::<bool>(
+            "return OptionsFrameContainerBodyInterfaceRowShowTutorialsCheck:GetChecked() \
+             and true or false"
+        )
+        .unwrap(),
+        "the row reads TutorialsEnabled(), not a stored value"
+    );
+
+    let _ = s.take_cvar_changes();
+    let _ = s.take_tutorial_clears();
+    let _ = s.take_tutorial_resets();
+
+    // Ticking it off is `ClearTutorials()` — every bit acknowledged.
+    s.run("OptionsFrameContainerBodyInterfaceRowShowTutorialsCheck:Click()")
+        .unwrap();
+    assert_eq!(s.take_tutorial_clears(), 1, "off clears the bank");
+    assert_eq!(s.take_tutorial_resets(), 0);
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "there is no tutorial CVar in 1.12 — the row must not invent one"
+    );
+
+    // The app answers by pushing the cleared bank back; the row now reads off.
+    s.set_tutorial_bank(Some(vec![0xFF; 32]));
+    s.run("OptionsFrameCategoryListRowAudio:Click()").unwrap();
+    s.run("OptionsFrameCategoryListRowInterface:Click()")
+        .unwrap();
+    assert!(
+        !s.eval::<bool>(
+            "return OptionsFrameContainerBodyInterfaceRowShowTutorialsCheck:GetChecked() \
+             and true or false"
+        )
+        .unwrap(),
+        "the revisit re-asks the getter"
+    );
+
+    // Ticking it back on is `ResetTutorials()`.
+    s.run("OptionsFrameContainerBodyInterfaceRowShowTutorialsCheck:Click()")
+        .unwrap();
+    assert_eq!(s.take_tutorial_resets(), 1, "on resets the bank");
+    assert_eq!(s.take_tutorial_clears(), 0);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The reference's `~=` guard, which is the whole reason its Save arm is not a bare pair of calls:
+/// setting the row to the value it already holds must send NOTHING. Without it, a Defaults click on
+/// a page where tutorials are already on would `ResetTutorials()` and re-arm every popup the player
+/// has dismissed — an option that silently undoes hours of play.
+#[test]
+fn a_no_op_write_does_not_re_arm_the_tutorials() {
+    let mut s = interface_harness();
+    s.set_tutorial_bank(Some(vec![0x00; 32])); // enabled
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowInterface:Click()")
+        .unwrap();
+    let _ = s.take_tutorial_clears();
+    let _ = s.take_tutorial_resets();
+
+    // Defaults writes "1" over a row that already reads "1".
+    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    assert_eq!(
+        (s.take_tutorial_resets(), s.take_tutorial_clears()),
+        (0, 0),
+        "the guard held: no bank write for a value that had not moved"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// Defaults on an API row: both boxes go back to shown, and the flip is sent **only** for the one
 /// that was actually off — the setter is a *set* over a wire verb that is a blind *toggle*, so a
 /// no-op default must not queue a packet that would turn the preference on its head.
@@ -3329,6 +3424,78 @@ fn the_defaults_button_is_armed_by_rows_not_by_a_category() {
 /// click queues the flag the host drains onto `BubbleConfig`, and the two are independent (the
 /// client gates party lines on their own CVar, which is why party bubbles survive turning
 /// say/yell bubbles off).
+/// **Disable Spam Filter** (decision 2077) — the reference's own *inverted* row, and the one shape
+/// on this page that would read backwards if it were wired like its neighbours.
+///
+/// `spamFilter` registers `"1"` (the filter ON), and the label says *Disable*: 1.12 checks the box
+/// when `GetCVar == "0"` (`UIOptionsFrame.lua` l.253) and flips the value before writing it
+/// (l.337). So a fresh client shows the box **unchecked**, and ticking it turns the filter off.
+#[test]
+fn the_disable_spam_filter_row_is_inverted() {
+    let mut s = harness_on(audio_harness());
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowChat:Click()").unwrap();
+
+    assert_eq!(
+        s.cvar("spamFilter").as_deref(),
+        Some("1"),
+        "the registered default is the filter ON"
+    );
+    assert!(
+        !s.eval::<bool>(
+            "return OptionsFrameContainerBodyChatRowSpamFilterCheck:GetChecked() and true or false"
+        )
+        .unwrap(),
+        "a filter that is ON shows *Disable Spam Filter* unchecked"
+    );
+
+    let _ = s.take_cvar_changes();
+    s.run("OptionsFrameContainerBodyChatRowSpamFilterCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("spamFilter".to_string(), "0".to_string())],
+        "ticking *Disable* writes the CVar OFF"
+    );
+    assert_eq!(s.cvar("spamFilter").as_deref(), Some("0"));
+
+    // And back: the row round-trips rather than latching.
+    s.run("OptionsFrameContainerBodyChatRowSpamFilterCheck:Click()")
+        .unwrap();
+    assert_eq!(s.cvar("spamFilter").as_deref(), Some("1"));
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **Profanity Filter** (decision 2077) — an ordinary CVar row, asserted because its *seat* is the
+/// surprising part: 1.12 files it under Basic Options' **Display** box (CheckButton5 anchors under
+/// CheckButton66), not with the chat settings its name suggests, so it closes the Interface page's
+/// column-C chain rather than joining the Chat page.
+#[test]
+fn the_profanity_filter_row_sits_on_the_interface_page_and_writes_its_cvar() {
+    let mut s = interface_harness();
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowInterface:Click()")
+        .unwrap();
+
+    assert!(
+        s.eval::<bool>(
+            "return OptionsFrameContainerBodyInterfaceRowProfanityFilterCheck:GetChecked() \
+             and true or false"
+        )
+        .unwrap(),
+        "registered \"1\" — a stock client boots with profanity masking on"
+    );
+    let _ = s.take_cvar_changes();
+    s.run("OptionsFrameContainerBodyInterfaceRowProfanityFilterCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("profanityFilter".to_string(), "0".to_string())],
+        "not inverted — the label and the CVar agree"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 #[test]
 fn the_chat_page_toggles_the_chat_bubble_cvars() {
     // No host override: since 1804 the registered pair IS bubbles-on / party-off, so the page's
@@ -4076,4 +4243,119 @@ fn without_a_seated_measurer_the_same_fit_reads_zero() {
         );
     }
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+// ── The reference table's CVar census (decision 2077) ────────────────────────────────────────────
+//
+// `UIOptionsFrameCheckButtons` in `OptionsFrame.xml` is a transcription of the reference's own
+// table (`UIOptionsFrame.lua` l.4-84), and every entry names its store. Twenty-eight of them name a
+// **CVar** — and a name in that table is a claim: `SetCVar(value.cvar, …)` against a CVar this
+// client never registered writes nothing and reads back nil, so the entry is a setting benilla
+// appears to offer and does not.
+//
+// Decision 1140 §4 wrote that census as prose in a decision record, and prose in a record is a
+// snapshot: by the time anyone looked again it said SHOW_TUTORIALS had "no store at all" (it has
+// three special-case arms, 2077) and had been amended once already for the multibar rows. So the
+// census lives here instead, where it cannot go stale — the same posture as `cvars::Reference`,
+// and checked in **both directions**: an unregistered name missing from this list fails, and a
+// listed name that has since been registered fails too.
+//
+// A row on this list is not a defect. It is a 1.12 setting whose *feature* benilla does not have,
+// and the reason is the row's whole point — "no key without a reader" (1134 §4) is why the CVar is
+// absent, and this is where that decision is written down per setting.
+const UNBACKED_REFERENCE_CVARS: &[(&str, &str)] = &[
+    ("autointeract", "click-to-move"),
+    ("assistAttack", "assist-attack"),
+    ("UnitNamePlayerGuild", "guild names over player nameplates"),
+    (
+        "UnitNamePlayerPVPTitle",
+        "PvP titles over player nameplates",
+    ),
+    ("cameraTerrainTilt", "camera terrain tilt"),
+    ("cameraBobbing", "camera head bob"),
+    ("cameraWaterCollision", "camera water collision"),
+    ("cameraPivot", "the smart-pivot camera"),
+    (
+        "CombatDamage",
+        "the floating-combat-text master gate is `combat_text::law::COMBAT_DAMAGE`, a const bool \
+         — the same shape ChatBubbles had before 1139: a faithful gate with no way to reach it",
+    ),
+    ("CombatLogPeriodicSpells", "a combat log"),
+    (
+        "PetMeleeDamage",
+        "`combat_text::law::PET_MELEE_DAMAGE`, a const bool — see CombatDamage",
+    ),
+];
+
+/// **Every CVar the reference's own options table names is registered here, or listed above with
+/// the feature it waits on** (decision 2077) — the check that turns 1140 §4's prose census into
+/// something that cannot rot, in both directions.
+///
+/// This is the instrument for the whole class: a table entry that names a CVar benilla does not
+/// register is a row that would tick and do nothing, and until now the only thing standing between
+/// us and shipping one was somebody re-reading a decision record from months ago.
+#[test]
+fn every_cvar_the_reference_table_names_is_registered_or_listed_with_its_blocker() {
+    let s = harness();
+    // The table as the file declares it: `name` (the display key) -> its `cvar`, if it has one.
+    let named: Vec<String> = s
+        .eval::<Vec<String>>(
+            "local out = {} \
+             for key, v in pairs(UIOptionsFrameCheckButtons) do \
+                 if v.cvar then table.insert(out, v.cvar) end \
+             end \
+             table.sort(out) \
+             return out",
+        )
+        .expect("read UIOptionsFrameCheckButtons");
+    assert!(
+        named.len() >= 28,
+        "the transcription lost rows: only {} cvar entries",
+        named.len()
+    );
+
+    let registered: std::collections::HashSet<String> = crate::cvars::registered_pairs()
+        .map(|(n, _)| n.to_ascii_lowercase())
+        .collect();
+    let listed: std::collections::HashSet<String> = UNBACKED_REFERENCE_CVARS
+        .iter()
+        .map(|(n, _)| n.to_ascii_lowercase())
+        .collect();
+
+    let mut unlisted: Vec<&str> = Vec::new();
+    for cvar in &named {
+        let key = cvar.to_ascii_lowercase();
+        if !registered.contains(&key) && !listed.contains(&key) {
+            unlisted.push(cvar);
+        }
+    }
+    assert!(
+        unlisted.is_empty(),
+        "these rows name a CVar nothing registers, and nothing says why: {unlisted:?} — either \
+         build the backing or add the row to UNBACKED_REFERENCE_CVARS with its blocker"
+    );
+
+    // The other direction: a listed name that IS registered now means the feature landed and the
+    // row is stale — exactly the drift `cvars::Reference` guards against on its own column.
+    let stale: Vec<&str> = UNBACKED_REFERENCE_CVARS
+        .iter()
+        .map(|(n, _)| *n)
+        .filter(|n| registered.contains(&n.to_ascii_lowercase()))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "these are registered now — drop them from UNBACKED_REFERENCE_CVARS and give them a row: \
+         {stale:?}"
+    );
+
+    // And a listed name the table never mentions is a row describing nothing.
+    let phantom: Vec<&str> = UNBACKED_REFERENCE_CVARS
+        .iter()
+        .map(|(n, _)| *n)
+        .filter(|n| !named.iter().any(|c| c.eq_ignore_ascii_case(n)))
+        .collect();
+    assert!(
+        phantom.is_empty(),
+        "UNBACKED_REFERENCE_CVARS names CVars the reference's table does not: {phantom:?}"
+    );
 }

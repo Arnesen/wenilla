@@ -31,7 +31,23 @@ use bevy::prelude::*;
 use crate::net::{EmoteKind, EmoteMessage, ObjectStore, RemoteMotion};
 use crate::sound::EmoteSounds;
 
-use super::{move_flags, EmoteAnim, MovementState};
+use super::{move_flags, EmoteAnim, Engaged, MovementState};
+
+/// The performer's live gate inputs, as both producers query them: stand-state (`ObjectStore`,
+/// any streamed unit incl. self), the movement flags (`MovementState` on our own avatar,
+/// `RemoteMotion` on a remote player — see `creature_anim`'s `unify`; a creature's spline carries
+/// no swim bit, so it defaults false), and the [`Engaged`] marker (the client's auto-attack
+/// target, decision 2067).
+pub(super) type PerformerQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Option<&'static ObjectStore>,
+        Option<&'static MovementState>,
+        Option<&'static RemoteMotion>,
+        Has<Engaged>,
+    ),
+>;
 
 /// Route a bridged `SMSG_EMOTE` (an anim emote) to the general one-shot player: resolve its
 /// `Emotes.dbc` id through the shared catalog, gate on the performer's live posture
@@ -43,14 +59,7 @@ pub(super) fn emote_to_anim(
     mut out: MessageWriter<EmoteAnim>,
     mut play_seq: ResMut<super::PlaySeq>,
     emotes: Option<Res<EmoteSounds>>,
-    // The performer's live stand-state (`ObjectStore`, any streamed unit incl. self) + movement
-    // flags (`MovementState` on our own avatar, `RemoteMotion` on a remote player — see
-    // `creature_anim`'s `unify`; a creature's spline carries no swim bit, so it defaults false).
-    units: Query<(
-        Option<&ObjectStore>,
-        Option<&MovementState>,
-        Option<&RemoteMotion>,
-    )>,
+    units: PerformerQuery,
 ) {
     let Some(emotes) = emotes else { return };
     for m in msgs.read() {
@@ -59,8 +68,9 @@ pub(super) fn emote_to_anim(
         else {
             continue;
         };
-        let (store, movement, remote) = units.get(entity).unwrap_or((None, None, None));
-        if !play_eligible(store, movement, remote) {
+        let (store, movement, remote, engaged) =
+            units.get(entity).unwrap_or((None, None, None, false));
+        if !play_eligible(store, movement, remote, engaged) {
             debug!("emote_anim: suppressed anim {anim_id} for {entity:?}");
             continue;
         }
@@ -96,10 +106,13 @@ fn player_eligible(channeling: bool, in_combat: bool) -> bool {
 }
 
 /// The whole gate for one unit, from its live components — the predicate both producers call.
+/// `engaged` is the unit's [`super::Engaged`] marker: the client's auto-attack-target GUID
+/// `[unit+0xc48]`, the half of the in-combat test that actually fires (below).
 pub(super) fn play_eligible(
     store: Option<&ObjectStore>,
     movement: Option<&MovementState>,
     remote: Option<&RemoteMotion>,
+    engaged: bool,
 ) -> bool {
     let fields = store.map(|s| &s.0);
     let stand_state = fields.map_or(0, |f| f.unit_stand_state());
@@ -110,14 +123,19 @@ pub(super) fn play_eligible(
         & move_flags::SWIMMING
         != 0;
     let channeling = fields.is_some_and(|f| f.unit_channel_spell() != 0);
-    let in_combat = fields.is_some_and(|f| f.unit_flags() & UNIT_FLAG_IN_COMBAT != 0);
+    let in_combat = engaged || fields.is_some_and(|f| f.unit_flags() & UNIT_FLAGS_COMBAT_BIT != 0);
     receive_eligible(stand_state, swimming) && player_eligible(channeling, in_combat)
 }
 
-/// `UNIT_FIELD_FLAGS & 0x800` — `UNIT_FLAG_IN_COMBAT`. The client's gate-12 test is "this flag **or**
-/// a local auto-attack target is set"; benilla checks the wire flag alone, so a unit that has swung
-/// but whose combat flag has not yet streamed can still gesture for a moment.
-const UNIT_FLAG_IN_COMBAT: u32 = 0x800;
+/// The flag half of the client's in-combat predicate `0x60ecd0` (`shr edx,0xb; test dl,1` on
+/// `UNIT_FIELD_FLAGS` — bit 11, `0x800`; the other half is `0x60ecb0`, the auto-attack target).
+/// **vmangos never sets this bit on a fighting player or creature**: its in-combat flag is
+/// `UNIT_FLAG_IN_COMBAT = 0x80000`, and `0x800` is `UNIT_FLAG_PET_IN_COMBAT`, a pet-only bit. So
+/// on our server the flag half is dormant and the attack-target half carries the whole gate — which
+/// is why checking the wire flag alone (decision 1469) let every crit's `EMOTE_ONESHOT_WOUNDCRITICAL`
+/// play as a full CombatCritical one-shot on a fighting unit, cutting or fast-pathing its own swing
+/// (decision 2067). The bit is kept for fidelity to the byte, not because it fires here.
+const UNIT_FLAGS_COMBAT_BIT: u32 = 0x800;
 
 /// The pure mapping: an `Anim` emote resolves through `lookup` (the catalog's `Emotes.dbc` →
 /// `AnimID`); a `Text` emote never carries an anim id through this path — its animation, when it
@@ -167,6 +185,19 @@ mod tests {
         );
         assert!(!player_eligible(true, false), "channeling suppresses");
         assert!(!player_eligible(false, true), "in combat suppresses");
+    }
+
+    /// The attack-target half of `0x60ecd0` (decision 2067): a unit with the [`super::super::Engaged`]
+    /// marker — ATTACKSTART..ATTACKSTOP, the client's `[+0xc48]` — refuses the play even with no
+    /// store at all (vmangos's `0x80000` in-combat flag is not the bit the client tests, so the
+    /// marker is what makes a brawl's crit emote silent, exactly like the reference).
+    #[test]
+    fn an_engaged_unit_refuses_the_play_without_the_flag_bit() {
+        assert!(
+            play_eligible(None, None, None, false),
+            "idle, no store: plays"
+        );
+        assert!(!play_eligible(None, None, None, true), "engaged: refused");
     }
 
     #[test]

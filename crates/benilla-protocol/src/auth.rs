@@ -306,7 +306,32 @@ pub fn write_realm_list_request(w: &mut impl Write) -> std::io::Result<()> {
     w.write_all(&packet)
 }
 
+/// The three **magic populations** the reference's realm-list parser rewrites, and the flag bit
+/// each one stands in for: `(population as sent, population rewritten to, flag OR'd)`.
+///
+/// Only bits `0x01`/`0x02`(/`0x04`) are real server flags on the wire. Recommended, New and Full
+/// travel as *populations* — the parser recognises the exact float, replaces it, and ORs in the bit
+/// the load band later reads. Compared by bit pattern because that is what the binary compares, and
+/// because it says plainly that these are sentinels rather than a numeric range.
+///
+/// VERIFIED, wow-re `system/glue/scratch/realm-list-bindings.md` §5 (the parser is `0x5b2230`).
+pub(crate) const MAGIC_POPULATIONS: [(u32, u32, u8); 3] = [
+    (0x4416_0000, 0x0000_0000, 0x20), // 600.0 → 0.0    — Recommended
+    (0x4348_0000, 0x3a83_126f, 0x40), // 200.0 → 0.001  — New
+    (0x43c8_0000, 0x4100_0000, 0x80), // 400.0 → 8.0    — Full
+];
+
 /// Read `CMD_REALM_LIST_Server` into the advertised realms.
+///
+/// **Every per-realm field is kept.** The flags byte, the category byte and the realm id were
+/// read-and-dropped for as long as benilla connected to `realms.first()` without ever drawing a
+/// list; the realm-list screen displays or groups on all three, and the population is the input to
+/// the load band rather than a string to print.
+///
+/// **And the population is rewritten on the way in** — see [`MAGIC_POPULATIONS`]. This has to
+/// happen *here*, in the parser, exactly as the reference does it: the realm-list screen computes a
+/// mean over every realm's population, and a realm advertised as Recommended arrives carrying
+/// `600.0`, which would drag that mean far enough to mislabel every other row on the list.
 pub async fn read_realm_list(r: &mut impl ReadExactAsync) -> Result<Vec<RealmInfo>> {
     let opcode = read_u8_async(r).await?;
     if opcode != CMD_REALM_LIST {
@@ -318,19 +343,30 @@ pub async fn read_realm_list(r: &mut impl ReadExactAsync) -> Result<Vec<RealmInf
     let mut realms = Vec::with_capacity(number_of_realms as usize);
     for _ in 0..number_of_realms {
         let realm_type = read_u32_le_async(r).await?;
-        let _flag = read_u8_async(r).await?;
+        let mut flags = read_u8_async(r).await?;
         let name = read_cstring_async(r).await?;
         let address = read_cstring_async(r).await?;
-        let population = read_f32_le_async(r).await?;
+        let mut population = read_f32_le_async(r).await?;
         let characters = read_u8_async(r).await?;
-        let _category = read_u8_async(r).await?;
-        let _realm_id = read_u8_async(r).await?;
+        let category = read_u8_async(r).await?;
+        let id = read_u8_async(r).await?;
+        // The sentinel swap, before anyone can average this number.
+        if let Some(&(_, rewritten, bit)) = MAGIC_POPULATIONS
+            .iter()
+            .find(|(magic, _, _)| *magic == population.to_bits())
+        {
+            population = f32::from_bits(rewritten);
+            flags |= bit;
+        }
         realms.push(RealmInfo {
             name,
             address,
-            population: format!("{population}"),
+            population,
             characters,
             realm_type,
+            flags,
+            category,
+            id,
         });
     }
     let _footer_padding = read_u16_le_async(r).await?; // consume so the stream stays aligned (see challenge reply)
@@ -340,6 +376,17 @@ pub async fn read_realm_list(r: &mut impl ReadExactAsync) -> Result<Vec<RealmInf
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The login readers are awaited (a browser reads its WebSocket off the event loop, never out
+    /// of a blocking call), so a fixture that hands them a `&[u8]` takes the same shape — the
+    /// carry's twin of the one in `tests/auth.rs`.
+    struct Cursor<'a>(&'a [u8]);
+
+    impl ReadExactAsync for Cursor<'_> {
+        async fn read_exact_async(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+            std::io::Read::read_exact(&mut self.0, buf)
+        }
+    }
 
     /// The OS/platform tags are reversed on the wire (the real client's little-endian u32s), and a
     /// server that reads anything but "Win"/"OSX" fails the session — so pin the byte order, not
@@ -415,5 +462,90 @@ mod tests {
             &version_proof(&MANGOS_VERSION_CHALLENGE, &a)
         );
         assert_eq!(&packet[73..], &[0, 0]);
+    }
+
+    /// Every per-realm field the wire carries survives the read.
+    ///
+    /// The flags byte, the category byte and the realm id were read into `_`-prefixed locals and
+    /// dropped for as long as nothing drew a realm list; the population was stringified on the way
+    /// in. All four are load-bearing for the realm-list screen, so pin the byte layout *and* the
+    /// capture — a field silently going back to `_` is the failure this catches.
+    #[test]
+    fn the_realm_list_keeps_every_field_the_wire_carries() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&8u32.to_le_bytes()); // realm_type: RPPVP
+        body.push(0x42); // flags: 0x02 offline | 0x40 sentinel
+        body.extend_from_slice(b"Onyxia\0");
+        body.extend_from_slice(b"127.0.0.1:8085\0");
+        body.extend_from_slice(&1.75f32.to_le_bytes()); // population
+        body.push(3); // characters
+        body.push(2); // category
+        body.push(9); // realm id
+
+        let mut packet = vec![CMD_REALM_LIST];
+        packet.extend_from_slice(&(body.len() as u16 + 3).to_le_bytes()); // size
+        packet.extend_from_slice(&0u32.to_le_bytes()); // header padding
+        packet.push(1); // number_of_realms
+        packet.extend_from_slice(&body);
+        packet.extend_from_slice(&0u16.to_le_bytes()); // footer padding
+
+        let realms =
+            futures_lite::future::block_on(read_realm_list(&mut Cursor(&packet))).unwrap();
+        assert_eq!(realms.len(), 1);
+        let r = &realms[0];
+        assert_eq!(r.name, "Onyxia");
+        assert_eq!(r.address, "127.0.0.1:8085");
+        assert_eq!(r.realm_type, 8);
+        assert_eq!(r.flags, 0x42);
+        assert_eq!(r.population, 1.75);
+        assert_eq!(r.characters, 3);
+        assert_eq!(r.category, 2);
+        assert_eq!(r.id, 9);
+    }
+
+    /// **Recommended / New / Full arrive as populations, not as flags**, and the parser swaps them
+    /// before anyone can average the number.
+    ///
+    /// This is the one place it can be done. The realm list's load band is computed from a mean
+    /// over every realm's population, so a single realm advertised as Recommended (600.0) sitting
+    /// unswapped in a list of realms at ~1.0 drags the mean past every other row and relabels the
+    /// whole screen. The rewritten values are the reference's own, bit for bit.
+    #[test]
+    fn the_three_magic_populations_become_flags_and_are_rewritten() {
+        let one = |pop: f32| {
+            let mut body = Vec::new();
+            body.extend_from_slice(&0u32.to_le_bytes());
+            body.push(0x02); // a real wire flag, which must survive the OR
+            body.extend_from_slice(b"R\0");
+            body.extend_from_slice(b"h:1\0");
+            body.extend_from_slice(&pop.to_le_bytes());
+            body.extend_from_slice(&[0, 1, 0]);
+            let mut packet = vec![CMD_REALM_LIST];
+            packet.extend_from_slice(&(body.len() as u16 + 3).to_le_bytes());
+            packet.extend_from_slice(&0u32.to_le_bytes());
+            packet.push(1);
+            packet.extend_from_slice(&body);
+            packet.extend_from_slice(&0u16.to_le_bytes());
+            futures_lite::future::block_on(read_realm_list(&mut Cursor(&packet)))
+                .unwrap()
+                .remove(0)
+        };
+
+        let recommended = one(600.0);
+        assert_eq!(recommended.flags, 0x02 | 0x20, "the wire flag survives");
+        assert_eq!(recommended.population, 0.0);
+
+        let new = one(200.0);
+        assert_eq!(new.flags, 0x02 | 0x40);
+        assert_eq!(new.population.to_bits(), 0x3a83_126f, "0.001f exactly");
+
+        let full = one(400.0);
+        assert_eq!(full.flags, 0x02 | 0x80);
+        assert_eq!(full.population, 8.0);
+
+        // An ordinary population is left alone, flags and all.
+        let plain = one(1.5);
+        assert_eq!(plain.flags, 0x02);
+        assert_eq!(plain.population, 1.5);
     }
 }

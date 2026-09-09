@@ -689,3 +689,115 @@ fn a_chorded_press_raises_the_held_frame_not_the_one_under_the_cursor() {
     s.mouse_button(ox, oy, "LeftButton", false);
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
+
+/// **A window raised while part of it is hidden must keep its own children level with each other**
+/// — the compaction may not split a sibling pair (director's report 2026-09-08, decision 2104).
+///
+/// This is Gatherer 1.0.0's Report window, built the way its XML builds it and reduced to the four
+/// frames that matter:
+///
+/// - `Win` — `toplevel`, `frameStrata="DIALOG"`, born hidden, at level 1 (what `SetParent` gives a
+///   child of a level-0 `UIParent`).
+/// - `Close` — a Button declared inside `Win`'s `<Frames>`, so level 2, and visible with `Win`.
+/// - `Body` — a `<Frame parent="Win" hidden="true" enableMouse="true">` covering the whole window
+///   (`GathererInfo_ReportFrame`, 640×370 centred on a 640×390 dialog), also level 2, but HIDDEN
+///   when `Win` is shown. The addon shows it one line later.
+/// - `Other` — the already-open Options window it overlaps, which is what arms the occlusion gate.
+///
+/// The sequence is the addon's: `Win:Show()` (whose raise runs while `Body` is still hidden), then
+/// `Body:Show()`. `Close` and `Body` are siblings under one parent, so their levels are equal by
+/// construction and **must stay equal** — the reference's hit sweep then gives the tie to the
+/// earlier-linked frame, which is `Close`, and the Close button works.
+///
+/// What went wrong: the compaction renumbered `Close` (visible, in the bucket) and not `Body`
+/// (hidden, in no bucket), then the raise's propagate pushed the same delta into both — so the one
+/// level the compaction squeezed out of `Close` and not out of `Body` became a permanent inversion.
+/// `Body` is mouse-enabled and covers the window, so it swallowed every click and hover the Close
+/// button should have had: the button showed no highlight and could not be pressed.
+#[test]
+fn a_raise_with_a_hidden_child_keeps_the_windows_own_siblings_level() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        -- The window already on screen that `Win` has to raise over.
+        Other = CreateFrame("Frame", "Other")
+        Other:SetFrameStrata("DIALOG")
+        Other:SetFrameLevel(1)
+        Other:SetPoint("BOTTOMLEFT", 50, 50)
+        Other:SetSize(400, 400)
+        Other:EnableMouse(true)
+        Other:SetToplevel(true)
+        OtherKid = CreateFrame("Frame", "OtherKid", Other)   -- level 2
+
+        Win = CreateFrame("Frame", "Win")
+        Win:SetFrameStrata("DIALOG")
+        Win:SetFrameLevel(1)
+        Win:SetPoint("BOTTOMLEFT", 200, 100)
+        Win:SetSize(400, 400)
+        Win:EnableMouse(true)
+        Win:SetToplevel(true)
+
+        Close = CreateFrame("Button", "Close", Win)          -- level 2, visible with Win
+        Close:SetPoint("BOTTOMRIGHT", Win, "BOTTOMRIGHT", -15, 15)
+        Close:SetSize(100, 21)
+        Close:EnableMouse(true)
+        Close:SetScript("OnEnter", function(self) hovered = self:GetName() end)
+        Close:SetScript("OnClick", function(self) clicked = self:GetName() end)
+
+        Body = CreateFrame("Frame", "Body", Win)             -- level 2, covers the whole window
+        Body:SetAllPoints(Win)
+        Body:EnableMouse(true)
+        Body:SetScript("OnEnter", function(self) hovered = self:GetName() end)
+        Body:Hide()
+
+        Win:Hide()
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+
+    // The addon's own two lines: show the window (the raise fires here, with `Body` still hidden),
+    // then show the sub-frame for the selected tab.
+    s.run("Win:Show()").unwrap();
+    s.run("Body:Show()").unwrap();
+    s.resolve();
+
+    assert!(
+        level(&mut s, "Win") > level(&mut s, "Other"),
+        "the window that was just shown is in front: Win={} Other={}",
+        level(&mut s, "Win"),
+        level(&mut s, "Other")
+    );
+
+    // THE SYMPTOM FIRST, through the engine's own pointer path: the Close button takes its own
+    // click and its own hover. Asserted before the arithmetic below so a regression reports what
+    // the director would see, not the number behind it.
+    let (cx, cy) = centre(&s, "Close");
+    assert_eq!(
+        s.hit_test_name(cx, cy).as_deref(),
+        Some("Close"),
+        "the click at the Close button's centre lands on the Close button"
+    );
+    s.mouse_move(cx, cy);
+    assert_eq!(
+        s.eval::<String>("return tostring(hovered)").unwrap(),
+        "Close",
+        "and so does the hover — the highlight is the reference's OnEnter"
+    );
+    s.mouse_button(cx, cy, "LeftButton", true);
+    s.mouse_button(cx, cy, "LeftButton", false);
+    assert_eq!(
+        s.eval::<String>("return tostring(clicked)").unwrap(),
+        "Close"
+    );
+
+    // …and the number behind it.
+    assert_eq!(
+        level(&mut s, "Close"),
+        level(&mut s, "Body"),
+        "two children of one parent are level with each other — the raise's compaction may not \
+         split them just because one of them was hidden when it ran"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}

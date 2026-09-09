@@ -51,10 +51,11 @@ pub(super) fn seed_ui_fixture(
     mut selection: ResMut<crate::target::Selection>,
     mut player: ResMut<crate::player::Player>,
     // Bundled: Bevy systems cap at 16 top-level params — a nested tuple is one param.
-    (mut actions, mut bank, mut exit): (
+    (mut actions, mut bank, mut exit, mut loading): (
         ResMut<crate::ui_action::PlayerActions>,
         ResMut<crate::ui_bank::BankOpen>,
         MessageWriter<AppExit>,
+        ResMut<crate::loading_screen::LoadingScreen>,
     ),
 ) {
     // A glue-screen capture has no world scenario, and no glue screen opens a UI fixture.
@@ -156,6 +157,11 @@ pub(super) fn seed_ui_fixture(
         // IS the fixture. The `script.is_none()` refusal above still guards it: these scenarios
         // photograph the player UI, so a run without a VM is as wrong for them as for any other.
         UiFixture::Bare => {}
+        // The one fixture that opens no window: it raises the world-entry loading screen over the
+        // settled scene and pins it there, tip and all. `hold_for_capture` sets the `Pick` edge;
+        // `crate::game_tip::drive_game_tip` paints it on the next frame, and the stability watch
+        // settles on the held image.
+        UiFixture::LoadingTip => loading.hold_for_capture(scenario.map),
         UiFixture::Merchant => {
             names.insert_creature(
                 NPC_ENTRY,
@@ -664,6 +670,29 @@ pub(super) fn seed_ui_fixture(
             };
             seed_bag_window(&mut script, icons.as_deref());
             seed_equipped_bags(&mut script, icons.as_deref());
+        }
+        UiFixture::Cooldown => {
+            let Some(mut script) = script else {
+                return;
+            };
+            seed_cooldown_filmstrip(&mut script, icons.as_deref());
+        }
+        UiFixture::CooldownShine => {
+            let Some(mut script) = script else {
+                return;
+            };
+            seed_cooldown_filmstrip(&mut script, icons.as_deref());
+            // The pet bar's autocast shine, raised by hand: no pet is fed here, so the bar's own
+            // show path never runs. The shine is the subject, not the bar's chrome.
+            if let Err(e) = script.run(
+                "PetActionBarFrame:Show()\n\
+                 for i = 1, 4 do\n\
+                     local b = getglobal(\"PetActionButton\"..i)\n\
+                     if b then b:Show(); getglobal(b:GetName()..\"AutoCast\"):Show() end\n\
+                 end",
+            ) {
+                warn!("capture: ui-cooldown-shine failed to raise the autocast shine: {e}");
+            }
         }
         UiFixture::WorldMap => {
             let Some(mut script) = script else {
@@ -1436,6 +1465,79 @@ pub(super) fn seed_ui_fixture(
 /// fixtures. The bag is a standalone addon (no `ShowUIPanel` path): drive the container snapshot
 /// and purse directly, then open and paint. The feed (`crate::ui_items`) leaves bag 0 alone when
 /// there is no `SelfPlayer` (net is disabled in capture), so this manual snapshot is not clobbered.
+/// The pinned `GetTime()` value the cooldown filmstrip parks the VM's session clock at, seconds.
+/// Large, because the reference's own `CooldownFrame_SetTimer` refuses a `start <= 0` and the
+/// starts here are `now − fraction · span`.
+const COOLDOWN_NOW_S: f64 = 100_000.0;
+
+/// Each filmstrip slot's cooldown duration, seconds. Long enough that the settle window's few
+/// seconds of VM clock move a phase by `~5e-4` of a step, so the shot is reproducible.
+const COOLDOWN_SPAN_S: f64 = 10_000.0;
+
+/// **The cooldown sweep as a filmstrip** (B379): sixteen backpack slots, each parked at its own
+/// fraction of one very long cooldown, so the window shows sixteen points of the 1000 ms sweep at
+/// once — the instrument for "what does the indicator actually draw", which no test can reach
+/// (the engine tests prove the scrub, not the picture).
+///
+/// Game slot 1 renders TOP-LEFT and slot 16 bottom-right (`ContainerFrame_GenerateFrame` numbers
+/// backwards — see [`seed_bag_window`]), so ascending slot is reading order and ascending
+/// fraction reads as a filmstrip.
+fn seed_cooldown_filmstrip(
+    script: &mut benilla_ui::script::UiScript,
+    icons: Option<&crate::entities::ItemDisplays>,
+) {
+    // Park the session clock FIRST: `set_container` stores each triple against it, and
+    // `GetContainerItemCooldown`'s cold-at-expiry guard reads it.
+    if let Err(e) = script.run(&format!("__benilla_now = {COOLDOWN_NOW_S}")) {
+        warn!("capture: ui-cooldown failed to pin the session clock: {e}");
+    }
+    const DISP_STONE: u32 = 6418;
+    let texture = icons
+        .and_then(|i| i.catalog.get(DISP_STONE))
+        .and_then(|d| d.icon.clone());
+    let span_ms = COOLDOWN_SPAN_S * 1000.0;
+    let now_ms = COOLDOWN_NOW_S * 1000.0;
+    let mut slots = std::collections::HashMap::new();
+    for slot in 1u32..=16 {
+        // Sixteen phases across the sweep, biased off both ends: 0 is the uniform disc and 1 is
+        // the flash, and neither is what this instrument is looking at.
+        let fraction = (f64::from(slot) - 0.5) / 16.0;
+        slots.insert(
+            slot,
+            benilla_ui::script::ContainerSlot {
+                petition: None,
+                durability: None,
+                duration_ms: None,
+                bar_placeable: true,
+                texture: texture.clone(),
+                count: 1,
+                quality: Some(1),
+                item_id: 6948,
+                link: Some("|cffffffff|Hitem:6948|h[Hearthstone]|h|r".into()),
+                locked: false,
+                equip_slots: Vec::new(),
+                cooldown: Some(((now_ms - fraction * span_ms) as i64, span_ms as u32, true)),
+                readable: false,
+                creator: None,
+                flags: 0,
+                already_bound: false,
+                enchants: Vec::new(),
+            },
+        );
+    }
+    script.set_container(
+        0,
+        Some(benilla_ui::script::ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 16,
+            slots,
+        }),
+    );
+    if let Err(e) = script.run("OpenBag(0)") {
+        warn!("capture: ui-cooldown failed to open the backpack: {e}");
+    }
+}
+
 fn seed_bag_window(
     script: &mut benilla_ui::script::UiScript,
     icons: Option<&crate::entities::ItemDisplays>,

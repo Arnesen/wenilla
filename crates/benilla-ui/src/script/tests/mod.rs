@@ -26,6 +26,7 @@ mod minimap;
 mod model_clock;
 mod modelframe;
 mod movable;
+mod name_targets;
 mod object_model;
 mod reference_surface;
 mod region_map;

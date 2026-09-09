@@ -8,8 +8,8 @@
 //! name (`GlueFontNormalHuge` at BOTTOM (0,100)), Enter World (200×60 at BOTTOM (0,30)) with the
 //! rotate pair tucked under it, Back (BOTTOMRIGHT (−30,25)) and Delete Character to its left, and
 //! the right-column character frame: 260×642 at TOPRIGHT (−5,−15), `Glue-Tooltip` backdrop tinted
-//! `DEFAULT_TOOLTIP_COLOR` at 0.85 alpha, holding the realm banner, the disabled Change Realm
-//! button (realm choice is out of scope — decision 0465 §6), ten 256×70 row buttons from TOPLEFT
+//! `DEFAULT_TOOLTIP_COLOR` at 0.85 alpha, holding the realm banner, the Change Realm
+//! button (back to [`crate::realm_select`]'s list), ten 256×70 row buttons from TOPLEFT
 //! (24,−65) at the authored 57 px pitch (13 px overlap, hit-inset 15), and Create New Character at
 //! the frame's BOTTOM (0,15). The delete dialog is [`super::dialog`]'s.
 
@@ -20,7 +20,7 @@ use bevy::window::PrimaryWindow;
 use crate::glue::art::{GlueArt, BACKDROP, DIM, GOLD, NAME_EDGE};
 use crate::glue::backdrop::{backdrop_border, tiled_bg_node};
 use crate::glue::widgets::{
-    abs, glue_button, outlined_text, overlay, GlueBtnKind, GlueText, Hilight,
+    abs, glue_button, outlined_text, overlay, GlueBtnKind, GlueText, Hilight, LockHighlight,
 };
 use crate::glue_strings::GlueStrings;
 use crate::portrait::{GluePreview, PortraitImages, PortraitSource, GLUE_SLOT};
@@ -41,7 +41,7 @@ pub(super) enum SelectAction {
     Back,
     Delete,
     CreateChar,
-    /// Rendered disabled — realm choice is out of scope (decision 0465 §6).
+    /// Back to the realm list — drops the parked session, keeps the logon.
     ChangeRealm,
     /// Open the AddOns list (decision 1197) — the reference's `CharacterSelectAddonsButton`.
     Addons,
@@ -171,40 +171,51 @@ fn spawn_screen(
     let empty = GlueStrings::default();
     let strings = strings.unwrap_or(&empty);
 
-    let mut root = commands.spawn((
-        CharSelectUi {
-            with_art: art.button_up.is_some(),
-            s,
-        },
-        GlobalZIndex(SCREEN_Z),
-        Node {
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            ..default()
-        },
-        BackgroundColor(BACKDROP),
-    ));
-    root.with_children(|ui| {
-        // The 3D scene, full-bleed and first (everything else draws over it) — the ref's screen IS
-        // the fullscreen ModelFFX: the selected race's scene with the geared character standing in
-        // it. The whole pane drags to rotate (the ref's full-frame mouse rotation); the page tint
-        // behind it is the no-art fallback.
-        let mut pane = ui.spawn((
-            SelectAction::Scene,
-            Button,
+    let root = commands
+        .spawn((
+            CharSelectUi {
+                with_art: art.button_up.is_some(),
+                s,
+            },
+            GlobalZIndex(SCREEN_Z),
             Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(0.0),
-                top: Val::Px(0.0),
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
                 ..default()
             },
-        ));
-        if let Some(image) = model_image {
-            pane.insert(ImageNode::new(image));
-        }
+            BackgroundColor(BACKDROP),
+        ))
+        .with_children(|ui| {
+            // The 3D scene, full-bleed and first (everything else draws over it) — the ref's
+            // screen IS the fullscreen ModelFFX: the selected race's scene with the geared
+            // character standing in it. The whole pane drags to rotate (the ref's full-frame mouse
+            // rotation); the page tint behind it is the no-art fallback. It keeps the WINDOW while
+            // the chrome below does not: a pillarbox's bars are the booth camera's own output
+            // clear inside this window-sized target (1619 §3), so the pane that samples it covers
+            // the window and brings the bars with it.
+            let mut pane = ui.spawn((
+                SelectAction::Scene,
+                Button,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    ..default()
+                },
+            ));
+            if let Some(image) = model_image {
+                pane.insert(ImageNode::new(image));
+            }
+        })
+        .id();
 
+    // ...and every piece of chrome hangs off the CANVAS — the boxed scene's own rect (decision
+    // 2091). Anchored to the window instead, the logo and the whole right-hand character frame
+    // (with Delete Character and Back) stood out in the bars at 21:9 (B377).
+    let mut canvas = commands.spawn((crate::glue::glue_canvas(), ChildOf(root)));
+    canvas.with_children(|ui| {
         // The WoW logo (`CharacterSelectLogo`, 256×128 at TOPLEFT (3,−7)).
         if let Some(logo) = &art.logo {
             ui.spawn((ImageNode::new(logo.clone()), abs(s, 3.0, 7.0, 256.0, 128.0)));
@@ -392,8 +403,9 @@ fn character_frame(
                 font,
                 s,
             );
-            // Change Realm (below the banner) — rendered disabled: realm choice is out of scope
-            // (decision 0465 §6; a dead-but-enabled button would lie).
+            // Change Realm (below the banner) — live. It was drawn permanently disabled for as
+            // long as there was no realm list behind it to go back to; there is now, and it
+            // costs a world dial rather than a re-login (`crate::realm_select`).
             frame
                 .spawn((Node {
                     position_type: PositionType::Absolute,
@@ -462,7 +474,8 @@ fn row_button(
         .spawn((
             SelectAction::Row(row),
             Button,
-            Visibility::Hidden, // shown by the refresh while the roster has this row
+            LockHighlight::default(), // `LockHighlight` on the selected row (refresh.rs)
+            Visibility::Hidden,       // shown by the refresh while the roster has this row
             Node {
                 position_type: PositionType::Absolute,
                 left: px(24.0),
@@ -659,6 +672,7 @@ pub(super) fn exit_select(
     roots: Query<Entity, With<CharSelectUi>>,
     mut preview: ResMut<GluePreview>,
     mut dialog: ResMut<super::dialog::DeleteDialog>,
+    mut glue_dialog: ResMut<crate::glue::dialog::GlueDialog>,
 ) {
     for e in &roots {
         commands.entity(e).despawn();
@@ -668,4 +682,10 @@ pub(super) fn exit_select(
     preview.look = None;
     preview.scene = None;
     dialog.close();
+    // The shared glue dialog is this screen's too while it is up (a refused character login), and
+    // it must not follow us into the world or onto the create screen — the login screen's own
+    // `exit_login` closes it on the same edge for the same reason. The tree goes with it **here**
+    // rather than being left to the driver: the driver runs on the glue screens only, so on the
+    // edges out of the glue layer there would be nobody left to despawn the root.
+    glue_dialog.dismiss(&mut commands);
 }

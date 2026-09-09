@@ -35,6 +35,21 @@ pub struct TokenContext<'a> {
     /// "Returns you to $z."). Fed from `SMSG_BINDPOINTUPDATE`'s areaId through AreaTable.dbc;
     /// `None` (no bind seen yet) leaves the token raw, like any unresolved token.
     pub home_area: Option<&'a str>,
+    /// **Resolve a `GlobalStrings` key and fill its `%d` holes** — the caller's job, because both
+    /// halves of it live on the other side of this crate's boundary: the string table is the
+    /// script VM's and the one shared printf-family filler is `benilla_ui::strings::fill`
+    /// (decision 2045). This crate has no business depending on either, so the split is that the
+    /// token engine picks the KEY and the NUMBERS and the caller renders them.
+    ///
+    /// Integer holes only, and the signature says so on purpose: every key reached through here
+    /// is one of the `INT_SPELL_*` family, which exists precisely because these values are
+    /// integers. The float twins (`SPELL_DURATION_SEC = "%.2f sec"`,
+    /// `SPELL_POINTS_SPREAD_TEMPLATE = "%.1f to %.1f"`) are a *different* set of keys for a
+    /// different path, and reaching for one of those would print "14.0 to 22.0" where the client
+    /// prints "14 to 22".
+    ///
+    /// `None` (key absent, or no table at all) leaves the token raw, like any unresolved token.
+    pub text: &'a dyn Fn(&str, &[i64]) -> Option<String>,
 }
 
 /// The byte-verified effect bounds (`0x6e3800`, flat term): `(min, max)`.
@@ -51,20 +66,50 @@ fn duration_ms(d: &SpellDisplay, ctx: &TokenContext) -> Option<i64> {
     Some(i64::from(row.base_ms))
 }
 
-/// Whole-unit duration text — INTERIM shape (the `0x52fa50` formatter's exact rendering is
-/// unpinned): "N sec" / "N min" / "N hours", "until cancelled" for the permanent sentinel.
-fn duration_text(ms: i64) -> String {
+/// Whole-unit duration text — the `INT_SPELL_DURATION_*` family, largest unit that fits, with
+/// `SPELL_DURATION_UNTIL_CANCELLED` for the permanent sentinel.
+///
+/// **The words were ours and two of them were wrong.** This read "N hours"; 1.12 says
+/// `INT_SPELL_DURATION_HOURS_P1 = "%d hrs"`. The sentence "N hours" *does* exist in
+/// GlobalStrings — as `LASTONLINE_HOURS_P1`, the friends list's last-seen column — which is
+/// exactly the trap decision 2045 describes: a text search finds a key, and it is the wrong key
+/// for this call site. It also had no days arm at all, so a two-day aura read "48 hrs".
+///
+/// The ladder is the one `0x52fa50` walks (byte-pinned for the aura line as wow-re §3-BUFF, and
+/// implemented for that surface in `benilla_ui::script::tooltip::duration_text`) and the plural
+/// pick is `GetText`'s: the bare token at exactly one, the `_P1` twin otherwise. Only HOURS ships
+/// a twin in this family, so the other three fall back to the bare token — which is the same
+/// fallback `plural_template` takes, and the reason `INT_SPELL_DURATION_MIN` reads "1 min" and
+/// "9 min" alike.
+fn duration_text(ms: i64, ctx: &TokenContext) -> Option<String> {
     if ms < 0 {
-        return "until cancelled".into();
+        return (ctx.text)("SPELL_DURATION_UNTIL_CANCELLED", &[]);
     }
     let secs = ms / 1000;
-    if secs < 60 {
-        format!("{secs} sec")
-    } else if secs < 3600 {
-        format!("{} min", secs / 60)
+    let (unit, n) = if secs < 60 {
+        ("SEC", secs)
+    } else if secs < 3_600 {
+        ("MIN", secs / 60)
+    } else if secs < 86_400 {
+        ("HOURS", secs / 3_600)
     } else {
-        format!("{} hours", secs / 3600)
-    }
+        ("DAYS", secs / 86_400)
+    };
+    let key = format!("INT_SPELL_DURATION_{unit}");
+    (n != 1)
+        .then(|| (ctx.text)(&format!("{key}_P1"), &[n]))
+        .flatten()
+        .or_else(|| (ctx.text)(&key, &[n]))
+}
+
+/// The min–max spread of an effect's points — `INT_SPELL_POINTS_SPREAD_TEMPLATE` ("%d to %d").
+///
+/// **The `INT_` twin, not `SPELL_POINTS_SPREAD_TEMPLATE`.** Both read the same shape in enUS and
+/// the float one is spelled `"%.1f to %.1f"`, so reaching for it would print "14.0 to 22.0" where
+/// Fireball rank 1 says "14 to 22". `effect_bounds` is integral by construction (base + dice ×
+/// sides, all `i32` columns), which is what makes the integer key the right one here.
+fn spread_text(min: i64, max: i64, ctx: &TokenContext) -> Option<String> {
+    (ctx.text)("INT_SPELL_POINTS_SPREAD_TEMPLATE", &[min, max])
 }
 
 /// Trim a float to the client's terse style (no trailing zeros: 2.5 → "2.5", 3.0 → "3").
@@ -98,7 +143,7 @@ fn token_value(
             Some(if min == max {
                 (min.to_string(), min as f64)
             } else {
-                (format!("{min} to {max}"), max as f64)
+                (spread_text(min, max, ctx)?, max as f64)
             })
         }
         'm' if letter == 'm' => {
@@ -122,13 +167,13 @@ fn token_value(
             Some(if tmin == tmax {
                 (tmin.to_string(), tmin as f64)
             } else {
-                (format!("{tmin} to {tmax}"), tmax as f64)
+                (spread_text(tmin, tmax, ctx)?, tmax as f64)
             })
         }
         'd' => {
             let ms = duration_ms(d, ctx)?;
             let v = if ms < 0 { 0.0 } else { ms as f64 / 1000.0 };
-            Some((duration_text(ms), v))
+            Some((duration_text(ms, ctx)?, v))
         }
         't' => {
             let period = i64::from(*d.effect_amplitude.get(slot).unwrap_or(&0));
@@ -285,6 +330,27 @@ mod tests {
     use super::*;
     use crate::spells::SpellDisplay;
 
+    /// The string table these tests resolve against — **deliberately not the shipped wording**.
+    ///
+    /// What is under test here is which KEY the engine reaches for and which numbers fill it,
+    /// never what the sentence says (decision 2045). A fixture that echoed the real strings would
+    /// pass on a *wrong* key wherever two of them agree in English, which is exactly how
+    /// `LASTONLINE_HOURS_P1`'s wording came to be spelled into the duration ladder in the first
+    /// place. It is also the idiom `benilla_ui::script::tests::tooltip` uses for the same reason.
+    fn text(key: &str, args: &[i64]) -> Option<String> {
+        let n = |i: usize| args.get(i).copied().unwrap_or_default();
+        Some(match key {
+            "SPELL_DURATION_UNTIL_CANCELLED" => "<forever>".into(),
+            "INT_SPELL_DURATION_SEC" => format!("<{}sec>", n(0)),
+            "INT_SPELL_DURATION_MIN" => format!("<{}min>", n(0)),
+            "INT_SPELL_DURATION_HOURS" => format!("<{}hour>", n(0)),
+            "INT_SPELL_DURATION_HOURS_P1" => format!("<{}hrs>", n(0)),
+            "INT_SPELL_DURATION_DAYS" => format!("<{}days>", n(0)),
+            "INT_SPELL_POINTS_SPREAD_TEMPLATE" => format!("<{}..{}>", n(0), n(1)),
+            _ => return None,
+        })
+    }
+
     fn ctx<'a>(
         durations: &'a SpellDurationCatalog,
         radii: &'a SpellRadiusCatalog,
@@ -295,7 +361,47 @@ mod tests {
             durations,
             radii,
             lookup,
+            text: &text,
         }
+    }
+
+    /// **The duration ladder picks its key by unit and by plural**, and the plural rule is
+    /// `GetText`'s: the bare token at exactly one, the `_P1` twin otherwise. Only HOURS ships a
+    /// twin, so the other three units read the same at one as at nine.
+    ///
+    /// The days arm is here because the reference's ladder has one and this file did not — a
+    /// two-day aura used to read as an hour count.
+    #[test]
+    fn the_duration_ladder_picks_unit_then_plural() {
+        let mut durations = SpellDurationCatalog::default();
+        let radii = SpellRadiusCatalog::default();
+        for (idx, ms) in [
+            (1, 30_000),
+            (2, 60_000),
+            (3, 3_600_000),
+            (4, 7_200_000),
+            (5, 172_800_000),
+            (6, -1),
+        ] {
+            durations.insert_for_tests(idx, ms);
+        }
+        let c = ctx(&durations, &radii, &none_lookup);
+        let d = |duration_index| {
+            substitute(
+                "$d",
+                &SpellDisplay {
+                    duration_index,
+                    ..Default::default()
+                },
+                &c,
+            )
+        };
+        assert_eq!(d(1), "<30sec>");
+        assert_eq!(d(2), "<1min>", "a single minute takes the bare token");
+        assert_eq!(d(3), "<1hour>", "and so does a single hour");
+        assert_eq!(d(4), "<2hrs>", "but two take the _P1 twin");
+        assert_eq!(d(5), "<2days>", "the days arm the ladder used to lack");
+        assert_eq!(d(6), "<forever>");
     }
 
     fn none_lookup<'a>(_: u32) -> Option<&'a SpellDisplay> {
@@ -317,7 +423,7 @@ mod tests {
         let c = ctx(&durations, &radii, &none_lookup);
         assert_eq!(
             substitute("causes $s1 Fire damage and $s2 more", &d, &c),
-            "causes 14 to 22 Fire damage and 24 more"
+            "causes <14..22> Fire damage and 24 more"
         );
         // Negative base points print absolute (the client's "reduces by N" phrasing).
         d.effect_base_points = [-31, 0, 0];
@@ -347,7 +453,7 @@ mod tests {
         let c = ctx(&durations, &radii, &none_lookup);
         assert_eq!(
             substitute("Deals $o1 damage over $d, every $t1 sec.", &d, &c),
-            "Deals 18 damage over 18 sec, every 3 sec."
+            "Deals 18 damage over <18sec>, every 3 sec."
         );
         assert_eq!(
             substitute("Restores $/2;s1 health: $l point:points;.", &d, &c),
@@ -374,6 +480,7 @@ mod tests {
             durations: &durations,
             radii: &radii,
             lookup: &lookup,
+            text: &text,
         };
         assert_eq!(
             substitute("as strong as $1234s1 hits", &d, &c),
@@ -390,6 +497,7 @@ mod tests {
             durations: &durations,
             radii: &radii,
             lookup: &lookup,
+            text: &text,
         };
         assert_eq!(
             substitute("Returns you to $z.", &d, &unbound),

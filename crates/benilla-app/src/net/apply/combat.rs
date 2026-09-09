@@ -116,6 +116,7 @@ pub(super) fn attacker_state(
     center: &mut MessageWriter<CombatTextEvent>,
     sheaths: &mut MessageWriter<SheathRequest>,
     edges: &mut MessageWriter<SwingRefusalEdge>,
+    stores: &Query<&mut crate::net::ObjectStore>,
     seq: u64,
 ) {
     let victim = index.0.get(&s.victim).copied();
@@ -191,7 +192,13 @@ pub(super) fn attacker_state(
             attacker: e,
             ..swing
         });
-    } else if swing.victim.is_some() {
+    } else if swing.victim.is_some_and(|v| {
+        // The receive-time arm goes THROUGH the gated dispatcher — `0x625823 je 0x625a3e` takes
+        // the unresolved-attacker leg, which resolves the victim and calls `0x625a6d call
+        // 0x624530`, so the LOOTABLE front gate applies here exactly as it does to the tag path
+        // (`creature_anim::impact::lootable_victim`). It calls no consequence directly.
+        !stores.get(v).is_ok_and(|s| s.0.unit_lootable())
+    }) {
         // The client's SMSG-arm fallback: an attacker we can't resolve (out of range)
         // can't animate a swing — its victim feedback fires immediately and in FULL
         // (`0x625a6d`, the only receive-time victim dispatch). The PLACEHOLDER

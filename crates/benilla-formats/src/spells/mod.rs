@@ -219,6 +219,11 @@ const COL_TARGETS: usize = 13;
 /// Ice Armor 7302 / Feign Death 5384 = 1 (self — clears bit 10), Arcane Intellect 1459 / Lesser
 /// Heal 2050 = 21 (→ assist bit 8), Battle Shout 6673 = 20 (party-area — a no-op arm).
 const COL_IMPLICIT_TARGET_A1: usize = 82;
+/// `EffectImplicitTargetB[0]` (`SpellRec+0x154`, `0x154/4 == 85`) — the second implicit-target
+/// column, walked beside A by the hostility classifier `0x6ea280` ([`SpellDisplay::is_harmful`]).
+/// Empirical pin: Frost Nova 122 carries A = 22 (caster coordinates) and B = 15 (src-area enemy)
+/// — harmful through B alone.
+const COL_IMPLICIT_TARGET_B1: usize = 85;
 /// The usable-walk columns (`IsSpellUsableNow 0x6e3d60`'s §2a gate table, wow-re
 /// `action-button-state-api.md`, byte-verified 2026-07-10; column = SpellRec-offset/4).
 /// Empirical pins on the real 5875 data: Claw 1082 Stances `0x1` (cat = form 1), Ambush 8676
@@ -807,6 +812,12 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 modal_next_spell: u32_at(r, COL_MODAL_NEXT_SPELL).unwrap_or(0),
                 targets: u32_at(r, COL_TARGETS).unwrap_or(0),
                 implicit_target_a1: u32_at(r, COL_IMPLICIT_TARGET_A1).unwrap_or(0),
+                effect_implicit_target_a: std::array::from_fn(|i| {
+                    u32_at(r, COL_IMPLICIT_TARGET_A1 + i).unwrap_or(0)
+                }),
+                effect_implicit_target_b: std::array::from_fn(|i| {
+                    u32_at(r, COL_IMPLICIT_TARGET_B1 + i).unwrap_or(0)
+                }),
                 stances: u32_at(r, COL_STANCES).unwrap_or(0),
                 stances_not: u32_at(r, COL_STANCES_NOT).unwrap_or(0),
                 caster_aura_state: u32_at(r, COL_CASTER_AURA_STATE).unwrap_or(0),
