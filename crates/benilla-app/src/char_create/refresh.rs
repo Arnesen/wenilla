@@ -19,7 +19,7 @@ use crate::glue::art::{
     class_tc, race_tc, tc_rect, GlueArt, ALLIANCE_FILL, BACKDROP_ALLIANCE, BACKDROP_HORDE, BTN_BG,
     BTN_HOVER, FALLBACK_ALPHA, HORDE_FILL,
 };
-use crate::glue::widgets::{FallbackFace, GlueDisabled, Hilight, HoverLabel};
+use crate::glue::widgets::{FallbackFace, GlueDisabled, Hilight, HoverLabel, LockHighlight};
 
 /// Refill everything that follows the selection — icon rects, dial labels, info texts, faction
 /// tints, class-slot mapping — on selection change or a fresh spawn.
@@ -238,10 +238,10 @@ pub(super) fn refresh_hover(
             &Children,
             &mut BackgroundColor,
             Has<FallbackFace>,
+            &mut LockHighlight,
         ),
         (With<Button>, Without<crate::glue::widgets::GlueBtn>),
     >,
-    mut hilights: Query<&mut Visibility, (With<Hilight>, Without<HoverLabel>)>,
     mut labels: Query<&mut Visibility, (With<HoverLabel>, Without<Hilight>)>,
     mut disables: Query<(&CreateAction, &mut GlueDisabled)>,
 ) {
@@ -254,23 +254,20 @@ pub(super) fn refresh_hover(
         _ => false,
     };
 
-    for (action, interaction, children, mut bg, fallback) in &mut buttons {
+    for (action, interaction, children, mut bg, fallback, mut locked) in &mut buttons {
         let is_sel = selected(action);
         let hovered = *interaction != Interaction::None;
         let lit = is_sel || hovered;
+        // The sheen itself is `crate::glue::glue_hilights`' — this says only which row is chosen.
+        if locked.0 != is_sel {
+            locked.0 = is_sel;
+        }
         // No-art fallback only: buttons spawned with a plain face get a hover shade. (Every node
         // *has* a `BackgroundColor` — only a `FallbackFace`'s belongs to us.)
         if fallback {
             bg.0 = if lit { BTN_HOVER } else { BTN_BG };
         }
         for child in children {
-            if let Ok(mut vis) = hilights.get_mut(*child) {
-                *vis = if lit {
-                    Visibility::Inherited
-                } else {
-                    Visibility::Hidden
-                };
-            }
             if let Ok(mut vis) = labels.get_mut(*child) {
                 // Without icon art the label IS the button face — always visible.
                 let show = lit || art.races.is_none();
@@ -358,15 +355,19 @@ pub(super) fn scroll_drive(
 pub(super) fn scroll_visuals(
     art: Res<GlueArt>,
     scrolls: Query<(&ComputedNode, &ScrollPosition), With<InfoScroll>>,
-    mut arrows: Query<(&ScrollArrow, &Interaction, &mut ImageNode, &Children)>,
+    mut arrows: Query<(
+        &ScrollArrow,
+        &Interaction,
+        &mut ImageNode,
+        &mut GlueDisabled,
+    )>,
     mut thumbs: Query<(&ScrollThumb, &mut Node)>,
     mut hides: Query<(&ScrollHides, &mut Visibility), Without<Hilight>>,
-    mut hilights: Query<&mut Visibility, With<Hilight>>,
 ) {
     let Some(sc) = &art.scroll else {
         return;
     };
-    for (arrow, interaction, mut img, children) in &mut arrows {
+    for (arrow, interaction, mut img, mut off) in &mut arrows {
         let Ok((node, pos)) = scrolls.get(arrow.scroll) else {
             continue;
         };
@@ -386,14 +387,10 @@ pub(super) fn scroll_visuals(
         if img.image != *face {
             img.image = face.clone();
         }
-        for child in children {
-            if let Ok(mut vis) = hilights.get_mut(*child) {
-                *vis = if !disabled && *interaction != Interaction::None {
-                    Visibility::Inherited
-                } else {
-                    Visibility::Hidden
-                };
-            }
+        // A scroll arrow at the end of its travel is genuinely disabled — said once, in the
+        // component the shared sheen pass already reads, rather than re-derived beside it.
+        if off.0 != disabled {
+            off.0 = disabled;
         }
     }
     for (thumb, mut node) in &mut thumbs {

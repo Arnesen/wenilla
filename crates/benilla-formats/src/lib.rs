@@ -222,8 +222,8 @@ pub use talents::{load_talent_catalog, Talent, TalentCatalog, TalentTabInfo, MAX
 mod spell_visual;
 pub use spell_visual::{
     char_proc_small_int, char_proc_type, load_spell_visual_catalog, ChainEffect, ChainProc,
-    CharProc, SpellVisualCatalog, VisualKit, VisualStages, CHAIN_MAX_BEAMS, KIT_CHAR_PROCS,
-    KIT_SLOT_TAGS, MISSILE_ATTACH_TABLE, WORLD_EFFECT_TAG,
+    CharProc, SpellVisualCatalog, TrailProc, VisualKit, VisualStages, CHAIN_MAX_BEAMS,
+    KIT_CHAR_PROCS, KIT_SLOT_TAGS, MISSILE_ATTACH_TABLE, WORLD_EFFECT_TAG,
 };
 mod emit_timing;
 pub use emit_timing::{EmitParams, EmitTiming, ParamsNow};
@@ -305,6 +305,10 @@ pub use chat_channels::{
 };
 mod server_messages;
 pub use server_messages::{load_server_messages_catalog, ServerMessagesCatalog};
+mod game_tips;
+pub use game_tips::{load_game_tips, GameTipsCatalog};
+mod text_filter_lists;
+pub use text_filter_lists::{load_chat_profanity, load_spam_messages, FilterPattern};
 mod race_sound;
 pub use race_sound::{load_exploration_sound_catalog, ExplorationSoundCatalog};
 mod zone_map;

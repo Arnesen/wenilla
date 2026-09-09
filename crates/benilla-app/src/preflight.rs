@@ -62,7 +62,7 @@ use bevy::window::PrimaryWindow;
 
 use crate::area::AreaTableRes;
 use crate::names::NameCache;
-use crate::net::{EnteredWorldMessage, ObjectStore, SelfGuid, SelfPlayer};
+use crate::net::{DisconnectedMessage, EnteredWorldMessage, ObjectStore, SelfGuid, SelfPlayer};
 use crate::probe_shield::{ProbeShield, ShieldReport};
 use benilla_world::world_map::CurrentMap;
 
@@ -241,7 +241,7 @@ fn camera_2d_msaa_agrees(
 }
 
 /// The banner's once-per-entry latch: armed by [`EnteredWorldMessage`], disarmed when the report
-/// goes out (or when the wait expires).
+/// goes out, when the wait expires, or when the session that armed it ends.
 #[derive(Resource, Default)]
 struct Preflight {
     /// `Time::elapsed_secs` at the world entry we still owe a report for; `None` = nothing pending.
@@ -253,6 +253,7 @@ struct Preflight {
 fn report_session(
     mut state: ResMut<Preflight>,
     mut entered: MessageReader<EnteredWorldMessage>,
+    mut ended: MessageReader<DisconnectedMessage>,
     time: Res<Time>,
     self_q: Query<(&ObjectStore, &Transform), With<SelfPlayer>>,
     self_guid: Res<SelfGuid>,
@@ -264,6 +265,16 @@ fn report_session(
 ) {
     if entered.read().next().is_some() {
         state.armed_at = Some(time.elapsed_secs());
+    }
+    // **A session that ended disarms the wait** — after the arm, so the entry-and-death-in-one-drain
+    // race (decision 1262) resolves the way it does everywhere else: the dead session is the last
+    // word. Without this the latch outlives the session that armed it and the banner fires from the
+    // glue screen, telling a future reader that "the avatar never streamed in" when the truth is
+    // that nobody ever entered a world for it to stream into. A refused character login makes that
+    // reachable on purpose (`SMSG_CHARACTER_LOGIN_FAILED` revokes an entry already announced); a
+    // socket that dies mid-entry always could.
+    if ended.read().next().is_some() {
+        state.armed_at = None;
     }
     let Some(armed_at) = state.armed_at else {
         return;

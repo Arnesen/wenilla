@@ -13,18 +13,106 @@ use bevy::prelude::*;
 use super::super::{find_resolved, AnimDriver};
 use super::select::{self, jump_land_pick, Mode, Special};
 
+/// The **base-animation lock** — the reference's `[unit+0xd58]` bits `0xc0000`, which are the whole
+/// reason a Lashed player visibly falls over (VERIFIED, wow-re `base-anim-lock-knockdown.md`;
+/// decision 2096, correcting 2085's §3).
+///
+/// `CGUnit::PlayAnimation 0x5fe2f0` opens with a guard that returns having done nothing at all:
+///
+/// ```text
+/// 5fe396  mov  eax,[ebx+0xd58]
+/// 5fe39c  test eax,0xc0000
+/// 5fe3a1  jne  0x5fec29        ; bare epilogue — no routing, no arm, no deferral
+/// ```
+///
+/// The bits are set by `PlayAnimation`'s **own** arm helper `0x5fdba0`, in a tail keyed on the id
+/// *actually armed* (`0x5fdcf7`'s byte table `0x5fdd90`): **121 `Knockdown` → `0x80000`**, **192
+/// `LiftOff` / 200 `Land` → `0x40000`**. They are cleared in `CGUnit::OnAnimationFinished
+/// `0x5fc9c6`, above that function's reason branch — so on natural completion *and* on pre-emption
+/// — and again on a model rebuild (`0x60adee`).
+///
+/// So a stun's root **does** recompute the base and the selector **does** resolve `Stand(0)`, and
+/// the `0x5fda20 call 0x5fe2f0(0)` that would overwrite the Knockdown is simply **refused**. The
+/// clip runs its full 2000 ms. Order-independent, which is why it holds whatever the packet timing.
+///
+/// The reference carries two independent bits; a unit can only ever hold one, because the second
+/// arm would itself be refused — so this models the holder as the id, which also expresses the
+/// "keyed on the FINISHED id" clearing rule directly. The two weaker relatives (`0x4` on 39
+/// `JumpEnd`, which only makes the fallback idle decline, and `0x8` on 127 `Birth`, which makes the
+/// whole selector return keep-current) are separate mechanisms at their own sites and are not
+/// modelled here.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BaseAnimLock(Option<u16>);
+
+impl BaseAnimLock {
+    /// The three ids whose arm takes the lock — `0x5fdd90`'s table, `0xc0000` half.
+    fn locking(id: u16) -> bool {
+        matches!(id, select::KNOCKDOWN | select::LIFT_OFF | select::LAND)
+    }
+
+    /// The guard: is a play refused right now? An **unconditional early return**, not a priority
+    /// comparison and not a dedup (`base-anim-lock-knockdown.md` §7.3).
+    pub(super) fn refuses(self) -> bool {
+        self.0.is_some()
+    }
+
+    /// The setter, run on the id **actually armed** and only when the arm happened.
+    fn took(&mut self, id: u16) {
+        if Self::locking(id) {
+            self.0 = Some(id);
+        }
+    }
+
+    /// The clearer, keyed on the **finished** id. Called once a frame before anything re-picks the
+    /// base, so completion and pre-emption both release it: an overridden clip's node still reports
+    /// finished at the end of its own span, which is exactly the reference's "the base stays locked
+    /// for the rest of the clip's window" when a mount arms over a knockdown (§7.6).
+    pub(super) fn release_finished(
+        &mut self,
+        player: &AnimationPlayer,
+        anims: &ModelAnimations,
+        catalog: Option<&AnimDataCatalog>,
+    ) {
+        if let Some(id) = self.0 {
+            if oneshot_finished(player, anims, id, catalog) {
+                self.0 = None;
+            }
+        }
+    }
+
+    /// Drop the lock outright — the reference's other two clearing sites (§7.5/§7.6).
+    ///
+    /// A **model rebuild** needs no call here: benilla's rebuild removes [`AnimDriver`] itself
+    /// (`entities::live_display`), so the lock goes with it and the unit comes back with the base
+    /// unheld — which is the reference's own outcome at `0x60adee`, reached differently. What does
+    /// call it is the pair of arms the reference never gates: the death pose and the mount attach.
+    pub(super) fn release(&mut self) {
+        self.0 = None;
+    }
+}
+
 /// Cross-fade the player into an **already-resolved** clip over its blend-in time. `repeat` sets its
 /// repetition (`Forever` for a loop, `Count(R)` for a rolled replay budget, `Never` for a plain
 /// one-shot — always set, so a reused graph node never carries a stale count from a prior play);
 /// `rate` sets its playback speed. The primitive [`play`] (and the gait picker, which already has
 /// the resolved [`AnimClip`] in hand) both funnel through this so resolution never runs twice.
+/// Returns whether the clip was actually armed — `false` is the lock's refusal, and a caller whose
+/// bookkeeping says "the base now holds this" must not write it on a `false` (the reference's guard
+/// returns before the arm's own `[bone+0xf8] = animId`, so nothing downstream believes it played).
 pub(super) fn play_clip(
+    lock: &mut BaseAnimLock,
     tr: &mut AnimationTransitions,
     player: &mut AnimationPlayer,
     c: &AnimClip,
     repeat: RepeatAnimation,
     rate: f32,
-) {
+) -> bool {
+    // The guard, at the very top — before any routing, descriptor build or slot election
+    // ([`BaseAnimLock`]). `arm` below is the primitive the reference reaches past this guard from
+    // the dismount, the sheath family and the weapon attach, so it stays ungated.
+    if lock.refuses() {
+        return false;
+    }
     arm(
         tr,
         player,
@@ -33,6 +121,8 @@ pub(super) fn play_clip(
         rate,
         Duration::from_secs_f32(c.blend_time.max(0.0)),
     );
+    lock.took(c.anim_id);
+    true
 }
 
 /// Arm an already-resolved **looping** clip with the cross-fade SUPPRESSED — op4 `0x7121a0` called
@@ -149,6 +239,7 @@ pub(super) fn roll_loop<'a>(
 /// the `Count` repeat — no window outlives the arm).
 #[allow(clippy::too_many_arguments)] // the resolve+roll+play primitive's full input set
 pub(super) fn play(
+    lock: &mut BaseAnimLock,
     tr: &mut AnimationTransitions,
     player: &mut AnimationPlayer,
     anims: &ModelAnimations,
@@ -160,6 +251,15 @@ pub(super) fn play(
     rng: &mut u32,
     window: &mut Option<(bevy::animation::graph::AnimationNodeIndex, u32)>,
 ) {
+    // The lock's guard is `PlayAnimation`'s **front door**, above the arm helper that draws the
+    // rolls (`0x5fe2f0`'s epilogue return is at `0x5fe3a1`; the `_rand()` sites live inside
+    // `0x5fdba0`'s op4 call). So a refused play must not roll either: the variation and replay
+    // draws come off the ONE shared stream (decision 0114), and rolling them for a body that
+    // cannot move would perturb every other unit's picks for the clip's whole 2 s — the same
+    // churn 2096 caught in the gait selector's live trace, at the event-play door instead.
+    if lock.refuses() {
+        return;
+    }
     if let Some(c) = find_resolved(anims, id, catalog) {
         let (c, repeat) = if looping {
             let (c, r) = roll_loop(anims, c, relaxed, rng);
@@ -169,7 +269,7 @@ pub(super) fn play(
             *window = None;
             roll_oneshot(anims, c, rng)
         };
-        play_clip(tr, player, c, repeat, rate);
+        play_clip(lock, tr, player, c, repeat, rate);
     }
 }
 
@@ -251,12 +351,40 @@ pub(super) fn oneshot_finished(
     }
 }
 
+/// Whether bone 0 still holds `sp`'s **own** clip — the arc's enter or its loop, resolved through
+/// the model's baked fallback exactly as [`play`] resolved it when it armed (decision 0082) and
+/// compared on the *resolved* id, so a rolled variation counts as the same clip.
+///
+/// This is the predicate the airborne snapshot-freeze (decision 0503, scoped by 1566) never had.
+/// The freeze exists to still **the cut airborne clip** before the landing cross-fades over it;
+/// both its sites took whatever bone 0 happened to hold, on the unstated assumption that the arc's
+/// own clip is what is there. The base-anim lock (2096) is the first thing that ever falsified it,
+/// and it falsified it catastrophically: every play the arc asked for was refused, so bone 0 still
+/// held the `Knockdown` that took the lock — and the landing stopped **that** dead. A clip stopped
+/// dead never finishes, and the lock clears on the finished id, so the body stayed on its back for
+/// the rest of the session with every later play refused (the director's report, decision 2098).
+pub(super) fn holds_own_clip(
+    anims: &ModelAnimations,
+    catalog: Option<&AnimDataCatalog>,
+    sp: Special,
+    node: bevy::animation::graph::AnimationNodeIndex,
+) -> bool {
+    let Some(cur) = anims.clips.iter().find(|c| c.node == node) else {
+        return false;
+    };
+    [sp.enter(), sp.loop_id()]
+        .into_iter()
+        .filter_map(|id| find_resolved(anims, id, catalog))
+        .any(|head| head.anim_id == cur.anim_id)
+}
+
 /// Enter the Special `sp`, returning the mode to adopt. A pose or a jump plays its enter one-shot
 /// and settles through [`Mode::Entering`]; **Fall has no enter** — the client plays the Fall(40)
 /// loop directly the tick FALLINGFAR latches (`0x602c40`) — so it goes straight to
 /// [`Mode::Looping`] with a looping play.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn enter_special(
+    lock: &mut BaseAnimLock,
     sp: Special,
     relaxed: bool,
     tr: &mut AnimationTransitions,
@@ -268,6 +396,7 @@ pub(super) fn enter_special(
 ) -> Mode {
     if sp == Special::Fall {
         play(
+            lock,
             tr,
             player,
             anims,
@@ -283,6 +412,7 @@ pub(super) fn enter_special(
     } else {
         // Enter plays are one-shots — `relaxed` (a looping-arm concern) is moot for them.
         play(
+            lock,
             tr,
             player,
             anims,
@@ -306,6 +436,7 @@ pub(super) fn enter_special(
 /// exit one-shot, which [`super::drive_animations`] then waits out. Returns the mode to adopt.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn leave_special(
+    lock: &mut BaseAnimLock,
     sp: Special,
     special: Option<Special>,
     moving: bool,
@@ -335,16 +466,37 @@ pub(super) fn leave_special(
     // derivation; what produces the reference's lingering kick is not yet known.
     // …and the frozen node is NAMED (decision 0906), so the per-frame rate write
     // ([`sync_base_rate`]) skips it instead of restarting the clock a line above just stopped.
+    //
+    // …and it is **the arc's own clip** that is stilled, never merely whatever bone 0 holds
+    // ([`holds_own_clip`]) — the predicate this always meant and never wrote down.
     if matches!(sp, Special::Jump | Special::Fall) {
         if let Some(node) = tr.get_main_animation() {
-            if let Some(active) = player.animation_mut(node) {
-                active.set_speed(0.0);
-                *frozen = Some(node);
+            if holds_own_clip(anims, catalog, sp, node) {
+                if let Some(active) = player.animation_mut(node) {
+                    active.set_speed(0.0);
+                    *frozen = Some(node);
+                }
+            } else if benilla_assets::trace::enabled() {
+                // The declined freeze is TRACED, because the wedge it used to cause was
+                // completely silent: nothing logs a clip being stopped, and a stopped clip that
+                // holds the base-anim lock ends the unit's animation for the session (2098).
+                let held = anims
+                    .clips
+                    .iter()
+                    .find(|c| c.node == node)
+                    .map(|c| c.anim_id);
+                benilla_assets::trace::line(
+                    "anim",
+                    &format!(
+                        "anim freeze DECLINED leaving {sp:?}: bone 0 holds {held:?}, not this \
+                         arc's clip"
+                    ),
+                );
             }
         }
     }
     if let Some(next) = special {
-        enter_special(next, relaxed, tr, player, anims, catalog, rng, window)
+        enter_special(lock, next, relaxed, tr, player, anims, catalog, rng, window)
     } else if matches!(sp, Special::Jump | Special::Fall) {
         // The landing is a plain, freely-overwritten pick (decisions 0083/0087 (d)): the clip
         // is chosen from the input *at touchdown* (`flags`) by the `0x602c60` dispatcher's rule,
@@ -353,7 +505,7 @@ pub(super) fn leave_special(
         match jump_land_pick(flags) {
             Some(id) => {
                 play(
-                    tr, player, anims, id, false, false, 1.0, catalog, rng, window,
+                    lock, tr, player, anims, id, false, false, 1.0, catalog, rng, window,
                 );
                 Mode::Land { id, flags }
             }
@@ -364,7 +516,7 @@ pub(super) fn leave_special(
     } else {
         let exit = sp.exit();
         play(
-            tr, player, anims, exit, false, false, 1.0, catalog, rng, window,
+            lock, tr, player, anims, exit, false, false, 1.0, catalog, rng, window,
         );
         Mode::Exiting(sp, exit)
     }

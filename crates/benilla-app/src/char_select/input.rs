@@ -30,17 +30,23 @@ pub(super) fn select_input(
     clicks: Res<crate::glue::GlueClicks>,
     keys: Res<ButtonInput<KeyCode>>,
     mut roster: ResMut<Roster>,
+    mut realms: ResMut<crate::realm_select::Realms>,
     pick: Res<CharPick>,
     mut dialog: ResMut<DeleteDialog>,
     mut panel: ResMut<super::addons::AddonsPanel>,
+    choice: Res<crate::net::RealmChoice>,
     mut next: ResMut<NextState<ClientState>>,
     mut sounds: MessageWriter<GlueSound>,
     mut intent: ResMut<crate::login::LoginIntent>,
+    glue_dialog: Res<crate::glue::dialog::GlueDialog>,
     time: Res<Time>,
     mut last_click: Local<Option<(usize, f32)>>,
 ) {
-    // A modal owns the input while it is up — the delete confirm, or the AddOns list.
-    if dialog.open || panel.open {
+    // A modal owns the input while it is up — the delete confirm, the AddOns list, the realm
+    // list (which stands over this screen rather than replacing it), or the shared glue dialog
+    // (a refused character login is said in that one, and its Okay must not double as this
+    // screen's Enter World / Escape).
+    if dialog.open || panel.open || realms.shown || glue_dialog.is_open() {
         return;
     }
     let now = time.elapsed_secs();
@@ -98,6 +104,16 @@ pub(super) fn select_input(
                 panel.open_for(realm, chars);
             }
             SelectAction::Back => back_to_login = true,
+            // The reference's `CHANGE_REALM`: raise the realm list **over** this screen. Nothing
+            // is torn down and nothing is disconnected — the character park serves the list in
+            // place and only leaves when a realm is picked, so Cancel puts the player back here
+            // with the session they never left. The pending pick still has to go, or the fresh
+            // roster on the OTHER realm would be auto-answered with a guid from this one.
+            SelectAction::ChangeRealm => {
+                sounds.write(GlueSound("gsLoginChangeRealmOK"));
+                roster.pending_pick = None;
+                crate::realm_select::open_over_char_select(&mut realms, &choice);
+            }
             _ => {}
         }
     }

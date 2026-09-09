@@ -71,14 +71,26 @@ enum LogoutSignal {
 
 /// The pending session-exit, and the signals owed to the UI.
 ///
-/// `quitting` is the ONE piece of local state the whole arc needs: the wire cannot tell a logout
+/// `quitting` is the piece of local state the arc's *meaning* needs: the wire cannot tell a logout
 /// from a quit (both are `CMSG_LOGOUT_REQUEST`), so which dialog to show and whether to exit the
 /// process at the end is remembered here. It is cleared by every terminal edge — a refusal, a
 /// cancel, or the exit itself — so a cancelled quit can never leave a client that dies on the next
 /// unrelated logout.
+///
+/// `pending` is the reference's own **`[session+0x1b1d]`** (decision 2092), which this module knew
+/// about in prose — `apply_cancelled`'s doc has always called it "the same pending byte the
+/// refusal arm clears" — and never modelled. `0x5ab000` bails on it *silently* when `force == 0`,
+/// so a second request while one is in flight is not a second packet. That gate was invisible
+/// while the only caller was a button a human presses once; the idle handler (2092) asks every
+/// frame past thirty minutes, and without the latch it would put a `CMSG_LOGOUT_REQUEST` on the
+/// wire sixty times a second until something else stamped the idle clock.
 #[derive(Resource, Default)]
 pub(crate) struct LogoutState {
     quitting: bool,
+    /// `[session+0x1b1d]` — a logout request is out and unanswered. Set by the non-forced path,
+    /// bypassed *and not set* by `ForceLogout` (`0x5aaff0`, decision 1963), cleared by every
+    /// terminal edge.
+    pending: bool,
     signals: Vec<LogoutSignal>,
 }
 
@@ -92,6 +104,9 @@ impl LogoutState {
         info!("logout: server answered reason={reason} instant={instant}");
         if reason != 0 {
             self.quitting = false;
+            // `0x5aaf21`'s arm: `DisplayError(ERR_LOGOUT_FAILED)` **and clear the pending flag**,
+            // which is what lets the player try again once they leave combat.
+            self.pending = false;
             self.signals.push(LogoutSignal::Refused);
             return;
         }
@@ -110,6 +125,7 @@ impl LogoutState {
     /// `LOGOUT_CANCEL` off the same pending byte the refusal arm clears (decision 1821).
     pub(crate) fn apply_cancelled(&mut self) {
         self.quitting = false;
+        self.pending = false;
         self.signals.push(LogoutSignal::Cancelled);
     }
 }
@@ -156,6 +172,12 @@ fn drain_logout(
     for request in script.take_session_requests() {
         match request {
             SessionRequest::Logout | SessionRequest::Quit => {
+                // `0x5ab000`'s pending-logout bail, and it is **silent** — no error line, no
+                // event, nothing on the wire. It sits ABOVE `0x5ab053`'s store of the quit byte,
+                // so a refused request does not even get to change camp-into-quit.
+                if logout.pending {
+                    continue;
+                }
                 logout.quitting = request == SessionRequest::Quit;
                 // Not in the world (or the socket is gone): there is nothing to log out OF, so a
                 // quit is just an exit and a logout is a no-op. The reference does the same — its
@@ -169,6 +191,7 @@ fn drain_logout(
                         logout.quitting = false;
                     }
                 } else {
+                    logout.pending = true;
                     // Announced because what happens next is entirely the server's call — instant
                     // or a 20 s countdown — and a silent request looks identical to a dropped one.
                     info!(
@@ -183,6 +206,7 @@ fn drain_logout(
                 // harmless (vmangos ignores it). `quitting` clears here rather than on the ack so a
                 // cancel with a dead socket still can't leave a quit armed.
                 logout.quitting = false;
+                logout.pending = false;
                 let _ = commands.0.send(ClientCommand::LogoutCancel);
             }
             SessionRequest::ForceQuit => {
@@ -191,6 +215,9 @@ fn drain_logout(
             }
             // `CMSG_PLAYER_LOGOUT`, the forced flavour: the dispatcher's own gate is a live
             // in-world session, and nothing happens without one (decision 1963).
+            // `0x5aaff0` calls the dispatcher with `force = 1`, which BYPASSES the pending bail
+            // and does NOT set the latch (wow-re `staticpopup-dialog-bindings.md` §4) — so a
+            // forced logout is exactly the escape hatch from a stuck pending one.
             SessionRequest::ForceLogout => {
                 if self_guid.0.is_some() {
                     info!("logout: forced");
@@ -220,6 +247,9 @@ fn exit_on_logout_complete(
     if logged_out.read().count() == 0 {
         return;
     }
+    // The request is answered — and on a logout that lands us at character select this is the edge
+    // that must disarm it, or the next character's first Logout would be swallowed.
+    logout.pending = false;
     if logout.quitting {
         logout.quitting = false;
         info!("logout: world session ended — exiting");
@@ -244,6 +274,8 @@ impl Plugin for UiLogoutPlugin {
 
 #[cfg(test)]
 mod tests {
+    use bevy::ecs::system::RunSystemOnce;
+
     use super::*;
 
     /// The response table (module docs): refusal speaks and disarms, instant is silent, and the
@@ -259,6 +291,7 @@ mod tests {
 
         let mut s = LogoutState {
             quitting: true,
+            pending: true,
             signals: Vec::new(),
         };
         s.apply_response(0, false);
@@ -268,11 +301,74 @@ mod tests {
         // minutes later and deliberate, would silently kill the process instead.
         let mut s = LogoutState {
             quitting: true,
+            pending: true,
             signals: Vec::new(),
         };
         s.apply_response(1, false);
         assert_eq!(s.signals, vec![LogoutSignal::Refused]);
         assert!(!s.quitting);
+        assert!(
+            !s.pending,
+            "the refusal arm clears the pending byte — otherwise a logout refused in combat \
+             would never be retryable"
+        );
+    }
+
+    /// **The pending latch, both directions** (decision 2092) — `0x5ab000` bails silently on
+    /// `[session+0x1b1d]`, and every terminal edge clears it. Driven through the real
+    /// [`drain_logout`] rather than the state alone, because the bail lives in the drain and the
+    /// thing under test is that the second ask puts nothing on the wire.
+    #[test]
+    fn a_second_logout_while_one_is_pending_is_silent() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.init_resource::<LogoutState>()
+            .init_resource::<crate::ui_script::ReloadUiPending>()
+            .init_resource::<crate::cinematic::Cinematic>()
+            .add_message::<AppExit>()
+            .add_message::<LoggedOutMessage>()
+            .insert_resource(SelfGuid(Some(0x4000_0000_0000_0009)))
+            .insert_resource(NetCommands(tx));
+        app.insert_non_send_resource(UiScript::new().unwrap());
+
+        let ask = |app: &mut App, request| {
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .queue_session_request(request);
+            app.world_mut()
+                .run_system_once(drain_logout)
+                .expect("drain");
+        };
+        let sent = |rx: &crossbeam_channel::Receiver<ClientCommand>| rx.try_iter().count();
+
+        ask(&mut app, SessionRequest::Logout);
+        assert_eq!(sent(&rx), 1, "the first ask goes out");
+        assert!(app.world().resource::<LogoutState>().pending);
+
+        // The idle handler's shape: ask again, and again, while the server has not answered.
+        for _ in 0..60 {
+            ask(&mut app, SessionRequest::Logout);
+        }
+        assert_eq!(sent(&rx), 0, "and not one more packet, nor any error line");
+
+        // `ForceLogout` bypasses the bail and does not set the latch (`0x5aaff0`, force = 1).
+        ask(&mut app, SessionRequest::ForceLogout);
+        assert_eq!(sent(&rx), 1, "the forced flavour is the escape hatch");
+
+        // A cancel disarms, and the next ask is heard again.
+        ask(&mut app, SessionRequest::CancelLogout);
+        assert_eq!(sent(&rx), 1, "CMSG_LOGOUT_CANCEL");
+        assert!(!app.world().resource::<LogoutState>().pending);
+        ask(&mut app, SessionRequest::Logout);
+        assert_eq!(sent(&rx), 1);
+
+        // …and so does the completion, so the next character's first Logout is not swallowed.
+        app.world_mut().resource_mut::<LogoutState>().pending = true;
+        app.world_mut().write_message(LoggedOutMessage);
+        app.world_mut()
+            .run_system_once(exit_on_logout_complete)
+            .expect("complete");
+        assert!(!app.world().resource::<LogoutState>().pending);
     }
 
     /// The cancel ack disarms a quit too — the same "no armed quit survives a terminal edge" rule.
@@ -280,6 +376,7 @@ mod tests {
     fn a_cancel_disarms_a_pending_quit() {
         let mut s = LogoutState {
             quitting: true,
+            pending: true,
             signals: Vec::new(),
         };
         s.apply_cancelled();

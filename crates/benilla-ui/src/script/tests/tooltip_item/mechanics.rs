@@ -97,7 +97,7 @@ fn bag_item_money_law_and_fallback() {
         TT:SetBagItem(0, 2)
         assert(money_fired == nil, "unsellable fires no money")
         local last = getglobal("TTTextLeft" .. TT:NumLines())
-        assert(last:GetText() == "No sell price", "ITEM_UNSELLABLE line")
+        assert(last:GetText() == "[ITEM_UNSELLABLE]", "ITEM_UNSELLABLE line")
     "#,
     )
     .unwrap();
@@ -160,7 +160,7 @@ fn wrap_lines_measure_wrapped_in_one_pass_and_survive_the_reenter_loop() {
         s.resolve();
     };
     answer(&mut s);
-    // name 14 + gap 2 + "1 Charge" 14 + gap 2 + description 36 + 2·pad 20 = 88.
+    // name 14 + gap 2 + the charges line 14 + gap 2 + description 36 + 2·pad 20 = 88.
     s.run(
         r#"
         assert(TT:GetWidth() == 270, "wrap column + padding, got " .. TT:GetWidth())
@@ -285,17 +285,17 @@ fn real_instance_hover_renders_live_durability() {
         found = nil
         for i = 1, tt:NumLines() do
             local t = getglobal("TTTextLeft" .. i):GetText()
-            if t and string.find(t, "Durability") then found = t end
+            if t and string.find(t, "DURABILITY") then found = t end
         end
-        assert(found == "Durability 30 / 40", "live pair on a bag hover, got " .. tostring(found))
+        assert(found == "[DURABILITY 30/40]", "live pair on a bag hover, got " .. tostring(found))
         -- The template/link hover of the SAME item keeps the authored full pair.
         tt:SetItemById(2264)
         found = nil
         for i = 1, tt:NumLines() do
             local t = getglobal("TTTextLeft" .. i):GetText()
-            if t and string.find(t, "Durability") then found = t end
+            if t and string.find(t, "DURABILITY") then found = t end
         end
-        assert(found == "Durability 40 / 40", "template hover stays full, got " .. tostring(found))
+        assert(found == "[DURABILITY 40/40]", "template hover stays full, got " .. tostring(found))
     "#,
     )
     .unwrap();
@@ -346,9 +346,9 @@ fn broken_instance_hover_renders_zero_durability() {
         found = nil
         for i = 1, tt:NumLines() do
             local t = getglobal("TTTextLeft" .. i):GetText()
-            if t and string.find(t, "Durability") then found = t end
+            if t and string.find(t, "DURABILITY") then found = t end
         end
-        assert(found == "Durability 0 / 40", "broken gear shows its true 0, got " .. tostring(found))
+        assert(found == "[DURABILITY 0/40]", "broken gear shows its true 0, got " .. tostring(found))
     "#,
     )
     .unwrap();
@@ -358,7 +358,7 @@ fn broken_instance_hover_renders_zero_durability() {
     let lines = super::lines_of(&mut s);
     let dur = lines
         .iter()
-        .find(|(t, _)| t.starts_with("Durability"))
+        .find(|(t, _)| t.starts_with("[DURABILITY"))
         .expect("the durability line renders");
     assert_eq!(
         dur.1,
@@ -431,7 +431,8 @@ fn an_enchanted_instance_renders_its_enchant_line_before_durability() {
             .unwrap_or_else(|| panic!("no {needle} line in {texts:?}"))
     };
     assert!(
-        at("+7 Nature Resistance") < at("Agility +15") && at("Agility +15") < at("Durability"),
+        at("[RESIST_SINGLE +7 [SCHOOL3]]") < at("Agility +15")
+            && at("Agility +15") < at("[DURABILITY"),
         "the enchant line sits between resistances and durability: {texts:?}"
     );
     assert_eq!(
@@ -564,7 +565,7 @@ fn temporary_enchant_line_carries_its_countdown_and_charges() {
                 EnchantView {
                     slot: 1,
                     name: "Rockbiter Weapon".into(),
-                    remaining_ms: Some(275_000), // 4 min 35 s → "(5 min)"
+                    remaining_ms: Some(275_000), // 4 min 35 s → the MIN arm, ceiled to 5
                     charges: 5,
                     ..Default::default()
                 },
@@ -606,7 +607,7 @@ fn temporary_enchant_line_carries_its_countdown_and_charges() {
     let lines = super::lines_of(&mut s);
     let texts: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
     assert!(
-        texts.contains(&"Rockbiter Weapon (5 min) (5 Charges)"),
+        texts.contains(&"[ENCH Rockbiter Weapon 5 m] ([CHARGES 5 x])"),
         "one line: name, countdown, charges — got {texts:?}"
     );
     assert!(
@@ -623,7 +624,7 @@ fn temporary_enchant_line_carries_its_countdown_and_charges() {
 /// (`0x5d8b00`, the same string `GetLootSlotInfo` returns), so the plate reads "… of the Monkey".
 ///
 /// This is the reported bug's exact shape: through the template path (`SetItemById`) the same
-/// hover printed `<Random enchantment>` until the item reached a bag.
+/// hover printed the ITEM_RANDOM_ENCHANT placeholder until the item reached a bag.
 #[test]
 fn a_looted_roll_shows_its_lines_and_never_the_placeholder() {
     let mut s = script();
@@ -689,7 +690,7 @@ fn a_looted_roll_shows_its_lines_and_never_the_placeholder() {
     let lines = super::lines_of(&mut s);
     let texts: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
     assert!(
-        !texts.contains(&"<Random enchantment>"),
+        !texts.contains(&"[ITEM_RANDOM_ENCHANT]"),
         "a block source never reaches the placeholder arm — got {texts:?}"
     );
     assert_eq!(
@@ -749,7 +750,7 @@ fn a_looted_item_with_no_roll_shows_neither_line_nor_placeholder() {
         .map(|(t, _)| t)
         .collect();
     assert!(
-        !texts.iter().any(|t| t == "<Random enchantment>"),
+        !texts.iter().any(|t| t == "[ITEM_RANDOM_ENCHANT]"),
         "no placeholder on a block source — got {texts:?}"
     );
 }
@@ -801,7 +802,7 @@ fn a_linked_roll_shows_its_lines_and_never_the_placeholder() {
         .map(|(t, _)| t)
         .collect();
     assert!(
-        !texts.iter().any(|t| t == "<Random enchantment>"),
+        !texts.iter().any(|t| t == "[ITEM_RANDOM_ENCHANT]"),
         "a link never reaches the placeholder arm — got {texts:?}"
     );
     assert_eq!(
@@ -815,7 +816,7 @@ fn a_linked_roll_shows_its_lines_and_never_the_placeholder() {
     );
 }
 
-/// `<Random enchantment>` (§E5) — the template-only placeholder: a random-property item with NO
+/// `ITEM_RANDOM_ENCHANT` (§E5) — the template-only placeholder: a random-property item with NO
 /// instance to read a roll from prints it, green, and the per-slot lines and this one are mutually
 /// exclusive by construction. The control is the same template hovered as a real enchanted
 /// instance: the roll is known, so the placeholder gives way to the slot lines.
@@ -844,7 +845,7 @@ fn random_property_template_hover_shows_the_placeholder() {
     let lines = super::lines_of(&mut s);
     let placeholder = lines
         .iter()
-        .find(|(t, _)| t == "<Random enchantment>")
+        .find(|(t, _)| t == "[ITEM_RANDOM_ENCHANT]")
         .expect("the template hover shows the placeholder");
     assert_eq!(placeholder.1, [0.0, 1.0, 0.0, 1.0], "green");
 
@@ -876,7 +877,7 @@ fn random_property_template_hover_shows_the_placeholder() {
     let lines = super::lines_of(&mut s);
     let texts: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
     assert!(
-        !texts.contains(&"<Random enchantment>") && texts.contains(&"Stamina +7"),
+        !texts.contains(&"[ITEM_RANDOM_ENCHANT]") && texts.contains(&"Stamina +7"),
         "an instance's known roll replaces the placeholder — got {texts:?}"
     );
 }

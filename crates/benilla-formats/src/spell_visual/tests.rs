@@ -308,7 +308,7 @@ fn real_spell_visual_chain_resolves_fireball() {
     // (row 21, byte-verified `0x61f5b0`/`0x8618e0`, decision 0304's §5 fold-back).
     assert_eq!(
         cat.hardcoded_effect("HARDCODED Unit Level Up"),
-        Some("Spells\\LevelUp\\LevelUp.mdl"),
+        Some((21, "Spells\\LevelUp\\LevelUp.mdl")),
         "the level-up pillar resolves by name"
     );
     assert!(
@@ -388,7 +388,7 @@ fn real_effect_name_table_resolves_the_loot_art_row() {
     let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_visual_catalog(&mut chain).expect("load the visual catalog");
-    assert_eq!(cat.loot_art_path(), Some("Particles\\LootFX.mdl"));
+    assert_eq!(cat.loot_art_effect(), Some((14, "Particles\\LootFX.mdl")));
     // The model the row names ships in the chain (consumers rewrite .mdl → .m2 to load it).
     assert!(
         chain.read_file("Particles\\LootFX.m2").is_ok(),
@@ -783,4 +783,57 @@ fn real_hunter_shots_take_the_bows_load_and_release_clips() {
     // The kit ids resolve to the AnimationData rows the caster actually plays.
     assert_eq!(cat.kit(7).and_then(|k| k.anim_id), Some(105), "LoadBow");
     assert_eq!(cat.kit(164).and_then(|k| k.anim_id), Some(46), "AttackBow");
+}
+
+/// The type-8 arm's decode is **plain truncation** (`_ftol` at `0x40a2b0`), not the small-int
+/// idiom every other integer-carrying param uses — a slot decoded the wrong way yields a colour
+/// of 0 and a duration of 0, i.e. silently no trail at all.
+#[test]
+fn a_weapon_trail_proc_decodes_by_truncation() {
+    // Kit 324's shipped row: Zero = 16263465 (`0xf82929`), One = 20, Two = 600, Three = 100.
+    let proc = CharProc {
+        ty: char_proc_type::WEAPON_TRAIL,
+        params: [16_263_465.0, 20.0, 600.0, 100.0],
+    };
+    let trail = proc.as_weapon_trail().expect("a live trail proc");
+    assert_eq!(trail.rgb(), [0xf8, 0x29, 0x29], "R248 G41 B41");
+    assert_eq!(trail.alpha(), 100);
+    assert_eq!(trail.duration_ms, 600);
+    assert_eq!(
+        trail.packed, 0x64f8_2929,
+        "0xAARRGGBB, as `unit+0xd1c` holds it"
+    );
+    assert_ne!(
+        proc.small_int(0),
+        u32::from(trail.rgb()[0]),
+        "the small-int decode is the WRONG idiom here and must not be reused"
+    );
+}
+
+/// `0x5fe494 cmp eax,edi ; je` — a zero duration fires nothing, so it is not a trail.
+#[test]
+fn a_zero_duration_trail_proc_is_no_trail() {
+    let proc = CharProc {
+        ty: char_proc_type::WEAPON_TRAIL,
+        params: [16_263_465.0, 20.0, 0.0, 100.0],
+    };
+    assert!(proc.as_weapon_trail().is_none());
+}
+
+/// Only type 8 reaches the arm — `VisualKit::trail_proc` must not answer for a tint or an alpha
+/// proc whose `params[2]` happens to be nonzero.
+#[test]
+fn only_type_eight_arms_a_trail() {
+    for ty in [
+        char_proc_type::TINT,
+        char_proc_type::ALPHA,
+        char_proc_type::ANIM_RATE,
+        char_proc_type::CHAIN_CAST,
+    ] {
+        let proc = CharProc {
+            ty,
+            params: [16_263_465.0, 20.0, 600.0, 100.0],
+        };
+        assert!(proc.as_weapon_trail().is_none(), "type {ty}");
+    }
 }

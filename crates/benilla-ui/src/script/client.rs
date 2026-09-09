@@ -204,12 +204,14 @@ impl super::UiScript {
             // `ace.trim(GetCVar("realmName"))` inside `SetGameState`, which EVERY Ace addon runs at
             // PLAYER_ENTERING_WORLD, so the nil became `gsub(nil, ...)` and took the family down.
             //
-            // Written straight into the slot rather than through `set_cvar_host` because that
-            // borrows the model again, and warns on an unknown name — this is the host declaring
-            // the value, not looking it up.
-            if let Some(slot) = model.cvars.get_mut("realmname") {
-                slot.value = realm.to_string();
-            }
+            // Through the **engine-write** path, not a bare slot poke. `realmName` is a persisted
+            // CVar — its whole documented job is to be the last realm connected to — and a slot
+            // written in place never reaches `cvar_changes`, so the host never hears it and never
+            // dirties the config file. The value was therefore correct for exactly as long as the
+            // process lived and absent from `config.toml` forever, which is the one thing a
+            // persisted CVar must not be. `set_from_engine` is the same silent-on-unknown-name
+            // write (a bare test VM registers nothing) and additionally queues the change.
+            super::cvars::set_from_engine(&mut model, "realmName", realm.to_string());
         }
     }
 

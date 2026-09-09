@@ -481,14 +481,15 @@ mod tests {
         let mut app = app();
         spawn_camera(&mut app);
         let (behind, _) = spawn_rig(&mut app, Vec3::Z * 50.0);
-        // A creature guid whose entry the cache answers with the flag set — composed the way
-        // vmangos composes one (`counter | entry << 24 | high << 48`).
+        // A streamed creature whose descriptor names an entry the cache answers with the flag
+        // set. The gate keys on `OBJECT_FIELD_ENTRY` (field 3), the way the reference keys its
+        // creature-query record (decision 2068) — not on the entry inside the guid.
         const ENTRY: u32 = 69;
-        let guid =
-            7u64 | (u64::from(ENTRY) << 24) | (u64::from(benilla_protocol::guid::HIGH_UNIT) << 48);
         app.world_mut()
             .entity_mut(behind)
-            .insert(crate::net::Guid(guid));
+            .insert(crate::net::ObjectStore(
+                benilla_protocol::ObjectFields::from_pairs(&[(3, ENTRY)]),
+            ));
         app.world_mut()
             .resource_mut::<crate::names::NameCache>()
             .insert_creature(
@@ -499,7 +500,7 @@ mod tests {
                     creature_type: 1,
                     pet_family: 0,
                     rank: 0,
-                    type_flags: 0x20,
+                    type_flags: crate::names::type_flags::MORE_AUDIBLE,
                     civilian: false,
                     racial_leader: false,
                     display_id: 0,

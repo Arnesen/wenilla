@@ -125,39 +125,68 @@ impl WidgetArena {
         }
     }
 
-    /// Renumber `strata`'s **occupied** levels contiguously into `[0, count)` and return `count` —
-    /// `level_compact 0x764eb0`, the step `CSimpleTop::Raise 0x7650f0` runs immediately before it
-    /// sets the raised frame's level to `bucket->count(+0x8)` (wow-re `ui/scratch/toplevel-raise.md`,
-    /// consequence 1: the new level is the counter read *after* compaction, "never from a live
-    /// max-scan of frames").
+    /// Squeeze the free levels out of `strata` and return the level counter — `level_compact
+    /// 0x764eb0`, the step `CSimpleTop::Raise 0x7650f0` runs immediately before it sets the raised
+    /// frame's level to `bucket->count(+0x8)` (wow-re `ui/scratch/level-compact-law.md`, a §5 trio
+    /// dispatched from here; `ui/scratch/toplevel-raise.md` for the raise it serves).
     ///
-    /// **Only frames in the bucket are renumbered — i.e. effective-visible ones.** A stratum bucket
-    /// is an array of intrusive level lists, and a frame is linked into one only while it is
-    /// effectively visible (the same visible-gate [`WidgetArena::resequence_to_tail`] mirrors); a
-    /// hidden frame is in no bucket, so its `+0xc4` is not touched and it re-enters at whatever level
-    /// it kept.
+    /// **EVERY frame of the stratum is renumbered — hidden ones included, and that is the byte
+    /// law, not a benilla choice** (decision 2104). `0x764eb0`'s occupancy test is a two-part OR: a
+    /// level node's own list, else a scan of the client's **master frame list** (`[root+0xcc4]`,
+    /// link offset `0x304` — every live frame, joined in the `CSimpleFrame` ctor and counted by
+    /// `GetNumFrames`), and that scan filters on exactly two fields — `+0xc0` strata (`0x764f18`)
+    /// and `+0xc4` level (`0x764f20`). The renumber pass `0x764f80..0x764fc9` walks the same list.
+    /// A census of `+0xd4` (effectiveVisible) over the whole body `[0x764eb0, 0x76500e)` finds
+    /// **zero** hits; in `set_frame_level 0x76a4f0` the `+0xc4` write is unconditional
+    /// (`0x76a53b`) and `+0xd4` gates only the bucket relink below it (`0x76a541`).
+    ///
+    /// Gating the renumber on visibility — which benilla did, reasoning from the level lists rather
+    /// than from the bytes — is not a relabelling at all: it changes the relative order of the part
+    /// it touches against the part it does not, and that difference then rides out on the raise's
+    /// `propagate` delta, which is computed in the *new* numbering and applied to levels still
+    /// carrying the *old* one. One level of squeeze taken out of a visible child and not out of its
+    /// hidden sibling becomes a permanent inversion between two frames that are level by
+    /// construction — `parent.level + 1` for both. Gatherer's Report window is the shape that found
+    /// it: the window's visible Close button and its hidden, mouse-enabled, full-cover body are both
+    /// direct children, the body was hidden for the Show raise, and it came out one level above the
+    /// button and ate every click and hover the button should have had. The reference lands that
+    /// pair equal, and the hit sweep's tie then goes to the earlier-linked frame, the button (1816).
+    ///
+    /// So the visible gate stays where it belongs — on the *link list* (`resequence_to_tail`, draw
+    /// participation) — and off the *numbering*, which is a property of the frame.
     ///
     /// **The renumber is strictly order-preserving, so by itself it changes no draw order**: distinct
     /// levels map to distinct indices monotonically and equal levels stay equal. Its whole job is to
     /// keep the raise target *bounded* — without it, `level := max + 1` would ratchet upward one step
     /// per raise for as long as the session lasts.
     ///
-    /// Two things it deliberately is **not**: it does not propagate (every same-strata descendant is
-    /// itself in the bucket and is renumbered by its own level node), and it does not relink — the
-    /// client relocates whole level nodes with their intrusive lists intact, so link order (our
-    /// `insertion_seq`) must survive. That is why this writes `level` directly instead of going
-    /// through [`WidgetArena::set_frame_level`], which would do both.
+    /// **Ours packs tighter than the binary's, deliberately.** `bucket+0x8` is a high-water *bound*,
+    /// not a count of occupied levels, and `0x764eb0`'s cursor resumes at its saved pre-gap index
+    /// while that bound shrinks under it (`0x764fd3`/`0x764fd8`), so a wide gap carries an interior
+    /// hole past it: occupied `{0, 4, 6}` at count 7 comes out `{0, 1, 3}` at count 4, not
+    /// `{0, 1, 2}` at 3. That artifact is invisible to draw and hit order — both maps are monotone
+    /// and injective on levels, and both keep the invariant the raise needs (`count` above every
+    /// occupied level) — so we take the contiguous one rather than model a cursor bug.
+    ///
+    /// Two things it deliberately is **not**: it does not propagate (`0x764faf` passes
+    /// `propagate = 0`, so a parent/child level *offset* is not preserved across a hole either —
+    /// parent 5 / child 7 comes out adjacent), and **it does not relink**, which is a known
+    /// divergence: the binary re-levels each moved frame through `0x76a4f0` at `0x764fb6`, so every
+    /// moved *visible* frame is unlinked and re-inserted and its within-level link order is
+    /// rewritten (a hidden frame takes no list churn). We write `level` directly instead, so our
+    /// `insertion_seq` survives a compaction untouched. Nothing observed yet turns on it; it is
+    /// named in 2104 rather than changed under a bug fix.
     pub fn compact_levels(&mut self, strata: Strata) -> u16 {
         let mut occupied: Vec<u16> = self
             .iter_frames()
-            .filter(|(_, f)| f.effective_visible && f.strata == strata)
+            .filter(|(_, f)| f.strata == strata)
             .map(|(_, f)| f.level)
             .collect();
         occupied.sort_unstable();
         occupied.dedup();
         let renumber: Vec<(FrameHandle, u16)> = self
             .iter_frames()
-            .filter(|(_, f)| f.effective_visible && f.strata == strata)
+            .filter(|(_, f)| f.strata == strata)
             .filter_map(|(h, f)| {
                 let idx = occupied.binary_search(&f.level).ok()? as u16;
                 (idx != f.level).then_some((h, idx))

@@ -7,11 +7,13 @@
 //!   empty line — the builder's name read is `0x609210`, the same resolver `UnitName` uses, and
 //!   its miss tail is the same string (decisions 2002/2040);
 //! - the creature SUBTITLE ("Stable Master") — white;
-//! - the LEVEL line, composed from three slots over the four `TOOLTIP_UNIT_LEVEL*` templates:
+//! - the LEVEL line, filled from three slots into one of the four `TOOLTIP_UNIT_LEVEL*` templates
+//!   the player's own `GlobalStrings.lua` carries (decision 2045 — the keys are the builder's,
+//!   read off `0x52a622`/`0x52a64d`/`0x52a682`/`0x52a6ac`, never matched on their English):
 //!   level text (`"??"` for a world boss, a much-higher hostile, or level ≤ 0 — the hostile
 //!   delta is INTERIM at +10 pending a byte pin of the comparison), the class slot (the creature
-//!   TYPE word for hostile/neutral creatures, `"Race Class"` for players, `"Corpse"` when dead),
-//!   and the type slot (the rank word `{"", Elite, Elite, Boss, ""}`; `"Player"` for players);
+//!   TYPE word for hostile/neutral creatures, `"Race Class"` for players, `CORPSE` when dead),
+//!   and the type slot (the rank key table `{"", ELITE, ELITE, BOSS, ""}`; `PLAYER` for players);
 //! - the FACTION NAME ("Stormwind", white) — the builder-tail block `0x52a7a0..` the law's §2
 //!   order originally omitted: the app resolves it (`faction_name`), every gate applied;
 //! - "PvP" (white) · "Skinnable" (**red**) · "Civilian" (green, `0x612550`: PvP-flagged +
@@ -36,6 +38,7 @@ use super::tooltip::{append_line, clear_content, fire_cleared, show_or_hide_empt
 use super::unit::{is_civilian_kill, level_reads_unknown, unknownobject};
 use super::{KindState, Model, UnitState};
 use crate::layout::{Anchor, Point};
+use crate::strings::{fill, Arg};
 use crate::widget::FrameHandle;
 
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
@@ -65,19 +68,31 @@ pub enum TooltipTint {
     LockOpen,
 }
 
-/// The rank word table — byte-verified `0x854158[]`: rare-elite prints ELITE, rare prints
-/// nothing (there is no distinct "Rare Elite" word in 1.12's builder).
-fn rank_word(rank: u32) -> Option<&'static str> {
+/// The rank word's GlobalString **key** — byte-verified `0x854158[]`, the pointer table the
+/// builder indexes by rank at `0x52a5bd`/`0x52a5d4`. Its entries are key names, not words: index 0
+/// and 4 are the pre-seeded empty string `0x882748`, 1 and 2 are both `ELITE` (rare-elite prints
+/// ELITE, rare prints nothing — there is no distinct "Rare Elite" word in 1.12's builder), 3 is
+/// `BOSS`.
+fn rank_key(rank: u32) -> Option<&'static str> {
     match rank {
-        1 | 2 => Some("Elite"),
-        3 => Some("Boss"),
+        1 | 2 => Some("ELITE"),
+        3 => Some("BOSS"),
         _ => None,
     }
 }
 
-/// The level line — three slots over the four `TOOLTIP_UNIT_LEVEL*` templates ("Level %s" /
-/// "Level %s %s" / "Level %s (%s)" / "Level %s %s (%s)", the extracted enUS strings).
-fn level_line(u: &UnitState, player_level: u32) -> String {
+/// The level line — three slots over the four `TOOLTIP_UNIT_LEVEL*` templates, each resolved off
+/// the player's own `GlobalStrings.lua` (decision 2045). The keys are the builder's own, pushed at
+/// `0x52a622` (`_CLASS_TYPE`), `0x52a64d` (`_CLASS`), `0x52a682` (`_TYPE`) and `0x52a6ac` (the
+/// bare one) — which matters, because `TOOLTIP_UNIT_LEVEL_CLASS`'s enUS "Level %s %s" is also the
+/// wording of `FRIENDS_LEVEL_TEMPLATE`, `UNIT_TYPE_LEVEL_TEMPLATE` and `CHARACTER_SELECT_INFO`,
+/// and the bare one collides with `ITEM_LEVEL`, `LEVEL_GAINED` and `UNIT_LEVEL_TEMPLATE`. Seven
+/// wrong keys are reachable by matching the English here; none by reading the builder.
+///
+/// `None` = the install's string table carries no template for the slot combination in hand, and
+/// the plate shows no level row rather than a composed one.
+fn level_line(lua: &Lua, u: &UnitState, player_level: u32) -> Option<String> {
+    let get = |key: &str| crate::strings::global(lua, key);
     // The "??" gate, byte-pinned (0x529fe0 §2-LEVEL): much-higher HOSTILE — internal reaction
     // ≤ 1 = hated/hostile = UnitReaction ≤ 2 on our 1..8 API scale (the UnitIsEnemy mapping) —
     // with playerLevel ≤ targetLevel−10; OR WorldBoss; OR level ≤ 0. Players NEVER read "??".
@@ -92,7 +107,7 @@ fn level_line(u: &UnitState, player_level: u32) -> String {
     // creatures (a friendly creature shows none — the byte law's hostile/neutral-only gate);
     // "Corpse" when dead.
     let class_slot = if u.dead {
-        Some("Corpse".to_string())
+        get("CORPSE")
     } else if u.is_player {
         match (&u.race, &u.class) {
             (Some(r), Some(c)) => Some(format!("{r} {c}")),
@@ -105,18 +120,28 @@ fn level_line(u: &UnitState, player_level: u32) -> String {
     } else {
         None
     };
-    // The type slot: the rank word, or "Player" for players.
+    // The type slot: the rank word, or PLAYER for players.
     let type_slot = if u.is_player {
-        Some("Player".to_string())
+        get("PLAYER")
     } else {
-        rank_word(u.rank).map(str::to_string)
+        rank_key(u.rank).and_then(&get)
     };
-    match (class_slot, type_slot) {
-        (Some(c), Some(t)) => format!("Level {level_text} {c} ({t})"),
-        (Some(c), None) => format!("Level {level_text} {c}"),
-        (None, Some(t)) => format!("Level {level_text} ({t})"),
-        (None, None) => format!("Level {level_text}"),
-    }
+    let (key, args): (&str, Vec<Arg<'_>>) = match (&class_slot, &type_slot) {
+        (Some(c), Some(t)) => (
+            "TOOLTIP_UNIT_LEVEL_CLASS_TYPE",
+            vec![Arg::S(&level_text), Arg::S(c), Arg::S(t)],
+        ),
+        (Some(c), None) => (
+            "TOOLTIP_UNIT_LEVEL_CLASS",
+            vec![Arg::S(&level_text), Arg::S(c)],
+        ),
+        (None, Some(t)) => (
+            "TOOLTIP_UNIT_LEVEL_TYPE",
+            vec![Arg::S(&level_text), Arg::S(t)],
+        ),
+        (None, None) => ("TOOLTIP_UNIT_LEVEL", vec![Arg::S(&level_text)]),
+    };
+    Some(fill(&get(key)?, &args))
 }
 
 /// Render the unit tooltip for `token`'s current snapshot; returns whether the unit existed.
@@ -160,13 +185,9 @@ fn render_unit(lua: &Lua, this: &Table, token: &str) -> mlua::Result<bool> {
     if let Some(sub) = &u.subtitle {
         append_line(lua, this, (sub.clone(), WHITE), None, false)?;
     }
-    append_line(
-        lua,
-        this,
-        (level_line(&u, player_level), WHITE),
-        None,
-        false,
-    )?;
+    if let Some(level) = level_line(lua, &u, player_level) {
+        append_line(lua, this, (level, WHITE), None, false)?;
+    }
     // The faction-name line ("Stormwind", white) sits between the level line and "PvP" — the
     // builder-tail block at `0x52a7a0`. The app resolved every gate into `faction_name`.
     if let Some(faction) = &u.faction_name {

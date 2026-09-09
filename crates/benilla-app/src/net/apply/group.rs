@@ -1,9 +1,14 @@
 //! The group/party arm bodies (decision 0434 §D2, superseded by 0440) for
-//! [`super::apply_net_updates`]'s dispatch match. [`GroupState`] mirrors the wire and *composes*
-//! the lines; these are the drain-side shims that push what it composed onto the chat log — the
-//! way the reference's engine-side errorId→GlobalStrings display does (mapping byte-verified,
-//! decision 0440's §5 fold-back). Each `pub(super)` fn here is exactly one arm's body; the match at
-//! the call site stays the dispatcher, one call per arm.
+//! [`super::apply_net_updates`]'s dispatch match. [`GroupState`] mirrors the wire and names the
+//! **messages** its roster diff implies; these are the drain-side shims that put them on the
+//! shared by-key queue. Each `pub(super)` fn here is exactly one arm's body; the match at the call
+//! site stays the dispatcher, one call per arm.
+//!
+//! **They are message ids, not sentences** (decisions 2045/2054). The reference reaches all twelve
+//! through one `CGGameUI::DisplayError(msgId)`, and the catalog row that id names answers three
+//! questions at once — the text, the surface, and the sound. Composing the English here answered
+//! only the first, and got the third wrong for free: `ERR_DECLINE_GROUP_S` carries the
+//! `igPlayerInviteDecline` cue, which a straight chat push had no way to play.
 
 use benilla_protocol::messages::{
     member_status, GroupLootInfo, GroupMemberEntry, PartyMemberStatsInfo,
@@ -11,19 +16,17 @@ use benilla_protocol::messages::{
 use bevy::prelude::*;
 
 use crate::names::NameCache;
-use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
+use crate::ui_action::{UiError, UiErrorKeys};
 use crate::ui_party::GroupState;
 use crate::ui_quest::QuestGiver;
 
 use super::super::{ClientCommand, GuidIndex, NetCommands, ObjectStore, SelfGuid};
 
-/// Push the lines a `GroupState::apply_*` composed as CHAT_MSG_SYSTEM — the same seam the other
-/// client-composed feeds use (the reference's engine formats these via its errorId→GlobalStrings
-/// display and fires them as system chat; benilla's composer hands us the finished strings).
-fn push_group_lines(chat_log: &mut ChatLog, lines: Vec<String>) {
-    for line in lines {
-        chat_log.push_event(ChatEvent::text_only(ChatEventKind::System, line));
-    }
+/// Queue the messages a `GroupState::apply_*` named. `ui_action::feed_actions` resolves each key
+/// against the VM's own `GlobalStrings.lua` and puts the line on the surface its catalog row
+/// names — `ui_guild`'s `push_lines` (decision 2054), one window over.
+fn push_group_lines(errors: &mut UiErrorKeys, lines: Vec<UiError>) {
+    errors.0.extend(lines);
 }
 
 /// `MSG_RAID_READY_CHECK`, the open form (decision 1989): our own echo as leader takes the
@@ -31,38 +34,38 @@ fn push_group_lines(chat_log: &mut ChatLog, lines: Vec<String>) {
 /// the popup ticket. The leader test is the reference's guid compare (`0x4ba3a0`).
 pub(super) fn ready_check_request(
     group: &mut GroupState,
-    chat_log: &mut ChatLog,
+    errors: &mut UiErrorKeys,
     self_guid: &SelfGuid,
 ) {
     let we_lead = self_guid.0 == Some(group.leader);
-    push_group_lines(chat_log, group.apply_ready_check_request(we_lead));
+    push_group_lines(errors, group.apply_ready_check_request(we_lead));
 }
 
 /// `SMSG_GROUP_INVITE` — someone asked us into their group.
-pub(super) fn invited(group: &mut GroupState, chat_log: &mut ChatLog, inviter: &str) {
-    push_group_lines(chat_log, group.apply_invited(inviter));
+pub(super) fn invited(group: &mut GroupState, errors: &mut UiErrorKeys, inviter: &str) {
+    push_group_lines(errors, group.apply_invited(inviter));
 }
 
 /// `SMSG_GROUP_DECLINE` — our invitee said no (sent to the inviter only).
-pub(super) fn declined(group: &mut GroupState, chat_log: &mut ChatLog, name: &str) {
-    push_group_lines(chat_log, group.apply_declined(name));
+pub(super) fn declined(group: &mut GroupState, errors: &mut UiErrorKeys, name: &str) {
+    push_group_lines(errors, group.apply_declined(name));
 }
 
 /// `SMSG_GROUP_UNINVITE` — we were kicked.
-pub(super) fn uninvited(group: &mut GroupState, chat_log: &mut ChatLog) {
-    push_group_lines(chat_log, group.apply_uninvited());
+pub(super) fn uninvited(group: &mut GroupState, errors: &mut UiErrorKeys) {
+    push_group_lines(errors, group.apply_uninvited());
 }
 
 /// `SMSG_GROUP_DESTROYED` — the group is gone outright.
-pub(super) fn destroyed(group: &mut GroupState, chat_log: &mut ChatLog) {
-    push_group_lines(chat_log, group.apply_destroyed());
+pub(super) fn destroyed(group: &mut GroupState, errors: &mut UiErrorKeys) {
+    push_group_lines(errors, group.apply_destroyed());
 }
 
 /// `SMSG_GROUP_SET_LEADER` — the line reads differently when the new leader is us, so the composer
 /// needs our own name. It is cache-seeded at login (`session::connected`), so this never asks.
 pub(super) fn leader_changed(
     group: &mut GroupState,
-    chat_log: &mut ChatLog,
+    errors: &mut UiErrorKeys,
     name: &str,
     self_guid: &SelfGuid,
     names: &mut NameCache,
@@ -71,7 +74,7 @@ pub(super) fn leader_changed(
     let own = self_guid
         .0
         .and_then(|g| names.resolve(g, net_commands).map(str::to_string));
-    push_group_lines(chat_log, group.apply_leader_changed(name, own.as_deref()));
+    push_group_lines(errors, group.apply_leader_changed(name, own.as_deref()));
 }
 
 /// `SMSG_GROUP_LIST` — the roster echo (and the join/leave diff's line source). Roster changes move
@@ -88,7 +91,7 @@ pub(super) fn leader_changed(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn list(
     group: &mut GroupState,
-    chat_log: &mut ChatLog,
+    errors: &mut UiErrorKeys,
     quest: &mut QuestGiver,
     group_type: u8,
     own_flags: u8,
@@ -109,7 +112,7 @@ pub(super) fn list(
         .map(|m| (m.guid, m.status & member_status::ONLINE != 0))
         .collect();
     let lines = group.apply_list(group_type, own_flags, members, leader, loot);
-    push_group_lines(chat_log, lines);
+    push_group_lines(errors, lines);
     seat_new_records(group, &seats, index, net_commands);
     quest.bump_reask();
 }
@@ -254,9 +257,9 @@ mod tests {
     fn the_roster_warms_every_member_into_the_name_cache_once() {
         let (tx, rx) = crossbeam_channel::unbounded();
         let net = NetCommands(tx);
-        let (mut group, mut chat_log, mut quest) = (
+        let (mut group, mut errors, mut quest) = (
             GroupState::default(),
-            ChatLog::default(),
+            UiErrorKeys::default(),
             QuestGiver::default(),
         );
         let mut names = NameCache::default();
@@ -266,7 +269,7 @@ mod tests {
 
         list(
             &mut group,
-            &mut chat_log,
+            &mut errors,
             &mut quest,
             0,
             0,
@@ -295,7 +298,7 @@ mod tests {
         names.insert_player(leader, "Frostshake".into(), Some((1, 4, 1)));
         list(
             &mut group,
-            &mut chat_log,
+            &mut errors,
             &mut quest,
             0,
             0,
@@ -419,9 +422,9 @@ mod tests {
     fn a_roster_new_member_is_seated_at_one_one_and_asked_for_only_when_unseen() {
         let (tx, rx) = crossbeam_channel::unbounded();
         let net = NetCommands(tx);
-        let (mut group, mut chat_log, mut quest) = (
+        let (mut group, mut errors, mut quest) = (
             GroupState::default(),
-            ChatLog::default(),
+            UiErrorKeys::default(),
             QuestGiver::default(),
         );
         let mut names = NameCache::default();
@@ -436,7 +439,7 @@ mod tests {
         let mut send = |group: &mut GroupState, members: Vec<GroupMemberEntry>| {
             list(
                 group,
-                &mut chat_log,
+                &mut errors,
                 &mut quest,
                 0,
                 0,

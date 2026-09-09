@@ -184,7 +184,7 @@ fn drive_child(
             child.particles.push(Particle {
                 pos: p.pos + fold(local),
                 vel,
-                age: 0.0,
+                age: birth_age(child.def.burst(), dt, &mut child.rng),
                 life: now.lifespan,
                 phase,
                 fresh: true,
@@ -193,6 +193,27 @@ fn drive_child(
             });
         }
     }
+}
+
+/// A particle's **birth age** — the reference's third spawn-kernel argument, `U01 · w`
+/// (`0x7b88c4`/`0x7b88c7` in the plane kernel, byte-identical in sphere and spline; wow-re
+/// `part-birth-age-and-quad-edge.md` §1.3/§1.4).
+///
+/// `w` is **not** the lifespan, which is the reading that would halve every pool's steady-state
+/// population: the burst loop pushes a literal `0` (`0x7b5600`) and both continuous loops push the
+/// **substep dt** (`0x7b5779` interpolated, `0x7b57e2` plain). So a burst's N particles are all born
+/// at age 0 together, while a poured one is born already aged by a random fraction of the frame it
+/// was born in — which de-synchronises the births that share a frame, and is why a steady stream
+/// does not visibly pulse at the frame rate.
+///
+/// **Named approximation:** the reference substeps at a hard `0.1 s` (`[0x81d828]`, `0x7b58e7`), so
+/// its `w` is bounded by construction; we do not substep, so the frame delta is clamped here
+/// instead. Identical below 0.1 s, which is every frame that is not a hitch.
+fn birth_age(is_burst: bool, dt: f32, rng: &mut u32) -> f32 {
+    if is_burst {
+        return 0.0;
+    }
+    rand01(rng) * dt.min(0.1)
 }
 
 /// The **draw-set gate's** scene inputs, bundled: the far-clip wall the gate bounds emitters at
@@ -775,6 +796,7 @@ pub(super) fn simulate_particles(
             model_instances,
             gated: _,
             frozen: _,
+            clip,
         } = &mut *emitter;
         // The water-interleave MODEL frame, captured before the draw-anchor local shadows the
         // `anchor` field below: the cloud anchor is "the MODEL, never the bone" — its transform
@@ -1181,7 +1203,7 @@ pub(super) fn simulate_particles(
             particles.push(Particle {
                 pos,
                 vel,
-                age: 0.0,
+                age: birth_age(def.burst(), dt, rng),
                 life: now.lifespan,
                 phase,
                 fresh: true,
@@ -1366,8 +1388,12 @@ pub(super) fn simulate_particles(
                 raster_bias: 0,
                 raster_slope: 0.0,
                 cam_relative: false,
+                no_depth_test: false,
                 main_entity: entity,
                 light: light_override.map(|l| l.0.clone()),
+                // The pane cell a UI model tile's cloud is confined to (`set_clip`); `None` for
+                // every world emitter, which owns the whole target.
+                clip: *clip,
             },
         );
         // CHILD pools: their own texture/blend/fog identity, the PARENT's anchor and rung
@@ -1408,8 +1434,11 @@ pub(super) fn simulate_particles(
                     raster_bias: 0,
                     raster_slope: 0.0,
                     cam_relative: false,
+                    no_depth_test: false,
                     main_entity: entity,
                     light: light_override.map(|l| l.0.clone()),
+                    // A child cloud draws where its parent does — same cell, same clip.
+                    clip: *clip,
                 },
             );
         }
@@ -1487,11 +1516,53 @@ fn fold_committed_light(
 #[cfg(test)]
 mod tests {
     use super::{
-        booth_frozen, fold_committed_light, follow_fraction, inherit_trigger, integrate_particle,
-        is_above, scene_frozen, ChildEmitter, EffectLighting, EffectVertex, Particle, StepEnv,
-        Vec3,
+        birth_age, booth_frozen, fold_committed_light, follow_fraction, inherit_trigger,
+        integrate_particle, is_above, scene_frozen, ChildEmitter, EffectLighting, EffectVertex,
+        Particle, StepEnv, Vec3,
     };
     use bevy::prelude::{Quat, Transform};
+
+    /// **A burst's particles are all born at age 0** — the burst spawn loop pushes a literal `0`
+    /// as the kernels' `w` (`0x7b5600`), so the whole puff shares one clock and ages as one body.
+    /// Reading `w` as the LIFESPAN instead — the shape an audit proposed here — would scatter the
+    /// puff over `[0, lifespan)`, halve its integrated brightness and halve every steady pool's
+    /// population, which is the arithmetic wow-re's own measured C1 (300 = rate x lifespan)
+    /// already ruled out. Pinned so that reading cannot come back.
+    #[test]
+    fn a_burst_births_every_particle_at_age_zero() {
+        let mut rng = 0x1234_5678;
+        for _ in 0..64 {
+            assert_eq!(birth_age(true, 0.016, &mut rng), 0.0);
+        }
+        // Not a function of dt: a hitch does not age a burst either.
+        assert_eq!(birth_age(true, 5.0, &mut rng), 0.0);
+    }
+
+    /// A POURED particle is born aged by a random fraction of its own frame (`U01 . dt`), which is
+    /// what de-synchronises the births sharing one frame.
+    #[test]
+    fn a_poured_particle_is_born_aged_within_its_own_frame() {
+        let mut rng = 0x9e37_79b9;
+        let dt = 0.016;
+        let mut saw_nonzero = false;
+        for _ in 0..256 {
+            let age = birth_age(false, dt, &mut rng);
+            assert!((0.0..dt).contains(&age), "age {age} outside [0, {dt})");
+            saw_nonzero |= age > 0.0;
+        }
+        assert!(saw_nonzero, "the seed is a real draw, not a constant 0");
+    }
+
+    /// The reference substeps at a hard 0.1 s, so its `w` is bounded by construction; we do not
+    /// substep, so a hitch frame is clamped here instead (the named approximation in `birth_age`).
+    #[test]
+    fn a_hitch_frame_cannot_birth_a_particle_older_than_the_substep_cap() {
+        let mut rng = 0xdead_beef;
+        for _ in 0..256 {
+            let age = birth_age(false, 5.0, &mut rng);
+            assert!((0.0..0.1).contains(&age), "age {age} outside [0, 0.1)");
+        }
+    }
 
     fn one_quad() -> Vec<EffectVertex> {
         vec![

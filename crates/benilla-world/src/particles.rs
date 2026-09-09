@@ -277,6 +277,9 @@ pub struct ParticleEmitter {
     /// [`quads::DrawFrame::size_scale`]. `1.0` (a yard) for every world lane; a UI model tile
     /// sets its pixels-per-unit through [`Self::set_size_scale`].
     size_scale: f32,
+    /// The render-target rectangle this cloud is confined to, target pixels — see
+    /// [`Self::set_clip`]. `None` = the whole target (every world emitter).
+    pub(crate) clip: Option<Vec4>,
 }
 
 /// One wired CHILD emitter (see [`ParticleEmitter::children`]): the recursion model's own
@@ -381,6 +384,21 @@ impl ParticleEmitter {
     /// (`gated && gate_inputs_still && !fade.is_changed()`, decision 1979's floor) reads none of
     /// the owner's inputs: a world-lane cloud left gated here on a still camera could never
     /// re-enter its own draw set. One full gate evaluation on the thaw edge is the price.
+    /// **Confine this cloud's quads to a rectangle of the render target**, in target pixels —
+    /// the UI model tiles' cell ([`crate::particles::buffer::EffectDrawSpec::clip`], decision
+    /// 2093). `None` (the default, and every world emitter) draws over the whole target.
+    ///
+    /// A tile's cloud is quads in the shared atlas's own space, so without this a cloud that
+    /// reaches past its cell lands in the cell the shelf packed beside it — which the composite
+    /// hands to a different widget (B379: the autocast shine's golden `GlowStar` down the left
+    /// edge of a bag slot's cooldown). The reference has no atlas and no such reach: it draws
+    /// each `<Model>` with the widget's rect as the VIEWPORT.
+    pub fn set_clip(&mut self, clip: Option<Vec4>) {
+        if self.clip != clip {
+            self.clip = clip;
+        }
+    }
+
     pub fn set_frozen(&mut self, frozen: bool) {
         self.frozen = frozen;
         if !frozen {
@@ -431,6 +449,35 @@ impl ParticleEmitter {
     /// whose instances carry their alpha in a `MeshTag` rather than a vertex colour.
     pub fn render_alpha(&self) -> f32 {
         self.alpha
+    }
+
+    /// The **cloud anchor** this emitter was spawned under ([`EmitterFrames::anchor`]) — the model
+    /// instance it belongs to. The identity an effect lane uses to find its own emitters when the
+    /// instance ends ([`Self::drain_on_owner_loss`]).
+    pub fn anchor(&self) -> Option<Entity> {
+        self.anchor
+    }
+
+    /// Switch this emitter to [`OwnerLoss::Drain`] — **the effect is ending, so its already-emitted
+    /// particles must finish rather than pop** (wow-re `ceffect-particle-drain.md` §4a).
+    ///
+    /// The reference makes this distinction the same way, at the same moment. `0x6203e0` — the
+    /// teardown every ending `CEffect` reaches, whether by its completion callback or by the
+    /// same-slot replace — does **not** free the node: it pushes it onto the pending-destroy list
+    /// and hides it, which stops emission only. The particle draw path never reads a flag that
+    /// teardown clears (its own admission test is the live-particle count `emitter+0x64`,
+    /// `0x7b4b46`), so the survivors keep drawing and ageing out one at a time; `0x61f680` frees
+    /// the node on the first frame the aggregate `CM2Model+0x3d8` reads zero — **the free
+    /// condition and the draw condition are the same word**.
+    ///
+    /// It is deliberately NOT the spawn-time policy for an attached instance, because the *other*
+    /// way an effect's owner can vanish is the model dtor — a gear change, a display swap, a unit
+    /// streaming out — and there the reference frees the emitters synchronously and the pool must
+    /// go with the body (decisions 0826/0833: draining that case stranded ghost clouds in the air
+    /// where the character had been). Both look identical from inside the sim, so the ending side
+    /// says so explicitly.
+    pub fn drain_on_owner_loss(&mut self) {
+        self.on_owner_loss = OwnerLoss::Drain;
     }
 
     /// The cloud's live world anchor — the census probe's fallback distance subject for an emitter
@@ -552,6 +599,19 @@ pub struct EmitterFade {
 }
 
 impl EmitterFade {
+    /// A bare fade **sphere** — the gate of a placement that is nobody's furniture: an ADT map
+    /// doodad, a WMO root's own geometry, a prop on a moving transport. `center` is WORLD space,
+    /// already placed. The building-prop form goes through
+    /// [`crate::terrain_stream::emitter_fade`], which composes this with the instance and rooms.
+    pub(crate) fn sphere(radius: f32, center: Vec3) -> Self {
+        Self {
+            radius,
+            center,
+            instance: None,
+            room: None,
+        }
+    }
+
     /// This owner's distance-fade ALPHA (not the cutoff): the reference writes it into the
     /// doodad's `CM2Model+0x180`, so it multiplies that model's particles exactly as it does its
     /// batches (`FUN_00683f80` → `+0x180` → `+0x19c` → `emitter+0x1a8`, decision 0827). The
@@ -731,6 +791,7 @@ pub fn spawn_emitter(
             geometry: emitter.geometry.clone(),
             model_instances: Vec::new(),
             size_scale: 1.0,
+            clip: None,
         },
     ));
     if emitter.recursion.is_some() {
@@ -1021,6 +1082,58 @@ pub(crate) mod tests {
         );
         // The ordinary model, whose idle IS slot 0, is unchanged.
         assert_eq!(seeded_slot(model_emitter(0), EmitClock::Pinned), Some(0));
+    }
+
+    /// **The ending side asks for the drain; the spawn-time policy does not give it** (wow-re
+    /// `ceffect-particle-drain.md` §4a). An attached instance is spawned `Free` so that a model
+    /// dtor — a gear change, a display swap, a unit streaming out — takes its pool with the body
+    /// (0826/0833: draining that case stranded ghost clouds in the air). The *other* way an
+    /// effect's owner vanishes is the effect simply ending, and there the reference hides the node
+    /// and lets the particles age out. Both look identical from inside the sim, so the ending side
+    /// flips the policy explicitly — and this is the flip.
+    #[test]
+    fn an_ending_instance_switches_its_emitters_from_free_to_drain() {
+        use bevy::ecs::system::RunSystemOnce;
+        let root = Entity::from_raw_u32(7).unwrap();
+        let mut app = App::new();
+        let e = app
+            .world_mut()
+            .run_system_once(move |mut c: Commands| {
+                spawn_emitter(
+                    &mut c,
+                    &model_emitter(0),
+                    Transform::IDENTITY,
+                    EmitterFrames {
+                        anchor: Some(root),
+                        on_owner_loss: OwnerLoss::Free,
+                        ..default()
+                    },
+                    EmitClock::Pinned,
+                )
+            })
+            .unwrap()
+            .expect("the emitter spawns");
+
+        assert_eq!(
+            app.world().get::<ParticleEmitter>(e).unwrap().anchor(),
+            Some(root),
+            "the instance root is the identity its lane finds this emitter by",
+        );
+        assert_eq!(
+            app.world().get::<ParticleEmitter>(e).unwrap().on_owner_loss,
+            OwnerLoss::Free,
+            "spawned Free — a torn-down model must not strand its cloud",
+        );
+
+        app.world_mut()
+            .get_mut::<ParticleEmitter>(e)
+            .unwrap()
+            .drain_on_owner_loss();
+        assert_eq!(
+            app.world().get::<ParticleEmitter>(e).unwrap().on_owner_loss,
+            OwnerLoss::Drain,
+            "the ending instance's particles finish instead of popping",
+        );
     }
 
     /// Camera at the origin looking down −Z (Bevy's convention), and an owner sphere `depth` yd

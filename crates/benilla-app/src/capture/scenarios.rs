@@ -64,6 +64,30 @@ pub(super) enum UiFixture {
     QuestLog,
     Loot,
     Bag,
+    /// **The cooldown sweep, at sixteen phases in one still** (B379).
+    ///
+    /// The backpack filled slot for slot, each slot's `GetContainerItemCooldown` triple parked at
+    /// its own fraction of one very long cooldown — so the sixteen `…Cooldown` model panes
+    /// (`CooldownFrameTemplate`, the reference's own `UI-Cooldown-Indicator.m2` through the tile
+    /// lane, decision 2019) each hold a different point of the 1000 ms sweep and the window reads
+    /// left-to-right, top-to-bottom as a filmstrip of it. Game slot 1 renders TOP-LEFT
+    /// (`ContainerFrame_GenerateFrame` numbers backwards — see `seed_bag_window`), so ascending
+    /// slot is reading order.
+    ///
+    /// **The clock is pinned so the phases are, too.** `GetTime()` is the VM's own accumulating
+    /// session clock (`__benilla_now`), and the frame count to the shutter varies run to run — so
+    /// an absolute start would put the sweep somewhere different every capture and the baseline
+    /// could never diff. The fixture parks `__benilla_now` at a large value and gives every
+    /// slot a very long cooldown, which makes the settle window's few seconds worth
+    /// `~5e-4` of one phase step.
+    Cooldown,
+    /// **The cooldown filmstrip with the pet bar's autocast SHINE up beside it** (B379).
+    ///
+    /// `UI-AutoCastButton.m2` is four additive spline emitters and no render batch at all — 300
+    /// live golden particles (`GlowStar.blp`, born `(0.98, 0.87, 0.19)`) circling the button. It
+    /// shares the tile atlas with every other `<Model>` pane, and a particle is a world quad in
+    /// ATLAS space: this scenario is the one that asks whether it stays inside its own cell.
+    CooldownShine,
     /// The bag window with the GameTooltip forced open over a known slot — the tooltip look-pass
     /// instrument (crisp border, tiled edges, tinted plate, quality-coloured item name, snug size).
     Tooltip,
@@ -79,6 +103,15 @@ pub(super) enum UiFixture {
     /// render): slot icons, the attribute/resistance panes with buff coloring, melee + ranged
     /// blocks, the ammo count, the level line.
     Character,
+    /// **The loading screen, held up, with the tip of the day on it** (decision 2083).
+    ///
+    /// Not a window: it raises the world-entry loading screen — per-map backdrop, progress bar,
+    /// and the `TipEdge::Pick` that chooses a `GameTips.dbc` row — and pins it so the harness has
+    /// a still frame to settle on. Every other screen in the client can be photographed by
+    /// standing in front of it; this one is up for a second on a path nobody can pause, which is
+    /// exactly why its tip could ship dead, log `tip 0 of 74` twice in a live smoke run, and be
+    /// caught by nothing at all.
+    LoadingTip,
     /// The shared **StaticPopup** plate, shown as the group-invite dialog (`PARTY_INVITE`).
     ///
     /// Every other StaticPopup customer in the tree raises its dialog over another window's opaque
@@ -885,6 +918,26 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     // The GameTooltip forced open over a seeded bag slot (a green-quality item). Run with
     // `WOW_CAPTURE=ui-tooltip`.
+    // The cooldown sweep as a filmstrip: sixteen bag slots, sixteen phases, one deterministic
+    // still (B379). Run with `WOW_CAPTURE=ui-cooldown`.
+    Scenario {
+        name: "ui-cooldown",
+        map: Some(MAP_AZEROTH),
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::Cooldown),
+    },
+    // The same filmstrip with the autocast shine sharing the atlas — the cell-bleed instrument.
+    // Run with `WOW_CAPTURE=ui-cooldown-shine`.
+    Scenario {
+        name: "ui-cooldown-shine",
+        map: Some(MAP_AZEROTH),
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::CooldownShine),
+    },
     Scenario {
         name: "ui-tooltip",
         map: Some(MAP_AZEROTH),
@@ -1041,6 +1094,17 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         look: GROUND_LOOK,
         minute: 720,
         ui: Some(UiFixture::Social),
+    },
+    // The world-entry loading screen, held up with its tip of the day. Run with
+    // `WOW_CAPTURE=loading-tip`. The backdrop is whatever `Map.dbc` → `LoadingScreens.dbc` gives
+    // this scenario's map, so it photographs the art chain and the bar as well as the tip.
+    Scenario {
+        name: "loading-tip",
+        map: Some(MAP_AZEROTH),
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::LoadingTip),
     },
     // The era Options window over the ground scene. Run with
     // `WOW_CAPTURE=ui-options`.

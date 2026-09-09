@@ -8,6 +8,7 @@ use mlua::{Lua, Table, Value};
 
 use super::object::{
     anchor_bits_eq, anchor_retarget_is_structural, as_f32, decode_id, id_to_lud, point_from_str,
+    NamedTarget,
 };
 use super::{
     Model, REG_FONTSTRING_META, REG_FONTSTRING_METHODS, REG_REGION_META, REG_REGION_METHODS,
@@ -349,6 +350,15 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
             };
             let wrong_type =
                 || mlua::Error::runtime("SetParent(): Wrong parent object type, expected frame");
+            // `_G[name]` before the guard, and **without** `$parent` expansion — the reparent
+            // bindings call `0x76c760` directly (`super::object::NamedTarget`).
+            let named = match &parent {
+                Value::String(s) => Some(match s.to_str() {
+                    Ok(n) => super::object::prefetch_named_target(lua, n.as_ref(), None),
+                    Err(_) => NamedTarget::unreadable(),
+                }),
+                _ => None,
+            };
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let new_owner = match &parent {
                 Value::Nil => None,
@@ -360,14 +370,17 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
                         .and_then(|id| model.id_to_frame.get(&id).copied())
                         .ok_or_else(wrong_type)?,
                 ),
-                // A name resolves through the frame registry, as every other frame-target argument
-                // does (`SetPoint`'s relativeTo, `SetParent` on the frame side).
-                Value::String(s) => {
-                    let name = s.to_str()?;
-                    Some(model.arena.lookup(name.as_ref()).ok_or_else(|| {
+                // A name resolves through `_G[name]` + the narrow **Frame** tag check
+                // (`[0xcf0c10]`), as every other frame-target argument does — the reference's
+                // `0x76c760`; see `object::NamedTarget`.
+                Value::String(_) => {
+                    let nt = named.as_ref().expect("a String argument is prefetched");
+                    let hit = super::object::resolve_named_target(&model, nt)
+                        .and_then(|id| model.id_to_frame.get(&id).copied());
+                    Some(hit.ok_or_else(|| {
                         mlua::Error::runtime(format!(
                             "SetParent(): Couldn't find region named '{}'",
-                            name.as_ref()
+                            nt.name
                         ))
                     })?)
                 }
@@ -701,33 +714,62 @@ pub(crate) fn implicit_creation_anchor_lua(lua: &Lua, wrapper: &Table) -> mlua::
     Ok(())
 }
 
-/// Resolve a `SetPoint`/`SetAllPoints` `relativeTo` argument (a frame/region wrapper table, a frame
-/// name, or nil) to a layout id, defaulting to `owner` when absent/unresolved.
-pub(super) fn resolve_target(model: &mut Model, target: &Value, owner: u32) -> u32 {
+/// Phase 1 of a region's `relativeTo`/`SetAllPoints` target — the frame twin is
+/// `object::layout_methods`' `prefetch_relative_to`, and the reason is the same: the reference
+/// reads `_G` with a *gettable*, so the read must happen with **no** `Model` guard alive
+/// ([`super::object::NamedTarget`]).
+///
+/// A region's `$parent` is its **owner** frame (the region's own `+0x9c`), so the walk starts
+/// there rather than one link higher.
+pub(super) fn prefetch_region_target(
+    lua: &Lua,
+    target: &Value,
+    rh: RegionHandle,
+) -> Option<NamedTarget> {
+    let Value::String(s) = target else {
+        return None;
+    };
+    let Ok(raw) = s.to_str() else {
+        return Some(NamedTarget::unreadable());
+    };
+    let base = {
+        let model = lua.app_data_ref::<Model>().expect("model");
+        let owner = model.arena.region(rh).map(|r| r.owner);
+        super::object::parent_token_base(&model, owner)
+    };
+    Some(super::object::prefetch_named_target(
+        lua,
+        raw.as_ref(),
+        Some(&base),
+    ))
+}
+
+/// Resolve a `SetPoint`/`SetAllPoints` `relativeTo` argument (a frame/region wrapper table, a
+/// widget name prefetched by [`prefetch_region_target`], or nil) to a layout id, defaulting to
+/// `owner` when absent/unresolved.
+pub(super) fn resolve_target(
+    model: &mut Model,
+    target: &Value,
+    named: Option<&NamedTarget>,
+    owner: u32,
+) -> u32 {
     match target {
         Value::Table(t) => decode_id(t)
             .ok()
             .filter(|id| model.id_to_frame.contains_key(id) || model.id_to_region.contains_key(id))
             .unwrap_or(owner),
-        Value::String(s) => s
-            .to_str()
-            .ok()
-            .and_then(|n| {
-                // Frames first (the client's global namespace is one; frames publish before their
-                // regions build), then the region-name registry — the real XML anchors regions to
-                // sibling regions by name (merchant label plate → `$parentSlot`).
-                model
-                    .arena
-                    .lookup(n.as_ref())
-                    .map(|h| model.frame_id(h))
-                    .or_else(|| model.region_names.get(n.as_ref()).copied())
-            })
-            .unwrap_or_else(|| {
-                // The owner fallback matches the frame path, but a *named* target that doesn't
-                // resolve is almost always a bug — a typo, or an XML forward reference (anchors
-                // resolve at SetPoint time, so a target must be declared before its dependents;
-                // ItemTextFrame's scrollbar track landed on the parchment this way). Warn
-                // instead of silently misdirecting the anchor.
+        Value::String(_) => {
+            // The client's global namespace is ONE, so a frame and a region answer the same
+            // lookup — the real XML anchors regions to sibling regions by name too (merchant
+            // label plate → `$parentSlot`, and that `$parent` is expanded on this path).
+            let nt = named.expect("a String argument is prefetched");
+            let hit = super::object::resolve_named_target(model, nt);
+            hit.unwrap_or_else(|| {
+                // The reference RAISES on this leg (`0x87ccd4`); ours warns and falls back to the
+                // owner — the frame twin carries the why, and decision 2105 the deferral. The
+                // warning earns its keep either way: a *named* target that doesn't resolve is
+                // almost always a bug (a typo, or an XML forward reference — ItemTextFrame's
+                // scrollbar track landed on the parchment this way).
                 let who = model
                     .id_to_frame
                     .get(&owner)
@@ -736,10 +778,11 @@ pub(super) fn resolve_target(model: &mut Model, target: &Value, owner: u32) -> u
                     .unwrap_or_else(|| "<anonymous>".into());
                 model.warnings.push(format!(
                     "SetPoint(region of {who}): relativeTo '{}' does not resolve — anchored to the owner",
-                    s.to_str().ok().as_deref().unwrap_or("<non-utf8>")
+                    nt.name
                 ));
                 owner
-            }),
+            })
+        }
         _ => owner,
     }
 }
@@ -769,6 +812,10 @@ pub(super) fn region_set_point(
     let point = point_from_str(point)
         .ok_or_else(|| mlua::Error::runtime(format!("SetPoint: unknown point '{point}'")))?;
     let rh = region_handle_of(lua, this)?;
+    // The `_G` read runs before the guard — see `prefetch_region_target`.
+    let named = rest
+        .first()
+        .and_then(|v| prefetch_region_target(lua, v, rh));
     let mut model = lua.app_data_mut::<Model>().expect("model");
     let owner = region_owner_id(&mut model, rh);
 
@@ -776,7 +823,7 @@ pub(super) fn region_set_point(
     let rel_to_id: u32 = match rest.first() {
         Some(Value::Table(_) | Value::String(_) | Value::Nil) => {
             cursor = 1;
-            resolve_target(&mut model, &rest[0], owner)
+            resolve_target(&mut model, &rest[0], named.as_ref(), owner)
         }
         // A leading number is the `SetPoint(point, x, y)` overload — cursor stays at 0.
         _ => owner,

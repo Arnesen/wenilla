@@ -462,40 +462,25 @@ pub(in crate::script) fn duration_text(
     Some(template.replacen("%d", &n.to_string(), 1))
 }
 
-/// The `_P1` pick behind `GetText(token, gender, n)`. **The rule is the bare token for exactly one
-/// and the `_P1` twin otherwise** — so a zero count takes the plural, which is why the lapsing
-/// second reads "0 second*s* remaining".
+/// [`crate::strings::plural`] for this module's callers — the `_P1` pick behind
+/// `GetText(token, gender, n)`, whose byte law (and the refuted `> 1` reading: `703c89` is a
+/// *signed* test, so a zero ordinal takes the plural arm and a lapsing aura reads "0 seconds
+/// remaining") now lives with the primitive rather than in a fourth private copy of it. Four
+/// copies of one rule is the shape decision 2045 wrote about; `fill` had eight.
 ///
-/// **Byte-pinned** (wow-re §3-BUFF-PLURAL, `aff4df61`), which upgrades what this house had read
-/// twice by inference — `FriendsFrame.xml`'s `guildPlural` and `TradeSkillFrame.xml`'s
-/// `pluralAbbr`. The exe resolves nothing itself: `0x52fa50` snprintf's the bare key, then
-/// `0x703bf0` looks up the **Lua global** `GetText` (`703c43: ba c8 2c 87 00`) and pcalls it with
-/// (key, ordinal, gender), using what comes back as the printf format. The predicate lives in
-/// `LocaleProperties.lua`'s `GetPluralIndex` — singular iff `not ordinal or ordinal == 1` — and
-/// `> 1` is REFUTED: `703c89: 7d 07` is a *signed* test, so a zero ordinal is pushed as the number
-/// `0` (Lua truthy) and takes the plural arm; only a negative becomes nil. Had it mapped zero to
-/// nil the lapsing line would read "0 second remaining".
+/// **Gender is not modelled, and that is faithful, not a gap:** `0x52fa50` pushes a literal `0`
+/// on both arms (`52fb8d: 6a 00`, `52fbaa: 6a 00`), which `0x703bf0` turns into nil, and enUS
+/// folds nil to no suffix.
 ///
-/// We collapse that to Rust rather than route through a `GetText` global because this line is
-/// computed engine-side off the live clock, and because `LocaleProperties.lua` is a file this house
-/// does not transcribe.
-///
-/// **Gender is not modelled, and that is faithful, not a gap:** `0x52fa50` pushes a literal `0` on
-/// both arms (`52fb8d: 6a 00`, `52fbaa: 6a 00`), which `0x703bf0` turns into nil, and enUS folds
-/// nil to no suffix.
-///
-/// **Falls back to the bare token when `_P1` is absent** — also byte-pinned: a nil `genderTag`
-/// sends `GetText` down its short arm to `getglobal(token)`, the singular. (When *both* are absent
-/// the reference renders an EMPTY line, off its pre-seeded `0x882748`; we render no line at all.
-/// The divergence is unreachable with shipped data — all eight of this family's keys ship — and off
-/// an install there is no string table to be faithful to.)
-fn plural_template(token: &str, n: u32, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
-    if n != 1 {
-        if let Some(p1) = get(&format!("{token}_P1")).filter(|s| !s.is_empty()) {
-            return Some(p1);
-        }
-    }
-    get(token).filter(|s| !s.is_empty())
+/// (When BOTH the twin and the bare token are absent the reference renders an EMPTY line, off its
+/// pre-seeded `0x882748`; we render no line at all. Unreachable with shipped data — all eight of
+/// the aura family's keys ship — and off an install there is no string table to be faithful to.)
+pub(in crate::script) fn plural_template(
+    token: &str,
+    n: u32,
+    get: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    crate::strings::plural(token, Some(n), get)
 }
 
 /// A colour-component argument — `lua_tonumber`'s coercion (a numeric string counts, `""` and

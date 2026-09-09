@@ -129,6 +129,7 @@ impl Plugin for NetPlugin {
         app.insert_resource(NetEvents(handles.events))
             .insert_resource(NetCommands(handles.commands))
             .insert_resource(CharPick(handles.pick))
+            .insert_resource(RealmChoice(handles.realm))
             .insert_resource(LoginSubmit(handles.login))
             .insert_resource(LoginAbandon(handles.login_abandon))
             .insert_resource(PingShared(handles.ping))
@@ -159,8 +160,10 @@ impl Plugin for NetPlugin {
             .add_message::<PetTalkMessage>()
             .add_message::<PetDismissSoundMessage>()
             .add_message::<WorldportMessage>()
+            .add_message::<RealmListMessage>()
             .add_message::<CharListMessage>()
             .add_message::<CharActionResultMessage>()
+            .add_message::<CharacterLoginFailedMessage>()
             .add_message::<EnteredWorldMessage>()
             .add_message::<CinematicTriggeredMessage>()
             .add_message::<ServerSaidMessage>()
@@ -479,6 +482,39 @@ pub(crate) enum CharRequest {
     Delete(u64),
     /// Select's Back (decision 0539): drop the parked session and return the IO thread to the
     /// pre-logon park — the app is heading to the login screen.
+    Abandon,
+}
+
+/// The **realm channel**: the app's answer to each [`RealmListMessage`], whichever park is asking.
+///
+/// **Two parks listen on it**, because the reference's realm list is a dialog rather than a screen
+/// (`RealmList.xml` is `frameStrata="DIALOG"` and `GlueParent.lua`'s `GlueScreenInfo` has no
+/// `realmlist` entry): the *login-side* realm park, between the logon and the first world dial,
+/// and the *character* park, where Change Realm raises the same list over the select screen. The
+/// app sends the same three requests either way and never has to know which one is listening —
+/// which is the point, since the answer to Cancel ("hide the dialog") is the same in both.
+///
+/// Sent by [`crate::realm_select`]'s policy (a remembered realm, `WOW_REALM`, or the player's
+/// click); the parked read thread blocks on the other end.
+#[derive(Resource)]
+pub(crate) struct RealmChoice(pub(crate) async_channel::Sender<RealmRequest>);
+
+/// One request to the IO thread parked at the realm list.
+#[derive(Debug)]
+pub(crate) enum RealmRequest {
+    /// Enter this realm — dial its world server. Carries the realm's **name**, not its index: the
+    /// list is re-requested every few seconds while the screen is up, and a server that adds or
+    /// drops a realm between the draw and the click would otherwise silently move the row out from
+    /// under the player's finger.
+    Enter(String),
+    /// Re-request the realm list on the still-open realmd connection (the reference's
+    /// `RequestRealmList`, fired by `RealmList_OnUpdate` every 5 s while the window is open).
+    Refresh,
+    /// The realm list's Cancel — `RealmList_OnCancel`, which only hides the frame. What that means
+    /// depends on which park hears it, and in both cases it means "leave the screen underneath
+    /// alone": at the login-side park there is no session yet, so the thread returns to the
+    /// pre-logon park and the login screen is what the player is left looking at; at the character
+    /// park the parked world session is untouched and the select screen simply reappears.
     Abandon,
 }
 
@@ -2432,6 +2468,15 @@ pub(crate) enum ClientCommand {
     },
 }
 
+/// The realms this account may enter (`CMD_REALM_LIST`, bridged from the Net drain): the IO thread
+/// is parked between the logon and the world dial, waiting for the app to name one. Consumed by
+/// [`crate::realm_select`]'s policy — auto-answer (the remembered realm / `WOW_REALM`) or show the
+/// realm list and wait for the director.
+#[derive(Message)]
+pub(crate) struct RealmListMessage {
+    pub(crate) realms: Vec<benilla_protocol::RealmInfo>,
+}
+
 /// The account's character roster (`SMSG_CHAR_ENUM`, bridged from the Net drain): the IO thread is
 /// parked at character select waiting for the app's pick. Consumed by [`crate::char_select`]'s
 /// policy — auto-answer (pending pick / `WOW_CHAR`) or show the roster and wait for the director.
@@ -2451,6 +2496,17 @@ pub(crate) struct CharListMessage {
 pub(crate) struct CharActionResultMessage {
     pub(crate) action: benilla_protocol::CharAction,
     pub(crate) code: u8,
+}
+
+/// The server **refused** the character we picked (`SMSG_CHARACTER_LOGIN_FAILED`), bridged from the
+/// Net drain. The entry announced a moment earlier is void: `crate::char_select` takes the screen
+/// back and raises the refusal dialog, and the loading cover comes down with it.
+///
+/// `result` is the server's raw reason index — [`crate::char_select::char_login_refusal_text`] is
+/// the one place that holds the reference's table for it.
+#[derive(Message, Clone, Copy)]
+pub(crate) struct CharacterLoginFailedMessage {
+    pub(crate) result: u8,
 }
 
 /// We entered the world (the IO thread's `Connected`, bridged from the Net drain): flips

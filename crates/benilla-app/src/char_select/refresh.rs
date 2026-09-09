@@ -7,7 +7,7 @@
 use bevy::prelude::*;
 
 use crate::area::AreaTableRes;
-use crate::glue::widgets::{GlueDisabled, Hilight};
+use crate::glue::widgets::{GlueDisabled, Hilight, LockHighlight};
 use crate::glue_strings::GlueStrings;
 use crate::net::NetStatus;
 use crate::portrait::{GlueLook, GluePreview, SelectLook};
@@ -95,20 +95,27 @@ pub(super) fn refresh_list(
     if let Ok(mut t) = banner.single_mut() {
         let new = match &roster.realm {
             Some(realm) => {
-                let suffix = match realm.realm_type {
-                    1 => strings.text("PVP_PARENTHESES", "(PVP)"),
-                    6 => strings.text("RP_PARENTHESES", "(RP)"),
-                    8 => strings.text("RPPVP_PARENTHESES", "(RPPVP)"),
-                    _ => "",
+                // `GetServerName`'s own `isPVP, isRP` pair, from the one table that owns it.
+                // The banner's normal-realm arm is EMPTY, unlike the realm list's `Normal` — the
+                // reference leaves `serverType = ""` when neither flag is set.
+                let suffix = match crate::realm_select::pvp_rp(realm.realm_type) {
+                    (true, true) => strings.text("RPPVP_PARENTHESES", "(RPPVP)"),
+                    (false, true) => strings.text("RP_PARENTHESES", "(RP)"),
+                    (true, false) => strings.text("PVP_PARENTHESES", "(PVP)"),
+                    (false, false) => "",
                 };
                 let down = (status.last_reason.is_some() && roster.pending_pick.is_none())
                     .then(|| strings.text("SERVER_DOWN", "Server down"));
                 realm_banner(&realm.name, suffix, down)
             }
-            None => match &status.last_reason {
-                Some(_) => strings.text("SERVER_DOWN", "Server down").to_string(),
-                None => "Connecting…".to_string(),
-            },
+            // **`CharSelectRealmName:Hide()`** (`CharacterSelect.lua` l.66): with no server name
+            // the reference hides the FontString outright — it has no string for this case, and
+            // ours used to invent one (`"Connecting…"`). Empty text is our Hide.
+            //
+            // It is also all but unreachable now. The realm is chosen *before* the world dial, so
+            // by the time this screen exists the session has one; what is left here is the
+            // no-network harness, which is exactly the case the reference draws nothing for.
+            None => String::new(),
         };
         if t.0 != new {
             t.0 = new;
@@ -141,39 +148,34 @@ fn realm_banner(name: &str, suffix: &str, down: Option<&str>) -> String {
 
 /// Per-frame interaction visuals + button states: the row highlight (hover ∪ selected — the ref's
 /// `LockHighlight` on the selected row), and the enabled states — Enter World / Delete disable on
-/// an empty list (the ref's `UpdateCharacterList`), Create hides at the 10-cap or disconnected,
-/// Change Realm stays disabled (decision 0465 §6).
+/// an empty list (the ref's `UpdateCharacterList`), Create hides at the 10-cap or disconnected.
+/// (Change Realm was drawn deliberately dead under 0465 §6, until 2056 gave it something to do and
+/// 2072 made it work.)
 #[allow(clippy::type_complexity)]
 pub(super) fn refresh_banner_and_buttons(
     roster: Res<Roster>,
-    mut rows: Query<(&SelectAction, &Interaction, &Children), With<Button>>,
-    mut hilights: Query<&mut Visibility, With<Hilight>>,
+    mut rows: Query<(&SelectAction, &mut LockHighlight), With<Button>>,
     mut disables: Query<(&SelectAction, &mut GlueDisabled)>,
     mut create_vis: Query<
         (&SelectAction, &mut Visibility),
         (With<crate::glue::widgets::GlueBtn>, Without<Hilight>),
     >,
 ) {
-    for (action, interaction, children) in &mut rows {
+    // `LockHighlight` on the chosen row and nothing about *visibility*: hovering is
+    // `crate::glue::glue_hilights`' question, and the two used to be one expression here.
+    for (action, mut locked) in &mut rows {
         let SelectAction::Row(i) = action else {
             continue;
         };
-        let lit = roster.selected() == Some(*i) || *interaction != Interaction::None;
-        for child in children {
-            if let Ok(mut vis) = hilights.get_mut(*child) {
-                *vis = if lit {
-                    Visibility::Inherited
-                } else {
-                    Visibility::Hidden
-                };
-            }
+        let want = roster.selected() == Some(*i);
+        if locked.0 != want {
+            locked.0 = want;
         }
     }
     let have_chars = !roster.chars.is_empty();
     for (action, mut disabled) in &mut disables {
         let want = match action {
             SelectAction::EnterWorld | SelectAction::Delete => !have_chars,
-            SelectAction::ChangeRealm => true,
             _ => false,
         };
         if disabled.0 != want {

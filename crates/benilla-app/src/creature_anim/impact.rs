@@ -38,6 +38,32 @@ use bevy::prelude::*;
 
 use super::events::AnimSoundEvent;
 use super::SwingMessage;
+use crate::net::ObjectStore;
+
+/// **The LOOTABLE front gate on the victim dispatcher** (`0x624552 test byte
+/// [[victim+0x110]+0x224],1` / `0x62455a jne 0x624689` — `UNIT_DYNAMIC_FLAGS` bit `0x1`; wow-re
+/// `melee-impact-timing.md`, byte-census landed 2026-09-07).
+///
+/// `0x624530` bails **before every consequence it owns** — blood, wound flinch, impact sounds and
+/// the floating damage number alike (`0x624689` is the bare epilogue, and the number's call at
+/// `0x624566` sits after the gate). A corpse you can loot takes no visible hits: swinging at it
+/// shows nothing at all.
+///
+/// **It does NOT cover the flushes, and that asymmetry is the whole reason this is a function
+/// rather than one `if` at the top.** An image-wide census of the floating-number emitter
+/// `0x6243e0` finds exactly three call sites — `0x624566` *inside* the gated dispatcher, plus
+/// `0x624ea7` (`SMSG_ATTACKSTOP`, `0x624e40`) and `0x625893` (the `0x14a` supersede arm) which
+/// call it **directly**, bypassing `0x624530` and its gate. So a superseded or attack-stopped
+/// record still floats its number over a lootable victim. Our single [`SwingImpact`] message
+/// carries both occasions, so gating it uniformly — the obvious implementation — would be wrong
+/// on the flush: only a **full** dispatch (`text_only == false`) is suppressed.
+///
+/// Nor does it cover the whiff slow-down: `0x624ca0` is its own function past the dispatcher's
+/// `0x624694` end, reached from the impact router, so a swing that whiffs a lootable corpse still
+/// drops to half speed.
+pub(crate) fn lootable_victim(stores: &Query<&ObjectStore>, victim: Option<Entity>) -> bool {
+    victim.is_some_and(|v| stores.get(v).is_ok_and(|s| s.0.unit_lootable()))
+}
 
 /// A melee swing's **impact moment** — the victim-feedback trigger, re-emitted from
 /// [`route_swing_impacts`] at the swing clip's attack-hit keyframe (or a flush).
@@ -125,6 +151,7 @@ pub(super) fn route_swing_impacts(
     mut flushes: MessageReader<SwingFlush>,
     mut pending: ResMut<PendingImpacts>,
     entities: Query<(), With<crate::net::NetEntity>>,
+    stores: Query<&ObjectStore>,
     mut out: MessageWriter<SwingImpact>,
     mut defenses: MessageWriter<DefenseAnim>,
     mut slows: MessageWriter<SwingSlowdown>,
@@ -173,8 +200,17 @@ pub(super) fn route_swing_impacts(
                     );
                 }
                 if is_whiff(p.swing.victim_state) {
-                    // The whiff slow-down rides the same crossing (`0x624ca0` gate).
+                    // The whiff slow-down rides the same crossing (`0x624ca0` gate) — and it is
+                    // NOT behind the LOOTABLE gate below: its function sits past the victim
+                    // dispatcher's end, so a swing that whiffs a lootable corpse still slows.
                     slows.write(SwingSlowdown(ev.entity));
+                }
+                // The victim dispatcher's front gate ([`lootable_victim`]): a lootable victim
+                // takes no feedback at all — no blood, no flinch, no impact sound, not even the
+                // number. The record is still consumed above, exactly as the reference's
+                // `0x6247d0` clears the GUIDs before it calls the dispatcher at all.
+                if lootable_victim(&stores, p.swing.victim) {
+                    continue;
                 }
                 out.write(SwingImpact {
                     swing: p.swing,
@@ -316,6 +352,126 @@ mod tests {
     fn drain_slows(app: &mut App, cursor: &mut MessageCursor<SwingSlowdown>) -> usize {
         let msgs = app.world().resource::<Messages<SwingSlowdown>>();
         cursor.read(msgs).count()
+    }
+
+    /// `UNIT_DYNAMIC_FLAGS`, absolute UpdateField index — bit `0x1` is LOOTABLE.
+    const FIELD_DYNAMIC_FLAGS: u16 = 143;
+
+    /// Give `entity` a store carrying `flags` in `UNIT_DYNAMIC_FLAGS`.
+    fn dynamic_flags(app: &mut App, entity: Entity, flags: u32) {
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(crate::net::ObjectStore(
+                benilla_protocol::messages::ObjectFields::from_pairs(&[(
+                    FIELD_DYNAMIC_FLAGS,
+                    flags,
+                )]),
+            ));
+    }
+
+    /// **The LOOTABLE front gate** (`0x624552`): a victim you can loot takes no visible hit at
+    /// all — the dispatcher `0x624530` bails past blood, flinch, sounds AND the floating number.
+    /// The tag still consumes the record, exactly as `0x6247d0` clears the GUIDs before calling
+    /// the dispatcher.
+    #[test]
+    fn a_lootable_victim_takes_no_full_dispatch() {
+        let mut app = app();
+        let (attacker, victim) = (unit(&mut app), unit(&mut app));
+        dynamic_flags(&mut app, victim, 0x1);
+        let mut cursor = MessageCursor::<SwingImpact>::default();
+        app.world_mut()
+            .write_message(swing(attacker, Some(victim), 1));
+        app.update();
+        drain(&mut app, &mut cursor);
+
+        tag(&mut app, attacker, *b"$CAH");
+        assert!(
+            drain(&mut app, &mut cursor).is_empty(),
+            "a lootable victim gets nothing — not even the number",
+        );
+        assert!(
+            !app.world()
+                .resource::<PendingImpacts>()
+                .0
+                .contains_key(&attacker),
+            "the record is still consumed by the tag",
+        );
+    }
+
+    /// The control the gate would be meaningless without: clear the bit and the same swing
+    /// dispatches in full.
+    #[test]
+    fn a_non_lootable_victim_still_takes_the_full_dispatch() {
+        let mut app = app();
+        let (attacker, victim) = (unit(&mut app), unit(&mut app));
+        dynamic_flags(&mut app, victim, 0x20); // dead-looking, NOT lootable
+        let mut cursor = MessageCursor::<SwingImpact>::default();
+        app.world_mut()
+            .write_message(swing(attacker, Some(victim), 1));
+        app.update();
+        drain(&mut app, &mut cursor);
+
+        tag(&mut app, attacker, *b"$CAH");
+        assert_eq!(drain(&mut app, &mut cursor), vec![(0x2, 1, false, None)]);
+    }
+
+    /// **The asymmetry that makes this a per-occasion gate.** The floating-number emitter
+    /// `0x6243e0` has exactly three call sites: one INSIDE the gated dispatcher (`0x624566`) and
+    /// two that call it directly — `0x624ea7` (`SMSG_ATTACKSTOP`) and `0x625893` (the `0x14a`
+    /// supersede arm). So a superseded record still floats its number over a lootable victim, and
+    /// suppressing our one message uniformly would be wrong.
+    #[test]
+    fn a_lootable_victim_still_gets_the_supersede_and_stop_flushes() {
+        let mut app = app();
+        let (attacker, victim) = (unit(&mut app), unit(&mut app));
+        dynamic_flags(&mut app, victim, 0x1);
+        let mut cursor = MessageCursor::<SwingImpact>::default();
+
+        // Two swings in a row: the second supersedes the first, which flushes text-only.
+        app.world_mut()
+            .write_message(swing(attacker, Some(victim), 1));
+        app.update();
+        drain(&mut app, &mut cursor);
+        app.world_mut()
+            .write_message(swing(attacker, Some(victim), 1));
+        app.update();
+        assert_eq!(
+            drain(&mut app, &mut cursor),
+            vec![(0x2, 1, true, None)],
+            "the superseded record still texts, gate or no gate",
+        );
+
+        // And SMSG_ATTACKSTOP flushes the survivor the same way.
+        app.world_mut().write_message(SwingFlush(attacker));
+        app.update();
+        assert_eq!(drain(&mut app, &mut cursor), vec![(0x2, 1, true, None)]);
+    }
+
+    /// The whiff slow-down is NOT the dispatcher's: `0x624ca0` is its own function past
+    /// `0x624694`, so a swing that whiffs a lootable corpse still drops to half speed.
+    #[test]
+    fn the_whiff_slowdown_survives_the_lootable_gate() {
+        let mut app = app();
+        let (attacker, victim) = (unit(&mut app), unit(&mut app));
+        dynamic_flags(&mut app, victim, 0x1);
+        let mut impacts = MessageCursor::<SwingImpact>::default();
+        let mut slows = MessageCursor::<SwingSlowdown>::default();
+        app.world_mut()
+            .write_message(swing(attacker, Some(victim), 2)); // dodged
+        app.update();
+        drain(&mut app, &mut impacts);
+        drain_slows(&mut app, &mut slows);
+
+        tag(&mut app, attacker, *b"$CAH");
+        assert_eq!(
+            drain_slows(&mut app, &mut slows),
+            1,
+            "the whiff still slows"
+        );
+        assert!(
+            drain(&mut app, &mut impacts).is_empty(),
+            "but nothing dispatches"
+        );
     }
 
     /// A swing waits for its tag; the first `$AH`/`$CAH` fires it FULL exactly once; `$HIT` and

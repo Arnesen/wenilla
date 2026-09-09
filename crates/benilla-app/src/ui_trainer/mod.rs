@@ -148,19 +148,34 @@ impl Plugin for UiTrainerPlugin {
     }
 }
 
-/// The red error-line text for a trainer refusal (`SMSG_TRAINER_BUY_FAILED`'s
-/// [`benilla_protocol::messages::train_fail`] code). The money case is the exact enUS `GlobalString`
-/// (`ERR_NOT_ENOUGH_MONEY`); the skill/unavailable cases are best-effort English — the real client
-/// builds these in C++, so their exact wording is a wow-re confirm item (rarely reached: the Train
-/// button is disabled unless the service is available and affordable).
-fn train_error_text(code: u32) -> String {
+/// A trainer refusal (`SMSG_TRAINER_BUY_FAILED`'s
+/// [`benilla_protocol::messages::train_fail`] code) is **silent on every player-facing surface**,
+/// and goes to the log instead. That is the reference's own behaviour, byte-carved rather than
+/// assumed (wow-re dispatch, 2026-09-07; handler `0x5e5f10`, registered at `0x5e3291`, arms at
+/// `0x5e5f95` / `0x5e5fb8` / `0x5e5fdc`, a code ≥ 3 doing nothing at all):
+///
+/// - there is **no GlobalStrings key and no message-catalog id** — the handler passes neither;
+/// - there is **no `DisplayError 0x496720` and no `0x4945b0`** anywhere in its body, so the line
+///   never reaches `UIErrorsFrame`, the info line, or chat;
+/// - all three arms call **`0x63cd00`**, the developer console's printf, with a hardcoded C format
+///   string whose `%d` is the spell id — the strings below, which are the *client's own* and are
+///   each referenced exactly once image-wide (`0x8604bc`, `0x860494`, `0x860464`);
+/// - no Lua event fires either: the reference UI knows only `TRAINER_SHOW`/`TRAINER_CLOSED`/
+///   `TRAINER_UPDATE`, and `BuyTrainerService 0x4da210` runs no client-side money or skill test
+///   before sending, so there is no second path that would speak.
+///
+/// benilla showed a red `UI_ERROR_MESSAGE` here, one of whose three sentences was a re-typed
+/// `ERR_NOT_ENOUGH_MONEY` and two of which were invented (decision 2045). Both problems have the
+/// same answer, and it is the reference's: say it to the log and nothing to the player. Rarely
+/// reached either way — the Train button is disabled unless the service is available and
+/// affordable.
+fn train_error_log_line(code: u32) -> &'static str {
     use benilla_protocol::messages::train_fail;
     match code {
-        train_fail::NOT_ENOUGH_MONEY => "You don't have enough money.",
-        train_fail::NOT_ENOUGH_SKILL => "You do not have the required skill.",
-        _ => "That trainer service is not available.",
+        train_fail::NOT_ENOUGH_MONEY => "Not enough money for trainer service",
+        train_fail::NOT_ENOUGH_SKILL => "Not enough skill points for trainer service",
+        _ => "Trainer service unavailable",
     }
-    .to_string()
 }
 
 /// Resolve one wire [`TrainerSpell`] into the Lua-facing [`TrainerService`]: name/subtext/icon from
@@ -179,6 +194,8 @@ fn resolve_service(
     icons: Option<&ItemDisplays>,
     items: &mut Items,
     commands: &NetCommands,
+    // The VM's own `GlobalStrings.lua`, for [`service_group`]'s three header labels.
+    get: &dyn Fn(&str) -> Option<String>,
 ) -> TrainerService {
     // The trainer offers a LEARN wrapper (decision 0247); the ability it teaches is the taught
     // spell, and the tree GROUPS by that hop (`0x4d7c60` → `[skillrec+4]`). It is the only thing
@@ -244,8 +261,15 @@ fn resolve_service(
     // unresolved `0` drops the service from the tree exactly as the client's builder does. Log the
     // genuine miss (catalog present but no line) so DBC gaps surface rather than silently swallowing
     // a service the server offered. The tradeskill arm resolves no line at all and cannot miss.
-    let (group_key, group_name) =
-        service_group(wire.spell, taught, trainer_type, cat, spells, skill_lines);
+    let (group_key, group_name) = service_group(
+        wire.spell,
+        taught,
+        trainer_type,
+        cat,
+        spells,
+        skill_lines,
+        get,
+    );
     if group_key == 0 && skill_lines.is_some() {
         debug!(
             "ui_trainer: trainer spell {} (teaches {taught}) has no skill line — dropped from the tree",
@@ -282,7 +306,7 @@ fn resolve_service(
 
 /// Build the Lua-facing snapshot from [`TrainerOpen`] + the spell/skill catalogs — `None` when no
 /// trainer is open.
-#[allow(clippy::too_many_arguments)] // the resolver's full catalog set
+#[allow(clippy::too_many_arguments)] // the catalogs, the player's state, and the string table
 fn snapshot(
     open: &TrainerOpen,
     spells: &SpellCatalog,
@@ -291,6 +315,7 @@ fn snapshot(
     icons: Option<&ItemDisplays>,
     items: &mut Items,
     commands: &NetCommands,
+    get: &dyn Fn(&str) -> Option<String>,
 ) -> Option<TrainerState> {
     open.trainer?;
     Some(TrainerState {
@@ -309,6 +334,7 @@ fn snapshot(
                     icons,
                     items,
                     commands,
+                    get,
                 )
             })
             .collect(),
@@ -347,12 +373,12 @@ fn feed_trainer(
     let last = last.get(&script);
     let last_trainer = last_trainer.get(&script);
     let last_name = last_name.get(&script);
-    // Refusals surface as the client's red error line (the merchant/equip/cast path's exact shape).
+    // Refusals go to the log and nowhere else — the reference's own console-only handling
+    // ([`train_error_log_line`]). Logged rather than dropped for the reason 0651 logs the server's
+    // dot-command answers: a refusal nothing said and a packet nothing noticed look identical
+    // afterwards.
     for code in errors.0.drain(..) {
-        script.fire_event(
-            "UI_ERROR_MESSAGE",
-            vec![ScriptValue::Str(train_error_text(code))],
-        );
+        info!("ui_trainer: {} (code {code})", train_error_log_line(code));
     }
     // Nothing to resolve a name/icon from yet — try again once Spell.dbc lands.
     let Some(spells) = spells.as_deref() else {
@@ -380,6 +406,14 @@ fn feed_trainer(
         icons.as_deref(),
         &mut items,
         &commands,
+        &|key: &str| {
+            script
+                .lua()
+                .globals()
+                .get::<String>(key)
+                .ok()
+                .filter(|t| !t.is_empty())
+        },
     );
     // The trainer's name resolves through the NameCache (a creature-name query, ask-once — the
     // real client's `UnitName("npc")`). `None`/empty while in flight; the title shows the static

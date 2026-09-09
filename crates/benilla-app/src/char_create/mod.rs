@@ -76,15 +76,13 @@ impl Plugin for CharCreatePlugin {
                     refresh::refresh_dynamic,
                     refresh_name_box,
                     refresh::refresh_hover,
-                    crate::glue::art_swaps,
-                    crate::glue::glue_button_visuals,
                     refresh::scroll_info,
                     refresh::scroll_drive,
                     refresh::scroll_visuals,
                     create_result,
-                    crate::glue::sync_outlines,
                 )
                     .chain()
+                    .before(crate::glue::GlueVisuals)
                     .run_if(in_state(ClientState::CharCreate))
                     .after(benilla_world::schedule::WorldStage::Net),
             );

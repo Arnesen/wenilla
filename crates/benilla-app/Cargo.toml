@@ -60,6 +60,11 @@ half = "2"
 # macro plus a no-dependency runtime shim — it adds nothing to the graph at runtime, and it is the
 # crate everyone uses for this. `assets/ui` is OUR content (MIT/Apache), not Blizzard's.
 include_dir = "0.7"
+# The 1.12 chat filters are PCRE over shipped DBCs (decision 2077; `text_filter`): 2289 profanity
+# expressions and 28 spam ones, compiled once at startup and run over every chat line. `RegexSet` is
+# exactly the shape that needs — one automaton over the whole list for the "can anything match at
+# all" pass — and the crate is already in the tree transitively.
+regex = "1"
 # `getrusage` — whole-process CPU time (all threads), the perf probes' `cpu_ms`/`cpu_pct` metric
 # (`perf::process_cpu_secs`). Wall-clock fps is unusable as a regression instrument on a machine
 # running parallel sessions' builds; CPU-per-frame is, and it is also the number the Mac report

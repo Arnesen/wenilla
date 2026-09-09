@@ -96,12 +96,12 @@ pub use channel::{channel_notice, ChannelNoticeTail, ChannelNotify};
 pub use chat::{
     chat_tag, ChatMessage, CHAT_MSG_AFK, CHAT_MSG_BATTLEGROUND, CHAT_MSG_BATTLEGROUND_LEADER,
     CHAT_MSG_BG_SYSTEM_ALLIANCE, CHAT_MSG_BG_SYSTEM_HORDE, CHAT_MSG_BG_SYSTEM_NEUTRAL,
-    CHAT_MSG_CHANNEL, CHAT_MSG_DND, CHAT_MSG_EMOTE, CHAT_MSG_GUILD, CHAT_MSG_IGNORED,
-    CHAT_MSG_MONSTER_EMOTE, CHAT_MSG_MONSTER_SAY, CHAT_MSG_MONSTER_WHISPER, CHAT_MSG_MONSTER_YELL,
-    CHAT_MSG_OFFICER, CHAT_MSG_PARTY, CHAT_MSG_RAID, CHAT_MSG_RAID_BOSS_EMOTE,
-    CHAT_MSG_RAID_BOSS_WHISPER, CHAT_MSG_RAID_LEADER, CHAT_MSG_RAID_WARNING, CHAT_MSG_SAY,
-    CHAT_MSG_SYSTEM, CHAT_MSG_WHISPER, CHAT_MSG_WHISPER_INFORM, CHAT_MSG_YELL,
-    MACRO_EXPANDED_TYPES,
+    CHAT_MSG_CHANNEL, CHAT_MSG_DND, CHAT_MSG_EMOTE, CHAT_MSG_FILTERED, CHAT_MSG_GUILD,
+    CHAT_MSG_IGNORED, CHAT_MSG_MONSTER_EMOTE, CHAT_MSG_MONSTER_SAY, CHAT_MSG_MONSTER_WHISPER,
+    CHAT_MSG_MONSTER_YELL, CHAT_MSG_OFFICER, CHAT_MSG_PARTY, CHAT_MSG_RAID,
+    CHAT_MSG_RAID_BOSS_EMOTE, CHAT_MSG_RAID_BOSS_WHISPER, CHAT_MSG_RAID_LEADER,
+    CHAT_MSG_RAID_WARNING, CHAT_MSG_SAY, CHAT_MSG_SYSTEM, CHAT_MSG_WHISPER,
+    CHAT_MSG_WHISPER_INFORM, CHAT_MSG_YELL, MACRO_EXPANDED_TYPES,
 };
 pub use client::{
     auth_session, channel_announcements, channel_ban, channel_invite, channel_kick, channel_list,
@@ -178,7 +178,9 @@ pub use mirror_timer::{
     read_pause_mirror_timer, read_start_mirror_timer, read_stop_mirror_timer, MirrorTimerKind,
     MirrorTimerStart,
 };
-pub use movement::{JumpInfo, MoveMode, MovementInfo, SpeedKind, SplineMode, TransportPose};
+pub use movement::{
+    JumpInfo, MoveMode, MovementInfo, RelayVerb, SpeedKind, SplineMode, TransportPose,
+};
 pub use opcode_names::opcode_name;
 pub use packet::{CreatureQueryInfo, MonsterMoveFacing, ServerPacket};
 pub use page_text::page_text_query;

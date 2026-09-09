@@ -2,6 +2,7 @@ use mlua::{ObjectLike, Table};
 
 use crate::framexml::{self, Element};
 
+use super::regions::FontAttrs;
 use super::{abs_dim, children_named, Loader};
 
 impl Loader<'_> {
@@ -200,7 +201,7 @@ impl Loader<'_> {
                 return;
             }
         };
-        self.apply_region_layout(tr, &region, self_name, dbg);
+        self.apply_region_layout(tr, &region, self_name, dbg, FontAttrs::Own);
     }
 
     pub(super) fn apply_size(&mut self, el: &Element, wrapper: &Table, dbg: &str) {

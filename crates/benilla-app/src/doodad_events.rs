@@ -16,13 +16,58 @@
 //! `KalidarStreetLamp01.m2`, one looping 3.333 s Stand that keys no bone at all and carries exactly
 //! one `$DSL` → `NightElfStreetLampLoop` — are bind-posed, and decision 0130's content gate
 //! deliberately builds them no rig. That gate is right about pixels and was never a claim about the
-//! clock: the reference arms **every** placed doodad and cycles it (wow-re `doodad-anim-host.md`
-//! §1/§5). So `doodad_anim::spawn_anim_host` now gives a sound-carrying model a clock-only host —
+//! clock: the reference arms **every** placed doodad it creates and cycles it whenever the doodad is
+//! in the frame's animate set (wow-re `doodad-anim-host.md` §1/§4a/§5b — see the gate below). So
+//! `doodad_anim::spawn_anim_host` gives a sound-carrying model a clock-only host —
 //! the arm bookkeeping, no player — and this scanner reads that arm.
 //!
-//! **The clock is the shared one, never the player** ([`DoodadAnimHost::arm_clock`]): the reference
-//! gates the cycle on *linkage* (residency), not on the draw, so a campfire behind you keeps
-//! crackling. Reading the draw-gated `AnimationPlayer` would silence it the moment you turned away.
+//! **The scan is gated on the frame's ANIMATE SET, and that gate is the whole mechanism** — not a
+//! budget, and not an optimisation (decision 2059). The reference's event scan `0x719370` is
+//! reached from exactly one place: `0x7074b0`'s walk of the per-frame M2 scene worklist
+//! `[CM2Scene+0x20]`, which is **emptied every frame** and refilled only by `0x710b90(model, 1)`
+//! from the terrain doodad drain `0x683f80` — and the drain walks only the bucket the scene-walk
+//! cull `0x683700` appended to, i.e. a doodad that passed frustum + horizon-occlusion **and** came
+//! out of the radius-tiered horizontal distance fade with `alpha > 0`. A doodad that fails any of
+//! those is not in the worklist, so its event track is never scanned, so **its `$DSL` never
+//! fires and it never takes one of the emitter pool's 32 entries** (wow-re
+//! `terrain/scratch/doodad-emitter-drawset-gate.md` §1b/§1c/§2b, `animation/scratch/
+//! doodad-anim-host.md` §5b, `object-layer/scratch/unit-anim-visibility-gate.md` §4).
+//!
+//! Ungated, this scanner registered **every resident doodad in the streaming radius**, and with the
+//! pool's four channels arbitrated by claim order (`super::sound::emitter_pool`) that is not a
+//! harmless surplus — it is silence. Measured at the director's Stratholme pin
+//! (`.go xyz 3471.91 -3366.89 136.85 329`, 2026-09-07): all four channels held by
+//! `UndeadCampfireSmall` / `CauldronLoop` / `TorchLoop` / `SlimeWaterfall`, **every one of them
+//! past its own `DistanceCutoff` and therefore inaudible**, while the fifth entitled entry —
+//! `StratholmeFireSmokeEmberSLoop`, the burning-building layer the director reported missing, with
+//! 88 emitters right there — was withheld by the cap. `0 sounding`, on the same frame that reported
+//! `parked=1004`: a thousand hosts outside the animate set, each still holding its registration.
+//!
+//! **"A campfire behind you keeps crackling" is still true, and this gate does not break it** — but
+//! by the other mechanism. A registration is released by `$DSE`, by a `$DSL` naming a different id,
+//! or by the doodad's own teardown, and by nothing else (`sound/scratch/doodad-sound-emitters.md`
+//! §9): turning away stops the *marker firing*, never the entry. The prose this module and
+//! [`DoodadAnimHost::arm_clock`] used to carry — "the reference gates the cycle on residency, not
+//! the draw" — read `doodad-anim-host.md` §5b's *linkage* as "loaded" when the note means spliced
+//! into `[scene+0x20]`, which **is** the drawn/faded set ("a doodad culled out of the drain stops
+//! advancing and resumes on re-link").
+//!
+//! The clock stays [`DoodadAnimHost::arm_clock`]'s shared one rather than the `AnimationPlayer`'s:
+//! while a host is in the animate set the two agree by construction (the gate's resume seeks the
+//! player to exactly this value), and the clock-only tier has no player to read at all.
+//!
+//! **Across a park the memory is DROPPED, not carried** — because the reference's scan window is
+//! one frame wide and it never replays. `0x719370` computes `prev = max(windowLo, now − dt)` and
+//! `cur = now` (`0x71950f`, for a looping sequence), **both off the absolute scene clock**, which
+//! `0x7074c2` advances every frame whether or not the model is linked; a write census over the
+//! whole function finds no persisted cursor. So the markers a culled doodad crossed are **lost**,
+//! and what actually fires on re-link is the completion watchdog re-arming at `startOffset = 0`
+//! (wow-re `doodad-sound-emitters.md` §3, corrected 2026-09-07 by the §5 round decision 2065
+//! records). Keeping [`advance_track`]'s entry across the park would hand the resume frame a
+//! `prev` from seconds ago and fire the whole span at once — harmless for a `$DSL` (its re-reach
+//! only repositions) and a burst of one-shots for `$DSO`/`$SND`. Dropping it makes the resume an
+//! **arm frame**, which fires nothing, and the frame after opens the head window `[0, cur]` — the
+//! re-arm, in the shape this scanner already has.
 
 use bevy::prelude::*;
 
@@ -58,6 +103,21 @@ fn fire_doodad_anim_events(
 ) {
     let now = time.elapsed_secs();
     for (entity, host, anims, world, pose) in &hosts {
+        // The worklist gate (module docs): a host outside this frame's animate set is not in
+        // `[CM2Scene+0x20]`, so the reference never scans its event track. `active` is benilla's
+        // one spelling of that membership — `gate_doodad_anim` writes it from the composed
+        // far-clip + distance-fade + portal verdict on the placement's submeshes, or, for a
+        // meshless (particles-only) model, from the same fade-sphere + frustum law its emitters
+        // gate on. It is a `PostUpdate` write and this reads it in `Update`, so the verdict is
+        // one frame old — the same accepted lag the interior and billboard laws carry, and
+        // nothing here can tell a 16 ms-late ambience from an on-time one.
+        if !host.active {
+            // …and forget where its clip stood. See the module docs: the reference's window is one
+            // frame wide off a clock that never stops, so a resume must re-arm rather than replay
+            // everything the park skipped.
+            last.remove(&entity);
+            continue;
+        }
         let Some((node, cur)) = host.arm_clock(now) else {
             continue; // gseq-only host with no sound arm: nothing is armed, so nothing fires
         };

@@ -93,6 +93,22 @@ pub(crate) fn pick_model_roots(
         .chain(mount)
 }
 
+/// **Where every model's skeleton is right now** — the owned palette rows and the per-part link
+/// that indexes them, as one [`SystemParam`].
+///
+/// They are two halves of one lookup ([`update_hover`]'s `palette_of` reads both, in that order,
+/// and neither has ever been wanted alone) and they are bundled because the picker sits exactly on
+/// Bevy's 16-param function-system ceiling — the seat this freed went to the `IsSelectable` grader
+/// (decision 2060), which has to run *inside* the pick rather than after it so [`Hovered`] is never
+/// published in its ungraded state.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct PickPose<'w, 's> {
+    /// The owned palette table (decision 0720): the picker reads the same world-space matrices the
+    /// vertex stage skins with, straight from the CPU rows.
+    palettes: Res<'w, benilla_world::rig_palette::RigPalettes>,
+    rigs: Query<'w, 's, &'static benilla_world::rig_palette::RigSkin>,
+}
+
 /// Recompute the unit under the cursor each frame — the real client's two-phase pick (wow-re
 /// pick-volume RE `bd630be` + `31562f1d`): **broad** = the cursor ray vs the *current animation's*
 /// bounds sphere (world-placed + world-scaled, no pad); **pass 1** = the ray vs the unit's **posed
@@ -122,10 +138,9 @@ pub(super) fn update_hover(
     plate_rects: Res<crate::vplates::PlateRects>,
     mut hovered: ResMut<Hovered>,
     mesh_assets: Res<Assets<Mesh>>,
-    // The owned palette table (decision 0720): the picker reads the same world-space matrices
-    // the vertex stage skins with, straight from the CPU rows.
-    palettes: Res<benilla_world::rig_palette::RigPalettes>,
-    rigs: Query<&benilla_world::rig_palette::RigSkin>,
+    pose: PickPose,
+    // `IsSelectable`'s second clause reads the active player's guid — see the grader at the publish.
+    self_guid: Res<crate::net::SelfGuid>,
     // Last frame's pick, for pass 2's sticky-hover (the reference's anti-flicker cache: the previous
     // pick outranks everything in the halo retry, so the hover doesn't strobe between two units).
     mut last_pick: Local<Option<Entity>>,
@@ -183,6 +198,7 @@ pub(super) fn update_hover(
     hovered.corpse = None;
     hovered.corpse_guid = None;
     hovered.distance = f32::MAX;
+    hovered.refused = false;
     if rig.is_looking() || pointer_over_ui.0 {
         *last_pick = None;
         return;
@@ -285,8 +301,8 @@ pub(super) fn update_hover(
         let palette_of =
             |sk: &[(&Mesh3d, &benilla_world::rig_palette::RigPart)]| -> Option<Vec<Mat4>> {
                 sk.first().and_then(|(_, part)| {
-                    let rig = rigs.get(part.0).ok()?;
-                    palettes.world_palette(rig.slot, rig.bones() as usize)
+                    let rig = pose.rigs.get(part.0).ok()?;
+                    pose.palettes.world_palette(rig.slot, rig.bones() as usize)
                 })
             };
         // The halo ladder (alive 3 / dead 2), with the corpse rung now **byte-verified** rather
@@ -417,16 +433,86 @@ pub(super) fn update_hover(
             if net.kind == EntityKind::Corpse {
                 hovered.corpse = Some(entity);
                 hovered.corpse_guid = Some(guid.0);
-            } else {
+            } else if selectable_pick(entity, &roots, self_guid.0) {
                 hovered.target = Some(entity);
                 hovered.guid = Some(guid.0);
+            } else {
+                hovered.refused = true;
             }
-        } else {
+        } else if selectable_pick(entity, &roots, self_guid.0) {
             hovered.target = Some(entity);
+        } else {
+            hovered.refused = true;
         }
+        // Set on EVERY arm, the refusal included — see [`Hovered::refused`].
         hovered.distance = t;
     }
     *last_pick = best.map(|(_, e)| e);
+}
+
+/// **The hover grader's `IsSelectable` verdict** — `0x4828d0`, the step between the pick and the
+/// mouseover publish:
+///
+/// ```text
+/// 48297d  mov  eax,[esi]              ; the picked object's vtable
+/// 482982  call [eax+0x54]             ; slot 21 = 0x60be60 IsSelectable — the SAME predicate
+/// 482985  test eax,eax                ;   SetSelection runs, reached there via the +0x58 thunk
+/// 482987  je   0x4829ed               ; FALSE -> 0x482090(0,0) + ResetCursor 0x523d30
+/// ```
+///
+/// So the refusal is **total, and it is one rule**: the mouseover globals `[0xb4e2c8]/[0xb4e2cc]`
+/// are cleared (their only two writers image-wide live in the publisher `0x492890`, which that jump
+/// skips), the cursor is reset, and the type dispatch that would have chosen an Interact/Attack
+/// cursor never runs. No tooltip, no cursor, no brighten and no click, out of one predicate rather
+/// than four.
+///
+/// **It is a grader, not a filter, and the difference is observable.** A census over the pick itself
+/// (`0x480a50`, `0x480d90`, `0x713cb0`, `0x481190`, `0x480df0`) finds **zero** reads of
+/// `[obj+0x110]`/`[+0xa0]` — positive control: four such reads inside `CanAttack` — so the flagged
+/// unit is registered as a candidate and *wins* the trace before anything looks at it. That is why
+/// the caller records [`Hovered::refused`] and keeps the pick's distance instead of skipping the
+/// candidate: a trigger stalker in front of a chest takes the pick, and the chest behind it must not
+/// inherit the mouseover.
+///
+/// Applied to the **unit** arms only. A corpse reaches `0x482982` too, but slot 21 there is
+/// `CGCorpse_C`'s, not `CGUnit_C`'s — the `xor eax,eax` base stub sits at slot **22** (`+0x58`),
+/// which is what makes a non-unit unselectable for `SetSelection`, and is not what this call goes
+/// through.
+///
+/// A **plate** hover is a deliberate non-case: the reference publishes it straight from
+/// `0x7cb869 call 0x492890` with no grader at all, so a plate on a flagged unit *would* tooltip —
+/// but the per-tick plate gate `0x60f600` refuses the same units one step earlier
+/// (`0x60f622`/`0x60f628`, unconditional, re-run every OnUpdate), which `crate::vplates` already
+/// models. There is no reachable state where the two disagree.
+///
+/// Run at the publish rather than as a system of its own, deliberately. The reference really does
+/// pick and *then* grade, but a second Bevy system means [`Hovered`] is briefly readable in its
+/// ungraded state by anything that forgot to order after `TargetUpdate` — a one-frame tooltip pop
+/// for a unit that must never have one. Written once, already graded, that state does not exist.
+///
+/// wow-re `object-layer/scratch/not-selectable-mouse-refusal.md`; decision 2060.
+#[allow(clippy::type_complexity)] // the picker's own root query, borrowed as-is
+fn selectable_pick(
+    entity: Entity,
+    roots: &Query<
+        (
+            Entity,
+            &GlobalTransform,
+            &NetEntity,
+            Option<&ModelAnimations>,
+            Option<&AnimDriver>,
+            Option<&ObjectStore>,
+            Option<&Children>,
+            Option<&crate::entities::mount::MountChild>,
+            Option<&InheritedVisibility>,
+            Option<&HeldAttached>,
+        ),
+        (With<Guid>, Without<SelfPlayer>),
+    >,
+    self_guid: Option<u64>,
+) -> bool {
+    let store = roots.get(entity).ok().and_then(|r| r.5);
+    super::relations::is_selectable(store, self_guid)
 }
 
 /// Recompute the **GameObject** under the cursor each frame into [`HoveredObject`] (decision 0236):

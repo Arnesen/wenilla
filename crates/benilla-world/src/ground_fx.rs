@@ -266,8 +266,10 @@ pub(crate) fn update_ground_fx_decals(
                 raster_bias: crate::sky_order::Rung::DECAL_RASTER,
                 raster_slope: 0.0,
                 cam_relative: false,
+                no_depth_test: false,
                 main_entity: entity,
                 light: None,
+                clip: None,
             },
         );
     }

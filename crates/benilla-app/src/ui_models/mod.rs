@@ -510,6 +510,11 @@ struct Tile {
     clips: HashMap<u16, (AnimationNodeIndex, usize)>,
     /// Which id the player is currently arming (to re-arm only on change).
     armed: Option<u16>,
+    /// The mat-anim row this tile's materials read their **cell clip** from
+    /// (`anim_slots.w`, decision 2093): `[min.x, min.y, max.x, max.y]` in atlas texels, written
+    /// every frame from the cell. `None` only when the table was full at build — the tile then
+    /// draws unclipped, which is the pre-2093 picture rather than a missing widget.
+    clip_slot: Option<u16>,
     alpha_parts: Vec<AlphaPart>,
     uv_parts: Vec<UvPart>,
     emitters: Vec<Entity>,
@@ -527,6 +532,9 @@ impl Tile {
     fn retire(self, commands: &mut Commands, table: &mut MatAnimTable) {
         for p in &self.uv_parts {
             p.free(table);
+        }
+        if let Some(slot) = self.clip_slot {
+            table.free(slot);
         }
         commands.entity(self.root).despawn();
     }
@@ -570,7 +578,8 @@ impl Plugin for UiModelsPlugin {
             // The composite: this frame's cells, appended in the lane the minimap fill uses —
             // after the cells are packed, before the mesh rebuild reads the lane.
             .add_systems(Update, compose_tiles.in_set(UiQuadAppend).after(sync_tiles))
-            .add_systems(Update, reap_tile_variants);
+            .add_systems(Update, reap_tile_variants)
+            .add_systems(Update, dump_atlas.after(sync_tiles));
     }
 }
 
@@ -904,6 +913,7 @@ fn sync_tiles(
             cam_slot,
             clips: HashMap::new(),
             armed: None,
+            clip_slot: None,
             alpha_parts: Vec::new(),
             uv_parts: Vec::new(),
             emitters: Vec::new(),
@@ -959,6 +969,7 @@ fn sync_tiles(
                         }
                     }
                     tile.clips = built.clips;
+                    tile.clip_slot = built.clip_slot;
                     tile.alpha_parts = built.alpha_parts;
                     tile.uv_parts = built.uv_parts;
                     tile.emitters = built.emitters;
@@ -1261,9 +1272,26 @@ fn sync_tiles(
         } else {
             req.star_px_per_unit
         };
+        // …and the CELL the cloud may draw in (decision 2093). A tile's particles are quads in
+        // the ATLAS's own space, so without this a cloud that reaches past its cell lands in the
+        // cell the shelf packed beside it — which the composite hands to a different widget
+        // (B379). `Cell::origin` is already in atlas texels, top-left origin, which is exactly
+        // the framebuffer coordinate the fragment tests.
+        let clip = Vec4::new(
+            cell.origin.x as f32,
+            cell.origin.y as f32,
+            (cell.origin.x + cell.size.x) as f32,
+            (cell.origin.y + cell.size.y) as f32,
+        );
+        // The MESH half of the same clip: the tile's own row, read by every one of its materials
+        // through `anim_slots.w`.
+        if let Some(slot) = tile.clip_slot {
+            render.table.set(slot, clip.to_array());
+        }
         for &e in &tile.emitters {
             if let Ok(mut em) = emitters.get_mut(e) {
                 em.set_size_scale(star);
+                em.set_clip(Some(clip));
             }
         }
     }
@@ -1414,6 +1442,66 @@ fn tile_layer(rig: &TileRig, cam_slot: Option<usize>) -> RenderLayers {
         Some(slot) => RenderLayers::layer(UI_MODEL_CAM_LAYER_BASE + slot),
         None => rig.layer.clone(),
     }
+}
+
+/// `WOW_TILE_DUMP=<path>:<secs>` — **shoot the tile atlas itself**, once, `secs` of app time in.
+///
+/// The composited frame is the wrong place to read a `<Model>` widget: over an action button or a
+/// bag slot the pane sits on the button's own art, so every measurement of what the widget drew is
+/// a measurement of the icon underneath it plus a sub-pixel alignment guess. The atlas cell is the
+/// widget ALONE, on transparent, at exactly the size the pane asked for — and the trace's
+/// `cell=(x,y WxH)` says where each pane's is. Together they answer "what did this widget
+/// actually paint", which nothing else here can (B379: the cooldown's sweep read as a filmstrip,
+/// one cell per phase).
+///
+/// The camera needs no waking, unlike the booths' twin (`portrait::test_bake::dump_booth_target`):
+/// the orthographic tile camera is the one that CLEARS the atlas, so it is active whenever any
+/// cell is packed — which is exactly when there is something to shoot. A dump that comes back
+/// uniformly transparent means no pane was drawing, not a broken widget.
+fn dump_atlas(
+    mut commands: Commands,
+    bridge: Res<UiModelTiles>,
+    time: Res<Time<bevy::time::Real>>,
+    mut done: Local<bool>,
+) {
+    static SPEC: std::sync::OnceLock<Option<(String, f32)>> = std::sync::OnceLock::new();
+    let Some((path, secs)) = SPEC.get_or_init(|| {
+        let v = std::env::var("WOW_TILE_DUMP").ok()?;
+        let (path, secs) = v.rsplit_once(':')?;
+        Some((path.to_string(), secs.parse().ok()?))
+    }) else {
+        return;
+    };
+    if *done || time.elapsed_secs() < *secs {
+        return;
+    }
+    let Some(atlas) = bridge.atlas.clone() else {
+        return; // no atlas yet — wait for the first tile rather than shoot nothing
+    };
+    *done = true;
+    use bevy::render::view::window::screenshot::{Screenshot, ScreenshotCaptured};
+    info!(
+        "WOW_TILE_DUMP: shooting the {}x{} tile atlas ({} cell(s)) -> {path}",
+        bridge.atlas_size.x,
+        bridge.atlas_size.y,
+        bridge.cells.len()
+    );
+    let out = std::path::PathBuf::from(path.clone());
+    commands
+        .spawn(Screenshot::image(atlas))
+        .observe(move |shot: On<ScreenshotCaptured>| {
+            let Some(img) = crate::portrait::test_bake::encode_target_readback(&shot.image) else {
+                warn!("WOW_TILE_DUMP: unexpected target format, nothing saved");
+                return;
+            };
+            match img.try_into_dynamic() {
+                Ok(dyn_img) => match dyn_img.save(&out) {
+                    Ok(()) => info!("WOW_TILE_DUMP: saved {}", out.display()),
+                    Err(e) => warn!("WOW_TILE_DUMP: save failed: {e}"),
+                },
+                Err(e) => warn!("WOW_TILE_DUMP: convert failed: {e}"),
+            }
+        });
 }
 
 #[allow(clippy::type_complexity)] // the system's own query, borrowed
@@ -1570,6 +1658,8 @@ fn shelf_pack(sizes: &[UVec2], edge: u32) -> Vec<Cell> {
 /// What [`build_tile`] made.
 struct BuiltTile {
     clips: HashMap<u16, (AnimationNodeIndex, usize)>,
+    /// The tile's cell-clip row — see [`Tile::clip_slot`].
+    clip_slot: Option<u16>,
     alpha_parts: Vec<AlphaPart>,
     uv_parts: Vec<UvPart>,
     emitters: Vec<Entity>,
@@ -1603,6 +1693,11 @@ fn build_tile(
     let built = forms.slices(handle);
     let (stat_forms, skin_forms) = (built.stat, built.skin.unwrap_or(&[]));
 
+    // The tile's **cell clip** row (decision 2093): one row per tile, `anim_slots.w` on every
+    // one of its materials, the cell rect written into it each frame. It is why a tile's batches
+    // are all its OWN clones rather than the shared twins — the twin is per (material, light),
+    // and the clip is per PANE.
+    let clip_slot = render.table.alloc();
     // Materials first — every one must be resident before anything spawns, or a retry would
     // leave half a tree behind.
     let mut part_mats: Vec<Handle<WowModelMaterial>> = Vec::with_capacity(model.submeshes.len());
@@ -1638,33 +1733,34 @@ fn build_tile(
             || sub.uv_seq.is_some()
             || sub.uv_rot_seq.is_some()
             || sub.uv_scale_seq.is_some();
-        if animated {
+        {
             let mut own = render.mats.materials().get(&twin).cloned()?;
+            own.extension.anim_slots.w = clip_slot.map_or(0.0, f32::from);
             let seed = [own.extension.sun_scale.z, own.extension.sun_scale.w];
-            let trans = (sub.uv_anim.is_some() || sub.uv_seq.is_some())
+            let trans = (animated && (sub.uv_anim.is_some() || sub.uv_seq.is_some()))
                 .then(|| render.table.alloc())
                 .flatten()
                 .map(|slot| {
                     own.extension.anim_slots.x = f32::from(slot);
                     (slot, seed)
                 });
-            let affine = (sub.uv_rot_seq.is_some() || sub.uv_scale_seq.is_some())
+            let affine = (animated && (sub.uv_rot_seq.is_some() || sub.uv_scale_seq.is_some()))
                 .then(|| render.table.alloc())
                 .flatten()
                 .inspect(|&slot| own.extension.anim_slots.z = f32::from(slot));
             let handle = render.mats.materials().add(own);
-            uv_parts.push(UvPart {
-                material: handle.clone(),
-                trans,
-                affine,
-                uv_anim: sub.uv_anim.clone(),
-                uv_seq: sub.uv_seq.clone(),
-                uv_rot: sub.uv_rot_seq.clone(),
-                uv_scale: sub.uv_scale_seq.clone(),
-            });
+            if animated {
+                uv_parts.push(UvPart {
+                    material: handle.clone(),
+                    trans,
+                    affine,
+                    uv_anim: sub.uv_anim.clone(),
+                    uv_seq: sub.uv_seq.clone(),
+                    uv_rot: sub.uv_rot_seq.clone(),
+                    uv_scale: sub.uv_scale_seq.clone(),
+                });
+            }
             part_mats.push(handle);
-        } else {
-            part_mats.push(twin);
         }
     }
 
@@ -1784,6 +1880,7 @@ fn build_tile(
     let _ = spawn_anim_host;
     Some(BuiltTile {
         clips,
+        clip_slot,
         alpha_parts,
         uv_parts,
         emitters,

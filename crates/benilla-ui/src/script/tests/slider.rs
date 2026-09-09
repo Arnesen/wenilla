@@ -302,3 +302,76 @@ fn slider_scrollbar_wiring_does_not_recurse() {
     )
     .unwrap();
 }
+
+#[test]
+fn slider_value_bits_gate_the_first_fire_and_the_range_reclamp() {
+    // The client's `+0x314` bit1 (has a range) and bit2 (has a value), wow-re
+    // `slider-mouse-law.md` §3/§6, byte-read off `SetValue 0x789930` / `SetMinMaxValues 0x7898f0`:
+    // rangeless SetValue is a no-op; the FIRST SetValue always fires, even at the zero-init value;
+    // SetMinMaxValues re-clamps through SetValue only once a value exists. Decision 2095 — Atlas's
+    // option sliders raised from their own <OnLoad> because our SetMinMaxValues clamped the
+    // zero-init value into (0.25, 1) and ran a handler the addon had not armed yet.
+    let s = script();
+    s.run(
+        r#"
+        seen = {}
+        local sl = CreateFrame("Slider", "SlBits")
+        sl:SetScript("OnValueChanged", function() table.insert(seen, arg1) end)
+
+        sl:SetValue(7)                       -- bit1 clear: a complete no-op
+        assert(sl:GetValue() == 0, "rangeless SetValue stores nothing: " .. sl:GetValue())
+        assert(table.getn(seen) == 0, "rangeless SetValue fires nothing")
+
+        sl:SetMinMaxValues(0.25, 1)          -- bit2 clear: the range excludes 0, still no fire
+        assert(table.getn(seen) == 0, "SetMinMaxValues on a fresh slider fires nothing")
+        assert(sl:GetValue() == 0, "and does not clamp a value that does not exist")
+
+        sl:SetMinMaxValues(0, 10)
+        sl:SetValue(0)                       -- first-ever value == zero-init: fires anyway
+        assert(table.getn(seen) == 1 and seen[1] == 0, "the first SetValue always fires")
+        sl:SetValue(0)                       -- now the change-gate holds
+        assert(table.getn(seen) == 1, "an equal value after the first does not fire")
+
+        sl:SetValue(8)
+        sl:SetMinMaxValues(0, 5)             -- bit2 set: re-clamp 8 -> 5 fires
+        assert(table.getn(seen) == 3 and seen[3] == 5, "a held value re-clamps and fires")
+        sl:SetMinMaxValues(0, 20)            -- 5 stays 5: no fire
+        assert(table.getn(seen) == 3, "a re-range that moves nothing fires nothing")
+    "#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn slider_onload_range_does_not_run_an_unarmed_onvaluechanged() {
+    // Atlas's exact shape (AtlasOptions.xml): the slider's <OnLoad> sets a range whose low end is
+    // above zero, and its <OnValueChanged> indexes a saved-variables global that only exists after
+    // ADDON_LOADED. In the reference the load raises nothing; before 2095 ours raised
+    // "attempt to index global 'AtlasOptions' (a nil value)" out of the OnLoad.
+    let mut s = script();
+    let doc = crate::framexml::parse(
+        r#"<Ui>
+          <Slider name="SlAtlasAlpha">
+            <Scripts>
+              <OnLoad>this:SetMinMaxValues(0.25, 1); this:SetValueStep(0.05)</OnLoad>
+              <OnValueChanged>SlAtlasOpts.alpha = this:GetValue()</OnValueChanged>
+            </Scripts>
+          </Slider>
+        </Ui>"#,
+    )
+    .unwrap();
+    let report = crate::loader::load(&s, &doc, &|_| None);
+    assert!(
+        report.errors.is_empty() && s.take_errors().is_empty(),
+        "an OnLoad range on a fresh slider must not run OnValueChanged: {:?}",
+        report.errors
+    );
+    s.run(
+        r#"
+        SlAtlasOpts = {}
+        SlAtlasAlpha:SetValue(0.5)
+        assert(SlAtlasOpts.alpha == 0.5, "the first real SetValue reaches the handler")
+    "#,
+    )
+    .unwrap();
+}

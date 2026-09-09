@@ -1366,10 +1366,27 @@ pub struct SliderState {
     pub min: f32,
     /// `SetMinMaxValues` high bound (XML `maxValue`).
     pub max: f32,
-    /// The current value (`SetValue`/XML `defaultValue`), clamped into `[min, max]`.
+    /// The current value (`SetValue`/XML `defaultValue`), clamped into `[min, max]`. Zero-initialised
+    /// like the client's `+0x320`, and readable through `GetValue` before anything set it.
     pub value: f32,
+    /// **Has a range** — the client's `+0x314` bit1, set by `SetMinMaxValues` and never cleared
+    /// (wow-re `slider-mouse-law.md` §3/§6). Until it is set, `SetValue` is a complete no-op: no
+    /// store, no `OnValueChanged`.
+    pub range_valid: bool,
+    /// **Has a value** — the client's `+0x314` bit2, set by the first successful `SetValue` and
+    /// never cleared. Two things hang off it, both byte-verified in wow-re (`0x789930`,
+    /// `0x7898f0`): the first-ever `SetValue` **always** fires `OnValueChanged`, even when the new
+    /// value equals the zero-init one; and `SetMinMaxValues` re-clamps the held value through
+    /// `SetValue` **only** once a value exists. Before this flag, `SetMinMaxValues` on a fresh
+    /// slider clamped the zero-init value into the new range and fired the handler — which is how
+    /// Atlas's option sliders raised `attempt to index global 'AtlasOptions'` from their own
+    /// `<OnLoad>`, a handler the reference never runs at that point.
+    pub has_value: bool,
     /// `SetValueStep` (XML `valueStep`) — the step the arrow keys / step buttons move by. Stored and
-    /// returned; `SetValue` does **not** snap to it (the client's SetValue sets the raw value).
+    /// returned. **Known divergence:** the client's `SetValue` (`0x789930`) round-half quantises the
+    /// value by this step before the change compare (wow-re `item9-firing34-merge.md`, `ui.md`
+    /// "clamped/step-quantized"); ours stores the raw value. Not yet reconciled — every scrollbar
+    /// rides this path, so it is its own change with its own falsifier.
     pub step: f32,
     /// `true` = VERTICAL (the ctor default; value maps along the track's height, min at the top),
     /// `false` = HORIZONTAL (`orientation`; shared enum `0x811b00` HORIZONTAL=0/VERTICAL=1).
@@ -1388,6 +1405,8 @@ impl Default for SliderState {
             min: 0.0,
             max: 0.0,
             value: 0.0,
+            range_valid: false,
+            has_value: false,
             step: 0.0,
             vertical: true,
             enabled: true,
@@ -1465,16 +1484,37 @@ impl SliderState {
         }
     }
 
-    /// Clamp `v` into the live range and store it; returns `Some(new_value)` iff it actually changed
-    /// (the caller fires `OnValueChanged` — firing only on a real change is what keeps the reference
-    /// scrollbar wiring `OnValueChanged → SetVerticalScroll → scrollbar:SetValue` from recursing
-    /// forever). A degenerate range (`max <= min`) pins to `min`.
+    /// `SetValue` (`0x789930`): clamp `v` into the live range and store it; returns `Some(value)`
+    /// when the caller must fire `OnValueChanged`. The fire law is the client's, emitted-jcc read
+    /// in wow-re `slider-mouse-law.md` §6: **no range yet → a complete no-op**; **first-ever value →
+    /// always store and fire**; after that, **fire iff the clamped value differs** from the stored
+    /// one. The change-gate is load-bearing, not an optimisation: the reference scrollbar wires
+    /// `OnValueChanged → SetVerticalScroll → scrollbar:SetValue` back on itself, and the gate is
+    /// what stops that after one hop. A degenerate range (`max <= min`) pins to `min`.
     pub fn store_value(&mut self, v: f32) -> Option<f32> {
+        if !self.range_valid {
+            return None;
+        }
         let clamped = v.clamp(self.min, self.max.max(self.min));
-        (clamped != self.value).then(|| {
+        let first = !self.has_value;
+        self.has_value = true;
+        (first || clamped != self.value).then(|| {
             self.value = clamped;
             clamped
         })
+    }
+
+    /// `SetMinMaxValues` (`0x7898f0`): set the range, mark it valid, and re-clamp the held value
+    /// **only if one exists** (bit2) — a fresh slider's zero-init value is not a value, so a range
+    /// that excludes zero fires nothing. Returns what [`Self::store_value`] would for the re-clamp.
+    pub fn set_min_max(&mut self, min: f32, max: f32) -> Option<f32> {
+        (self.min, self.max) = (min, max);
+        self.range_valid = true;
+        if self.has_value {
+            self.store_value(self.value)
+        } else {
+            None
+        }
     }
 }
 

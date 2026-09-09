@@ -75,17 +75,22 @@ pub(super) fn feed_petition(
     };
     let fed = fed.get(&script);
 
-    // The composed lines, each onto the surface its message record names. Drained before the
-    // snapshot so a refusal shows in the same frame as the state change that caused it.
+    // The composed lines, each resolved against the VM's own `GlobalStrings.lua` and put on the
+    // surface its message record names. Drained before the snapshot so a refusal shows in the
+    // same frame as the state change that caused it. A key the string table has no entry for
+    // shows nothing — the reference's data-suppression face, and the reason every line upstream
+    // carries a key rather than a sentence (decision 2045).
     let composed = std::mem::take(&mut petition.lines);
-    crate::ui_action::show_messages(
-        &mut script,
-        &mut sink,
-        "ui_petition",
-        composed
-            .into_iter()
-            .map(|(key, text)| crate::ui_action::Shown::keyed(key, text)),
-    );
+    let resolved: Vec<crate::ui_action::Shown> = composed
+        .iter()
+        .filter_map(|e| {
+            crate::ui_action::ui_error_text(e, &|key| {
+                script.lua().globals().get::<String>(key).ok()
+            })
+            .map(|text| crate::ui_action::Shown::keyed(e.key, text))
+        })
+        .collect();
+    crate::ui_action::show_messages(&mut script, &mut sink, "ui_petition", resolved);
 
     // **Rebuilt every frame, deliberately.** Half of what this window shows arrives from a CACHE,
     // not a packet, and reading that cache is what ISSUES its query (decision 0660's law). So a

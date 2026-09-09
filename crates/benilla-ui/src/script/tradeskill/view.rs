@@ -40,34 +40,46 @@ fn inv_slot_mask(inv_type: u32) -> u32 {
     }
 }
 
-/// The InvSlot dropdown's per-bit display word — the real client's 24-entry GlobalString-token
-/// table (`0x84dd70`, byte-VERIFIED — wow-re `tradeskill` TU-G §2), resolved to the tokens' enUS
-/// values (`GlobalStrings.lua`: `HEADSLOT = "Head"` … `NONEQUIPSLOT = "Not equippable."`). Bits
-/// 11/13/20-22 (FINGER1SLOT/TRINKET1SLOT/extra BAGSLOTs) are present in the table but unreachable
-/// through [`inv_slot_mask`] — kept for the full 24-entry fidelity.
-pub(super) fn inv_slot_name(bit: u32) -> &'static str {
-    match bit {
-        0 => "Head",
-        1 => "Neck",
-        2 => "Shoulders",
-        3 => "Shirt",
-        4 => "Chest",
-        5 => "Waist",
-        6 => "Legs",
-        7 => "Feet",
-        8 => "Wrist",
-        9 => "Hands",
-        10 | 11 => "Finger",
-        12 | 13 => "Trinket",
-        14 => "Back",
-        15 => "Main Hand",
-        16 => "Off Hand",
-        17 => "Ranged",
-        18 => "Tabard",
-        19..=22 => "Bag",
-        23 => "Not equippable.",
-        _ => "",
-    }
+/// The InvSlot dropdown's per-bit GlobalString **token** — the real client's 24-entry table
+/// (`0x84dd70`, byte-VERIFIED — wow-re `tradeskill` TU-G §2), dumped entry by entry. The caller
+/// resolves it against the player's own `GlobalStrings.lua` (decision 2045); these are the
+/// paper-doll `*SLOT` family, **not** the `INVTYPE_*` family the item tooltip's slot line uses,
+/// and that distinction is exactly why the word cannot be stored here: `SECONDARYHANDSLOT`,
+/// `INVTYPE_SHIELD` and `INVTYPE_WEAPONOFFHAND` are three separately-localizable strings that all
+/// read "Off Hand" in enUS.
+///
+/// Bits 11/13/20-22 (`FINGER1SLOT`/`TRINKET1SLOT`/the extra `BAGSLOT`s) are present in the table
+/// but unreachable through [`inv_slot_mask`] — kept for the full 24-entry fidelity.
+///
+/// **`None` is the out-of-range arm and is unreachable by construction**: the only caller walks
+/// [`present_inv_slots`], which enumerates bits 0..23, and the reference's table has an entry for
+/// every one of them. It resolves to the empty string at the call site, which is what
+/// `FrameScript_GetText` hands back for a token the table has no row for.
+pub(super) fn inv_slot_token(bit: u32) -> Option<&'static str> {
+    Some(match bit {
+        0 => "HEADSLOT",
+        1 => "NECKSLOT",
+        2 => "SHOULDERSLOT",
+        3 => "SHIRTSLOT",
+        4 => "CHESTSLOT",
+        5 => "WAISTSLOT",
+        6 => "LEGSSLOT",
+        7 => "FEETSLOT",
+        8 => "WRISTSLOT",
+        9 => "HANDSSLOT",
+        10 => "FINGER0SLOT",
+        11 => "FINGER1SLOT",
+        12 => "TRINKET0SLOT",
+        13 => "TRINKET1SLOT",
+        14 => "BACKSLOT",
+        15 => "MAINHANDSLOT",
+        16 => "SECONDARYHANDSLOT",
+        17 => "RANGEDSLOT",
+        18 => "TABARDSLOT",
+        19..=22 => "BAGSLOT",
+        23 => "NONEQUIPSLOT",
+        _ => return None,
+    })
 }
 
 /// The InvSlot filter vocabulary: the set bits of the accumulated slot mask, ascending — the real

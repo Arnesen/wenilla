@@ -49,35 +49,6 @@ mod query;
 
 pub(crate) use query::parse as who_query;
 
-/// The GlobalStrings templates for the friend/ignore results, quoted verbatim from the reference
-/// client's own patch chain (decision 0246 extraction; `GlobalStrings.lua` line cited per
-/// constant). Composed here rather than in Lua for the same reason the party lines are
-/// (decision 0434 §D2): the real client composes them engine-side, and the FrameXML never names
-/// these keys.
-const ERR_FRIEND_DB_ERROR: &str = "Friend lookup database error."; // GlobalStrings:1571
-const ERR_FRIEND_LIST_FULL: &str = "You don't have room for any more friends."; // :1573
-const ERR_FRIEND_ONLINE_SS: &str = "|Hplayer:%s|h[%s]|h has come online."; // :1576
-const ERR_FRIEND_OFFLINE_S: &str = "%s has gone offline."; // :1575
-const ERR_FRIEND_NOT_FOUND: &str = "Player not found."; // :1574
-const ERR_FRIEND_REMOVED_S: &str = "%s removed from friends list."; // :1577
-const ERR_FRIEND_ADDED_S: &str = "%s added to friends."; // :1569
-const ERR_FRIEND_ALREADY_S: &str = "%s is already your friend."; // :1570
-const ERR_FRIEND_SELF: &str = "You can't put yourself on your friend list."; // :1578
-const ERR_FRIEND_WRONG_FACTION: &str = "Friends must be part of your alliance."; // :1579
-const ERR_IGNORE_FULL: &str = "You can't ignore any more players."; // :1639
-const ERR_IGNORE_SELF: &str = "You can't ignore yourself."; // :1642
-const ERR_IGNORE_NOT_FOUND: &str = "Player not found."; // :1640
-const ERR_IGNORE_ALREADY_S: &str = "%s is already being ignored."; // :1637
-const ERR_IGNORE_ADDED_S: &str = "%s is now being ignored."; // :1636
-const ERR_IGNORE_REMOVED_S: &str = "%s is no longer being ignored."; // :1641
-const ERR_IGNORE_AMBIGUOUS: &str = "That name is ambiguous, type more of the player's server name"; // :1638
-const ERR_FRIEND_ERROR: &str = "Unknown friend response from server."; // :1572
-
-/// The away tags the friends-list template's third `%s` takes — `CHAT_FLAG_AFK` / `CHAT_FLAG_DND`
-/// (`GlobalStrings.lua:766-767`), the same pair the chat frame prefixes a speaker's name with.
-const CHAT_FLAG_AFK: &str = "<AFK>";
-const CHAT_FLAG_DND: &str = "<DND>";
-
 /// The social session mirror. Filled by the net drain's social arms, read by the feed, cleared on
 /// disconnect beside the other per-login resources.
 #[derive(Resource, Default)]
@@ -251,50 +222,70 @@ impl SocialState {
     }
 }
 
-/// The line one result prints, and whether it needs the subject's name first.
+/// The **message key** one friend/ignore result prints — resolved at the feed against the player's
+/// own `GlobalStrings.lua` (decision 2045), never composed here.
 ///
-/// `%s` templates wait for the name query; the rest print immediately. This is the reference's
-/// own order (resolve, then compose — wow-re's text-emote flow, VERIFIED for the sibling path).
-fn result_template(result: u8) -> Option<&'static str> {
+/// The keys are what makes this table readable at all: two of its rows,
+/// `ERR_FRIEND_NOT_FOUND` and `ERR_IGNORE_NOT_FOUND`, are the *same sentence* in enUS ("Player not
+/// found.") and different strings everywhere else. A table of English cannot tell them apart, and
+/// nothing that compared displayed text — a test of ours included — ever could.
+///
+/// Composed engine-side in the reference too (decision 0434 §D2): the FrameXML never names these
+/// keys, so there is no Lua path that would resolve them for us.
+fn result_key(result: u8) -> Option<&'static str> {
     Some(match result {
-        friend_result::DB_ERROR => ERR_FRIEND_DB_ERROR,
-        friend_result::LIST_FULL => ERR_FRIEND_LIST_FULL,
-        friend_result::ONLINE => ERR_FRIEND_ONLINE_SS,
-        friend_result::OFFLINE => ERR_FRIEND_OFFLINE_S,
-        friend_result::NOT_FOUND => ERR_FRIEND_NOT_FOUND,
-        friend_result::REMOVED => ERR_FRIEND_REMOVED_S,
-        friend_result::ADDED_ONLINE | friend_result::ADDED_OFFLINE => ERR_FRIEND_ADDED_S,
-        friend_result::ALREADY => ERR_FRIEND_ALREADY_S,
-        friend_result::SELF => ERR_FRIEND_SELF,
-        friend_result::ENEMY => ERR_FRIEND_WRONG_FACTION,
-        friend_result::IGNORE_FULL => ERR_IGNORE_FULL,
-        friend_result::IGNORE_SELF => ERR_IGNORE_SELF,
-        friend_result::IGNORE_NOT_FOUND => ERR_IGNORE_NOT_FOUND,
-        friend_result::IGNORE_ALREADY => ERR_IGNORE_ALREADY_S,
-        friend_result::IGNORE_ADDED => ERR_IGNORE_ADDED_S,
-        friend_result::IGNORE_REMOVED => ERR_IGNORE_REMOVED_S,
-        friend_result::IGNORE_AMBIGUOUS => ERR_IGNORE_AMBIGUOUS,
-        friend_result::UNKNOWN => ERR_FRIEND_ERROR,
+        friend_result::DB_ERROR => "ERR_FRIEND_DB_ERROR",
+        friend_result::LIST_FULL => "ERR_FRIEND_LIST_FULL",
+        friend_result::ONLINE => "ERR_FRIEND_ONLINE_SS",
+        friend_result::OFFLINE => "ERR_FRIEND_OFFLINE_S",
+        friend_result::NOT_FOUND => "ERR_FRIEND_NOT_FOUND",
+        friend_result::REMOVED => "ERR_FRIEND_REMOVED_S",
+        friend_result::ADDED_ONLINE | friend_result::ADDED_OFFLINE => "ERR_FRIEND_ADDED_S",
+        friend_result::ALREADY => "ERR_FRIEND_ALREADY_S",
+        friend_result::SELF => "ERR_FRIEND_SELF",
+        friend_result::ENEMY => "ERR_FRIEND_WRONG_FACTION",
+        friend_result::IGNORE_FULL => "ERR_IGNORE_FULL",
+        friend_result::IGNORE_SELF => "ERR_IGNORE_SELF",
+        friend_result::IGNORE_NOT_FOUND => "ERR_IGNORE_NOT_FOUND",
+        friend_result::IGNORE_ALREADY => "ERR_IGNORE_ALREADY_S",
+        friend_result::IGNORE_ADDED => "ERR_IGNORE_ADDED_S",
+        friend_result::IGNORE_REMOVED => "ERR_IGNORE_REMOVED_S",
+        friend_result::IGNORE_AMBIGUOUS => "ERR_IGNORE_AMBIGUOUS",
+        friend_result::UNKNOWN => "ERR_FRIEND_ERROR",
         // An unknown code shows nothing — GlobalStrings data-suppression, the same face an
         // absent key wears everywhere else in this client.
         _ => return None,
     })
 }
 
-/// Fill a result template with the subject's name. `ERR_FRIEND_ONLINE_SS` takes it **twice**
-/// (the `|Hplayer:%s|h[%s]|h` link the comment in GlobalStrings explicitly warns not to
-/// localize), so a plain replace-all is the right substitution, not a positional one.
-fn fill_line(template: &str, name: &str) -> String {
-    template.replace("%s", name)
+/// How many times the subject's name is pushed with a result's message — **the arity the key's own
+/// suffix names**, which is the reference's convention rather than ours: a bare key takes none,
+/// `_S` one, `_SS` two.
+///
+/// `ERR_FRIEND_ONLINE_SS`'s two are the `|Hplayer:%s|h[%s]|h` link's, and GlobalStrings' own
+/// comment beside it warns the link is not to be localized. Reading the arity off the key rather
+/// than counting `%s` in the resolved text is what keeps a line that has not resolved yet — an
+/// install without the string, a name still in flight — from being mistaken for one that takes no
+/// name at all.
+fn name_pushes(key: &str) -> usize {
+    if key.ends_with("_SS") {
+        2
+    } else if key.ends_with("_S") {
+        1
+    } else {
+        0
+    }
 }
 
-/// The `<AFK>`/`<DND>` tag a friend row's third `%s` takes.
-fn status_tag(status: u8) -> &'static str {
-    match status {
-        friend_status::AFK => CHAT_FLAG_AFK,
-        friend_status::DND => CHAT_FLAG_DND,
-        _ => "",
-    }
+/// The `CHAT_FLAG_AFK`/`CHAT_FLAG_DND` key a friend row's away tag resolves through — the same
+/// pair the chat frame prefixes a speaker's name with. `None` = present and not flagged, which
+/// shows nothing.
+fn status_flag_key(status: u8) -> Option<&'static str> {
+    Some(match status {
+        friend_status::AFK => "CHAT_FLAG_AFK",
+        friend_status::DND => "CHAT_FLAG_DND",
+        _ => return None,
+    })
 }
 
 /// The net drain's `SessionEvent::Friend*`/`Who*` arms, factored here so the wire laws live
@@ -452,19 +443,27 @@ mod tests {
     fn every_result_code_maps_to_a_line() {
         for result in 0x00..=0x11u8 {
             assert!(
-                result_template(result).is_some(),
+                result_key(result).is_some(),
                 "result {result:#04x} has no line"
             );
         }
         assert_eq!(
-            result_template(friend_result::ADDED_ONLINE),
-            result_template(friend_result::ADDED_OFFLINE),
+            result_key(friend_result::ADDED_ONLINE),
+            result_key(friend_result::ADDED_OFFLINE),
+        );
+        assert_eq!(result_key(friend_result::UNKNOWN), Some("ERR_FRIEND_ERROR"));
+        assert_eq!(result_key(0x77), None, "an unknown code shows nothing");
+        // **The two "Player not found." rows are different keys.** They read identically in enUS
+        // and differently in other locales, so this pair is the reason the table names keys at
+        // all — no assertion on displayed text could tell them apart (decision 2045).
+        assert_eq!(
+            result_key(friend_result::NOT_FOUND),
+            Some("ERR_FRIEND_NOT_FOUND")
         );
         assert_eq!(
-            result_template(friend_result::UNKNOWN),
-            Some(ERR_FRIEND_ERROR)
+            result_key(friend_result::IGNORE_NOT_FOUND),
+            Some("ERR_IGNORE_NOT_FOUND")
         );
-        assert_eq!(result_template(0x77), None, "an unknown code shows nothing");
     }
 
     /// A logout drops the lists and the last `/who`, and keeps the **sort chain** — which is
@@ -496,17 +495,64 @@ mod tests {
         );
     }
 
-    /// The online line takes the name twice (the player link); the rest take it once.
+    /// **The arity comes off the key's suffix**, which is the reference's own marker: the online
+    /// line's `_SS` takes the name twice (the `|Hplayer:%s|h[%s]|h` link), an `_S` once, and a
+    /// bare key none. Read this way rather than by counting `%s` in the resolved sentence, so a
+    /// line whose string has not resolved is never mistaken for one that needs no name.
     #[test]
-    fn the_online_line_fills_the_name_twice() {
-        assert_eq!(
-            fill_line(ERR_FRIEND_ONLINE_SS, "Bob"),
-            "|Hplayer:Bob|h[Bob]|h has come online."
+    fn the_key_suffix_is_the_name_arity() {
+        assert_eq!(name_pushes("ERR_FRIEND_ONLINE_SS"), 2);
+        assert_eq!(name_pushes("ERR_FRIEND_ADDED_S"), 1);
+        assert_eq!(name_pushes("ERR_FRIEND_SELF"), 0, "not an _S despite the S");
+    }
+
+    /// **Every key this table names resolves in the shipped file, is a catalog row, and its own
+    /// `%s` count matches the arity its suffix promises.** The three checks that replace comparing
+    /// our copy of each sentence to the file's — and the third is the one the copies never made:
+    /// nothing used to join `ERR_FRIEND_ONLINE_SS`'s two holes to the two pushes it gets.
+    #[test]
+    fn every_key_resolves_and_its_arity_matches_the_string() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let src = chain
+            .read_file("Interface\\FrameXML\\GlobalStrings.lua")
+            .expect("GlobalStrings.lua in the chain");
+        let s = benilla_ui::script::UiScript::new().expect("VM");
+        s.run(&String::from_utf8_lossy(&src)).expect("runs clean");
+
+        let mut keys: Vec<&str> = (0x00..=0x11u8).filter_map(result_key).collect();
+        keys.extend(
+            [
+                status_flag_key(friend_status::AFK),
+                status_flag_key(friend_status::DND),
+            ]
+            .map(Option::unwrap),
         );
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), 19, "17 result rows plus the two away tags");
+
+        for key in keys {
+            let text: String = s.lua().globals().get(key).expect(key);
+            assert!(!text.is_empty(), "{key} resolves empty");
+            // The away tags are `CHAT_FLAG_*`, not `DisplayError` messages: no catalog row, and
+            // none owed — they are a field on a friends-list row, not a line on a surface.
+            if !key.starts_with("CHAT_FLAG_") {
+                assert!(
+                    benilla_ui::messages::by_key(key).is_some(),
+                    "{key} is not a catalog row, so its surface and sound would be a guess"
+                );
+                assert_eq!(
+                    text.matches("%s").count(),
+                    name_pushes(key),
+                    "{key}: the string's holes vs the arity its suffix promises"
+                );
+            }
+        }
         assert_eq!(
-            fill_line(ERR_FRIEND_ADDED_S, "Bob"),
-            "Bob added to friends."
+            benilla_ui::messages::by_key("ERR_FRIEND_ONLINE_SS").and_then(|r| r.sound),
+            Some("FRIENDJOINGAME"),
+            "the cue the chat-log path was dropping"
         );
-        assert_eq!(fill_line(ERR_FRIEND_SELF, "Bob"), ERR_FRIEND_SELF);
     }
 }

@@ -151,6 +151,18 @@ pub enum SessionEvent {
     /// A login attempt progressed to `stage` (decision 0539) — IO-thread-emitted, like
     /// [`Self::CharacterList`], never wire-decoded.
     LoginStage { stage: LoginStage },
+    /// **The realms this account may enter** (`CMD_REALM_LIST`), and the IO thread's third park.
+    ///
+    /// Emitted the moment the SRP6 logon succeeds, *before* any world socket is dialed: which
+    /// realm to dial is the answer this park is waiting for. Like [`Self::CharacterList`] it is a
+    /// pure IO-thread emit and the thread blocks on its channel until the app answers — the app
+    /// owns the policy (a remembered realm, `WOW_REALM`, or the player on the realm-list screen),
+    /// exactly as it owns the character pick.
+    ///
+    /// Re-emitted on every refresh while the screen is up (the reference re-requests the list
+    /// every 5 s) and again when the player asks to change realm, so the app never has to cache a
+    /// list across parks.
+    RealmList { realms: Vec<crate::RealmInfo> },
     /// **We are queued for a full realm** (`SMSG_AUTH_RESPONSE(AUTH_WAIT_QUEUE)`) — a wait, not
     /// an outcome. Emitted once per queue packet while the world handshake is parked; the attempt
     /// is still live and ends normally with a roster (admitted) or a failure. `position` is `None`
@@ -207,6 +219,21 @@ pub enum SessionEvent {
         /// (decision 1976); `None` when it will arrive in the world stream instead.
         tutorial_flags: Option<Vec<u8>>,
     },
+    /// The server **refused** the character we picked (`SMSG_CHARACTER_LOGIN_FAILED`) — we are not
+    /// in the world and never were, whatever [`Self::Connected`] said a moment ago.
+    ///
+    /// It arrives on the world stream, *after* the IO thread has optimistically announced the
+    /// connection (the pick is sent and the entry begins in the same breath, decision 0777 — the
+    /// destination tiles start streaming a whole round-trip before the server's snap). So this is
+    /// an entry being *revoked*, and the app answers it the way it answers a logout: tear the
+    /// half-built entry down, go back to character select, and say why. The IO thread cycles the
+    /// connection behind that, and a fresh [`Self::CharacterList`] follows.
+    ///
+    /// `result` is the server's raw byte — a **1-based reason index** the reference maps through a
+    /// six-entry jump table onto its `CHAR_LOGIN_*` strings. Mapping it to something a player can
+    /// read is the glue layer's job ([`crate::messages::ServerPacket::CharacterLoginFailed`] has
+    /// the wire law).
+    CharacterLoginFailed { result: u8 },
     /// The server confirmed our logout (`SMSG_LOGOUT_COMPLETE`) — we are back at character select.
     /// The IO thread cycles the connection immediately; a fresh [`Self::CharacterList`] follows.
     LoggedOut,
@@ -317,10 +344,11 @@ pub enum SessionEvent {
         /// *deltas* between consecutive stamps — replay paced by the sender's own cadence, wow-re
         /// `remote-apply-timing.md`; the app mirrors that per unit (decisions 0601/0615).
         time: u32,
-        /// True for `MSG_MOVE_HEARTBEAT` — the periodic mid-move pulse. The reference's reconcile
-        /// lerp is armed only for NON-heartbeat events (`0x619090` excludes tag `0x26`); a
-        /// heartbeat applies as an outright snap (decision 0601).
-        heartbeat: bool,
+        /// **What this packet's opcode means on top of the pose** — heartbeat, teleport, root, or
+        /// nothing at all ([`crate::messages::RelayVerb`], decision 2064). Twenty-three opcodes
+        /// share this one body and one client handler; three of them are more than narration, and
+        /// the enum is exactly those three.
+        verb: crate::messages::RelayVerb,
         fall_time: u32,
         jump: Option<JumpInfo>,
         transport: Option<TransportPose>,

@@ -6,9 +6,10 @@
 //!
 //! **The line law is BYTE-VERIFIED** — the 0274 §5 verdict on `0x52b650`'s emission order
 //! (wow-re `ui/scratch/tooltip-content-law.md`, §5-cross-checked; folded back 2026-07-10):
-//! every family's order, gate, and color pointer is the binary's, with the enUS text from the
-//! extracted GlobalStrings. Not yet built (feeds pending, laws recorded): the instance
-//! families (soulbound override, enchants, made-by, live durability, cooldown-remaining).
+//! every family's order, gate, and color pointer is the binary's, and every sentence is a KEY
+//! resolved off the player's own `GlobalStrings.lua` at render time (decision 2045). Not yet
+//! built (feeds pending, laws recorded): the instance families (soulbound override, enchants,
+//! made-by, live durability, cooldown-remaining).
 //! Residual INTERIMs cited inline: the dual-wield/off-hand proficiency exception
 //! (`0x5eab70`), the type cell's override red, the set-owned count source.
 //!
@@ -30,8 +31,9 @@
 //! The sell-price money row is the byte-verified law: only a REAL-INSTANCE source (`SetBagItem`)
 //! while the merchant window is open and repair mode is off — the engine computes
 //! `SellPrice × stack` and fires the `OnTooltipAddMoney` script; FrameXML renders the coins
-//! (`SetTooltipMoney`). A zero sell price in that context prints `ITEM_UNSELLABLE`. Template
-//! sources (`SetMerchantItem`/`SetItemById`/quest rows) never show money, per the same law.
+//! (`SetTooltipMoney`). A zero sell price in that context prints `ITEM_UNSELLABLE`
+//! (`0x854a74`, pushed at `0x52e4a3`). Template sources (`SetMerchantItem`/`SetItemById`/quest
+//! rows) never show money, per the same law.
 
 use mlua::{Lua, MultiValue, Table, Value};
 
@@ -586,8 +588,12 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 None => {
                     // Template in flight — the slot view's own name holds the plate (the same
                     // 0138 posture as SetBagItem's miss path).
+                    // The compare header is a key like every other sentence (2045); this
+                    // fallback path shows it for exactly the reason the full render does.
                     if compare {
-                        append_line(lua, &this, ("Currently Equipped".into(), GRAY), None, false)?;
+                        if let Some(t) = crate::strings::global(lua, "CURRENTLY_EQUIPPED") {
+                            append_line(lua, &this, (t, GRAY), None, false)?;
+                        }
                     }
                     if let Some(name) = name {
                         let color = if compare {
@@ -693,8 +699,8 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     if merchant_open && !repairing {
                         if v.sell_price > 0 {
                             fire_add_money(lua, h, u64::from(v.sell_price) * u64::from(count));
-                        } else {
-                            append_line(lua, &this, ("No sell price".into(), WHITE), None, false)?;
+                        } else if let Some(t) = crate::strings::global(lua, "ITEM_UNSELLABLE") {
+                            append_line(lua, &this, (t, WHITE), None, false)?;
                         }
                     }
                     arm_compare(lua, h, &v);

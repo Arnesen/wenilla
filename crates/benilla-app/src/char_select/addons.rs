@@ -566,12 +566,6 @@ struct AddonsUi;
 #[derive(Component)]
 pub(super) struct ScrollBand;
 
-/// A panel button whose child [`Hilight`] lights on hover (the checkboxes' `UI-CheckBox-Highlight`,
-/// the close X, the dropdown arrow, the open list's `UI-QuestTitleHighlight` rows, the scroll
-/// arrows) — driven per frame by [`drive_addons_panel`] with **no respawn**, which is the point.
-#[derive(Component)]
-pub(super) struct HoverLit;
-
 /// Spawn/despawn the panel, run its flows, and repaint when anything it shows has changed.
 ///
 /// Ordered before the select screen's own click handling so a click that lands on the panel is
@@ -590,8 +584,6 @@ pub(super) fn drive_addons_panel(
     mut sounds: MessageWriter<GlueSound>,
     clicks: Res<crate::glue::GlueClicks>,
     hovers: Query<(Entity, &AddonsAction, Ref<Interaction>)>,
-    lit: Query<(&Interaction, &Children), With<HoverLit>>,
-    mut hilights: Query<&mut Visibility, With<Hilight>>,
     band: Query<(&ComputedNode, &UiGlobalTransform), With<ScrollBand>>,
     window: Query<&Window, With<bevy::window::PrimaryWindow>>,
 ) {
@@ -754,21 +746,9 @@ pub(super) fn drive_addons_panel(
         return;
     }
 
-    // ── hover: highlights + the tooltip, with the tree left alone ─────────────────────────────
-    for (interaction, children) in &lit {
-        let want = if *interaction == Interaction::None {
-            Visibility::Hidden
-        } else {
-            Visibility::Inherited
-        };
-        for &child in children {
-            if let Ok(mut vis) = hilights.get_mut(child) {
-                if *vis != want {
-                    *vis = want;
-                }
-            }
-        }
-    }
+    // ── hover: the tooltip, with the tree left alone ──────────────────────────────────────────
+    // (The sheens are `crate::glue::glue_hilights`' — this panel used to drive its own, which is
+    // one of the four copies that let the realm list ship with none.)
 
     let hover = hovers.iter().find_map(|(_, a, i)| {
         if !matches!(*i, Interaction::Hovered | Interaction::Pressed) {
@@ -837,7 +817,7 @@ fn checkbox_button<A: Component>(
     state: BoxState,
     node: Node,
 ) {
-    let mut b = parent.spawn((action, Button, HoverLit, node));
+    let mut b = parent.spawn((action, Button, node));
     match &art.checkbox {
         Some(c) => {
             b.insert((
@@ -1013,7 +993,6 @@ fn spawn_panel(
                     let mut x = b.spawn((
                         AddonsAction::Cancel,
                         Button,
-                        HoverLit,
                         abs(BG_W - 42.0 - 32.0, 3.0, 32.0, 32.0),
                     ));
                     if let Some(cb) = &art.close_btn {
@@ -1136,7 +1115,6 @@ fn spawn_panel(
                         let mut arrow = d.spawn((
                             AddonsAction::DropdownToggle,
                             Button,
-                            HoverLit,
                             abs(DROP_W - 16.0 - 24.0, 18.0, 24.0, 24.0),
                         ));
                         match (&art.dropdown_arrow_up, &art.dropdown_arrow_down) {
@@ -1351,7 +1329,6 @@ fn spawn_panel(
                             b.spawn((
                                 action,
                                 Button,
-                                HoverLit,
                                 ImageNode {
                                     image: up.up.clone(),
                                     rect: Some(tc_rect(up.size, crate::glue::art::SCROLL_BTN_TC)),
@@ -1557,7 +1534,6 @@ fn spawn_panel(
                             let mut row = list.spawn((
                                 AddonsAction::DropdownPick(view),
                                 Button,
-                                HoverLit,
                                 Node {
                                     height: px(ROW_H),
                                     min_width: px(120.0),

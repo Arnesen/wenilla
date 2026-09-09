@@ -235,6 +235,23 @@ pub struct LitEmitters(Vec<Entity>);
 #[derive(Component, Clone, Copy, PartialEq, Debug)]
 pub struct ParticleLight(pub [f32; 3]);
 
+/// The **ambient half alone** of this anchor's committed words — `[`GroundShade::ambient`], the
+/// ramped chase toward `cap96(MOCV)`, with no diffuse lobe and no MOLT points.
+///
+/// [`ParticleLight`] is the whole fixed-function term (`ambient + 0.9·diffuse + Σ lamps`) because
+/// that is what a lit particle quad receives. One consumer needs strictly less: a **vertex format
+/// with no normal** disables the normal array outright, so its draw evaluates only the ambient
+/// product — `out = (Σ enabled lights' Ambient) × authoredColour` (wow-re
+/// `gx/scratch/format7-lighting-term.md`). The weapon swing trail is that draw, and it inherits
+/// the *wearer's* committed light, four-way byte-derived through
+/// `0x70d982 → 0x70ca50 → 0x70baf0` plus the held-weapon `[+0x3b8]` alias.
+///
+/// Same lifetime as [`ParticleLight`], for the same reason: present only on [`AppliedLaw::Bake`],
+/// and its ABSENCE is the exterior lane — outdoors a unit's ambient **is** the day/night ambient
+/// (`0x69e4ad`'s exterior intensity leg), so a consumer falls back to the scene's own.
+#[derive(Component, Clone, Copy, PartialEq, Debug)]
+pub struct NodeAmbient(pub [f32; 3]);
+
 /// The anchor's classification record (0734) — the law its parts render under, plus the
 /// movement/residency gate that used to live per part. Inserted by the classifier on the first
 /// resolve; a settled anchor is one distance compare per frame, whatever its part count.
@@ -479,6 +496,7 @@ pub fn classify_entity_interior(
             Option<&BodyBakeCenter>,
             Option<&LitEmitters>,
             Option<&mut ParticleLight>,
+            Option<&mut NodeAmbient>,
         ),
         Or<(With<LitParts>, With<LitEmitters>)>,
     >,
@@ -511,6 +529,7 @@ pub fn classify_entity_interior(
         bake_center,
         lit_emitters,
         particle_light,
+        node_ambient,
     ) in &mut anchors
     {
         n_anchors += 1;
@@ -545,6 +564,11 @@ pub fn classify_entity_interior(
                                     bake.ref_point,
                                     &bake.lobes,
                                 )));
+                            }
+                            // …and the ambient word on its own, for the normal-less draws whose
+                            // term is that product and nothing else ([`NodeAmbient`]).
+                            if let Some(mut amb) = node_ambient {
+                                amb.set_if_neq(NodeAmbient(words.0));
                             }
                         }
                     }
@@ -1022,6 +1046,9 @@ fn resolve_anchor_law(
                                 // curve, because a particle draw takes the fixed-function lane
                                 // where a mesh batch takes the SH one ([`interior_light_up`]).
                                 ParticleLight(emitter_light),
+                                // …and the ambient half alone, which is the whole term for a
+                                // draw whose vertex format carries no normal ([`NodeAmbient`]).
+                                NodeAmbient(words.0),
                             ));
                             AppliedLaw::Bake(slot)
                         }
@@ -1060,7 +1087,8 @@ fn resolve_anchor_law(
                 .entity(anchor)
                 .try_remove::<PropProbeSlot>()
                 .try_remove::<BakeState>()
-                .try_remove::<ParticleLight>();
+                .try_remove::<ParticleLight>()
+                .try_remove::<NodeAmbient>();
         }
         _ => {}
     }

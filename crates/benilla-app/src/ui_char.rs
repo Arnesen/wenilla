@@ -47,6 +47,7 @@ use benilla_ui::script::{
     SkillsState, UiScript, UnitCombatStats, BANK_BAG_SLOT_COUNT, EQUIPMENT_BAG, SKILL_DEFENSE,
     SKILL_UNARMED,
 };
+use benilla_ui::strings::Arg;
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
@@ -157,6 +158,35 @@ type SkillBlock = Option<(u64, std::collections::HashMap<u16, u16>)>;
 /// login fill (empty → populated) and a character switch (self guid change) re-seed silently —
 /// the event fires, the lines don't. Still open: the exact chat channel of the real emitter
 /// (TU-E left `0x496720`'s routing untraced; Skill is the `ChatTypeInfo` family's own key).
+/// One skill-watcher line: resolve the key off the player's own `GlobalStrings.lua`, fill it, and
+/// push it as `CHAT_MSG_SKILL`.
+///
+/// **Deliberately not `ui_action::show_messages`, and the reason is a real gap rather than a
+/// preference.** `ERR_SKILL_UP_SI`/`ERR_SKILL_GAINED_S` (rows 54/53) are the two of the three
+/// catalog rows whose `chat_type` is **23 = `CHAT_MSG_SKILL`**, not the `10 = CHAT_MSG_SYSTEM`
+/// every other `kind 0` row carries — and that field is exactly what the shared sink does not
+/// read yet (its own doc says so: "benilla raises none of them yet; when it does, this is the
+/// line that has to read the field"). Routing these through it today would silently demote them
+/// to SYSTEM and out of the Skill filter. So the key, the fill and the data-suppression rule are
+/// the shared ones; only the surface is carried here, until the sink learns `chat_type`.
+///
+/// An absent or empty key shows nothing — the reference's own null/empty guard.
+fn skill_line(script: &UiScript, chat: &mut crate::ui_chat::ChatLog, key: &str, args: &[Arg<'_>]) {
+    let Some(template) = script
+        .lua()
+        .globals()
+        .get::<String>(key)
+        .ok()
+        .filter(|t| !t.is_empty())
+    else {
+        return;
+    };
+    chat.push_event(crate::ui_chat::ChatEvent::text_only(
+        crate::ui_chat::ChatEventKind::Skill,
+        benilla_ui::strings::fill(&template, args),
+    ));
+}
+
 fn watch_skill_ups(
     script: Option<NonSendMut<UiScript>>,
     self_guid: Res<crate::net::SelfGuid>,
@@ -224,17 +254,20 @@ fn watch_skill_ups(
                         .is_some_and(|s| s.catalog.announces_skill_ups(line_id, race, class))
                 };
                 match prev_map.get(&id) {
-                    // A rank-up: the ERR_SKILL_UP_SI line (GlobalStrings.lua:1838).
+                    // A rank-up: `ERR_SKILL_UP_SI`, catalog row 54 — **not** `SKILL_RANK_UP`,
+                    // which is the same enUS sentence and no catalog row at all (decision 2045).
                     Some(&old) if value > old => {
                         if let Some(name) = name() {
                             // Both verdicts are logged — the retest's instrument: a moved line
                             // either announces or names the gate that held it.
                             if announces() {
                                 debug!("chat: skill-up announced ({name} {old}→{value})");
-                                chat.push_event(crate::ui_chat::ChatEvent::text_only(
-                                    crate::ui_chat::ChatEventKind::Skill,
-                                    format!("Your skill in {name} has increased to {value}."),
-                                ));
+                                skill_line(
+                                    &script,
+                                    &mut chat,
+                                    "ERR_SKILL_UP_SI",
+                                    &[Arg::S(&name), Arg::D(i64::from(value))],
+                                );
                             } else {
                                 debug!("chat: skill-up silenced ({name} {old}→{value}, the 0x402 gate)");
                             }
@@ -247,10 +280,12 @@ fn watch_skill_ups(
                         if let Some(name) = name() {
                             if announces() {
                                 debug!("chat: skill-gain announced ({name} at {value})");
-                                chat.push_event(crate::ui_chat::ChatEvent::text_only(
-                                    crate::ui_chat::ChatEventKind::Skill,
-                                    format!("You have gained the {name} skill."),
-                                ));
+                                skill_line(
+                                    &script,
+                                    &mut chat,
+                                    "ERR_SKILL_GAINED_S",
+                                    &[Arg::S(&name)],
+                                );
                             } else {
                                 debug!(
                                     "chat: skill-gain silenced ({name} at {value}, the 0x402 gate)"

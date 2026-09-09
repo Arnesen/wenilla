@@ -89,10 +89,14 @@ struct ExtractedDraw {
     /// Vertices are already camera-relative — the prepare rebase skips this draw. See
     /// [`super::buffer::EffectDrawSpec::cam_relative`].
     cam_relative: bool,
+    /// This draw ignores the depth buffer. See [`super::buffer::EffectDrawSpec::no_depth_test`].
+    no_depth_test: bool,
     /// Vertex range in the shared stream.
     range: Range<u32>,
     /// A booth's scene-light override (0539 §5); `None` = the world's shared light buffer.
     light: Option<Buffer>,
+    /// The target-pixel clip rect — see [`super::buffer::EffectDrawSpec::clip`].
+    clip: Option<Vec4>,
 }
 
 /// One GPU draw call after the merge walk: a contiguous index range plus the bind-group
@@ -101,7 +105,9 @@ struct MergedDraw {
     index_range: Range<u32>,
     texture: AssetId<Image>,
     light: Option<Buffer>,
-    fog: EffectFog,
+    /// The dynamic offset of this draw's row in [`EffectMeta::params`] — its fog policy and its
+    /// clip rect together, resolved by [`EffectMeta::build_params`].
+    params_offset: u32,
 }
 
 /// The lane's per-frame GPU state: the shared vertex stream (rebased camera-relative in
@@ -115,8 +121,21 @@ pub struct EffectMeta {
     draws: Vec<ExtractedDraw>,
     merged: Vec<MergedDraw>,
     view_bind_group: Option<BindGroup>,
-    params: DynamicUniformBuffer<Vec4>,
-    params_offsets: Option<[u32; 6]>,
+    params: DynamicUniformBuffer<EffectParams>,
+    /// The six canonical fog rows' dynamic offsets, in [`EffectFog::slot`] order.
+    params_offsets: [u32; 6],
+    /// The params buffer as it was last written — the bind-group cache holds a binding into it,
+    /// so a re-created buffer has to invalidate that cache ([`prepare_effect_bind_groups`]).
+    params_buffer: Option<BufferId>,
+}
+
+/// One row of the lane's per-draw uniform: the fog policy the shader reads, and the target-pixel
+/// rectangle it clips to. `clip.z <= clip.x` means **no clip**, which is every world draw and
+/// every canonical fog row.
+#[derive(Clone, Copy, bevy::render::render_resource::ShaderType)]
+struct EffectParams {
+    fog: Vec4,
+    clip: Vec4,
 }
 
 impl Default for EffectMeta {
@@ -128,8 +147,71 @@ impl Default for EffectMeta {
             merged: Vec::new(),
             view_bind_group: None,
             params: DynamicUniformBuffer::default(),
-            params_offsets: None,
+            params_offsets: [0; 6],
+            params_buffer: None,
         }
+    }
+}
+
+/// How many CLIPPED params rows one frame may carry. A clip is a UI model tile's cell, and a
+/// pane whose row does not fit degrades to the unclipped row — so this only has to cover the
+/// panes that can actually spill, which is the ones with emitters (the autocast shines, the two
+/// pings, the bag's item animation): a whole pet bar plus both pings is ten.
+const MAX_CLIP_ROWS: usize = 64;
+
+impl EffectMeta {
+    /// Write this frame's per-draw uniform rows and return the clipped ones' offsets, keyed by
+    /// `(fog slot, the clip rect's bits)`. The six canonical fog rows are always rows 0..6, in
+    /// [`EffectFog::slot`] order — `params.fog.x` carries the shader's fog COLOUR policy (the
+    /// `0x70baf0` table), `params.fog.y` the forced-fog enable with `zw` its start/end (rain's
+    /// verified 70..75 window — the constants live with their law in `weather::precip`), and
+    /// `params.clip` the target-pixel rectangle (`z <= x` = no clip).
+    fn build_params(
+        &mut self,
+        device: &RenderDevice,
+        queue: &RenderQueue,
+    ) -> HashMap<(u32, [u32; 4]), u32> {
+        const NO_CLIP: Vec4 = Vec4::ZERO;
+        let fog_rows = [
+            Vec4::new(0.0, 0.0, 0.0, 0.0),
+            Vec4::new(1.0, 0.0, 0.0, 0.0),
+            Vec4::new(2.0, 0.0, 0.0, 0.0),
+            Vec4::new(3.0, 0.0, 0.0, 0.0),
+            Vec4::new(4.0, 0.0, 0.0, 0.0),
+            Vec4::new(
+                0.0,
+                1.0,
+                crate::weather::RAIN_FOG_START,
+                crate::weather::RAIN_FOG_END,
+            ),
+        ];
+        self.params.clear();
+        let mut offsets = [0u32; 6];
+        for (i, fog) in fog_rows.iter().enumerate() {
+            offsets[i] = self.params.push(&EffectParams {
+                fog: *fog,
+                clip: NO_CLIP,
+            });
+        }
+        self.params_offsets = offsets;
+        let mut clip_rows: HashMap<(u32, [u32; 4]), u32> = HashMap::default();
+        for i in 0..self.draws.len() {
+            let (Some(clip), slot) = (self.draws[i].clip, self.draws[i].fog.slot()) else {
+                continue;
+            };
+            let key = (slot, clip.to_array().map(f32::to_bits));
+            if clip_rows.contains_key(&key) || clip_rows.len() >= MAX_CLIP_ROWS {
+                continue;
+            }
+            let off = self.params.push(&EffectParams {
+                fog: fog_rows[slot as usize],
+                clip,
+            });
+            clip_rows.insert(key, off);
+        }
+        self.params.write_buffer(device, queue);
+        self.params_buffer = self.params.buffer().map(|b| b.id());
+        clip_rows
     }
 }
 
@@ -140,6 +222,9 @@ impl Default for EffectMeta {
 #[derive(Resource, Default)]
 pub struct EffectBindGroups {
     images: HashMap<(AssetId<Image>, Option<BufferId>), BindGroup>,
+    /// The params buffer the cached groups were built against — see
+    /// [`prepare_effect_bind_groups`].
+    params_buffer: Option<BufferId>,
 }
 
 /// The lane's pipeline: layouts + shader, specialized per (blend, raster bias, msaa, hdr).
@@ -169,7 +254,7 @@ pub fn init_effect_pipeline(mut commands: Commands, asset_server: Res<AssetServe
                 // time; the WGSL struct pins the layout.
                 storage_buffer_read_only_sized(false, None),
                 // The per-draw fog-params `vec4`, dynamic-offset into the canonical rows.
-                uniform_buffer::<Vec4>(true),
+                uniform_buffer::<EffectParams>(true),
             ),
         ),
     );
@@ -200,6 +285,9 @@ pub struct EffectPipelineKey {
     /// def rather than a uniform bit so the 95% unlit majority keeps the identical instruction
     /// stream it has today.
     lit: bool,
+    /// Does this draw ignore the depth buffer entirely (`depth_compare = Always`)? Two values
+    /// exist and only one family sets it — see [`super::buffer::EffectDrawSpec::no_depth_test`].
+    no_depth_test: bool,
 }
 
 impl SpecializedRenderPipeline for EffectPipeline {
@@ -281,11 +369,12 @@ impl SpecializedRenderPipeline for EffectPipeline {
         }
         // `$WOW_PARTICLE_NODEPTH` — the occlusion A/B (B16): force the depth COMPARE to
         // `Always`, splitting "nothing is emitted" from "emitted and the depth buffer eats it".
-        let depth_compare = if std::env::var_os("WOW_PARTICLE_NODEPTH").is_some() {
-            CompareFunction::Always
-        } else {
-            CompareFunction::GreaterEqual
-        };
+        let depth_compare =
+            if key.no_depth_test || std::env::var_os("WOW_PARTICLE_NODEPTH").is_some() {
+                CompareFunction::Always
+            } else {
+                CompareFunction::GreaterEqual
+            };
         RenderPipelineDescriptor {
             label: Some("wow_effect_pipeline".into()),
             layout: vec![self.view_layout.clone(), self.image_layout.clone()],
@@ -368,8 +457,10 @@ fn extract_effects(
         raster_bias: d.raster_bias,
         raster_slope: d.raster_slope,
         cam_relative: d.cam_relative,
+        no_depth_test: d.no_depth_test,
         range: d.range.clone(),
         light: d.light.clone(),
+        clip: d.clip,
     }));
 }
 
@@ -425,6 +516,7 @@ fn queue_effects(
                     raster_bias: draw.raster_bias,
                     raster_slope_bits: draw.raster_slope.to_bits(),
                     lit: draw.lit,
+                    no_depth_test: draw.no_depth_test,
                 },
             );
             phase.add(Transparent3d {
@@ -446,7 +538,8 @@ fn queue_effects(
 }
 
 /// The run identity the merge walk groups by: everything two adjacent items must share to be
-/// one GPU draw — pipeline (blend/bias/msaa/hdr), bind group (texture + light), params row.
+/// one GPU draw — pipeline (blend/bias/msaa/hdr), bind group (texture + light), and the params
+/// row (the fog policy AND the clip rect, which is why two panes' clouds never fold together).
 type RunKey = (
     bevy::render::render_resource::CachedRenderPipelineId,
     AssetId<Image>,
@@ -537,6 +630,11 @@ fn prepare_effects(
     // shadows here for exactly that reason).
     let trace = std::env::var_os("WOW_EFFECT_TRACE").is_some();
     let mut trace_lines: Vec<String> = Vec::new();
+    // The per-draw uniform rows, THIS frame: the six canonical fog policies plus one row per
+    // distinct (fog, clip) a clipped draw asks for. It is rebuilt every frame rather than once
+    // because the clip set is per-frame — the rows are a handful of `vec4` pairs, and the walk
+    // below needs the offsets to key its runs on.
+    let clip_rows = meta.build_params(&device, &queue);
     meta.indices.clear();
     meta.merged.clear();
     let mut n_items = 0u32;
@@ -606,11 +704,19 @@ fn prepare_effects(
                     draw.texture,
                 ));
             }
+            let params_offset = match draw.clip {
+                None => meta.params_offsets[draw.fog.slot() as usize],
+                // A clipped draw whose row did not fit the frame's budget degrades to the
+                // unclipped one — the pre-2093 picture, never a wrong pixel elsewhere.
+                Some(clip) => *clip_rows
+                    .get(&(draw.fog.slot(), clip.to_array().map(f32::to_bits)))
+                    .unwrap_or(&meta.params_offsets[draw.fog.slot() as usize]),
+            };
             let key: RunKey = (
                 pipeline,
                 draw.texture,
                 draw.light.as_ref().map(|b| b.id()),
-                draw.fog.slot(),
+                params_offset,
             );
             match &mut open {
                 Some((_, run_len, open_key)) if *open_key == key => {
@@ -627,7 +733,7 @@ fn prepare_effects(
                         index_range: index_start..index_end,
                         texture: draw.texture,
                         light: draw.light.clone(),
-                        fog: draw.fog,
+                        params_offset,
                     });
                     open = Some((i, 1, key));
                 }
@@ -651,28 +757,6 @@ fn prepare_effects(
     }
     if !meta.indices.is_empty() {
         meta.indices.write_buffer(&device, &queue);
-    }
-
-    if meta.params_offsets.is_none() {
-        // Slot order = `EffectFog::slot`: off, scene, black, white, grey, rain-forced —
-        // `params.x` carries the shader's fog COLOUR policy (the `0x70baf0` table), `params.y`
-        // the forced-fog enable with `zw` its start/end (rain's verified 70..75 window — the
-        // constants live with their law in `weather::precip`).
-        let offsets = [
-            meta.params.push(&Vec4::new(0.0, 0.0, 0.0, 0.0)),
-            meta.params.push(&Vec4::new(1.0, 0.0, 0.0, 0.0)),
-            meta.params.push(&Vec4::new(2.0, 0.0, 0.0, 0.0)),
-            meta.params.push(&Vec4::new(3.0, 0.0, 0.0, 0.0)),
-            meta.params.push(&Vec4::new(4.0, 0.0, 0.0, 0.0)),
-            meta.params.push(&Vec4::new(
-                0.0,
-                1.0,
-                crate::weather::RAIN_FOG_START,
-                crate::weather::RAIN_FOG_END,
-            )),
-        ];
-        meta.params.write_buffer(&device, &queue);
-        meta.params_offsets = Some(offsets);
     }
 }
 
@@ -700,6 +784,13 @@ fn prepare_effect_bind_groups(
     let Some(params_binding) = meta.params.binding() else {
         return;
     };
+    // The cached groups hold a binding INTO the params buffer, and that buffer is rebuilt every
+    // frame now (the clip rows are per-frame) — so a re-created buffer, which is what a growing
+    // row count produces, has to invalidate the cache or the groups bind freed memory.
+    if bind_groups.params_buffer != meta.params_buffer {
+        bind_groups.images.clear();
+        bind_groups.params_buffer = meta.params_buffer;
+    }
     for draw in &meta.draws {
         let key = (draw.texture, draw.light.as_ref().map(|b| b.id()));
         if bind_groups.images.contains_key(&key) {
@@ -781,14 +872,11 @@ impl<P: PhaseItem> RenderCommand<P> for DrawEffectBatch {
         let Some(image_bind_group) = bind_groups.into_inner().images.get(&key) else {
             return RenderCommandResult::Skip;
         };
-        let (Some(vertices), Some(indices), Some(offsets)) = (
-            meta.vertices.buffer(),
-            meta.indices.buffer(),
-            meta.params_offsets,
-        ) else {
+        let (Some(vertices), Some(indices)) = (meta.vertices.buffer(), meta.indices.buffer())
+        else {
             return RenderCommandResult::Failure("effect lane buffers not available");
         };
-        pass.set_bind_group(1, image_bind_group, &[offsets[draw.fog.slot() as usize]]);
+        pass.set_bind_group(1, image_bind_group, &[draw.params_offset]);
         pass.set_vertex_buffer(0, vertices.slice(..));
         pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
         // The `$WOW_EFFECT_TRACE` tail: what draw_indexed ACTUALLY ran — read against the

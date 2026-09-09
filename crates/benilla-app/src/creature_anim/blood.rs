@@ -13,6 +13,7 @@ use benilla_formats::BloodCatalog;
 use crate::net::NetEntity;
 use benilla_assets::{LockRecover, WorldAssets};
 
+use super::spell_visual::FxSlot;
 use super::spell_visual::SpellVisuals;
 use super::{SpellKitFx, SwingImpact, SwingMessage};
 
@@ -132,10 +133,10 @@ pub(super) fn blood_spurts(
             _ => true,
         };
         let large = swing.hit_info & 0x2000 != 0; // HITINFO crushing — the Large row, not crit
-        let Some(path) = blood
+        let Some((effect, path)) = blood
             .0
             .effect_id(blood_id, VIOLENCE_LEVEL, front, large)
-            .and_then(|id| visuals.0.effect_path(id))
+            .and_then(|id| visuals.0.effect_path(id).map(|path| (id, path)))
         else {
             info!("blood: dropped — no effect for blood {blood_id} (front {front}, large {large})");
             continue;
@@ -149,10 +150,15 @@ pub(super) fn blood_spurts(
             // The blood spurt is `CEffect::AddEffect` off the melee path, not a kit stage — but it
             // is the same self-terminating shape (one pass, then gone).
             stage: super::FxStage::OneShot,
-            effects: vec![(
-                if front { ATTACH_FRONT } else { ATTACH_BACK },
-                path.to_string(),
-            )],
+            // One spurt per (record, tag) on a body: five attackers hitting the same flank
+            // REPLACE each other's spurt rather than stacking five copies of it — the
+            // reference's `0x6208e0` walk, which `resolve_spell_fx` runs for every slot
+            // (decision 2057). It is why a busy fight does not brighten without bound there.
+            effects: vec![FxSlot {
+                tag: if front { ATTACH_FRONT } else { ATTACH_BACK },
+                effect,
+                path: path.to_string(),
+            }],
         });
     }
 }

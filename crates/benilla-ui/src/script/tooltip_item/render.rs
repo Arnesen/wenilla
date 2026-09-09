@@ -1,11 +1,24 @@
 //! The item tooltip's line law — [`render_view`], the byte-verified emission order of the
 //! client's shared renderer `0x52b650` (see the parent module doc for the law's provenance and
 //! the compare/red/SET summaries).
+//!
+//! **Every sentence here is a key, never a Rust string** (decision 2045). The builder names its
+//! keys outright — the census of the string pointers reachable from `[0x52b650, 0x52e600)` is
+//! where each one below came from, so a line's key is the *reference's* choice and not a match on
+//! English. That distinction is load-bearing: `ITEM_REQ_SKILL`, `LOCKED_WITH_ITEM`,
+//! `LOCKED_WITH_SPELL` and `LOCKED_WITH_SPELL_KNOWN` are all "Requires %s" in enUS and four
+//! different strings anywhere else.
+//!
+//! A key the player's `GlobalStrings.lua` does not carry emits **no line at all** — never an
+//! invented one. That is `duration_text`'s disposition and the reference's own: its
+//! `FrameScript_GetText` hands back the pre-seeded empty string and `AddLine` drops an empty row
+//! before it ever counts it.
 
 use mlua::{Lua, Table};
 
-use crate::script::tooltip::append_line;
+use crate::script::tooltip::{append_line, duration_text, plural_template};
 use crate::script::{ItemTemplateView, Model};
+use crate::strings::{fill, Arg};
 
 use super::names::*;
 
@@ -150,11 +163,23 @@ pub(super) fn render_view(
     let addw = |l: (String, [f32; 4])| append_line(lua, this, l, None, true);
     let add2 =
         |l: (String, [f32; 4]), r: (String, [f32; 4])| append_line(lua, this, l, Some(r), false);
+    // The VM's own `GlobalStrings.lua`, off the player's patch chain — the one source of every
+    // sentence below.
+    let get = |key: &str| crate::strings::global(lua, key);
+    // One line, named by KEY and filled from the template the install carries. A key the table
+    // does not hold emits nothing: the reference's empty `FrameScript_GetText` return reaches
+    // `AddLine`'s `0x530270`, which bails before it increments the line count.
+    let keyed = |key: &str, args: &[Arg<'_>], color: [f32; 4], wrap: bool| -> mlua::Result<()> {
+        match get(key) {
+            Some(t) => append_line(lua, this, (fill(&t, args), color), None, wrap),
+            None => Ok(()),
+        }
+    };
 
     // Compare mode (the shopping tooltips): the gray CURRENTLY_EQUIPPED header (`[arg+0x18]≠0`)
     // and a WHITE name instead of the quality color (`[arg+0x14]≠0`) — both byte-verified.
     if compare {
-        add(("Currently Equipped".into(), GRAY))?;
+        keyed("CURRENTLY_EQUIPPED", &[], GRAY, false)?;
     }
     let name_color = if compare {
         WHITE
@@ -175,25 +200,25 @@ pub(super) fn render_view(
     // rule, and the reference's own (its resolve callback repaints the tooltip; ours is the
     // container re-enter loop).
     if let Some(p) = inst.and_then(|i| i.petition.as_ref()) {
-        let (title_fmt, creator_fmt) = if p.is_charter {
-            ("Guild Name: %s", "Guild Master: %s")
+        let (title_key, creator_key) = if p.is_charter {
+            ("GUILD_CHARTER_TITLE", "GUILD_CHARTER_CREATOR")
         } else {
-            ("Petition: %s", "Created by %s")
+            ("PETITION_TITLE", "PETITION_CREATOR")
         };
         if !p.title.is_empty() {
-            add((title_fmt.replacen("%s", &p.title, 1), WHITE))?;
+            keyed(title_key, &[Arg::S(&p.title)], WHITE, false)?;
         }
         if let Some(owner) = p.owner.as_deref().filter(|o| !o.is_empty()) {
-            add((creator_fmt.replacen("%s", owner, 1), WHITE))?;
+            keyed(creator_key, &[Arg::S(owner)], WHITE, false)?;
         }
     }
     // ITEM_SIGNABLE (green) — Flags bit 0x2000 (petitions).
     if v.flags & 0x2000 != 0 {
-        add(("<Right Click for Details>".into(), GREEN))?;
+        keyed("ITEM_SIGNABLE", &[], GREEN, false)?;
     }
-    // "Conjured Item" (Flags bit 0x2).
+    // ITEM_CONJURED (Flags bit 0x2).
     if v.flags & 0x2 != 0 {
-        add(("Conjured Item".into(), WHITE))?;
+        keyed("ITEM_CONJURED", &[], WHITE, false)?;
     }
     // The bind line (§6, white, one line). Bonding `[record+0x194]` ∈ {1..5} is what decides
     // whether a line prints at ALL — a Bonding-0 item says nothing here however it is held.
@@ -206,26 +231,28 @@ pub(super) fn render_view(
     // forever (B310, Frostshake): the template's `bonding` never changes when the item binds —
     // the instance's flag is the only thing that does.
     match v.bonding {
-        4 | 5 => add(("Quest Item".into(), WHITE))?,
-        1..=3 if inst.is_some_and(|i| i.already_bound) => add(("Soulbound".into(), WHITE))?,
-        1 => add(("Binds when picked up".into(), WHITE))?,
-        2 => add(("Binds when equipped".into(), WHITE))?,
-        3 => add(("Binds when used".into(), WHITE))?,
+        4 | 5 => keyed("ITEM_BIND_QUEST", &[], WHITE, false)?,
+        1..=3 if inst.is_some_and(|i| i.already_bound) => {
+            keyed("ITEM_SOULBOUND", &[], WHITE, false)?
+        }
+        1 => keyed("ITEM_BIND_ON_PICKUP", &[], WHITE, false)?,
+        2 => keyed("ITEM_BIND_ON_EQUIP", &[], WHITE, false)?,
+        3 => keyed("ITEM_BIND_ON_USE", &[], WHITE, false)?,
         _ => {}
     }
     match v.max_count {
-        1 => add(("Unique".into(), WHITE))?,
-        n if n > 1 => add((format!("Unique ({n})"), WHITE))?,
+        1 => keyed("ITEM_UNIQUE", &[], WHITE, false)?,
+        n if n > 1 => keyed("ITEM_UNIQUE_MULTIPLE", &[Arg::D(n.into())], WHITE, false)?,
         _ => {}
     }
     if v.start_quest != 0 {
-        add(("This Item Begins a Quest".into(), WHITE))?;
+        keyed("ITEM_STARTS_QUEST", &[], WHITE, false)?;
     }
     // LOCKED (red) — suppressed once the INSTANCE carries UNLOCKED `0x4` (the law's "and the
     // item is not already unlocked"; the same bit the openable sub-gate reads). The key-item
     // "Requires %s" sub-line joins with the Lock.dbc resolve (the GO-locks follow-up).
     if v.lock_id != 0 && inst.is_none_or(|i| i.flags & 0x4 == 0) {
-        add(("Locked".into(), RED))?;
+        keyed("LOCKED", &[], RED, false)?;
     }
     // Slot | type — or, for a bag, the single CONTAINER_SLOTS line in the same seat. The type
     // cell is suppressed for cloaks (InventoryType 16) and displayFlags-hidden subclasses
@@ -241,7 +268,10 @@ pub(super) fn render_view(
     if v.container_slots > 0 {
         add((format!("{} Slot Bag", v.container_slots), WHITE))?;
     } else {
-        let slot = invtype_name(v.inventory_type);
+        // The slot cell is the `0x83ddb0` key table's entry for this InventoryType, resolved here
+        // — so the four types whose keys the string table does not carry (ammo, thrown,
+        // ranged-right, quiver) draw no slot cell, exactly as the reference does.
+        let slot = invtype_key(v.inventory_type).and_then(&get);
         let ty = if v.inventory_type == 16 || v.hide_subclass {
             None
         } else {
@@ -264,11 +294,10 @@ pub(super) fn render_view(
             left_red = true;
         }
         match (slot, ty) {
-            (Some(s), Some(t)) => add2(
-                (s.into(), req_color(!left_red)),
-                (t.into(), req_color(!right_red)),
-            )?,
-            (Some(s), None) => add((s.into(), req_color(!left_red)))?,
+            (Some(s), Some(t)) => {
+                add2((s, req_color(!left_red)), (t.into(), req_color(!right_red)))?
+            }
+            (Some(s), None) => add((s, req_color(!left_red)))?,
             // No slot name: the type stands alone and takes the hard-miss color (the
             // builder's single-cell fallback keeps flag-1).
             (None, Some(t)) => add((t.into(), req_color(!right_red)))?,
@@ -282,7 +311,7 @@ pub(super) fn render_view(
             (min + 0.5).floor() as i64,
             (max + 0.5).floor() as i64
         );
-        if let Some(s) = school_name(sch) {
+        if let Some(s) = school_key(sch).and_then(|k| get(&k)) {
             dmg = format!("{dmg} {s}");
         }
         dmg.push_str(" Damage");
@@ -293,7 +322,7 @@ pub(super) fn render_view(
             add((dmg, WHITE))?;
         }
         for &(emin, emax, esch) in v.damages.iter().skip(1).filter(|d| d.1 > 0.0) {
-            let s = school_name(esch).unwrap_or("");
+            let s = school_key(esch).and_then(|k| get(&k)).unwrap_or_default();
             let sep = if s.is_empty() { "" } else { " " };
             add((
                 format!(
@@ -312,17 +341,27 @@ pub(super) fn render_view(
                 .filter(|d| d.1 > 0.0)
                 .map(|&(a, b, _)| (a + b) * 0.5)
                 .sum();
-            add((
-                format!("({:.1} damage per second)", f64::from(total) / speed),
+            // The precision is DPS_TEMPLATE's own `%.1f`, not ours — a locale that respells it
+            // gets its own number of decimals with no code change (law §12: "the print precision
+            // is FRAMEXML-DATA").
+            keyed(
+                "DPS_TEMPLATE",
+                &[Arg::F(f64::from(total) / speed)],
                 WHITE,
-            ))?;
+                false,
+            )?;
         }
     }
     if v.armor > 0 {
-        add((format!("{} Armor", v.armor), WHITE))?;
+        keyed("ARMOR_TEMPLATE", &[Arg::D(v.armor.into())], WHITE, false)?;
     }
     if v.block > 0 {
-        add((format!("{} Block", v.block), WHITE))?;
+        keyed(
+            "SHIELD_BLOCK_TEMPLATE",
+            &[Arg::D(v.block.into())],
+            WHITE,
+            false,
+        )?;
     }
     // Stat mods (+N Stamina …) in the client's DISPLAY order — the `0x808e88` table (byte-read:
     // 4,3,7,5,6,1,0 then 8,9,2,10 + zero padding; the builder's outer loop walks the table,
@@ -337,31 +376,41 @@ pub(super) fn render_view(
             if t != want || val == 0 {
                 continue;
             }
-            let Some(name) = stat_name(t) else { continue };
-            let sign = if val > 0 { '+' } else { '-' };
-            add((format!("{sign}{} {name}", val.abs()), WHITE))?;
+            // The `ITEM_MOD_*` template is the whole line, sign hole included
+            // (`"%c%d Agility"`) — the sign is an argument, not a prefix we glue on.
+            let Some(key) = stat_key(t) else { continue };
+            let sign = if val > 0 { "+" } else { "-" };
+            keyed(key, &[Arg::S(sign), Arg::D(val.abs().into())], WHITE, false)?;
         }
     }
     // Resistances: six equal nonzero values collapse to the ALL line; otherwise one line per
-    // nonzero school with HOLY excluded from the singles loop (both byte-verified).
-    const RESIST_NAMES: [&str; 6] = ["Holy", "Fire", "Nature", "Frost", "Shadow", "Arcane"];
+    // nonzero school with HOLY excluded from the singles loop (both byte-verified). The six
+    // fields are schools 1..6, so slot `i` names `SPELL_SCHOOL{i+1}_CAP` — the same `%d`-composed
+    // key the damage line uses one block up.
     let first_res = v.resistances[0];
     if first_res != 0 && v.resistances.iter().all(|&r| r == first_res) {
-        let sign = if first_res > 0 { '+' } else { '-' };
-        add((
-            format!("{sign}{} to All Resistances", first_res.abs()),
+        let sign = if first_res > 0 { "+" } else { "-" };
+        keyed(
+            "ITEM_RESIST_ALL",
+            &[Arg::S(sign), Arg::D(first_res.abs().into())],
             WHITE,
-        ))?;
+            false,
+        )?;
     } else {
         for (i, &r) in v.resistances.iter().enumerate() {
             if r == 0 || i == 0 {
                 continue; // Holy (i == 0) never prints singly in 1.12
             }
-            let sign = if r > 0 { '+' } else { '-' };
-            add((
-                format!("{sign}{} {} Resistance", r.abs(), RESIST_NAMES[i]),
+            let sign = if r > 0 { "+" } else { "-" };
+            let school = school_key(i as u32 + 1)
+                .and_then(|k| get(&k))
+                .unwrap_or_default();
+            keyed(
+                "ITEM_RESIST_SINGLE",
+                &[Arg::S(sign), Arg::D(r.abs().into()), Arg::S(&school)],
                 WHITE,
-            ))?;
+                false,
+            )?;
         }
     }
     // **Line 17 — the enchant family** (wow-re `tooltip-content-law.md` §1-ENCHANT, byte-carved
@@ -401,7 +450,7 @@ pub(super) fn render_view(
     // where the reference shows the rolled lines).
     let no_id_source = inst.is_none_or(|i| i.flags & 0x8 != 0);
     if no_id_source && !signable && v.random_property != 0 {
-        add(("<Random enchantment>".into(), GREEN))?;
+        keyed("ITEM_RANDOM_ENCHANT", &[], GREEN, false)?;
     }
     for e in enchant_slots {
         let color = match (e.slot < 2, e.negative) {
@@ -414,14 +463,23 @@ pub(super) fn render_view(
         // ceil-vs-truncate split are [`enchant_time_left`]'s; its source is
         // `SMSG_ITEM_ENCHANT_TIME_UPDATE`, never the item's own duration field.
         let mut text = match e.remaining_ms {
-            Some(ms) => enchant_time_left(&e.name, ms),
+            // The countdown IS the line — `ITEM_ENCHANT_TIME_LEFT_MIN = "%s (%d min)"` carries
+            // the enchant's own name in its first hole. Without that template there is no line
+            // to compose: the reference printf's an empty format into a zeroed buffer and
+            // `AddLine` drops the empty row, so a missing key skips the slot rather than falling
+            // back to the bare name.
+            Some(ms) => match enchant_time_left(&e.name, ms, &get) {
+                Some(t) => t,
+                None => continue,
+            },
             None => e.name.clone(),
         };
         // " (N Charges)" — the slot's own charges dword through ITEM_SPELL_CHARGES, then the
-        // literal `" (%s)" 0x854820` (`0x52caa6–0x52cb38`). Only an owned item object carries
-        // charges; the session/inspect legs ship ids alone, so this is naturally absent there.
-        if e.charges != 0 {
-            text.push_str(&format!(" ({})", charges_phrase(e.charges)));
+        // literal `" (%s)" 0x854820` (`0x52caa6–0x52cb38`), which is the engine's own format and
+        // not a string table entry. Only an owned item object carries charges; the session/inspect
+        // legs ship ids alone, so this is naturally absent there.
+        if let Some(charges) = charges_phrase(e.charges, &get) {
+            text.push_str(&format!(" ({charges})"));
         }
         add((text, color))?;
     }
@@ -430,12 +488,20 @@ pub(super) fn render_view(
         // "durability (red iff broken==0)", the AddLine colour pointer `0xc0d390`, the same
         // red as the unmet-requirement lines).
         let color = if cur == 0 { RED } else { WHITE };
-        add((format!("Durability {cur} / {max}"), color))?;
+        keyed(
+            "DURABILITY_TEMPLATE",
+            &[Arg::D(cur.into()), Arg::D(max.into())],
+            color,
+            false,
+        )?;
     } else if v.max_durability > 0 {
-        add((
-            format!("Durability {} / {}", v.max_durability, v.max_durability),
+        let full = i64::from(v.max_durability);
+        keyed(
+            "DURABILITY_TEMPLATE",
+            &[Arg::D(full), Arg::D(full)],
             WHITE,
-        ))?;
+            false,
+        )?;
     }
     // **ITEM_DURATION `0x854bb4` — the item's own expiry countdown** (`0x52ce0d`, one of the four
     // sites that set the builder's `[ebp-0x38]` return, wow-re `tooltip-content-law.md` §E3's
@@ -444,9 +510,20 @@ pub(super) fn render_view(
     // 23) — the numbered law list omits the line entirely, which is the gap decision 1933 names.
     // Formatted through the same `0x52fa50` ladder as the enchant countdown, with key prefix
     // `ITEM_DURATION`; unlike its siblings that prefix ships **no `_P1` plural twin**, so every
-    // count reads "days"/"hrs" (`GlobalStrings.lua:2401-2404`).
+    // count reads "days"/"hrs" (`GlobalStrings.lua:2401-2404`) — which `plural_template`'s
+    // fall-back-to-the-bare-token arm produces without a special case.
+    //
+    // **This is `tooltip::duration_text` itself**, not a second copy of the ladder: the two had
+    // drifted into separate implementations of the same four arms, and the local one always
+    // emitted a line (an invented sentence off an install) where the shared one returns `None`.
+    // The one seam is the width — the deadline is parked as `u64` milliseconds and the reference's
+    // formatter takes a dword, so a timer past 49.7 days saturates rather than wrapping. No 1.12
+    // item carries one; the longest shipped duration is a fortnight.
     if let Some(ms) = inst.and_then(|i| i.duration_ms) {
-        add((duration_left(ms), WHITE))?;
+        let ms = u32::try_from(ms).unwrap_or(u32::MAX);
+        if let Some(line) = duration_text(ms, "ITEM_DURATION", true, &get) {
+            add((line, WHITE))?;
+        }
     }
     // Class/race lists — red when the player's own bit is absent (the usable ask).
     if v.allowable_class > 0
@@ -459,7 +536,12 @@ pub(super) fn render_view(
             .collect();
         if !list.is_empty() {
             let ok = req.class_id > 0 && v.allowable_class & (1 << (req.class_id - 1)) != 0;
-            add((format!("Classes: {}", list.join(", ")), req_color(ok)))?;
+            keyed(
+                "ITEM_CLASSES_ALLOWED",
+                &[Arg::S(&list.join(", "))],
+                req_color(ok),
+                false,
+            )?;
         }
     }
     if v.allowable_race > 0 && (v.allowable_race & full_mask(&RACE_NAMES)) != full_mask(&RACE_NAMES)
@@ -471,30 +553,48 @@ pub(super) fn render_view(
             .collect();
         if !list.is_empty() {
             let ok = req.race_id > 0 && v.allowable_race & (1 << (req.race_id - 1)) != 0;
-            add((format!("Races: {}", list.join(", ")), req_color(ok)))?;
+            keyed(
+                "ITEM_RACES_ALLOWED",
+                &[Arg::S(&list.join(", "))],
+                req_color(ok),
+                false,
+            )?;
         }
     }
     // ITEM_MIN_LEVEL prints only for RequiredLevel > 1 (byte-VERIFIED `0x52d2cf`: `cmp esi,0x1 /
     // jle skip`) — a level-1 requirement gates nothing a logged-in player could fail, so the
     // real client hides it on all the level-1 consumables that carry one.
     if v.required_level > 1 {
-        add((
-            format!("Requires Level {}", v.required_level),
+        keyed(
+            "ITEM_MIN_LEVEL",
+            &[Arg::D(v.required_level.into())],
             req_color(req.level >= v.required_level),
-        ))?;
+            false,
+        )?;
     }
+    // The skill requirement is TWO keys, picked by whether a rank is asked for — `ITEM_MIN_SKILL`
+    // = "Requires %s (%d)" and `ITEM_REQ_SKILL` = "Requires %s" (the builder's own pair at
+    // `0x52d34e`/`0x52d355`). `ITEM_REQ_SKILL` is also what the required-SPELL line below takes
+    // (`0x52d650`): three other 1.12 keys read "Requires %s" in enUS — the `LOCKED_WITH_*` trio —
+    // and none of them is this line.
     if let Some(skill) = &v.required_skill_name {
         let have = req.skills.get(&v.required_skill).copied().unwrap_or(0);
-        let line = if v.required_skill_rank > 0 {
-            format!("Requires {skill} ({})", v.required_skill_rank)
+        let color = req_color(have >= v.required_skill_rank.max(1));
+        if v.required_skill_rank > 0 {
+            let args = [Arg::S(skill), Arg::D(v.required_skill_rank.into())];
+            keyed("ITEM_MIN_SKILL", &args, color, false)?;
         } else {
-            format!("Requires {skill}")
-        };
-        add((line, req_color(have >= v.required_skill_rank.max(1))))?;
+            keyed("ITEM_REQ_SKILL", &[Arg::S(skill)], color, false)?;
+        }
     }
     if v.required_spell != 0 {
         if let Some(name) = &v.required_spell_name {
-            add((format!("Requires {name}"), req_color(known_spell)))?;
+            keyed(
+                "ITEM_REQ_SKILL",
+                &[Arg::S(name)],
+                req_color(known_spell),
+                false,
+            )?;
         }
     }
     if let Some(rep) = &v.required_rep_line {
@@ -513,31 +613,40 @@ pub(super) fn render_view(
     }
     // ITEM_SPELL_KNOWN — a taught spell the player already knows, UNCONDITIONALLY red.
     if taught_known {
-        add(("Already known".into(), RED))?;
+        keyed("ITEM_SPELL_KNOWN", &[], RED, false)?;
     }
-    // Green trigger lines (Use:/Equip:/Chance on hit:), wrapped — the text is app-resolved (the
-    // spell's name in P1; its $-substituted description via the token engine in P2).
+    // Green trigger lines, wrapped — the text is app-resolved (the spell's name in P1; its
+    // $-substituted description via the token engine in P2). The prefix is a key, joined to the
+    // text by the engine's own `"%s %s"` literal `0x82ef08` (`0x52da7e`) — which is why the
+    // shipped values ("Use:", "Equip:", "Chance on hit:") carry no trailing space of their own.
     for &(trigger, _, ref text) in &v.spell_triggers {
-        let prefix = match trigger {
-            0 | 5 => "Use: ",
-            1 => "Equip: ",
-            2 => "Chance on hit: ",
+        let key = match trigger {
+            0 | 5 => "ITEM_SPELL_TRIGGER_ONUSE",
+            1 => "ITEM_SPELL_TRIGGER_ONEQUIP",
+            2 => "ITEM_SPELL_TRIGGER_ONPROC",
             _ => continue,
         };
-        addw((format!("{prefix}{text}"), GREEN))?;
+        let Some(prefix) = get(key) else { continue };
+        addw((format!("{prefix} {text}"), GREEN))?;
     }
-    if v.charges > 0 {
-        add((charges_phrase(v.charges as u32), WHITE))?;
+    if let Some(charges) = charges_phrase(v.charges.max(0) as u32, &get) {
+        add((charges, WHITE))?;
     }
     // The item-SET block (§22, ABOVE the compact cut), byte-read at the builder's
     // `0x52d8a0..0x52e0f5`: a blank gold line ([`SET_SPACER`]), the gold "name (owned/total)"
     // header, the set-level skill line (white, red when short), the member ladder ("  name" —
     // pale-cream `0xc0d368` when equipped, gray otherwise; a member whose template is still in
     // flight waits — the app re-pushes the view as names land), a second blank, then the threshold
-    // bonuses "(N) Set: text" sorted THRESHOLD-ASCENDING (the builder qsorts the slot indices
-    // via `0x52e5c0` — never the DBC's stored order), green only when the skill requirement
-    // is met (`0x5eaae0`) AND owned ≥ threshold. "Owned" counts EQUIPPED members on both
-    // builder paths (the owner-unit 19-slot scan / the hyperlink walk with section mask 0x1).
+    // bonuses sorted THRESHOLD-ASCENDING (the builder qsorts the slot indices via `0x52e5c0` —
+    // never the DBC's stored order), green only when the skill requirement is met (`0x5eaae0`)
+    // AND owned ≥ threshold. "Owned" counts EQUIPPED members on both builder paths (the
+    // owner-unit 19-slot scan / the hyperlink walk with section mask 0x1).
+    //
+    // **The two bonus arms are two different KEYS, and this is where reading the byte law paid**
+    // (`0x52e056..0x52e0d6`): the met arm formats `ITEM_SET_BONUS` = "Set: %s" with the text
+    // alone, and only the unmet arm formats `ITEM_SET_BONUS_GRAY` = "(%d) Set: %s" with the
+    // count. We had printed the counted form in both colours, so an ACTIVE set bonus read
+    // "(3) Set: …" where 1.12 reads "Set: …".
     if let Some(set) = &set_view {
         let owned = set
             .members
@@ -545,22 +654,31 @@ pub(super) fn render_view(
             .filter(|(id, _)| equipped.contains(id))
             .count();
         addw((SET_SPACER.into(), GOLD))?;
-        add((
-            format!("{} ({}/{})", set.name, owned, set.members.len()),
+        keyed(
+            "ITEM_SET_NAME",
+            &[
+                Arg::S(&set.name),
+                Arg::D(owned as i64),
+                Arg::D(set.members.len() as i64),
+            ],
             GOLD,
-        ))?;
+            false,
+        )?;
         let skill_met = set.required_skill == 0 || {
             let have = req.skills.get(&set.required_skill).copied().unwrap_or(0);
             have >= set.required_skill_rank
         };
         if let Some(skill) = &set.required_skill_name {
-            let line = if set.required_skill_rank > 0 {
-                format!("Requires {skill} ({})", set.required_skill_rank)
+            let color = req_color(skill_met);
+            if set.required_skill_rank > 0 {
+                let args = [Arg::S(skill), Arg::D(set.required_skill_rank.into())];
+                keyed("ITEM_MIN_SKILL", &args, color, false)?;
             } else {
-                format!("Requires {skill}")
-            };
-            add((line, req_color(skill_met)))?;
+                keyed("ITEM_REQ_SKILL", &[Arg::S(skill)], color, false)?;
+            }
         }
+        // The member ladder's two-space indent is the engine's own `"  %s"` literal `0x854b14`,
+        // not a string-table entry.
         for (id, name) in &set.members {
             let Some(name) = name else { continue };
             let color = if equipped.contains(id) { CREAM } else { GRAY };
@@ -570,12 +688,12 @@ pub(super) fn render_view(
         let mut bonuses: Vec<&(u32, String)> = set.bonuses.iter().collect();
         bonuses.sort_by_key(|&&(threshold, _)| threshold);
         for &(threshold, ref text) in bonuses {
-            let color = if skill_met && owned as u32 >= threshold {
-                GREEN
+            if skill_met && owned as u32 >= threshold {
+                keyed("ITEM_SET_BONUS", &[Arg::S(text)], GREEN, true)?;
             } else {
-                GRAY
-            };
-            addw((format!("({threshold}) Set: {text}"), color))?;
+                let args = [Arg::D(threshold.into()), Arg::S(text)];
+                keyed("ITEM_SET_BONUS_GRAY", &args, GRAY, true)?;
+            }
         }
     }
     // The compact/compare early-return (`0x52e14c`, `[arg+0x14]≠0`): everything below —
@@ -601,11 +719,12 @@ pub(super) fn render_view(
     // "Made by" (gifts join with the wrap/unwrap arc).
     if inst.flags & 0x8 == 0 {
         if let Some(name) = &inst.creator {
-            if inst.has_text {
-                add((format!("Written by {name}"), WHITE))?;
+            let key = if inst.has_text {
+                "ITEM_WRITTEN_BY"
             } else {
-                add((format!("|cff00ff00<Made by {name}>|r"), WHITE))?;
-            }
+                "ITEM_CREATED_BY"
+            };
+            keyed(key, &[Arg::S(name)], WHITE, false)?;
         }
     }
     // ITEM_OPENABLE / ITEM_READABLE — ONE line, openable wins outright (the `jmp 0x52e35d` past
@@ -624,9 +743,9 @@ pub(super) fn render_view(
         && ((v.flags & 0x4 != 0 && (v.lock_id == 0 || inst.flags & 0x4 != 0))
             || (v.flags & 0x200 != 0 && inst.flags & 0x8 != 0));
     if openable {
-        add(("<Right Click to Open>".into(), GREEN))?;
+        keyed("ITEM_OPENABLE", &[], GREEN, false)?;
     } else if v.page_text != 0 || inst.has_text {
-        add(("<Right Click to Read>".into(), GREEN))?;
+        keyed("ITEM_READABLE", &[], GREEN, false)?;
     }
     Ok(())
 }
@@ -634,124 +753,122 @@ pub(super) fn render_view(
 /// A temporary enchant's line text — the name with its countdown, the reference's own bucket
 /// ladder (wow-re `tooltip-content-law.md` §E3 → `0x52fa50`, byte-verified): a runtime key
 /// `ITEM_ENCHANT_TIME_LEFT_<DAYS|HOURS|MIN|SEC>` chosen by the largest unit that fits, with the
-/// count taken as **ceil** in the day/hour/minute arms and **truncated** in the seconds arm. The
-/// day/hour keys carry a `_P1` plural twin in the shipped GlobalStrings; minutes and seconds do
-/// not, so those read "(1 min)" at one minute exactly as they read "(9 min)".
+/// count taken as **ceil** in the day/hour/minute arms and **truncated** in the seconds arm, and
+/// the `_P1` plural twin picked by [`plural_template`]'s byte-pinned rule. The day and hour keys
+/// ship a twin; minutes and seconds do not, so those read "(1 min)" at one minute exactly as they
+/// read "(9 min)".
 ///
-/// Templates are the shipped enUS values (`Interface\FrameXML\GlobalStrings.lua:2406-2411`),
-/// inlined like every other string in this builder.
-fn enchant_time_left(name: &str, ms: u64) -> String {
-    match time_bucket(ms) {
-        (TimeBucket::Days, 1) => format!("{name} (1 day)"),
-        (TimeBucket::Days, n) => format!("{name} ({n} days)"),
-        (TimeBucket::Hours, 1) => format!("{name} (1 hour)"),
-        (TimeBucket::Hours, n) => format!("{name} ({n} hrs)"),
-        (TimeBucket::Min, n) => format!("{name} ({n} min)"),
-        (TimeBucket::Sec, n) => format!("{name} ({n} sec)"),
-    }
+/// **Two holes, which is why this cannot be `duration_text`**: the templates are
+/// `"%s (%d min)"` — the enchant's own name fills the first, the count the second. That name is
+/// the `SpellItemEnchantment` row's, DBC data rather than a string-table sentence, so it arrives
+/// as an argument. `None` = the family is absent from the install's string table, and the caller
+/// draws no line at all.
+fn enchant_time_left(name: &str, ms: u64, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let (suffix, n) = time_bucket(ms);
+    let template = plural_template(&format!("ITEM_ENCHANT_TIME_LEFT_{suffix}"), n, get)?;
+    Some(fill(&template, &[Arg::S(name), Arg::D(i64::from(n))]))
 }
 
-/// The item self-expiry line's text — the same `0x52fa50` bucket ladder as
-/// [`enchant_time_left`] (largest unit that fits; **ceil** in the day/hour/minute arms,
-/// **truncated** in the seconds arm), composed against key prefix `ITEM_DURATION`.
+/// `0x52fa50`'s bucket + count for the ENCHANT countdown — the key suffix and the number that
+/// fills it. The largest unit that fits wins (`>= 1 day` · `>= 1 h` · `>= 1 min` · else seconds);
+/// the count is **ceil** in the day/hour/minute arms (the `roundUp` argument, which all seven of
+/// the function's callers pass as 1) and plain **truncation** in the seconds arm.
 ///
-/// The one difference from its siblings is the absence of a plural split: `ITEM_DURATION_*` ships
-/// no `_P1` twin (`GlobalStrings.lua:2401-2404`), so a one-day timer reads "Duration: 1 days"
-/// exactly as the reference's own string table spells it.
-fn duration_left(ms: u64) -> String {
-    match time_bucket(ms) {
-        (TimeBucket::Days, n) => format!("Duration: {n} days"),
-        (TimeBucket::Hours, n) => format!("Duration: {n} hrs"),
-        (TimeBucket::Min, n) => format!("Duration: {n} min"),
-        (TimeBucket::Sec, n) => format!("Duration: {n} sec"),
-    }
-}
-
-/// The rung [`time_bucket`] picked — `0x52fa50`'s runtime key suffix, as a type.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum TimeBucket {
-    Days,
-    Hours,
-    Min,
-    Sec,
-}
-
-/// `0x52fa50`'s bucket + count, shared by every countdown line the item builder emits (the
-/// temporary enchant, the item's own expiry, and — when it is fed — the cooldown remaining).
-/// The largest unit that fits wins (`>= 1 day` · `>= 1 h` · `>= 1 min` · else seconds); the count
-/// is **ceil** in the day/hour/minute arms (the `roundUp` argument, which all seven of the
-/// function's callers pass as 1) and plain **truncation** in the seconds arm.
-fn time_bucket(ms: u64) -> (TimeBucket, u64) {
+/// The same ladder [`crate::script::tooltip::duration_text`] walks — it stays separate only
+/// because that one fills a single-hole template and this family has two holes; every other
+/// countdown in the tooltips goes through `duration_text`.
+fn time_bucket(ms: u64) -> (&'static str, u32) {
     const SEC: u64 = 1_000;
     const MIN: u64 = 60 * SEC;
     const HOUR: u64 = 60 * MIN;
     const DAY: u64 = 24 * HOUR;
-    match ms {
-        _ if ms >= DAY => (TimeBucket::Days, ms.div_ceil(DAY)),
-        _ if ms >= HOUR => (TimeBucket::Hours, ms.div_ceil(HOUR)),
-        _ if ms >= MIN => (TimeBucket::Min, ms.div_ceil(MIN)),
-        _ => (TimeBucket::Sec, ms / SEC),
-    }
+    let (suffix, n) = match ms {
+        _ if ms >= DAY => ("DAYS", ms.div_ceil(DAY)),
+        _ if ms >= HOUR => ("HOURS", ms.div_ceil(HOUR)),
+        _ if ms >= MIN => ("MIN", ms.div_ceil(MIN)),
+        _ => ("SEC", ms / SEC),
+    };
+    // The count is a dword in the reference; a timer long enough to overflow one does not exist.
+    (suffix, u32::try_from(n).unwrap_or(u32::MAX))
 }
 
-/// `ITEM_SPELL_CHARGES` — "%d Charge" / "%d Charges" (`GlobalStrings.lua:2448-2449`, the `_P1`
-/// plural twin). One rule for both consumers: the standalone charges line (law line 21) and the
-/// enchant line's ` (…)` suffix (§E3).
-fn charges_phrase(n: u32) -> String {
-    match n {
-        1 => "1 Charge".into(),
-        n => format!("{n} Charges"),
+/// `ITEM_SPELL_CHARGES` and its `_P1` plural twin (`0x84e3b4`, pushed at `0x52cae8` for the
+/// enchant suffix and `0x52db61` for the standalone line). One rule for both consumers: the
+/// charges line (law line 21) and the enchant line's ` (…)` suffix (§E3).
+///
+/// Zero answers `None` — the reference never reaches this with a zero count, and neither
+/// consumer here has a line to draw without one.
+fn charges_phrase(n: u32, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    if n == 0 {
+        return None;
     }
+    let template = plural_template("ITEM_SPELL_CHARGES", n, get)?;
+    Some(fill(&template, &[Arg::D(i64::from(n))]))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A stand-in string table, **deliberately not the shipped wording** — what is under test is
+    /// which key is reached and what fills it, never what the sentence says (decision 2045,
+    /// "assert the identifier, not the sentence"). Every value carries angle brackets so a
+    /// resolved line cannot be mistaken for a composed one.
+    fn table(key: &str) -> Option<String> {
+        Some(
+            match key {
+                "ITEM_ENCHANT_TIME_LEFT_DAYS" => "<%s :: %d D>",
+                "ITEM_ENCHANT_TIME_LEFT_DAYS_P1" => "<%s :: %d DD>",
+                "ITEM_ENCHANT_TIME_LEFT_HOURS" => "<%s :: %d H>",
+                "ITEM_ENCHANT_TIME_LEFT_HOURS_P1" => "<%s :: %d HH>",
+                "ITEM_ENCHANT_TIME_LEFT_MIN" => "<%s :: %d M>",
+                "ITEM_ENCHANT_TIME_LEFT_SEC" => "<%s :: %d S>",
+                "ITEM_SPELL_CHARGES" => "<%d chg>",
+                "ITEM_SPELL_CHARGES_P1" => "<%d chgs>",
+                _ => return None,
+            }
+            .to_string(),
+        )
+    }
+
     /// The countdown's bucket ladder (wow-re §1-ENCHANT §E3 → `0x52fa50`): the largest unit that
     /// fits wins, the count is **ceil** in the day/hour/minute arms and **truncated** in seconds,
-    /// and the day/hour arms have singular/plural twins while minutes and seconds do not.
+    /// and the day/hour arms have `_P1` twins while minutes and seconds do not — so those two
+    /// suffixes reach the same key at every count.
     #[test]
     fn enchant_countdown_buckets_and_rounding() {
-        let t = |ms| enchant_time_left("Rockbiter", ms);
-        // Seconds truncate: 1900 ms is "1 sec", not 2.
-        assert_eq!(t(1_900), "Rockbiter (1 sec)");
-        assert_eq!(t(59_999), "Rockbiter (59 sec)");
+        let t = |ms| enchant_time_left("Rockbiter", ms, &table);
+        // Seconds truncate: 1900 ms is 1, not 2.
+        assert_eq!(t(1_900).as_deref(), Some("<Rockbiter :: 1 S>"));
+        assert_eq!(t(59_999).as_deref(), Some("<Rockbiter :: 59 S>"));
         // Minutes ceil: one second past 4 minutes already reads 5.
-        assert_eq!(t(60_000), "Rockbiter (1 min)");
-        assert_eq!(t(241_000), "Rockbiter (5 min)");
-        // Hours ceil, with the shipped plural spelling ("hrs", not "hours").
-        assert_eq!(t(3_600_000), "Rockbiter (1 hour)");
-        assert_eq!(t(3_600_001), "Rockbiter (2 hrs)");
+        assert_eq!(t(60_000).as_deref(), Some("<Rockbiter :: 1 M>"));
+        assert_eq!(t(241_000).as_deref(), Some("<Rockbiter :: 5 M>"));
+        // Hours ceil, and only the non-singular count takes the `_P1` key.
+        assert_eq!(t(3_600_000).as_deref(), Some("<Rockbiter :: 1 H>"));
+        assert_eq!(t(3_600_001).as_deref(), Some("<Rockbiter :: 2 HH>"));
         // Days ceil.
-        assert_eq!(t(86_400_000), "Rockbiter (1 day)");
-        assert_eq!(t(86_400_001), "Rockbiter (2 days)");
-        // Zero never reaches here (the app drops an expired timer), but it must not panic.
-        assert_eq!(t(0), "Rockbiter (0 sec)");
+        assert_eq!(t(86_400_000).as_deref(), Some("<Rockbiter :: 1 D>"));
+        assert_eq!(t(86_400_001).as_deref(), Some("<Rockbiter :: 2 DD>"));
+        // Zero never reaches here (the app drops an expired timer), but it must not panic — and
+        // zero takes the PLURAL arm, which is `GetPluralIndex`'s rule, not a rounding accident.
+        assert_eq!(t(0).as_deref(), Some("<Rockbiter :: 0 S>"));
     }
 
-    /// The item self-expiry line shares the enchant countdown's ladder and differs in exactly one
-    /// way: `ITEM_DURATION_*` ships **no `_P1` plural twin**, so a one-unit count reads the same
-    /// plural spelling as any other ("1 days", "1 hrs") — the shipped enUS strings say so
-    /// (`GlobalStrings.lua:2401-2404`), and inventing a singular here would be our own invention,
-    /// not the reference's.
+    /// A string table that does not carry the family draws **no line**, never an invented one —
+    /// the whole point of resolving by key rather than composing (2045).
     #[test]
-    fn item_duration_shares_the_ladder_but_not_the_plural() {
-        assert_eq!(duration_left(1_900), "Duration: 1 sec"); // seconds truncate
-        assert_eq!(duration_left(59_999), "Duration: 59 sec");
-        assert_eq!(duration_left(60_000), "Duration: 1 min"); // minutes ceil
-        assert_eq!(duration_left(241_000), "Duration: 5 min");
-        assert_eq!(duration_left(3_600_000), "Duration: 1 hrs"); // no singular twin
-        assert_eq!(duration_left(3_600_001), "Duration: 2 hrs");
-        assert_eq!(duration_left(86_400_000), "Duration: 1 days");
-        assert_eq!(duration_left(1_209_600_000), "Duration: 14 days");
+    fn a_missing_countdown_family_draws_nothing() {
+        assert_eq!(enchant_time_left("Rockbiter", 60_000, &|_| None), None);
+        assert_eq!(charges_phrase(3, &|_| None), None);
     }
 
-    /// `ITEM_SPELL_CHARGES` and its `_P1` plural twin — one rule, both consumers (the standalone
-    /// charges line and the enchant line's suffix).
+    /// `ITEM_SPELL_CHARGES` and its `_P1` plural twin — one rule, both consumers (the charges
+    /// line and the enchant line's suffix). A zero count has no line either way.
     #[test]
     fn charges_phrase_picks_the_plural() {
-        assert_eq!(charges_phrase(1), "1 Charge");
-        assert_eq!(charges_phrase(5), "5 Charges");
+        assert_eq!(charges_phrase(1, &table).as_deref(), Some("<1 chg>"));
+        assert_eq!(charges_phrase(5, &table).as_deref(), Some("<5 chgs>"));
+        assert_eq!(charges_phrase(0, &table), None);
     }
 }

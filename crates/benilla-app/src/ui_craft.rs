@@ -162,11 +162,13 @@ fn feed_craft(
             .line(line)
             .map(|l| l.name.clone())
             .unwrap_or_else(|| format!("Skill {line}"));
+        let text = crate::ui_script::token_text(&script);
         let ctx = benilla_formats::TokenContext {
             durations: &spells.durations,
             radii: &spells.radii,
             lookup: &|id| spells.catalog.get(id),
             home_area: None,
+            text: &text,
         };
         // The **admission law** — `0x5e9c20`, byte-verified (decision 1124): the player knows the
         // spell, it is not hidden (`Attributes & 0x20`), and its `castUI` **equals this window's

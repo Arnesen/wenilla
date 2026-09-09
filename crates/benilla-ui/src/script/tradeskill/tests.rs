@@ -677,12 +677,38 @@ fn subclass_filter_exclusive_narrows_list_but_not_vocabulary() {
     );
 }
 
+/// A stand-in string table for the `0x84dd70` token family — **deliberately not the shipped
+/// wording**, because what these tests establish is *which token* each slot bit reaches, never
+/// what the word says (decision 2045, "assert the identifier, not the sentence"). Naming each
+/// value after its own key is the point: `SECONDARYHANDSLOT`, `INVTYPE_SHIELD` and
+/// `INVTYPE_WEAPONOFFHAND` all read "Off Hand" in enUS, so an assertion on the English could not
+/// tell a correct table from one wired to the item tooltip's family.
+fn seed_slot_tokens(s: &mut UiScript) {
+    s.run(
+        r#"
+        HEADSLOT = "<HEADSLOT>";       NECKSLOT = "<NECKSLOT>"
+        SHOULDERSLOT = "<SHOULDERSLOT>"; SHIRTSLOT = "<SHIRTSLOT>"
+        CHESTSLOT = "<CHESTSLOT>";     WAISTSLOT = "<WAISTSLOT>"
+        LEGSSLOT = "<LEGSSLOT>";       FEETSLOT = "<FEETSLOT>"
+        WRISTSLOT = "<WRISTSLOT>";     HANDSSLOT = "<HANDSSLOT>"
+        FINGER0SLOT = "<FINGER0SLOT>"; FINGER1SLOT = "<FINGER1SLOT>"
+        TRINKET0SLOT = "<TRINKET0SLOT>"; TRINKET1SLOT = "<TRINKET1SLOT>"
+        BACKSLOT = "<BACKSLOT>";       MAINHANDSLOT = "<MAINHANDSLOT>"
+        SECONDARYHANDSLOT = "<SECONDARYHANDSLOT>"; RANGEDSLOT = "<RANGEDSLOT>"
+        TABARDSLOT = "<TABARDSLOT>";   BAGSLOT = "<BAGSLOT>"
+        NONEQUIPSLOT = "<NONEQUIPSLOT>"
+    "#,
+    )
+    .unwrap();
+}
+
 /// The InvSlot filter: the vocabulary is the distinct slot words ascending by slot bit; an
 /// exclusive set drops every recipe on other slots AND any group that empties — header
 /// included.
 #[test]
 fn invslot_filter_drops_recipes_and_emptied_groups() {
     let mut s = UiScript::new().unwrap();
+    seed_slot_tokens(&mut s);
     let mut st = state();
     // Wind Cloak is the one Back product (16 → bit 14); everything else stays Robe/Chest.
     st.recipes
@@ -695,7 +721,7 @@ fn invslot_filter_drops_recipes_and_emptied_groups() {
     assert_eq!(
         s.eval::<(String, String)>("return GetTradeSkillInvSlots()")
             .unwrap(),
-        ("Chest".to_string(), "Back".to_string()),
+        ("<CHESTSLOT>".to_string(), "<BACKSLOT>".to_string()),
         "ascending slot-bit order (4 before 14)"
     );
     assert_eq!(
@@ -723,6 +749,7 @@ fn invslot_filter_drops_recipes_and_emptied_groups() {
 #[test]
 fn one_hand_weapon_spans_both_hand_slots() {
     let mut s = UiScript::new().unwrap();
+    seed_slot_tokens(&mut s);
     let mut st = two_recipe_state();
     st.recipes[0].product_inv_type = 13; // Bolt of Linen Cloth becomes a one-hand weapon
     s.set_trade_skill(Some(st));
@@ -731,9 +758,10 @@ fn one_hand_weapon_spans_both_hand_slots() {
         s.eval::<(String, String, String)>("return GetTradeSkillInvSlots()")
             .unwrap(),
         (
-            "Chest".to_string(),
-            "Main Hand".to_string(),
-            "Off Hand".to_string()
+            "<CHESTSLOT>".to_string(),
+            "<MAINHANDSLOT>".to_string(),
+            // Not `INVTYPE_WEAPONOFFHAND`: this dropdown is the paper-doll family.
+            "<SECONDARYHANDSLOT>".to_string()
         )
     );
     // Exclusive "Off Hand" (index 3): the weapon row survives, the robe row hides.

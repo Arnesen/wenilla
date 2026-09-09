@@ -78,7 +78,7 @@ pub struct WorldAssets {
     /// here — the caller supplies the RGBA — so this stays a cache, not a second art pipeline.
     generated: HashMap<&'static str, Handle<Image>>,
     /// The **loose-file root for `Interface\AddOns\` sprite paths** — the AddOns folder, installed
-    /// by the app ([`Self::set_loose_sprite_root`]), `None` until then and in every capture run
+    /// by the app ([`Self::set_loose_addon_root`]), `None` until then and in every capture run
     /// (the app resolves it through `local_state`, which is hermetic under `$WOW_CAPTURE`).
     ///
     /// Addon art never lives in an MPQ: the reference's Storm open reads loose files from the game
@@ -205,7 +205,7 @@ pub fn sprite_dimensions(
 /// can't poison the second.
 ///
 /// Each candidate is asked of **two stores**: the patch chain, then — for `Interface\AddOns\`
-/// paths — the loose addon folder ([`loose_sprite_file`], decision 1322). The chain never holds an
+/// paths — the loose addon folder ([`loose_addon_file`], decision 1322). The chain never holds an
 /// `AddOns\` path (Blizzard's own `Blizzard_*` stubs aside, addon art only exists on disk), so the
 /// order between the stores is unobservable; chain-first keeps every non-addon path on exactly the
 /// code it always ran.
@@ -222,7 +222,7 @@ fn decode_sprite(
                 return Some(decoded);
             }
         }
-        if let Some(file) = loose_root.and_then(|root| loose_sprite_file(root, candidate)) {
+        if let Some(file) = loose_root.and_then(|root| loose_addon_file(root, candidate)) {
             if let Ok(decoded) = std::fs::read(&file)
                 .map_err(anyhow::Error::from)
                 .and_then(|bytes| decode_sprite_bytes(&bytes))
@@ -255,16 +255,21 @@ fn decode_sprite_bytes(bytes: &[u8]) -> anyhow::Result<(u32, u32, Vec<u8>)> {
     }
 }
 
-/// Map a **normalized** sprite candidate (`interface\addons\<addon>\<…>.blp`, lowercase,
+/// Map a **normalized** addon-relative path (`interface\addons\<addon>\<…>`, lowercase,
 /// backslashed — [`normalize_path`] has run) onto a file under the loose addon root, or `None` if
 /// it is not an `Interface\AddOns\` path or nothing is there.
+///
+/// **Not sprite-specific, and named for that** (decision 2103): 1322 built this for addon-shipped
+/// BLP/TGA art, and an addon's own TTFs reach the client by exactly the same route — a loose file
+/// under the one AddOns root, named by a virtual `Interface\AddOns\…` path no MPQ carries. One
+/// resolver, one prefix rule, one sandbox.
 ///
 /// The walk matches each component **case-insensitively** (exact join first — free on the
 /// case-insensitive filesystems macOS installs default to — then a `read_dir` scan): the reference
 /// is a Windows client and addons reference their own art in arbitrary case. The candidate cannot
 /// escape the root — `normalize_path` leaves no `/`, and any dot-component is refused before a
 /// filesystem call happens (same lexical posture as `ui_script::addons::read_under`).
-pub fn loose_sprite_file(root: &Path, candidate: &str) -> Option<PathBuf> {
+pub fn loose_addon_file(root: &Path, candidate: &str) -> Option<PathBuf> {
     let rel = candidate.strip_prefix("interface\\addons\\")?;
     let mut at = root.to_path_buf();
     for comp in rel.split('\\') {
@@ -370,7 +375,7 @@ impl WorldAssets {
     /// [`Self::loose_root`] field doc. Called by the app once it knows the AddOns folder; evicts
     /// cached **misses** so a path asked before the root existed gets a second look (a cached hit
     /// can only have come from the chain and stays right).
-    pub fn set_loose_sprite_root(&mut self, root: Option<PathBuf>) {
+    pub fn set_loose_addon_root(&mut self, root: Option<PathBuf>) {
         if self.loose_root == root {
             return;
         }
@@ -726,7 +731,7 @@ mod tests {
     /// (as [`sprite_candidates`] always hands it over) — the walk must land on the file anyway,
     /// because the reference is a Windows client and addon authors never matched their own case.
     #[test]
-    fn loose_sprite_file_maps_addon_paths_case_insensitively() {
+    fn loose_addon_file_maps_addon_paths_case_insensitively() {
         let root =
             std::env::temp_dir().join(format!("benilla-loose-sprite-test-{}", std::process::id()));
         let dir = root.join("Atlas").join("Images").join("Maps");
@@ -736,7 +741,7 @@ mod tests {
         // The returned SPELLING is filesystem-dependent (a case-insensitive filesystem answers
         // the exact-join fast path with the candidate's own casing), so the claim is that the
         // path opens the right file, not how it is spelt.
-        let hit = loose_sprite_file(
+        let hit = loose_addon_file(
             &root,
             "interface\\addons\\atlas\\images\\maps\\blackrockdepths.blp",
         )
@@ -744,17 +749,17 @@ mod tests {
         assert_eq!(std::fs::read(&hit).unwrap(), b"x");
 
         // Not an AddOns path → not this store's question.
-        assert_eq!(loose_sprite_file(&root, "interface\\icons\\foo.blp"), None);
+        assert_eq!(loose_addon_file(&root, "interface\\icons\\foo.blp"), None);
         // A directory is not a file, and a missing file is a miss, not an error.
-        assert_eq!(loose_sprite_file(&root, "interface\\addons\\atlas"), None);
+        assert_eq!(loose_addon_file(&root, "interface\\addons\\atlas"), None);
         assert_eq!(
-            loose_sprite_file(&root, "interface\\addons\\atlas\\images\\maps\\nope.blp"),
+            loose_addon_file(&root, "interface\\addons\\atlas\\images\\maps\\nope.blp"),
             None
         );
         // Dot-components never reach the filesystem (the read_under posture; `normalize_path`
         // already forbids `/`, so this is the one lexical escape left to refuse).
         assert_eq!(
-            loose_sprite_file(&root, "interface\\addons\\..\\..\\etc\\passwd"),
+            loose_addon_file(&root, "interface\\addons\\..\\..\\etc\\passwd"),
             None
         );
 

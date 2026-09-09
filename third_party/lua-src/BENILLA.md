@@ -5,6 +5,12 @@ the version mlua 0.11 resolves to. Wired in through `[patch.crates-io]` in the w
 
 ## Why a fork exists at all
 
+**benilla's Lua has to accept exactly the grammar the 1.12.1 client's Lua accepts — no more and no
+less.** Every hunk below is that one rule: three restore 5.0 constructs 5.1 deleted, three delete
+5.1 constructs 5.0 never had. A grammar difference in either direction is invisible to every
+instrument we own until an addon trips over it, and the corpus *asks about* the difference
+directly (decisions 1208, 2101).
+
 The 1.12 addon corpus is Lua **5.0** code. It uses the iterator-less generic-for:
 
 ```lua
@@ -35,10 +41,12 @@ downgrade, and it is the entire reason this is a one-hunk fork rather than a ven
 
 ## The delta, and the command that proves it
 
-**Current state: three hunks, in three files.** `src/lib.rs` additionally differs by having Lua
+**Current state: six hunks, in three files.** `src/lib.rs` additionally differs by having Lua
 5.2/5.3/5.4/5.5 stripped from the `Version` enum (with their source trees deleted) — benilla builds
 5.1 and only 5.1, and a fork that still *offered* the other four would answer a request for one with
 a missing directory at build time instead of a compile error.
+
+**Three hunks restore what 5.1 removed:**
 
 | file | hunk | why | record |
 |---|---|---|---|
@@ -46,11 +54,27 @@ a missing directory at build time instead of a compile error.
 | `luaconf.h` | `LUA_COMPAT_LSTR` `1` → `2` | 5.1 kept 5.0's nesting machinery and put an advisory error in front of it; two corpus addons died on "nesting of `[[...]]` is deprecated" | — |
 | `lparser.c` | 5.0's compat-semicolon skip restored at the top of `constructor()`'s field loop — 5.0's own line, verbatim, comment included | one extra `;` after a field separator inside a table constructor (`Back_Title = AL["Factions"];;`, ×20 in AtlasLoot's `ButtonRegistry.lua`) parses on the client and died here with "unexpected symbol near `;`"; statement-level `;;` stays rejected by both dialects | 1315 |
 
+**Three delete what 5.1 added** — all in `lparser.c`, all byte-read out of the client's own parser
+(`simpleexp 0x6fd240`, `getunopr 0x6fe0a0`, `getbinopr 0x6fe0c0`), all landing on 5.0's own
+`unexpected symbol` at `prefixexp 0x6fde40`:
+
+| hunk | why | record |
+|---|---|---|
+| `simpleexp`'s `case TK_DOTS` deleted — `...` is no longer an expression | the Ace2 corpus **asks** which interpreter it is on by compiling `return function(...) return ... end`; 170 `loadstring` sites in the 219-addon corpus are that question and 92 library files gate on it. Answering `true` put Cartographer on its client-2.0 branch, hooking `CloseSpecialWindows` — a name 1.12 does not have. Also restores 5.0's rule that **every** vararg function gets its `arg` table | 1208, 2101 |
+| `getunopr`'s `case '#'` deleted — no length operator | the client's `getunopr` tests exactly two tokens (`-`, `not`) and its `OPR_NOUNOPR` is **2**: a three-member enum, 5.0's. 5.0 asks a table with `table.getn` and a string with `string.len` | 2101 |
+| `getbinopr`'s `case '%'` deleted — no modulo operator | the client's `getbinopr` switch is based at `'*'` (0x2A), so `%` (0x25) is below its range and reaches `OPR_NOBINOPR` = **14**: a fifteen-member `BinOpr`, 5.0's. 5.0 spells it `math.mod` | 2101 |
+
 The ordering was deliberate and it held: the fork landed **inert**, byte-identical to upstream, so
 the build pipeline was proven transparent *before* any behavioural payload went into it — and when
-the suite then moved, the patch was the only thing that could have moved it. Both hunks are measured
-against the 218-addon corpus rather than argued: the long-string one alone took loaded 134 → 139 and
+the suite then moved, the patch was the only thing that could have moved it. Every hunk is measured
+against the corpus rather than argued: the long-string one alone took loaded 134 → 139 and
 survivors 99 → 104.
+
+**The deletions are safe because nothing the reference runs uses those constructs, and that was
+scanned rather than assumed** (2101 §4): a comment/string-stripping scan of the extracted 1.12
+FrameXML (177 files), GlueXML, Blizzard's own addons and the director's installed AddOns folder
+finds **zero** sites of all three. Our own engine Lua did use them and was rewritten into the 5.0
+spellings; the rule now is that no chunk of ours may use a construct the client's parser rejects.
 
 To verify the Lua sources against upstream at any time:
 
@@ -60,7 +84,7 @@ diff -r third_party/lua-src/lua-5.1.5 \
   ~/.cargo/registry/src/*/lua-src-550.0.0/lua-5.1.5
 ```
 
-That must print **exactly** the three hunks in the table above and nothing else. If it ever prints
+That must print **exactly** the six hunks in the tables above and nothing else. If it ever prints
 more, something crept in.
 
 ## Status of the payload

@@ -191,6 +191,10 @@ fn probe_key_by_name(name: &str) -> Option<KeyCode> {
         "F" => KeyCode::KeyF,
         "Ctrl" => KeyCode::ControlLeft,
         "Shift" => KeyCode::ShiftLeft,
+        // The cost pill's toggle, dev chord + `P` (`perf::hud::toggle_hud`). Reachable no other
+        // way — it is a host chord, not a binding or a Lua verb — and since the pill starts hidden
+        // (2099) a probe that wants to see it in a shot has to press it.
+        "P" => KeyCode::KeyP,
         // The text-editing keys. Added for decision 1077's hyperlink-atomicity law, whose whole
         // observable — "one BACKSPACE removes a whole item link" — is a keypress no chat command
         // and no Lua chunk can reach (`EditBox` has no Lua deletion API; the law lives behind the

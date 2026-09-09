@@ -42,13 +42,20 @@ fn main() -> Result<()> {
         println!("no realms advertised");
     }
     for (i, realm) in logon.realms.iter().enumerate() {
+        // Every field the wire carries: the three that used to be dropped (flags, category,
+        // realm id) are what the realm-list screen greys rows out and groups tabs by, and the
+        // population is the raw float the load band is computed FROM, not the word it shows.
         println!(
-            "[Realm {}] {} — {} @ {} ({} characters)",
+            "[Realm {}] {} @ {} — type {} flags {:#04x} pop {} chars {} category {} id {}",
             i + 1,
             realm.name,
-            realm.population,
             realm.address,
-            realm.characters
+            realm.realm_type,
+            realm.flags,
+            realm.population,
+            realm.characters,
+            realm.category,
+            realm.id
         );
     }
 

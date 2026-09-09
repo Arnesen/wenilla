@@ -320,6 +320,16 @@ impl HeldAttached {
     pub(crate) fn spawned_slots(&self) -> &[Option<Entity>; ATTACH_SLOTS] {
         &self.spawned
     }
+
+    /// The spawned roots as they would be after an attach pass — the one field a consumer test
+    /// needs, without standing up the resolver, the display cache and the attach chain to get it.
+    #[cfg(test)]
+    pub(crate) fn with_spawned(spawned: [Option<Entity>; ATTACH_SLOTS]) -> Self {
+        Self {
+            applied: HeldItems::default(),
+            spawned,
+        }
+    }
 }
 
 /// The attach-slot names, in [`HeldAttached::spawned_slots`] order — the instruments' labels for

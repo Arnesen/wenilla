@@ -22,6 +22,9 @@ pub type TextureProbe = Box<dyn Fn(&str) -> bool>;
 /// The host's texture **texel-size** oracle — see [`Model::texture_size_probe`].
 pub type TextureSizeProbe = Box<dyn Fn(&str) -> Option<(u32, u32)>>;
 
+/// The host's font-path resolvability oracle — see [`Model::font_probe`].
+pub type FontProbe = Box<dyn Fn(&str) -> bool>;
+
 /// A map from a minted object id to its handle, indexed directly: ids are dense (`next_id`
 /// counts from 1), and every scripted method call on a frame or region starts with this lookup
 /// — a few hundred a frame from the stock `OnUpdate` sweep alone (decision 1979's UI tick), so
@@ -92,6 +95,20 @@ pub(crate) struct Model {
     /// `None` in an engine-less VM (tests, the addon harness), where a zero-size texture keeps the
     /// rect it always had — there is no art to measure without a backend.
     pub(crate) texture_size_probe: Option<TextureSizeProbe>,
+    /// The host's font-path oracle ([`super::UiScript::set_font_probe`]): does this font reference
+    /// load — patch chain or loose addon folder? What lets `SetFont`'s path form answer the
+    /// reference's **1 | nil**, whose nil is a *load failure* and not an argument error (wow-re
+    /// `system/ui/ui.md`: `0x79f345`/`0x79f361`, originating at `0x5c1ae0` under the `0x44d040`
+    /// font-factory cache) — `!OmniCC/main.lua:41`'s `if not Font:SetFont(saved, size) then
+    /// revert end` is exactly that probe.
+    ///
+    /// **`None` answers 1 for a non-empty path, which is where this differs from
+    /// [`Self::texture_probe`]** (decision 2103). A VM with no font backend has no font store to
+    /// fail against, so nil there would report a load failure that never happened — and it would
+    /// send `!OmniCC` down its revert branch in every harness run. The texture probe could take
+    /// the opposite default because nil was already what its engine-less callers observed; here 1
+    /// is.
+    pub(crate) font_probe: Option<FontProbe>,
     /// Where per-addon saved variables live: the account-scoped folder, then this character's.
     /// Both are directories holding one `<Addon>.lua` per declaring addon.
     pub(crate) addons_saved_account: Option<std::path::PathBuf>,
@@ -1731,6 +1748,7 @@ impl Model {
             measurer: None,
             texture_probe: None,
             texture_size_probe: None,
+            font_probe: None,
             addons_saved_account: None,
             addons_saved_character: None,
             framexml_templates: Default::default(),

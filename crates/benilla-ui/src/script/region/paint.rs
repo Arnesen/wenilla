@@ -550,6 +550,14 @@ impl crate::script::UiScript {
         self.model_mut().texture_probe = Some(probe);
     }
 
+    /// Install the host's font-path oracle — the resolver behind `SetFont`'s **1 | nil** return
+    /// ([`Model::font_probe`], decision 2103). The host hands in load-ability over its real stores
+    /// (patch chain + the one AddOns folder); a VM that never gets one keeps answering 1 for every
+    /// non-empty path, because it has no font store a load could fail against.
+    pub fn set_font_probe(&mut self, probe: crate::script::FontProbe) {
+        self.model_mut().font_probe = Some(probe);
+    }
+
     /// Install the host's texture **texel-size** oracle — what lets a region with an authored size
     /// of `0` on an axis take that span from its art, as the client's virtual size getters do
     /// ([`Model::texture_size_probe`], decision 1349 / wow-re `region-size-fallback.md` §2). A VM

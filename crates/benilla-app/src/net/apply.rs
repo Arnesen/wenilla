@@ -123,8 +123,20 @@ pub(crate) fn apply_net_updates(
     session_msgs: (
         MessageWriter<TeleportMessage>,
         MessageWriter<WorldportMessage>,
-        MessageWriter<CharListMessage>,
-        MessageWriter<CharActionResultMessage>,
+        // **The two park publications, paired** — the tuple is at Bevy's 16-param ceiling, and
+        // these are the pair that belongs together: the realm list and the character roster are
+        // the same thing one park apart, each published so the app's policy can answer it.
+        (
+            MessageWriter<CharListMessage>,
+            MessageWriter<crate::net::RealmListMessage>,
+        ),
+        // **The pick park's two verdicts, paired** (the tuple is at Bevy's 16-element ceiling, and
+        // these belong together): what a create/delete came back with, and the refusal of the pick
+        // itself.
+        (
+            MessageWriter<CharActionResultMessage>,
+            MessageWriter<super::CharacterLoginFailedMessage>,
+        ),
         MessageWriter<EnteredWorldMessage>,
         MessageWriter<LoggedOutMessage>,
         MessageWriter<super::SpeedChangeMessage>,
@@ -524,8 +536,8 @@ pub(crate) fn apply_net_updates(
     let (
         mut teleports,
         mut worldports,
-        mut char_lists,
-        mut char_actions,
+        (mut char_lists, mut realm_lists),
+        (mut char_actions, mut char_login_failures),
         mut entered_world,
         mut logged_out,
         mut speed_changes,
@@ -580,11 +592,17 @@ pub(crate) fn apply_net_updates(
                 terminal,
                 dial,
             } => session::login_failed(refusal, reason, terminal, dial, &mut login_failures),
+            SessionEvent::RealmList { realms } => {
+                realm_lists.write(crate::net::RealmListMessage { realms });
+            }
             SessionEvent::CharacterList { characters, realm } => {
                 session::character_list(characters, realm, &mut status, &mut char_lists)
             }
             SessionEvent::CharActionResult { action, code } => {
                 session::char_action_result(action, code, &mut char_actions)
+            }
+            SessionEvent::CharacterLoginFailed { result } => {
+                session::character_login_failed(result, &mut char_login_failures)
             }
             SessionEvent::CinematicTriggered { cinematic_id } => {
                 session::cinematic_triggered(cinematic_id, &mut cinematics)
@@ -722,7 +740,7 @@ pub(crate) fn apply_net_updates(
                 flags,
                 pitch,
                 time,
-                heartbeat,
+                verb,
                 fall_time,
                 jump,
                 transport,
@@ -742,7 +760,7 @@ pub(crate) fn apply_net_updates(
                         fall_time,
                         jump,
                         transport,
-                        heartbeat,
+                        verb,
                     },
                     now_ms,
                     &mut commands,
@@ -1010,7 +1028,7 @@ pub(crate) fn apply_net_updates(
                 crate::ui_binder::apply::bound(
                     area,
                     &mut binder,
-                    &mut chat_log,
+                    &mut ui_error_keys,
                     area_table.as_deref(),
                     &mut audio.0,
                 )
@@ -1164,9 +1182,9 @@ pub(crate) fn apply_net_updates(
                 channel, members, ..
             } => chat::channel_list(channel, &members, &mut chat_log),
             SessionEvent::ChatPlayerNotFound { name } => {
-                chat::chat_player_not_found(&name, &mut chat_log)
+                chat::chat_player_not_found(&name, &mut ui_error_keys)
             }
-            SessionEvent::ChatWrongFaction => chat::chat_wrong_faction(&mut chat_log),
+            SessionEvent::ChatWrongFaction => chat::chat_wrong_faction(&mut ui_error_keys),
             // The four world broadcasts — parked for `ui_chat::broadcast`'s resolve pass, which
             // owns the AreaTable/ServerMessages lookups and the joined-defense-channel walk.
             SessionEvent::ZoneUnderAttack { area_id } => chat::broadcast(
@@ -1204,21 +1222,21 @@ pub(crate) fn apply_net_updates(
             // ── The group/party family (decision 0434 §D2, superseded by 0440) — arm bodies in
             // `group` ──
             SessionEvent::GroupInvite { inviter } => {
-                group::invited(&mut group, &mut chat_log, &inviter)
+                group::invited(&mut group, &mut ui_error_keys, &inviter)
             }
             SessionEvent::GroupDecline { name } => {
-                group::declined(&mut group, &mut chat_log, &name)
+                group::declined(&mut group, &mut ui_error_keys, &name)
             }
-            SessionEvent::GroupUninvited => group::uninvited(&mut group, &mut chat_log),
+            SessionEvent::GroupUninvited => group::uninvited(&mut group, &mut ui_error_keys),
             SessionEvent::GroupLeaderChanged { name } => group::leader_changed(
                 &mut group,
-                &mut chat_log,
+                &mut ui_error_keys,
                 &name,
                 &self_guid,
                 &mut names,
                 &net_commands,
             ),
-            SessionEvent::GroupDestroyed => group::destroyed(&mut group, &mut chat_log),
+            SessionEvent::GroupDestroyed => group::destroyed(&mut group, &mut ui_error_keys),
             SessionEvent::GroupList {
                 group_type,
                 own_flags,
@@ -1227,7 +1245,7 @@ pub(crate) fn apply_net_updates(
                 loot,
             } => group::list(
                 &mut group,
-                &mut chat_log,
+                &mut ui_error_keys,
                 &mut quest,
                 group_type,
                 own_flags,
@@ -1253,7 +1271,7 @@ pub(crate) fn apply_net_updates(
             // alone — is logged for the engine's flags, which the timeout tick sums up after 30 s
             // (1.12 has no per-member answer surface, only the AFK summary line).
             SessionEvent::ReadyCheckRequest => {
-                group::ready_check_request(&mut group, &mut chat_log, &self_guid)
+                group::ready_check_request(&mut group, &mut ui_error_keys, &self_guid)
             }
             SessionEvent::RaidInstanceInfo { entries } => group.apply_raid_instance_info(entries),
             // A group member pinged (decision 1596). The wire carries raw world floats and the
@@ -1275,7 +1293,7 @@ pub(crate) fn apply_net_updates(
                 challenger,
             } => crate::ui_duel::apply::requested(
                 &mut duel,
-                &mut chat_log,
+                &mut ui_error_keys,
                 &net_commands,
                 arbiter,
                 challenger,
@@ -1307,13 +1325,13 @@ pub(crate) fn apply_net_updates(
             SessionEvent::DuelOutOfBounds => crate::ui_duel::apply::bounds(&mut duel, true),
             SessionEvent::DuelInBounds => crate::ui_duel::apply::bounds(&mut duel, false),
             SessionEvent::DuelComplete { started } => {
-                crate::ui_duel::apply::complete(&mut duel, &mut chat_log, started);
+                crate::ui_duel::apply::complete(&mut duel, &mut ui_error_keys, started);
             }
             SessionEvent::DuelWinner {
                 fled,
                 winner,
                 loser,
-            } => crate::ui_duel::apply::winner(&mut chat_log, fled, &winner, &loser),
+            } => crate::ui_duel::apply::winner(&mut duel, fled, &winner, &loser),
             SessionEvent::DuelCountdown { seconds } => {
                 crate::ui_duel::apply::countdown(&mut duel, seconds);
             }
@@ -1525,6 +1543,7 @@ pub(crate) fn apply_net_updates(
                     &mut audio.15 .1,
                     &mut audio.15 .2,
                     &mut audio.15 .7,
+                    &stores,
                     play_seq.next(),
                 )
             }
@@ -1928,14 +1947,9 @@ pub(crate) fn apply_net_updates(
             SessionEvent::QuestObjectivesComplete { quest_id } => {
                 quest_objectives_complete(quest_id, &mut quest)
             }
-            SessionEvent::QuestFailed { quest_id, timed } => quest_failed(
-                quest_id,
-                timed,
-                &mut quest_log,
-                &net_commands,
-                &mut chat_log,
-                &mut quest,
-            ),
+            SessionEvent::QuestFailed { quest_id, timed } => {
+                quest_failed(quest_id, timed, &mut quest_log, &net_commands, &mut quest)
+            }
             SessionEvent::QuestLogFull => quest_log_full(&mut quest),
             // The party quest-share (decision 1733): one member's verdict on a quest we pushed,
             // and the escort-quest confirm. Both park in `QuestShare` for `crate::ui_quest_share`

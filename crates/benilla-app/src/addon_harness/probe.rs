@@ -89,9 +89,11 @@ pub fn probe(root: &Path, name: &str, evals: &[String]) -> Option<ProbeOutcome> 
     };
     script.set_instruction_budget(super::ADDON_INSTRUCTION_BUDGET);
     script.set_screen_size(1024.0, 768.0);
-    // `None` roots: a probe must never read or write the director's real saved variables, for the
-    // same reason the survey does not call `finish_ui_load` (1213 §4).
-    script.register_addons(registry, None, None, None);
+    // `None` **saved-variable** roots: a probe must never read or write the director's real ones,
+    // for the same reason the survey does not call `finish_ui_load` (1213 §4). The AddOns root is
+    // passed, exactly as [`super::survey_one`] passes it — a probe VM that answers `MISSING` to
+    // every `LoadAddOn` is not the VM the row came from (decision 2102).
+    script.register_addons(registry, Some(root.to_path_buf()), None, None);
     super::seat_a_session(&mut script);
     let _ = crate::ui_script::load_default_ui(&script);
 
@@ -106,7 +108,13 @@ pub fn probe(root: &Path, name: &str, evals: &[String]) -> Option<ProbeOutcome> 
     );
 
     let (load_errors, _absent) = super::load_addon_files(&script, root, name, &toc);
-    let session_errors = super::drive_session_start(&mut script, name, &dep_order);
+    // Same stamp the survey applies, for the same reason: the registry must agree with the VM
+    // about what is loaded, or `IsAddOnLoaded` and every dependency verdict answer for a session
+    // that does not exist.
+    for loaded in dep_order.iter().chain(std::iter::once(&name.to_string())) {
+        script.mark_addon_loaded(loaded);
+    }
+    let session_errors = super::drive_session_start(&mut script, name, &dep_order, &installed);
 
     let answers = evals
         .iter()

@@ -114,8 +114,9 @@ struct Entry {
 
 impl Entry {
     /// `0x461b40` steps 1–3: is there a channel coming to this entry at all? (Occupied, its kit
-    /// resolvable, and at least one emitter registered.) Entitlement, not audibility — see
-    /// [`admitted`].
+    /// resolvable, and at least one emitter registered.) Entitlement, not audibility — it decides
+    /// whether the cap walk *services* the entry, never whether it *counts*; the composite return
+    /// of steps 4–6 decides that (see [`cap_step`], decision 2065).
     fn entitled(&self) -> bool {
         self.id != 0 && !self.failed && !self.records.is_empty()
     }
@@ -163,6 +164,10 @@ pub(super) struct AmbientEmitterPool {
     /// culled past its cutoff and restarted is exactly the churn a broken nearest-follow would
     /// produce, and the census is where that has to be visible.
     last_census: Vec<(u32, bool)>,
+    /// The last logged **withheld** set — the entitled ids past the cap. Part of the edge key for
+    /// the same reason liveness is: *which* ambience the cap took away is the whole question a
+    /// report of a missing layer asks, and the census could only ever say how many (2059).
+    last_withheld: Vec<u32>,
 }
 
 impl Default for AmbientEmitterPool {
@@ -173,6 +178,7 @@ impl Default for AmbientEmitterPool {
             fading: Vec::new(),
             complained: HashSet::new(),
             last_census: Vec::new(),
+            last_withheld: Vec::new(),
         }
     }
 }
@@ -312,26 +318,53 @@ impl AmbientEmitterPool {
     }
 }
 
-/// The entries that get a channel this frame: the first [`PLAYING_CAP`] entitled ones **by
-/// ascending index** (`0x4619c0`).
+/// What the cap walk does with one entry, folded over ascending index
+/// (`0x4619c0`–`0x4619f9`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CapStep {
+    /// Not entitled — free, failed, or emitter-less. Costs the cap nothing and gets no service.
+    Skip,
+    /// Under the cap: service it (start or reposition), then let the channel say whether it
+    /// counts.
+    Service,
+    /// Four are already sounding — fade this entry's channel out over [`FADE_SECS`] and leave
+    /// everything else on the entry (`0x4619c5`).
+    Retire,
+}
+
+/// One step of the cap walk. **`sounding_so_far` counts entries that came back LIVE AND IN RANGE,
+/// not entitled ones** — the correction of 2026-09-07 (decision 2065).
 ///
 /// Index is claim order, so this is first-come — emphatically **not** nearest. That is the cap's
-/// one surprising property and the reference's own falsifiable prediction: standing where five
-/// distinct doodad ambiences are in range, exactly four sound, and walking toward the fifth does
-/// not make it take over.
+/// one surprising property: standing where five distinct doodad ambiences are *audible*, exactly
+/// four sound, and walking toward the fifth does not make it take over.
 ///
-/// Entitlement is deliberately not audibility. An entry whose nearest emitter is past its kit's
-/// `DistanceCutoff` still holds its slot, because in the reference its FMOD channel is still
-/// *playing* — merely attenuated to nothing — and `0x461b40` counts it. A far ambience therefore
-/// keeps a near one silent, which is exactly what the cap does in the real client.
-fn admitted(entries: &[Entry]) -> Vec<usize> {
-    entries
-        .iter()
-        .enumerate()
-        .filter(|(_, x)| x.entitled())
-        .map(|(i, _)| i)
-        .take(PLAYING_CAP)
-        .collect()
+/// **What changed, and why the old reading mattered.** This used to count *entitlement* — id
+/// present, kit resolvable, at least one emitter registered — on the reasoning that a channel past
+/// its `DistanceCutoff` is still "playing" in FMOD, merely attenuated to nothing. The binary says
+/// otherwise. `0x461b40` returns `[+0xE04] != 0 && 0x7a5810(ch) && !0x7a5870(ch)`, and `0x7a5870`
+/// is bit `0x100000` of `[ch+0x38]` — **the `DistanceCutoff` verdict**, maintained by a second
+/// system the pump never mentions (`0x7a5ca0` registers the channel into the cull list
+/// `[0xcf5580]`, and `0x7a5000`, run immediately before `FSOUND_Update`, sets the bit and *stops*
+/// the channel out of range, clearing it and re-issuing `FSOUND_Stream_PlayEx` back in range). So a
+/// far, inaudible ambience does **not** hold one of the four, and neither does one whose start
+/// failed. The one exception is byte-derived too: a kit whose `DistanceCutoff` is **0** is never
+/// registered into the cull list (`0x7a5cca jnp`), so it holds a slot at any distance — which our
+/// `play_kit_ext` reproduces, since its own cutoff gate is `cutoff > 0.0 && !audible`.
+/// (wow-re `sound/scratch/doodad-sound-emitters.md` §8, §5 round + byte arbitration.)
+///
+/// This is not a detail. At the director's Stratholme pin all four channels were held by
+/// `UndeadCampfireSmall` / `CauldronLoop` / `TorchLoop` / `SlimeWaterfall`, **every one past its
+/// own cutoff** — nothing audible at all — while the burning-building loop right there was
+/// withheld. Under the reference's rule not one of the four would have counted.
+const fn cap_step(entitled: bool, sounding_so_far: usize) -> CapStep {
+    if !entitled {
+        CapStep::Skip
+    } else if sounding_so_far >= PLAYING_CAP {
+        CapStep::Retire
+    } else {
+        CapStep::Service
+    }
 }
 
 /// The pump (`0x461990`): fade the orphans, mark unresolvable kits, then service the admitted
@@ -396,14 +429,27 @@ fn pump_emitters(
         }
     }
 
-    let admitted = admitted(&pool.entries);
+    // The cap walk (`0x461990`), ascending entry index. An entry is SERVICED while fewer than four
+    // are sounding, and it counts only if servicing produced a live, in-range channel
+    // ([`cap_step`]) — so an out-of-range ambience is kept up to date and re-starts the moment it
+    // comes into range, but never costs a near one its slot.
+    let mut sounding = 0usize;
     let mut census: Vec<(u32, bool)> = Vec::new();
+    let mut withheld: Vec<u32> = Vec::new();
     for e in 0..POOL_ENTRIES {
-        if !admitted.contains(&e) {
-            // Free, failed, emitter-less — or over the cap, which is the case that matters: the
-            // channel fades out and the entry keeps everything else.
-            pool.retire(e);
-            continue;
+        match cap_step(pool.entries[e].entitled(), sounding) {
+            CapStep::Skip => {
+                // Free, failed or emitter-less: nothing to hold, nothing to fade.
+                pool.retire(e);
+                continue;
+            }
+            CapStep::Retire => {
+                // Over the cap: the channel fades out and the entry keeps everything else.
+                withheld.push(pool.entries[e].id);
+                pool.retire(e);
+                continue;
+            }
+            CapStep::Service => {}
         }
         let id = pool.entries[e].id;
         let Some(nearest) = pool.entries[e].nearest(listener_pos) else {
@@ -443,6 +489,7 @@ fn pump_emitters(
             }
         };
         if source_kit_playing(&out, emitter, id) {
+            sounding += 1;
             census.push((id, true));
             continue;
         }
@@ -480,41 +527,56 @@ fn pump_emitters(
         }
         // Whether the start actually took: `play_kit_ext` succeeds *without playing* when the kit
         // is past its cutoff, held by the loading cover, or refused by the voice ceiling. Reading
-        // the channel back is the only honest answer, and the difference between "admitted" and
-        // "audible" is the whole point of this line.
-        census.push((id, source_kit_playing(&out, emitter, id)));
+        // the channel back is the only honest answer — and since 2065 it is also the cap's own
+        // counter (`0x461b40`'s composite return, [`cap_step`]), which is why this is read rather
+        // than predicted.
+        let live = source_kit_playing(&out, emitter, id);
+        if live {
+            sounding += 1;
+        }
+        census.push((id, live));
     }
 
-    // The pool's one observable. "Which doodad ambiences are sounding, and how many are being held
-    // back by the cap" is invisible in the audio itself — five ids in range and four sounding is
-    // indistinguishable from four in range unless something says so — and it is precisely the
-    // question a retest of the cap has to answer. Logged on the **edge**, so a parked camera
-    // prints one line, not one per frame.
-    if census != pool.last_census {
+    // The pool's one observable, in the three states the cap actually has. "Which doodad ambiences
+    // are sounding, and which one went quiet" is invisible in the audio itself — five ids in range
+    // and four sounding is indistinguishable from four in range unless something says so — and it
+    // is precisely the question a retest of the cap has to answer. Logged on the **edge**, so a
+    // parked camera prints one line, not one per frame.
+    //
+    // **Naming the withheld entries is the half the census was missing** (2059): "1 withheld by
+    // the cap" cannot say *which* ambience went silent, and that is the only question a report of
+    // a missing sound layer asks. Since 2065 the split is three ways rather than two, because the
+    // cap's own counter is liveness: `serviced [out of range]` is an entry the walk reached, kept
+    // positioned and could not sound — costing the cap **nothing** — while `withheld` is one the
+    // walk never reached because four were already sounding. Those were the same word before, and
+    // conflating them is exactly the reading the binary refuted.
+    if census != pool.last_census || withheld != pool.last_withheld {
         let entitled = pool.entries.iter().filter(|x| x.entitled()).count();
         let named: Vec<String> = census
             .iter()
             .map(|(id, live)| {
                 let name = kit_name(&kits, *id).unwrap_or("?");
-                // A kit past its own `DistanceCutoff` is admitted, holds its cap slot, and is
-                // inaudible. Saying "sounding" of it would be the observable lying about the one
-                // thing it exists to report.
                 format!(
                     "{id} ({name}){}",
                     if *live { "" } else { " [out of range]" }
                 )
             })
             .collect();
+        let held: Vec<String> = withheld
+            .iter()
+            .map(|id| format!("{id} ({})", kit_name(&kits, *id).unwrap_or("?")))
+            .collect();
         debug!(
-            "emitter pool: admitted [{}] — {} sounding, {entitled} entitled entr{}, {} withheld by \
-             the cap, {} fading",
+            "emitter pool: serviced [{}] — {} sounding, {entitled} entitled entr{}, withheld by \
+             the cap [{}], {} fading",
             named.join(", "),
             census.iter().filter(|(_, live)| *live).count(),
             if entitled == 1 { "y" } else { "ies" },
-            entitled.saturating_sub(census.len()),
+            held.join(", "),
             pool.fading.len(),
         );
         pool.last_census = census;
+        pool.last_withheld = withheld;
     }
 }
 
@@ -777,11 +839,52 @@ mod tests {
         assert!(!pool.handles.contains_key(&late));
     }
 
-    /// The cap picks by ENTRY INDEX — claim order — and stops at four.
+    /// Run the cap walk over a pool, given each entry's liveness verdict for this frame —
+    /// [`cap_step`] folded exactly as [`pump_emitters`] folds it, without a mixer. Returns
+    /// `(sounding indices, withheld indices)`.
+    fn walk(pool: &AmbientEmitterPool, live: impl Fn(usize) -> bool) -> (Vec<usize>, Vec<usize>) {
+        let (mut sounding, mut withheld) = (Vec::new(), Vec::new());
+        for e in 0..POOL_ENTRIES {
+            match cap_step(pool.entries[e].entitled(), sounding.len()) {
+                CapStep::Skip => {}
+                CapStep::Retire => withheld.push(e),
+                CapStep::Service => {
+                    if live(e) {
+                        sounding.push(e);
+                    }
+                }
+            }
+        }
+        (sounding, withheld)
+    }
+
+    /// The cap picks by ENTRY INDEX — claim order — and stops at four SOUNDING entries.
     #[test]
-    fn the_cap_admits_the_first_four_entitled_entries_by_index() {
+    fn the_cap_admits_the_first_four_sounding_entries_by_index() {
         let pool = pool_with(&[(10, 1), (20, 1), (30, 1), (40, 1), (50, 1), (60, 1)]);
-        assert_eq!(admitted(&pool.entries), vec![0, 1, 2, 3]);
+        let (sounding, withheld) = walk(&pool, |_| true);
+        assert_eq!(sounding, vec![0, 1, 2, 3]);
+        assert_eq!(withheld, vec![4, 5]);
+    }
+
+    /// **The correction of 2065, and the reason Stratholme went silent.** An entry the walk
+    /// services but which comes back with no live channel — past its own `DistanceCutoff`, or a
+    /// start that failed — consumes **nothing**. `0x461b40` returns false for it (`0x7a5870`, the
+    /// cutoff bit), so `0x4619c0`'s counter never advances and the walk keeps going.
+    ///
+    /// The four here are the real Stratholme pin: `UndeadCampfireSmall`, `CauldronLoop`,
+    /// `TorchLoop` and `SlimeWaterfall`, every one out of range, in front of the burning-building
+    /// loop with 88 emitters on top of the listener. Under the old entitlement count they held all
+    /// four slots and it was withheld; under the binary's rule they hold none.
+    #[test]
+    fn a_serviced_but_silent_entry_does_not_consume_a_cap_slot() {
+        let pool = pool_with(&[(3255, 1), (3379, 1), (4694, 1), (4855, 1), (6437, 1)]);
+        let (sounding, withheld) = walk(&pool, |e| e == 4); // only the fire is in range
+        assert_eq!(sounding, vec![4], "the audible fifth sounds");
+        assert!(
+            withheld.is_empty(),
+            "nothing was ever withheld: {withheld:?}"
+        );
     }
 
     /// Free, emitter-less and failed entries are not entitled and cost the cap nothing — the
@@ -790,24 +893,30 @@ mod tests {
     fn unentitled_entries_do_not_consume_a_cap_slot() {
         let mut pool = pool_with(&[(10, 1), (0, 0), (30, 0), (40, 1), (50, 1), (60, 1), (70, 1)]);
         pool.entries[3].failed = true;
-        assert_eq!(admitted(&pool.entries), vec![0, 4, 5, 6]);
+        let (sounding, _) = walk(&pool, |_| true);
+        assert_eq!(sounding, vec![0, 4, 5, 6]);
     }
 
-    /// The falsifiable half: distance does NOT arbitrate. A fifth id right on top of the listener
-    /// stays silent behind four claimed earlier and far away.
+    /// The falsifiable half: distance does NOT arbitrate **among entries that are all audible**.
+    /// A fifth id right on top of the listener stays silent behind four claimed earlier — but
+    /// only while those four are inside their own cutoffs, which is the qualifier 2065 added
+    /// (wow-re rewrote its own live A/B for the same reason: with far incumbents the prediction
+    /// is the opposite, and reading it without the qualifier would have torn up a correct
+    /// mechanism).
     #[test]
-    fn distance_never_promotes_a_fifth_entry_over_an_earlier_one() {
+    fn distance_never_promotes_a_fifth_entry_over_an_earlier_audible_one() {
         let mut pool = AmbientEmitterPool::default();
         let ds = doodads(5);
         for (i, d) in ds.iter().enumerate().take(4) {
             pool.register(*d, 100 + i as u32, Vec3::new(400.0, 0.0, 0.0), Vec3::ZERO);
         }
         pool.register(ds[4], 999, Vec3::ZERO, Vec3::ZERO);
-        let admitted = admitted(&pool.entries);
-        assert_eq!(admitted, vec![0, 1, 2, 3]);
-        assert!(
-            !admitted.contains(&4),
-            "the near fifth is held back by claim order"
+        let (sounding, withheld) = walk(&pool, |_| true); // all four incumbents audible
+        assert_eq!(sounding, vec![0, 1, 2, 3]);
+        assert_eq!(
+            withheld,
+            vec![4],
+            "the near fifth is held back by claim order, not distance"
         );
     }
 }

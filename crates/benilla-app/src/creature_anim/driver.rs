@@ -22,6 +22,7 @@ use bevy::animation::graph::AnimationNodeIndex;
 use bevy::animation::transition::AnimationTransitions;
 use bevy::prelude::*;
 
+use crate::names::type_flags::DO_NOT_PLAY_WOUND_ANIM;
 use crate::net::{
     ClientCommand, FacingStep, NetCommands, ObjectStore, RemoteMotion, SelfPlayer, Spline,
     UnitSpeeds,
@@ -34,20 +35,20 @@ use super::select::{
 };
 use super::sheath::{advance_sheath_ceremony, start_sheath_ceremony};
 use super::{
-    find_resolved, move_flags, AnimData, AnimDriver, AutoRepeatArmed, CastHold, DefenseAnim,
-    EmoteAnim, Engaged, MovementState, NockLatch, Overlay, OverlayFade, SheathRequest,
+    find_resolved, move_flags, AnimData, AnimDriver, AutoRepeatArmed, BaseAnimRecompute, CastHold,
+    DefenseAnim, EmoteAnim, Engaged, MovementState, NockLatch, Overlay, OverlayFade, SheathRequest,
     SheathSwapMessage, SwingImpact, SwingMessage, SwingSlowdown, Wielded, WoundAnim,
 };
 
 mod grip;
 mod mode;
-mod play;
+pub(super) mod play;
 #[cfg(test)]
 mod tests;
 mod wound;
 
 pub(super) use grip::drive_hand_grip;
-use play::{oneshot_finished, play_clip, roll_loop, roll_oneshot};
+use play::{holds_own_clip, oneshot_finished, play_clip, roll_loop, roll_oneshot};
 use wound::{wound_evict, wound_trigger, wound_upkeep, WoundEdge};
 
 /// The weight of a masked upper-body one-shot overlay ([`AnimDriver::overlay`]) over the base clip on
@@ -298,6 +299,10 @@ pub(super) fn drive_animations(
             // hover, walk-mode, swim. `unify` folds them into the flags word the selector reads, so
             // a creature the server has rooted or put in walk mode is animated as one.
             Option<&crate::net::UnitMoveModes>,
+            // The unit's aura CharProc nodes — read for ONE thing here: whether a proc-11
+            // animation-rate node (the freeze auras' `0x6201d0` node, decision 0889) is on the
+            // unit, which is the client's `+0x2c & 0x4` wound-flinch refusal (decision 2063).
+            Option<&crate::aura_visual::AuraNodes>,
         ),
     )>,
     // A mount child's movement view is its HOST's (decision 0441): the same
@@ -347,6 +352,14 @@ pub(super) fn drive_animations(
         // retiring node is *frozen* on the clip's final frame, so unlike the wound's decay there
         // is no playback clock to read the λ window off.
         Res<Time>,
+        // The creature-template cache — read for ONE bit, the victim's `DO_NOT_PLAY_WOUND_ANIM`
+        // (decision 2068), which is the wound trigger's first entry gate below. `Option` for the
+        // headless test worlds that build no net seam; a missing cache reads exactly like a
+        // template we have not received, which is the reference's own null-record leg.
+        Option<Res<crate::names::NameCache>>,
+        // The **stage-2 base recomputes** ([`BaseAnimRecompute`]) — in the tuple for the same
+        // reason as its neighbours: this system sits on the 16-SystemParam ceiling.
+        MessageReader<BaseAnimRecompute>,
     ),
     // The variation roll's LCG state (decision 0114 — the client's single CRT `_rand` stream,
     // shared by every play; [`select::msvc_rand`]).
@@ -355,7 +368,7 @@ pub(super) fn drive_animations(
     // diff-only filter; see the trace block after the mode machine).
     mut anim_trace_last: Local<std::collections::HashMap<Entity, String>>,
 ) {
-    let (emote_sounds, loot_kneel, time) = aux;
+    let (emote_sounds, loot_kneel, time, names, mut recomputes) = aux;
     let dt = time.delta_secs();
     // This frame's one-shot PLAY CALLS (swings + anim-emotes), gathered per unit and replayed
     // in the client's call order below ([`PlaySeq`] stamps — the net drain stamps packet order,
@@ -364,11 +377,11 @@ pub(super) fn drive_animations(
     // keys on what is *currently playing* when each call runs.
     let mut pending: bevy::ecs::entity::EntityHashMap<Vec<(OneShotReq, u64)>> = default();
     // …and by victim: a landed hit with the flinch bit (`HitInfo & 0x2` — the sole trigger gate,
-    // decision 0111) plays the victim's wound-flinch **decay overlay** below, as does a spell
-    // impact whose kit carries a CombatWound anim ([`WoundAnim`], decision 0099 phase 4 — the
-    // kit player's own 8–10 branch). Last hit wins, matching the client, where a re-trigger
-    // re-seeds the same secondary slot. Independent of the attacker-side 0x10000 suppressor
-    // (that bit gates the *swing* animation only).
+    // decision 0111) plays the victim's wound-flinch **decay overlay** below, as does a spell-side
+    // flinch ([`WoundAnim`] — the kit player's 8–10 branch, a harmful instant impact, a missile
+    // impact; severity 0 every time, decision 2058). Last hit wins, matching the client, where a
+    // re-trigger re-seeds the same secondary slot. Independent of the attacker-side 0x10000
+    // suppressor (that bit gates the *swing* animation only).
     let mut pending_wound: bevy::ecs::entity::EntityHashMap<WoundEdge> = default();
     for s in swings.read() {
         // HitInfo bit 0x10000 suppresses the swing anim (decision 0073's verified suppressor).
@@ -394,7 +407,7 @@ pub(super) fn drive_animations(
         }
     }
     for w in spell_wounds.read() {
-        pending_wound.insert(w.entity, WoundEdge::Spell(w.anim_id));
+        pending_wound.insert(w.entity, WoundEdge::Spell);
     }
     // This frame's victim DEFENSE reactions (`$CPP`, decision 0279), keyed by victim — last wins
     // (a re-trigger re-arms the same primary). Resolved to an anim id inside the loop: the parry
@@ -417,6 +430,13 @@ pub(super) fn drive_animations(
             .entry(e.entity)
             .or_default()
             .push((OneShotReq::Emote(e.anim_id), e.seq));
+    }
+    // This frame's **stage-2 base recomputes** — a state kit's anim id, which is never played
+    // ([`BaseAnimRecompute`]). Last wins: the reference makes the comparison per kit play, and two
+    // in one frame leave the second's verdict standing.
+    let mut pending_recompute: bevy::ecs::entity::EntityHashMap<u16> = default();
+    for r in recomputes.read() {
+        pending_recompute.insert(r.entity, r.anim_id);
     }
     // This frame's sheath requests, keyed by unit (a later request replaces an earlier — the
     // client's last SetSheatheState call wins).
@@ -458,6 +478,7 @@ pub(super) fn drive_animations(
             nock_latched,
             transform,
             move_modes,
+            aura_nodes,
         ),
     ) in &mut units
     {
@@ -640,7 +661,7 @@ pub(super) fn drive_animations(
         let outgoing = drv.active_anim().unwrap_or(STAND);
         let relaxed = !select::arm_forces_head(engaged, cast_hold.is_some(), outgoing);
 
-        wound_upkeep(&mut drv, &mut player);
+        wound_upkeep(entity, &mut drv, &mut player);
 
         // Death overrides every state (a corpse doesn't transition); play Death and hold.
         if dead {
@@ -900,15 +921,40 @@ pub(super) fn drive_animations(
         // plays (the key-bone) evict a masked wound. A play on the *other* bone leaves the wound
         // decaying (the §5's inherited-swing case). Mode/gait changes proxy the mode machine's own
         // base plays; the flags catch the same-id re-plays the proxy can't see.
+        // ── The **base-animation lock**'s clearer, keyed on the FINISHED id and run before
+        // anything re-picks the base this frame — the reference clears at `0x5fc9c6`, above
+        // `OnAnimationFinished`'s own reason branch, so completion and pre-emption both release it
+        // ([`play::BaseAnimLock`], decision 2096).
+        drv.base_lock.release_finished(&player, anims, catalog);
+
         let pre_state = (drv.mode, drv.gait);
         let mut base_played = false;
         let mut masked_played = false;
         let mut played_oneshot: Option<u16> = None;
+        // The victim's cached creature template carries `DO_NOT_PLAY_WOUND_ANIM` (`type_flags`
+        // bit `0x8`) — the reference's `0x6125f0`, read at its two consumers below: the parry
+        // pick `0x60ec1f` and the wound flinch `0x60ea9f` (decision 2068). Keyed on the
+        // descriptor's `OBJECT_FIELD_ENTRY`, the way `0x60b160` keys the query record, and false
+        // on a template we have not received — `0x6125f0`'s own null leg.
+        let no_wound_anim = store
+            .and_then(|s| s.0.object_entry())
+            .zip(names.as_deref())
+            .and_then(|(entry, n)| n.creature_record(entry))
+            .is_some_and(|r| r.type_flags & DO_NOT_PLAY_WOUND_ANIM != 0);
         // Defense outranks a same-frame own swing/emote: the client's `$CPP` arm is the later
         // PlayAnimation call in that (rare) frame, and the being-hit reaction is the one the
         // player must read. Gated alive (`0x60ec00` checks IsDead / stand-state 7 before the LUT).
         let defense = pending_defense.get(&entity).and_then(|&vs| {
             if dead {
+                return None;
+            }
+            // `DO_NOT_PLAY_WOUND_ANIM` takes the **parry** with the flinch (`0x60ec1f`, the bit's
+            // second and last consumer — wow-re `wound-parry-gate-and-injury-vocal.md` Q1/Q6).
+            // The gate is inside `0x60ec00`, which the `$CPP` ladder enters only on
+            // victimState 3: DODGE/DEFLECT (30) and BLOCK (24) go straight to PlayAnimation from
+            // `0x624a90`/`0x624a74` and are NOT gated — a flagged creature still dodges and still
+            // raises its shield, it just never parries.
+            if vs == 3 && no_wound_anim {
                 return None;
             }
             // The parry LUT `0x60ec00` reads the victim's mainhand through `GetWeapon(0, 0)`
@@ -977,6 +1023,13 @@ pub(super) fn drive_animations(
             requests.extend(drv.deferred.take());
         }
         for id in requests {
+            // **The lock, first** — `0x5fe2f0`'s head guard returns before any routing, descriptor
+            // build or slot election, so it precedes the fast path and the dedup below and takes
+            // the deferral with it: "no routing, no arm, no deferral" ([`play::BaseAnimLock`]).
+            // This is what keeps a stunned victim knocked flat for the whole clip.
+            if drv.base_lock.refuses() {
+                continue;
+            }
             // The COMBAT FAST-PATH (`0x5fe43c`–`0x5fe48b`, wow-re `combat-anim-fastpath.md`,
             // decision 0406): a combat clip requested while another combat clip is playing is
             // NOT armed — the CURRENT clip's rate doubles (op6 2.0f re-times its remainder,
@@ -1073,16 +1126,21 @@ pub(super) fn drive_animations(
                 // ref's mid-air cast). Cutting an airborne clip freezes the outgoing node first —
                 // the pose-snapshot decay of the client's op4 blend, scoped exactly like
                 // [`leave_special`]'s (decision 0503).
-                if matches!(special, Some(select::Special::Jump | select::Special::Fall)) {
+                if let Some(sp) =
+                    special.filter(|sp| matches!(sp, select::Special::Jump | select::Special::Fall))
+                {
+                    // …the ARC's clip, not merely whatever bone 0 holds ([`holds_own_clip`]) —
+                    // the freeze's missing predicate, at its second site (decision 2098).
                     if let Some(active) = tr
                         .get_main_animation()
+                        .filter(|&n| holds_own_clip(anims, catalog, sp, n))
                         .and_then(|n| player.animation_mut(n))
                     {
                         active.set_speed(0.0);
                     }
                 }
                 if let Some((c, repeat)) = picked {
-                    play_clip(&mut tr, &mut player, c, repeat, 1.0);
+                    play_clip(&mut drv.base_lock, &mut tr, &mut player, c, repeat, 1.0);
                 }
                 drv.mode = Mode::Swing { id, under: special };
                 drv.gait = None;
@@ -1173,6 +1231,7 @@ pub(super) fn drive_animations(
                         let rate = player.animation(node).map_or(1.0, |a| a.speed());
                         let (c, fresh) = roll_loop(anims, head, relaxed, &mut rng);
                         play_clip(
+                            &mut drv.base_lock,
                             &mut tr,
                             &mut player,
                             c,
@@ -1184,6 +1243,35 @@ pub(super) fn drive_animations(
                 }
             }
         }
+        // ── The **stage-2 base recompute** (`0x60f389`–`0x60f399`, decision 2085): a state kit
+        // that names an animation compares it against the id the unit is already playing
+        // (`0x5fdb50` — the upper-body key bone if it holds one, else bone 0) and, on a
+        // difference, runs `0x5fd9e0(unit, -1)`. It never plays the id, and on a match it does
+        // nothing at all.
+        //
+        // It runs HERE, after this frame's one-shot arms, because that ordering is the whole
+        // observable effect: the impact kit (stage 1) plays first and the state kit (stage 2)
+        // then cuts it. Charge (22911) is the case that names itself — `Knockdown`(121) from kit
+        // 348, cut by kit 349's `Stun`(14) because 121 ≠ 14.
+        //
+        // Expressed as the re-selection, not a re-arm: clearing the gait target IS the recompute
+        // (decision 1655), and dropping `Mode::Swing` is what ends a one-shot. **Named residual:**
+        // a unit inside a Special (a pose, an airborne arc) is left alone — the reference's
+        // recompute re-enters the selector chain, which would land back in the same state, and
+        // forcing `Mode::Gait` here would replay the pose's enter clip instead.
+        if let Some(&want) = pending_recompute.get(&entity) {
+            let armed = drv.overlay.map(|ov| ov.id).or_else(|| {
+                tr.get_main_animation()
+                    .and_then(|n| anims.clips.iter().find(|c| c.node == n))
+                    .map(|c| c.anim_id)
+            });
+            if armed != Some(want) && matches!(drv.mode, Mode::Swing { .. } | Mode::Gait) {
+                drv.deferred = None; // a normal arm clears the cache (`0x5fe48e`)
+                drv.mode = Mode::Gait;
+                drv.gait = None; // recompute a fresh gait next frame
+            }
+        }
+
         // ── **The mode machine** — the base track's whole decision, lifted into [`mode`]
         // (decision 0933). It is the one phase of this pass with a clean input boundary: a fixed
         // set of already-computed facts in, the driver + player + transitions out, and none of
@@ -1365,26 +1453,77 @@ pub(super) fn drive_animations(
 
         let masked_played = masked_played || hold_played.is_some();
 
-        let base_played = base_played || (drv.mode, drv.gait) != pre_state;
-        wound_evict(&mut drv, &mut player, masked_played, base_played);
+        // A mode/gait change is a **proxy** for the mode machine's plays, and the base-anim lock
+        // is the one state where the proxy is wrong for longer than the single frame its own doc
+        // allows: while the lock refuses, the machine still walks its brackets — Gait →
+        // Entering(Jump) → Looping(Jump) → Land — with every play declined, so a change there
+        // means nothing was armed at all. Claiming otherwise evicted the victim's flinch off the
+        // key-bone and latched the weapon trail's edge (2076) on a play that never happened
+        // (decision 2098). Only the PROXY is gated: an arm that reached the player directly says
+        // so on its own.
+        let base_played =
+            base_played || ((drv.mode, drv.gait) != pre_state && !drv.base_lock.refuses());
+        // The weapon-trail latch's edge (decision 2076) — `0x5fe2f0` is the image's single
+        // animation entry point, so ANY start consumes the arm, the mode machine's gait plays
+        // included. Written every pass (never OR'd) so it is exactly this frame's.
+        drv.started_anim = masked_played || base_played;
+        wound_evict(entity, &mut drv, &mut player, masked_played, base_played);
 
         if let Some(&edge) = pending_wound.get(&entity) {
-            // A melee edge picks its wound id by severity + the victim's engagement (decision
-            // 0111); a spell edge arrives with the kit's own id (the client passes it through).
+            // Both edges pick the wound id by severity + the victim's engagement (decision
+            // 0111's `0x60ea70`); a spell edge is the client's `severity = 0` call (decision
+            // 2058), so it is CombatWound/StandWound by engagement and never the kit's own id.
             let id = match edge {
                 WoundEdge::Melee(hit_info) => select::wound_anim(hit_info, engaged),
-                WoundEdge::Spell(anim_id) => anim_id,
+                WoundEdge::Spell => select::wound_anim(0, engaged),
             };
-            wound_trigger(
-                &mut drv,
-                &mut player,
-                anims,
-                catalog,
-                &mut rng,
-                id,
-                &mv,
-                mounted,
-            );
+            // The trigger's entry gates, in the reference's own order inside `0x60ea70`:
+            //
+            // 1. `0x60ea9f` → `0x6125f0`: the victim's cached creature template carries
+            //    `type_flags` bit `0x8`, **DO_NOT_PLAY_WOUND_ANIM** — a skeleton, a ghost, a
+            //    bone golem has no flesh to recoil, and the reference refuses every flinch it
+            //    would ever take, melee and spell alike (decision 2068; wow-re
+            //    `melee-blood-spurt-suppression.md` §6). It gates the ANIMATION only: the blood
+            //    spurt is a separate system reading [`SwingImpact`] itself, and wow-re §8 Q1 is
+            //    explicit that nothing keyed on creature type suppresses it — a skeleton bleeds.
+            //    A record we have not received yet reads as NOT flagged, which is `0x6125f0`'s
+            //    own null-record leg (`return record ? … : false`), so a creature whose query is
+            //    still in flight flinches there too.
+            // 2. `0x60eaac`–`0x60eac8` (wow-re `charproc-rate-override-wound-gate.md`, decision
+            //    2063): a CharProc-11 rate-override node on the unit's effect list — the freeze
+            //    auras' node, Freezing Trap / Ice Block / petrify / web wrap — refuses EVERY
+            //    flinch for as long as it lives. The gate is the node's presence, not its rate
+            //    (kit 3071's 1.0 gates too), so it reads the node list, not the pause it applies.
+            //
+            // `no_wound_anim` is read once above, where the parry pick — the flag's other
+            // consumer — needs the same answer.
+            let refusal = if no_wound_anim {
+                Some("the template carries DO_NOT_PLAY_WOUND_ANIM")
+            } else if aura_nodes.is_some_and(|n| n.head_anim_rate().is_some()) {
+                Some("a proc-11 rate node is attached")
+            } else {
+                None
+            };
+            if let Some(why) = refusal {
+                if benilla_assets::trace::enabled() {
+                    benilla_assets::trace::line(
+                        "fct",
+                        &format!("wound trigger unit={entity} id={id} REFUSED ({why})"),
+                    );
+                }
+            } else {
+                wound_trigger(
+                    entity,
+                    &mut drv,
+                    &mut player,
+                    anims,
+                    catalog,
+                    &mut rng,
+                    id,
+                    &mv,
+                    mounted,
+                );
+            }
         }
 
         // ── The per-animation sheath reconcile (decision 0080 structure 3 — the client's

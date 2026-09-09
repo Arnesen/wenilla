@@ -9,7 +9,35 @@ use crate::layout::{Anchor, Point};
 use crate::script::{Model, SCREEN};
 use crate::widget::FrameHandle;
 
-use super::{as_f32, decode_id, frame_handle_of, frame_wrapper, point_from_str, point_name};
+use super::{
+    as_f32, decode_id, frame_handle_of, frame_parent_token_base, frame_wrapper, point_from_str,
+    point_name, prefetch_named_target, resolve_named_target, NamedTarget,
+};
+
+/// Phase 1 of a `relativeTo`/`SetAllPoints` target: when the argument is a **name string**, expand
+/// a leading `$parent` against `h`'s first named ancestor and read `_G` — all of it with **no**
+/// `Model` guard alive, because the reference's read is a gettable and an `__index` on `_G` can run
+/// Lua that calls straight back into a binding ([`NamedTarget`]).
+///
+/// Anything else needs no prefetch and answers `None`.
+fn prefetch_relative_to(
+    lua: &Lua,
+    arg: Option<&Value>,
+    h: FrameHandle,
+) -> mlua::Result<Option<NamedTarget>> {
+    let Some(Value::String(s)) = arg else {
+        return Ok(None);
+    };
+    // A name we cannot even read names nothing; the caller's miss path reports it as before.
+    let Ok(raw) = s.to_str() else {
+        return Ok(Some(NamedTarget::unreadable()));
+    };
+    let base = {
+        let model = lua.app_data_ref::<Model>().expect("model");
+        frame_parent_token_base(&model, h)
+    };
+    Ok(Some(prefetch_named_target(lua, raw.as_ref(), Some(&base))))
+}
 
 /// Populate `m`'s layout (anchor/size) methods (see the module doc).
 pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
@@ -100,6 +128,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "SetAllPoints",
         lua.create_function(|lua, (this, target): (Table, Value)| {
             let h = frame_handle_of(lua, &this)?;
+            // The `_G` read runs before the guard — see `set_point` and `object::NamedTarget`.
+            let named = prefetch_relative_to(lua, Some(&target), h)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let rel_id: u32 = match &target {
                 // Same id_to_region fallback as `set_point` above (and `region.rs`'s own
@@ -110,18 +140,13 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                         model.id_to_frame.contains_key(id) || model.id_to_region.contains_key(id)
                     })
                     .unwrap_or_else(|| default_parent_id(&mut model, h)),
-                Value::String(s) => {
-                    // Frames first, then the region-name registry: the real XML anchors frames to
-                    // REGIONS too (gossip option rows → the greeting FontString) — resolve() binds
-                    // region targets in its second round.
-                    let named = s.to_str().ok().and_then(|n| {
-                        model
-                            .arena
-                            .lookup(n.as_ref())
-                            .map(|hh| model.frame_id(hh))
-                            .or_else(|| model.region_names.get(n.as_ref()).copied())
-                    });
-                    named.unwrap_or_else(|| default_parent_id(&mut model, h))
+                Value::String(_) => {
+                    // `_G[name]` — the client's one widget namespace, frames and regions alike
+                    // (`object::NamedTarget`). The real XML anchors frames to REGIONS too (gossip
+                    // option rows → the greeting FontString), and both publish there.
+                    let nt = named.as_ref().expect("a String argument is prefetched");
+                    let hit = resolve_named_target(&model, nt);
+                    hit.unwrap_or_else(|| default_parent_id(&mut model, h))
                 }
                 _ => default_parent_id(&mut model, h),
             };
@@ -358,6 +383,10 @@ fn set_point(lua: &Lua, this: &Table, point: &str, rest: [Value; 4]) -> mlua::Re
         .ok_or_else(|| mlua::Error::runtime(format!("SetPoint: unknown point '{point}'")))?;
     let h = frame_handle_of(lua, this)?;
 
+    // A name target is read out of `_G` FIRST, with no model guard alive — the reference's read is
+    // a gettable, so an `__index` on `_G` can run Lua that calls back in (`object::NamedTarget`).
+    let named = prefetch_relative_to(lua, rest.first(), h)?;
+
     let mut model = lua.app_data_mut::<Model>().expect("model");
 
     // relativeTo: a table (wrapper) or a string (name), else default to the parent/screen. A table
@@ -379,23 +408,23 @@ fn set_point(lua: &Lua, this: &Table, point: &str, rest: [Value; 4]) -> mlua::Re
                 })
                 .unwrap_or_else(|| default_parent_id(&mut model, h))
         }
-        Some(Value::String(s)) => {
+        Some(Value::String(_)) => {
             cursor = 1;
-            // Frames first, then regions by name (see SetAllPoints above — same rationale).
-            let named = s.to_str().ok().and_then(|n| {
-                model
-                    .arena
-                    .lookup(n.as_ref())
-                    .map(|hh| model.frame_id(hh))
-                    .or_else(|| model.region_names.get(n.as_ref()).copied())
-            });
-            named.unwrap_or_else(|| {
-                // The parent fallback is the client's behavior, but a *named* target that
-                // doesn't resolve is almost always a bug (a typo, or an XML forward reference —
-                // anchors resolve at SetPoint time, so a target must be declared before its
-                // dependents). Say so instead of silently misdirecting the anchor: this exact
-                // silence cost a hunt twice (QuestLogFrame's reward rows, ItemTextFrame's
-                // scrollbar track).
+            // `_G[name]`, frames and regions alike (see SetAllPoints above — same rationale), with
+            // a leading `$parent` already expanded against this frame's first named ancestor.
+            let nt = named.as_ref().expect("a String argument is prefetched");
+            let hit = resolve_named_target(&model, nt);
+            hit.unwrap_or_else(|| {
+                // **The reference RAISES here** — `luaL_error(0x87ccd4, "%s:SetPoint(): Couldn't
+                // find region named '%s'")`, no fallback and no no-op (`luaG_errormsg`/`luaD_throw`
+                // contain no `ret`). Ours still falls back to the parent and warns, because we
+                // cannot yet see how many of our own transcriptions and of the addon corpus that
+                // raise would abort — the harness reports no engine warnings, which is the
+                // instrument that has to come first (decision 2105, "Named, not done").
+                //
+                // The warning is worth keeping regardless: a *named* target that doesn't resolve is
+                // almost always a bug, and this exact silence cost a hunt twice (QuestLogFrame's
+                // reward rows, ItemTextFrame's scrollbar track).
                 let who = model
                     .arena
                     .frame(h)
@@ -403,7 +432,7 @@ fn set_point(lua: &Lua, this: &Table, point: &str, rest: [Value; 4]) -> mlua::Re
                     .unwrap_or_else(|| "<anonymous>".into());
                 model.warnings.push(format!(
                     "SetPoint({who}): relativeTo '{}' does not resolve — anchored to the parent",
-                    s.to_str().ok().as_deref().unwrap_or("<non-utf8>")
+                    nt.name
                 ));
                 default_parent_id(&mut model, h)
             })

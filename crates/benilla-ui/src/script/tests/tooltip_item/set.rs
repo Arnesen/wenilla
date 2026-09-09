@@ -5,11 +5,15 @@
 use super::{lines_of, script};
 use crate::script::*;
 
-/// The §22 SET block, byte-read: a blank gold line, the gold "name (owned/total)" header, the
-/// skill line (white/red) between header and the member ladder (cream when equipped / gray;
-/// in-flight names wait), a second blank, then the threshold bonuses SORTED ascending — green
-/// only when the skill requirement is met AND owned ≥ threshold — plus the ask-once for an
-/// unseen set id.
+/// The §22 SET block, byte-read: a blank gold line, the gold `ITEM_SET_NAME` header, the skill
+/// line (white/red) between header and the member ladder (cream when equipped / gray; in-flight
+/// names wait), a second blank, then the threshold bonuses SORTED ascending — green only when the
+/// skill requirement is met AND owned ≥ threshold — plus the ask-once for an unseen set id.
+///
+/// **The two bonus arms are two different keys** (`0x52e056..0x52e0d6`): an ACTIVE bonus formats
+/// `ITEM_SET_BONUS` = "Set: %s" with no count at all, and only an inactive one formats
+/// `ITEM_SET_BONUS_GRAY` = "(%d) Set: %s". Watching the (2) bonus move between them as the skill
+/// gate opens and closes is what these assertions are for.
 #[test]
 fn item_set_block_counts_and_colors() {
     let mut s = script();
@@ -65,14 +69,16 @@ fn item_set_block_counts_and_colors() {
         -- in the reference: `0x530270` bails before its `inc [esi+0x31c]`).
         assert(TTTextLeft3:GetText() == " \n", "blank before the header, got "
                .. string.format("%q", tostring(TTTextLeft3:GetText())))
-        assert(TTTextLeft4:GetText() == "Defias Leather (2/5)", "got " .. tostring(TTTextLeft4:GetText()))
+        assert(TTTextLeft4:GetText() == "[SET_NAME Defias Leather 2/5]", "got " .. tostring(TTTextLeft4:GetText()))
         assert(TTTextLeft5:GetText() == "  Defias Mark")
         assert(TTTextLeft8:GetText() == "  Defias Boots", "in-flight member renders no line")
         assert(TTTextLeft9:GetText() == " \n", "blank before the bonuses, got "
                .. string.format("%q", tostring(TTTextLeft9:GetText())))
-        assert(TTTextLeft10:GetText() == "(2) Set: Increases movement speed slightly.",
+        -- Owned 2 of 5: the (2) bonus is ACTIVE and takes the countless ITEM_SET_BONUS; the
+        -- (4) one is not and takes ITEM_SET_BONUS_GRAY, which is the arm that carries the count.
+        assert(TTTextLeft10:GetText() == "[SET_BONUS Increases movement speed slightly.]",
                "thresholds sort ascending, got " .. tostring(TTTextLeft10:GetText()))
-        assert(TTTextLeft11:GetText() == "(4) Set: +10 Attack Power.")
+        assert(TTTextLeft11:GetText() == "[SET_BONUS_GRAY 4 +10 Attack Power.]")
     "#,
     )
     .unwrap();
@@ -90,7 +96,7 @@ fn item_set_block_counts_and_colors() {
     let green = [0.0, 1.0, 0.0, 1.0];
     let red = [1.0, 32.0 / 255.0, 32.0 / 255.0, 1.0];
     assert_eq!(
-        color(&lines, "Defias Leather (2/5)"),
+        color(&lines, "[SET_NAME Defias Leather 2/5]"),
         gold,
         "set name is gold"
     );
@@ -105,12 +111,12 @@ fn item_set_block_counts_and_colors() {
         "unowned member is gray"
     );
     assert_eq!(
-        color(&lines, "(2) Set: Increases movement speed slightly."),
+        color(&lines, "[SET_BONUS Increases movement speed slightly.]"),
         green,
         "active bonus is green"
     );
     assert_eq!(
-        color(&lines, "(4) Set: +10 Attack Power."),
+        color(&lines, "[SET_BONUS_GRAY 4 +10 Attack Power.]"),
         gray,
         "inactive bonus is gray"
     );
@@ -124,16 +130,20 @@ fn item_set_block_counts_and_colors() {
     s.run(
         r#"
         TT:SetOwner(Slot10, "ANCHOR_RIGHT"); TT:SetItemById(6303)
-        assert(TTTextLeft5:GetText() == "Requires Leatherworking (250)",
+        assert(TTTextLeft5:GetText() == "[MIN_SKILL Leatherworking 250]",
                "the skill line sits between header and members")
         assert(TTTextLeft6:GetText() == "  Defias Mark")
     "#,
     )
     .unwrap();
     let lines = lines_of(&mut s);
-    assert_eq!(color(&lines, "Requires Leatherworking (250)"), red);
+    assert_eq!(color(&lines, "[MIN_SKILL Leatherworking 250]"), red);
+    // The gate also moves it onto the OTHER key: an inactive bonus is the counted spelling.
     assert_eq!(
-        color(&lines, "(2) Set: Increases movement speed slightly."),
+        color(
+            &lines,
+            "[SET_BONUS_GRAY 2 Increases movement speed slightly.]"
+        ),
         gray,
         "an unmet skill grays even a met threshold"
     );
@@ -144,13 +154,13 @@ fn item_set_block_counts_and_colors() {
         .unwrap();
     let lines = lines_of(&mut s);
     assert_eq!(
-        color(&lines, "Requires Leatherworking (250)"),
+        color(&lines, "[MIN_SKILL Leatherworking 250]"),
         [1.0, 1.0, 1.0, 1.0]
     );
     assert_eq!(
-        color(&lines, "(2) Set: Increases movement speed slightly."),
+        color(&lines, "[SET_BONUS Increases movement speed slightly.]"),
         green,
-        "meeting the skill restores the green"
+        "meeting the skill restores the green — and the countless key with it"
     );
     // An unseen set id records the ask-once.
     s.set_item_template(

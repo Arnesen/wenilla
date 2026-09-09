@@ -1557,6 +1557,143 @@ mod loader_tests {
         );
     }
 
+    /// **The two spellings of a Button's label are two different legs, and only `<NormalText>` is
+    /// disowned of its own font attributes — so its `justifyH` never reaches the label and the
+    /// implicit anchor stays CENTER, while a `<ButtonText>`'s does and still seats LEFT.**
+    ///
+    /// `CSimpleButton::LoadXML 0x7788c0`'s child chain routes them apart (wow-re
+    /// `scratch/button-label-build-and-anchor-order.md`, §5 + arbitration, VERIFIED):
+    /// `<ButtonText>` (tag `0x8799f0`, compared `0x7789c1`) goes to `0x7789d0 call 0x6f2780`, the
+    /// ordinary `<FontString>` region builder the `<Layers>` walker uses, which never writes
+    /// `+0x12c`; `<NormalText>` (tag `0x879978`, `0x778b43`) goes to the inline build
+    /// `[0x778b4c, 0x778bb6)` carrying `0x778b7b mov byte [edi+0x12c],0` — the one site image-wide
+    /// that clears the gate. Cleared, gate B (`0x7710d3 → je 0x771468`) makes the label's own
+    /// `CSimpleFontString::LoadXML 0x770f40` skip `0x7710e1`–`0x771467` wholesale: `font=`,
+    /// `<FontHeight>`, `outline=`, `monochrome=`, the file load, `spacing=`, **`justifyV=`,
+    /// `justifyH=`**, `<Color>` and `<Shadow>`. That node is fed instead to the button's
+    /// Normal-state `CSimpleFont` at `+0x33c` (`0x778ba9`/`0x778baf call 0x783c30`).
+    ///
+    /// So the creation post-step `0x771480` reads the `<NormalText>` label's **untouched ctor
+    /// default** `0x212` = CENTER|MIDDLE (`0x770dd3`) and seats a single CENTER→CENTER anchor
+    /// (point 4, `0x7714dc`/`0x7714e4`). The authored `justifyH="LEFT"` still reaches the *paint*
+    /// and `GetJustifyH()` — `0x783c30`'s tail notify writes the resolved word into the label's own
+    /// `+0x120` (`0x784111` → `0x784180` → `0x773530` → `0x770800` at `0x770876`) — but that runs
+    /// downstream of the anchor, and a FontString pinned at one point is exactly as wide as its
+    /// text, so a left justify inside it has nothing to move.
+    ///
+    /// The live case is Gatherer 1.0.0's minimap quick-menu, transcribed here: every row is a
+    /// `GathererUI_PopupButtonTemplate`, all rows are `SetWidth` to one common width and stacked
+    /// TOP-to-BOTTOM so they share a centreline, and the template's only alignment statement is
+    /// `<NormalText inherits=… justifyH="LEFT"/>`. Applying that word to the label seated all
+    /// seven rows LEFT→LEFT and the menu read as a left-aligned list against the reference's
+    /// centred one.
+    ///
+    /// Two controls, and the second is why this test carries both spellings: an ordinary
+    /// `<Layers>` `<FontString justifyH="LEFT">` still seats LEFT
+    /// (`anchorless_fontstring_seats_at_its_justify_point` above), and so does a
+    /// `<ButtonText justifyH="LEFT"/>` — the gate is the `<NormalText>` leg's alone.
+    #[test]
+    fn a_button_label_element_does_not_own_its_justify() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Font name="GatherFont" font="Fonts\FRIZQT__.TTF" virtual="true">
+                    <FontHeight><AbsValue val="10"/></FontHeight>
+                </Font>
+                <Button name="GathererUI_PopupButtonTemplate" virtual="true">
+                    <Size><AbsDimension x="64" y="12"/></Size>
+                    <NormalText inherits="GatherFont" justifyH="LEFT"/>
+                    <HighlightText inherits="GatherFont" justifyH="LEFT"/>
+                    <DisabledText inherits="GatherFont" justifyH="LEFT"/>
+                </Button>
+                <Button name="OwnLabelTemplate" virtual="true">
+                    <Size><AbsDimension x="64" y="12"/></Size>
+                    <ButtonText inherits="GatherFont" justifyH="LEFT"/>
+                </Button>
+                <Frame name="GathererUI_Popup">
+                    <Size><AbsDimension x="120" y="60"/></Size>
+                    <Anchors>
+                        <Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                    </Anchors>
+                    <Frames>
+                        <Button name="GathererUI_PopupButton1" inherits="GathererUI_PopupButtonTemplate" text="Minimap [on]">
+                            <Anchors><Anchor point="TOP"/></Anchors>
+                        </Button>
+                        <Button name="OwnLabelButton" inherits="OwnLabelTemplate" text="Minimap [on]">
+                            <Anchors><Anchor point="BOTTOM"/></Anchors>
+                        </Button>
+                    </Frames>
+                </Frame>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+
+        // 1 · The anchor — the whole mechanism, read straight off the label.
+        let (point, rel_point, x, y) = s
+            .eval::<(String, String, f64, f64)>(
+                "local p, rel, rp, x, y = GathererUI_PopupButton1:GetFontString():GetPoint(1) \
+                 return p, rp, x, y",
+            )
+            .unwrap();
+        assert_eq!(
+            (point.as_str(), rel_point.as_str(), x, y),
+            ("CENTER", "CENTER", 0.0, 0.0),
+            "<NormalText>'s justifyH is disowned, so 0x771480 seats the ctor's CENTER"
+        );
+
+        // 2 · ...and the authored word still reaches the label's PAINT and its getter, through the
+        // Normal-state font's link. Only the anchor was ever the reference's answer here.
+        assert_eq!(
+            s.eval::<String>("return GathererUI_PopupButton1:GetFontString():GetJustifyH()")
+                .unwrap(),
+            "LEFT",
+            "the state font's justify still reaches the label"
+        );
+
+        // 3 · The CONTROL, and the half the byte round corrected: `<ButtonText>` is built by the
+        // ordinary FontString builder (`0x6f2780`), which never clears `+0x12c`, so its own
+        // justifyH lands on the label and the same post-step seats it LEFT.
+        let (point, rel_point) = s
+            .eval::<(String, String)>(
+                "local p, rel, rp = OwnLabelButton:GetFontString():GetPoint(1) return p, rp",
+            )
+            .unwrap();
+        assert_eq!(
+            (point.as_str(), rel_point.as_str()),
+            ("LEFT", "LEFT"),
+            "<ButtonText> owns its font attributes — the gate is the <NormalText> leg's alone"
+        );
+
+        // 4 · The visible consequence, in resolved coordinates. The popup is [0,0]..[120,60] and
+        // the rows are 64 wide, centred on x=60 → [28,92]. A 40-wide label centred in that is
+        // [40,80]; seated LEFT it is [28,68] — the left edge every Gatherer row shared before this.
+        s.run(
+            "GathererUI_PopupButton1:GetFontString():SetWidth(40) \
+             OwnLabelButton:GetFontString():SetWidth(40)",
+        )
+        .unwrap();
+        s.resolve();
+        let (cl, cr, ll, lr) = s
+            .eval::<(f64, f64, f64, f64)>(
+                "local c = GathererUI_PopupButton1:GetFontString() \
+                 local l = OwnLabelButton:GetFontString() \
+                 return c:GetLeft(), c:GetRight(), l:GetLeft(), l:GetRight()",
+            )
+            .unwrap();
+        assert_eq!(
+            (cl, cr),
+            (40.0, 80.0),
+            "the Gatherer row's label is centred on the button, not hugging its left edge"
+        );
+        assert_eq!(
+            (ll, lr),
+            (28.0, 68.0),
+            "the <ButtonText> row's label still hugs the button's left edge"
+        );
+    }
+
     /// **`text=` is a GLOBAL-STRING LOOKUP, not a literal** (wow-re rf28 l.36/l.115 →
     /// `FrameScript_GetText 0x703bf0`). Every arm of [`Loader::resolve_text`] in one document:
     /// a `<Button text=>`, a `<ButtonText text=>` and a `<FontString text=>` all resolve through

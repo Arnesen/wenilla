@@ -163,15 +163,26 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetScrollChild",
         lua.create_function(|lua, (this, target): (Table, Value)| {
+            // `_G[name]` before the guard, no `$parent` — `0x790fa0`'s string arm calls `0x76c760`
+            // directly, the same narrow-Frame-tag resolver `SetParent` uses
+            // (`object::NamedTarget`).
+            let named = match &target {
+                Value::String(s) => s
+                    .to_str()
+                    .ok()
+                    .map(|n| super::object::prefetch_named_target(lua, n.as_ref(), None)),
+                _ => None,
+            };
             let new_child: Option<FrameHandle> = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 match &target {
                     Value::Table(t) => decode_id(t)
                         .ok()
                         .and_then(|id| model.id_to_frame.get(&id).copied()),
-                    Value::String(s) => {
-                        s.to_str().ok().and_then(|n| model.arena.lookup(n.as_ref()))
-                    }
+                    Value::String(_) => named.as_ref().and_then(|nt| {
+                        super::object::resolve_named_target(&model, nt)
+                            .and_then(|id| model.id_to_frame.get(&id).copied())
+                    }),
                     _ => None,
                 }
             };

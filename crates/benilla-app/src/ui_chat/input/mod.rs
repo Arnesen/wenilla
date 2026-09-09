@@ -269,13 +269,6 @@ pub(super) fn drain_chat_input(
             ParsedChat::ChatList { name } => {
                 let _ = commands.0.send(ClientCommand::ChannelList { name });
             }
-            ParsedChat::AfkDnd { kind, msg } => {
-                let _ = commands.0.send(ClientCommand::Chat {
-                    kind,
-                    target: None,
-                    text: msg,
-                });
-            }
             ParsedChat::Random { min, max } => {
                 let _ = commands.0.send(ClientCommand::RandomRoll { min, max });
             }
@@ -553,13 +546,15 @@ pub(super) fn drain_chat_input(
                 "off" => group.clear_session(),
                 // The raid grid's instrument (decision 1549) — 25 synthetic rows, us leading.
                 "raid" => {
-                    for line in crate::ui_party::synthetic_raid(&mut group, &mut names, self_guid.0)
-                    {
-                        chat_log.push_event(super::event::ChatEvent::text_only(
-                            super::event::ChatEventKind::System,
-                            line,
-                        ));
-                    }
+                    // Onto the same by-key queue the wire arm uses (2045/2054), so the instrument
+                    // shows the lines a real roster would — resolved from GlobalStrings, on the
+                    // surface each catalog row names, with its sound. An instrument that composed
+                    // its own text would be eyeballing something the game never prints.
+                    chat_out.ui_errors.0.extend(crate::ui_party::synthetic_raid(
+                        &mut group,
+                        &mut names,
+                        self_guid.0,
+                    ));
                 }
                 "invite" => group.pending_invite = Some("Partner".to_string()),
                 // A group member's ping, without the group member (decision 1596). 35 yd
@@ -598,12 +593,10 @@ pub(super) fn drain_chat_input(
                         let w = benilla_assets::coords::bevy_to_wow(tf.translation());
                         (w[0], w[1])
                     });
-                    for line in crate::ui_party::synthetic_roster(&mut group, player_xy) {
-                        chat_log.push_event(super::event::ChatEvent::text_only(
-                            super::event::ChatEventKind::System,
-                            line,
-                        ));
-                    }
+                    chat_out
+                        .ui_errors
+                        .0
+                        .extend(crate::ui_party::synthetic_roster(&mut group, player_xy));
                     if arg == "lead" {
                         // The leader-view variant: an unmatched leader guid resolves to
                         // leader_index 0 in the feed — "we lead" — so the leader-only popup
@@ -898,7 +891,14 @@ pub(super) fn drain_chat_input(
                     None => warn!("castvis: no selection and no self avatar — dropped"),
                 }
             }
-            ParsedChat::ChatTest => chattest_battery(&mut chat_log),
+            ParsedChat::ChatTest => chattest_battery(&mut chat_log, &|key: &str| {
+                script
+                    .lua()
+                    .globals()
+                    .get::<String>(key)
+                    .ok()
+                    .filter(|t| !t.is_empty())
+            }),
             // `/logout` (and `/camp`) is the reference's own `SlashCmdList["LOGOUT"]` → `Logout()`,
             // so it takes the SAME route the game menu's Logout button does (decision 0674): the
             // request queues on the script seam, `crate::ui_logout` sends it and narrates the
@@ -1025,11 +1025,22 @@ pub(super) fn drain_chat_input(
                         continue;
                     }
                 }
-                // HELP_TEXT_SIMPLE (the ref's unknown-command reply, ChatEdit_ParseText l.2203).
-                chat_log.push_event(super::event::ChatEvent::text_only(
-                    super::event::ChatEventKind::System,
-                    "Type '/help' for a listing of a few commands.".to_string(),
-                ));
+                // HELP_TEXT_SIMPLE (the ref's unknown-command reply, ChatEdit_ParseText l.2203),
+                // read off the player's own table rather than re-typed here (decision 2045). It is
+                // no message-catalog row — the reference emits it from Lua straight into chat — so
+                // there is no surface or sound to look up, only the wording.
+                if let Some(text) = script
+                    .lua()
+                    .globals()
+                    .get::<String>("HELP_TEXT_SIMPLE")
+                    .ok()
+                    .filter(|t| !t.is_empty())
+                {
+                    chat_log.push_event(super::event::ChatEvent::text_only(
+                        super::event::ChatEventKind::System,
+                        text,
+                    ));
+                }
             }
         }
     }
@@ -1038,7 +1049,7 @@ pub(super) fn drain_chat_input(
 /// `/chattest` (the 0288 instrument): one synthetic line of every renderable form through the
 /// real event pipeline — kinds, flags, the language header, channel prefixes, notices, and both
 /// link forms (item + player), so formats/colors/links verify in one screen.
-fn chattest_battery(log: &mut super::feed::ChatLog) {
+fn chattest_battery(log: &mut super::feed::ChatLog, get: &dyn Fn(&str) -> Option<String>) {
     use super::event::{ChatEvent, ChatEventKind as K};
     let player = |kind: K, text: &str, sender: &str| {
         let mut e = ChatEvent::text_only(kind, text.into());
@@ -1094,7 +1105,7 @@ fn chattest_battery(log: &mut super::feed::ChatLog) {
     for e in battery {
         log.push_event(e);
     }
-    combat_log_battery(log);
+    combat_log_battery(log, get);
     info!("chattest: battery queued");
 }
 
@@ -1110,7 +1121,7 @@ fn chattest_battery(log: &mut super::feed::ChatLog) {
 ///
 /// The chat TYPES are picked to show the block's spread rather than one row: your own melee and
 /// spells, your pet, a hostile player, and a creature hitting you (which is the one that is red).
-fn combat_log_battery(log: &mut super::feed::ChatLog) {
+fn combat_log_battery(log: &mut super::feed::ChatLog, get: &dyn Fn(&str) -> Option<String>) {
     use super::combat::{self, Family, Fills, PendingCombat, Variant};
     use super::event::ChatEventKind as K;
 
@@ -1372,12 +1383,18 @@ fn combat_log_battery(log: &mut super::feed::ChatLog) {
                 ..fills(250, None, None)
             },
         ),
+        // The failure reason is the ONE fill in this battery that is a reference string rather
+        // than a synthetic name: production puts a resolved GlobalString in this slot
+        // (`ui_action::feed`'s `CAST_FAIL_KEYS` lookup), so a battery that typed English here
+        // would read as the only untranslated line on a localized install. `ERR_OUT_OF_MANA` and
+        // not `OUT_OF_MANA` — the same enUS sentence, but the byte-verified NO_POWER pick table
+        // `0x8118dc` names the former (`ui_action::cast_fail`).
         line(
             K::SpellFailedLocalPlayer,
             combat::SPELLFAILCAST,
             Variant::SelfOther,
             Fills {
-                named: "Not enough mana".into(),
+                named: get("ERR_OUT_OF_MANA").unwrap_or_default(),
                 ..fills(0, None, None)
             },
         ),
@@ -1487,6 +1504,27 @@ pub(super) fn emote_send_eligible(
     EmoteGate::Send
 }
 
+/// `PLAYER_FLAGS_DND` (`0x4`) off our own live descriptor — the DND arm's state test.
+///
+/// **Live, not mirrored, and that asymmetry is the reference's** (wow-re
+/// `afk-dnd-command-law.md` §8): the AFK path keeps an optimistic global and the DND path keeps
+/// nothing, so a second `/dnd` typed before the server's `PLAYER_FLAGS` update lands still reads
+/// DND clear and re-marks, where a second `/afk` in the same window clears. Do not "fix" this into
+/// a symmetric pair.
+fn is_dnd(self_q: &Query<&crate::net::ObjectStore, With<crate::net::SelfPlayer>>) -> bool {
+    self_q
+        .iter()
+        .next()
+        .is_some_and(|s| s.0.player_flags() & 0x4 != 0)
+}
+
+/// `autoClearAFK` — registered default `"1"` (`0x5e24d4 push 0x82e748`). Its reader tests
+/// `[cvar+0x28]` for non-zero (`0x5eb84b`), and with the CVar OFF the clear is a **total** no-op:
+/// no echo, no mirror write, no packet.
+fn auto_clear_afk(cvars: &crate::cvars::CvarPersist) -> bool {
+    cvars.stored("autoClearAFK").is_none_or(|v| v != "0")
+}
+
 /// Turn an addon's `SendChatMessage` calls into sends (decision 1199).
 ///
 /// Its own system rather than a branch inside [`drain_chat_input`], for the reason
@@ -1500,6 +1538,12 @@ pub(super) fn drain_addon_chat_sends(
     commands: Res<NetCommands>,
     mut chat_log: ResMut<super::feed::ChatLog>,
     mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
+    // The optimistic AFK mirror (`[0xb6e5cc]`) the `/afk` toggle reads and writes — 2088.
+    mut mirror: ResMut<super::away::AfkMirror>,
+    // `autoClearAFK`, whose registered default is `"1"` — the gate on the implicit clear.
+    cvars: Res<crate::cvars::CvarPersist>,
+    // Our own descriptor, for the DND arm's LIVE `PLAYER_FLAGS & 0x4` read (DND has no mirror).
+    self_q: Query<&crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -1529,10 +1573,57 @@ pub(super) fn drain_addon_chat_sends(
                 });
             }
         }
+        // ── The away commands, and the implicit clear every other send carries (2088) ────────
+        //
+        // `SendChatMessage 0x49f1e0` is not a uniform dispatcher: AFK and DND each carry their own
+        // arm ahead of the generic send, and EVERY other type first clears a standing AFK. The
+        // whole law — the four `CHAT_MSG_SYSTEM` lines, the client-side default substitution, the
+        // optimistic mirror — is `super::away`, off wow-re's `afk-dnd-command-law.md` §12 table.
+        let strings = |key: &str| crate::ui_chat::combat::global_string(&script, key);
+        let wire = kind.wire();
+        let text = match wire {
+            crate::net::ChatKind::Afk => {
+                let out = super::away::afk_line(&send.text, *mirror, &strings);
+                if let Some(line) = out.line {
+                    super::away::push_system(&mut chat_log, line);
+                }
+                if let Some(v) = out.mirror {
+                    mirror.0 = v;
+                }
+                out.body
+            }
+            crate::net::ChatKind::Dnd => {
+                // The live descriptor bit, not a mirror: DND has none (§8), which is what makes a
+                // repeated `/dnd` re-mark where a repeated `/afk` clears.
+                let out = super::away::dnd_line(&send.text, is_dnd(&self_q), &strings);
+                if let Some(line) = out.line {
+                    super::away::push_system(&mut chat_log, line);
+                }
+                out.body
+            }
+            // Any other type: clear a standing AFK first (`0x49f3d6` skips only type `0x14`), then
+            // send the line's own packet. `/dnd` is type `0x15`, so it takes this path too — which
+            // is why the reference prints THREE lines for a typed `/afk` then `/dnd`.
+            _ => {
+                if let Some(line) =
+                    super::away::auto_clear_line(*mirror, auto_clear_afk(&cvars), &strings)
+                {
+                    super::away::push_system(&mut chat_log, line);
+                    mirror.0 = 0;
+                    // The empty `0x14` that tells the server, alongside the message's own packet.
+                    let _ = commands.0.send(ClientCommand::Chat {
+                        kind: crate::net::ChatKind::Afk,
+                        target: None,
+                        text: String::new(),
+                    });
+                }
+                send.text
+            }
+        };
         let cmd = ClientCommand::Chat {
-            kind: kind.wire(),
+            kind: wire,
             target: send.target,
-            text: send.text,
+            text,
         };
         if commands.0.send(cmd).is_err() {
             warn!("chat: not connected; addon line dropped");

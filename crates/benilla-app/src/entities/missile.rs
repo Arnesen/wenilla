@@ -71,7 +71,7 @@ use crate::creature_anim::{
 use benilla_assets::m2_url;
 
 use super::equipment::ItemDisplays;
-use super::spell_fx::{attach_effect_visuals, EffectHost, SpellFx};
+use super::spell_fx::{attach_effect_visuals, ensure_model, EffectHost, SpellFx};
 use super::{BoneAttach, DisplayModel, ModelHandle};
 
 /// The anim-event idents that release queued missiles — the dispatcher's drain arms (`0x5ffbd0`:
@@ -596,25 +596,27 @@ pub(super) fn spawn_missiles(
 pub(super) fn attach_missile_models(
     mut commands: Commands,
     mut missiles: Query<(Entity, &mut Missile)>,
-    fx: Option<Res<SpellFx>>,
+    fx: Option<ResMut<SpellFx>>,
+    asset_server: Res<AssetServer>,
     time: Res<Time>,
     mut wow_materials: ResMut<Assets<benilla_assets::materials::WowModelMaterial>>,
     mut tint_reg: ResMut<super::spell_fx::FxTintAnims>,
     ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
 ) {
-    let Some(fx) = fx else {
+    let Some(mut fx) = fx else {
         return;
     };
     for (entity, mut missile) in &mut missiles {
         if missile.parts_spawned {
             continue;
         }
-        let Some(key) = &missile.path else {
+        let Some(key) = missile.path.clone() else {
             continue; // unreachable (spawn sets parts_spawned) — but never look up a None key
         };
-        let Some(dm) = fx.models.get(key) else {
-            continue; // unreachable — the spawn created the cache entry
+        ensure_model(&mut fx, &asset_server, &key);
+        let Some(dm) = fx.models.get(&key) else {
+            continue; // unreachable — just inserted
         };
         // The one shared effect-visuals body (`spell_fx::attach_effect_visuals`): the rig (the
         // fireball's constant bone keys rotate its authored frame into flight-forward, its

@@ -20,6 +20,47 @@ use benilla_protocol::guid;
 
 use crate::net::{ClientCommand, NetCommands, ObjectStore};
 
+/// The creature template's **`type_flags`** word, bit by bit — the dword the server ships in
+/// `SMSG_CREATURE_QUERY_RESPONSE` and the reference caches at `[CGUnit+0xb30] + 0x14` (its async
+/// creature-query record, **not** a DBC row and **not** `CreatureType.dbc`).
+///
+/// Named because the bits are one-apart neighbours with wholly unrelated meanings, and reading a
+/// literal `& 0x10` at a call site is how the wound gate below spent months testing the faction
+/// tooltip's bit instead of its own (decision 2068). The reference gives each bit its own getter,
+/// which is the shape mirrored here — every consumer names the bit it wants:
+///
+/// | bit | reference getter | meaning |
+/// |---|---|---|
+/// | `0x1` | `0x529d15` | TAMEABLE |
+/// | `0x2` | `0x605f70` | VISIBLE_TO_GHOSTS |
+/// | `0x4` | `0x612530` | BOSS_MOB |
+/// | `0x8` | `0x6125f0` | [`DO_NOT_PLAY_WOUND_ANIM`] |
+/// | `0x10` | `0x612610` (inverted) | [`NO_FACTION_TOOLTIP`] |
+/// | `0x20` | `0x623b70` | [`MORE_AUDIBLE`] |
+/// | `0x40` | `0x60d840` | SPELL_ATTACKABLE / no harmful vertex colouring |
+/// | `0x80` | `0x613230` = `CanInteractWhileDead` | INTERACT_WHILE_DEAD |
+///
+/// (wow-re `object-layer/scratch/melee-blood-spurt-suppression.md` §6, bit numbering VERIFIED at
+/// each reader; the names corroborated by vmangos `CreatureDefines.h:146-152`.)
+pub(crate) mod type_flags {
+    /// `0x8` — **DO_NOT_PLAY_WOUND_ANIM**: this creature has nothing to flinch with. The
+    /// reference refuses the victim wound-flinch overlay outright for it (`0x60ea9f` inside the
+    /// flinch `0x60ea70`), whatever the trigger — a skeleton, a ghost, an elemental takes hits
+    /// without recoiling. It gates **only** the animation: the blood spurt is unaffected
+    /// (wow-re §8 Q1: "no blood-, creature-type- or display-record-keyed mechanism exists" —
+    /// a skeleton bleeds), and so is the floating combat text. Decision 2068.
+    pub(crate) const DO_NOT_PLAY_WOUND_ANIM: u32 = 0x8;
+
+    /// `0x10` — **NO_FACTION_TOOLTIP**: the unit tooltip drops its faction-name line
+    /// (the reference's `0x612610`, which returns the bit inverted).
+    pub(crate) const NO_FACTION_TOOLTIP: u32 = 0x10;
+
+    /// `0x20` — **MORE_AUDIBLE**: the pass-2 election re-links an off-screen creature for
+    /// tick-only so its combat stays audible (`0x607da0`'s `0x623b70` arm — wow-re
+    /// `outdoor-object-pass-election.md` §4, decision 1482).
+    pub(crate) const MORE_AUDIBLE: u32 = 0x20;
+}
+
 /// The name cache: players by guid, creatures by template entry, plus the in-flight ask-once sets.
 /// Filled by the net bridge; read (and query-triggered) through [`Self::resolve`].
 #[derive(Resource, Default)]
@@ -68,8 +109,8 @@ pub(crate) struct CreatureRecord {
     /// Elite rank 0..4 **as the template declares it** — read it through [`gated_rank`], never
     /// directly, unless you specifically want the ungated template value.
     pub(crate) rank: u32,
-    /// Template type flags — bit `0x10` (HIDE_FACTION_TOOLTIP) suppresses the tooltip's
-    /// faction-name line (the client's `0x612610` gate).
+    /// Template type flags — the wire dword, read bit by bit through [`type_flags`]. Never test a
+    /// literal against it: its bits are unrelated neighbours (decision 2068).
     pub(crate) type_flags: u32,
     pub(crate) civilian: bool,
     /// Racial leader — the tooltip's white LEADER line (`0x6125c0`).
@@ -207,19 +248,6 @@ impl NameCache {
         }
     }
 
-    /// The cached creature template's `type_flags` for a live guid — read-only, no query on a
-    /// miss. `None` = not a creature guid, or its template answer hasn't landed; the caller that
-    /// exists for (the parked-event gate, decision 1482) fails CLOSED on `None`, exactly as the
-    /// reference's `0x623b70` does on a null cached query record.
-    pub(crate) fn peek_type_flags(&self, guid_val: u64) -> Option<u32> {
-        if guid::pet_number(guid_val).is_some() || !guid::is_creature_or_pet(guid_val) {
-            return None; // a pet's cache entry is name-only; players/GOs carry no template flags
-        }
-        self.creatures
-            .get(&guid::entry(guid_val)?)
-            .and_then(|n| n.as_ref().map(|r| r.type_flags))
-    }
-
     /// Record a player-name answer. An empty wire name means the server doesn't know the guid —
     /// cached as a negative answer.
     ///
@@ -289,8 +317,19 @@ impl NameCache {
     }
 
     /// The whole cached record for a creature entry — the unit tooltip's read (subtitle, type,
-    /// rank word, civilian — decision 0276's level-line law). Read-only, the subname's ask-once
-    /// discipline.
+    /// rank word, civilian — decision 0276's level-line law), and the one route to a live unit's
+    /// [`type_flags`]. Read-only, the subname's ask-once discipline.
+    ///
+    /// **Key it off the unit's descriptor `OBJECT_FIELD_ENTRY`, never the entry in its guid**
+    /// (decision 2068): the reference registers this record under `[[unit+8]+0xc]` (`0x60b160`),
+    /// there is exactly one record per unit, and only the descriptor carries a template entry for
+    /// a `HIGHGUID_PET` guid — whose entry slot holds a pet number instead. A guid-keyed twin of
+    /// this read used to exist and is gone: two keys onto one field is how the readers drift.
+    ///
+    /// `None` = no template answer yet, and **each consumer decides what that means, because the
+    /// reference's per-bit getters do**: the parked-event gate (`MORE_AUDIBLE`, decision 1482)
+    /// fails CLOSED like `0x623b70`'s null leg, the wound gate (`DO_NOT_PLAY_WOUND_ANIM`, 2068)
+    /// fails OPEN like `0x6125f0`'s.
     pub(crate) fn creature_record(&self, entry: u32) -> Option<&CreatureRecord> {
         self.creatures.get(&entry)?.as_ref()
     }
