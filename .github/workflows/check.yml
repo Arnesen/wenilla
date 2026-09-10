@@ -68,7 +68,9 @@ jobs:
         with:
           key: client-carries
       - name: native Bevy dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
       # Compare the small carry against upstream's original math after every merge.
       - name: rig composition equivalence and browser budget
         run: |
