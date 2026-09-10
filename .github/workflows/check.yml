@@ -4,9 +4,9 @@
 # head is what wenilla-realm builds into the production image (bump-realm-pin.yml), so a red
 # `main` is a red image ~25 minutes later.
 #
-# Two jobs, both cheap next to the image build: the wasm target is *checked* (no codegen, no
-# wasm-bindgen pass), and the realm service's own tests run natively (mock SOAP, sqlite — no game
-# data). The full workspace test suite needs a 1.12.1 patch chain and is not run here.
+# The wasm target is checked; service/browser tests and targeted client-carry tests
+# catch behavior regressions after upstream merges. These need no game data. The
+# full workspace test suite needs a 1.12.1 patch chain and is not run here.
 name: check
 on:
   pull_request:
@@ -47,3 +47,32 @@ jobs:
           key: realm
       - name: cargo test -p wenilla-realm
         run: cargo test -p wenilla-realm
+      - name: browser startup and journal regressions
+        run: node --test web/tests/*.test.mjs
+      - name: host cache and relay regressions
+        run: cargo test -p wenilla-host
+      - name: UI listener ordering and mutation
+        run: |
+          cargo test -p benilla-ui --lib script::tests::events
+          cargo test -p benilla-ui --lib wenilla_listener
+  client-carries:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: client-carries
+      - name: native Bevy dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+      # Compare the small carry against upstream's original math after every merge.
+      - name: rig composition equivalence and browser budget
+        run: |
+          cargo test -p benilla-world --lib rig_anim::compose --no-default-features
+          cargo test -p benilla-world --lib web_budget --no-default-features

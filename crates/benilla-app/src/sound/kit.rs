@@ -75,7 +75,10 @@ pub(crate) struct SoundKits {
     catalog: SoundKitCatalog,
     /// Decoded SFX by (lowercased) path — kit variations are short files, decoded once and
     /// cheaply cloned per play (the frames are shared). The client's SoundFileDataCache analogue.
+    #[cfg(not(target_arch = "wasm32"))]
     cache: HashMap<String, StaticSoundData>,
+    #[cfg(target_arch = "wasm32")]
+    cache: deferred::SfxCache,
     /// wasm32: the files the browser is fetching and decoding for this cache, by the same key,
     /// with the plays waiting on each (`deferred`). Native fills the cache inline and has none.
     #[cfg(target_arch = "wasm32")]
@@ -1064,7 +1067,10 @@ impl SoundKits {
     pub(crate) fn new(catalog: SoundKitCatalog) -> Self {
         Self {
             catalog,
+            #[cfg(not(target_arch = "wasm32"))]
             cache: HashMap::new(),
+            #[cfg(target_arch = "wasm32")]
+            cache: deferred::SfxCache::default(),
             #[cfg(target_arch = "wasm32")]
             pending: HashMap::new(),
             pick: HashMap::new(),

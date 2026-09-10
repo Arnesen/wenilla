@@ -37,6 +37,27 @@ pub fn verify_password(hash: &str, password: &str) -> bool {
         .unwrap_or(false)
 }
 
+// Bound memory-hard work across login, setup and password changes. The permit
+// stays in the blocking task even if its HTTP caller disconnects.
+static PASSWORD_WORK: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+async fn password_work<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> anyhow::Result<T> {
+    let permit = PASSWORD_WORK.acquire().await?;
+    Ok(tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await?)
+}
+
+pub async fn verify_password_async(hash: &str, password: &str) -> anyhow::Result<bool> {
+    let hash = hash.to_owned();
+    let password = password.to_owned();
+    password_work(move || verify_password(&hash, &password)).await
+}
+
 pub fn valid_username(u: &str) -> bool {
     (3..=32).contains(&u.len())
         && u.chars()
@@ -81,7 +102,8 @@ async fn store(
     must_change: bool,
     expires_at: Option<i64>,
 ) -> anyhow::Result<()> {
-    let hash = hash_password(password)?;
+    let password = password.to_owned();
+    let hash = password_work(move || hash_password(&password)).await??;
     sqlx::query(
         "INSERT INTO local_credentials (user_id, password_hash, must_change, expires_at, updated_at) VALUES (?, ?, ?, ?, ?) \
          ON CONFLICT(user_id) DO UPDATE SET password_hash = excluded.password_hash, must_change = excluded.must_change, expires_at = excluded.expires_at, updated_at = excluded.updated_at",
@@ -105,7 +127,15 @@ pub fn router() -> Router<Arc<AppState>> {
 async fn login_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
     if let Some(t) = jar.get(session::COOKIE) {
         if let Ok(Some(s)) = session::lookup(&state.db, t.value()).await {
-            return Redirect::to(if s.user.is_admin() { "/admin" } else { "/" }).into_response();
+            let jar = match s.fresh_token {
+                Some(token) => jar.add(session::cookie(token, !state.cfg.cookie_insecure)),
+                None => jar,
+            };
+            return (
+                jar,
+                Redirect::to(if s.user.is_admin() { "/admin" } else { "/" }),
+            )
+                .into_response();
         }
     }
     render(templates::Login {
@@ -158,10 +188,12 @@ async fn login_submit(
     .fetch_optional(&state.db)
     .await?;
     let ok = match &row {
-        Some((_, hash, _, disabled, _)) => *disabled == 0 && verify_password(hash, &form.password),
+        Some((_, hash, _, disabled, _)) => {
+            verify_password_async(hash, &form.password).await? && *disabled == 0
+        }
         // Burn the same time on unknown users so the response does not say which it was.
         None => {
-            let _ = verify_password("$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$Wf1yQwVQqk4jTfGCe3Fj5UOX0f8kO0m6mOQWhNfR2nY", &form.password);
+            let _ = verify_password_async("$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$Wf1yQwVQqk4jTfGCe3Fj5UOX0f8kO0m6mOQWhNfR2nY", &form.password).await?;
             false
         }
     };
@@ -311,10 +343,11 @@ async fn password_submit(
             .bind(session.user.id)
             .fetch_optional(&state.db)
             .await?;
-    if !row
-        .map(|r| verify_password(&r.0, &f.current))
-        .unwrap_or(false)
-    {
+    let verified = match row {
+        Some((hash,)) => verify_password_async(&hash, &f.current).await?,
+        None => false,
+    };
+    if !verified {
         return Ok(fail("current password is wrong"));
     }
     if f.new != f.confirm {

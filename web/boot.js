@@ -7,7 +7,7 @@
 // the first frame the app could draw. So the page owns a DOM overlay, and it does two jobs:
 //
 //   1. SHOW what is happening: a byte-counted wasm download bar (the counting stream is
-//      re-wrapped in a Response so `WebAssembly.instantiateStreaming` still streams), a
+//      re-wrapped in a Response so `WebAssembly.compileStreaming` still streams), a
 //      "game data N/M" line for the prefetch, then indeterminate "Starting…" states driven by
 //      the client's own `window.__wenilla_progress(stage)` calls (benilla-app/src/webprogress.rs)
 //      until "ready" — the first glue screen — fades the overlay out.
@@ -45,21 +45,17 @@ export async function boot(init, opts = {}) {
         () => ui.setData(0, 0)
       );
 
-  const wasm = fetchWasm(new URL('./wenilla_bg.wasm', import.meta.url), (got, total) =>
+  // Compile immediately: merely fetching a Response leaves its body backpressured until
+  // someone consumes it. Instantiation must still wait for the cache warmup because the
+  // game's Startup performs synchronous reads of the prefetched catalogs.
+  const wasm = compileWasm(new URL('./wenilla_bg.wasm', import.meta.url), (got, total) =>
     ui.setWasmProgress(got, total)
   );
-  // The prefetch is AWAITED before init(), and that is the whole trick. init() runs the app's
-  // Startup soon after, and Startup is ~100+ *synchronous serial* chain reads in one rAF task:
-  // on a 100 ms-RTT link that task measured 50 s uncached — the Mac "unresponsive tab" — and
-  // still 25 s when the pool merely raced it (A/B, 2026-08-31). Waiting here costs the same
-  // wall-clock the reads would cost anyway, but it is spent on a moving progress bar with the
-  // page responsive, and the catalog task then runs against a warm cache (~2 s, parse-bound).
-  // The wasm download + streaming compile still overlap the pool: fetchWasm() is already
-  // in flight, only `init()` — instantiation + plugin build — moves after the data.
-  await prefetch;
   let w;
   try {
-    w = await init({ module_or_path: wasm });
+    // Attach rejection handlers to both operations now, including while prefetch is pending.
+    const [module] = await Promise.all([wasm, prefetch]);
+    w = await init({ module_or_path: module });
   } catch (e) {
     ui.fail('The client failed to start: ' + (e && e.message ? e.message : e));
     throw e;
@@ -72,11 +68,23 @@ export async function boot(init, opts = {}) {
   return w;
 }
 
+// Match wasm-bindgen's non-streaming fallback for servers without the WASM MIME type.
+// Choose before consuming the body, avoiding a cloned response buffering the whole module.
+async function compileWasm(url, onBytes) {
+  const response = await fetchWasm(url, onBytes);
+  if (!response.ok) throw new Error(`Client download failed (HTTP ${response.status})`);
+  if (typeof WebAssembly.compileStreaming === 'function' &&
+      response.headers.get('content-type')?.trim().toLowerCase() === 'application/wasm') {
+    return WebAssembly.compileStreaming(response);
+  }
+  return WebAssembly.compile(await response.arrayBuffer());
+}
+
 /// Byte-counting fetch of the wasm, re-wrapped so streaming compilation survives. Returns a
-/// Promise<Response> — wasm-bindgen's init feeds it straight to instantiateStreaming.
+/// Promise<Response> consumed immediately by compileWasm, before game instantiation.
 async function fetchWasm(url, onBytes) {
   const r = await fetch(url);
-  if (!r.ok || !r.body) return r; // let init surface the real error / non-streaming fallback
+  if (!r.ok || !r.body) return r; // compileWasm surfaces HTTP errors / handles a missing stream
   const contentLength = Number(r.headers.get('content-length')) || 0;
   const compressed = !!(r.headers.get('content-encoding') || '').trim();
   const total = contentLength ? contentLength * (compressed ? BR_RATIO : 1) : 0;
@@ -98,7 +106,7 @@ async function fetchWasm(url, onBytes) {
       return reader.cancel(reason);
     },
   });
-  // Headers are copied so Content-Type: application/wasm survives — instantiateStreaming
+  // Headers are copied so Content-Type: application/wasm survives — compileStreaming
   // refuses anything else.
   return new Response(counted, { status: r.status, statusText: r.statusText, headers: r.headers });
 }

@@ -19,6 +19,9 @@ use bevy::prelude::*;
 use bevy::tasks::futures_lite::future;
 use bevy::tasks::{block_on, AsyncComputeTaskPool, Task};
 
+#[cfg(any(target_arch = "wasm32", test))]
+mod web_budget;
+
 /// Wall-clock spent per frame *attaching* finished colliders before deferring the rest to a later
 /// frame — the collider twin of `SPAWN_BUDGET`, and for the same reason. Measured cost of one attach
 /// (decision 0610): ~0.004 ms per entity plus ~1.8e-5 ms per triangle, so a burst of a thousand-odd
@@ -71,6 +74,8 @@ pub(super) fn finish_colliders(
     world: &mut World,
     state: &mut SystemState<Query<'static, 'static, (Entity, &mut PendingCollider)>>,
 ) {
+    #[cfg(target_arch = "wasm32")]
+    web_budget::begin_frame();
     // Pass 1 — poll in-flight builds. A completed task hands its shape to `built`, so running out of
     // budget below can never drop a finished collider on the floor.
     //
@@ -319,6 +324,9 @@ pub(super) fn impassable_wall_data(
 /// attaches the result. A few-frame delay in collision for just-streamed *static* geometry is
 /// imperceptible — the streamer loads ahead of the view, so you never reach it before it's solid.
 pub fn build_collider_task(verts: Vec<Vec3>, tris: Vec<[u32; 3]>) -> Task<Collider> {
+    #[cfg(target_arch = "wasm32")]
+    return web_budget::build(verts, tris);
+    #[cfg(not(target_arch = "wasm32"))]
     AsyncComputeTaskPool::get().spawn(async move { Collider::trimesh(verts, tris) })
 }
 

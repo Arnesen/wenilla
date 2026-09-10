@@ -29,6 +29,9 @@ use crate::ui_chat::ChatEvent;
 
 use super::BridgeConfig;
 
+#[path = "nearby.rs"]
+mod nearby;
+
 /// Everything the snapshot reads, as one parameter (the `UnitStores` idiom: Bevy's tuple limit
 /// is sixteen, and the outbound system has its own parameters besides). Every resource is
 /// `Option` for the same reason the unit feed's are — a UI-only harness runs without the net
@@ -170,18 +173,28 @@ impl BridgeReadout<'_, '_> {
         m.push(("self".into(), me));
 
         // ── units within the radius, nearest first ──
-        let mut rows: Vec<(f32, PlainValue)> = Vec::new();
-        let mut target = PlainValue::Null;
         let target_guid = self.selection.as_ref().and_then(|s| s.guid);
-        let radius2 = cfg.radius * cfg.radius;
-        for (guid, net, transform, store, motion) in self.units.iter() {
-            let d2 =
-                player_pos.map_or(f32::INFINITY, |p| p.distance_squared(transform.translation));
-            let is_target = Some(guid.0) == target_guid;
-            if d2 > radius2 && !is_target {
-                continue;
-            }
-            let row = self.unit_row(
+        let (candidates, target_candidate) = nearby::select(
+            self.units.iter().map(|row| {
+                let (guid, _, transform, _, _) = row;
+                let d2 =
+                    player_pos.map_or(f32::INFINITY, |p| p.distance_squared(transform.translation));
+                (d2, Some(guid.0) == target_guid, row)
+            }),
+            cfg.radius * cfg.radius,
+            cfg.max_units,
+        );
+        let payload = |(d2, (guid, net, transform, store, motion)): (
+            f32,
+            (
+                &Guid,
+                &NetEntity,
+                &Transform,
+                Option<&ObjectStore>,
+                Option<&MovementState>,
+            ),
+        )| {
+            self.unit_row(
                 guid.0,
                 net,
                 transform,
@@ -190,16 +203,27 @@ impl BridgeReadout<'_, '_> {
                 self_store,
                 d2.sqrt(),
                 chr,
-            );
-            if is_target {
-                target = row.clone();
-            }
-            if d2 <= radius2 {
-                rows.push((d2, row));
+            )
+        };
+        let mut target = PlainValue::Null;
+        let rows = candidates
+            .into_iter()
+            .map(|candidate| {
+                let row = payload(candidate);
+                let (_, (guid, ..)) = candidate;
+                if Some(guid.0) == target_guid {
+                    target = row.clone();
+                }
+                row
+            })
+            .collect();
+        // A selected target shares its constructed payload. Targets outside the radius or
+        // nearest-K result are still reported independently, including when max_units is zero.
+        if target == PlainValue::Null {
+            if let Some(candidate) = target_candidate {
+                target = payload(candidate);
             }
         }
-        rows.sort_by(|a, b| a.0.total_cmp(&b.0));
-        rows.truncate(cfg.max_units);
         m.push(("target".into(), target));
         m.push((
             "hover".into(),
@@ -210,10 +234,7 @@ impl BridgeReadout<'_, '_> {
                     PlainValue::Map(vec![("guid".into(), guid_payload(g))])
                 }),
         ));
-        m.push((
-            "units".into(),
-            PlainValue::List(rows.into_iter().map(|(_, r)| r).collect()),
-        ));
+        m.push(("units".into(), PlainValue::List(rows)));
         PlainValue::Map(m)
     }
 

@@ -75,6 +75,7 @@ async fn harness() -> Harness {
         .await
         .unwrap();
     let state = Arc::new(AppState {
+        setup_cache: Default::default(),
         realmdb: realmdb::connect(&cfg.mariadb_url).await.unwrap(),
         soap: soap::Client::new(&cfg.soap_url, "ADMINISTRATOR", "ADMINISTRATOR"),
         conf: mangos_conf::ConfFiles::in_dir(&conf_dir),
@@ -631,4 +632,21 @@ async fn a_self_chosen_password_never_expires() {
         send(&h.app, get("/admin", Some(&admin))).await.status,
         StatusCode::OK
     );
+}
+
+#[tokio::test]
+async fn setup_cache_refreshes_after_completion_and_external_reset() {
+    let h = harness().await;
+    assert!(!h.state.setup_complete().await.unwrap());
+    h.state.mark_setup_complete().await.unwrap();
+    assert!(h.state.setup_complete().await.unwrap());
+    db::meta_set(&h.state.db, "setup_complete", "0")
+        .await
+        .unwrap();
+    // Simulate TTL expiry without a wall-clock sleep.
+    *h.state.setup_cache.lock().await = Some((
+        std::time::Instant::now() - std::time::Duration::from_secs(6),
+        true,
+    ));
+    assert!(!h.state.setup_complete().await.unwrap());
 }

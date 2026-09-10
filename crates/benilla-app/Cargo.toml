@@ -218,6 +218,9 @@ kira = { version = "0.12", features = ["cpal"] }
 # fetches over `fetch` and decodes through `OfflineAudioContext::decodeAudioData`, both off the
 # main thread, because doing either on it froze the frame at every zone line and doorway.
 web-sys = { version = "0.3", features = [
+    "AbortController",
+    "AbortSignal",
+    "RequestInit",
     "Window",
     "Location",
     "Storage",

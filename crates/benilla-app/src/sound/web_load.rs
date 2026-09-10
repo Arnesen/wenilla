@@ -60,7 +60,8 @@
 //! divergence is the intro fanfare's `MinDelayMinutes` stamp: it is taken when the load *starts*
 //! rather than when the track plays, so a load that fails consumes the cooldown.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
@@ -87,16 +88,33 @@ pub(super) struct Pending {
     /// holds these is a Bevy `Resource` and the narration's is a `Local`, both of which demand
     /// it. wasm has one thread, so the lock is never contended — it is a type-level formality.
     slot: Arc<Mutex<Option<Result<StaticSoundData, String>>>>,
+    request_id: u64,
 }
 
 impl Pending {
     /// The result, once the browser has it. `None` = still in flight.
     ///
-    /// A `Pending` that is dropped while still running (the player crossed a second border before
-    /// the first load landed) leaves its task writing into an `Arc` nobody reads — the last edge
-    /// wins, which is the same answer the synchronous path gave.
+    /// Dropping a pending load aborts its fetch. A decode already in progress may finish,
+    /// but cancellation prevents its PCM copy and the weak completion retains no result.
     pub(super) fn take(&mut self) -> Option<Result<StaticSoundData, String>> {
         self.slot.lock().unwrap_or_else(|p| p.into_inner()).take()
+    }
+}
+
+// JS handles cannot be carried in a Send Bevy resource. Only the numeric ID
+// lives in Pending; this registry is accessed on the browser's sole thread.
+thread_local! {
+    static REQUESTS: RefCell<HashMap<u64, web_sys::AbortController>> = RefCell::new(HashMap::new());
+    static NEXT_REQUEST: Cell<u64> = const { Cell::new(0) };
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        REQUESTS.with(|requests| {
+            if let Some(controller) = requests.borrow_mut().remove(&self.request_id) {
+                controller.abort();
+            }
+        });
     }
 }
 
@@ -120,28 +138,51 @@ pub(super) fn begin(
     looping: bool,
 ) -> Pending {
     let slot: Arc<Mutex<Option<Result<StaticSoundData, String>>>> = Arc::new(Mutex::new(None));
-    let write = slot.clone();
-    wasm_bindgen_futures::spawn_local(async move {
-        let out = fetch_and_decode(&url, looping).await;
-        *write.lock().unwrap_or_else(|p| p.into_inner()) = Some(out);
+    let write = Arc::downgrade(&slot);
+    let request_id = NEXT_REQUEST.with(|next| {
+        let id = next.get();
+        next.set(id.wrapping_add(1));
+        id
     });
+    match web_sys::AbortController::new() {
+        Ok(controller) => {
+            REQUESTS.with(|requests| requests.borrow_mut().insert(request_id, controller.clone()));
+            wasm_bindgen_futures::spawn_local(async move {
+                let signal = controller.signal();
+                let out = fetch_and_decode(&url, looping, &signal).await;
+                REQUESTS.with(|requests| requests.borrow_mut().remove(&request_id));
+                if let Some(write) = write.upgrade() {
+                    *write.lock().unwrap_or_else(|p| p.into_inner()) = Some(out);
+                }
+            });
+        }
+        Err(error) => *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(Err(js_err(error))),
+    }
     Pending {
         kit_id,
         kit_vol,
         path,
         fade_ms,
         slot,
+        request_id,
     }
 }
 
 /// `fetch` the bytes, then decode them — in the browser where possible, in wasm where not.
-async fn fetch_and_decode(url: &str, looping: bool) -> Result<StaticSoundData, String> {
+async fn fetch_and_decode(
+    url: &str,
+    looping: bool,
+    signal: &web_sys::AbortSignal,
+) -> Result<StaticSoundData, String> {
     let window = web_sys::window().ok_or("no window: fetch is browser-only")?;
-    let resp: web_sys::Response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(url))
-        .await
-        .map_err(js_err)?
-        .dyn_into()
-        .map_err(|_| "fetch() did not resolve to a Response".to_string())?;
+    let options = web_sys::RequestInit::new();
+    options.set_signal(Some(signal));
+    let resp: web_sys::Response =
+        wasm_bindgen_futures::JsFuture::from(window.fetch_with_str_and_init(url, &options))
+            .await
+            .map_err(js_err)?
+            .dyn_into()
+            .map_err(|_| "fetch() did not resolve to a Response".to_string())?;
     if !resp.ok() {
         return Err(format!("HTTP {}", resp.status()));
     }
@@ -152,14 +193,21 @@ async fn fetch_and_decode(url: &str, looping: bool) -> Result<StaticSoundData, S
             .dyn_into()
             .map_err(|_| "body did not resolve to an ArrayBuffer".to_string())?;
 
+    if signal.aborted() {
+        return Err("audio load cancelled".into());
+    }
+
     // The fallback copy MUST be taken here: `decodeAudioData` DETACHES the buffer it is given, so
     // a copy taken afterwards would be empty. It is one memcpy of the compressed file (~1 MB), not
     // of the decoded PCM, and it is what makes the ADPCM fallback below possible at all.
     let bytes = js_sys::Uint8Array::new(&buf).to_vec();
 
-    let data = match decode_in_browser(&buf).await {
+    let data = match decode_in_browser(&buf, signal).await {
         Ok(data) => data,
         Err(e) => {
+            if signal.aborted() {
+                return Err("audio load cancelled".into());
+            }
             debug!("web_load: decodeAudioData refused ({e}) — decoding in wasm instead");
             super::mixer::sfx_from_bytes(bytes).map_err(|e| format!("{e:#}"))?
         }
@@ -168,7 +216,10 @@ async fn fetch_and_decode(url: &str, looping: bool) -> Result<StaticSoundData, S
 }
 
 /// `decodeAudioData` on the decode-only offline context, into kira's PCM.
-async fn decode_in_browser(buf: &js_sys::ArrayBuffer) -> Result<StaticSoundData, String> {
+async fn decode_in_browser(
+    buf: &js_sys::ArrayBuffer,
+    signal: &web_sys::AbortSignal,
+) -> Result<StaticSoundData, String> {
     let ctx = decode_context()?;
     let promise = ctx.decode_audio_data(buf).map_err(js_err)?;
     let audio: web_sys::AudioBuffer = wasm_bindgen_futures::JsFuture::from(promise)
@@ -176,6 +227,10 @@ async fn decode_in_browser(buf: &js_sys::ArrayBuffer) -> Result<StaticSoundData,
         .map_err(js_err)?
         .dyn_into()
         .map_err(|_| "decodeAudioData did not resolve to an AudioBuffer".to_string())?;
+    // decodeAudioData itself cannot be aborted; avoid PCM copies after cancellation.
+    if signal.aborted() {
+        return Err("audio load cancelled".into());
+    }
     // The one part of this that IS on the main thread: copying the browser's planar channels
     // into kira's interleaved frames — a memcpy, measured under the 8 ms floor at every size in
     // the corpus, where the decode it replaces was 91 ms.

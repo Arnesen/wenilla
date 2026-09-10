@@ -12,21 +12,50 @@
 
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{header, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::{Json, Router};
+use axum::Router;
 use benilla_formats::Chain;
+use tokio::sync::OnceCell;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::compression::CompressionLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 /// Router state: the opened patch chain. `Chain::read`/`list` are `&self` and lock-free (see the
-/// chain module doc), so cloning the `Arc` per request is the whole synchronization story.
+/// chain module doc). The serialized index is shared across requests for this mounted chain.
 #[derive(Clone)]
 pub struct DataState {
     pub chain: Arc<Chain>,
+    index: Arc<IndexCache>,
+}
+
+/// Single-flight initialization; transient list errors are retried on the next request.
+#[derive(Default)]
+struct IndexCache(Arc<OnceCell<Bytes>>);
+
+impl IndexCache {
+    async fn get(
+        &self,
+        build: impl FnOnce() -> anyhow::Result<Vec<u8>> + Send + 'static,
+    ) -> anyhow::Result<Bytes> {
+        if let Some(bytes) = self.0.get() {
+            return Ok(bytes.clone());
+        }
+        let cell = Arc::clone(&self.0);
+        // The initializer owns the cell independently of this request. Dropping a request
+        // cannot cancel spawn_blocking, so keep its result and single-flight guard alive too.
+        tokio::spawn(async move {
+            cell.get_or_try_init(|| async move {
+                tokio::task::spawn_blocking(build).await?.map(Bytes::from)
+            })
+            .await
+            .cloned()
+        })
+        .await?
+    }
 }
 
 /// Build the `/data/*` router. Kept separate from `static_site`'s and `ws`'s so `main.rs` can
@@ -51,7 +80,10 @@ pub fn router(chain: Arc<Chain>) -> Router {
             HeaderName::from_static("cross-origin-resource-policy"),
             HeaderValue::from_static("same-origin"),
         ))
-        .with_state(DataState { chain })
+        .with_state(DataState {
+            chain,
+            index: Arc::default(),
+        })
 }
 
 /// Which bodies are worth compressing, as a value rather than inline in [`router`] so the tests
@@ -152,27 +184,25 @@ async fn file(method: Method, uri: Uri, State(state): State<DataState>) -> Respo
 /// (Lane A) to mirror the native directory walk it can't do in a browser.
 async fn index(State(state): State<DataState>) -> Response {
     let chain = Arc::clone(&state.chain);
-    let listed = tokio::task::spawn_blocking(move || chain.list()).await;
-    match listed {
-        Ok(Ok(entries)) => {
+    let listed = state
+        .index
+        .get(move || {
+            let entries = chain.list()?;
             let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-            // Cacheable, unlike before: the wasm `Chain` now reads this once per session to
-            // answer `contains` from memory (its struct doc has the numbers), and `web/boot.js`
-            // prefetches it at character select so that read is a cache hit. A day, not the
-            // files' year: the list changes when an operator adds a patch archive, and a stale
-            // index would make the client believe those files absent until it expires.
-            (
-                [(header::CACHE_CONTROL, "private, max-age=86400")],
-                Json(names),
-            )
-                .into_response()
-        }
-        Ok(Err(e)) => {
-            tracing::error!(error = %e, "chain list failed");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-        Err(join_err) => {
-            tracing::error!(error = %join_err, "chain list task panicked");
+            Ok(serde_json::to_vec(&names)?)
+        })
+        .await;
+    match listed {
+        Ok(bytes) => (
+            [
+                (header::CACHE_CONTROL, "private, max-age=86400"),
+                (header::CONTENT_TYPE, "application/json"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "chain index initialization failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
@@ -184,6 +214,102 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn index_cache_coalesces_requests_and_is_scoped_to_mount() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let cache = Arc::new(super::IndexCache::default());
+        let builds = Arc::new(AtomicUsize::new(0));
+        let mut requests = Vec::new();
+        for _ in 0..32 {
+            let cache = cache.clone();
+            let builds = builds.clone();
+            requests.push(tokio::spawn(async move {
+                cache
+                    .get(move || {
+                        builds.fetch_add(1, Ordering::SeqCst);
+                        Ok(br#"["Interface\\FrameXML\\UI.lua"]"#.to_vec())
+                    })
+                    .await
+                    .unwrap()
+            }));
+        }
+        let mut first: Option<super::Bytes> = None;
+        for request in requests {
+            let bytes = request.await.unwrap();
+            if let Some(ref prior) = first {
+                assert_eq!(&bytes, prior);
+                assert_eq!(bytes.as_ptr(), prior.as_ptr());
+            } else {
+                first = Some(bytes);
+            }
+        }
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        let new_mount = super::IndexCache::default();
+        let bytes = new_mount.get(|| Ok(b"[]".to_vec())).await.unwrap();
+        assert_eq!(&bytes[..], b"[]");
+    }
+
+    #[tokio::test]
+    async fn index_cache_retains_initialization_when_first_request_is_canceled() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let cache = Arc::new(super::IndexCache::default());
+        let builds = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first_cache = cache.clone();
+        let first_builds = builds.clone();
+        let first = tokio::spawn(async move {
+            first_cache
+                .get(move || {
+                    first_builds.fetch_add(1, Ordering::SeqCst);
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(br#"["first"]"#.to_vec())
+                })
+                .await
+        });
+        // Cancel only after the blocking work has definitely started and cannot be canceled.
+        started_rx.await.unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let later_builds = builds.clone();
+        let later_cache = cache.clone();
+        let later = tokio::spawn(async move {
+            later_cache
+                .get(move || {
+                    later_builds.fetch_add(1, Ordering::SeqCst);
+                    Ok(br#"["duplicate"]"#.to_vec())
+                })
+                .await
+                .unwrap()
+        });
+        release_tx.send(()).unwrap();
+        let bytes = later.await.unwrap();
+        assert_eq!(&bytes[..], br#"["first"]"#);
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        let warm = cache
+            .get(|| panic!("warm cache must not rebuild"))
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ptr(), warm.as_ptr());
+    }
+
+    #[tokio::test]
+    async fn index_cache_retries_failed_initialization() {
+        let cache = super::IndexCache::default();
+        assert!(cache
+            .get(|| anyhow::bail!("temporary read failure"))
+            .await
+            .is_err());
+        assert_eq!(&cache.get(|| Ok(b"[]".to_vec())).await.unwrap()[..], b"[]");
+    }
 
     /// Run one GET through the real predicate behind a handler that answers with `content_type`
     /// and `len` bytes, and report what `Content-Encoding` came back. `aaaa...` is maximally

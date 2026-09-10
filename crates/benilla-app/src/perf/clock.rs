@@ -6,6 +6,10 @@
 //! of. [`system_cpu_ticks`] says how loaded the machine was while we measured, so two legs can be
 //! told apart from two moods of the same leg (1157).
 
+#[cfg(windows)]
+#[path = "clock_windows.rs"]
+mod windows;
+
 /// Whole-process CPU seconds consumed so far — **user + system, summed across every thread**
 /// (`getrusage(RUSAGE_SELF)`).
 ///
@@ -16,7 +20,7 @@
 /// report is written in ("250 % CPU at 59 fps" against 1.12.1's "100 % at 160"), so a probe that
 /// prints it can be compared against a reporter's number directly.
 ///
-/// Non-unix returns `None`: the probes print the field only where the platform answers.
+/// Windows uses `GetProcessTimes`; unsupported platforms return `None`.
 pub(crate) fn process_cpu_secs() -> Option<f64> {
     #[cfg(unix)]
     {
@@ -31,7 +35,11 @@ pub(crate) fn process_cpu_secs() -> Option<f64> {
             Some(secs(ru.ru_utime) + secs(ru.ru_stime))
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows::process_cpu_secs()
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         None
     }
@@ -73,7 +81,7 @@ pub(crate) fn process_faults() -> Option<(u64, u64)> {
 /// becomes "whichever worker happened to run this system", which is noise shaped like a
 /// measurement.
 ///
-/// Non-unix returns `None`, like its twin.
+/// Windows uses `GetThreadTimes`; unsupported platforms return `None`, like its twin.
 pub(crate) fn main_thread_cpu_secs() -> Option<f64> {
     #[cfg(unix)]
     {
@@ -87,7 +95,11 @@ pub(crate) fn main_thread_cpu_secs() -> Option<f64> {
             Some(ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9)
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows::main_thread_cpu_secs()
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         None
     }

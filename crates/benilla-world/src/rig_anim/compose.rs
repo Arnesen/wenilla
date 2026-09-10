@@ -41,6 +41,10 @@ use crate::view::WorldCamera;
 
 use super::{AnimParked, RigFrame, RigPose};
 
+#[cfg(not(target_os = "macos"))]
+#[path = "compose_scratch.rs"]
+mod compose_scratch;
+
 /// The pose post-pass window: every writer of [`RigPose`] locals that runs after the evaluator
 /// (the body twist, the global-sequence channels) is a member; the model compose runs after the
 /// whole set. Configured after [`bevy::app::AnimationSystems`], before transform propagation.
@@ -187,6 +191,7 @@ pub fn finalize_rig_worlds(
     frames: Query<&RigFrame>,
     ibps: Res<Assets<SkinnedMeshInverseBindposes>>,
     mut palettes: ResMut<RigPalettes>,
+    #[cfg(not(target_os = "macos"))] mut scratch: Local<compose_scratch::RigWorldScratch>,
 ) {
     let cam_basis = cam
         .single()
@@ -250,7 +255,10 @@ pub fn finalize_rig_worlds(
             // rebase is worth; see `rig_palette::rebase_origin`.)
             let origin = crate::rig_palette::rebase_origin(root_g.translation());
             let root_rel = crate::rig_palette::rebase_global(root_g, origin);
+            #[cfg(target_os = "macos")]
             let (worlds, touched) = rig_worlds(rig, root_rel, cam_basis);
+            #[cfg(not(target_os = "macos"))]
+            let (worlds, touched) = scratch.compose(rig, root_rel, cam_basis);
             if let Some(skin) = skin {
                 if let Some(ibp) = ibps.get(&skin.ibp) {
                     palettes.write_rig_worlds(skin, &worlds, ibp, origin);
