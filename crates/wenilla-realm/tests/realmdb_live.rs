@@ -32,6 +32,17 @@ async fn characters_decode_from_a_real_cmangos_schema() {
         !chars.is_empty(),
         "WOWCHAT has characters in this database; an empty answer means the query lost them"
     );
+    let mut batch = wenilla_realm::realmdb::characters_for_accounts(&pool, &["WOWCHAT"])
+        .await
+        .expect("batched characters must decode a real cmangos row");
+    let batched = batch
+        .remove("WOWCHAT")
+        .expect("account is grouped by username");
+    assert_eq!(
+        serde_json::to_value(&batched).unwrap(),
+        serde_json::to_value(&chars).unwrap(),
+        "batch preserves character fields and sort order"
+    );
     wenilla_realm::realmdb::online(&pool)
         .await
         .expect("online() must decode a real cmangos row");

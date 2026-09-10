@@ -22,6 +22,7 @@ use crate::AppState;
 pub const COOKIE: &str = "wr_session";
 const MAX_AGE_SECS: i64 = 30 * 24 * 3600;
 const ROTATE_AFTER_SECS: i64 = 24 * 3600;
+const ROTATION_GRACE_SECS: i64 = 60;
 const TOUCH_EVERY_SECS: i64 = 5 * 60;
 
 #[derive(Clone, Debug, sqlx::FromRow)]
@@ -106,8 +107,10 @@ pub async fn create(
 }
 
 pub async fn delete_by_token(db: &SqlitePool, token: &str) -> Result<()> {
-    sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
+    sqlx::query("DELETE FROM sessions WHERE token_hash = ? OR (previous_token_hash = ? AND previous_valid_until > ?)")
         .bind(hash(token))
+        .bind(hash(token))
+        .bind(now())
         .execute(db)
         .await?;
     Ok(())
@@ -125,31 +128,51 @@ pub async fn delete_for_user(db: &SqlitePool, user_id: i64) -> Result<()> {
 /// Resolve a cookie token to a live session, touching/rotating it as a side effect.
 pub async fn lookup(db: &SqlitePool, token: &str) -> Result<Option<Session>> {
     let t = now();
-    let row: Option<(i64, i64, String, i64, i64)> = sqlx::query_as(
-        "SELECT id, user_id, csrf_token, rotated_at, last_seen FROM sessions WHERE token_hash = ? AND expires_at > ?",
+    #[derive(sqlx::FromRow)]
+    struct Lookup {
+        id: i64,
+        user_id: i64,
+        csrf_token: String,
+        rotated_at: i64,
+        last_seen: i64,
+        username: String,
+        display_name: String,
+        role: String,
+        disabled: i64,
+        must_change: i64,
+    }
+    let token_hash = hash(token);
+    let row: Option<Lookup> = sqlx::query_as(
+        "SELECT s.id, s.user_id, s.csrf_token, s.rotated_at, s.last_seen, \
+         u.username, u.display_name, u.role, u.disabled, COALESCE(c.must_change, 0) AS must_change \
+         FROM sessions s JOIN users u ON u.id = s.user_id \
+         LEFT JOIN local_credentials c ON c.user_id = u.id \
+         WHERE (s.token_hash = ? OR (s.previous_token_hash = ? AND s.previous_valid_until > ?)) \
+         AND s.expires_at > ? AND u.disabled = 0",
     )
-    .bind(hash(token))
+    .bind(&token_hash)
+    .bind(&token_hash)
+    .bind(t)
     .bind(t)
     .fetch_optional(db)
     .await?;
-    let Some((id, user_id, csrf_token, rotated_at, last_seen)) = row else {
+    let Some(row) = row else {
         return Ok(None);
     };
-    // The join rides along with the user row rather than costing a second round trip: this runs
-    // on every request behind a session, `/data/*` included (hundreds per boot).
-    let row: Option<(i64, String, String, String, i64, i64)> = sqlx::query_as(
-        "SELECT u.id, u.username, u.display_name, u.role, u.disabled, COALESCE(c.must_change, 0) \
-         FROM users u LEFT JOIN local_credentials c ON c.user_id = u.id \
-         WHERE u.id = ? AND u.disabled = 0",
-    )
-    .bind(user_id)
-    .fetch_optional(db)
-    .await?;
-    let Some((id_, username, display_name, role, disabled, must_change)) = row else {
-        return Ok(None);
-    };
+    let Lookup {
+        id,
+        user_id,
+        csrf_token,
+        rotated_at,
+        last_seen,
+        username,
+        display_name,
+        role,
+        disabled,
+        must_change,
+    } = row;
     let user = User {
-        id: id_,
+        id: user_id,
         username,
         display_name,
         role,
@@ -158,15 +181,22 @@ pub async fn lookup(db: &SqlitePool, token: &str) -> Result<Option<Session>> {
     let mut fresh_token = None;
     if t - rotated_at > ROTATE_AFTER_SECS {
         let token = new_token();
-        sqlx::query("UPDATE sessions SET token_hash = ?, rotated_at = ?, last_seen = ?, expires_at = ? WHERE id = ?")
+        // Compare-and-swap: concurrent old-token requests may authenticate, but only
+        // the winner sends a cookie. A later response cannot overwrite it with a loser.
+        let updated = sqlx::query("UPDATE sessions SET previous_token_hash = token_hash, previous_valid_until = ?, token_hash = ?, rotated_at = ?, last_seen = ?, expires_at = ? WHERE id = ? AND token_hash = ? AND rotated_at = ?")
+            .bind(t + ROTATION_GRACE_SECS)
             .bind(hash(&token))
             .bind(t)
             .bind(t)
             .bind(t + MAX_AGE_SECS)
             .bind(id)
+            .bind(&token_hash)
+            .bind(rotated_at)
             .execute(db)
             .await?;
-        fresh_token = Some(token);
+        if updated.rows_affected() == 1 {
+            fresh_token = Some(token);
+        }
     } else if t - last_seen > TOUCH_EVERY_SECS {
         sqlx::query("UPDATE sessions SET last_seen = ? WHERE id = ?")
             .bind(t)
@@ -273,12 +303,13 @@ pub async fn require_session(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    if session.must_change_password && req.uri().path() != PASSWORD_CHANGE_PATH {
-        return must_change_first(&req);
-    }
     let fresh = session.fresh_token.clone();
-    req.extensions_mut().insert(session);
-    let mut resp = next.run(req).await;
+    let mut resp = if session.must_change_password && req.uri().path() != PASSWORD_CHANGE_PATH {
+        must_change_first(&req)
+    } else {
+        req.extensions_mut().insert(session);
+        next.run(req).await
+    };
     if let Some(token) = fresh {
         let c = cookie(token, !state.cfg.cookie_insecure);
         if let Ok(v) = HeaderValue::from_str(&c.to_string()) {

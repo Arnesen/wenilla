@@ -46,6 +46,43 @@ pub async fn characters(db: &MySqlPool, game_username: &str) -> Result<Vec<Chara
     .await?)
 }
 
+/// Fetch the panel's accounts together, without scanning bot accounts or making
+/// a network round trip for every web user. Chunk bind parameters for large realms.
+pub async fn characters_for_accounts(
+    db: &MySqlPool,
+    usernames: &[&str],
+) -> Result<std::collections::HashMap<String, Vec<Character>>> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        account: String,
+        #[sqlx(flatten)]
+        character: Character,
+    }
+    let mut result = std::collections::HashMap::<String, Vec<Character>>::new();
+    for chunk in usernames.chunks(500) {
+        let mut query = sqlx::QueryBuilder::<sqlx::MySql>::new(
+            "SELECT a.username AS account, CAST(c.guid AS SIGNED) AS guid, c.name, \
+             CAST(c.race AS SIGNED) AS race, CAST(c.class AS SIGNED) AS class, \
+             CAST(c.level AS SIGNED) AS level, CAST(c.online AS SIGNED) AS online, \
+             CAST(c.totaltime AS SIGNED) AS totaltime, CAST(c.zone AS SIGNED) AS zone \
+             FROM classiccharacters.characters c JOIN classicrealmd.account a ON a.id = c.account \
+             WHERE a.username IN (",
+        );
+        let mut values = query.separated(", ");
+        for username in chunk {
+            values.push_bind(*username);
+        }
+        values.push_unseparated(") ORDER BY c.level DESC, c.name");
+        for row in query.build_query_as::<Row>().fetch_all(db).await? {
+            result
+                .entry(row.account.to_ascii_uppercase())
+                .or_default()
+                .push(row.character);
+        }
+    }
+    Ok(result)
+}
+
 #[derive(Debug, sqlx::FromRow, serde::Serialize)]
 pub struct OnlineRow {
     pub name: String,

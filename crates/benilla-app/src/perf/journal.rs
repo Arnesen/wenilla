@@ -50,6 +50,10 @@ use bevy::time::Real;
 
 use super::clock::{main_thread_cpu_secs, process_cpu_secs};
 
+#[cfg(target_arch = "wasm32")]
+#[path = "journal_web.rs"]
+mod web;
+
 pub(crate) struct FpsJournalPlugin;
 
 /// The `fpsJournal` CVar's knob (2008): on, the journal appends to the player's
@@ -75,8 +79,13 @@ impl Plugin for FpsJournalPlugin {
         app.add_plugins(RenderDiagnosticsPlugin)
             .init_resource::<FpsJournalSetting>()
             .insert_resource(FpsJournal {
+                #[cfg(not(target_arch = "wasm32"))]
                 env_path: std::env::var("WOW_FPS_JOURNAL")
                     .ok()
+                    .filter(|p| !p.is_empty())
+                    .map(PathBuf::from),
+                #[cfg(target_arch = "wasm32")]
+                env_path: crate::webenv::var("WOW_FPS_JOURNAL")
                     .filter(|p| !p.is_empty())
                     .map(PathBuf::from),
                 path: None,
@@ -319,6 +328,7 @@ fn journal_fps(
             };
             // The header goes in exactly once, at creation: the rows are appended for the life
             // of the run (and across runs, deliberately — a journal accumulates legs).
+            #[cfg(not(target_arch = "wasm32"))]
             if !path.exists() {
                 let head = format!(
                     "{}{JOURNAL_HEADER}",
@@ -329,7 +339,15 @@ fn journal_fps(
                     return;
                 }
             }
+            #[cfg(target_arch = "wasm32")]
+            web::begin(&format!(
+                "{}{JOURNAL_HEADER}",
+                preamble(gpu.adapter.as_deref(), gpu.device.as_deref())
+            ));
+            #[cfg(not(target_arch = "wasm32"))]
             info!("fps journal: writing {}", path.display());
+            #[cfg(target_arch = "wasm32")]
+            info!("fps journal: recording the latest hour; use the download FPS journal button");
             journal.last_flush = now;
             journal.cpu_at_flush = process_cpu_secs();
             journal.main_at_flush = main_thread_cpu_secs();
@@ -407,16 +425,21 @@ fn journal_fps(
     let gpu_cells = journal.gpu.columns();
     line.push_str(&gpu_cells);
     line.push('\n');
-    use std::io::Write;
-    let Some(path) = journal.path.as_ref() else {
-        return;
-    };
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
+    #[cfg(target_arch = "wasm32")]
+    web::append(&line);
+    #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = f.write_all(line.as_bytes());
+        use std::io::Write;
+        let Some(path) = journal.path.as_ref() else {
+            return;
+        };
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = f.write_all(line.as_bytes());
+        }
     }
 }
 

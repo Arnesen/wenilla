@@ -14,7 +14,7 @@ anyhow.workspace = true
 clap.workspace = true
 benilla-formats = { path = "../benilla-formats", default-features = false }
 axum = { version = "0.8", features = ["ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync"] }
 # Splits `axum::extract::ws::WebSocket` into independent read/write halves — it implements
 # Stream + Sink but has no `.split()` of its own, and the proxy needs both directions live at
 # once. `sink`/`std` only: no futures executor of our own, tokio already is one.

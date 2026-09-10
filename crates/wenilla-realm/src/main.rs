@@ -76,6 +76,7 @@ async fn main() -> Result<()> {
         }
     };
     let state = Arc::new(AppState {
+        setup_cache: Default::default(),
         client_data_error,
         realmdb: realmdb::connect(&cfg.mariadb_url).await?,
         soap: soap::Client::new(

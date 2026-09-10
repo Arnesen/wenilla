@@ -36,6 +36,7 @@ use benilla_formats::Chain;
 pub use config::Config;
 
 pub struct AppState {
+    pub setup_cache: tokio::sync::Mutex<Option<(std::time::Instant, bool)>>,
     pub cfg: Config,
     pub db: sqlx::SqlitePool,
     pub realmdb: sqlx::MySqlPool,
@@ -52,6 +53,28 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Cache this global gate across asset requests. A short TTL also observes
+    /// reset-admin run by another process without requiring a service restart.
+    pub async fn setup_complete(&self) -> Result<bool> {
+        let mut cache = self.setup_cache.lock().await;
+        if let Some((at, complete)) = *cache {
+            if at.elapsed() < std::time::Duration::from_secs(5) {
+                return Ok(complete);
+            }
+        }
+        let complete = db::setup_complete(&self.db).await?;
+        *cache = Some((std::time::Instant::now(), complete));
+        Ok(complete)
+    }
+
+    pub async fn mark_setup_complete(&self) -> Result<()> {
+        // Serialize invalidation with refresh so an older read cannot repopulate it.
+        let mut cache = self.setup_cache.lock().await;
+        db::meta_set(&self.db, "setup_complete", "1").await?;
+        *cache = Some((std::time::Instant::now(), true));
+        Ok(())
+    }
+
     pub async fn realm_name(&self) -> String {
         db::meta_get(&self.db, "realm_name")
             .await
@@ -135,7 +158,7 @@ async fn setup_gate(State(state): State<Arc<AppState>>, req: Request, next: Next
     if p.starts_with("/setup") || p == "/healthz" {
         return next.run(req).await;
     }
-    match db::setup_complete(&state.db).await {
+    match state.setup_complete().await {
         Ok(true) => next.run(req).await,
         Ok(false) => Redirect::to("/setup").into_response(),
         Err(e) => {

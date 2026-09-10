@@ -175,20 +175,24 @@ async fn user_rows(state: &AppState) -> Result<Vec<UserRow>, AppError> {
     )
     .fetch_all(&state.db)
     .await?;
-    let bans: Vec<String> = realmdb::active_bans(&state.realmdb)
+    let usernames: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| row.5.as_deref())
+        .filter(|name| !name.is_empty())
+        .collect();
+    let mut characters_by_account = realmdb::characters_for_accounts(&state.realmdb, &usernames)
+        .await
+        .unwrap_or_default();
+    let bans: std::collections::HashSet<String> = realmdb::active_bans(&state.realmdb)
         .await
         .map(|b| b.into_iter().map(|b| b.username).collect())
         .unwrap_or_default();
     let mut out = Vec::with_capacity(rows.len());
     for (id, username, display_name, role, disabled, game_username) in rows {
         let game_username = game_username.unwrap_or_default();
-        let characters = if game_username.is_empty() {
-            Vec::new()
-        } else {
-            realmdb::characters(&state.realmdb, &game_username)
-                .await
-                .unwrap_or_default()
-        };
+        let characters = characters_by_account
+            .remove(&game_username.to_ascii_uppercase())
+            .unwrap_or_default();
         out.push(UserRow {
             id,
             username,

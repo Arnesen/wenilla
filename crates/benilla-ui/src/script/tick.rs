@@ -86,6 +86,10 @@ impl UiScript {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
+#[path = "wenilla_listener.rs"]
+mod wenilla_listener;
+
 /// [`UiScript::fire_event`] against the VM directly, for a caller that holds `&Lua` rather than
 /// `&UiScript` — which is every Lua binding, and therefore `UpdateSpells` (decision 1924).
 ///
@@ -107,6 +111,8 @@ pub(crate) fn fire_event_into(lua: &Lua, event: &str, args: Vec<ScriptValue>) {
                 .get(event)
                 .and_then(|l| l.first().copied())
         };
+        #[cfg(not(target_os = "macos"))]
+        let mut next_index = 0;
         while let Some(h) = at {
             let mut model = model_mut();
             // The saved handle must still be registered — its removal (by the previous handler)
@@ -114,7 +120,16 @@ pub(crate) fn fire_event_into(lua: &Lua, event: &str, args: Vec<ScriptValue>) {
             let Some(pos) = model
                 .event_to_frames
                 .get(event)
-                .and_then(|l| l.iter().position(|&x| x == h))
+                .and_then(|l| {
+                    #[cfg(target_os = "macos")]
+                    {
+                        l.iter().position(|&x| x == h)
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        wenilla_listener::position(l, &h, next_index)
+                    }
+                })
             else {
                 break;
             };
@@ -122,6 +137,10 @@ pub(crate) fn fire_event_into(lua: &Lua, event: &str, args: Vec<ScriptValue>) {
                 .event_to_frames
                 .get(event)
                 .and_then(|l| l.get(pos + 1).copied());
+            #[cfg(not(target_os = "macos"))]
+            {
+                next_index = pos + 1;
+            }
             let id = model.frame_id(h);
             drop(model);
             if let Err(e) = event::fire_event_handler(lua, id, event, &args) {

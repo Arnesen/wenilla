@@ -97,6 +97,7 @@ pub fn read() -> Memory {
 #[cfg(test)]
 mod tests {
     #[test]
+    #[cfg(target_os = "linux")]
     fn reads_something_on_linux() {
         let m = super::read();
         assert!(m.total_mb > 0);

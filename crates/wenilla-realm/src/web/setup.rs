@@ -205,7 +205,7 @@ async fn submit(
 
     set_password(&state.db, admin_id, &f.admin_password).await?;
     let _ = accounts::provision(&state.db, &state.soap, &state.secrets, admin_id).await;
-    meta_set(&state.db, "setup_complete", "1").await?;
+    state.mark_setup_complete().await?;
     meta_del(&state.db, "setup_token").await?;
     meta_del(&state.db, "setup_mode").await?;
     let _ = std::fs::remove_file(state.cfg.state_dir.join("setup-token"));
